@@ -1,0 +1,9 @@
+.zig-cache/
+zig-cache/
+zig-out/
+.wrangler/
+*.log
+.DS_Store
+
+# Test-generated private keys (older path; retained to avoid accidental leaks)
+mkit/test-key

@@ -1,0 +1,14 @@
+.{
+    .name = .mkit,
+    .version = "0.1.0",
+    .fingerprint = 0x4fddb1c8b76c43bd,
+    .minimum_zig_version = "0.15.2",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE-MIT",
+        "LICENSE-APACHE",
+        "README.md",
+    },
+}

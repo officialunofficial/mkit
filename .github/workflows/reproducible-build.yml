@@ -1,0 +1,87 @@
+name: Reproducible Build Smoke Test
+
+# Build mkit twice from the same commit and diff the outputs.
+# A non-zero diff indicates a non-deterministic input (embedded timestamp,
+# random seed, absolute path, non-sorted directory read, etc.) slipped in.
+#
+# See docs/release/REPRODUCIBILITY.md for the full set of inputs that
+# determine a mkit binary, and for the standalone steps that a user can
+# run to reproduce a published release binary from source.
+#
+# NOTE: diffoscope provides rich, human-readable diffs (ELF sections, debug
+# info, etc.) but is heavyweight to install. For now this is a smoke test
+# that compares raw SHA256s + falls back to cmp. A fully-fleshed-out version
+# would install `diffoscope` via apt and emit an HTML report to artifacts.
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - '.zigversion'
+      - '.github/workflows/reproducible-build.yml'
+  schedule:
+    # Mondays at 12:00 UTC — weekly drift check on main.
+    - cron: '0 12 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  two-pass-build:
+    name: Build twice, diff outputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build pass 1
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux
+          mkdir -p out/pass1
+          cp zig-out/bin/mkit out/pass1/mkit
+          rm -rf zig-out .zig-cache
+
+      - name: Build pass 2
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux
+          mkdir -p out/pass2
+          cp zig-out/bin/mkit out/pass2/mkit
+
+      - name: Compare outputs (SHA256)
+        id: compare
+        run: |
+          H1=$(sha256sum out/pass1/mkit | awk '{print $1}')
+          H2=$(sha256sum out/pass2/mkit | awk '{print $1}')
+          echo "pass1=${H1}"
+          echo "pass2=${H2}"
+          if [ "${H1}" != "${H2}" ]; then
+            echo "::error::Non-deterministic build. pass1=${H1} pass2=${H2}"
+            # Fall back to a byte-level cmp to show the first differing offset.
+            cmp out/pass1/mkit out/pass2/mkit || true
+            exit 1
+          fi
+          echo "Build is byte-reproducible: ${H1}"
+
+      # TODO: install diffoscope and emit a richer report for investigators.
+      # - name: Install diffoscope
+      #   if: failure()
+      #   run: sudo apt-get update && sudo apt-get install -y --no-install-recommends diffoscope
+      # - name: Diffoscope report
+      #   if: failure()
+      #   run: diffoscope --html diffoscope-report.html out/pass1/mkit out/pass2/mkit || true
+      # - uses: actions/upload-artifact@v4
+      #   if: failure()
+      #   with:
+      #     name: diffoscope-report
+      #     path: diffoscope-report.html

@@ -1,0 +1,258 @@
+.\" SPDX-License-Identifier: MIT OR Apache-2.0
+.Dd April 22, 2026
+.Dt MKIT 1
+.Os
+.Sh NAME
+.Nm mkit
+.Nd decentralized, content-addressed version control with cryptographic attribution
+.Sh SYNOPSIS
+.Nm
+.Ar command
+.Op Ar args ...
+.Sh DESCRIPTION
+.Nm
+is a git-like command-line tool that produces signed, content-addressed
+objects and exchanges them over pluggable transports
+.Pq Cm mkit+file , Cm mkit+https , Cm mkit+s3 , Cm mkit+ssh .
+Every commit is Ed25519-signed and identified by its BLAKE3 hash, so
+chains of objects are self-verifying independent of the store they live
+in.
+.Pp
+The on-disk layout under
+.Pa .mkit/
+is deliberately similar to
+.Pa .git/ :
+objects are stored under
+.Pa .mkit/objects/ ,
+refs under
+.Pa .mkit/refs/ ,
+and the current branch is recorded in
+.Pa .mkit/HEAD .
+A user-level config at
+.Pa $XDG_CONFIG_HOME/mkit/config
+provides cross-repo defaults; repo-local values in
+.Pa .mkit/config
+always win.
+.Sh COMMANDS
+The full list of subcommands is printed by
+.Nm mkit Fl Fl help .
+The highlights:
+.Bl -tag -width "cherry-pick"
+.It Cm init
+Create a new
+.Nm
+repository in the current directory.
+.It Cm add Ar path ...
+Stage files for the next commit. Respects
+.Pa .mkitignore .
+.It Cm rm Ar path ...
+Mark a file for deletion in the next commit.
+.It Cm commit Op Fl m Ar message
+Create a signed commit. If
+.Fl m
+is omitted,
+.Nm
+opens
+.Ev EDITOR
+on
+.Pa .mkit/COMMIT_EDITMSG ;
+lines starting with
+.Ql #
+are stripped, and an empty message aborts the commit.
+.It Cm log Op Fl Fl oneline Op Fl Fl graph Op Fl n Ar N
+Show commit history.
+.It Cm diff Op Ar hash1 Ar hash2
+Show changes. With no args, compares HEAD to the working tree.
+.It Cm status
+Show the staged and working-tree changes.
+.It Cm branch Op Fl d Ar name
+List, create, or delete branches.
+.It Cm checkout Ar branch
+Switch HEAD to a branch and restore files from its tree.
+.It Cm merge Ar branch
+Merge
+.Ar branch
+into HEAD. Fast-forwards when possible.
+.It Cm rebase Ar branch
+Replay commits from HEAD onto
+.Ar branch .
+Accepts
+.Fl Fl continue
+and
+.Fl Fl abort
+after a conflict.
+.It Cm push Op Fl Fl dry-run
+Push HEAD's commit chain to the configured remote.
+.It Cm pull , Cm fetch
+Download or download-and-merge from the remote.
+.It Cm clone Op Fl Fl depth Ar N Op Fl Fl sparse ... Ar url
+Clone a remote into a new working directory.
+.It Cm remote Oo Cm add | Cm set Oc Ar url
+Configure the
+.Ar origin
+remote. URLs MUST use the strict
+.Ql mkit+<scheme>://
+form.
+.It Cm cherry-pick Ar hash
+Apply a single commit from elsewhere onto HEAD.
+.It Cm bisect Cm start | Cm good | Cm bad | Cm reset
+Binary-search for the commit that introduced a regression.
+.It Cm stash Op Cm save Fl m Ar msg | Cm list | Cm pop Op Ar N | Cm drop Op Ar N | Cm show Op Ar N
+Save or restore a snapshot of working-tree changes.
+.It Cm blame Ar file
+Line-level attribution of the committed state of
+.Ar file .
+.It Cm verify Ar hash
+Verify the signature on a commit object.
+.It Cm keygen
+Generate a fresh Ed25519 keypair in
+.Pa .mkit/keys/default.key .
+.It Cm config Ar key Op Ar value
+Read or write a config key. Recognized keys include
+.Cm user.identity , Cm ssh.strict_host_key_checking ,
+.Cm ssh.user_known_hosts_file ,
+and
+.Cm ssh.identity_file .
+.It Cm serve Ar path
+Internal subcommand: act as the server end of an
+.Cm mkit+ssh://
+transport.
+.It Cm version
+Print the version to stdout.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width "CLICOLOR_FORCE"
+.It Ev EDITOR , Ev VISUAL
+Editor used by
+.Cm mkit commit
+when no
+.Fl m
+is supplied. If neither is set, the commit aborts with a clear error.
+.It Ev NO_COLOR
+If set to any value (including empty),
+.Nm
+suppresses ANSI color output on stdout. See
+.Lk https://no-color.org .
+.It Ev CLICOLOR_FORCE
+If set to
+.Ql 1 ,
+.Nm
+emits ANSI color even when stdout is not a terminal.
+.Ev NO_COLOR
+overrides this.
+.It Ev SSH_AUTH_SOCK
+Standard OpenSSH agent socket; used when pushing or cloning via
+.Cm mkit+ssh:// .
+.It Ev XDG_CONFIG_HOME , Ev XDG_DATA_HOME , Ev XDG_CACHE_HOME , Ev XDG_STATE_HOME
+Locations of user-level config, keystore, cache, and state
+respectively. See
+.Sx FILES .
+.El
+.Sh FILES
+.Bl -tag -width "~/.local/state/mkit/"
+.It Pa .mkit/
+Repo-local state dir (analogous to
+.Pa .git/ ).
+.It Pa .mkit/config
+Repo-local config; overrides any user-level value.
+.It Pa .mkit/keys/default.key
+Repo-local Ed25519 signing key.
+.It Pa .mkit/index
+Staged-change index.
+.It Pa .mkit/index.lock
+Lockfile held by
+.Cm commit , Cm checkout , Cm merge , Cm rebase
+to serialize concurrent invocations.
+.It Pa .mkit/COMMIT_EDITMSG
+Scratch file written before
+.Ev EDITOR
+is invoked by
+.Cm commit .
+.It Pa $XDG_CONFIG_HOME/mkit/config
+User-level config.
+.It Pa $XDG_DATA_HOME/mkit/keys/
+User-level keystore (optional; for a single identity across repos).
+.It Pa $XDG_CACHE_HOME/mkit/
+User-level cache directory.
+.It Pa $XDG_STATE_HOME/mkit/
+User-level state directory.
+.El
+.Sh EXIT STATUS
+.Nm
+follows the BSD
+.Xr sysexits 3
+conventions where practical:
+.Bl -tag -width "76"
+.It 0
+Success.
+.It 1
+General error (catch-all).
+.It 64
+Command-line usage error (unknown subcommand, missing required arg).
+.It 65
+Input data was malformed (corrupt object, bad hex hash).
+.It 66
+Input file was missing or unreadable.
+.It 69
+Service unavailable (transport could not connect).
+.It 73
+Could not create output (permission denied writing a ref, etc.).
+.It 75
+Temporary failure; retrying is safe (5xx after retry budget,
+SIGINT/SIGTERM interruption).
+.It 76
+Protocol error (bad URL scheme, malformed server response).
+.It 77
+Permission denied.
+.It 78
+Config error (unknown key, invalid value).
+.El
+.Sh DIAGNOSTICS
+Errors are written to stderr on a single line beginning with
+.Ql error: .
+When
+.Ev NO_COLOR
+is unset and stdout is a terminal, colored labels may be used; consult
+.Ev CLICOLOR_FORCE
+to override.
+.Pp
+.Nm
+installs
+.Dv SIGPIPE
+as ignored, so common pipelines like
+.Dl mkit log | head -1
+exit cleanly without a "Broken pipe" message.
+.Dv SIGINT
+and
+.Dv SIGTERM
+set a flag that long-running operations honor at the next checkpoint.
+.Sh SEE ALSO
+.Xr git 1 ,
+.Xr ssh 1 ,
+.Xr sysexits 3
+.Pp
+Project documentation lives alongside the source under
+.Pa docs/ ;
+see
+.Pa docs/CLI.md
+for a short usage reference and
+.Pa docs/SPEC-OBJECTS.md
+et al. for the on-disk format.
+.Sh AUTHORS
+.An Official Unofficial Aq Mt opensource@unofficial.run
+.Sh BUGS
+Report issues at the project's source repository. Known limitations:
+.Bl -bullet
+.It
+Windows is not supported in 0.1.0.
+.Nm
+is POSIX-only; macOS and Linux are tier-1 platforms.
+.It
+Per-subcommand man pages
+.Po Nm mkit-commit 1 Pc
+are not yet shipped.
+.Nm mkit Fl Fl help
+is authoritative for subcommand synopses.
+.El
+.Sh COPYRIGHT
+Licensed under MIT OR Apache-2.0.

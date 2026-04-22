@@ -1,0 +1,317 @@
+name: Release
+
+# Triggered by pushing a semver tag (v0.1.0, v1.2.3, etc.).
+#
+# This workflow:
+#   1. Builds static mkit binaries for macOS (arm64/x86_64) and Linux (x86_64/arm64)
+#      with a pinned Zig toolchain.
+#   2. Produces a CycloneDX SBOM (sbom.cdx.json).
+#   3. Signs the per-platform SHA256SUMS with cosign OIDC keyless
+#      (transparency log: Rekor).
+#   4. Optionally notarizes macOS binaries when Apple secrets are present.
+#   5. Aggregates all artifacts into a GitHub Release.
+#
+# Secrets (all optional — gated steps no-op without them):
+#   APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID   (macOS notarization)
+#
+# No secrets are needed for cosign keyless — OIDC token comes from GitHub.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write       # create the GitHub Release + upload assets
+  id-token: write       # cosign keyless OIDC
+  attestations: write   # supply-chain attestations
+
+env:
+  ZIG_VERSION: "0.16.0"
+  BINARY_NAME: mkit
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-macos
+            runner: macos-14
+            archive_ext: tar.gz
+          - target: x86_64-macos
+            runner: macos-13
+            archive_ext: tar.gz
+          - target: x86_64-linux
+            runner: ubuntu-latest
+            archive_ext: tar.gz
+          - target: aarch64-linux
+            runner: ubuntu-24.04-arm
+            archive_ext: tar.gz
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "archive=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}.${{ matrix.archive_ext }}" >> "$GITHUB_OUTPUT"
+          echo "stage=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          zig build \
+            -Doptimize=ReleaseSafe \
+            -Dtarget=${{ matrix.target }} \
+            --summary all
+
+      - name: Stage archive contents
+        shell: bash
+        run: |
+          STAGE="${{ steps.meta.outputs.stage }}"
+          mkdir -p "${STAGE}"
+          # Locate the produced binary. Zig emits to zig-out/bin/ by default.
+          if [ -f "zig-out/bin/${{ env.BINARY_NAME }}" ]; then
+            cp "zig-out/bin/${{ env.BINARY_NAME }}" "${STAGE}/"
+          elif [ -f "zig-out/bin/${{ env.BINARY_NAME }}.exe" ]; then
+            cp "zig-out/bin/${{ env.BINARY_NAME }}.exe" "${STAGE}/"
+          else
+            echo "ERROR: mkit binary not found in zig-out/bin/" >&2
+            ls -la zig-out/bin/ || true
+            exit 1
+          fi
+          cp LICENSE-MIT LICENSE-APACHE README.md "${STAGE}/"
+          # Optional artifacts — included when present.
+          [ -f CHANGELOG.md ] && cp CHANGELOG.md "${STAGE}/" || true
+          [ -d share/man/man1 ] && cp -R share/man "${STAGE}/" || true
+
+      - name: Compute per-archive SHA256SUMS
+        shell: bash
+        working-directory: ${{ steps.meta.outputs.stage }}
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            find . -type f ! -name SHA256SUMS -exec sha256sum {} \; | sort -k 2 > SHA256SUMS
+          else
+            find . -type f ! -name SHA256SUMS -exec shasum -a 256 {} \; | sort -k 2 > SHA256SUMS
+          fi
+          cat SHA256SUMS
+
+      - name: Create archive
+        shell: bash
+        run: |
+          tar -czf "${{ steps.meta.outputs.archive }}" "${{ steps.meta.outputs.stage }}"
+          ls -la "${{ steps.meta.outputs.archive }}"
+
+      - name: Compute archive-level SHA256
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ steps.meta.outputs.archive }}" > "${{ steps.meta.outputs.archive }}.sha256"
+          else
+            shasum -a 256 "${{ steps.meta.outputs.archive }}" > "${{ steps.meta.outputs.archive }}.sha256"
+          fi
+          cat "${{ steps.meta.outputs.archive }}.sha256"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign archive with cosign (keyless OIDC)
+        shell: bash
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          COSIGN_YES: "true"
+        run: |
+          ARCHIVE="${{ steps.meta.outputs.archive }}"
+          cosign sign-blob --yes \
+            --bundle "${ARCHIVE}.cosign.bundle" \
+            --output-signature "${ARCHIVE}.sig" \
+            --output-certificate "${ARCHIVE}.crt" \
+            "${ARCHIVE}"
+          echo "Signed ${ARCHIVE}; transparency log entries visible at https://search.sigstore.dev/"
+
+      - name: Notarize macOS binary (gated on secrets)
+        # Only runs on macOS runners when Apple secrets are configured.
+        if: runner.os == 'macOS' && env.APPLE_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != '' && env.APPLE_TEAM_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ARCHIVE: ${{ steps.meta.outputs.archive }}
+        shell: bash
+        run: |
+          # TODO(notarization): codesign + notarize + staple.
+          # This block is intentionally a scaffold — fill in when:
+          #   1. A Developer ID Application certificate is imported into the runner keychain
+          #      (via apple-actions/import-codesign-certs).
+          #   2. The mkit binary is codesigned:
+          #        codesign --force --options runtime --timestamp \
+          #          --sign "Developer ID Application: <NAME> (${APPLE_TEAM_ID})" \
+          #          "<path to mkit>"
+          #   3. A notarization zip is submitted and stapled:
+          #        xcrun notarytool submit notarize.zip \
+          #          --apple-id "${APPLE_ID}" \
+          #          --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
+          #          --team-id "${APPLE_TEAM_ID}" \
+          #          --wait
+          #        xcrun stapler staple "<path to mkit>"
+          #   4. Re-tar the archive after stapling so the stapled ticket is included.
+          echo "Apple secrets present — notarization would run here."
+          echo "Scaffold step: no-op until the TODO above is implemented."
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: |
+            ${{ steps.meta.outputs.archive }}
+            ${{ steps.meta.outputs.archive }}.sha256
+            ${{ steps.meta.outputs.archive }}.sig
+            ${{ steps.meta.outputs.archive }}.crt
+            ${{ steps.meta.outputs.archive }}.cosign.bundle
+          if-no-files-found: error
+          retention-days: 7
+
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          artifact-name: sbom.cdx.json
+          upload-artifact: false
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, sbom]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts into dist/
+        shell: bash
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          ls -la dist/
+
+      - name: Compute top-level SHA256SUMS
+        shell: bash
+        working-directory: dist
+        run: |
+          sha256sum *.tar.gz sbom.cdx.json > SHA256SUMS || \
+            shasum -a 256 *.tar.gz sbom.cdx.json > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign aggregated SHA256SUMS
+        shell: bash
+        working-directory: dist
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob --yes \
+            --bundle SHA256SUMS.cosign.bundle \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.crt \
+            SHA256SUMS
+
+      - name: Resolve version
+        id: meta
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: mkit ${{ steps.meta.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.tar.gz.sig
+            dist/*.tar.gz.crt
+            dist/*.tar.gz.cosign.bundle
+            dist/sbom.cdx.json
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+            dist/SHA256SUMS.crt
+            dist/SHA256SUMS.cosign.bundle
+          body: |
+            ## mkit ${{ steps.meta.outputs.version }}
+
+            Content-addressed VCS for creative work.
+
+            ### Verifying downloads
+
+            Every archive is signed with **cosign keyless** via GitHub OIDC; the
+            signing certificate embeds the workflow identity and a Rekor
+            transparency log entry is public. See `docs/release/SIGNING.md`
+            in the repo for full verification steps.
+
+            ```sh
+            cosign verify-blob \
+              --certificate-identity-regexp "https://github.com/officialunofficial/mkit/.github/workflows/release.yml@refs/tags/v.*" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --bundle <archive>.cosign.bundle \
+              <archive>
+            ```
+
+            ### SBOM
+
+            A CycloneDX SBOM (`sbom.cdx.json`) is attached. Zero external Zig
+            packages today — the SBOM reflects toolchain + OS libraries only.

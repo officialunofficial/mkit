@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+
+      - name: Check formatting
+        run: zig fmt --check src build.zig
+
+      - name: Verify rename gate
+        run: bash scripts/verify-rename.sh
+
+      - name: Build
+        run: zig build
+
+      - name: Test (unit)
+        run: zig build test
+
+      - name: Test (integration)
+        run: zig build test-integration

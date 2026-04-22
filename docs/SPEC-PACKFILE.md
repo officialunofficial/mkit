@@ -1,0 +1,254 @@
+# SPEC-PACKFILE — mkit v1 packfile format
+
+Status: **Normative** for mkit v1.
+Scope: the byte layout of a `.mkit`-produced packfile, used for
+transport upload/download and for bundle exchange.
+
+Resolves red-team R-05 (no spec at all) and R-06 (magic rename risk).
+
+---
+
+## 1. High-level layout
+
+```
+offset  size          field
+0       4             magic               "MKIT"   (0x4D 0x4B 0x49 0x54)
+4       4             version             u32 LE, == 1
+8       4             entry_count         u32 LE
+12      …             entries             entry_count entries
+…       32            trailer             BLAKE3(all preceding bytes)
+```
+
+The **trailer** is computed over bytes `[0 .. trailer_offset)` — i.e.
+everything written before the trailer itself. It is not a signature.
+Its purpose is defense-in-depth against bit-rot on transports that do
+not guarantee byte-exact delivery (e.g. S3 after a proxy).
+
+**Magic rename:** zmit used `"ZMIT"` (`zmit/src/packfile.zig:12`).
+mkit v1 uses `"MKIT"`. There is no backward compatibility. All existing
+packs in zmit remotes MUST be re-packed or discarded before mkit reads
+them. Any reader encountering `"ZMIT"` MUST fail with `InvalidMagic`
+(and MAY emit a diagnostic hinting at re-packing).
+
+**Version byte rule:** the first four bytes MUST remain `"MKIT"` in
+every future version. Format evolution is signalled by the `version`
+field. A reader seeing `"MKIT"` + unknown version MUST fail
+`UnsupportedPackVersion` (not `InvalidMagic`), so clients can
+distinguish "wrong tool" from "too-new pack".
+
+---
+
+## 2. Entry framing
+
+Each entry:
+
+```
+[u8 entry_type]
+[u32 LE payload_len]                         0 .. 2^31 - 1
+[payload_len bytes payload]                  type-specific, see §3
+```
+
+`payload_len` is the length of the payload only; it excludes the
+1-byte `entry_type` and the 4-byte length field itself. Readers MUST
+bounds-check every `payload_len` against the remaining packfile tail
+(before the trailer) to avoid buffer over-read.
+
+---
+
+## 3. Entry types
+
+```
+0x00    raw       payload = serialised mkit object (see SPEC-OBJECTS)
+0x02    delta     payload = [32 base_hash] [instructions]  (see SPEC-DELTA)
+```
+
+Notes:
+
+- `0x01` is **reserved** and MUST NOT be emitted by v1 writers. Readers
+  MUST reject it with `InvalidEntryType`. (In zmit v2 packfiles, `0x01`
+  was used as `delta`; in mkit v1 we re-number `delta` to `0x02` so the
+  numerical space cleanly separates "legacy zmit-shaped" from "mkit v1"
+  should anyone ever implement a lenient dual reader.)
+- Any other value → `InvalidEntryType`.
+
+### 3.1 `raw` (0x00)
+
+Payload is exactly the bytes you would get from SPEC-OBJECTS
+serialisation, starting with the object prologue. Unpackers insert
+these bytes into the object store verbatim (writing
+`.mkit/objects/<dd>/<rr...>`) after verifying BLAKE3 matches the
+expected storage path.
+
+### 3.2 `delta` (0x02)
+
+Payload:
+
+```
+[32 bytes base_hash]
+[all remaining payload bytes = SPEC-DELTA stream]
+```
+
+`base_hash` MUST be reachable at delta-resolution time: either as a
+previous `raw` entry in the same pack or already present in the
+destination object store. If unresolvable → `DeltaBaseMissing`.
+
+Delta payloads reconstruct a full serialised object (with its
+SPEC-OBJECTS prologue). The reconstructed bytes are then hashed to
+produce the object's storage path — the same way a `raw` entry is
+stored.
+
+Delta encoding is the **v1 default** for blobs above 64 bytes when a
+suitable base is available. Writers SHOULD prefer delta entries for
+blob pairs whose delta is < 50% of the target size
+(`zmit/src/packfile.zig:786-809`). Writers MAY emit all-`raw` packs
+for simplicity; readers MUST handle both mixes.
+
+---
+
+## 4. Ordering rule
+
+Base objects MUST precede their deltas. Specifically, for any
+`0x02 delta` entry with `base_hash = H`, at least one of:
+
+1. An earlier entry in the same pack whose computed hash is `H`, or
+2. An object already present at path `objects/<H>` in the destination
+   store at unpack time.
+
+Must hold. Readers MUST NOT buffer undefined delta chains. (This
+matches the invariant at `zmit/src/packfile.zig:815-844`.)
+
+Writers SHOULD emit non-blob objects first (commits, trees,
+chunked_blob, remix), then base blobs, then delta blobs. This lets a
+streaming reader complete without buffering.
+
+---
+
+## 5. Size limits (v1)
+
+From current impl and preserved in v1:
+
+- `entry_count <= 10_000_000` (`zmit/src/packfile.zig:63`).
+- Sum of all `payload_len` <= **4 GiB** (`zmit/src/packfile.zig:74`).
+- Single entry `payload_len` must fit in a `u32` (≤ ~4 GiB).
+
+These are policy caps, not wire limits. Implementations MUST fail with
+`TooManyObjects` / `PackfileTooLarge` on violation rather than
+silently truncating.
+
+**S3 single-PUT limit:** AWS S3 and Cloudflare R2 enforce a 5 GiB single-
+object cap; our 4 GiB cap stays under it. Larger packs require
+multipart upload, which is a v2 candidate (red-team R-14).
+
+**Known future relaxations** (not part of v1): streaming packs,
+multipart upload, removal of the 10 M entry count. Each requires a
+`version` bump.
+
+---
+
+## 6. Parsing model
+
+mkit v1 packfiles are **buffered**, not streamed. The reader reads the
+entire packfile into memory and then walks entries
+(`zmit/src/packfile.zig:54-91`, `:907-999`). This is a deliberate
+simplification. Consequences:
+
+- Memory = packfile size (4 GiB worst-case).
+- Random access to entries is O(n) scan since no entry index exists.
+
+Future v2 may add a trailing index, but v1 does not.
+
+---
+
+## 7. Transport key layout
+
+For all object-storage transports (S3, HTTP, file), packfile objects
+are stored under the fixed key:
+
+```
+packs/<64-char-hex-of-BLAKE3(pack_bytes)>    — 70 bytes total
+```
+
+(`zmit/src/protocol.zig:108-114`.) Writers and readers MUST use this
+exact layout. Lowercase hex only; comparison is byte-exact.
+
+The digest that names the pack is computed over the *entire packfile*
+including the 32-byte trailer. This is slightly redundant (trailer
+covers pack, digest covers trailer-covered bytes) but matches current
+impl and means `upload_pack` callers can pass the same `digest` they
+used to compute the trailer.
+
+---
+
+## 8. Trailer computation detail
+
+Let `P` be the packfile bytes from offset 0 through
+`trailer_offset = len(packfile) - 32`. The trailer is
+`BLAKE3(P)` written as 32 raw bytes, NOT hex.
+
+Readers MUST:
+
+1. Verify `len(packfile) >= 12 + 32 = 44`. (Minimum: header + empty
+   entries + trailer.)
+2. Slice `trailer = packfile[len-32 ..]`.
+3. Compute `BLAKE3(packfile[0 .. len-32])`.
+4. Compare byte-equal. Mismatch → `PackfileCorrupted`.
+
+Step 3 MUST happen before any entry is stored to the destination.
+
+(Note: the current zmit impl does not write/verify a trailer. W4 will
+add it; this SPEC pins the layout so the implementation doesn't drift.)
+
+---
+
+## 9. Backward compatibility rule
+
+mkit v1 is the first version. The format rule going forward is:
+
+- First 4 bytes MUST be ASCII `"MKIT"`. Forever. (The magic is the
+  format family marker, not a version marker.)
+- Format changes MUST bump the `version` u32.
+- `version` values are monotonically assigned; gaps are allowed but
+  reservations SHOULD be documented here before use.
+- Reserved version codes (v1):
+  - `0` — never emitted; reserved to distinguish "all-zero buffer" from
+    a real pack.
+  - `2`, `3`, `4` — reserved for future format work (streaming index,
+    multipart, etc.).
+
+---
+
+## 10. Test vectors (implementer MUST produce)
+
+TO BE FIXED IN IMPLEMENTATION:
+
+1. **Empty pack**: header + `entry_count=0` + trailer. Expected length
+   = 12 + 32 = 44 bytes. Record the trailer BLAKE3 digest hex.
+2. **Single-raw pack** containing the empty blob from SPEC-OBJECTS §13
+   vector 1. Record full byte layout and trailer digest.
+3. **Two-entry pack with delta**: raw base blob + delta entry that
+   reconstructs a second blob. Unpacker produces two object-store
+   entries.
+4. **Pack with ZMIT magic** → verifier rejects with `InvalidMagic`.
+5. **Pack with version = 99** → verifier rejects with
+   `UnsupportedPackVersion`, not `InvalidMagic`.
+6. **Bit-flipped trailer** → `PackfileCorrupted`.
+7. **Delta entry referring to unknown base** → `DeltaBaseMissing`.
+8. **Pack exceeding 4 GiB payload sum** → `PackfileTooLarge` emitted
+   during parse, before any entry is stored.
+9. **Entry with `payload_len` pointing past trailer** → `UnexpectedEof`
+   (or equivalent) before trailer verification.
+
+---
+
+## 11. Streaming hook (informative)
+
+Implementations MAY provide a streaming unpack API that yields each
+entry as it is parsed, for callers that want to pipe entries into a
+content-addressable store without buffering. v1 does not require this.
+Streaming implementations MUST still verify the trailer at end-of-stream
+and retroactively reject partially-stored objects if trailer
+verification fails.
+
+---
+
+*~1300 words.*
