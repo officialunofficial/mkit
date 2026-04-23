@@ -70,13 +70,14 @@ fn formatAuthorShort(buf: []u8, id: mkit.object.Identity) []const u8 {
         .@"opaque" => "opaque",
     };
     const hex_alphabet = "0123456789abcdef";
-    const take = @min(id.bytes.len, 4);
+    const take: usize = @min(id.bytes.len, 4);
     var tmp: [8]u8 = undefined;
     for (id.bytes[0..take], 0..) |b, i| {
         tmp[i * 2] = hex_alphabet[b >> 4];
         tmp[i * 2 + 1] = hex_alphabet[b & 0x0F];
     }
-    return std.fmt.bufPrint(buf, "{s}:{s}", .{ kind_name, tmp[0 .. take * 2] }) catch "?";
+    const hex_len: usize = take * 2;
+    return std.fmt.bufPrint(buf, "{s}:{s}", .{ kind_name, tmp[0..hex_len] }) catch "?";
 }
 
 /// Open `$EDITOR` on `.mkit/COMMIT_EDITMSG`, read the user's message
