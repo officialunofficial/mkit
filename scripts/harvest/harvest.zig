@@ -25,6 +25,7 @@ const serialize = mkit.serialize;
 const hash_mod = mkit.hash;
 const sign = mkit.sign;
 const attestations = mkit.attestations;
+const fastcdc = mkit.fastcdc;
 
 const Allocator = std.mem.Allocator;
 const Hash = hash_mod.Hash;
@@ -334,6 +335,108 @@ fn buildEnvelopeBasic(arena: Allocator) ![]u8 {
     });
 }
 
+// Phase 3 — FastCDC vector builders. These mirror the v1 frozen
+// parameters in `docs/SPEC-FASTCDC.md` and produce inputs the Rust
+// port (rust/crates/mkit-core/src/chunker.rs) consumes byte-identically.
+
+/// Deterministic 1 MiB pseudo-random buffer driven by splitmix64 with a
+/// fixed seed. Linear `i*31+7 mod 256` doesn't excite the gear-hash mask
+/// (the high bits never change), so we use a real splitmix to generate
+/// boundary-rich input. No env reads, no time reads — fully reproducible.
+fn fastcdcInput1Mib(arena: Allocator) ![]u8 {
+    const total: usize = 1024 * 1024;
+    const buf = try arena.alloc(u8, total);
+    var state: u64 = 0xA5A5_F00D_DEAD_BEEF;
+    var i: usize = 0;
+    while (i < total) : (i += 8) {
+        state +%= 0x9e3779b97f4a7c15;
+        var z = state;
+        z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
+        z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
+        z = z ^ (z >> 31);
+        const end = @min(i + 8, total);
+        const bytes = std.mem.toBytes(z);
+        for (i..end) |j| buf[j] = bytes[j - i];
+    }
+    return buf;
+}
+
+/// Emit chunk-end offsets as JSON: `[N1, N2, ..., Nk]` with `Nk = total`.
+/// Caller frees.
+fn buildFastcdcBoundariesJson(arena: Allocator) ![]u8 {
+    const data = try fastcdcInput1Mib(arena);
+    defer arena.free(data);
+
+    const cdc = fastcdc.FastCDC.init(16 * 1024, 64 * 1024, 256 * 1024);
+    var boundaries: std.ArrayList(usize) = .empty;
+    defer boundaries.deinit(arena);
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const len = cdc.cut(data[offset..]);
+        offset += len;
+        try boundaries.append(arena, offset);
+    }
+
+    var json: std.ArrayList(u8) = .empty;
+    errdefer json.deinit(arena);
+    try json.append(arena, '[');
+    for (boundaries.items, 0..) |b, idx| {
+        if (idx > 0) try json.appendSlice(arena, ", ");
+        var nbuf: [24]u8 = undefined;
+        const s = std.fmt.bufPrint(&nbuf, "{d}", .{b}) catch unreachable;
+        try json.appendSlice(arena, s);
+    }
+    try json.append(arena, ']');
+    try json.append(arena, '\n');
+    return try json.toOwnedSlice(arena);
+}
+
+/// Smaller deterministic input for a second boundary vector — 256 KiB
+/// of splitmix64 bytes from a different seed.
+fn fastcdcInput256kRepeating(arena: Allocator) ![]u8 {
+    const total: usize = 256 * 1024;
+    const buf = try arena.alloc(u8, total);
+    var state: u64 = 0xCAFE_BABE_1234_5678;
+    var i: usize = 0;
+    while (i < total) : (i += 8) {
+        state +%= 0x9e3779b97f4a7c15;
+        var z = state;
+        z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
+        z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
+        z = z ^ (z >> 31);
+        const end = @min(i + 8, total);
+        const bytes = std.mem.toBytes(z);
+        for (i..end) |j| buf[j] = bytes[j - i];
+    }
+    return buf;
+}
+
+fn buildFastcdcBoundariesSmallJson(arena: Allocator) ![]u8 {
+    const data = try fastcdcInput256kRepeating(arena);
+    defer arena.free(data);
+    const cdc = fastcdc.FastCDC.init(16 * 1024, 64 * 1024, 256 * 1024);
+    var boundaries: std.ArrayList(usize) = .empty;
+    defer boundaries.deinit(arena);
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const len = cdc.cut(data[offset..]);
+        offset += len;
+        try boundaries.append(arena, offset);
+    }
+    var json: std.ArrayList(u8) = .empty;
+    errdefer json.deinit(arena);
+    try json.append(arena, '[');
+    for (boundaries.items, 0..) |b, idx| {
+        if (idx > 0) try json.appendSlice(arena, ", ");
+        var nbuf: [24]u8 = undefined;
+        const s = std.fmt.bufPrint(&nbuf, "{d}", .{b}) catch unreachable;
+        try json.appendSlice(arena, s);
+    }
+    try json.append(arena, ']');
+    try json.append(arena, '\n');
+    return try json.toOwnedSlice(arena);
+}
+
 // Dispatch: returns bytes for the named vector. Caller frees.
 fn buildByName(arena: Allocator, name: []const u8) !?[]u8 {
     if (std.mem.eql(u8, name, "blob")) return try buildBlob(arena);
@@ -356,6 +459,9 @@ fn buildByName(arena: Allocator, name: []const u8) !?[]u8 {
     // Phase 8 attestation vectors (see Phase 8 README).
     if (std.mem.eql(u8, name, "statement_basic")) return try buildStatementBasic(arena);
     if (std.mem.eql(u8, name, "envelope_basic")) return try buildEnvelopeBasic(arena);
+    // Phase 3 vectors (additive — keep at the end of the dispatch).
+    if (std.mem.eql(u8, name, "fastcdc_boundaries_1mib")) return try buildFastcdcBoundariesJson(arena);
+    if (std.mem.eql(u8, name, "fastcdc_boundaries_256k")) return try buildFastcdcBoundariesSmallJson(arena);
     return null;
 }
 
