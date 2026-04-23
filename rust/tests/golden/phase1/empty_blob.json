@@ -1,0 +1,7 @@
+{
+  "name": "empty_blob",
+  "description": "zero-byte blob; SPEC-OBJECTS §13.1 (10 bytes total)",
+  "bin": "empty_blob.bin",
+  "size": 10,
+  "blake3": "16d3d19d44264ac14ffabb3b590ee66192a8b6b415eca3e1d51c747fb100b63b"
+}

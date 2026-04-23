@@ -44,6 +44,29 @@ fn buildBlob(arena: Allocator) ![]u8 {
     return try serialize.serialize(arena, obj);
 }
 
+fn buildEmptyBlob(arena: Allocator) ![]u8 {
+    const obj = object.Object{ .blob = .{ .data = "" } };
+    return try serialize.serialize(arena, obj);
+}
+
+fn buildEmptyTree(arena: Allocator) ![]u8 {
+    const entries = try arena.alloc(object.TreeEntry, 0);
+    const obj = object.Object{ .tree = .{ .entries = entries } };
+    return try serialize.serialize(arena, obj);
+}
+
+fn buildTreeSingleFile(arena: Allocator) ![]u8 {
+    // Per SPEC-OBJECTS §13.3 — single-entry tree where the entry's
+    // object_hash is BLAKE3 of the empty-blob bytes (§13.1).
+    const empty_blob_bytes = try buildEmptyBlob(arena);
+    defer arena.free(empty_blob_bytes);
+    const blob_hash = hash_mod.hash(empty_blob_bytes);
+    var entries = try arena.alloc(object.TreeEntry, 1);
+    entries[0] = .{ .name = "README.md", .mode = .blob, .object_hash = blob_hash };
+    const obj = object.Object{ .tree = .{ .entries = entries } };
+    return try serialize.serialize(arena, obj);
+}
+
 fn buildIdentityEd25519(arena: Allocator) ![]u8 {
     // Raw wire format per SPEC-OBJECTS §9: [u8 kind][u16 LE len][payload].
     var buf: std.ArrayList(u8) = .empty;
@@ -155,15 +178,64 @@ fn buildChunkedBlob(arena: Allocator) ![]u8 {
     return try serialize.serialize(arena, obj);
 }
 
+fn buildChunkedBlobCs0(arena: Allocator) ![]u8 {
+    // Per SPEC-OBJECTS §13.7 — chunk_size=0 (CDC marker) with 3 chunks.
+    // Length must equal 6 (prologue) + 8 + 4 + 4 + 32*3 = 118 bytes.
+    var chunks = try arena.alloc(Hash, 3);
+    chunks[0] = .{0xA1} ** 32;
+    chunks[1] = .{0xA2} ** 32;
+    chunks[2] = .{0xA3} ** 32;
+    const obj = object.Object{ .chunked_blob = .{
+        .total_size = 1_000_000,
+        .chunk_size = 0,
+        .chunks = chunks,
+    } };
+    return try serialize.serialize(arena, obj);
+}
+
+fn buildRemixIdenticalUpstream(arena: Allocator) ![]u8 {
+    // Per SPEC-OBJECTS §13.6 — two sources sharing upstream_id but with
+    // distinct commit_hash, sorted ascending by the secondary key.
+    const tree_hash: Hash = .{0x77} ** 32;
+    const parents = try arena.alloc(Hash, 0);
+    var sources = try arena.alloc(object.RemixSource, 2);
+    sources[0] = .{
+        .upstream_id = .{0x10} ** 32,
+        .commit_hash = .{0x30} ** 32,
+    };
+    sources[1] = .{
+        .upstream_id = .{0x10} ** 32,
+        .commit_hash = .{0x31} ** 32,
+    };
+    const author = object.Identity{ .kind = .ed25519, .bytes = &PUBKEY_B };
+    const obj = object.Object{ .remix = .{
+        .tree_hash = tree_hash,
+        .parents = parents,
+        .sources = sources,
+        .author = author,
+        .signer = SIGNER,
+        .message = "remix same upstream",
+        .timestamp = FIXED_TIMESTAMP + 11,
+        .signature = SIGNATURE,
+    } };
+    return try serialize.serialize(arena, obj);
+}
+
 // Dispatch: returns bytes for the named vector. Caller frees.
 fn buildByName(arena: Allocator, name: []const u8) !?[]u8 {
     if (std.mem.eql(u8, name, "blob")) return try buildBlob(arena);
+    if (std.mem.eql(u8, name, "empty_blob")) return try buildEmptyBlob(arena);
     if (std.mem.eql(u8, name, "tree")) return try buildTree(arena);
+    if (std.mem.eql(u8, name, "empty_tree")) return try buildEmptyTree(arena);
+    if (std.mem.eql(u8, name, "tree_single_file")) return try buildTreeSingleFile(arena);
     if (std.mem.eql(u8, name, "commit_0parent")) return try buildCommit(arena, 0);
     if (std.mem.eql(u8, name, "commit_1parent")) return try buildCommit(arena, 1);
     if (std.mem.eql(u8, name, "commit_2parent")) return try buildCommit(arena, 2);
     if (std.mem.eql(u8, name, "remix_2sources")) return try buildRemix(arena);
+    if (std.mem.eql(u8, name, "remix_identical_upstream_distinct_commit"))
+        return try buildRemixIdenticalUpstream(arena);
     if (std.mem.eql(u8, name, "chunked_blob")) return try buildChunkedBlob(arena);
+    if (std.mem.eql(u8, name, "chunked_blob_cs0_3chunks")) return try buildChunkedBlobCs0(arena);
     if (std.mem.eql(u8, name, "identity_ed25519")) return try buildIdentityEd25519(arena);
     if (std.mem.eql(u8, name, "identity_opaque")) return try buildIdentityOpaque(arena);
     return null;

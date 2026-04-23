@@ -16,6 +16,7 @@
 pub mod hash;
 pub mod object;
 pub mod serialize;
+pub mod store;
 
 pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher};
 pub use object::{
@@ -23,3 +24,4 @@ pub use object::{
     MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, Tree, TreeEntry,
 };
 pub use serialize::{deserialize, serialize};
+pub use store::{MAX_RAW_OBJECT_SIZE, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError, StoreResult};
