@@ -14,7 +14,6 @@ pub const config = @import("config.zig");
 pub const restore = @import("restore.zig");
 pub const packfile = @import("packfile.zig");
 pub const merge = @import("merge.zig");
-pub const notary = @import("notary.zig");
 pub const s3 = @import("s3.zig");
 pub const remote = @import("remote.zig");
 pub const remote_test = @import("remote_test.zig");
@@ -62,7 +61,6 @@ test {
     _ = restore;
     _ = packfile;
     _ = merge;
-    _ = notary;
     _ = s3;
     _ = remote;
     _ = remote_test;

@@ -37,7 +37,6 @@ const legacy_keys = [_][]const u8{
     "project_id",
     "gateway" ++ "_url",
     "network",
-    "notary.kind",
 };
 
 fn isLegacyKey(key: []const u8) bool {
@@ -566,7 +565,7 @@ test "config roundtrip without remote" {
 test "parseConfig silently ignores legacy chain keys" {
     const allocator = std.testing.allocator;
     const gw = "gateway" ++ "_url";
-    const input = "project_id = abcd\n" ++ gw ++ " = https://example.com\nnetwork = mainnet\nnotary.kind = custom\nsigning_key = keep.key\n";
+    const input = "project_id = abcd\n" ++ gw ++ " = https://example.com\nnetwork = mainnet\nsigning_key = keep.key\n";
     var config = try parseConfig(allocator, input);
     defer config.deinit();
     // Legacy keys are dropped on the floor; surviving keys still parse.
