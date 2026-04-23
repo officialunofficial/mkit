@@ -19,6 +19,7 @@
 #![allow(clippy::multiple_crate_versions)]
 
 pub mod chunker;
+pub mod delta;
 pub mod hash;
 pub mod object;
 pub mod serialize;
@@ -44,3 +45,6 @@ pub use chunker::{
     MASK_S as CHUNK_MASK_S, MAX_SIZE as CHUNK_MAX_SIZE, MIN_SIZE as CHUNK_MIN_SIZE,
     SEED as CHUNK_SEED, chunk_boundaries, gear_table_digest,
 };
+
+// Phase 3 — delta instruction stream (SPEC-DELTA v1).
+pub use delta::{HEADER_LEN as DELTA_HEADER_LEN, MAX_INSERT_LEN, OP_COPY, STREAM_VERSION};
