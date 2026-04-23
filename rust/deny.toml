@@ -21,12 +21,20 @@ allow = [
     "CC0-1.0",
     "0BSD",
     "Zlib",
+    # libfuzzer-sys ships its LLVM-derived C shim under NCSA alongside
+    # its Rust MIT/Apache-2.0. Pulled in only when --features libfuzzer
+    # is enabled (not our default).
+    "NCSA",
 ]
 confidence-threshold = 0.93
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace crates depend on each other via `path = "..."` without a
+# version pin, which cargo-deny treats as a wildcard. This is the normal
+# shape for a Rust workspace that never publishes; whitelist it.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

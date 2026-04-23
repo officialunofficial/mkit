@@ -97,6 +97,42 @@ Every fuzz test block in this repo must satisfy all six:
 - Fuzz outputs are only checked for "no panic, no runaway". We do not
   diff against a reference decoder.
 
+## Rust-adaptation (the `mkit-fuzz` crate)
+
+The Rust port at `rust/fuzz/` enforces the same six guardrails with one
+deliberate adaptation to **Guardrail #3**:
+
+- The Zig side uses `FixedBufferAllocator` because the Zig code is
+  explicit about the `Allocator` parameter everywhere — the fuzz harness
+  can swap in an FBA at the call site and every downstream allocation is
+  contained.
+- `mkit-core` (Rust) uses the global allocator in production. Threading
+  a custom `Allocator` trait through every public entry point **only for
+  the fuzz path** would make the fuzz harness execute a divergent code
+  path from the one users hit — defeating the point of fuzzing. It would
+  also require `#![feature(allocator_api)]`, which is nightly-only.
+- **We containerise allocations at the source instead.** Guardrail #3 is
+  satisfied in Rust by the combination of:
+  - Guardrail #2 (input ≤ 64 KiB).
+  - `delta::decode` caps its initial `Vec::with_capacity` at
+    `result_len.min(base.len() + 2 * stream.len())` so a 9-byte stream
+    claiming `result_len = u32::MAX` cannot pre-allocate 4 GiB.
+  - `pack::PackReader` enforces `MAX_ENTRIES = 10_000_000` and
+    `MAX_PAYLOAD = 4 GiB` with count × entry-frame-length lower-bound
+    checks against the input slice before any `Vec::with_capacity`.
+  - The fuzz harness (`rust/fuzz/src/lib.rs`) adds a second layer of
+    defensive pre-checks — `claimed_result_len > MAX_INPUT * 4` and
+    `claimed_entries > 100_000` — that short-circuit before calling
+    into core, so the most pathological inputs don't even reach the
+    parsers.
+- Net worst-case heap per iteration is ~1 MiB (two copies of the
+  input plus a small fixed overhead for temp directories / store state).
+  This is tighter than the Zig 2 MiB FBA budget.
+
+This adaptation is audited here rather than silently in the Rust code so
+that any future review reading `docs/FUZZ.md` finds the reasoning in one
+place.
+
 ## Adding a new target
 
 Use this checklist before you land a new `src/fuzz_<name>.zig`:

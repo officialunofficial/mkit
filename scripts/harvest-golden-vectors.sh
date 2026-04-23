@@ -42,6 +42,9 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 OUT_DIR="${1:-$ROOT_DIR/rust/tests/golden/phase1}"
+# Phase 3 fixtures live alongside phase1 under their own subtree so each
+# Rust test crate can scope its loader to its own phase.
+PHASE3_OUT_DIR="${PHASE3_OUT_DIR:-$ROOT_DIR/rust/tests/golden/phase3}"
 HARVEST_SRC="$ROOT_DIR/scripts/harvest/harvest.zig"
 BUNDLE_SRC="$ROOT_DIR/src/lib.zig"
 
@@ -85,15 +88,16 @@ esac
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 
-# Emit a single vector into OUT_DIR/<name>.bin + <name>.json. The Zig
+# Emit a single vector into <out_dir>/<name>.bin + <name>.json. The Zig
 # harness prints raw bytes on stdout and "BLAKE3: <hex>\n" on stderr,
 # so we don't need an external hasher.
-emit_vector() {
-  local name="$1"
-  local description="$2"
-  local bin_path="$OUT_DIR/$name.bin"
-  local json_path="$OUT_DIR/$name.json"
-  local err_path="$OUT_DIR/.$name.err"
+emit_vector_to() {
+  local out_dir="$1"
+  local name="$2"
+  local description="$3"
+  local bin_path="$out_dir/$name.bin"
+  local json_path="$out_dir/$name.json"
+  local err_path="$out_dir/.$name.err"
 
   zig run \
     "${TARGET_FLAGS[@]}" \
@@ -122,6 +126,11 @@ emit_vector() {
   } >"$json_path"
 
   printf '%s %s\n' "$name" "${digest:-unknown}"
+}
+
+# Backwards-compatible wrapper: emit into the phase1 OUT_DIR.
+emit_vector() {
+  emit_vector_to "$OUT_DIR" "$1" "$2"
 }
 
 # Manifest collects (name, blake3) for all emitted vectors, so the
@@ -164,3 +173,36 @@ done
 echo "harvest: wrote $(printf '%s\n' "${VECTORS[@]}" | wc -l | tr -d ' ') vectors to $OUT_DIR"
 echo "harvest: manifest:"
 cat "$MANIFEST"
+
+# -----------------------------------------------------------------------
+# Phase 3 vectors — additive. Reset and emit into PHASE3_OUT_DIR.
+# These are FastCDC chunk-boundary lists harvested from the Zig
+# implementation so the Rust port can assert byte-identical cuts.
+# pack/delta vectors live in the Rust crate's own pin tests because the
+# Zig packfile/delta predate SPEC-PACKFILE / SPEC-DELTA — they don't
+# emit the spec wire format.
+# -----------------------------------------------------------------------
+rm -rf "$PHASE3_OUT_DIR"
+mkdir -p "$PHASE3_OUT_DIR"
+PHASE3_MANIFEST="$PHASE3_OUT_DIR/MANIFEST.txt"
+{
+  echo "# Phase 3 golden vectors (deterministic; FastCDC boundaries from Zig)"
+  echo "# Produced by scripts/harvest-golden-vectors.sh"
+  echo "# Format: <name> <blake3-hex-of-bin-bytes>"
+} >"$PHASE3_MANIFEST"
+
+declare -a PHASE3_VECTORS=(
+  "fastcdc_boundaries_1mib|1 MiB pseudo-random buffer (i*31+7 mod 256); chunk-end offsets as JSON"
+  "fastcdc_boundaries_256k|256 KiB pattern ((i*17)^(i>>3))&0xFF; chunk-end offsets as JSON"
+)
+
+for entry in "${PHASE3_VECTORS[@]}"; do
+  name="${entry%%|*}"
+  desc="${entry#*|}"
+  line="$(emit_vector_to "$PHASE3_OUT_DIR" "$name" "$desc")"
+  echo "$line" >>"$PHASE3_MANIFEST"
+done
+
+echo "harvest: wrote $(printf '%s\n' "${PHASE3_VECTORS[@]}" | wc -l | tr -d ' ') Phase 3 vectors to $PHASE3_OUT_DIR"
+echo "harvest: phase3 manifest:"
+cat "$PHASE3_MANIFEST"
