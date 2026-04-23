@@ -122,8 +122,8 @@ pub fn couldMatchDescendant(patterns: []const SparsePattern, dir_prefix: []const
 /// Load sparse checkout patterns from .mkit/sparse-checkout file.
 /// Returns null if the file does not exist.
 /// Caller must free with freeSparsePatterns.
-pub fn loadSparseCheckout(allocator: Allocator, mkit_dir: std.fs.Dir) !?[]SparsePattern {
-    const content = mkit_dir.readFileAlloc(allocator, ".mkit/sparse-checkout", 1024 * 1024) catch |err| switch (err) {
+pub fn loadSparseCheckout(allocator: Allocator, io: std.Io, mkit_dir: std.Io.Dir) !?[]SparsePattern {
+    const content = mkit_dir.readFileAlloc(io, ".mkit/sparse-checkout", allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -137,27 +137,28 @@ pub fn loadSparseCheckout(allocator: Allocator, mkit_dir: std.fs.Dir) !?[]Sparse
 }
 
 /// Write sparse checkout patterns to .mkit/sparse-checkout file.
-pub fn writeSparseCheckout(mkit_dir: std.fs.Dir, pattern_lines: []const []const u8) !void {
-    mkit_dir.makeDir(".mkit") catch |err| switch (err) {
+pub fn writeSparseCheckout(io: std.Io, mkit_dir: std.Io.Dir, pattern_lines: []const []const u8) !void {
+    mkit_dir.createDirPath(io, ".mkit") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    var write_buffer: [1024]u8 = undefined;
-    var atomic_file = try mkit_dir.atomicFile(".mkit/sparse-checkout", .{
-        .mode = std.fs.File.default_mode,
+    var atomic_file = try mkit_dir.createFileAtomic(io, ".mkit/sparse-checkout", .{
         .make_path = true,
-        .write_buffer = &write_buffer,
+        .replace = true,
     });
-    defer atomic_file.deinit();
+    defer atomic_file.deinit(io);
+
+    var write_buffer: [1024]u8 = undefined;
+    var file_writer = atomic_file.file.writer(io, &write_buffer);
 
     for (pattern_lines) |line| {
-        try atomic_file.file_writer.interface.writeAll(line);
-        try atomic_file.file_writer.interface.writeAll("\n");
+        try file_writer.interface.writeAll(line);
+        try file_writer.interface.writeAll("\n");
     }
-    try atomic_file.flush();
-    try atomic_file.file_writer.file.sync();
-    try atomic_file.renameIntoPlace();
+    try file_writer.interface.flush();
+    try file_writer.file.sync(io);
+    try atomic_file.replace(io);
 }
 
 /// Check if a path matches a simple pattern.
@@ -1168,9 +1169,9 @@ test "writeSparseCheckout and loadSparseCheckout roundtrip" {
     try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const lines = [_][]const u8{ "src", "!src/secret", "docs/" };
-    try writeSparseCheckout(tmp.dir, &lines);
+    try writeSparseCheckout(std.testing.io, tmp.dir, &lines);
 
-    const patterns = (try loadSparseCheckout(allocator, tmp.dir)).?;
+    const patterns = (try loadSparseCheckout(allocator, std.testing.io, tmp.dir)).?;
     defer freeSparsePatterns(allocator, patterns);
 
     try std.testing.expectEqual(@as(usize, 3), patterns.len);
@@ -1189,13 +1190,14 @@ test "loadSparseCheckout returns null when file missing" {
 
     try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
-    const result = try loadSparseCheckout(allocator, tmp.dir);
+    const result = try loadSparseCheckout(allocator, std.testing.io, tmp.dir);
     try std.testing.expect(result == null);
 }
 
 test "fuzz: parseSparsePatterns does not crash" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             const allocator = std.heap.page_allocator;
             const patterns = parseSparsePatterns(allocator, input) catch return;
             freeSparsePatterns(allocator, patterns);
