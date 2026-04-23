@@ -35,8 +35,8 @@ pub const BisectStep = union(enum) {
 };
 
 /// Check if a bisect session is currently in progress.
-pub fn isBisectInProgress(mkit_dir: std.fs.Dir) bool {
-    mkit_dir.access(bisect_file, .{}) catch return false;
+pub fn isBisectInProgress(io: std.Io, mkit_dir: std.Io.Dir) bool {
+    mkit_dir.access(io, bisect_file, .{}) catch return false;
     return true;
 }
 
@@ -47,8 +47,8 @@ pub fn isBisectInProgress(mkit_dir: std.fs.Dir) bool {
 /// - Line 2: orig_branch name (or empty for detached)
 /// - Line 3: bad hash (or empty if not set)
 /// - Line 4+: good hashes (one per line)
-pub fn readState(allocator: Allocator, mkit_dir: std.fs.Dir) !BisectState {
-    const content = mkit_dir.readFileAlloc(allocator, bisect_file, 1024 * 1024) catch |err| switch (err) {
+pub fn readState(allocator: Allocator, io: std.Io, mkit_dir: std.Io.Dir) !BisectState {
+    const content = mkit_dir.readFileAlloc(io, bisect_file, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return error.NoBisectInProgress,
         else => return err,
     };
@@ -102,7 +102,7 @@ pub fn readState(allocator: Allocator, mkit_dir: std.fs.Dir) !BisectState {
 }
 
 /// Write bisect state to `.mkit/bisect`.
-pub fn writeState(mkit_dir: std.fs.Dir, state: BisectState) !void {
+pub fn writeState(io: std.Io, mkit_dir: std.Io.Dir, state: BisectState) !void {
     // Calculate buffer size
     // orig_head (64) + \n + branch + \n + bad (64 or empty) + \n + good hashes
     const branch_len = if (state.orig_branch) |b| b.len else 0;
@@ -147,9 +147,9 @@ pub fn writeState(mkit_dir: std.fs.Dir, state: BisectState) !void {
         pos += 1;
     }
 
-    const file = try mkit_dir.createFile(bisect_file, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(buf[0..pos]);
+    const file = try mkit_dir.createFile(io, bisect_file, .{ .truncate = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, buf[0..pos]);
 }
 
 /// Enumerate the range of candidate commits between bad and good.
@@ -213,8 +213,8 @@ pub fn pickMidpoint(candidates: []const Hash) Hash {
 }
 
 /// Remove the bisect state file.
-pub fn cleanupBisect(mkit_dir: std.fs.Dir) !void {
-    mkit_dir.deleteFile(bisect_file) catch |err| switch (err) {
+pub fn cleanupBisect(io: std.Io, mkit_dir: std.Io.Dir) !void {
+    mkit_dir.deleteFile(io, bisect_file) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
@@ -252,9 +252,9 @@ test "state write/read round-trip" {
         .allocator = allocator,
     };
 
-    try writeState(tmp.dir, state);
+    try writeState(std.testing.io, tmp.dir, state);
 
-    var read_state = try readState(allocator, tmp.dir);
+    var read_state = try readState(allocator, std.testing.io, tmp.dir);
     defer read_state.deinit();
 
     try std.testing.expectEqual(orig_head, read_state.orig_head);
@@ -283,9 +283,9 @@ test "state write/read with no bad hash and no branch" {
         .allocator = allocator,
     };
 
-    try writeState(tmp.dir, state);
+    try writeState(std.testing.io, tmp.dir, state);
 
-    var read_state = try readState(allocator, tmp.dir);
+    var read_state = try readState(allocator, std.testing.io, tmp.dir);
     defer read_state.deinit();
 
     try std.testing.expectEqual(@as(?[]const u8, null), read_state.orig_branch);
@@ -363,14 +363,14 @@ test "isBisectInProgress detection" {
     try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // No bisect file -> not in progress
-    try std.testing.expect(!isBisectInProgress(tmp.dir));
+    try std.testing.expect(!isBisectInProgress(std.testing.io, tmp.dir));
 
     // Create bisect file -> in progress
     const file = try tmp.dir.createFile(std.testing.io, bisect_file, .{});
-    try file.writeAll("placeholder\n");
-    file.close();
+    try file.writeStreamingAll(std.testing.io, "placeholder\n");
+    file.close(std.testing.io);
 
-    try std.testing.expect(isBisectInProgress(tmp.dir));
+    try std.testing.expect(isBisectInProgress(std.testing.io, tmp.dir));
 }
 
 test "cleanupBisect removes state file" {
@@ -380,14 +380,14 @@ test "cleanupBisect removes state file" {
     try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const file = try tmp.dir.createFile(std.testing.io, bisect_file, .{});
-    try file.writeAll("data\n");
-    file.close();
+    try file.writeStreamingAll(std.testing.io, "data\n");
+    file.close(std.testing.io);
 
-    try std.testing.expect(isBisectInProgress(tmp.dir));
+    try std.testing.expect(isBisectInProgress(std.testing.io, tmp.dir));
 
-    try cleanupBisect(tmp.dir);
+    try cleanupBisect(std.testing.io, tmp.dir);
 
-    try std.testing.expect(!isBisectInProgress(tmp.dir));
+    try std.testing.expect(!isBisectInProgress(std.testing.io, tmp.dir));
 }
 
 test "cleanupBisect on nonexistent file is fine" {
@@ -395,7 +395,7 @@ test "cleanupBisect on nonexistent file is fine" {
     defer tmp.cleanup();
 
     try tmp.dir.createDirPath(std.testing.io, ".mkit");
-    try cleanupBisect(tmp.dir);
+    try cleanupBisect(std.testing.io, tmp.dir);
 }
 
 test "enumerateRange with diamond merge" {
@@ -450,7 +450,7 @@ test "readState rejects empty file" {
 
     // Create empty bisect file
     const file = try tmp.dir.createFile(std.testing.io, bisect_file, .{});
-    file.close();
+    file.close(std.testing.io);
 
-    try std.testing.expectError(error.InvalidBisectState, readState(allocator, tmp.dir));
+    try std.testing.expectError(error.InvalidBisectState, readState(allocator, std.testing.io, tmp.dir));
 }
