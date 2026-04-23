@@ -44,7 +44,8 @@ pub const default_timeout_ns: u64 = 5 * std.time.ns_per_s;
 /// Holder for an acquired lock. `release()` removes the lockfile.
 /// Uses a stack-allocated path buffer so no allocator is required.
 pub const RepoLock = struct {
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
+    io: std.Io,
     /// Null-terminated path of the lock file, relative to `dir`.
     path_buf: [256]u8,
     path_len: usize,
@@ -55,7 +56,7 @@ pub const RepoLock = struct {
     pub fn release(self: *RepoLock) void {
         const p = self.path_buf[0..self.path_len];
         if (p.len == 0) return;
-        self.dir.deleteFile(p) catch {};
+        self.dir.deleteFile(self.io, p) catch {};
         // Mark as released so a subsequent call is a cheap no-op.
         self.path_len = 0;
     }
@@ -76,7 +77,8 @@ pub const RepoLock = struct {
 ///   - `error.LockNameTooLong` — `name` doesn't fit in the path buffer.
 ///   - underlying I/O errors from `createFile` (disk full, etc.)
 pub fn acquire(
-    dir: std.fs.Dir,
+    io: std.Io,
+    dir: std.Io.Dir,
     name: []const u8,
     timeout_ns: u64,
 ) !RepoLock {
@@ -85,40 +87,43 @@ pub fn acquire(
 
     var lock: RepoLock = .{
         .dir = dir,
+        .io = io,
         .path_buf = undefined,
         .path_len = name.len,
     };
     @memcpy(lock.path_buf[0..name.len], name);
     lock.path_buf[name.len] = 0;
 
-    const start = std.time.nanoTimestamp();
+    const start = std.Io.Clock.awake.now(io);
     var attempts: u32 = 0;
     const max_attempts: u32 = 1000; // hard iteration cap per the project rules
 
     while (true) : (attempts += 1) {
         if (attempts >= max_attempts) return error.LockBusy;
 
-        const f = dir.createFile(lock.path_buf[0..name.len], .{ .exclusive = true }) catch |err| switch (err) {
+        const f = dir.createFile(io, lock.path_buf[0..name.len], .{ .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 // Check wall-clock timeout in addition to the iteration
                 // cap — this is the user-visible bound.
-                const now = std.time.nanoTimestamp();
-                if (@as(u64, @intCast(now - start)) >= timeout_ns) {
+                const now = std.Io.Clock.awake.now(io);
+                const elapsed = start.durationTo(now);
+                if (@as(u64, @intCast(elapsed.nanoseconds)) >= timeout_ns) {
                     return error.LockBusy;
                 }
-                std.Thread.sleep(default_sleep_ns);
+                // Why: std.Thread.sleep is removed in 0.16; use Io clock sleep.
+                std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(default_sleep_ns)), .awake) catch {};
                 continue;
             },
             else => return err,
         };
-        f.close();
+        f.close(io);
         return lock;
     }
 }
 
 /// Convenience wrapper: acquire with the default timeout.
-pub fn acquireDefault(dir: std.fs.Dir, name: []const u8) !RepoLock {
-    return acquire(dir, name, default_timeout_ns);
+pub fn acquireDefault(io: std.Io, dir: std.Io.Dir, name: []const u8) !RepoLock {
+    return acquire(io, dir, name, default_timeout_ns);
 }
 
 // -------------------------------------------------------------------------
@@ -129,36 +134,39 @@ pub fn acquireDefault(dir: std.fs.Dir, name: []const u8) !RepoLock {
 test "acquire + release round-trip" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const io = std.testing.io;
 
-    var lock = try acquireDefault(tmp.dir, "index.lock");
+    var lock = try acquireDefault(io, tmp.dir, "index.lock");
     try std.testing.expectEqualStrings("index.lock", lock.path());
 
     // File exists while held.
-    try tmp.dir.access("index.lock", .{});
+    try tmp.dir.access(io, "index.lock", .{});
 
     lock.release();
 
     // File gone after release.
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("index.lock", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "index.lock", .{}));
 }
 
 test "second acquire after release succeeds" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const io = std.testing.io;
 
-    var lock1 = try acquireDefault(tmp.dir, "index.lock");
+    var lock1 = try acquireDefault(io, tmp.dir, "index.lock");
     lock1.release();
 
-    var lock2 = try acquireDefault(tmp.dir, "index.lock");
+    var lock2 = try acquireDefault(io, tmp.dir, "index.lock");
     defer lock2.release();
-    try tmp.dir.access("index.lock", .{});
+    try tmp.dir.access(io, "index.lock", .{});
 }
 
 test "acquire while held returns LockBusy after short timeout" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const io = std.testing.io;
 
-    var lock1 = try acquireDefault(tmp.dir, "index.lock");
+    var lock1 = try acquireDefault(io, tmp.dir, "index.lock");
     defer lock1.release();
 
     // 100 ms timeout — long enough to sleep at least once, short
@@ -166,15 +174,16 @@ test "acquire while held returns LockBusy after short timeout" {
     const short_timeout_ns: u64 = 100 * std.time.ns_per_ms;
     try std.testing.expectError(
         error.LockBusy,
-        acquire(tmp.dir, "index.lock", short_timeout_ns),
+        acquire(io, tmp.dir, "index.lock", short_timeout_ns),
     );
 }
 
 test "release is idempotent (safe to call twice)" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const io = std.testing.io;
 
-    var lock = try acquireDefault(tmp.dir, "index.lock");
+    var lock = try acquireDefault(io, tmp.dir, "index.lock");
     lock.release();
     lock.release(); // No crash, no error.
 }
@@ -182,33 +191,36 @@ test "release is idempotent (safe to call twice)" {
 test "acquire rejects empty name" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const io = std.testing.io;
     try std.testing.expectError(
         error.LockNameTooLong,
-        acquire(tmp.dir, "", default_timeout_ns),
+        acquire(io, tmp.dir, "", default_timeout_ns),
     );
 }
 
 test "acquire rejects names that overflow the 255-byte buffer" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const io = std.testing.io;
 
     var huge: [300]u8 = undefined;
     @memset(&huge, 'a');
     try std.testing.expectError(
         error.LockNameTooLong,
-        acquire(tmp.dir, &huge, default_timeout_ns),
+        acquire(io, tmp.dir, &huge, default_timeout_ns),
     );
 }
 
 test "two distinct lock names coexist" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const io = std.testing.io;
 
-    var a = try acquireDefault(tmp.dir, "a.lock");
+    var a = try acquireDefault(io, tmp.dir, "a.lock");
     defer a.release();
-    var b = try acquireDefault(tmp.dir, "b.lock");
+    var b = try acquireDefault(io, tmp.dir, "b.lock");
     defer b.release();
 
-    try tmp.dir.access("a.lock", .{});
-    try tmp.dir.access("b.lock", .{});
+    try tmp.dir.access(io, "a.lock", .{});
+    try tmp.dir.access(io, "b.lock", .{});
 }
