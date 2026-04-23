@@ -22,7 +22,7 @@ ObjectType (u8)         name
 0x06                    delta
 ```
 
-(Source ground truth: `zmit/src/object.zig:7-13`. Unchanged in v1.)
+(Source ground truth: `src/object.zig:7-13`. Unchanged in v1.)
 
 `delta` objects are **pack-only**. They MUST NOT appear in the object store
 and MUST NOT be served by `downloadObject`-style APIs. Deltas are resolved
@@ -45,8 +45,8 @@ offset  size  field              value
 
 The prologue applies to **all six object types**. Rationale:
 
-1. `zmit` shipped with *no* version byte anywhere
-   (`zmit/src/object.zig:7-13`, `zmit/src/serialize.zig:30-40`). Any field
+1. `mkit` shipped with *no* version byte anywhere
+   (`src/object.zig:7-13`, `src/serialize.zig:30-40`). Any field
    addition silently shifts every hash.
 2. Partial prologue (commit + remix only) leaves four object types
    unversioned and makes readers branch on type before they can detect a
@@ -60,7 +60,7 @@ Readers MUST reject any of:
 - `magic` != `"MKT1"` → `InvalidMagic`
 - `schema_version` != `0x01` → `UnsupportedObjectVersion`
 
-There is no v0. mkit does not read zmit-era bytes.
+There is no v0. mkit does not read mkit-era bytes.
 
 ---
 
@@ -74,7 +74,7 @@ There is no v0. mkit does not read zmit-era bytes.
 
 No interpretation of `data`. `len = 0` is valid (empty blob). Upper bound
 is enforced at the storage layer: `ObjectStore.getRaw` rejects objects
-> 1 GiB (`zmit/src/store.zig:81`). A pack entry independently caps at the
+> 1 GiB (`src/store.zig:81`). A pack entry independently caps at the
 packfile total limit (see SPEC-PACKFILE).
 
 ---
@@ -92,11 +92,11 @@ repeat entry_count:
 ```
 
 `entry_count > 1_000_000` → `TooManyEntries`
-(`zmit/src/serialize.zig:204`).
+(`src/serialize.zig:204`).
 
 ### 4.1 Entry name rules
 
-From `zmit/src/object.zig:127-134`. Normative:
+From `src/object.zig:127-134`. Normative:
 
 - `name_len` ∈ `[1, 255]`. Zero-length name is illegal.
 - Forbidden bytes **anywhere** in name: `0x00`, `/` (`0x2F`), `\` (`0x5C`).
@@ -107,7 +107,7 @@ From `zmit/src/object.zig:127-134`. Normative:
 Additionally, entries within a single tree MUST be sorted
 lexicographically (byte-wise ascending) by `name` with no duplicates.
 Readers MUST reject unsorted trees with `InvalidEntryOrder`
-(`zmit/src/serialize.zig:220-223`). This is load-bearing: tree hashes are
+(`src/serialize.zig:220-223`). This is load-bearing: tree hashes are
 only reproducible across implementations when ordering is canonical.
 
 ### 4.2 Entry mode
@@ -153,7 +153,7 @@ repeat parent_count:
 [64 bytes signature]                      Ed25519, see SPEC-SIGNING
 ```
 
-Differences from zmit:
+Differences from mkit:
 - `author_mid: u64` → `Identity` tagged union (§9). (W2.)
 - `timestamp: u32` → `u64`. Avoids 2106 overflow (red-team 7d / Team Lead
   7d).
@@ -178,7 +178,7 @@ hash). Readers MUST NOT reject a commit because they are zero.
 
 `parent_count = 0` is valid and denotes a root commit.
 `parent_count > 1_000` → `TooManyParents`
-(`zmit/src/serialize.zig:237`).
+(`src/serialize.zig:237`).
 
 ---
 
@@ -192,7 +192,7 @@ repeat parent_count:
     [32 bytes parent_hash]
 [u32 LE source_count]                     0..=10_000
 repeat source_count:
-    [32 bytes upstream_id]                was project_id in zmit
+    [32 bytes upstream_id]                was project_id in mkit
     [32 bytes commit_hash]
 [Identity author]                         see §9
 [u32 LE message_len]
@@ -202,12 +202,12 @@ repeat source_count:
 [64 bytes signature]                      Ed25519, see SPEC-SIGNING
 ```
 
-Differences from zmit:
+Differences from mkit:
 - `RemixSource.project_id` → `RemixSource.upstream_id`. Byte layout
   unchanged (still 32 bytes at the same offset). Name transition only.
   W3 must update both the sort comparator
-  (`zmit/src/object.zig:191-201`) and the deserialiser validator
-  (`zmit/src/serialize.zig:290-297`) in lockstep.
+  (`src/object.zig:191-201`) and the deserialiser validator
+  (`src/serialize.zig:290-297`) in lockstep.
 - `author_mid: u64` → `Identity`.
 - `timestamp: u32` → `u64`.
 
@@ -245,7 +245,7 @@ Reassembly: concatenate each `chunk_hash` blob's contents in order.
 The concatenated length MUST equal `total_size`.
 
 `chunk_count > 1_000_000` → `TooManyChunks`
-(`zmit/src/serialize.zig:318`).
+(`src/serialize.zig:318`).
 
 ---
 
@@ -285,7 +285,7 @@ Kinds:
 Rules:
 
 - `len = 0` is **illegal** for every kind → `InvalidIdentity`.
-- `len > 4096` → `IdentityTooLarge`. (New cap; not present in zmit
+- `len > 4096` → `IdentityTooLarge`. (New cap; not present in mkit
   because identities were a fixed u64.)
 - Unknown `kind` → `UnknownIdentityKind`.
 - Two identities compare equal iff `kind` and `payload` bytes are
@@ -298,8 +298,8 @@ which is why the `len` field is always explicit.
 
 ### 9.1 No legacy `author_mid`
 
-v1 has no representation for the zmit `u64 author_mid` field. Attempting
-to decode zmit-era bytes as v1 will fail at the `MKT1` magic check.
+v1 has no representation for the mkit `u64 author_mid` field. Attempting
+to decode mkit-era bytes as v1 will fail at the `MKT1` magic check.
 
 ---
 
@@ -307,17 +307,17 @@ to decode zmit-era bytes as v1 will fail at the `MKT1` magic check.
 
 Objects are stored at `.mkit/objects/<dd>/<rrrrrrrrr...r>` where `<dd>`
 is the lowercase-hex first byte of `BLAKE3(object bytes)` and `<r...>`
-is the remaining 62 hex chars (`zmit/src/hash.zig:52-58`,
-`zmit/src/store.zig:57-67`).
+is the remaining 62 hex chars (`src/hash.zig:52-58`,
+`src/store.zig:57-67`).
 
 On read, the store MUST recompute BLAKE3 and fail `HashMismatch` if the
 computed hash does not match the path
-(`zmit/src/store.zig:87-89`). Objects > 1 GiB MUST be rejected
-(`zmit/src/store.zig:81`). v1 preserves both caps.
+(`src/store.zig:87-89`). Objects > 1 GiB MUST be rejected
+(`src/store.zig:81`). v1 preserves both caps.
 
 `.mkit/` directory magic: unchanged from filesystem layout point of
 view — presence of `.mkit/objects` is the repository marker
-(`zmit/src/store.zig:17-20`, adapted). See SPEC-INDEX for the
+(`src/store.zig:17-20`, adapted). See SPEC-INDEX for the
 `.mkit/index` sidecar.
 
 ---
@@ -326,7 +326,7 @@ view — presence of `.mkit/objects` is the repository marker
 
 Every object deserialiser MUST verify that after parsing the declared
 layout there are zero remaining bytes. Extra bytes → `TrailingData`
-(`zmit/src/serialize.zig:229`, `:251`, `:298`, etc.). This prevents
+(`src/serialize.zig:229`, `:251`, `:298`, etc.). This prevents
 trivial amplification and prologue-replay attacks.
 
 ---

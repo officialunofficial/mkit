@@ -58,34 +58,25 @@ for each of 256 entries:
     table[i] = z
 ```
 
-(Current zmit: `src/fastcdc.zig:9-21`.)
+(Current mkit: `src/fastcdc.zig:9-21`.)
 
 ### 3.1 Seed decision (v1)
 
-The seed ASCII is **`"MKITFCDC"`** — renamed from zmit's `"ZMITFCDC"`
-as part of the v1 format bump. Rationale:
+The seed ASCII is **`"MKITFCDC"`**, frozen for the lifetime of v1.
+The seed is not user-visible; it is 8 bytes inside the chunker.
 
-- mkit has no legacy users to dedup against; the "no back-compat"
-  posture (W1 decision) makes chunk-boundary preservation moot.
-- Keeping a `Z…` seed in an `mkit`-named project is a cosmetic
-  wart that future readers of the source would find confusing.
-- The seed is not user-visible; it's 8 bytes inside the chunker.
-  Renaming is a one-time, irreversible shift documented here.
-
-The seed is frozen at `"MKITFCDC"` for the lifetime of v1. Future
-format versions that want to change chunking MUST bump the format
-version and publish a migration path.
-
-A future reader that needs to chunk for a different chunk-family MAY
-use a different seed and namespace the result accordingly, but v1
-does NOT provide a mechanism for this.
+Future format versions that want to change chunking MUST bump the
+format version and publish a migration path. A future reader that
+needs to chunk for a different chunk-family MAY use a different seed
+and namespace the result accordingly, but v1 does NOT provide a
+mechanism for this.
 
 ---
 
 ## 4. Chunking parameters
 
 Hard-coded defaults (used by `hashFileChunked` in
-`zmit/src/worktree.zig:122-126`):
+`src/worktree.zig:122-126`):
 
 ```
 min_size =  16 * 1024   =   16 KiB
@@ -107,7 +98,7 @@ used.
 
 ## 5. Mask derivation and cut algorithm
 
-From `zmit/src/fastcdc.zig:32-42`:
+From `src/fastcdc.zig:32-42`:
 
 ```
 bits   = log2(avg_size)
@@ -124,7 +115,7 @@ mask_s = 0x0001_FFFF
 mask_l = 0x0000_7FFF
 ```
 
-Cut algorithm (normative, `zmit/src/fastcdc.zig:49-64`):
+Cut algorithm (normative, `src/fastcdc.zig:49-64`):
 
 ```
 cut(data) -> length:
@@ -204,9 +195,8 @@ TO BE FIXED IN IMPLEMENTATION:
    shifted by 1; a majority of chunks should have identical hashes to
    vector 4. Record the proportion.
 7. **Seed misuse detector**: if an implementation is accidentally
-   built with any seed other than `"MKITFCDC"` (e.g. the legacy
-   `"ZMITFCDC"`), the gear table hash in vector 1 will not match —
-   fails loudly at test time.
+   built with any seed other than `"MKITFCDC"`, the gear table hash
+   in vector 1 will not match — fails loudly at test time.
 
 ---
 

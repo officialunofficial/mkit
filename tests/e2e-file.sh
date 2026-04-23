@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# zmit E2E test with file:// transport
+# mkit E2E test with file:// transport
 # Proves: init -> commit -> push -> clone -> modify -> push -> pull -> branch -> staging -> fetch
 # Full distributed VCS cycle using only local filesystem. No network, no R2.
 #
-# Usage: cd zmit && ./tests/e2e-file.sh
+# Usage: cd mkit && ./tests/e2e-file.sh
 
 set -euo pipefail
 
@@ -25,20 +25,20 @@ assert() {
     fi
 }
 
-# Helper: run zmit command, capture stdout only, tolerate exit code
+# Helper: run mkit command, capture stdout only, tolerate exit code
 # (debug allocator may exit 1 on memory leaks even when the command succeeds)
-zmit_run() {
-    "$ZMIT" "$@" 2>/dev/null || true
+mkit_run() {
+    "$MKIT" "$@" 2>/dev/null || true
 }
 
-# Build zmit
+# Build mkit
 cd "$(dirname "$0")/.."
-bold "Building zmit..."
+bold "Building mkit..."
 zig build 2>&1
-ZMIT="$(pwd)/zig-out/bin/zmit"
+MKIT="$(pwd)/zig-out/bin/mkit"
 
 echo ""
-bold "zmit E2E test with file:// transport"
+bold "mkit E2E test with file:// transport"
 bold "====================================="
 
 REPO_A=$(mktemp -d)
@@ -56,22 +56,22 @@ bold ""
 bold "Phase 1: Init + first commit in repo A"
 cd "$REPO_A"
 
-zmit_run init
-assert "zmit init" '[ -d ".zmit" ]'
+mkit_run init
+assert "mkit init" '[ -d ".mkit" ]'
 
-zmit_run keygen
-assert "zmit keygen" '[ -f ".zmit/keys/default.key" ]'
+mkit_run keygen
+assert "mkit keygen" '[ -f ".mkit/keys/default.key" ]'
 
 mkdir -p src
 echo 'fn main() void { }' > src/main.zig
-echo '# zmit file transport test' > README.md
-echo '*.log' > .zmitignore
+echo '# mkit file transport test' > README.md
+echo '*.log' > .mkitignore
 echo 'should be ignored' > debug.log
 
-COMMIT_OUT=$(zmit_run commit -m "initial commit")
-assert "zmit commit succeeds" 'echo "$COMMIT_OUT" | grep -q "commit"'
+COMMIT_OUT=$(mkit_run commit -m "initial commit")
+assert "mkit commit succeeds" 'echo "$COMMIT_OUT" | grep -q "commit"'
 
-HEAD_HASH=$(cat .zmit/refs/heads/main | tr -d '\n\r ')
+HEAD_HASH=$(cat .mkit/refs/heads/main | tr -d '\n\r ')
 echo "  HEAD: ${HEAD_HASH:0:16}..."
 assert "HEAD ref exists" '[ -n "$HEAD_HASH" ]'
 
@@ -79,13 +79,13 @@ assert "HEAD ref exists" '[ -n "$HEAD_HASH" ]'
 bold ""
 bold "Phase 2: Configure remote + push"
 
-REMOTE_OUT=$(zmit_run remote set "file://$REMOTE")
-assert "zmit remote set" 'echo "$REMOTE_OUT" | grep -q "remote set"'
+REMOTE_OUT=$(mkit_run remote set "file://$REMOTE")
+assert "mkit remote set" 'echo "$REMOTE_OUT" | grep -q "remote set"'
 assert "remote type is file" 'echo "$REMOTE_OUT" | grep -q "file"'
 
-PUSH_OUT=$(zmit_run push --project "$DUMMY_PROJECT")
+PUSH_OUT=$(mkit_run push --project "$DUMMY_PROJECT")
 echo "  push: $(echo "$PUSH_OUT" | head -2)"
-assert "zmit push succeeds" 'echo "$PUSH_OUT" | grep -q "pushed"'
+assert "mkit push succeeds" 'echo "$PUSH_OUT" | grep -q "pushed"'
 
 # Verify remote has pack files
 assert "remote has packs/ dir" '[ -d "$REMOTE/packs" ]'
@@ -101,43 +101,43 @@ bold ""
 bold "Phase 3: Clone into repo B"
 cd "$REPO_B"
 
-CLONE_OUT=$(zmit_run clone "file://$REMOTE")
+CLONE_OUT=$(mkit_run clone "file://$REMOTE")
 echo "  clone: $(echo "$CLONE_OUT" | head -3)"
-assert "zmit clone succeeds" 'echo "$CLONE_OUT" | grep -q "initialized"'
+assert "mkit clone succeeds" 'echo "$CLONE_OUT" | grep -q "initialized"'
 assert "clone fetches main" 'echo "$CLONE_OUT" | grep -q "main"'
 
 # Verify log shows the commit
-LOG_OUT=$(zmit_run log)
-assert "zmit log shows initial commit" 'echo "$LOG_OUT" | grep -q "initial commit"'
+LOG_OUT=$(mkit_run log)
+assert "mkit log shows initial commit" 'echo "$LOG_OUT" | grep -q "initial commit"'
 
 # Get commit hash from log
-CLONE_HEAD=$(cat .zmit/refs/heads/main | tr -d '\n\r ')
+CLONE_HEAD=$(cat .mkit/refs/heads/main | tr -d '\n\r ')
 assert "clone HEAD matches origin" '[ "$CLONE_HEAD" = "$HEAD_HASH" ]'
 
 # Cat the commit
-CAT_OUT=$(zmit_run cat "$CLONE_HEAD")
-assert "zmit cat works on commit" 'echo "$CAT_OUT" | grep -q "^tree"'
+CAT_OUT=$(mkit_run cat "$CLONE_HEAD")
+assert "mkit cat works on commit" 'echo "$CAT_OUT" | grep -q "^tree"'
 
 # Extract tree hash and verify tree contents
 TREE_HASH=$(echo "$CAT_OUT" | grep "^tree" | awk '{print $2}')
-TREE_OUT=$(zmit_run cat "$TREE_HASH")
+TREE_OUT=$(mkit_run cat "$TREE_HASH")
 assert "tree has README.md" 'echo "$TREE_OUT" | grep -q "README.md"'
 assert "tree has src/" 'echo "$TREE_OUT" | grep -q "src"'
-assert "tree has .zmitignore" 'echo "$TREE_OUT" | grep -q ".zmitignore"'
+assert "tree has .mkitignore" 'echo "$TREE_OUT" | grep -q ".mkitignore"'
 assert "tree excludes debug.log" '! echo "$TREE_OUT" | grep -q "debug.log"'
 
 # Verify blob content
 README_HASH=$(echo "$TREE_OUT" | grep "README.md" | awk '{print $2}')
-README_CONTENT=$(zmit_run cat "$README_HASH")
-assert "README.md content correct" '[ "$README_CONTENT" = "# zmit file transport test" ]'
+README_CONTENT=$(mkit_run cat "$README_HASH")
+assert "README.md content correct" '[ "$README_CONTENT" = "# mkit file transport test" ]'
 
 # Verify signature
-VERIFY_OUT=$(zmit_run verify "$CLONE_HEAD")
+VERIFY_OUT=$(mkit_run verify "$CLONE_HEAD")
 assert "commit signature valid" 'echo "$VERIFY_OUT" | grep -q "valid commit signature"'
 
 # Check if checkout restored files
 if [ -f "README.md" ]; then
-    assert "checkout restored README.md" '[ "$(cat README.md)" = "# zmit file transport test" ]'
+    assert "checkout restored README.md" '[ "$(cat README.md)" = "# mkit file transport test" ]'
     assert "checkout restored src/main.zig" '[ -f "src/main.zig" ]'
     assert "checkout did not restore debug.log" '[ ! -f "debug.log" ]'
 else
@@ -149,17 +149,17 @@ bold ""
 bold "Phase 4: Second commit + push from A"
 cd "$REPO_A"
 
-echo '# zmit file transport test (updated)' > README.md
+echo '# mkit file transport test (updated)' > README.md
 echo 'hello world' > CHANGELOG.md
 
-COMMIT2_OUT=$(zmit_run commit -m "second commit")
+COMMIT2_OUT=$(mkit_run commit -m "second commit")
 assert "second commit succeeds" 'echo "$COMMIT2_OUT" | grep -q "^tree"'
 
-HEAD2_HASH=$(cat .zmit/refs/heads/main | tr -d '\n\r ')
+HEAD2_HASH=$(cat .mkit/refs/heads/main | tr -d '\n\r ')
 assert "HEAD advanced" '[ "$HEAD2_HASH" != "$HEAD_HASH" ]'
 echo "  HEAD: ${HEAD2_HASH:0:16}..."
 
-PUSH2_OUT=$(zmit_run push --project "$DUMMY_PROJECT")
+PUSH2_OUT=$(mkit_run push --project "$DUMMY_PROJECT")
 assert "second push succeeds" 'echo "$PUSH2_OUT" | grep -q "pushed"'
 
 # Verify remote updated
@@ -171,27 +171,27 @@ bold ""
 bold "Phase 5: Pull in repo B"
 cd "$REPO_B"
 
-PULL_OUT=$(zmit_run pull)
+PULL_OUT=$(mkit_run pull)
 echo "  pull: $PULL_OUT"
-assert "zmit pull succeeds" 'echo "$PULL_OUT" | grep -q "pulled"'
+assert "mkit pull succeeds" 'echo "$PULL_OUT" | grep -q "pulled"'
 
 # Verify repo B now has the second commit
-LOG2_OUT=$(zmit_run log)
+LOG2_OUT=$(mkit_run log)
 assert "log shows second commit" 'echo "$LOG2_OUT" | grep -q "second commit"'
 assert "log still shows initial commit" 'echo "$LOG2_OUT" | grep -q "initial commit"'
 
 # Verify HEAD updated
-PULL_HEAD=$(cat .zmit/refs/heads/main | tr -d '\n\r ')
+PULL_HEAD=$(cat .mkit/refs/heads/main | tr -d '\n\r ')
 assert "pull updated HEAD" '[ "$PULL_HEAD" = "$HEAD2_HASH" ]'
 
 # Verify file content updated (if checkout restores on pull)
 if [ -f "README.md" ]; then
-    assert "README.md content updated" '[ "$(cat README.md)" = "# zmit file transport test (updated)" ]'
+    assert "README.md content updated" '[ "$(cat README.md)" = "# mkit file transport test (updated)" ]'
     assert "CHANGELOG.md exists" '[ -f "CHANGELOG.md" ]'
 fi
 
 # Pulling again should be a no-op
-PULL_AGAIN=$(zmit_run pull)
+PULL_AGAIN=$(mkit_run pull)
 assert "pull again is up to date" 'echo "$PULL_AGAIN" | grep -q "already up to date"'
 
 # === Phase 6: Branch workflow ===
@@ -199,18 +199,18 @@ bold ""
 bold "Phase 6: Branch workflow"
 cd "$REPO_A"
 
-zmit_run branch feature
-assert "create feature branch" '[ -f ".zmit/refs/heads/feature" ]'
+mkit_run branch feature
+assert "create feature branch" '[ -f ".mkit/refs/heads/feature" ]'
 
-zmit_run checkout feature
-BRANCH_OUT=$(zmit_run branch)
+mkit_run checkout feature
+BRANCH_OUT=$(mkit_run branch)
 assert "feature is current branch" 'echo "$BRANCH_OUT" | grep -q "\* feature"'
 
 echo 'feature work' > feature.txt
-FEAT_OUT=$(zmit_run commit -m "feature commit")
+FEAT_OUT=$(mkit_run commit -m "feature commit")
 assert "feature commit succeeds" 'echo "$FEAT_OUT" | grep -q "^tree"'
 
-FEAT_PUSH=$(zmit_run push --project "$DUMMY_PROJECT")
+FEAT_PUSH=$(mkit_run push --project "$DUMMY_PROJECT")
 assert "push feature branch" 'echo "$FEAT_PUSH" | grep -q "pushed"'
 assert "push targets feature ref" 'echo "$FEAT_PUSH" | grep -q "refs/heads/feature"'
 
@@ -227,52 +227,52 @@ bold "Phase 7: Selective staging + fetch"
 cd "$REPO_A"
 
 # Switch back to main for this phase
-zmit_run checkout main
+mkit_run checkout main
 
 # Create two new files, stage only one
 echo 'staged content' > staged_file.txt
 echo 'unstaged content' > unstaged_file.txt
 
-ADD_OUT=$(zmit_run add staged_file.txt)
-assert "zmit add stages one file" 'echo "$ADD_OUT" | grep -q "staged 1"'
+ADD_OUT=$(mkit_run add staged_file.txt)
+assert "mkit add stages one file" 'echo "$ADD_OUT" | grep -q "staged 1"'
 
 # Verify status shows staged file
-STATUS_OUT=$(zmit_run status)
+STATUS_OUT=$(mkit_run status)
 assert "status shows staged file" 'echo "$STATUS_OUT" | grep -q "staged_file.txt"'
 assert "status shows Changes to be committed" 'echo "$STATUS_OUT" | grep -q "Changes to be committed"'
 
 # Commit with staging — only staged_file.txt should be in the tree
-STAGED_COMMIT=$(zmit_run commit -m "selective staging commit")
+STAGED_COMMIT=$(mkit_run commit -m "selective staging commit")
 assert "staged commit succeeds" 'echo "$STAGED_COMMIT" | grep -q "^tree"'
 
 # Inspect the committed tree to verify only staged_file.txt was included (not unstaged_file.txt as new)
-STAGED_HEAD=$(cat .zmit/refs/heads/main | tr -d '\n\r ')
-STAGED_CAT=$(zmit_run cat "$STAGED_HEAD")
+STAGED_HEAD=$(cat .mkit/refs/heads/main | tr -d '\n\r ')
+STAGED_CAT=$(mkit_run cat "$STAGED_HEAD")
 STAGED_TREE_HASH=$(echo "$STAGED_CAT" | grep "^tree" | awk "{print \$2}")
-STAGED_TREE_OUT=$(zmit_run cat "$STAGED_TREE_HASH")
+STAGED_TREE_OUT=$(mkit_run cat "$STAGED_TREE_HASH")
 assert "committed tree has staged_file.txt" 'echo "$STAGED_TREE_OUT" | grep -q "staged_file.txt"'
 assert "committed tree excludes unstaged_file.txt" '! echo "$STAGED_TREE_OUT" | grep -q "unstaged_file.txt"'
 
 # Push to remote
-STAGED_PUSH=$(zmit_run push --project "$DUMMY_PROJECT")
+STAGED_PUSH=$(mkit_run push --project "$DUMMY_PROJECT")
 assert "push staged commit" 'echo "$STAGED_PUSH" | grep -q "pushed"'
 
 # Test fetch in repo B — should update tracking ref without touching local branch
 cd "$REPO_B"
 
 # Record local main before fetch
-LOCAL_MAIN_BEFORE=$(cat .zmit/refs/heads/main | tr -d '\n\r ')
+LOCAL_MAIN_BEFORE=$(cat .mkit/refs/heads/main | tr -d '\n\r ')
 
-FETCH_OUT=$(zmit_run fetch)
-assert "zmit fetch succeeds" 'echo "$FETCH_OUT" | grep -q "fetched"'
-assert "fetch creates remote tracking ref" '[ -f ".zmit/refs/remotes/origin/main" ]'
+FETCH_OUT=$(mkit_run fetch)
+assert "mkit fetch succeeds" 'echo "$FETCH_OUT" | grep -q "fetched"'
+assert "fetch creates remote tracking ref" '[ -f ".mkit/refs/remotes/origin/main" ]'
 
 # Verify local main is NOT updated by fetch
-LOCAL_MAIN_AFTER=$(cat .zmit/refs/heads/main | tr -d '\n\r ')
+LOCAL_MAIN_AFTER=$(cat .mkit/refs/heads/main | tr -d '\n\r ')
 assert "fetch does not update local branch" '[ "$LOCAL_MAIN_AFTER" = "$LOCAL_MAIN_BEFORE" ]'
 
 # Verify remote tracking ref points to the new commit
-REMOTE_TRACKING=$(cat .zmit/refs/remotes/origin/main | tr -d '\n\r ')
+REMOTE_TRACKING=$(cat .mkit/refs/remotes/origin/main | tr -d '\n\r ')
 assert "tracking ref points to fetched commit" '[ "$REMOTE_TRACKING" = "$STAGED_HEAD" ]'
 assert "tracking ref differs from local branch" '[ "$REMOTE_TRACKING" != "$LOCAL_MAIN_BEFORE" ]'
 
@@ -282,12 +282,12 @@ assert "tracking ref differs from local branch" '[ "$REMOTE_TRACKING" != "$LOCAL
 cd "$REPO_A"
 
 BLAME_AVAIL=false
-if $ZMIT blame --help 2>&1 | grep -qi "usage\|blame\|file"; then
+if $MKIT blame --help 2>&1 | grep -qi "usage\|blame\|file"; then
     BLAME_AVAIL=true
 fi
 
 STASH_AVAIL=false
-if $ZMIT stash --help 2>&1 | grep -qi "usage\|stash\|save"; then
+if $MKIT stash --help 2>&1 | grep -qi "usage\|stash\|save"; then
     STASH_AVAIL=true
 fi
 
@@ -298,22 +298,22 @@ fi
 
 if [ "$BLAME_AVAIL" = true ]; then
     # Ensure we are on main
-    zmit_run checkout main
+    mkit_run checkout main
 
     # Create a file and commit
     echo "line1" > blame-test.txt
     echo "line2" >> blame-test.txt
-    zmit_run add blame-test.txt
-    zmit_run commit -m "add blame-test"
+    mkit_run add blame-test.txt
+    mkit_run commit -m "add blame-test"
 
     # Modify and commit again
     echo "line1" > blame-test.txt
     echo "modified-line2" >> blame-test.txt
     echo "line3" >> blame-test.txt
-    zmit_run add blame-test.txt
-    zmit_run commit -m "modify blame-test"
+    mkit_run add blame-test.txt
+    mkit_run commit -m "modify blame-test"
 
-    BLAME_OUT=$(zmit_run blame blame-test.txt)
+    BLAME_OUT=$(mkit_run blame blame-test.txt)
     assert "blame outputs line1" 'echo "$BLAME_OUT" | grep -q "line1"'
     assert "blame outputs modified-line2" 'echo "$BLAME_OUT" | grep -q "modified-line2"'
     assert "blame outputs line3" 'echo "$BLAME_OUT" | grep -q "line3"'
@@ -325,23 +325,23 @@ fi
 
 if [ "$STASH_AVAIL" = true ]; then
     # Ensure we are on main with a clean state
-    zmit_run checkout main
+    mkit_run checkout main
 
     # Create untracked/modified content to stash
     echo "stashed content" > stash-test.txt
-    zmit_run add stash-test.txt
+    mkit_run add stash-test.txt
 
-    zmit_run stash
+    mkit_run stash
     assert "stash cleans working dir" '[ ! -f stash-test.txt ] || [ "$(cat stash-test.txt 2>/dev/null)" != "stashed content" ]'
 
-    STASH_LIST=$(zmit_run stash list)
+    STASH_LIST=$(mkit_run stash list)
     assert "stash list shows entry" 'echo "$STASH_LIST" | grep -q "stash@{0}"'
 
-    zmit_run stash pop
+    mkit_run stash pop
     assert "stash pop restores file" '[ -f stash-test.txt ] && [ "$(cat stash-test.txt)" = "stashed content" ]'
 
     # Verify stash list is now empty
-    STASH_LIST2=$(zmit_run stash list)
+    STASH_LIST2=$(mkit_run stash list)
     assert "stash list empty after pop" '[ -z "$STASH_LIST2" ] || ! echo "$STASH_LIST2" | grep -q "stash@{0}"'
 else
     echo ""

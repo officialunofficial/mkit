@@ -24,10 +24,10 @@ everything written before the trailer itself. It is not a signature.
 Its purpose is defense-in-depth against bit-rot on transports that do
 not guarantee byte-exact delivery (e.g. S3 after a proxy).
 
-**Magic rename:** zmit used `"ZMIT"` (`zmit/src/packfile.zig:12`).
+**Magic rename:** mkit used `"MKIT"` (`src/packfile.zig:12`).
 mkit v1 uses `"MKIT"`. There is no backward compatibility. All existing
-packs in zmit remotes MUST be re-packed or discarded before mkit reads
-them. Any reader encountering `"ZMIT"` MUST fail with `InvalidMagic`
+packs in mkit remotes MUST be re-packed or discarded before mkit reads
+them. Any reader encountering `"MKIT"` MUST fail with `InvalidMagic`
 (and MAY emit a diagnostic hinting at re-packing).
 
 **Version byte rule:** the first four bytes MUST remain `"MKIT"` in
@@ -65,9 +65,9 @@ bounds-check every `payload_len` against the remaining packfile tail
 Notes:
 
 - `0x01` is **reserved** and MUST NOT be emitted by v1 writers. Readers
-  MUST reject it with `InvalidEntryType`. (In zmit v2 packfiles, `0x01`
+  MUST reject it with `InvalidEntryType`. (In mkit v2 packfiles, `0x01`
   was used as `delta`; in mkit v1 we re-number `delta` to `0x02` so the
-  numerical space cleanly separates "legacy zmit-shaped" from "mkit v1"
+  numerical space cleanly separates "legacy mkit-shaped" from "mkit v1"
   should anyone ever implement a lenient dual reader.)
 - Any other value → `InvalidEntryType`.
 
@@ -100,7 +100,7 @@ stored.
 Delta encoding is the **v1 default** for blobs above 64 bytes when a
 suitable base is available. Writers SHOULD prefer delta entries for
 blob pairs whose delta is < 50% of the target size
-(`zmit/src/packfile.zig:786-809`). Writers MAY emit all-`raw` packs
+(`src/packfile.zig:786-809`). Writers MAY emit all-`raw` packs
 for simplicity; readers MUST handle both mixes.
 
 ---
@@ -115,7 +115,7 @@ Base objects MUST precede their deltas. Specifically, for any
    store at unpack time.
 
 Must hold. Readers MUST NOT buffer undefined delta chains. (This
-matches the invariant at `zmit/src/packfile.zig:815-844`.)
+matches the invariant at `src/packfile.zig:815-844`.)
 
 Writers SHOULD emit non-blob objects first (commits, trees,
 chunked_blob, remix), then base blobs, then delta blobs. This lets a
@@ -127,8 +127,8 @@ streaming reader complete without buffering.
 
 From current impl and preserved in v1:
 
-- `entry_count <= 10_000_000` (`zmit/src/packfile.zig:63`).
-- Sum of all `payload_len` <= **4 GiB** (`zmit/src/packfile.zig:74`).
+- `entry_count <= 10_000_000` (`src/packfile.zig:63`).
+- Sum of all `payload_len` <= **4 GiB** (`src/packfile.zig:74`).
 - Single entry `payload_len` must fit in a `u32` (≤ ~4 GiB).
 
 These are policy caps, not wire limits. Implementations MUST fail with
@@ -149,7 +149,7 @@ multipart upload, removal of the 10 M entry count. Each requires a
 
 mkit v1 packfiles are **buffered**, not streamed. The reader reads the
 entire packfile into memory and then walks entries
-(`zmit/src/packfile.zig:54-91`, `:907-999`). This is a deliberate
+(`src/packfile.zig:54-91`, `:907-999`). This is a deliberate
 simplification. Consequences:
 
 - Memory = packfile size (4 GiB worst-case).
@@ -168,7 +168,7 @@ are stored under the fixed key:
 packs/<64-char-hex-of-BLAKE3(pack_bytes)>    — 70 bytes total
 ```
 
-(`zmit/src/protocol.zig:108-114`.) Writers and readers MUST use this
+(`src/protocol.zig:108-114`.) Writers and readers MUST use this
 exact layout. Lowercase hex only; comparison is byte-exact.
 
 The digest that names the pack is computed over the *entire packfile*
@@ -195,7 +195,7 @@ Readers MUST:
 
 Step 3 MUST happen before any entry is stored to the destination.
 
-(Note: the current zmit impl does not write/verify a trailer. W4 will
+(Note: the current mkit impl does not write/verify a trailer. W4 will
 add it; this SPEC pins the layout so the implementation doesn't drift.)
 
 ---
@@ -228,7 +228,7 @@ TO BE FIXED IN IMPLEMENTATION:
 3. **Two-entry pack with delta**: raw base blob + delta entry that
    reconstructs a second blob. Unpacker produces two object-store
    entries.
-4. **Pack with ZMIT magic** → verifier rejects with `InvalidMagic`.
+4. **Pack with MKIT magic** → verifier rejects with `InvalidMagic`.
 5. **Pack with version = 99** → verifier rejects with
    `UnsupportedPackVersion`, not `InvalidMagic`.
 6. **Bit-flipped trailer** → `PackfileCorrupted`.

@@ -11,8 +11,8 @@ const Io = std.Io;
 
 pub const index_file = ".mkit/index";
 
-/// Magic bytes for index file format: "ZMIX" (ZMit IndeX).
-const magic: [4]u8 = .{ 'Z', 'M', 'I', 'X' };
+/// Magic bytes for index file format: "MKIX" (MKit IndeX).
+const magic: [4]u8 = .{ 'M', 'K', 'I', 'X' };
 /// Current index format version.
 const format_version: u8 = 1;
 
@@ -827,7 +827,7 @@ test "index corrupt data returns error" {
     try std.testing.expectError(error.IndexCorrupt, deserializeIndex(allocator, &bad_magic));
 
     // Too short
-    try std.testing.expectError(error.IndexCorrupt, deserializeIndex(allocator, "ZMIX"));
+    try std.testing.expectError(error.IndexCorrupt, deserializeIndex(allocator, "MKIX"));
 }
 
 test "reject path traversal in staged paths" {

@@ -13,8 +13,8 @@ const Allocator = std.mem.Allocator;
 
 pub const stash_file = ".mkit/stash";
 
-/// Magic bytes for stash file format: "ZMST" (ZMit STash).
-const magic: [4]u8 = .{ 'Z', 'M', 'S', 'T' };
+/// Magic bytes for stash file format: "MKST" (MKit STash).
+const magic: [4]u8 = .{ 'M', 'K', 'S', 'T' };
 
 pub const StashEntry = struct {
     commit_hash: Hash,

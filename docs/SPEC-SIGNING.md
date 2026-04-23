@@ -15,10 +15,10 @@ bytes) and R-17 (cross-domain signature confusion).
   signing layer). Output: 32 bytes.
 - **Signature:** Ed25519 per RFC 8032, using `std.crypto.sign.Ed25519`.
   Public key 32 bytes, seed 32 bytes, signature 64 bytes.
-  (`zmit/src/sign.zig:7-38`.)
+  (`src/sign.zig:7-38`.)
 - Signers sign the BLAKE3 digest (32 bytes) rather than the raw signing
   bytes. This is Ed25519 "PureEdDSA over a pre-hashed message" as used
-  by the zmit code at `zmit/src/sign.zig:104-110` and preserved in v1.
+  by the mkit code at `src/sign.zig:104-110` and preserved in v1.
 - No batched verification. Each verify is independent.
 
 ---
@@ -188,7 +188,7 @@ independent fields. Identity is an attribution claim; `signer` is the
 verification key. Pairing is adapter/application policy, not a core
 invariant.
 
-(Source: `zmit/src/sign.zig:125-146` for the verify flow; we preserve
+(Source: `src/sign.zig:125-146` for the verify flow; we preserve
 it and add domain separation.)
 
 ---
@@ -203,12 +203,12 @@ Permissions:  0600 (mandatory on POSIX)
 
 The seed is passed to `Ed25519.KeyPair.generateDeterministic(seed)` to
 recover `(public_key, secret_key)` on load
-(`zmit/src/sign.zig:27-33`). No PEM, no DER, no password wrapping in
+(`src/sign.zig:27-33`). No PEM, no DER, no password wrapping in
 v1.
 
 Writers MUST `chmod 0600` the file immediately after creation and MUST
 fail keygen if they cannot set that mode on POSIX. (Resolves red-team
-7a / R-01-adjacent: zmit relied on umask.)
+7a / R-01-adjacent: mkit relied on umask.)
 
 On non-POSIX hosts this rule is advisory; implementations SHOULD use
 the host's equivalent access restriction.

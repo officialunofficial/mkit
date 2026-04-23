@@ -16,7 +16,7 @@ and size limits).
 ## 1. The 7 verbs
 
 All transports implement the same abstract vtable
-(`zmit/src/protocol.zig:20-61`):
+(`src/protocol.zig:20-61`):
 
 ```
 uploadPack(bytes, digest)      upload a pack under "packs/<hex>"
@@ -89,7 +89,7 @@ atomic-rename for local refs, which W4 adds; pack writes remain plain
 ```
 
 `ensureParentDirs` creates subdirectories on demand
-(`zmit/src/transport/file.zig:176-186`). Refs under nested names
+(`src/transport/file.zig:176-186`). Refs under nested names
 (e.g. `refs/heads/feat/x`) create the `feat` directory as needed.
 
 ### 4.2 `updateRef` semantics
@@ -151,8 +151,8 @@ Per SPEC-REFS §5.2:
 ### 5.4 listRefs
 
 XML `list-type=2` output parsed to strip the prefix per SPEC-REFS §4
-(`zmit/src/transport/s3.zig:301-316`). Implementations MUST handle
-pagination (`<NextContinuationToken>`). Current zmit implementation
+(`src/transport/s3.zig:301-316`). Implementations MUST handle
+pagination (`<NextContinuationToken>`). Current mkit implementation
 assumes a single page; v1 clarifies this is a bug to fix in W4.
 
 ### 5.5 Size limit
@@ -181,7 +181,7 @@ GET    <base>/<ref-name>                read ref
 GET    <base>/refs/?prefix=<prefix>    list refs; JSON response
 ```
 
-JSON listing response (`zmit/src/transport/http.zig:79-112`):
+JSON listing response (`src/transport/http.zig:79-112`):
 
 ```json
 {"refs":["refs/heads/main","refs/heads/feature/x"]}
@@ -230,7 +230,7 @@ Every request and response is framed as:
 ```
 
 `payload_len` max: 16 MiB (`MAX_PAYLOAD`,
-`zmit/src/transport/ssh.zig:28`). Larger payloads (e.g. packs
+`src/transport/ssh.zig:28`). Larger payloads (e.g. packs
 > 16 MiB) use repeated frames — SSH transport does NOT fragment; v1
 clarifies this is an intentional limit. Large packs over SSH require a
 v2 fragmented protocol or a switch to S3/HTTP for transfer.

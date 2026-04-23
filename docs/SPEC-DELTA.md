@@ -33,8 +33,8 @@ object (§8) supplies a `result_size` field; pack entries do not.
 [instructions …]        concatenation of opcodes, see §3
 ```
 
-The `stream_version` byte is **new in v1**. zmit's v2 packfile delta
-entries had no version byte (`zmit/src/delta.zig:10-13`); v1 adds one
+The `stream_version` byte is **new in v1**. mkit's v2 packfile delta
+entries had no version byte (`src/delta.zig:10-13`); v1 adds one
 before any external users depend on the format.
 
 Readers MUST reject `stream_version != 0x01` with
@@ -123,17 +123,17 @@ fn apply(base: &[u8], stream: &[u8]) -> Vec<u8>:
     return out
 ```
 
-(Matches `zmit/src/delta.zig:106-139` with added version/length header
+(Matches `src/delta.zig:106-139` with added version/length header
 checks.)
 
 ---
 
 ## 5. Writing algorithm (informative)
 
-The reference writer in zmit uses a 16-byte block hash-table scan over
+The reference writer in mkit uses a 16-byte block hash-table scan over
 the base, extends matches greedily, and emits INSERTs for unmatched
-runs (`zmit/src/delta.zig:21-100`). The block hash is FNV-1a 64-bit
-(`zmit/src/delta.zig:143-152`).
+runs (`src/delta.zig:21-100`). The block hash is FNV-1a 64-bit
+(`src/delta.zig:143-152`).
 
 This algorithm is not normative. Any writer that produces a stream that
 passes the v1 verify rules in §4 is conformant. In particular, a writer
@@ -152,7 +152,7 @@ reconstructed bytes equal the target.
   2. The reconstructed object's hash matching the path under which it
      is stored in the object store.
   3. The commit signature over the reconstructed tree hash etc.
-  (`zmit/src/packfile.zig:964-995`.)
+  (`src/packfile.zig:964-995`.)
 
 - **Not independently verifiable.** A delta stream must be paired with
   its declared base. Tamper detection is transitive through the pack

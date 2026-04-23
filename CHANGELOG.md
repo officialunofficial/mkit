@@ -30,23 +30,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2026-04-22
 
-Initial public release. The binary is extracted from the upstream `zmit`
-project and re-homed under the `mkit` name with a fresh license.
+Initial public release.
 
 ### Added
 
-- Extracted from `zmit`: renamed binary, paths, environment variables, and
-  on-disk magic values (`"ZMIT"` → `"MKIT"` packfile magic, `"ZMITFCDC"` →
-  `"MKITFCDC"` FastCDC seed). See `scripts/verify-rename.sh` for the rename
-  gate, enforced in CI.
 - Dual **MIT OR Apache-2.0** licensing with SPDX headers on every source
   file.
 - **`Notary` trait** (`src/notary.zig`) as a library extension point for
   downstream consumers. The public `mkit` binary ships only `NullNotary`
   and exposes no notary surface in its CLI. See `docs/NOTARY.md` for the
   trait contract.
-- **`Identity` opaque tagged union** replaces zmit's `u64 author_mid`.
-  Kinds: `ed25519`, `did_key`, `opaque`. 4096-byte length cap.
+- **`Identity` opaque tagged union** for commit authorship. Kinds:
+  `ed25519`, `did_key`, `opaque`. 4096-byte length cap.
 - **v1 on-disk format**: every object carries `[ObjectType:u8]["MKIT":4]
   [schema_version:u8]` prologue. Timestamps widened to `u64` (no 2106
   overflow). TreeEntry gains `executable` mode.
