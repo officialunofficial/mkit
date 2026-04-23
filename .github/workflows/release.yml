@@ -20,6 +20,17 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # Manual escape hatch. GitHub occasionally de-dupes tag-push events when
+  # a prior workflow for a nearby tag is still active or recently cancelled
+  # — we hit this between v0.2.0 (cancelled after macos-13 retirement
+  # stuck it) and v0.2.1 (never auto-fired). workflow_dispatch lets us
+  # force a release build against an existing tag from the Actions UI.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build (e.g. v0.2.1). Must already be pushed to origin.'
+        required: true
+        type: string
 
 permissions:
   contents: write       # create the GitHub Release + upload assets
@@ -59,21 +70,32 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
       - name: Resolve release metadata
         id: meta
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          # On a tag push, GITHUB_REF_NAME is the tag. On workflow_dispatch,
+          # use the inputs.tag the operator supplied.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [ -z "${TAG}" ]; then
+            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
+            exit 1
+          fi
           VERSION="${TAG#v}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "archive=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}.${{ matrix.archive_ext }}" >> "$GITHUB_OUTPUT"
           echo "stage=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout (at resolved tag)
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+          fetch-depth: 0
 
       - name: Install Zig ${{ env.ZIG_VERSION }}
         shell: bash
@@ -289,7 +311,11 @@ jobs:
         id: meta
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
           VERSION="${TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
