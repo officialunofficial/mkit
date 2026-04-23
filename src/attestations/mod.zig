@@ -23,6 +23,7 @@ pub const signer = @import("signer.zig");
 pub const signer_repo_key = @import("signer_repo_key.zig");
 pub const signer_external = @import("signer_external.zig");
 pub const signer_sigstore = @import("signer_sigstore.zig");
+pub const verify = @import("verify.zig");
 
 /// Re-exports so callers can write `attestations.Statement`, etc.
 pub const Statement = statement.Statement;
@@ -44,6 +45,16 @@ pub const RepoKeySigner = signer_repo_key.RepoKeySigner;
 pub const ExternalSigner = signer_external.ExternalSigner;
 pub const SigstoreSigner = signer_sigstore.SigstoreSigner;
 
+/// Verifier surface — trust root registry + DSSE envelope verification.
+/// See docs/SPEC-ATTESTATIONS.md §5.3.
+pub const Registry = verify.Registry;
+pub const TrustRoot = verify.TrustRoot;
+pub const EnvelopeResult = verify.EnvelopeResult;
+pub const SignatureResult = verify.SignatureResult;
+pub const Reason = verify.Reason;
+pub const verifyEnvelope = verify.verifyEnvelope;
+pub const extractPrimaryCommitHash = verify.extractPrimaryCommitHash;
+
 test {
     _ = jcs;
     _ = statement;
@@ -52,4 +63,5 @@ test {
     _ = signer_repo_key;
     _ = signer_external;
     _ = signer_sigstore;
+    _ = verify;
 }
