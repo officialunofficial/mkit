@@ -27,6 +27,14 @@ pub mod serialize;
 pub mod sign;
 pub mod store;
 
+// Phase 4 — refs + index + worktree + ignore + repo_lock.
+pub(crate) mod atomic;
+pub mod ignore;
+pub mod index;
+pub mod refs;
+pub mod repo_lock;
+pub mod worktree;
+
 pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher};
 pub use object::{
     Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind, MAGIC,
@@ -55,4 +63,20 @@ pub use pack::{
     HEADER_LEN as PACK_HEADER_LEN, MAGIC as PACK_MAGIC, MAX_ENTRIES as PACK_MAX_ENTRIES,
     MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, PackError, PackReader, PackWriter,
     TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport, VERSION as PACK_VERSION, pack_key,
+};
+
+// Phase 4 — refs + index + worktree + ignore + repo_lock.
+pub use ignore::{IgnoreError, IgnoreList, MAX_IGNORE_FILE_BYTES, Pattern, glob_match};
+pub use index::{
+    EntryStatus, INDEX_FILE, Index, IndexEntry, IndexError, IndexResult, MAGIC as INDEX_MAGIC,
+    MAX_INDEX_BYTES, MAX_PATH_LEN, validate_index_path,
+};
+pub use refs::{
+    HEAD_FILE, HEADS_DIR, Head, REFS_DIR, Ref, RefError, RefResult, RefWriteCondition,
+    SHALLOW_FILE, TAGS_DIR, decode_ref_wire, encode_ref_wire, validate_ref_name,
+    validate_ref_prefix,
+};
+pub use repo_lock::{DEFAULT_TIMEOUT as LOCK_DEFAULT_TIMEOUT, LockError, LockResult, RepoLock};
+pub use worktree::{
+    CHUNK_THRESHOLD, MAX_FILE_BYTES, WorktreeError, WorktreeResult, validate_symlink_target,
 };
