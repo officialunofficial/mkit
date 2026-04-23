@@ -1,0 +1,660 @@
+//! Ed25519 commit / remix signing — port of `src/sign.zig`.
+//!
+//! Spec: `docs/SPEC-SIGNING.md`. The exact bytes covered by an Ed25519
+//! signature, and the domain separator used, are normative; this module
+//! reproduces them byte-for-byte. The Zig reference is checked for
+//! cross-implementation parity by the `phase6_*` golden tests in
+//! `tests/golden_sign.rs`.
+//!
+//! Briefly:
+//!
+//! * Algorithm: Ed25519 per RFC 8032, signing the **BLAKE3 digest** of
+//!   `domain || signing_bytes` (`PureEdDSA` over a pre-hashed message —
+//!   the digest itself is what is signed; we do *not* use Ed25519ph).
+//! * Domain separator is byte-prepended to the signing bytes; the
+//!   trailing `\x00` is part of the domain (see SPEC §2).
+//! * `commit_signing_bytes` and `remix_signing_bytes` deliberately
+//!   exclude `signature`, `message_hash`, and `content_digest` (commit
+//!   only) — see SPEC §3.
+//!
+//! Keys live on disk as the raw 32-byte Ed25519 seed at
+//! `.mkit/keys/default.key`, mode 0600. Public-key derivation is
+//! deterministic from the seed.
+
+use crate::hash::{HASH_LEN, Hash};
+use crate::object::{Commit, Identity, MAGIC, MkitError, ObjectType, Remix, SCHEMA_VERSION};
+
+use core::fmt;
+use std::path::Path;
+
+use ed25519_dalek::{
+    PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH, SIGNATURE_LENGTH, Signature as DalekSignature, Signer,
+    SigningKey, Verifier, VerifyingKey,
+};
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// Domain separator used when signing commit objects. The trailing
+/// `\x00` is load-bearing — see `docs/SPEC-SIGNING.md` §2. Twelve bytes.
+pub const COMMIT_DOMAIN: &[u8] = b"mkit.commit\x00";
+
+/// Domain separator used when signing remix objects. Eleven bytes
+/// including the trailing `\x00`.
+pub const REMIX_DOMAIN: &[u8] = b"mkit.remix\x00";
+
+/// 32-byte Ed25519 public key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PublicKey(pub [u8; PUBLIC_KEY_LENGTH]);
+
+impl fmt::Debug for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PublicKey").field(&"…").finish()
+    }
+}
+
+/// 32-byte Ed25519 *seed* (the private value we persist to disk).
+///
+/// This is **not** the expanded RFC 8032 secret key; it is the raw
+/// 32-byte input to `SHA512(seed)` from which the scalar and prefix are
+/// derived. We deliberately mirror what `.mkit/keys/default.key` stores.
+///
+/// The wrapped bytes are zeroed on drop.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct SecretSeed(pub [u8; SECRET_KEY_LENGTH]);
+
+impl fmt::Debug for SecretSeed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SecretSeed").field(&"<redacted>").finish()
+    }
+}
+
+impl PartialEq for SecretSeed {
+    fn eq(&self, other: &Self) -> bool {
+        // Constant-time equality. We don't pull in `subtle::ConstantTimeEq`
+        // because dalek already pins it transitively but exposing it here
+        // would widen the public dep graph; this hand-rolled XOR-OR is
+        // adequate for a 32-byte buffer.
+        let mut acc: u8 = 0;
+        for i in 0..SECRET_KEY_LENGTH {
+            acc |= self.0[i] ^ other.0[i];
+        }
+        acc == 0
+    }
+}
+impl Eq for SecretSeed {}
+
+/// 64-byte Ed25519 signature (R || s).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Signature(pub [u8; SIGNATURE_LENGTH]);
+
+impl fmt::Debug for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Signature").field(&"…").finish()
+    }
+}
+
+/// Ed25519 keypair: seed plus the deterministically-derived public key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyPair {
+    pub public: PublicKey,
+    pub secret: SecretSeed,
+}
+
+impl KeyPair {
+    /// Generate a fresh keypair using the system CSPRNG (`getrandom`).
+    pub fn generate() -> Result<Self, MkitError> {
+        let mut seed = [0u8; SECRET_KEY_LENGTH];
+        getrandom::fill(&mut seed).map_err(|_| MkitError::RngFailure)?;
+        Ok(Self::from_seed(seed))
+    }
+
+    /// Reconstruct a keypair deterministically from a 32-byte seed.
+    /// Pure function: same seed always yields the same public key.
+    #[must_use]
+    pub fn from_seed(seed: [u8; SECRET_KEY_LENGTH]) -> Self {
+        let signing = SigningKey::from_bytes(&seed);
+        let public = PublicKey(signing.verifying_key().to_bytes());
+        // `signing` and any cloned seed are about to go out of scope;
+        // store our own copy and let the dalek key drop normally.
+        let secret = SecretSeed(seed);
+        Self { public, secret }
+    }
+
+    /// Sign `signing_bytes` under the given domain. The actual Ed25519
+    /// input is `BLAKE3(domain || signing_bytes)` — see SPEC §2.2.
+    #[must_use]
+    pub fn sign(&self, domain: &[u8], signing_bytes: &[u8]) -> Signature {
+        let digest = domain_digest(domain, signing_bytes);
+        let signing = SigningKey::from_bytes(&self.secret.0);
+        let sig = signing.sign(&digest);
+        Signature(sig.to_bytes())
+    }
+}
+
+/// Verify a signature over `BLAKE3(domain || signing_bytes)` against the
+/// embedded public key. Returns `Ok(())` on success.
+pub fn verify(
+    public: &PublicKey,
+    domain: &[u8],
+    signing_bytes: &[u8],
+    sig: &Signature,
+) -> Result<(), MkitError> {
+    let vk = VerifyingKey::from_bytes(&public.0).map_err(|_| MkitError::InvalidPublicKey)?;
+    let dalek_sig = DalekSignature::from_bytes(&sig.0);
+    let digest = domain_digest(domain, signing_bytes);
+    vk.verify(&digest, &dalek_sig)
+        .map_err(|_| MkitError::SignatureInvalid)
+}
+
+// -------------------------------------------------------------------
+// Signing-bytes builders
+// -------------------------------------------------------------------
+
+/// Compute `BLAKE3(domain || signing_bytes)`. Always 32 bytes.
+#[must_use]
+fn domain_digest(domain: &[u8], signing_bytes: &[u8]) -> [u8; HASH_LEN] {
+    let mut h = blake3::Hasher::new();
+    h.update(domain);
+    h.update(signing_bytes);
+    *h.finalize().as_bytes()
+}
+
+/// Public helper: `BLAKE3(COMMIT_DOMAIN || commit_signing_bytes(c))`.
+pub fn commit_signing_hash(c: &Commit) -> Result<Hash, MkitError> {
+    let sb = commit_signing_bytes(c)?;
+    Ok(domain_digest(COMMIT_DOMAIN, &sb))
+}
+
+/// Public helper: `BLAKE3(REMIX_DOMAIN || remix_signing_bytes(r))`.
+pub fn remix_signing_hash(r: &Remix) -> Result<Hash, MkitError> {
+    let sb = remix_signing_bytes(r)?;
+    Ok(domain_digest(REMIX_DOMAIN, &sb))
+}
+
+fn write_prologue(buf: &mut Vec<u8>, t: ObjectType) {
+    buf.push(t as u8);
+    buf.extend_from_slice(&MAGIC);
+    buf.push(SCHEMA_VERSION);
+}
+
+fn write_identity(buf: &mut Vec<u8>, id: &Identity) -> Result<(), MkitError> {
+    if !id.is_valid() {
+        return Err(MkitError::InvalidIdentity);
+    }
+    buf.push(id.kind as u8);
+    let len = u16::try_from(id.bytes.len()).map_err(|_| MkitError::IdentityTooLarge)?;
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(&id.bytes);
+    Ok(())
+}
+
+/// Serialize a commit's fields for signing. SPEC-SIGNING §3.
+///
+/// INCLUDED, in order:
+/// 1. Object prologue: `[type=0x03][magic="MKT1"][schema_version=0x01]`.
+/// 2. `tree_hash` (32).
+/// 3. `parent_count` (u32 LE) and `parent_hash` × `parent_count` (32 each).
+/// 4. Identity author: `[kind:u8][len:u16 LE][payload:len]`.
+/// 5. `message_len` (u32 LE) and message bytes.
+/// 6. `timestamp` (u64 LE).
+/// 7. `signer` (32).
+///
+/// EXCLUDED: `signature`, `message_hash`, `content_digest`.
+pub fn commit_signing_bytes(c: &Commit) -> Result<Vec<u8>, MkitError> {
+    let mut buf = Vec::with_capacity(
+        6 + 32 + 4 + c.parents.len() * 32 + 3 + c.author.bytes.len() + 4 + c.message.len() + 8 + 32,
+    );
+    write_prologue(&mut buf, ObjectType::Commit);
+    buf.extend_from_slice(&c.tree_hash);
+    let parent_count = u32::try_from(c.parents.len()).map_err(|_| MkitError::TooManyParents)?;
+    buf.extend_from_slice(&parent_count.to_le_bytes());
+    for p in &c.parents {
+        buf.extend_from_slice(p);
+    }
+    write_identity(&mut buf, &c.author)?;
+    let mlen = u32::try_from(c.message.len()).map_err(|_| MkitError::UnexpectedEof)?;
+    buf.extend_from_slice(&mlen.to_le_bytes());
+    buf.extend_from_slice(&c.message);
+    buf.extend_from_slice(&c.timestamp.to_le_bytes());
+    buf.extend_from_slice(&c.signer);
+    Ok(buf)
+}
+
+/// Serialize a remix's fields for signing. SPEC-SIGNING §4. Same shape
+/// as commit, with `source_count || sources` between parents and author.
+pub fn remix_signing_bytes(r: &Remix) -> Result<Vec<u8>, MkitError> {
+    let mut buf = Vec::with_capacity(
+        6 + 32
+            + 4
+            + r.parents.len() * 32
+            + 4
+            + r.sources.len() * 64
+            + 3
+            + r.author.bytes.len()
+            + 4
+            + r.message.len()
+            + 8
+            + 32,
+    );
+    write_prologue(&mut buf, ObjectType::Remix);
+    buf.extend_from_slice(&r.tree_hash);
+    let parent_count = u32::try_from(r.parents.len()).map_err(|_| MkitError::TooManyParents)?;
+    buf.extend_from_slice(&parent_count.to_le_bytes());
+    for p in &r.parents {
+        buf.extend_from_slice(p);
+    }
+    let source_count = u32::try_from(r.sources.len()).map_err(|_| MkitError::TooManySources)?;
+    buf.extend_from_slice(&source_count.to_le_bytes());
+    for s in &r.sources {
+        buf.extend_from_slice(&s.upstream_id);
+        buf.extend_from_slice(&s.commit_hash);
+    }
+    write_identity(&mut buf, &r.author)?;
+    let mlen = u32::try_from(r.message.len()).map_err(|_| MkitError::UnexpectedEof)?;
+    buf.extend_from_slice(&mlen.to_le_bytes());
+    buf.extend_from_slice(&r.message);
+    buf.extend_from_slice(&r.timestamp.to_le_bytes());
+    buf.extend_from_slice(&r.signer);
+    Ok(buf)
+}
+
+/// Sign a commit object. Returns the 64-byte signature.
+pub fn sign_commit(c: &Commit, kp: &KeyPair) -> Result<Signature, MkitError> {
+    let sb = commit_signing_bytes(c)?;
+    Ok(kp.sign(COMMIT_DOMAIN, &sb))
+}
+
+/// Sign a remix object.
+pub fn sign_remix(r: &Remix, kp: &KeyPair) -> Result<Signature, MkitError> {
+    let sb = remix_signing_bytes(r)?;
+    Ok(kp.sign(REMIX_DOMAIN, &sb))
+}
+
+/// Verify a commit against the public key embedded in `c.signer`.
+///
+/// Returns `Ok(())` on success. Note: this does *not* check whether
+/// `c.author`'s payload matches `c.signer` — that is an application
+/// policy decision (see SPEC §6).
+pub fn verify_commit(c: &Commit) -> Result<(), MkitError> {
+    let sb = commit_signing_bytes(c)?;
+    let pk = PublicKey(c.signer);
+    let sig = Signature(c.signature);
+    verify(&pk, COMMIT_DOMAIN, &sb, &sig)
+}
+
+/// Verify a remix against the public key embedded in `r.signer`.
+pub fn verify_remix(r: &Remix) -> Result<(), MkitError> {
+    let sb = remix_signing_bytes(r)?;
+    let pk = PublicKey(r.signer);
+    let sig = Signature(r.signature);
+    verify(&pk, REMIX_DOMAIN, &sb, &sig)
+}
+
+// -------------------------------------------------------------------
+// Key file I/O — `.mkit/keys/default.key`
+// -------------------------------------------------------------------
+
+/// Load a keypair from `path`. The file must contain exactly 32 raw
+/// seed bytes; on POSIX the file mode must be exactly 0600 (any
+/// group/other bits → `InsecureKeyPermissions`).
+///
+/// On Windows the permission check is a no-op; callers should rely on
+/// the standard ACL inherited from the user profile directory.
+pub fn load_key(path: &Path) -> Result<KeyPair, MkitError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).map_err(|e| MkitError::KeyIo(format!("stat: {e}")))?;
+        // Mask to permission bits only.
+        let mode = meta.mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(MkitError::InsecureKeyPermissions { actual: mode });
+        }
+    }
+    let raw = std::fs::read(path).map_err(|e| MkitError::KeyIo(format!("read: {e}")))?;
+    if raw.len() != SECRET_KEY_LENGTH {
+        return Err(MkitError::InvalidKeyLength { actual: raw.len() });
+    }
+    let mut seed = [0u8; SECRET_KEY_LENGTH];
+    seed.copy_from_slice(&raw);
+    // We've copied the seed; scrub the file buffer.
+    let mut raw = raw;
+    raw.zeroize();
+    Ok(KeyPair::from_seed(seed))
+}
+
+/// Persist a keypair to `path` as the raw 32-byte seed. On POSIX the
+/// file is created with mode 0600 atomically (open with `O_CREAT | O_EXCL`
+/// then chmod is unnecessary because `mode` is set at creation). If the
+/// file already exists it is **truncated** but its mode is reset.
+///
+/// On Windows the file is written with default ACLs; users should keep
+/// `.mkit/keys/` inside `%USERPROFILE%`.
+pub fn save_key(path: &Path, kp: &KeyPair) -> Result<(), MkitError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| MkitError::KeyIo(format!("mkdir {}: {e}", parent.display())))?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| MkitError::KeyIo(format!("open: {e}")))?;
+        f.write_all(&kp.secret.0)
+            .map_err(|e| MkitError::KeyIo(format!("write: {e}")))?;
+        f.sync_all()
+            .map_err(|e| MkitError::KeyIo(format!("fsync: {e}")))?;
+        // If the file pre-existed with a wider mode, reset it.
+        let mut perm = std::fs::metadata(path)
+            .map_err(|e| MkitError::KeyIo(format!("stat: {e}")))?
+            .permissions();
+        perm.set_mode(0o600);
+        std::fs::set_permissions(path, perm)
+            .map_err(|e| MkitError::KeyIo(format!("chmod: {e}")))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, &kp.secret.0).map_err(|e| MkitError::KeyIo(format!("write: {e}")))?;
+        // No permission enforcement on non-Unix; the user-profile ACL
+        // is the only protection. This is documented in SPEC-SIGNING §7.
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------
+// Tests
+// -------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::{ZERO, hash};
+    use crate::object::{Identity, IdentityKind, RemixSource};
+
+    fn fixed_kp() -> KeyPair {
+        KeyPair::from_seed([0x42; 32])
+    }
+
+    fn ed25519_id(pk: [u8; 32]) -> Identity {
+        Identity {
+            kind: IdentityKind::Ed25519,
+            bytes: pk.to_vec(),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Sign/verify roundtrip and tamper detection
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn sign_verify_roundtrip() {
+        let kp = fixed_kp();
+        let bytes = b"some signing bytes";
+        let sig = kp.sign(COMMIT_DOMAIN, bytes);
+        verify(&kp.public, COMMIT_DOMAIN, bytes, &sig).expect("verify ok");
+    }
+
+    #[test]
+    fn verify_rejects_tampered_input() {
+        let kp = fixed_kp();
+        let bytes = b"original".to_vec();
+        let sig = kp.sign(COMMIT_DOMAIN, &bytes);
+        let mut tampered = bytes.clone();
+        tampered[0] ^= 0x01;
+        assert!(matches!(
+            verify(&kp.public, COMMIT_DOMAIN, &tampered, &sig),
+            Err(MkitError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_wrong_key() {
+        let kp1 = fixed_kp();
+        let kp2 = KeyPair::from_seed([0x55; 32]);
+        let bytes = b"x";
+        let sig = kp1.sign(COMMIT_DOMAIN, bytes);
+        assert!(matches!(
+            verify(&kp2.public, COMMIT_DOMAIN, bytes, &sig),
+            Err(MkitError::SignatureInvalid)
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // Domain separation guard (SPEC §2.1)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn domain_separation_commit_vs_remix() {
+        let kp = fixed_kp();
+        let bytes = b"shared bytes";
+        let sig = kp.sign(COMMIT_DOMAIN, bytes);
+        // Same bytes, same key, but the wrong domain → MUST fail.
+        assert!(matches!(
+            verify(&kp.public, REMIX_DOMAIN, bytes, &sig),
+            Err(MkitError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn domain_digest_differs_per_domain() {
+        let bytes = b"abc";
+        let a = domain_digest(COMMIT_DOMAIN, bytes);
+        let b = domain_digest(REMIX_DOMAIN, bytes);
+        assert_ne!(a, b);
+    }
+
+    // ------------------------------------------------------------------
+    // RFC 8032 §7.1 known-answer test 1.
+    //
+    // The reference vector covers a *raw* empty message. PureEdDSA over
+    // an empty input should produce the published signature. Since the
+    // only thing our `sign()` API exposes is "domain || signing_bytes",
+    // the simplest way to reproduce the vector is to call into the
+    // dalek `SigningKey` directly. This guards against any accidental
+    // change to the underlying primitive (e.g. someone swapping in
+    // Ed25519ph would silently break interop).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn ed25519_rfc8032_vector_1() {
+        // Test vector 1 from RFC 8032 §7.1.
+        let seed_hex = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+        let pk_hex = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        let sig_hex = concat!(
+            "e5564300c360ac729086e2cc806e828a",
+            "84877f1eb8e5d974d873e06522490155",
+            "5fb8821590a33bacc61e39701cf9b46b",
+            "d25bf5f0595bbe24655141438e7a100b",
+        );
+        let seed: [u8; 32] = hex::decode(seed_hex).unwrap().try_into().unwrap();
+        let kp = KeyPair::from_seed(seed);
+        // Round-trip the public key.
+        assert_eq!(hex::encode(kp.public.0), pk_hex);
+        // Sign the empty message — bypass our domain-prefix path so the
+        // test reads as the RFC vector.
+        let signing = SigningKey::from_bytes(&kp.secret.0);
+        let sig = signing.sign(b"");
+        assert_eq!(hex::encode(sig.to_bytes()), sig_hex);
+    }
+
+    // ------------------------------------------------------------------
+    // Commit / remix sign + verify (uses the full pipeline).
+    // ------------------------------------------------------------------
+
+    fn build_commit(kp: &KeyPair, msg: &[u8]) -> Commit {
+        Commit {
+            tree_hash: hash(b"tree"),
+            parents: vec![],
+            author: ed25519_id(kp.public.0),
+            signer: kp.public.0,
+            message: msg.to_vec(),
+            timestamp: 1_711_300_000,
+            message_hash: ZERO,
+            content_digest: ZERO,
+            signature: [0u8; 64],
+        }
+    }
+
+    #[test]
+    fn sign_then_verify_commit() {
+        let kp = fixed_kp();
+        let mut c = build_commit(&kp, b"hello");
+        c.signature = sign_commit(&c, &kp).unwrap().0;
+        verify_commit(&c).expect("verify ok");
+    }
+
+    #[test]
+    fn tampered_commit_message_fails_verify() {
+        let kp = fixed_kp();
+        let mut c = build_commit(&kp, b"hello");
+        c.signature = sign_commit(&c, &kp).unwrap().0;
+        c.message = b"tampered".to_vec();
+        assert!(matches!(
+            verify_commit(&c),
+            Err(MkitError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn message_hash_does_not_affect_signing_bytes() {
+        // Spec §3: `message_hash` and `content_digest` are EXCLUDED from
+        // the signing bytes. Two commits differing only in those fields
+        // must have identical signing bytes (and therefore identical
+        // signatures under the same key).
+        let kp = fixed_kp();
+        let mut c1 = build_commit(&kp, b"x");
+        let mut c2 = c1.clone();
+        c2.message_hash = hash(b"some annotation");
+        c2.content_digest = hash(b"another annotation");
+        let sb1 = commit_signing_bytes(&c1).unwrap();
+        let sb2 = commit_signing_bytes(&c2).unwrap();
+        assert_eq!(sb1, sb2);
+        c1.signature = sign_commit(&c1, &kp).unwrap().0;
+        c2.signature = c1.signature;
+        verify_commit(&c2).expect("annotation fields are not signed");
+    }
+
+    #[test]
+    fn sign_then_verify_remix() {
+        let kp = fixed_kp();
+        let mut r = Remix {
+            tree_hash: hash(b"tree"),
+            parents: vec![],
+            sources: vec![RemixSource {
+                upstream_id: hash(b"upstream"),
+                commit_hash: hash(b"commit"),
+            }],
+            author: ed25519_id(kp.public.0),
+            signer: kp.public.0,
+            message: b"remix".to_vec(),
+            timestamp: 2_000,
+            signature: [0u8; 64],
+        };
+        r.signature = sign_remix(&r, &kp).unwrap().0;
+        verify_remix(&r).expect("verify ok");
+    }
+
+    // ------------------------------------------------------------------
+    // Determinism — Ed25519 deterministic signatures (RFC 8032).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn signing_is_deterministic() {
+        let kp = fixed_kp();
+        let bytes = b"deterministic";
+        let s1 = kp.sign(COMMIT_DOMAIN, bytes);
+        let s2 = kp.sign(COMMIT_DOMAIN, bytes);
+        assert_eq!(s1.0, s2.0);
+    }
+
+    // ------------------------------------------------------------------
+    // Key file I/O.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn save_then_load_roundtrip() {
+        let dir = tempdir();
+        let p = dir.join("default.key");
+        let kp = KeyPair::from_seed([0x77; 32]);
+        save_key(&p, &kp).unwrap();
+        let kp2 = load_key(&p).unwrap();
+        assert_eq!(kp.public.0, kp2.public.0);
+        assert_eq!(kp.secret.0, kp2.secret.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_key_writes_mode_0600() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempdir();
+        let p = dir.join("default.key");
+        let kp = KeyPair::from_seed([0x33; 32]);
+        save_key(&p, &kp).unwrap();
+        let meta = std::fs::metadata(&p).unwrap();
+        assert_eq!(meta.mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_key_rejects_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        let p = dir.join("default.key");
+        let kp = KeyPair::from_seed([0x33; 32]);
+        save_key(&p, &kp).unwrap();
+        // Loosen perms to 0644 — load must reject.
+        let mut perm = std::fs::metadata(&p).unwrap().permissions();
+        perm.set_mode(0o644);
+        std::fs::set_permissions(&p, perm).unwrap();
+        match load_key(&p) {
+            Err(MkitError::InsecureKeyPermissions { actual }) => {
+                assert_eq!(actual, 0o644);
+            }
+            other => panic!("expected InsecureKeyPermissions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_key_rejects_wrong_length() {
+        let dir = tempdir();
+        let p = dir.join("short.key");
+        std::fs::write(&p, b"too short").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&p).unwrap().permissions();
+            perm.set_mode(0o600);
+            std::fs::set_permissions(&p, perm).unwrap();
+        }
+        assert!(matches!(
+            load_key(&p),
+            Err(MkitError::InvalidKeyLength { actual: 9 })
+        ));
+    }
+
+    // Tiny self-contained tempdir helper — we don't want to pull in the
+    // `tempfile` crate just for two tests. Each call returns a fresh
+    // dir under `std::env::temp_dir()` named with a per-process counter
+    // and a high-resolution timestamp.
+    fn tempdir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let p =
+            std::env::temp_dir().join(format!("mkit-sign-test-{nanos}-{n}-{}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+}
