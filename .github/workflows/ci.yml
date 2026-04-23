@@ -84,3 +84,38 @@ jobs:
           "$MKIT" log --oneline -n 1 | grep -q 'jemalloc CI smoke'
           cd /
           rm -rf "$WORKDIR"
+
+  # Wire-level SSH transport e2e. Runs on ubuntu-latest only because sshd
+  # isn't practical on the macOS runner (would need launchd config + a test
+  # user). Runs AFTER build-and-test passes so we don't pay for sshd setup
+  # on an already-red PR. Uses the binary built here directly (x86_64 linux
+  # native for the runner), not a cross-compile.
+  e2e-ssh:
+    name: SSH transport e2e
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig 0.16.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-delay 5 \
+            "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz" \
+            -o /tmp/zig.tar.xz
+          mkdir -p "$HOME/.local/zig"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
+          echo "$HOME/.local/zig" >> "$GITHUB_PATH"
+          "$HOME/.local/zig/zig" version
+
+      - name: Build mkit (native x86_64-linux)
+        run: zig build
+
+      - name: Run tests/e2e-ssh.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The script default-hardcodes /src/zig-out/bin/mkit for container use;
+          # override with the native build path on the runner.
+          MKIT="$(pwd)/zig-out/bin/mkit" bash tests/e2e-ssh.sh
