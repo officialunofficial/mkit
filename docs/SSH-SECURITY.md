@@ -1,6 +1,6 @@
 # SSH transport security model
 
-Status: **Informative** for mkit 0.1.0. Addresses red-team R-10 / R-11.
+Status: **Informative**. Addresses red-team R-10 / R-11.
 
 This document describes what mkit's SSH transport does and does NOT do,
 what guarantees users can rely on, and how to harden a deployment.
@@ -98,7 +98,7 @@ affected, not every SSH session on your machine.
 
 ---
 
-## 4. Known limitations (v0.1.0)
+## 4. Known limitations
 
 - **No native SSH.** We do not ship a libssh2-style in-process client,
   and we do not implement the SSH transport from scratch. This keeps
@@ -112,17 +112,19 @@ affected, not every SSH session on your machine.
 - **No known-hosts auto-rotation.** If the upstream rotates its host
   key, the user's ssh will prompt or reject depending on
   `StrictHostKeyChecking`. mkit has no custom path here.
-- **No timeout on initial hello (server side).** Zig 0.15.2 does not
-  expose a portable per-handle read timeout; a misbehaving client that
-  connects and sends nothing will block the server's `mkit serve`
-  process until the SSH channel times out at the transport layer. This
-  is flagged as `TODO(W5.5)` and deferred to 0.2.0.
+- **No timeout on initial hello (server side).** A misbehaving client
+  that connects and sends nothing will block the server's
+  `mkit serve` process until the SSH channel times out at the
+  transport layer. Flagged as `TODO(W5.5)` in
+  `src/main.zig:cmdServe`; implementing it requires a portable
+  per-handle read timeout, which Zig 0.16's `std.Io` does not yet
+  expose in a stable form.
 
 ---
 
-## 5. Upgrade path (post-0.1.0)
+## 5. Upgrade path
 
-Candidate 0.2.0 work (non-binding):
+Candidate future work (non-binding):
 
 - A native SSH implementation (pure-Zig port or libssh binding), so
   mkit owns host-key verification and we can ship fingerprint pinning
@@ -142,8 +144,8 @@ Until then: rely on `ssh(1)` and the pinning keys above.
 | MitM on first connection                  | user's `StrictHostKeyChecking`     |
 | Upstream host-key rotation (silent swap)  | user's `StrictHostKeyChecking=yes` + known_hosts |
 | Wrong binary on remote (legacy rename)    | OP_HELLO, §7.4 (fails loud)         |
-| Future-proto mkit client ↔ 0.1 server     | OP_HELLO STATUS_UNSUPPORTED reply   |
-| Slow-loris client against `mkit serve`    | **NOT mitigated in 0.1.0** (§4)    |
+| Future-proto mkit client ↔ older server   | OP_HELLO STATUS_UNSUPPORTED reply   |
+| Slow-loris client against `mkit serve`    | **NOT mitigated** (§4)             |
 | Compromised identity file                 | user's key management              |
 | Agent forwarding abuse                    | user's `ForwardAgent no`           |
 

@@ -286,13 +286,13 @@ Client → Server:
             [u8 binary_name_len]          ≤ 32
             [binary_name_len bytes]       "mkit"
             [u8 client_version_len]       ≤ 64
-            [client_version_len bytes]    "mkit 0.1.0"
+            [client_version_len bytes]    "mkit 0.2.0"
 
 Server → Client (on match):
   status  = 0x00 STATUS_OK
   payload = [u8 proto_version]            = 0x01
             [u8 server_version_len]       ≤ 64
-            [server_version_len bytes]    "mkit 0.1.0"
+            [server_version_len bytes]    "mkit 0.2.0"
 
 Server → Client (on binary_name mismatch):
   status  = 0x01 STATUS_ERROR
@@ -303,7 +303,9 @@ Server → Client (on client proto_version > server's):
   payload = "unsupported proto version" — then disconnect
 ```
 
-Concrete successful v1 wire (bytes in hex):
+Concrete successful v1 wire (bytes in hex; versions in examples reflect
+the current release — the wire contract is `proto_version=1`, not a
+specific human version string):
 
 ```
 Client → Server frame (opcode=0x00, payload 18 bytes):
@@ -313,21 +315,21 @@ Client → Server frame (opcode=0x00, payload 18 bytes):
   04               binary_name_len = 4
   6D 6B 69 74      "mkit"
   0A               client_version_len = 10
-  6D 6B 69 74 20 30 2E 31 2E 30   "mkit 0.1.0"
+  6D 6B 69 74 20 30 2E 32 2E 30   "mkit 0.2.0"
 
 Server → Client frame (status=0x00, payload 12 bytes):
   00               STATUS_OK
   0C 00 00 00      u32 LE payload length = 12
   01               proto_version = 1
   0A               server_version_len = 10
-  6D 6B 69 74 20 30 2E 31 2E 30   "mkit 0.1.0"
+  6D 6B 69 74 20 30 2E 32 2E 30   "mkit 0.2.0"
 ```
 
 Client behaviour on an unparseable / truncated / non-OK server reply:
 return `error.IncompatiblePeer` and teardown. Do NOT silently continue;
-no pre-v1 fallback is supported in 0.1.0 (no-back-compat per W1). A
-pre-v1 server (no OP_HELLO support) will reject opcode 0x00 and the
-client will see STATUS_ERROR → IncompatiblePeer.
+no pre-v1 fallback is supported (no-back-compat per W1). A pre-v1 server
+(no OP_HELLO support) will reject opcode 0x00 and the client will see
+STATUS_ERROR → IncompatiblePeer.
 
 This resolves red-team R-10 (binary rename breaks remotes): a renamed
 or legacy peer fails loud on the first byte exchange instead of

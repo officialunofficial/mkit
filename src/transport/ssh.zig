@@ -2,6 +2,7 @@
 const std = @import("std");
 const protocol = @import("../protocol.zig");
 const hash_mod = @import("../hash.zig");
+const cli = @import("../cli.zig");
 const Hash = hash_mod.Hash;
 const Allocator = std.mem.Allocator;
 
@@ -34,8 +35,11 @@ pub const MAX_REF_NAME: usize = 4096;
 // OP_HELLO handshake parameters (SPEC-TRANSPORT §7.4).
 pub const PROTO_VERSION: u8 = 1;
 pub const BINARY_NAME: []const u8 = "mkit";
-pub const CLIENT_VERSION: []const u8 = "mkit 0.1.0";
-pub const SERVER_VERSION: []const u8 = "mkit 0.1.0";
+// Derive the human-readable version strings from cli.cli_version so a
+// release bump automatically propagates to the wire handshake instead
+// of leaving a stale "mkit 0.1.0" advertisement behind.
+pub const CLIENT_VERSION: []const u8 = "mkit " ++ cli.cli_version;
+pub const SERVER_VERSION: []const u8 = "mkit " ++ cli.cli_version;
 pub const MAX_BINARY_NAME_LEN: usize = 32;
 pub const MAX_VERSION_STRING_LEN: usize = 64;
 

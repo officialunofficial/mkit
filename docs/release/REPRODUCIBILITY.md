@@ -18,9 +18,9 @@ byte-identical binary to the one published on GitHub Releases.
    file consumed by the build is tracked in Git; the release workflow
    checks out the exact commit the tag resolves to.
 5. **Dependency fingerprint.** `build.zig.zon`'s `dependencies` table (and
-   their `.hash` fields). mkit 0.1.0 has **zero** external Zig packages, so
-   this is currently the empty set — but any future dep must be pinned by
-   hash, and that hash becomes part of the reproducibility contract.
+   their `.hash` fields). mkit currently declares **zero** external Zig
+   packages, so this is the empty set — but any future dep must be pinned
+   by hash, and that hash becomes part of the reproducibility contract.
 
 ## Reproducing a published binary from source
 
@@ -65,5 +65,8 @@ info, unsorted directory reads, etc.) and must be fixed before the next tag.
   and linker versions match. The Linux x86_64 build is the most reliable
   reproducibility target for third parties.
 - Debug symbols and sections tied to host toolchain versions (e.g. Mach-O
-  `LC_UUID`) may vary; a tighter pass would strip these before shipping.
-  That is a post-0.1.0 improvement.
+  `LC_UUID`) are stripped on release modules (`optimize != .Debug`) in
+  `build.zig`, so back-to-back `-Doptimize=ReleaseSafe -Dtarget=x86_64-linux`
+  builds produce byte-identical binaries. Mach-O targets may still drift
+  across host SDK versions; use the Linux x86_64 archive if you need the
+  strongest third-party guarantee.
