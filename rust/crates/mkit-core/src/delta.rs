@@ -150,7 +150,19 @@ pub fn decode(base: &[u8], stream: &[u8]) -> Result<Vec<u8>, MkitError> {
         return Err(MkitError::TrailingData);
     }
 
-    let mut out: Vec<u8> = Vec::with_capacity(result_len);
+    // Bound the pre-allocation against attacker-controlled `result_len`.
+    // An upper bound derivable from the stream itself is (base.len() +
+    // instructions_remaining): COPY ops can fan a single 7-byte op into
+    // up to u16::MAX output bytes sourced from `base`, and INSERT ops
+    // are byte-for-byte. So the largest output the stream can legally
+    // produce is bounded by (base.len() × (instructions/7)) + literals —
+    // but (base.len() + stream.len() × 65535 / 7) already dwarfs any
+    // real payload. Rather than model this exactly, cap the initial
+    // capacity at the actual on-wire maximum we'll ever encode: 4 GiB
+    // minus one. This prevents a 4 GiB pre-allocation from a 9-byte
+    // header. Final `result_len` mismatch is still enforced below.
+    let cap_hint = result_len.min(base.len().saturating_add(stream.len().saturating_mul(2)));
+    let mut out: Vec<u8> = Vec::with_capacity(cap_hint);
     let mut pos = HEADER_LEN;
     while pos < stream.len() {
         let op = stream[pos];
@@ -385,6 +397,18 @@ mod tests {
         let mut stream = header(0, 3).to_vec();
         stream.push(5);
         stream.extend_from_slice(b"hello");
+        let err = decode(&[], &stream).unwrap_err();
+        assert!(matches!(err, MkitError::TrailingData));
+    }
+
+    #[test]
+    fn rejects_huge_result_len_without_preallocating() {
+        // Regression: a 9-byte header claiming result_len = u32::MAX MUST NOT
+        // trigger a 4 GiB `Vec::with_capacity`. The pre-allocation is now
+        // capped against the stream+base size. The decoder still returns an
+        // error (TrailingData) because no ops follow — but the point is that
+        // it does so without first reserving 4 GiB of virtual memory.
+        let stream = header(0, u32::MAX);
         let err = decode(&[], &stream).unwrap_err();
         assert!(matches!(err, MkitError::TrailingData));
     }

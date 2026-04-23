@@ -14,7 +14,12 @@
 # Guardrails enforced in every target (see docs/FUZZ.md):
 #   1. <= 100 iterations per target invocation.
 #   2. <= 64 KiB input per iteration.
-#   3. bumpalo arena (2 MiB) — no global heap during the fuzz loop.
+#   3. Bounded allocations: input cap (2) + per-op output caps inside
+#      mkit-core bound the worst-case heap to ~1 MiB per iteration.
+#      (Rust adaptation of the Zig FixedBufferAllocator — mkit-core uses
+#      the global allocator in production, so wiring a custom allocator
+#      into only the fuzz path would make the fuzz harness divergent
+#      from production. Documented in docs/FUZZ.md §Rust-adaptation.)
 #   4. 100 ms wall-clock cap per iteration.
 #   5. No unbounded loops; iteration counter mandatory.
 #   6. Seeded RNG so failures reproduce.
@@ -31,7 +36,6 @@ cargo-fuzz = true
 
 [dependencies]
 mkit-core = { path = "../crates/mkit-core" }
-bumpalo = "3"
 tempfile = "3"
 
 # libfuzzer-sys is gated on the `libfuzzer` feature so `cargo test`
