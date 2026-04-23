@@ -298,7 +298,8 @@ const ATTEST_PREDICATE_JCS = "{}";
 // `verify::tests::deterministic_repo_key_roundtrip` style — fully
 // reproducible across runs and across implementations.
 const ATTEST_ED25519_SEED: [32]u8 = .{0xAB} ** 32;
-const ATTEST_KEYID = "blake3:00000000000000000000000000000000000000000000000000000000000000aa";
+// ATTEST_KEYID is derived at runtime in buildEnvelopeBasic via
+// attestKeyid() — no hardcoded constant.
 
 fn buildStatementBasic(arena: Allocator) ![]u8 {
     const hex = hash_mod.toHex(ATTEST_COMMIT_HASH);
@@ -313,9 +314,29 @@ fn buildStatementBasic(arena: Allocator) ![]u8 {
     });
 }
 
+/// Derive "blake3:<hex64>" keyid from a 32-byte Ed25519 seed.
+/// The keyid is BLAKE3(pubkey) where pubkey is derived deterministically
+/// from the seed via Ed25519 key generation. Result is written into `buf`
+/// and the full 71-byte slice is returned (borrowed from `buf`).
+fn attestKeyid(seed: [32]u8, buf: *[71]u8) ![]const u8 {
+    const Ed25519 = std.crypto.sign.Ed25519;
+    const kp = try Ed25519.KeyPair.generateDeterministic(seed);
+    const pubkey = kp.public_key.toBytes();
+    const digest = hash_mod.hash(&pubkey);
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    @memcpy(buf[0..7], "blake3:");
+    @memcpy(buf[7..71], &hex);
+    return buf[0..71];
+}
+
 fn buildEnvelopeBasic(arena: Allocator) ![]u8 {
     const Ed25519 = std.crypto.sign.Ed25519;
     const kp = try Ed25519.KeyPair.generateDeterministic(ATTEST_ED25519_SEED);
+
+    // Derive keyid from the actual pubkey so the golden pins the real
+    // derivation path rather than a placeholder constant.
+    var keyid_buf: [71]u8 = undefined;
+    const keyid = try attestKeyid(ATTEST_ED25519_SEED, &keyid_buf);
 
     const stmt_bytes = try buildStatementBasic(arena);
     defer arena.free(stmt_bytes);
@@ -333,7 +354,7 @@ fn buildEnvelopeBasic(arena: Allocator) ![]u8 {
     return try attestations.envelope.encode(arena, .{
         .payload_type = attestations.PAYLOAD_TYPE_IN_TOTO,
         .payload = stmt_bytes,
-        .signatures = &.{.{ .keyid = ATTEST_KEYID, .sig = sig_bytes[0..] }},
+        .signatures = &.{.{ .keyid = keyid, .sig = sig_bytes[0..] }},
     });
 }
 

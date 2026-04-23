@@ -18,16 +18,22 @@ use std::path::PathBuf;
 
 use ed25519_dalek::SigningKey;
 use mkit_attest::envelope::{self as env_mod, PAYLOAD_TYPE_IN_TOTO};
+use mkit_attest::signer_repo_key::RepoKeySigner;
 use mkit_attest::statement::{self, Statement, Subject};
 use mkit_attest::verify::{self, Reason, Registry, TrustRoot};
 use mkit_core::hash::{hash, to_hex};
+use mkit_core::sign::KeyPair;
 
 const ATTEST_COMMIT_HASH: [u8; 32] = [0xCC; 32];
 const ATTEST_PREDICATE_TYPE: &str = "https://example.com/predicate/v1";
 const ATTEST_PREDICATE_JCS: &[u8] = b"{}";
 const ATTEST_ED25519_SEED: [u8; 32] = [0xAB; 32];
-const ATTEST_KEYID: &str =
-    "blake3:00000000000000000000000000000000000000000000000000000000000000aa";
+
+/// Derive the keyid string from the fixed seed, matching the Zig harvester.
+/// keyid = "blake3:" || hex(BLAKE3(pubkey)) where pubkey is derived from seed.
+fn attest_keyid() -> String {
+    RepoKeySigner::new(KeyPair::from_seed(ATTEST_ED25519_SEED)).keyid_string()
+}
 
 fn golden_dir() -> PathBuf {
     // CARGO_MANIFEST_DIR points at rust/crates/mkit-attest. Goldens live
@@ -84,7 +90,10 @@ fn envelope_basic_decodes_and_signature_verifies() {
     let env = env_mod::decode(&golden).expect("decode envelope");
     assert_eq!(env.payload_type, PAYLOAD_TYPE_IN_TOTO);
     assert_eq!(env.signatures.len(), 1);
-    assert_eq!(env.signatures[0].keyid, ATTEST_KEYID);
+
+    // Derive keyid from the fixed seed — same path the Zig harvester uses.
+    let keyid = attest_keyid();
+    assert_eq!(env.signatures[0].keyid, keyid);
 
     // The decoded payload must be byte-identical to the Statement golden.
     let stmt_golden = std::fs::read(golden_dir().join("statement_basic.json")).unwrap();
@@ -95,7 +104,7 @@ fn envelope_basic_decodes_and_signature_verifies() {
     let pk = signing.verifying_key().to_bytes();
 
     let mut reg = Registry::new();
-    reg.add(ATTEST_KEYID, TrustRoot::Ed25519PubKey(pk));
+    reg.add(&keyid, TrustRoot::Ed25519PubKey(pk));
 
     let r = verify::verify(&env, &reg).expect("verify");
     assert!(r.any_verified, "Zig-produced signature must verify in Rust");
