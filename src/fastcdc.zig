@@ -235,7 +235,7 @@ test "StreamingChunker matches ChunkIterator" {
     // Write to temp file
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const f = try tmp.dir.createFile("test.bin", .{});
+    const f = try tmp.dir.createFile(std.testing.io, "test.bin", .{});
     try f.writeAll(&data);
     f.close();
 
@@ -251,7 +251,7 @@ test "StreamingChunker matches ChunkIterator" {
     var chunker = try StreamingChunker.init(allocator, cdc);
     defer chunker.deinit();
 
-    var file = try tmp.dir.openFile("test.bin", .{});
+    var file = try tmp.dir.openFile(std.testing.io, "test.bin", .{});
     defer file.close();
 
     var actual: std.ArrayList(usize) = .empty;

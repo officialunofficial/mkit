@@ -387,7 +387,7 @@ fn initTestRepo(_: Allocator) !struct {
     var tmp = std.testing.tmpDir(.{});
     errdefer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try refs.init(tmp.dir);
 
     var store_tmp = std.testing.tmpDir(.{});
@@ -464,7 +464,7 @@ test "stash save creates entry" {
     _ = try makeTestCommit(allocator, &repo.store, repo.tmp.dir, "hello.txt", "original", "initial commit");
 
     // Modify file
-    const f = try repo.tmp.dir.createFile("hello.txt", .{});
+    const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f.writeAll("modified content");
     f.close();
 
@@ -488,7 +488,7 @@ test "stash restores clean state" {
     _ = try makeTestCommit(allocator, &repo.store, repo.tmp.dir, "hello.txt", "original", "initial commit");
 
     // Modify file
-    const f = try repo.tmp.dir.createFile("hello.txt", .{});
+    const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f.writeAll("modified content");
     f.close();
 
@@ -511,7 +511,7 @@ test "stash pop restores changes" {
     _ = try makeTestCommit(allocator, &repo.store, repo.tmp.dir, "hello.txt", "original", "initial commit");
 
     // Modify file
-    const f = try repo.tmp.dir.createFile("hello.txt", .{});
+    const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f.writeAll("modified content");
     f.close();
 
@@ -537,7 +537,7 @@ test "stash pop removes from list" {
     _ = try makeTestCommit(allocator, &repo.store, repo.tmp.dir, "hello.txt", "original", "initial commit");
 
     // Modify and stash
-    const f = try repo.tmp.dir.createFile("hello.txt", .{});
+    const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f.writeAll("modified");
     f.close();
     try save(allocator, &repo.store, repo.tmp.dir, "WIP");
@@ -561,7 +561,7 @@ test "stash drop removes without applying" {
     _ = try makeTestCommit(allocator, &repo.store, repo.tmp.dir, "hello.txt", "original", "initial commit");
 
     // Modify and stash
-    const f = try repo.tmp.dir.createFile("hello.txt", .{});
+    const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f.writeAll("modified");
     f.close();
     try save(allocator, &repo.store, repo.tmp.dir, "WIP");
@@ -591,7 +591,7 @@ test "multiple stashes LIFO" {
 
     // Modify A, stash
     {
-        const f = try repo.tmp.dir.createFile("a.txt", .{});
+        const f = try repo.tmp.dir.createFile(std.testing.io, "a.txt", .{});
         try f.writeAll("modified-a");
         f.close();
     }
@@ -599,7 +599,7 @@ test "multiple stashes LIFO" {
 
     // Modify A again differently, stash
     {
-        const f = try repo.tmp.dir.createFile("a.txt", .{});
+        const f = try repo.tmp.dir.createFile(std.testing.io, "a.txt", .{});
         try f.writeAll("modified-a-again");
         f.close();
     }
@@ -643,12 +643,12 @@ test "stash show diffs against parent" {
 
     // Add a new file and modify existing
     {
-        const f = try repo.tmp.dir.createFile("hello.txt", .{});
+        const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
         try f.writeAll("modified");
         f.close();
     }
     {
-        const f = try repo.tmp.dir.createFile("new.txt", .{});
+        const f = try repo.tmp.dir.createFile(std.testing.io, "new.txt", .{});
         try f.writeAll("brand new");
         f.close();
     }

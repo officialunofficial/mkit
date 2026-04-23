@@ -229,7 +229,7 @@ test "state write/read round-trip" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const orig_head = hash_mod.hash("orig-head");
     const bad = hash_mod.hash("bad-commit");
@@ -270,7 +270,7 @@ test "state write/read with no bad hash and no branch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const good_hashes = try allocator.alloc(Hash, 0);
     defer allocator.free(good_hashes);
@@ -360,13 +360,13 @@ test "isBisectInProgress detection" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // No bisect file -> not in progress
     try std.testing.expect(!isBisectInProgress(tmp.dir));
 
     // Create bisect file -> in progress
-    const file = try tmp.dir.createFile(bisect_file, .{});
+    const file = try tmp.dir.createFile(std.testing.io, bisect_file, .{});
     try file.writeAll("placeholder\n");
     file.close();
 
@@ -377,9 +377,9 @@ test "cleanupBisect removes state file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
-    const file = try tmp.dir.createFile(bisect_file, .{});
+    const file = try tmp.dir.createFile(std.testing.io, bisect_file, .{});
     try file.writeAll("data\n");
     file.close();
 
@@ -394,7 +394,7 @@ test "cleanupBisect on nonexistent file is fine" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try cleanupBisect(tmp.dir);
 }
 
@@ -446,10 +446,10 @@ test "readState rejects empty file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // Create empty bisect file
-    const file = try tmp.dir.createFile(bisect_file, .{});
+    const file = try tmp.dir.createFile(std.testing.io, bisect_file, .{});
     file.close();
 
     try std.testing.expectError(error.InvalidBisectState, readState(allocator, tmp.dir));

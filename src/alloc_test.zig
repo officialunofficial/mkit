@@ -99,21 +99,21 @@ test "commit workflow no leaks" {
     defer work_tmp.cleanup();
 
     // Init refs
-    try work_tmp.dir.makeDir(".mkit");
+    try work_tmp.dir.createDirPath(std.testing.io, ".mkit");
     try refs.init(work_tmp.dir);
 
     // Create some files
-    const f1 = try work_tmp.dir.createFile("hello.txt", .{});
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f1.writeAll("hello world");
     f1.close();
 
-    try work_tmp.dir.makeDir("src");
-    const f2 = try work_tmp.dir.createFile("src/main.zig", .{});
+    try work_tmp.dir.createDirPath(std.testing.io, "src");
+    const f2 = try work_tmp.dir.createFile(std.testing.io, "src/main.zig", .{});
     try f2.writeAll("pub fn main() void {}");
     f2.close();
 
     // Build tree from working directory
-    var d = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d.close();
     const tree_hash = try worktree.buildTree(allocator, &store, d);
 
@@ -185,27 +185,27 @@ test "status diff workflow no leaks" {
     defer work_tmp.cleanup();
 
     // Create initial file
-    const f1 = try work_tmp.dir.createFile("file.txt", .{});
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "file.txt", .{});
     try f1.writeAll("original");
     f1.close();
 
     // Build HEAD tree
-    var d1 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
     const head_tree = try worktree.buildTree(allocator, &store, d1);
 
     // Modify the file
-    const f2 = try work_tmp.dir.createFile("file.txt", .{});
+    const f2 = try work_tmp.dir.createFile(std.testing.io, "file.txt", .{});
     try f2.writeAll("modified");
     f2.close();
 
     // Add a new file
-    const f3 = try work_tmp.dir.createFile("new.txt", .{});
+    const f3 = try work_tmp.dir.createFile(std.testing.io, "new.txt", .{});
     try f3.writeAll("new content");
     f3.close();
 
     // Compute status diff
-    var d2 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d2.close();
     var result = try diff_mod.statusDiff(allocator, &store, head_tree, d2);
     defer result.deinit();
@@ -380,7 +380,7 @@ test "restore workflow no leaks" {
     var target_tmp = std.testing.tmpDir(.{});
     defer target_tmp.cleanup();
 
-    var target_dir = try target_tmp.dir.openDir(".", .{ .iterate = true });
+    var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer target_dir.close();
     try restore_mod.restoreTree(allocator, &store, root_tree, target_dir, .{});
 
@@ -403,7 +403,7 @@ test "config roundtrip no leaks" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // Write config with non-default values (exercises heap allocation paths)
     const original = config_mod.Config{
@@ -459,7 +459,7 @@ test "ignore load no leaks" {
     defer tmp.cleanup();
 
     // Create .mkitignore with various patterns
-    const f = try tmp.dir.createFile(".mkitignore", .{});
+    const f = try tmp.dir.createFile(std.testing.io, ".mkitignore", .{});
     try f.writeAll(
         \\# build artifacts
         \\*.o
@@ -493,7 +493,7 @@ test "refs lifecycle no leaks" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try refs.init(tmp.dir);
 
     // Write several branch refs
@@ -801,16 +801,16 @@ test "end-to-end workflow no leaks" {
     var work_tmp = std.testing.tmpDir(.{});
     defer work_tmp.cleanup();
 
-    const f1 = try work_tmp.dir.createFile("README.md", .{});
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "README.md", .{});
     try f1.writeAll("# Hello");
     f1.close();
-    try work_tmp.dir.makeDir("src");
-    const f2 = try work_tmp.dir.createFile("src/lib.zig", .{});
+    try work_tmp.dir.createDirPath(std.testing.io, "src");
+    const f2 = try work_tmp.dir.createFile(std.testing.io, "src/lib.zig", .{});
     try f2.writeAll("pub const version = 1;");
     f2.close();
 
     // Build tree and commit
-    var d1 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
     const tree1 = try worktree.buildTree(allocator, &store, d1);
 
@@ -819,11 +819,11 @@ test "end-to-end workflow no leaks" {
     try refs.updateHead(allocator, repo_tmp.dir, commit1);
 
     // Modify a file and make a second commit
-    const f3 = try work_tmp.dir.createFile("src/lib.zig", .{});
+    const f3 = try work_tmp.dir.createFile(std.testing.io, "src/lib.zig", .{});
     try f3.writeAll("pub const version = 2;");
     f3.close();
 
-    var d2 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d2.close();
     const tree2 = try worktree.buildTree(allocator, &store, d2);
 
@@ -846,7 +846,7 @@ test "end-to-end workflow no leaks" {
     // Restore the latest tree to a fresh directory
     var restore_tmp = std.testing.tmpDir(.{});
     defer restore_tmp.cleanup();
-    var restore_dir = try restore_tmp.dir.openDir(".", .{ .iterate = true });
+    var restore_dir = try restore_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer restore_dir.close();
     try restore_mod.restoreTree(allocator, &store, tree2, restore_dir, .{});
 

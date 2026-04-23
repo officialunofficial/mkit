@@ -340,8 +340,8 @@ test "sparse restore filters files correctly" {
     };
 
     // Create output directory
-    try tmp.dir.makeDir("output");
-    var output_dir = try tmp.dir.openDir("output", .{ .iterate = true });
+    try tmp.dir.createDirPath(std.testing.io, "output");
+    var output_dir = try tmp.dir.openDir(std.testing.io, "output", .{ .iterate = true });
     defer output_dir.close();
 
     try restore.restoreTree(

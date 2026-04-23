@@ -426,7 +426,7 @@ test "config roundtrip" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const original = Config{
         .signing_key = ".mkit/keys/deploy.key",
@@ -448,7 +448,7 @@ test "config not found returns defaults" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     var config = try readConfig(allocator, tmp.dir);
     defer config.deinit();
@@ -481,7 +481,7 @@ test "config roundtrip with remote" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const original = Config{
         .signing_key = ".mkit/keys/deploy.key",
@@ -517,7 +517,7 @@ test "config roundtrip without remote" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // Write config with no remote fields
     const original = Config{
@@ -574,7 +574,7 @@ test "config roundtrip with ssh.* fields" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const original = Config{
         .ssh_strict_host_key_checking = "accept-new",
@@ -737,7 +737,7 @@ test "config roundtrip without ssh.* fields omits them" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const original = Config{ .default_branch = "dev" };
     try writeConfig(tmp.dir, original);

@@ -586,21 +586,21 @@ test "status shows added file" {
     var work_tmp = std.testing.tmpDir(.{});
     defer work_tmp.cleanup();
 
-    const f1 = try work_tmp.dir.createFile("a.txt", .{});
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
     try f1.writeAll("hello");
     f1.close();
 
-    var d1 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
     const old_tree_hash = try worktree.buildTree(allocator, &store, d1);
 
     // Now add b.txt to workdir
-    const f2 = try work_tmp.dir.createFile("b.txt", .{});
+    const f2 = try work_tmp.dir.createFile(std.testing.io, "b.txt", .{});
     try f2.writeAll("world");
     f2.close();
 
     // statusDiff: old tree vs current workdir (which now has a.txt + b.txt)
-    var d2 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d2.close();
     var result = try statusDiff(allocator, &store, old_tree_hash, d2);
     defer result.deinit();
@@ -622,22 +622,22 @@ test "status shows removed file" {
     var work_tmp = std.testing.tmpDir(.{});
     defer work_tmp.cleanup();
 
-    const f1 = try work_tmp.dir.createFile("a.txt", .{});
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
     try f1.writeAll("hello");
     f1.close();
-    const f2 = try work_tmp.dir.createFile("b.txt", .{});
+    const f2 = try work_tmp.dir.createFile(std.testing.io, "b.txt", .{});
     try f2.writeAll("world");
     f2.close();
 
-    var d1 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
     const old_tree_hash = try worktree.buildTree(allocator, &store, d1);
 
     // Remove b.txt from workdir
-    try work_tmp.dir.deleteFile("b.txt");
+    try work_tmp.dir.deleteFile(std.testing.io, "b.txt");
 
     // statusDiff: old tree (a.txt + b.txt) vs current workdir (only a.txt)
-    var d2 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d2.close();
     var result = try statusDiff(allocator, &store, old_tree_hash, d2);
     defer result.deinit();
@@ -659,21 +659,21 @@ test "status shows modified file" {
     var work_tmp = std.testing.tmpDir(.{});
     defer work_tmp.cleanup();
 
-    const f1 = try work_tmp.dir.createFile("a.txt", .{});
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
     try f1.writeAll("old");
     f1.close();
 
-    var d1 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
     const old_tree_hash = try worktree.buildTree(allocator, &store, d1);
 
     // Modify a.txt to "new"
-    const f2 = try work_tmp.dir.createFile("a.txt", .{});
+    const f2 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
     try f2.writeAll("new");
     f2.close();
 
     // statusDiff: old tree vs current workdir
-    var d2 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d2.close();
     var result = try statusDiff(allocator, &store, old_tree_hash, d2);
     defer result.deinit();
@@ -695,16 +695,16 @@ test "status clean working directory" {
     var work_tmp = std.testing.tmpDir(.{});
     defer work_tmp.cleanup();
 
-    const f1 = try work_tmp.dir.createFile("a.txt", .{});
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
     try f1.writeAll("content");
     f1.close();
 
-    var d1 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
     const old_tree_hash = try worktree.buildTree(allocator, &store, d1);
 
     // Don't change anything — statusDiff should show 0 entries
-    var d2 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d2.close();
     var result = try statusDiff(allocator, &store, old_tree_hash, d2);
     defer result.deinit();
@@ -724,14 +724,14 @@ test "status no commits" {
     var work_tmp = std.testing.tmpDir(.{});
     defer work_tmp.cleanup();
 
-    const f1 = try work_tmp.dir.createFile("a.txt", .{});
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
     try f1.writeAll("aaa");
     f1.close();
-    const f2 = try work_tmp.dir.createFile("b.txt", .{});
+    const f2 = try work_tmp.dir.createFile(std.testing.io, "b.txt", .{});
     try f2.writeAll("bbb");
     f2.close();
 
-    var d1 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
     var result = try statusDiff(allocator, &store, null, d1);
     defer result.deinit();
@@ -756,22 +756,22 @@ test "status nested changes" {
     var work_tmp = std.testing.tmpDir(.{});
     defer work_tmp.cleanup();
 
-    try work_tmp.dir.makeDir("src");
-    const f1 = try work_tmp.dir.createFile("src/a.txt", .{});
+    try work_tmp.dir.createDirPath(std.testing.io, "src");
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "src/a.txt", .{});
     try f1.writeAll("original");
     f1.close();
 
-    var d1 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
     const old_tree_hash = try worktree.buildTree(allocator, &store, d1);
 
     // Modify src/a.txt
-    const f2 = try work_tmp.dir.createFile("src/a.txt", .{});
+    const f2 = try work_tmp.dir.createFile(std.testing.io, "src/a.txt", .{});
     try f2.writeAll("modified");
     f2.close();
 
     // statusDiff should show src/a.txt as modified
-    var d2 = try work_tmp.dir.openDir(".", .{ .iterate = true });
+    var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d2.close();
     var result = try statusDiff(allocator, &store, old_tree_hash, d2);
     defer result.deinit();

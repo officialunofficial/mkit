@@ -166,7 +166,7 @@ test "build tree from empty directory" {
     defer store.close();
 
     // Build tree from empty dir
-    var work_dir = try tmp.dir.openDir(".", .{ .iterate = true });
+    var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer work_dir.close();
     const h = try buildTree(allocator, &store, work_dir);
 
@@ -183,7 +183,7 @@ test "build tree from single file" {
     defer tmp.cleanup();
 
     // Create a file
-    const f = try tmp.dir.createFile("hello.txt", .{});
+    const f = try tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f.writeAll("hello world");
     f.close();
 
@@ -192,7 +192,7 @@ test "build tree from single file" {
     var store = try store_mod.ObjectStore.init(store_tmp.dir);
     defer store.close();
 
-    var work_dir = try tmp.dir.openDir(".", .{ .iterate = true });
+    var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer work_dir.close();
     const h = try buildTree(allocator, &store, work_dir);
 
@@ -214,14 +214,14 @@ test "reject invalid symlink targets" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.symLink("/etc/passwd", "bad-link", .{});
+    try tmp.dir.symLink(std.testing.io, "/etc/passwd", "bad-link", .{});
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
     var store = try store_mod.ObjectStore.init(store_tmp.dir);
     defer store.close();
 
-    var work_dir = try tmp.dir.openDir(".", .{ .iterate = true });
+    var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer work_dir.close();
     try std.testing.expectError(error.InvalidSymlinkTarget, buildTree(allocator, &store, work_dir));
 }
@@ -233,11 +233,11 @@ test "build tree with nested directories" {
     defer tmp.cleanup();
 
     // Create nested structure
-    try tmp.dir.makeDir("subdir");
-    const f1 = try tmp.dir.createFile("a.txt", .{});
+    try tmp.dir.createDirPath(std.testing.io, "subdir");
+    const f1 = try tmp.dir.createFile(std.testing.io, "a.txt", .{});
     try f1.writeAll("file a");
     f1.close();
-    const f2 = try tmp.dir.createFile("subdir/b.txt", .{});
+    const f2 = try tmp.dir.createFile(std.testing.io, "subdir/b.txt", .{});
     try f2.writeAll("file b");
     f2.close();
 
@@ -246,7 +246,7 @@ test "build tree with nested directories" {
     var store = try store_mod.ObjectStore.init(store_tmp.dir);
     defer store.close();
 
-    var work_dir = try tmp.dir.openDir(".", .{ .iterate = true });
+    var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer work_dir.close();
     const h = try buildTree(allocator, &store, work_dir);
 
@@ -274,10 +274,10 @@ test "build tree skips .mkit directory" {
     defer tmp.cleanup();
 
     // Create a .mkit dir that should be skipped
-    try tmp.dir.makeDir(".mkit");
-    const f1 = try tmp.dir.createFile(".mkit/should_skip", .{});
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
+    const f1 = try tmp.dir.createFile(std.testing.io, ".mkit/should_skip", .{});
     f1.close();
-    const f2 = try tmp.dir.createFile("keep.txt", .{});
+    const f2 = try tmp.dir.createFile(std.testing.io, "keep.txt", .{});
     try f2.writeAll("kept");
     f2.close();
 
@@ -286,7 +286,7 @@ test "build tree skips .mkit directory" {
     var store = try store_mod.ObjectStore.init(store_tmp.dir);
     defer store.close();
 
-    var work_dir = try tmp.dir.openDir(".", .{ .iterate = true });
+    var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer work_dir.close();
     const h = try buildTree(allocator, &store, work_dir);
 
@@ -303,10 +303,10 @@ test "build tree is deterministic" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const f1 = try tmp.dir.createFile("z.txt", .{});
+    const f1 = try tmp.dir.createFile(std.testing.io, "z.txt", .{});
     try f1.writeAll("z");
     f1.close();
-    const f2 = try tmp.dir.createFile("a.txt", .{});
+    const f2 = try tmp.dir.createFile(std.testing.io, "a.txt", .{});
     try f2.writeAll("a");
     f2.close();
 
@@ -316,11 +316,11 @@ test "build tree is deterministic" {
     defer store.close();
 
     // Build twice — must produce same hash
-    var d1 = try tmp.dir.openDir(".", .{ .iterate = true });
+    var d1 = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
     const h1 = try buildTree(allocator, &store, d1);
 
-    var d2 = try tmp.dir.openDir(".", .{ .iterate = true });
+    var d2 = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d2.close();
     const h2 = try buildTree(allocator, &store, d2);
 
@@ -334,15 +334,15 @@ test "build tree respects mkitignore" {
     defer tmp.cleanup();
 
     // Create .mkitignore containing "*.log"
-    const ignore_file = try tmp.dir.createFile(".mkitignore", .{});
+    const ignore_file = try tmp.dir.createFile(std.testing.io, ".mkitignore", .{});
     try ignore_file.writeAll("*.log\n");
     ignore_file.close();
 
     // Create files: keep.txt (should appear), debug.log (should be ignored)
-    const f1 = try tmp.dir.createFile("keep.txt", .{});
+    const f1 = try tmp.dir.createFile(std.testing.io, "keep.txt", .{});
     try f1.writeAll("kept");
     f1.close();
-    const f2 = try tmp.dir.createFile("debug.log", .{});
+    const f2 = try tmp.dir.createFile(std.testing.io, "debug.log", .{});
     try f2.writeAll("ignored");
     f2.close();
 
@@ -351,7 +351,7 @@ test "build tree respects mkitignore" {
     var store = try store_mod.ObjectStore.init(store_tmp.dir);
     defer store.close();
 
-    var work_dir = try tmp.dir.openDir(".", .{ .iterate = true });
+    var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer work_dir.close();
     const h = try buildTree(allocator, &store, work_dir);
 
@@ -373,7 +373,7 @@ test "large file creates chunked blob" {
 
     // Create a file larger than chunk_threshold (1MB)
     const large_size = chunk_threshold + 1024; // just over 1MB
-    const f = try tmp.dir.createFile("large.bin", .{});
+    const f = try tmp.dir.createFile(std.testing.io, "large.bin", .{});
     // Write deterministic data
     const buf = try allocator.alloc(u8, 4096);
     defer allocator.free(buf);
@@ -391,7 +391,7 @@ test "large file creates chunked blob" {
     var store = try store_mod.ObjectStore.init(store_tmp.dir);
     defer store.close();
 
-    var work_dir = try tmp.dir.openDir(".", .{ .iterate = true });
+    var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer work_dir.close();
     const h = try buildTree(allocator, &store, work_dir);
 
@@ -417,7 +417,7 @@ test "small file stays as regular blob" {
     defer tmp.cleanup();
 
     // Create a file smaller than chunk_threshold
-    const f = try tmp.dir.createFile("small.txt", .{});
+    const f = try tmp.dir.createFile(std.testing.io, "small.txt", .{});
     try f.writeAll("hello world");
     f.close();
 
@@ -426,7 +426,7 @@ test "small file stays as regular blob" {
     var store = try store_mod.ObjectStore.init(store_tmp.dir);
     defer store.close();
 
-    var work_dir = try tmp.dir.openDir(".", .{ .iterate = true });
+    var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer work_dir.close();
     const h = try buildTree(allocator, &store, work_dir);
 

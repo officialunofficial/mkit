@@ -199,8 +199,8 @@ test "is repo root only at repository root" {
 
     try std.testing.expect(ObjectStore.isRepoRoot(tmp.dir));
 
-    try tmp.dir.makeDir("nested");
-    var nested = try tmp.dir.openDir("nested", .{});
+    try tmp.dir.createDirPath(std.testing.io, "nested");
+    var nested = try tmp.dir.openDir(std.testing.io, "nested", .{});
     defer nested.close();
     try std.testing.expect(!ObjectStore.isRepoRoot(nested));
 }
@@ -212,8 +212,8 @@ test "open rejects subdirectories inside a repository" {
     var store = try ObjectStore.init(tmp.dir);
     defer store.close();
 
-    try tmp.dir.makeDir("nested");
-    var nested = try tmp.dir.openDir("nested", .{});
+    try tmp.dir.createDirPath(std.testing.io, "nested");
+    var nested = try tmp.dir.openDir(std.testing.io, "nested", .{});
     defer nested.close();
 
     try std.testing.expectError(error.NotAZmitRepository, ObjectStore.open(nested));

@@ -342,7 +342,7 @@ fn benchHashFiles() void {
     var file_names: [num_files][16]u8 = undefined;
     for (0..num_files) |i| {
         const name = std.fmt.bufPrint(&file_names[i], "file_{d:0>4}.txt", .{i}) catch continue;
-        const f = tmp.dir.createFile(name, .{}) catch continue;
+        const f = tmp.dir.createFile(std.testing.io, name, .{}) catch continue;
         var data: [file_size]u8 = undefined;
         std.mem.writeInt(u64, data[0..8], @intCast(i), .little);
         @memset(data[8..], 0xCC);
@@ -356,7 +356,7 @@ fn benchHashFiles() void {
     for (0..iters) |_| {
         for (0..num_files) |i| {
             const name = std.fmt.bufPrint(&file_names[i], "file_{d:0>4}.txt", .{i}) catch continue;
-            const file = tmp.dir.openFile(name, .{}) catch continue;
+            const file = tmp.dir.openFile(std.testing.io, name, .{}) catch continue;
             defer file.close();
             const stat = file.stat() catch continue;
             const data = alloc.alloc(u8, stat.size) catch continue;
@@ -387,15 +387,15 @@ fn benchTreeSnapshot() void {
     defer store.close();
 
     // Create a realistic project structure
-    tmp.dir.makeDir("src") catch {};
-    tmp.dir.makeDir("tests") catch {};
-    tmp.dir.makeDir("docs") catch {};
+    tmp.dir.createDirPath(std.testing.io, "src") catch {};
+    tmp.dir.createDirPath(std.testing.io, "tests") catch {};
+    tmp.dir.createDirPath(std.testing.io, "docs") catch {};
 
     for (0..num_files) |i| {
         var name_buf: [32]u8 = undefined;
         const dir_prefix: []const u8 = if (i < 20) "src/" else if (i < 35) "tests/" else if (i < 45) "docs/" else "";
         const name = std.fmt.bufPrint(&name_buf, "{s}f_{d:0>3}.txt", .{ dir_prefix, i }) catch continue;
-        const f = tmp.dir.createFile(name, .{}) catch continue;
+        const f = tmp.dir.createFile(std.testing.io, name, .{}) catch continue;
         var data: [1024]u8 = undefined;
         std.mem.writeInt(u64, data[0..8], @intCast(i), .little);
         @memset(data[8..], 0xDD);
@@ -407,7 +407,7 @@ fn benchTreeSnapshot() void {
     const iters: u64 = 20;
     var timer = Timer.start() catch return;
     for (0..iters) |_| {
-        var work_dir = tmp.dir.openDir(".", .{ .iterate = true }) catch continue;
+        var work_dir = tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true }) catch continue;
         defer work_dir.close();
         doNotOptimizeAway(mkit.worktree.buildTree(alloc, &store, work_dir) catch continue);
     }
@@ -440,7 +440,7 @@ fn benchCommitWorkflow() void {
         for (0..10) |i| {
             var name_buf: [16]u8 = undefined;
             const name = std.fmt.bufPrint(&name_buf, "f_{d:0>2}.txt", .{i}) catch continue;
-            const f = tmp.dir.createFile(name, .{}) catch continue;
+            const f = tmp.dir.createFile(std.testing.io, name, .{}) catch continue;
             var data: [512]u8 = undefined;
             std.mem.writeInt(u64, data[0..8], @as(u64, iter * 10 + i), .little);
             @memset(data[8..], 0xEE);
@@ -449,7 +449,7 @@ fn benchCommitWorkflow() void {
         }
 
         // Build tree
-        var work_dir = tmp.dir.openDir(".", .{ .iterate = true }) catch {
+        var work_dir = tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true }) catch {
             store.close();
             tmp.cleanup();
             continue;

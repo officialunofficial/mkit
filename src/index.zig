@@ -524,7 +524,7 @@ test "index writeIndex and readIndex roundtrip" {
     defer tmp.cleanup();
 
     // Create .mkit directory for index file
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     var idx = Index.init(allocator);
     defer idx.deinit();
@@ -550,7 +550,7 @@ test "index addFile stages a file" {
     defer tmp.cleanup();
 
     // Create a file to stage
-    const f = try tmp.dir.createFile("hello.txt", .{});
+    const f = try tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f.writeAll("hello world");
     f.close();
 
@@ -585,7 +585,7 @@ test "index addFile updates existing entry" {
     defer store.close();
 
     // Create and stage a file
-    const f1 = try tmp.dir.createFile("hello.txt", .{});
+    const f1 = try tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f1.writeAll("version 1");
     f1.close();
 
@@ -596,7 +596,7 @@ test "index addFile updates existing entry" {
     const hash1 = idx.entries.items[0].object_hash;
 
     // Update the file and re-stage
-    const f2 = try tmp.dir.createFile("hello.txt", .{});
+    const f2 = try tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f2.writeAll("version 2");
     f2.close();
 
@@ -767,18 +767,18 @@ test "index addAll stages all non-ignored files" {
     defer tmp.cleanup();
 
     // Create files
-    const f1 = try tmp.dir.createFile("a.txt", .{});
+    const f1 = try tmp.dir.createFile(std.testing.io, "a.txt", .{});
     try f1.writeAll("aaa");
     f1.close();
-    const f2 = try tmp.dir.createFile("b.txt", .{});
+    const f2 = try tmp.dir.createFile(std.testing.io, "b.txt", .{});
     try f2.writeAll("bbb");
     f2.close();
 
     // Create an ignore file
-    const ig = try tmp.dir.createFile(".mkitignore", .{});
+    const ig = try tmp.dir.createFile(std.testing.io, ".mkitignore", .{});
     try ig.writeAll("*.log\n");
     ig.close();
-    const f3 = try tmp.dir.createFile("debug.log", .{});
+    const f3 = try tmp.dir.createFile(std.testing.io, "debug.log", .{});
     try f3.writeAll("log stuff");
     f3.close();
 
@@ -790,7 +790,7 @@ test "index addAll stages all non-ignored files" {
     var idx = Index.init(allocator);
     defer idx.deinit();
 
-    var work_dir = try tmp.dir.openDir(".", .{ .iterate = true });
+    var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer work_dir.close();
 
     try addAll(allocator, &store, work_dir, &idx);

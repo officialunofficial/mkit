@@ -678,7 +678,7 @@ test "atomic ref write: two refs written in sequence round-trip" {
     try std.testing.expectEqual(h2, r.?);
 
     // No leftover tmp files should remain.
-    var dir = try tmp.dir.openDir("refs/heads", .{ .iterate = true });
+    var dir = try tmp.dir.openDir(std.testing.io, "refs/heads", .{ .iterate = true });
     defer dir.close();
     var iter = dir.iterate();
     var leftover_tmp: usize = 0;
@@ -814,7 +814,7 @@ test "updateRef(.match) with pre-existing stale lock times out to RefConflict, n
     // here; the real attempts are bounded by LOCK_MAX_ATTEMPTS so the 5 s
     // timeout is the upper bound for this test.
     {
-        const lock = try tmp.dir.createFile("refs/heads/main.lock", .{ .exclusive = true });
+        const lock = try tmp.dir.createFile(std.testing.io, "refs/heads/main.lock", .{ .exclusive = true });
         lock.close();
     }
 
@@ -830,5 +830,5 @@ test "updateRef(.match) with pre-existing stale lock times out to RefConflict, n
 
     // The pre-existing lock we planted is still there (we never stole it);
     // remove it so tmp.cleanup doesn't complain.
-    try tmp.dir.deleteFile("refs/heads/main.lock");
+    try tmp.dir.deleteFile(std.testing.io, "refs/heads/main.lock");
 }

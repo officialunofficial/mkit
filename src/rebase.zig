@@ -284,7 +284,7 @@ test "state write/read round-trip" {
     defer tmp.cleanup();
 
     // Create .mkit directory
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const orig_head = hash_mod.hash("orig-head");
     const onto = hash_mod.hash("onto");
@@ -333,13 +333,13 @@ test "isRebaseInProgress detection" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // No rebase dir -> not in progress
     try std.testing.expect(!isRebaseInProgress(tmp.dir));
 
     // Create rebase dir -> in progress
-    try tmp.dir.makeDir(rebase_dir);
+    try tmp.dir.createDirPath(std.testing.io, rebase_dir);
     try std.testing.expect(isRebaseInProgress(tmp.dir));
 }
 
@@ -347,11 +347,11 @@ test "cleanupRebase removes state dir" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
-    try tmp.dir.makeDir(rebase_dir);
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
+    try tmp.dir.createDirPath(std.testing.io, rebase_dir);
 
     // Create a file inside to make sure deleteTree works
-    const file = try tmp.dir.createFile(rebase_dir ++ "/head-name", .{});
+    const file = try tmp.dir.createFile(std.testing.io, rebase_dir ++ "/head-name", .{});
     try file.writeAll("main\n");
     file.close();
 
@@ -366,7 +366,7 @@ test "cleanupRebase on nonexistent dir is fine" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // Should not error
     try cleanupRebase(tmp.dir);
@@ -377,7 +377,7 @@ test "state write/read with empty todo and done" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const head_name = try allocator.dupe(u8, "main");
     defer allocator.free(head_name);
@@ -454,7 +454,7 @@ test "readState with missing directory returns error" {
     defer tmp.cleanup();
 
     // Create .mkit but NOT .mkit/rebase-apply/
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     try std.testing.expectError(error.NoRebaseInProgress, readState(allocator, tmp.dir));
 }

@@ -357,10 +357,10 @@ test "config from file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // Write a config file with remote fields
-    const f = try tmp.dir.createFile(config_mod.config_file, .{});
+    const f = try tmp.dir.createFile(std.testing.io, config_mod.config_file, .{});
     defer f.close();
     try f.writeAll(
         \\author_mid = 42
@@ -388,10 +388,10 @@ test "config from file missing required" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // Write a config file without remote fields
-    const f = try tmp.dir.createFile(config_mod.config_file, .{});
+    const f = try tmp.dir.createFile(std.testing.io, config_mod.config_file, .{});
     defer f.close();
     try f.writeAll("author_mid = 1\n");
 
@@ -405,10 +405,10 @@ test "config from file defaults" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // Write a config file with only endpoint and bucket (minimal required)
-    const f = try tmp.dir.createFile(config_mod.config_file, .{});
+    const f = try tmp.dir.createFile(std.testing.io, config_mod.config_file, .{});
     defer f.close();
     try f.writeAll(
         \\remote_endpoint = https://r2.minimal.com
@@ -432,7 +432,7 @@ test "config from file no file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // No config file exists
     const result = try configFromFile(allocator, tmp.dir);

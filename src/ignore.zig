@@ -274,7 +274,7 @@ test "load from directory with mkitignore" {
     defer tmp.cleanup();
 
     // Create .mkitignore file
-    const f = try tmp.dir.createFile(".mkitignore", .{});
+    const f = try tmp.dir.createFile(std.testing.io, ".mkitignore", .{});
     try f.writeAll("*.log\nbuild/\n");
     f.close();
 

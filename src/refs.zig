@@ -378,7 +378,7 @@ test "init creates refs structure and HEAD" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     // HEAD should exist and point to main
@@ -398,7 +398,7 @@ test "write and read branch ref" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const h = hash_mod.hash("commit1");
@@ -414,7 +414,7 @@ test "resolve HEAD with no commits returns null" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     // HEAD points to main, but main has no ref file yet
@@ -428,7 +428,7 @@ test "resolve HEAD after commit" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const h = hash_mod.hash("commit1");
@@ -444,7 +444,7 @@ test "update HEAD updates current branch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const h1 = hash_mod.hash("commit1");
@@ -467,7 +467,7 @@ test "detached HEAD" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const h = hash_mod.hash("commit-detached");
     try writeHeadDetached(tmp.dir, h);
@@ -487,7 +487,7 @@ test "nonexistent branch returns null" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const result = try readRef(allocator, tmp.dir, "nonexistent");
@@ -500,7 +500,7 @@ test "list refs empty" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     // After init, no branch ref files exist (only HEAD), so listRefs returns empty
@@ -520,7 +520,7 @@ test "list refs after writes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const h1 = hash_mod.hash("commit-main");
@@ -549,7 +549,7 @@ test "delete ref" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const h = hash_mod.hash("commit-to-delete");
@@ -571,7 +571,7 @@ test "delete nonexistent ref" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     // Try to delete a ref that doesn't exist
@@ -585,7 +585,7 @@ test "checkout switches HEAD" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     // Switch HEAD to "dev"
@@ -608,7 +608,7 @@ test "refuse delete current branch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     // HEAD points to "main" by default. Write a ref so it exists.
@@ -627,7 +627,7 @@ test "write and read tag" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const h = hash_mod.hash("release-v1.0");
@@ -643,7 +643,7 @@ test "list tags empty" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const tag_list = try listTags(allocator, tmp.dir);
@@ -662,7 +662,7 @@ test "list tags sorted" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const h1 = hash_mod.hash("release-v2.0");
@@ -691,7 +691,7 @@ test "delete tag" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const h = hash_mod.hash("tag-to-delete");
@@ -713,7 +713,7 @@ test "delete nonexistent tag" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const result = deleteTag(tmp.dir, "nonexistent");
@@ -725,7 +725,7 @@ test "tag and branch same name" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const tag_hash = hash_mod.hash("tag-commit");
@@ -746,7 +746,7 @@ test "reject invalid branch names" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const h = hash_mod.hash("commit");
@@ -759,7 +759,7 @@ test "nested refs are listed recursively" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     try init(tmp.dir);
 
     const h = hash_mod.hash("nested");
@@ -782,7 +782,7 @@ test "loadShallowBoundaries returns null when file missing" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     const result = try loadShallowBoundaries(allocator, tmp.dir);
     try std.testing.expect(result == null);
 }
@@ -791,7 +791,7 @@ test "writeShallowBoundaries and loadShallowBoundaries roundtrip" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     const h1 = hash_mod.hash("boundary-1");
     const h2 = hash_mod.hash("boundary-2");
     const h3 = hash_mod.hash("boundary-3");
@@ -809,7 +809,7 @@ test "writeShallowBoundaries empty removes file" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     const h = hash_mod.hash("boundary-to-remove");
     const boundaries = [_]Hash{h};
     try writeShallowBoundaries(tmp.dir, &boundaries);
@@ -824,8 +824,8 @@ test "loadShallowBoundaries empty file returns null" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
-    const f = try tmp.dir.createFile(shallow_file, .{});
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
+    const f = try tmp.dir.createFile(std.testing.io, shallow_file, .{});
     f.close();
     const result = try loadShallowBoundaries(allocator, tmp.dir);
     try std.testing.expect(result == null);
@@ -835,10 +835,10 @@ test "loadShallowBoundaries skips invalid lines" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
     const h = hash_mod.hash("valid-boundary");
     const hex = hash_mod.toHex(h);
-    const f = try tmp.dir.createFile(shallow_file, .{});
+    const f = try tmp.dir.createFile(std.testing.io, shallow_file, .{});
     defer f.close();
     try f.writeAll("short\n");
     try f.writeAll(&hex);
