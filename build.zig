@@ -26,9 +26,15 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("mkit", lib_mod);
     exe_mod.addOptions("build_options", options);
 
+    // mkit is POSIX-only and leans on libc for a handful of syscalls
+    // that Zig 0.16's std.posix no longer exposes: `std.c.isatty` and
+    // `std.c.environ` in term.zig, and `std.c.fchmod` in main.zig's
+    // `cmdKeygen` to lock down the .mkit/keys dir to 0700. link_libc
+    // has to be explicit at the module level on non-macOS targets.
+    exe_mod.link_libc = true;
+
     if (use_jemalloc) {
         exe_mod.linkSystemLibrary("jemalloc", .{});
-        exe_mod.link_libc = true;
     }
 
     const exe = b.addExecutable(.{
