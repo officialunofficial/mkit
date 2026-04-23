@@ -39,12 +39,14 @@ SCAN_PATHS=(
   .github/
   README.md
   SECURITY.md
+  rust/
 )
 
 EXCLUDES=(
   --exclude-dir=.git
   --exclude-dir=.zig-cache
   --exclude-dir=zig-out
+  --exclude-dir=target
   --exclude=verify-rename.sh
 )
 
