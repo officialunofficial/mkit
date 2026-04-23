@@ -91,12 +91,13 @@ pub const StreamingChunker = struct {
     cdc: FastCDC,
     buf: []u8,
     buf_len: usize,
+    file_offset: u64,
     eof: bool,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, cdc: FastCDC) !StreamingChunker {
         const buf = try allocator.alloc(u8, cdc.max_size * 2);
-        return .{ .cdc = cdc, .buf = buf, .buf_len = 0, .eof = false, .allocator = allocator };
+        return .{ .cdc = cdc, .buf = buf, .buf_len = 0, .file_offset = 0, .eof = false, .allocator = allocator };
     }
 
     pub fn deinit(self: *StreamingChunker) void {
@@ -111,11 +112,12 @@ pub const StreamingChunker = struct {
     pub fn nextChunk(self: *StreamingChunker, io: std.Io, file: std.Io.File) !?[]const u8 {
         // Fill buffer if needed
         while (!self.eof and self.buf_len < self.cdc.max_size) {
-            const n = try file.readStreaming(io, &.{self.buf[self.buf_len..]});
+            const n = try file.readPositional(io, &.{self.buf[self.buf_len..]}, self.file_offset);
             if (n == 0) {
                 self.eof = true;
                 break;
             }
+            self.file_offset += n;
             self.buf_len += n;
         }
         if (self.buf_len == 0) return null;

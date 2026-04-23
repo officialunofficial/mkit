@@ -390,7 +390,7 @@ fn initTestRepo(_: Allocator) !struct {
     errdefer tmp.cleanup();
 
     try tmp.dir.createDirPath(std.testing.io, ".mkit");
-    try refs.init(tmp.dir);
+    try refs.init(std.testing.io, tmp.dir);
 
     var store_tmp = std.testing.tmpDir(.{});
     errdefer store_tmp.cleanup();
@@ -413,17 +413,17 @@ fn makeTestCommit(
     message: []const u8,
 ) !Hash {
     // Write file
-    const f = try dir.createFile(file_name, .{});
+    const f = try dir.createFile(std.testing.io, file_name, .{});
     try f.writeStreamingAll(std.testing.io, file_content);
     f.close(std.testing.io);
 
     // Build tree
-    var work_dir = try dir.openDir(".", .{ .iterate = true });
-    defer work_dir.close();
-    const tree_hash = try worktree.buildTree(allocator, store, work_dir);
+    var work_dir = try dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer work_dir.close(std.testing.io);
+    const tree_hash = try worktree.buildTree(allocator, std.testing.io, store, work_dir);
 
     // Get parent
-    const parent_hash = try refs.resolveHead(allocator, dir);
+    const parent_hash = try refs.resolveHead(allocator, std.testing.io, dir);
     var parents_buf: [1]Hash = undefined;
     var parents: []Hash = undefined;
     if (parent_hash) |ph| {
@@ -447,7 +447,7 @@ fn makeTestCommit(
     const commit_hash = try store.put(allocator, commit);
 
     // Update HEAD
-    try refs.updateHead(allocator, dir, commit_hash);
+    try refs.updateHead(allocator, std.testing.io, dir, commit_hash);
 
     return commit_hash;
 }
@@ -471,10 +471,10 @@ test "stash save creates entry" {
     f.close(std.testing.io);
 
     // Stash
-    try save(allocator, &repo.store, repo.tmp.dir, "WIP changes");
+    try save(allocator, &repo.store, std.testing.io, repo.tmp.dir, "WIP changes");
 
     // List should have 1 entry
-    var stash_list = try list(allocator, repo.tmp.dir);
+    var stash_list = try list(allocator, std.testing.io, repo.tmp.dir);
     defer stash_list.deinit();
     try std.testing.expectEqual(@as(usize, 1), stash_list.entries.len);
     try std.testing.expectEqualStrings("WIP changes", stash_list.entries[0].message);
@@ -495,10 +495,10 @@ test "stash restores clean state" {
     f.close(std.testing.io);
 
     // Stash
-    try save(allocator, &repo.store, repo.tmp.dir, "WIP");
+    try save(allocator, &repo.store, std.testing.io, repo.tmp.dir, "WIP");
 
     // Working dir should be back to "original"
-    const content = try repo.tmp.dir.readFileAlloc(allocator, "hello.txt", 4096);
+    const content = try repo.tmp.dir.readFileAlloc(std.testing.io, "hello.txt", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expectEqualStrings("original", content);
 }
@@ -518,13 +518,13 @@ test "stash pop restores changes" {
     f.close(std.testing.io);
 
     // Stash
-    try save(allocator, &repo.store, repo.tmp.dir, "WIP");
+    try save(allocator, &repo.store, std.testing.io, repo.tmp.dir, "WIP");
 
     // Pop
-    try pop(allocator, &repo.store, repo.tmp.dir, 0);
+    try pop(allocator, std.testing.io, &repo.store, repo.tmp.dir, 0);
 
     // File should have the modification again
-    const content = try repo.tmp.dir.readFileAlloc(allocator, "hello.txt", 4096);
+    const content = try repo.tmp.dir.readFileAlloc(std.testing.io, "hello.txt", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expectEqualStrings("modified content", content);
 }
@@ -542,13 +542,13 @@ test "stash pop removes from list" {
     const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f.writeStreamingAll(std.testing.io, "modified");
     f.close(std.testing.io);
-    try save(allocator, &repo.store, repo.tmp.dir, "WIP");
+    try save(allocator, &repo.store, std.testing.io, repo.tmp.dir, "WIP");
 
     // Pop
-    try pop(allocator, &repo.store, repo.tmp.dir, 0);
+    try pop(allocator, std.testing.io, &repo.store, repo.tmp.dir, 0);
 
     // List should be empty
-    var stash_list = try list(allocator, repo.tmp.dir);
+    var stash_list = try list(allocator, std.testing.io, repo.tmp.dir);
     defer stash_list.deinit();
     try std.testing.expectEqual(@as(usize, 0), stash_list.entries.len);
 }
@@ -566,18 +566,18 @@ test "stash drop removes without applying" {
     const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
     try f.writeStreamingAll(std.testing.io, "modified");
     f.close(std.testing.io);
-    try save(allocator, &repo.store, repo.tmp.dir, "WIP");
+    try save(allocator, &repo.store, std.testing.io, repo.tmp.dir, "WIP");
 
     // Drop (don't apply)
-    try drop(allocator, repo.tmp.dir, 0);
+    try drop(allocator, std.testing.io, repo.tmp.dir, 0);
 
     // List should be empty
-    var stash_list = try list(allocator, repo.tmp.dir);
+    var stash_list = try list(allocator, std.testing.io, repo.tmp.dir);
     defer stash_list.deinit();
     try std.testing.expectEqual(@as(usize, 0), stash_list.entries.len);
 
     // Working dir should still be clean (HEAD state, not stash state)
-    const content = try repo.tmp.dir.readFileAlloc(allocator, "hello.txt", 4096);
+    const content = try repo.tmp.dir.readFileAlloc(std.testing.io, "hello.txt", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expectEqualStrings("original", content);
 }
@@ -597,7 +597,7 @@ test "multiple stashes LIFO" {
         try f.writeStreamingAll(std.testing.io, "modified-a");
         f.close(std.testing.io);
     }
-    try save(allocator, &repo.store, repo.tmp.dir, "stash A");
+    try save(allocator, &repo.store, std.testing.io, repo.tmp.dir, "stash A");
 
     // Modify A again differently, stash
     {
@@ -605,11 +605,11 @@ test "multiple stashes LIFO" {
         try f.writeStreamingAll(std.testing.io, "modified-a-again");
         f.close(std.testing.io);
     }
-    try save(allocator, &repo.store, repo.tmp.dir, "stash B");
+    try save(allocator, &repo.store, std.testing.io, repo.tmp.dir, "stash B");
 
     // List should have 2 entries, newest first
     {
-        var stash_list = try list(allocator, repo.tmp.dir);
+        var stash_list = try list(allocator, std.testing.io, repo.tmp.dir);
         defer stash_list.deinit();
         try std.testing.expectEqual(@as(usize, 2), stash_list.entries.len);
         try std.testing.expectEqualStrings("stash B", stash_list.entries[0].message);
@@ -617,19 +617,19 @@ test "multiple stashes LIFO" {
     }
 
     // Pop gives B's changes first (LIFO)
-    try pop(allocator, &repo.store, repo.tmp.dir, 0);
-    const content_b = try repo.tmp.dir.readFileAlloc(allocator, "a.txt", 4096);
+    try pop(allocator, std.testing.io, &repo.store, repo.tmp.dir, 0);
+    const content_b = try repo.tmp.dir.readFileAlloc(std.testing.io, "a.txt", allocator, .limited(4096));
     defer allocator.free(content_b);
     try std.testing.expectEqualStrings("modified-a-again", content_b);
 
     // Pop gives A's changes next
-    try pop(allocator, &repo.store, repo.tmp.dir, 0);
-    const content_a = try repo.tmp.dir.readFileAlloc(allocator, "a.txt", 4096);
+    try pop(allocator, std.testing.io, &repo.store, repo.tmp.dir, 0);
+    const content_a = try repo.tmp.dir.readFileAlloc(std.testing.io, "a.txt", allocator, .limited(4096));
     defer allocator.free(content_a);
     try std.testing.expectEqualStrings("modified-a", content_a);
 
     // List should be empty
-    var stash_list = try list(allocator, repo.tmp.dir);
+    var stash_list = try list(allocator, std.testing.io, repo.tmp.dir);
     defer stash_list.deinit();
     try std.testing.expectEqual(@as(usize, 0), stash_list.entries.len);
 }
@@ -656,10 +656,10 @@ test "stash show diffs against parent" {
     }
 
     // Stash
-    try save(allocator, &repo.store, repo.tmp.dir, "WIP with new file");
+    try save(allocator, &repo.store, std.testing.io, repo.tmp.dir, "WIP with new file");
 
     // Show should show the diff
-    var diff_result = try show(allocator, &repo.store, repo.tmp.dir, 0);
+    var diff_result = try show(allocator, std.testing.io, &repo.store, repo.tmp.dir, 0);
     defer diff_result.deinit();
 
     // Should have 2 changes: hello.txt modified, new.txt added
@@ -688,9 +688,9 @@ test "stash index out of range" {
     defer repo.deinit();
 
     // Pop on empty stash
-    try std.testing.expectError(error.StashIndexOutOfRange, pop(allocator, &repo.store, repo.tmp.dir, 0));
-    try std.testing.expectError(error.StashIndexOutOfRange, drop(allocator, repo.tmp.dir, 0));
-    try std.testing.expectError(error.StashIndexOutOfRange, show(allocator, &repo.store, repo.tmp.dir, 0));
+    try std.testing.expectError(error.StashIndexOutOfRange, pop(allocator, std.testing.io, &repo.store, repo.tmp.dir, 0));
+    try std.testing.expectError(error.StashIndexOutOfRange, drop(allocator, std.testing.io, repo.tmp.dir, 0));
+    try std.testing.expectError(error.StashIndexOutOfRange, show(allocator, std.testing.io, &repo.store, repo.tmp.dir, 0));
 }
 
 test "stash manifest roundtrip" {

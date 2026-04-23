@@ -342,7 +342,7 @@ test "sparse restore filters files correctly" {
     // Create output directory
     try tmp.dir.createDirPath(std.testing.io, "output");
     var output_dir = try tmp.dir.openDir(std.testing.io, "output", .{ .iterate = true });
-    defer output_dir.close();
+    defer output_dir.close(std.testing.io);
 
     try restore.restoreTree(
         allocator,
@@ -354,18 +354,18 @@ test "sparse restore filters files correctly" {
     );
 
     // src/a.zig should exist
-    var src_dir = try output_dir.openDir("src", .{});
-    defer src_dir.close();
-    const zig_file = try src_dir.openFile("a.zig", .{});
+    var src_dir = try output_dir.openDir(std.testing.io, "src", .{});
+    defer src_dir.close(std.testing.io);
+    const zig_file = try src_dir.openFile(std.testing.io, "a.zig", .{});
     defer zig_file.close(std.testing.io);
     var buf: [64]u8 = undefined;
-    const n = try zig_file.readAll(&buf);
+    const n = try zig_file.readPositionalAll(std.testing.io, &buf, 0);
     try testing.expectEqualStrings("const x = 42;", buf[0..n]);
 
     // docs/ directory should not exist
-    if (output_dir.openDir("docs", .{})) |dir_val| {
+    if (output_dir.openDir(std.testing.io, "docs", .{})) |dir_val| {
         var d = dir_val;
-        d.close();
+        d.close(std.testing.io);
         // If we got here, docs/ exists, which is wrong
         return error.TestUnexpectedResult;
     } else |err| {

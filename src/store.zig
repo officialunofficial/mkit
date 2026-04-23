@@ -35,7 +35,7 @@ pub const ObjectStore = struct {
 
     /// Initialize a new .mkit repository in the given directory.
     pub fn init(io: Io, dir: Io.Dir) !ObjectStore {
-        dir.createDirPath(io, mkit_dir) catch |err| switch (err) {
+        dir.createDir(io, mkit_dir, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => return error.AlreadyInitialized,
             else => return err,
         };

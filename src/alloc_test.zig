@@ -122,7 +122,7 @@ test "commit workflow no leaks" {
     const commit_hash = try createCommit(allocator, &store, tree_hash, &.{}, "initial commit", kp);
 
     // Update HEAD
-    try refs.updateHead(allocator, work_tmp.dir, commit_hash);
+    try refs.updateHead(allocator, std.testing.io, work_tmp.dir, commit_hash);
 
     // Verify roundtrip: read commit back
     var obj = try store.get(allocator, commit_hash);
@@ -207,7 +207,7 @@ test "status diff workflow no leaks" {
     // Compute status diff
     var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d2.close(std.testing.io);
-    var result = try diff_mod.statusDiff(allocator, &store, head_tree, d2);
+    var result = try diff_mod.statusDiff(allocator, std.testing.io, &store, head_tree, d2);
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), result.entries.len);
@@ -381,15 +381,15 @@ test "restore workflow no leaks" {
     defer target_tmp.cleanup();
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restore_mod.restoreTree(allocator, &store, root_tree, target_dir, .{});
+    defer target_dir.close(std.testing.io);
+    try restore_mod.restoreTree(allocator, std.testing.io, &store, root_tree, target_dir, .{});
 
     // Verify files exist with correct content
-    const readme = try target_tmp.dir.readFileAlloc(allocator, "README.md", 4096);
+    const readme = try target_tmp.dir.readFileAlloc(std.testing.io, "README.md", allocator, .limited(4096));
     defer allocator.free(readme);
     try std.testing.expectEqualStrings("# Project", readme);
 
-    const main_zig = try target_tmp.dir.readFileAlloc(allocator, "src/main.zig", 4096);
+    const main_zig = try target_tmp.dir.readFileAlloc(std.testing.io, "src/main.zig", allocator, .limited(4096));
     defer allocator.free(main_zig);
     try std.testing.expectEqualStrings("pub fn main() !void {}", main_zig);
 }
@@ -411,10 +411,10 @@ test "config roundtrip no leaks" {
         .signing_key = "/custom/path/to/key.pem",
         .default_branch = "develop",
     };
-    try config_mod.writeConfig(tmp.dir, original);
+    try config_mod.writeConfig(std.testing.io, tmp.dir, original);
 
     // Read it back
-    var read = try config_mod.readConfig(allocator, tmp.dir);
+    var read = try config_mod.readConfig(allocator, std.testing.io, tmp.dir);
     defer read.deinit();
 
     try std.testing.expectEqualStrings("030800" ++ "2a00000000000000", read.user_identity);
@@ -473,7 +473,7 @@ test "ignore load no leaks" {
     );
     f.close(std.testing.io);
 
-    var il = try ignore_mod.load(allocator, tmp.dir);
+    var il = try ignore_mod.load(allocator, std.testing.io, tmp.dir);
     defer il.deinit();
 
     try std.testing.expectEqual(@as(usize, 5), il.patterns.len);
@@ -816,7 +816,7 @@ test "end-to-end workflow no leaks" {
 
     const kp = sign.KeyPair.generate(std.testing.io);
     const commit1 = try createCommit(allocator, &store, tree1, &.{}, "initial", kp);
-    try refs.updateHead(allocator, repo_tmp.dir, commit1);
+    try refs.updateHead(allocator, std.testing.io, repo_tmp.dir, commit1);
 
     // Modify a file and make a second commit
     const f3 = try work_tmp.dir.createFile(std.testing.io, "src/lib.zig", .{});
@@ -828,7 +828,7 @@ test "end-to-end workflow no leaks" {
     const tree2 = try worktree.buildTree(allocator, std.testing.io, &store, d2);
 
     const commit2 = try createCommit(allocator, &store, tree2, &.{commit1}, "bump version", kp);
-    try refs.updateHead(allocator, repo_tmp.dir, commit2);
+    try refs.updateHead(allocator, std.testing.io, repo_tmp.dir, commit2);
 
     // Diff between the two commits
     var diff_result = try diff_mod.diffTrees(allocator, &store, tree1, tree2);
@@ -847,10 +847,10 @@ test "end-to-end workflow no leaks" {
     var restore_tmp = std.testing.tmpDir(.{});
     defer restore_tmp.cleanup();
     var restore_dir = try restore_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer restore_dir.close();
-    try restore_mod.restoreTree(allocator, &store, tree2, restore_dir, .{});
+    defer restore_dir.close(std.testing.io);
+    try restore_mod.restoreTree(allocator, std.testing.io, &store, tree2, restore_dir, .{});
 
-    const restored_lib = try restore_tmp.dir.readFileAlloc(allocator, "src/lib.zig", 4096);
+    const restored_lib = try restore_tmp.dir.readFileAlloc(std.testing.io, "src/lib.zig", allocator, .limited(4096));
     defer allocator.free(restored_lib);
     try std.testing.expectEqualStrings("pub const version = 2;", restored_lib);
 }

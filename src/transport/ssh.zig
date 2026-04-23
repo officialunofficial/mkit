@@ -586,12 +586,12 @@ pub const SshTransport = struct {
         errdefer allocator.free(data);
         if (data_len > 0) {
             var data_off: usize = 0;
-        while (data_off < data.len) {
-            const n = try stdout.readStreaming(self.io, &.{data[data_off..]});
-            if (n == 0) break;
-            data_off += n;
-        }
-        const data_read = data_off;
+            while (data_off < data.len) {
+                const n = try stdout.readStreaming(self.io, &.{data[data_off..]});
+                if (n == 0) break;
+                data_off += n;
+            }
+            const data_read = data_off;
             if (data_read != data_len) {
                 allocator.free(data);
                 return error.UnexpectedEof;

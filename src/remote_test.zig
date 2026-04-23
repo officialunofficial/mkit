@@ -186,8 +186,8 @@ test "pull fast-forward" {
     try packfile.unpackInto(allocator, pack_a.bytes, &local_store);
 
     // Set up local refs (.mkit already exists from ObjectStore.init)
-    try refs_mod.init(local_tmp.dir);
-    try refs_mod.writeRef(local_tmp.dir, "main", a.commit);
+    try refs_mod.init(std.testing.io, local_tmp.dir);
+    try refs_mod.writeRef(std.testing.io, local_tmp.dir, "main", a.commit);
 
     // --- Remote has commit B ---
     var mem = transport_memory.MemoryTransport.init(allocator);
@@ -208,10 +208,10 @@ test "pull fast-forward" {
     try packfile.unpackInto(allocator, downloaded, &local_store);
 
     // Advance local ref
-    try refs_mod.writeRef(local_tmp.dir, "main", b.commit);
+    try refs_mod.writeRef(std.testing.io, local_tmp.dir, "main", b.commit);
 
     // Verify local ref now points to B
-    const local_ref = (try refs_mod.readRef(allocator, local_tmp.dir, "main")).?;
+    const local_ref = (try refs_mod.readRef(allocator, std.testing.io, local_tmp.dir, "main")).?;
     try std.testing.expectEqual(b.commit, local_ref);
 
     // Verify B's commit is accessible with updated tree
@@ -317,8 +317,8 @@ test "clone from transport" {
     try packfile.unpackInto(allocator, cloned_pack, &clone_store);
 
     // Set up local refs (.mkit already exists from ObjectStore.init)
-    try refs_mod.init(clone_tmp.dir);
-    try refs_mod.writeRef(clone_tmp.dir, "main", b.commit);
+    try refs_mod.init(std.testing.io, clone_tmp.dir);
+    try refs_mod.writeRef(std.testing.io, clone_tmp.dir, "main", b.commit);
 
     // Verify: all objects from both commits are accessible from one pack
     try std.testing.expect(clone_store.exists(a.commit));
@@ -329,7 +329,7 @@ test "clone from transport" {
     try std.testing.expect(clone_store.exists(b.blob));
 
     // Verify local HEAD -> main -> B
-    const local_main = (try refs_mod.readRef(allocator, clone_tmp.dir, "main")).?;
+    const local_main = (try refs_mod.readRef(allocator, std.testing.io, clone_tmp.dir, "main")).?;
     try std.testing.expectEqual(b.commit, local_main);
 
     // Verify commit B's blob content

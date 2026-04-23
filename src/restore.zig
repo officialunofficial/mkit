@@ -531,7 +531,7 @@ test "restore single file" {
     try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
     // Verify file exists with content "hello"
-    const content = try target_tmp.dir.readFileAlloc(allocator, "file.txt", 4096);
+    const content = try target_tmp.dir.readFileAlloc(std.testing.io, "file.txt", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expectEqualStrings("hello", content);
 }
@@ -562,7 +562,7 @@ test "restore nested directories" {
     defer target_dir.close(std.testing.io);
     try restoreTree(allocator, std.testing.io, &store, root_hash, target_dir, .{});
 
-    const content = try target_tmp.dir.readFileAlloc(allocator, "src/main.zig", 4096);
+    const content = try target_tmp.dir.readFileAlloc(std.testing.io, "src/main.zig", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expectEqualStrings("const main = void;", content);
 }
@@ -592,7 +592,7 @@ test "restore overwrites existing files" {
     defer target_dir.close(std.testing.io);
     try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
-    const content = try target_tmp.dir.readFileAlloc(allocator, "file.txt", 4096);
+    const content = try target_tmp.dir.readFileAlloc(std.testing.io, "file.txt", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expectEqualStrings("new content", content);
 }
@@ -622,10 +622,10 @@ test "restore removes untracked files" {
     defer target_dir.close(std.testing.io);
     try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
-    const stat = target_tmp.dir.statFile(std.testing.io, "extra.txt");
+    const stat = target_tmp.dir.statFile(std.testing.io, "extra.txt", .{});
     try std.testing.expectError(error.FileNotFound, stat);
 
-    const content = try target_tmp.dir.readFileAlloc(allocator, "tracked.txt", 4096);
+    const content = try target_tmp.dir.readFileAlloc(std.testing.io, "tracked.txt", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expectEqualStrings("tracked", content);
 }
@@ -653,7 +653,7 @@ test "restore preserves mkit directory" {
     defer target_dir.close(std.testing.io);
     try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
-    const content = try target_tmp.dir.readFileAlloc(allocator, ".mkit/config", 4096);
+    const content = try target_tmp.dir.readFileAlloc(std.testing.io, ".mkit/config", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expectEqualStrings("important data", content);
 }
@@ -689,7 +689,7 @@ test "restore creates parent directories" {
     defer target_dir.close(std.testing.io);
     try restoreTree(allocator, std.testing.io, &store, root_hash, target_dir, .{});
 
-    const content = try target_tmp.dir.readFileAlloc(allocator, "a/b/file.txt", 4096);
+    const content = try target_tmp.dir.readFileAlloc(std.testing.io, "a/b/file.txt", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expectEqualStrings("deep content", content);
 }
@@ -724,11 +724,11 @@ test "restore is idempotent" {
         try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
     }
 
-    const content_a = try target_tmp.dir.readFileAlloc(allocator, "a.txt", 4096);
+    const content_a = try target_tmp.dir.readFileAlloc(std.testing.io, "a.txt", allocator, .limited(4096));
     defer allocator.free(content_a);
     try std.testing.expectEqualStrings("alpha", content_a);
 
-    const content_b = try target_tmp.dir.readFileAlloc(allocator, "b.txt", 4096);
+    const content_b = try target_tmp.dir.readFileAlloc(std.testing.io, "b.txt", allocator, .limited(4096));
     defer allocator.free(content_b);
     try std.testing.expectEqualStrings("beta", content_b);
 
@@ -767,10 +767,12 @@ test "restore with symlink" {
     try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const link_target = try target_tmp.dir.readLink("link", &link_buf);
+    const _n = try target_tmp.dir.readLink(std.testing.io, "link", &link_buf);
+
+    const link_target = link_buf[0.._n];
     try std.testing.expectEqualStrings("target.txt", link_target);
 
-    const content = try target_tmp.dir.readFileAlloc(allocator, "target.txt", 4096);
+    const content = try target_tmp.dir.readFileAlloc(std.testing.io, "target.txt", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expectEqualStrings("real content", content);
 }
@@ -820,19 +822,22 @@ test "restore replaces mismatched kinds" {
     defer target_dir.close(std.testing.io);
     try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
-    const nested_content = try target_tmp.dir.readFileAlloc(allocator, "dir-from-file/child.txt", 4096);
+    const nested_content = try target_tmp.dir.readFileAlloc(std.testing.io, "dir-from-file/child.txt", allocator, .limited(4096));
     defer allocator.free(nested_content);
     try std.testing.expectEqualStrings("inside directory", nested_content);
 
-    const file_content = try target_tmp.dir.readFileAlloc(allocator, "file-from-dir", 4096);
+    const file_content = try target_tmp.dir.readFileAlloc(std.testing.io, "file-from-dir", allocator, .limited(4096));
     defer allocator.free(file_content);
     try std.testing.expectEqualStrings("fresh file", file_content);
 
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const link_target = try target_tmp.dir.readLink("link-from-file", &link_buf);
+    const _n = try target_tmp.dir.readLink(std.testing.io, "link-from-file", &link_buf);
+
+    const link_target = link_buf[0.._n];
     try std.testing.expectEqualStrings("target.txt", link_target);
 
-    const relink_target = try target_tmp.dir.readLink("relink", &link_buf);
+    const _rn = try target_tmp.dir.readLink(std.testing.io, "relink", &link_buf);
+    const relink_target = link_buf[0.._rn];
     try std.testing.expectEqualStrings("target-two.txt", relink_target);
 }
 
@@ -883,11 +888,11 @@ test "restore clean false keeps untracked" {
     defer target_dir.close(std.testing.io);
     try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{ .clean = false });
 
-    const extra_content = try target_tmp.dir.readFileAlloc(allocator, "extra.txt", 4096);
+    const extra_content = try target_tmp.dir.readFileAlloc(std.testing.io, "extra.txt", allocator, .limited(4096));
     defer allocator.free(extra_content);
     try std.testing.expectEqualStrings("should survive", extra_content);
 
-    const tracked_content = try target_tmp.dir.readFileAlloc(allocator, "tracked.txt", 4096);
+    const tracked_content = try target_tmp.dir.readFileAlloc(std.testing.io, "tracked.txt", allocator, .limited(4096));
     defer allocator.free(tracked_content);
     try std.testing.expectEqualStrings("tracked", tracked_content);
 }
@@ -932,7 +937,7 @@ test "restore chunked blob" {
     defer target_dir.close(std.testing.io);
     try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
-    const content = try target_tmp.dir.readFileAlloc(allocator, "reassembled.txt", 4096);
+    const content = try target_tmp.dir.readFileAlloc(std.testing.io, "reassembled.txt", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expectEqualStrings("Hello, chunked world!", content);
 }
@@ -1107,14 +1112,14 @@ test "sparse restore only restores matched files" {
         .sparse_patterns = &patterns,
     });
 
-    const main_content = try target_tmp.dir.readFileAlloc(allocator, "src/main.zig", 4096);
+    const main_content = try target_tmp.dir.readFileAlloc(std.testing.io, "src/main.zig", allocator, .limited(4096));
     defer allocator.free(main_content);
     try std.testing.expectEqualStrings("pub fn main() void {}", main_content);
 
-    const tests_stat = target_tmp.dir.statFile(std.testing.io, "tests/test.zig");
+    const tests_stat = target_tmp.dir.statFile(std.testing.io, "tests/test.zig", .{});
     try std.testing.expectError(error.FileNotFound, tests_stat);
 
-    const readme_stat = target_tmp.dir.statFile(std.testing.io, "README.md");
+    const readme_stat = target_tmp.dir.statFile(std.testing.io, "README.md", .{});
     try std.testing.expectError(error.FileNotFound, readme_stat);
 }
 
@@ -1159,11 +1164,11 @@ test "sparse restore with negation excludes subtree" {
         .sparse_patterns = &patterns,
     });
 
-    const main_content = try target_tmp.dir.readFileAlloc(allocator, "src/main.zig", 4096);
+    const main_content = try target_tmp.dir.readFileAlloc(std.testing.io, "src/main.zig", allocator, .limited(4096));
     defer allocator.free(main_content);
     try std.testing.expectEqualStrings("main code", main_content);
 
-    const key_stat = target_tmp.dir.statFile(std.testing.io, "src/secret/key.pem");
+    const key_stat = target_tmp.dir.statFile(std.testing.io, "src/secret/key.pem", .{});
     try std.testing.expectError(error.FileNotFound, key_stat);
 }
 
