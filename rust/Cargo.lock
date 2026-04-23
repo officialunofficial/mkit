@@ -903,6 +903,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkit-transport-ssh"
+version = "0.2.1"
+dependencies = [
+ "hex",
+ "mkit-core",
+ "thiserror",
+]
+
+[[package]]
 name = "mockito"
 version = "1.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
