@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Native attestation subsystem** (`src/attestations/`) — mkit now
+  produces and verifies [DSSE envelopes](https://github.com/secure-systems-lab/dsse)
+  wrapping [in-toto v1 Statements](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md)
+  with commits as subjects. Predicate-agnostic: Makechain settlement,
+  SLSA provenance, human review sign-offs, vuln scans, and any future
+  `predicateType` URI round-trip through mkit without schema changes.
+  Components:
+  - `jcs.zig` — RFC 8785 canonical JSON writer (subset used by in-toto
+    + DSSE; no floats).
+  - `statement.zig` — in-toto v1 Statement encoder; predicate bytes
+    pass through verbatim.
+  - `envelope.zig` — DSSE envelope encode/decode + PAE builder.
+    `attestationId = BLAKE3(envelope_bytes)`.
+  - `signer.zig` + three built-in impls (`repo-key` via the existing
+    Ed25519 commit key, `external` via a JSON-over-stdin/stdout
+    subprocess, `sigstore` as a scaffold returning
+    `SigstoreNotImplemented`).
+  - `verify.zig` — trust-root registry + DSSE signature verification
+    dispatched on `keyid`.
+  - `store.zig` — on-disk layout at
+    `.mkit/attestations/<commit-hex>/<att-id-hex>.dsse`, with
+    atomic tempfile + rename + dir fsync and idempotent writes.
+  - Transport verbs `OP_UPLOAD_ATTESTATION = 0x08`,
+    `OP_DOWNLOAD_ATTESTATION = 0x09`, `OP_LIST_ATTESTATIONS = 0x0A`
+    across all five transports (memory/file/http/s3/ssh). Pre-0.3
+    servers return `STATUS_ERROR` for the new opcodes; clients surface
+    `error.UnsupportedOperation` for callers to degrade.
+
+  Full contract in [`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md).
+  CLI surface (`mkit attest {create|verify|ls|show|rm}`) lands in a
+  follow-up commit.
+
+### Removed
+
+- **`Notary` trait and `NullNotary`** (`src/notary.zig`, `docs/NOTARY.md`).
+  Superseded by the attestation subsystem above. The `Notary` trait
+  was a library-only extension point with a single in-tree
+  implementation; the new subsystem replaces it with a standard-format,
+  CLI-exposed primitive. Downstream consumers that previously linked
+  `mkit` purely for the trait should migrate to producing attestations
+  via `attestations.Signer` + `attestations.store`. `notary.kind`
+  config-key tolerance also dropped — old configs with that key will
+  now fail to parse (per the no-legacy-code directive).
+
 ### Security
 
 A pass of input-validation + resource-limit hardening across the parsers,

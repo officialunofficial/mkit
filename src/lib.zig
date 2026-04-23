@@ -14,7 +14,6 @@ pub const config = @import("config.zig");
 pub const restore = @import("restore.zig");
 pub const packfile = @import("packfile.zig");
 pub const merge = @import("merge.zig");
-pub const notary = @import("notary.zig");
 pub const s3 = @import("s3.zig");
 pub const remote = @import("remote.zig");
 pub const remote_test = @import("remote_test.zig");
@@ -43,6 +42,7 @@ pub const integration_test = @import("integration_test.zig");
 pub const fuzz_packfile = @import("fuzz_packfile.zig");
 pub const fuzz_tree = @import("fuzz_tree.zig");
 pub const fuzz_delta = @import("fuzz_delta.zig");
+pub const attestations = @import("attestations/mod.zig");
 
 test {
     _ = @import("test_helpers.zig");
@@ -61,7 +61,6 @@ test {
     _ = restore;
     _ = packfile;
     _ = merge;
-    _ = notary;
     _ = s3;
     _ = remote;
     _ = remote_test;
@@ -90,4 +89,5 @@ test {
     _ = fuzz_packfile;
     _ = fuzz_tree;
     _ = fuzz_delta;
+    _ = attestations;
 }

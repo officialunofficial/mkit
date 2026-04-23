@@ -3,10 +3,9 @@
 A content-addressed version control toolkit written in Zig.
 
 `mkit` is a generic content-addressed VCS — Git-like commits, refs,
-transports — with no built-in knowledge of any blockchain, notary, or
-attestation backend. Downstream projects that need attestation can pull
-`mkit` in as a Zig library and plug into the `Notary` trait exposed at
-`src/notary.zig`.
+transports — plus a native, predicate-agnostic attestation subsystem
+(in-toto v1 Statements wrapped in DSSE envelopes) that any downstream
+service can attach witness signatures to commits with.
 
 ## Quick start
 
@@ -49,42 +48,67 @@ for forbidden legacy strings across the public build surface.
 
 ## Architecture
 
-mkit is a thin, generic VCS. The `Notary` trait in `src/notary.zig` is a
-library extension point for downstream consumers that need to witness or
-attest to a push:
+mkit is a thin, generic VCS with a predicate-agnostic attestation layer
+built on industry-standard primitives:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  mkit core binary                                       │
 │  - objects, packs, refs, transports, CLI                │
-│  - depends only on: src/notary.zig (Notary vtable)      │
+│  - attestations: in-toto v1 Statement + DSSE envelopes  │
 └────────────────────┬────────────────────────────────────┘
                      │
         ┌────────────┼────────────────┐
         │            │                │
 ┌───────┴────────┐   │   ┌────────────┴────────────────┐
-│ NullNotary     │   │   │ your custom Notary impl     │
-│ (core default) │   │   │ (supplied by library user)  │
-│ no-op          │   │   │                             │
-│ always present │   │   │                             │
+│ repo-key       │   │   │ external subprocess signer  │
+│ (Ed25519, the  │   │   │ (custom notary, blockchain  │
+│  commit key)   │   │   │  attestor, settlement svc)  │
 └────────────────┘   │   └─────────────────────────────┘
                      │
-           (library consumers plug in here)
+            ┌────────┴────────┐
+            │ sigstore-keyless │
+            │ (planned)        │
+            └──────────────────┘
 ```
 
-The public `mkit` binary never surfaces notary behaviour in its CLI —
-`NullNotary` is the only backend it knows about. Consumers that need
-attestation bring their own `Notary` implementation in their own
-codebase.
+Attestations are plain DSSE envelopes carrying an in-toto v1 Statement
+with the commit hash as subject — no mkit-specific schema. Any service
+(CI provenance producer, human reviewer sign-off tool, external
+settlement attestor) can produce or verify them with off-the-shelf
+tooling. See
+[`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) for the full
+contract.
 
-See [`docs/NOTARY.md`](docs/NOTARY.md) for the trait contract.
+## Identity & push auth — one key, many roles
+
+`.mkit/keys/default.key` is a raw Ed25519 seed. The same seed covers:
+
+- commit / remix signing (`docs/SPEC-SIGNING.md`);
+- DSSE attestation signing via the `repo-key` signer (`docs/SPEC-ATTESTATIONS.md` §6.2);
+- SSH transport authentication — OpenSSH 8.0+ accepts a raw Ed25519
+  seed as `id_ed25519`, so the same key authenticates your
+  `mkit push` over `mkit+ssh://`.
+
+For `mkit+ssh://` push authorisation the idiomatic pattern is Git's:
+the server's `sshd` runs an `AuthorizedKeysCommand` that maps an
+incoming pubkey to an account, and `mkit serve` executes as that
+account. mkit core ships **no custom push-auth protocol** — SSH's own
+KEX handshake already does the nonce/signature exchange, and
+`AuthorizedKeysCommand` is the standard server-side extension point
+for resolving `pubkey → account`. A downstream service can wire its
+own identity model (e.g. pubkey → on-chain owner address) through
+that hook without changing the wire protocol.
+
+See `docs/SPEC-SIGNING.md` §8 for the convention and
+`docs/SSH-SECURITY.md` for transport trust model.
 
 ## Documentation
 
 | Doc | Audience |
 |---|---|
 | [`docs/CLI.md`](docs/CLI.md) | End users — subcommands, env vars, exit codes |
-| [`docs/NOTARY.md`](docs/NOTARY.md) | Library consumers — extension-point contract for downstream notary implementations |
+| [`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) | Implementers + integrators — native attestation primitive (in-toto v1 + DSSE) |
 | [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) | Implementers of compatible tools — on-disk format |
 | [`docs/SPEC-SIGNING.md`](docs/SPEC-SIGNING.md) | Implementers — commit signing format |
 | [`docs/SPEC-PACKFILE.md`](docs/SPEC-PACKFILE.md) | Implementers — packfile wire format |

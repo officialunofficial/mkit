@@ -122,7 +122,41 @@ affected, not every SSH session on your machine.
 
 ---
 
-## 5. Upgrade path
+## 5. Push authorisation (server side)
+
+mkit core does not define a push-auth protocol. For `mkit+ssh://` the
+idiomatic integration is the same one Git forges have used for a
+decade:
+
+1. User generates one Ed25519 key (`mkit keygen` — the seed doubles as
+   an `id_ed25519` for OpenSSH 8.0+; see `docs/SPEC-SIGNING.md` §8).
+2. Server runs `sshd` with:
+
+   ```
+   AuthorizedKeysCommand /usr/local/bin/forge-resolve-pubkey
+   AuthorizedKeysCommandUser nobody
+   ```
+
+   The resolver looks up the incoming pubkey in whatever account
+   database the forge owns (a SQL table, a chain RPC, an LDAP
+   directory) and emits a matching `authorized_keys` line, including
+   a `command=` that execs `mkit serve /srv/mkit/<account>/<repo>`
+   with the caller's account baked in.
+3. mkit serve runs as that account and sees a repo path it can
+   validate with a simple `startsWith(account_prefix)` check.
+
+No custom handshake, no nonce opcode, no new domain separator. SSH's
+KEX handshake already signs a per-session nonce with the client's
+private key — that's the transport-level proof of possession. The
+forge's only responsibility is the `pubkey → account` mapping plus a
+shell that execs `mkit serve` with the resolved path.
+
+`AuthorizedKeysCommand` gets the pubkey as `%k` (and the fingerprint
+as `%f` / user as `%u`); see `sshd_config(5)` for the full token list.
+
+---
+
+## 6. Upgrade path
 
 Candidate future work (non-binding):
 
@@ -137,7 +171,7 @@ Until then: rely on `ssh(1)` and the pinning keys above.
 
 ---
 
-## 6. Threat model summary
+## 7. Threat model summary
 
 | Threat                                    | mitigated by                       |
 |-------------------------------------------|------------------------------------|
