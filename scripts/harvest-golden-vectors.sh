@@ -148,6 +148,8 @@ declare -a VECTORS=(
   "commit_2parent|merge commit with two parents, ed25519 identity"
   "remix_2sources|remix with two sources sorted by (upstream_id, commit_hash)"
   "remix_identical_upstream_distinct_commit|remix with two sources sharing upstream_id; SPEC-OBJECTS §13.6 (secondary-key sort)"
+  "commit_0parent_signing_bytes|canonical Ed25519 signing-bytes preimage for commit_0parent (sign domain prefix not included)"
+  "remix_2sources_signing_bytes|canonical Ed25519 signing-bytes preimage for remix_2sources"
   "chunked_blob|chunked blob manifest with 4 fixed-size chunks"
   "chunked_blob_cs0_3chunks|chunked blob with chunk_size=0 (CDC) and 3 chunks; SPEC-OBJECTS §13.7 (118 bytes)"
 )

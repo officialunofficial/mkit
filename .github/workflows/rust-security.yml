@@ -41,12 +41,18 @@ jobs:
         with:
           workspaces: rust -> rust/target
 
+      # rustsec/audit-check@v1 does not accept a working-directory input
+      # (silently dropped; the action then `cargo generate-lockfile`s at the
+      # repo root, which has no Cargo.toml, and fails with exit 101). Install
+      # cargo-audit ourselves and point it at rust/Cargo.lock directly.
+      - name: Install cargo-audit
+        if: steps.lock.outputs.has_lock == 'true'
+        run: cargo install --locked cargo-audit
+
       - name: cargo audit
         if: steps.lock.outputs.has_lock == 'true'
-        uses: rustsec/audit-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: rust
+        working-directory: rust
+        run: cargo audit --deny warnings
 
   deny:
     name: cargo deny

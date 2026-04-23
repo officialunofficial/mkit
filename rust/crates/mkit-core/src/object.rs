@@ -367,6 +367,28 @@ pub enum MkitError {
     /// than `u32::MAX` because it reads the prefix first.
     #[error("oversized payload in field `{field}`: {len} bytes > u32::MAX")]
     OversizePayload { field: &'static str, len: usize },
+    // ---- sign / key-management errors (Phase 6) ----
+    /// Underlying secure-randomness source could not produce bytes.
+    #[error("rng failed to produce key material")]
+    RngFailure,
+    /// Signature verification failed (bad signature, wrong key, tampered
+    /// input, or wrong domain). The Ed25519 layer never tells us *why*.
+    #[error("signature verification failed")]
+    SignatureInvalid,
+    /// Public-key bytes do not decode to a valid Edwards point.
+    #[error("public key is not a valid Ed25519 point")]
+    InvalidPublicKey,
+    /// Key file on disk has a permission bit set that allows non-owner
+    /// access (POSIX `mode & 0o077 != 0`). Refuses to load.
+    #[error("key file mode {actual:#o} is broader than 0600")]
+    InsecureKeyPermissions { actual: u32 },
+    /// Key file length is not exactly 32 bytes.
+    #[error("key file size {actual} is not 32 bytes (raw Ed25519 seed)")]
+    InvalidKeyLength { actual: usize },
+    /// Wrapped I/O error from key load/save. Boxed to keep `MkitError`
+    /// variant size small.
+    #[error("key file I/O error: {0}")]
+    KeyIo(String),
 }
 
 impl fmt::Display for Object {

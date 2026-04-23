@@ -16,8 +16,11 @@ workspace = true
 
 [dependencies]
 blake3 = "1"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+getrandom = "0.3"
 tempfile = "3"
 thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 hex = "0.4"

@@ -12,10 +12,16 @@
 //! No `serde`, no `anyhow`, no panics on unchecked input.
 
 #![forbid(unsafe_code)]
+// `ed25519-dalek` v2.2 still pulls in older sha2/cpufeatures (and
+// rand_core 0.6 which transitively wants getrandom 0.2). These are
+// transitive duplicates we cannot dedupe without forking dalek; allow
+// them. cargo-deny still tracks them at warn level via deny.toml.
+#![allow(clippy::multiple_crate_versions)]
 
 pub mod hash;
 pub mod object;
 pub mod serialize;
+pub mod sign;
 pub mod store;
 
 pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher};
@@ -24,4 +30,9 @@ pub use object::{
     MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, Tree, TreeEntry,
 };
 pub use serialize::{deserialize, serialize};
+pub use sign::{
+    COMMIT_DOMAIN, KeyPair, PublicKey, REMIX_DOMAIN, SecretSeed, Signature, commit_signing_bytes,
+    commit_signing_hash, remix_signing_bytes, remix_signing_hash, sign_commit, sign_remix, verify,
+    verify_commit, verify_remix,
+};
 pub use store::{MAX_RAW_OBJECT_SIZE, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError, StoreResult};
