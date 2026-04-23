@@ -29,19 +29,22 @@ const MAX_CHUNKS: u32 = 1_000_000;
 
 /// Serialize an [`Object`] to its canonical byte form. Allocates fresh
 /// each call; the result is fully owned.
-#[must_use]
-pub fn serialize(obj: &Object) -> Vec<u8> {
+///
+/// Returns [`MkitError::OversizePayload`] if any length-prefixed field
+/// exceeds the wire-format `u32` cap, and [`MkitError::InvalidIdentity`]
+/// if the object carries a structurally invalid [`Identity`].
+pub fn serialize(obj: &Object) -> Result<Vec<u8>, MkitError> {
     let mut buf = Vec::with_capacity(PROLOGUE_LEN + estimated_body_len(obj));
     write_prologue(&mut buf, obj.object_type());
     match obj {
-        Object::Blob(b) => write_blob(&mut buf, b),
-        Object::Tree(t) => write_tree(&mut buf, t),
-        Object::Commit(c) => write_commit(&mut buf, c),
-        Object::Remix(r) => write_remix(&mut buf, r),
-        Object::ChunkedBlob(cb) => write_chunked_blob(&mut buf, cb),
-        Object::Delta(d) => write_delta(&mut buf, d),
+        Object::Blob(b) => write_blob(&mut buf, b)?,
+        Object::Tree(t) => write_tree(&mut buf, t)?,
+        Object::Commit(c) => write_commit(&mut buf, c)?,
+        Object::Remix(r) => write_remix(&mut buf, r)?,
+        Object::ChunkedBlob(cb) => write_chunked_blob(&mut buf, cb)?,
+        Object::Delta(d) => write_delta(&mut buf, d)?,
     }
-    buf
+    Ok(buf)
 }
 
 /// Deserialize bytes into an owned [`Object`]. Validates the prologue
@@ -94,92 +97,93 @@ fn write_u64_le(buf: &mut Vec<u8>, v: u64) {
     buf.extend_from_slice(&v.to_le_bytes());
 }
 
-fn write_lp_bytes(buf: &mut Vec<u8>, data: &[u8]) {
-    write_u32_le(buf, u32::try_from(data.len()).expect("len fits in u32"));
+fn checked_u32(field: &'static str, len: usize) -> Result<u32, MkitError> {
+    u32::try_from(len).map_err(|_| MkitError::OversizePayload { field, len })
+}
+
+fn write_lp_bytes(buf: &mut Vec<u8>, field: &'static str, data: &[u8]) -> Result<(), MkitError> {
+    write_u32_le(buf, checked_u32(field, data.len())?);
     buf.extend_from_slice(data);
+    Ok(())
 }
 
-fn write_identity(buf: &mut Vec<u8>, id: &Identity) {
-    debug_assert!(id.is_valid(), "writers expect valid identities");
+fn write_identity(buf: &mut Vec<u8>, id: &Identity) -> Result<(), MkitError> {
+    if !id.is_valid() {
+        return Err(MkitError::InvalidIdentity);
+    }
     buf.push(id.kind as u8);
-    write_u16_le(buf, u16::try_from(id.bytes.len()).expect("len fits in u16"));
+    // `is_valid` already enforces 1..=IDENTITY_MAX_LEN, so the cast is
+    // safe — but keep the guard so the encoder can never silently lose
+    // bytes if `is_valid` is ever loosened.
+    let len = u16::try_from(id.bytes.len()).map_err(|_| MkitError::InvalidIdentity)?;
+    write_u16_le(buf, len);
     buf.extend_from_slice(&id.bytes);
+    Ok(())
 }
 
-fn write_blob(buf: &mut Vec<u8>, b: &Blob) {
-    write_lp_bytes(buf, &b.data);
+fn write_blob(buf: &mut Vec<u8>, b: &Blob) -> Result<(), MkitError> {
+    write_lp_bytes(buf, "blob.data", &b.data)
 }
 
-fn write_tree(buf: &mut Vec<u8>, t: &Tree) {
-    write_u32_le(
-        buf,
-        u32::try_from(t.entries.len()).expect("len fits in u32"),
-    );
+fn write_tree(buf: &mut Vec<u8>, t: &Tree) -> Result<(), MkitError> {
+    write_u32_le(buf, checked_u32("tree.entries", t.entries.len())?);
     for e in &t.entries {
-        write_lp_bytes(buf, &e.name);
+        write_lp_bytes(buf, "tree.entry.name", &e.name)?;
         buf.push(e.mode as u8);
         buf.extend_from_slice(&e.object_hash);
     }
+    Ok(())
 }
 
-fn write_commit(buf: &mut Vec<u8>, c: &Commit) {
+fn write_commit(buf: &mut Vec<u8>, c: &Commit) -> Result<(), MkitError> {
     buf.extend_from_slice(&c.tree_hash);
-    write_u32_le(
-        buf,
-        u32::try_from(c.parents.len()).expect("len fits in u32"),
-    );
+    write_u32_le(buf, checked_u32("commit.parents", c.parents.len())?);
     for p in &c.parents {
         buf.extend_from_slice(p);
     }
-    write_identity(buf, &c.author);
-    write_lp_bytes(buf, &c.message);
+    write_identity(buf, &c.author)?;
+    write_lp_bytes(buf, "commit.message", &c.message)?;
     write_u64_le(buf, c.timestamp);
     buf.extend_from_slice(&c.signer);
     buf.extend_from_slice(&c.message_hash);
     buf.extend_from_slice(&c.content_digest);
     buf.extend_from_slice(&c.signature);
+    Ok(())
 }
 
-fn write_remix(buf: &mut Vec<u8>, r: &Remix) {
+fn write_remix(buf: &mut Vec<u8>, r: &Remix) -> Result<(), MkitError> {
     buf.extend_from_slice(&r.tree_hash);
-    write_u32_le(
-        buf,
-        u32::try_from(r.parents.len()).expect("len fits in u32"),
-    );
+    write_u32_le(buf, checked_u32("remix.parents", r.parents.len())?);
     for p in &r.parents {
         buf.extend_from_slice(p);
     }
-    write_u32_le(
-        buf,
-        u32::try_from(r.sources.len()).expect("len fits in u32"),
-    );
+    write_u32_le(buf, checked_u32("remix.sources", r.sources.len())?);
     for s in &r.sources {
         buf.extend_from_slice(&s.upstream_id);
         buf.extend_from_slice(&s.commit_hash);
     }
-    write_identity(buf, &r.author);
-    write_lp_bytes(buf, &r.message);
+    write_identity(buf, &r.author)?;
+    write_lp_bytes(buf, "remix.message", &r.message)?;
     write_u64_le(buf, r.timestamp);
     buf.extend_from_slice(&r.signer);
     buf.extend_from_slice(&r.signature);
+    Ok(())
 }
 
-fn write_chunked_blob(buf: &mut Vec<u8>, cb: &ChunkedBlob) {
+fn write_chunked_blob(buf: &mut Vec<u8>, cb: &ChunkedBlob) -> Result<(), MkitError> {
     write_u64_le(buf, cb.total_size);
     write_u32_le(buf, cb.chunk_size);
-    write_u32_le(
-        buf,
-        u32::try_from(cb.chunks.len()).expect("len fits in u32"),
-    );
+    write_u32_le(buf, checked_u32("chunked_blob.chunks", cb.chunks.len())?);
     for c in &cb.chunks {
         buf.extend_from_slice(c);
     }
+    Ok(())
 }
 
-fn write_delta(buf: &mut Vec<u8>, d: &Delta) {
+fn write_delta(buf: &mut Vec<u8>, d: &Delta) -> Result<(), MkitError> {
     buf.extend_from_slice(&d.base_hash);
     write_u32_le(buf, d.result_size);
-    write_lp_bytes(buf, &d.instructions);
+    write_lp_bytes(buf, "delta.instructions", &d.instructions)
 }
 
 fn estimated_body_len(obj: &Object) -> usize {
@@ -508,7 +512,7 @@ mod tests {
         let obj = Object::Blob(Blob {
             data: b"hello world".to_vec(),
         });
-        let bytes = serialize(&obj);
+        let bytes = serialize(&obj).expect("valid blob serialises");
         // Prologue
         assert_eq!(bytes[0], 0x01);
         assert_eq!(&bytes[1..5], b"MKT1");
@@ -520,7 +524,7 @@ mod tests {
     #[test]
     fn empty_blob_size_is_10() {
         let obj = Object::Blob(Blob { data: vec![] });
-        let bytes = serialize(&obj);
+        let bytes = serialize(&obj).unwrap();
         assert_eq!(bytes.len(), 10);
         assert_eq!(deserialize(&bytes).unwrap(), obj);
     }
@@ -528,7 +532,7 @@ mod tests {
     #[test]
     fn empty_tree_roundtrip() {
         let obj = Object::Tree(Tree { entries: vec![] });
-        let bytes = serialize(&obj);
+        let bytes = serialize(&obj).unwrap();
         assert_eq!(deserialize(&bytes).unwrap(), obj);
     }
 
@@ -553,7 +557,7 @@ mod tests {
                 },
             ],
         });
-        assert_eq!(deserialize(&serialize(&obj)).unwrap(), obj);
+        assert_eq!(deserialize(&serialize(&obj).unwrap()).unwrap(), obj);
     }
 
     #[test]
@@ -567,7 +571,7 @@ mod tests {
             1_711_300_000,
             [0xBB; 64],
         ));
-        assert_eq!(deserialize(&serialize(&obj)).unwrap(), obj);
+        assert_eq!(deserialize(&serialize(&obj).unwrap()).unwrap(), obj);
     }
 
     #[test]
@@ -581,7 +585,7 @@ mod tests {
             1_000_000,
             [0x22; 64],
         ));
-        assert_eq!(deserialize(&serialize(&obj)).unwrap(), obj);
+        assert_eq!(deserialize(&serialize(&obj).unwrap()).unwrap(), obj);
     }
 
     #[test]
@@ -596,7 +600,7 @@ mod tests {
             1_700_000_000,
             [0xBB; 64],
         ));
-        let parsed = deserialize(&serialize(&obj)).unwrap();
+        let parsed = deserialize(&serialize(&obj).unwrap()).unwrap();
         if let Object::Commit(c) = &parsed {
             assert_eq!(c.author.kind, IdentityKind::Opaque);
             assert_eq!(c.author.bytes, mid);
@@ -621,7 +625,7 @@ mod tests {
             timestamp: 1_711_300_100,
             signature: [0xDD; 64],
         });
-        assert_eq!(deserialize(&serialize(&obj)).unwrap(), obj);
+        assert_eq!(deserialize(&serialize(&obj).unwrap()).unwrap(), obj);
     }
 
     #[test]
@@ -631,7 +635,7 @@ mod tests {
             chunk_size: 65536,
             chunks: vec![hash(b"c1"), hash(b"c2"), hash(b"c3")],
         });
-        let bytes = serialize(&obj);
+        let bytes = serialize(&obj).unwrap();
         assert_eq!(bytes[0], 0x05);
         assert_eq!(deserialize(&bytes).unwrap(), obj);
     }
@@ -643,7 +647,7 @@ mod tests {
             chunk_size: 0,
             chunks: vec![hash(b"x"), hash(b"y")],
         });
-        assert_eq!(deserialize(&serialize(&obj)).unwrap(), obj);
+        assert_eq!(deserialize(&serialize(&obj).unwrap()).unwrap(), obj);
     }
 
     // ---- Negative tests ----
@@ -704,7 +708,7 @@ mod tests {
         let obj = Object::Blob(Blob {
             data: b"hello".to_vec(),
         });
-        let mut bytes = serialize(&obj);
+        let mut bytes = serialize(&obj).unwrap();
         bytes.push(0xFF);
         assert_eq!(deserialize(&bytes), Err(MkitError::TrailingData));
     }
@@ -774,12 +778,72 @@ mod tests {
         let obj = Object::Blob(Blob {
             data: b"deterministic".to_vec(),
         });
-        let a = serialize(&obj);
-        let b = serialize(&obj);
+        let a = serialize(&obj).unwrap();
+        let b = serialize(&obj).unwrap();
         assert_eq!(a, b);
         assert_eq!(hash(&a), hash(&b));
         // Ensure hash() and ZERO are linked correctly — silly sanity.
         assert_ne!(a, vec![0u8; a.len()]);
         let _ = ZERO;
+    }
+
+    // ---- Fallible-serialize tests (review follow-up #22) ----
+
+    #[test]
+    fn serialize_rejects_invalid_identity_in_commit() {
+        // Empty payload is structurally invalid for every kind.
+        let bad_id = Identity {
+            kind: IdentityKind::Opaque,
+            bytes: Vec::new(),
+        };
+        let obj = Object::Commit(Commit::new_unannotated(
+            hash(b"tree"),
+            vec![],
+            bad_id,
+            [0; 32],
+            b"x".to_vec(),
+            0,
+            [0; 64],
+        ));
+        assert_eq!(serialize(&obj), Err(MkitError::InvalidIdentity));
+    }
+
+    #[test]
+    fn serialize_rejects_invalid_identity_in_remix() {
+        // Ed25519 with non-32-byte payload.
+        let bad_id = Identity {
+            kind: IdentityKind::Ed25519,
+            bytes: vec![0u8; 16],
+        };
+        let obj = Object::Remix(Remix {
+            tree_hash: ZERO,
+            parents: vec![],
+            sources: vec![],
+            author: bad_id,
+            signer: [0; 32],
+            message: b"x".to_vec(),
+            timestamp: 0,
+            signature: [0; 64],
+        });
+        assert_eq!(serialize(&obj), Err(MkitError::InvalidIdentity));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn checked_u32_rejects_oversize() {
+        // Direct unit test on the bounds helper — we cannot allocate a
+        // Vec with > u32::MAX entries in a unit test, so exercise the
+        // guard surface itself. This pins the field-name string so
+        // downstream consumers can grep on it. 32-bit targets cannot
+        // even construct `n`, so the test is gated on pointer width.
+        let n: usize = u32::MAX as usize + 1;
+        let err = checked_u32("blob.data", n).unwrap_err();
+        assert_eq!(
+            err,
+            MkitError::OversizePayload {
+                field: "blob.data",
+                len: n,
+            }
+        );
     }
 }

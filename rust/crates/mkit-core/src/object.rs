@@ -362,6 +362,11 @@ pub enum MkitError {
     InvalidIdentity,
     #[error("identity payload len > {}", IDENTITY_MAX_LEN)]
     IdentityTooLarge,
+    /// A length-prefixed field exceeded the wire-format `u32` cap. Only
+    /// raised by serialise; deserialise can never observe a value larger
+    /// than `u32::MAX` because it reads the prefix first.
+    #[error("oversized payload in field `{field}`: {len} bytes > u32::MAX")]
+    OversizePayload { field: &'static str, len: usize },
 }
 
 impl fmt::Display for Object {

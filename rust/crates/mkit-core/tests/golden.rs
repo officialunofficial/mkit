@@ -59,7 +59,7 @@ fn manifest_digest(name: &str) -> Option<String> {
 
 fn assert_object_matches(name: &str, obj: &Object) {
     let want = load(&format!("{name}.bin"));
-    let got = serialize(obj);
+    let got = serialize(obj).expect("test vector is valid");
     assert_eq!(
         got, want,
         "{name}.bin: re-serialized bytes differ from harvested vector"
@@ -214,4 +214,87 @@ fn chunked_blob_matches_golden() {
         chunks: vec![[0x01; 32], [0x02; 32], [0x03; 32], [0x04; 32]],
     });
     assert_object_matches("chunked_blob", &obj);
+}
+
+// ---- SPEC-OBJECTS §13 mandatory vectors ----
+
+#[test]
+fn empty_blob_matches_golden() {
+    let obj = Object::Blob(Blob { data: Vec::new() });
+    assert_object_matches("empty_blob", &obj);
+    // SPEC §13.1: 10-byte file (6-byte prologue + u32 length=0).
+    let bytes = serialize(&obj).unwrap();
+    assert_eq!(bytes.len(), 10, "empty_blob.bin must be exactly 10 bytes");
+}
+
+#[test]
+fn empty_tree_matches_golden() {
+    let obj = Object::Tree(Tree { entries: vec![] });
+    assert_object_matches("empty_tree", &obj);
+    // SPEC §13.2: 10-byte file (6-byte prologue + u32 entry_count=0).
+    let bytes = serialize(&obj).unwrap();
+    assert_eq!(bytes.len(), 10, "empty_tree.bin must be exactly 10 bytes");
+}
+
+#[test]
+fn tree_single_file_matches_golden() {
+    // SPEC §13.3: single-entry tree pointing at the empty blob hash.
+    let empty_blob_bytes = serialize(&Object::Blob(Blob { data: Vec::new() })).unwrap();
+    let blob_hash = hash(&empty_blob_bytes);
+    let obj = Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"README.md".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: blob_hash,
+        }],
+    });
+    assert_object_matches("tree_single_file", &obj);
+}
+
+#[test]
+fn chunked_blob_cs0_3chunks_matches_golden() {
+    // SPEC §13.7: chunk_size=0 (CDC marker) + 3 chunks => exactly 118 bytes.
+    let obj = Object::ChunkedBlob(ChunkedBlob {
+        total_size: 1_000_000,
+        chunk_size: 0,
+        chunks: vec![[0xA1; 32], [0xA2; 32], [0xA3; 32]],
+    });
+    assert_object_matches("chunked_blob_cs0_3chunks", &obj);
+    let bytes = serialize(&obj).unwrap();
+    // 6 (prologue) + 8 (total_size u64) + 4 (chunk_size u32) + 4 (count u32) + 32*3 = 118
+    assert_eq!(
+        bytes.len(),
+        118,
+        "chunked_blob_cs0_3chunks must be exactly 118 bytes per SPEC §13.7"
+    );
+}
+
+#[test]
+fn remix_identical_upstream_distinct_commit_matches_golden() {
+    // SPEC §13.6: two sources with identical upstream_id, distinct
+    // commit_hash. Exercises the secondary sort key on commit_hash.
+    let obj = Object::Remix(Remix {
+        tree_hash: [0x77; 32],
+        parents: vec![],
+        sources: vec![
+            RemixSource {
+                upstream_id: [0x10; 32],
+                commit_hash: [0x30; 32],
+            },
+            RemixSource {
+                upstream_id: [0x10; 32],
+                commit_hash: [0x31; 32],
+            },
+        ],
+        author: Identity::ed25519([0xBB; 32]),
+        signer: [0x11; 32],
+        message: b"remix same upstream".to_vec(),
+        timestamp: TS + 11,
+        signature: [0x22; 64],
+    });
+    assert!(
+        matches!(&obj, Object::Remix(r) if r.sources_sorted()),
+        "secondary-key sort must hold"
+    );
+    assert_object_matches("remix_identical_upstream_distinct_commit", &obj);
 }
