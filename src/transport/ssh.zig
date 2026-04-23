@@ -989,33 +989,41 @@ test "encodeUploadPack large payload" {
 
 test "fuzz: decodeUploadPack does not crash" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
-            _ = decodeUploadPack(input) catch return;
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [4096]u8 = undefined;
+            const n = smith.slice(&buf);
+            _ = decodeUploadPack(buf[0..n]) catch return;
         }
     }.run, .{});
 }
 
 test "fuzz: decodeWriteRef does not crash" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
-            _ = decodeWriteRef(input) catch return;
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [4096]u8 = undefined;
+            const n = smith.slice(&buf);
+            _ = decodeWriteRef(buf[0..n]) catch return;
         }
     }.run, .{});
 }
 
 test "fuzz: decodeUpdateRef does not crash" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
-            _ = decodeUpdateRef(input) catch return;
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [4096]u8 = undefined;
+            const n = smith.slice(&buf);
+            _ = decodeUpdateRef(buf[0..n]) catch return;
         }
     }.run, .{});
 }
 
 test "fuzz: decodeRefList does not crash" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [4096]u8 = undefined;
+            const n = smith.slice(&buf);
             const allocator = std.heap.page_allocator;
-            const refs = decodeRefList(allocator, input) catch return;
+            const refs = decodeRefList(allocator, buf[0..n]) catch return;
             for (refs) |ref| allocator.free(ref.name);
             allocator.free(refs);
         }
