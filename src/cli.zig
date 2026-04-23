@@ -82,7 +82,7 @@ const std = @import("std");
 /// trim outer whitespace. Used for `mkit commit` when the user edits
 /// `.mkit/COMMIT_EDITMSG` via $EDITOR. Returns an allocator-owned slice.
 pub fn stripCommentsAndTrim(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
     var it = std.mem.splitScalar(u8, input, '\n');

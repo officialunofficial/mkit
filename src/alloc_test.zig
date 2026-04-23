@@ -460,7 +460,7 @@ test "ignore load no leaks" {
 
     // Create .mkitignore with various patterns
     const f = try tmp.dir.createFile(std.testing.io, ".mkitignore", .{});
-    try f.writeStreamingAll(std.testing.io, 
+    try f.writeStreamingAll(std.testing.io,
         \\# build artifacts
         \\*.o
         \\*.a
@@ -494,7 +494,7 @@ test "refs lifecycle no leaks" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(std.testing.io, ".mkit");
-    try refs.init(tmp.dir);
+    try refs.init(std.testing.io, tmp.dir);
 
     // Write several branch refs
     const h1 = hash_mod.hash("commit-main");

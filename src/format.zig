@@ -459,7 +459,7 @@ pub const GraphState = struct {
 
     pub fn init(allocator: Allocator) GraphState {
         return .{
-            .columns = .{},
+            .columns = .empty,
             .allocator = allocator,
         };
     }
