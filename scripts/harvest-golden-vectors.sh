@@ -45,6 +45,8 @@ OUT_DIR="${1:-$ROOT_DIR/rust/tests/golden/phase1}"
 # Phase 3 fixtures live alongside phase1 under their own subtree so each
 # Rust test crate can scope its loader to its own phase.
 PHASE3_OUT_DIR="${PHASE3_OUT_DIR:-$ROOT_DIR/rust/tests/golden/phase3}"
+# Phase 7d fixture (SigV4 golden) — additive.
+PHASE7D_OUT_DIR="${PHASE7D_OUT_DIR:-$ROOT_DIR/rust/tests/golden/phase7}"
 HARVEST_SRC="$ROOT_DIR/scripts/harvest/harvest.zig"
 BUNDLE_SRC="$ROOT_DIR/src/lib.zig"
 
@@ -206,3 +208,15 @@ done
 echo "harvest: wrote $(printf '%s\n' "${PHASE3_VECTORS[@]}" | wc -l | tr -d ' ') Phase 3 vectors to $PHASE3_OUT_DIR"
 echo "harvest: phase3 manifest:"
 cat "$PHASE3_MANIFEST"
+
+# -----------------------------------------------------------------------
+# Phase 7d vectors — additive. SigV4 golden fixture used by the Rust
+# S3 transport crate to cross-check canonical_request + string_to_sign
+# + signature against the Zig signer byte-for-byte. The phase7 output
+# directory is NOT wiped wholesale — TX-SSH and TX-S3 share it — so we
+# only touch the one file we own.
+# -----------------------------------------------------------------------
+mkdir -p "$PHASE7D_OUT_DIR"
+emit_vector_to "$PHASE7D_OUT_DIR" "sigv4_basic" \
+  "SigV4 canonical_request + string_to_sign + signature for fixed PUT inputs (SPEC-TRANSPORT §5)"
+echo "harvest: wrote Phase 7d sigv4_basic to $PHASE7D_OUT_DIR"
