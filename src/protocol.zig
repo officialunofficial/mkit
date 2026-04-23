@@ -616,16 +616,20 @@ test "parseRemoteUrl bounded input does not crash" {
 
 test "fuzz: parseUrl does not crash" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
-            _ = parseUrl(input) catch return;
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [1024]u8 = undefined;
+            const n = smith.slice(&buf);
+            _ = parseUrl(buf[0..n]) catch return;
         }
     }.run, .{});
 }
 
 test "fuzz: validateRefName does not crash" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
-            _ = validateRefName(input);
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [1024]u8 = undefined;
+            const n = smith.slice(&buf);
+            _ = validateRefName(buf[0..n]);
         }
     }.run, .{});
 }
