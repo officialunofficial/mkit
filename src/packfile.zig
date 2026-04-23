@@ -317,7 +317,7 @@ test "pack reachable from commit" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Create a blob
@@ -366,7 +366,7 @@ test "pack reachable includes commit ancestors" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Commit A: blob/tree/commit
@@ -423,7 +423,7 @@ test "pack reachable includes commit ancestors" {
 
     var dst_tmp = std.testing.tmpDir(.{});
     defer dst_tmp.cleanup();
-    var dst_store = try store_mod.ObjectStore.init(dst_tmp.dir);
+    var dst_store = try store_mod.ObjectStore.init(std.testing.io, dst_tmp.dir);
     defer dst_store.close();
 
     try unpackInto(allocator, result.bytes, &dst_store);
@@ -446,7 +446,7 @@ test "pack deduplicates" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Create ONE blob, referenced by two tree entries
@@ -511,7 +511,7 @@ test "pack nested trees" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // blob in subdirectory
@@ -568,7 +568,7 @@ test "unpack into store" {
     // Source store
     var src_tmp = std.testing.tmpDir(.{});
     defer src_tmp.cleanup();
-    var src_store = try store_mod.ObjectStore.init(src_tmp.dir);
+    var src_store = try store_mod.ObjectStore.init(std.testing.io, src_tmp.dir);
     defer src_store.close();
 
     // Create objects in source store
@@ -602,7 +602,7 @@ test "unpack into store" {
     // Destination store
     var dst_tmp = std.testing.tmpDir(.{});
     defer dst_tmp.cleanup();
-    var dst_store = try store_mod.ObjectStore.init(dst_tmp.dir);
+    var dst_store = try store_mod.ObjectStore.init(std.testing.io, dst_tmp.dir);
     defer dst_store.close();
 
     // Verify objects don't exist in destination yet
@@ -1023,7 +1023,7 @@ test "incremental pack excludes base" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Create commit A: blob_a -> tree_a -> commit_a
@@ -1097,7 +1097,7 @@ test "incremental pack null base packs all" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Create a simple commit: blob -> tree -> commit
@@ -1153,7 +1153,7 @@ test "pack with deltas smaller than raw" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Create two similar 1KB blobs that differ only slightly.
@@ -1221,7 +1221,7 @@ test "unpack delta restores original" {
     // Source store with two similar blobs
     var src_tmp = std.testing.tmpDir(.{});
     defer src_tmp.cleanup();
-    var src_store = try store_mod.ObjectStore.init(src_tmp.dir);
+    var src_store = try store_mod.ObjectStore.init(std.testing.io, src_tmp.dir);
     defer src_store.close();
 
     var base_content: [1024]u8 = undefined;
@@ -1270,7 +1270,7 @@ test "unpack delta restores original" {
     // Unpack into a fresh destination store
     var dst_tmp = std.testing.tmpDir(.{});
     defer dst_tmp.cleanup();
-    var dst_store = try store_mod.ObjectStore.init(dst_tmp.dir);
+    var dst_store = try store_mod.ObjectStore.init(std.testing.io, dst_tmp.dir);
     defer dst_store.close();
 
     try unpackDeltaInto(allocator, delta_pack.bytes, &dst_store);
@@ -1330,7 +1330,7 @@ test "collectShallowBoundaries depth 2 with 5 commits" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
     const c1 = try makeTestCommit(allocator, &store, "commit 1", &.{});
     const c2 = try makeTestCommit(allocator, &store, "commit 2", &.{c1});
@@ -1347,7 +1347,7 @@ test "collectShallowBoundaries depth 1" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
     const c1 = try makeTestCommit(allocator, &store, "commit 1", &.{});
     const c2 = try makeTestCommit(allocator, &store, "commit 2", &.{c1});
@@ -1362,7 +1362,7 @@ test "collectShallowBoundaries no parents" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
     const c1 = try makeTestCommit(allocator, &store, "root commit", &.{});
     const boundaries = try collectShallowBoundaries(allocator, &store, c1, 2);
@@ -1374,7 +1374,7 @@ test "collectShallowBoundaries merge commit" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
     const c1 = try makeTestCommit(allocator, &store, "base", &.{});
     const c2 = try makeTestCommit(allocator, &store, "branch a", &.{c1});
@@ -1397,7 +1397,7 @@ test "collectShallowBoundaries depth exceeds chain" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
     const c1 = try makeTestCommit(allocator, &store, "commit 1", &.{});
     const c2 = try makeTestCommit(allocator, &store, "commit 2", &.{c1});
