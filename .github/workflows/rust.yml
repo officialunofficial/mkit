@@ -1,0 +1,112 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - rewrite/rust
+      - "rewrite/rust/**"
+  pull_request:
+    branches:
+      - rewrite/rust
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-build:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt,clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> rust/target
+
+      - name: Detect workspace members
+        id: workspace
+        shell: bash
+        run: |
+          if ls rust/crates/*/Cargo.toml >/dev/null 2>&1; then
+            echo "has_members=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_members=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check formatting
+        working-directory: rust
+        run: cargo fmt --check
+
+      - name: Clippy
+        if: steps.workspace.outputs.has_members == 'true'
+        working-directory: rust
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        if: steps.workspace.outputs.has_members == 'true'
+        working-directory: rust
+        run: cargo build --locked
+
+      - name: Test
+        if: steps.workspace.outputs.has_members == 'true'
+        working-directory: rust
+        run: cargo test --locked
+
+      - name: Rename gate
+        run: bash scripts/verify-rename.sh
+
+  rust-reproducible-build:
+    name: Reproducible build (ubuntu-latest)
+    runs-on: ubuntu-latest
+    needs: rust-build
+    if: hashFiles('rust/crates/mkit-cli/Cargo.toml') != ''
+    env:
+      RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt,clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> rust/target
+
+      - name: Build (pass 1)
+        working-directory: rust
+        run: cargo build --release --locked --frozen --target-dir target-r1
+
+      - name: Build (pass 2)
+        working-directory: rust
+        run: cargo build --release --locked --frozen --target-dir target-r2
+
+      - name: Compare sha256 of output binary
+        run: |
+          SHA1=$(sha256sum rust/target-r1/release/mkit | awk '{print $1}')
+          SHA2=$(sha256sum rust/target-r2/release/mkit | awk '{print $1}')
+          echo "Pass 1: $SHA1"
+          echo "Pass 2: $SHA2"
+          if [ "$SHA1" != "$SHA2" ]; then
+            echo "ERROR: build is not reproducible"
+            exit 1
+          fi
+          echo "OK: builds are bit-for-bit identical"

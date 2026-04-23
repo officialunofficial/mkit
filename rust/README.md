@@ -31,6 +31,13 @@ rust/
 Phase 0 lands the workspace scaffold and golden-vector harvest. Subsequent
 phases (1–10) follow the TDD plan; see the draft PR for the checklist.
 
+## CI
+
+Two GitHub Actions workflows guard this branch:
+
+- **[`rust.yml`](../.github/workflows/rust.yml)** — runs on every push/PR to `rewrite/rust`. Matrix: `ubuntu-latest` + `macos-latest`. Steps: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build --locked`, `cargo test --locked`, and the rename gate (`scripts/verify-rename.sh`). A `rust-reproducible-build` job (ubuntu-only) compares `sha256sum` of two sequential release builds; it no-ops until `crates/mkit-cli` exists.
+- **[`rust-security.yml`](../.github/workflows/rust-security.yml)** — runs weekly (Monday 06:00 UTC) and on PRs. Runs `cargo audit` (via `rustsec/audit-check`) and `cargo deny check` (config in `deny.toml`).
+
 ## Non-negotiables
 
 - Every on-disk / wire byte must match the Zig v0.2.x output. Golden-vector
