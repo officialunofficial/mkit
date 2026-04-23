@@ -10,6 +10,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Internal monorepo crate; not published to crates.io during the Rust
+# port. Flip to `true` once the 1.0 cutover freezes the public API.
+publish = false
 
 [lints]
 workspace = true
