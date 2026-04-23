@@ -23,6 +23,7 @@ const mkit = @import("mkit_src");
 const object = mkit.object;
 const serialize = mkit.serialize;
 const hash_mod = mkit.hash;
+const sign = mkit.sign;
 
 const Allocator = std.mem.Allocator;
 const Hash = hash_mod.Hash;
@@ -164,6 +165,63 @@ fn buildRemix(arena: Allocator) ![]u8 {
     return try serialize.serialize(arena, obj);
 }
 
+// Build the canonical signing bytes for the commit_0parent vector. This
+// must use the *exact same* inputs as buildCommit(arena, 0) so the Rust
+// port can deserialize commit_0parent.bin and re-derive identical bytes.
+fn buildCommitSigningBytes(arena: Allocator, parent_count: u32) ![]u8 {
+    const tree_hash: Hash = .{0x77} ** 32;
+    var parents = try arena.alloc(Hash, parent_count);
+    if (parent_count >= 1) parents[0] = .{0xA0} ** 32;
+    if (parent_count >= 2) parents[1] = .{0xB0} ** 32;
+    const author = object.Identity{ .kind = .ed25519, .bytes = &PUBKEY_A };
+    const message: []const u8 = switch (parent_count) {
+        0 => "genesis",
+        1 => "second",
+        2 => "merge",
+        else => "commit",
+    };
+    const c = object.Commit{
+        .tree_hash = tree_hash,
+        .parents = parents,
+        .author = author,
+        .signer = SIGNER,
+        .message = message,
+        .timestamp = FIXED_TIMESTAMP + parent_count,
+        .signature = SIGNATURE,
+    };
+    return try sign.commitSigningBytes(arena, c);
+}
+
+// Build the canonical signing bytes for the remix_2sources vector. Must
+// match buildRemix above field-for-field.
+fn buildRemixSigningBytes(arena: Allocator) ![]u8 {
+    const tree_hash: Hash = .{0x77} ** 32;
+    const parents = try arena.alloc(Hash, 0);
+
+    var sources = try arena.alloc(object.RemixSource, 2);
+    sources[0] = .{
+        .upstream_id = .{0x10} ** 32,
+        .commit_hash = .{0x30} ** 32,
+    };
+    sources[1] = .{
+        .upstream_id = .{0x20} ** 32,
+        .commit_hash = .{0x40} ** 32,
+    };
+
+    const author = object.Identity{ .kind = .ed25519, .bytes = &PUBKEY_B };
+    const r = object.Remix{
+        .tree_hash = tree_hash,
+        .parents = parents,
+        .sources = sources,
+        .author = author,
+        .signer = SIGNER,
+        .message = "remix two",
+        .timestamp = FIXED_TIMESTAMP + 10,
+        .signature = SIGNATURE,
+    };
+    return try sign.remixSigningBytes(arena, r);
+}
+
 fn buildChunkedBlob(arena: Allocator) ![]u8 {
     var chunks = try arena.alloc(Hash, 4);
     chunks[0] = .{0x01} ** 32;
@@ -234,6 +292,8 @@ fn buildByName(arena: Allocator, name: []const u8) !?[]u8 {
     if (std.mem.eql(u8, name, "remix_2sources")) return try buildRemix(arena);
     if (std.mem.eql(u8, name, "remix_identical_upstream_distinct_commit"))
         return try buildRemixIdenticalUpstream(arena);
+    if (std.mem.eql(u8, name, "commit_0parent_signing_bytes")) return try buildCommitSigningBytes(arena, 0);
+    if (std.mem.eql(u8, name, "remix_2sources_signing_bytes")) return try buildRemixSigningBytes(arena);
     if (std.mem.eql(u8, name, "chunked_blob")) return try buildChunkedBlob(arena);
     if (std.mem.eql(u8, name, "chunked_blob_cs0_3chunks")) return try buildChunkedBlobCs0(arena);
     if (std.mem.eql(u8, name, "identity_ed25519")) return try buildIdentityEd25519(arena);
