@@ -264,7 +264,7 @@ const MergeError = error{
     UnknownIdentityKind,
     InvalidIdentity,
     IdentityTooLarge,
-} || std.fs.File.OpenError || std.fs.File.WriteError || std.fs.File.ReadError || std.fs.Dir.OpenError;
+} || std.Io.File.OpenError || std.Io.File.WriteError || std.Io.File.ReadError || std.Io.Dir.OpenError;
 
 /// Recursive 3-pointer lockstep merge over sorted entry arrays.
 fn mergeEntriesRecursive(

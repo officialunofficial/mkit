@@ -198,7 +198,7 @@ pub fn restoreTree(
     allocator: Allocator,
     store: *store_mod.ObjectStore,
     tree_hash: Hash,
-    target_dir: std.fs.Dir,
+    target_dir: std.Io.Dir,
     options: RestoreOptions,
 ) !void {
     try restoreTreeInner(allocator, store, tree_hash, target_dir, options, "");
@@ -208,7 +208,7 @@ fn restoreTreeInner(
     allocator: Allocator,
     store: *store_mod.ObjectStore,
     tree_hash: Hash,
-    target_dir: std.fs.Dir,
+    target_dir: std.Io.Dir,
     options: RestoreOptions,
     path_prefix: []const u8,
 ) !void {
@@ -275,7 +275,7 @@ fn restoreTreeInner(
 fn restoreBlob(
     allocator: Allocator,
     store: *store_mod.ObjectStore,
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     name: []const u8,
     blob_hash: Hash,
 ) !void {
@@ -286,18 +286,18 @@ fn restoreBlob(
         .blob => |b| {
             try preparePathForKind(dir, name, .file, false);
             const file = try dir.createFile(name, .{});
-            defer file.close();
-            try file.writeAll(b.data);
+            defer file.close(std.testing.io);
+            try file.writeStreamingAll(std.testing.io, b.data);
         },
         .chunked_blob => |cb| {
             try preparePathForKind(dir, name, .file, false);
             const file = try dir.createFile(name, .{});
-            defer file.close();
+            defer file.close(std.testing.io);
             for (cb.chunks) |chunk_hash| {
                 var chunk = try store.get(allocator, chunk_hash);
                 defer chunk.deinit(allocator);
                 if (chunk != .blob) return error.InvalidChunk;
-                try file.writeAll(chunk.blob.data);
+                try file.writeStreamingAll(std.testing.io, chunk.blob.data);
             }
         },
         else => return error.NotABlob,
@@ -308,7 +308,7 @@ fn restoreBlob(
 fn restoreSymlink(
     allocator: Allocator,
     store: *store_mod.ObjectStore,
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     name: []const u8,
     blob_hash: Hash,
 ) !void {
@@ -326,9 +326,9 @@ fn restoreSymlink(
 }
 
 fn preparePathForKind(
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     name: []const u8,
-    expected_kind: std.fs.File.Kind,
+    expected_kind: std.Io.File.Kind,
     replace_same_kind: bool,
 ) !void {
     const current_kind = try existingPathKind(dir, name);
@@ -341,7 +341,7 @@ fn preparePathForKind(
     }
 }
 
-fn existingPathKind(dir: std.fs.Dir, name: []const u8) !?std.fs.File.Kind {
+fn existingPathKind(dir: std.Io.Dir, name: []const u8) !?std.Io.File.Kind {
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (dir.readLink(name, &link_buf)) |_| {
         return .sym_link;
@@ -360,7 +360,7 @@ fn existingPathKind(dir: std.fs.Dir, name: []const u8) !?std.fs.File.Kind {
 /// When sparse patterns are active, only clean files within the sparse set.
 fn cleanDirectory(
     allocator: Allocator,
-    target_dir: std.fs.Dir,
+    target_dir: std.Io.Dir,
     tree_entries: []const object.TreeEntry,
     sparse_patterns: ?[]const SparsePattern,
     path_prefix: []const u8,
@@ -374,8 +374,8 @@ fn cleanDirectory(
         to_delete.deinit(allocator);
     }
 
-    var iter = target_dir.iterate();
-    while (try iter.next()) |fs_entry| {
+    var iter = target_dir.iterate(io);
+    while (try iter.next(io)) |fs_entry| {
         // Always preserve .mkit and .git
         if (std.mem.eql(u8, fs_entry.name, ".mkit") or std.mem.eql(u8, fs_entry.name, ".git")) {
             continue;
@@ -429,7 +429,7 @@ fn cleanDirectory(
 
 const CleanEntry = struct {
     name: []const u8,
-    kind: std.fs.File.Kind,
+    kind: std.Io.File.Kind,
 };
 
 // -- Helper for tests: create a store and populate it --
@@ -491,9 +491,9 @@ test "restore empty tree" {
     try restoreTree(allocator, &store, tree_hash, target_dir, .{});
 
     // Verify no files created
-    var iter = target_dir.iterate();
+    var iter = target_dir.iterate(io);
     var count: usize = 0;
-    while (try iter.next()) |_| {
+    while (try iter.next(io)) |_| {
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), count);
@@ -573,8 +573,8 @@ test "restore overwrites existing files" {
     defer target_tmp.cleanup();
 
     const old_file = try target_tmp.dir.createFile(std.testing.io, "file.txt", .{});
-    try old_file.writeAll("old content");
-    old_file.close();
+    try old_file.writeStreamingAll(std.testing.io, "old content");
+    old_file.close(std.testing.io);
 
     const blob_hash = try storeBlob(allocator, &store, "new content");
     const entries = [_]TestEntry{
@@ -603,8 +603,8 @@ test "restore removes untracked files" {
     defer target_tmp.cleanup();
 
     const extra = try target_tmp.dir.createFile(std.testing.io, "extra.txt", .{});
-    try extra.writeAll("should be removed");
-    extra.close();
+    try extra.writeStreamingAll(std.testing.io, "should be removed");
+    extra.close(std.testing.io);
 
     const blob_hash = try storeBlob(allocator, &store, "tracked");
     const entries = [_]TestEntry{
@@ -637,8 +637,8 @@ test "restore preserves mkit directory" {
 
     try target_tmp.dir.createDirPath(std.testing.io, ".mkit");
     const mkit_file = try target_tmp.dir.createFile(std.testing.io, ".mkit/config", .{});
-    try mkit_file.writeAll("important data");
-    mkit_file.close();
+    try mkit_file.writeStreamingAll(std.testing.io, "important data");
+    mkit_file.close(std.testing.io);
 
     const empty_entries = [_]TestEntry{};
     const tree_hash = try makeTestTree(allocator, &store, &empty_entries);
@@ -728,9 +728,9 @@ test "restore is idempotent" {
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer target_dir.close();
-    var iter = target_dir.iterate();
+    var iter = target_dir.iterate(io);
     var count: usize = 0;
-    while (try iter.next()) |_| {
+    while (try iter.next(io)) |_| {
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), count);
@@ -781,14 +781,14 @@ test "restore replaces mismatched kinds" {
     defer target_tmp.cleanup();
 
     const old_dir_file = try target_tmp.dir.createFile(std.testing.io, "dir-from-file", .{});
-    try old_dir_file.writeAll("stale file");
-    old_dir_file.close();
+    try old_dir_file.writeStreamingAll(std.testing.io, "stale file");
+    old_dir_file.close(std.testing.io);
 
     try target_tmp.dir.createDirPath(std.testing.io, "file-from-dir");
 
     const old_link_file = try target_tmp.dir.createFile(std.testing.io, "link-from-file", .{});
-    try old_link_file.writeAll("stale file");
-    old_link_file.close();
+    try old_link_file.writeStreamingAll(std.testing.io, "stale file");
+    old_link_file.close(std.testing.io);
 
     try target_tmp.dir.symLink(std.testing.io, "old-target", "relink", .{});
 
@@ -864,8 +864,8 @@ test "restore clean false keeps untracked" {
     defer target_tmp.cleanup();
 
     const extra = try target_tmp.dir.createFile(std.testing.io, "extra.txt", .{});
-    try extra.writeAll("should survive");
-    extra.close();
+    try extra.writeStreamingAll(std.testing.io, "should survive");
+    extra.close(std.testing.io);
 
     const blob_hash = try storeBlob(allocator, &store, "tracked");
     const entries = [_]TestEntry{

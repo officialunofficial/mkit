@@ -104,18 +104,18 @@ test "commit workflow no leaks" {
 
     // Create some files
     const f1 = try work_tmp.dir.createFile(std.testing.io, "hello.txt", .{});
-    try f1.writeAll("hello world");
-    f1.close();
+    try f1.writeStreamingAll(std.testing.io, "hello world");
+    f1.close(std.testing.io);
 
     try work_tmp.dir.createDirPath(std.testing.io, "src");
     const f2 = try work_tmp.dir.createFile(std.testing.io, "src/main.zig", .{});
-    try f2.writeAll("pub fn main() void {}");
-    f2.close();
+    try f2.writeStreamingAll(std.testing.io, "pub fn main() void {}");
+    f2.close(std.testing.io);
 
     // Build tree from working directory
     var d = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d.close();
-    const tree_hash = try worktree.buildTree(allocator, &store, d);
+    const tree_hash = try worktree.buildTree(allocator, std.testing.io, &store, d);
 
     // Sign and store commit
     const kp = sign.KeyPair.generate();
@@ -186,23 +186,23 @@ test "status diff workflow no leaks" {
 
     // Create initial file
     const f1 = try work_tmp.dir.createFile(std.testing.io, "file.txt", .{});
-    try f1.writeAll("original");
-    f1.close();
+    try f1.writeStreamingAll(std.testing.io, "original");
+    f1.close(std.testing.io);
 
     // Build HEAD tree
     var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
-    const head_tree = try worktree.buildTree(allocator, &store, d1);
+    const head_tree = try worktree.buildTree(allocator, std.testing.io, &store, d1);
 
     // Modify the file
     const f2 = try work_tmp.dir.createFile(std.testing.io, "file.txt", .{});
-    try f2.writeAll("modified");
-    f2.close();
+    try f2.writeStreamingAll(std.testing.io, "modified");
+    f2.close(std.testing.io);
 
     // Add a new file
     const f3 = try work_tmp.dir.createFile(std.testing.io, "new.txt", .{});
-    try f3.writeAll("new content");
-    f3.close();
+    try f3.writeStreamingAll(std.testing.io, "new content");
+    f3.close(std.testing.io);
 
     // Compute status diff
     var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
@@ -460,7 +460,7 @@ test "ignore load no leaks" {
 
     // Create .mkitignore with various patterns
     const f = try tmp.dir.createFile(std.testing.io, ".mkitignore", .{});
-    try f.writeAll(
+    try f.writeStreamingAll(std.testing.io, 
         \\# build artifacts
         \\*.o
         \\*.a
@@ -471,7 +471,7 @@ test "ignore load no leaks" {
         \\.*.swp
         \\
     );
-    f.close();
+    f.close(std.testing.io);
 
     var il = try ignore_mod.load(allocator, tmp.dir);
     defer il.deinit();
@@ -802,17 +802,17 @@ test "end-to-end workflow no leaks" {
     defer work_tmp.cleanup();
 
     const f1 = try work_tmp.dir.createFile(std.testing.io, "README.md", .{});
-    try f1.writeAll("# Hello");
-    f1.close();
+    try f1.writeStreamingAll(std.testing.io, "# Hello");
+    f1.close(std.testing.io);
     try work_tmp.dir.createDirPath(std.testing.io, "src");
     const f2 = try work_tmp.dir.createFile(std.testing.io, "src/lib.zig", .{});
-    try f2.writeAll("pub const version = 1;");
-    f2.close();
+    try f2.writeStreamingAll(std.testing.io, "pub const version = 1;");
+    f2.close(std.testing.io);
 
     // Build tree and commit
     var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
-    const tree1 = try worktree.buildTree(allocator, &store, d1);
+    const tree1 = try worktree.buildTree(allocator, std.testing.io, &store, d1);
 
     const kp = sign.KeyPair.generate();
     const commit1 = try createCommit(allocator, &store, tree1, &.{}, "initial", kp);
@@ -820,12 +820,12 @@ test "end-to-end workflow no leaks" {
 
     // Modify a file and make a second commit
     const f3 = try work_tmp.dir.createFile(std.testing.io, "src/lib.zig", .{});
-    try f3.writeAll("pub const version = 2;");
-    f3.close();
+    try f3.writeStreamingAll(std.testing.io, "pub const version = 2;");
+    f3.close(std.testing.io);
 
     var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d2.close();
-    const tree2 = try worktree.buildTree(allocator, &store, d2);
+    const tree2 = try worktree.buildTree(allocator, std.testing.io, &store, d2);
 
     const commit2 = try createCommit(allocator, &store, tree2, &.{commit1}, "bump version", kp);
     try refs.updateHead(allocator, repo_tmp.dir, commit2);

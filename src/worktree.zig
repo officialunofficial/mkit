@@ -40,8 +40,8 @@ fn buildTreeInner(allocator: Allocator, io: std.Io, store: *store_mod.ObjectStor
 
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
 
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    var iter = dir.iterate(io);
+    while (try iter.next(io)) |entry| {
         const is_dir = entry.kind == .directory;
         if (ignores.isIgnored(entry.name, is_dir)) continue;
 
@@ -224,7 +224,7 @@ test "reject invalid symlink targets" {
 
     var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer work_dir.close(std.testing.io);
-    try std.testing.expectError(error.InvalidSymlinkTarget, buildTree(allocator, &store, work_dir));
+    try std.testing.expectError(error.InvalidSymlinkTarget, buildTree(allocator, std.testing.io, &store, work_dir));
 }
 
 test "build tree with nested directories" {
@@ -319,11 +319,11 @@ test "build tree is deterministic" {
     // Build twice — must produce same hash
     var d1 = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close(std.testing.io);
-    const h1 = try buildTree(allocator, &store, d1);
+    const h1 = try buildTree(allocator, std.testing.io, &store, d1);
 
     var d2 = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d2.close(std.testing.io);
-    const h2 = try buildTree(allocator, &store, d2);
+    const h2 = try buildTree(allocator, std.testing.io, &store, d2);
 
     try std.testing.expectEqual(h1, h2);
 }

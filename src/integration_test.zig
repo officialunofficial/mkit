@@ -356,7 +356,7 @@ test "sparse restore filters files correctly" {
     var src_dir = try output_dir.openDir("src", .{});
     defer src_dir.close();
     const zig_file = try src_dir.openFile("a.zig", .{});
-    defer zig_file.close();
+    defer zig_file.close(std.testing.io);
     var buf: [64]u8 = undefined;
     const n = try zig_file.readAll(&buf);
     try testing.expectEqualStrings("const x = 42;", buf[0..n]);

@@ -27,7 +27,7 @@ pub fn formatObject(allocator: Allocator, obj: object.Object, obj_hash: hash_mod
 pub fn printObject(file: std.fs.File, allocator: Allocator, obj: object.Object, obj_hash: hash_mod.Hash) !void {
     const formatted = try formatObject(allocator, obj, obj_hash);
     defer allocator.free(formatted);
-    try file.writeAll(formatted);
+    try file.writeStreamingAll(std.testing.io, formatted);
 }
 
 fn formatBlob(buf: *Buffer, allocator: Allocator, b: object.Blob) !void {

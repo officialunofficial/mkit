@@ -254,7 +254,7 @@ fn readStashList(allocator: Allocator, cwd: std.fs.Dir) !StashList {
         },
         else => return err,
     };
-    defer file.close();
+    defer file.close(std.testing.io);
 
     const stat = try file.stat();
     if (stat.size == 0) return StashList{
@@ -412,8 +412,8 @@ fn makeTestCommit(
 ) !Hash {
     // Write file
     const f = try dir.createFile(file_name, .{});
-    try f.writeAll(file_content);
-    f.close();
+    try f.writeStreamingAll(std.testing.io, file_content);
+    f.close(std.testing.io);
 
     // Build tree
     var work_dir = try dir.openDir(".", .{ .iterate = true });
@@ -465,8 +465,8 @@ test "stash save creates entry" {
 
     // Modify file
     const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
-    try f.writeAll("modified content");
-    f.close();
+    try f.writeStreamingAll(std.testing.io, "modified content");
+    f.close(std.testing.io);
 
     // Stash
     try save(allocator, &repo.store, repo.tmp.dir, "WIP changes");
@@ -489,8 +489,8 @@ test "stash restores clean state" {
 
     // Modify file
     const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
-    try f.writeAll("modified content");
-    f.close();
+    try f.writeStreamingAll(std.testing.io, "modified content");
+    f.close(std.testing.io);
 
     // Stash
     try save(allocator, &repo.store, repo.tmp.dir, "WIP");
@@ -512,8 +512,8 @@ test "stash pop restores changes" {
 
     // Modify file
     const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
-    try f.writeAll("modified content");
-    f.close();
+    try f.writeStreamingAll(std.testing.io, "modified content");
+    f.close(std.testing.io);
 
     // Stash
     try save(allocator, &repo.store, repo.tmp.dir, "WIP");
@@ -538,8 +538,8 @@ test "stash pop removes from list" {
 
     // Modify and stash
     const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
-    try f.writeAll("modified");
-    f.close();
+    try f.writeStreamingAll(std.testing.io, "modified");
+    f.close(std.testing.io);
     try save(allocator, &repo.store, repo.tmp.dir, "WIP");
 
     // Pop
@@ -562,8 +562,8 @@ test "stash drop removes without applying" {
 
     // Modify and stash
     const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
-    try f.writeAll("modified");
-    f.close();
+    try f.writeStreamingAll(std.testing.io, "modified");
+    f.close(std.testing.io);
     try save(allocator, &repo.store, repo.tmp.dir, "WIP");
 
     // Drop (don't apply)
@@ -592,16 +592,16 @@ test "multiple stashes LIFO" {
     // Modify A, stash
     {
         const f = try repo.tmp.dir.createFile(std.testing.io, "a.txt", .{});
-        try f.writeAll("modified-a");
-        f.close();
+        try f.writeStreamingAll(std.testing.io, "modified-a");
+        f.close(std.testing.io);
     }
     try save(allocator, &repo.store, repo.tmp.dir, "stash A");
 
     // Modify A again differently, stash
     {
         const f = try repo.tmp.dir.createFile(std.testing.io, "a.txt", .{});
-        try f.writeAll("modified-a-again");
-        f.close();
+        try f.writeStreamingAll(std.testing.io, "modified-a-again");
+        f.close(std.testing.io);
     }
     try save(allocator, &repo.store, repo.tmp.dir, "stash B");
 
@@ -644,13 +644,13 @@ test "stash show diffs against parent" {
     // Add a new file and modify existing
     {
         const f = try repo.tmp.dir.createFile(std.testing.io, "hello.txt", .{});
-        try f.writeAll("modified");
-        f.close();
+        try f.writeStreamingAll(std.testing.io, "modified");
+        f.close(std.testing.io);
     }
     {
         const f = try repo.tmp.dir.createFile(std.testing.io, "new.txt", .{});
-        try f.writeAll("brand new");
-        f.close();
+        try f.writeStreamingAll(std.testing.io, "brand new");
+        f.close(std.testing.io);
     }
 
     // Stash

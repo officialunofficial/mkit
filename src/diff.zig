@@ -587,17 +587,17 @@ test "status shows added file" {
     defer work_tmp.cleanup();
 
     const f1 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
-    try f1.writeAll("hello");
-    f1.close();
+    try f1.writeStreamingAll(std.testing.io, "hello");
+    f1.close(std.testing.io);
 
     var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
-    const old_tree_hash = try worktree.buildTree(allocator, &store, d1);
+    const old_tree_hash = try worktree.buildTree(allocator, std.testing.io, &store, d1);
 
     // Now add b.txt to workdir
     const f2 = try work_tmp.dir.createFile(std.testing.io, "b.txt", .{});
-    try f2.writeAll("world");
-    f2.close();
+    try f2.writeStreamingAll(std.testing.io, "world");
+    f2.close(std.testing.io);
 
     // statusDiff: old tree vs current workdir (which now has a.txt + b.txt)
     var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
@@ -623,15 +623,15 @@ test "status shows removed file" {
     defer work_tmp.cleanup();
 
     const f1 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
-    try f1.writeAll("hello");
-    f1.close();
+    try f1.writeStreamingAll(std.testing.io, "hello");
+    f1.close(std.testing.io);
     const f2 = try work_tmp.dir.createFile(std.testing.io, "b.txt", .{});
-    try f2.writeAll("world");
-    f2.close();
+    try f2.writeStreamingAll(std.testing.io, "world");
+    f2.close(std.testing.io);
 
     var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
-    const old_tree_hash = try worktree.buildTree(allocator, &store, d1);
+    const old_tree_hash = try worktree.buildTree(allocator, std.testing.io, &store, d1);
 
     // Remove b.txt from workdir
     try work_tmp.dir.deleteFile(std.testing.io, "b.txt");
@@ -660,17 +660,17 @@ test "status shows modified file" {
     defer work_tmp.cleanup();
 
     const f1 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
-    try f1.writeAll("old");
-    f1.close();
+    try f1.writeStreamingAll(std.testing.io, "old");
+    f1.close(std.testing.io);
 
     var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
-    const old_tree_hash = try worktree.buildTree(allocator, &store, d1);
+    const old_tree_hash = try worktree.buildTree(allocator, std.testing.io, &store, d1);
 
     // Modify a.txt to "new"
     const f2 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
-    try f2.writeAll("new");
-    f2.close();
+    try f2.writeStreamingAll(std.testing.io, "new");
+    f2.close(std.testing.io);
 
     // statusDiff: old tree vs current workdir
     var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
@@ -696,12 +696,12 @@ test "status clean working directory" {
     defer work_tmp.cleanup();
 
     const f1 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
-    try f1.writeAll("content");
-    f1.close();
+    try f1.writeStreamingAll(std.testing.io, "content");
+    f1.close(std.testing.io);
 
     var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
-    const old_tree_hash = try worktree.buildTree(allocator, &store, d1);
+    const old_tree_hash = try worktree.buildTree(allocator, std.testing.io, &store, d1);
 
     // Don't change anything — statusDiff should show 0 entries
     var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
@@ -725,11 +725,11 @@ test "status no commits" {
     defer work_tmp.cleanup();
 
     const f1 = try work_tmp.dir.createFile(std.testing.io, "a.txt", .{});
-    try f1.writeAll("aaa");
-    f1.close();
+    try f1.writeStreamingAll(std.testing.io, "aaa");
+    f1.close(std.testing.io);
     const f2 = try work_tmp.dir.createFile(std.testing.io, "b.txt", .{});
-    try f2.writeAll("bbb");
-    f2.close();
+    try f2.writeStreamingAll(std.testing.io, "bbb");
+    f2.close(std.testing.io);
 
     var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
@@ -758,17 +758,17 @@ test "status nested changes" {
 
     try work_tmp.dir.createDirPath(std.testing.io, "src");
     const f1 = try work_tmp.dir.createFile(std.testing.io, "src/a.txt", .{});
-    try f1.writeAll("original");
-    f1.close();
+    try f1.writeStreamingAll(std.testing.io, "original");
+    f1.close(std.testing.io);
 
     var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
     defer d1.close();
-    const old_tree_hash = try worktree.buildTree(allocator, &store, d1);
+    const old_tree_hash = try worktree.buildTree(allocator, std.testing.io, &store, d1);
 
     // Modify src/a.txt
     const f2 = try work_tmp.dir.createFile(std.testing.io, "src/a.txt", .{});
-    try f2.writeAll("modified");
-    f2.close();
+    try f2.writeStreamingAll(std.testing.io, "modified");
+    f2.close(std.testing.io);
 
     // statusDiff should show src/a.txt as modified
     var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
