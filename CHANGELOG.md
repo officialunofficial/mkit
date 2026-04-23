@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **Toolchain bumped to Zig 0.16.0.** The `std.Io` overhaul is landed: every
+  subsystem that touches the filesystem, clock, RNG, or child processes now
+  threads an explicit `std.Io` capability. Public signatures for
+  `ObjectStore.{init,open,isRepoRoot}`, `refs.*`, `index.*`, `worktree.*`,
+  `restore.*`, `rebase.*`, `bisect.*`, `stash.*`, `ignore.load`,
+  `config.{readConfig,writeConfig}`, `diff.statusDiff`, `format.printObject`,
+  and the `*Transport.init` family now take `io: std.Io`. Consumers
+  consuming mkit as a library will need to thread `io` through their own
+  callers.
+- `std.meta.intToEnum` replaced with `std.enums.fromInt` (optional return,
+  not error-union).
+- `std.mem.trimRight` / `trimLeft` renamed to `trimEnd` / `trimStart`.
+- `ArrayList(T) = .{}` default-init replaced with `.empty`.
+- FUZZ harnesses (`fuzz_packfile`, `fuzz_tree`, `fuzz_delta`) now use
+  `std.Io.Clock.awake.now(io)` for the per-iteration deadline in place of
+  the removed `std.time.nanoTimestamp`; every FUZZ.md invariant is
+  preserved verbatim (≤100 iters, ≤64 KiB inputs, 2 MiB FBA, 100 ms cap,
+  seeded DefaultPrng, no `std.testing.fuzz`).
 
 ## [0.1.0] - 2026-04-22
 
@@ -97,13 +116,11 @@ project and re-homed under the `mkit` name with a fresh license.
 
 ### Deferred to 0.2.0
 
-- Zig 0.16 migration (the `std.Io` overhaul touches ~500 sites; needs its
-  own multi-session workstream).
 - Windows support (Scoop manifest stub already in `contrib/scoop/`).
 - S3 multipart upload for >5 GiB packs.
 - Cross-transport conformance test matrix.
 - SSH operational-verb retry (hello handshake is deterministic).
-- File transport directory-fsync (`std.fs.Dir.sync` not exposed in 0.15.2).
+- File transport directory-fsync (not yet exposed in 0.16's `std.Io.Dir`).
 - Symlink-restore fuzz harness + SSH-wire fuzz harness.
 - Per-subcommand man pages (`mkit-commit(1)` etc.); 0.1.0 ships one
   comprehensive `mkit(1)`.
