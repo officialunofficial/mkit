@@ -8,6 +8,7 @@
 set -euo pipefail
 
 WORKER="https://vcs.makechain.net/v1"
+MKIT_URL="mkit+${WORKER}"
 PASS=0
 FAIL=0
 
@@ -69,7 +70,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-DUMMY_PROJECT="0000000000000000000000000000000000000000000000000000000000000000"
 
 # === Phase 1: Init + first commit in repo A ===
 bold "Phase 1: Init + first commit in repo A"
@@ -94,7 +94,7 @@ echo "  HEAD: ${HEAD_HASH:0:16}..."
 assert "HEAD ref exists" '[ -n "$HEAD_HASH" ]'
 
 # Configure remote for HTTPS transport
-REMOTE_OUT=$(mkit_run remote set "$WORKER")
+REMOTE_OUT=$(mkit_run remote set "$MKIT_URL")
 assert "mkit remote set" 'echo "$REMOTE_OUT" | grep -q "remote set"'
 assert "remote type is http" 'echo "$REMOTE_OUT" | grep -q "http"'
 
@@ -114,7 +114,7 @@ BRANCH_HASH=$(cat ".mkit/refs/heads/$BRANCH" | tr -d '\n\r ')
 echo "  branch HEAD: ${BRANCH_HASH:0:16}..."
 
 # Push to remote
-PUSH_OUT=$(mkit_run push --project "$DUMMY_PROJECT")
+PUSH_OUT=$(mkit_run push)
 echo "  push: $(echo "$PUSH_OUT" | head -2)"
 assert "mkit push succeeds" 'echo "$PUSH_OUT" | grep -q "pushed"'
 assert "push targets test branch ref" 'echo "$PUSH_OUT" | grep -q "refs/heads/$BRANCH"'
@@ -135,9 +135,12 @@ bold ""
 bold "Phase 3: Clone into repo B"
 cd "$REPO_B"
 
-CLONE_OUT=$(mkit_run clone "$WORKER")
+CLONE_OUT=$(mkit_run clone "$MKIT_URL")
 echo "  clone: $(echo "$CLONE_OUT" | head -3)"
 assert "mkit clone succeeds" 'echo "$CLONE_OUT" | grep -q "initialized"'
+# mkit clone only does init + remote set — pull fetches content
+mkit_run pull >/dev/null
+assert "pull after clone has local main ref" \'[ -f ".mkit/refs/heads/main" ]\'
 
 # Switch to the test branch
 mkit_run checkout "$BRANCH"
@@ -177,7 +180,7 @@ HEAD2_HASH=$(cat ".mkit/refs/heads/$BRANCH" | tr -d '\n\r ')
 assert "HEAD advanced" '[ "$HEAD2_HASH" != "$BRANCH_HASH" ]'
 echo "  HEAD: ${HEAD2_HASH:0:16}..."
 
-PUSH2_OUT=$(mkit_run push --project "$DUMMY_PROJECT")
+PUSH2_OUT=$(mkit_run push)
 echo "  push: $(echo "$PUSH2_OUT" | head -2)"
 assert "second push succeeds" 'echo "$PUSH2_OUT" | grep -q "pushed"'
 

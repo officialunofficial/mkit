@@ -74,7 +74,7 @@ bold ""
 bold "Phase 2: Pack + upload to R2"
 
 # Use mkit push to get the digest
-PUSH_OUT=$($MKIT push --project 0000000000000000000000000000000000000000000000000000000000000000 2>&1)
+PUSH_OUT=$($MKIT push 2>&1)
 PACK_DIGEST=$(echo "$PUSH_OUT" | grep "^digest" | awk '{print $2}')
 echo "  digest: $PACK_DIGEST"
 assert "mkit push dry-run" '[ -n "$PACK_DIGEST" ]'
