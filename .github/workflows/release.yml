@@ -27,7 +27,7 @@ permissions:
   attestations: write   # supply-chain attestations
 
 env:
-  ZIG_VERSION: "0.15.2"
+  ZIG_VERSION: "0.16.0"
   BINARY_NAME: mkit
 
 jobs:

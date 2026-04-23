@@ -74,7 +74,7 @@ pub fn formatRef(h: Hash) [65]u8 {
 
 /// Parse ref wire format back to a Hash. Accepts optional trailing whitespace.
 pub fn parseRef(data: []const u8) !Hash {
-    const trimmed = std.mem.trimRight(u8, data, "\n\r \t");
+    const trimmed = std.mem.trimEnd(u8, data, "\n\r \t");
     if (trimmed.len != 64) return error.InvalidRef;
     return hash_mod.fromHex(trimmed) catch error.InvalidRef;
 }
@@ -100,7 +100,7 @@ pub fn validateRefName(name: []const u8) bool {
 /// Validate a ref prefix used for listings. Allows an optional trailing slash.
 pub fn validateRefPrefix(prefix: []const u8) bool {
     if (prefix.len == 0) return true;
-    const trimmed = std.mem.trimRight(u8, prefix, "/");
+    const trimmed = std.mem.trimEnd(u8, prefix, "/");
     if (trimmed.len == 0) return false;
     return validateRefName(trimmed);
 }
@@ -152,7 +152,16 @@ pub const RemoteUrl = union(enum) {
 ///   http://host:port/v1                 → HTTP transport
 ///   ssh://user@host:port/path           → SSH transport
 ///   user@host:path                      → SSH transport (SCP-style)
-pub fn parseUrl(url: []const u8) !RemoteUrl {
+pub fn parseUrl(raw_url: []const u8) !RemoteUrl {
+    // Strict namespace: mkit remote URLs are prefixed with `mkit+<scheme>://`.
+    // Strip the `mkit+` prefix here so the legacy body below can match the
+    // unqualified scheme. Bare `file://` / `https://` / `ssh://` / etc. are
+    // still accepted for backwards-compat.
+    const url = if (std.mem.startsWith(u8, raw_url, "mkit+"))
+        raw_url["mkit+".len..]
+    else
+        raw_url;
+
     if (std.mem.startsWith(u8, url, "file://")) {
         const path = url["file://".len..];
         if (path.len == 0) return error.InvalidUrl;
@@ -616,16 +625,20 @@ test "parseRemoteUrl bounded input does not crash" {
 
 test "fuzz: parseUrl does not crash" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
-            _ = parseUrl(input) catch return;
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [1024]u8 = undefined;
+            const n = smith.slice(&buf);
+            _ = parseUrl(buf[0..n]) catch return;
         }
     }.run, .{});
 }
 
 test "fuzz: validateRefName does not crash" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
-            _ = validateRefName(input);
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [1024]u8 = undefined;
+            const n = smith.slice(&buf);
+            _ = validateRefName(buf[0..n]);
         }
     }.run, .{});
 }

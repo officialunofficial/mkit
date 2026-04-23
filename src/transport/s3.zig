@@ -49,9 +49,10 @@ pub fn backoffNs(attempt: u32) u64 {
 pub const S3Transport = struct {
     config: s3_auth.S3Config,
     allocator: Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: Allocator, config: s3_auth.S3Config) S3Transport {
-        return .{ .config = config, .allocator = allocator };
+    pub fn init(allocator: Allocator, io: std.Io, config: s3_auth.S3Config) S3Transport {
+        return .{ .config = config, .allocator = allocator, .io = io };
     }
 
     pub fn deinit(self: *S3Transport) void {
@@ -148,7 +149,8 @@ pub const S3Transport = struct {
             const result = self.httpRequestOnce(allocator, method, key, query, payload, extra_headers) catch |err| {
                 // Network-level error — retry if we still have attempts left.
                 if (attempt + 1 < RETRY_MAX_ATTEMPTS) {
-                    std.Thread.sleep(backoffNs(attempt));
+                    // Why: std.Thread.sleep was removed in Zig 0.16; wait via Io.
+                    std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(backoffNs(attempt))), .awake) catch {};
                     continue;
                 }
                 return err;
@@ -158,7 +160,7 @@ pub const S3Transport = struct {
                 // Drain the response body before retrying.
                 var to_discard = result;
                 to_discard.deinit();
-                std.Thread.sleep(backoffNs(attempt));
+                std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(backoffNs(attempt))), .awake) catch {};
                 continue;
             }
 
@@ -185,7 +187,9 @@ pub const S3Transport = struct {
         const method_str = methodToString(method);
 
         // 3. Get current timestamp
-        const timestamp = std.time.timestamp();
+        // Why: std.time.timestamp() was removed in Zig 0.16; wall-clock now
+        // comes from Io.
+        const timestamp = std.Io.Clock.real.now(self.io).toSeconds();
 
         // 4. Sign the request
         const payload_bytes = payload orelse "";
@@ -208,7 +212,8 @@ pub const S3Transport = struct {
         defer allocator.free(url_str);
 
         // 6. Create HTTP client
-        var client = std.http.Client{ .allocator = allocator };
+        // Why: std.http.Client gained a required `io` field in Zig 0.16.
+        var client = std.http.Client{ .allocator = allocator, .io = self.io };
         defer client.deinit();
 
         // 7. Set up response body capture via ArrayListUnmanaged + Allocating writer
@@ -564,7 +569,7 @@ test "transport vtable construction" {
         .region = "auto",
     };
 
-    var s3 = S3Transport.init(allocator, config);
+    var s3 = S3Transport.init(allocator, std.testing.io, config);
     defer s3.deinit();
 
     const t = s3.transport();
@@ -614,7 +619,7 @@ test "uploadPack rejects >5 GiB without dereferencing body" {
         .secret_access_key = "s",
         .region = "auto",
     };
-    var s3 = S3Transport.init(allocator, config);
+    var s3 = S3Transport.init(allocator, std.testing.io, config);
     defer s3.deinit();
 
     const t = s3.transport();

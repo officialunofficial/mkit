@@ -8,7 +8,7 @@ const Buffer = std.ArrayList(u8);
 
 /// Format an object to a byte buffer. Caller owns returned slice.
 pub fn formatObject(allocator: Allocator, obj: object.Object, obj_hash: hash_mod.Hash) ![]u8 {
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     errdefer buf.deinit(allocator);
 
     switch (obj) {
@@ -24,10 +24,10 @@ pub fn formatObject(allocator: Allocator, obj: object.Object, obj_hash: hash_mod
 }
 
 /// Write formatted object to a file.
-pub fn printObject(file: std.fs.File, allocator: Allocator, obj: object.Object, obj_hash: hash_mod.Hash) !void {
+pub fn printObject(file: std.Io.File, io: std.Io, allocator: Allocator, obj: object.Object, obj_hash: hash_mod.Hash) !void {
     const formatted = try formatObject(allocator, obj, obj_hash);
     defer allocator.free(formatted);
-    try file.writeAll(formatted);
+    try file.writeStreamingAll(io, formatted);
 }
 
 fn formatBlob(buf: *Buffer, allocator: Allocator, b: object.Blob) !void {
@@ -240,7 +240,7 @@ fn formatDelta(buf: *Buffer, allocator: Allocator, d: object.Delta) !void {
 /// Format a commit as a single line: "<hash8> <title>\n"
 /// Caller owns the returned slice.
 pub fn formatCommitOneline(allocator: Allocator, commit_hash: hash_mod.Hash, commit: object.Commit) ![]u8 {
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     errdefer buf.deinit(allocator);
 
     const hex = hash_mod.toHex(commit_hash);
@@ -459,7 +459,7 @@ pub const GraphState = struct {
 
     pub fn init(allocator: Allocator) GraphState {
         return .{
-            .columns = .{},
+            .columns = .empty,
             .allocator = allocator,
         };
     }
@@ -506,7 +506,7 @@ pub fn graphRenderCommit(
 
     const col_idx = commit_col.?;
 
-    var prefix_buf: Buffer = .{};
+    var prefix_buf: Buffer = .empty;
     errdefer prefix_buf.deinit(allocator);
 
     for (state.columns.items, 0..) |_, i| {
@@ -520,7 +520,7 @@ pub fn graphRenderCommit(
     const commit_prefix = try prefix_buf.toOwnedSlice(allocator);
     errdefer allocator.free(commit_prefix);
 
-    var post_lines_list: std.ArrayList([]const u8) = .{};
+    var post_lines_list: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (post_lines_list.items) |line| allocator.free(line);
         post_lines_list.deinit(allocator);
@@ -549,7 +549,7 @@ pub fn graphRenderCommit(
         for (parents[1..]) |parent| {
             try state.columns.append(state.allocator, .{ .target = parent });
         }
-        var merge_buf: Buffer = .{};
+        var merge_buf: Buffer = .empty;
         errdefer merge_buf.deinit(allocator);
         for (state.columns.items, 0..) |_, i| {
             if (i == col_idx) {
@@ -575,7 +575,7 @@ pub fn graphRenderCommit(
 }
 
 fn buildContinuationLine(allocator: Allocator, columns: []const GraphColumn) ![]const u8 {
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     errdefer buf.deinit(allocator);
     for (columns) |col| {
         if (col.target != null) {

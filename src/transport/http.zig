@@ -32,12 +32,14 @@ pub const HttpTransport = struct {
     base_url: []const u8, // e.g. "https://mkit-vcs.workers.dev/v1" (no trailing slash)
     api_token: ?[]const u8, // optional Bearer token for writes
     allocator: Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: Allocator, base_url: []const u8, api_token: ?[]const u8) HttpTransport {
+    pub fn init(allocator: Allocator, io: std.Io, base_url: []const u8, api_token: ?[]const u8) HttpTransport {
         return .{
             .base_url = base_url,
             .api_token = api_token,
             .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -160,7 +162,8 @@ pub const HttpTransport = struct {
         while (true) : (attempt += 1) {
             const result = self.httpRequestOnce(allocator, method, url_str, payload, extra_headers) catch |err| {
                 if (attempt + 1 < RETRY_MAX_ATTEMPTS) {
-                    std.Thread.sleep(backoffNs(attempt));
+                    // Why: std.Thread.sleep was removed in Zig 0.16; wait via Io.
+                    std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(backoffNs(attempt))), .awake) catch {};
                     continue;
                 }
                 return err;
@@ -169,7 +172,7 @@ pub const HttpTransport = struct {
             if (isRetryableStatus(result.status) and attempt + 1 < RETRY_MAX_ATTEMPTS) {
                 var to_discard = result;
                 to_discard.deinit();
-                std.Thread.sleep(backoffNs(attempt));
+                std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(backoffNs(attempt))), .awake) catch {};
                 continue;
             }
             return result;
@@ -186,7 +189,8 @@ pub const HttpTransport = struct {
         payload: ?[]const u8,
         extra_headers: []const std.http.Header,
     ) !HttpResponse {
-        var client = std.http.Client{ .allocator = allocator };
+        // Why: std.http.Client gained a required `io` field in Zig 0.16.
+        var client = std.http.Client{ .allocator = allocator, .io = self.io };
         defer client.deinit();
 
         // Build Authorization if we have a token; call-site may add conditional headers too.
@@ -584,7 +588,7 @@ test "build ref write headers match" {
 test "vtable construction" {
     const allocator = std.testing.allocator;
 
-    var ht = HttpTransport.init(allocator, "https://example.com/v1", "my-secret-token");
+    var ht = HttpTransport.init(allocator, std.testing.io, "https://example.com/v1", "my-secret-token");
     defer ht.deinit();
 
     const t = ht.transport();
@@ -607,7 +611,7 @@ test "vtable construction" {
 test "vtable construction no token" {
     const allocator = std.testing.allocator;
 
-    var ht = HttpTransport.init(allocator, "https://example.com/v1", null);
+    var ht = HttpTransport.init(allocator, std.testing.io, "https://example.com/v1", null);
     defer ht.deinit();
 
     const t = ht.transport();

@@ -28,8 +28,8 @@ pub const KeyPair = struct {
     seed: SecretSeed,
 
     /// Generate a new random keypair.
-    pub fn generate() KeyPair {
-        const kp = Ed25519.KeyPair.generate();
+    pub fn generate(io: std.Io) KeyPair {
+        const kp = Ed25519.KeyPair.generate(io);
         return .{
             .public_key = kp.public_key.bytes,
             .seed = kp.secret_key.seed(),
@@ -82,7 +82,7 @@ fn writePrologue(buf: *Buffer, allocator: Allocator, t: object.ObjectType) !void
 /// `content_digest` (see docs/SPEC-OBJECTS.md §5.1 for the canonical
 /// signing-bytes pattern).
 pub fn commitSigningBytes(allocator: Allocator, c: object.Commit) ![]u8 {
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     errdefer buf.deinit(allocator);
 
     try writePrologue(&buf, allocator, .commit);
@@ -102,7 +102,7 @@ pub fn commitSigningBytes(allocator: Allocator, c: object.Commit) ![]u8 {
 
 /// Serialize a remix's fields for signing. See docs/SPEC-SIGNING.md §4.
 pub fn remixSigningBytes(allocator: Allocator, r: object.Remix) ![]u8 {
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     errdefer buf.deinit(allocator);
 
     try writePrologue(&buf, allocator, .remix);
@@ -195,14 +195,14 @@ fn makeEd25519Identity(pk: *const [32]u8) object.Identity {
 }
 
 test "keypair generate and recreate from seed" {
-    const kp1 = KeyPair.generate();
+    const kp1 = KeyPair.generate(std.testing.io);
     const kp2 = try KeyPair.fromSeed(kp1.seed);
     try std.testing.expectEqual(kp1.public_key, kp2.public_key);
 }
 
 test "sign and verify commit" {
     const allocator = std.testing.allocator;
-    const kp = KeyPair.generate();
+    const kp = KeyPair.generate(std.testing.io);
 
     const parents = try allocator.alloc(Hash, 0);
     defer allocator.free(parents);
@@ -228,7 +228,7 @@ test "sign and verify commit" {
 
 test "reject tampered commit" {
     const allocator = std.testing.allocator;
-    const kp = KeyPair.generate();
+    const kp = KeyPair.generate(std.testing.io);
 
     const parents = try allocator.alloc(Hash, 0);
     defer allocator.free(parents);
@@ -253,8 +253,8 @@ test "reject tampered commit" {
 
 test "reject wrong signer key" {
     const allocator = std.testing.allocator;
-    const kp1 = KeyPair.generate();
-    const kp2 = KeyPair.generate();
+    const kp1 = KeyPair.generate(std.testing.io);
+    const kp2 = KeyPair.generate(std.testing.io);
 
     const parents = try allocator.alloc(Hash, 0);
     defer allocator.free(parents);
@@ -279,7 +279,7 @@ test "reject wrong signer key" {
 
 test "sign and verify remix" {
     const allocator = std.testing.allocator;
-    const kp = KeyPair.generate();
+    const kp = KeyPair.generate(std.testing.io);
 
     const parents = try allocator.alloc(Hash, 0);
     defer allocator.free(parents);
@@ -430,7 +430,7 @@ test "domain separation: commit domain differs from remix" {
 
 test "commit with parents signs correctly" {
     const allocator = std.testing.allocator;
-    const kp = KeyPair.generate();
+    const kp = KeyPair.generate(std.testing.io);
 
     var parents = try allocator.alloc(Hash, 2);
     defer allocator.free(parents);

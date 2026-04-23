@@ -92,37 +92,37 @@ test "commit workflow no leaks" {
     // Separate temp dirs for store and working directory
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var work_tmp = std.testing.tmpDir(.{});
     defer work_tmp.cleanup();
 
     // Init refs
-    try work_tmp.dir.makeDir(".mkit");
-    try refs.init(work_tmp.dir);
+    try work_tmp.dir.createDirPath(std.testing.io, ".mkit");
+    try refs.init(std.testing.io, work_tmp.dir);
 
     // Create some files
-    const f1 = try work_tmp.dir.createFile("hello.txt", .{});
-    try f1.writeAll("hello world");
-    f1.close();
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "hello.txt", .{});
+    try f1.writeStreamingAll(std.testing.io, "hello world");
+    f1.close(std.testing.io);
 
-    try work_tmp.dir.makeDir("src");
-    const f2 = try work_tmp.dir.createFile("src/main.zig", .{});
-    try f2.writeAll("pub fn main() void {}");
-    f2.close();
+    try work_tmp.dir.createDirPath(std.testing.io, "src");
+    const f2 = try work_tmp.dir.createFile(std.testing.io, "src/main.zig", .{});
+    try f2.writeStreamingAll(std.testing.io, "pub fn main() void {}");
+    f2.close(std.testing.io);
 
     // Build tree from working directory
-    var d = try work_tmp.dir.openDir(".", .{ .iterate = true });
-    defer d.close();
-    const tree_hash = try worktree.buildTree(allocator, &store, d);
+    var d = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer d.close(std.testing.io);
+    const tree_hash = try worktree.buildTree(allocator, std.testing.io, &store, d);
 
     // Sign and store commit
-    const kp = sign.KeyPair.generate();
+    const kp = sign.KeyPair.generate(std.testing.io);
     const commit_hash = try createCommit(allocator, &store, tree_hash, &.{}, "initial commit", kp);
 
     // Update HEAD
-    try refs.updateHead(allocator, work_tmp.dir, commit_hash);
+    try refs.updateHead(allocator, std.testing.io, work_tmp.dir, commit_hash);
 
     // Verify roundtrip: read commit back
     var obj = try store.get(allocator, commit_hash);
@@ -144,7 +144,7 @@ test "diff workflow no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_a = try storeBlob(allocator, &store, "content A");
@@ -178,36 +178,36 @@ test "status diff workflow no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var work_tmp = std.testing.tmpDir(.{});
     defer work_tmp.cleanup();
 
     // Create initial file
-    const f1 = try work_tmp.dir.createFile("file.txt", .{});
-    try f1.writeAll("original");
-    f1.close();
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "file.txt", .{});
+    try f1.writeStreamingAll(std.testing.io, "original");
+    f1.close(std.testing.io);
 
     // Build HEAD tree
-    var d1 = try work_tmp.dir.openDir(".", .{ .iterate = true });
-    defer d1.close();
-    const head_tree = try worktree.buildTree(allocator, &store, d1);
+    var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer d1.close(std.testing.io);
+    const head_tree = try worktree.buildTree(allocator, std.testing.io, &store, d1);
 
     // Modify the file
-    const f2 = try work_tmp.dir.createFile("file.txt", .{});
-    try f2.writeAll("modified");
-    f2.close();
+    const f2 = try work_tmp.dir.createFile(std.testing.io, "file.txt", .{});
+    try f2.writeStreamingAll(std.testing.io, "modified");
+    f2.close(std.testing.io);
 
     // Add a new file
-    const f3 = try work_tmp.dir.createFile("new.txt", .{});
-    try f3.writeAll("new content");
-    f3.close();
+    const f3 = try work_tmp.dir.createFile(std.testing.io, "new.txt", .{});
+    try f3.writeStreamingAll(std.testing.io, "new content");
+    f3.close(std.testing.io);
 
     // Compute status diff
-    var d2 = try work_tmp.dir.openDir(".", .{ .iterate = true });
-    defer d2.close();
-    var result = try diff_mod.statusDiff(allocator, &store, head_tree, d2);
+    var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer d2.close(std.testing.io);
+    var result = try diff_mod.statusDiff(allocator, std.testing.io, &store, head_tree, d2);
     defer result.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), result.entries.len);
@@ -222,7 +222,7 @@ test "merge workflow no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_base = try storeBlob(allocator, &store, "base content");
@@ -265,7 +265,7 @@ test "merge with conflicts no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_base = try storeBlob(allocator, &store, "base");
@@ -306,7 +306,7 @@ test "packfile roundtrip no leaks" {
     // Source store
     var src_tmp = std.testing.tmpDir(.{});
     defer src_tmp.cleanup();
-    var src_store = try store_mod.ObjectStore.init(src_tmp.dir);
+    var src_store = try store_mod.ObjectStore.init(std.testing.io, src_tmp.dir);
     defer src_store.close();
 
     // Create blob + tree + commit
@@ -316,7 +316,7 @@ test "packfile roundtrip no leaks" {
         .{ .name = "data.txt", .mode = .blob, .hash = blob_hash },
     });
 
-    const kp = sign.KeyPair.generate();
+    const kp = sign.KeyPair.generate(std.testing.io);
     const commit_hash = try createCommit(allocator, &src_store, tree_hash, &.{}, "pack test", kp);
 
     // Pack reachable objects
@@ -329,7 +329,7 @@ test "packfile roundtrip no leaks" {
     // Destination store
     var dst_tmp = std.testing.tmpDir(.{});
     defer dst_tmp.cleanup();
-    var dst_store = try store_mod.ObjectStore.init(dst_tmp.dir);
+    var dst_store = try store_mod.ObjectStore.init(std.testing.io, dst_tmp.dir);
     defer dst_store.close();
 
     // Unpack into destination
@@ -360,7 +360,7 @@ test "restore workflow no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Build a tree with nested structure: src/main.zig, README.md
@@ -380,16 +380,16 @@ test "restore workflow no leaks" {
     var target_tmp = std.testing.tmpDir(.{});
     defer target_tmp.cleanup();
 
-    var target_dir = try target_tmp.dir.openDir(".", .{ .iterate = true });
-    defer target_dir.close();
-    try restore_mod.restoreTree(allocator, &store, root_tree, target_dir, .{});
+    var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer target_dir.close(std.testing.io);
+    try restore_mod.restoreTree(allocator, std.testing.io, &store, root_tree, target_dir, .{});
 
     // Verify files exist with correct content
-    const readme = try target_tmp.dir.readFileAlloc(allocator, "README.md", 4096);
+    const readme = try target_tmp.dir.readFileAlloc(std.testing.io, "README.md", allocator, .limited(4096));
     defer allocator.free(readme);
     try std.testing.expectEqualStrings("# Project", readme);
 
-    const main_zig = try target_tmp.dir.readFileAlloc(allocator, "src/main.zig", 4096);
+    const main_zig = try target_tmp.dir.readFileAlloc(std.testing.io, "src/main.zig", allocator, .limited(4096));
     defer allocator.free(main_zig);
     try std.testing.expectEqualStrings("pub fn main() !void {}", main_zig);
 }
@@ -403,7 +403,7 @@ test "config roundtrip no leaks" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // Write config with non-default values (exercises heap allocation paths)
     const original = config_mod.Config{
@@ -411,10 +411,10 @@ test "config roundtrip no leaks" {
         .signing_key = "/custom/path/to/key.pem",
         .default_branch = "develop",
     };
-    try config_mod.writeConfig(tmp.dir, original);
+    try config_mod.writeConfig(std.testing.io, tmp.dir, original);
 
     // Read it back
-    var read = try config_mod.readConfig(allocator, tmp.dir);
+    var read = try config_mod.readConfig(allocator, std.testing.io, tmp.dir);
     defer read.deinit();
 
     try std.testing.expectEqualStrings("030800" ++ "2a00000000000000", read.user_identity);
@@ -459,8 +459,8 @@ test "ignore load no leaks" {
     defer tmp.cleanup();
 
     // Create .mkitignore with various patterns
-    const f = try tmp.dir.createFile(".mkitignore", .{});
-    try f.writeAll(
+    const f = try tmp.dir.createFile(std.testing.io, ".mkitignore", .{});
+    try f.writeStreamingAll(std.testing.io,
         \\# build artifacts
         \\*.o
         \\*.a
@@ -471,9 +471,9 @@ test "ignore load no leaks" {
         \\.*.swp
         \\
     );
-    f.close();
+    f.close(std.testing.io);
 
-    var il = try ignore_mod.load(allocator, tmp.dir);
+    var il = try ignore_mod.load(allocator, std.testing.io, tmp.dir);
     defer il.deinit();
 
     try std.testing.expectEqual(@as(usize, 5), il.patterns.len);
@@ -493,23 +493,23 @@ test "refs lifecycle no leaks" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
-    try refs.init(tmp.dir);
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
+    try refs.init(std.testing.io, tmp.dir);
 
     // Write several branch refs
     const h1 = hash_mod.hash("commit-main");
     const h2 = hash_mod.hash("commit-dev");
     const h3 = hash_mod.hash("commit-feature");
-    try refs.writeRef(tmp.dir, "main", h1);
-    try refs.writeRef(tmp.dir, "dev", h2);
-    try refs.writeRef(tmp.dir, "feature", h3);
+    try refs.writeRef(std.testing.io, tmp.dir, "main", h1);
+    try refs.writeRef(std.testing.io, tmp.dir, "dev", h2);
+    try refs.writeRef(std.testing.io, tmp.dir, "feature", h3);
 
     // Write some tags
-    try refs.writeTag(tmp.dir, "v1.0", h1);
-    try refs.writeTag(tmp.dir, "v2.0", h2);
+    try refs.writeTag(std.testing.io, tmp.dir, "v1.0", h1);
+    try refs.writeTag(std.testing.io, tmp.dir, "v2.0", h2);
 
     // Read HEAD (returns allocated branch name)
-    const head = try refs.readHead(allocator, tmp.dir);
+    const head = try refs.readHead(allocator, std.testing.io, tmp.dir);
     switch (head) {
         .branch => |branch| {
             defer allocator.free(branch);
@@ -519,11 +519,11 @@ test "refs lifecycle no leaks" {
     }
 
     // Resolve HEAD
-    const resolved = try refs.resolveHead(allocator, tmp.dir);
+    const resolved = try refs.resolveHead(allocator, std.testing.io, tmp.dir);
     try std.testing.expectEqual(h1, resolved.?);
 
     // List all branch refs (returns allocated slice with allocated names)
-    const ref_list = try refs.listRefs(allocator, tmp.dir);
+    const ref_list = try refs.listRefs(allocator, std.testing.io, tmp.dir);
     defer {
         for (ref_list) |ref| {
             allocator.free(ref.name);
@@ -533,7 +533,7 @@ test "refs lifecycle no leaks" {
     try std.testing.expectEqual(@as(usize, 3), ref_list.len);
 
     // List all tags
-    const tag_list = try refs.listTags(allocator, tmp.dir);
+    const tag_list = try refs.listTags(allocator, std.testing.io, tmp.dir);
     defer {
         for (tag_list) |t| {
             allocator.free(t.name);
@@ -543,18 +543,18 @@ test "refs lifecycle no leaks" {
     try std.testing.expectEqual(@as(usize, 2), tag_list.len);
 
     // Delete a branch ref
-    try refs.deleteRef(tmp.dir, "feature");
-    const after_ref = try refs.readRef(allocator, tmp.dir, "feature");
+    try refs.deleteRef(std.testing.io, tmp.dir, "feature");
+    const after_ref = try refs.readRef(allocator, std.testing.io, tmp.dir, "feature");
     try std.testing.expectEqual(@as(?Hash, null), after_ref);
 
     // Delete a tag
-    try refs.deleteTag(tmp.dir, "v1.0");
-    const after_tag = try refs.readTag(allocator, tmp.dir, "v1.0");
+    try refs.deleteTag(std.testing.io, tmp.dir, "v1.0");
+    const after_tag = try refs.readTag(allocator, std.testing.io, tmp.dir, "v1.0");
     try std.testing.expectEqual(@as(?Hash, null), after_tag);
 
     // Update HEAD
-    try refs.updateHead(allocator, tmp.dir, h2);
-    const resolved2 = try refs.resolveHead(allocator, tmp.dir);
+    try refs.updateHead(allocator, std.testing.io, tmp.dir, h2);
+    const resolved2 = try refs.resolveHead(allocator, std.testing.io, tmp.dir);
     try std.testing.expectEqual(h2, resolved2.?);
 }
 
@@ -730,7 +730,7 @@ test "store lifecycle all types no leaks" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Store and retrieve a blob
@@ -793,42 +793,42 @@ test "end-to-end workflow no leaks" {
     // Create repo
     var repo_tmp = std.testing.tmpDir(.{});
     defer repo_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(repo_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, repo_tmp.dir);
     defer store.close();
-    try refs.init(repo_tmp.dir);
+    try refs.init(std.testing.io, repo_tmp.dir);
 
     // Create work files
     var work_tmp = std.testing.tmpDir(.{});
     defer work_tmp.cleanup();
 
-    const f1 = try work_tmp.dir.createFile("README.md", .{});
-    try f1.writeAll("# Hello");
-    f1.close();
-    try work_tmp.dir.makeDir("src");
-    const f2 = try work_tmp.dir.createFile("src/lib.zig", .{});
-    try f2.writeAll("pub const version = 1;");
-    f2.close();
+    const f1 = try work_tmp.dir.createFile(std.testing.io, "README.md", .{});
+    try f1.writeStreamingAll(std.testing.io, "# Hello");
+    f1.close(std.testing.io);
+    try work_tmp.dir.createDirPath(std.testing.io, "src");
+    const f2 = try work_tmp.dir.createFile(std.testing.io, "src/lib.zig", .{});
+    try f2.writeStreamingAll(std.testing.io, "pub const version = 1;");
+    f2.close(std.testing.io);
 
     // Build tree and commit
-    var d1 = try work_tmp.dir.openDir(".", .{ .iterate = true });
-    defer d1.close();
-    const tree1 = try worktree.buildTree(allocator, &store, d1);
+    var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer d1.close(std.testing.io);
+    const tree1 = try worktree.buildTree(allocator, std.testing.io, &store, d1);
 
-    const kp = sign.KeyPair.generate();
+    const kp = sign.KeyPair.generate(std.testing.io);
     const commit1 = try createCommit(allocator, &store, tree1, &.{}, "initial", kp);
-    try refs.updateHead(allocator, repo_tmp.dir, commit1);
+    try refs.updateHead(allocator, std.testing.io, repo_tmp.dir, commit1);
 
     // Modify a file and make a second commit
-    const f3 = try work_tmp.dir.createFile("src/lib.zig", .{});
-    try f3.writeAll("pub const version = 2;");
-    f3.close();
+    const f3 = try work_tmp.dir.createFile(std.testing.io, "src/lib.zig", .{});
+    try f3.writeStreamingAll(std.testing.io, "pub const version = 2;");
+    f3.close(std.testing.io);
 
-    var d2 = try work_tmp.dir.openDir(".", .{ .iterate = true });
-    defer d2.close();
-    const tree2 = try worktree.buildTree(allocator, &store, d2);
+    var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer d2.close(std.testing.io);
+    const tree2 = try worktree.buildTree(allocator, std.testing.io, &store, d2);
 
     const commit2 = try createCommit(allocator, &store, tree2, &.{commit1}, "bump version", kp);
-    try refs.updateHead(allocator, repo_tmp.dir, commit2);
+    try refs.updateHead(allocator, std.testing.io, repo_tmp.dir, commit2);
 
     // Diff between the two commits
     var diff_result = try diff_mod.diffTrees(allocator, &store, tree1, tree2);
@@ -846,11 +846,11 @@ test "end-to-end workflow no leaks" {
     // Restore the latest tree to a fresh directory
     var restore_tmp = std.testing.tmpDir(.{});
     defer restore_tmp.cleanup();
-    var restore_dir = try restore_tmp.dir.openDir(".", .{ .iterate = true });
-    defer restore_dir.close();
-    try restore_mod.restoreTree(allocator, &store, tree2, restore_dir, .{});
+    var restore_dir = try restore_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer restore_dir.close(std.testing.io);
+    try restore_mod.restoreTree(allocator, std.testing.io, &store, tree2, restore_dir, .{});
 
-    const restored_lib = try restore_tmp.dir.readFileAlloc(allocator, "src/lib.zig", 4096);
+    const restored_lib = try restore_tmp.dir.readFileAlloc(std.testing.io, "src/lib.zig", allocator, .limited(4096));
     defer allocator.free(restored_lib);
     try std.testing.expectEqualStrings("pub const version = 2;", restored_lib);
 }
@@ -899,7 +899,7 @@ test "stress repeated diff no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var prev_hash: ?Hash = null;

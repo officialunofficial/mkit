@@ -178,8 +178,12 @@ pub const Config = struct {
 };
 
 /// Read config from .mkit/config. Returns defaults if file doesn't exist.
-pub fn readConfig(allocator: Allocator, dir: std.fs.Dir) !Config {
-    const content = dir.readFileAlloc(allocator, config_file, 4096) catch |err| switch (err) {
+///
+/// Why: `std.fs.Dir` no longer exists in 0.16 — file-system ops go through
+/// `std.Io.Dir` with an explicit `io: std.Io` capability. Callers thread
+/// the same `io` they already hold for the rest of the command.
+pub fn readConfig(allocator: Allocator, io: std.Io, dir: std.Io.Dir) !Config {
+    const content = dir.readFileAlloc(io, config_file, allocator, .limited(4096)) catch |err| switch (err) {
         error.FileNotFound => return Config{},
         else => return err,
     };
@@ -189,58 +193,58 @@ pub fn readConfig(allocator: Allocator, dir: std.fs.Dir) !Config {
 }
 
 /// Write config to .mkit/config as key=value lines.
-pub fn writeConfig(dir: std.fs.Dir, config: Config) !void {
-    const f = try dir.createFile(config_file, .{ .mode = 0o600 });
-    defer f.close();
+pub fn writeConfig(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+    const f = try dir.createFile(io, config_file, .{ .permissions = .fromMode(0o600) });
+    defer f.close(io);
 
     if (config.user_identity.len > 0) {
-        try f.writeAll("user.identity = ");
-        try f.writeAll(config.user_identity);
-        try f.writeAll("\n");
+        try f.writeStreamingAll(io, "user.identity = ");
+        try f.writeStreamingAll(io, config.user_identity);
+        try f.writeStreamingAll(io, "\n");
     }
 
-    try f.writeAll("signing_key = ");
-    try f.writeAll(config.signing_key);
-    try f.writeAll("\n");
+    try f.writeStreamingAll(io, "signing_key = ");
+    try f.writeStreamingAll(io, config.signing_key);
+    try f.writeStreamingAll(io, "\n");
 
-    try f.writeAll("default_branch = ");
-    try f.writeAll(config.default_branch);
-    try f.writeAll("\n");
+    try f.writeStreamingAll(io, "default_branch = ");
+    try f.writeStreamingAll(io, config.default_branch);
+    try f.writeStreamingAll(io, "\n");
 
     if (config.remote_endpoint.len > 0) {
-        try f.writeAll("remote_endpoint = ");
-        try f.writeAll(config.remote_endpoint);
-        try f.writeAll("\n");
+        try f.writeStreamingAll(io, "remote_endpoint = ");
+        try f.writeStreamingAll(io, config.remote_endpoint);
+        try f.writeStreamingAll(io, "\n");
     }
 
     if (config.remote_bucket.len > 0) {
-        try f.writeAll("remote_bucket = ");
-        try f.writeAll(config.remote_bucket);
-        try f.writeAll("\n");
+        try f.writeStreamingAll(io, "remote_bucket = ");
+        try f.writeStreamingAll(io, config.remote_bucket);
+        try f.writeStreamingAll(io, "\n");
     }
 
     if (config.remote_type.len > 0) {
-        try f.writeAll("remote_type = ");
-        try f.writeAll(config.remote_type);
-        try f.writeAll("\n");
+        try f.writeStreamingAll(io, "remote_type = ");
+        try f.writeStreamingAll(io, config.remote_type);
+        try f.writeStreamingAll(io, "\n");
     }
 
     if (config.ssh_strict_host_key_checking.len > 0) {
-        try f.writeAll("ssh.strict_host_key_checking = ");
-        try f.writeAll(config.ssh_strict_host_key_checking);
-        try f.writeAll("\n");
+        try f.writeStreamingAll(io, "ssh.strict_host_key_checking = ");
+        try f.writeStreamingAll(io, config.ssh_strict_host_key_checking);
+        try f.writeStreamingAll(io, "\n");
     }
 
     if (config.ssh_user_known_hosts_file.len > 0) {
-        try f.writeAll("ssh.user_known_hosts_file = ");
-        try f.writeAll(config.ssh_user_known_hosts_file);
-        try f.writeAll("\n");
+        try f.writeStreamingAll(io, "ssh.user_known_hosts_file = ");
+        try f.writeStreamingAll(io, config.ssh_user_known_hosts_file);
+        try f.writeStreamingAll(io, "\n");
     }
 
     if (config.ssh_identity_file.len > 0) {
-        try f.writeAll("ssh.identity_file = ");
-        try f.writeAll(config.ssh_identity_file);
-        try f.writeAll("\n");
+        try f.writeStreamingAll(io, "ssh.identity_file = ");
+        try f.writeStreamingAll(io, config.ssh_identity_file);
+        try f.writeStreamingAll(io, "\n");
     }
 }
 
@@ -259,8 +263,8 @@ pub fn parseConfig(allocator: Allocator, content: []const u8) !Config {
 
         // Split on '='
         const eq_pos = std.mem.indexOfScalar(u8, trimmed, '=') orelse continue;
-        const key = std.mem.trimRight(u8, trimmed[0..eq_pos], " \t");
-        const value = std.mem.trimLeft(u8, trimmed[eq_pos + 1 ..], " \t");
+        const key = std.mem.trimEnd(u8, trimmed[0..eq_pos], " \t");
+        const value = std.mem.trimStart(u8, trimmed[eq_pos + 1 ..], " \t");
 
         if (std.mem.eql(u8, key, "user.identity")) {
             if (config.user_identity.len > 0) allocator.free(config.user_identity);
@@ -426,16 +430,16 @@ test "config roundtrip" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const original = Config{
         .signing_key = ".mkit/keys/deploy.key",
         .default_branch = "develop",
     };
 
-    try writeConfig(tmp.dir, original);
+    try writeConfig(std.testing.io, tmp.dir, original);
 
-    var read = try readConfig(allocator, tmp.dir);
+    var read = try readConfig(allocator, std.testing.io, tmp.dir);
     defer read.deinit();
 
     try std.testing.expectEqualStrings(".mkit/keys/deploy.key", read.signing_key);
@@ -448,9 +452,9 @@ test "config not found returns defaults" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
-    var config = try readConfig(allocator, tmp.dir);
+    var config = try readConfig(allocator, std.testing.io, tmp.dir);
     defer config.deinit();
 
     try std.testing.expectEqualStrings("", config.user_identity);
@@ -481,7 +485,7 @@ test "config roundtrip with remote" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const original = Config{
         .signing_key = ".mkit/keys/deploy.key",
@@ -490,9 +494,9 @@ test "config roundtrip with remote" {
         .remote_bucket = "mkit-repos",
     };
 
-    try writeConfig(tmp.dir, original);
+    try writeConfig(std.testing.io, tmp.dir, original);
 
-    var read = try readConfig(allocator, tmp.dir);
+    var read = try readConfig(allocator, std.testing.io, tmp.dir);
     defer read.deinit();
 
     try std.testing.expectEqualStrings(".mkit/keys/deploy.key", read.signing_key);
@@ -517,16 +521,16 @@ test "config roundtrip without remote" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // Write config with no remote fields
     const original = Config{
         .default_branch = "develop",
     };
 
-    try writeConfig(tmp.dir, original);
+    try writeConfig(std.testing.io, tmp.dir, original);
 
-    var read = try readConfig(allocator, tmp.dir);
+    var read = try readConfig(allocator, std.testing.io, tmp.dir);
     defer read.deinit();
 
     // Remote fields should remain empty defaults
@@ -574,16 +578,16 @@ test "config roundtrip with ssh.* fields" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const original = Config{
         .ssh_strict_host_key_checking = "accept-new",
         .ssh_user_known_hosts_file = "/tmp/mkit_known_hosts",
         .ssh_identity_file = "/tmp/mkit_id_ed25519",
     };
-    try writeConfig(tmp.dir, original);
+    try writeConfig(std.testing.io, tmp.dir, original);
 
-    var read = try readConfig(allocator, tmp.dir);
+    var read = try readConfig(allocator, std.testing.io, tmp.dir);
     defer read.deinit();
 
     try std.testing.expectEqualStrings("accept-new", read.ssh_strict_host_key_checking);
@@ -613,11 +617,30 @@ test "config roundtrip with ssh.* fields" {
 // which is a hard error on any sane POSIX system.
 // -------------------------------------------------------------------------
 
+/// POSIX `getenv`-equivalent backed by the libc `environ` global.
+///
+/// Why: `std.posix.getenv` was removed in 0.16 — the new path goes through
+/// `std.process.Environ` which needs an `std.Io` capability. We only need
+/// a read-only lookup at XDG-resolution time, so drop to libc directly
+/// (matching term.zig's approach) instead of threading io through every
+/// config-path helper.
+fn posixGetenv(name: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (std.c.environ[i]) |entry_ptr| : (i += 1) {
+        const entry = std.mem.sliceTo(entry_ptr, 0);
+        if (entry.len <= name.len) continue;
+        if (!std.mem.eql(u8, entry[0..name.len], name)) continue;
+        if (entry[name.len] != '=') continue;
+        return entry[name.len + 1 ..];
+    }
+    return null;
+}
+
 fn xdgFallback(allocator: Allocator, xdg_var: []const u8, relative: []const u8) ![]u8 {
-    if (std.posix.getenv(xdg_var)) |v| {
+    if (posixGetenv(xdg_var)) |v| {
         if (v.len > 0) return try allocator.dupe(u8, v);
     }
-    const home = std.posix.getenv("HOME") orelse return error.NoHome;
+    const home = posixGetenv("HOME") orelse return error.NoHome;
     return try std.fs.path.join(allocator, &.{ home, relative });
 }
 
@@ -737,13 +760,13 @@ test "config roundtrip without ssh.* fields omits them" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir(".mkit");
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     const original = Config{ .default_branch = "dev" };
-    try writeConfig(tmp.dir, original);
+    try writeConfig(std.testing.io, tmp.dir, original);
 
     // Read raw file content and assert ssh.* keys are absent when empty.
-    const content = try tmp.dir.readFileAlloc(allocator, ".mkit/config", 4096);
+    const content = try tmp.dir.readFileAlloc(std.testing.io, ".mkit/config", allocator, .limited(4096));
     defer allocator.free(content);
     try std.testing.expect(std.mem.indexOf(u8, content, "ssh.strict_host_key_checking") == null);
     try std.testing.expect(std.mem.indexOf(u8, content, "ssh.user_known_hosts_file") == null);

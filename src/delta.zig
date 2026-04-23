@@ -20,7 +20,7 @@ const Buffer = std.ArrayList(u8);
 /// Uses a hash index over 16-byte aligned blocks of base for copy detection.
 /// Caller owns the returned instruction bytes.
 pub fn computeDelta(allocator: Allocator, base: []const u8, target: []const u8) ![]u8 {
-    var instructions: Buffer = .{};
+    var instructions: Buffer = .empty;
     errdefer instructions.deinit(allocator);
 
     // Build hash table: hash(16-byte block) -> position in base
@@ -106,7 +106,7 @@ pub fn computeDelta(allocator: Allocator, base: []const u8, target: []const u8) 
 /// Caller owns the returned slice.
 pub fn applyDelta(allocator: Allocator, base: []const u8, instructions: []const u8, result_size_hint: u32) ![]u8 {
     _ = result_size_hint; // hint only; we grow dynamically
-    var result: std.ArrayList(u8) = .{};
+    var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
 
     var ii: usize = 0;

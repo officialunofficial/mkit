@@ -7,3 +7,4 @@ zig-out/
 
 # Test-generated private keys (older path; retained to avoid accidental leaks)
 mkit/test-key
+.claude/

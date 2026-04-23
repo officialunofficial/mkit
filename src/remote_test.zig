@@ -47,7 +47,7 @@ test "push then pull roundtrip" {
     // --- Source repo ---
     var src_tmp = std.testing.tmpDir(.{});
     defer src_tmp.cleanup();
-    var src_store = try store_mod.ObjectStore.init(src_tmp.dir);
+    var src_store = try store_mod.ObjectStore.init(std.testing.io, src_tmp.dir);
     defer src_store.close();
 
     // Create blob -> tree -> commit
@@ -76,7 +76,7 @@ test "push then pull roundtrip" {
     // --- Destination repo ---
     var dst_tmp = std.testing.tmpDir(.{});
     defer dst_tmp.cleanup();
-    var dst_store = try store_mod.ObjectStore.init(dst_tmp.dir);
+    var dst_store = try store_mod.ObjectStore.init(std.testing.io, dst_tmp.dir);
     defer dst_store.close();
 
     // Verify objects don't exist in destination yet
@@ -114,7 +114,7 @@ test "push updates remote ref" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     var mem = transport_memory.MemoryTransport.init(allocator);
@@ -151,7 +151,7 @@ test "pull fast-forward" {
     // --- Create repo with A -> B ---
     var src_tmp = std.testing.tmpDir(.{});
     defer src_tmp.cleanup();
-    var src_store = try store_mod.ObjectStore.init(src_tmp.dir);
+    var src_store = try store_mod.ObjectStore.init(std.testing.io, src_tmp.dir);
     defer src_store.close();
 
     // Commit A
@@ -177,7 +177,7 @@ test "pull fast-forward" {
     // --- Set up local repo with commit A ---
     var local_tmp = std.testing.tmpDir(.{});
     defer local_tmp.cleanup();
-    var local_store = try store_mod.ObjectStore.init(local_tmp.dir);
+    var local_store = try store_mod.ObjectStore.init(std.testing.io, local_tmp.dir);
     defer local_store.close();
 
     // Pack and unpack A into local
@@ -186,8 +186,8 @@ test "pull fast-forward" {
     try packfile.unpackInto(allocator, pack_a.bytes, &local_store);
 
     // Set up local refs (.mkit already exists from ObjectStore.init)
-    try refs_mod.init(local_tmp.dir);
-    try refs_mod.writeRef(local_tmp.dir, "main", a.commit);
+    try refs_mod.init(std.testing.io, local_tmp.dir);
+    try refs_mod.writeRef(std.testing.io, local_tmp.dir, "main", a.commit);
 
     // --- Remote has commit B ---
     var mem = transport_memory.MemoryTransport.init(allocator);
@@ -208,10 +208,10 @@ test "pull fast-forward" {
     try packfile.unpackInto(allocator, downloaded, &local_store);
 
     // Advance local ref
-    try refs_mod.writeRef(local_tmp.dir, "main", b.commit);
+    try refs_mod.writeRef(std.testing.io, local_tmp.dir, "main", b.commit);
 
     // Verify local ref now points to B
-    const local_ref = (try refs_mod.readRef(allocator, local_tmp.dir, "main")).?;
+    const local_ref = (try refs_mod.readRef(allocator, std.testing.io, local_tmp.dir, "main")).?;
     try std.testing.expectEqual(b.commit, local_ref);
 
     // Verify B's commit is accessible with updated tree
@@ -229,7 +229,7 @@ test "push idempotent" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     var mem = transport_memory.MemoryTransport.init(allocator);
@@ -267,7 +267,7 @@ test "clone from transport" {
     // --- Source repo with chain A -> B ---
     var src_tmp = std.testing.tmpDir(.{});
     defer src_tmp.cleanup();
-    var src_store = try store_mod.ObjectStore.init(src_tmp.dir);
+    var src_store = try store_mod.ObjectStore.init(std.testing.io, src_tmp.dir);
     defer src_store.close();
 
     const a = try makeSimpleCommit(
@@ -304,7 +304,7 @@ test "clone from transport" {
     // --- Clone: init fresh repo, read remote ref, download packs, unpack ---
     var clone_tmp = std.testing.tmpDir(.{});
     defer clone_tmp.cleanup();
-    var clone_store = try store_mod.ObjectStore.init(clone_tmp.dir);
+    var clone_store = try store_mod.ObjectStore.init(std.testing.io, clone_tmp.dir);
     defer clone_store.close();
 
     // Read remote ref
@@ -317,8 +317,8 @@ test "clone from transport" {
     try packfile.unpackInto(allocator, cloned_pack, &clone_store);
 
     // Set up local refs (.mkit already exists from ObjectStore.init)
-    try refs_mod.init(clone_tmp.dir);
-    try refs_mod.writeRef(clone_tmp.dir, "main", b.commit);
+    try refs_mod.init(std.testing.io, clone_tmp.dir);
+    try refs_mod.writeRef(std.testing.io, clone_tmp.dir, "main", b.commit);
 
     // Verify: all objects from both commits are accessible from one pack
     try std.testing.expect(clone_store.exists(a.commit));
@@ -329,7 +329,7 @@ test "clone from transport" {
     try std.testing.expect(clone_store.exists(b.blob));
 
     // Verify local HEAD -> main -> B
-    const local_main = (try refs_mod.readRef(allocator, clone_tmp.dir, "main")).?;
+    const local_main = (try refs_mod.readRef(allocator, std.testing.io, clone_tmp.dir, "main")).?;
     try std.testing.expectEqual(b.commit, local_main);
 
     // Verify commit B's blob content
@@ -348,7 +348,7 @@ test "multiple branches" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     var mem = transport_memory.MemoryTransport.init(allocator);
@@ -404,7 +404,7 @@ test "multiple branches" {
     // Clone both branches into a fresh store
     var clone_tmp = std.testing.tmpDir(.{});
     defer clone_tmp.cleanup();
-    var clone_store = try store_mod.ObjectStore.init(clone_tmp.dir);
+    var clone_store = try store_mod.ObjectStore.init(std.testing.io, clone_tmp.dir);
     defer clone_store.close();
 
     // Download and unpack main
@@ -436,7 +436,7 @@ test "packfile content-addressed" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     var mem = transport_memory.MemoryTransport.init(allocator);
@@ -476,7 +476,7 @@ test "remote ref overwrite" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     var mem = transport_memory.MemoryTransport.init(allocator);
@@ -564,7 +564,7 @@ test "push with pack companion for pull discovery" {
     // --- Source repo ---
     var src_tmp = std.testing.tmpDir(.{});
     defer src_tmp.cleanup();
-    var src_store = try store_mod.ObjectStore.init(src_tmp.dir);
+    var src_store = try store_mod.ObjectStore.init(std.testing.io, src_tmp.dir);
     defer src_store.close();
 
     const src = try makeSimpleCommit(
@@ -608,7 +608,7 @@ test "push with pack companion for pull discovery" {
 
     var dst_tmp = std.testing.tmpDir(.{});
     defer dst_tmp.cleanup();
-    var dst_store = try store_mod.ObjectStore.init(dst_tmp.dir);
+    var dst_store = try store_mod.ObjectStore.init(std.testing.io, dst_tmp.dir);
     defer dst_store.close();
 
     try packfile.unpackInto(allocator, pack_bytes, &dst_store);

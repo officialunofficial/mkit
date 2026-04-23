@@ -65,7 +65,7 @@ test "fuzz tree: single valid entry succeeds" {
     const a = fba.allocator();
 
     // 1 entry: name="a" (len=1), mode=blob (0x01), hash=zeros
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(1)); // count
@@ -84,7 +84,7 @@ test "fuzz tree: entry named '..' rejected" {
     var fba = makeFba();
     const a = fba.allocator();
 
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(1));
@@ -100,7 +100,7 @@ test "fuzz tree: entry name with embedded null rejected" {
     var fba = makeFba();
     const a = fba.allocator();
 
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(1));
@@ -116,7 +116,7 @@ test "fuzz tree: entry mode 0xFF rejected" {
     var fba = makeFba();
     const a = fba.allocator();
 
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(1));
@@ -132,7 +132,7 @@ test "fuzz tree: declared name length > remaining bytes rejected" {
     var fba = makeFba();
     const a = fba.allocator();
 
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(1));
@@ -149,7 +149,7 @@ test "fuzz tree: oversize entry count rejected without allocator blow-up" {
     var fba = makeFba();
     const a = fba.allocator();
 
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(0xFFFFFFFF)); // count > cap
@@ -180,9 +180,11 @@ test "fuzz tree: random bytes never panic" {
         var fba = makeFba();
         const a = fba.allocator();
 
-        const start = std.time.nanoTimestamp();
+        // Why: std.time.nanoTimestamp was removed in 0.16; monotonic clock
+        // readings now come from the Io capability via std.testing.io.
+        const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         tryDeserialize(a, buf[0..len]);
-        const elapsed: u64 = @intCast(std.time.nanoTimestamp() - start);
+        const elapsed: u64 = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start);
         if (elapsed > PER_ITER_NS) return error.FuzzIterationTooSlow;
     }
 }
@@ -220,9 +222,9 @@ test "fuzz tree: bit-flips on valid tree header" {
         var fba = makeFba();
         const a = fba.allocator();
 
-        const start = std.time.nanoTimestamp();
+        const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         tryDeserialize(a, &bytes);
-        const elapsed: u64 = @intCast(std.time.nanoTimestamp() - start);
+        const elapsed: u64 = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start);
         if (elapsed > PER_ITER_NS) return error.FuzzIterationTooSlow;
     }
 }

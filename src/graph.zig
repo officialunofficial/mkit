@@ -15,7 +15,7 @@ pub fn collectAncestorSet(
     start: Hash,
     set: *std.AutoHashMap(Hash, void),
 ) !void {
-    var stack: std.ArrayList(Hash) = .{};
+    var stack: std.ArrayList(Hash) = .empty;
     defer stack.deinit(allocator);
     try stack.append(allocator, start);
 
@@ -46,7 +46,7 @@ test "collectAncestorSet on linear chain" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
 
     const blob_obj = object.Object{ .blob = .{ .data = "data" } };
     const blob_hash = try store.put(allocator, blob_obj);
@@ -109,7 +109,7 @@ test "collectAncestorSet on diamond DAG" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const tree = try th.makeSingleFileTree(allocator, &store, "f.txt", "data");
@@ -135,7 +135,7 @@ test "collectAncestorSet on root commit" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const tree = try th.makeSingleFileTree(allocator, &store, "f.txt", "data");
@@ -153,7 +153,7 @@ test "collectAncestorSet handles non-existent parent gracefully" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const tree = try th.makeSingleFileTree(allocator, &store, "f.txt", "data");
@@ -176,7 +176,7 @@ test "collectAncestorSet on empty store" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Non-existent start hash

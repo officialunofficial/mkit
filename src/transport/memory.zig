@@ -129,7 +129,7 @@ pub const MemoryTransport = struct {
         const self: *MemoryTransport = @ptrCast(@alignCast(ptr));
         if (!protocol.validateRefPrefix(prefix)) return error.InvalidRef;
 
-        var result: std.ArrayList(protocol.Ref) = .{};
+        var result: std.ArrayList(protocol.Ref) = .empty;
         errdefer {
             for (result.items) |ref| allocator.free(ref.name);
             result.deinit(allocator);
@@ -140,7 +140,7 @@ pub const MemoryTransport = struct {
             if (std.mem.startsWith(u8, entry.key_ptr.*, prefix) and protocol.validateRefName(entry.key_ptr.*)) {
                 const suffix = entry.key_ptr.*[prefix.len..];
                 if (!protocol.validateRefName(suffix)) continue;
-                const trimmed = std.mem.trimRight(u8, entry.value_ptr.*, "\n\r ");
+                const trimmed = std.mem.trimEnd(u8, entry.value_ptr.*, "\n\r ");
                 const h = hash_mod.fromHex(trimmed) catch continue;
                 const name = try allocator.dupe(u8, suffix);
                 errdefer allocator.free(name);

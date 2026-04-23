@@ -56,7 +56,7 @@ pub fn resetShutdown() void {
 /// Signal-safe handler for SIGINT and SIGTERM. Stores the shutdown
 /// flag and returns immediately; the main thread's next `shouldExit()`
 /// poll does the actual cleanup + exit.
-fn handleShutdown(_: c_int) callconv(.c) void {
+fn handleShutdown(_: std.c.SIG) callconv(.c) void {
     shutdown_requested.store(true, .release);
 }
 

@@ -42,27 +42,27 @@ pub const IgnoreList = struct {
 };
 
 /// Load .mkitignore from a directory. Returns empty list if file doesn't exist.
-pub fn load(allocator: Allocator, dir: std.fs.Dir) !IgnoreList {
-    const file = dir.openFile(".mkitignore", .{}) catch |err| switch (err) {
+pub fn load(allocator: Allocator, io: std.Io, dir: std.Io.Dir) !IgnoreList {
+    const file = dir.openFile(io, ".mkitignore", .{}) catch |err| switch (err) {
         error.FileNotFound => return IgnoreList{
             .patterns = &.{},
             .allocator = allocator,
         },
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     if (stat.size > 1024 * 1024) return error.IgnoreFileTooLarge; // 1MB limit
     const content = try allocator.alloc(u8, stat.size);
     defer allocator.free(content);
-    const read = try file.readAll(content);
+    const read = try file.readPositionalAll(io, content, 0);
     return parse(allocator, content[0..read]);
 }
 
 /// Parse ignore file content into patterns.
 pub fn parse(allocator: Allocator, content: []const u8) !IgnoreList {
-    var patterns: std.ArrayList(Pattern) = .{};
+    var patterns: std.ArrayList(Pattern) = .empty;
     errdefer {
         for (patterns.items) |p| {
             allocator.free(p.pattern);
@@ -263,7 +263,7 @@ test "load from directory without mkitignore" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const allocator = std.testing.allocator;
-    var il = try load(allocator, tmp.dir);
+    var il = try load(allocator, std.testing.io, tmp.dir);
     defer il.deinit();
     try std.testing.expectEqual(@as(usize, 0), il.patterns.len);
 }
@@ -274,11 +274,11 @@ test "load from directory with mkitignore" {
     defer tmp.cleanup();
 
     // Create .mkitignore file
-    const f = try tmp.dir.createFile(".mkitignore", .{});
-    try f.writeAll("*.log\nbuild/\n");
-    f.close();
+    const f = try tmp.dir.createFile(std.testing.io, ".mkitignore", .{});
+    try f.writeStreamingAll(std.testing.io, "*.log\nbuild/\n");
+    f.close(std.testing.io);
 
-    var il = try load(allocator, tmp.dir);
+    var il = try load(allocator, std.testing.io, tmp.dir);
     defer il.deinit();
     try std.testing.expectEqual(@as(usize, 2), il.patterns.len);
     try std.testing.expect(il.isIgnored("test.log", false));

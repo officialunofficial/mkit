@@ -12,8 +12,57 @@ const mkit = struct {
     const refs = @import("refs.zig");
 };
 
-const Timer = std.time.Timer;
 const doNotOptimizeAway = std.mem.doNotOptimizeAway;
+
+// Why: std.time.Timer was removed in 0.16; monotonic wall-clock reads now
+// go through the Io capability. We retain the same "start → read nanos"
+// shape as the old Timer so callsites stay readable.
+var bench_threaded: std.Io.Threaded = undefined;
+var bench_io: std.Io = undefined;
+
+const Timer = struct {
+    start_ns: i96,
+
+    fn start() error{TimerUnsupported}!Timer {
+        return .{ .start_ns = std.Io.Clock.awake.now(bench_io).nanoseconds };
+    }
+
+    fn read(self: Timer) u64 {
+        const now_ns = std.Io.Clock.awake.now(bench_io).nanoseconds;
+        return @intCast(now_ns - self.start_ns);
+    }
+};
+
+// Why: std.testing.tmpDir is @compileError'd outside `is_test` in 0.16,
+// so the bench binary can no longer lean on it. Provide a minimal
+// equivalent that creates a unique directory under `.zig-cache/bench-tmp/`
+// using a seeded counter.
+var tmp_counter: u64 = 0;
+const BenchTmpDir = struct {
+    dir: std.Io.Dir,
+    parent: std.Io.Dir,
+    sub_path: [32]u8,
+
+    fn cleanup(self: *BenchTmpDir) void {
+        self.dir.close(bench_io);
+        self.parent.deleteTree(bench_io, &self.sub_path) catch {};
+        self.parent.close(bench_io);
+    }
+};
+
+fn benchTmpDir() BenchTmpDir {
+    tmp_counter += 1;
+    const seed = std.Io.Clock.awake.now(bench_io).nanoseconds;
+    var sub_path: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&sub_path, "bench-{x:0>16}-{x:0>8}", .{ @as(u64, @truncate(@as(u96, @bitCast(seed)))), tmp_counter }) catch unreachable;
+
+    const cwd = std.Io.Dir.cwd();
+    var cache = cwd.createDirPathOpen(bench_io, ".zig-cache", .{}) catch @panic("bench: cannot open .zig-cache");
+    defer cache.close(bench_io);
+    var parent = cache.createDirPathOpen(bench_io, "bench-tmp", .{}) catch @panic("bench: cannot open .zig-cache/bench-tmp");
+    const dir = parent.createDirPathOpen(bench_io, &sub_path, .{}) catch @panic("bench: cannot open bench tmp subdir");
+    return .{ .dir = dir, .parent = parent, .sub_path = sub_path };
+}
 
 // ---------------------------------------------------------------------------
 // Output
@@ -22,7 +71,7 @@ const doNotOptimizeAway = std.mem.doNotOptimizeAway;
 fn print(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, fmt, args) catch &buf;
-    std.fs.File.stdout().writeAll(s) catch {};
+    std.Io.File.stdout().writeStreamingAll(bench_io, s) catch {};
 }
 
 fn printRow(name: []const u8, ns_per_op: u64, detail: []const u8) void {
@@ -163,7 +212,7 @@ fn benchSerializeTree() void {
 fn benchSign() void {
     const alloc = std.heap.page_allocator;
     const iters: u64 = 1_000;
-    const kp = mkit.sign.KeyPair.generate();
+    const kp = mkit.sign.KeyPair.generate(bench_io);
 
     var parents = [_]mkit.hash.Hash{};
     var mid_buf: [8]u8 = undefined;
@@ -205,9 +254,9 @@ fn benchStore() void {
     const alloc = std.heap.page_allocator;
     const iters: u64 = 1_000;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = benchTmpDir();
     defer tmp.cleanup();
-    var store = mkit.store.ObjectStore.init(tmp.dir) catch return;
+    var store = mkit.store.ObjectStore.init(bench_io, tmp.dir) catch return;
     defer store.close();
 
     // Put
@@ -268,9 +317,9 @@ fn benchDiff() void {
     const iters: u64 = 500;
     const n = 100;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = benchTmpDir();
     defer tmp.cleanup();
-    var store = mkit.store.ObjectStore.init(tmp.dir) catch return;
+    var store = mkit.store.ObjectStore.init(bench_io, tmp.dir) catch return;
     defer store.close();
 
     var old_entries: [n]mkit.object.TreeEntry = undefined;
@@ -313,13 +362,13 @@ fn benchInit() void {
 
     var timer = Timer.start() catch return;
     for (0..iters) |_| {
-        var tmp = std.testing.tmpDir(.{});
-        var st = mkit.store.ObjectStore.init(tmp.dir) catch {
+        var tmp = benchTmpDir();
+        var st = mkit.store.ObjectStore.init(bench_io, tmp.dir) catch {
             tmp.cleanup();
             continue;
         };
         st.close();
-        mkit.refs.init(tmp.dir) catch {};
+        mkit.refs.init(bench_io, tmp.dir) catch {};
         tmp.cleanup();
     }
     const elapsed = timer.read();
@@ -333,21 +382,21 @@ fn benchHashFiles() void {
     const file_size = 4096;
 
     // Set up repo with files
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = benchTmpDir();
     defer tmp.cleanup();
-    var store = mkit.store.ObjectStore.init(tmp.dir) catch return;
+    var store = mkit.store.ObjectStore.init(bench_io, tmp.dir) catch return;
     defer store.close();
 
     // Create files
     var file_names: [num_files][16]u8 = undefined;
     for (0..num_files) |i| {
         const name = std.fmt.bufPrint(&file_names[i], "file_{d:0>4}.txt", .{i}) catch continue;
-        const f = tmp.dir.createFile(name, .{}) catch continue;
+        const f = tmp.dir.createFile(bench_io, name, .{}) catch continue;
         var data: [file_size]u8 = undefined;
         std.mem.writeInt(u64, data[0..8], @intCast(i), .little);
         @memset(data[8..], 0xCC);
-        f.writeAll(&data) catch {};
-        f.close();
+        f.writeStreamingAll(bench_io, &data) catch {};
+        f.close(bench_io);
     }
 
     // Benchmark: hash all files (read from disk + BLAKE3 + store to object db)
@@ -356,12 +405,12 @@ fn benchHashFiles() void {
     for (0..iters) |_| {
         for (0..num_files) |i| {
             const name = std.fmt.bufPrint(&file_names[i], "file_{d:0>4}.txt", .{i}) catch continue;
-            const file = tmp.dir.openFile(name, .{}) catch continue;
-            defer file.close();
-            const stat = file.stat() catch continue;
+            const file = tmp.dir.openFile(bench_io, name, .{}) catch continue;
+            defer file.close(bench_io);
+            const stat = file.stat(bench_io) catch continue;
             const data = alloc.alloc(u8, stat.size) catch continue;
             defer alloc.free(data);
-            const read = file.readAll(data) catch continue;
+            const read = file.readPositionalAll(bench_io, data, 0) catch continue;
             const blob = mkit.object.Object{ .blob = .{ .data = data[0..read] } };
             doNotOptimizeAway(store.put(alloc, blob) catch continue);
         }
@@ -378,38 +427,38 @@ fn benchTreeSnapshot() void {
     const num_files = 50;
 
     // Set up a directory with files and subdirs
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = benchTmpDir();
     defer tmp.cleanup();
 
-    var store_tmp = std.testing.tmpDir(.{});
+    var store_tmp = benchTmpDir();
     defer store_tmp.cleanup();
-    var store = mkit.store.ObjectStore.init(store_tmp.dir) catch return;
+    var store = mkit.store.ObjectStore.init(bench_io, store_tmp.dir) catch return;
     defer store.close();
 
     // Create a realistic project structure
-    tmp.dir.makeDir("src") catch {};
-    tmp.dir.makeDir("tests") catch {};
-    tmp.dir.makeDir("docs") catch {};
+    tmp.dir.createDirPath(bench_io, "src") catch {};
+    tmp.dir.createDirPath(bench_io, "tests") catch {};
+    tmp.dir.createDirPath(bench_io, "docs") catch {};
 
     for (0..num_files) |i| {
         var name_buf: [32]u8 = undefined;
         const dir_prefix: []const u8 = if (i < 20) "src/" else if (i < 35) "tests/" else if (i < 45) "docs/" else "";
         const name = std.fmt.bufPrint(&name_buf, "{s}f_{d:0>3}.txt", .{ dir_prefix, i }) catch continue;
-        const f = tmp.dir.createFile(name, .{}) catch continue;
+        const f = tmp.dir.createFile(bench_io, name, .{}) catch continue;
         var data: [1024]u8 = undefined;
         std.mem.writeInt(u64, data[0..8], @intCast(i), .little);
         @memset(data[8..], 0xDD);
-        f.writeAll(&data) catch {};
-        f.close();
+        f.writeStreamingAll(bench_io, &data) catch {};
+        f.close(bench_io);
     }
 
     // Benchmark: snapshot entire working directory
     const iters: u64 = 20;
     var timer = Timer.start() catch return;
     for (0..iters) |_| {
-        var work_dir = tmp.dir.openDir(".", .{ .iterate = true }) catch continue;
-        defer work_dir.close();
-        doNotOptimizeAway(mkit.worktree.buildTree(alloc, &store, work_dir) catch continue);
+        var work_dir = tmp.dir.openDir(bench_io, ".", .{ .iterate = true }) catch continue;
+        defer work_dir.close(bench_io);
+        doNotOptimizeAway(mkit.worktree.buildTree(alloc, bench_io, &store, work_dir) catch continue);
     }
     const elapsed = timer.read();
     var buf: [32]u8 = undefined;
@@ -424,13 +473,13 @@ fn benchCommitWorkflow() void {
     var timer = Timer.start() catch return;
 
     for (0..iters) |iter| {
-        var tmp = std.testing.tmpDir(.{});
+        var tmp = benchTmpDir();
 
-        var store = mkit.store.ObjectStore.init(tmp.dir) catch {
+        var store = mkit.store.ObjectStore.init(bench_io, tmp.dir) catch {
             tmp.cleanup();
             continue;
         };
-        mkit.refs.init(tmp.dir) catch {
+        mkit.refs.init(bench_io, tmp.dir) catch {
             store.close();
             tmp.cleanup();
             continue;
@@ -440,30 +489,30 @@ fn benchCommitWorkflow() void {
         for (0..10) |i| {
             var name_buf: [16]u8 = undefined;
             const name = std.fmt.bufPrint(&name_buf, "f_{d:0>2}.txt", .{i}) catch continue;
-            const f = tmp.dir.createFile(name, .{}) catch continue;
+            const f = tmp.dir.createFile(bench_io, name, .{}) catch continue;
             var data: [512]u8 = undefined;
             std.mem.writeInt(u64, data[0..8], @as(u64, iter * 10 + i), .little);
             @memset(data[8..], 0xEE);
-            f.writeAll(&data) catch {};
-            f.close();
+            f.writeStreamingAll(bench_io, &data) catch {};
+            f.close(bench_io);
         }
 
         // Build tree
-        var work_dir = tmp.dir.openDir(".", .{ .iterate = true }) catch {
+        var work_dir = tmp.dir.openDir(bench_io, ".", .{ .iterate = true }) catch {
             store.close();
             tmp.cleanup();
             continue;
         };
-        const tree_hash = mkit.worktree.buildTree(alloc, &store, work_dir) catch {
-            work_dir.close();
+        const tree_hash = mkit.worktree.buildTree(alloc, bench_io, &store, work_dir) catch {
+            work_dir.close(bench_io);
             store.close();
             tmp.cleanup();
             continue;
         };
-        work_dir.close();
+        work_dir.close(bench_io);
 
         // Sign commit
-        const kp = mkit.sign.KeyPair.generate();
+        const kp = mkit.sign.KeyPair.generate(bench_io);
         var parents = [_]mkit.hash.Hash{};
         var mid_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &mid_buf, 42, .little);
@@ -490,7 +539,7 @@ fn benchCommitWorkflow() void {
             tmp.cleanup();
             continue;
         };
-        mkit.refs.updateHead(alloc, tmp.dir, commit_hash) catch {};
+        mkit.refs.updateHead(alloc, bench_io, tmp.dir, commit_hash) catch {};
         doNotOptimizeAway(commit_hash);
 
         store.close();
@@ -507,9 +556,13 @@ fn benchCommitWorkflow() void {
 // ---------------------------------------------------------------------------
 
 pub fn main() !void {
-    const out = std.fs.File.stdout();
-    try out.writeAll("\nmkit benchmarks (ReleaseFast)\n");
-    try out.writeAll("========================================================================\n");
+    bench_threaded = .init(std.heap.page_allocator, .{});
+    defer bench_threaded.deinit();
+    bench_io = bench_threaded.io();
+
+    const out = std.Io.File.stdout();
+    try out.writeStreamingAll(bench_io, "\nmkit benchmarks (ReleaseFast)\n");
+    try out.writeStreamingAll(bench_io, "========================================================================\n");
 
     header("BLAKE3 hashing");
     benchBlake3(1_024, "blake3 1 KB");
@@ -539,5 +592,5 @@ pub fn main() !void {
     benchTreeSnapshot();
     benchCommitWorkflow();
 
-    try out.writeAll("\n========================================================================\n\n");
+    try out.writeStreamingAll(bench_io, "\n========================================================================\n\n");
 }

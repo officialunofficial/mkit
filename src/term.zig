@@ -20,21 +20,48 @@
 // beyond ~4-color SGR that a "dumb" terminal couldn't already mangle
 // harmlessly.
 //
-// Portability: POSIX only (macOS + Linux). We use `std.posix.isatty`
-// directly, not a Windows fallback.
+// Portability: POSIX only (macOS + Linux). We go through libc
+// (`std.c.isatty`, `std.c.environ`) directly — Zig 0.16 dropped
+// `std.posix.isatty` and `std.posix.getenv`, and the replacements all
+// require an `std.Io` capability we don't want to thread through every
+// colorised-print callsite. Both macOS and Linux builds of mkit are
+// already libc-linked, so this is safe here.
 
 const std = @import("std");
 
+const STDOUT_FILENO: c_int = 1;
+const STDERR_FILENO: c_int = 2;
+
 /// Returns true if stdout is a terminal.
 pub fn stdoutIsTty() bool {
-    return std.posix.isatty(std.posix.STDOUT_FILENO);
+    return std.c.isatty(STDOUT_FILENO) != 0;
 }
 
 /// Returns true if stderr is a terminal. Useful for deciding whether to
 /// emit progress bars (which should go to stderr even when stdout is
 /// piped, e.g. `mkit log | less`).
 pub fn stderrIsTty() bool {
-    return std.posix.isatty(std.posix.STDERR_FILENO);
+    return std.c.isatty(STDERR_FILENO) != 0;
+}
+
+/// POSIX `getenv`-equivalent backed by the libc `environ` global.
+/// Returns the value portion of `NAME=VALUE`, or null if the name is not
+/// set. Never heap-allocates; the returned slice is valid for as long as
+/// the process does not mutate its environment.
+///
+/// Exposed as `pub` so that main.zig's editor-resolution path can reach
+/// $EDITOR / $VISUAL after `std.posix.getenv` was removed from the stdlib
+/// in Zig 0.16.
+pub fn posixGetenv(name: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (std.c.environ[i]) |entry_ptr| : (i += 1) {
+        const entry = std.mem.sliceTo(entry_ptr, 0);
+        if (entry.len <= name.len) continue;
+        if (!std.mem.eql(u8, entry[0..name.len], name)) continue;
+        if (entry[name.len] != '=') continue;
+        return entry[name.len + 1 ..];
+    }
+    return null;
 }
 
 /// Pure decision function: given the raw environment-variable values and
@@ -65,8 +92,8 @@ pub fn colorEnabledFor(
 /// See the header comment for precedence rules.
 pub fn colorEnabled() bool {
     return colorEnabledFor(
-        std.posix.getenv("NO_COLOR"),
-        std.posix.getenv("CLICOLOR_FORCE"),
+        posixGetenv("NO_COLOR"),
+        posixGetenv("CLICOLOR_FORCE"),
         stdoutIsTty(),
     );
 }

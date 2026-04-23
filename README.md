@@ -11,7 +11,7 @@ attestation backend. Downstream projects that need attestation can pull
 ## Quick start
 
 ```sh
-# Build (Zig 0.15.2):
+# Build (Zig 0.16.0):
 zig build
 
 # Initialize a repo, generate a key, commit:
@@ -34,7 +34,7 @@ See [`docs/CLI.md`](docs/CLI.md) for the full CLI reference.
 
 ## Build
 
-Requires **Zig 0.15.2** (0.16 migration deferred to 0.2.0).
+Requires **Zig 0.16.0**.
 
 ```sh
 zig build                       # mkit binary → zig-out/bin/mkit
@@ -120,8 +120,7 @@ for the full change list.
 
 ## Contributing
 
-This is a young project. The next big workstream is the Zig 0.16 migration
-(0.2.0). Open issues and PRs welcome.
+This is a young project. Open issues and PRs welcome.
 
 Security-sensitive disclosures: see [`SECURITY.md`](SECURITY.md).
 

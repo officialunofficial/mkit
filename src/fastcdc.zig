@@ -91,12 +91,13 @@ pub const StreamingChunker = struct {
     cdc: FastCDC,
     buf: []u8,
     buf_len: usize,
+    file_offset: u64,
     eof: bool,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, cdc: FastCDC) !StreamingChunker {
         const buf = try allocator.alloc(u8, cdc.max_size * 2);
-        return .{ .cdc = cdc, .buf = buf, .buf_len = 0, .eof = false, .allocator = allocator };
+        return .{ .cdc = cdc, .buf = buf, .buf_len = 0, .file_offset = 0, .eof = false, .allocator = allocator };
     }
 
     pub fn deinit(self: *StreamingChunker) void {
@@ -105,14 +106,18 @@ pub const StreamingChunker = struct {
 
     /// Read the next chunk from the file. Returns a slice into the internal
     /// buffer (valid until the next call to nextChunk) or null at EOF.
-    pub fn nextChunk(self: *StreamingChunker, file: std.fs.File) !?[]const u8 {
+    ///
+    /// How: file reads in 0.16 go through `readStreaming`, which takes the
+    /// Io capability and a `[]const []u8` scatter vector.
+    pub fn nextChunk(self: *StreamingChunker, io: std.Io, file: std.Io.File) !?[]const u8 {
         // Fill buffer if needed
         while (!self.eof and self.buf_len < self.cdc.max_size) {
-            const n = try file.read(self.buf[self.buf_len..]);
+            const n = try file.readPositional(io, &.{self.buf[self.buf_len..]}, self.file_offset);
             if (n == 0) {
                 self.eof = true;
                 break;
             }
+            self.file_offset += n;
             self.buf_len += n;
         }
         if (self.buf_len == 0) return null;
@@ -145,7 +150,7 @@ test "determinism: same data produces identical boundaries" {
 
     // First pass
     var iter1 = ChunkIterator.init(cdc, &data);
-    var boundaries1: std.ArrayList(ChunkBoundary) = .{};
+    var boundaries1: std.ArrayList(ChunkBoundary) = .empty;
     defer boundaries1.deinit(std.testing.allocator);
     while (iter1.next()) |b| {
         try boundaries1.append(std.testing.allocator, b);
@@ -153,7 +158,7 @@ test "determinism: same data produces identical boundaries" {
 
     // Second pass
     var iter2 = ChunkIterator.init(cdc, &data);
-    var boundaries2: std.ArrayList(ChunkBoundary) = .{};
+    var boundaries2: std.ArrayList(ChunkBoundary) = .empty;
     defer boundaries2.deinit(std.testing.allocator);
     while (iter2.next()) |b| {
         try boundaries2.append(std.testing.allocator, b);
@@ -235,13 +240,13 @@ test "StreamingChunker matches ChunkIterator" {
     // Write to temp file
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const f = try tmp.dir.createFile("test.bin", .{});
-    try f.writeAll(&data);
-    f.close();
+    const f = try tmp.dir.createFile(std.testing.io, "test.bin", .{});
+    try f.writeStreamingAll(std.testing.io, &data);
+    f.close(std.testing.io);
 
     // Collect boundaries from ChunkIterator
     var iter = ChunkIterator.init(cdc, &data);
-    var expected: std.ArrayList(usize) = .{};
+    var expected: std.ArrayList(usize) = .empty;
     defer expected.deinit(allocator);
     while (iter.next()) |b| {
         try expected.append(allocator, b.length);
@@ -251,12 +256,12 @@ test "StreamingChunker matches ChunkIterator" {
     var chunker = try StreamingChunker.init(allocator, cdc);
     defer chunker.deinit();
 
-    var file = try tmp.dir.openFile("test.bin", .{});
-    defer file.close();
+    var file = try tmp.dir.openFile(std.testing.io, "test.bin", .{});
+    defer file.close(std.testing.io);
 
-    var actual: std.ArrayList(usize) = .{};
+    var actual: std.ArrayList(usize) = .empty;
     defer actual.deinit(allocator);
-    while (try chunker.nextChunk(file)) |chunk| {
+    while (try chunker.nextChunk(std.testing.io, file)) |chunk| {
         try actual.append(allocator, chunk.len);
     }
 
@@ -285,14 +290,14 @@ test "stability: single byte insertion causes minimal boundary changes" {
 
     // Collect chunk hashes from both
     var orig_iter = ChunkIterator.init(cdc, &original);
-    var orig_chunks: std.ArrayList(ChunkBoundary) = .{};
+    var orig_chunks: std.ArrayList(ChunkBoundary) = .empty;
     defer orig_chunks.deinit(allocator);
     while (orig_iter.next()) |b| {
         try orig_chunks.append(allocator, b);
     }
 
     var mod_iter = ChunkIterator.init(cdc, modified);
-    var mod_chunks: std.ArrayList(ChunkBoundary) = .{};
+    var mod_chunks: std.ArrayList(ChunkBoundary) = .empty;
     defer mod_chunks.deinit(allocator);
     while (mod_iter.next()) |b| {
         try mod_chunks.append(allocator, b);
@@ -350,8 +355,13 @@ test "cut on exactly min_size input" {
 
 test "fuzz: chunking covers all bytes" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
+        // Why: 0.16 changed the fuzz callback signature from (ctx, []const u8)
+        // to (ctx, *std.testing.Smith). Input bytes come via smith.slice.
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             const cdc = FastCDC.init(64, 256, 1024);
+            var buf: [64 * 1024]u8 = undefined;
+            const len = smith.slice(&buf);
+            const input = buf[0..len];
             var iter = ChunkIterator.init(cdc, input);
             var total: usize = 0;
             while (iter.next()) |b| {
@@ -398,7 +408,7 @@ test "different avg_size produces different boundaries" {
     // CDC with avg=32KB
     const cdc_small = FastCDC.init(8 * 1024, 32 * 1024, 128 * 1024);
     var iter_small = ChunkIterator.init(cdc_small, &data);
-    var boundaries_small: std.ArrayList(usize) = .{};
+    var boundaries_small: std.ArrayList(usize) = .empty;
     defer boundaries_small.deinit(allocator);
     while (iter_small.next()) |b| {
         try boundaries_small.append(allocator, b.offset + b.length);
@@ -407,7 +417,7 @@ test "different avg_size produces different boundaries" {
     // CDC with avg=64KB
     const cdc_large = FastCDC.init(16 * 1024, 64 * 1024, 256 * 1024);
     var iter_large = ChunkIterator.init(cdc_large, &data);
-    var boundaries_large: std.ArrayList(usize) = .{};
+    var boundaries_large: std.ArrayList(usize) = .empty;
     defer boundaries_large.deinit(allocator);
     while (iter_large.next()) |b| {
         try boundaries_large.append(allocator, b.offset + b.length);
