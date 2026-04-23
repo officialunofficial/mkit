@@ -22,6 +22,7 @@ pub mod chunker;
 pub mod delta;
 pub mod hash;
 pub mod object;
+pub mod pack;
 pub mod serialize;
 pub mod sign;
 pub mod store;
@@ -48,3 +49,10 @@ pub use chunker::{
 
 // Phase 3 — delta instruction stream (SPEC-DELTA v1).
 pub use delta::{HEADER_LEN as DELTA_HEADER_LEN, MAX_INSERT_LEN, OP_COPY, STREAM_VERSION};
+
+// Phase 3 — packfile reader/writer (SPEC-PACKFILE v1).
+pub use pack::{
+    HEADER_LEN as PACK_HEADER_LEN, MAGIC as PACK_MAGIC, MAX_ENTRIES as PACK_MAX_ENTRIES,
+    MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, PackError, PackReader, PackWriter,
+    TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport, VERSION as PACK_VERSION, pack_key,
+};
