@@ -529,9 +529,17 @@ pub const SshTransport = struct {
         argv_buf[argc] = host_spec;
         argc += 1;
 
-        const remote_command = try buildRemoteServeCommand(allocator, path);
-        defer allocator.free(remote_command);
-        argv_buf[argc] = remote_command;
+        // The path has already been restricted to [A-Za-z0-9._-/] with no
+        // empty / dot / dot-dot components by `protocol.validateSshPath`
+        // above, so it's safe to hand to the remote shell as-is. Pass the
+        // three tokens separately (not as a joined string) so sshd
+        // invokes `mkit serve <path>` without an intervening `sh -c`
+        // parse that broke the OP_HELLO handshake on some sshd configs.
+        argv_buf[argc] = "mkit";
+        argc += 1;
+        argv_buf[argc] = "serve";
+        argc += 1;
+        argv_buf[argc] = path;
         argc += 1;
 
         const child = try std.process.spawn(io, .{

@@ -13,13 +13,10 @@ const Buffer = std.ArrayList(u8);
 pub const MAGIC = "MKIT".*;
 pub const VERSION: u32 = 1;
 
-/// Legacy delta pack version. Its delta payload omitted the reconstructed
-/// object's expected hash and size, so unpack had to trust the delta result
-/// until after persistence. Kept only so unpack can reject it explicitly.
-pub const VERSION_DELTA_LEGACY: u32 = 2;
-
-/// Secure delta pack version. Delta entries carry the base hash, expected
-/// reconstructed hash, expected raw size, and delta instructions.
+/// Delta pack version. Delta entries carry the base hash, expected
+/// reconstructed hash, expected raw size, and delta instructions, so
+/// unpack rejects a malformed / attacker-crafted delta before it reaches
+/// the object store.
 pub const VERSION_DELTA: u32 = 3;
 
 /// Object entry type within a delta-capable packfile.
@@ -987,7 +984,6 @@ pub fn unpackDeltaInto(
         return unpackInto(allocator, data, store);
     }
 
-    if (version == VERSION_DELTA_LEGACY) return error.InsecureLegacyDeltaPack;
     if (version != VERSION_DELTA) return error.UnsupportedVersion;
 
     const count = std.mem.littleToNative(u32, @bitCast(data[8..12].*));
@@ -1357,7 +1353,7 @@ test "unpack delta restores original" {
     try std.testing.expectEqualSlices(u8, &target_content, retrieved_b.blob.data);
 }
 
-test "unpackDeltaInto rejects legacy insecure delta pack version" {
+test "unpackDeltaInto rejects any non-current delta pack version" {
     const allocator = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});
@@ -1365,13 +1361,15 @@ test "unpackDeltaInto rejects legacy insecure delta pack version" {
     var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
-    const legacy_header = [_]u8{
+    // Any version byte other than VERSION (1, handled by the v1 branch)
+    // or VERSION_DELTA (3, the current delta pack) is a hard reject. No
+    // back-compat is promised.
+    const stale_header = [_]u8{
         'M', 'K', 'I', 'T',
-        0x02, 0x00, 0x00, 0x00, // VERSION_DELTA_LEGACY
+        0x02, 0x00, 0x00, 0x00, // deliberately not VERSION or VERSION_DELTA
         0x00, 0x00, 0x00, 0x00, // count = 0
     };
-
-    try std.testing.expectError(error.InsecureLegacyDeltaPack, unpackDeltaInto(allocator, &legacy_header, &store));
+    try std.testing.expectError(error.UnsupportedVersion, unpackDeltaInto(allocator, &stale_header, &store));
 }
 
 test "unpackDeltaInto rejects delta with mismatched reconstructed hash" {

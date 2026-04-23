@@ -178,13 +178,17 @@ pub fn formatStrictSshUrl(
     try out.append(allocator, '@');
     try out.appendSlice(allocator, host);
     if (port) |p| {
-        // std.ArrayList in Zig 0.16 has no `.writer()` helper; fall through
+        // std.ArrayList in Zig 0.16 has no `.writer()` helper; go through
         // fmt.allocPrint + appendSlice.
         const port_str = try std.fmt.allocPrint(allocator, ":{d}", .{p});
         defer allocator.free(port_str);
         try out.appendSlice(allocator, port_str);
     }
-    try out.append(allocator, ':');
+    // URL-style `/path`, not SCP-style `:path`. Ensure exactly one leading
+    // slash — append `/` only if the path doesn't already carry one.
+    if (path.len == 0 or path[0] != '/') {
+        try out.append(allocator, '/');
+    }
     try out.appendSlice(allocator, path);
     return try out.toOwnedSlice(allocator);
 }
@@ -407,21 +411,55 @@ fn parseStrictSsh(after: []const u8) StrictParseError!StrictRemoteUrl {
     // if the next segment is all digits and followed by another `:` — the
     // digits are the port and what remains is the path. Otherwise the first
     // `:` terminates the host and what remains is the path.
+    // Accepted forms:
+    //   user@host/path                        — URL-style, no port
+    //   user@host:port/path                   — URL-style, explicit port
+    //   user@host:path                        — SCP-style, no port
+    //   user@host:port:path                   — SCP-style with port
+    //
+    // The URL-style (slash before path) is what users actually type and
+    // what `mkit+ssh://user@host:port/path` naturally produces when
+    // parroting standard `ssh://` conventions; an earlier version only
+    // accepted the SCP-style colon-colon form, which silently mis-parsed
+    // real inputs (the port would disappear into the path component).
     const at = std.mem.indexOfScalar(u8, after, '@') orelse return error.MalformedUrl;
     const user = after[0..at];
     const rest = after[at + 1 ..];
     if (user.len == 0 or rest.len == 0) return error.MalformedUrl;
 
+    // Split host[:port] on the first '/' if present — that's the URL form.
+    //
+    // We only commit to URL-style if the resulting host_port part parses
+    // cleanly. For an SCP-style input like `host:port:rel/path` the first
+    // slash lives INSIDE the path component, so host_port would end with
+    // `...:rel` and its port-string parse would fail; in that case we
+    // fall through to the SCP parser below.
+    if (std.mem.indexOfScalar(u8, rest, '/')) |slash| url: {
+        const host_port = rest[0..slash];
+        const path = rest[slash..]; // path keeps its leading '/'
+        if (host_port.len == 0 or path.len == 0) break :url;
+        var host: []const u8 = host_port;
+        var port: ?u16 = null;
+        if (std.mem.indexOfScalar(u8, host_port, ':')) |colon| {
+            host = host_port[0..colon];
+            const port_str = host_port[colon + 1 ..];
+            if (host.len == 0 or port_str.len == 0) break :url;
+            port = std.fmt.parseInt(u16, port_str, 10) catch break :url;
+        }
+        if (host.len == 0) break :url;
+        validateSshPath(path) catch break :url;
+        return .{ .ssh = .{ .user = user, .host = host, .port = port, .path = path } };
+    }
+
+    // No slash — legacy SCP form: `host[:port]:path`.
     const first_colon = std.mem.indexOfScalar(u8, rest, ':') orelse return error.MalformedUrl;
     const host = rest[0..first_colon];
     const tail = rest[first_colon + 1 ..];
     if (host.len == 0 or tail.len == 0) return error.MalformedUrl;
 
-    // Look for a second `:` that would separate port from path.
     if (std.mem.indexOfScalar(u8, tail, ':')) |second_colon| {
         const maybe_port = tail[0..second_colon];
         const path = tail[second_colon + 1 ..];
-        // Only treat it as host:port:path if the middle segment is a valid port.
         if (maybe_port.len > 0 and path.len > 0) {
             if (std.fmt.parseInt(u16, maybe_port, 10)) |port| {
                 validateSshPath(path) catch return error.MalformedUrl;
@@ -430,7 +468,6 @@ fn parseStrictSsh(after: []const u8) StrictParseError!StrictRemoteUrl {
         }
     }
 
-    // No explicit port — everything after the first colon is the path.
     validateSshPath(tail) catch return error.MalformedUrl;
     return .{ .ssh = .{ .user = user, .host = host, .port = null, .path = tail } };
 }
@@ -625,15 +662,26 @@ test "parseRemoteUrl s3 empty prefix" {
 }
 
 test "parseRemoteUrl ssh full" {
-    const r = try parseRemoteUrl("mkit+ssh://alice@host.example.com:2222:/repos/project");
+    const r = try parseRemoteUrl("mkit+ssh://alice@host.example.com:2222/repos/project");
     try std.testing.expectEqualStrings("alice", r.ssh.user);
     try std.testing.expectEqualStrings("host.example.com", r.ssh.host);
     try std.testing.expectEqual(@as(?u16, 2222), r.ssh.port);
     try std.testing.expectEqualStrings("/repos/project", r.ssh.path);
 }
 
+test "parseRemoteUrl ssh full legacy SCP double-colon form" {
+    // The strict parser also accepts the older `user@host:port:path`
+    // spelling for parity with git-over-ssh SCP-style inputs. New code
+    // should use the slash form (see the previous test).
+    const r = try parseRemoteUrl("mkit+ssh://alice@host.example.com:2222:repos/project");
+    try std.testing.expectEqualStrings("alice", r.ssh.user);
+    try std.testing.expectEqualStrings("host.example.com", r.ssh.host);
+    try std.testing.expectEqual(@as(?u16, 2222), r.ssh.port);
+    try std.testing.expectEqualStrings("repos/project", r.ssh.path);
+}
+
 test "parseRemoteUrl ssh no port" {
-    const r = try parseRemoteUrl("mkit+ssh://alice@host.example.com:/repos/project");
+    const r = try parseRemoteUrl("mkit+ssh://alice@host.example.com/repos/project");
     try std.testing.expectEqualStrings("alice", r.ssh.user);
     try std.testing.expectEqualStrings("host.example.com", r.ssh.host);
     try std.testing.expect(r.ssh.port == null);
@@ -649,10 +697,16 @@ test "parseRemoteUrl rejects unsafe ssh paths" {
     try std.testing.expectError(error.MalformedUrl, parseRemoteUrl("mkit+ssh://alice@host.example.com:/repos/../project"));
 }
 
-test "formatStrictSshUrl" {
+test "formatStrictSshUrl emits URL-style slash-path" {
     const formatted = try formatStrictSshUrl(std.testing.allocator, "alice", "host.example.com", 2222, "/repos/project");
     defer std.testing.allocator.free(formatted);
-    try std.testing.expectEqualStrings("mkit+ssh://alice@host.example.com:2222:/repos/project", formatted);
+    try std.testing.expectEqualStrings("mkit+ssh://alice@host.example.com:2222/repos/project", formatted);
+}
+
+test "formatStrictSshUrl normalizes path without leading slash" {
+    const formatted = try formatStrictSshUrl(std.testing.allocator, "alice", "host.example.com", null, "repos/project");
+    defer std.testing.allocator.free(formatted);
+    try std.testing.expectEqualStrings("mkit+ssh://alice@host.example.com/repos/project", formatted);
 }
 
 test "parseRemoteUrl memory" {
