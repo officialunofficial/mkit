@@ -19,6 +19,7 @@ const std = @import("std");
 pub const jcs = @import("jcs.zig");
 pub const statement = @import("statement.zig");
 pub const envelope = @import("envelope.zig");
+pub const store = @import("store.zig");
 
 /// Re-exports so callers can write `attestations.Statement`, etc.
 pub const Statement = statement.Statement;
@@ -38,4 +39,5 @@ test {
     _ = jcs;
     _ = statement;
     _ = envelope;
+    _ = store;
 }
