@@ -5,6 +5,7 @@ const serialize_mod = @import("serialize.zig");
 const object = @import("object.zig");
 const Hash = hash_mod.Hash;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 pub const mkit_dir = ".mkit";
 pub const objects_dir = "objects";
@@ -12,11 +13,12 @@ pub const objects_dir = "objects";
 /// Local content-addressed object store backed by the filesystem.
 /// Objects are stored at `.mkit/objects/<2-hex>/<62-hex>`.
 pub const ObjectStore = struct {
-    root: std.fs.Dir,
+    io: Io,
+    root: Io.Dir,
 
     /// Returns true when `dir` is the repository root that contains `.mkit/objects`.
-    pub fn isRepoRoot(dir: std.fs.Dir) bool {
-        dir.access(mkit_dir ++ "/" ++ objects_dir, .{}) catch return false;
+    pub fn isRepoRoot(io: Io, dir: Io.Dir) bool {
+        dir.access(io, mkit_dir ++ "/" ++ objects_dir, .{}) catch return false;
         return true;
     }
 
@@ -24,25 +26,26 @@ pub const ObjectStore = struct {
     ///
     /// Commands intentionally require the repository root so refs, index, config,
     /// and worktree operations all use the same base directory.
-    pub fn open(dir: std.fs.Dir) !ObjectStore {
-        const obj_dir = dir.openDir(mkit_dir ++ "/" ++ objects_dir, .{}) catch {
+    pub fn open(io: Io, dir: Io.Dir) !ObjectStore {
+        const obj_dir = dir.openDir(io, mkit_dir ++ "/" ++ objects_dir, .{}) catch {
             return error.NotAZmitRepository;
         };
-        return .{ .root = obj_dir };
+        return .{ .io = io, .root = obj_dir };
     }
 
     /// Initialize a new .mkit repository in the given directory.
-    pub fn init(dir: std.fs.Dir) !ObjectStore {
-        dir.makeDir(mkit_dir) catch |err| switch (err) {
+    pub fn init(io: Io, dir: Io.Dir) !ObjectStore {
+        dir.createDirPath(io, mkit_dir) catch |err| switch (err) {
             error.PathAlreadyExists => return error.AlreadyInitialized,
             else => return err,
         };
-        const obj_dir = try dir.makeOpenPath(mkit_dir ++ "/" ++ objects_dir, .{});
-        return .{ .root = obj_dir };
+        try dir.createDirPath(io, mkit_dir ++ "/" ++ objects_dir);
+        const obj_dir = try dir.openDir(io, mkit_dir ++ "/" ++ objects_dir, .{});
+        return .{ .io = io, .root = obj_dir };
     }
 
     pub fn close(self: *ObjectStore) void {
-        self.root.close();
+        self.root.close(self.io);
     }
 
     /// Store an object, returning its content hash.
@@ -58,14 +61,14 @@ pub const ObjectStore = struct {
         const path = hash_mod.objectPath(h);
 
         // Ensure shard directory exists
-        self.root.makeDir(&path.dir) catch |err| switch (err) {
+        self.root.createDirPath(self.io, &path.dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
-        var sub = try self.root.openDir(&path.dir, .{});
-        defer sub.close();
-        try writeAtomicBytes(sub, &path.file, bytes);
+        var sub = try self.root.openDir(self.io, &path.dir, .{});
+        defer sub.close(self.io);
+        try writeAtomicBytes(self.io, sub, &path.file, bytes);
 
         return h;
     }
@@ -73,17 +76,17 @@ pub const ObjectStore = struct {
     /// Read raw bytes for an object hash.
     pub fn getRaw(self: *ObjectStore, allocator: Allocator, h: Hash) ![]u8 {
         const path = hash_mod.objectPath(h);
-        var sub = self.root.openDir(&path.dir, .{}) catch return error.ObjectNotFound;
-        defer sub.close();
-        const file = sub.openFile(&path.file, .{}) catch return error.ObjectNotFound;
-        defer file.close();
+        var sub = self.root.openDir(self.io, &path.dir, .{}) catch return error.ObjectNotFound;
+        defer sub.close(self.io);
+        const file = sub.openFile(self.io, &path.file, .{}) catch return error.ObjectNotFound;
+        defer file.close(self.io);
 
-        const stat = try file.stat();
-        if (stat.size > 1024 * 1024 * 1024) return error.ObjectTooLarge; // 1GB safety limit
-        const bytes = try allocator.alloc(u8, stat.size);
+        const size = try file.length(self.io);
+        if (size > 1024 * 1024 * 1024) return error.ObjectTooLarge; // 1GB safety limit
+        const bytes = try allocator.alloc(u8, size);
         errdefer allocator.free(bytes);
-        const read = try file.readAll(bytes);
-        if (read != stat.size) return error.UnexpectedEof;
+        const read = try file.readPositionalAll(self.io, bytes, 0);
+        if (read != size) return error.UnexpectedEof;
 
         // Verify integrity
         const actual = hash_mod.hash(bytes);
@@ -102,49 +105,45 @@ pub const ObjectStore = struct {
     /// Check if an object exists.
     pub fn exists(self: *ObjectStore, h: Hash) bool {
         const path = hash_mod.objectPath(h);
-        var sub = self.root.openDir(&path.dir, .{}) catch return false;
-        defer sub.close();
-        const file = sub.openFile(&path.file, .{}) catch return false;
-        file.close();
+        var sub = self.root.openDir(self.io, &path.dir, .{}) catch return false;
+        defer sub.close(self.io);
+        const file = sub.openFile(self.io, &path.file, .{}) catch return false;
+        file.close(self.io);
         return true;
     }
 };
 
-fn writeAtomicBytes(dir: std.fs.Dir, path: []const u8, bytes: []const u8) !void {
-    var write_buffer: [4096]u8 = undefined;
-    var atomic_file = try dir.atomicFile(path, .{
-        .mode = std.fs.File.default_mode,
-        .write_buffer = &write_buffer,
+fn writeAtomicBytes(io: Io, dir: Io.Dir, path: []const u8, bytes: []const u8) !void {
+    var atomic_file = try dir.createFileAtomic(io, path, .{
+        .replace = true,
     });
-    defer atomic_file.deinit();
+    defer atomic_file.deinit(io);
 
-    try atomic_file.file_writer.interface.writeAll(bytes);
-    try atomic_file.flush();
-    try atomic_file.file_writer.file.sync();
-    try atomic_file.renameIntoPlace();
+    var buffer: [4096]u8 = undefined;
+    var file_writer = atomic_file.file.writer(io, &buffer);
+    try file_writer.interface.writeAll(bytes);
+    try file_writer.interface.flush();
+    try file_writer.file.sync(io);
+    try atomic_file.replace(io);
 }
 
 // -- Tests --
 
 test "init and put/get roundtrip" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
-    // Create a temp directory
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // Init store
-    var store = try ObjectStore.init(tmp.dir);
+    var store = try ObjectStore.init(io, tmp.dir);
     defer store.close();
 
-    // Store a blob
     const blob_obj = object.Object{ .blob = .{ .data = "test content" } };
     const h = try store.put(allocator, blob_obj);
 
-    // Verify it exists
     try std.testing.expect(store.exists(h));
 
-    // Read it back
     var retrieved = try store.get(allocator, h);
     defer retrieved.deinit(allocator);
     try std.testing.expectEqualStrings("test content", retrieved.blob.data);
@@ -152,11 +151,12 @@ test "init and put/get roundtrip" {
 
 test "put is idempotent" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var store = try ObjectStore.init(tmp.dir);
+    var store = try ObjectStore.init(io, tmp.dir);
     defer store.close();
 
     const obj = object.Object{ .blob = .{ .data = "duplicate" } };
@@ -166,10 +166,11 @@ test "put is idempotent" {
 }
 
 test "nonexistent object" {
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var store = try ObjectStore.init(tmp.dir);
+    var store = try ObjectStore.init(io, tmp.dir);
     defer store.close();
 
     const fake_hash = hash_mod.hash("nonexistent");
@@ -177,58 +178,60 @@ test "nonexistent object" {
 }
 
 test "already initialized" {
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var store = try ObjectStore.init(tmp.dir);
+    var store = try ObjectStore.init(io, tmp.dir);
     store.close();
 
-    // Second init should fail
-    const result = ObjectStore.init(tmp.dir);
+    const result = ObjectStore.init(io, tmp.dir);
     try std.testing.expectError(error.AlreadyInitialized, result);
 }
 
 test "is repo root only at repository root" {
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try std.testing.expect(!ObjectStore.isRepoRoot(tmp.dir));
+    try std.testing.expect(!ObjectStore.isRepoRoot(io, tmp.dir));
 
-    var store = try ObjectStore.init(tmp.dir);
+    var store = try ObjectStore.init(io, tmp.dir);
     defer store.close();
 
-    try std.testing.expect(ObjectStore.isRepoRoot(tmp.dir));
+    try std.testing.expect(ObjectStore.isRepoRoot(io, tmp.dir));
 
     try tmp.dir.createDirPath(std.testing.io, "nested");
     var nested = try tmp.dir.openDir(std.testing.io, "nested", .{});
-    defer nested.close();
-    try std.testing.expect(!ObjectStore.isRepoRoot(nested));
+    defer nested.close(io);
+    try std.testing.expect(!ObjectStore.isRepoRoot(io, nested));
 }
 
 test "open rejects subdirectories inside a repository" {
+    const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var store = try ObjectStore.init(tmp.dir);
+    var store = try ObjectStore.init(io, tmp.dir);
     defer store.close();
 
     try tmp.dir.createDirPath(std.testing.io, "nested");
     var nested = try tmp.dir.openDir(std.testing.io, "nested", .{});
-    defer nested.close();
+    defer nested.close(io);
 
-    try std.testing.expectError(error.NotAZmitRepository, ObjectStore.open(nested));
+    try std.testing.expectError(error.NotAZmitRepository, ObjectStore.open(io, nested));
 }
 
 test "store chunked blob" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var store = try ObjectStore.init(tmp.dir);
+    var store = try ObjectStore.init(io, tmp.dir);
     defer store.close();
 
-    // Create chunk hashes
     var chunks = try allocator.alloc(hash_mod.Hash, 2);
     chunks[0] = hash_mod.hash("chunk-0");
     chunks[1] = hash_mod.hash("chunk-1");
@@ -241,10 +244,8 @@ test "store chunked blob" {
     const h = try store.put(allocator, cb_obj);
     cb_obj.deinit(allocator);
 
-    // Verify it exists
     try std.testing.expect(store.exists(h));
 
-    // Read it back
     var retrieved = try store.get(allocator, h);
     defer retrieved.deinit(allocator);
     try std.testing.expectEqual(object.ObjectType.chunked_blob, retrieved.objectType());
