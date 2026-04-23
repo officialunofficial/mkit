@@ -41,19 +41,20 @@ pub const StashList = struct {
 pub fn save(
     allocator: Allocator,
     store: *store_mod.ObjectStore,
-    cwd: std.fs.Dir,
+    io: std.Io,
+    cwd: std.Io.Dir,
     message: []const u8,
 ) !void {
     // Build tree from working dir
-    var work_dir = try cwd.openDir(".", .{ .iterate = true });
-    defer work_dir.close();
-    const tree_hash = try worktree.buildTree(allocator, store, work_dir);
+    var work_dir = try cwd.openDir(io, ".", .{ .iterate = true });
+    defer work_dir.close(io);
+    const tree_hash = try worktree.buildTree(allocator, io, store, work_dir);
 
     // Get HEAD
-    const head_hash = try refs.resolveHead(allocator, cwd);
+    const head_hash = try refs.resolveHead(allocator, io, cwd);
 
     // Get timestamp (u64 Unix seconds per SPEC-OBJECTS §5).
-    const timestamp: u64 = @intCast(@max(std.time.timestamp(), 0));
+    const timestamp: u64 = @intCast(@max(@divTrunc(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s), 0));
 
     // Create unsigned commit for stash (no signing needed)
     var parents_buf: [1]Hash = undefined;
@@ -80,7 +81,7 @@ pub fn save(
     const stash_hash = try store.put(allocator, commit);
 
     // Read existing stash list, prepend new entry, write back
-    var stash_list = try readStashList(allocator, cwd);
+    var stash_list = try readStashList(allocator, io, cwd);
     defer stash_list.deinit();
 
     // Build new entries list with prepended entry.
@@ -107,7 +108,7 @@ pub fn save(
     }
 
     // Write updated stash list
-    try writeStashList(allocator, cwd, new_entries);
+    try writeStashList(allocator, io, cwd, new_entries);
 
     // Free our new_entries (writeStashList doesn't take ownership)
     for (new_entries) |entry| {
@@ -120,31 +121,32 @@ pub fn save(
         var head_obj = try store.get(allocator, hh);
         defer head_obj.deinit(allocator);
         if (head_obj == .commit) {
-            var restore_dir = try cwd.openDir(".", .{ .iterate = true });
-            defer restore_dir.close();
-            try restore.restoreTree(allocator, store, head_obj.commit.tree_hash, restore_dir, .{});
+            var restore_dir = try cwd.openDir(io, ".", .{ .iterate = true });
+            defer restore_dir.close(io);
+            try restore.restoreTree(allocator, io, store, head_obj.commit.tree_hash, restore_dir, .{});
         }
     }
 
     // Clear index
     var empty_idx = index_mod.Index.init(allocator);
     defer empty_idx.deinit();
-    index_mod.writeIndex(cwd, &empty_idx) catch {};
+    index_mod.writeIndex(io, cwd, &empty_idx) catch {};
 }
 
 /// List all stash entries (newest first).
-pub fn list(allocator: Allocator, cwd: std.fs.Dir) !StashList {
-    return readStashList(allocator, cwd);
+pub fn list(allocator: Allocator, io: std.Io, cwd: std.Io.Dir) !StashList {
+    return readStashList(allocator, io, cwd);
 }
 
 /// Pop: apply stash entry to working dir and remove from stack.
 pub fn pop(
     allocator: Allocator,
+    io: std.Io,
     store: *store_mod.ObjectStore,
-    cwd: std.fs.Dir,
+    cwd: std.Io.Dir,
     index: usize,
 ) !void {
-    var stash_list = try readStashList(allocator, cwd);
+    var stash_list = try readStashList(allocator, io, cwd);
     defer stash_list.deinit();
 
     if (index >= stash_list.entries.len) return error.StashIndexOutOfRange;
@@ -157,9 +159,9 @@ pub fn pop(
     if (commit_obj != .commit) return error.NotACommit;
 
     // Restore working dir to stash tree
-    var restore_dir = try cwd.openDir(".", .{ .iterate = true });
-    defer restore_dir.close();
-    try restore.restoreTree(allocator, store, commit_obj.commit.tree_hash, restore_dir, .{});
+    var restore_dir = try cwd.openDir(io, ".", .{ .iterate = true });
+    defer restore_dir.close(io);
+    try restore.restoreTree(allocator, io, store, commit_obj.commit.tree_hash, restore_dir, .{});
 
     // Remove entry from list, write back
     const new_len = stash_list.entries.len - 1;
@@ -180,12 +182,12 @@ pub fn pop(
         j += 1;
     }
 
-    try writeStashList(allocator, cwd, new_entries);
+    try writeStashList(allocator, io, cwd, new_entries);
 }
 
 /// Drop: remove stash entry without applying.
-pub fn drop(allocator: Allocator, cwd: std.fs.Dir, index: usize) !void {
-    var stash_list = try readStashList(allocator, cwd);
+pub fn drop(allocator: Allocator, io: std.Io, cwd: std.Io.Dir, index: usize) !void {
+    var stash_list = try readStashList(allocator, io, cwd);
     defer stash_list.deinit();
 
     if (index >= stash_list.entries.len) return error.StashIndexOutOfRange;
@@ -209,17 +211,18 @@ pub fn drop(allocator: Allocator, cwd: std.fs.Dir, index: usize) !void {
         j += 1;
     }
 
-    try writeStashList(allocator, cwd, new_entries);
+    try writeStashList(allocator, io, cwd, new_entries);
 }
 
 /// Show: diff stash tree vs parent tree.
 pub fn show(
     allocator: Allocator,
+    io: std.Io,
     store: *store_mod.ObjectStore,
-    cwd: std.fs.Dir,
+    cwd: std.Io.Dir,
     index: usize,
 ) !diff_mod.DiffResult {
-    var stash_list = try readStashList(allocator, cwd);
+    var stash_list = try readStashList(allocator, io, cwd);
     defer stash_list.deinit();
 
     if (index >= stash_list.entries.len) return error.StashIndexOutOfRange;
@@ -246,17 +249,17 @@ pub fn show(
 
 // -- Binary stash manifest read/write --
 
-fn readStashList(allocator: Allocator, cwd: std.fs.Dir) !StashList {
-    const file = cwd.openFile(stash_file, .{}) catch |err| switch (err) {
+fn readStashList(allocator: Allocator, io: std.Io, cwd: std.Io.Dir) !StashList {
+    const file = cwd.openFile(io, stash_file, .{}) catch |err| switch (err) {
         error.FileNotFound => return StashList{
             .entries = try allocator.alloc(StashEntry, 0),
             .allocator = allocator,
         },
         else => return err,
     };
-    defer file.close(std.testing.io);
+    defer file.close(io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     if (stat.size == 0) return StashList{
         .entries = try allocator.alloc(StashEntry, 0),
         .allocator = allocator,
@@ -265,7 +268,7 @@ fn readStashList(allocator: Allocator, cwd: std.fs.Dir) !StashList {
 
     const data = try allocator.alloc(u8, stat.size);
     defer allocator.free(data);
-    const read = try file.readAll(data);
+    const read = try file.readPositionalAll(io, data, 0);
     if (read != stat.size) return error.UnexpectedEof;
 
     return deserializeStashList(allocator, data[0..read]);
@@ -323,7 +326,7 @@ fn deserializeStashList(allocator: Allocator, data: []const u8) !StashList {
     };
 }
 
-fn writeStashList(allocator: Allocator, cwd: std.fs.Dir, entries: []const StashEntry) !void {
+fn writeStashList(allocator: Allocator, io: std.Io, cwd: std.Io.Dir, entries: []const StashEntry) !void {
     // Calculate total size
     var total_size: usize = 4 + 4; // magic + count
     for (entries) |entry| {
@@ -353,22 +356,21 @@ fn writeStashList(allocator: Allocator, cwd: std.fs.Dir, entries: []const StashE
         pos += entry.message.len;
     }
 
-    try writeAtomicFile(cwd, stash_file, data);
+    try writeAtomicFile(io, cwd, stash_file, data);
 }
 
-fn writeAtomicFile(dir: std.fs.Dir, path: []const u8, data: []const u8) !void {
-    var write_buffer: [4096]u8 = undefined;
-    var atomic_file = try dir.atomicFile(path, .{
-        .mode = std.fs.File.default_mode,
+fn writeAtomicFile(io: std.Io, dir: std.Io.Dir, path: []const u8, data: []const u8) !void {
+    var atomic_file = try dir.createFileAtomic(io, path, .{
         .make_path = true,
-        .write_buffer = &write_buffer,
+        .replace = true,
     });
-    defer atomic_file.deinit();
-
-    try atomic_file.file_writer.interface.writeAll(data);
-    try atomic_file.flush();
-    try atomic_file.file_writer.file.sync();
-    try atomic_file.renameIntoPlace();
+    defer atomic_file.deinit(io);
+    var write_buffer: [4096]u8 = undefined;
+    var file_writer = atomic_file.file.writer(io, &write_buffer);
+    try file_writer.interface.writeAll(data);
+    try file_writer.interface.flush();
+    try file_writer.file.sync(io);
+    try atomic_file.replace(io);
 }
 
 // -- Helper: set up a test repo with a store, refs, and an initial commit --
@@ -405,7 +407,7 @@ fn initTestRepo(_: Allocator) !struct {
 fn makeTestCommit(
     allocator: Allocator,
     store: *store_mod.ObjectStore,
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     file_name: []const u8,
     file_content: []const u8,
     message: []const u8,

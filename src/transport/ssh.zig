@@ -406,13 +406,15 @@ pub const SshOptions = struct {
 pub const SshTransport = struct {
     process: std.process.Child,
     allocator: Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: Allocator, user: ?[]const u8, host: []const u8, port: ?u16, path: []const u8) !SshTransport {
-        return initWithOptions(allocator, user, host, port, path, .{});
+    pub fn init(allocator: Allocator, io: std.Io, user: ?[]const u8, host: []const u8, port: ?u16, path: []const u8) !SshTransport {
+        return initWithOptions(allocator, io, user, host, port, path, .{});
     }
 
     pub fn initWithOptions(
         allocator: Allocator,
+        io: std.Io,
         user: ?[]const u8,
         host: []const u8,
         port: ?u16,
@@ -477,26 +479,27 @@ pub const SshTransport = struct {
         argv_buf[argc] = path;
         argc += 1;
 
-        var child = std.process.Child.init(argv_buf[0..argc], allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        try child.spawn();
+        const child = try std.process.spawn(io, .{
+            .argv = argv_buf[0..argc],
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        });
 
         var t: SshTransport = .{
             .process = child,
             .allocator = allocator,
+            .io = io,
         };
 
         // Perform OP_HELLO handshake before returning.
         // On any failure, tear down the child and surface the error.
         t.performClientHandshake() catch |err| {
             if (t.process.stdin) |*stdin| {
-                stdin.close();
+                stdin.close(io);
                 t.process.stdin = null;
             }
-            _ = t.process.wait() catch {};
+            _ = t.process.wait(io) catch {};
             return err;
         };
 
@@ -535,10 +538,10 @@ pub const SshTransport = struct {
     pub fn deinit(self: *SshTransport) void {
         self.sendRequest(OP_CLOSE, &.{}) catch {};
         if (self.process.stdin) |*stdin| {
-            stdin.close();
+            stdin.close(self.io);
             self.process.stdin = null;
         }
-        _ = self.process.wait() catch {};
+        _ = self.process.wait(self.io) catch {};
     }
 
     pub fn transport(self: *SshTransport) protocol.Transport {
@@ -558,16 +561,22 @@ pub const SshTransport = struct {
     fn sendRequest(self: *SshTransport, opcode: u8, payload: []const u8) !void {
         const stdin = self.process.stdin orelse return error.BrokenPipe;
         const header: [5]u8 = .{opcode} ++ std.mem.toBytes(std.mem.nativeToLittle(u32, @intCast(payload.len)));
-        try stdin.writeAll(&header);
+        try stdin.writeStreamingAll(self.io, &header);
         if (payload.len > 0) {
-            try stdin.writeAll(payload);
+            try stdin.writeStreamingAll(self.io, payload);
         }
     }
 
     fn readResponse(self: *SshTransport, allocator: Allocator) !Response {
         const stdout = self.process.stdout orelse return error.BrokenPipe;
         var header: [5]u8 = undefined;
-        const read = try stdout.readAll(&header);
+        var header_off: usize = 0;
+        while (header_off < header.len) {
+            const n = try stdout.readStreaming(self.io, &.{header[header_off..]});
+            if (n == 0) break;
+            header_off += n;
+        }
+        const read = header_off;
         if (read != 5) return error.UnexpectedEof;
         const status = header[0];
         const data_len = std.mem.littleToNative(u32, @bitCast(header[1..5].*));
@@ -576,7 +585,13 @@ pub const SshTransport = struct {
         const data = try allocator.alloc(u8, data_len);
         errdefer allocator.free(data);
         if (data_len > 0) {
-            const data_read = try stdout.readAll(data);
+            var data_off: usize = 0;
+        while (data_off < data.len) {
+            const n = try stdout.readStreaming(self.io, &.{data[data_off..]});
+            if (n == 0) break;
+            data_off += n;
+        }
+        const data_read = data_off;
             if (data_read != data_len) {
                 allocator.free(data);
                 return error.UnexpectedEof;

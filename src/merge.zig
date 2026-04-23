@@ -257,6 +257,11 @@ const MergeError = error{
     LinkQuotaExceeded,
     ReadOnlyFileSystem,
     RenameAcrossMountPoints,
+    Streaming,
+    Unseekable,
+    DirNotEmpty,
+    CrossDevice,
+    HardwareFailure,
     WriteFailed,
     // New in v1 (object prologue + Identity):
     InvalidMagic,
@@ -264,7 +269,7 @@ const MergeError = error{
     UnknownIdentityKind,
     InvalidIdentity,
     IdentityTooLarge,
-} || std.Io.File.OpenError || std.Io.File.WriteError || std.Io.File.ReadError || std.Io.Dir.OpenError;
+} || std.Io.File.OpenError || std.Io.File.Writer.Error || std.Io.File.Reader.Error || std.Io.Dir.OpenError;
 
 /// Recursive 3-pointer lockstep merge over sorted entry arrays.
 fn mergeEntriesRecursive(

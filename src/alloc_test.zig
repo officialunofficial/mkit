@@ -100,7 +100,7 @@ test "commit workflow no leaks" {
 
     // Init refs
     try work_tmp.dir.createDirPath(std.testing.io, ".mkit");
-    try refs.init(work_tmp.dir);
+    try refs.init(std.testing.io, work_tmp.dir);
 
     // Create some files
     const f1 = try work_tmp.dir.createFile(std.testing.io, "hello.txt", .{});
@@ -114,11 +114,11 @@ test "commit workflow no leaks" {
 
     // Build tree from working directory
     var d = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer d.close();
+    defer d.close(std.testing.io);
     const tree_hash = try worktree.buildTree(allocator, std.testing.io, &store, d);
 
     // Sign and store commit
-    const kp = sign.KeyPair.generate();
+    const kp = sign.KeyPair.generate(std.testing.io);
     const commit_hash = try createCommit(allocator, &store, tree_hash, &.{}, "initial commit", kp);
 
     // Update HEAD
@@ -191,7 +191,7 @@ test "status diff workflow no leaks" {
 
     // Build HEAD tree
     var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer d1.close();
+    defer d1.close(std.testing.io);
     const head_tree = try worktree.buildTree(allocator, std.testing.io, &store, d1);
 
     // Modify the file
@@ -206,7 +206,7 @@ test "status diff workflow no leaks" {
 
     // Compute status diff
     var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer d2.close();
+    defer d2.close(std.testing.io);
     var result = try diff_mod.statusDiff(allocator, &store, head_tree, d2);
     defer result.deinit();
 
@@ -316,7 +316,7 @@ test "packfile roundtrip no leaks" {
         .{ .name = "data.txt", .mode = .blob, .hash = blob_hash },
     });
 
-    const kp = sign.KeyPair.generate();
+    const kp = sign.KeyPair.generate(std.testing.io);
     const commit_hash = try createCommit(allocator, &src_store, tree_hash, &.{}, "pack test", kp);
 
     // Pack reachable objects
@@ -795,7 +795,7 @@ test "end-to-end workflow no leaks" {
     defer repo_tmp.cleanup();
     var store = try store_mod.ObjectStore.init(std.testing.io, repo_tmp.dir);
     defer store.close();
-    try refs.init(repo_tmp.dir);
+    try refs.init(std.testing.io, repo_tmp.dir);
 
     // Create work files
     var work_tmp = std.testing.tmpDir(.{});
@@ -811,10 +811,10 @@ test "end-to-end workflow no leaks" {
 
     // Build tree and commit
     var d1 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer d1.close();
+    defer d1.close(std.testing.io);
     const tree1 = try worktree.buildTree(allocator, std.testing.io, &store, d1);
 
-    const kp = sign.KeyPair.generate();
+    const kp = sign.KeyPair.generate(std.testing.io);
     const commit1 = try createCommit(allocator, &store, tree1, &.{}, "initial", kp);
     try refs.updateHead(allocator, repo_tmp.dir, commit1);
 
@@ -824,7 +824,7 @@ test "end-to-end workflow no leaks" {
     f3.close(std.testing.io);
 
     var d2 = try work_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer d2.close();
+    defer d2.close(std.testing.io);
     const tree2 = try worktree.buildTree(allocator, std.testing.io, &store, d2);
 
     const commit2 = try createCommit(allocator, &store, tree2, &.{commit1}, "bump version", kp);

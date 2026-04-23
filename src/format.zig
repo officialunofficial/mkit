@@ -24,10 +24,10 @@ pub fn formatObject(allocator: Allocator, obj: object.Object, obj_hash: hash_mod
 }
 
 /// Write formatted object to a file.
-pub fn printObject(file: std.fs.File, allocator: Allocator, obj: object.Object, obj_hash: hash_mod.Hash) !void {
+pub fn printObject(file: std.Io.File, io: std.Io, allocator: Allocator, obj: object.Object, obj_hash: hash_mod.Hash) !void {
     const formatted = try formatObject(allocator, obj, obj_hash);
     defer allocator.free(formatted);
-    try file.writeStreamingAll(std.testing.io, formatted);
+    try file.writeStreamingAll(io, formatted);
 }
 
 fn formatBlob(buf: *Buffer, allocator: Allocator, b: object.Blob) !void {

@@ -132,7 +132,7 @@ test "packfile roundtrip through memory transport" {
     // Unpack into a new store
     var tmp2 = testing.tmpDir(.{});
     defer tmp2.cleanup();
-    var store2 = try store_mod.ObjectStore.init(tmp2.dir);
+    var store2 = try store_mod.ObjectStore.init(std.testing.io, tmp2.dir);
     defer store2.close();
 
     try packfile.unpackInto(allocator, downloaded, &store2);
@@ -346,6 +346,7 @@ test "sparse restore filters files correctly" {
 
     try restore.restoreTree(
         allocator,
+        std.testing.io,
         &store,
         root_tree,
         output_dir,

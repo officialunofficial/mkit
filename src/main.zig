@@ -3,6 +3,17 @@ const std = @import("std");
 const mkit = @import("mkit");
 const build_options = @import("build_options");
 
+
+fn readExact(file: std.Io.File, io_cap: std.Io, buf: []u8) !usize {
+    var off: usize = 0;
+    while (off < buf.len) {
+        const n = file.readStreaming(io_cap, &.{buf[off..]}) catch |e| return e;
+        if (n == 0) break;
+        off += n;
+    }
+    return off;
+}
+
 /// Re-export the shared CLI surface constants through the mkit module.
 const cli = mkit.cli;
 const exit = mkit.exit;
@@ -275,21 +286,21 @@ fn cmdInit() !void {
     const stderr = std.Io.File.stderr();
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.init(cwd) catch |err| switch (err) {
+    var store = mkit.store.ObjectStore.init(io(), cwd) catch |err| switch (err) {
         error.AlreadyInitialized => {
             try stderr.writeStreamingAll(io(), "error: already a mkit repository\n");
             return;
         },
         else => return err,
     };
-    store.close(io());
+    store.close();
 
     // Initialize refs and HEAD
-    try mkit.refs.init(cwd);
+    try mkit.refs.init(io(), cwd);
 
     // Create default config (if it doesn't already exist)
     const config_path = ".mkit/config";
-    cwd.access(config_path, .{}) catch {
+    cwd.access(io(), config_path, .{}) catch {
         const cf = try cwd.createFile(io(), config_path, .{});
         defer cf.close(io());
         // user.identity intentionally unset — the CLI derives an Ed25519
@@ -316,18 +327,18 @@ fn cmdHash(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
     ensureCleanWorktree(allocator, &store, cwd) catch {
         try stderr.writeStreamingAll(io(), "error: merge would overwrite local changes; commit or stash them first\n");
         return;
     };
 
     const file_path = args[0];
-    const h = mkit.worktree.hashFile(allocator, &store, cwd, file_path) catch |err| {
+    const h = mkit.worktree.hashFile(allocator, io(), &store, cwd, file_path) catch |err| {
         try stderr.writeStreamingAll(io(), "error: cannot hash '");
         try stderr.writeStreamingAll(io(), file_path);
         try stderr.writeStreamingAll(io(), "': ");
@@ -353,11 +364,11 @@ fn cmdCat(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     const hash_str = args[0];
     const h = mkit.hash.fromHex(hash_str) catch {
@@ -380,7 +391,7 @@ fn cmdCat(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer obj.deinit(allocator);
 
-    try mkit.format.printObject(stdout, allocator, obj, h);
+    try mkit.format.printObject(stdout, io(), allocator, obj, h);
 }
 
 fn cmdTree(allocator: std.mem.Allocator) !void {
@@ -388,11 +399,11 @@ fn cmdTree(allocator: std.mem.Allocator) !void {
     const stderr = std.Io.File.stderr();
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     var work_dir = cwd.openDir(io(), ".", .{ .iterate = true }) catch {
         try stderr.writeStreamingAll(io(), "error: cannot open working directory\n");
@@ -400,7 +411,7 @@ fn cmdTree(allocator: std.mem.Allocator) !void {
     };
     defer work_dir.close(io());
 
-    const h = try mkit.worktree.buildTree(allocator, &store, work_dir);
+    const h = try mkit.worktree.buildTree(allocator, io(), &store, work_dir);
     const hex = mkit.hash.toHex(h);
     try stdout.writeStreamingAll(io(), &hex);
     try stdout.writeStreamingAll(io(), "\n");
@@ -417,13 +428,13 @@ fn cmdAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
-    var idx = try mkit.index.readIndex(allocator, cwd);
+    var idx = try mkit.index.readIndex(allocator, io(), cwd);
     defer idx.deinit();
 
     for (args) |arg| {
@@ -433,9 +444,9 @@ fn cmdAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 return;
             };
             defer work_dir.close(io());
-            try mkit.index.addAll(allocator, &store, work_dir, &idx);
+            try mkit.index.addAll(allocator, io(), &store, work_dir, &idx);
         } else {
-            mkit.index.addFile(allocator, &store, cwd, &idx, arg) catch |err| {
+            mkit.index.addFile(allocator, io(), &store, cwd, &idx, arg) catch |err| {
                 try stderr.writeStreamingAll(io(), "error: cannot stage '");
                 try stderr.writeStreamingAll(io(), arg);
                 try stderr.writeStreamingAll(io(), "': ");
@@ -448,7 +459,7 @@ fn cmdAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    try mkit.index.writeIndex(cwd, &idx);
+    try mkit.index.writeIndex(io(), cwd, &idx);
 
     // Print summary
     var buf: [64]u8 = undefined;
@@ -468,13 +479,13 @@ fn cmdRm(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    store.close(io());
+    store.close();
 
-    var idx = try mkit.index.readIndex(allocator, cwd);
+    var idx = try mkit.index.readIndex(allocator, io(), cwd);
     defer idx.deinit();
 
     for (args) |arg| {
@@ -484,7 +495,7 @@ fn cmdRm(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try stdout.writeStreamingAll(io(), "\n");
     }
 
-    try mkit.index.writeIndex(cwd, &idx);
+    try mkit.index.writeIndex(io(), cwd, &idx);
 }
 
 fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -502,11 +513,11 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     // Acquire .mkit/index.lock to serialize against any other mkit commit
     // / checkout / merge / rebase operating on this repo. See src/lock.zig.
@@ -515,7 +526,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     };
     defer mkit_dir.close(io());
-    var repo_lock = mkit.lock.acquireDefault(mkit_dir, "index.lock") catch |err| switch (err) {
+    var repo_lock = mkit.lock.acquireDefault(io(), mkit_dir, "index.lock") catch |err| switch (err) {
         error.LockBusy => {
             try stderr.writeStreamingAll(io(), "error: another mkit process is running in this repository (.mkit/index.lock held)\n");
             return;
@@ -569,11 +580,11 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     // Build tree: use index if it has staged entries, otherwise fall back to whole working dir
-    var idx = try mkit.index.readIndex(allocator, cwd);
+    var idx = try mkit.index.readIndex(allocator, io(), cwd);
     defer idx.deinit();
 
     // Get parent from HEAD
-    const parent_hash = try mkit.refs.resolveHead(allocator, cwd);
+    const parent_hash = try mkit.refs.resolveHead(allocator, io(), cwd);
     const head_tree = try resolveHeadTree(allocator, &store, cwd);
     const tree_hash = if (idx.entries.items.len > 0)
         mkit.index.buildCommitTreeFromIndex(allocator, &store, head_tree, &idx) catch |err| {
@@ -590,7 +601,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         };
         defer work_dir.close(io());
-        break :blk try mkit.worktree.buildTree(allocator, &store, work_dir);
+        break :blk try mkit.worktree.buildTree(allocator, io(), &store, work_dir);
     };
 
     var parents_buf: [1]mkit.hash.Hash = undefined;
@@ -635,13 +646,13 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const commit_hash = try store.put(allocator, commit_obj);
 
     // Update HEAD
-    try mkit.refs.updateHead(allocator, cwd, commit_hash);
+    try mkit.refs.updateHead(allocator, io(), cwd, commit_hash);
 
     // Clear the index after successful commit
     if (idx.entries.items.len > 0) {
         var empty_idx = mkit.index.Index.init(allocator);
         defer empty_idx.deinit();
-        mkit.index.writeIndex(cwd, &empty_idx) catch {};
+        mkit.index.writeIndex(io(), cwd, &empty_idx) catch {};
     }
 
     // Print result
@@ -652,7 +663,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try stdout.writeStreamingAll(io(), "root commit");
     } else {
         // Resolve current branch name from HEAD
-        const head = mkit.refs.readHead(allocator, cwd) catch null;
+        const head = mkit.refs.readHead(allocator, io(), cwd) catch null;
         if (head) |h| {
             switch (h) {
                 .branch => |branch| {
@@ -698,13 +709,13 @@ fn cmdLog(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
-    const head_hash = try mkit.refs.resolveHead(allocator, cwd);
+    const head_hash = try mkit.refs.resolveHead(allocator, io(), cwd);
     if (head_hash == null) {
         try stderr.writeStreamingAll(io(), "no commits yet\n");
         return;
@@ -826,7 +837,7 @@ fn cmdLog(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 defer allocator.free(formatted);
                 try stdout.writeStreamingAll(io(), formatted);
             } else {
-                try mkit.format.printObject(stdout, allocator, obj, h);
+                try mkit.format.printObject(stdout, io(), allocator, obj, h);
                 try stdout.writeStreamingAll(io(), "\n");
             }
 
@@ -852,13 +863,13 @@ fn cmdBlame(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const path = args[0];
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
-    const head_hash = try mkit.refs.resolveHead(allocator, cwd);
+    const head_hash = try mkit.refs.resolveHead(allocator, io(), cwd);
     if (head_hash == null) {
         try stderr.writeStreamingAll(io(), "no commits yet\n");
         return;
@@ -910,16 +921,16 @@ fn cmdBranch(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const stderr = std.Io.File.stderr();
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    store.close(io());
+    store.close();
 
     // mkit branch -d <name>
     if (args.len >= 2 and std.mem.eql(u8, args[0], "-d")) {
         const branch_name = args[1];
-        mkit.refs.deleteRefSafe(allocator, cwd, branch_name) catch |err| switch (err) {
+        mkit.refs.deleteRefSafe(allocator, io(), cwd, branch_name) catch |err| switch (err) {
             error.RefNotFound => {
                 try stderr.writeStreamingAll(io(), "error: branch '");
                 try stderr.writeStreamingAll(io(), branch_name);
@@ -943,20 +954,20 @@ fn cmdBranch(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // mkit branch <name> — create branch at HEAD
     if (args.len >= 1) {
         const branch_name = args[0];
-        const head_hash = try mkit.refs.resolveHead(allocator, cwd);
+        const head_hash = try mkit.refs.resolveHead(allocator, io(), cwd);
         if (head_hash == null) {
             try stderr.writeStreamingAll(io(), "error: no commits yet — cannot create branch\n");
             return;
         }
         // Check if branch already exists
-        const existing = try mkit.refs.readRef(allocator, cwd, branch_name);
+        const existing = try mkit.refs.readRef(allocator, io(), cwd, branch_name);
         if (existing != null) {
             try stderr.writeStreamingAll(io(), "error: branch '");
             try stderr.writeStreamingAll(io(), branch_name);
             try stderr.writeStreamingAll(io(), "' already exists\n");
             return;
         }
-        try mkit.refs.writeRef(cwd, branch_name, head_hash.?);
+        try mkit.refs.writeRef(io(), cwd, branch_name, head_hash.?);
         const hex = mkit.hash.toHex(head_hash.?);
         try stdout.writeStreamingAll(io(), "created branch ");
         try stdout.writeStreamingAll(io(), branch_name);
@@ -968,7 +979,7 @@ fn cmdBranch(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // mkit branch — list branches
     const current_branch: ?[]const u8 = blk: {
-        const head = mkit.refs.readHead(allocator, cwd) catch break :blk null;
+        const head = mkit.refs.readHead(allocator, io(), cwd) catch break :blk null;
         switch (head) {
             .branch => |b| break :blk b,
             .detached => break :blk null,
@@ -976,7 +987,7 @@ fn cmdBranch(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer if (current_branch) |b| allocator.free(b);
 
-    const ref_list = try mkit.refs.listRefs(allocator, cwd);
+    const ref_list = try mkit.refs.listRefs(allocator, io(), cwd);
     defer {
         for (ref_list) |ref| {
             allocator.free(ref.name);
@@ -1035,11 +1046,11 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     // Serialize against other commit/checkout/merge/rebase. See src/lock.zig.
     var mkit_dir = cwd.openDir(io(), ".mkit", .{}) catch {
@@ -1047,7 +1058,7 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     };
     defer mkit_dir.close(io());
-    var repo_lock = mkit.lock.acquireDefault(mkit_dir, "index.lock") catch |err| switch (err) {
+    var repo_lock = mkit.lock.acquireDefault(io(), mkit_dir, "index.lock") catch |err| switch (err) {
         error.LockBusy => {
             try stderr.writeStreamingAll(io(), "error: another mkit process is running in this repository (.mkit/index.lock held)\n");
             return;
@@ -1061,7 +1072,7 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try stderr.writeStreamingAll(io(), "error: invalid branch name\n");
         return;
     }
-    const branch_hash = try mkit.refs.readRef(allocator, cwd, branch_name);
+    const branch_hash = try mkit.refs.readRef(allocator, io(), cwd, branch_name);
     if (branch_hash == null) {
         try stderr.writeStreamingAll(io(), "error: branch '");
         try stderr.writeStreamingAll(io(), branch_name);
@@ -1074,7 +1085,7 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     // Load sparse checkout patterns
-    const sparse = mkit.restore.loadSparseCheckout(allocator, cwd) catch null;
+    const sparse = mkit.restore.loadSparseCheckout(allocator, io(), cwd) catch null;
     defer if (sparse) |s| mkit.restore.freeSparsePatterns(allocator, s);
 
     // Restore working directory from the branch's commit tree
@@ -1095,7 +1106,7 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 return;
             };
             defer work_dir.close(io());
-            mkit.restore.restoreTree(allocator, &store, commit_obj.commit.tree_hash, work_dir, .{
+            mkit.restore.restoreTree(allocator, io(), &store, commit_obj.commit.tree_hash, work_dir, .{
                 .sparse_patterns = sparse,
             }) catch |err| {
                 var buf2: [256]u8 = undefined;
@@ -1108,7 +1119,7 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    try mkit.refs.writeHeadBranch(cwd, branch_name);
+    try mkit.refs.writeHeadBranch(io(), cwd, branch_name);
 
     try stdout.writeStreamingAll(io(), "switched to branch '");
     try stdout.writeStreamingAll(io(), branch_name);
@@ -1130,7 +1141,7 @@ fn printDiffEntries(stdout: std.Io.File, entries: []const mkit.diff.DiffEntry) !
 }
 
 fn resolveHeadTree(allocator: std.mem.Allocator, store: *mkit.store.ObjectStore, cwd: std.Io.Dir) !?mkit.hash.Hash {
-    const head_hash = try mkit.refs.resolveHead(allocator, cwd);
+    const head_hash = try mkit.refs.resolveHead(allocator, io(), cwd);
     if (head_hash) |hh| {
         var obj = try store.get(allocator, hh);
         defer obj.deinit(allocator);
@@ -1144,16 +1155,16 @@ fn cmdStatus(allocator: std.mem.Allocator) !void {
     const stderr = std.Io.File.stderr();
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     const head_tree = try resolveHeadTree(allocator, &store, cwd);
 
     // Check if we have a staging index
-    var idx = try mkit.index.readIndex(allocator, cwd);
+    var idx = try mkit.index.readIndex(allocator, io(), cwd);
     defer idx.deinit();
 
     var has_output = false;
@@ -1205,7 +1216,7 @@ fn cmdStatus(allocator: std.mem.Allocator) !void {
     };
     defer work_dir.close(io());
 
-    var result = try mkit.diff.statusDiff(allocator, &store, head_tree, work_dir);
+    var result = try mkit.diff.statusDiff(allocator, io(), &store, head_tree, work_dir);
     defer result.deinit();
 
     if (result.entries.len > 0) {
@@ -1242,11 +1253,11 @@ fn cmdDiff(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const stderr = std.Io.File.stderr();
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     if (args.len == 2) {
         // mkit diff <hash1> <hash2> — diff two trees
@@ -1295,7 +1306,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: []const []const u8) !void {
         };
         defer work_dir.close(io());
 
-        var result = try mkit.diff.statusDiff(allocator, &store, head_tree, work_dir);
+        var result = try mkit.diff.statusDiff(allocator, io(), &store, head_tree, work_dir);
         defer result.deinit();
 
         if (result.entries.len == 0) {
@@ -1396,7 +1407,7 @@ fn openTransport(allocator: std.mem.Allocator, config: mkit.config.Config) !Open
             }
 
             const ft = try allocator.create(mkit.transport_file.FileTransport);
-            ft.* = mkit.transport_file.FileTransport.init(allocator, path) catch |err| {
+            ft.* = mkit.transport_file.FileTransport.init(allocator, io(), path) catch |err| {
                 allocator.destroy(ft);
                 return err;
             };
@@ -1423,7 +1434,7 @@ fn openTransport(allocator: std.mem.Allocator, config: mkit.config.Config) !Open
             }
 
             const s3 = try allocator.create(mkit.transport_s3.S3Transport);
-            s3.* = mkit.transport_s3.S3Transport.init(allocator, .{
+            s3.* = mkit.transport_s3.S3Transport.init(allocator, io(), .{
                 .endpoint = env_cfg.endpoint,
                 .bucket = env_cfg.bucket,
                 .access_key_id = env_cfg.access_key_id,
@@ -1445,7 +1456,7 @@ fn openTransport(allocator: std.mem.Allocator, config: mkit.config.Config) !Open
             const api_token: ?[]const u8 = mkit.term.posixGetenv("MKIT_API_TOKEN");
 
             const ht = try allocator.create(mkit.transport_http.HttpTransport);
-            ht.* = mkit.transport_http.HttpTransport.init(allocator, base_url, api_token);
+            ht.* = mkit.transport_http.HttpTransport.init(allocator, io(), base_url, api_token);
             return .{
                 .transport = ht.transport(),
                 .backing = .{ .http = ht },
@@ -1467,6 +1478,7 @@ fn openTransport(allocator: std.mem.Allocator, config: mkit.config.Config) !Open
             };
             st.* = mkit.transport_ssh.SshTransport.initWithOptions(
                 allocator,
+                io(),
                 ssh_url.user,
                 ssh_url.host,
                 ssh_url.port,
@@ -1490,15 +1502,15 @@ fn cmdStash(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const stderr = std.Io.File.stderr();
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     if (args.len == 0) {
         // Default: save with "WIP" message
-        mkit.stash.save(allocator, &store, cwd, "WIP") catch |err| {
+        mkit.stash.save(allocator, &store, io(), cwd, "WIP") catch |err| {
             try writeStashError(stderr, "save", err);
             return;
         };
@@ -1518,13 +1530,13 @@ fn cmdStash(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 i += 1;
             }
         }
-        mkit.stash.save(allocator, &store, cwd, message) catch |err| {
+        mkit.stash.save(allocator, &store, io(), cwd, message) catch |err| {
             try writeStashError(stderr, "save", err);
             return;
         };
         try stdout.writeStreamingAll(io(), "saved working directory to stash\n");
     } else if (std.mem.eql(u8, subcmd, "list")) {
-        var stash_list = mkit.stash.list(allocator, cwd) catch |err| {
+        var stash_list = mkit.stash.list(allocator, io(), cwd) catch |err| {
             try writeStashError(stderr, "list", err);
             return;
         };
@@ -1547,21 +1559,21 @@ fn cmdStash(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     } else if (std.mem.eql(u8, subcmd, "pop")) {
         const idx = if (args.len > 1) parseStashIndex(args[1]) else 0;
-        mkit.stash.pop(allocator, &store, cwd, idx) catch |err| {
+        mkit.stash.pop(allocator, io(), &store, cwd, idx) catch |err| {
             try writeStashError(stderr, "pop", err);
             return;
         };
         try stdout.writeStreamingAll(io(), "applied and dropped stash entry\n");
     } else if (std.mem.eql(u8, subcmd, "drop")) {
         const idx = if (args.len > 1) parseStashIndex(args[1]) else 0;
-        mkit.stash.drop(allocator, cwd, idx) catch |err| {
+        mkit.stash.drop(allocator, io(), cwd, idx) catch |err| {
             try writeStashError(stderr, "drop", err);
             return;
         };
         try stdout.writeStreamingAll(io(), "dropped stash entry\n");
     } else if (std.mem.eql(u8, subcmd, "show")) {
         const idx = if (args.len > 1) parseStashIndex(args[1]) else 0;
-        var diff_result = mkit.stash.show(allocator, &store, cwd, idx) catch |err| {
+        var diff_result = mkit.stash.show(allocator, io(), &store, cwd, idx) catch |err| {
             try writeStashError(stderr, "show", err);
             return;
         };
@@ -1603,7 +1615,7 @@ fn writeStashError(stderr: std.Io.File, operation: []const u8, err: anyerror) !v
 }
 
 fn readRepoConfig(allocator: std.mem.Allocator, cwd: std.Io.Dir) !mkit.config.Config {
-    return mkit.config.readConfig(allocator, cwd) catch mkit.config.Config{};
+    return mkit.config.readConfig(allocator, io(), cwd) catch mkit.config.Config{};
 }
 
 fn loadSigningKey(
@@ -1669,7 +1681,7 @@ fn ensureCleanWorktree(
     var work_dir = try cwd.openDir(io(), ".", .{ .iterate = true });
     defer work_dir.close(io());
 
-    var diff = try mkit.diff.statusDiff(allocator, store, head_tree, work_dir);
+    var diff = try mkit.diff.statusDiff(allocator, io(), store, head_tree, work_dir);
     defer diff.deinit();
     if (diff.entries.len > 0) return error.DirtyWorktree;
 }
@@ -1679,7 +1691,7 @@ fn ensureDirectoryEmpty(dir: std.Io.Dir) !void {
     var iterable = dir.openDir(io(), ".", .{ .iterate = true }) catch return error.DirectoryNotEmpty;
     defer iterable.close(io());
     var iter = iterable.iterate();
-    while (try iter.next()) |_| {
+    while (try iter.next(io())) |_| {
         return error.DirectoryNotEmpty;
     }
 }
@@ -1703,16 +1715,16 @@ fn cmdTag(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const stderr = std.Io.File.stderr();
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    store.close(io());
+    store.close();
 
     // mkit tag -d <name>
     if (args.len >= 2 and std.mem.eql(u8, args[0], "-d")) {
         const tag_name = args[1];
-        mkit.refs.deleteTag(cwd, tag_name) catch |err| switch (err) {
+        mkit.refs.deleteTag(io(), cwd, tag_name) catch |err| switch (err) {
             error.TagNotFound => {
                 try stderr.writeStreamingAll(io(), "error: tag '");
                 try stderr.writeStreamingAll(io(), tag_name);
@@ -1738,14 +1750,14 @@ fn cmdTag(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         };
         // Check if tag already exists
-        const existing = try mkit.refs.readTag(allocator, cwd, tag_name);
+        const existing = try mkit.refs.readTag(allocator, io(), cwd, tag_name);
         if (existing != null) {
             try stderr.writeStreamingAll(io(), "error: tag '");
             try stderr.writeStreamingAll(io(), tag_name);
             try stderr.writeStreamingAll(io(), "' already exists\n");
             return;
         }
-        try mkit.refs.writeTag(cwd, tag_name, h);
+        try mkit.refs.writeTag(io(), cwd, tag_name, h);
         const hex = mkit.hash.toHex(h);
         try stdout.writeStreamingAll(io(), "created tag ");
         try stdout.writeStreamingAll(io(), tag_name);
@@ -1758,20 +1770,20 @@ fn cmdTag(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // mkit tag <name> — create tag at HEAD
     if (args.len == 1) {
         const tag_name = args[0];
-        const head_hash = try mkit.refs.resolveHead(allocator, cwd);
+        const head_hash = try mkit.refs.resolveHead(allocator, io(), cwd);
         if (head_hash == null) {
             try stderr.writeStreamingAll(io(), "error: no commits yet — cannot create tag\n");
             return;
         }
         // Check if tag already exists
-        const existing = try mkit.refs.readTag(allocator, cwd, tag_name);
+        const existing = try mkit.refs.readTag(allocator, io(), cwd, tag_name);
         if (existing != null) {
             try stderr.writeStreamingAll(io(), "error: tag '");
             try stderr.writeStreamingAll(io(), tag_name);
             try stderr.writeStreamingAll(io(), "' already exists\n");
             return;
         }
-        try mkit.refs.writeTag(cwd, tag_name, head_hash.?);
+        try mkit.refs.writeTag(io(), cwd, tag_name, head_hash.?);
         const hex = mkit.hash.toHex(head_hash.?);
         try stdout.writeStreamingAll(io(), "created tag ");
         try stdout.writeStreamingAll(io(), tag_name);
@@ -1782,7 +1794,7 @@ fn cmdTag(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // mkit tag — list tags
-    const tag_list = try mkit.refs.listTags(allocator, cwd);
+    const tag_list = try mkit.refs.listTags(allocator, io(), cwd);
     defer {
         for (tag_list) |t| {
             allocator.free(t.name);
@@ -1812,18 +1824,18 @@ fn cmdConfig(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const stderr = std.Io.File.stderr();
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    store.close(io());
+    store.close();
 
     // mkit config <key> <value> — set value
     if (args.len >= 2) {
         const key = args[0];
         const value = args[1];
 
-        var config = try mkit.config.readConfig(allocator, cwd);
+        var config = try mkit.config.readConfig(allocator, io(), cwd);
         defer config.deinit();
 
         if (std.mem.eql(u8, key, "author_mid")) {
@@ -1926,7 +1938,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         }
 
-        try mkit.config.writeConfig(cwd, config);
+        try mkit.config.writeConfig(io(), cwd, config);
         try stdout.writeStreamingAll(io(), key);
         try stdout.writeStreamingAll(io(), " = ");
         try stdout.writeStreamingAll(io(), value);
@@ -1935,7 +1947,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // mkit config — show all config
-    var config = try mkit.config.readConfig(allocator, cwd);
+    var config = try mkit.config.readConfig(allocator, io(), cwd);
     defer config.deinit();
 
     try stdout.writeStreamingAll(io(), "user.identity = ");
@@ -1983,24 +1995,24 @@ fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const cwd = std.Io.Dir.cwd();
 
-    var config = mkit.config.readConfig(allocator, cwd) catch mkit.config.Config{};
+    var config = mkit.config.readConfig(allocator, io(), cwd) catch mkit.config.Config{};
     defer config.deinit();
 
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     // Resolve HEAD to a commit
-    const head_hash = try mkit.refs.resolveHead(allocator, cwd);
+    const head_hash = try mkit.refs.resolveHead(allocator, io(), cwd);
     if (head_hash == null) {
         try stderr.writeStreamingAll(io(), "error: no commits yet — nothing to push\n");
         return;
     }
     const tip_hash = head_hash.?;
 
-    const head = mkit.refs.readHead(allocator, cwd) catch null;
+    const head = mkit.refs.readHead(allocator, io(), cwd) catch null;
     var ref_name_buf: [256]u8 = undefined;
     var ref_name: []const u8 = "refs/heads/main";
     if (head) |h| {
@@ -2196,11 +2208,11 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     // Serialize against other commit/checkout/merge/rebase. See src/lock.zig.
     var mkit_dir = cwd.openDir(io(), ".mkit", .{}) catch {
@@ -2208,7 +2220,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     };
     defer mkit_dir.close(io());
-    var repo_lock = mkit.lock.acquireDefault(mkit_dir, "index.lock") catch |err| switch (err) {
+    var repo_lock = mkit.lock.acquireDefault(io(), mkit_dir, "index.lock") catch |err| switch (err) {
         error.LockBusy => {
             try stderr.writeStreamingAll(io(), "error: another mkit process is running in this repository (.mkit/index.lock held)\n");
             return;
@@ -2220,13 +2232,13 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const branch_name = args[0];
 
     // Resolve HEAD (ours)
-    const ours_hash = try mkit.refs.resolveHead(allocator, cwd) orelse {
+    const ours_hash = try mkit.refs.resolveHead(allocator, io(), cwd) orelse {
         try stderr.writeStreamingAll(io(), "error: no commits on current branch\n");
         return;
     };
 
     // Resolve target branch (theirs)
-    const theirs_hash = (try mkit.refs.readRef(allocator, cwd, branch_name)) orelse {
+    const theirs_hash = (try mkit.refs.readRef(allocator, io(), cwd, branch_name)) orelse {
         try stderr.writeStreamingAll(io(), "error: branch '");
         try stderr.writeStreamingAll(io(), branch_name);
         try stderr.writeStreamingAll(io(), "' not found\n");
@@ -2262,13 +2274,13 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
                     return;
                 };
                 defer work_dir.close(io());
-                mkit.restore.restoreTree(allocator, &store, theirs_obj.commit.tree_hash, work_dir, .{}) catch {
+                mkit.restore.restoreTree(allocator, io(), &store, theirs_obj.commit.tree_hash, work_dir, .{}) catch {
                     try stderr.writeStreamingAll(io(), "error: failed to restore working directory\n");
                     return;
                 };
             }
 
-            try mkit.refs.updateHead(allocator, cwd, theirs_hash);
+            try mkit.refs.updateHead(allocator, io(), cwd, theirs_hash);
 
             const hex = mkit.hash.toHex(theirs_hash);
             try stdout.writeStreamingAll(io(), "fast-forward ");
@@ -2395,7 +2407,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         };
         defer work_dir.close(io());
-        mkit.restore.restoreTree(allocator, &store, result.tree_hash, work_dir, .{}) catch |err| {
+        mkit.restore.restoreTree(allocator, io(), &store, result.tree_hash, work_dir, .{}) catch |err| {
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
             try stderr.writeStreamingAll(io(), "error: could not restore merged working tree: ");
@@ -2406,7 +2418,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // Update HEAD after restore succeeds
-    try mkit.refs.updateHead(allocator, cwd, commit_hash);
+    try mkit.refs.updateHead(allocator, io(), cwd, commit_hash);
 
     const hex = mkit.hash.toHex(commit_hash);
     try stdout.writeStreamingAll(io(), "merged '");
@@ -2423,13 +2435,13 @@ fn cmdKeygen() !void {
 
     const cwd = std.Io.Dir.cwd();
 
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    store.close(io());
+    store.close();
 
-    cwd.makeDir(io(), ".mkit/keys") catch |err| switch (err) {
+    cwd.createDirPath(io(), ".mkit/keys") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -2438,12 +2450,12 @@ fn cmdKeygen() !void {
     {
         var d = cwd.openDir(io(), ".mkit/keys", .{}) catch null;
         if (d) |*dir| {
-            std.posix.fchmod(dir.fd, 0o700) catch {};
+            _ = std.c.fchmod(dir.handle, 0o700);
             dir.close(io());
         }
     }
 
-    const kp = mkit.sign.KeyPair.generate();
+    const kp = mkit.sign.KeyPair.generate(io());
 
     const key_path = ".mkit/keys/default.key";
     if (cwd.openFile(io(), key_path, .{})) |f| {
@@ -2453,7 +2465,7 @@ fn cmdKeygen() !void {
         return;
     } else |_| {}
 
-    const file = try cwd.createFile(io(), key_path, .{ .mode = 0o600 });
+    const file = try cwd.createFile(io(), key_path, .{ .permissions = @enumFromInt(0o600) });
     defer file.close(io());
     try file.writeStreamingAll(io(), &kp.seed);
 
@@ -2475,11 +2487,11 @@ fn cmdVerify(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     const hash_str = args[0];
     const h = mkit.hash.fromHex(hash_str) catch {
@@ -2565,11 +2577,11 @@ fn cmdRemote(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const cwd = std.Io.Dir.cwd();
 
     // Verify we're in a mkit repo
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    store.close(io());
+    store.close();
 
     // `mkit remote set <url>` and `mkit remote add <url>` are aliases —
     // both run the URL through the strict `mkit+<scheme>://` validator
@@ -2596,7 +2608,7 @@ fn cmdRemote(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         };
 
-        var config = try mkit.config.readConfig(allocator, cwd);
+        var config = try mkit.config.readConfig(allocator, io(), cwd);
         defer config.deinit();
 
         // Free old values if heap-allocated
@@ -2642,7 +2654,7 @@ fn cmdRemote(allocator: std.mem.Allocator, args: []const []const u8) !void {
             },
         }
 
-        try mkit.config.writeConfig(cwd, config);
+        try mkit.config.writeConfig(io(), cwd, config);
 
         try stdout.writeStreamingAll(io(), "remote ");
         try stdout.writeStreamingAll(io(), args[0]);
@@ -2662,7 +2674,7 @@ fn cmdRemote(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     } else if (args.len == 0) {
         // mkit remote — show current config
-        var config = try mkit.config.readConfig(allocator, cwd);
+        var config = try mkit.config.readConfig(allocator, io(), cwd);
         defer config.deinit();
 
         if (config.remote_endpoint.len == 0) {
@@ -2696,14 +2708,14 @@ fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
 
     const cwd = std.Io.Dir.cwd();
 
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     // Read remote config
-    var config = try mkit.config.readConfig(allocator, cwd);
+    var config = try mkit.config.readConfig(allocator, io(), cwd);
     defer config.deinit();
 
     if (config.remote_endpoint.len == 0) {
@@ -2712,7 +2724,7 @@ fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
     }
 
     // Get current branch
-    const head = mkit.refs.readHead(allocator, cwd) catch {
+    const head = mkit.refs.readHead(allocator, io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: cannot read HEAD\n");
         return;
     };
@@ -2765,7 +2777,7 @@ fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
     };
 
     // 2. Check if already up to date
-    const local_hash = try mkit.refs.readRef(allocator, cwd, branch_name);
+    const local_hash = try mkit.refs.readRef(allocator, io(), cwd, branch_name);
     if (local_hash) |lh| {
         if (std.mem.eql(u8, &lh, &remote_hash)) {
             try stdout.writeStreamingAll(io(), "already up to date\n");
@@ -2849,7 +2861,7 @@ fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
             return;
         };
         defer work_dir.close(io());
-        mkit.restore.restoreTree(allocator, &store, commit_obj.commit.tree_hash, work_dir, .{}) catch |err| {
+        mkit.restore.restoreTree(allocator, io(), &store, commit_obj.commit.tree_hash, work_dir, .{}) catch |err| {
             try stderr.writeStreamingAll(io(), "error: failed to restore working directory: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
@@ -2861,7 +2873,7 @@ fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
     }
 
     // 7. Update local ref only after restore succeeds
-    mkit.refs.writeRef(cwd, branch_name, remote_hash) catch |err| {
+    mkit.refs.writeRef(io(), cwd, branch_name, remote_hash) catch |err| {
         try stderr.writeStreamingAll(io(), "error: failed to update local ref: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
@@ -3028,7 +3040,7 @@ fn cloneWithConfig(
         try stderr.writeStreamingAll(io(), "error: clone target directory must be empty\n");
         return;
     };
-    var store = mkit.store.ObjectStore.init(cwd) catch |err| switch (err) {
+    var store = mkit.store.ObjectStore.init(io(), cwd) catch |err| switch (err) {
         error.AlreadyInitialized => {
             try stderr.writeStreamingAll(io(), "error: already a mkit repository\n");
             return;
@@ -3036,9 +3048,9 @@ fn cloneWithConfig(
         else => return err,
     };
     // Keep store open for unpacking
-    defer store.close(io());
+    defer store.close();
 
-    try mkit.refs.init(cwd);
+    try mkit.refs.init(io(), cwd);
 
     // Save remote config
     var config = mkit.config.Config{};
@@ -3051,7 +3063,7 @@ fn cloneWithConfig(
         mkit.config.default_remote_type;
     defer config.deinit();
 
-    try mkit.config.writeConfig(cwd, config);
+    try mkit.config.writeConfig(io(), cwd, config);
 
     try stdout.writeStreamingAll(io(), "initialized mkit repository\n");
     try stdout.writeStreamingAll(io(), "remote: ");
@@ -3110,7 +3122,7 @@ fn cloneWithConfig(
         ensureCommitExists(allocator, &store, ref.hash) catch continue;
 
         // Set local ref
-        mkit.refs.writeRef(cwd, ref.name, ref.hash) catch continue;
+        mkit.refs.writeRef(io(), cwd, ref.name, ref.hash) catch continue;
 
         try stdout.writeStreamingAll(io(), "  fetched ");
         try stdout.writeStreamingAll(io(), ref.name);
@@ -3131,7 +3143,7 @@ fn cloneWithConfig(
 
     // Write sparse checkout patterns if specified
     if (params.sparse_patterns) |patterns| {
-        mkit.restore.writeSparseCheckout(cwd, patterns) catch |err| {
+        mkit.restore.writeSparseCheckout(io(), cwd, patterns) catch |err| {
             try stderr.writeStreamingAll(io(), "warning: failed to write sparse checkout: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
@@ -3142,25 +3154,25 @@ fn cloneWithConfig(
 
     // Checkout default branch
     if (default_branch) |db| {
-        try mkit.refs.writeHeadBranch(cwd, db);
+        try mkit.refs.writeHeadBranch(io(), cwd, db);
 
         // Write shallow boundaries if --depth was specified
         if (params.depth) |d| {
-            if (mkit.refs.readRef(allocator, cwd, db) catch null) |tip_hash| {
+            if (mkit.refs.readRef(allocator, io(), cwd, db) catch null) |tip_hash| {
                 const boundaries = mkit.packfile.collectShallowBoundaries(allocator, &store, tip_hash, d) catch null;
                 if (boundaries) |b| {
                     defer allocator.free(b);
-                    mkit.refs.writeShallowBoundaries(cwd, b) catch {};
+                    mkit.refs.writeShallowBoundaries(io(), cwd, b) catch {};
                 }
             }
         }
 
         // Load sparse checkout patterns for restore
-        const sparse = mkit.restore.loadSparseCheckout(allocator, cwd) catch null;
+        const sparse = mkit.restore.loadSparseCheckout(allocator, io(), cwd) catch null;
         defer if (sparse) |s| mkit.restore.freeSparsePatterns(allocator, s);
 
         // Restore working directory
-        if (mkit.refs.readRef(allocator, cwd, db) catch null) |tip_hash| {
+        if (mkit.refs.readRef(allocator, io(), cwd, db) catch null) |tip_hash| {
             var commit_obj = store.get(allocator, tip_hash) catch {
                 return;
             };
@@ -3169,7 +3181,7 @@ fn cloneWithConfig(
             if (commit_obj == .commit) {
                 var work_dir = cwd.openDir(io(), ".", .{ .iterate = true }) catch return;
                 defer work_dir.close(io());
-                mkit.restore.restoreTree(allocator, &store, commit_obj.commit.tree_hash, work_dir, .{
+                mkit.restore.restoreTree(allocator, io(), &store, commit_obj.commit.tree_hash, work_dir, .{
                     .sparse_patterns = sparse,
                 }) catch |err| {
                     try stderr.writeStreamingAll(io(), "warning: failed to restore working directory: ");
@@ -3192,13 +3204,13 @@ fn cmdFetch(allocator: std.mem.Allocator) !void {
     const stderr = std.Io.File.stderr();
     const cwd = std.Io.Dir.cwd();
 
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
-    var config = try mkit.config.readConfig(allocator, cwd);
+    var config = try mkit.config.readConfig(allocator, io(), cwd);
     defer config.deinit();
 
     if (config.remote_endpoint.len == 0) {
@@ -3213,7 +3225,7 @@ fn cmdFetch(allocator: std.mem.Allocator) !void {
     defer transport_handle.deinit();
     const t = transport_handle.transport;
 
-    const head = mkit.refs.readHead(allocator, cwd) catch {
+    const head = mkit.refs.readHead(allocator, io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: cannot read HEAD\n");
         return;
     };
@@ -3281,11 +3293,11 @@ fn cmdFetch(allocator: std.mem.Allocator) !void {
     }
 
     // Write remote-tracking ref
-    cwd.makeDir(io(), ".mkit/refs/remotes") catch |err| switch (err) {
+    cwd.createDirPath(io(), ".mkit/refs/remotes") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    cwd.makeDir(io(), ".mkit/refs/remotes/origin") catch |err| switch (err) {
+    cwd.createDirPath(io(), ".mkit/refs/remotes/origin") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -3309,14 +3321,14 @@ fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     // Resolve HEAD
-    const head_hash = try mkit.refs.resolveHead(allocator, cwd) orelse {
+    const head_hash = try mkit.refs.resolveHead(allocator, io(), cwd) orelse {
         try stderr.writeStreamingAll(io(), "error: no commits on current branch\n");
         return;
     };
@@ -3425,7 +3437,7 @@ fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         };
         defer work_dir.close(io());
-        mkit.restore.restoreTree(allocator, &store, result.tree_hash, work_dir, .{}) catch |err| {
+        mkit.restore.restoreTree(allocator, io(), &store, result.tree_hash, work_dir, .{}) catch |err| {
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
             try stderr.writeStreamingAll(io(), "error: could not restore working tree: ");
@@ -3436,7 +3448,7 @@ fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // Update HEAD
-    try mkit.refs.updateHead(allocator, cwd, commit_hash);
+    try mkit.refs.updateHead(allocator, io(), cwd, commit_hash);
 
     const hex = mkit.hash.toHex(commit_hash);
     try stdout.writeStreamingAll(io(), "[cherry-pick] ");
@@ -3456,11 +3468,11 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     // Serialize against other commit/checkout/merge/rebase. See src/lock.zig.
     var mkit_dir = cwd.openDir(io(), ".mkit", .{}) catch {
@@ -3468,7 +3480,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     };
     defer mkit_dir.close(io());
-    var repo_lock = mkit.lock.acquireDefault(mkit_dir, "index.lock") catch |err| switch (err) {
+    var repo_lock = mkit.lock.acquireDefault(io(), mkit_dir, "index.lock") catch |err| switch (err) {
         error.LockBusy => {
             try stderr.writeStreamingAll(io(), "error: another mkit process is running in this repository (.mkit/index.lock held)\n");
             return;
@@ -3479,7 +3491,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     if (std.mem.eql(u8, args[0], "--abort")) {
         // Abort: restore original HEAD and clean up
-        var state = mkit.rebase.readState(allocator, cwd) catch |err| {
+        var state = mkit.rebase.readState(allocator, io(), cwd) catch |err| {
             if (err == error.NoRebaseInProgress) {
                 try stderr.writeStreamingAll(io(), "error: no rebase in progress\n");
                 return;
@@ -3490,13 +3502,13 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer state.deinit();
 
         // Restore original HEAD (update branch ref and HEAD)
-        mkit.refs.writeRef(cwd, state.head_name, state.orig_head) catch {};
-        mkit.refs.writeHeadBranch(cwd, state.head_name) catch {};
+        mkit.refs.writeRef(io(), cwd, state.head_name, state.orig_head) catch {};
+        mkit.refs.writeHeadBranch(io(), cwd, state.head_name) catch {};
 
         // Restore working tree
         var orig_obj = store.get(allocator, state.orig_head) catch {
             try stderr.writeStreamingAll(io(), "warning: could not read original commit\n");
-            try mkit.rebase.cleanupRebase(cwd);
+            try mkit.rebase.cleanupRebase(io(), cwd);
             try stdout.writeStreamingAll(io(), "rebase aborted\n");
             return;
         };
@@ -3505,22 +3517,22 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (orig_obj == .commit) {
             var work_dir = cwd.openDir(io(), ".", .{ .iterate = true }) catch {
                 try stderr.writeStreamingAll(io(), "warning: could not open working directory for restore\n");
-                try mkit.rebase.cleanupRebase(cwd);
+                try mkit.rebase.cleanupRebase(io(), cwd);
                 try stdout.writeStreamingAll(io(), "rebase aborted\n");
                 return;
             };
             defer work_dir.close(io());
-            mkit.restore.restoreTree(allocator, &store, orig_obj.commit.tree_hash, work_dir, .{}) catch {};
+            mkit.restore.restoreTree(allocator, io(), &store, orig_obj.commit.tree_hash, work_dir, .{}) catch {};
         }
 
-        try mkit.rebase.cleanupRebase(cwd);
+        try mkit.rebase.cleanupRebase(io(), cwd);
         try stdout.writeStreamingAll(io(), "rebase aborted\n");
         return;
     }
 
     if (std.mem.eql(u8, args[0], "--continue")) {
         // Continue: read state, build tree from working dir, create commit, advance
-        var state = mkit.rebase.readState(allocator, cwd) catch |err| {
+        var state = mkit.rebase.readState(allocator, io(), cwd) catch |err| {
             if (err == error.NoRebaseInProgress) {
                 try stderr.writeStreamingAll(io(), "error: no rebase in progress\n");
                 return;
@@ -3532,9 +3544,9 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         if (state.todo.len == 0) {
             // All done
-            mkit.refs.writeRef(cwd, state.head_name, state.onto) catch {};
-            mkit.refs.writeHeadBranch(cwd, state.head_name) catch {};
-            try mkit.rebase.cleanupRebase(cwd);
+            mkit.refs.writeRef(io(), cwd, state.head_name, state.onto) catch {};
+            mkit.refs.writeHeadBranch(io(), cwd, state.head_name) catch {};
+            try mkit.rebase.cleanupRebase(io(), cwd);
             try stdout.writeStreamingAll(io(), "rebase complete\n");
             return;
         }
@@ -3563,10 +3575,10 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         };
         defer work_dir.close(io());
-        const tree_hash = try mkit.worktree.buildTree(allocator, &store, work_dir);
+        const tree_hash = try mkit.worktree.buildTree(allocator, io(), &store, work_dir);
 
         // Get the current HEAD (what we're building on)
-        const current_head = try mkit.refs.resolveHead(allocator, cwd) orelse state.onto;
+        const current_head = try mkit.refs.resolveHead(allocator, io(), cwd) orelse state.onto;
 
         // Load original commit message
         const current_todo = state.todo[0];
@@ -3608,7 +3620,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         const commit_obj = mkit.object.Object{ .commit = commit };
         const commit_hash = try store.put(allocator, commit_obj);
-        try mkit.refs.updateHead(allocator, cwd, commit_hash);
+        try mkit.refs.updateHead(allocator, io(), cwd, commit_hash);
 
         // Advance state: move current from todo to done
         const new_done = try allocator.alloc(mkit.hash.Hash, state.done.len + 1);
@@ -3633,13 +3645,13 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const branch_name = args[0];
 
     // Resolve HEAD
-    const head_hash = try mkit.refs.resolveHead(allocator, cwd) orelse {
+    const head_hash = try mkit.refs.resolveHead(allocator, io(), cwd) orelse {
         try stderr.writeStreamingAll(io(), "error: no commits on current branch\n");
         return;
     };
 
     // Resolve target branch
-    const onto_hash = (try mkit.refs.readRef(allocator, cwd, branch_name)) orelse {
+    const onto_hash = (try mkit.refs.readRef(allocator, io(), cwd, branch_name)) orelse {
         try stderr.writeStreamingAll(io(), "error: branch '");
         try stderr.writeStreamingAll(io(), branch_name);
         try stderr.writeStreamingAll(io(), "' not found\n");
@@ -3652,7 +3664,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // Get current branch name
-    const head = mkit.refs.readHead(allocator, cwd) catch {
+    const head = mkit.refs.readHead(allocator, io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: cannot read HEAD\n");
         return;
     };
@@ -3688,10 +3700,10 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer state.deinit();
 
-    try mkit.rebase.writeState(cwd, state);
+    try mkit.rebase.writeState(io(), cwd, state);
 
     // Point HEAD to onto
-    try mkit.refs.updateHead(allocator, cwd, onto_hash);
+    try mkit.refs.updateHead(allocator, io(), cwd, onto_hash);
 
     var config = try readRepoConfig(allocator, cwd);
     defer config.deinit();
@@ -3729,7 +3741,7 @@ fn rebaseReplay(
         const current_commit_hash = state.todo[0];
 
         // Get current HEAD tree
-        const current_head = try mkit.refs.resolveHead(allocator, cwd) orelse state.onto;
+        const current_head = try mkit.refs.resolveHead(allocator, io(), cwd) orelse state.onto;
         var current_obj = store.get(allocator, current_head) catch {
             try stderr.writeStreamingAll(io(), "error: could not read current HEAD\n");
             return;
@@ -3754,7 +3766,7 @@ fn rebaseReplay(
 
         if (cp_result.hasConflicts()) {
             // Save state and stop
-            try mkit.rebase.writeState(cwd, state.*);
+            try mkit.rebase.writeState(io(), cwd, state.*);
             try stderr.writeStreamingAll(io(), "conflict while replaying ");
             const hash_hex = mkit.hash.toHex(current_commit_hash);
             try stderr.writeStreamingAll(io(), hash_hex[0..8]);
@@ -3805,7 +3817,7 @@ fn rebaseReplay(
 
         const commit_obj = mkit.object.Object{ .commit = commit };
         const new_hash = try store.put(allocator, commit_obj);
-        try mkit.refs.updateHead(allocator, cwd, new_hash);
+        try mkit.refs.updateHead(allocator, io(), cwd, new_hash);
 
         const new_hex = mkit.hash.toHex(new_hash);
         try stdout.writeStreamingAll(io(), "  replayed ");
@@ -3828,13 +3840,13 @@ fn rebaseReplay(
     }
 
     // All done: update branch ref, restore tree, clean up
-    const final_head = try mkit.refs.resolveHead(allocator, cwd) orelse state.onto;
-    mkit.refs.writeRef(cwd, state.head_name, final_head) catch {};
-    mkit.refs.writeHeadBranch(cwd, state.head_name) catch {};
+    const final_head = try mkit.refs.resolveHead(allocator, io(), cwd) orelse state.onto;
+    mkit.refs.writeRef(io(), cwd, state.head_name, final_head) catch {};
+    mkit.refs.writeHeadBranch(io(), cwd, state.head_name) catch {};
 
     // Restore working tree
     var final_obj = store.get(allocator, final_head) catch {
-        try mkit.rebase.cleanupRebase(cwd);
+        try mkit.rebase.cleanupRebase(io(), cwd);
         try stdout.writeStreamingAll(io(), "rebase complete\n");
         return;
     };
@@ -3842,15 +3854,15 @@ fn rebaseReplay(
 
     if (final_obj == .commit) {
         var work_dir = cwd.openDir(io(), ".", .{ .iterate = true }) catch {
-            try mkit.rebase.cleanupRebase(cwd);
+            try mkit.rebase.cleanupRebase(io(), cwd);
             try stdout.writeStreamingAll(io(), "rebase complete\n");
             return;
         };
         defer work_dir.close(io());
-        mkit.restore.restoreTree(allocator, store, final_obj.commit.tree_hash, work_dir, .{}) catch {};
+        mkit.restore.restoreTree(allocator, io(), store, final_obj.commit.tree_hash, work_dir, .{}) catch {};
     }
 
-    try mkit.rebase.cleanupRebase(cwd);
+    try mkit.rebase.cleanupRebase(io(), cwd);
     try stdout.writeStreamingAll(io(), "rebase complete\n");
 }
 
@@ -3864,28 +3876,28 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const cwd = std.Io.Dir.cwd();
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    defer store.close(io());
+    defer store.close();
 
     const subcmd = args[0];
 
     if (std.mem.eql(u8, subcmd, "start")) {
         // Check if bisect already in progress
-        if (mkit.bisect.isBisectInProgress(cwd)) {
+        if (mkit.bisect.isBisectInProgress(io(), cwd)) {
             try stderr.writeStreamingAll(io(), "error: bisect already in progress (use 'mkit bisect reset' first)\n");
             return;
         }
 
-        const head_hash = try mkit.refs.resolveHead(allocator, cwd) orelse {
+        const head_hash = try mkit.refs.resolveHead(allocator, io(), cwd) orelse {
             try stderr.writeStreamingAll(io(), "error: no commits yet\n");
             return;
         };
 
         // Get current branch
-        const head = mkit.refs.readHead(allocator, cwd) catch {
+        const head = mkit.refs.readHead(allocator, io(), cwd) catch {
             try stderr.writeStreamingAll(io(), "error: cannot read HEAD\n");
             return;
         };
@@ -3902,7 +3914,7 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
             .good_hashes = try allocator.alloc(mkit.hash.Hash, 0),
             .allocator = allocator,
         };
-        try mkit.bisect.writeState(cwd, state);
+        try mkit.bisect.writeState(io(), cwd, state);
         allocator.free(state.good_hashes);
 
         try stdout.writeStreamingAll(io(), "bisect started\n");
@@ -3911,7 +3923,7 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     if (std.mem.eql(u8, subcmd, "good")) {
-        var state = mkit.bisect.readState(allocator, cwd) catch |err| {
+        var state = mkit.bisect.readState(allocator, io(), cwd) catch |err| {
             if (err == error.NoBisectInProgress) {
                 try stderr.writeStreamingAll(io(), "error: no bisect in progress (run 'mkit bisect start')\n");
                 return;
@@ -3928,7 +3940,7 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 return;
             };
         } else blk: {
-            break :blk (try mkit.refs.resolveHead(allocator, cwd)) orelse {
+            break :blk (try mkit.refs.resolveHead(allocator, io(), cwd)) orelse {
                 try stderr.writeStreamingAll(io(), "error: no commits yet\n");
                 return;
             };
@@ -3941,7 +3953,7 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         allocator.free(state.good_hashes);
         state.good_hashes = new_good;
 
-        try mkit.bisect.writeState(cwd, state);
+        try mkit.bisect.writeState(io(), cwd, state);
 
         const good_hex = mkit.hash.toHex(good_hash);
         try stdout.writeStreamingAll(io(), "marked ");
@@ -3956,7 +3968,7 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     if (std.mem.eql(u8, subcmd, "bad")) {
-        var state = mkit.bisect.readState(allocator, cwd) catch |err| {
+        var state = mkit.bisect.readState(allocator, io(), cwd) catch |err| {
             if (err == error.NoBisectInProgress) {
                 try stderr.writeStreamingAll(io(), "error: no bisect in progress (run 'mkit bisect start')\n");
                 return;
@@ -3973,14 +3985,14 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 return;
             };
         } else blk: {
-            break :blk (try mkit.refs.resolveHead(allocator, cwd)) orelse {
+            break :blk (try mkit.refs.resolveHead(allocator, io(), cwd)) orelse {
                 try stderr.writeStreamingAll(io(), "error: no commits yet\n");
                 return;
             };
         };
 
         state.bad_hash = bad_hash;
-        try mkit.bisect.writeState(cwd, state);
+        try mkit.bisect.writeState(io(), cwd, state);
 
         const bad_hex = mkit.hash.toHex(bad_hash);
         try stdout.writeStreamingAll(io(), "marked ");
@@ -3995,7 +4007,7 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     if (std.mem.eql(u8, subcmd, "reset")) {
-        var state = mkit.bisect.readState(allocator, cwd) catch |err| {
+        var state = mkit.bisect.readState(allocator, io(), cwd) catch |err| {
             if (err == error.NoBisectInProgress) {
                 try stderr.writeStreamingAll(io(), "error: no bisect in progress\n");
                 return;
@@ -4007,15 +4019,15 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         // Restore original HEAD + branch
         if (state.orig_branch) |branch| {
-            mkit.refs.writeRef(cwd, branch, state.orig_head) catch {};
-            mkit.refs.writeHeadBranch(cwd, branch) catch {};
+            mkit.refs.writeRef(io(), cwd, branch, state.orig_head) catch {};
+            mkit.refs.writeHeadBranch(io(), cwd, branch) catch {};
         } else {
-            mkit.refs.updateHead(allocator, cwd, state.orig_head) catch {};
+            mkit.refs.updateHead(allocator, io(), cwd, state.orig_head) catch {};
         }
 
         // Restore working tree
         var orig_obj = store.get(allocator, state.orig_head) catch {
-            try mkit.bisect.cleanupBisect(cwd);
+            try mkit.bisect.cleanupBisect(io(), cwd);
             try stdout.writeStreamingAll(io(), "bisect reset\n");
             return;
         };
@@ -4023,15 +4035,15 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         if (orig_obj == .commit) {
             var work_dir = cwd.openDir(io(), ".", .{ .iterate = true }) catch {
-                try mkit.bisect.cleanupBisect(cwd);
+                try mkit.bisect.cleanupBisect(io(), cwd);
                 try stdout.writeStreamingAll(io(), "bisect reset\n");
                 return;
             };
             defer work_dir.close(io());
-            mkit.restore.restoreTree(allocator, &store, orig_obj.commit.tree_hash, work_dir, .{}) catch {};
+            mkit.restore.restoreTree(allocator, io(), &store, orig_obj.commit.tree_hash, work_dir, .{}) catch {};
         }
 
-        try mkit.bisect.cleanupBisect(cwd);
+        try mkit.bisect.cleanupBisect(io(), cwd);
         try stdout.writeStreamingAll(io(), "bisect reset\n");
         return;
     }
@@ -4074,7 +4086,7 @@ fn bisectStep(
     const mid_hex = mkit.hash.toHex(midpoint);
 
     // Checkout midpoint (detached HEAD)
-    try mkit.refs.updateHead(allocator, cwd, midpoint);
+    try mkit.refs.updateHead(allocator, io(), cwd, midpoint);
 
     // Restore working tree
     var mid_obj = store.get(allocator, midpoint) catch {
@@ -4086,7 +4098,7 @@ fn bisectStep(
     if (mid_obj == .commit) {
         var work_dir = cwd.openDir(io(), ".", .{ .iterate = true }) catch return;
         defer work_dir.close(io());
-        mkit.restore.restoreTree(allocator, store, mid_obj.commit.tree_hash, work_dir, .{}) catch {};
+        mkit.restore.restoreTree(allocator, io(), store, mid_obj.commit.tree_hash, work_dir, .{}) catch {};
     }
 
     var count_buf: [20]u8 = undefined;
@@ -4110,7 +4122,7 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const path = args[0];
 
     // Open a FileTransport at the given path
-    var ft = mkit.transport_file.FileTransport.init(allocator, path) catch {
+    var ft = mkit.transport_file.FileTransport.init(allocator, io(), path) catch {
         try stderr.writeStreamingAll(io(), "error: could not open repository at '");
         try stderr.writeStreamingAll(io(), path);
         try stderr.writeStreamingAll(io(), "'\n");
@@ -4133,7 +4145,7 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // requires raw fd poll() work, which is deferred to 0.2.0.
     {
         var hello_header: [5]u8 = undefined;
-        const h_read = stdin.readAll(&hello_header) catch return;
+        const h_read = readExact(stdin, io(), &hello_header) catch return;
         if (h_read != 5) return;
         const hello_op = hello_header[0];
         const hello_len = std.mem.littleToNative(u32, @bitCast(hello_header[1..5].*));
@@ -4149,7 +4161,7 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const hello_payload = allocator.alloc(u8, hello_len) catch return;
         defer allocator.free(hello_payload);
         if (hello_len > 0) {
-            const read = stdin.readAll(hello_payload) catch return;
+            const read = readExact(stdin, io(), hello_payload) catch return;
             if (read != hello_len) return;
         }
 
@@ -4201,7 +4213,7 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
     while (true) {
         // Read header: [1-byte opcode][4-byte LE length]
         var header: [5]u8 = undefined;
-        const header_read = stdin.readAll(&header) catch break;
+        const header_read = readExact(stdin, io(), &header) catch break;
         if (header_read != 5) break;
 
         const opcode = header[0];
@@ -4220,7 +4232,7 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const payload = allocator.alloc(u8, payload_len) catch break;
         defer allocator.free(payload);
         if (payload_len > 0) {
-            const payload_read = stdin.readAll(payload) catch break;
+            const payload_read = readExact(stdin, io(), payload) catch break;
             if (payload_read != payload_len) break;
         }
 
@@ -4383,11 +4395,11 @@ fn cmdSparseCheckout(allocator: std.mem.Allocator, args: []const []const u8) !vo
     const cwd = std.Io.Dir.cwd();
 
     // Verify we're in a mkit repo
-    var store = mkit.store.ObjectStore.open(cwd) catch {
+    var store = mkit.store.ObjectStore.open(io(), cwd) catch {
         try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
-    store.close(io());
+    store.close();
 
     const subcmd = args[0];
 
@@ -4396,7 +4408,7 @@ fn cmdSparseCheckout(allocator: std.mem.Allocator, args: []const []const u8) !vo
             try stderr.writeStreamingAll(io(), "usage: mkit sparse-checkout set <pattern>...\n");
             return;
         }
-        mkit.restore.writeSparseCheckout(cwd, args[1..]) catch |err| {
+        mkit.restore.writeSparseCheckout(io(), cwd, args[1..]) catch |err| {
             try stderr.writeStreamingAll(io(), "error: failed to write sparse checkout: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
@@ -4406,7 +4418,7 @@ fn cmdSparseCheckout(allocator: std.mem.Allocator, args: []const []const u8) !vo
         };
         try stdout.writeStreamingAll(io(), "sparse checkout patterns updated\n");
     } else if (std.mem.eql(u8, subcmd, "list")) {
-        const patterns = mkit.restore.loadSparseCheckout(allocator, cwd) catch |err| {
+        const patterns = mkit.restore.loadSparseCheckout(allocator, io(), cwd) catch |err| {
             try stderr.writeStreamingAll(io(), "error: failed to load sparse checkout: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";

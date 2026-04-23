@@ -196,16 +196,18 @@ fn pathMatchesPattern(pattern: []const u8, path: []const u8) bool {
 /// and creates symlinks for symlink entries.
 pub fn restoreTree(
     allocator: Allocator,
+    io: std.Io,
     store: *store_mod.ObjectStore,
     tree_hash: Hash,
     target_dir: std.Io.Dir,
     options: RestoreOptions,
 ) !void {
-    try restoreTreeInner(allocator, store, tree_hash, target_dir, options, "");
+    try restoreTreeInner(allocator, io, store, tree_hash, target_dir, options, "");
 }
 
 fn restoreTreeInner(
     allocator: Allocator,
+    io: std.Io,
     store: *store_mod.ObjectStore,
     tree_hash: Hash,
     target_dir: std.Io.Dir,
@@ -220,7 +222,7 @@ fn restoreTreeInner(
     const entries = tree_obj.tree.entries;
 
     if (options.clean) {
-        try cleanDirectory(allocator, target_dir, entries, options.sparse_patterns, path_prefix);
+        try cleanDirectory(allocator, io, target_dir, entries, options.sparse_patterns, path_prefix);
     }
 
     for (entries) |entry| {
@@ -239,7 +241,7 @@ fn restoreTreeInner(
                 if (options.sparse_patterns) |patterns| {
                     if (!matchesSparse(patterns, full_path, false)) continue;
                 }
-                try restoreBlob(allocator, store, target_dir, entry.name, entry.object_hash);
+                try restoreBlob(allocator, io, store, target_dir, entry.name, entry.object_hash);
                 if (entry.mode == .executable) {
                     // Best-effort POSIX chmod 0755 for executable entries.
                     // Silent no-op on hosts without fchmodat.
@@ -252,20 +254,20 @@ fn restoreTreeInner(
                 if (options.sparse_patterns) |patterns| {
                     if (!couldMatchDescendant(patterns, full_path)) continue;
                 }
-                try preparePathForKind(target_dir, entry.name, .directory, false);
-                target_dir.makeDir(entry.name) catch |err| switch (err) {
+                try preparePathForKind(io, target_dir, entry.name, .directory, false);
+                target_dir.createDirPath(io, entry.name) catch |err| switch (err) {
                     error.PathAlreadyExists => {},
                     else => return err,
                 };
-                var subdir = try target_dir.openDir(entry.name, .{ .iterate = true });
-                defer subdir.close();
-                try restoreTreeInner(allocator, store, entry.object_hash, subdir, options, full_path);
+                var subdir = try target_dir.openDir(io, entry.name, .{ .iterate = true });
+                defer subdir.close(io);
+                try restoreTreeInner(allocator, io, store, entry.object_hash, subdir, options, full_path);
             },
             .symlink => {
                 if (options.sparse_patterns) |patterns| {
                     if (!matchesSparse(patterns, full_path, false)) continue;
                 }
-                try restoreSymlink(allocator, store, target_dir, entry.name, entry.object_hash);
+                try restoreSymlink(allocator, io, store, target_dir, entry.name, entry.object_hash);
             },
         }
     }
@@ -274,6 +276,7 @@ fn restoreTreeInner(
 /// Write a blob or chunked_blob object to a file in the target directory.
 fn restoreBlob(
     allocator: Allocator,
+    io: std.Io,
     store: *store_mod.ObjectStore,
     dir: std.Io.Dir,
     name: []const u8,
@@ -284,20 +287,20 @@ fn restoreBlob(
 
     switch (blob_obj) {
         .blob => |b| {
-            try preparePathForKind(dir, name, .file, false);
-            const file = try dir.createFile(name, .{});
-            defer file.close(std.testing.io);
-            try file.writeStreamingAll(std.testing.io, b.data);
+            try preparePathForKind(io, dir, name, .file, false);
+            const file = try dir.createFile(io, name, .{});
+            defer file.close(io);
+            try file.writeStreamingAll(io, b.data);
         },
         .chunked_blob => |cb| {
-            try preparePathForKind(dir, name, .file, false);
-            const file = try dir.createFile(name, .{});
-            defer file.close(std.testing.io);
+            try preparePathForKind(io, dir, name, .file, false);
+            const file = try dir.createFile(io, name, .{});
+            defer file.close(io);
             for (cb.chunks) |chunk_hash| {
                 var chunk = try store.get(allocator, chunk_hash);
                 defer chunk.deinit(allocator);
                 if (chunk != .blob) return error.InvalidChunk;
-                try file.writeStreamingAll(std.testing.io, chunk.blob.data);
+                try file.writeStreamingAll(io, chunk.blob.data);
             }
         },
         else => return error.NotABlob,
@@ -307,6 +310,7 @@ fn restoreBlob(
 /// Create a symlink from a blob whose content is the link target path.
 fn restoreSymlink(
     allocator: Allocator,
+    io: std.Io,
     store: *store_mod.ObjectStore,
     dir: std.Io.Dir,
     name: []const u8,
@@ -320,30 +324,31 @@ fn restoreSymlink(
     const target = blob_obj.blob.data;
     if (!worktree_mod.validateSymlinkTarget(target)) return error.InvalidSymlinkTarget;
 
-    try preparePathForKind(dir, name, .sym_link, true);
+    try preparePathForKind(io, dir, name, .sym_link, true);
 
-    dir.symLink(target, name, .{}) catch return error.SymlinkFailed;
+    dir.symLink(io, target, name, .{}) catch return error.SymlinkFailed;
 }
 
 fn preparePathForKind(
+    io: std.Io,
     dir: std.Io.Dir,
     name: []const u8,
     expected_kind: std.Io.File.Kind,
     replace_same_kind: bool,
 ) !void {
-    const current_kind = try existingPathKind(dir, name);
+    const current_kind = try existingPathKind(io, dir, name);
     if (current_kind == null) return;
     if (current_kind.? == expected_kind and !replace_same_kind) return;
 
     switch (current_kind.?) {
-        .directory => try dir.deleteTree(name),
-        else => try dir.deleteFile(name),
+        .directory => try dir.deleteTree(io, name),
+        else => try dir.deleteFile(io, name),
     }
 }
 
-fn existingPathKind(dir: std.Io.Dir, name: []const u8) !?std.Io.File.Kind {
+fn existingPathKind(io: std.Io, dir: std.Io.Dir, name: []const u8) !?std.Io.File.Kind {
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (dir.readLink(name, &link_buf)) |_| {
+    if (dir.readLink(io, name, &link_buf)) |_| {
         return .sym_link;
     } else |err| switch (err) {
         error.FileNotFound => return null,
@@ -351,7 +356,7 @@ fn existingPathKind(dir: std.Io.Dir, name: []const u8) !?std.Io.File.Kind {
         else => return err,
     }
 
-    const stat = try dir.statFile(name);
+    const stat = try dir.statFile(io, name, .{});
     return stat.kind;
 }
 
@@ -360,6 +365,7 @@ fn existingPathKind(dir: std.Io.Dir, name: []const u8) !?std.Io.File.Kind {
 /// When sparse patterns are active, only clean files within the sparse set.
 fn cleanDirectory(
     allocator: Allocator,
+    io: std.Io,
     target_dir: std.Io.Dir,
     tree_entries: []const object.TreeEntry,
     sparse_patterns: ?[]const SparsePattern,
@@ -374,7 +380,7 @@ fn cleanDirectory(
         to_delete.deinit(allocator);
     }
 
-    var iter = target_dir.iterate(io);
+    var iter = target_dir.iterate();
     while (try iter.next(io)) |fs_entry| {
         // Always preserve .mkit and .git
         if (std.mem.eql(u8, fs_entry.name, ".mkit") or std.mem.eql(u8, fs_entry.name, ".git")) {
@@ -418,10 +424,10 @@ fn cleanDirectory(
     for (to_delete.items) |item| {
         switch (item.kind) {
             .directory => {
-                target_dir.deleteTree(item.name) catch {};
+                target_dir.deleteTree(io, item.name) catch {};
             },
             else => {
-                target_dir.deleteFile(item.name) catch {};
+                target_dir.deleteFile(io, item.name) catch {};
             },
         }
     }
@@ -487,13 +493,13 @@ test "restore empty tree" {
 
     // Restore
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, tree_hash, target_dir, .{});
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
     // Verify no files created
-    var iter = target_dir.iterate(io);
+    var iter = target_dir.iterate();
     var count: usize = 0;
-    while (try iter.next(io)) |_| {
+    while (try iter.next(std.testing.io)) |_| {
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), count);
@@ -521,8 +527,8 @@ test "restore single file" {
 
     // Restore
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, tree_hash, target_dir, .{});
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
     // Verify file exists with content "hello"
     const content = try target_tmp.dir.readFileAlloc(allocator, "file.txt", 4096);
@@ -553,8 +559,8 @@ test "restore nested directories" {
     const root_hash = try makeTestTree(allocator, &store, &root_entries);
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, root_hash, target_dir, .{});
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, root_hash, target_dir, .{});
 
     const content = try target_tmp.dir.readFileAlloc(allocator, "src/main.zig", 4096);
     defer allocator.free(content);
@@ -583,8 +589,8 @@ test "restore overwrites existing files" {
     const tree_hash = try makeTestTree(allocator, &store, &entries);
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, tree_hash, target_dir, .{});
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
     const content = try target_tmp.dir.readFileAlloc(allocator, "file.txt", 4096);
     defer allocator.free(content);
@@ -613,8 +619,8 @@ test "restore removes untracked files" {
     const tree_hash = try makeTestTree(allocator, &store, &entries);
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, tree_hash, target_dir, .{});
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
     const stat = target_tmp.dir.statFile(std.testing.io, "extra.txt");
     try std.testing.expectError(error.FileNotFound, stat);
@@ -644,8 +650,8 @@ test "restore preserves mkit directory" {
     const tree_hash = try makeTestTree(allocator, &store, &empty_entries);
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, tree_hash, target_dir, .{});
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
     const content = try target_tmp.dir.readFileAlloc(allocator, ".mkit/config", 4096);
     defer allocator.free(content);
@@ -680,8 +686,8 @@ test "restore creates parent directories" {
     const root_hash = try makeTestTree(allocator, &store, &root_entries);
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, root_hash, target_dir, .{});
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, root_hash, target_dir, .{});
 
     const content = try target_tmp.dir.readFileAlloc(allocator, "a/b/file.txt", 4096);
     defer allocator.free(content);
@@ -709,13 +715,13 @@ test "restore is idempotent" {
 
     {
         var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-        defer target_dir.close();
-        try restoreTree(allocator, &store, tree_hash, target_dir, .{});
+        defer target_dir.close(std.testing.io);
+        try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
     }
     {
         var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-        defer target_dir.close();
-        try restoreTree(allocator, &store, tree_hash, target_dir, .{});
+        defer target_dir.close(std.testing.io);
+        try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
     }
 
     const content_a = try target_tmp.dir.readFileAlloc(allocator, "a.txt", 4096);
@@ -727,10 +733,10 @@ test "restore is idempotent" {
     try std.testing.expectEqualStrings("beta", content_b);
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    var iter = target_dir.iterate(io);
+    defer target_dir.close(std.testing.io);
+    var iter = target_dir.iterate();
     var count: usize = 0;
-    while (try iter.next(io)) |_| {
+    while (try iter.next(std.testing.io)) |_| {
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), count);
@@ -757,8 +763,8 @@ test "restore with symlink" {
     const tree_hash = try makeTestTree(allocator, &store, &entries);
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, tree_hash, target_dir, .{});
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link_target = try target_tmp.dir.readLink("link", &link_buf);
@@ -811,8 +817,8 @@ test "restore replaces mismatched kinds" {
     const tree_hash = try makeTestTree(allocator, &store, &root_entries);
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, tree_hash, target_dir, .{});
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
     const nested_content = try target_tmp.dir.readFileAlloc(allocator, "dir-from-file/child.txt", 4096);
     defer allocator.free(nested_content);
@@ -848,8 +854,8 @@ test "restore rejects invalid symlink targets" {
     const tree_hash = try makeTestTree(allocator, &store, &entries);
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try std.testing.expectError(error.InvalidSymlinkTarget, restoreTree(allocator, &store, tree_hash, target_dir, .{}));
+    defer target_dir.close(std.testing.io);
+    try std.testing.expectError(error.InvalidSymlinkTarget, restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{}));
 }
 
 test "restore clean false keeps untracked" {
@@ -874,8 +880,8 @@ test "restore clean false keeps untracked" {
     const tree_hash = try makeTestTree(allocator, &store, &entries);
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, tree_hash, target_dir, .{ .clean = false });
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{ .clean = false });
 
     const extra_content = try target_tmp.dir.readFileAlloc(allocator, "extra.txt", 4096);
     defer allocator.free(extra_content);
@@ -923,8 +929,8 @@ test "restore chunked blob" {
     const tree_hash = try makeTestTree(allocator, &store, &entries);
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, tree_hash, target_dir, .{});
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, tree_hash, target_dir, .{});
 
     const content = try target_tmp.dir.readFileAlloc(allocator, "reassembled.txt", 4096);
     defer allocator.free(content);
@@ -1096,8 +1102,8 @@ test "sparse restore only restores matched files" {
     };
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, root_hash, target_dir, .{
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, root_hash, target_dir, .{
         .sparse_patterns = &patterns,
     });
 
@@ -1148,8 +1154,8 @@ test "sparse restore with negation excludes subtree" {
     };
 
     var target_dir = try target_tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer target_dir.close();
-    try restoreTree(allocator, &store, root_hash, target_dir, .{
+    defer target_dir.close(std.testing.io);
+    try restoreTree(allocator, std.testing.io, &store, root_hash, target_dir, .{
         .sparse_patterns = &patterns,
     });
 

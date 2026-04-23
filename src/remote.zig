@@ -140,11 +140,11 @@ pub fn validateRemoteUrl(url: []const u8) StrictParseError!StrictRemoteUrl {
 /// Optional: MKIT_R2_REGION (defaults to "auto")
 /// Returns null if any required variable is missing. Caller must call deinit().
 pub fn configFromEnv(allocator: Allocator) !?RemoteConfig {
-    const endpoint = std.posix.getenv("MKIT_R2_ENDPOINT") orelse return null;
-    const bucket = std.posix.getenv("MKIT_R2_BUCKET") orelse return null;
-    const access_key = std.posix.getenv("MKIT_R2_ACCESS_KEY") orelse return null;
-    const secret_key = std.posix.getenv("MKIT_R2_SECRET_KEY") orelse return null;
-    const region = std.posix.getenv("MKIT_R2_REGION") orelse "auto";
+    const endpoint = @import("term.zig").posixGetenv("MKIT_R2_ENDPOINT") orelse return null;
+    const bucket = @import("term.zig").posixGetenv("MKIT_R2_BUCKET") orelse return null;
+    const access_key = @import("term.zig").posixGetenv("MKIT_R2_ACCESS_KEY") orelse return null;
+    const secret_key = @import("term.zig").posixGetenv("MKIT_R2_SECRET_KEY") orelse return null;
+    const region = @import("term.zig").posixGetenv("MKIT_R2_REGION") orelse "auto";
 
     const ep = try allocator.dupe(u8, endpoint);
     errdefer allocator.free(ep);

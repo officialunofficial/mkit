@@ -40,7 +40,7 @@ fn buildTreeInner(allocator: Allocator, io: std.Io, store: *store_mod.ObjectStor
 
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
 
-    var iter = dir.iterate(io);
+    var iter = dir.iterate();
     while (try iter.next(io)) |entry| {
         const is_dir = entry.kind == .directory;
         if (ignores.isIgnored(entry.name, is_dir)) continue;
@@ -106,7 +106,7 @@ pub fn hashFile(allocator: Allocator, io: std.Io, store: *store_mod.ObjectStore,
     if (stat.size > 1024 * 1024 * 1024) return error.FileTooLarge;
 
     if (stat.size > chunk_threshold) {
-        return hashFileChunked(allocator, store, file, stat.size);
+        return hashFileChunked(allocator, io, store, file, stat.size);
     }
 
     const data = try allocator.alloc(u8, stat.size);
@@ -117,7 +117,7 @@ pub fn hashFile(allocator: Allocator, io: std.Io, store: *store_mod.ObjectStore,
     return store.put(allocator, blob);
 }
 
-fn hashFileChunked(allocator: Allocator, store: *store_mod.ObjectStore, file: std.Io.File, total_size: u64) !Hash {
+fn hashFileChunked(allocator: Allocator, io: std.Io, store: *store_mod.ObjectStore, file: std.Io.File, total_size: u64) !Hash {
     var chunk_hashes: std.ArrayList(hash_mod.Hash) = .empty;
     defer chunk_hashes.deinit(allocator);
 
@@ -128,7 +128,7 @@ fn hashFileChunked(allocator: Allocator, store: *store_mod.ObjectStore, file: st
     ));
     defer chunker.deinit();
 
-    while (try chunker.nextChunk(file)) |chunk_data| {
+    while (try chunker.nextChunk(io, file)) |chunk_data| {
         const chunk_blob = object.Object{ .blob = .{ .data = chunk_data } };
         const chunk_hash = try store.put(allocator, chunk_blob);
         try chunk_hashes.append(allocator, chunk_hash);
