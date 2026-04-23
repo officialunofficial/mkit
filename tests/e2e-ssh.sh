@@ -104,8 +104,15 @@ LogLevel QUIET
 AcceptEnv PATH
 EOF
 
-# sshd needs /var/run/sshd
-mkdir -p /var/run/sshd
+# sshd expects /var/run/sshd to exist as a fallback chroot dir for
+# non-pubkey auth paths. Since we only do pubkey on a non-privileged port
+# and keep the PidFile inside $SSH_DIR, we don't actually need the default
+# location — BUT sshd still stats it on some distros. Best-effort create.
+if [ -w /var/run ] || [ "$(id -u)" -eq 0 ]; then
+    mkdir -p /var/run/sshd 2>/dev/null || true
+elif command -v sudo >/dev/null 2>&1; then
+    sudo mkdir -p /var/run/sshd 2>/dev/null || true
+fi
 
 # Start sshd in the background. -D keeps it in the foreground; we background it
 # with &; -e sends logs to stderr for debugging.
