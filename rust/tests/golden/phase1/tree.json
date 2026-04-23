@@ -1,0 +1,7 @@
+{
+  "name": "tree",
+  "description": "3-entry tree: README.md (blob) + scripts (executable) + src (tree), lex-sorted",
+  "bin": "tree.bin",
+  "size": 140,
+  "blake3": "bbe5431cc7a6dd021ddb485b3cfda42dff664066ad4d00125e171c2bc908fd74"
+}

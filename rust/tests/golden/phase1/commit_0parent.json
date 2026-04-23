@@ -1,0 +1,7 @@
+{
+  "name": "commit_0parent",
+  "description": "root commit, zero parents, ed25519 identity",
+  "bin": "commit_0parent.bin",
+  "size": 256,
+  "blake3": "912b986684595dee04db00c34b531b41ec1244ca70ffcd612b1b93e4575a5d1b"
+}
