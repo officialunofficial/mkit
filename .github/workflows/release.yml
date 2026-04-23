@@ -194,7 +194,7 @@ jobs:
           echo "Scaffold step: no-op until the TODO above is implemented."
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-${{ matrix.target }}
           path: |
@@ -224,7 +224,7 @@ jobs:
           upload-artifact: false
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: sbom.cdx.json
