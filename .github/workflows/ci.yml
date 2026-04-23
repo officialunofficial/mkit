@@ -49,3 +49,38 @@ jobs:
 
       - name: Test (integration)
         run: zig build test-integration
+
+      # -Djemalloc smoke: ubuntu-latest only.
+      #
+      # The `-Djemalloc` option switches `main()` from the DebugAllocator to
+      # `std.heap.c_allocator` and links libjemalloc. The code path has been
+      # unchanged since the 0.15 era but had no CI coverage — it's easy to
+      # silently break with a stray Allocator method rename. Install the
+      # dev headers via apt and run a minimal init + commit + log smoke so
+      # we exercise the allocator path end-to-end without paying for a full
+      # test rerun.
+      - name: Install libjemalloc (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libjemalloc-dev
+
+      - name: Build + smoke-run -Djemalloc (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          zig build -Djemalloc
+          MKIT="$(pwd)/zig-out/bin/mkit"
+          # Confirm the built binary actually linked against jemalloc.
+          # ldd output varies across distros (symlinks vs versioned); accept either.
+          ldd "$MKIT" | grep -qE 'libjemalloc\.so'
+          # Minimal lifecycle: init, keygen, commit, log, check the leak
+          # tripwire by exiting cleanly.
+          WORKDIR="$(mktemp -d)"
+          cd "$WORKDIR"
+          "$MKIT" init
+          "$MKIT" keygen
+          echo "hello jemalloc" > f.txt
+          "$MKIT" commit -m "jemalloc CI smoke"
+          "$MKIT" log --oneline -n 1 | grep -q 'jemalloc CI smoke'
+          cd /
+          rm -rf "$WORKDIR"
