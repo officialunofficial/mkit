@@ -24,6 +24,14 @@ jobs:
     name: Dependency review (PRs)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Non-blocking: Dependency Review requires the Dependency Graph feature
+    # to be enabled in repo settings (Settings → Code security → Dependency
+    # graph). Until that's flipped on the action returns
+    # "Dependency review is not supported on this repository". Treat as
+    # informational rather than a required gate. mkit has zero external Zig
+    # packages today (see docs/release/SUPPLY-CHAIN.md), so the review adds
+    # little value until a real dep lands.
+    continue-on-error: true
     permissions:
       contents: read
       pull-requests: write
