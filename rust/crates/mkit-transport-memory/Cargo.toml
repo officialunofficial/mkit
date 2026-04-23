@@ -1,0 +1,18 @@
+[package]
+name = "mkit-transport-memory"
+description = "mkit in-memory transport — HashMap-backed, for tests and fuzz harnesses"
+keywords = ["mkit", "vcs", "transport"]
+categories = ["data-structures"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mkit-core = { path = "../mkit-core" }
