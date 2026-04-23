@@ -25,6 +25,10 @@ allow = [
     # its Rust MIT/Apache-2.0. Pulled in only when --features libfuzzer
     # is enabled (not our default).
     "NCSA",
+    # webpki-roots / cert bundles used by rustls ship under the
+    # Community Data License (CDLA) Permissive 2.0 — an OSI-aligned
+    # permissive data license for the Mozilla CA trust store snapshot.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
 

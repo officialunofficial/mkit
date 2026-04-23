@@ -11,6 +11,7 @@ members = [
     "fuzz",
     "crates/mkit-transport-memory",
     "crates/mkit-transport-file",
+    "crates/mkit-transport-http",
 ]
 
 [workspace.package]
