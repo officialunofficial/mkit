@@ -36,21 +36,34 @@ jobs:
         with:
           workspaces: rust -> rust/target
 
+      - name: Detect workspace members
+        id: workspace
+        shell: bash
+        run: |
+          if ls rust/crates/*/Cargo.toml >/dev/null 2>&1; then
+            echo "has_members=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_members=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check formatting
         working-directory: rust
         run: cargo fmt --check
 
       - name: Clippy
+        if: steps.workspace.outputs.has_members == 'true'
         working-directory: rust
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Build
+        if: steps.workspace.outputs.has_members == 'true'
         working-directory: rust
-        run: cargo build --locked --frozen
+        run: cargo build --locked
 
       - name: Test
+        if: steps.workspace.outputs.has_members == 'true'
         working-directory: rust
-        run: cargo test --locked --frozen
+        run: cargo test --locked
 
       - name: Rename gate
         run: bash scripts/verify-rename.sh
