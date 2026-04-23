@@ -19,6 +19,10 @@ const std = @import("std");
 pub const jcs = @import("jcs.zig");
 pub const statement = @import("statement.zig");
 pub const envelope = @import("envelope.zig");
+pub const signer = @import("signer.zig");
+pub const signer_repo_key = @import("signer_repo_key.zig");
+pub const signer_external = @import("signer_external.zig");
+pub const signer_sigstore = @import("signer_sigstore.zig");
 
 /// Re-exports so callers can write `attestations.Statement`, etc.
 pub const Statement = statement.Statement;
@@ -34,8 +38,18 @@ pub const PAYLOAD_TYPE_IN_TOTO = envelope.PAYLOAD_TYPE_IN_TOTO;
 /// Re-exported for callers that only want the ID computation.
 pub const attestationId = envelope.attestationId;
 
+/// Signer trait + three built-in impls. See SPEC-ATTESTATIONS §6.
+pub const Signer = signer.Signer;
+pub const RepoKeySigner = signer_repo_key.RepoKeySigner;
+pub const ExternalSigner = signer_external.ExternalSigner;
+pub const SigstoreSigner = signer_sigstore.SigstoreSigner;
+
 test {
     _ = jcs;
     _ = statement;
     _ = envelope;
+    _ = signer;
+    _ = signer_repo_key;
+    _ = signer_external;
+    _ = signer_sigstore;
 }
