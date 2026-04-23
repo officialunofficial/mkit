@@ -38,8 +38,8 @@ mkit version
 
 ## Automation (TODO)
 
-When 0.1.0 ships, we can automate this with
+Once a tap repo exists we can automate this with
 [`dawidd6/action-homebrew-bump-formula`](https://github.com/dawidd6/action-homebrew-bump-formula)
 or a hand-rolled job in `release.yml` that opens a PR against the tap repo.
-We intentionally defer this to keep the first release boring and auditable
-by hand.
+Each release is still promoted by hand to keep the publication boring and
+auditable.
