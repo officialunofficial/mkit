@@ -11,6 +11,18 @@ const exit = mkit.exit;
 /// working for any callers (notably `printVersion` below).
 pub const cli_version = cli.cli_version;
 
+/// Module-level threaded Io, initialized at the top of main() so that any
+/// CLI helper can reach for `io()` without plumbing it through every
+/// function. Mirrors the pattern the task brief prescribes.
+var g_threaded: std.Io.Threaded = undefined;
+/// Preserved copy of the argv vector given to `main(Init.Minimal)` so
+/// that `run()` can produce a `[][]const u8` without re-parsing.
+var g_argv_vector: std.process.Args.Vector = undefined;
+
+fn io() std.Io {
+    return g_threaded.io();
+}
+
 /// Resolve the commit author `Identity`. If `config.user_identity` is set,
 /// decode it into the caller-supplied `scratch` buffer (`scratch.len` MUST
 /// be at least `user_identity.len / 2`). Otherwise derive an Ed25519
@@ -68,7 +80,7 @@ fn formatAuthorShort(buf: []u8, id: mkit.object.Identity) []const u8 {
 ///
 /// Note: we deliberately do NOT default to `vi`. Failing loud tells the
 /// user exactly what's missing; `export EDITOR=vi` is cheap to fix.
-fn editCommitMessage(allocator: std.mem.Allocator, mkit_dir: std.fs.Dir) ![]u8 {
+fn editCommitMessage(allocator: std.mem.Allocator, mkit_dir: std.Io.Dir) ![]u8 {
     const editor = std.posix.getenv("EDITOR") orelse std.posix.getenv("VISUAL") orelse return error.NoEditor;
     if (editor.len == 0) return error.NoEditor;
 
@@ -76,7 +88,7 @@ fn editCommitMessage(allocator: std.mem.Allocator, mkit_dir: std.fs.Dir) ![]u8 {
     {
         const f = try mkit_dir.createFile("COMMIT_EDITMSG", .{ .truncate = true });
         defer f.close();
-        try f.writeAll(mkit.cli.commit_editmsg_template);
+        try f.writeStreamingAll(io(), mkit.cli.commit_editmsg_template);
     }
 
     // Spawn the editor. Realpath so the child doesn't need to share cwd.
@@ -107,29 +119,46 @@ fn editCommitMessage(allocator: std.mem.Allocator, mkit_dir: std.fs.Dir) ![]u8 {
     return cleaned;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
+    g_argv_vector = init.args.vector;
     if (build_options.use_jemalloc) {
-        return run(std.heap.c_allocator);
+        return bootstrap(std.heap.c_allocator, init);
     } else {
         var da: std.heap.DebugAllocator(.{}) = .init;
         defer {
             if (da.deinit() == .leak) {
-                std.debug.print("mkit: memory leak detected\n", .{});
+                // In 0.16 writes take an Io; use the stderr file via a
+                // short-lived Threaded. We are about to exit anyway, so
+                // skip the diagnostic if that fails.
+                const msg = "mkit: memory leak detected\n";
+                _ = std.Io.File.stderr().writeStreamingAll(g_threaded.io(), msg) catch {};
                 std.process.exit(exit.general_error);
             }
         }
-        return run(da.allocator());
+        return bootstrap(da.allocator(), init);
     }
 }
 
-fn run(allocator: std.mem.Allocator) !void {
+fn bootstrap(allocator: std.mem.Allocator, init: std.process.Init.Minimal) !void {
+    g_threaded = .init(allocator, .{
+        .argv0 = .init(init.args),
+        .environ = init.environ,
+    });
+    defer g_threaded.deinit();
+    return run(allocator, init);
+}
+
+fn run(allocator: std.mem.Allocator, init: std.process.Init.Minimal) !void {
     // Install SIGINT/SIGTERM shutdown flag + SIGPIPE ignore before any
     // subcommand dispatch. Idempotent; cheap; must happen before any
     // long-running operation (clone, push, pull) can start.
     mkit.signal.setupHandlers();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // Build an arena to own argv slices — Args.toSlice requires an arena-style
+    // allocator. Freeing is handled when the arena is torn down on `run` exit.
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const args = try init.args.toSlice(arena_state.allocator());
 
     if (args.len < 2) {
         printUsage();
@@ -207,10 +236,10 @@ fn run(allocator: std.mem.Allocator) !void {
     } else if (std.mem.eql(u8, command, "version")) {
         try printVersion();
     } else {
-        const stderr = std.fs.File.stderr();
-        try stderr.writeAll("error: unknown command '");
-        try stderr.writeAll(command);
-        try stderr.writeAll("' (run 'mkit --help' for a list of commands)\n");
+        const stderr = std.Io.File.stderr();
+        try stderr.writeStreamingAll(io(), "error: unknown command '");
+        try stderr.writeStreamingAll(io(), command);
+        try stderr.writeStreamingAll(io(), "' (run 'mkit --help' for a list of commands)\n");
         // Exit with sysexits(3) EX_USAGE (64) so CI scripts / shell one-liners
         // can distinguish "user typed the wrong thing" from a real failure.
         std.process.exit(exit.usage);
@@ -221,31 +250,31 @@ fn run(allocator: std.mem.Allocator) !void {
 /// `assert_match "mkit 0.1.0", shell_output("#{bin}/mkit version")`, so the
 /// wire format here must stay stable across cosmetic refactors.
 fn printVersion() !void {
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll("mkit ");
-    try stdout.writeAll(cli_version);
-    try stdout.writeAll("\n");
+    const stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(io(), "mkit ");
+    try stdout.writeStreamingAll(io(), cli_version);
+    try stdout.writeStreamingAll(io(), "\n");
 }
 
 fn printUsage() void {
-    const stderr = std.fs.File.stderr();
-    stderr.writeAll(cli.help_text) catch {};
+    const stderr = std.Io.File.stderr();
+    stderr.writeStreamingAll(io(), cli.help_text) catch {};
 }
 
 /// `mkit --help` / `mkit help` / `mkit -h` path — stdout, exit 0.
 fn printHelp() !void {
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll(cli.help_text);
+    const stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(io(), cli.help_text);
 }
 
 fn cmdInit() !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.init(cwd) catch |err| switch (err) {
         error.AlreadyInitialized => {
-            try stderr.writeAll("error: already a mkit repository\n");
+            try stderr.writeStreamingAll(io(), "error: already a mkit repository\n");
             return;
         },
         else => return err,
@@ -263,85 +292,85 @@ fn cmdInit() !void {
         // user.identity intentionally unset — the CLI derives an Ed25519
         // Identity from the signing key at commit time. Users can override
         // via `mkit config user.identity <value>`.
-        try cf.writeAll("signing_key = .mkit/keys/default.key\n");
-        try cf.writeAll("default_branch = main\n");
+        try cf.writeStreamingAll(io(), "signing_key = .mkit/keys/default.key\n");
+        try cf.writeStreamingAll(io(), "default_branch = main\n");
     };
 
-    try stdout.writeAll("initialized empty mkit repository in .mkit/\n");
-    try stdout.writeAll("\nnext steps:\n");
-    try stdout.writeAll("  mkit keygen           generate signing key\n");
-    try stdout.writeAll("  mkit add .            stage files\n");
-    try stdout.writeAll("  mkit commit -m \"msg\"  create first commit\n");
+    try stdout.writeStreamingAll(io(), "initialized empty mkit repository in .mkit/\n");
+    try stdout.writeStreamingAll(io(), "\nnext steps:\n");
+    try stdout.writeStreamingAll(io(), "  mkit keygen           generate signing key\n");
+    try stdout.writeStreamingAll(io(), "  mkit add .            stage files\n");
+    try stdout.writeStreamingAll(io(), "  mkit commit -m \"msg\"  create first commit\n");
 }
 
 fn cmdHash(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit hash <file>\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit hash <file>\n");
         return;
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
     ensureCleanWorktree(allocator, &store, cwd) catch {
-        try stderr.writeAll("error: merge would overwrite local changes; commit or stash them first\n");
+        try stderr.writeStreamingAll(io(), "error: merge would overwrite local changes; commit or stash them first\n");
         return;
     };
 
     const file_path = args[0];
     const h = mkit.worktree.hashFile(allocator, &store, cwd, file_path) catch |err| {
-        try stderr.writeAll("error: cannot hash '");
-        try stderr.writeAll(file_path);
-        try stderr.writeAll("': ");
+        try stderr.writeStreamingAll(io(), "error: cannot hash '");
+        try stderr.writeStreamingAll(io(), file_path);
+        try stderr.writeStreamingAll(io(), "': ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
         return;
     };
 
     const hex = mkit.hash.toHex(h);
-    try stdout.writeAll(&hex);
-    try stdout.writeAll("\n");
+    try stdout.writeStreamingAll(io(), &hex);
+    try stdout.writeStreamingAll(io(), "\n");
 }
 
 fn cmdCat(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit cat <hash>\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit cat <hash>\n");
         return;
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
 
     const hash_str = args[0];
     const h = mkit.hash.fromHex(hash_str) catch {
-        try stderr.writeAll("error: invalid hash '");
-        try stderr.writeAll(hash_str);
-        try stderr.writeAll("'\n");
+        try stderr.writeStreamingAll(io(), "error: invalid hash '");
+        try stderr.writeStreamingAll(io(), hash_str);
+        try stderr.writeStreamingAll(io(), "'\n");
         return;
     };
 
     var obj = store.get(allocator, h) catch |err| switch (err) {
         error.ObjectNotFound => {
-            try stderr.writeAll("error: object not found\n");
+            try stderr.writeStreamingAll(io(), "error: object not found\n");
             return;
         },
         error.HashMismatch => {
-            try stderr.writeAll("error: object corrupt (hash mismatch)\n");
+            try stderr.writeStreamingAll(io(), "error: object corrupt (hash mismatch)\n");
             return;
         },
         else => return err,
@@ -352,41 +381,41 @@ fn cmdCat(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn cmdTree(allocator: std.mem.Allocator) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
 
     var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-        try stderr.writeAll("error: cannot open working directory\n");
+        try stderr.writeStreamingAll(io(), "error: cannot open working directory\n");
         return;
     };
     defer work_dir.close();
 
     const h = try mkit.worktree.buildTree(allocator, &store, work_dir);
     const hex = mkit.hash.toHex(h);
-    try stdout.writeAll(&hex);
-    try stdout.writeAll("\n");
+    try stdout.writeStreamingAll(io(), &hex);
+    try stdout.writeStreamingAll(io(), "\n");
 }
 
 fn cmdAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit add <path>...\n");
-        try stderr.writeAll("       mkit add .          (stage all files)\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit add <path>...\n");
+        try stderr.writeStreamingAll(io(), "       mkit add .          (stage all files)\n");
         return;
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
@@ -397,20 +426,20 @@ fn cmdAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
     for (args) |arg| {
         if (std.mem.eql(u8, arg, ".")) {
             var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-                try stderr.writeAll("error: cannot open working directory\n");
+                try stderr.writeStreamingAll(io(), "error: cannot open working directory\n");
                 return;
             };
             defer work_dir.close();
             try mkit.index.addAll(allocator, &store, work_dir, &idx);
         } else {
             mkit.index.addFile(allocator, &store, cwd, &idx, arg) catch |err| {
-                try stderr.writeAll("error: cannot stage '");
-                try stderr.writeAll(arg);
-                try stderr.writeAll("': ");
+                try stderr.writeStreamingAll(io(), "error: cannot stage '");
+                try stderr.writeStreamingAll(io(), arg);
+                try stderr.writeStreamingAll(io(), "': ");
                 var buf2: [256]u8 = undefined;
                 const err_name = std.fmt.bufPrint(&buf2, "{s}", .{@errorName(err)}) catch "unknown";
-                try stderr.writeAll(err_name);
-                try stderr.writeAll("\n");
+                try stderr.writeStreamingAll(io(), err_name);
+                try stderr.writeStreamingAll(io(), "\n");
                 continue;
             };
         }
@@ -421,23 +450,23 @@ fn cmdAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Print summary
     var buf: [64]u8 = undefined;
     const count_str = std.fmt.bufPrint(&buf, "{d}", .{idx.stagedCount()}) catch "?";
-    try stdout.writeAll("staged ");
-    try stdout.writeAll(count_str);
-    try stdout.writeAll(" file(s)\n");
+    try stdout.writeStreamingAll(io(), "staged ");
+    try stdout.writeStreamingAll(io(), count_str);
+    try stdout.writeStreamingAll(io(), " file(s)\n");
 }
 
 fn cmdRm(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit rm <path>...\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit rm <path>...\n");
         return;
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     store.close();
@@ -447,17 +476,17 @@ fn cmdRm(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     for (args) |arg| {
         try mkit.index.removeFile(&idx, allocator, arg);
-        try stdout.writeAll("removed ");
-        try stdout.writeAll(arg);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "removed ");
+        try stdout.writeStreamingAll(io(), arg);
+        try stdout.writeStreamingAll(io(), "\n");
     }
 
     try mkit.index.writeIndex(cwd, &idx);
 }
 
 fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     // Parse -m <message>
     var message: ?[]const u8 = null;
@@ -469,9 +498,9 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
@@ -479,13 +508,13 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Acquire .mkit/index.lock to serialize against any other mkit commit
     // / checkout / merge / rebase operating on this repo. See src/lock.zig.
     var mkit_dir = cwd.openDir(".mkit", .{}) catch {
-        try stderr.writeAll("error: cannot open .mkit directory\n");
+        try stderr.writeStreamingAll(io(), "error: cannot open .mkit directory\n");
         return;
     };
     defer mkit_dir.close();
     var repo_lock = mkit.lock.acquireDefault(mkit_dir, "index.lock") catch |err| switch (err) {
         error.LockBusy => {
-            try stderr.writeAll("error: another mkit process is running in this repository (.mkit/index.lock held)\n");
+            try stderr.writeStreamingAll(io(), "error: another mkit process is running in this repository (.mkit/index.lock held)\n");
             return;
         },
         else => return err,
@@ -501,16 +530,16 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (message == null) {
         edit_buf = editCommitMessage(allocator, mkit_dir) catch |err| switch (err) {
             error.NoEditor => {
-                try stderr.writeAll("error: no commit message supplied and $EDITOR is unset\n");
-                try stderr.writeAll("       pass -m <message> or set EDITOR=<path-to-your-editor>\n");
+                try stderr.writeStreamingAll(io(), "error: no commit message supplied and $EDITOR is unset\n");
+                try stderr.writeStreamingAll(io(), "       pass -m <message> or set EDITOR=<path-to-your-editor>\n");
                 std.process.exit(exit.usage);
             },
             error.EditorFailed => {
-                try stderr.writeAll("error: editor exited with non-zero status; aborting commit\n");
+                try stderr.writeStreamingAll(io(), "error: editor exited with non-zero status; aborting commit\n");
                 std.process.exit(exit.general_error);
             },
             error.EmptyCommitMessage => {
-                try stderr.writeAll("error: empty commit message; aborting\n");
+                try stderr.writeStreamingAll(io(), "error: empty commit message; aborting\n");
                 std.process.exit(exit.usage);
             },
             else => return err,
@@ -523,15 +552,15 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
         error.FileNotFound => {
-            try stderr.writeAll("error: no signing key found (run 'mkit keygen' first)\n");
+            try stderr.writeStreamingAll(io(), "error: no signing key found (run 'mkit keygen' first)\n");
             return;
         },
         error.InvalidKeyFile => {
-            try stderr.writeAll("error: invalid key file (expected 32-byte seed)\n");
+            try stderr.writeStreamingAll(io(), "error: invalid key file (expected 32-byte seed)\n");
             return;
         },
         else => {
-            try stderr.writeAll("error: invalid key seed\n");
+            try stderr.writeStreamingAll(io(), "error: invalid key seed\n");
             return;
         },
     };
@@ -545,16 +574,16 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const head_tree = try resolveHeadTree(allocator, &store, cwd);
     const tree_hash = if (idx.entries.items.len > 0)
         mkit.index.buildCommitTreeFromIndex(allocator, &store, head_tree, &idx) catch |err| {
-            try stderr.writeAll("error: could not build staged tree: ");
+            try stderr.writeStreamingAll(io(), "error: could not build staged tree: ");
             var buf_tree: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf_tree, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         }
     else blk: {
         var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-            try stderr.writeAll("error: cannot open working directory\n");
+            try stderr.writeStreamingAll(io(), "error: cannot open working directory\n");
             return;
         };
         defer work_dir.close();
@@ -575,7 +604,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     var id_scratch: [1024]u8 = undefined;
     const author_id = resolveAuthorIdentity(config.user_identity, id_scratch[0..], kp.public_key[0..]) catch {
-        try stderr.writeAll("error: invalid user.identity in config (run 'mkit config user.identity <value>')\n");
+        try stderr.writeStreamingAll(io(), "error: invalid user.identity in config (run 'mkit config user.identity <value>')\n");
         return;
     };
 
@@ -594,7 +623,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Sign the commit
     commit.signature = mkit.sign.signCommit(allocator, commit, kp) catch {
-        try stderr.writeAll("error: signing failed\n");
+        try stderr.writeStreamingAll(io(), "error: signing failed\n");
         return;
     };
 
@@ -615,9 +644,9 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Print result
     const hex = mkit.hash.toHex(commit_hash);
     const tree_hex = mkit.hash.toHex(tree_hash);
-    try stdout.writeAll("[");
+    try stdout.writeStreamingAll(io(), "[");
     if (parent_hash == null) {
-        try stdout.writeAll("root commit");
+        try stdout.writeStreamingAll(io(), "root commit");
     } else {
         // Resolve current branch name from HEAD
         const head = mkit.refs.readHead(allocator, cwd) catch null;
@@ -625,29 +654,29 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
             switch (h) {
                 .branch => |branch| {
                     defer allocator.free(branch);
-                    try stdout.writeAll(branch);
+                    try stdout.writeStreamingAll(io(), branch);
                 },
-                .detached => try stdout.writeAll("detached"),
+                .detached => try stdout.writeStreamingAll(io(), "detached"),
             }
         } else {
-            try stdout.writeAll("HEAD");
+            try stdout.writeStreamingAll(io(), "HEAD");
         }
     }
-    try stdout.writeAll("] ");
-    try stdout.writeAll(&hex);
-    try stdout.writeAll("\n");
-    try stdout.writeAll("tree   ");
-    try stdout.writeAll(&tree_hex);
-    try stdout.writeAll("\n");
-    try stdout.writeAll("signer ");
+    try stdout.writeStreamingAll(io(), "] ");
+    try stdout.writeStreamingAll(io(), &hex);
+    try stdout.writeStreamingAll(io(), "\n");
+    try stdout.writeStreamingAll(io(), "tree   ");
+    try stdout.writeStreamingAll(io(), &tree_hex);
+    try stdout.writeStreamingAll(io(), "\n");
+    try stdout.writeStreamingAll(io(), "signer ");
     const signer_hex = mkit.hash.toHex(kp.public_key);
-    try stdout.writeAll(&signer_hex);
-    try stdout.writeAll("\n");
+    try stdout.writeStreamingAll(io(), &signer_hex);
+    try stdout.writeStreamingAll(io(), "\n");
 }
 
 fn cmdLog(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     // Parse flags
     var oneline = false;
@@ -665,16 +694,16 @@ fn cmdLog(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
 
     const head_hash = try mkit.refs.resolveHead(allocator, cwd);
     if (head_hash == null) {
-        try stderr.writeAll("no commits yet\n");
+        try stderr.writeStreamingAll(io(), "no commits yet\n");
         return;
     }
 
@@ -695,7 +724,7 @@ fn cmdLog(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         while (head_idx < queue.items.len) {
             if (count >= max_entries) {
-                try stdout.writeAll("... (truncated)\n");
+                try stdout.writeStreamingAll(io(), "... (truncated)\n");
                 break;
             }
 
@@ -706,7 +735,7 @@ fn cmdLog(allocator: std.mem.Allocator, args: []const []const u8) !void {
             if (gop.found_existing) continue;
 
             var obj = store.get(allocator, h) catch {
-                try stderr.writeAll("error: corrupt commit chain\n");
+                try stderr.writeStreamingAll(io(), "error: corrupt commit chain\n");
                 return;
             };
             defer obj.deinit(allocator);
@@ -723,40 +752,40 @@ fn cmdLog(allocator: std.mem.Allocator, args: []const []const u8) !void {
             defer lines.deinit();
 
             // Print commit line with graph prefix
-            try stdout.writeAll(lines.commit_prefix);
+            try stdout.writeStreamingAll(io(), lines.commit_prefix);
             if (oneline) {
                 const formatted = try mkit.format.formatCommitOneline(allocator, h, c);
                 defer allocator.free(formatted);
-                try stdout.writeAll(formatted);
+                try stdout.writeStreamingAll(io(), formatted);
             } else {
                 const hex = mkit.hash.toHex(h);
-                try stdout.writeAll("commit ");
-                try stdout.writeAll(&hex);
-                try stdout.writeAll("\n");
+                try stdout.writeStreamingAll(io(), "commit ");
+                try stdout.writeStreamingAll(io(), &hex);
+                try stdout.writeStreamingAll(io(), "\n");
                 // Print message with continuation prefix
                 for (lines.post_lines) |post_line| {
-                    try stdout.writeAll(post_line);
-                    try stdout.writeAll("  ");
-                    try stdout.writeAll(c.message);
-                    try stdout.writeAll("\n");
+                    try stdout.writeStreamingAll(io(), post_line);
+                    try stdout.writeStreamingAll(io(), "  ");
+                    try stdout.writeStreamingAll(io(), c.message);
+                    try stdout.writeStreamingAll(io(), "\n");
                     break; // Only print message once
                 }
                 // Print remaining post lines
                 if (lines.post_lines.len > 1) {
                     for (lines.post_lines[1..]) |post_line| {
-                        try stdout.writeAll(post_line);
-                        try stdout.writeAll("\n");
+                        try stdout.writeStreamingAll(io(), post_line);
+                        try stdout.writeStreamingAll(io(), "\n");
                     }
                 } else if (lines.post_lines.len == 0) {
-                    try stdout.writeAll("\n");
+                    try stdout.writeStreamingAll(io(), "\n");
                 }
             }
 
             // Print post-commit graph lines (for oneline mode, or remaining lines)
             if (oneline) {
                 for (lines.post_lines) |post_line| {
-                    try stdout.writeAll(post_line);
-                    try stdout.writeAll("\n");
+                    try stdout.writeStreamingAll(io(), post_line);
+                    try stdout.writeStreamingAll(io(), "\n");
                 }
             }
 
@@ -774,28 +803,28 @@ fn cmdLog(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         while (current) |h| {
             if (count >= max_entries) {
-                try stdout.writeAll("... (truncated)\n");
+                try stdout.writeStreamingAll(io(), "... (truncated)\n");
                 break;
             }
 
             var obj = store.get(allocator, h) catch {
-                try stderr.writeAll("error: corrupt commit chain\n");
+                try stderr.writeStreamingAll(io(), "error: corrupt commit chain\n");
                 return;
             };
             defer obj.deinit(allocator);
 
             if (obj != .commit) {
-                try stderr.writeAll("error: non-commit object in history\n");
+                try stderr.writeStreamingAll(io(), "error: non-commit object in history\n");
                 return;
             }
 
             if (oneline) {
                 const formatted = try mkit.format.formatCommitOneline(allocator, h, obj.commit);
                 defer allocator.free(formatted);
-                try stdout.writeAll(formatted);
+                try stdout.writeStreamingAll(io(), formatted);
             } else {
                 try mkit.format.printObject(stdout, allocator, obj, h);
-                try stdout.writeAll("\n");
+                try stdout.writeStreamingAll(io(), "\n");
             }
 
             const c = obj.commit;
@@ -810,33 +839,33 @@ fn cmdLog(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn cmdBlame(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit blame <file>\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit blame <file>\n");
         return;
     }
     const path = args[0];
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
 
     const head_hash = try mkit.refs.resolveHead(allocator, cwd);
     if (head_hash == null) {
-        try stderr.writeAll("no commits yet\n");
+        try stderr.writeStreamingAll(io(), "no commits yet\n");
         return;
     }
 
     var result = mkit.blame.blameFile(allocator, &store, head_hash.?, path) catch |err| switch (err) {
         error.FileNotFound => {
-            try stderr.writeAll("error: file '");
-            try stderr.writeAll(path);
-            try stderr.writeAll("' not found in HEAD\n");
+            try stderr.writeStreamingAll(io(), "error: file '");
+            try stderr.writeStreamingAll(io(), path);
+            try stderr.writeStreamingAll(io(), "' not found in HEAD\n");
             return;
         },
         else => return err,
@@ -848,38 +877,38 @@ fn cmdBlame(allocator: std.mem.Allocator, args: []const []const u8) !void {
     for (result.lines) |line| {
         const hex = mkit.hash.toHex(line.commit_hash);
         const short_hash = hex[0..8];
-        try stdout.writeAll(short_hash);
-        try stdout.writeAll(" (");
+        try stdout.writeStreamingAll(io(), short_hash);
+        try stdout.writeStreamingAll(io(), " (");
 
         // Format author: for opaque 8-byte identities (interpreted as a u64 LE counter)
         // show the decoded u64; otherwise show "<kind>:<first-bytes>".
         const author_str = formatAuthorShort(&buf, line.author);
-        try stdout.writeAll(author_str);
+        try stdout.writeStreamingAll(io(), author_str);
         if (author_str.len < 4) {
             const pad_len = 4 - author_str.len;
             var pad: [4]u8 = .{' '} ** 4;
-            try stdout.writeAll(pad[0..pad_len]);
+            try stdout.writeStreamingAll(io(), pad[0..pad_len]);
         }
 
-        try stdout.writeAll(" ");
+        try stdout.writeStreamingAll(io(), " ");
 
         // Format timestamp as ISO date if non-zero
         const ts_str = std.fmt.bufPrint(&buf, "{d}", .{line.timestamp}) catch "?";
-        try stdout.writeAll(ts_str);
+        try stdout.writeStreamingAll(io(), ts_str);
 
-        try stdout.writeAll(") ");
-        try stdout.writeAll(line.text);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), ") ");
+        try stdout.writeStreamingAll(io(), line.text);
+        try stdout.writeStreamingAll(io(), "\n");
     }
 }
 
 fn cmdBranch(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     store.close();
@@ -889,22 +918,22 @@ fn cmdBranch(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const branch_name = args[1];
         mkit.refs.deleteRefSafe(allocator, cwd, branch_name) catch |err| switch (err) {
             error.RefNotFound => {
-                try stderr.writeAll("error: branch '");
-                try stderr.writeAll(branch_name);
-                try stderr.writeAll("' not found\n");
+                try stderr.writeStreamingAll(io(), "error: branch '");
+                try stderr.writeStreamingAll(io(), branch_name);
+                try stderr.writeStreamingAll(io(), "' not found\n");
                 return;
             },
             error.CannotDeleteCurrentBranch => {
-                try stderr.writeAll("error: cannot delete branch '");
-                try stderr.writeAll(branch_name);
-                try stderr.writeAll("' — it is the current branch\n");
+                try stderr.writeStreamingAll(io(), "error: cannot delete branch '");
+                try stderr.writeStreamingAll(io(), branch_name);
+                try stderr.writeStreamingAll(io(), "' — it is the current branch\n");
                 return;
             },
             else => return err,
         };
-        try stdout.writeAll("deleted branch ");
-        try stdout.writeAll(branch_name);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "deleted branch ");
+        try stdout.writeStreamingAll(io(), branch_name);
+        try stdout.writeStreamingAll(io(), "\n");
         return;
     }
 
@@ -913,24 +942,24 @@ fn cmdBranch(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const branch_name = args[0];
         const head_hash = try mkit.refs.resolveHead(allocator, cwd);
         if (head_hash == null) {
-            try stderr.writeAll("error: no commits yet — cannot create branch\n");
+            try stderr.writeStreamingAll(io(), "error: no commits yet — cannot create branch\n");
             return;
         }
         // Check if branch already exists
         const existing = try mkit.refs.readRef(allocator, cwd, branch_name);
         if (existing != null) {
-            try stderr.writeAll("error: branch '");
-            try stderr.writeAll(branch_name);
-            try stderr.writeAll("' already exists\n");
+            try stderr.writeStreamingAll(io(), "error: branch '");
+            try stderr.writeStreamingAll(io(), branch_name);
+            try stderr.writeStreamingAll(io(), "' already exists\n");
             return;
         }
         try mkit.refs.writeRef(cwd, branch_name, head_hash.?);
         const hex = mkit.hash.toHex(head_hash.?);
-        try stdout.writeAll("created branch ");
-        try stdout.writeAll(branch_name);
-        try stdout.writeAll(" at ");
-        try stdout.writeAll(hex[0..8]);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "created branch ");
+        try stdout.writeStreamingAll(io(), branch_name);
+        try stdout.writeStreamingAll(io(), " at ");
+        try stdout.writeStreamingAll(io(), hex[0..8]);
+        try stdout.writeStreamingAll(io(), "\n");
         return;
     }
 
@@ -955,11 +984,11 @@ fn cmdBranch(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (ref_list.len == 0) {
         // Show current branch even if no ref file exists yet
         if (current_branch) |branch| {
-            try stdout.writeAll("* ");
-            try stdout.writeAll(branch);
-            try stdout.writeAll("\n");
+            try stdout.writeStreamingAll(io(), "* ");
+            try stdout.writeStreamingAll(io(), branch);
+            try stdout.writeStreamingAll(io(), "\n");
         } else {
-            try stderr.writeAll("no branches yet\n");
+            try stderr.writeStreamingAll(io(), "no branches yet\n");
         }
         return;
     }
@@ -976,48 +1005,48 @@ fn cmdBranch(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // If HEAD points to a branch not yet in the refs list, show it first
     if (current_branch != null and !current_in_list) {
-        try stdout.writeAll("* ");
-        try stdout.writeAll(current_branch.?);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "* ");
+        try stdout.writeStreamingAll(io(), current_branch.?);
+        try stdout.writeStreamingAll(io(), "\n");
     }
 
     for (ref_list) |ref| {
         const is_current = if (current_branch) |cb| std.mem.eql(u8, ref.name, cb) else false;
         if (is_current) {
-            try stdout.writeAll("* ");
+            try stdout.writeStreamingAll(io(), "* ");
         } else {
-            try stdout.writeAll("  ");
+            try stdout.writeStreamingAll(io(), "  ");
         }
-        try stdout.writeAll(ref.name);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), ref.name);
+        try stdout.writeStreamingAll(io(), "\n");
     }
 }
 
 fn cmdCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit checkout <branch>\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit checkout <branch>\n");
         return;
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
 
     // Serialize against other commit/checkout/merge/rebase. See src/lock.zig.
     var mkit_dir = cwd.openDir(".mkit", .{}) catch {
-        try stderr.writeAll("error: cannot open .mkit directory\n");
+        try stderr.writeStreamingAll(io(), "error: cannot open .mkit directory\n");
         return;
     };
     defer mkit_dir.close();
     var repo_lock = mkit.lock.acquireDefault(mkit_dir, "index.lock") catch |err| switch (err) {
         error.LockBusy => {
-            try stderr.writeAll("error: another mkit process is running in this repository (.mkit/index.lock held)\n");
+            try stderr.writeStreamingAll(io(), "error: another mkit process is running in this repository (.mkit/index.lock held)\n");
             return;
         },
         else => return err,
@@ -1026,18 +1055,18 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const branch_name = args[0];
     if (!mkit.protocol.validateRefName(branch_name)) {
-        try stderr.writeAll("error: invalid branch name\n");
+        try stderr.writeStreamingAll(io(), "error: invalid branch name\n");
         return;
     }
     const branch_hash = try mkit.refs.readRef(allocator, cwd, branch_name);
     if (branch_hash == null) {
-        try stderr.writeAll("error: branch '");
-        try stderr.writeAll(branch_name);
-        try stderr.writeAll("' not found\n");
+        try stderr.writeStreamingAll(io(), "error: branch '");
+        try stderr.writeStreamingAll(io(), branch_name);
+        try stderr.writeStreamingAll(io(), "' not found\n");
         return;
     }
     ensureCleanWorktree(allocator, &store, cwd) catch {
-        try stderr.writeAll("error: checkout would overwrite local changes; commit or stash them first\n");
+        try stderr.writeStreamingAll(io(), "error: checkout would overwrite local changes; commit or stash them first\n");
         return;
     };
 
@@ -1050,16 +1079,16 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
         var commit_obj = store.get(allocator, bh) catch |err| {
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll("error: could not read commit: ");
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), "error: could not read commit: ");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         };
         defer commit_obj.deinit(allocator);
 
         if (commit_obj == .commit) {
             var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-                try stderr.writeAll("error: could not open working directory for restore\n");
+                try stderr.writeStreamingAll(io(), "error: could not open working directory for restore\n");
                 return;
             };
             defer work_dir.close();
@@ -1068,9 +1097,9 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }) catch |err| {
                 var buf2: [256]u8 = undefined;
                 const err_name = std.fmt.bufPrint(&buf2, "{s}", .{@errorName(err)}) catch "unknown";
-                try stderr.writeAll("error: could not restore working directory: ");
-                try stderr.writeAll(err_name);
-                try stderr.writeAll("\n");
+                try stderr.writeStreamingAll(io(), "error: could not restore working directory: ");
+                try stderr.writeStreamingAll(io(), err_name);
+                try stderr.writeStreamingAll(io(), "\n");
                 return;
             };
         }
@@ -1078,12 +1107,12 @@ fn cmdCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     try mkit.refs.writeHeadBranch(cwd, branch_name);
 
-    try stdout.writeAll("switched to branch '");
-    try stdout.writeAll(branch_name);
-    try stdout.writeAll("'\n");
+    try stdout.writeStreamingAll(io(), "switched to branch '");
+    try stdout.writeStreamingAll(io(), branch_name);
+    try stdout.writeStreamingAll(io(), "'\n");
 }
 
-fn printDiffEntries(stdout: std.fs.File, entries: []const mkit.diff.DiffEntry) !void {
+fn printDiffEntries(stdout: std.Io.File, entries: []const mkit.diff.DiffEntry) !void {
     for (entries) |entry| {
         const prefix: []const u8 = switch (entry.kind) {
             .added => "A  ",
@@ -1091,13 +1120,13 @@ fn printDiffEntries(stdout: std.fs.File, entries: []const mkit.diff.DiffEntry) !
             .modified => "M  ",
             .mode_changed => "T  ",
         };
-        try stdout.writeAll(prefix);
-        try stdout.writeAll(entry.path);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), prefix);
+        try stdout.writeStreamingAll(io(), entry.path);
+        try stdout.writeStreamingAll(io(), "\n");
     }
 }
 
-fn resolveHeadTree(allocator: std.mem.Allocator, store: *mkit.store.ObjectStore, cwd: std.fs.Dir) !?mkit.hash.Hash {
+fn resolveHeadTree(allocator: std.mem.Allocator, store: *mkit.store.ObjectStore, cwd: std.Io.Dir) !?mkit.hash.Hash {
     const head_hash = try mkit.refs.resolveHead(allocator, cwd);
     if (head_hash) |hh| {
         var obj = try store.get(allocator, hh);
@@ -1108,12 +1137,12 @@ fn resolveHeadTree(allocator: std.mem.Allocator, store: *mkit.store.ObjectStore,
 }
 
 fn cmdStatus(allocator: std.mem.Allocator) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
@@ -1137,7 +1166,7 @@ fn cmdStatus(allocator: std.mem.Allocator) !void {
         defer staged_diff.deinit();
 
         if (staged_diff.entries.len > 0) {
-            try stdout.writeAll("Changes to be committed:\n");
+            try stdout.writeStreamingAll(io(), "Changes to be committed:\n");
             for (staged_diff.entries) |entry| {
                 const prefix: []const u8 = switch (entry.kind) {
                     .added => "  A  ",
@@ -1145,9 +1174,9 @@ fn cmdStatus(allocator: std.mem.Allocator) !void {
                     .modified => "  M  ",
                     .mode_changed => "  T  ",
                 };
-                try stdout.writeAll(prefix);
-                try stdout.writeAll(entry.path);
-                try stdout.writeAll("\n");
+                try stdout.writeStreamingAll(io(), prefix);
+                try stdout.writeStreamingAll(io(), entry.path);
+                try stdout.writeStreamingAll(io(), "\n");
             }
             has_output = true;
         }
@@ -1156,11 +1185,11 @@ fn cmdStatus(allocator: std.mem.Allocator) !void {
         for (idx.entries.items) |entry| {
             if (entry.status == .removed) {
                 if (!has_output) {
-                    try stdout.writeAll("Changes to be committed:\n");
+                    try stdout.writeStreamingAll(io(), "Changes to be committed:\n");
                 }
-                try stdout.writeAll("  D  ");
-                try stdout.writeAll(entry.path);
-                try stdout.writeAll("\n");
+                try stdout.writeStreamingAll(io(), "  D  ");
+                try stdout.writeStreamingAll(io(), entry.path);
+                try stdout.writeStreamingAll(io(), "\n");
                 has_output = true;
             }
         }
@@ -1168,7 +1197,7 @@ fn cmdStatus(allocator: std.mem.Allocator) !void {
 
     // Show working tree changes (workdir vs HEAD) — the original behavior
     var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-        try stderr.writeAll("error: cannot open working directory\n");
+        try stderr.writeStreamingAll(io(), "error: cannot open working directory\n");
         return;
     };
     defer work_dir.close();
@@ -1178,10 +1207,10 @@ fn cmdStatus(allocator: std.mem.Allocator) !void {
 
     if (result.entries.len > 0) {
         if (has_output) {
-            try stdout.writeAll("\n");
+            try stdout.writeStreamingAll(io(), "\n");
         }
         if (idx.entries.items.len > 0) {
-            try stdout.writeAll("Changes not staged for commit:\n");
+            try stdout.writeStreamingAll(io(), "Changes not staged for commit:\n");
             for (result.entries) |entry| {
                 const prefix: []const u8 = switch (entry.kind) {
                     .added => "  A  ",
@@ -1189,9 +1218,9 @@ fn cmdStatus(allocator: std.mem.Allocator) !void {
                     .modified => "  M  ",
                     .mode_changed => "  T  ",
                 };
-                try stdout.writeAll(prefix);
-                try stdout.writeAll(entry.path);
-                try stdout.writeAll("\n");
+                try stdout.writeStreamingAll(io(), prefix);
+                try stdout.writeStreamingAll(io(), entry.path);
+                try stdout.writeStreamingAll(io(), "\n");
             }
         } else {
             // No index — use original flat format
@@ -1201,17 +1230,17 @@ fn cmdStatus(allocator: std.mem.Allocator) !void {
     }
 
     if (!has_output) {
-        try stdout.writeAll("nothing to commit, working tree clean\n");
+        try stdout.writeStreamingAll(io(), "nothing to commit, working tree clean\n");
     }
 }
 
 fn cmdDiff(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
@@ -1222,25 +1251,25 @@ fn cmdDiff(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const hash2_str = args[1];
 
         const h1 = mkit.hash.fromHex(hash1_str) catch {
-            try stderr.writeAll("error: invalid hash '");
-            try stderr.writeAll(hash1_str);
-            try stderr.writeAll("'\n");
+            try stderr.writeStreamingAll(io(), "error: invalid hash '");
+            try stderr.writeStreamingAll(io(), hash1_str);
+            try stderr.writeStreamingAll(io(), "'\n");
             return;
         };
         const h2 = mkit.hash.fromHex(hash2_str) catch {
-            try stderr.writeAll("error: invalid hash '");
-            try stderr.writeAll(hash2_str);
-            try stderr.writeAll("'\n");
+            try stderr.writeStreamingAll(io(), "error: invalid hash '");
+            try stderr.writeStreamingAll(io(), hash2_str);
+            try stderr.writeStreamingAll(io(), "'\n");
             return;
         };
 
         // Resolve: if hash is a commit, use its tree_hash; if it's a tree, use directly
         const tree1 = try resolveTreeHash(allocator, &store, h1) orelse {
-            try stderr.writeAll("error: first argument is not a tree or commit\n");
+            try stderr.writeStreamingAll(io(), "error: first argument is not a tree or commit\n");
             return;
         };
         const tree2 = try resolveTreeHash(allocator, &store, h2) orelse {
-            try stderr.writeAll("error: second argument is not a tree or commit\n");
+            try stderr.writeStreamingAll(io(), "error: second argument is not a tree or commit\n");
             return;
         };
 
@@ -1248,7 +1277,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer result.deinit();
 
         if (result.entries.len == 0) {
-            try stdout.writeAll("no differences\n");
+            try stdout.writeStreamingAll(io(), "no differences\n");
             return;
         }
 
@@ -1258,7 +1287,7 @@ fn cmdDiff(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const head_tree = try resolveHeadTree(allocator, &store, cwd);
 
         var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-            try stderr.writeAll("error: cannot open working directory\n");
+            try stderr.writeStreamingAll(io(), "error: cannot open working directory\n");
             return;
         };
         defer work_dir.close();
@@ -1267,13 +1296,13 @@ fn cmdDiff(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer result.deinit();
 
         if (result.entries.len == 0) {
-            try stdout.writeAll("no differences\n");
+            try stdout.writeStreamingAll(io(), "no differences\n");
             return;
         }
 
         try printDiffEntries(stdout, result.entries);
     } else {
-        try stderr.writeAll("usage: mkit diff [<hash1> <hash2>]\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit diff [<hash1> <hash2>]\n");
     }
 }
 
@@ -1454,12 +1483,12 @@ fn openTransport(allocator: std.mem.Allocator, config: mkit.config.Config) !Open
 }
 
 fn cmdStash(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
@@ -1470,7 +1499,7 @@ fn cmdStash(allocator: std.mem.Allocator, args: []const []const u8) !void {
             try writeStashError(stderr, "save", err);
             return;
         };
-        try stdout.writeAll("saved working directory to stash\n");
+        try stdout.writeStreamingAll(io(), "saved working directory to stash\n");
         return;
     }
 
@@ -1490,7 +1519,7 @@ fn cmdStash(allocator: std.mem.Allocator, args: []const []const u8) !void {
             try writeStashError(stderr, "save", err);
             return;
         };
-        try stdout.writeAll("saved working directory to stash\n");
+        try stdout.writeStreamingAll(io(), "saved working directory to stash\n");
     } else if (std.mem.eql(u8, subcmd, "list")) {
         var stash_list = mkit.stash.list(allocator, cwd) catch |err| {
             try writeStashError(stderr, "list", err);
@@ -1499,7 +1528,7 @@ fn cmdStash(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer stash_list.deinit();
 
         if (stash_list.entries.len == 0) {
-            try stdout.writeAll("no stash entries\n");
+            try stdout.writeStreamingAll(io(), "no stash entries\n");
             return;
         }
 
@@ -1507,11 +1536,11 @@ fn cmdStash(allocator: std.mem.Allocator, args: []const []const u8) !void {
             // Format: stash@{N}: <message>
             var idx_buf: [16]u8 = undefined;
             const idx_str = std.fmt.bufPrint(&idx_buf, "{d}", .{i}) catch "?";
-            try stdout.writeAll("stash@{");
-            try stdout.writeAll(idx_str);
-            try stdout.writeAll("}: ");
-            try stdout.writeAll(entry.message);
-            try stdout.writeAll("\n");
+            try stdout.writeStreamingAll(io(), "stash@{");
+            try stdout.writeStreamingAll(io(), idx_str);
+            try stdout.writeStreamingAll(io(), "}: ");
+            try stdout.writeStreamingAll(io(), entry.message);
+            try stdout.writeStreamingAll(io(), "\n");
         }
     } else if (std.mem.eql(u8, subcmd, "pop")) {
         const idx = if (args.len > 1) parseStashIndex(args[1]) else 0;
@@ -1519,14 +1548,14 @@ fn cmdStash(allocator: std.mem.Allocator, args: []const []const u8) !void {
             try writeStashError(stderr, "pop", err);
             return;
         };
-        try stdout.writeAll("applied and dropped stash entry\n");
+        try stdout.writeStreamingAll(io(), "applied and dropped stash entry\n");
     } else if (std.mem.eql(u8, subcmd, "drop")) {
         const idx = if (args.len > 1) parseStashIndex(args[1]) else 0;
         mkit.stash.drop(allocator, cwd, idx) catch |err| {
             try writeStashError(stderr, "drop", err);
             return;
         };
-        try stdout.writeAll("dropped stash entry\n");
+        try stdout.writeStreamingAll(io(), "dropped stash entry\n");
     } else if (std.mem.eql(u8, subcmd, "show")) {
         const idx = if (args.len > 1) parseStashIndex(args[1]) else 0;
         var diff_result = mkit.stash.show(allocator, &store, cwd, idx) catch |err| {
@@ -1536,7 +1565,7 @@ fn cmdStash(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer diff_result.deinit();
 
         if (diff_result.entries.len == 0) {
-            try stdout.writeAll("no changes in stash entry\n");
+            try stdout.writeStreamingAll(io(), "no changes in stash entry\n");
             return;
         }
 
@@ -1547,12 +1576,12 @@ fn cmdStash(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 .modified => "M  ",
                 .mode_changed => "T  ",
             };
-            try stdout.writeAll(prefix);
-            try stdout.writeAll(entry.path);
-            try stdout.writeAll("\n");
+            try stdout.writeStreamingAll(io(), prefix);
+            try stdout.writeStreamingAll(io(), entry.path);
+            try stdout.writeStreamingAll(io(), "\n");
         }
     } else {
-        try stderr.writeAll("usage: mkit stash [save|list|pop|drop|show]\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit stash [save|list|pop|drop|show]\n");
     }
 }
 
@@ -1560,23 +1589,23 @@ fn parseStashIndex(arg: []const u8) usize {
     return std.fmt.parseInt(usize, arg, 10) catch 0;
 }
 
-fn writeStashError(stderr: std.fs.File, operation: []const u8, err: anyerror) !void {
-    try stderr.writeAll("error: stash ");
-    try stderr.writeAll(operation);
-    try stderr.writeAll(" failed: ");
+fn writeStashError(stderr: std.Io.File, operation: []const u8, err: anyerror) !void {
+    try stderr.writeStreamingAll(io(), "error: stash ");
+    try stderr.writeStreamingAll(io(), operation);
+    try stderr.writeStreamingAll(io(), " failed: ");
     var buf: [256]u8 = undefined;
     const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-    try stderr.writeAll(err_name);
-    try stderr.writeAll("\n");
+    try stderr.writeStreamingAll(io(), err_name);
+    try stderr.writeStreamingAll(io(), "\n");
 }
 
-fn readRepoConfig(allocator: std.mem.Allocator, cwd: std.fs.Dir) !mkit.config.Config {
+fn readRepoConfig(allocator: std.mem.Allocator, cwd: std.Io.Dir) !mkit.config.Config {
     return mkit.config.readConfig(allocator, cwd) catch mkit.config.Config{};
 }
 
 fn loadSigningKey(
     allocator: std.mem.Allocator,
-    cwd: std.fs.Dir,
+    cwd: std.Io.Dir,
     key_path: []const u8,
 ) !mkit.sign.KeyPair {
     const seed = try cwd.readFileAlloc(allocator, key_path, 128);
@@ -1631,7 +1660,7 @@ fn readPackDigestForRef(
 fn ensureCleanWorktree(
     allocator: std.mem.Allocator,
     store: *mkit.store.ObjectStore,
-    cwd: std.fs.Dir,
+    cwd: std.Io.Dir,
 ) !void {
     const head_tree = try resolveHeadTree(allocator, store, cwd);
     var work_dir = try cwd.openDir(".", .{ .iterate = true });
@@ -1642,7 +1671,7 @@ fn ensureCleanWorktree(
     if (diff.entries.len > 0) return error.DirtyWorktree;
 }
 
-fn ensureDirectoryEmpty(dir: std.fs.Dir) !void {
+fn ensureDirectoryEmpty(dir: std.Io.Dir) !void {
     // Open with iterate flag — cwd() handle may lack iteration support on macOS
     var iterable = dir.openDir(".", .{ .iterate = true }) catch return error.DirectoryNotEmpty;
     defer iterable.close();
@@ -1667,12 +1696,12 @@ fn resolveTreeHash(allocator: std.mem.Allocator, store: *mkit.store.ObjectStore,
 }
 
 fn cmdTag(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     store.close();
@@ -1682,16 +1711,16 @@ fn cmdTag(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const tag_name = args[1];
         mkit.refs.deleteTag(cwd, tag_name) catch |err| switch (err) {
             error.TagNotFound => {
-                try stderr.writeAll("error: tag '");
-                try stderr.writeAll(tag_name);
-                try stderr.writeAll("' not found\n");
+                try stderr.writeStreamingAll(io(), "error: tag '");
+                try stderr.writeStreamingAll(io(), tag_name);
+                try stderr.writeStreamingAll(io(), "' not found\n");
                 return;
             },
             else => return err,
         };
-        try stdout.writeAll("deleted tag ");
-        try stdout.writeAll(tag_name);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "deleted tag ");
+        try stdout.writeStreamingAll(io(), tag_name);
+        try stdout.writeStreamingAll(io(), "\n");
         return;
     }
 
@@ -1700,26 +1729,26 @@ fn cmdTag(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const tag_name = args[0];
         const hash_str = args[1];
         const h = mkit.hash.fromHex(hash_str) catch {
-            try stderr.writeAll("error: invalid hash '");
-            try stderr.writeAll(hash_str);
-            try stderr.writeAll("'\n");
+            try stderr.writeStreamingAll(io(), "error: invalid hash '");
+            try stderr.writeStreamingAll(io(), hash_str);
+            try stderr.writeStreamingAll(io(), "'\n");
             return;
         };
         // Check if tag already exists
         const existing = try mkit.refs.readTag(allocator, cwd, tag_name);
         if (existing != null) {
-            try stderr.writeAll("error: tag '");
-            try stderr.writeAll(tag_name);
-            try stderr.writeAll("' already exists\n");
+            try stderr.writeStreamingAll(io(), "error: tag '");
+            try stderr.writeStreamingAll(io(), tag_name);
+            try stderr.writeStreamingAll(io(), "' already exists\n");
             return;
         }
         try mkit.refs.writeTag(cwd, tag_name, h);
         const hex = mkit.hash.toHex(h);
-        try stdout.writeAll("created tag ");
-        try stdout.writeAll(tag_name);
-        try stdout.writeAll(" at ");
-        try stdout.writeAll(hex[0..8]);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "created tag ");
+        try stdout.writeStreamingAll(io(), tag_name);
+        try stdout.writeStreamingAll(io(), " at ");
+        try stdout.writeStreamingAll(io(), hex[0..8]);
+        try stdout.writeStreamingAll(io(), "\n");
         return;
     }
 
@@ -1728,24 +1757,24 @@ fn cmdTag(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const tag_name = args[0];
         const head_hash = try mkit.refs.resolveHead(allocator, cwd);
         if (head_hash == null) {
-            try stderr.writeAll("error: no commits yet — cannot create tag\n");
+            try stderr.writeStreamingAll(io(), "error: no commits yet — cannot create tag\n");
             return;
         }
         // Check if tag already exists
         const existing = try mkit.refs.readTag(allocator, cwd, tag_name);
         if (existing != null) {
-            try stderr.writeAll("error: tag '");
-            try stderr.writeAll(tag_name);
-            try stderr.writeAll("' already exists\n");
+            try stderr.writeStreamingAll(io(), "error: tag '");
+            try stderr.writeStreamingAll(io(), tag_name);
+            try stderr.writeStreamingAll(io(), "' already exists\n");
             return;
         }
         try mkit.refs.writeTag(cwd, tag_name, head_hash.?);
         const hex = mkit.hash.toHex(head_hash.?);
-        try stdout.writeAll("created tag ");
-        try stdout.writeAll(tag_name);
-        try stdout.writeAll(" at ");
-        try stdout.writeAll(hex[0..8]);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "created tag ");
+        try stdout.writeStreamingAll(io(), tag_name);
+        try stdout.writeStreamingAll(io(), " at ");
+        try stdout.writeStreamingAll(io(), hex[0..8]);
+        try stdout.writeStreamingAll(io(), "\n");
         return;
     }
 
@@ -1759,29 +1788,29 @@ fn cmdTag(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     if (tag_list.len == 0) {
-        try stderr.writeAll("no tags\n");
+        try stderr.writeStreamingAll(io(), "no tags\n");
         return;
     }
 
     for (tag_list) |t| {
-        try stdout.writeAll("  ");
-        try stdout.writeAll(t.name);
+        try stdout.writeStreamingAll(io(), "  ");
+        try stdout.writeStreamingAll(io(), t.name);
         if (t.hash) |h| {
             const hex = mkit.hash.toHex(h);
-            try stdout.writeAll(" ");
-            try stdout.writeAll(hex[0..8]);
+            try stdout.writeStreamingAll(io(), " ");
+            try stdout.writeStreamingAll(io(), hex[0..8]);
         }
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "\n");
     }
 }
 
 fn cmdConfig(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     store.close();
@@ -1795,8 +1824,8 @@ fn cmdConfig(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer config.deinit();
 
         if (std.mem.eql(u8, key, "author_mid")) {
-            try stderr.writeAll("error: unknown config key 'author_mid' (did you mean 'user.identity'?)\n");
-            try stderr.writeAll("hint: run 'mkit config user.identity mid:<N>' for the 8-byte-LE opaque form\n");
+            try stderr.writeStreamingAll(io(), "error: unknown config key 'author_mid' (did you mean 'user.identity'?)\n");
+            try stderr.writeStreamingAll(io(), "hint: run 'mkit config user.identity mid:<N>' for the 8-byte-LE opaque form\n");
             return;
         } else if (std.mem.eql(u8, key, "user.identity")) {
             if (config.user_identity.len > 0) {
@@ -1806,8 +1835,8 @@ fn cmdConfig(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 config.user_identity = mkit.config.default_user_identity;
             } else {
                 config.user_identity = mkit.config.expandUserIdentity(allocator, value) catch {
-                    try stderr.writeAll("error: invalid user.identity value\n");
-                    try stderr.writeAll("hint: accepted forms: ed25519:<64-hex>, mid:<u64>, or raw [kind][len][bytes] hex\n");
+                    try stderr.writeStreamingAll(io(), "error: invalid user.identity value\n");
+                    try stderr.writeStreamingAll(io(), "hint: accepted forms: ed25519:<64-hex>, mid:<u64>, or raw [kind][len][bytes] hex\n");
                     return;
                 };
             }
@@ -1887,18 +1916,18 @@ fn cmdConfig(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
             config.ssh_identity_file = if (value.len == 0) "" else try allocator.dupe(u8, value);
         } else {
-            try stderr.writeAll("error: unknown config key '");
-            try stderr.writeAll(key);
-            try stderr.writeAll("'\n");
-            try stderr.writeAll("valid keys: user.identity, signing_key, default_branch, remote_endpoint, remote_bucket, remote_type, ssh.strict_host_key_checking, ssh.user_known_hosts_file, ssh.identity_file\n");
+            try stderr.writeStreamingAll(io(), "error: unknown config key '");
+            try stderr.writeStreamingAll(io(), key);
+            try stderr.writeStreamingAll(io(), "'\n");
+            try stderr.writeStreamingAll(io(), "valid keys: user.identity, signing_key, default_branch, remote_endpoint, remote_bucket, remote_type, ssh.strict_host_key_checking, ssh.user_known_hosts_file, ssh.identity_file\n");
             return;
         }
 
         try mkit.config.writeConfig(cwd, config);
-        try stdout.writeAll(key);
-        try stdout.writeAll(" = ");
-        try stdout.writeAll(value);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), key);
+        try stdout.writeStreamingAll(io(), " = ");
+        try stdout.writeStreamingAll(io(), value);
+        try stdout.writeStreamingAll(io(), "\n");
         return;
     }
 
@@ -1906,39 +1935,39 @@ fn cmdConfig(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var config = try mkit.config.readConfig(allocator, cwd);
     defer config.deinit();
 
-    try stdout.writeAll("user.identity = ");
-    try stdout.writeAll(if (config.user_identity.len > 0) config.user_identity else "(derived from signing key)");
-    try stdout.writeAll("\n");
-    try stdout.writeAll("signing_key = ");
-    try stdout.writeAll(config.signing_key);
-    try stdout.writeAll("\n");
-    try stdout.writeAll("default_branch = ");
-    try stdout.writeAll(config.default_branch);
-    try stdout.writeAll("\n");
-    try stdout.writeAll("remote_endpoint = ");
-    try stdout.writeAll(if (config.remote_endpoint.len > 0) config.remote_endpoint else "(not set)");
-    try stdout.writeAll("\n");
-    try stdout.writeAll("remote_bucket = ");
-    try stdout.writeAll(if (config.remote_bucket.len > 0) config.remote_bucket else "(not set)");
-    try stdout.writeAll("\n");
-    try stdout.writeAll("remote_type = ");
-    try stdout.writeAll(if (config.remote_type.len > 0) config.remote_type else "(auto)");
-    try stdout.writeAll("\n");
-    try stdout.writeAll("ssh.strict_host_key_checking = ");
-    try stdout.writeAll(if (config.ssh_strict_host_key_checking.len > 0) config.ssh_strict_host_key_checking else "(inherit)");
-    try stdout.writeAll("\n");
-    try stdout.writeAll("ssh.user_known_hosts_file = ");
-    try stdout.writeAll(if (config.ssh_user_known_hosts_file.len > 0) config.ssh_user_known_hosts_file else "(inherit)");
-    try stdout.writeAll("\n");
-    try stdout.writeAll("ssh.identity_file = ");
-    try stdout.writeAll(if (config.ssh_identity_file.len > 0) config.ssh_identity_file else "(inherit)");
-    try stdout.writeAll("\n");
+    try stdout.writeStreamingAll(io(), "user.identity = ");
+    try stdout.writeStreamingAll(io(), if (config.user_identity.len > 0) config.user_identity else "(derived from signing key)");
+    try stdout.writeStreamingAll(io(), "\n");
+    try stdout.writeStreamingAll(io(), "signing_key = ");
+    try stdout.writeStreamingAll(io(), config.signing_key);
+    try stdout.writeStreamingAll(io(), "\n");
+    try stdout.writeStreamingAll(io(), "default_branch = ");
+    try stdout.writeStreamingAll(io(), config.default_branch);
+    try stdout.writeStreamingAll(io(), "\n");
+    try stdout.writeStreamingAll(io(), "remote_endpoint = ");
+    try stdout.writeStreamingAll(io(), if (config.remote_endpoint.len > 0) config.remote_endpoint else "(not set)");
+    try stdout.writeStreamingAll(io(), "\n");
+    try stdout.writeStreamingAll(io(), "remote_bucket = ");
+    try stdout.writeStreamingAll(io(), if (config.remote_bucket.len > 0) config.remote_bucket else "(not set)");
+    try stdout.writeStreamingAll(io(), "\n");
+    try stdout.writeStreamingAll(io(), "remote_type = ");
+    try stdout.writeStreamingAll(io(), if (config.remote_type.len > 0) config.remote_type else "(auto)");
+    try stdout.writeStreamingAll(io(), "\n");
+    try stdout.writeStreamingAll(io(), "ssh.strict_host_key_checking = ");
+    try stdout.writeStreamingAll(io(), if (config.ssh_strict_host_key_checking.len > 0) config.ssh_strict_host_key_checking else "(inherit)");
+    try stdout.writeStreamingAll(io(), "\n");
+    try stdout.writeStreamingAll(io(), "ssh.user_known_hosts_file = ");
+    try stdout.writeStreamingAll(io(), if (config.ssh_user_known_hosts_file.len > 0) config.ssh_user_known_hosts_file else "(inherit)");
+    try stdout.writeStreamingAll(io(), "\n");
+    try stdout.writeStreamingAll(io(), "ssh.identity_file = ");
+    try stdout.writeStreamingAll(io(), if (config.ssh_identity_file.len > 0) config.ssh_identity_file else "(inherit)");
+    try stdout.writeStreamingAll(io(), "\n");
 }
 
 /// Push reachable objects + the current branch ref to the configured remote.
 fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     // Parse --dry-run.
     var dry_run = false;
@@ -1949,13 +1978,13 @@ fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
 
     var config = mkit.config.readConfig(allocator, cwd) catch mkit.config.Config{};
     defer config.deinit();
 
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
@@ -1963,7 +1992,7 @@ fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Resolve HEAD to a commit
     const head_hash = try mkit.refs.resolveHead(allocator, cwd);
     if (head_hash == null) {
-        try stderr.writeAll("error: no commits yet — nothing to push\n");
+        try stderr.writeStreamingAll(io(), "error: no commits yet — nothing to push\n");
         return;
     }
     const tip_hash = head_hash.?;
@@ -1985,7 +2014,7 @@ fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Build pack companion ref name early so we can read it during negotiation.
     var pack_ref_buf: [512]u8 = undefined;
     const pack_ref_name = buildPackLocatorRef(&pack_ref_buf, ref_name, tip_hash) catch {
-        try stderr.writeAll("error: ref name too long\n");
+        try stderr.writeStreamingAll(io(), "error: ref name too long\n");
         return;
     };
 
@@ -1993,22 +2022,22 @@ fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var remote_old_pack: ?mkit.hash.Hash = null;
     if (config.remote_endpoint.len > 0) {
         var transport_handle = openTransport(allocator, config) catch |err| {
-            try stderr.writeAll("error: failed to open transport: ");
+            try stderr.writeStreamingAll(io(), "error: failed to open transport: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         };
         defer transport_handle.deinit();
         const t = transport_handle.transport;
 
         remote_old_hash = t.readRef(allocator, ref_name) catch |err| {
-            try stderr.writeAll("error: failed to read remote ref: ");
+            try stderr.writeStreamingAll(io(), "error: failed to read remote ref: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         };
 
@@ -2017,19 +2046,19 @@ fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         if (remote_old_hash) |remote_tip| {
             if (std.mem.eql(u8, &remote_tip, &tip_hash)) {
-                try stdout.writeAll("already up to date\n");
+                try stdout.writeStreamingAll(io(), "already up to date\n");
                 return;
             }
             ensureCommitExists(allocator, &store, remote_tip) catch {
-                try stderr.writeAll("error: remote ref points to a commit that is not present locally — run 'mkit pull' first\n");
+                try stderr.writeStreamingAll(io(), "error: remote ref points to a commit that is not present locally — run 'mkit pull' first\n");
                 return;
             };
             const fast_forward = mkit.merge.isAncestor(allocator, &store, remote_tip, tip_hash) catch {
-                try stderr.writeAll("error: failed to verify remote ancestry\n");
+                try stderr.writeStreamingAll(io(), "error: failed to verify remote ancestry\n");
                 return;
             };
             if (!fast_forward) {
-                try stderr.writeAll("error: non-fast-forward push rejected — run 'mkit pull' first\n");
+                try stderr.writeStreamingAll(io(), "error: non-fast-forward push rejected — run 'mkit pull' first\n");
                 return;
             }
         }
@@ -2037,11 +2066,11 @@ fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Build packfile from reachable objects
     const pack_result = mkit.packfile.packReachable(allocator, &store, tip_hash) catch |err| {
-        try stderr.writeAll("error: failed to build packfile: ");
+        try stderr.writeStreamingAll(io(), "error: failed to build packfile: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
         return;
     };
     defer allocator.free(pack_result.bytes);
@@ -2049,11 +2078,11 @@ fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (config.remote_endpoint.len > 0 and !dry_run) {
         // Transport-based push: upload pack + write ref + write .pack companion
         var transport_handle = openTransport(allocator, config) catch |err| {
-            try stderr.writeAll("error: failed to open transport: ");
+            try stderr.writeStreamingAll(io(), "error: failed to open transport: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         };
         defer transport_handle.deinit();
@@ -2061,11 +2090,11 @@ fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         // 1. Upload packfile
         t.uploadPack(allocator, pack_result.bytes, pack_result.digest) catch |err| {
-            try stderr.writeAll("error: failed to upload pack: ");
+            try stderr.writeStreamingAll(io(), "error: failed to upload pack: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         };
 
@@ -2078,10 +2107,10 @@ fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
         t.updateRef(allocator, pack_ref_name, pack_condition, pack_result.digest) catch |err| switch (err) {
             error.RefConflict => {
                 // Pack companion conflict is non-fatal — the pack itself is content-addressed.
-                try stderr.writeAll("warning: pack companion ref conflict (non-fatal)\n");
+                try stderr.writeStreamingAll(io(), "warning: pack companion ref conflict (non-fatal)\n");
             },
             else => {
-                try stderr.writeAll("warning: could not write pack companion\n");
+                try stderr.writeStreamingAll(io(), "warning: could not write pack companion\n");
             },
         };
 
@@ -2092,93 +2121,93 @@ fn cmdPush(allocator: std.mem.Allocator, args: []const []const u8) !void {
             .missing;
         t.updateRef(allocator, ref_name, ref_condition, tip_hash) catch |err| {
             if (err == error.RefConflict) {
-                try stderr.writeAll("error: remote ref changed during push — retry after fetch/pull\n");
+                try stderr.writeStreamingAll(io(), "error: remote ref changed during push — retry after fetch/pull\n");
                 return;
             }
-            try stderr.writeAll("error: failed to write remote ref: ");
+            try stderr.writeStreamingAll(io(), "error: failed to write remote ref: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         };
 
         // Print success summary
         const tip_hex = mkit.hash.toHex(tip_hash);
-        try stdout.writeAll("pushed ");
-        try stdout.writeAll(tip_hex[0..8]);
-        try stdout.writeAll(" -> ");
-        try stdout.writeAll(ref_name);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "pushed ");
+        try stdout.writeStreamingAll(io(), tip_hex[0..8]);
+        try stdout.writeStreamingAll(io(), " -> ");
+        try stdout.writeStreamingAll(io(), ref_name);
+        try stdout.writeStreamingAll(io(), "\n");
 
         var size_buf: [20]u8 = undefined;
         const size_str = std.fmt.bufPrint(&size_buf, "{d}", .{pack_result.bytes.len}) catch "?";
-        try stdout.writeAll("packfile: ");
-        try stdout.writeAll(size_str);
-        try stdout.writeAll(" bytes\n");
+        try stdout.writeStreamingAll(io(), "packfile: ");
+        try stdout.writeStreamingAll(io(), size_str);
+        try stdout.writeStreamingAll(io(), " bytes\n");
     } else {
         // Dry-run or no remote configured: print a minimal summary.
-        try stdout.writeAll("=== push summary (dry run) ===\n");
+        try stdout.writeStreamingAll(io(), "=== push summary (dry run) ===\n");
 
         const tip_hex = mkit.hash.toHex(tip_hash);
-        try stdout.writeAll("commit: ");
-        try stdout.writeAll(tip_hex[0..16]);
-        try stdout.writeAll("...\n");
+        try stdout.writeStreamingAll(io(), "commit: ");
+        try stdout.writeStreamingAll(io(), tip_hex[0..16]);
+        try stdout.writeStreamingAll(io(), "...\n");
 
-        try stdout.writeAll("\nref update:\n");
-        try stdout.writeAll("  ");
-        try stdout.writeAll(ref_name);
-        try stdout.writeAll(" ");
+        try stdout.writeStreamingAll(io(), "\nref update:\n");
+        try stdout.writeStreamingAll(io(), "  ");
+        try stdout.writeStreamingAll(io(), ref_name);
+        try stdout.writeStreamingAll(io(), " ");
         if (remote_old_hash) |old| {
             const old_hex = mkit.hash.toHex(old);
-            try stdout.writeAll(old_hex[0..8]);
+            try stdout.writeStreamingAll(io(), old_hex[0..8]);
         } else {
-            try stdout.writeAll("(new)");
+            try stdout.writeStreamingAll(io(), "(new)");
         }
-        try stdout.writeAll(" -> ");
+        try stdout.writeStreamingAll(io(), " -> ");
         const new_hex = mkit.hash.toHex(tip_hash);
-        try stdout.writeAll(new_hex[0..8]);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), new_hex[0..8]);
+        try stdout.writeStreamingAll(io(), "\n");
 
         var size_buf: [20]u8 = undefined;
         const size_str = std.fmt.bufPrint(&size_buf, "{d}", .{pack_result.bytes.len}) catch "?";
-        try stdout.writeAll("\npackfile: ");
-        try stdout.writeAll(size_str);
-        try stdout.writeAll(" bytes\n");
+        try stdout.writeStreamingAll(io(), "\npackfile: ");
+        try stdout.writeStreamingAll(io(), size_str);
+        try stdout.writeStreamingAll(io(), " bytes\n");
 
         if (config.remote_endpoint.len == 0) {
-            try stdout.writeAll("\nno remote configured — use 'mkit remote add <url>' to enable push\n");
+            try stdout.writeStreamingAll(io(), "\nno remote configured — use 'mkit remote add <url>' to enable push\n");
         } else {
-            try stdout.writeAll("\nremote update skipped (--dry-run)\n");
+            try stdout.writeStreamingAll(io(), "\nremote update skipped (--dry-run)\n");
         }
     }
 }
 
 fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit merge <branch>\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit merge <branch>\n");
         return;
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
 
     // Serialize against other commit/checkout/merge/rebase. See src/lock.zig.
     var mkit_dir = cwd.openDir(".mkit", .{}) catch {
-        try stderr.writeAll("error: cannot open .mkit directory\n");
+        try stderr.writeStreamingAll(io(), "error: cannot open .mkit directory\n");
         return;
     };
     defer mkit_dir.close();
     var repo_lock = mkit.lock.acquireDefault(mkit_dir, "index.lock") catch |err| switch (err) {
         error.LockBusy => {
-            try stderr.writeAll("error: another mkit process is running in this repository (.mkit/index.lock held)\n");
+            try stderr.writeStreamingAll(io(), "error: another mkit process is running in this repository (.mkit/index.lock held)\n");
             return;
         },
         else => return err,
@@ -2189,21 +2218,21 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Resolve HEAD (ours)
     const ours_hash = try mkit.refs.resolveHead(allocator, cwd) orelse {
-        try stderr.writeAll("error: no commits on current branch\n");
+        try stderr.writeStreamingAll(io(), "error: no commits on current branch\n");
         return;
     };
 
     // Resolve target branch (theirs)
     const theirs_hash = (try mkit.refs.readRef(allocator, cwd, branch_name)) orelse {
-        try stderr.writeAll("error: branch '");
-        try stderr.writeAll(branch_name);
-        try stderr.writeAll("' not found\n");
+        try stderr.writeStreamingAll(io(), "error: branch '");
+        try stderr.writeStreamingAll(io(), branch_name);
+        try stderr.writeStreamingAll(io(), "' not found\n");
         return;
     };
 
     // Already up to date?
     if (std.mem.eql(u8, &ours_hash, &theirs_hash)) {
-        try stdout.writeAll("already up to date\n");
+        try stdout.writeStreamingAll(io(), "already up to date\n");
         return;
     }
 
@@ -2217,21 +2246,21 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
             var theirs_obj = store.get(allocator, theirs_hash) catch |err| {
                 var buf: [256]u8 = undefined;
                 const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-                try stderr.writeAll("error: could not read commit: ");
-                try stderr.writeAll(err_name);
-                try stderr.writeAll("\n");
+                try stderr.writeStreamingAll(io(), "error: could not read commit: ");
+                try stderr.writeStreamingAll(io(), err_name);
+                try stderr.writeStreamingAll(io(), "\n");
                 return;
             };
             defer theirs_obj.deinit(allocator);
 
             if (theirs_obj == .commit) {
                 var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-                    try stderr.writeAll("warning: could not open working directory for restore\n");
+                    try stderr.writeStreamingAll(io(), "warning: could not open working directory for restore\n");
                     return;
                 };
                 defer work_dir.close();
                 mkit.restore.restoreTree(allocator, &store, theirs_obj.commit.tree_hash, work_dir, .{}) catch {
-                    try stderr.writeAll("error: failed to restore working directory\n");
+                    try stderr.writeStreamingAll(io(), "error: failed to restore working directory\n");
                     return;
                 };
             }
@@ -2239,33 +2268,33 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
             try mkit.refs.updateHead(allocator, cwd, theirs_hash);
 
             const hex = mkit.hash.toHex(theirs_hash);
-            try stdout.writeAll("fast-forward ");
-            try stdout.writeAll(hex[0..8]);
-            try stdout.writeAll("\n");
+            try stdout.writeStreamingAll(io(), "fast-forward ");
+            try stdout.writeStreamingAll(io(), hex[0..8]);
+            try stdout.writeStreamingAll(io(), "\n");
             return;
         }
     }
 
     // Load ours commit to get tree hash
     var ours_obj = store.get(allocator, ours_hash) catch {
-        try stderr.writeAll("error: could not read HEAD commit\n");
+        try stderr.writeStreamingAll(io(), "error: could not read HEAD commit\n");
         return;
     };
     defer ours_obj.deinit(allocator);
     if (ours_obj != .commit) {
-        try stderr.writeAll("error: HEAD does not point to a commit\n");
+        try stderr.writeStreamingAll(io(), "error: HEAD does not point to a commit\n");
         return;
     }
     const ours_tree = ours_obj.commit.tree_hash;
 
     // Load theirs commit to get tree hash
     var theirs_obj = store.get(allocator, theirs_hash) catch {
-        try stderr.writeAll("error: could not read branch commit\n");
+        try stderr.writeStreamingAll(io(), "error: could not read branch commit\n");
         return;
     };
     defer theirs_obj.deinit(allocator);
     if (theirs_obj != .commit) {
-        try stderr.writeAll("error: branch does not point to a commit\n");
+        try stderr.writeStreamingAll(io(), "error: branch does not point to a commit\n");
         return;
     }
     const theirs_tree = theirs_obj.commit.tree_hash;
@@ -2274,7 +2303,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var base_tree: ?mkit.hash.Hash = null;
     if (base_hash) |bh| {
         var base_obj = store.get(allocator, bh) catch {
-            try stderr.writeAll("error: could not read merge base commit\n");
+            try stderr.writeStreamingAll(io(), "error: could not read merge base commit\n");
             return;
         };
         defer base_obj.deinit(allocator);
@@ -2288,18 +2317,18 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer result.deinit();
 
     if (result.hasConflicts()) {
-        try stderr.writeAll("merge conflict:\n");
+        try stderr.writeStreamingAll(io(), "merge conflict:\n");
         for (result.conflicts) |c| {
             const kind_str: []const u8 = switch (c.kind) {
                 .modify_modify => "both modified",
                 .delete_modify => "delete/modify",
                 .add_add => "both added",
             };
-            try stderr.writeAll("  ");
-            try stderr.writeAll(c.path);
-            try stderr.writeAll(" (");
-            try stderr.writeAll(kind_str);
-            try stderr.writeAll(")\n");
+            try stderr.writeStreamingAll(io(), "  ");
+            try stderr.writeStreamingAll(io(), c.path);
+            try stderr.writeStreamingAll(io(), " (");
+            try stderr.writeStreamingAll(io(), kind_str);
+            try stderr.writeStreamingAll(io(), ")\n");
         }
         return;
     }
@@ -2309,15 +2338,15 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
         error.FileNotFound => {
-            try stderr.writeAll("error: no signing key found (run 'mkit keygen' first)\n");
+            try stderr.writeStreamingAll(io(), "error: no signing key found (run 'mkit keygen' first)\n");
             return;
         },
         error.InvalidKeyFile => {
-            try stderr.writeAll("error: invalid key file (expected 32-byte seed)\n");
+            try stderr.writeStreamingAll(io(), "error: invalid key file (expected 32-byte seed)\n");
             return;
         },
         else => {
-            try stderr.writeAll("error: invalid key seed\n");
+            try stderr.writeStreamingAll(io(), "error: invalid key seed\n");
             return;
         },
     };
@@ -2331,7 +2360,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     var id_scratch: [1024]u8 = undefined;
     const author_id = resolveAuthorIdentity(config.user_identity, id_scratch[0..], kp.public_key[0..]) catch {
-        try stderr.writeAll("error: invalid user.identity in config (run 'mkit config user.identity <value>')\n");
+        try stderr.writeStreamingAll(io(), "error: invalid user.identity in config (run 'mkit config user.identity <value>')\n");
         return;
     };
 
@@ -2349,7 +2378,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     commit.signature = mkit.sign.signCommit(allocator, commit, kp) catch {
-        try stderr.writeAll("error: signing failed\n");
+        try stderr.writeStreamingAll(io(), "error: signing failed\n");
         return;
     };
 
@@ -2359,16 +2388,16 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Restore working directory from merged tree
     {
         var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-            try stderr.writeAll("error: could not open working directory for restore\n");
+            try stderr.writeStreamingAll(io(), "error: could not open working directory for restore\n");
             return;
         };
         defer work_dir.close();
         mkit.restore.restoreTree(allocator, &store, result.tree_hash, work_dir, .{}) catch |err| {
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll("error: could not restore merged working tree: ");
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), "error: could not restore merged working tree: ");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         };
     }
@@ -2377,22 +2406,22 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
     try mkit.refs.updateHead(allocator, cwd, commit_hash);
 
     const hex = mkit.hash.toHex(commit_hash);
-    try stdout.writeAll("merged '");
-    try stdout.writeAll(branch_name);
-    try stdout.writeAll("' into HEAD\n");
-    try stdout.writeAll("[merge] ");
-    try stdout.writeAll(&hex);
-    try stdout.writeAll("\n");
+    try stdout.writeStreamingAll(io(), "merged '");
+    try stdout.writeStreamingAll(io(), branch_name);
+    try stdout.writeStreamingAll(io(), "' into HEAD\n");
+    try stdout.writeStreamingAll(io(), "[merge] ");
+    try stdout.writeStreamingAll(io(), &hex);
+    try stdout.writeStreamingAll(io(), "\n");
 }
 
 fn cmdKeygen() !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
 
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     store.close();
@@ -2416,54 +2445,54 @@ fn cmdKeygen() !void {
     const key_path = ".mkit/keys/default.key";
     if (cwd.openFile(key_path, .{})) |f| {
         f.close();
-        try stderr.writeAll("error: key already exists at .mkit/keys/default.key\n");
-        try stderr.writeAll("       delete it first if you want to generate a new one\n");
+        try stderr.writeStreamingAll(io(), "error: key already exists at .mkit/keys/default.key\n");
+        try stderr.writeStreamingAll(io(), "       delete it first if you want to generate a new one\n");
         return;
     } else |_| {}
 
     const file = try cwd.createFile(key_path, .{ .mode = 0o600 });
     defer file.close();
-    try file.writeAll(&kp.seed);
+    try file.writeStreamingAll(io(), &kp.seed);
 
     const pub_hex = mkit.hash.toHex(kp.public_key);
-    try stdout.writeAll("generated keypair\n");
-    try stdout.writeAll("public key: ");
-    try stdout.writeAll(&pub_hex);
-    try stdout.writeAll("\n");
-    try stdout.writeAll("saved seed: .mkit/keys/default.key\n");
+    try stdout.writeStreamingAll(io(), "generated keypair\n");
+    try stdout.writeStreamingAll(io(), "public key: ");
+    try stdout.writeStreamingAll(io(), &pub_hex);
+    try stdout.writeStreamingAll(io(), "\n");
+    try stdout.writeStreamingAll(io(), "saved seed: .mkit/keys/default.key\n");
 }
 
 fn cmdVerify(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit verify <hash>\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit verify <hash>\n");
         return;
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
 
     const hash_str = args[0];
     const h = mkit.hash.fromHex(hash_str) catch {
-        try stderr.writeAll("error: invalid hash '");
-        try stderr.writeAll(hash_str);
-        try stderr.writeAll("'\n");
+        try stderr.writeStreamingAll(io(), "error: invalid hash '");
+        try stderr.writeStreamingAll(io(), hash_str);
+        try stderr.writeStreamingAll(io(), "'\n");
         return;
     };
 
     var obj = store.get(allocator, h) catch |err| switch (err) {
         error.ObjectNotFound => {
-            try stderr.writeAll("error: object not found\n");
+            try stderr.writeStreamingAll(io(), "error: object not found\n");
             return;
         },
         error.HashMismatch => {
-            try stderr.writeAll("error: object corrupt (hash mismatch)\n");
+            try stderr.writeStreamingAll(io(), "error: object corrupt (hash mismatch)\n");
             return;
         },
         else => return err,
@@ -2473,68 +2502,68 @@ fn cmdVerify(allocator: std.mem.Allocator, args: []const []const u8) !void {
     switch (obj) {
         .commit => |c| {
             const valid = mkit.sign.verifyCommit(allocator, c) catch {
-                try stderr.writeAll("error: verification failed\n");
+                try stderr.writeStreamingAll(io(), "error: verification failed\n");
                 return;
             };
             if (valid) {
                 const signer_hex = mkit.hash.toHex(c.signer);
-                try stdout.writeAll("valid commit signature\n");
-                try stdout.writeAll("signer: ");
-                try stdout.writeAll(&signer_hex);
-                try stdout.writeAll("\n");
+                try stdout.writeStreamingAll(io(), "valid commit signature\n");
+                try stdout.writeStreamingAll(io(), "signer: ");
+                try stdout.writeStreamingAll(io(), &signer_hex);
+                try stdout.writeStreamingAll(io(), "\n");
                 var author_buf: [64]u8 = undefined;
                 const author_str = formatAuthorShort(&author_buf, c.author);
-                try stdout.writeAll("author: ");
-                try stdout.writeAll(author_str);
-                try stdout.writeAll("\n");
+                try stdout.writeStreamingAll(io(), "author: ");
+                try stdout.writeStreamingAll(io(), author_str);
+                try stdout.writeStreamingAll(io(), "\n");
             } else {
-                try stderr.writeAll("invalid: signature verification failed\n");
+                try stderr.writeStreamingAll(io(), "invalid: signature verification failed\n");
             }
         },
         .remix => |r| {
             const valid = mkit.sign.verifyRemix(allocator, r) catch {
-                try stderr.writeAll("error: verification failed\n");
+                try stderr.writeStreamingAll(io(), "error: verification failed\n");
                 return;
             };
             if (valid) {
                 const signer_hex = mkit.hash.toHex(r.signer);
-                try stdout.writeAll("valid remix signature\n");
-                try stdout.writeAll("signer: ");
-                try stdout.writeAll(&signer_hex);
-                try stdout.writeAll("\n");
+                try stdout.writeStreamingAll(io(), "valid remix signature\n");
+                try stdout.writeStreamingAll(io(), "signer: ");
+                try stdout.writeStreamingAll(io(), &signer_hex);
+                try stdout.writeStreamingAll(io(), "\n");
                 var author_buf: [64]u8 = undefined;
                 const author_str = formatAuthorShort(&author_buf, r.author);
-                try stdout.writeAll("author: ");
-                try stdout.writeAll(author_str);
-                try stdout.writeAll("\n");
+                try stdout.writeStreamingAll(io(), "author: ");
+                try stdout.writeStreamingAll(io(), author_str);
+                try stdout.writeStreamingAll(io(), "\n");
             } else {
-                try stderr.writeAll("invalid: signature verification failed\n");
+                try stderr.writeStreamingAll(io(), "invalid: signature verification failed\n");
             }
         },
         .blob => {
-            try stderr.writeAll("error: blobs are not signed objects\n");
+            try stderr.writeStreamingAll(io(), "error: blobs are not signed objects\n");
         },
         .tree => {
-            try stderr.writeAll("error: trees are not signed objects\n");
+            try stderr.writeStreamingAll(io(), "error: trees are not signed objects\n");
         },
         .chunked_blob => {
-            try stderr.writeAll("error: chunked blobs are not signed objects\n");
+            try stderr.writeStreamingAll(io(), "error: chunked blobs are not signed objects\n");
         },
         .delta => {
-            try stderr.writeAll("error: deltas are not signed objects\n");
+            try stderr.writeStreamingAll(io(), "error: deltas are not signed objects\n");
         },
     }
 }
 
 fn cmdRemote(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
 
     // Verify we're in a mkit repo
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     store.close();
@@ -2551,16 +2580,16 @@ fn cmdRemote(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Strict `mkit+<scheme>://...` parser (W5). Anything else is a
         // hard reject — we never persist ambiguous URLs.
         const parsed = mkit.remote.validateRemoteUrl(url) catch |err| {
-            try stderr.writeAll("error: invalid remote URL '");
-            try stderr.writeAll(url);
-            try stderr.writeAll("': ");
+            try stderr.writeStreamingAll(io(), "error: invalid remote URL '");
+            try stderr.writeStreamingAll(io(), url);
+            try stderr.writeStreamingAll(io(), "': ");
             switch (err) {
-                error.InvalidScheme => try stderr.writeAll("must start with 'mkit+<scheme>://'"),
-                error.UnknownScheme => try stderr.writeAll("unknown scheme (expected file, https, s3, ssh, or memory)"),
-                error.MalformedUrl => try stderr.writeAll("malformed URL (missing host, path, or field)"),
+                error.InvalidScheme => try stderr.writeStreamingAll(io(), "must start with 'mkit+<scheme>://'"),
+                error.UnknownScheme => try stderr.writeStreamingAll(io(), "unknown scheme (expected file, https, s3, ssh, or memory)"),
+                error.MalformedUrl => try stderr.writeStreamingAll(io(), "malformed URL (missing host, path, or field)"),
             }
-            try stderr.writeAll("\n");
-            try stderr.writeAll("hint: URL must start with mkit+<scheme>:// (e.g. mkit+https://, mkit+ssh://, mkit+file://, mkit+s3://)\n");
+            try stderr.writeStreamingAll(io(), "\n");
+            try stderr.writeStreamingAll(io(), "hint: URL must start with mkit+<scheme>:// (e.g. mkit+https://, mkit+ssh://, mkit+file://, mkit+s3://)\n");
             return;
         };
 
@@ -2612,21 +2641,21 @@ fn cmdRemote(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         try mkit.config.writeConfig(cwd, config);
 
-        try stdout.writeAll("remote ");
-        try stdout.writeAll(args[0]);
-        try stdout.writeAll("\n");
-        try stdout.writeAll("  endpoint: ");
-        try stdout.writeAll(config.remote_endpoint);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "remote ");
+        try stdout.writeStreamingAll(io(), args[0]);
+        try stdout.writeStreamingAll(io(), "\n");
+        try stdout.writeStreamingAll(io(), "  endpoint: ");
+        try stdout.writeStreamingAll(io(), config.remote_endpoint);
+        try stdout.writeStreamingAll(io(), "\n");
         if (config.remote_bucket.len > 0) {
-            try stdout.writeAll("  bucket:   ");
-            try stdout.writeAll(config.remote_bucket);
-            try stdout.writeAll("\n");
+            try stdout.writeStreamingAll(io(), "  bucket:   ");
+            try stdout.writeStreamingAll(io(), config.remote_bucket);
+            try stdout.writeStreamingAll(io(), "\n");
         }
         if (config.remote_type.len > 0) {
-            try stdout.writeAll("  type:     ");
-            try stdout.writeAll(config.remote_type);
-            try stdout.writeAll("\n");
+            try stdout.writeStreamingAll(io(), "  type:     ");
+            try stdout.writeStreamingAll(io(), config.remote_type);
+            try stdout.writeStreamingAll(io(), "\n");
         }
     } else if (args.len == 0) {
         // mkit remote — show current config
@@ -2634,38 +2663,38 @@ fn cmdRemote(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer config.deinit();
 
         if (config.remote_endpoint.len == 0) {
-            try stdout.writeAll("no remote configured\n");
-            try stdout.writeAll("use: mkit remote add <url>\n");
+            try stdout.writeStreamingAll(io(), "no remote configured\n");
+            try stdout.writeStreamingAll(io(), "use: mkit remote add <url>\n");
         } else {
-            try stdout.writeAll("endpoint: ");
-            try stdout.writeAll(config.remote_endpoint);
-            try stdout.writeAll("\n");
+            try stdout.writeStreamingAll(io(), "endpoint: ");
+            try stdout.writeStreamingAll(io(), config.remote_endpoint);
+            try stdout.writeStreamingAll(io(), "\n");
             if (config.remote_bucket.len > 0) {
-                try stdout.writeAll("bucket:   ");
-                try stdout.writeAll(config.remote_bucket);
-                try stdout.writeAll("\n");
+                try stdout.writeStreamingAll(io(), "bucket:   ");
+                try stdout.writeStreamingAll(io(), config.remote_bucket);
+                try stdout.writeStreamingAll(io(), "\n");
             }
             if (config.remote_type.len > 0) {
-                try stdout.writeAll("type:     ");
-                try stdout.writeAll(config.remote_type);
-                try stdout.writeAll("\n");
+                try stdout.writeStreamingAll(io(), "type:     ");
+                try stdout.writeStreamingAll(io(), config.remote_type);
+                try stdout.writeStreamingAll(io(), "\n");
             }
         }
     } else {
-        try stderr.writeAll("usage: mkit remote [add|set <url>]\n");
-        try stderr.writeAll("  URL must start with mkit+<scheme>://\n");
-        try stderr.writeAll("  schemes: file, https, s3, ssh, memory\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit remote [add|set <url>]\n");
+        try stderr.writeStreamingAll(io(), "  URL must start with mkit+<scheme>://\n");
+        try stderr.writeStreamingAll(io(), "  schemes: file, https, s3, ssh, memory\n");
     }
 }
 
 fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
 
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
@@ -2675,13 +2704,13 @@ fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
     defer config.deinit();
 
     if (config.remote_endpoint.len == 0) {
-        try stderr.writeAll("error: no remote configured (use 'mkit remote add <url>')\n");
+        try stderr.writeStreamingAll(io(), "error: no remote configured (use 'mkit remote add <url>')\n");
         return;
     }
 
     // Get current branch
     const head = mkit.refs.readHead(allocator, cwd) catch {
-        try stderr.writeAll("error: cannot read HEAD\n");
+        try stderr.writeStreamingAll(io(), "error: cannot read HEAD\n");
         return;
     };
     var branch_name: []const u8 = undefined;
@@ -2692,7 +2721,7 @@ fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
             branch_owned = true;
         },
         .detached => {
-            try stderr.writeAll("error: cannot pull in detached HEAD state\n");
+            try stderr.writeStreamingAll(io(), "error: cannot pull in detached HEAD state\n");
             return;
         },
     }
@@ -2701,17 +2730,17 @@ fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
     // Build ref name
     var ref_name_buf: [256]u8 = undefined;
     const ref_name = std.fmt.bufPrint(&ref_name_buf, "refs/heads/{s}", .{branch_name}) catch {
-        try stderr.writeAll("error: branch name too long\n");
+        try stderr.writeStreamingAll(io(), "error: branch name too long\n");
         return;
     };
 
     // Open transport
     var transport_handle = openTransport(allocator, config) catch |err| {
-        try stderr.writeAll("error: failed to open transport: ");
+        try stderr.writeStreamingAll(io(), "error: failed to open transport: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
         return;
     };
     defer transport_handle.deinit();
@@ -2719,16 +2748,16 @@ fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
 
     // 1. Read remote ref
     const remote_hash = t.readRef(allocator, ref_name) catch |err| {
-        try stderr.writeAll("error: failed to read remote ref: ");
+        try stderr.writeStreamingAll(io(), "error: failed to read remote ref: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
         return;
     } orelse {
-        try stderr.writeAll("remote branch '");
-        try stderr.writeAll(branch_name);
-        try stderr.writeAll("' not found\n");
+        try stderr.writeStreamingAll(io(), "remote branch '");
+        try stderr.writeStreamingAll(io(), branch_name);
+        try stderr.writeStreamingAll(io(), "' not found\n");
         return;
     };
 
@@ -2736,136 +2765,136 @@ fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
     const local_hash = try mkit.refs.readRef(allocator, cwd, branch_name);
     if (local_hash) |lh| {
         if (std.mem.eql(u8, &lh, &remote_hash)) {
-            try stdout.writeAll("already up to date\n");
+            try stdout.writeStreamingAll(io(), "already up to date\n");
             return;
         }
     }
 
     // 3. Read the commit-specific pack locator to discover pack digest.
     const pack_digest = readPackDigestForRef(t, allocator, ref_name, remote_hash) catch |err| {
-        try stderr.writeAll("error: failed to read pack companion: ");
+        try stderr.writeStreamingAll(io(), "error: failed to read pack companion: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
         return;
     } orelse {
-        try stderr.writeAll("error: pack companion not found for ");
-        try stderr.writeAll(ref_name);
-        try stderr.writeAll("\n");
+        try stderr.writeStreamingAll(io(), "error: pack companion not found for ");
+        try stderr.writeStreamingAll(io(), ref_name);
+        try stderr.writeStreamingAll(io(), "\n");
         return;
     };
 
     // 4. Download pack
     const pack_bytes = t.downloadPack(allocator, pack_digest) catch |err| {
-        try stderr.writeAll("error: failed to download pack: ");
+        try stderr.writeStreamingAll(io(), "error: failed to download pack: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
         return;
     };
     defer allocator.free(pack_bytes);
     verifyPackDigest(pack_digest, pack_bytes) catch {
-        try stderr.writeAll("error: downloaded pack failed digest verification\n");
+        try stderr.writeStreamingAll(io(), "error: downloaded pack failed digest verification\n");
         return;
     };
 
     // 5. Unpack into local store
     mkit.packfile.unpackInto(allocator, pack_bytes, &store) catch |err| {
-        try stderr.writeAll("error: failed to unpack: ");
+        try stderr.writeStreamingAll(io(), "error: failed to unpack: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
         return;
     };
     ensureCommitExists(allocator, &store, remote_hash) catch {
-        try stderr.writeAll("error: downloaded pack does not contain the advertised remote commit\n");
+        try stderr.writeStreamingAll(io(), "error: downloaded pack does not contain the advertised remote commit\n");
         return;
     };
 
     if (local_hash) |lh| {
         const fast_forward = mkit.merge.isAncestor(allocator, &store, lh, remote_hash) catch {
-            try stderr.writeAll("error: failed to verify pull ancestry\n");
+            try stderr.writeStreamingAll(io(), "error: failed to verify pull ancestry\n");
             return;
         };
         if (!fast_forward) {
-            try stderr.writeAll("error: non-fast-forward pull rejected — local branch has diverged\n");
+            try stderr.writeStreamingAll(io(), "error: non-fast-forward pull rejected — local branch has diverged\n");
             return;
         }
     }
     ensureCleanWorktree(allocator, &store, cwd) catch {
-        try stderr.writeAll("error: pull would overwrite local changes; commit or stash them first\n");
+        try stderr.writeStreamingAll(io(), "error: pull would overwrite local changes; commit or stash them first\n");
         return;
     };
 
     // 6. Restore working directory from the remote commit's tree
     var commit_obj = store.get(allocator, remote_hash) catch |err| {
-        try stderr.writeAll("error: could not read commit: ");
+        try stderr.writeStreamingAll(io(), "error: could not read commit: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
         return;
     };
     defer commit_obj.deinit(allocator);
 
     if (commit_obj == .commit) {
         var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-            try stderr.writeAll("error: cannot open working directory\n");
+            try stderr.writeStreamingAll(io(), "error: cannot open working directory\n");
             return;
         };
         defer work_dir.close();
         mkit.restore.restoreTree(allocator, &store, commit_obj.commit.tree_hash, work_dir, .{}) catch |err| {
-            try stderr.writeAll("error: failed to restore working directory: ");
+            try stderr.writeStreamingAll(io(), "error: failed to restore working directory: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
-            try stderr.writeAll("ref not updated — working directory may be inconsistent\n");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
+            try stderr.writeStreamingAll(io(), "ref not updated — working directory may be inconsistent\n");
             return;
         };
     }
 
     // 7. Update local ref only after restore succeeds
     mkit.refs.writeRef(cwd, branch_name, remote_hash) catch |err| {
-        try stderr.writeAll("error: failed to update local ref: ");
+        try stderr.writeStreamingAll(io(), "error: failed to update local ref: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
         return;
     };
 
     // Print success
     const remote_hex = mkit.hash.toHex(remote_hash);
-    try stdout.writeAll("pulled ");
-    try stdout.writeAll(remote_hex[0..8]);
-    try stdout.writeAll(" -> ");
-    try stdout.writeAll(branch_name);
-    try stdout.writeAll("\n");
+    try stdout.writeStreamingAll(io(), "pulled ");
+    try stdout.writeStreamingAll(io(), remote_hex[0..8]);
+    try stdout.writeStreamingAll(io(), " -> ");
+    try stdout.writeStreamingAll(io(), branch_name);
+    try stdout.writeStreamingAll(io(), "\n");
 
     var size_buf: [20]u8 = undefined;
     const size_str = std.fmt.bufPrint(&size_buf, "{d}", .{pack_bytes.len}) catch "?";
-    try stdout.writeAll("unpacked ");
-    try stdout.writeAll(size_str);
-    try stdout.writeAll(" bytes\n");
+    try stdout.writeStreamingAll(io(), "unpacked ");
+    try stdout.writeStreamingAll(io(), size_str);
+    try stdout.writeStreamingAll(io(), " bytes\n");
 }
 
 fn cmdClone(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit clone [--depth N] [--sparse ...] <url>\n");
-        try stderr.writeAll("  examples:\n");
-        try stderr.writeAll("    mkit clone https://account.r2.cloudflarestorage.com/bucket\n");
-        try stderr.writeAll("    mkit clone s3://endpoint/bucket\n");
-        try stderr.writeAll("    mkit clone file:///path/to/repo\n");
-        try stderr.writeAll("    mkit clone /path/to/repo\n");
-        try stderr.writeAll("    mkit clone --depth 1 <url>\n");
-        try stderr.writeAll("    mkit clone --sparse src/ docs/ <url>\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit clone [--depth N] [--sparse ...] <url>\n");
+        try stderr.writeStreamingAll(io(), "  examples:\n");
+        try stderr.writeStreamingAll(io(), "    mkit clone https://account.r2.cloudflarestorage.com/bucket\n");
+        try stderr.writeStreamingAll(io(), "    mkit clone s3://endpoint/bucket\n");
+        try stderr.writeStreamingAll(io(), "    mkit clone file:///path/to/repo\n");
+        try stderr.writeStreamingAll(io(), "    mkit clone /path/to/repo\n");
+        try stderr.writeStreamingAll(io(), "    mkit clone --depth 1 <url>\n");
+        try stderr.writeStreamingAll(io(), "    mkit clone --sparse src/ docs/ <url>\n");
         return;
     }
 
@@ -2902,7 +2931,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const url = url_arg orelse {
-        try stderr.writeAll("error: missing URL argument\n");
+        try stderr.writeStreamingAll(io(), "error: missing URL argument\n");
         return;
     };
 
@@ -2922,7 +2951,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const parsed = mkit.protocol.parseUrl(url) catch {
         // Fall back to legacy endpoint/bucket split
         const legacy = parseRemoteUrl(url) orelse {
-            try stderr.writeAll("error: invalid remote URL\n");
+            try stderr.writeStreamingAll(io(), "error: invalid remote URL\n");
             return;
         };
         // Build config from legacy parsing and proceed
@@ -2986,19 +3015,19 @@ const CloneParams = struct {
 
 fn cloneWithConfig(
     allocator: std.mem.Allocator,
-    stdout: std.fs.File,
-    stderr: std.fs.File,
+    stdout: std.Io.File,
+    stderr: std.Io.File,
     params: CloneParams,
 ) !void {
     // Init local repo
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     ensureDirectoryEmpty(cwd) catch {
-        try stderr.writeAll("error: clone target directory must be empty\n");
+        try stderr.writeStreamingAll(io(), "error: clone target directory must be empty\n");
         return;
     };
     var store = mkit.store.ObjectStore.init(cwd) catch |err| switch (err) {
         error.AlreadyInitialized => {
-            try stderr.writeAll("error: already a mkit repository\n");
+            try stderr.writeStreamingAll(io(), "error: already a mkit repository\n");
             return;
         },
         else => return err,
@@ -3021,23 +3050,23 @@ fn cloneWithConfig(
 
     try mkit.config.writeConfig(cwd, config);
 
-    try stdout.writeAll("initialized mkit repository\n");
-    try stdout.writeAll("remote: ");
-    try stdout.writeAll(params.remote_endpoint);
+    try stdout.writeStreamingAll(io(), "initialized mkit repository\n");
+    try stdout.writeStreamingAll(io(), "remote: ");
+    try stdout.writeStreamingAll(io(), params.remote_endpoint);
     if (params.remote_bucket.len > 0) {
-        try stdout.writeAll("/");
-        try stdout.writeAll(params.remote_bucket);
+        try stdout.writeStreamingAll(io(), "/");
+        try stdout.writeStreamingAll(io(), params.remote_bucket);
     }
-    try stdout.writeAll("\n");
+    try stdout.writeStreamingAll(io(), "\n");
 
     // Open transport and pull refs
     var transport_handle = openTransport(allocator, config) catch |err| {
-        try stderr.writeAll("warning: could not connect to remote: ");
+        try stderr.writeStreamingAll(io(), "warning: could not connect to remote: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
-        try stdout.writeAll("(run 'mkit pull' to fetch remote content)\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
+        try stdout.writeStreamingAll(io(), "(run 'mkit pull' to fetch remote content)\n");
         return;
     };
     defer transport_handle.deinit();
@@ -3045,12 +3074,12 @@ fn cloneWithConfig(
 
     // List remote refs
     const remote_refs = t.listRefs(allocator, "refs/heads/") catch |err| {
-        try stderr.writeAll("warning: could not list remote refs: ");
+        try stderr.writeStreamingAll(io(), "warning: could not list remote refs: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
-        try stdout.writeAll("(run 'mkit pull' to fetch remote content)\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
+        try stdout.writeStreamingAll(io(), "(run 'mkit pull' to fetch remote content)\n");
         return;
     };
     defer {
@@ -3059,7 +3088,7 @@ fn cloneWithConfig(
     }
 
     if (remote_refs.len == 0) {
-        try stdout.writeAll("(empty repository — no branches found)\n");
+        try stdout.writeStreamingAll(io(), "(empty repository — no branches found)\n");
         return;
     }
 
@@ -3080,9 +3109,9 @@ fn cloneWithConfig(
         // Set local ref
         mkit.refs.writeRef(cwd, ref.name, ref.hash) catch continue;
 
-        try stdout.writeAll("  fetched ");
-        try stdout.writeAll(ref.name);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "  fetched ");
+        try stdout.writeStreamingAll(io(), ref.name);
+        try stdout.writeStreamingAll(io(), "\n");
     }
 
     // Determine default branch: "main" if it exists, otherwise first ref
@@ -3100,11 +3129,11 @@ fn cloneWithConfig(
     // Write sparse checkout patterns if specified
     if (params.sparse_patterns) |patterns| {
         mkit.restore.writeSparseCheckout(cwd, patterns) catch |err| {
-            try stderr.writeAll("warning: failed to write sparse checkout: ");
+            try stderr.writeStreamingAll(io(), "warning: failed to write sparse checkout: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
         };
     }
 
@@ -3140,28 +3169,28 @@ fn cloneWithConfig(
                 mkit.restore.restoreTree(allocator, &store, commit_obj.commit.tree_hash, work_dir, .{
                     .sparse_patterns = sparse,
                 }) catch |err| {
-                    try stderr.writeAll("warning: failed to restore working directory: ");
+                    try stderr.writeStreamingAll(io(), "warning: failed to restore working directory: ");
                     var buf: [256]u8 = undefined;
                     const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-                    try stderr.writeAll(err_name);
-                    try stderr.writeAll("\n");
+                    try stderr.writeStreamingAll(io(), err_name);
+                    try stderr.writeStreamingAll(io(), "\n");
                 };
             }
         }
 
-        try stdout.writeAll("checked out ");
-        try stdout.writeAll(db);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "checked out ");
+        try stdout.writeStreamingAll(io(), db);
+        try stdout.writeStreamingAll(io(), "\n");
     }
 }
 
 fn cmdFetch(allocator: std.mem.Allocator) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
-    const cwd = std.fs.cwd();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
+    const cwd = std.Io.Dir.cwd();
 
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
@@ -3170,25 +3199,25 @@ fn cmdFetch(allocator: std.mem.Allocator) !void {
     defer config.deinit();
 
     if (config.remote_endpoint.len == 0) {
-        try stderr.writeAll("error: no remote configured (use 'mkit remote add <url>')\n");
+        try stderr.writeStreamingAll(io(), "error: no remote configured (use 'mkit remote add <url>')\n");
         return;
     }
 
     var transport_handle = openTransport(allocator, config) catch {
-        try stderr.writeAll("error: could not open transport\n");
+        try stderr.writeStreamingAll(io(), "error: could not open transport\n");
         return;
     };
     defer transport_handle.deinit();
     const t = transport_handle.transport;
 
     const head = mkit.refs.readHead(allocator, cwd) catch {
-        try stderr.writeAll("error: cannot read HEAD\n");
+        try stderr.writeStreamingAll(io(), "error: cannot read HEAD\n");
         return;
     };
     const branch_name: []const u8 = switch (head) {
         .branch => |b| b,
         .detached => {
-            try stderr.writeAll("error: cannot fetch in detached HEAD state\n");
+            try stderr.writeStreamingAll(io(), "error: cannot fetch in detached HEAD state\n");
             return;
         },
     };
@@ -3196,56 +3225,56 @@ fn cmdFetch(allocator: std.mem.Allocator) !void {
 
     var ref_name_buf: [256]u8 = undefined;
     const ref_name = std.fmt.bufPrint(&ref_name_buf, "refs/heads/{s}", .{branch_name}) catch {
-        try stderr.writeAll("error: branch name too long\n");
+        try stderr.writeStreamingAll(io(), "error: branch name too long\n");
         return;
     };
 
     const remote_hash = t.readRef(allocator, ref_name) catch {
-        try stderr.writeAll("error: could not read remote ref\n");
+        try stderr.writeStreamingAll(io(), "error: could not read remote ref\n");
         return;
     } orelse {
-        try stderr.writeAll("remote branch '");
-        try stderr.writeAll(branch_name);
-        try stderr.writeAll("' not found\n");
+        try stderr.writeStreamingAll(io(), "remote branch '");
+        try stderr.writeStreamingAll(io(), branch_name);
+        try stderr.writeStreamingAll(io(), "' not found\n");
         return;
     };
 
     if (store.exists(remote_hash)) {
-        try stdout.writeAll("already up to date\n");
+        try stdout.writeStreamingAll(io(), "already up to date\n");
     } else {
         const pack_digest = readPackDigestForRef(t, allocator, ref_name, remote_hash) catch {
-            try stderr.writeAll("error: could not read pack companion\n");
+            try stderr.writeStreamingAll(io(), "error: could not read pack companion\n");
             return;
         } orelse {
-            try stderr.writeAll("error: no pack companion found\n");
+            try stderr.writeStreamingAll(io(), "error: no pack companion found\n");
             return;
         };
 
         const pack_bytes = t.downloadPack(allocator, pack_digest) catch {
-            try stderr.writeAll("error: could not download pack\n");
+            try stderr.writeStreamingAll(io(), "error: could not download pack\n");
             return;
         };
         defer allocator.free(pack_bytes);
         verifyPackDigest(pack_digest, pack_bytes) catch {
-            try stderr.writeAll("error: downloaded pack failed digest verification\n");
+            try stderr.writeStreamingAll(io(), "error: downloaded pack failed digest verification\n");
             return;
         };
 
         mkit.packfile.unpackInto(allocator, pack_bytes, &store) catch {
-            try stderr.writeAll("error: could not unpack\n");
+            try stderr.writeStreamingAll(io(), "error: could not unpack\n");
             return;
         };
         ensureCommitExists(allocator, &store, remote_hash) catch {
-            try stderr.writeAll("error: downloaded pack does not contain the advertised remote commit\n");
+            try stderr.writeStreamingAll(io(), "error: downloaded pack does not contain the advertised remote commit\n");
             return;
         };
 
         const remote_hex = mkit.hash.toHex(remote_hash);
-        try stdout.writeAll("fetched ");
-        try stdout.writeAll(remote_hex[0..8]);
-        try stdout.writeAll(" -> ");
-        try stdout.writeAll(branch_name);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "fetched ");
+        try stdout.writeStreamingAll(io(), remote_hex[0..8]);
+        try stdout.writeStreamingAll(io(), " -> ");
+        try stdout.writeStreamingAll(io(), branch_name);
+        try stdout.writeStreamingAll(io(), "\n");
     }
 
     // Write remote-tracking ref
@@ -3263,40 +3292,40 @@ fn cmdFetch(allocator: std.mem.Allocator) !void {
     const hex = mkit.hash.toHex(remote_hash);
     const rf = cwd.createFile(remote_ref_path, .{}) catch return;
     defer rf.close();
-    rf.writeAll(&hex) catch {};
-    rf.writeAll("\n") catch {};
+    rf.writeStreamingAll(io(), &hex) catch {};
+    rf.writeStreamingAll(io(), "\n") catch {};
 }
 
 fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit cherry-pick <hash>\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit cherry-pick <hash>\n");
         return;
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
 
     // Resolve HEAD
     const head_hash = try mkit.refs.resolveHead(allocator, cwd) orelse {
-        try stderr.writeAll("error: no commits on current branch\n");
+        try stderr.writeStreamingAll(io(), "error: no commits on current branch\n");
         return;
     };
 
     // Get HEAD commit's tree
     var head_obj = store.get(allocator, head_hash) catch {
-        try stderr.writeAll("error: could not read HEAD commit\n");
+        try stderr.writeStreamingAll(io(), "error: could not read HEAD commit\n");
         return;
     };
     defer head_obj.deinit(allocator);
     if (head_obj != .commit) {
-        try stderr.writeAll("error: HEAD does not point to a commit\n");
+        try stderr.writeStreamingAll(io(), "error: HEAD does not point to a commit\n");
         return;
     }
     const head_tree = head_obj.commit.tree_hash;
@@ -3304,36 +3333,36 @@ fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Parse target hash
     const hash_str = args[0];
     const target_hash = mkit.hash.fromHex(hash_str) catch {
-        try stderr.writeAll("error: invalid hash '");
-        try stderr.writeAll(hash_str);
-        try stderr.writeAll("'\n");
+        try stderr.writeStreamingAll(io(), "error: invalid hash '");
+        try stderr.writeStreamingAll(io(), hash_str);
+        try stderr.writeStreamingAll(io(), "'\n");
         return;
     };
 
     // Cherry-pick
     var result = mkit.cherry_pick.cherryPick(allocator, &store, target_hash, head_tree) catch |err| {
-        try stderr.writeAll("error: cherry-pick failed: ");
+        try stderr.writeStreamingAll(io(), "error: cherry-pick failed: ");
         var buf: [256]u8 = undefined;
         const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-        try stderr.writeAll(err_name);
-        try stderr.writeAll("\n");
+        try stderr.writeStreamingAll(io(), err_name);
+        try stderr.writeStreamingAll(io(), "\n");
         return;
     };
     defer result.deinit();
 
     if (result.hasConflicts()) {
-        try stderr.writeAll("cherry-pick conflict:\n");
+        try stderr.writeStreamingAll(io(), "cherry-pick conflict:\n");
         for (result.conflicts) |c| {
             const kind_str: []const u8 = switch (c.kind) {
                 .modify_modify => "both modified",
                 .delete_modify => "delete/modify",
                 .add_add => "both added",
             };
-            try stderr.writeAll("  ");
-            try stderr.writeAll(c.path);
-            try stderr.writeAll(" (");
-            try stderr.writeAll(kind_str);
-            try stderr.writeAll(")\n");
+            try stderr.writeStreamingAll(io(), "  ");
+            try stderr.writeStreamingAll(io(), c.path);
+            try stderr.writeStreamingAll(io(), " (");
+            try stderr.writeStreamingAll(io(), kind_str);
+            try stderr.writeStreamingAll(io(), ")\n");
         }
         return;
     }
@@ -3344,15 +3373,15 @@ fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
         error.FileNotFound => {
-            try stderr.writeAll("error: no signing key found (run 'mkit keygen' first)\n");
+            try stderr.writeStreamingAll(io(), "error: no signing key found (run 'mkit keygen' first)\n");
             return;
         },
         error.InvalidKeyFile => {
-            try stderr.writeAll("error: invalid key file (expected 32-byte seed)\n");
+            try stderr.writeStreamingAll(io(), "error: invalid key file (expected 32-byte seed)\n");
             return;
         },
         else => {
-            try stderr.writeAll("error: invalid key seed\n");
+            try stderr.writeStreamingAll(io(), "error: invalid key seed\n");
             return;
         },
     };
@@ -3361,7 +3390,7 @@ fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     var id_scratch: [1024]u8 = undefined;
     const author_id = resolveAuthorIdentity(config.user_identity, id_scratch[0..], kp.public_key[0..]) catch {
-        try stderr.writeAll("error: invalid user.identity in config (run 'mkit config user.identity <value>')\n");
+        try stderr.writeStreamingAll(io(), "error: invalid user.identity in config (run 'mkit config user.identity <value>')\n");
         return;
     };
 
@@ -3379,7 +3408,7 @@ fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     commit.signature = mkit.sign.signCommit(allocator, commit, kp) catch {
-        try stderr.writeAll("error: signing failed\n");
+        try stderr.writeStreamingAll(io(), "error: signing failed\n");
         return;
     };
 
@@ -3389,16 +3418,16 @@ fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Restore working directory
     {
         var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-            try stderr.writeAll("error: could not open working directory for restore\n");
+            try stderr.writeStreamingAll(io(), "error: could not open working directory for restore\n");
             return;
         };
         defer work_dir.close();
         mkit.restore.restoreTree(allocator, &store, result.tree_hash, work_dir, .{}) catch |err| {
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll("error: could not restore working tree: ");
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), "error: could not restore working tree: ");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         };
     }
@@ -3407,38 +3436,38 @@ fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
     try mkit.refs.updateHead(allocator, cwd, commit_hash);
 
     const hex = mkit.hash.toHex(commit_hash);
-    try stdout.writeAll("[cherry-pick] ");
-    try stdout.writeAll(&hex);
-    try stdout.writeAll("\n");
+    try stdout.writeStreamingAll(io(), "[cherry-pick] ");
+    try stdout.writeStreamingAll(io(), &hex);
+    try stdout.writeStreamingAll(io(), "\n");
 }
 
 fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit rebase <branch>\n");
-        try stderr.writeAll("       mkit rebase --continue\n");
-        try stderr.writeAll("       mkit rebase --abort\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit rebase <branch>\n");
+        try stderr.writeStreamingAll(io(), "       mkit rebase --continue\n");
+        try stderr.writeStreamingAll(io(), "       mkit rebase --abort\n");
         return;
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
 
     // Serialize against other commit/checkout/merge/rebase. See src/lock.zig.
     var mkit_dir = cwd.openDir(".mkit", .{}) catch {
-        try stderr.writeAll("error: cannot open .mkit directory\n");
+        try stderr.writeStreamingAll(io(), "error: cannot open .mkit directory\n");
         return;
     };
     defer mkit_dir.close();
     var repo_lock = mkit.lock.acquireDefault(mkit_dir, "index.lock") catch |err| switch (err) {
         error.LockBusy => {
-            try stderr.writeAll("error: another mkit process is running in this repository (.mkit/index.lock held)\n");
+            try stderr.writeStreamingAll(io(), "error: another mkit process is running in this repository (.mkit/index.lock held)\n");
             return;
         },
         else => return err,
@@ -3449,10 +3478,10 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Abort: restore original HEAD and clean up
         var state = mkit.rebase.readState(allocator, cwd) catch |err| {
             if (err == error.NoRebaseInProgress) {
-                try stderr.writeAll("error: no rebase in progress\n");
+                try stderr.writeStreamingAll(io(), "error: no rebase in progress\n");
                 return;
             }
-            try stderr.writeAll("error: could not read rebase state\n");
+            try stderr.writeStreamingAll(io(), "error: could not read rebase state\n");
             return;
         };
         defer state.deinit();
@@ -3463,18 +3492,18 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         // Restore working tree
         var orig_obj = store.get(allocator, state.orig_head) catch {
-            try stderr.writeAll("warning: could not read original commit\n");
+            try stderr.writeStreamingAll(io(), "warning: could not read original commit\n");
             try mkit.rebase.cleanupRebase(cwd);
-            try stdout.writeAll("rebase aborted\n");
+            try stdout.writeStreamingAll(io(), "rebase aborted\n");
             return;
         };
         defer orig_obj.deinit(allocator);
 
         if (orig_obj == .commit) {
             var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-                try stderr.writeAll("warning: could not open working directory for restore\n");
+                try stderr.writeStreamingAll(io(), "warning: could not open working directory for restore\n");
                 try mkit.rebase.cleanupRebase(cwd);
-                try stdout.writeAll("rebase aborted\n");
+                try stdout.writeStreamingAll(io(), "rebase aborted\n");
                 return;
             };
             defer work_dir.close();
@@ -3482,7 +3511,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
 
         try mkit.rebase.cleanupRebase(cwd);
-        try stdout.writeAll("rebase aborted\n");
+        try stdout.writeStreamingAll(io(), "rebase aborted\n");
         return;
     }
 
@@ -3490,10 +3519,10 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Continue: read state, build tree from working dir, create commit, advance
         var state = mkit.rebase.readState(allocator, cwd) catch |err| {
             if (err == error.NoRebaseInProgress) {
-                try stderr.writeAll("error: no rebase in progress\n");
+                try stderr.writeStreamingAll(io(), "error: no rebase in progress\n");
                 return;
             }
-            try stderr.writeAll("error: could not read rebase state\n");
+            try stderr.writeStreamingAll(io(), "error: could not read rebase state\n");
             return;
         };
         defer state.deinit();
@@ -3503,7 +3532,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
             mkit.refs.writeRef(cwd, state.head_name, state.onto) catch {};
             mkit.refs.writeHeadBranch(cwd, state.head_name) catch {};
             try mkit.rebase.cleanupRebase(cwd);
-            try stdout.writeAll("rebase complete\n");
+            try stdout.writeStreamingAll(io(), "rebase complete\n");
             return;
         }
 
@@ -3512,22 +3541,22 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         const kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
             error.FileNotFound => {
-                try stderr.writeAll("error: no signing key found (run 'mkit keygen' first)\n");
+                try stderr.writeStreamingAll(io(), "error: no signing key found (run 'mkit keygen' first)\n");
                 return;
             },
             error.InvalidKeyFile => {
-                try stderr.writeAll("error: invalid key file (expected 32-byte seed)\n");
+                try stderr.writeStreamingAll(io(), "error: invalid key file (expected 32-byte seed)\n");
                 return;
             },
             else => {
-                try stderr.writeAll("error: invalid key seed\n");
+                try stderr.writeStreamingAll(io(), "error: invalid key seed\n");
                 return;
             },
         };
 
         // Build tree from current working directory
         var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
-            try stderr.writeAll("error: cannot open working directory\n");
+            try stderr.writeStreamingAll(io(), "error: cannot open working directory\n");
             return;
         };
         defer work_dir.close();
@@ -3539,7 +3568,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Load original commit message
         const current_todo = state.todo[0];
         var orig_commit_obj = store.get(allocator, current_todo) catch {
-            try stderr.writeAll("error: could not read original commit\n");
+            try stderr.writeStreamingAll(io(), "error: could not read original commit\n");
             return;
         };
         defer orig_commit_obj.deinit(allocator);
@@ -3552,7 +3581,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         var id_scratch: [1024]u8 = undefined;
         const author_id = resolveAuthorIdentity(config.user_identity, id_scratch[0..], kp.public_key[0..]) catch {
-            try stderr.writeAll("error: invalid user.identity in config (run 'mkit config user.identity <value>')\n");
+            try stderr.writeStreamingAll(io(), "error: invalid user.identity in config (run 'mkit config user.identity <value>')\n");
             return;
         };
 
@@ -3570,7 +3599,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
         };
 
         commit.signature = mkit.sign.signCommit(allocator, commit, kp) catch {
-            try stderr.writeAll("error: signing failed\n");
+            try stderr.writeStreamingAll(io(), "error: signing failed\n");
             return;
         };
 
@@ -3602,32 +3631,32 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Resolve HEAD
     const head_hash = try mkit.refs.resolveHead(allocator, cwd) orelse {
-        try stderr.writeAll("error: no commits on current branch\n");
+        try stderr.writeStreamingAll(io(), "error: no commits on current branch\n");
         return;
     };
 
     // Resolve target branch
     const onto_hash = (try mkit.refs.readRef(allocator, cwd, branch_name)) orelse {
-        try stderr.writeAll("error: branch '");
-        try stderr.writeAll(branch_name);
-        try stderr.writeAll("' not found\n");
+        try stderr.writeStreamingAll(io(), "error: branch '");
+        try stderr.writeStreamingAll(io(), branch_name);
+        try stderr.writeStreamingAll(io(), "' not found\n");
         return;
     };
 
     if (std.mem.eql(u8, &head_hash, &onto_hash)) {
-        try stdout.writeAll("already up to date\n");
+        try stdout.writeStreamingAll(io(), "already up to date\n");
         return;
     }
 
     // Get current branch name
     const head = mkit.refs.readHead(allocator, cwd) catch {
-        try stderr.writeAll("error: cannot read HEAD\n");
+        try stderr.writeStreamingAll(io(), "error: cannot read HEAD\n");
         return;
     };
     const current_branch: []const u8 = switch (head) {
         .branch => |b| b,
         .detached => {
-            try stderr.writeAll("error: cannot rebase in detached HEAD state\n");
+            try stderr.writeStreamingAll(io(), "error: cannot rebase in detached HEAD state\n");
             return;
         },
     };
@@ -3635,13 +3664,13 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Collect commits to replay
     const commits = mkit.rebase.collectCommitsToReplay(allocator, &store, head_hash, onto_hash) catch {
-        try stderr.writeAll("error: could not collect commits to replay\n");
+        try stderr.writeStreamingAll(io(), "error: could not collect commits to replay\n");
         return;
     };
     defer allocator.free(commits);
 
     if (commits.len == 0) {
-        try stdout.writeAll("nothing to rebase\n");
+        try stdout.writeStreamingAll(io(), "nothing to rebase\n");
         return;
     }
 
@@ -3666,15 +3695,15 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
         error.FileNotFound => {
-            try stderr.writeAll("error: no signing key found (run 'mkit keygen' first)\n");
+            try stderr.writeStreamingAll(io(), "error: no signing key found (run 'mkit keygen' first)\n");
             return;
         },
         error.InvalidKeyFile => {
-            try stderr.writeAll("error: invalid key file (expected 32-byte seed)\n");
+            try stderr.writeStreamingAll(io(), "error: invalid key file (expected 32-byte seed)\n");
             return;
         },
         else => {
-            try stderr.writeAll("error: invalid key seed\n");
+            try stderr.writeStreamingAll(io(), "error: invalid key seed\n");
             return;
         },
     };
@@ -3686,12 +3715,12 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
 fn rebaseReplay(
     allocator: std.mem.Allocator,
     store: *mkit.store.ObjectStore,
-    cwd: std.fs.Dir,
+    cwd: std.Io.Dir,
     state: *mkit.rebase.RebaseState,
     config: mkit.config.Config,
     kp: mkit.sign.KeyPair,
-    stdout: std.fs.File,
-    stderr: std.fs.File,
+    stdout: std.Io.File,
+    stderr: std.Io.File,
 ) !void {
     while (state.todo.len > 0) {
         const current_commit_hash = state.todo[0];
@@ -3699,23 +3728,23 @@ fn rebaseReplay(
         // Get current HEAD tree
         const current_head = try mkit.refs.resolveHead(allocator, cwd) orelse state.onto;
         var current_obj = store.get(allocator, current_head) catch {
-            try stderr.writeAll("error: could not read current HEAD\n");
+            try stderr.writeStreamingAll(io(), "error: could not read current HEAD\n");
             return;
         };
         defer current_obj.deinit(allocator);
         if (current_obj != .commit) {
-            try stderr.writeAll("error: HEAD does not point to a commit\n");
+            try stderr.writeStreamingAll(io(), "error: HEAD does not point to a commit\n");
             return;
         }
         const current_tree = current_obj.commit.tree_hash;
 
         // Cherry-pick this commit
         var cp_result = mkit.cherry_pick.cherryPick(allocator, store, current_commit_hash, current_tree) catch |err| {
-            try stderr.writeAll("error: cherry-pick failed during rebase: ");
+            try stderr.writeStreamingAll(io(), "error: cherry-pick failed during rebase: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         };
         defer cp_result.deinit();
@@ -3723,24 +3752,24 @@ fn rebaseReplay(
         if (cp_result.hasConflicts()) {
             // Save state and stop
             try mkit.rebase.writeState(cwd, state.*);
-            try stderr.writeAll("conflict while replaying ");
+            try stderr.writeStreamingAll(io(), "conflict while replaying ");
             const hash_hex = mkit.hash.toHex(current_commit_hash);
-            try stderr.writeAll(hash_hex[0..8]);
-            try stderr.writeAll(":\n");
+            try stderr.writeStreamingAll(io(), hash_hex[0..8]);
+            try stderr.writeStreamingAll(io(), ":\n");
             for (cp_result.conflicts) |c| {
                 const kind_str: []const u8 = switch (c.kind) {
                     .modify_modify => "both modified",
                     .delete_modify => "delete/modify",
                     .add_add => "both added",
                 };
-                try stderr.writeAll("  ");
-                try stderr.writeAll(c.path);
-                try stderr.writeAll(" (");
-                try stderr.writeAll(kind_str);
-                try stderr.writeAll(")\n");
+                try stderr.writeStreamingAll(io(), "  ");
+                try stderr.writeStreamingAll(io(), c.path);
+                try stderr.writeStreamingAll(io(), " (");
+                try stderr.writeStreamingAll(io(), kind_str);
+                try stderr.writeStreamingAll(io(), ")\n");
             }
-            try stderr.writeAll("\nresolve conflicts and run 'mkit rebase --continue'\n");
-            try stderr.writeAll("or run 'mkit rebase --abort' to cancel\n");
+            try stderr.writeStreamingAll(io(), "\nresolve conflicts and run 'mkit rebase --continue'\n");
+            try stderr.writeStreamingAll(io(), "or run 'mkit rebase --abort' to cancel\n");
             return;
         }
 
@@ -3749,7 +3778,7 @@ fn rebaseReplay(
 
         var id_scratch: [1024]u8 = undefined;
         const author_id = resolveAuthorIdentity(config.user_identity, id_scratch[0..], kp.public_key[0..]) catch {
-            try stderr.writeAll("error: invalid user.identity in config (run 'mkit config user.identity <value>')\n");
+            try stderr.writeStreamingAll(io(), "error: invalid user.identity in config (run 'mkit config user.identity <value>')\n");
             return;
         };
 
@@ -3767,7 +3796,7 @@ fn rebaseReplay(
         };
 
         commit.signature = mkit.sign.signCommit(allocator, commit, kp) catch {
-            try stderr.writeAll("error: signing failed during rebase\n");
+            try stderr.writeStreamingAll(io(), "error: signing failed during rebase\n");
             return;
         };
 
@@ -3776,9 +3805,9 @@ fn rebaseReplay(
         try mkit.refs.updateHead(allocator, cwd, new_hash);
 
         const new_hex = mkit.hash.toHex(new_hash);
-        try stdout.writeAll("  replayed ");
-        try stdout.writeAll(new_hex[0..8]);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "  replayed ");
+        try stdout.writeStreamingAll(io(), new_hex[0..8]);
+        try stdout.writeStreamingAll(io(), "\n");
 
         // Advance state
         const new_done = try allocator.alloc(mkit.hash.Hash, state.done.len + 1);
@@ -3803,7 +3832,7 @@ fn rebaseReplay(
     // Restore working tree
     var final_obj = store.get(allocator, final_head) catch {
         try mkit.rebase.cleanupRebase(cwd);
-        try stdout.writeAll("rebase complete\n");
+        try stdout.writeStreamingAll(io(), "rebase complete\n");
         return;
     };
     defer final_obj.deinit(allocator);
@@ -3811,7 +3840,7 @@ fn rebaseReplay(
     if (final_obj == .commit) {
         var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
             try mkit.rebase.cleanupRebase(cwd);
-            try stdout.writeAll("rebase complete\n");
+            try stdout.writeStreamingAll(io(), "rebase complete\n");
             return;
         };
         defer work_dir.close();
@@ -3819,21 +3848,21 @@ fn rebaseReplay(
     }
 
     try mkit.rebase.cleanupRebase(cwd);
-    try stdout.writeAll("rebase complete\n");
+    try stdout.writeStreamingAll(io(), "rebase complete\n");
 }
 
 fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit bisect <start|good|bad|reset>\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit bisect <start|good|bad|reset>\n");
         return;
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     defer store.close();
@@ -3843,18 +3872,18 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (std.mem.eql(u8, subcmd, "start")) {
         // Check if bisect already in progress
         if (mkit.bisect.isBisectInProgress(cwd)) {
-            try stderr.writeAll("error: bisect already in progress (use 'mkit bisect reset' first)\n");
+            try stderr.writeStreamingAll(io(), "error: bisect already in progress (use 'mkit bisect reset' first)\n");
             return;
         }
 
         const head_hash = try mkit.refs.resolveHead(allocator, cwd) orelse {
-            try stderr.writeAll("error: no commits yet\n");
+            try stderr.writeStreamingAll(io(), "error: no commits yet\n");
             return;
         };
 
         // Get current branch
         const head = mkit.refs.readHead(allocator, cwd) catch {
-            try stderr.writeAll("error: cannot read HEAD\n");
+            try stderr.writeStreamingAll(io(), "error: cannot read HEAD\n");
             return;
         };
         const branch_name: ?[]const u8 = switch (head) {
@@ -3873,18 +3902,18 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try mkit.bisect.writeState(cwd, state);
         allocator.free(state.good_hashes);
 
-        try stdout.writeAll("bisect started\n");
-        try stdout.writeAll("use 'mkit bisect bad [hash]' and 'mkit bisect good [hash]' to mark commits\n");
+        try stdout.writeStreamingAll(io(), "bisect started\n");
+        try stdout.writeStreamingAll(io(), "use 'mkit bisect bad [hash]' and 'mkit bisect good [hash]' to mark commits\n");
         return;
     }
 
     if (std.mem.eql(u8, subcmd, "good")) {
         var state = mkit.bisect.readState(allocator, cwd) catch |err| {
             if (err == error.NoBisectInProgress) {
-                try stderr.writeAll("error: no bisect in progress (run 'mkit bisect start')\n");
+                try stderr.writeStreamingAll(io(), "error: no bisect in progress (run 'mkit bisect start')\n");
                 return;
             }
-            try stderr.writeAll("error: could not read bisect state\n");
+            try stderr.writeStreamingAll(io(), "error: could not read bisect state\n");
             return;
         };
         defer state.deinit();
@@ -3892,12 +3921,12 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Parse optional hash arg, default to HEAD
         const good_hash = if (args.len > 1) blk: {
             break :blk mkit.hash.fromHex(args[1]) catch {
-                try stderr.writeAll("error: invalid hash\n");
+                try stderr.writeStreamingAll(io(), "error: invalid hash\n");
                 return;
             };
         } else blk: {
             break :blk (try mkit.refs.resolveHead(allocator, cwd)) orelse {
-                try stderr.writeAll("error: no commits yet\n");
+                try stderr.writeStreamingAll(io(), "error: no commits yet\n");
                 return;
             };
         };
@@ -3912,9 +3941,9 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try mkit.bisect.writeState(cwd, state);
 
         const good_hex = mkit.hash.toHex(good_hash);
-        try stdout.writeAll("marked ");
-        try stdout.writeAll(good_hex[0..8]);
-        try stdout.writeAll(" as good\n");
+        try stdout.writeStreamingAll(io(), "marked ");
+        try stdout.writeStreamingAll(io(), good_hex[0..8]);
+        try stdout.writeStreamingAll(io(), " as good\n");
 
         // If we have both good and bad, compute midpoint
         if (state.bad_hash) |bad| {
@@ -3926,10 +3955,10 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (std.mem.eql(u8, subcmd, "bad")) {
         var state = mkit.bisect.readState(allocator, cwd) catch |err| {
             if (err == error.NoBisectInProgress) {
-                try stderr.writeAll("error: no bisect in progress (run 'mkit bisect start')\n");
+                try stderr.writeStreamingAll(io(), "error: no bisect in progress (run 'mkit bisect start')\n");
                 return;
             }
-            try stderr.writeAll("error: could not read bisect state\n");
+            try stderr.writeStreamingAll(io(), "error: could not read bisect state\n");
             return;
         };
         defer state.deinit();
@@ -3937,12 +3966,12 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Parse optional hash arg, default to HEAD
         const bad_hash = if (args.len > 1) blk: {
             break :blk mkit.hash.fromHex(args[1]) catch {
-                try stderr.writeAll("error: invalid hash\n");
+                try stderr.writeStreamingAll(io(), "error: invalid hash\n");
                 return;
             };
         } else blk: {
             break :blk (try mkit.refs.resolveHead(allocator, cwd)) orelse {
-                try stderr.writeAll("error: no commits yet\n");
+                try stderr.writeStreamingAll(io(), "error: no commits yet\n");
                 return;
             };
         };
@@ -3951,9 +3980,9 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try mkit.bisect.writeState(cwd, state);
 
         const bad_hex = mkit.hash.toHex(bad_hash);
-        try stdout.writeAll("marked ");
-        try stdout.writeAll(bad_hex[0..8]);
-        try stdout.writeAll(" as bad\n");
+        try stdout.writeStreamingAll(io(), "marked ");
+        try stdout.writeStreamingAll(io(), bad_hex[0..8]);
+        try stdout.writeStreamingAll(io(), " as bad\n");
 
         // If we have both good and bad, compute midpoint
         if (state.good_hashes.len > 0) {
@@ -3965,10 +3994,10 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (std.mem.eql(u8, subcmd, "reset")) {
         var state = mkit.bisect.readState(allocator, cwd) catch |err| {
             if (err == error.NoBisectInProgress) {
-                try stderr.writeAll("error: no bisect in progress\n");
+                try stderr.writeStreamingAll(io(), "error: no bisect in progress\n");
                 return;
             }
-            try stderr.writeAll("error: could not read bisect state\n");
+            try stderr.writeStreamingAll(io(), "error: could not read bisect state\n");
             return;
         };
         defer state.deinit();
@@ -3984,7 +4013,7 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Restore working tree
         var orig_obj = store.get(allocator, state.orig_head) catch {
             try mkit.bisect.cleanupBisect(cwd);
-            try stdout.writeAll("bisect reset\n");
+            try stdout.writeStreamingAll(io(), "bisect reset\n");
             return;
         };
         defer orig_obj.deinit(allocator);
@@ -3992,7 +4021,7 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (orig_obj == .commit) {
             var work_dir = cwd.openDir(".", .{ .iterate = true }) catch {
                 try mkit.bisect.cleanupBisect(cwd);
-                try stdout.writeAll("bisect reset\n");
+                try stdout.writeStreamingAll(io(), "bisect reset\n");
                 return;
             };
             defer work_dir.close();
@@ -4000,41 +4029,41 @@ fn cmdBisect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
 
         try mkit.bisect.cleanupBisect(cwd);
-        try stdout.writeAll("bisect reset\n");
+        try stdout.writeStreamingAll(io(), "bisect reset\n");
         return;
     }
 
-    try stderr.writeAll("unknown bisect subcommand '");
-    try stderr.writeAll(subcmd);
-    try stderr.writeAll("'\n");
-    try stderr.writeAll("usage: mkit bisect <start|good|bad|reset>\n");
+    try stderr.writeStreamingAll(io(), "unknown bisect subcommand '");
+    try stderr.writeStreamingAll(io(), subcmd);
+    try stderr.writeStreamingAll(io(), "'\n");
+    try stderr.writeStreamingAll(io(), "usage: mkit bisect <start|good|bad|reset>\n");
 }
 
 fn bisectStep(
     allocator: std.mem.Allocator,
     store: *mkit.store.ObjectStore,
-    cwd: std.fs.Dir,
+    cwd: std.Io.Dir,
     bad: mkit.hash.Hash,
     good_hashes: []const mkit.hash.Hash,
-    stdout: std.fs.File,
-    stderr: std.fs.File,
+    stdout: std.Io.File,
+    stderr: std.Io.File,
 ) !void {
     const candidates = mkit.bisect.enumerateRange(allocator, store, bad, good_hashes) catch {
-        try stderr.writeAll("error: could not enumerate bisect range\n");
+        try stderr.writeStreamingAll(io(), "error: could not enumerate bisect range\n");
         return;
     };
     defer allocator.free(candidates);
 
     if (candidates.len == 0) {
-        try stdout.writeAll("bisect: no candidates found\n");
+        try stdout.writeStreamingAll(io(), "bisect: no candidates found\n");
         return;
     }
 
     if (candidates.len == 1) {
         const found_hex = mkit.hash.toHex(candidates[0]);
-        try stdout.writeAll("bisect: first bad commit is ");
-        try stdout.writeAll(&found_hex);
-        try stdout.writeAll("\n");
+        try stdout.writeStreamingAll(io(), "bisect: first bad commit is ");
+        try stdout.writeStreamingAll(io(), &found_hex);
+        try stdout.writeStreamingAll(io(), "\n");
         return;
     }
 
@@ -4046,7 +4075,7 @@ fn bisectStep(
 
     // Restore working tree
     var mid_obj = store.get(allocator, midpoint) catch {
-        try stderr.writeAll("warning: could not read midpoint commit\n");
+        try stderr.writeStreamingAll(io(), "warning: could not read midpoint commit\n");
         return;
     };
     defer mid_obj.deinit(allocator);
@@ -4059,19 +4088,19 @@ fn bisectStep(
 
     var count_buf: [20]u8 = undefined;
     const count_str = std.fmt.bufPrint(&count_buf, "{d}", .{candidates.len}) catch "?";
-    try stdout.writeAll("bisecting: ");
-    try stdout.writeAll(count_str);
-    try stdout.writeAll(" commits remaining\n");
-    try stdout.writeAll("testing ");
-    try stdout.writeAll(mid_hex[0..8]);
-    try stdout.writeAll("\n");
+    try stdout.writeStreamingAll(io(), "bisecting: ");
+    try stdout.writeStreamingAll(io(), count_str);
+    try stdout.writeStreamingAll(io(), " commits remaining\n");
+    try stdout.writeStreamingAll(io(), "testing ");
+    try stdout.writeStreamingAll(io(), mid_hex[0..8]);
+    try stdout.writeStreamingAll(io(), "\n");
 }
 
 fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stderr = std.fs.File.stderr();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit serve <path>\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit serve <path>\n");
         return;
     }
 
@@ -4079,16 +4108,16 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Open a FileTransport at the given path
     var ft = mkit.transport_file.FileTransport.init(allocator, path) catch {
-        try stderr.writeAll("error: could not open repository at '");
-        try stderr.writeAll(path);
-        try stderr.writeAll("'\n");
+        try stderr.writeStreamingAll(io(), "error: could not open repository at '");
+        try stderr.writeStreamingAll(io(), path);
+        try stderr.writeStreamingAll(io(), "'\n");
         return;
     };
     defer ft.deinit();
     const transport = ft.transport();
 
-    const stdin = std.fs.File.stdin();
-    const stdout = std.fs.File.stdout();
+    const stdin = std.Io.File.stdin();
+    const stdout = std.Io.File.stdout();
 
     // -- OP_HELLO handshake (SPEC-TRANSPORT §7.4) --
     // First frame MUST be OP_HELLO. This pins the protocol version and binary
@@ -4109,7 +4138,7 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (hello_op != mkit.transport_ssh.OP_HELLO) {
             const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "hello required") catch return;
             defer allocator.free(resp);
-            stdout.writeAll(resp) catch {};
+            stdout.writeStreamingAll(io(), resp) catch {};
             return;
         }
         if (hello_len > mkit.transport_ssh.MAX_PAYLOAD) return;
@@ -4124,25 +4153,25 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const hello = mkit.transport_ssh.decodeHelloRequest(hello_payload) catch {
             const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "hello decode error") catch return;
             defer allocator.free(resp);
-            stdout.writeAll(resp) catch {};
+            stdout.writeStreamingAll(io(), resp) catch {};
             return;
         };
 
         if (!std.mem.eql(u8, hello.binary_name, mkit.transport_ssh.BINARY_NAME)) {
-            try stderr.writeAll("serve: rejecting peer with binary_name='");
-            try stderr.writeAll(hello.binary_name);
-            try stderr.writeAll("' (expected 'mkit')\n");
+            try stderr.writeStreamingAll(io(), "serve: rejecting peer with binary_name='");
+            try stderr.writeStreamingAll(io(), hello.binary_name);
+            try stderr.writeStreamingAll(io(), "' (expected 'mkit')\n");
             const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "binary name mismatch") catch return;
             defer allocator.free(resp);
-            stdout.writeAll(resp) catch {};
+            stdout.writeStreamingAll(io(), resp) catch {};
             return;
         }
 
         if (hello.proto_version > mkit.transport_ssh.PROTO_VERSION) {
-            try stderr.writeAll("serve: client advertises future proto_version\n");
+            try stderr.writeStreamingAll(io(), "serve: client advertises future proto_version\n");
             const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_UNSUPPORTED, "unsupported proto version") catch return;
             defer allocator.free(resp);
-            stdout.writeAll(resp) catch {};
+            stdout.writeStreamingAll(io(), resp) catch {};
             return;
         }
 
@@ -4150,7 +4179,7 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
             // Older-than-v1: v1 is currently the floor. Reject loud.
             const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_UNSUPPORTED, "unsupported proto version") catch return;
             defer allocator.free(resp);
-            stdout.writeAll(resp) catch {};
+            stdout.writeStreamingAll(io(), resp) catch {};
             return;
         }
 
@@ -4162,7 +4191,7 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer allocator.free(server_hello);
         const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_OK, server_hello) catch return;
         defer allocator.free(resp);
-        stdout.writeAll(resp) catch return;
+        stdout.writeStreamingAll(io(), resp) catch return;
     }
 
     // Wire protocol loop: read request frames, dispatch, write response frames
@@ -4180,7 +4209,7 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (payload_len > mkit.transport_ssh.MAX_PAYLOAD) {
             const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "payload too large") catch break;
             defer allocator.free(resp);
-            stdout.writeAll(resp) catch break;
+            stdout.writeStreamingAll(io(), resp) catch break;
             continue;
         }
 
@@ -4198,118 +4227,118 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 const decoded = mkit.transport_ssh.decodeUploadPack(payload) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "decode error") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 transport.uploadPack(allocator, decoded.data, decoded.digest) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "upload failed") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_OK, "") catch break;
                 defer allocator.free(resp);
-                stdout.writeAll(resp) catch break;
+                stdout.writeStreamingAll(io(), resp) catch break;
             },
             mkit.transport_ssh.OP_DOWNLOAD_PACK => {
                 const digest = mkit.transport_ssh.decodeDownloadPack(payload) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "decode error") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 const data = transport.downloadPack(allocator, digest) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_NULL, "") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 defer allocator.free(data);
                 const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_OK, data) catch break;
                 defer allocator.free(resp);
-                stdout.writeAll(resp) catch break;
+                stdout.writeStreamingAll(io(), resp) catch break;
             },
             mkit.transport_ssh.OP_PACK_EXISTS => {
                 const digest = mkit.transport_ssh.decodePackExists(payload) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "decode error") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 const exists = transport.packExists(allocator, digest) catch false;
                 const exists_byte: [1]u8 = .{if (exists) 1 else 0};
                 const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_OK, &exists_byte) catch break;
                 defer allocator.free(resp);
-                stdout.writeAll(resp) catch break;
+                stdout.writeStreamingAll(io(), resp) catch break;
             },
             mkit.transport_ssh.OP_WRITE_REF => {
                 const decoded = mkit.transport_ssh.decodeWriteRef(payload) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "decode error") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 transport.writeRef(allocator, decoded.name, decoded.hash) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "write ref failed") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_OK, "") catch break;
                 defer allocator.free(resp);
-                stdout.writeAll(resp) catch break;
+                stdout.writeStreamingAll(io(), resp) catch break;
             },
             mkit.transport_ssh.OP_UPDATE_REF => {
                 const decoded = mkit.transport_ssh.decodeUpdateRef(payload) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "decode error") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 transport.updateRef(allocator, decoded.name, decoded.condition, decoded.hash) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "update ref failed") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_OK, "") catch break;
                 defer allocator.free(resp);
-                stdout.writeAll(resp) catch break;
+                stdout.writeStreamingAll(io(), resp) catch break;
             },
             mkit.transport_ssh.OP_READ_REF => {
                 const ref_name = mkit.transport_ssh.decodeReadRef(payload) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "decode error") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 const maybe_hash = transport.readRef(allocator, ref_name) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "read ref failed") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 if (maybe_hash) |h| {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_OK, &h) catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                 } else {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_NULL, "") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                 }
             },
             mkit.transport_ssh.OP_LIST_REFS => {
                 const prefix = mkit.transport_ssh.decodeListRefs(payload) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "decode error") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 const refs = transport.listRefs(allocator, prefix) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "list refs failed") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 defer {
@@ -4319,40 +4348,40 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 const encoded = mkit.transport_ssh.encodeRefList(allocator, refs) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "encode error") catch break;
                     defer allocator.free(resp);
-                    stdout.writeAll(resp) catch break;
+                    stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
                 defer allocator.free(encoded);
                 const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_OK, encoded) catch break;
                 defer allocator.free(resp);
-                stdout.writeAll(resp) catch break;
+                stdout.writeStreamingAll(io(), resp) catch break;
             },
             else => {
                 const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "unknown opcode") catch break;
                 defer allocator.free(resp);
-                stdout.writeAll(resp) catch break;
+                stdout.writeStreamingAll(io(), resp) catch break;
             },
         }
     }
 }
 
 fn cmdSparseCheckout(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const stdout = std.fs.File.stdout();
-    const stderr = std.fs.File.stderr();
+    const stdout = std.Io.File.stdout();
+    const stderr = std.Io.File.stderr();
 
     if (args.len < 1) {
-        try stderr.writeAll("usage: mkit sparse-checkout <set|list|disable>\n");
-        try stderr.writeAll("       mkit sparse-checkout set <pattern>...\n");
-        try stderr.writeAll("       mkit sparse-checkout list\n");
-        try stderr.writeAll("       mkit sparse-checkout disable\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit sparse-checkout <set|list|disable>\n");
+        try stderr.writeStreamingAll(io(), "       mkit sparse-checkout set <pattern>...\n");
+        try stderr.writeStreamingAll(io(), "       mkit sparse-checkout list\n");
+        try stderr.writeStreamingAll(io(), "       mkit sparse-checkout disable\n");
         return;
     }
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
 
     // Verify we're in a mkit repo
     var store = mkit.store.ObjectStore.open(cwd) catch {
-        try stderr.writeAll("error: not a mkit repository (run 'mkit init' first)\n");
+        try stderr.writeStreamingAll(io(), "error: not a mkit repository (run 'mkit init' first)\n");
         return;
     };
     store.close();
@@ -4361,54 +4390,54 @@ fn cmdSparseCheckout(allocator: std.mem.Allocator, args: []const []const u8) !vo
 
     if (std.mem.eql(u8, subcmd, "set")) {
         if (args.len < 2) {
-            try stderr.writeAll("usage: mkit sparse-checkout set <pattern>...\n");
+            try stderr.writeStreamingAll(io(), "usage: mkit sparse-checkout set <pattern>...\n");
             return;
         }
         mkit.restore.writeSparseCheckout(cwd, args[1..]) catch |err| {
-            try stderr.writeAll("error: failed to write sparse checkout: ");
+            try stderr.writeStreamingAll(io(), "error: failed to write sparse checkout: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         };
-        try stdout.writeAll("sparse checkout patterns updated\n");
+        try stdout.writeStreamingAll(io(), "sparse checkout patterns updated\n");
     } else if (std.mem.eql(u8, subcmd, "list")) {
         const patterns = mkit.restore.loadSparseCheckout(allocator, cwd) catch |err| {
-            try stderr.writeAll("error: failed to load sparse checkout: ");
+            try stderr.writeStreamingAll(io(), "error: failed to load sparse checkout: ");
             var buf: [256]u8 = undefined;
             const err_name = std.fmt.bufPrint(&buf, "{s}", .{@errorName(err)}) catch "unknown";
-            try stderr.writeAll(err_name);
-            try stderr.writeAll("\n");
+            try stderr.writeStreamingAll(io(), err_name);
+            try stderr.writeStreamingAll(io(), "\n");
             return;
         };
         if (patterns) |pats| {
             defer mkit.restore.freeSparsePatterns(allocator, pats);
             for (pats) |pat| {
-                if (pat.negated) try stdout.writeAll("!");
-                try stdout.writeAll(pat.pattern);
-                if (pat.dir_only) try stdout.writeAll("/");
-                try stdout.writeAll("\n");
+                if (pat.negated) try stdout.writeStreamingAll(io(), "!");
+                try stdout.writeStreamingAll(io(), pat.pattern);
+                if (pat.dir_only) try stdout.writeStreamingAll(io(), "/");
+                try stdout.writeStreamingAll(io(), "\n");
             }
         } else {
-            try stdout.writeAll("no sparse checkout configured\n");
+            try stdout.writeStreamingAll(io(), "no sparse checkout configured\n");
         }
     } else if (std.mem.eql(u8, subcmd, "disable")) {
         cwd.deleteFile(".mkit/sparse-checkout") catch |err| switch (err) {
             error.FileNotFound => {
-                try stdout.writeAll("sparse checkout not configured\n");
+                try stdout.writeStreamingAll(io(), "sparse checkout not configured\n");
                 return;
             },
             else => {
-                try stderr.writeAll("error: failed to remove sparse checkout file\n");
+                try stderr.writeStreamingAll(io(), "error: failed to remove sparse checkout file\n");
                 return;
             },
         };
-        try stdout.writeAll("sparse checkout disabled\n");
+        try stdout.writeStreamingAll(io(), "sparse checkout disabled\n");
     } else {
-        try stderr.writeAll("unknown sparse-checkout subcommand '");
-        try stderr.writeAll(subcmd);
-        try stderr.writeAll("'\n");
-        try stderr.writeAll("usage: mkit sparse-checkout <set|list|disable>\n");
+        try stderr.writeStreamingAll(io(), "unknown sparse-checkout subcommand '");
+        try stderr.writeStreamingAll(io(), subcmd);
+        try stderr.writeStreamingAll(io(), "'\n");
+        try stderr.writeStreamingAll(io(), "usage: mkit sparse-checkout <set|list|disable>\n");
     }
 }

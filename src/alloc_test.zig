@@ -500,16 +500,16 @@ test "refs lifecycle no leaks" {
     const h1 = hash_mod.hash("commit-main");
     const h2 = hash_mod.hash("commit-dev");
     const h3 = hash_mod.hash("commit-feature");
-    try refs.writeRef(tmp.dir, "main", h1);
-    try refs.writeRef(tmp.dir, "dev", h2);
-    try refs.writeRef(tmp.dir, "feature", h3);
+    try refs.writeRef(std.testing.io, tmp.dir, "main", h1);
+    try refs.writeRef(std.testing.io, tmp.dir, "dev", h2);
+    try refs.writeRef(std.testing.io, tmp.dir, "feature", h3);
 
     // Write some tags
-    try refs.writeTag(tmp.dir, "v1.0", h1);
-    try refs.writeTag(tmp.dir, "v2.0", h2);
+    try refs.writeTag(std.testing.io, tmp.dir, "v1.0", h1);
+    try refs.writeTag(std.testing.io, tmp.dir, "v2.0", h2);
 
     // Read HEAD (returns allocated branch name)
-    const head = try refs.readHead(allocator, tmp.dir);
+    const head = try refs.readHead(allocator, std.testing.io, tmp.dir);
     switch (head) {
         .branch => |branch| {
             defer allocator.free(branch);
@@ -519,11 +519,11 @@ test "refs lifecycle no leaks" {
     }
 
     // Resolve HEAD
-    const resolved = try refs.resolveHead(allocator, tmp.dir);
+    const resolved = try refs.resolveHead(allocator, std.testing.io, tmp.dir);
     try std.testing.expectEqual(h1, resolved.?);
 
     // List all branch refs (returns allocated slice with allocated names)
-    const ref_list = try refs.listRefs(allocator, tmp.dir);
+    const ref_list = try refs.listRefs(allocator, std.testing.io, tmp.dir);
     defer {
         for (ref_list) |ref| {
             allocator.free(ref.name);
@@ -533,7 +533,7 @@ test "refs lifecycle no leaks" {
     try std.testing.expectEqual(@as(usize, 3), ref_list.len);
 
     // List all tags
-    const tag_list = try refs.listTags(allocator, tmp.dir);
+    const tag_list = try refs.listTags(allocator, std.testing.io, tmp.dir);
     defer {
         for (tag_list) |t| {
             allocator.free(t.name);
@@ -543,18 +543,18 @@ test "refs lifecycle no leaks" {
     try std.testing.expectEqual(@as(usize, 2), tag_list.len);
 
     // Delete a branch ref
-    try refs.deleteRef(tmp.dir, "feature");
-    const after_ref = try refs.readRef(allocator, tmp.dir, "feature");
+    try refs.deleteRef(std.testing.io, tmp.dir, "feature");
+    const after_ref = try refs.readRef(allocator, std.testing.io, tmp.dir, "feature");
     try std.testing.expectEqual(@as(?Hash, null), after_ref);
 
     // Delete a tag
-    try refs.deleteTag(tmp.dir, "v1.0");
-    const after_tag = try refs.readTag(allocator, tmp.dir, "v1.0");
+    try refs.deleteTag(std.testing.io, tmp.dir, "v1.0");
+    const after_tag = try refs.readTag(allocator, std.testing.io, tmp.dir, "v1.0");
     try std.testing.expectEqual(@as(?Hash, null), after_tag);
 
     // Update HEAD
-    try refs.updateHead(allocator, tmp.dir, h2);
-    const resolved2 = try refs.resolveHead(allocator, tmp.dir);
+    try refs.updateHead(allocator, std.testing.io, tmp.dir, h2);
+    const resolved2 = try refs.resolveHead(allocator, std.testing.io, tmp.dir);
     try std.testing.expectEqual(h2, resolved2.?);
 }
 
