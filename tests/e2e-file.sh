@@ -49,7 +49,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-DUMMY_PROJECT="0000000000000000000000000000000000000000000000000000000000000000"
 
 # === Phase 1: Init + first commit in repo A ===
 bold ""
@@ -79,11 +78,11 @@ assert "HEAD ref exists" '[ -n "$HEAD_HASH" ]'
 bold ""
 bold "Phase 2: Configure remote + push"
 
-REMOTE_OUT=$(mkit_run remote set "file://$REMOTE")
+REMOTE_OUT=$(mkit_run remote set "mkit+file://$REMOTE")
 assert "mkit remote set" 'echo "$REMOTE_OUT" | grep -q "remote set"'
 assert "remote type is file" 'echo "$REMOTE_OUT" | grep -q "file"'
 
-PUSH_OUT=$(mkit_run push --project "$DUMMY_PROJECT")
+PUSH_OUT=$(mkit_run push)
 echo "  push: $(echo "$PUSH_OUT" | head -2)"
 assert "mkit push succeeds" 'echo "$PUSH_OUT" | grep -q "pushed"'
 
@@ -101,10 +100,12 @@ bold ""
 bold "Phase 3: Clone into repo B"
 cd "$REPO_B"
 
-CLONE_OUT=$(mkit_run clone "file://$REMOTE")
+CLONE_OUT=$(mkit_run clone "mkit+file://$REMOTE")
 echo "  clone: $(echo "$CLONE_OUT" | head -3)"
 assert "mkit clone succeeds" 'echo "$CLONE_OUT" | grep -q "initialized"'
-assert "clone fetches main" 'echo "$CLONE_OUT" | grep -q "main"'
+# mkit clone only does init + remote set — pull fetches content
+mkit_run pull >/dev/null
+assert "pull after clone fetches main" '[ -f ".mkit/refs/heads/main" ]'
 
 # Verify log shows the commit
 LOG_OUT=$(mkit_run log)
@@ -159,7 +160,7 @@ HEAD2_HASH=$(cat .mkit/refs/heads/main | tr -d '\n\r ')
 assert "HEAD advanced" '[ "$HEAD2_HASH" != "$HEAD_HASH" ]'
 echo "  HEAD: ${HEAD2_HASH:0:16}..."
 
-PUSH2_OUT=$(mkit_run push --project "$DUMMY_PROJECT")
+PUSH2_OUT=$(mkit_run push)
 assert "second push succeeds" 'echo "$PUSH2_OUT" | grep -q "pushed"'
 
 # Verify remote updated
@@ -210,7 +211,7 @@ echo 'feature work' > feature.txt
 FEAT_OUT=$(mkit_run commit -m "feature commit")
 assert "feature commit succeeds" 'echo "$FEAT_OUT" | grep -q "^tree"'
 
-FEAT_PUSH=$(mkit_run push --project "$DUMMY_PROJECT")
+FEAT_PUSH=$(mkit_run push)
 assert "push feature branch" 'echo "$FEAT_PUSH" | grep -q "pushed"'
 assert "push targets feature ref" 'echo "$FEAT_PUSH" | grep -q "refs/heads/feature"'
 
@@ -254,7 +255,7 @@ assert "committed tree has staged_file.txt" 'echo "$STAGED_TREE_OUT" | grep -q "
 assert "committed tree excludes unstaged_file.txt" '! echo "$STAGED_TREE_OUT" | grep -q "unstaged_file.txt"'
 
 # Push to remote
-STAGED_PUSH=$(mkit_run push --project "$DUMMY_PROJECT")
+STAGED_PUSH=$(mkit_run push)
 assert "push staged commit" 'echo "$STAGED_PUSH" | grep -q "pushed"'
 
 # Test fetch in repo B — should update tracking ref without touching local branch
