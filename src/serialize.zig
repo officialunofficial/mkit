@@ -253,6 +253,8 @@ fn deserializeTree(allocator: Allocator, data: []const u8) !object.Tree {
     var r = Reader.init(data);
     const count = try r.readU32();
     if (count > 1_000_000) return error.TooManyEntries;
+    const min_entry_bytes: usize = 4 + 1 + 1 + 32;
+    if (@as(usize, count) > r.remaining() / min_entry_bytes) return error.UnexpectedEof;
     const entries = try allocator.alloc(object.TreeEntry, count);
     var initialized: usize = 0;
     errdefer {
@@ -369,6 +371,7 @@ fn deserializeChunkedBlob(allocator: Allocator, data: []const u8) !object.Chunke
     // chunk_size == 0 is valid and indicates content-defined chunking (CDC)
     const chunk_count = try r.readU32();
     if (chunk_count > 1_000_000) return error.TooManyChunks;
+    if (@as(usize, chunk_count) > r.remaining() / @sizeOf(Hash)) return error.UnexpectedEof;
     const chunks = try allocator.alloc(Hash, chunk_count);
     errdefer allocator.free(chunks);
     for (chunks) |*chunk| {
@@ -830,6 +833,20 @@ test "chunked blob CDC (chunk_size=0) roundtrip" {
     try std.testing.expectEqual(@as(usize, 2), parsed.chunked_blob.chunks.len);
     try std.testing.expectEqual(h1, parsed.chunked_blob.chunks[0]);
     try std.testing.expectEqual(h2, parsed.chunked_blob.chunks[1]);
+}
+
+test "chunked blob truncated chunk list rejected" {
+    const allocator = std.testing.allocator;
+    var buf: Buffer = .empty;
+    defer buf.deinit(allocator);
+
+    try writePrologue(&buf, allocator, .chunked_blob);
+    try bufWriteU64(&buf, allocator, 1024);
+    try bufWriteU32(&buf, allocator, 0);
+    try bufWriteU32(&buf, allocator, 2);
+    try bufWriteHash(&buf, allocator, hash_mod.hash("only-one-chunk"));
+
+    try std.testing.expectError(error.UnexpectedEof, deserialize(allocator, buf.items));
 }
 
 test "fuzz: deserialize does not crash on arbitrary bytes" {

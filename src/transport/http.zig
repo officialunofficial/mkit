@@ -7,6 +7,7 @@ const std = @import("std");
 const protocol = @import("../protocol.zig");
 const hash_mod = @import("../hash.zig");
 const s3_transport = @import("s3.zig");
+const ssh_transport = @import("ssh.zig");
 const Hash = hash_mod.Hash;
 const Allocator = std.mem.Allocator;
 
@@ -16,6 +17,10 @@ const Allocator = std.mem.Allocator;
 const RETRY_MAX_ATTEMPTS = s3_transport.RETRY_MAX_ATTEMPTS;
 const isRetryableStatus = s3_transport.isRetryableStatus;
 const backoffNs = s3_transport.backoffNs;
+const PACK_BODY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
+const REF_BODY_LIMIT: usize = 256;
+const SMALL_RESPONSE_LIMIT: usize = 4 * 1024;
+const REF_LIST_BODY_LIMIT: usize = ssh_transport.MAX_PAYLOAD;
 
 /// Plain HTTP transport for mkit VCS Worker (apps/vcs).
 ///
@@ -157,10 +162,11 @@ pub const HttpTransport = struct {
         url_str: []const u8,
         payload: ?[]const u8,
         extra_headers: []const std.http.Header,
+        body_limit: ?usize,
     ) !HttpResponse {
         var attempt: u32 = 0;
         while (true) : (attempt += 1) {
-            const result = self.httpRequestOnce(allocator, method, url_str, payload, extra_headers) catch |err| {
+            const result = self.httpRequestOnce(allocator, method, url_str, payload, extra_headers, body_limit) catch |err| {
                 if (attempt + 1 < RETRY_MAX_ATTEMPTS) {
                     // Why: std.Thread.sleep was removed in Zig 0.16; wait via Io.
                     std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(backoffNs(attempt))), .awake) catch {};
@@ -188,8 +194,8 @@ pub const HttpTransport = struct {
         url_str: []const u8,
         payload: ?[]const u8,
         extra_headers: []const std.http.Header,
+        body_limit: ?usize,
     ) !HttpResponse {
-        // Why: std.http.Client gained a required `io` field in Zig 0.16.
         var client = std.http.Client{ .allocator = allocator, .io = self.io };
         defer client.deinit();
 
@@ -216,25 +222,52 @@ pub const HttpTransport = struct {
 
         const request_headers = request_headers_buf[0..request_header_count];
 
-        // Set up response body capture
-        var body_list: std.ArrayListUnmanaged(u8) = .empty;
-        var body_writer = std.Io.Writer.Allocating.fromArrayList(allocator, &body_list);
-        defer body_writer.deinit();
-
-        const result = client.fetch(.{
-            .location = .{ .url = url_str },
-            .method = method,
-            .payload = payload,
-            .extra_headers = request_headers,
+        const uri = std.Uri.parse(url_str) catch return error.ConnectionFailed;
+        var req = client.request(method, uri, .{
             .redirect_behavior = .unhandled,
-            .response_writer = &body_writer.writer,
+            .extra_headers = request_headers,
         }) catch return error.ConnectionFailed;
+        defer req.deinit();
 
-        var list = body_writer.toArrayList();
-        const body = list.toOwnedSlice(allocator) catch return error.ServerError;
+        if (payload) |bytes| {
+            req.transfer_encoding = .{ .content_length = bytes.len };
+            var body = req.sendBodyUnflushed(&.{}) catch return error.ConnectionFailed;
+            body.writer.writeAll(bytes) catch return error.ConnectionFailed;
+            body.end() catch return error.ConnectionFailed;
+            req.connection.?.flush() catch return error.ConnectionFailed;
+        } else {
+            req.sendBodiless() catch return error.ConnectionFailed;
+        }
+
+        var response = req.receiveHead(&.{}) catch return error.ConnectionFailed;
+        if (body_limit) |limit| {
+            if (response.head.content_length) |content_length| {
+                if (content_length > @as(u64, limit)) return error.ResponseTooLarge;
+            }
+        }
+
+        var body: []u8 = &.{};
+        if (body_limit) |limit| {
+            const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+                .identity => &.{},
+                .zstd => allocator.alloc(u8, std.compress.zstd.default_window_len) catch return error.ServerError,
+                .deflate, .gzip => allocator.alloc(u8, std.compress.flate.max_window_len) catch return error.ServerError,
+                .compress => return error.UnsupportedCompressionMethod,
+            };
+            defer if (response.head.content_encoding != .identity) allocator.free(decompress_buffer);
+
+            var transfer_buffer: [64]u8 = undefined;
+            var decompress: std.http.Decompress = undefined;
+            const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+            body = reader.allocRemaining(allocator, .limited(limit)) catch |err| switch (err) {
+                error.ReadFailed => return response.bodyErr() orelse error.ConnectionFailed,
+                error.StreamTooLong => return error.ResponseTooLarge,
+                error.OutOfMemory => return error.ServerError,
+            };
+        }
 
         return HttpResponse{
-            .status = result.status,
+            .status = response.head.status,
             .body = body,
             .allocator = allocator,
         };
@@ -283,10 +316,11 @@ pub const HttpTransport = struct {
 
     fn uploadPackImpl(ptr: *anyopaque, allocator: Allocator, bytes: []const u8, digest: Hash) anyerror!void {
         const self: *HttpTransport = @ptrCast(@alignCast(ptr));
+        if (bytes.len > PACK_BODY_LIMIT) return error.PackTooLarge;
         const url = try buildPackUrl(allocator, self.base_url, digest);
         defer allocator.free(url);
 
-        var resp = try self.httpRequest(allocator, .PUT, url, bytes, &.{});
+        var resp = try self.httpRequest(allocator, .PUT, url, bytes, &.{}, SMALL_RESPONSE_LIMIT);
         defer resp.deinit();
 
         switch (resp.status) {
@@ -301,7 +335,7 @@ pub const HttpTransport = struct {
         const url = try buildPackUrl(allocator, self.base_url, digest);
         defer allocator.free(url);
 
-        var resp = try self.httpRequest(allocator, .GET, url, null, &.{});
+        var resp = try self.httpRequest(allocator, .GET, url, null, &.{}, PACK_BODY_LIMIT);
         errdefer resp.deinit();
 
         switch (resp.status) {
@@ -330,7 +364,7 @@ pub const HttpTransport = struct {
         const url = try buildPackUrl(allocator, self.base_url, digest);
         defer allocator.free(url);
 
-        var resp = try self.httpRequest(allocator, .HEAD, url, null, &.{});
+        var resp = try self.httpRequest(allocator, .HEAD, url, null, &.{}, null);
         defer resp.deinit();
 
         return switch (resp.status) {
@@ -362,7 +396,7 @@ pub const HttpTransport = struct {
         const current = try readRefImpl(ptr, allocator, ref_name);
         var headers = buildRefWriteHeaders(condition, current);
 
-        var resp = try self.httpRequest(allocator, .PUT, url, &wire, headers.slice());
+        var resp = try self.httpRequest(allocator, .PUT, url, &wire, headers.slice(), SMALL_RESPONSE_LIMIT);
         defer resp.deinit();
 
         switch (resp.status) {
@@ -379,7 +413,7 @@ pub const HttpTransport = struct {
         const url = try buildRefUrl(allocator, self.base_url, ref_name);
         defer allocator.free(url);
 
-        var resp = try self.httpRequest(allocator, .GET, url, null, &.{});
+        var resp = try self.httpRequest(allocator, .GET, url, null, &.{}, REF_BODY_LIMIT);
         defer resp.deinit();
 
         switch (resp.status) {
@@ -398,7 +432,7 @@ pub const HttpTransport = struct {
         const list_url = try buildListUrl(allocator, self.base_url, prefix);
         defer allocator.free(list_url);
 
-        var resp = try self.httpRequest(allocator, .GET, list_url, null, &.{});
+        var resp = try self.httpRequest(allocator, .GET, list_url, null, &.{}, REF_LIST_BODY_LIMIT);
         defer resp.deinit();
 
         switch (resp.status) {
@@ -431,7 +465,7 @@ pub const HttpTransport = struct {
             const ref_url = try buildRefUrl(allocator, self.base_url, full_name);
             defer allocator.free(ref_url);
 
-            var ref_resp = self.httpRequest(allocator, .GET, ref_url, null, &.{}) catch continue;
+            var ref_resp = self.httpRequest(allocator, .GET, ref_url, null, &.{}, REF_BODY_LIMIT) catch continue;
             defer ref_resp.deinit();
 
             if (ref_resp.status != .ok) continue;

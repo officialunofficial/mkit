@@ -4,6 +4,7 @@ const protocol = @import("../protocol.zig");
 const hash_mod = @import("../hash.zig");
 const s3_auth = @import("../s3.zig");
 const remote_mod = @import("../remote.zig");
+const ssh_transport = @import("ssh.zig");
 const Hash = hash_mod.Hash;
 const Allocator = std.mem.Allocator;
 
@@ -13,6 +14,10 @@ const Allocator = std.mem.Allocator;
 // LIMITATION(W5-multipart): S3/R2 single-PUT cap is 5 GiB. Multipart upload
 // deferred post-0.1.0.
 pub const S3_SINGLE_PUT_MAX: u64 = 5 * 1024 * 1024 * 1024;
+const PACK_BODY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
+const REF_BODY_LIMIT: usize = 256;
+const SMALL_RESPONSE_LIMIT: usize = 4 * 1024;
+const REF_LIST_BODY_LIMIT: usize = ssh_transport.MAX_PAYLOAD;
 
 // -- Retry policy (W5-3) --
 
@@ -143,10 +148,11 @@ pub const S3Transport = struct {
         query: []const u8,
         payload: ?[]const u8,
         extra_headers: []const std.http.Header,
+        body_limit: ?usize,
     ) !HttpResponse {
         var attempt: u32 = 0;
         while (true) : (attempt += 1) {
-            const result = self.httpRequestOnce(allocator, method, key, query, payload, extra_headers) catch |err| {
+            const result = self.httpRequestOnce(allocator, method, key, query, payload, extra_headers, body_limit) catch |err| {
                 // Network-level error — retry if we still have attempts left.
                 if (attempt + 1 < RETRY_MAX_ATTEMPTS) {
                     // Why: std.Thread.sleep was removed in Zig 0.16; wait via Io.
@@ -178,6 +184,7 @@ pub const S3Transport = struct {
         query: []const u8,
         payload: ?[]const u8,
         extra_headers: []const std.http.Header,
+        body_limit: ?usize,
     ) !HttpResponse {
         // 1. Build path: /<bucket>/<key>
         const path = try remote_mod.buildPath(allocator, self.config, key);
@@ -211,15 +218,8 @@ pub const S3Transport = struct {
             try std.fmt.allocPrint(allocator, "{s}{s}", .{ self.config.endpoint, path });
         defer allocator.free(url_str);
 
-        // 6. Create HTTP client
-        // Why: std.http.Client gained a required `io` field in Zig 0.16.
         var client = std.http.Client{ .allocator = allocator, .io = self.io };
         defer client.deinit();
-
-        // 7. Set up response body capture via ArrayListUnmanaged + Allocating writer
-        var body_list: std.ArrayListUnmanaged(u8) = .empty;
-        var body_writer = std.Io.Writer.Allocating.fromArrayList(allocator, &body_list);
-        defer body_writer.deinit();
 
         var header_buf: [4]std.http.Header = .{
             .{ .name = "Authorization", .value = signed.authorization },
@@ -233,22 +233,52 @@ pub const S3Transport = struct {
         }
         const header_slice = header_buf[0 .. 3 + extra_headers.len];
 
-        // 8. Perform the fetch
-        const result = client.fetch(.{
-            .location = .{ .url = url_str },
-            .method = method,
-            .payload = payload,
-            .extra_headers = header_slice,
+        const uri = std.Uri.parse(url_str) catch return error.ConnectionFailed;
+        var req = client.request(method, uri, .{
             .redirect_behavior = .unhandled,
-            .response_writer = &body_writer.writer,
+            .extra_headers = header_slice,
         }) catch return error.ConnectionFailed;
+        defer req.deinit();
 
-        // 9. Extract body from the allocating writer
-        var list = body_writer.toArrayList();
-        const body = list.toOwnedSlice(allocator) catch return error.ServerError;
+        if (payload) |bytes| {
+            req.transfer_encoding = .{ .content_length = bytes.len };
+            var body = req.sendBodyUnflushed(&.{}) catch return error.ConnectionFailed;
+            body.writer.writeAll(bytes) catch return error.ConnectionFailed;
+            body.end() catch return error.ConnectionFailed;
+            req.connection.?.flush() catch return error.ConnectionFailed;
+        } else {
+            req.sendBodiless() catch return error.ConnectionFailed;
+        }
+
+        var response = req.receiveHead(&.{}) catch return error.ConnectionFailed;
+        if (body_limit) |limit| {
+            if (response.head.content_length) |content_length| {
+                if (content_length > @as(u64, limit)) return error.ResponseTooLarge;
+            }
+        }
+
+        var body: []u8 = &.{};
+        if (body_limit) |limit| {
+            const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+                .identity => &.{},
+                .zstd => allocator.alloc(u8, std.compress.zstd.default_window_len) catch return error.ServerError,
+                .deflate, .gzip => allocator.alloc(u8, std.compress.flate.max_window_len) catch return error.ServerError,
+                .compress => return error.UnsupportedCompressionMethod,
+            };
+            defer if (response.head.content_encoding != .identity) allocator.free(decompress_buffer);
+
+            var transfer_buffer: [64]u8 = undefined;
+            var decompress: std.http.Decompress = undefined;
+            const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+            body = reader.allocRemaining(allocator, .limited(limit)) catch |err| switch (err) {
+                error.ReadFailed => return response.bodyErr() orelse error.ConnectionFailed,
+                error.StreamTooLong => return error.ResponseTooLarge,
+                error.OutOfMemory => return error.ServerError,
+            };
+        }
 
         return HttpResponse{
-            .status = result.status,
+            .status = response.head.status,
             .body = body,
             .allocator = allocator,
         };
@@ -268,12 +298,12 @@ pub const S3Transport = struct {
     fn uploadPackImpl(ptr: *anyopaque, allocator: Allocator, bytes: []const u8, digest: Hash) anyerror!void {
         // Length check MUST come before any pointer dereference — callers
         // may hand us a slice whose .len is an untrusted size field.
-        if (bytes.len > S3_SINGLE_PUT_MAX) return error.PackTooLargeForSinglePut;
+        if (bytes.len > S3_SINGLE_PUT_MAX or bytes.len > PACK_BODY_LIMIT) return error.PackTooLargeForSinglePut;
 
         const self: *S3Transport = @ptrCast(@alignCast(ptr));
         const key = packObjectKey(digest);
 
-        var resp = try self.httpRequest(allocator, .PUT, &key, "", bytes, &.{});
+        var resp = try self.httpRequest(allocator, .PUT, &key, "", bytes, &.{}, SMALL_RESPONSE_LIMIT);
         defer resp.deinit();
 
         switch (resp.status) {
@@ -287,7 +317,7 @@ pub const S3Transport = struct {
         const self: *S3Transport = @ptrCast(@alignCast(ptr));
         const key = packObjectKey(digest);
 
-        var resp = try self.httpRequest(allocator, .GET, &key, "", null, &.{});
+        var resp = try self.httpRequest(allocator, .GET, &key, "", null, &.{}, PACK_BODY_LIMIT);
         errdefer resp.deinit();
 
         switch (resp.status) {
@@ -316,7 +346,7 @@ pub const S3Transport = struct {
         const self: *S3Transport = @ptrCast(@alignCast(ptr));
         const key = packObjectKey(digest);
 
-        var resp = try self.httpRequest(allocator, .HEAD, &key, "", null, &.{});
+        var resp = try self.httpRequest(allocator, .HEAD, &key, "", null, &.{}, null);
         defer resp.deinit();
 
         return switch (resp.status) {
@@ -350,7 +380,7 @@ pub const S3Transport = struct {
         }
         const headers = if (condition_header) |header| &[_]std.http.Header{header} else &[_]std.http.Header{};
 
-        var resp = try self.httpRequest(allocator, .PUT, ref_name, "", &wire, headers);
+        var resp = try self.httpRequest(allocator, .PUT, ref_name, "", &wire, headers, SMALL_RESPONSE_LIMIT);
         defer resp.deinit();
 
         switch (resp.status) {
@@ -365,7 +395,7 @@ pub const S3Transport = struct {
         const self: *S3Transport = @ptrCast(@alignCast(ptr));
         if (!protocol.validateRefName(ref_name)) return error.InvalidRef;
 
-        var resp = try self.httpRequest(allocator, .GET, ref_name, "", null, &.{});
+        var resp = try self.httpRequest(allocator, .GET, ref_name, "", null, &.{}, REF_BODY_LIMIT);
         defer resp.deinit();
 
         switch (resp.status) {
@@ -387,7 +417,7 @@ pub const S3Transport = struct {
         defer allocator.free(query);
 
         // List objects with the prefix — send to bucket root
-        var resp = try self.httpRequest(allocator, .GET, "", query, null, &.{});
+        var resp = try self.httpRequest(allocator, .GET, "", query, null, &.{}, REF_LIST_BODY_LIMIT);
         defer resp.deinit();
 
         switch (resp.status) {
@@ -415,7 +445,7 @@ pub const S3Transport = struct {
         for (keys) |key| {
             if (!protocol.validateRefName(key)) continue;
             // Read each ref to get the hash
-            var ref_resp = try self.httpRequest(allocator, .GET, key, "", null, &.{});
+            var ref_resp = try self.httpRequest(allocator, .GET, key, "", null, &.{}, REF_BODY_LIMIT);
             defer ref_resp.deinit();
 
             if (ref_resp.status != .ok) continue;

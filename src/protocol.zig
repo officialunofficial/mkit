@@ -136,6 +136,59 @@ pub const SshUrl = struct {
     path: []const u8,
 };
 
+/// Validate the repository-path portion of an SSH remote.
+/// The path must be non-empty, must not contain empty / dot / dot-dot
+/// components, and is restricted to a conservative ASCII subset so both the
+/// on-disk config and the remote-shell transport stay unambiguous.
+pub fn validateSshPath(path: []const u8) error{InvalidUrl}!void {
+    if (path.len == 0) return error.InvalidUrl;
+
+    var start: usize = 0;
+    if (path[0] == '/') {
+        if (path.len == 1) return error.InvalidUrl;
+        start = 1;
+    }
+
+    var parts = std.mem.splitScalar(u8, path[start..], '/');
+    while (parts.next()) |part| {
+        if (part.len == 0) return error.InvalidUrl;
+        if (std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return error.InvalidUrl;
+        for (part) |c| {
+            if (!(std.ascii.isAlphanumeric(c) or c == '.' or c == '_' or c == '-')) {
+                return error.InvalidUrl;
+            }
+        }
+    }
+}
+
+pub fn formatStrictSshUrl(
+    allocator: Allocator,
+    user: []const u8,
+    host: []const u8,
+    port: ?u16,
+    path: []const u8,
+) ![]u8 {
+    try validateSshPath(path);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, "mkit+ssh://");
+    try out.appendSlice(allocator, user);
+    try out.append(allocator, '@');
+    try out.appendSlice(allocator, host);
+    if (port) |p| {
+        // std.ArrayList in Zig 0.16 has no `.writer()` helper; fall through
+        // fmt.allocPrint + appendSlice.
+        const port_str = try std.fmt.allocPrint(allocator, ":{d}", .{p});
+        defer allocator.free(port_str);
+        try out.appendSlice(allocator, port_str);
+    }
+    try out.append(allocator, ':');
+    try out.appendSlice(allocator, path);
+    return try out.toOwnedSlice(allocator);
+}
+
 pub const RemoteUrl = union(enum) {
     s3: S3Url,
     file: FileUrl,
@@ -227,6 +280,7 @@ fn parseSshSchemeUrlInternal(url: []const u8) !RemoteUrl {
         port = std.fmt.parseInt(u16, port_str, 10) catch return error.InvalidUrl;
     }
     if (host.len == 0) return error.InvalidUrl;
+    try validateSshPath(path);
     return .{ .ssh = .{ .user = user, .host = host, .port = port, .path = path } };
 }
 
@@ -238,6 +292,7 @@ fn parseScpStyleUrlInternal(url: []const u8) ?SshUrl {
     const host = after_at[0..colon_pos];
     const path = after_at[colon_pos + 1 ..];
     if (user.len == 0 or host.len == 0 or path.len == 0) return null;
+    validateSshPath(path) catch return null;
     return .{ .user = user, .host = host, .port = null, .path = path };
 }
 
@@ -369,12 +424,14 @@ fn parseStrictSsh(after: []const u8) StrictParseError!StrictRemoteUrl {
         // Only treat it as host:port:path if the middle segment is a valid port.
         if (maybe_port.len > 0 and path.len > 0) {
             if (std.fmt.parseInt(u16, maybe_port, 10)) |port| {
+                validateSshPath(path) catch return error.MalformedUrl;
                 return .{ .ssh = .{ .user = user, .host = host, .port = port, .path = path } };
             } else |_| {}
         }
     }
 
     // No explicit port — everything after the first colon is the path.
+    validateSshPath(tail) catch return error.MalformedUrl;
     return .{ .ssh = .{ .user = user, .host = host, .port = null, .path = tail } };
 }
 
@@ -496,12 +553,22 @@ test "parseUrl ssh scheme minimal" {
     try std.testing.expectEqualStrings("/path/to/repo", result.ssh.path);
 }
 
+test "validateSshPath rejects control characters" {
+    try std.testing.expectError(error.InvalidUrl, validateSshPath("/tmp/repo\nname"));
+    try std.testing.expectError(error.InvalidUrl, validateSshPath("repo\tname"));
+}
+
 test "parseUrl scp style" {
     const result = try parseUrl("git@github.com:org/repo");
     try std.testing.expectEqualStrings("git", result.ssh.user.?);
     try std.testing.expectEqualStrings("github.com", result.ssh.host);
     try std.testing.expect(result.ssh.port == null);
     try std.testing.expectEqualStrings("org/repo", result.ssh.path);
+}
+
+test "parseUrl rejects unsafe ssh paths" {
+    try std.testing.expectError(error.InvalidUrl, parseUrl("git@github.com:org/repo;rm"));
+    try std.testing.expectError(error.InvalidUrl, parseUrl("ssh://git@github.com/org/../repo"));
 }
 
 test "parseUrl ssh no path" {
@@ -571,6 +638,21 @@ test "parseRemoteUrl ssh no port" {
     try std.testing.expectEqualStrings("host.example.com", r.ssh.host);
     try std.testing.expect(r.ssh.port == null);
     try std.testing.expectEqualStrings("/repos/project", r.ssh.path);
+}
+
+test "parseRemoteUrl rejects ssh path with dot segments" {
+    try std.testing.expectError(error.MalformedUrl, parseRemoteUrl("mkit+ssh://alice@host.example.com:/repos/../project"));
+}
+
+test "parseRemoteUrl rejects unsafe ssh paths" {
+    try std.testing.expectError(error.MalformedUrl, parseRemoteUrl("mkit+ssh://alice@host.example.com:/repos/project;touch"));
+    try std.testing.expectError(error.MalformedUrl, parseRemoteUrl("mkit+ssh://alice@host.example.com:/repos/../project"));
+}
+
+test "formatStrictSshUrl" {
+    const formatted = try formatStrictSshUrl(std.testing.allocator, "alice", "host.example.com", 2222, "/repos/project");
+    defer std.testing.allocator.free(formatted);
+    try std.testing.expectEqualStrings("mkit+ssh://alice@host.example.com:2222:/repos/project", formatted);
 }
 
 test "parseRemoteUrl memory" {

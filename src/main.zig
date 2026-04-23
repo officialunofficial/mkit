@@ -564,7 +564,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var config = try readRepoConfig(allocator, cwd);
     defer config.deinit();
 
-    const kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
+    var kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
         error.FileNotFound => {
             try stderr.writeStreamingAll(io(), "error: no signing key found (run 'mkit keygen' first)\n");
             return;
@@ -578,6 +578,7 @@ fn cmdCommit(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         },
     };
+    defer kp.zeroize();
 
     // Build tree: use index if it has staged entries, otherwise fall back to whole working dir
     var idx = try mkit.index.readIndex(allocator, io(), cwd);
@@ -1464,11 +1465,30 @@ fn openTransport(allocator: std.mem.Allocator, config: mkit.config.Config) !Open
             };
         },
         .ssh => {
-            // Parse the SSH URL from the endpoint
-            const parsed = mkit.protocol.parseUrl(config.remote_endpoint) catch return error.InvalidUrl;
-            const ssh_url = switch (parsed) {
-                .ssh => |s| s,
-                else => return error.InvalidUrl,
+            // Both parseRemoteUrl (strict `mkit+ssh://`) and parseUrl
+            // (legacy bare `ssh://`) produce an ssh-shaped struct. StrictSshUrl
+            // has non-optional `user`; legacy `SshUrl.user` is `?[]const u8`.
+            // Normalize to the legacy shape because downstream `SshTransport`
+            // takes `user: ?[]const u8`.
+            const ssh_url: mkit.protocol.SshUrl = blk: {
+                if (std.mem.startsWith(u8, config.remote_endpoint, "mkit+")) {
+                    const parsed = try mkit.protocol.parseRemoteUrl(config.remote_endpoint);
+                    break :blk switch (parsed) {
+                        .ssh => |s| mkit.protocol.SshUrl{
+                            .user = s.user,
+                            .host = s.host,
+                            .port = s.port,
+                            .path = s.path,
+                        },
+                        else => return error.InvalidUrl,
+                    };
+                }
+
+                const parsed = try mkit.protocol.parseUrl(config.remote_endpoint);
+                break :blk switch (parsed) {
+                    .ssh => |s| s,
+                    else => return error.InvalidUrl,
+                };
             };
             const st = try allocator.create(mkit.transport_ssh.SshTransport);
             const ssh_options = mkit.transport_ssh.SshOptions{
@@ -1624,7 +1644,10 @@ fn loadSigningKey(
     key_path: []const u8,
 ) !mkit.sign.KeyPair {
     const seed = try cwd.readFileAlloc(io(), key_path, allocator, .limited(128));
-    defer allocator.free(seed);
+    defer {
+        std.crypto.secureZero(u8, seed);
+        allocator.free(seed);
+    }
     if (seed.len != 32) return error.InvalidKeyFile;
     return mkit.sign.KeyPair.fromSeed(seed[0..32].*);
 }
@@ -1819,6 +1842,15 @@ fn cmdTag(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
+fn ensureSafeConfigValue(stderr: std.Io.File, label: []const u8, value: []const u8) !void {
+    mkit.config.validateConfigValue(value) catch {
+        try stderr.writeStreamingAll(io(), "error: invalid ");
+        try stderr.writeStreamingAll(io(), label);
+        try stderr.writeStreamingAll(io(), " value (control characters are not allowed)\n");
+        return error.InvalidConfigValue;
+    };
+}
+
 fn cmdConfig(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const stdout = std.Io.File.stdout();
     const stderr = std.Io.File.stderr();
@@ -1834,6 +1866,7 @@ fn cmdConfig(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len >= 2) {
         const key = args[0];
         const value = args[1];
+        ensureSafeConfigValue(stderr, key, value) catch return;
 
         var config = try mkit.config.readConfig(allocator, io(), cwd);
         defer config.deinit();
@@ -1938,7 +1971,13 @@ fn cmdConfig(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         }
 
-        try mkit.config.writeConfig(io(), cwd, config);
+        mkit.config.writeConfig(io(), cwd, config) catch |err| switch (err) {
+            error.InvalidConfigValue => {
+                try stderr.writeStreamingAll(io(), "error: refusing to write config with control characters\n");
+                return;
+            },
+            else => return err,
+        };
         try stdout.writeStreamingAll(io(), key);
         try stdout.writeStreamingAll(io(), " = ");
         try stdout.writeStreamingAll(io(), value);
@@ -2351,7 +2390,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var config = try readRepoConfig(allocator, cwd);
     defer config.deinit();
 
-    const kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
+    var kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
         error.FileNotFound => {
             try stderr.writeStreamingAll(io(), "error: no signing key found (run 'mkit keygen' first)\n");
             return;
@@ -2365,6 +2404,7 @@ fn cmdMerge(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         },
     };
+    defer kp.zeroize();
 
     // Get timestamp (u64 Unix seconds per SPEC-OBJECTS §5).
     const timestamp: u64 = @intCast(@max(std.Io.Clock.real.now(io()).toSeconds(), 0));
@@ -2455,7 +2495,8 @@ fn cmdKeygen() !void {
         }
     }
 
-    const kp = mkit.sign.KeyPair.generate(io());
+    var kp = mkit.sign.KeyPair.generate(io());
+    defer kp.zeroize();
 
     const key_path = ".mkit/keys/default.key";
     if (cwd.openFile(io(), key_path, .{})) |f| {
@@ -2591,6 +2632,7 @@ fn cmdRemote(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     if (is_set_or_add) {
         const url = args[1];
+        ensureSafeConfigValue(stderr, "remote URL", url) catch return;
 
         // Strict `mkit+<scheme>://...` parser (W5). Anything else is a
         // hard reject — we never persist ambiguous URLs.
@@ -2654,7 +2696,13 @@ fn cmdRemote(allocator: std.mem.Allocator, args: []const []const u8) !void {
             },
         }
 
-        try mkit.config.writeConfig(io(), cwd, config);
+        mkit.config.writeConfig(io(), cwd, config) catch |err| switch (err) {
+            error.InvalidConfigValue => {
+                try stderr.writeStreamingAll(io(), "error: refusing to write config with control characters\n");
+                return;
+            },
+            else => return err,
+        };
 
         try stdout.writeStreamingAll(io(), "remote ");
         try stdout.writeStreamingAll(io(), args[0]);
@@ -2713,6 +2761,20 @@ fn cmdPull(allocator: std.mem.Allocator, _: []const []const u8) !void {
         return;
     };
     defer store.close();
+
+    var mkit_dir = cwd.openDir(io(), ".mkit", .{}) catch {
+        try stderr.writeStreamingAll(io(), "error: cannot open .mkit directory\n");
+        return;
+    };
+    defer mkit_dir.close(io());
+    var repo_lock = mkit.lock.acquireDefault(io(), mkit_dir, "index.lock") catch |err| switch (err) {
+        error.LockBusy => {
+            try stderr.writeStreamingAll(io(), "error: another mkit process is running in this repository (.mkit/index.lock held)\n");
+            return;
+        },
+        else => return err,
+    };
+    defer repo_lock.release();
 
     // Read remote config
     var config = try mkit.config.readConfig(allocator, io(), cwd);
@@ -2949,6 +3011,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try stderr.writeStreamingAll(io(), "error: missing URL argument\n");
         return;
     };
+    ensureSafeConfigValue(stderr, "remote URL", url) catch return;
 
     const clone_params_base = struct {
         fn build(remote_endpoint: []const u8, remote_bucket: []const u8, remote_type: []const u8, d: ?u32, sp: []const []const u8) CloneParams {
@@ -3007,10 +3070,21 @@ fn cmdClone(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 sparse_patterns.items,
             ));
         },
-        .ssh => {
-            // For SSH, store the full URL as the endpoint
+        .ssh => |ssh| {
+            const user = ssh.user orelse {
+                try stderr.writeStreamingAll(io(), "error: SSH remotes must include an explicit user (use user@host:path or mkit+ssh://user@host:path)\n");
+                return;
+            };
+            const endpoint = try mkit.protocol.formatStrictSshUrl(
+                allocator,
+                user,
+                ssh.host,
+                ssh.port,
+                ssh.path,
+            );
+            defer allocator.free(endpoint);
             return cloneWithConfig(allocator, stdout, stderr, clone_params_base.build(
-                url,
+                endpoint,
                 "",
                 "ssh",
                 depth,
@@ -3055,6 +3129,9 @@ fn cloneWithConfig(
     // Save remote config
     var config = mkit.config.Config{};
     config.allocator = allocator;
+    ensureSafeConfigValue(stderr, "remote_endpoint", params.remote_endpoint) catch return;
+    ensureSafeConfigValue(stderr, "remote_bucket", params.remote_bucket) catch return;
+    ensureSafeConfigValue(stderr, "remote_type", params.remote_type) catch return;
     config.remote_endpoint = try allocator.dupe(u8, params.remote_endpoint);
     config.remote_bucket = try allocator.dupe(u8, params.remote_bucket);
     config.remote_type = if (params.remote_type.len > 0)
@@ -3063,7 +3140,13 @@ fn cloneWithConfig(
         mkit.config.default_remote_type;
     defer config.deinit();
 
-    try mkit.config.writeConfig(io(), cwd, config);
+    mkit.config.writeConfig(io(), cwd, config) catch |err| switch (err) {
+        error.InvalidConfigValue => {
+            try stderr.writeStreamingAll(io(), "error: refusing to write config with control characters\n");
+            return;
+        },
+        else => return err,
+    };
 
     try stdout.writeStreamingAll(io(), "initialized mkit repository\n");
     try stdout.writeStreamingAll(io(), "remote: ");
@@ -3386,7 +3469,7 @@ fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var config = try readRepoConfig(allocator, cwd);
     defer config.deinit();
 
-    const kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
+    var kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
         error.FileNotFound => {
             try stderr.writeStreamingAll(io(), "error: no signing key found (run 'mkit keygen' first)\n");
             return;
@@ -3400,6 +3483,7 @@ fn cmdCherryPick(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         },
     };
+    defer kp.zeroize();
 
     const timestamp: u64 = @intCast(@max(std.Io.Clock.real.now(io()).toSeconds(), 0));
 
@@ -3554,7 +3638,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
         var config = try readRepoConfig(allocator, cwd);
         defer config.deinit();
 
-        const kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
+        var kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
             error.FileNotFound => {
                 try stderr.writeStreamingAll(io(), "error: no signing key found (run 'mkit keygen' first)\n");
                 return;
@@ -3568,6 +3652,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 return;
             },
         };
+        defer kp.zeroize();
 
         // Build tree from current working directory
         var work_dir = cwd.openDir(io(), ".", .{ .iterate = true }) catch {
@@ -3708,7 +3793,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var config = try readRepoConfig(allocator, cwd);
     defer config.deinit();
 
-    const kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
+    var kp = loadSigningKey(allocator, cwd, config.signing_key) catch |err| switch (err) {
         error.FileNotFound => {
             try stderr.writeStreamingAll(io(), "error: no signing key found (run 'mkit keygen' first)\n");
             return;
@@ -3722,6 +3807,7 @@ fn cmdRebase(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         },
     };
+    defer kp.zeroize();
 
     // Begin replaying
     try rebaseReplay(allocator, &store, cwd, &state, config, kp, stdout, stderr);

@@ -13,16 +13,28 @@ const Buffer = std.ArrayList(u8);
 pub const MAGIC = "MKIT".*;
 pub const VERSION: u32 = 1;
 
-/// Packfile version 2 supports delta-encoded objects.
-pub const VERSION_DELTA: u32 = 2;
+/// Legacy delta pack version. Its delta payload omitted the reconstructed
+/// object's expected hash and size, so unpack had to trust the delta result
+/// until after persistence. Kept only so unpack can reject it explicitly.
+pub const VERSION_DELTA_LEGACY: u32 = 2;
 
-/// Object entry type within a packfile v2.
+/// Secure delta pack version. Delta entries carry the base hash, expected
+/// reconstructed hash, expected raw size, and delta instructions.
+pub const VERSION_DELTA: u32 = 3;
+
+/// Object entry type within a delta-capable packfile.
 pub const EntryType = enum(u8) {
     /// Raw serialized object (same as v1)
     raw = 0x00,
-    /// Delta-encoded object: base_hash (32 bytes) + delta instructions
+    /// Delta-encoded object: base_hash + target_hash + result_size + instructions
     delta = 0x01,
 };
+
+const MAX_OBJECT_COUNT: u32 = 10_000_000;
+const MAX_PACK_TOTAL_BYTES: usize = 4 * 1024 * 1024 * 1024; // 4 GiB safety cap
+const V1_ENTRY_MIN_BYTES: usize = 4;
+const DELTA_ENTRY_HEADER_SIZE: usize = 32 + 32 + 4;
+const DELTA_PACK_ENTRY_MIN_BYTES: usize = 1 + 4;
 
 pub const PackResult = struct {
     bytes: []u8,
@@ -61,7 +73,9 @@ pub fn unpack(allocator: Allocator, data: []const u8) ![][]u8 {
     if (version != VERSION) return error.UnsupportedVersion;
 
     const count = std.mem.littleToNative(u32, @bitCast(data[8..12].*));
-    if (count > 10_000_000) return error.TooManyObjects;
+    if (count > MAX_OBJECT_COUNT) return error.TooManyObjects;
+    const remaining = data.len - 12;
+    if (count > remaining / V1_ENTRY_MIN_BYTES) return error.TooManyObjects;
 
     var objects = try allocator.alloc([]u8, count);
     var initialized: u32 = 0;
@@ -72,7 +86,6 @@ pub fn unpack(allocator: Allocator, data: []const u8) ![][]u8 {
         allocator.free(objects);
     }
 
-    const max_total_bytes: usize = 4 * 1024 * 1024 * 1024; // 4GB safety limit
     var total_bytes: usize = 0;
     var pos: usize = 12;
     for (0..count) |i| {
@@ -81,7 +94,7 @@ pub fn unpack(allocator: Allocator, data: []const u8) ![][]u8 {
         pos += 4;
 
         total_bytes += obj_len;
-        if (total_bytes > max_total_bytes) return error.PackfileTooLarge;
+        if (total_bytes > MAX_PACK_TOTAL_BYTES) return error.PackfileTooLarge;
         if (pos + obj_len > data.len) return error.UnexpectedEof;
         objects[i] = try allocator.dupe(u8, data[pos..][0..obj_len]);
         initialized += 1;
@@ -704,11 +717,12 @@ const CollectedBlob = struct {
 
 /// Pack objects reachable from tip with delta compression for blobs.
 /// Similar blobs (adjacent by size) are delta-encoded when the delta is < 50% of original.
-/// The packfile uses VERSION_DELTA (v2) format:
+/// The packfile uses VERSION_DELTA (secure delta format) layout:
 ///   MAGIC (4) | VERSION (4) | COUNT (4)
 ///   For each object: ENTRY_TYPE (1) | OBJ_LEN (4) | OBJ_DATA
 ///     - raw:   type=0x00, data = serialized object bytes
-///     - delta: type=0x01, data = base_hash (32) + delta instructions
+///     - delta: type=0x01, data = base_hash (32) + target_hash (32) +
+///              result_size (u32 LE) + delta instructions
 pub fn packWithDeltas(
     allocator: Allocator,
     store: *store_mod.ObjectStore,
@@ -792,10 +806,13 @@ pub fn packWithDeltas(
 
             // Use delta only if < 50% of original
             if (delta_data.len < target.size / 2) {
-                // Build delta entry: base_hash (32) + delta instructions
-                const entry_data = try allocator.alloc(u8, 32 + delta_data.len);
-                @memcpy(entry_data[0..32], &base.hash);
-                @memcpy(entry_data[32..], delta_data);
+                const entry_data = try encodeDeltaEntry(
+                    allocator,
+                    base.hash,
+                    target.hash,
+                    @intCast(target.raw.len),
+                    delta_data,
+                );
                 allocator.free(delta_data);
 
                 try delta_entries.append(allocator, .{
@@ -850,10 +867,57 @@ pub fn packWithDeltas(
 const DeltaEntry = struct {
     target_hash: Hash,
     base_hash: Hash,
-    delta_data: []u8, // base_hash (32) + delta instructions
+    delta_data: []u8, // base_hash + target_hash + result_size + instructions
 };
 
-/// Pack a v2 packfile with mixed raw and delta entries.
+const DecodedDeltaEntry = struct {
+    base_hash: Hash,
+    target_hash: Hash,
+    result_size: u32,
+    instructions: []const u8,
+};
+
+fn encodeDeltaEntry(
+    allocator: Allocator,
+    base_hash: Hash,
+    target_hash: Hash,
+    result_size: u32,
+    instructions: []const u8,
+) ![]u8 {
+    const entry = try allocator.alloc(u8, DELTA_ENTRY_HEADER_SIZE + instructions.len);
+    @memcpy(entry[0..32], &base_hash);
+    @memcpy(entry[32..64], &target_hash);
+    entry[64..68].* = std.mem.toBytes(std.mem.nativeToLittle(u32, result_size));
+    @memcpy(entry[68..], instructions);
+    return entry;
+}
+
+fn decodeDeltaEntry(entry_data: []const u8) !DecodedDeltaEntry {
+    if (entry_data.len < DELTA_ENTRY_HEADER_SIZE) return error.DeltaEntryTooShort;
+    return .{
+        .base_hash = entry_data[0..32].*,
+        .target_hash = entry_data[32..64].*,
+        .result_size = std.mem.littleToNative(u32, @bitCast(entry_data[64..68].*)),
+        .instructions = entry_data[68..],
+    };
+}
+
+fn rememberRaw(
+    allocator: Allocator,
+    stored_raw: *std.AutoHashMap(Hash, []const u8),
+    h: Hash,
+    raw: []const u8,
+) !void {
+    const copy = try allocator.dupe(u8, raw);
+    errdefer allocator.free(copy);
+    const gop = try stored_raw.getOrPut(h);
+    if (gop.found_existing) {
+        allocator.free(gop.value_ptr.*);
+    }
+    gop.value_ptr.* = copy;
+}
+
+/// Pack a secure delta packfile with mixed raw and delta entries.
 fn packV2Mixed(
     allocator: Allocator,
     raw_items: []const []const u8,
@@ -895,7 +959,7 @@ fn packV2Mixed(
     return .{ .bytes = bytes, .digest = digest };
 }
 
-/// Pack a v2 packfile (unused helper, kept for API symmetry).
+/// Pack a secure delta packfile (unused helper, kept for API symmetry).
 fn packV2(
     allocator: Allocator,
     raw_items: []const []const u8,
@@ -905,7 +969,7 @@ fn packV2(
     return packV2Mixed(allocator, raw_items, delta_items, entry_types);
 }
 
-/// Unpack a v2 (delta-aware) packfile and store all objects.
+/// Unpack a secure delta-aware packfile and store all objects.
 /// Resolves deltas inline: base objects must appear before their deltas.
 pub fn unpackDeltaInto(
     allocator: Allocator,
@@ -923,10 +987,13 @@ pub fn unpackDeltaInto(
         return unpackInto(allocator, data, store);
     }
 
+    if (version == VERSION_DELTA_LEGACY) return error.InsecureLegacyDeltaPack;
     if (version != VERSION_DELTA) return error.UnsupportedVersion;
 
     const count = std.mem.littleToNative(u32, @bitCast(data[8..12].*));
-    if (count > 10_000_000) return error.TooManyObjects;
+    if (count > MAX_OBJECT_COUNT) return error.TooManyObjects;
+    const remaining = data.len - 12;
+    if (count > remaining / DELTA_PACK_ENTRY_MIN_BYTES) return error.TooManyObjects;
 
     // Track stored objects by hash for delta resolution
     var stored_raw = std.AutoHashMap(Hash, []const u8).init(allocator);
@@ -938,7 +1005,6 @@ pub fn unpackDeltaInto(
         stored_raw.deinit();
     }
 
-    const max_total_bytes: usize = 4 * 1024 * 1024 * 1024; // 4GB safety limit
     var total_bytes: usize = 0;
     var pos: usize = 12;
 
@@ -954,7 +1020,7 @@ pub fn unpackDeltaInto(
         pos += 4;
 
         total_bytes += obj_len;
-        if (total_bytes > max_total_bytes) return error.PackfileTooLarge;
+        if (total_bytes > MAX_PACK_TOTAL_BYTES) return error.PackfileTooLarge;
         if (pos + obj_len > data.len) return error.UnexpectedEof;
         const entry_data = data[pos..][0..obj_len];
         pos += obj_len;
@@ -963,37 +1029,37 @@ pub fn unpackDeltaInto(
             .raw => {
                 // Store raw object directly
                 const h = try store.putRaw(entry_data);
-                // Keep a copy for potential delta resolution
-                const copy = try allocator.dupe(u8, entry_data);
-                try stored_raw.put(h, copy);
+                try rememberRaw(allocator, &stored_raw, h, entry_data);
             },
             .delta => {
-                // Resolve delta: entry_data = base_hash (32) + delta instructions
-                if (entry_data.len < 32) return error.DeltaEntryTooShort;
-                const base_hash: Hash = entry_data[0..32].*;
-                const delta_instructions = entry_data[32..];
+                const delta_entry = try decodeDeltaEntry(entry_data);
+                if (@as(usize, delta_entry.result_size) > store_mod.MAX_RAW_OBJECT_SIZE) return error.ObjectTooLarge;
 
                 // Look up base in our stored objects
-                const base_raw = stored_raw.get(base_hash) orelse {
+                const base_raw = stored_raw.get(delta_entry.base_hash) orelse {
                     // Base might already be in the store (from a previous pack or pre-existing)
-                    const fetched = store.getRaw(allocator, base_hash) catch return error.DeltaBaseMissing;
+                    const fetched = store.getRaw(allocator, delta_entry.base_hash) catch return error.DeltaBaseMissing;
                     defer allocator.free(fetched);
 
-                    const resolved = try delta_mod.applyDelta(allocator, fetched, delta_instructions, 0);
+                    const resolved = try delta_mod.applyDelta(allocator, fetched, delta_entry.instructions, delta_entry.result_size);
                     defer allocator.free(resolved);
 
+                    const resolved_hash = hash_mod.hash(resolved);
+                    if (!std.mem.eql(u8, &resolved_hash, &delta_entry.target_hash)) return error.DeltaHashMismatch;
                     const h = try store.putRaw(resolved);
-                    const copy = try allocator.dupe(u8, resolved);
-                    try stored_raw.put(h, copy);
+                    if (!std.mem.eql(u8, &h, &delta_entry.target_hash)) return error.DeltaHashMismatch;
+                    try rememberRaw(allocator, &stored_raw, h, resolved);
                     continue;
                 };
 
-                const resolved = try delta_mod.applyDelta(allocator, base_raw, delta_instructions, 0);
+                const resolved = try delta_mod.applyDelta(allocator, base_raw, delta_entry.instructions, delta_entry.result_size);
                 defer allocator.free(resolved);
 
+                const resolved_hash = hash_mod.hash(resolved);
+                if (!std.mem.eql(u8, &resolved_hash, &delta_entry.target_hash)) return error.DeltaHashMismatch;
                 const h = try store.putRaw(resolved);
-                const copy = try allocator.dupe(u8, resolved);
-                try stored_raw.put(h, copy);
+                if (!std.mem.eql(u8, &h, &delta_entry.target_hash)) return error.DeltaHashMismatch;
+                try rememberRaw(allocator, &stored_raw, h, resolved);
             },
         }
     }
@@ -1209,7 +1275,7 @@ test "pack with deltas smaller than raw" {
     // Delta pack should be smaller than raw pack
     try std.testing.expect(delta_result.bytes.len < raw_result.bytes.len);
 
-    // Verify v2 magic
+    // Verify secure delta pack version
     try std.testing.expectEqualStrings("MKIT", delta_result.bytes[0..4]);
     const version = std.mem.littleToNative(u32, @bitCast(delta_result.bytes[4..8].*));
     try std.testing.expectEqual(VERSION_DELTA, version);
@@ -1289,6 +1355,64 @@ test "unpack delta restores original" {
     var retrieved_b = try dst_store.get(allocator, blob_b_hash);
     defer retrieved_b.deinit(allocator);
     try std.testing.expectEqualSlices(u8, &target_content, retrieved_b.blob.data);
+}
+
+test "unpackDeltaInto rejects legacy insecure delta pack version" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
+    defer store.close();
+
+    const legacy_header = [_]u8{
+        'M', 'K', 'I', 'T',
+        0x02, 0x00, 0x00, 0x00, // VERSION_DELTA_LEGACY
+        0x00, 0x00, 0x00, 0x00, // count = 0
+    };
+
+    try std.testing.expectError(error.InsecureLegacyDeltaPack, unpackDeltaInto(allocator, &legacy_header, &store));
+}
+
+test "unpackDeltaInto rejects delta with mismatched reconstructed hash" {
+    const allocator = std.testing.allocator;
+
+    var src_tmp = std.testing.tmpDir(.{});
+    defer src_tmp.cleanup();
+    var src_store = try store_mod.ObjectStore.init(std.testing.io, src_tmp.dir);
+    defer src_store.close();
+
+    const base_raw = try serialize.serialize(allocator, .{ .blob = .{ .data = "base blob for delta" } });
+    defer allocator.free(base_raw);
+    const base_hash = try src_store.putRaw(base_raw);
+
+    const target_raw = try serialize.serialize(allocator, .{ .blob = .{ .data = "base blob for delta plus tail" } });
+    defer allocator.free(target_raw);
+
+    const instructions = try delta_mod.computeDelta(allocator, base_raw, target_raw);
+    defer allocator.free(instructions);
+
+    const wrong_target_hash = hash_mod.hash("wrong target hash");
+    const delta_entry = try encodeDeltaEntry(
+        allocator,
+        base_hash,
+        wrong_target_hash,
+        @intCast(target_raw.len),
+        instructions,
+    );
+    defer allocator.free(delta_entry);
+
+    const pack_result = try packV2Mixed(allocator, &.{base_raw}, &.{delta_entry}, &.{ .raw, .delta });
+    defer allocator.free(pack_result.bytes);
+
+    var dst_tmp = std.testing.tmpDir(.{});
+    defer dst_tmp.cleanup();
+    var dst_store = try store_mod.ObjectStore.init(std.testing.io, dst_tmp.dir);
+    defer dst_store.close();
+
+    try std.testing.expectError(error.DeltaHashMismatch, unpackDeltaInto(allocator, pack_result.bytes, &dst_store));
+    try std.testing.expect(dst_store.exists(base_hash));
+    try std.testing.expect(!dst_store.exists(hash_mod.hash(target_raw)));
 }
 
 // -- Shallow clone tests --
