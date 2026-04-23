@@ -19,6 +19,7 @@ const std = @import("std");
 pub const jcs = @import("jcs.zig");
 pub const statement = @import("statement.zig");
 pub const envelope = @import("envelope.zig");
+pub const verify = @import("verify.zig");
 
 /// Re-exports so callers can write `attestations.Statement`, etc.
 pub const Statement = statement.Statement;
@@ -34,8 +35,19 @@ pub const PAYLOAD_TYPE_IN_TOTO = envelope.PAYLOAD_TYPE_IN_TOTO;
 /// Re-exported for callers that only want the ID computation.
 pub const attestationId = envelope.attestationId;
 
+/// Verifier surface — trust root registry + DSSE envelope verification.
+/// See docs/SPEC-ATTESTATIONS.md §5.3.
+pub const Registry = verify.Registry;
+pub const TrustRoot = verify.TrustRoot;
+pub const EnvelopeResult = verify.EnvelopeResult;
+pub const SignatureResult = verify.SignatureResult;
+pub const Reason = verify.Reason;
+pub const verifyEnvelope = verify.verifyEnvelope;
+pub const extractPrimaryCommitHash = verify.extractPrimaryCommitHash;
+
 test {
     _ = jcs;
     _ = statement;
     _ = envelope;
+    _ = verify;
 }
