@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/mkit-core"]
+members = ["crates/mkit-core", "crates/mkit-attest"]
 
 [workspace.package]
 version = "0.2.1"
