@@ -1,0 +1,7 @@
+{
+  "name": "envelope_basic",
+  "description": "DSSE envelope wrapping statement_basic; one Ed25519 sig over PAE",
+  "bin": "envelope_basic.json",
+  "size": 559,
+  "blake3": "b1f995e6c6a959d968c55d057149d4c655e5f52e8dbf67da2b2b93e425171565"
+}

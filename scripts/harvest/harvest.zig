@@ -24,6 +24,7 @@ const object = mkit.object;
 const serialize = mkit.serialize;
 const hash_mod = mkit.hash;
 const sign = mkit.sign;
+const attestations = mkit.attestations;
 
 const Allocator = std.mem.Allocator;
 const Hash = hash_mod.Hash;
@@ -279,6 +280,60 @@ fn buildRemixIdenticalUpstream(arena: Allocator) ![]u8 {
     return try serialize.serialize(arena, obj);
 }
 
+// ------------------------------------------------------------------------
+// Phase 8 — attestation vectors (JCS-canonical bytes for cross-impl tests)
+// ------------------------------------------------------------------------
+
+// Fixed commit hash 0xCC*32; matches the "commit"-named subject. Predicate
+// is intentionally tiny ({}) so the byte sequence is short and easy to
+// inspect by hand. Producers using different predicates round-trip via
+// the encoder; the cross-impl invariant is "same inputs → same bytes".
+const ATTEST_COMMIT_HASH: [32]u8 = .{0xCC} ** 32;
+const ATTEST_PREDICATE_TYPE = "https://example.com/predicate/v1";
+const ATTEST_PREDICATE_JCS = "{}";
+// Fixed Ed25519 seed used to sign envelope_basic. Matches the
+// `verify::tests::deterministic_repo_key_roundtrip` style — fully
+// reproducible across runs and across implementations.
+const ATTEST_ED25519_SEED: [32]u8 = .{0xAB} ** 32;
+const ATTEST_KEYID = "blake3:00000000000000000000000000000000000000000000000000000000000000aa";
+
+fn buildStatementBasic(arena: Allocator) ![]u8 {
+    const hex = hash_mod.toHex(ATTEST_COMMIT_HASH);
+    const subjects = [_]attestations.Subject{.{
+        .name = "commit",
+        .digest_blake3_hex = hex[0..],
+    }};
+    return try attestations.statement.encode(arena, .{
+        .subjects = subjects[0..],
+        .predicate_type = ATTEST_PREDICATE_TYPE,
+        .predicate_jcs = ATTEST_PREDICATE_JCS,
+    });
+}
+
+fn buildEnvelopeBasic(arena: Allocator) ![]u8 {
+    const Ed25519 = std.crypto.sign.Ed25519;
+    const kp = try Ed25519.KeyPair.generateDeterministic(ATTEST_ED25519_SEED);
+
+    const stmt_bytes = try buildStatementBasic(arena);
+    defer arena.free(stmt_bytes);
+
+    const pae_bytes = try attestations.envelope.pae(
+        arena,
+        attestations.PAYLOAD_TYPE_IN_TOTO,
+        stmt_bytes,
+    );
+    defer arena.free(pae_bytes);
+
+    const sig = try kp.sign(pae_bytes, null);
+    const sig_bytes = sig.toBytes();
+
+    return try attestations.envelope.encode(arena, .{
+        .payload_type = attestations.PAYLOAD_TYPE_IN_TOTO,
+        .payload = stmt_bytes,
+        .signatures = &.{.{ .keyid = ATTEST_KEYID, .sig = sig_bytes[0..] }},
+    });
+}
+
 // Dispatch: returns bytes for the named vector. Caller frees.
 fn buildByName(arena: Allocator, name: []const u8) !?[]u8 {
     if (std.mem.eql(u8, name, "blob")) return try buildBlob(arena);
@@ -298,6 +353,9 @@ fn buildByName(arena: Allocator, name: []const u8) !?[]u8 {
     if (std.mem.eql(u8, name, "chunked_blob_cs0_3chunks")) return try buildChunkedBlobCs0(arena);
     if (std.mem.eql(u8, name, "identity_ed25519")) return try buildIdentityEd25519(arena);
     if (std.mem.eql(u8, name, "identity_opaque")) return try buildIdentityOpaque(arena);
+    // Phase 8 attestation vectors (see Phase 8 README).
+    if (std.mem.eql(u8, name, "statement_basic")) return try buildStatementBasic(arena);
+    if (std.mem.eql(u8, name, "envelope_basic")) return try buildEnvelopeBasic(arena);
     return null;
 }
 

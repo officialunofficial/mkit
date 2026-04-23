@@ -1,0 +1,5 @@
+# Phase 8 golden vectors (deterministic)
+# Produced by scripts/harvest-golden-vectors-phase8.sh
+# Format: <name> <blake3-hex-of-bin-bytes>
+statement_basic f16487164072097ed704c4d8687e2069dadc6dfcba453d14b45db1ceb7eba59f
+envelope_basic b1f995e6c6a959d968c55d057149d4c655e5f52e8dbf67da2b2b93e425171565
