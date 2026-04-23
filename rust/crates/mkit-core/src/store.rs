@@ -20,11 +20,13 @@
 //!
 //! See `docs/SPEC-OBJECTS.md` §10 for the path-layout rule.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use tempfile::NamedTempFile;
 
 use crate::hash::{self, Hash, object_path, to_hex};
 use crate::object::{MkitError, Object};
@@ -195,8 +197,16 @@ impl ObjectStore {
 }
 
 /// Atomically write `bytes` to `final_path`. We write to a sibling temp
-/// file, `sync_all`, close, then `rename`. On Unix, `rename` over a
-/// regular file is atomic with respect to concurrent readers.
+/// file in the same directory, `fsync` the file, then rename into place.
+/// On Unix, `rename(2)` is atomic with respect to concurrent readers and
+/// replaces the destination. On Windows, [`NamedTempFile::persist`] uses
+/// `MOVEFILE_REPLACE_EXISTING` semantics so the replace-existing path
+/// works there too.
+///
+/// After a successful rename we `fsync` the parent directory on Unix to
+/// flush the dirent update — without this, the rename can survive a
+/// power loss only in the page cache and the file appears missing on
+/// reboot. Mirrors `src/store.zig`'s post-rename `syncDir`.
 fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = final_path.parent().expect("write_atomic: path has parent");
     let file_name = final_path
@@ -206,29 +216,35 @@ fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     let pid = process::id();
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
-    let tmp_path = parent.join(&tmp_name);
 
-    // Best-effort cleanup if a previous attempt with the same name was
-    // left behind (different process, same pid/seq is astronomically
-    // unlikely; a stale `.tmp.*` from a crashed earlier run is more
-    // realistic).
-    let _ = fs::remove_file(&tmp_path);
+    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    tmp.as_file_mut().write_all(bytes)?;
+    tmp.as_file_mut().sync_all()?;
 
-    {
-        let mut tmp = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)?;
-        tmp.write_all(bytes)?;
-        tmp.sync_all()?;
-        // Drop closes the file.
+    // NamedTempFile::persist uses a cross-platform atomic replace:
+    // rename(2) on Unix, MoveFileExW with MOVEFILE_REPLACE_EXISTING on Windows.
+    tmp.persist(final_path).map_err(|e| e.error)?;
+
+    sync_parent_dir(parent)?;
+    Ok(())
+}
+
+/// On Unix, fsync the directory holding the just-renamed file so the
+/// dirent update is durable. No-op on non-Unix (Windows does not expose
+/// a stable directory-fsync primitive via `std::fs`).
+#[cfg(unix)]
+fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+    match File::open(parent) {
+        Ok(dir) => dir.sync_all(),
+        // If the dir disappeared under us (race with external cleanup),
+        // the durability invariant is moot — propagate silently.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
+}
 
-    if let Err(e) = fs::rename(&tmp_path, final_path) {
-        // Best-effort cleanup of the temp; don't mask the original error.
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e);
-    }
+#[cfg(not(unix))]
+fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -236,6 +252,7 @@ fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::object::Blob;
+    use std::fs::OpenOptions;
     use std::io::Seek;
     use tempfile::TempDir;
 

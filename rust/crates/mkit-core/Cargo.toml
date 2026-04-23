@@ -16,8 +16,8 @@ workspace = true
 
 [dependencies]
 blake3 = "1"
+tempfile = "3"
 thiserror = "2"
 
 [dev-dependencies]
 hex = "0.4"
-tempfile = "3"
