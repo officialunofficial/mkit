@@ -31,18 +31,18 @@ pub const RebaseState = struct {
 };
 
 /// Check if a rebase is currently in progress.
-pub fn isRebaseInProgress(mkit_dir: std.fs.Dir) bool {
-    mkit_dir.access(rebase_dir, .{}) catch return false;
+pub fn isRebaseInProgress(io: std.Io, mkit_dir: std.Io.Dir) bool {
+    mkit_dir.access(io, rebase_dir, .{}) catch return false;
     return true;
 }
 
 /// Read rebase state from the `.mkit/rebase-apply/` directory.
-pub fn readState(allocator: Allocator, mkit_dir: std.fs.Dir) !RebaseState {
-    var dir = mkit_dir.openDir(rebase_dir, .{}) catch return error.NoRebaseInProgress;
-    defer dir.close();
+pub fn readState(allocator: Allocator, io: std.Io, mkit_dir: std.Io.Dir) !RebaseState {
+    var dir = mkit_dir.openDir(io, rebase_dir, .{}) catch return error.NoRebaseInProgress;
+    defer dir.close(io);
 
     // Read head-name
-    const head_name_raw = dir.readFileAlloc(allocator, head_name_file, 4096) catch return error.InvalidRebaseState;
+    const head_name_raw = dir.readFileAlloc(io, head_name_file, allocator, .limited(4096)) catch return error.InvalidRebaseState;
     const head_name = std.mem.trimEnd(u8, head_name_raw, "\n\r ");
     const head_name_duped = allocator.dupe(u8, head_name) catch {
         allocator.free(head_name_raw);
@@ -52,23 +52,23 @@ pub fn readState(allocator: Allocator, mkit_dir: std.fs.Dir) !RebaseState {
     errdefer allocator.free(head_name_duped);
 
     // Read orig-head
-    const orig_head_raw = dir.readFileAlloc(allocator, orig_head_file, 128) catch return error.InvalidRebaseState;
+    const orig_head_raw = dir.readFileAlloc(io, orig_head_file, allocator, .limited(128)) catch return error.InvalidRebaseState;
     defer allocator.free(orig_head_raw);
     const orig_head_trimmed = std.mem.trimEnd(u8, orig_head_raw, "\n\r ");
     const orig_head = hash_mod.fromHex(orig_head_trimmed) catch return error.InvalidRebaseState;
 
     // Read onto
-    const onto_raw = dir.readFileAlloc(allocator, onto_file, 128) catch return error.InvalidRebaseState;
+    const onto_raw = dir.readFileAlloc(io, onto_file, allocator, .limited(128)) catch return error.InvalidRebaseState;
     defer allocator.free(onto_raw);
     const onto_trimmed = std.mem.trimEnd(u8, onto_raw, "\n\r ");
     const onto = hash_mod.fromHex(onto_trimmed) catch return error.InvalidRebaseState;
 
     // Read todo
-    const todo = try readHashList(allocator, dir, todo_file);
+    const todo = try readHashList(allocator, io, dir, todo_file);
     errdefer allocator.free(todo);
 
     // Read done
-    const done = try readHashList(allocator, dir, done_file);
+    const done = try readHashList(allocator, io, dir, done_file);
     errdefer allocator.free(done);
 
     return RebaseState{
@@ -82,32 +82,32 @@ pub fn readState(allocator: Allocator, mkit_dir: std.fs.Dir) !RebaseState {
 }
 
 /// Write rebase state to the `.mkit/rebase-apply/` directory.
-pub fn writeState(mkit_dir: std.fs.Dir, state: RebaseState) !void {
+pub fn writeState(io: std.Io, mkit_dir: std.Io.Dir, state: RebaseState) !void {
     // Ensure rebase-apply directory exists
-    mkit_dir.makeDir(rebase_dir) catch |err| switch (err) {
+    mkit_dir.createDirPath(io, rebase_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    var dir = try mkit_dir.openDir(rebase_dir, .{});
-    defer dir.close();
+    var dir = try mkit_dir.openDir(io, rebase_dir, .{});
+    defer dir.close(io);
 
     // Write head-name
-    try writeFileContent(dir, head_name_file, state.head_name);
+    try writeFileContent(io, dir, head_name_file, state.head_name);
 
     // Write orig-head
     const orig_hex = hash_mod.toHex(state.orig_head);
-    try writeFileContent(dir, orig_head_file, &orig_hex);
+    try writeFileContent(io, dir, orig_head_file, &orig_hex);
 
     // Write onto
     const onto_hex = hash_mod.toHex(state.onto);
-    try writeFileContent(dir, onto_file, &onto_hex);
+    try writeFileContent(io, dir, onto_file, &onto_hex);
 
     // Write todo
-    try writeHashList(state.allocator, dir, todo_file, state.todo);
+    try writeHashList(state.allocator, io, dir, todo_file, state.todo);
 
     // Write done
-    try writeHashList(state.allocator, dir, done_file, state.done);
+    try writeHashList(state.allocator, io, dir, done_file, state.done);
 }
 
 /// Collect commits to replay: walk first-parent chain from head_hash back,
@@ -159,16 +159,16 @@ pub fn collectCommitsToReplay(
 }
 
 /// Remove the rebase state directory.
-pub fn cleanupRebase(mkit_dir: std.fs.Dir) !void {
-    mkit_dir.deleteTree(rebase_dir) catch {};
+pub fn cleanupRebase(io: std.Io, mkit_dir: std.Io.Dir) !void {
+    mkit_dir.deleteTree(io, rebase_dir) catch {};
 }
 
 // ===========================================================================
 // Internal helpers
 // ===========================================================================
 
-fn readHashList(allocator: Allocator, dir: std.fs.Dir, filename: []const u8) ![]Hash {
-    const content = dir.readFileAlloc(allocator, filename, 1024 * 1024) catch |err| switch (err) {
+fn readHashList(allocator: Allocator, io: std.Io, dir: std.Io.Dir, filename: []const u8) ![]Hash {
+    const content = dir.readFileAlloc(io, filename, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return allocator.alloc(Hash, 0),
         else => return err,
     };
@@ -191,9 +191,9 @@ fn readHashList(allocator: Allocator, dir: std.fs.Dir, filename: []const u8) ![]
     return list.toOwnedSlice(allocator);
 }
 
-fn writeHashList(allocator: Allocator, dir: std.fs.Dir, filename: []const u8, hashes: []const Hash) !void {
+fn writeHashList(allocator: Allocator, io: std.Io, dir: std.Io.Dir, filename: []const u8, hashes: []const Hash) !void {
     if (hashes.len == 0) {
-        try writeFileContent(dir, filename, "");
+        try writeFileContent(io, dir, filename, "");
         return;
     }
 
@@ -210,15 +210,15 @@ fn writeHashList(allocator: Allocator, dir: std.fs.Dir, filename: []const u8, ha
         pos += 65;
     }
 
-    try writeFileContent(dir, filename, buf);
+    try writeFileContent(io, dir, filename, buf);
 }
 
-fn writeFileContent(dir: std.fs.Dir, filename: []const u8, content: []const u8) !void {
-    const file = try dir.createFile(filename, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(content);
+fn writeFileContent(io: std.Io, dir: std.Io.Dir, filename: []const u8, content: []const u8) !void {
+    const file = try dir.createFile(io, filename, .{ .truncate = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, content);
     if (content.len == 0 or content[content.len - 1] != '\n') {
-        try file.writeAll("\n");
+        try file.writeStreamingAll(io, "\n");
     }
 }
 
@@ -313,10 +313,10 @@ test "state write/read round-trip" {
         .allocator = allocator,
     };
 
-    try writeState(tmp.dir, state);
+    try writeState(std.testing.io, tmp.dir, state);
 
     // Read it back
-    var read_state = try readState(allocator, tmp.dir);
+    var read_state = try readState(allocator, std.testing.io, tmp.dir);
     defer read_state.deinit();
 
     try std.testing.expectEqualStrings("feature-branch", read_state.head_name);
@@ -336,11 +336,11 @@ test "isRebaseInProgress detection" {
     try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // No rebase dir -> not in progress
-    try std.testing.expect(!isRebaseInProgress(tmp.dir));
+    try std.testing.expect(!isRebaseInProgress(std.testing.io, tmp.dir));
 
     // Create rebase dir -> in progress
     try tmp.dir.createDirPath(std.testing.io, rebase_dir);
-    try std.testing.expect(isRebaseInProgress(tmp.dir));
+    try std.testing.expect(isRebaseInProgress(std.testing.io, tmp.dir));
 }
 
 test "cleanupRebase removes state dir" {
@@ -352,14 +352,14 @@ test "cleanupRebase removes state dir" {
 
     // Create a file inside to make sure deleteTree works
     const file = try tmp.dir.createFile(std.testing.io, rebase_dir ++ "/head-name", .{});
-    try file.writeAll("main\n");
-    file.close();
+    try file.writeStreamingAll(std.testing.io, "main\n");
+    file.close(std.testing.io);
 
-    try std.testing.expect(isRebaseInProgress(tmp.dir));
+    try std.testing.expect(isRebaseInProgress(std.testing.io, tmp.dir));
 
-    try cleanupRebase(tmp.dir);
+    try cleanupRebase(std.testing.io, tmp.dir);
 
-    try std.testing.expect(!isRebaseInProgress(tmp.dir));
+    try std.testing.expect(!isRebaseInProgress(std.testing.io, tmp.dir));
 }
 
 test "cleanupRebase on nonexistent dir is fine" {
@@ -369,7 +369,7 @@ test "cleanupRebase on nonexistent dir is fine" {
     try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // Should not error
-    try cleanupRebase(tmp.dir);
+    try cleanupRebase(std.testing.io, tmp.dir);
 }
 
 test "state write/read with empty todo and done" {
@@ -395,9 +395,9 @@ test "state write/read with empty todo and done" {
         .allocator = allocator,
     };
 
-    try writeState(tmp.dir, state);
+    try writeState(std.testing.io, tmp.dir, state);
 
-    var read_state = try readState(allocator, tmp.dir);
+    var read_state = try readState(allocator, std.testing.io, tmp.dir);
     defer read_state.deinit();
 
     try std.testing.expectEqualStrings("main", read_state.head_name);
@@ -456,5 +456,5 @@ test "readState with missing directory returns error" {
     // Create .mkit but NOT .mkit/rebase-apply/
     try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
-    try std.testing.expectError(error.NoRebaseInProgress, readState(allocator, tmp.dir));
+    try std.testing.expectError(error.NoRebaseInProgress, readState(allocator, std.testing.io, tmp.dir));
 }
