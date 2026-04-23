@@ -38,8 +38,8 @@ Install cosign: <https://docs.sigstore.dev/cosign/system_config/installation/>
 Then:
 
 ```sh
-ARCHIVE=mkit-0.1.0-aarch64-macos.tar.gz
-TAG=v0.1.0
+ARCHIVE=mkit-0.2.0-aarch64-macos.tar.gz
+TAG=v0.2.0
 
 cosign verify-blob \
   --certificate-identity-regexp "https://github.com/officialunofficial/mkit/.github/workflows/release.yml@refs/tags/v.*" \

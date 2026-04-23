@@ -62,10 +62,10 @@ capped so a regression that introduces an accidental loop aborts instead
 of hanging CI.
 
 Deeper fuzz runs (millions of iterations, per-target corpora, coverage
-feedback) are intentionally **out of scope for 0.1.0**. When we add a
-dedicated fuzz step, each target here gains a matching `fuzz_<name>`
-build step and moves its body into a function callable from both
-`zig build test` and the fuzz runner.
+feedback) are intentionally **out of scope** for the bounded-property
+harnesses in this directory. When we add a dedicated fuzz step, each
+target here gains a matching `fuzz_<name>` build step and moves its body
+into a function callable from both `zig build test` and the fuzz runner.
 
 ## Guardrails (NON-NEGOTIABLE)
 

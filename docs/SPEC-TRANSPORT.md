@@ -327,9 +327,9 @@ Server → Client frame (status=0x00, payload 12 bytes):
 
 Client behaviour on an unparseable / truncated / non-OK server reply:
 return `error.IncompatiblePeer` and teardown. Do NOT silently continue;
-no pre-v1 fallback is supported in 0.1.0 (no-back-compat per W1). A
-pre-v1 server (no OP_HELLO support) will reject opcode 0x00 and the
-client will see STATUS_ERROR → IncompatiblePeer.
+no pre-v1 fallback is supported (no-back-compat per W1). A pre-v1 server
+(no OP_HELLO support) will reject opcode 0x00 and the client will see
+STATUS_ERROR → IncompatiblePeer.
 
 This resolves red-team R-10 (binary rename breaks remotes): a renamed
 or legacy peer fails loud on the first byte exchange instead of
