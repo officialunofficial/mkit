@@ -25,7 +25,7 @@ pub const RestoreOptions = struct {
 /// Leading ! means negation. Trailing / means directory-only.
 /// Caller owns returned slice and must free with freeSparsePatterns.
 pub fn parseSparsePatterns(allocator: Allocator, content: []const u8) ![]SparsePattern {
-    var patterns: std.ArrayList(SparsePattern) = .{};
+    var patterns: std.ArrayList(SparsePattern) = .empty;
     errdefer {
         for (patterns.items) |p| allocator.free(p.pattern);
         patterns.deinit(allocator);
@@ -33,7 +33,7 @@ pub fn parseSparsePatterns(allocator: Allocator, content: []const u8) ![]SparseP
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r ");
+        const line = std.mem.trimEnd(u8, raw_line, "\r ");
         if (line.len == 0) continue;
         if (line[0] == '#') continue;
 
@@ -365,7 +365,7 @@ fn cleanDirectory(
     path_prefix: []const u8,
 ) !void {
     // Collect names to delete (cannot mutate dir while iterating)
-    var to_delete: std.ArrayList(CleanEntry) = .{};
+    var to_delete: std.ArrayList(CleanEntry) = .empty;
     defer {
         for (to_delete.items) |item| {
             allocator.free(item.name);

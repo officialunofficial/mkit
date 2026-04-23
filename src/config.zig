@@ -259,8 +259,8 @@ pub fn parseConfig(allocator: Allocator, content: []const u8) !Config {
 
         // Split on '='
         const eq_pos = std.mem.indexOfScalar(u8, trimmed, '=') orelse continue;
-        const key = std.mem.trimRight(u8, trimmed[0..eq_pos], " \t");
-        const value = std.mem.trimLeft(u8, trimmed[eq_pos + 1 ..], " \t");
+        const key = std.mem.trimEnd(u8, trimmed[0..eq_pos], " \t");
+        const value = std.mem.trimStart(u8, trimmed[eq_pos + 1 ..], " \t");
 
         if (std.mem.eql(u8, key, "user.identity")) {
             if (config.user_identity.len > 0) allocator.free(config.user_identity);

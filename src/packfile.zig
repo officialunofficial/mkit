@@ -33,7 +33,7 @@ pub const PackResult = struct {
 /// Returns packfile bytes and BLAKE3 digest of the packfile.
 /// Caller owns the returned bytes.
 pub fn pack(allocator: Allocator, objects: []const []const u8) !PackResult {
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     errdefer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, &MAGIC);
@@ -103,7 +103,7 @@ pub fn packReachable(
     var seen = std.AutoHashMap(Hash, void).init(allocator);
     defer seen.deinit();
 
-    var raw_objects: std.ArrayList([]const u8) = .{};
+    var raw_objects: std.ArrayList([]const u8) = .empty;
     defer {
         for (raw_objects.items) |item| {
             allocator.free(item);
@@ -203,7 +203,7 @@ pub fn collectShallowBoundaries(
 
     const DepthEntry = struct { h: Hash, depth: u32 };
 
-    var queue: std.ArrayList(DepthEntry) = .{};
+    var queue: std.ArrayList(DepthEntry) = .empty;
     defer queue.deinit(allocator);
 
     var visited = std.AutoHashMap(Hash, void).init(allocator);
@@ -641,7 +641,7 @@ pub fn packReachableIncremental(
         collectObjectHashes(allocator, store, base, &seen) catch {};
     }
 
-    var raw_objects: std.ArrayList([]const u8) = .{};
+    var raw_objects: std.ArrayList([]const u8) = .empty;
     defer {
         for (raw_objects.items) |item| {
             allocator.free(item);
@@ -724,7 +724,7 @@ pub fn packWithDeltas(
     }
 
     // Collect all raw objects
-    var raw_objects: std.ArrayList([]const u8) = .{};
+    var raw_objects: std.ArrayList([]const u8) = .empty;
     defer {
         for (raw_objects.items) |item| {
             allocator.free(item);
@@ -739,10 +739,10 @@ pub fn packWithDeltas(
     }
 
     // Classify objects: separate blobs (delta candidates) from non-blobs
-    var blobs: std.ArrayList(CollectedBlob) = .{};
+    var blobs: std.ArrayList(CollectedBlob) = .empty;
     defer blobs.deinit(allocator);
 
-    var non_blob_indices: std.ArrayList(usize) = .{};
+    var non_blob_indices: std.ArrayList(usize) = .empty;
     defer non_blob_indices.deinit(allocator);
 
     for (raw_objects.items, 0..) |raw, idx| {
@@ -768,7 +768,7 @@ pub fn packWithDeltas(
 
     // Try delta encoding: for each blob, try delta against its size-adjacent neighbor
     // Use the previous blob (in size order) as base
-    var delta_entries: std.ArrayList(DeltaEntry) = .{};
+    var delta_entries: std.ArrayList(DeltaEntry) = .empty;
     defer {
         for (delta_entries.items) |entry| {
             allocator.free(entry.delta_data);
@@ -814,11 +814,11 @@ pub fn packWithDeltas(
     // - All non-blob raw objects (commits, trees, etc.) go first
     // - Base blobs (those used as bases) go next
     // - Delta blobs go last (so bases are always before deltas)
-    var final_raw: std.ArrayList([]const u8) = .{};
+    var final_raw: std.ArrayList([]const u8) = .empty;
     defer final_raw.deinit(allocator);
-    var final_delta: std.ArrayList([]const u8) = .{};
+    var final_delta: std.ArrayList([]const u8) = .empty;
     defer final_delta.deinit(allocator);
-    var final_entry_types: std.ArrayList(EntryType) = .{};
+    var final_entry_types: std.ArrayList(EntryType) = .empty;
     defer final_entry_types.deinit(allocator);
 
     // 1. Non-blob objects (raw)
@@ -860,7 +860,7 @@ fn packV2Mixed(
     delta_items: []const []const u8,
     entry_types: []const EntryType,
 ) !PackResult {
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     errdefer buf.deinit(allocator);
 
     const total_count: u32 = @intCast(raw_items.len + delta_items.len);
@@ -947,7 +947,7 @@ pub fn unpackDeltaInto(
         const entry_type_byte = data[pos];
         pos += 1;
 
-        const entry_type = std.meta.intToEnum(EntryType, entry_type_byte) catch return error.InvalidEntryType;
+        const entry_type = std.enums.fromInt(EntryType, entry_type_byte) orelse return error.InvalidEntryType;
 
         if (pos + 4 > data.len) return error.UnexpectedEof;
         const obj_len = std.mem.littleToNative(u32, @bitCast(data[pos..][0..4].*));

@@ -43,7 +43,7 @@ pub fn readState(allocator: Allocator, mkit_dir: std.fs.Dir) !RebaseState {
 
     // Read head-name
     const head_name_raw = dir.readFileAlloc(allocator, head_name_file, 4096) catch return error.InvalidRebaseState;
-    const head_name = std.mem.trimRight(u8, head_name_raw, "\n\r ");
+    const head_name = std.mem.trimEnd(u8, head_name_raw, "\n\r ");
     const head_name_duped = allocator.dupe(u8, head_name) catch {
         allocator.free(head_name_raw);
         return error.OutOfMemory;
@@ -54,13 +54,13 @@ pub fn readState(allocator: Allocator, mkit_dir: std.fs.Dir) !RebaseState {
     // Read orig-head
     const orig_head_raw = dir.readFileAlloc(allocator, orig_head_file, 128) catch return error.InvalidRebaseState;
     defer allocator.free(orig_head_raw);
-    const orig_head_trimmed = std.mem.trimRight(u8, orig_head_raw, "\n\r ");
+    const orig_head_trimmed = std.mem.trimEnd(u8, orig_head_raw, "\n\r ");
     const orig_head = hash_mod.fromHex(orig_head_trimmed) catch return error.InvalidRebaseState;
 
     // Read onto
     const onto_raw = dir.readFileAlloc(allocator, onto_file, 128) catch return error.InvalidRebaseState;
     defer allocator.free(onto_raw);
-    const onto_trimmed = std.mem.trimRight(u8, onto_raw, "\n\r ");
+    const onto_trimmed = std.mem.trimEnd(u8, onto_raw, "\n\r ");
     const onto = hash_mod.fromHex(onto_trimmed) catch return error.InvalidRebaseState;
 
     // Read todo
@@ -130,7 +130,7 @@ pub fn collectCommitsToReplay(
     try graph_mod.collectAncestorSet(allocator, store, onto_hash, &onto_ancestors);
 
     // Walk first-parent chain from head_hash, collecting commits
-    var commits: std.ArrayList(Hash) = .{};
+    var commits: std.ArrayList(Hash) = .empty;
     errdefer commits.deinit(allocator);
 
     var current = head_hash;
@@ -174,15 +174,15 @@ fn readHashList(allocator: Allocator, dir: std.fs.Dir, filename: []const u8) ![]
     };
     defer allocator.free(content);
 
-    const trimmed = std.mem.trimRight(u8, content, "\n\r ");
+    const trimmed = std.mem.trimEnd(u8, content, "\n\r ");
     if (trimmed.len == 0) return allocator.alloc(Hash, 0);
 
-    var list: std.ArrayList(Hash) = .{};
+    var list: std.ArrayList(Hash) = .empty;
     errdefer list.deinit(allocator);
 
     var lines = std.mem.splitScalar(u8, trimmed, '\n');
     while (lines.next()) |line| {
-        const line_trimmed = std.mem.trimRight(u8, line, "\r ");
+        const line_trimmed = std.mem.trimEnd(u8, line, "\r ");
         if (line_trimmed.len == 0) continue;
         const h = hash_mod.fromHex(line_trimmed) catch return error.InvalidRebaseState;
         try list.append(allocator, h);

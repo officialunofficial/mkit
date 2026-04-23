@@ -76,14 +76,14 @@ pub fn mergeTrees(
         break :blk theirs_obj.?.tree.entries;
     } else &[_]object.TreeEntry{};
 
-    var merged: std.ArrayList(object.TreeEntry) = .{};
+    var merged: std.ArrayList(object.TreeEntry) = .empty;
     errdefer {
         for (merged.items) |entry| {
             allocator.free(entry.name);
         }
         merged.deinit(allocator);
     }
-    var conflicts: std.ArrayList(Conflict) = .{};
+    var conflicts: std.ArrayList(Conflict) = .empty;
     errdefer {
         for (conflicts.items) |c| {
             allocator.free(c.path);
@@ -124,7 +124,7 @@ fn collectAncestors(
     var ancestors = std.AutoHashMap(Hash, usize).init(allocator);
     errdefer ancestors.deinit();
 
-    var queue: std.ArrayList(AncestorNode) = .{};
+    var queue: std.ArrayList(AncestorNode) = .empty;
     defer queue.deinit(allocator);
     try queue.append(allocator, .{ .hash = start, .depth = 0 });
 
@@ -166,7 +166,7 @@ pub fn findMergeBase(
     defer ancestors_a.deinit();
 
     // Walk B's DAG breadth-first until we hit a node that A can reach.
-    var queue: std.ArrayList(AncestorNode) = .{};
+    var queue: std.ArrayList(AncestorNode) = .empty;
     defer queue.deinit(allocator);
     try queue.append(allocator, .{ .hash = hash_b, .depth = 0 });
 
@@ -213,7 +213,7 @@ pub fn isAncestor(
     var seen = std.AutoHashMap(Hash, void).init(allocator);
     defer seen.deinit();
 
-    var stack: std.ArrayList(Hash) = .{};
+    var stack: std.ArrayList(Hash) = .empty;
     defer stack.deinit(allocator);
     try stack.append(allocator, descendant);
 
@@ -468,7 +468,7 @@ fn recurseSubtreeMerge(
         break :blk theirs_sub_obj.?.tree.entries;
     } else &[_]object.TreeEntry{};
 
-    var sub_merged: std.ArrayList(object.TreeEntry) = .{};
+    var sub_merged: std.ArrayList(object.TreeEntry) = .empty;
     errdefer {
         for (sub_merged.items) |entry| {
             allocator.free(entry.name);

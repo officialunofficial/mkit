@@ -79,7 +79,7 @@ pub fn readHead(allocator: Allocator, dir: std.fs.Dir) !Head {
     const content = dir.readFileAlloc(allocator, head_file, 4096) catch return error.NoHead;
     defer allocator.free(content);
 
-    const trimmed = std.mem.trimRight(u8, content, "\n\r ");
+    const trimmed = std.mem.trimEnd(u8, content, "\n\r ");
 
     if (std.mem.startsWith(u8, trimmed, "ref: refs/heads/")) {
         const branch_name = trimmed["ref: refs/heads/".len..];
@@ -125,7 +125,7 @@ fn readRefFromDir(allocator: Allocator, heads: std.fs.Dir, branch: []const u8) !
     const content = heads.readFileAlloc(allocator, branch, 128) catch return null;
     defer allocator.free(content);
 
-    const trimmed = std.mem.trimRight(u8, content, "\n\r ");
+    const trimmed = std.mem.trimEnd(u8, content, "\n\r ");
     if (trimmed.len != 64) return error.InvalidRef;
     return hash_mod.fromHex(trimmed) catch error.InvalidRef;
 }
@@ -214,7 +214,7 @@ fn deleteRefFromDir(dir: std.fs.Dir, sub_dir: []const u8, name: []const u8) !voi
 }
 
 fn listRefsFromDir(allocator: Allocator, dir: std.fs.Dir, sub_dir: []const u8) ![]Ref {
-    var ref_list: std.ArrayList(Ref) = .{};
+    var ref_list: std.ArrayList(Ref) = .empty;
     errdefer {
         for (ref_list.items) |ref| {
             allocator.free(ref.name);
@@ -334,7 +334,7 @@ pub fn loadShallowBoundaries(allocator: Allocator, mkit_dir: std.fs.Dir) !?std.A
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
-        const trimmed = std.mem.trimRight(u8, line, "\r ");
+        const trimmed = std.mem.trimEnd(u8, line, "\r ");
         if (trimmed.len != 64) continue;
         const h = hash_mod.fromHex(trimmed) catch continue;
         try map.put(h, {});

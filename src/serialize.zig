@@ -9,7 +9,7 @@ const Buffer = std.ArrayList(u8);
 
 /// Serialize an object to bytes. Caller owns returned slice.
 pub fn serialize(allocator: Allocator, obj: object.Object) ![]u8 {
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     errdefer buf.deinit(allocator);
 
     switch (obj) {
@@ -28,7 +28,7 @@ pub fn serialize(allocator: Allocator, obj: object.Object) ![]u8 {
 pub fn deserialize(allocator: Allocator, data: []const u8) !object.Object {
     if (data.len < 1 + 4 + 1) return error.EmptyData;
 
-    const tag = std.meta.intToEnum(object.ObjectType, data[0]) catch return error.InvalidObjectType;
+    const tag = std.enums.fromInt(object.ObjectType, data[0]) orelse return error.InvalidObjectType;
     // v1 prologue: [type:u8][magic:4 = "MKT1"][schema_version:u8 = 1]
     if (!std.mem.eql(u8, data[1..5], &object.MAGIC)) return error.InvalidMagic;
     if (data[5] != object.SCHEMA_VERSION) return error.UnsupportedObjectVersion;
@@ -222,7 +222,7 @@ const Reader = struct {
 
     fn readIdentity(self: *Reader, allocator: Allocator) !object.Identity {
         const kind_byte = try self.readByte();
-        const kind = std.meta.intToEnum(object.IdentityKind, kind_byte) catch return error.UnknownIdentityKind;
+        const kind = std.enums.fromInt(object.IdentityKind, kind_byte) orelse return error.UnknownIdentityKind;
         const len = try self.readU16();
         if (len == 0) return error.InvalidIdentity;
         if (len > object.IDENTITY_MAX_LEN) return error.IdentityTooLarge;
@@ -273,7 +273,7 @@ fn deserializeTree(allocator: Allocator, data: []const u8) !object.Tree {
                 return error.InvalidEntryOrder;
             }
         }
-        entry.mode = std.meta.intToEnum(object.EntryMode, try r.readByte()) catch return error.InvalidEntryMode;
+        entry.mode = std.enums.fromInt(object.EntryMode, try r.readByte()) orelse return error.InvalidEntryMode;
         entry.object_hash = try r.readHash();
         prev_name = entry.name;
     }
@@ -671,7 +671,7 @@ test "truncated blob" {
 
 test "reject unsorted tree entries" {
     const allocator = std.testing.allocator;
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     defer buf.deinit(allocator);
 
     try writePrologue(&buf, allocator, .tree);
@@ -702,7 +702,7 @@ test "reject trailing bytes" {
 
 test "reject identity with zero length" {
     const allocator = std.testing.allocator;
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     defer buf.deinit(allocator);
 
     try writePrologue(&buf, allocator, .commit);
@@ -717,7 +717,7 @@ test "reject identity with zero length" {
 
 test "reject identity with unknown kind" {
     const allocator = std.testing.allocator;
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     defer buf.deinit(allocator);
 
     try writePrologue(&buf, allocator, .commit);
@@ -732,7 +732,7 @@ test "reject identity with unknown kind" {
 
 test "reject ed25519 identity with wrong length" {
     const allocator = std.testing.allocator;
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     defer buf.deinit(allocator);
 
     try writePrologue(&buf, allocator, .commit);

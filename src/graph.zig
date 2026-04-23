@@ -15,7 +15,7 @@ pub fn collectAncestorSet(
     start: Hash,
     set: *std.AutoHashMap(Hash, void),
 ) !void {
-    var stack: std.ArrayList(Hash) = .{};
+    var stack: std.ArrayList(Hash) = .empty;
     defer stack.deinit(allocator);
     try stack.append(allocator, start);
 

@@ -686,7 +686,7 @@ fn cmdLog(allocator: std.mem.Allocator, args: []const []const u8) !void {
         var visited = std.AutoHashMap(mkit.hash.Hash, void).init(allocator);
         defer visited.deinit();
 
-        var queue: std.ArrayList(mkit.hash.Hash) = .{};
+        var queue: std.ArrayList(mkit.hash.Hash) = .empty;
         defer queue.deinit(allocator);
         try queue.append(allocator, head_hash.?);
 
@@ -2874,7 +2874,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // The last non-flag arg is always the URL.
     var depth: ?u32 = null;
     var has_sparse = false;
-    var positional: std.ArrayList([]const u8) = .{};
+    var positional: std.ArrayList([]const u8) = .empty;
     defer positional.deinit(allocator);
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -2890,7 +2890,7 @@ fn cmdClone(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Last positional is URL; if --sparse, earlier positionals are patterns
     var url_arg: ?[]const u8 = null;
-    var sparse_patterns: std.ArrayList([]const u8) = .{};
+    var sparse_patterns: std.ArrayList([]const u8) = .empty;
     defer sparse_patterns.deinit(allocator);
     if (positional.items.len > 0) {
         url_arg = positional.items[positional.items.len - 1];

@@ -74,7 +74,7 @@ pub fn formatRef(h: Hash) [65]u8 {
 
 /// Parse ref wire format back to a Hash. Accepts optional trailing whitespace.
 pub fn parseRef(data: []const u8) !Hash {
-    const trimmed = std.mem.trimRight(u8, data, "\n\r \t");
+    const trimmed = std.mem.trimEnd(u8, data, "\n\r \t");
     if (trimmed.len != 64) return error.InvalidRef;
     return hash_mod.fromHex(trimmed) catch error.InvalidRef;
 }
@@ -100,7 +100,7 @@ pub fn validateRefName(name: []const u8) bool {
 /// Validate a ref prefix used for listings. Allows an optional trailing slash.
 pub fn validateRefPrefix(prefix: []const u8) bool {
     if (prefix.len == 0) return true;
-    const trimmed = std.mem.trimRight(u8, prefix, "/");
+    const trimmed = std.mem.trimEnd(u8, prefix, "/");
     if (trimmed.len == 0) return false;
     return validateRefName(trimmed);
 }

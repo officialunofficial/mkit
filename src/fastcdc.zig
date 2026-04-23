@@ -145,7 +145,7 @@ test "determinism: same data produces identical boundaries" {
 
     // First pass
     var iter1 = ChunkIterator.init(cdc, &data);
-    var boundaries1: std.ArrayList(ChunkBoundary) = .{};
+    var boundaries1: std.ArrayList(ChunkBoundary) = .empty;
     defer boundaries1.deinit(std.testing.allocator);
     while (iter1.next()) |b| {
         try boundaries1.append(std.testing.allocator, b);
@@ -153,7 +153,7 @@ test "determinism: same data produces identical boundaries" {
 
     // Second pass
     var iter2 = ChunkIterator.init(cdc, &data);
-    var boundaries2: std.ArrayList(ChunkBoundary) = .{};
+    var boundaries2: std.ArrayList(ChunkBoundary) = .empty;
     defer boundaries2.deinit(std.testing.allocator);
     while (iter2.next()) |b| {
         try boundaries2.append(std.testing.allocator, b);
@@ -241,7 +241,7 @@ test "StreamingChunker matches ChunkIterator" {
 
     // Collect boundaries from ChunkIterator
     var iter = ChunkIterator.init(cdc, &data);
-    var expected: std.ArrayList(usize) = .{};
+    var expected: std.ArrayList(usize) = .empty;
     defer expected.deinit(allocator);
     while (iter.next()) |b| {
         try expected.append(allocator, b.length);
@@ -254,7 +254,7 @@ test "StreamingChunker matches ChunkIterator" {
     var file = try tmp.dir.openFile("test.bin", .{});
     defer file.close();
 
-    var actual: std.ArrayList(usize) = .{};
+    var actual: std.ArrayList(usize) = .empty;
     defer actual.deinit(allocator);
     while (try chunker.nextChunk(file)) |chunk| {
         try actual.append(allocator, chunk.len);
@@ -285,14 +285,14 @@ test "stability: single byte insertion causes minimal boundary changes" {
 
     // Collect chunk hashes from both
     var orig_iter = ChunkIterator.init(cdc, &original);
-    var orig_chunks: std.ArrayList(ChunkBoundary) = .{};
+    var orig_chunks: std.ArrayList(ChunkBoundary) = .empty;
     defer orig_chunks.deinit(allocator);
     while (orig_iter.next()) |b| {
         try orig_chunks.append(allocator, b);
     }
 
     var mod_iter = ChunkIterator.init(cdc, modified);
-    var mod_chunks: std.ArrayList(ChunkBoundary) = .{};
+    var mod_chunks: std.ArrayList(ChunkBoundary) = .empty;
     defer mod_chunks.deinit(allocator);
     while (mod_iter.next()) |b| {
         try mod_chunks.append(allocator, b);
@@ -398,7 +398,7 @@ test "different avg_size produces different boundaries" {
     // CDC with avg=32KB
     const cdc_small = FastCDC.init(8 * 1024, 32 * 1024, 128 * 1024);
     var iter_small = ChunkIterator.init(cdc_small, &data);
-    var boundaries_small: std.ArrayList(usize) = .{};
+    var boundaries_small: std.ArrayList(usize) = .empty;
     defer boundaries_small.deinit(allocator);
     while (iter_small.next()) |b| {
         try boundaries_small.append(allocator, b.offset + b.length);
@@ -407,7 +407,7 @@ test "different avg_size produces different boundaries" {
     // CDC with avg=64KB
     const cdc_large = FastCDC.init(16 * 1024, 64 * 1024, 256 * 1024);
     var iter_large = ChunkIterator.init(cdc_large, &data);
-    var boundaries_large: std.ArrayList(usize) = .{};
+    var boundaries_large: std.ArrayList(usize) = .empty;
     defer boundaries_large.deinit(allocator);
     while (iter_large.next()) |b| {
         try boundaries_large.append(allocator, b.offset + b.length);

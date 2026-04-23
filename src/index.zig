@@ -98,7 +98,7 @@ pub fn writeIndex(dir: std.fs.Dir, idx: *const Index) !void {
 /// Format: magic(4) + version(1) + entry_count(4 LE) + entries...
 /// Each entry: status(1) + hash(32) + path_len(2 LE) + path(path_len)
 fn serializeIndex(allocator: Allocator, idx: *const Index) ![]u8 {
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     // Header
@@ -141,7 +141,7 @@ fn deserializeIndex(allocator: Allocator, data: []const u8) !Index {
     for (0..count) |_| {
         if (offset + 35 > data.len) return error.IndexCorrupt; // status(1) + hash(32) + path_len(2)
 
-        const status = std.meta.intToEnum(EntryStatus, data[offset]) catch return error.IndexCorrupt;
+        const status = std.enums.fromInt(EntryStatus, data[offset]) orelse return error.IndexCorrupt;
         offset += 1;
 
         const entry_hash: Hash = data[offset..][0..32].*;
@@ -388,7 +388,7 @@ fn buildTreeRecursiveFromFlat(
     prefix: []const u8,
 ) !Hash {
     // Collect all non-removed entries
-    var tree_entries: std.ArrayList(object.TreeEntry) = .{};
+    var tree_entries: std.ArrayList(object.TreeEntry) = .empty;
     defer {
         for (tree_entries.items) |te| {
             allocator.free(te.name);
@@ -397,7 +397,7 @@ fn buildTreeRecursiveFromFlat(
     }
 
     // Track which subdirectory names we've already processed
-    var seen_dirs: std.ArrayList([]const u8) = .{};
+    var seen_dirs: std.ArrayList([]const u8) = .empty;
     defer {
         for (seen_dirs.items) |s| allocator.free(s);
         seen_dirs.deinit(allocator);

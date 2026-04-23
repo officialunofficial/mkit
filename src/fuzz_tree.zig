@@ -65,7 +65,7 @@ test "fuzz tree: single valid entry succeeds" {
     const a = fba.allocator();
 
     // 1 entry: name="a" (len=1), mode=blob (0x01), hash=zeros
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(1)); // count
@@ -84,7 +84,7 @@ test "fuzz tree: entry named '..' rejected" {
     var fba = makeFba();
     const a = fba.allocator();
 
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(1));
@@ -100,7 +100,7 @@ test "fuzz tree: entry name with embedded null rejected" {
     var fba = makeFba();
     const a = fba.allocator();
 
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(1));
@@ -116,7 +116,7 @@ test "fuzz tree: entry mode 0xFF rejected" {
     var fba = makeFba();
     const a = fba.allocator();
 
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(1));
@@ -132,7 +132,7 @@ test "fuzz tree: declared name length > remaining bytes rejected" {
     var fba = makeFba();
     const a = fba.allocator();
 
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(1));
@@ -149,7 +149,7 @@ test "fuzz tree: oversize entry count rejected without allocator blow-up" {
     var fba = makeFba();
     const a = fba.allocator();
 
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(a);
     try buf.appendSlice(a, &TREE_PROLOGUE);
     try buf.appendSlice(a, &u32le(0xFFFFFFFF)); // count > cap

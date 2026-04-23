@@ -62,7 +62,7 @@ pub fn load(allocator: Allocator, dir: std.fs.Dir) !IgnoreList {
 
 /// Parse ignore file content into patterns.
 pub fn parse(allocator: Allocator, content: []const u8) !IgnoreList {
-    var patterns: std.ArrayList(Pattern) = .{};
+    var patterns: std.ArrayList(Pattern) = .empty;
     errdefer {
         for (patterns.items) |p| {
             allocator.free(p.pattern);

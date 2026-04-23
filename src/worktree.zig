@@ -30,7 +30,7 @@ pub fn validateSymlinkTarget(target: []const u8) bool {
 }
 
 fn buildTreeInner(allocator: Allocator, store: *store_mod.ObjectStore, dir: std.fs.Dir, ignores: *const ignore_mod.IgnoreList) !Hash {
-    var entries: std.ArrayList(object.TreeEntry) = .{};
+    var entries: std.ArrayList(object.TreeEntry) = .empty;
     defer {
         for (entries.items) |entry| {
             allocator.free(entry.name);
@@ -117,7 +117,7 @@ pub fn hashFile(allocator: Allocator, store: *store_mod.ObjectStore, dir: std.fs
 }
 
 fn hashFileChunked(allocator: Allocator, store: *store_mod.ObjectStore, file: std.fs.File, total_size: u64) !Hash {
-    var chunk_hashes: std.ArrayList(hash_mod.Hash) = .{};
+    var chunk_hashes: std.ArrayList(hash_mod.Hash) = .empty;
     defer chunk_hashes.deinit(allocator);
 
     var chunker = try fastcdc_mod.StreamingChunker.init(allocator, fastcdc_mod.FastCDC.init(

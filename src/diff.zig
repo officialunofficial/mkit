@@ -77,7 +77,7 @@ pub fn diffTrees(
         break :blk new_obj.?.tree.entries;
     } else &[_]object.TreeEntry{};
 
-    var result: std.ArrayList(DiffEntry) = .{};
+    var result: std.ArrayList(DiffEntry) = .empty;
     errdefer {
         for (result.items) |entry| {
             allocator.free(entry.path);

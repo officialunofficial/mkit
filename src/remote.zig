@@ -81,7 +81,7 @@ pub fn parseHost(endpoint: []const u8) []const u8 {
 /// Extracts the text content of each <Key>...</Key> element inside <Contents>.
 /// Caller owns returned slice and each string within it.
 pub fn parseListXml(allocator: Allocator, xml: []const u8) ![][]u8 {
-    var keys: std.ArrayList([]u8) = .{};
+    var keys: std.ArrayList([]u8) = .empty;
     errdefer {
         for (keys.items) |k| {
             allocator.free(k);
@@ -195,8 +195,8 @@ pub fn configFromFile(allocator: Allocator, dir: std.fs.Dir) !?RemoteConfig {
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
         const eq_pos = std.mem.indexOfScalar(u8, trimmed, '=') orelse continue;
-        const key = std.mem.trimRight(u8, trimmed[0..eq_pos], " \t");
-        const value = std.mem.trimLeft(u8, trimmed[eq_pos + 1 ..], " \t");
+        const key = std.mem.trimEnd(u8, trimmed[0..eq_pos], " \t");
+        const value = std.mem.trimStart(u8, trimmed[eq_pos + 1 ..], " \t");
 
         if (std.mem.eql(u8, key, "remote_endpoint")) {
             if (endpoint) |prev| allocator.free(prev);

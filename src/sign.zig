@@ -82,7 +82,7 @@ fn writePrologue(buf: *Buffer, allocator: Allocator, t: object.ObjectType) !void
 /// `content_digest` (see docs/SPEC-OBJECTS.md §5.1 for the canonical
 /// signing-bytes pattern).
 pub fn commitSigningBytes(allocator: Allocator, c: object.Commit) ![]u8 {
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     errdefer buf.deinit(allocator);
 
     try writePrologue(&buf, allocator, .commit);
@@ -102,7 +102,7 @@ pub fn commitSigningBytes(allocator: Allocator, c: object.Commit) ![]u8 {
 
 /// Serialize a remix's fields for signing. See docs/SPEC-SIGNING.md §4.
 pub fn remixSigningBytes(allocator: Allocator, r: object.Remix) ![]u8 {
-    var buf: Buffer = .{};
+    var buf: Buffer = .empty;
     errdefer buf.deinit(allocator);
 
     try writePrologue(&buf, allocator, .remix);

@@ -220,8 +220,8 @@ pub const FileTransport = struct {
         const self: *FileTransport = @ptrCast(@alignCast(ptr));
         if (!protocol.validateRefPrefix(prefix)) return error.InvalidRef;
         // Normalize: strip trailing slash to avoid double-slash in path joins
-        const normalized = std.mem.trimRight(u8, prefix, "/");
-        var refs: std.ArrayList(protocol.Ref) = .{};
+        const normalized = std.mem.trimEnd(u8, prefix, "/");
+        var refs: std.ArrayList(protocol.Ref) = .empty;
         errdefer {
             for (refs.items) |ref| {
                 allocator.free(ref.name);

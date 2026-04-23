@@ -65,10 +65,10 @@ pub fn blameFile(
         author_bytes: []const u8,
         timestamp: u64,
     };
-    var history: std.ArrayList(HistoryEntry) = .{};
+    var history: std.ArrayList(HistoryEntry) = .empty;
     defer history.deinit(allocator);
 
-    var author_bytes_pool: std.ArrayList([]const u8) = .{};
+    var author_bytes_pool: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (author_bytes_pool.items) |b| allocator.free(b);
         author_bytes_pool.deinit(allocator);
@@ -254,7 +254,7 @@ pub fn findBlobInTree(
     tree_hash: Hash,
     path: []const u8,
 ) !?Hash {
-    var components: std.ArrayList([]const u8) = .{};
+    var components: std.ArrayList([]const u8) = .empty;
     defer components.deinit(allocator);
 
     var iter = std.mem.splitScalar(u8, path, '/');
@@ -316,7 +316,7 @@ fn loadBlobLines(allocator: Allocator, store: *store_mod.ObjectStore, blob_hash:
 
 /// Split text into lines. Each line is an owned copy.
 fn splitLines(allocator: Allocator, data: []const u8) ![][]const u8 {
-    var lines: std.ArrayList([]const u8) = .{};
+    var lines: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (lines.items) |line| allocator.free(line);
         lines.deinit(allocator);

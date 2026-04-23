@@ -60,13 +60,13 @@ pub fn readState(allocator: Allocator, mkit_dir: std.fs.Dir) !BisectState {
 
     // Line 1: orig_head
     const orig_head_line = lines.next() orelse return error.InvalidBisectState;
-    const orig_head_trimmed = std.mem.trimRight(u8, orig_head_line, "\r ");
+    const orig_head_trimmed = std.mem.trimEnd(u8, orig_head_line, "\r ");
     if (orig_head_trimmed.len == 0) return error.InvalidBisectState;
     const orig_head = hash_mod.fromHex(orig_head_trimmed) catch return error.InvalidBisectState;
 
     // Line 2: orig_branch (or empty)
     const branch_line = lines.next() orelse return error.InvalidBisectState;
-    const branch_trimmed = std.mem.trimRight(u8, branch_line, "\r ");
+    const branch_trimmed = std.mem.trimEnd(u8, branch_line, "\r ");
     const orig_branch: ?[]const u8 = if (branch_trimmed.len > 0)
         try allocator.dupe(u8, branch_trimmed)
     else
@@ -75,18 +75,18 @@ pub fn readState(allocator: Allocator, mkit_dir: std.fs.Dir) !BisectState {
 
     // Line 3: bad hash (or empty)
     const bad_line = lines.next() orelse return error.InvalidBisectState;
-    const bad_trimmed = std.mem.trimRight(u8, bad_line, "\r ");
+    const bad_trimmed = std.mem.trimEnd(u8, bad_line, "\r ");
     const bad_hash: ?Hash = if (bad_trimmed.len > 0)
         hash_mod.fromHex(bad_trimmed) catch return error.InvalidBisectState
     else
         null;
 
     // Remaining lines: good hashes
-    var good_list: std.ArrayList(Hash) = .{};
+    var good_list: std.ArrayList(Hash) = .empty;
     errdefer good_list.deinit(allocator);
 
     while (lines.next()) |line| {
-        const line_trimmed = std.mem.trimRight(u8, line, "\r ");
+        const line_trimmed = std.mem.trimEnd(u8, line, "\r ");
         if (line_trimmed.len == 0) continue;
         const h = hash_mod.fromHex(line_trimmed) catch return error.InvalidBisectState;
         try good_list.append(allocator, h);
@@ -170,13 +170,13 @@ pub fn enumerateRange(
     }
 
     // BFS from bad, collect candidates that are not in the good set
-    var candidates: std.ArrayList(Hash) = .{};
+    var candidates: std.ArrayList(Hash) = .empty;
     errdefer candidates.deinit(allocator);
 
     var visited = std.AutoHashMap(Hash, void).init(allocator);
     defer visited.deinit();
 
-    var queue: std.ArrayList(Hash) = .{};
+    var queue: std.ArrayList(Hash) = .empty;
     defer queue.deinit(allocator);
     try queue.append(allocator, bad);
 
