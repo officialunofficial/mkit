@@ -38,12 +38,23 @@ mkit_run() {
 # -----------------------------------------------------------------------------
 # Prerequisites: openssh-server + openssh-client
 # -----------------------------------------------------------------------------
-bold "Installing openssh..."
-apt-get update -qq >/dev/null
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server openssh-client >/dev/null
+# Skip the apt install if the binaries are already present (ubuntu-latest
+# GitHub runners pre-install both; only the container path needs it).
+if ! command -v sshd >/dev/null 2>&1 || ! command -v ssh >/dev/null 2>&1; then
+    bold "Installing openssh..."
+    if [ "$(id -u)" -eq 0 ]; then
+        apt-get update -qq >/dev/null
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server openssh-client >/dev/null
+    else
+        sudo apt-get update -qq >/dev/null
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server openssh-client >/dev/null
+    fi
+fi
 
-MKIT="/src/zig-out/bin/mkit"
-[ -x "$MKIT" ] || { red "error: $MKIT not executable — cross-compile first"; exit 1; }
+# Default binary path is the `container run … debian:12-slim` bind-mount;
+# CI / local runs can override via MKIT env var.
+MKIT="${MKIT:-/src/zig-out/bin/mkit}"
+[ -x "$MKIT" ] || { red "error: $MKIT not executable — cross-compile first or set MKIT=<path>"; exit 1; }
 bold "Using mkit binary: $MKIT ($($MKIT version))"
 
 # Put mkit on PATH for the server-side `ssh user@host mkit serve <path>`
@@ -51,7 +62,17 @@ bold "Using mkit binary: $MKIT ($($MKIT version))"
 # can't find the binary and `mkit serve` never starts — the client reads
 # the shell's "command not found" error instead of our framed OP_HELLO
 # response and surfaces it as error.IncompatiblePeer.
-ln -sf "$MKIT" /usr/local/bin/mkit
+# Needs root for /usr/local/bin write; both container and GitHub Actions
+# sudo-less ubuntu-latest satisfy that (the latter because $GITHUB_USER
+# owns /usr/local/bin via pre-provisioned writeable perms).
+if [ -w /usr/local/bin ]; then
+    ln -sf "$MKIT" /usr/local/bin/mkit
+elif command -v sudo >/dev/null 2>&1; then
+    sudo ln -sf "$MKIT" /usr/local/bin/mkit
+else
+    red "error: cannot write /usr/local/bin/mkit (no sudo, no write perm)"
+    exit 1
+fi
 
 # -----------------------------------------------------------------------------
 # Start sshd on 127.0.0.1:2222, passwordless pubkey auth
