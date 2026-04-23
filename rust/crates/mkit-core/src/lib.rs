@@ -18,6 +18,7 @@
 // them. cargo-deny still tracks them at warn level via deny.toml.
 #![allow(clippy::multiple_crate_versions)]
 
+pub mod chunker;
 pub mod hash;
 pub mod object;
 pub mod serialize;
@@ -36,3 +37,10 @@ pub use sign::{
     verify_commit, verify_remix,
 };
 pub use store::{MAX_RAW_OBJECT_SIZE, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError, StoreResult};
+
+// Phase 3 — content-defined chunker (FastCDC v1).
+pub use chunker::{
+    AVG_SIZE as CHUNK_AVG_SIZE, ChunkBoundary, ChunkIterator, FastCdc, MASK_L as CHUNK_MASK_L,
+    MASK_S as CHUNK_MASK_S, MAX_SIZE as CHUNK_MAX_SIZE, MIN_SIZE as CHUNK_MIN_SIZE,
+    SEED as CHUNK_SEED, chunk_boundaries, gear_table_digest,
+};
