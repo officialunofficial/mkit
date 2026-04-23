@@ -41,8 +41,14 @@ jobs:
           - target: aarch64-macos
             runner: macos-14
             archive_ext: tar.gz
+          # GitHub retired the `macos-13` runner image in ~March 2026, so
+          # x86_64-macos jobs pinned to it queue forever. The fix: run on
+          # the arm64 host (`macos-14`) and let Zig cross-compile Mach-O
+          # to x86_64. The `zig build -Dtarget=x86_64-macos` step below
+          # handles it for free — no toolchain tricks needed, Zig was
+          # designed cross-compile-first.
           - target: x86_64-macos
-            runner: macos-13
+            runner: macos-14
             archive_ext: tar.gz
           - target: x86_64-linux
             runner: ubuntu-latest

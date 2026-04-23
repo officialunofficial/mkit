@@ -21,7 +21,7 @@ test "mkit version: wire format is exactly \"mkit <version>\\n\"" {
     // asserts the substring `mkit <version>`. If the newline terminator
     // or the `mkit ` prefix ever moves, this snapshot catches it.
     const expected = "mkit " ++ cli.cli_version ++ "\n";
-    try std.testing.expectEqualStrings("mkit 0.2.0\n", expected);
+    try std.testing.expectEqualStrings("mkit 0.2.1\n", expected);
 }
 
 test "cli_version is a numeric x.y.z" {
