@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/mkit-core", "crates/mkit-attest"]
+# `fuzz` is the cargo-fuzz crate. It's a workspace member so
+# `cargo test -p mkit-fuzz` runs its plain-unit-test fallback path
+# (without libfuzzer / nightly). The libfuzzer-driven binaries under
+# `fuzz/fuzz_targets/` are gated behind `--features libfuzzer` so the
+# default `cargo build` skips them.
+members = ["crates/mkit-core", "crates/mkit-attest", "fuzz"]
 
 [workspace.package]
 version = "0.2.1"

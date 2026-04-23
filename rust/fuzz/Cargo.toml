@@ -1,0 +1,74 @@
+# Standalone fuzz crate — NOT a workspace member. cargo-fuzz expects a
+# leaf crate; including this in the workspace would make `cargo test`
+# pull in libfuzzer-sys (nightly-only on stable builds).
+#
+# Two execution paths:
+#
+# * `cd rust/fuzz && cargo +nightly fuzz run delta` — libfuzzer-sys
+#   harness; the iteration counter inside each target body still
+#   enforces the FUZZ.md guardrails.
+# * `cargo test --manifest-path rust/fuzz/Cargo.toml` — plain unit-test
+#   harness over the same target bodies, so CI catches regressions
+#   even without nightly.
+#
+# Guardrails enforced in every target (see docs/FUZZ.md):
+#   1. <= 100 iterations per target invocation.
+#   2. <= 64 KiB input per iteration.
+#   3. bumpalo arena (2 MiB) — no global heap during the fuzz loop.
+#   4. 100 ms wall-clock cap per iteration.
+#   5. No unbounded loops; iteration counter mandatory.
+#   6. Seeded RNG so failures reproduce.
+
+[package]
+name = "mkit-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+mkit-core = { path = "../crates/mkit-core" }
+bumpalo = "3"
+tempfile = "3"
+
+# libfuzzer-sys is gated on the `libfuzzer` feature so `cargo test`
+# (stable, no nightly) doesn't pull it in. cargo-fuzz drives the build
+# with `--features libfuzzer` automatically.
+libfuzzer-sys = { version = "0.4", optional = true }
+
+[features]
+default = []
+libfuzzer = ["dep:libfuzzer-sys"]
+
+[[bin]]
+name = "delta"
+path = "fuzz_targets/delta.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "pack"
+path = "fuzz_targets/pack.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "tree"
+path = "fuzz_targets/tree.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+# When run as plain unit tests (no `--features libfuzzer`), the targets
+# expose their guardrail-enforcing bodies via `pub fn run_unit_tests()`
+# in each file. The shim below exposes them as `#[test]`s.
+[lib]
+path = "src/lib.rs"
