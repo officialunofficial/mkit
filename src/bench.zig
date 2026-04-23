@@ -212,7 +212,7 @@ fn benchSerializeTree() void {
 fn benchSign() void {
     const alloc = std.heap.page_allocator;
     const iters: u64 = 1_000;
-    const kp = mkit.sign.KeyPair.generate();
+    const kp = mkit.sign.KeyPair.generate(bench_io);
 
     var parents = [_]mkit.hash.Hash{};
     var mid_buf: [8]u8 = undefined;
@@ -458,7 +458,7 @@ fn benchTreeSnapshot() void {
     for (0..iters) |_| {
         var work_dir = tmp.dir.openDir(bench_io, ".", .{ .iterate = true }) catch continue;
         defer work_dir.close(bench_io);
-        doNotOptimizeAway(mkit.worktree.buildTree(alloc, &store, work_dir) catch continue);
+        doNotOptimizeAway(mkit.worktree.buildTree(alloc, bench_io, &store, work_dir) catch continue);
     }
     const elapsed = timer.read();
     var buf: [32]u8 = undefined;
@@ -503,7 +503,7 @@ fn benchCommitWorkflow() void {
             tmp.cleanup();
             continue;
         };
-        const tree_hash = mkit.worktree.buildTree(alloc, &store, work_dir) catch {
+        const tree_hash = mkit.worktree.buildTree(alloc, bench_io, &store, work_dir) catch {
             work_dir.close(bench_io);
             store.close();
             tmp.cleanup();
@@ -512,7 +512,7 @@ fn benchCommitWorkflow() void {
         work_dir.close(bench_io);
 
         // Sign commit
-        const kp = mkit.sign.KeyPair.generate();
+        const kp = mkit.sign.KeyPair.generate(bench_io);
         var parents = [_]mkit.hash.Hash{};
         var mid_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &mid_buf, 42, .little);
@@ -539,7 +539,7 @@ fn benchCommitWorkflow() void {
             tmp.cleanup();
             continue;
         };
-        mkit.refs.updateHead(alloc, tmp.dir, commit_hash) catch {};
+        mkit.refs.updateHead(alloc, bench_io, tmp.dir, commit_hash) catch {};
         doNotOptimizeAway(commit_hash);
 
         store.close();
