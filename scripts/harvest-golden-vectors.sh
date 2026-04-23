@@ -139,12 +139,17 @@ declare -a VECTORS=(
   "identity_ed25519|ed25519 identity, 32-byte pubkey 0xAA*32 (raw wire form)"
   "identity_opaque|opaque 8-byte LE u64=42 identity (raw wire form)"
   "blob|11-byte UTF-8 blob 'hello mkit\\n'"
+  "empty_blob|zero-byte blob; SPEC-OBJECTS §13.1 (10 bytes total)"
   "tree|3-entry tree: README.md (blob) + scripts (executable) + src (tree), lex-sorted"
+  "empty_tree|zero-entry tree; SPEC-OBJECTS §13.2 (10 bytes total)"
+  "tree_single_file|single-entry tree pointing at the empty blob; SPEC-OBJECTS §13.3"
   "commit_0parent|root commit, zero parents, ed25519 identity"
   "commit_1parent|commit with one parent, ed25519 identity"
   "commit_2parent|merge commit with two parents, ed25519 identity"
   "remix_2sources|remix with two sources sorted by (upstream_id, commit_hash)"
+  "remix_identical_upstream_distinct_commit|remix with two sources sharing upstream_id; SPEC-OBJECTS §13.6 (secondary-key sort)"
   "chunked_blob|chunked blob manifest with 4 fixed-size chunks"
+  "chunked_blob_cs0_3chunks|chunked blob with chunk_size=0 (CDC) and 3 chunks; SPEC-OBJECTS §13.7 (118 bytes)"
 )
 
 for entry in "${VECTORS[@]}"; do

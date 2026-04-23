@@ -1,0 +1,7 @@
+{
+  "name": "remix_identical_upstream_distinct_commit",
+  "description": "remix with two sources sharing upstream_id; SPEC-OBJECTS §13.6 (secondary-key sort)",
+  "bin": "remix_identical_upstream_distinct_commit.bin",
+  "size": 336,
+  "blake3": "22971cf14bdea3230ff9238f865586a4cd4ecdd450def1ffc3ad49abcf188a3f"
+}
