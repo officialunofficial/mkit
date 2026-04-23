@@ -14,13 +14,25 @@ var tmp_counter: std.atomic.Value(u64) = .init(0);
 const LOCK_MAX_ATTEMPTS: u32 = 50;
 const LOCK_SLEEP_NS: u64 = 100 * std.time.ns_per_ms;
 
-/// Write `wire` to `ref_name` via a tmp-file + fsync + rename sequence so a
-/// crash mid-write cannot leave the ref at zero bytes.
+/// Write `wire` to `ref_name` via a tmp-file + fsync + rename + dir-fsync
+/// sequence so a crash mid-write cannot leave the ref at zero bytes AND a
+/// crash immediately after the rename cannot leave the rename itself
+/// unflushed (classic atomic-write-through-rename pattern).
 ///
 /// Layout: `<ref_name>.tmp.<pid>.<counter>` → `<ref_name>` (atomic rename on POSIX).
-// TODO(W5): sync ref dir when stdlib supports — Dir.sync is still unavailable
-// in Zig 0.16, so a containing-directory fsync is deferred. The
-// tmp-rename sequence is still crash-safe for the ref contents themselves.
+///
+/// Why fsync the containing directory: `rename(2)` updates the parent
+/// directory's entry, but that update is in the page cache; a power loss
+/// before the kernel writes the dirent back can leave the rename
+/// unreflected on disk even though the file contents are durable. Opening
+/// the parent, calling fsync on its handle, and closing it is the
+/// canonical fix (see LWN "Ensuring data reaches disk", Kerrisk APUE §4.24).
+///
+/// `std.Io.Dir` in Zig 0.16 does not expose a `sync` method, but the
+/// underlying file descriptor is reachable as `dir.handle` and
+/// `std.c.fsync` works on any fd including directory descriptors on both
+/// Linux and Darwin. mkit already links libc for every binary, so this is
+/// safe without further build changes.
 fn atomicWriteRef(io: std.Io, root: std.Io.Dir, ref_name: []const u8, wire: []const u8) !void {
     var tmp_buf: [512]u8 = undefined;
     const pid: i32 = @intCast(std.posix.system.getpid());
@@ -34,13 +46,42 @@ fn atomicWriteRef(io: std.Io, root: std.Io.Dir, ref_name: []const u8, wire: []co
         const file = try root.createFile(io, tmp_path, .{});
         defer file.close(io);
         try file.writeStreamingAll(io, wire);
-        // Best-effort fsync — a rename-over-rename is already atomic on POSIX.
-        // On filesystems that do not support fsync (e.g. some tmpfs in CI) we
-        // accept the weaker durability rather than failing the write.
+        // Best-effort file-content fsync. On filesystems that do not
+        // support fsync (e.g. some tmpfs in CI) we accept the weaker
+        // durability rather than failing the write.
         file.sync(io) catch {};
     }
 
     try root.rename(tmp_path, root, ref_name, io);
+
+    // Fsync the containing directory of the rename. For refs that live in
+    // subdirectories (e.g. refs/heads/main lives under `root/refs/heads/`),
+    // open the parent and sync that handle. Best-effort: a failure here
+    // means the rename might not be durable across an immediate power
+    // loss, but the file contents are — we'd rather surface that as
+    // future-read-returns-old-ref than fail the whole push.
+    syncParentOf(io, root, ref_name) catch {};
+}
+
+/// Open the directory containing `path` relative to `root`, fsync its file
+/// descriptor, and close it. If `path` has no `/`, syncs `root` itself.
+fn syncParentOf(io: std.Io, root: std.Io.Dir, path: []const u8) !void {
+    const last_slash = std.mem.lastIndexOfScalar(u8, path, '/');
+    if (last_slash) |i| {
+        const parent_path = path[0..i];
+        var parent = try root.openDir(io, parent_path, .{});
+        defer parent.close(io);
+        syncDir(parent) catch {};
+    } else {
+        syncDir(root) catch {};
+    }
+}
+
+/// fsync a directory file descriptor. Uses libc `fsync` directly since
+/// `std.Io.Dir` doesn't expose a sync wrapper and `std.posix.fsync` is
+/// only the raw syscall on some targets. mkit links libc unconditionally.
+fn syncDir(dir: std.Io.Dir) !void {
+    if (std.c.fsync(dir.handle) != 0) return error.SyncFailed;
 }
 
 /// Local filesystem Transport implementation.
