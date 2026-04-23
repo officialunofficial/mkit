@@ -22,6 +22,7 @@ pub mod chunker;
 pub mod delta;
 pub mod hash;
 pub mod object;
+pub mod ops;
 pub mod pack;
 pub mod serialize;
 pub mod sign;
@@ -79,4 +80,13 @@ pub use refs::{
 pub use repo_lock::{DEFAULT_TIMEOUT as LOCK_DEFAULT_TIMEOUT, LockError, LockResult, RepoLock};
 pub use worktree::{
     CHUNK_THRESHOLD, MAX_FILE_BYTES, WorktreeError, WorktreeResult, validate_symlink_target,
+};
+
+// Phase 5a — ops re-exports.
+// Pulled out at the crate root so downstream callers can write
+// `mkit_core::diff_trees` rather than `mkit_core::ops::diff::diff_trees`.
+pub use ops::{
+    CherryPickError, CherryPickResult, Conflict, ConflictKind, DiffEntry, DiffKind, DiffResult,
+    MergeResult, cherry_pick, collect_ancestor_set, diff_trees, find_merge_base, is_ancestor,
+    merge_trees,
 };
