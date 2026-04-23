@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.2.1] - 2026-04-23
+
+Patch release. v0.2.0's release workflow was pinned to the `macos-13`
+GitHub-Actions runner image, which GitHub retired in ~March 2026; the
+`x86_64-macos` job queued forever and the Release page never published.
+v0.2.1 ships with the four platform binaries v0.2.0 intended to, plus
+one real-bug backfill that surfaced while auditing the "deferred" list.
+
 ### Fixed
 
 - File transport now fsyncs the containing directory after a ref rename,
@@ -15,6 +25,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `std.Io.Dir.handle` is the raw `fd_t` and `std.c.fsync` (mkit links
   libc unconditionally) works on directory descriptors on Linux and
   Darwin. Classic atomic-write-through-rename pattern now complete.
+- `tests/e2e-ssh.sh` now runs in CI on ubuntu-latest (previously
+  manual-only), guarding the 0.16 SSH transport rewrite against
+  regressions on every PR.
+- SSH wire `CLIENT_VERSION` / `SERVER_VERSION` now derived from
+  `cli.cli_version` at comptime; v0.2.0's handshake still advertised
+  the stale `"mkit 0.1.0"` string (no protocol break — OP_HELLO only
+  validates `BINARY_NAME` + `PROTO_VERSION` — but misleading in packet
+  captures).
+
+### Build
+
+- `.github/workflows/release.yml`: `x86_64-macos` matrix entry now runs
+  on `macos-14` (arm64 host) with `zig build -Dtarget=x86_64-macos`
+  cross-compiling Mach-O to x86_64. Unblocks the release after GitHub's
+  `macos-13` image retirement.
+
+### Added
+
+- `-Djemalloc` CI smoke on `ubuntu-latest`: installs `libjemalloc-dev`,
+  builds with `-Djemalloc`, ldd-checks that the produced binary actually
+  links `libjemalloc.so`, and runs an init/keygen/commit/log lifecycle
+  to exercise the alt allocator end-to-end.
 
 ## [0.2.0] - 2026-04-23
 
@@ -166,6 +198,7 @@ Initial public release.
   comprehensive `mkit(1)`.
 - Fish shell completions.
 
-[Unreleased]: https://github.com/officialunofficial/mkit/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/officialunofficial/mkit/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/officialunofficial/mkit/releases/tag/v0.2.1
 [0.2.0]: https://github.com/officialunofficial/mkit/releases/tag/v0.2.0
 [0.1.0]: https://github.com/officialunofficial/mkit/releases/tag/v0.1.0

@@ -10,7 +10,7 @@
 /// rendered by `mkit version` exactly as `"mkit <version>\n"` so that
 /// downstream packagers (Homebrew, Scoop) can shell-out assert on the
 /// output. See docs/CLI.md.
-pub const cli_version = "0.2.0";
+pub const cli_version = "0.2.1";
 
 /// Full help text for `mkit --help` / `mkit help` / `mkit` (with no args).
 /// Kept as a single const so:
