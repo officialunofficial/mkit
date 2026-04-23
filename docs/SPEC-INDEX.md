@@ -21,8 +21,8 @@ accidental drift and to provide a migration path for future evolution.
 
 ## 2. Layout
 
-Current zmit implementation uses magic `"ZMIX"` + version `0x01`
-(`zmit/src/index.zig:12-15`). v1 MUST rename to `"MKIX"` — this is the
+Current mkit implementation uses magic `"ZMIX"` + version `0x01`
+(`src/index.zig:12-15`). v1 MUST rename to `"MKIX"` — this is the
 correct rename scope because, unlike the pack magic, the index file
 never round-trips between tools and a rename is cheap.
 
@@ -67,7 +67,7 @@ codes. Other values → `IndexCorrupt`.
 
 ## 4. Atomicity
 
-Writes use atomic-rename (`zmit/src/index.zig:166-178`): write to a
+Writes use atomic-rename (`src/index.zig:166-178`): write to a
 sibling tempfile, `fsync`, then `rename` into place. This is already
 implemented; v1 preserves it.
 
@@ -75,7 +75,7 @@ Readers tolerate:
 
 - File absent → empty index.
 - File zero-length → empty index.
-- File > 64 MiB → `IndexTooLarge` (`zmit/src/index.zig:79`). This cap
+- File > 64 MiB → `IndexTooLarge` (`src/index.zig:79`). This cap
   is hit only by pathological repos and stays in v1.
 
 ---
@@ -83,7 +83,7 @@ Readers tolerate:
 ## 5. No cross-version compatibility
 
 v1 readers MUST reject `"ZMIX"`-prefixed files: there is no upgrade
-path. A zmit repo migrating to mkit MUST either commit all staged
+path. A mkit repo migrating to mkit MUST either commit all staged
 work, run `mkit add .` (rebuilding the index from scratch), or wipe
 `.mkit/index` manually.
 

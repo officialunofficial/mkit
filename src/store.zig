@@ -28,7 +28,7 @@ pub const ObjectStore = struct {
     /// and worktree operations all use the same base directory.
     pub fn open(io: Io, dir: Io.Dir) !ObjectStore {
         const obj_dir = dir.openDir(io, mkit_dir ++ "/" ++ objects_dir, .{}) catch {
-            return error.NotAZmitRepository;
+            return error.NotAMkitRepository;
         };
         return .{ .io = io, .root = obj_dir };
     }
@@ -219,7 +219,7 @@ test "open rejects subdirectories inside a repository" {
     var nested = try tmp.dir.openDir(std.testing.io, "nested", .{});
     defer nested.close(io);
 
-    try std.testing.expectError(error.NotAZmitRepository, ObjectStore.open(io, nested));
+    try std.testing.expectError(error.NotAMkitRepository, ObjectStore.open(io, nested));
 }
 
 test "store chunked blob" {

@@ -20,7 +20,7 @@ A single ref value on the wire is:
 
 Total: **65 bytes**.
 
-(Source: `zmit/src/protocol.zig:66-72`.)
+(Source: `src/protocol.zig:66-72`.)
 
 - Hex alphabet: `0-9` and `a-f` only. Uppercase is **forbidden**; writers
   MUST emit lowercase. Readers MUST reject uppercase input with
@@ -49,7 +49,7 @@ refs/tags/<name>     tag refs
 
 On local disk (`.mkit/refs/heads/<name>`, `.mkit/refs/tags/<name>`).
 On transports, the same path shape is used relative to the transport's
-root (`zmit/src/refs.zig:7-10`, `zmit/src/transport/file.zig:43-51`).
+root (`src/refs.zig:7-10`, `src/transport/file.zig:43-51`).
 
 `HEAD` is a special file at `.mkit/HEAD` containing either:
 
@@ -61,13 +61,13 @@ or a bare 64-char lowercase hex hash + `\n` (detached HEAD).
 
 The file `.mkit/shallow` contains one `<64-hex>\n` per line denoting
 commits beyond which the local repo does not have history
-(`zmit/src/refs.zig:317-346`).
+(`src/refs.zig:317-346`).
 
 ---
 
 ## 3. Ref name grammar
 
-From `zmit/src/protocol.zig:83-105`. Normative:
+From `src/protocol.zig:83-105`. Normative:
 
 ```
 ref_name    := segment ( '/' segment )*
@@ -146,7 +146,7 @@ Callers SHOULD pass prefixes that end at a path component boundary.
 Callers MUST NOT assume `prefix` includes a trailing `/`; the transport
 normalises either form.
 
-(Resolves red-team R-08. The current zmit impls diverge on this edge:
+(Resolves red-team R-08. The current mkit impls diverge on this edge:
 memory strips unconditionally, file trims trailing `/`, http strips
 prefix no-separator. v1 pins the behavior above; transports MUST
 conform or fail conformance tests.)
@@ -161,7 +161,7 @@ empty slice, not null.
 
 The prefix itself must be empty or pass the same grammar as a ref name
 (§3), possibly with a single trailing `/`. Reject invalid prefixes with
-`InvalidRef`. (Current: `zmit/src/protocol.zig:100-105`.)
+`InvalidRef`. (Current: `src/protocol.zig:100-105`.)
 
 ---
 
@@ -204,17 +204,17 @@ critical paths.
 
 The `.match(H)` condition is serialised differently by transport:
 
-- **S3** (`zmit/src/transport/s3.zig:181-188`): ETag value is
+- **S3** (`src/transport/s3.zig:181-188`): ETag value is
   `"\"<md5_hex>\""` where `md5_hex` is the MD5 hash of the 65-byte ref
   wire bytes for `H`. Enclosing double-quotes are part of the header
   value.
 - **HTTP** (Worker flavour,
-  `zmit/src/transport/http.zig:199-226`): ETag value is
+  `src/transport/http.zig:199-226`): ETag value is
   `"\"<hash_hex>\""` where `hash_hex` is the 64-char hex of `H`
   directly. Enclosing double-quotes again.
 - **SSH**: no ETag; the 32 raw bytes of `H` are sent in the
   `CONDITION_MATCH` payload
-  (`zmit/src/transport/ssh.zig:115-120`).
+  (`src/transport/ssh.zig:115-120`).
 - **file / memory**: read-then-compare against `H`'s raw bytes
   in-process.
 
@@ -243,7 +243,7 @@ Clients requiring CAS MUST use `.match` explicitly.
 ```
 
 Writers MUST use atomic write-then-rename on local disk
-(`zmit/src/index.zig:166-178` pattern) to avoid torn reads. The zmit
+(`src/index.zig:166-178` pattern) to avoid torn reads. The mkit
 `FileTransport` currently does not (red-team R-24); v1 requires it.
 
 ---

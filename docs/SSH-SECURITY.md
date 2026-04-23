@@ -33,7 +33,7 @@ posture is exactly whatever that CLI is configured to enforce.**
 The only protocol-level safety net mkit adds is **OP_HELLO** (SPEC-
 TRANSPORT §7.4): a first-frame handshake that refuses peers with the
 wrong binary name or a future `proto_version`. This prevents a silent
-interop bug after the zmit → mkit rename, but it is NOT a replacement
+interop bug after the mkit → mkit rename, but it is NOT a replacement
 for host-key verification.
 
 ---

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# zmit E2E test with HTTPS transport (vcs.makechain.net)
+# mkit E2E test with HTTPS transport (vcs.makechain.net)
 # Proves: push -> clone -> modify -> push -> pull with DO-backed atomic refs
 #
-# Requires: ZMIT_API_TOKEN env var (Worker write auth)
-# Usage: cd zmit && ZMIT_API_TOKEN=<token> ./tests/e2e-https.sh
+# Requires: MKIT_API_TOKEN env var (Worker write auth)
+# Usage: cd mkit && MKIT_API_TOKEN=<token> ./tests/e2e-https.sh
 
 set -euo pipefail
 
@@ -26,16 +26,16 @@ assert() {
     fi
 }
 
-# Helper: run zmit command, capture stdout only, tolerate exit code
+# Helper: run mkit command, capture stdout only, tolerate exit code
 # (debug allocator may exit 1 on memory leaks even when the command succeeds)
-zmit_run() {
-    "$ZMIT" "$@" 2>/dev/null || true
+mkit_run() {
+    "$MKIT" "$@" 2>/dev/null || true
 }
 
 # === Check prerequisites ===
-if [ -z "${ZMIT_API_TOKEN:-}" ]; then
-    echo "ZMIT_API_TOKEN not set — skipping HTTPS E2E test"
-    echo "(set it to run: ZMIT_API_TOKEN=<token> ./tests/e2e-https.sh)"
+if [ -z "${MKIT_API_TOKEN:-}" ]; then
+    echo "MKIT_API_TOKEN not set — skipping HTTPS E2E test"
+    echo "(set it to run: MKIT_API_TOKEN=<token> ./tests/e2e-https.sh)"
     exit 0
 fi
 
@@ -49,14 +49,14 @@ fi
 # Use unique branch names to avoid conflicts with other test runs
 BRANCH="test-$(date +%s)-$$"
 
-# Build zmit
+# Build mkit
 cd "$(dirname "$0")/.."
-bold "Building zmit..."
+bold "Building mkit..."
 zig build 2>&1
-ZMIT="$(pwd)/zig-out/bin/zmit"
+MKIT="$(pwd)/zig-out/bin/mkit"
 
 echo ""
-bold "zmit E2E test with HTTPS transport"
+bold "mkit E2E test with HTTPS transport"
 bold "===================================="
 echo "  Worker:  $WORKER"
 echo "  Branch:  $BRANCH"
@@ -75,48 +75,48 @@ DUMMY_PROJECT="0000000000000000000000000000000000000000000000000000000000000000"
 bold "Phase 1: Init + first commit in repo A"
 cd "$REPO_A"
 
-zmit_run init
-assert "zmit init" '[ -d ".zmit" ]'
+mkit_run init
+assert "mkit init" '[ -d ".mkit" ]'
 
-zmit_run keygen
-assert "zmit keygen" '[ -f ".zmit/keys/default.key" ]'
+mkit_run keygen
+assert "mkit keygen" '[ -f ".mkit/keys/default.key" ]'
 
 mkdir -p src
 echo 'fn main() void { }' > src/main.zig
-echo '# zmit HTTPS transport test' > README.md
-echo '*.log' > .zmitignore
+echo '# mkit HTTPS transport test' > README.md
+echo '*.log' > .mkitignore
 
-COMMIT_OUT=$(zmit_run commit -m "HTTPS E2E initial commit")
-assert "zmit commit succeeds" 'echo "$COMMIT_OUT" | grep -q "commit"'
+COMMIT_OUT=$(mkit_run commit -m "HTTPS E2E initial commit")
+assert "mkit commit succeeds" 'echo "$COMMIT_OUT" | grep -q "commit"'
 
-HEAD_HASH=$(cat .zmit/refs/heads/main | tr -d '\n\r ')
+HEAD_HASH=$(cat .mkit/refs/heads/main | tr -d '\n\r ')
 echo "  HEAD: ${HEAD_HASH:0:16}..."
 assert "HEAD ref exists" '[ -n "$HEAD_HASH" ]'
 
 # Configure remote for HTTPS transport
-REMOTE_OUT=$(zmit_run remote set "$WORKER")
-assert "zmit remote set" 'echo "$REMOTE_OUT" | grep -q "remote set"'
+REMOTE_OUT=$(mkit_run remote set "$WORKER")
+assert "mkit remote set" 'echo "$REMOTE_OUT" | grep -q "remote set"'
 assert "remote type is http" 'echo "$REMOTE_OUT" | grep -q "http"'
 
 # === Phase 2: Create branch + push ===
 bold ""
 bold "Phase 2: Create branch + push"
 
-zmit_run branch "$BRANCH"
-assert "create test branch" '[ -f ".zmit/refs/heads/$BRANCH" ]'
+mkit_run branch "$BRANCH"
+assert "create test branch" '[ -f ".mkit/refs/heads/$BRANCH" ]'
 
-zmit_run checkout "$BRANCH"
-BRANCH_OUT=$(zmit_run branch)
+mkit_run checkout "$BRANCH"
+BRANCH_OUT=$(mkit_run branch)
 assert "$BRANCH is current branch" 'echo "$BRANCH_OUT" | grep -q "\\* $BRANCH"'
 
 # Recommit on the branch (branch starts at same HEAD)
-BRANCH_HASH=$(cat ".zmit/refs/heads/$BRANCH" | tr -d '\n\r ')
+BRANCH_HASH=$(cat ".mkit/refs/heads/$BRANCH" | tr -d '\n\r ')
 echo "  branch HEAD: ${BRANCH_HASH:0:16}..."
 
 # Push to remote
-PUSH_OUT=$(zmit_run push --project "$DUMMY_PROJECT")
+PUSH_OUT=$(mkit_run push --project "$DUMMY_PROJECT")
 echo "  push: $(echo "$PUSH_OUT" | head -2)"
-assert "zmit push succeeds" 'echo "$PUSH_OUT" | grep -q "pushed"'
+assert "mkit push succeeds" 'echo "$PUSH_OUT" | grep -q "pushed"'
 assert "push targets test branch ref" 'echo "$PUSH_OUT" | grep -q "refs/heads/$BRANCH"'
 
 # Verify remote ref via curl
@@ -135,31 +135,31 @@ bold ""
 bold "Phase 3: Clone into repo B"
 cd "$REPO_B"
 
-CLONE_OUT=$(zmit_run clone "$WORKER")
+CLONE_OUT=$(mkit_run clone "$WORKER")
 echo "  clone: $(echo "$CLONE_OUT" | head -3)"
-assert "zmit clone succeeds" 'echo "$CLONE_OUT" | grep -q "initialized"'
+assert "mkit clone succeeds" 'echo "$CLONE_OUT" | grep -q "initialized"'
 
 # Switch to the test branch
-zmit_run checkout "$BRANCH"
+mkit_run checkout "$BRANCH"
 
 # Verify log shows the commit
-LOG_OUT=$(zmit_run log)
-assert "zmit log shows initial commit" 'echo "$LOG_OUT" | grep -q "HTTPS E2E initial commit"'
+LOG_OUT=$(mkit_run log)
+assert "mkit log shows initial commit" 'echo "$LOG_OUT" | grep -q "HTTPS E2E initial commit"'
 
 # Verify HEAD matches
-CLONE_HEAD=$(cat ".zmit/refs/heads/$BRANCH" | tr -d '\n\r ')
+CLONE_HEAD=$(cat ".mkit/refs/heads/$BRANCH" | tr -d '\n\r ')
 assert "clone HEAD matches origin" '[ "$CLONE_HEAD" = "$BRANCH_HASH" ]'
 
 # Verify file content
 if [ -f "README.md" ]; then
-    assert "README.md content correct" '[ "$(cat README.md)" = "# zmit HTTPS transport test" ]'
+    assert "README.md content correct" '[ "$(cat README.md)" = "# mkit HTTPS transport test" ]'
     assert "src/main.zig exists" '[ -f "src/main.zig" ]'
 else
     echo "  (checkout file restore: skipped — not yet implemented)"
 fi
 
 # Verify signature
-VERIFY_OUT=$(zmit_run verify "$CLONE_HEAD")
+VERIFY_OUT=$(mkit_run verify "$CLONE_HEAD")
 assert "commit signature valid" 'echo "$VERIFY_OUT" | grep -q "valid commit signature"'
 
 # === Phase 4: Second commit + push from A ===
@@ -167,17 +167,17 @@ bold ""
 bold "Phase 4: Second commit + push from A"
 cd "$REPO_A"
 
-echo '# zmit HTTPS transport test (updated)' > README.md
+echo '# mkit HTTPS transport test (updated)' > README.md
 echo 'hello from repo A' > CHANGELOG.md
 
-COMMIT2_OUT=$(zmit_run commit -m "HTTPS E2E second commit")
+COMMIT2_OUT=$(mkit_run commit -m "HTTPS E2E second commit")
 assert "second commit succeeds" 'echo "$COMMIT2_OUT" | grep -q "^tree"'
 
-HEAD2_HASH=$(cat ".zmit/refs/heads/$BRANCH" | tr -d '\n\r ')
+HEAD2_HASH=$(cat ".mkit/refs/heads/$BRANCH" | tr -d '\n\r ')
 assert "HEAD advanced" '[ "$HEAD2_HASH" != "$BRANCH_HASH" ]'
 echo "  HEAD: ${HEAD2_HASH:0:16}..."
 
-PUSH2_OUT=$(zmit_run push --project "$DUMMY_PROJECT")
+PUSH2_OUT=$(mkit_run push --project "$DUMMY_PROJECT")
 echo "  push: $(echo "$PUSH2_OUT" | head -2)"
 assert "second push succeeds" 'echo "$PUSH2_OUT" | grep -q "pushed"'
 
@@ -191,27 +191,27 @@ bold ""
 bold "Phase 5: Pull in repo B"
 cd "$REPO_B"
 
-PULL_OUT=$(zmit_run pull)
+PULL_OUT=$(mkit_run pull)
 echo "  pull: $PULL_OUT"
-assert "zmit pull succeeds" 'echo "$PULL_OUT" | grep -q "pulled"'
+assert "mkit pull succeeds" 'echo "$PULL_OUT" | grep -q "pulled"'
 
 # Verify updated content
-LOG2_OUT=$(zmit_run log)
+LOG2_OUT=$(mkit_run log)
 assert "log shows second commit" 'echo "$LOG2_OUT" | grep -q "HTTPS E2E second commit"'
 assert "log still shows initial commit" 'echo "$LOG2_OUT" | grep -q "HTTPS E2E initial commit"'
 
 # Verify HEAD updated
-PULL_HEAD=$(cat ".zmit/refs/heads/$BRANCH" | tr -d '\n\r ')
+PULL_HEAD=$(cat ".mkit/refs/heads/$BRANCH" | tr -d '\n\r ')
 assert "pull updated HEAD" '[ "$PULL_HEAD" = "$HEAD2_HASH" ]'
 
 # Verify file content updated (if checkout restores on pull)
 if [ -f "README.md" ]; then
-    assert "README.md content updated" '[ "$(cat README.md)" = "# zmit HTTPS transport test (updated)" ]'
+    assert "README.md content updated" '[ "$(cat README.md)" = "# mkit HTTPS transport test (updated)" ]'
     assert "CHANGELOG.md exists" '[ -f "CHANGELOG.md" ]'
 fi
 
 # Pulling again should be a no-op
-PULL_AGAIN=$(zmit_run pull)
+PULL_AGAIN=$(mkit_run pull)
 assert "pull again is up to date" 'echo "$PULL_AGAIN" | grep -q "already up to date"'
 
 # === Phase 6: Cleanup ===
