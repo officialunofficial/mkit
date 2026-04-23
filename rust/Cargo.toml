@@ -12,6 +12,7 @@ members = [
     "crates/mkit-transport-memory",
     "crates/mkit-transport-file",
     "crates/mkit-transport-http",
+    "crates/mkit-transport-s3",
 ]
 
 [workspace.package]

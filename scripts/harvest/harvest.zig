@@ -26,6 +26,8 @@ const hash_mod = mkit.hash;
 const sign = mkit.sign;
 const attestations = mkit.attestations;
 const fastcdc = mkit.fastcdc;
+const s3_auth = mkit.s3;
+const remote_mod = mkit.remote;
 
 const Allocator = std.mem.Allocator;
 const Hash = hash_mod.Hash;
@@ -437,6 +439,125 @@ fn buildFastcdcBoundariesSmallJson(arena: Allocator) ![]u8 {
     return try json.toOwnedSlice(arena);
 }
 
+// ------------------------------------------------------------------------
+// Phase 7d: S3 SigV4 golden. Emits a JSON blob carrying
+// `canonical_request`, `string_to_sign`, and `signature_hex` so the
+// Rust SigV4 signer can assert byte-identical output against Zig's
+// `src/s3.zig`. All inputs are fixed constants — re-running produces
+// identical bytes.
+// ------------------------------------------------------------------------
+fn buildSigv4Basic(arena: Allocator) ![]u8 {
+    const config = s3_auth.S3Config{
+        .endpoint = "https://abc123.r2.cloudflarestorage.com",
+        .bucket = "mkit-storage",
+        .access_key_id = "AKIAIOSFODNN7EXAMPLE",
+        .secret_access_key = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        .region = "auto",
+    };
+    const method = "PUT";
+    const path = "/mkit-storage/packs/0101010101010101010101010101010101010101010101010101010101010101";
+    const query = "";
+    const payload = "mkit-sigv4-golden-payload";
+    const timestamp: i64 = 1_711_300_000; // 2024-03-24T17:06:40Z
+
+    // Re-derive the canonical request / string-to-sign here so we can
+    // emit them alongside the final signature — the public signer only
+    // returns the Authorization header.
+    const payload_hash = s3_auth.sha256Hex(payload);
+    const date = s3_auth.formatDate(timestamp);
+    const datetime = s3_auth.formatIso8601(timestamp);
+    const host = "abc123.r2.cloudflarestorage.com";
+    const signed_headers = "host;x-amz-content-sha256;x-amz-date";
+
+    const canonical_request = try std.fmt.allocPrint(arena,
+        \\{s}
+        \\{s}
+        \\{s}
+        \\host:{s}
+        \\x-amz-content-sha256:{s}
+        \\x-amz-date:{s}
+        \\
+        \\{s}
+        \\{s}
+    , .{
+        method,
+        path,
+        query,
+        host,
+        &payload_hash,
+        &datetime,
+        signed_headers,
+        &payload_hash,
+    });
+    defer arena.free(canonical_request);
+
+    const canonical_hash = s3_auth.sha256Hex(canonical_request);
+    const scope = try std.fmt.allocPrint(arena, "{s}/{s}/s3/aws4_request", .{ &date, config.region });
+    defer arena.free(scope);
+    const string_to_sign = try std.fmt.allocPrint(arena,
+        \\AWS4-HMAC-SHA256
+        \\{s}
+        \\{s}
+        \\{s}
+    , .{
+        &datetime,
+        scope,
+        &canonical_hash,
+    });
+    defer arena.free(string_to_sign);
+
+    const signing_key = s3_auth.deriveSigningKey(config.secret_access_key, &date, config.region);
+    const signature_bytes = s3_auth.hmacSha256(&signing_key, string_to_sign);
+    const signature_hex = std.fmt.bytesToHex(signature_bytes, .lower);
+
+    // JSON-escape canonical_request + string_to_sign so Rust's serde can
+    // round-trip the exact bytes. All we need to escape is LF, quote,
+    // and backslash — no other control chars appear in SigV4 inputs.
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(arena);
+
+    try out.appendSlice(arena, "{\n  \"method\": \"");
+    try out.appendSlice(arena, method);
+    try out.appendSlice(arena, "\",\n  \"path\": \"");
+    try out.appendSlice(arena, path);
+    try out.appendSlice(arena, "\",\n  \"query\": \"");
+    try out.appendSlice(arena, query);
+    try out.appendSlice(arena, "\",\n  \"payload\": \"");
+    try out.appendSlice(arena, payload);
+    try out.appendSlice(arena, "\",\n  \"endpoint\": \"");
+    try out.appendSlice(arena, config.endpoint);
+    try out.appendSlice(arena, "\",\n  \"region\": \"");
+    try out.appendSlice(arena, config.region);
+    try out.appendSlice(arena, "\",\n  \"access_key_id\": \"");
+    try out.appendSlice(arena, config.access_key_id);
+    try out.appendSlice(arena, "\",\n  \"secret_access_key\": \"");
+    try out.appendSlice(arena, config.secret_access_key);
+    try out.appendSlice(arena, "\",\n  \"timestamp\": ");
+    var tsbuf: [24]u8 = undefined;
+    const tss = std.fmt.bufPrint(&tsbuf, "{d}", .{timestamp}) catch unreachable;
+    try out.appendSlice(arena, tss);
+    try out.appendSlice(arena, ",\n  \"canonical_request\": \"");
+    try appendJsonEscaped(arena, &out, canonical_request);
+    try out.appendSlice(arena, "\",\n  \"string_to_sign\": \"");
+    try appendJsonEscaped(arena, &out, string_to_sign);
+    try out.appendSlice(arena, "\",\n  \"signature_hex\": \"");
+    try out.appendSlice(arena, &signature_hex);
+    try out.appendSlice(arena, "\"\n}\n");
+
+    return try out.toOwnedSlice(arena);
+}
+
+fn appendJsonEscaped(arena: Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '\n' => try out.appendSlice(arena, "\\n"),
+            '"' => try out.appendSlice(arena, "\\\""),
+            '\\' => try out.appendSlice(arena, "\\\\"),
+            else => try out.append(arena, c),
+        }
+    }
+}
+
 // Dispatch: returns bytes for the named vector. Caller frees.
 fn buildByName(arena: Allocator, name: []const u8) !?[]u8 {
     if (std.mem.eql(u8, name, "blob")) return try buildBlob(arena);
@@ -462,6 +583,8 @@ fn buildByName(arena: Allocator, name: []const u8) !?[]u8 {
     // Phase 3 vectors (additive — keep at the end of the dispatch).
     if (std.mem.eql(u8, name, "fastcdc_boundaries_1mib")) return try buildFastcdcBoundariesJson(arena);
     if (std.mem.eql(u8, name, "fastcdc_boundaries_256k")) return try buildFastcdcBoundariesSmallJson(arena);
+    // Phase 7d vectors (additive — keep at the end of the dispatch).
+    if (std.mem.eql(u8, name, "sigv4_basic")) return try buildSigv4Basic(arena);
     return null;
 }
 
