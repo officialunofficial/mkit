@@ -407,13 +407,18 @@ pub fn decodeUploadAttestation(payload: []const u8) !struct { commit: Hash, enve
     };
 }
 
-pub fn encodeDownloadAttestation(att_id: Hash) [32]u8 {
-    return att_id;
+pub const DownloadAttestation = struct { commit: Hash, att_id: Hash };
+
+pub fn encodeDownloadAttestation(commit: Hash, att_id: Hash) [64]u8 {
+    var out: [64]u8 = undefined;
+    @memcpy(out[0..32], &commit);
+    @memcpy(out[32..64], &att_id);
+    return out;
 }
 
-pub fn decodeDownloadAttestation(payload: []const u8) !Hash {
-    if (payload.len < 32) return error.PayloadTooShort;
-    return payload[0..32].*;
+pub fn decodeDownloadAttestation(payload: []const u8) !DownloadAttestation {
+    if (payload.len < 64) return error.PayloadTooShort;
+    return .{ .commit = payload[0..32].*, .att_id = payload[32..64].* };
 }
 
 pub fn encodeListAttestations(commit: Hash) [32]u8 {
@@ -851,10 +856,11 @@ pub const SshTransport = struct {
     fn downloadAttestationImpl(
         ptr: *anyopaque,
         allocator: Allocator,
+        commit: Hash,
         att_id: Hash,
     ) anyerror![]u8 {
         const self: *SshTransport = @ptrCast(@alignCast(ptr));
-        const payload_arr = encodeDownloadAttestation(att_id);
+        const payload_arr = encodeDownloadAttestation(commit, att_id);
         try self.sendRequest(OP_DOWNLOAD_ATTESTATION, &payload_arr);
         const resp = try self.readResponse(allocator);
         if (resp.status == STATUS_UNSUPPORTED) {
@@ -1387,10 +1393,12 @@ test "encodeUploadAttestation roundtrip" {
 }
 
 test "encodeDownloadAttestation roundtrip" {
+    const commit = hash_mod.hash("ssh-att-commit");
     const id = hash_mod.hash("ssh-att-id");
-    const encoded = encodeDownloadAttestation(id);
+    const encoded = encodeDownloadAttestation(commit, id);
     const decoded = try decodeDownloadAttestation(&encoded);
-    try std.testing.expectEqual(id, decoded);
+    try std.testing.expectEqual(commit, decoded.commit);
+    try std.testing.expectEqual(id, decoded.att_id);
 }
 
 test "encodeListAttestations roundtrip" {

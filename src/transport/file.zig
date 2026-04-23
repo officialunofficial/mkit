@@ -2,6 +2,7 @@
 const std = @import("std");
 const protocol = @import("../protocol.zig");
 const hash_mod = @import("../hash.zig");
+const att_store = @import("../attestations/store.zig");
 const Hash = hash_mod.Hash;
 const Allocator = std.mem.Allocator;
 
@@ -303,152 +304,36 @@ pub const FileTransport = struct {
     // atomicWriteRef so a crash mid-write cannot leave a partial envelope
     // visible to concurrent readers.
     //
-    // TODO(integration): refactor to call attestations.store.writeAttestation
     fn uploadAttestationImpl(
         ptr: *anyopaque,
-        _: Allocator,
+        allocator: Allocator,
         commit: Hash,
         envelope_bytes: []const u8,
     ) anyerror!Hash {
         const self: *FileTransport = @ptrCast(@alignCast(ptr));
-        const att_id = hash_mod.hash(envelope_bytes);
-
-        const commit_hex = hash_mod.toHex(commit);
-        const att_hex = hash_mod.toHex(att_id);
-
-        // Ensure `attestations/` and `attestations/<commit-hex>/` exist.
-        self.root.createDir(self.io, "attestations", .default_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        var dir_path_buf: [13 + 64]u8 = undefined;
-        const dir_path = std.fmt.bufPrint(&dir_path_buf, "attestations/{s}", .{&commit_hex}) catch return error.RefNameTooLong;
-        self.root.createDir(self.io, dir_path, .default_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        // Final envelope path: attestations/<commit-hex>/<att-id-hex>.dsse
-        var final_path_buf: [13 + 64 + 1 + 64 + 5]u8 = undefined;
-        const final_path = std.fmt.bufPrint(
-            &final_path_buf,
-            "attestations/{s}/{s}.dsse",
-            .{ &commit_hex, &att_hex },
-        ) catch return error.RefNameTooLong;
-
-        // Atomic tmp+rename; mirrors the pack-write pattern.
-        var tmp_path_buf: [13 + 64 + 1 + 64 + 5 + 32]u8 = undefined;
-        const pid: i32 = @intCast(std.posix.system.getpid());
-        const counter = tmp_counter.fetchAdd(1, .monotonic);
-        const tmp_path = std.fmt.bufPrint(
-            &tmp_path_buf,
-            "{s}.tmp.{d}.{d}",
-            .{ final_path, pid, counter },
-        ) catch return error.RefNameTooLong;
-
-        errdefer self.root.deleteFile(self.io, tmp_path) catch {};
-        {
-            const file = try self.root.createFile(self.io, tmp_path, .{});
-            defer file.close(self.io);
-            try file.writeStreamingAll(self.io, envelope_bytes);
-            file.sync(self.io) catch {};
-        }
-        try self.root.rename(tmp_path, self.root, final_path, self.io);
-        // Best-effort fsync of the commit directory so the rename is durable.
-        syncParentOf(self.io, self.root, final_path) catch {};
-
-        return att_id;
+        return att_store.writeAttestation(allocator, self.io, self.root, commit, envelope_bytes);
     }
 
-    // TODO(integration): refactor to call attestations.store.readAttestation
     fn downloadAttestationImpl(
         ptr: *anyopaque,
         allocator: Allocator,
+        commit: Hash,
         att_id: Hash,
     ) anyerror![]u8 {
         const self: *FileTransport = @ptrCast(@alignCast(ptr));
-        const att_hex = hash_mod.toHex(att_id);
-
-        // We don't know which commit the envelope is filed under, so iterate
-        // the per-commit subdirectories. Attestation ids are globally unique
-        // (BLAKE3 of bytes) so at most one file matches.
-        //
-        // `attestations/` may not exist yet — that's "not found".
-        var att_root = self.root.openDir(self.io, "attestations", .{ .iterate = true }) catch |err| switch (err) {
-            error.FileNotFound, error.NotDir => return error.AttestationNotFound,
-            else => return err,
+        return att_store.readAttestation(allocator, self.io, self.root, commit, att_id) catch |err| switch (err) {
+            error.NotFound => error.AttestationNotFound,
+            else => err,
         };
-        defer att_root.close(self.io);
-
-        var iter = att_root.iterate();
-        while (try iter.next(self.io)) |entry| {
-            if (entry.kind != .directory) continue;
-            if (entry.name.len != 64) continue;
-            _ = hash_mod.fromHex(entry.name) catch continue;
-
-            var fname_buf: [64 + 5]u8 = undefined;
-            const fname = std.fmt.bufPrint(&fname_buf, "{s}.dsse", .{&att_hex}) catch return error.RefNameTooLong;
-
-            var commit_dir = att_root.openDir(self.io, entry.name, .{}) catch continue;
-            defer commit_dir.close(self.io);
-
-            const file = commit_dir.openFile(self.io, fname, .{}) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => return err,
-            };
-            defer file.close(self.io);
-
-            const stat = try file.stat(self.io);
-            if (stat.size > 16 * 1024 * 1024) return error.ResponseTooLarge; // 16 MiB envelope cap
-            const bytes = try allocator.alloc(u8, stat.size);
-            errdefer allocator.free(bytes);
-            const read = try file.readPositionalAll(self.io, bytes, 0);
-            if (read != stat.size) {
-                allocator.free(bytes);
-                return error.UnexpectedEof;
-            }
-            return bytes;
-        }
-
-        return error.AttestationNotFound;
     }
 
-    // TODO(integration): refactor to call attestations.store.listAttestations
     fn listAttestationsImpl(
         ptr: *anyopaque,
         allocator: Allocator,
         commit: Hash,
     ) anyerror![]Hash {
         const self: *FileTransport = @ptrCast(@alignCast(ptr));
-        const commit_hex = hash_mod.toHex(commit);
-
-        var dir_path_buf: [13 + 64]u8 = undefined;
-        const dir_path = std.fmt.bufPrint(&dir_path_buf, "attestations/{s}", .{&commit_hex}) catch return error.RefNameTooLong;
-
-        var dir = self.root.openDir(self.io, dir_path, .{ .iterate = true }) catch |err| switch (err) {
-            error.FileNotFound, error.NotDir => return allocator.alloc(Hash, 0),
-            else => return err,
-        };
-        defer dir.close(self.io);
-
-        var ids: std.ArrayList(Hash) = .empty;
-        errdefer ids.deinit(allocator);
-
-        var iter = dir.iterate();
-        while (try iter.next(self.io)) |entry| {
-            if (entry.kind != .file) continue;
-            const att_id = protocol.parseAttestationFilename(entry.name) orelse continue;
-            try ids.append(allocator, att_id);
-        }
-
-        std.sort.pdq(Hash, ids.items, {}, struct {
-            fn lt(_: void, a: Hash, b: Hash) bool {
-                return std.mem.order(u8, &a, &b) == .lt;
-            }
-        }.lt);
-
-        return ids.toOwnedSlice(allocator);
+        return att_store.listAttestations(allocator, self.io, self.root, commit);
     }
 
     // =========================================================================
@@ -1083,12 +968,12 @@ test "attestation round-trip: upload/download/list across two commits" {
 
     // Download each.
     {
-        const got = try t.downloadAttestation(allocator, id_a1);
+        const got = try t.downloadAttestation(allocator, commit_a, id_a1);
         defer allocator.free(got);
         try std.testing.expectEqualStrings(env_a1, got);
     }
     {
-        const got = try t.downloadAttestation(allocator, id_b1);
+        const got = try t.downloadAttestation(allocator, commit_b, id_b1);
         defer allocator.free(got);
         try std.testing.expectEqualStrings(env_b1, got);
     }
@@ -1112,7 +997,7 @@ test "attestation round-trip: upload/download/list across two commits" {
     // Download unknown att-id returns error.
     {
         const nope = hash_mod.hash("ft-never-seen");
-        try std.testing.expectError(error.AttestationNotFound, t.downloadAttestation(allocator, nope));
+        try std.testing.expectError(error.AttestationNotFound, t.downloadAttestation(allocator, commit_a, nope));
     }
 }
 

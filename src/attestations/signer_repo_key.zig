@@ -43,24 +43,17 @@ pub const RepoKeySigner = struct {
 
     fn keyidImpl(ptr: *anyopaque, allocator: Allocator) anyerror![]u8 {
         const self: *RepoKeySigner = @ptrCast(@alignCast(ptr));
-        const pk_digest = hash_mod.hash(&self.kp.public_key);
-        const hex = hash_mod.toHex(pk_digest);
-        var out = try allocator.alloc(u8, KEYID_PREFIX.len + hex.len);
-        @memcpy(out[0..KEYID_PREFIX.len], KEYID_PREFIX);
-        @memcpy(out[KEYID_PREFIX.len..], &hex);
-        return out;
+        const hex = hash_mod.toHex(hash_mod.hash(&self.kp.public_key));
+        return std.fmt.allocPrint(allocator, "{s}{s}", .{ KEYID_PREFIX, &hex });
     }
 
     fn signDsseImpl(ptr: *anyopaque, allocator: Allocator, pae: []const u8) anyerror![]u8 {
         const self: *RepoKeySigner = @ptrCast(@alignCast(ptr));
         const ed_kp = try self.kp.toEd25519();
-        // Sign the PAE bytes directly — no extra domain prefix (the
-        // "DSSEv1 " inside the PAE is already the domain separator).
+        // The "DSSEv1 " prefix inside the PAE is already the domain
+        // separator — sign the PAE bytes directly.
         const sig = try ed_kp.sign(pae, null);
-        const bytes = sig.toBytes();
-        const out = try allocator.alloc(u8, bytes.len);
-        @memcpy(out, &bytes);
-        return out;
+        return allocator.dupe(u8, &sig.toBytes());
     }
 };
 

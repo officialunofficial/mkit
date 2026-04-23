@@ -205,53 +205,22 @@ const ParsedResponse = struct {
     sig: []u8, // raw signature bytes (base64-decoded)
 };
 
-/// Minimal parser for {"keyid":"<..>","sig_base64":"<..>"}. Accepts that
-/// exact shape in that exact order with no whitespace — same strictness
-/// philosophy as the DSSE envelope decoder.
 fn parseResponse(allocator: Allocator, line: []const u8) !ParsedResponse {
+    const Shape = struct { keyid: []const u8, sig_base64: []const u8 };
+    const parsed = std.json.parseFromSlice(Shape, allocator, line, .{}) catch {
+        return error.ExternalSignerBadResponse;
+    };
+    defer parsed.deinit();
+
     const b64 = std.base64.standard.Decoder;
-
-    var p = StringParser{ .src = line, .pos = 0 };
-    try p.expect("{\"keyid\":");
-    const keyid = try p.takeString(allocator);
-    errdefer allocator.free(keyid);
-    try p.expect(",\"sig_base64\":");
-    const sig_b64 = try p.takeString(allocator);
-    defer allocator.free(sig_b64);
-    try p.expect("}");
-    if (p.pos != p.src.len) return error.ExternalSignerBadResponse;
-
-    const sig_len = b64.calcSizeForSlice(sig_b64) catch return error.ExternalSignerBadResponse;
+    const sig_len = b64.calcSizeForSlice(parsed.value.sig_base64) catch return error.ExternalSignerBadResponse;
     const sig = try allocator.alloc(u8, sig_len);
     errdefer allocator.free(sig);
-    b64.decode(sig, sig_b64) catch return error.ExternalSignerBadResponse;
+    b64.decode(sig, parsed.value.sig_base64) catch return error.ExternalSignerBadResponse;
 
+    const keyid = try allocator.dupe(u8, parsed.value.keyid);
     return .{ .keyid = keyid, .sig = sig };
 }
-
-const StringParser = struct {
-    src: []const u8,
-    pos: usize,
-
-    fn expect(self: *StringParser, s: []const u8) !void {
-        if (self.pos + s.len > self.src.len) return error.ExternalSignerBadResponse;
-        if (!std.mem.eql(u8, self.src[self.pos .. self.pos + s.len], s)) return error.ExternalSignerBadResponse;
-        self.pos += s.len;
-    }
-
-    fn takeString(self: *StringParser, allocator: Allocator) ![]u8 {
-        if (self.pos >= self.src.len or self.src[self.pos] != '"') return error.ExternalSignerBadResponse;
-        self.pos += 1;
-        const start = self.pos;
-        while (self.pos < self.src.len and self.src[self.pos] != '"') : (self.pos += 1) {
-            if (self.src[self.pos] == '\\') return error.ExternalSignerBadResponse;
-        }
-        if (self.pos >= self.src.len) return error.ExternalSignerBadResponse;
-        const buf = try allocator.dupe(u8, self.src[start..self.pos]);
-        self.pos += 1;
-        return buf;
-    }
-};
 
 // -----------------------------------------------------------------------------
 // Tests

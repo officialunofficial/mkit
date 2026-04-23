@@ -40,18 +40,12 @@ const Io = std.Io;
 
 const hash_mod = @import("../hash.zig");
 const Hash = hash_mod.Hash;
+const protocol = @import("../protocol.zig");
 const envelope_mod = @import("envelope.zig");
 
 /// Errors specific to the attestation store.
 pub const Error = error{
     NotFound,
-    /// Reserved for a future pre-signed-filename API: the supplied envelope
-    /// bytes' computed att-id does not match the filename we'd assign. The
-    /// current API always recomputes the att-id internally, so this is
-    /// surfaced only when an existing file at the target path has content
-    /// that differs from what we're about to write — an impossibility given
-    /// content-addressing, but we error out rather than silently clobber.
-    AttestationIdMismatch,
 };
 
 /// The subdirectory under `root_dir` that owns every envelope on disk.
@@ -83,15 +77,11 @@ pub fn attFileName(att_id: Hash) [hash_mod.hex_len + file_ext.len]u8 {
 
 /// Write a DSSE envelope for `commit`. Returns the att-id.
 ///
-/// Idempotent: writing the same envelope bytes twice produces the same
-/// file. If the target file already exists and its contents are
-/// byte-equal to `envelope_bytes`, this is a no-op and the same id is
-/// returned. If the target exists with different content, we return
-/// `error.AttestationIdMismatch` rather than overwriting — the only
-/// way that can happen is a hash collision or on-disk corruption, so
-/// failing loudly is correct.
+/// Idempotent via content-addressing: the filename is the BLAKE3 of
+/// the bytes, so if the target already exists we return the same id
+/// without rewriting.
 pub fn writeAttestation(
-    allocator: Allocator,
+    _: Allocator,
     io: Io,
     root_dir: Io.Dir,
     commit: Hash,
@@ -103,13 +93,11 @@ pub fn writeAttestation(
     const commit_hex = commitDirName(commit);
     const file_name = attFileName(att_id);
 
-    // 1. Ensure `<root>/attestations/` exists.
     root_dir.createDir(io, subdir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    // 2. Open it and ensure `<root>/attestations/<commit>/` exists.
     var att_root = try root_dir.openDir(io, subdir, .{});
     defer att_root.close(io);
 
@@ -121,35 +109,28 @@ pub fn writeAttestation(
     var commit_dir = try att_root.openDir(io, &commit_hex, .{});
     defer commit_dir.close(io);
 
-    // 3. Idempotency check: if the target already exists with the same
-    //    contents, we're done. Content-addressing guarantees that if the
-    //    hash matches then the bytes should match; if they somehow
-    //    don't, refuse rather than silently overwrite.
-    if (readIfExists(allocator, io, commit_dir, &file_name)) |existing| {
-        defer allocator.free(existing);
-        if (std.mem.eql(u8, existing, envelope_bytes)) {
+    // Idempotency via content-addressing: the filename IS the BLAKE3 of
+    // the bytes, so presence implies equality. One stat beats a full
+    // read+compare.
+    commit_dir.access(io, &file_name, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            var atomic_file = try commit_dir.createFileAtomic(io, &file_name, .{ .replace = true });
+            defer atomic_file.deinit(io);
+
+            var buffer: [4096]u8 = undefined;
+            var file_writer = atomic_file.file.writer(io, &buffer);
+            try file_writer.interface.writeAll(envelope_bytes);
+            try file_writer.interface.flush();
+            try file_writer.file.sync(io);
+            try atomic_file.replace(io);
+
+            // fsync the containing directory so rename(2) survives a
+            // power loss. Best-effort: tmpfs rejects dir-fd fsync.
+            syncDir(commit_dir) catch {};
             return att_id;
-        }
-        return error.AttestationIdMismatch;
-    }
-
-    // 4. Atomic write (mirrors src/store.zig `writeAtomicBytes`).
-    var atomic_file = try commit_dir.createFileAtomic(io, &file_name, .{ .replace = true });
-    defer atomic_file.deinit(io);
-
-    var buffer: [4096]u8 = undefined;
-    var file_writer = atomic_file.file.writer(io, &buffer);
-    try file_writer.interface.writeAll(envelope_bytes);
-    try file_writer.interface.flush();
-    try file_writer.file.sync(io);
-    try atomic_file.replace(io);
-
-    // 5. fsync the containing directory so the rename(2) dirent update
-    //    survives a power loss. Best-effort — some filesystems (tmpfs in
-    //    CI) don't support fsync on a directory fd; we'd rather have the
-    //    envelope's contents durable than fail the write entirely.
-    syncDir(commit_dir) catch {};
-
+        },
+        else => return err,
+    };
     return att_id;
 }
 
@@ -218,7 +199,7 @@ pub fn listAttestations(
     }
 
     const slice = try ids.toOwnedSlice(allocator);
-    std.sort.pdq(Hash, slice, {}, hashLessThan);
+    std.sort.pdq(Hash, slice, {}, protocol.hashLessThan);
     return slice;
 }
 
@@ -266,41 +247,7 @@ pub fn removeAttestation(
 // Internals
 // -----------------------------------------------------------------------------
 
-fn hashLessThan(_: void, a: Hash, b: Hash) bool {
-    return std.mem.order(u8, &a, &b) == .lt;
-}
-
-/// Parse "<64-hex>.dsse" into a Hash. Returns null if the name is not
-/// a valid envelope filename. Filter rules per the brief:
-///   * must end in `.dsse`
-///   * stem must be exactly 64 lowercase hex chars
-fn parseAttFileName(name: []const u8) ?Hash {
-    if (name.len != hash_mod.hex_len + file_ext.len) return null;
-    if (!std.mem.endsWith(u8, name, file_ext)) return null;
-    const stem = name[0..hash_mod.hex_len];
-    for (stem) |c| {
-        const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
-        if (!ok) return null;
-    }
-    return hash_mod.fromHex(stem) catch null;
-}
-
-/// Read a file if it exists, returning null (NOT an error) on
-/// FileNotFound. Any other error propagates.
-fn readIfExists(
-    allocator: Allocator,
-    io: Io,
-    dir: Io.Dir,
-    name: []const u8,
-) ?[]u8 {
-    return dir.readFileAlloc(io, name, allocator, .limited(MAX_ENVELOPE_SIZE)) catch |err| switch (err) {
-        error.FileNotFound => null,
-        // On any other error we pretend the file doesn't exist for
-        // idempotency purposes. The subsequent createFileAtomic will
-        // either succeed or surface the real error.
-        else => null,
-    };
-}
+const parseAttFileName = protocol.parseAttestationFilename;
 
 /// fsync a directory file descriptor. See the module doc comment for
 /// why this is needed and why it uses libc directly.

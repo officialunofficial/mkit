@@ -37,15 +37,15 @@ pub const Transport = struct {
         // returns the computed attestation id so the client can cross-check
         // against its own local BLAKE3 of the bytes.
         //
-        // `downloadAttestation` fetches an envelope by its attestation id
-        // (BLAKE3 of the bytes). Returns the raw envelope bytes — the
-        // transport does NOT parse them.
+        // `downloadAttestation` fetches an envelope by (commit, att-id).
+        // Both are required so transports can build a direct `O(1)` key
+        // (`attestations/<commit-hex>/<att-id-hex>.dsse`) without scanning.
         //
         // `listAttestations` returns every attestation id currently stored
         // against the given commit, byte-lexicographically sorted. Unknown
         // commits return an empty slice, not an error.
         uploadAttestation: *const fn (ptr: *anyopaque, allocator: Allocator, commit: Hash, envelope_bytes: []const u8) anyerror!Hash,
-        downloadAttestation: *const fn (ptr: *anyopaque, allocator: Allocator, att_id: Hash) anyerror![]u8,
+        downloadAttestation: *const fn (ptr: *anyopaque, allocator: Allocator, commit: Hash, att_id: Hash) anyerror![]u8,
         listAttestations: *const fn (ptr: *anyopaque, allocator: Allocator, commit: Hash) anyerror![]Hash,
     };
 
@@ -81,8 +81,8 @@ pub const Transport = struct {
         return self.vtable.uploadAttestation(self.ptr, allocator, commit, envelope_bytes);
     }
 
-    pub fn downloadAttestation(self: Transport, allocator: Allocator, att_id: Hash) ![]u8 {
-        return self.vtable.downloadAttestation(self.ptr, allocator, att_id);
+    pub fn downloadAttestation(self: Transport, allocator: Allocator, commit: Hash, att_id: Hash) ![]u8 {
+        return self.vtable.downloadAttestation(self.ptr, allocator, commit, att_id);
     }
 
     pub fn listAttestations(self: Transport, allocator: Allocator, commit: Hash) ![]Hash {
@@ -128,6 +128,11 @@ pub fn parseAttestationFilename(name: []const u8) ?Hash {
     if (!std.mem.endsWith(u8, name, ATTESTATION_EXT)) return null;
     const hex = name[0..64];
     return hash_mod.fromHex(hex) catch null;
+}
+
+/// Byte-lexicographic `Hash` ordering for `std.sort.pdq`.
+pub fn hashLessThan(_: void, a: Hash, b: Hash) bool {
+    return std.mem.order(u8, &a, &b) == .lt;
 }
 
 // -- Wire format --

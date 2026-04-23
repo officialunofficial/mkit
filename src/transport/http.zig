@@ -6,6 +6,7 @@
 const std = @import("std");
 const protocol = @import("../protocol.zig");
 const hash_mod = @import("../hash.zig");
+const envelope_mod = @import("../attestations/envelope.zig");
 const s3_transport = @import("s3.zig");
 const ssh_transport = @import("ssh.zig");
 const Hash = hash_mod.Hash;
@@ -112,21 +113,6 @@ pub const HttpTransport = struct {
         );
     }
 
-    /// Build the URL for downloading an attestation by id only (the server
-    /// resolves the commit): `"<base_url>/attestations/by-id/<att-id-hex>"`.
-    pub fn buildAttestationByIdUrl(
-        allocator: Allocator,
-        base_url: []const u8,
-        att_id: Hash,
-    ) ![]u8 {
-        const att_hex = hash_mod.toHex(att_id);
-        return std.fmt.allocPrint(
-            allocator,
-            "{s}/attestations/by-id/{s}",
-            .{ base_url, &att_hex },
-        );
-    }
-
     /// Build the URL for listing attestations on a commit:
     /// `"<base_url>/attestations/<commit-hex>/"`.
     pub fn buildAttestationListUrl(
@@ -157,11 +143,7 @@ pub const HttpTransport = struct {
             const id = hash_mod.fromHex(hex_str) catch return error.InvalidResponse;
             try out.append(allocator, id);
         }
-        std.sort.pdq(Hash, out.items, {}, struct {
-            fn lt(_: void, a: Hash, b: Hash) bool {
-                return std.mem.order(u8, &a, &b) == .lt;
-            }
-        }.lt);
+        std.sort.pdq(Hash, out.items, {}, protocol.hashLessThan);
         return out.toOwnedSlice(allocator);
     }
 
@@ -579,7 +561,7 @@ pub const HttpTransport = struct {
     ) anyerror!Hash {
         const self: *HttpTransport = @ptrCast(@alignCast(ptr));
         if (envelope_bytes.len > 16 * 1024 * 1024) return error.ResponseTooLarge;
-        const att_id = hash_mod.hash(envelope_bytes);
+        const att_id = envelope_mod.attestationId(envelope_bytes);
         const url = try buildAttestationUrl(allocator, self.base_url, commit, att_id);
         defer allocator.free(url);
 
@@ -597,10 +579,11 @@ pub const HttpTransport = struct {
     fn downloadAttestationImpl(
         ptr: *anyopaque,
         allocator: Allocator,
+        commit: Hash,
         att_id: Hash,
     ) anyerror![]u8 {
         const self: *HttpTransport = @ptrCast(@alignCast(ptr));
-        const url = try buildAttestationByIdUrl(allocator, self.base_url, att_id);
+        const url = try buildAttestationUrl(allocator, self.base_url, commit, att_id);
         defer allocator.free(url);
 
         var resp = try self.httpRequest(allocator, .GET, url, null, &.{}, 16 * 1024 * 1024);
@@ -906,14 +889,6 @@ test "build attestation url" {
     try std.testing.expect(std.mem.endsWith(u8, url, ".dsse"));
     const commit_hex = hash_mod.toHex(commit);
     try std.testing.expect(std.mem.indexOf(u8, url, &commit_hex) != null);
-}
-
-test "build attestation by-id url" {
-    const allocator = std.testing.allocator;
-    const att = hash_mod.hash("envelope-bytes-by-id");
-    const url = try HttpTransport.buildAttestationByIdUrl(allocator, "https://example.com/v1", att);
-    defer allocator.free(url);
-    try std.testing.expect(std.mem.startsWith(u8, url, "https://example.com/v1/attestations/by-id/"));
 }
 
 test "build attestation list url" {

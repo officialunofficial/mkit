@@ -4458,7 +4458,6 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 stdout.writeStreamingAll(io(), resp) catch break;
             },
             mkit.transport_ssh.OP_UPLOAD_ATTESTATION => {
-                // TODO(integration): refactor to call attestations.store.writeAttestation
                 if (payload.len > mkit.transport_ssh.MAX_ATTESTATION_ENVELOPE + 32) {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "envelope too large") catch break;
                     defer allocator.free(resp);
@@ -4482,14 +4481,13 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 stdout.writeStreamingAll(io(), resp) catch break;
             },
             mkit.transport_ssh.OP_DOWNLOAD_ATTESTATION => {
-                // TODO(integration): refactor to call attestations.store.readAttestation
-                const att_id = mkit.transport_ssh.decodeDownloadAttestation(payload) catch {
+                const decoded = mkit.transport_ssh.decodeDownloadAttestation(payload) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "decode error") catch break;
                     defer allocator.free(resp);
                     stdout.writeStreamingAll(io(), resp) catch break;
                     continue;
                 };
-                const envelope = transport.downloadAttestation(allocator, att_id) catch {
+                const envelope = transport.downloadAttestation(allocator, decoded.commit, decoded.att_id) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_NULL, "") catch break;
                     defer allocator.free(resp);
                     stdout.writeStreamingAll(io(), resp) catch break;
@@ -4501,7 +4499,6 @@ fn cmdServe(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 stdout.writeStreamingAll(io(), resp) catch break;
             },
             mkit.transport_ssh.OP_LIST_ATTESTATIONS => {
-                // TODO(integration): refactor to call attestations.store.listAttestations
                 const commit = mkit.transport_ssh.decodeListAttestations(payload) catch {
                     const resp = mkit.transport_ssh.encodeResponse(allocator, mkit.transport_ssh.STATUS_ERROR, "decode error") catch break;
                     defer allocator.free(resp);

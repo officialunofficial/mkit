@@ -2,6 +2,7 @@
 const std = @import("std");
 const protocol = @import("../protocol.zig");
 const hash_mod = @import("../hash.zig");
+const envelope_mod = @import("../attestations/envelope.zig");
 const Hash = hash_mod.Hash;
 const Allocator = std.mem.Allocator;
 
@@ -17,19 +18,15 @@ const Allocator = std.mem.Allocator;
 /// allocator and freed on `deinit`.
 pub const MemoryTransport = struct {
     objects: std.StringHashMap([]u8),
-    /// Attestation envelopes keyed by lowercase-hex `<att-id>`.
-    attestations: std.StringHashMap([]u8),
-    /// Commit-hex → list of owned lowercase-hex `<att-id>` strings.
-    /// The list entries are NOT aliased into `attestations` keys; each is
-    /// an independent dupe so the two maps can be freed independently.
-    att_by_commit: std.StringHashMap(std.ArrayList([]u8)),
+    attestations: std.AutoHashMap(Hash, []u8),
+    att_by_commit: std.AutoHashMap(Hash, std.ArrayList(Hash)),
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) MemoryTransport {
         return .{
             .objects = std.StringHashMap([]u8).init(allocator),
-            .attestations = std.StringHashMap([]u8).init(allocator),
-            .att_by_commit = std.StringHashMap(std.ArrayList([]u8)).init(allocator),
+            .attestations = std.AutoHashMap(Hash, []u8).init(allocator),
+            .att_by_commit = std.AutoHashMap(Hash, std.ArrayList(Hash)).init(allocator),
             .allocator = allocator,
         };
     }
@@ -43,17 +40,12 @@ pub const MemoryTransport = struct {
         self.objects.deinit();
 
         var att_iter = self.attestations.iterator();
-        while (att_iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
-        }
+        while (att_iter.next()) |entry| self.allocator.free(entry.value_ptr.*);
         self.attestations.deinit();
 
         var by_commit_iter = self.att_by_commit.iterator();
         while (by_commit_iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
             var list = entry.value_ptr.*;
-            for (list.items) |item| self.allocator.free(item);
             list.deinit(self.allocator);
         }
         self.att_by_commit.deinit();
@@ -192,40 +184,24 @@ pub const MemoryTransport = struct {
         envelope_bytes: []const u8,
     ) anyerror!Hash {
         const self: *MemoryTransport = @ptrCast(@alignCast(ptr));
-        const att_id = hash_mod.hash(envelope_bytes);
-        const att_hex = hash_mod.toHex(att_id);
-        const commit_hex = hash_mod.toHex(commit);
+        const att_id = envelope_mod.attestationId(envelope_bytes);
 
-        // Upsert envelope bytes.
-        const att_key = try self.allocator.dupe(u8, &att_hex);
-        errdefer self.allocator.free(att_key);
         const value = try self.allocator.dupe(u8, envelope_bytes);
         errdefer self.allocator.free(value);
 
-        if (self.attestations.fetchRemove(att_key)) |old| {
-            self.allocator.free(old.key);
-            self.allocator.free(old.value);
-        }
-        try self.attestations.put(att_key, value);
+        if (self.attestations.fetchRemove(att_id)) |old| self.allocator.free(old.value);
+        try self.attestations.put(att_id, value);
 
-        // Track in commit index.
-        if (self.att_by_commit.getPtr(&commit_hex)) |list_ptr| {
-            // Only append if not already present — uploads are idempotent.
+        if (self.att_by_commit.getPtr(commit)) |list_ptr| {
             for (list_ptr.items) |existing| {
-                if (std.mem.eql(u8, existing, &att_hex)) return att_id;
+                if (std.mem.eql(u8, &existing, &att_id)) return att_id;
             }
-            const att_hex_dup = try self.allocator.dupe(u8, &att_hex);
-            errdefer self.allocator.free(att_hex_dup);
-            try list_ptr.append(self.allocator, att_hex_dup);
+            try list_ptr.append(self.allocator, att_id);
         } else {
-            const commit_key = try self.allocator.dupe(u8, &commit_hex);
-            errdefer self.allocator.free(commit_key);
-            var list: std.ArrayList([]u8) = .empty;
+            var list: std.ArrayList(Hash) = .empty;
             errdefer list.deinit(self.allocator);
-            const att_hex_dup = try self.allocator.dupe(u8, &att_hex);
-            errdefer self.allocator.free(att_hex_dup);
-            try list.append(self.allocator, att_hex_dup);
-            try self.att_by_commit.put(commit_key, list);
+            try list.append(self.allocator, att_id);
+            try self.att_by_commit.put(commit, list);
         }
 
         return att_id;
@@ -234,11 +210,11 @@ pub const MemoryTransport = struct {
     fn downloadAttestationImpl(
         ptr: *anyopaque,
         allocator: Allocator,
+        _: Hash,
         att_id: Hash,
     ) anyerror![]u8 {
         const self: *MemoryTransport = @ptrCast(@alignCast(ptr));
-        const att_hex = hash_mod.toHex(att_id);
-        const entry = self.attestations.get(&att_hex) orelse return error.AttestationNotFound;
+        const entry = self.attestations.get(att_id) orelse return error.AttestationNotFound;
         return allocator.dupe(u8, entry);
     }
 
@@ -248,25 +224,9 @@ pub const MemoryTransport = struct {
         commit: Hash,
     ) anyerror![]Hash {
         const self: *MemoryTransport = @ptrCast(@alignCast(ptr));
-        const commit_hex = hash_mod.toHex(commit);
-
-        const list_entry = self.att_by_commit.get(&commit_hex) orelse {
-            return allocator.alloc(Hash, 0);
-        };
-
-        const out = try allocator.alloc(Hash, list_entry.items.len);
-        errdefer allocator.free(out);
-        for (list_entry.items, 0..) |hex_str, i| {
-            out[i] = hash_mod.fromHex(hex_str) catch return error.InvalidResponse;
-        }
-
-        // Byte-lexicographic sort.
-        std.sort.pdq(Hash, out, {}, struct {
-            fn lt(_: void, a: Hash, b: Hash) bool {
-                return std.mem.order(u8, &a, &b) == .lt;
-            }
-        }.lt);
-
+        const list_entry = self.att_by_commit.get(commit) orelse return allocator.alloc(Hash, 0);
+        const out = try allocator.dupe(Hash, list_entry.items);
+        std.sort.pdq(Hash, out, {}, protocol.hashLessThan);
         return out;
     }
 };
@@ -545,17 +505,17 @@ test "attestation round-trip: upload, download, list for two commits" {
 
     // Download each, verify bytes round-trip.
     {
-        const got = try t.downloadAttestation(allocator, id_a1);
+        const got = try t.downloadAttestation(allocator, commit_a, id_a1);
         defer allocator.free(got);
         try std.testing.expectEqualStrings(env_a1, got);
     }
     {
-        const got = try t.downloadAttestation(allocator, id_a2);
+        const got = try t.downloadAttestation(allocator, commit_a, id_a2);
         defer allocator.free(got);
         try std.testing.expectEqualStrings(env_a2, got);
     }
     {
-        const got = try t.downloadAttestation(allocator, id_b1);
+        const got = try t.downloadAttestation(allocator, commit_b, id_b1);
         defer allocator.free(got);
         try std.testing.expectEqualStrings(env_b1, got);
     }
@@ -601,7 +561,8 @@ test "attestation download missing returns error" {
 
     var t = mem.transport();
     const nowhere = hash_mod.hash("nowhere");
-    try std.testing.expectError(error.AttestationNotFound, t.downloadAttestation(allocator, nowhere));
+    const any_commit = hash_mod.hash("any-commit");
+    try std.testing.expectError(error.AttestationNotFound, t.downloadAttestation(allocator, any_commit, nowhere));
 }
 
 test "attestation upload is idempotent" {

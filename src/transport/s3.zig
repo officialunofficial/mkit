@@ -2,6 +2,7 @@
 const std = @import("std");
 const protocol = @import("../protocol.zig");
 const hash_mod = @import("../hash.zig");
+const envelope_mod = @import("../attestations/envelope.zig");
 const s3_auth = @import("../s3.zig");
 const remote_mod = @import("../remote.zig");
 const ssh_transport = @import("ssh.zig");
@@ -454,7 +455,7 @@ pub const S3Transport = struct {
     ) anyerror!Hash {
         const self: *S3Transport = @ptrCast(@alignCast(ptr));
         if (envelope_bytes.len > 16 * 1024 * 1024) return error.PackTooLargeForSinglePut;
-        const att_id = hash_mod.hash(envelope_bytes);
+        const att_id = envelope_mod.attestationId(envelope_bytes);
         const key = attestationObjectKey(commit, att_id);
 
         var resp = try self.httpRequest(allocator, .PUT, &key, "", envelope_bytes, &.{}, SMALL_RESPONSE_LIMIT);
@@ -470,49 +471,12 @@ pub const S3Transport = struct {
     fn downloadAttestationImpl(
         ptr: *anyopaque,
         allocator: Allocator,
+        commit: Hash,
         att_id: Hash,
     ) anyerror![]u8 {
         const self: *S3Transport = @ptrCast(@alignCast(ptr));
-        // S3 has no "find by id" without scanning buckets; we rely on the
-        // client knowing which commit(s) the id might belong to. For the
-        // mkit workflow the caller always uses `listAttestations` first and
-        // then downloads by the id they got back; but since S3 keys are
-        // commit-scoped, we implement download-by-id as a LIST of the whole
-        // attestations/ prefix + GET. This is expensive but correct, and
-        // integration-level callers will typically use the on-disk store
-        // helper (Agent C) instead.
-        const att_hex = hash_mod.toHex(att_id);
-
-        // List everything under attestations/ and find the matching key.
-        const query = try std.fmt.allocPrint(allocator, "list-type=2&prefix=attestations/", .{});
-        defer allocator.free(query);
-
-        var list_resp = try self.httpRequest(allocator, .GET, "", query, null, &.{}, REF_LIST_BODY_LIMIT);
-        defer list_resp.deinit();
-
-        if (list_resp.status != .ok) return error.AttestationNotFound;
-
-        const keys = try remote_mod.parseListXml(allocator, list_resp.body);
-        defer {
-            for (keys) |k| allocator.free(k);
-            allocator.free(keys);
-        }
-
-        var match_key: ?[]const u8 = null;
-        for (keys) |k| {
-            if (std.mem.endsWith(u8, k, &att_hex) or std.mem.indexOf(u8, k, &att_hex) != null) {
-                // Full match test: suffix must be `<att_hex>.dsse`.
-                var tail_buf: [64 + 5]u8 = undefined;
-                const tail = std.fmt.bufPrint(&tail_buf, "{s}.dsse", .{&att_hex}) catch return error.InvalidResponse;
-                if (std.mem.endsWith(u8, k, tail)) {
-                    match_key = k;
-                    break;
-                }
-            }
-        }
-        const key = match_key orelse return error.AttestationNotFound;
-
-        var resp = try self.httpRequest(allocator, .GET, key, "", null, &.{}, 16 * 1024 * 1024);
+        const key = attestationObjectKey(commit, att_id);
+        var resp = try self.httpRequest(allocator, .GET, &key, "", null, &.{}, 16 * 1024 * 1024);
         errdefer resp.deinit();
 
         switch (resp.status) {
@@ -570,12 +534,7 @@ pub const S3Transport = struct {
             }
         }
 
-        std.sort.pdq(Hash, out.items, {}, struct {
-            fn lt(_: void, a: Hash, b: Hash) bool {
-                return std.mem.order(u8, &a, &b) == .lt;
-            }
-        }.lt);
-
+        std.sort.pdq(Hash, out.items, {}, protocol.hashLessThan);
         return out.toOwnedSlice(allocator);
     }
 

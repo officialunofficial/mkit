@@ -232,10 +232,7 @@ pub fn extractPrimaryCommitHash(
 
     const hex = blake3_val.string;
     if (hex.len != hash_mod.hex_len) return error.InvalidDigestLength;
-
-    var out: Hash = undefined;
-    _ = std.fmt.hexToBytes(out[0..], hex) catch return error.InvalidDigestHex;
-    return out;
+    return hash_mod.fromHex(hex) catch error.InvalidDigestHex;
 }
 
 // -----------------------------------------------------------------------------
