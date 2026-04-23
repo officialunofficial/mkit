@@ -110,9 +110,17 @@ pub const StreamingChunker = struct {
     /// How: file reads in 0.16 go through `readStreaming`, which takes the
     /// Io capability and a `[]const []u8` scatter vector.
     pub fn nextChunk(self: *StreamingChunker, io: std.Io, file: std.Io.File) !?[]const u8 {
-        // Fill buffer if needed
+        // Fill up to max_size bytes into the first half of the buffer.
+        // CRITICAL: cap the read length at `max_size - buf_len` so we never
+        // overshoot into the second half. readPositional is free to return
+        // up to the slice length it was given; a small file that fits
+        // entirely in one syscall would otherwise fill buf[0..file_size]
+        // and push buf_len past max_size, which breaks the "preserve chunk
+        // in second half" invariant below (the @memcpy destination would
+        // overlap the shift's source region at buf[chunk_len..buf_len]).
         while (!self.eof and self.buf_len < self.cdc.max_size) {
-            const n = try file.readPositional(io, &.{self.buf[self.buf_len..]}, self.file_offset);
+            const want = self.cdc.max_size - self.buf_len;
+            const n = try file.readPositional(io, &.{self.buf[self.buf_len..][0..want]}, self.file_offset);
             if (n == 0) {
                 self.eof = true;
                 break;
@@ -123,7 +131,15 @@ pub const StreamingChunker = struct {
         if (self.buf_len == 0) return null;
 
         const chunk_len = self.cdc.cut(self.buf[0..self.buf_len]);
-        const chunk = self.buf[0..chunk_len];
+        // The shift below writes into buf[0..remaining], which overlaps
+        // buf[0..chunk_len] — so `buf[0..chunk_len]` would be invalidated
+        // between `return` and the caller's first read of `chunk`. Preserve
+        // the chunk bytes in the second half of the buffer (allocated as
+        // `max_size * 2`) before shifting. Safe because buf_len <= max_size
+        // (enforced by the fill loop above), so buf[max_size..] is entirely
+        // unused at this point.
+        const chunk = self.buf[self.cdc.max_size .. self.cdc.max_size + chunk_len];
+        @memcpy(chunk, self.buf[0..chunk_len]);
 
         // Shift remaining data to the front
         const remaining = self.buf_len - chunk_len;
@@ -246,10 +262,10 @@ test "StreamingChunker matches ChunkIterator" {
 
     // Collect boundaries from ChunkIterator
     var iter = ChunkIterator.init(cdc, &data);
-    var expected: std.ArrayList(usize) = .empty;
+    var expected: std.ArrayList(ChunkBoundary) = .empty;
     defer expected.deinit(allocator);
     while (iter.next()) |b| {
-        try expected.append(allocator, b.length);
+        try expected.append(allocator, b);
     }
 
     // Collect chunk lengths from StreamingChunker
@@ -259,16 +275,16 @@ test "StreamingChunker matches ChunkIterator" {
     var file = try tmp.dir.openFile(std.testing.io, "test.bin", .{});
     defer file.close(std.testing.io);
 
-    var actual: std.ArrayList(usize) = .empty;
-    defer actual.deinit(allocator);
+    var idx: usize = 0;
     while (try chunker.nextChunk(std.testing.io, file)) |chunk| {
-        try actual.append(allocator, chunk.len);
+        try std.testing.expect(idx < expected.items.len);
+        const boundary = expected.items[idx];
+        try std.testing.expectEqual(boundary.length, chunk.len);
+        try std.testing.expectEqualSlices(u8, data[boundary.offset..][0..boundary.length], chunk);
+        idx += 1;
     }
 
-    try std.testing.expectEqual(expected.items.len, actual.items.len);
-    for (expected.items, actual.items) |e, a| {
-        try std.testing.expectEqual(e, a);
-    }
+    try std.testing.expectEqual(expected.items.len, idx);
 }
 
 test "stability: single byte insertion causes minimal boundary changes" {

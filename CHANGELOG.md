@@ -7,7 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+
+A pass of input-validation + resource-limit hardening across the parsers,
+transports, and on-disk code. Most of the work came from an external review
+(an offline Codex agent); I audited, ported to 0.16, and fixed a latent
+`fastcdc.StreamingChunker` bug the strengthened test surfaced.
+
+- **Packfile format v3 (`VERSION_DELTA = 3`)** — delta entries now carry
+  the base hash, expected reconstructed hash, and expected raw size, so
+  unpack can reject a malformed / attacker-crafted delta *before*
+  persistence. The legacy v2 delta format is explicitly rejected
+  (`VERSION_DELTA_LEGACY`) since its delta payload lacked integrity info.
+  Adds `MAX_OBJECT_COUNT = 10M` and `MAX_PACK_TOTAL_BYTES = 4 GiB` caps.
+- **Delta apply bounds-checked** — COPY `offset + length` can't escape
+  the base buffer; INSERT plus accumulated length can't exceed the
+  declared target size (`error.DeltaSizeMismatch` / `DeltaCorrupt`).
+- **`serialize.zig` bounds checks** — reject tree/chunked_blob headers
+  whose declared count exceeds `remaining() / min_entry_bytes`
+  (prevents OOM-via-malformed-header).
+- **`store.zig` MAX_RAW_OBJECT_SIZE = 1 GiB** — `putRaw` / `getRaw`
+  reject anything larger with `error.ObjectTooLarge`.
+- **`config.zig` `validateConfigValue`** — rejects control chars and
+  null bytes in values before they can reach the config writer.
+- **`protocol.zig` `validateSshPath`** — rejects empty / dot / dot-dot
+  path components and non-ASCII-safe characters in `mkit+ssh://` URLs.
+  Pairs with…
+- **`transport/ssh.zig` `shellEscapeArg` / `buildRemoteServeCommand`** —
+  hardens the remote command string against shell-metacharacter
+  injection via a malicious repo path. Also rejects malformed ref names
+  during ref-list decode.
+- **`transport/http.zig` + `transport/s3.zig`** — rewritten onto the
+  0.16 `std.http.Client` API (`sendBodyUnflushed`, `receiveHead`,
+  `Uri.parse`); add a `Content-Length`-bounded response cap
+  (`error.ResponseTooLarge`); correct decompress buffer sizing.
+- **`restore.zig` atomic symlink** — `restoreSymlink` now creates
+  under a temp name and renames into place; idempotent on
+  `PathAlreadyExists`.
+- **`sign.zig` `KeyPair.zeroize`** — explicit memory wipe helper for
+  callers that want to drop a keypair before process exit.
+- **`worktree.zig` / `restore.zig` symlink-safe traversal** — pre-stat
+  every entry with `follow_symlinks = false` and reject kind
+  mismatches before opening. Zig 0.16's `Io.Dir.OpenFileOptions` /
+  `OpenOptions` don't expose a no-follow knob, so the pre-stat is the
+  equivalent defence.
+
+### Fixed
+
+- **`fastcdc.StreamingChunker` could return bytes overwritten by its
+  own shift** — the chunk slice `buf[0..chunk_len]` was aliased against
+  the `copyForwards(buf[0..remaining], buf[chunk_len..buf_len])` shift,
+  so the caller's slice read post-shift bytes, not the actual chunk.
+  Unit tests only compared chunk *lengths* so the bug never showed.
+  The strengthened `expectEqualSlices` test from this round surfaced
+  it. Fix: preserve chunk bytes in the buffer's second half
+  (allocated `max_size * 2`) before the shift, and cap the fill read
+  at `max_size - buf_len` so the preservation region can never overlap
+  the shift's source.
 
 ## [0.2.1] - 2026-04-23
 

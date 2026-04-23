@@ -7,6 +7,8 @@ const worktree_mod = @import("worktree.zig");
 const Hash = hash_mod.Hash;
 const Allocator = std.mem.Allocator;
 
+var restore_tmp_counter: std.atomic.Value(u64) = .init(0);
+
 pub const SparsePattern = struct {
     pattern: []const u8,
     negated: bool,
@@ -241,25 +243,22 @@ fn restoreTreeInner(
                 if (options.sparse_patterns) |patterns| {
                     if (!matchesSparse(patterns, full_path, false)) continue;
                 }
-                try restoreBlob(allocator, io, store, target_dir, entry.name, entry.object_hash);
-                if (entry.mode == .executable) {
-                    // Best-effort POSIX chmod 0755 for executable entries.
-                    // Silent no-op on hosts without fchmodat.
-                    if (@hasDecl(std.posix, "fchmodat")) {
-                        std.posix.fchmodat(target_dir.fd, entry.name, 0o755, 0) catch {};
-                    }
-                }
+                try restoreBlob(allocator, io, store, target_dir, entry.name, entry.object_hash, entry.mode == .executable);
             },
             .tree => {
                 if (options.sparse_patterns) |patterns| {
                     if (!couldMatchDescendant(patterns, full_path)) continue;
                 }
-                try preparePathForKind(io, target_dir, entry.name, .directory, false);
-                target_dir.createDirPath(io, entry.name) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => return err,
-                };
-                var subdir = try target_dir.openDir(io, entry.name, .{ .iterate = true });
+                try ensureDirectoryPath(io, target_dir, entry.name);
+                // Reject symlink-replaced directories: Zig 0.16's
+                // Io.Dir.OpenOptions has no no-follow knob, so pre-stat
+                // without following symlinks and refuse if the kind
+                // shifted from the dir we expect.
+                const dir_stat = try target_dir.statFile(io, entry.name, .{ .follow_symlinks = false });
+                if (dir_stat.kind != .directory) return error.NotADirectory;
+                var subdir = try target_dir.openDir(io, entry.name, .{
+                    .iterate = true,
+                });
                 defer subdir.close(io);
                 try restoreTreeInner(allocator, io, store, entry.object_hash, subdir, options, full_path);
             },
@@ -281,20 +280,21 @@ fn restoreBlob(
     dir: std.Io.Dir,
     name: []const u8,
     blob_hash: Hash,
+    executable: bool,
 ) !void {
     var blob_obj = try store.get(allocator, blob_hash);
     defer blob_obj.deinit(allocator);
 
     switch (blob_obj) {
         .blob => |b| {
-            try preparePathForKind(io, dir, name, .file, false);
-            const file = try dir.createFile(io, name, .{});
-            defer file.close(io);
-            try file.writeStreamingAll(io, b.data);
+            try writeFileAtomically(io, dir, name, b.data, executable);
         },
         .chunked_blob => |cb| {
-            try preparePathForKind(io, dir, name, .file, false);
-            const file = try dir.createFile(io, name, .{});
+            var tmp_buf: [512]u8 = undefined;
+            const tmp_name = try makeTempSiblingName(name, &tmp_buf);
+            errdefer dir.deleteFile(io, tmp_name) catch {};
+
+            const file = try dir.createFile(io, tmp_name, .{});
             defer file.close(io);
             for (cb.chunks) |chunk_hash| {
                 var chunk = try store.get(allocator, chunk_hash);
@@ -302,6 +302,11 @@ fn restoreBlob(
                 if (chunk != .blob) return error.InvalidChunk;
                 try file.writeStreamingAll(io, chunk.blob.data);
             }
+            applyExecutableMode(file, executable);
+            file.sync(io) catch {};
+
+            try preparePathForRename(io, dir, name);
+            try dir.rename(tmp_name, dir, name, io);
         },
         else => return error.NotABlob,
     }
@@ -324,26 +329,65 @@ fn restoreSymlink(
     const target = blob_obj.blob.data;
     if (!worktree_mod.validateSymlinkTarget(target)) return error.InvalidSymlinkTarget;
 
-    try preparePathForKind(io, dir, name, .sym_link, true);
+    var tmp_buf: [512]u8 = undefined;
+    const tmp_name = try makeTempSiblingName(name, &tmp_buf);
+    errdefer dir.deleteFile(io, tmp_name) catch {};
 
-    dir.symLink(io, target, name, .{}) catch return error.SymlinkFailed;
+    dir.symLink(io, target, tmp_name, .{}) catch return error.SymlinkFailed;
+
+    try preparePathForRename(io, dir, name);
+    try dir.rename(tmp_name, dir, name, io);
 }
 
-fn preparePathForKind(
-    io: std.Io,
-    dir: std.Io.Dir,
-    name: []const u8,
-    expected_kind: std.Io.File.Kind,
-    replace_same_kind: bool,
-) !void {
-    const current_kind = try existingPathKind(io, dir, name);
-    if (current_kind == null) return;
-    if (current_kind.? == expected_kind and !replace_same_kind) return;
+fn writeFileAtomically(io: std.Io, dir: std.Io.Dir, name: []const u8, content: []const u8, executable: bool) !void {
+    var tmp_buf: [512]u8 = undefined;
+    const tmp_name = try makeTempSiblingName(name, &tmp_buf);
+    errdefer dir.deleteFile(io, tmp_name) catch {};
 
-    switch (current_kind.?) {
-        .directory => try dir.deleteTree(io, name),
-        else => try dir.deleteFile(io, name),
+    const file = try dir.createFile(io, tmp_name, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, content);
+    applyExecutableMode(file, executable);
+    file.sync(io) catch {};
+
+    try preparePathForRename(io, dir, name);
+    try dir.rename(tmp_name, dir, name, io);
+}
+
+fn applyExecutableMode(file: std.Io.File, executable: bool) void {
+    if (!executable) return;
+    if (@hasDecl(std.c, "fchmod")) {
+        _ = std.c.fchmod(file.handle, 0o755);
     }
+}
+
+fn ensureDirectoryPath(io: std.Io, dir: std.Io.Dir, name: []const u8) !void {
+    const current_kind = try existingPathKind(io, dir, name);
+    if (current_kind) |kind| switch (kind) {
+        .directory => return,
+        else => try dir.deleteFile(io, name),
+    };
+
+    dir.createDirPath(io, name) catch |err| switch (err) {
+        error.PathAlreadyExists => {
+            const kind = try existingPathKind(io, dir, name) orelse return error.FileNotFound;
+            if (kind != .directory) return error.PathAlreadyExists;
+        },
+        else => return err,
+    };
+}
+
+fn preparePathForRename(io: std.Io, dir: std.Io.Dir, name: []const u8) !void {
+    const current_kind = try existingPathKind(io, dir, name);
+    if (current_kind == .directory) {
+        try dir.deleteTree(io, name);
+    }
+}
+
+fn makeTempSiblingName(name: []const u8, buf: []u8) ![]const u8 {
+    const pid: i32 = @intCast(std.posix.system.getpid());
+    const counter = restore_tmp_counter.fetchAdd(1, .monotonic);
+    return std.fmt.bufPrint(buf, ".{s}.tmp.{d}.{d}", .{ name, pid, counter }) catch error.NameTooLong;
 }
 
 fn existingPathKind(io: std.Io, dir: std.Io.Dir, name: []const u8) !?std.Io.File.Kind {
@@ -356,7 +400,10 @@ fn existingPathKind(io: std.Io, dir: std.Io.Dir, name: []const u8) !?std.Io.File
         else => return err,
     }
 
-    const stat = try dir.statFile(io, name, .{});
+    const stat = dir.statFile(io, name, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
     return stat.kind;
 }
 

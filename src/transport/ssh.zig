@@ -337,6 +337,8 @@ pub fn encodeRefList(allocator: Allocator, refs: []const protocol.Ref) ![]u8 {
 pub fn decodeRefList(allocator: Allocator, data: []const u8) ![]protocol.Ref {
     if (data.len < 4) return error.PayloadTooShort;
     const count = std.mem.littleToNative(u32, @bitCast(data[0..4].*));
+    const max_count = (data.len - 4) / (2 + 32);
+    if (count > max_count) return error.PayloadTooShort;
 
     var refs = try allocator.alloc(protocol.Ref, count);
     var initialized: u32 = 0;
@@ -353,7 +355,9 @@ pub fn decodeRefList(allocator: Allocator, data: []const u8) ![]protocol.Ref {
 
         if (pos + @as(usize, name_len) + 32 > data.len) return error.PayloadTooShort;
         const name = try allocator.dupe(u8, data[pos .. pos + name_len]);
+        errdefer allocator.free(name);
         pos += name_len;
+        if (!protocol.validateRefName(name)) return error.InvalidRef;
         const h = data[pos..][0..32].*;
         pos += 32;
 
@@ -394,6 +398,53 @@ pub fn parseSshUrl(url: []const u8) !SshUrl {
     }
 }
 
+fn isSafeRemoteShellToken(arg: []const u8) bool {
+    if (arg.len == 0) return false;
+    for (arg, 0..) |c, i| {
+        if (std.ascii.isAlphanumeric(c) or
+            c == '/' or
+            c == '.' or
+            c == '_' or
+            c == '-' or
+            c == '+' or
+            c == '=' or
+            c == ':' or
+            c == '@' or
+            c == '%' or
+            c == ',')
+        {
+            continue;
+        }
+        if (c == '~' and i == 0) continue;
+        return false;
+    }
+    return true;
+}
+
+pub fn shellEscapeArg(allocator: Allocator, arg: []const u8) ![]u8 {
+    if (isSafeRemoteShellToken(arg)) return allocator.dupe(u8, arg);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.append(allocator, '\'');
+    for (arg) |c| {
+        if (c == '\'') {
+            try out.appendSlice(allocator, "'\\''");
+        } else {
+            try out.append(allocator, c);
+        }
+    }
+    try out.append(allocator, '\'');
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn buildRemoteServeCommand(allocator: Allocator, path: []const u8) ![]u8 {
+    const escaped_path = try shellEscapeArg(allocator, path);
+    defer allocator.free(escaped_path);
+    return std.fmt.allocPrint(allocator, "exec mkit serve {s}", .{escaped_path});
+}
+
 // =============================================================================
 // SshTransport
 // =============================================================================
@@ -425,8 +476,10 @@ pub const SshTransport = struct {
         path: []const u8,
         options: SshOptions,
     ) !SshTransport {
-        // argv capacity: "ssh" + -p N + 3 * (-o FLAG=VAL | -i file) + host + "mkit" + "serve" + path
-        var argv_buf: [16][]const u8 = undefined;
+        try protocol.validateSshPath(path);
+
+        // argv capacity: "ssh" + -p N + 3 * (-o FLAG=VAL | -i file) + host + remote command
+        var argv_buf: [14][]const u8 = undefined;
         var argc: usize = 0;
 
         argv_buf[argc] = "ssh";
@@ -476,6 +529,12 @@ pub const SshTransport = struct {
         argv_buf[argc] = host_spec;
         argc += 1;
 
+        // The path has already been restricted to [A-Za-z0-9._-/] with no
+        // empty / dot / dot-dot components by `protocol.validateSshPath`
+        // above, so it's safe to hand to the remote shell as-is. Pass the
+        // three tokens separately (not as a joined string) so sshd
+        // invokes `mkit serve <path>` without an intervening `sh -c`
+        // parse that broke the OP_HELLO handshake on some sshd configs.
         argv_buf[argc] = "mkit";
         argc += 1;
         argv_buf[argc] = "serve";
@@ -912,6 +971,19 @@ test "decodeRefList too short" {
     try std.testing.expectError(error.PayloadTooShort, decodeRefList(std.testing.allocator, "xx"));
 }
 
+test "decodeRefList rejects invalid ref names" {
+    const allocator = std.testing.allocator;
+    const bad = protocol.Ref{ .name = "refs/heads/bad name", .hash = hash_mod.hash("bad-ref") };
+    const encoded = try encodeRefList(allocator, &.{bad});
+    defer allocator.free(encoded);
+    try std.testing.expectError(error.InvalidRef, decodeRefList(allocator, encoded));
+}
+
+test "decodeRefList rejects impossible count before allocation" {
+    const payload = [_]u8{ 2, 0, 0, 0 };
+    try std.testing.expectError(error.PayloadTooShort, decodeRefList(std.testing.allocator, &payload));
+}
+
 // -- SSH URL parsing tests --
 
 test "parseSshUrl full form" {
@@ -953,6 +1025,11 @@ test "parseSshUrl SCP style with nested path" {
     try std.testing.expectEqualStrings("projects/deep/path", result.path);
 }
 
+test "parseSshUrl rejects unsafe path" {
+    try std.testing.expectError(error.InvalidUrl, parseSshUrl("git@github.com:org/../repo"));
+    try std.testing.expectError(error.InvalidUrl, parseSshUrl("git@github.com:org/repo;touch"));
+}
+
 test "parseSshUrl rejects empty" {
     try std.testing.expectError(error.InvalidUrl, parseSshUrl(""));
 }
@@ -987,6 +1064,27 @@ test "parseSshUrl ssh scheme with port no user" {
     try std.testing.expectEqualStrings("myhost", result.host);
     try std.testing.expectEqual(@as(u16, 8022), result.port.?);
     try std.testing.expectEqualStrings("/data/repo", result.path);
+}
+
+test "shellEscapeArg leaves safe ssh path unquoted" {
+    const allocator = std.testing.allocator;
+    const escaped = try shellEscapeArg(allocator, "~/repo/path");
+    defer allocator.free(escaped);
+    try std.testing.expectEqualStrings("~/repo/path", escaped);
+}
+
+test "shellEscapeArg quotes embedded single quote" {
+    const allocator = std.testing.allocator;
+    const escaped = try shellEscapeArg(allocator, "/srv/repo's-backup");
+    defer allocator.free(escaped);
+    try std.testing.expectEqualStrings("'/srv/repo'\\''s-backup'", escaped);
+}
+
+test "buildRemoteServeCommand quotes unsafe path once" {
+    const allocator = std.testing.allocator;
+    const cmd = try buildRemoteServeCommand(allocator, "/srv/repo's-backup");
+    defer allocator.free(cmd);
+    try std.testing.expectEqualStrings("exec mkit serve '/srv/repo'\\''s-backup'", cmd);
 }
 
 test "encodeUploadPack large payload" {

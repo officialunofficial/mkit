@@ -17,9 +17,8 @@
 // first W6.5 attempt came from std.testing.fuzz + page_allocator; we don't
 // use either here.
 //
-// Note: delta.applyDelta takes a `result_size_hint` that the current
-// implementation ignores (grows dynamically). The fuzz invariants we
-// assert below are the actual parser contract:
+// Note: delta.applyDelta enforces `result_size_hint` only when it is
+// non-zero. The fuzz invariants we assert below are the parser contract:
 //   * COPY offset + length must stay within base bounds
 //   * INSERT literal length must not overrun the instruction stream
 //   * opcode 0 and malformed copy headers produce DeltaCorrupt

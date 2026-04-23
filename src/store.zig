@@ -9,6 +9,7 @@ const Io = std.Io;
 
 pub const mkit_dir = ".mkit";
 pub const objects_dir = "objects";
+pub const MAX_RAW_OBJECT_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB safety cap
 
 /// Local content-addressed object store backed by the filesystem.
 /// Objects are stored at `.mkit/objects/<2-hex>/<62-hex>`.
@@ -57,6 +58,7 @@ pub const ObjectStore = struct {
 
     /// Store raw serialized bytes, returning their content hash.
     pub fn putRaw(self: *ObjectStore, bytes: []const u8) !Hash {
+        if (bytes.len > MAX_RAW_OBJECT_SIZE) return error.ObjectTooLarge;
         const h = hash_mod.hash(bytes);
         const path = hash_mod.objectPath(h);
 
@@ -82,7 +84,7 @@ pub const ObjectStore = struct {
         defer file.close(self.io);
 
         const size = try file.length(self.io);
-        if (size > 1024 * 1024 * 1024) return error.ObjectTooLarge; // 1GB safety limit
+        if (size > MAX_RAW_OBJECT_SIZE) return error.ObjectTooLarge;
         const bytes = try allocator.alloc(u8, size);
         errdefer allocator.free(bytes);
         const read = try file.readPositionalAll(self.io, bytes, 0);
@@ -252,4 +254,19 @@ test "store chunked blob" {
     try std.testing.expectEqual(@as(u64, 2 * 65536), retrieved.chunked_blob.total_size);
     try std.testing.expectEqual(@as(u32, 65536), retrieved.chunked_blob.chunk_size);
     try std.testing.expectEqual(@as(usize, 2), retrieved.chunked_blob.chunks.len);
+}
+
+test "putRaw rejects oversized raw slice before hashing" {
+    var fake: []const u8 = undefined;
+    fake.len = MAX_RAW_OBJECT_SIZE + 1;
+    fake.ptr = undefined;
+
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var store = try ObjectStore.init(io, tmp.dir);
+    defer store.close();
+
+    try std.testing.expectError(error.ObjectTooLarge, store.putRaw(fake));
 }

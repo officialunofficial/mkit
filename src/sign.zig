@@ -48,6 +48,11 @@ pub const KeyPair = struct {
     pub fn toEd25519(self: KeyPair) !Ed25519.KeyPair {
         return Ed25519.KeyPair.generateDeterministic(self.seed);
     }
+
+    pub fn zeroize(self: *KeyPair) void {
+        std.crypto.secureZero(u8, self.seed[0..]);
+        std.crypto.secureZero(u8, self.public_key[0..]);
+    }
 };
 
 const Buffer = std.ArrayList(u8);

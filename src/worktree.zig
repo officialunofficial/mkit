@@ -58,7 +58,15 @@ fn buildTreeInner(allocator: Allocator, io: std.Io, store: *store_mod.ObjectStor
                 });
             },
             .directory => {
-                var subdir = try dir.openDir(io, entry.name, .{ .iterate = true });
+                // Pre-stat to ensure the entry really is a directory and
+                // not a symlink-to-directory. `Io.Dir.OpenOptions` has no
+                // no-follow knob in 0.16; a statFile with
+                // `follow_symlinks = false` gives the same guarantee.
+                const dir_stat = try dir.statFile(io, entry.name, .{ .follow_symlinks = false });
+                if (dir_stat.kind != .directory) return error.NotADirectory;
+                var subdir = try dir.openDir(io, entry.name, .{
+                    .iterate = true,
+                });
                 defer subdir.close(io);
                 const h = try buildTreeInner(allocator, io, store, subdir, ignores);
                 try entries.append(allocator, .{
@@ -99,6 +107,15 @@ fn buildTreeInner(allocator: Allocator, io: std.Io, store: *store_mod.ObjectStor
 pub const chunk_threshold: usize = 1 * 1024 * 1024; // 1MB
 
 pub fn hashFile(allocator: Allocator, io: std.Io, store: *store_mod.ObjectStore, dir: std.Io.Dir, name: []const u8) !Hash {
+    // Defense-in-depth against symlink attacks. `Io.Dir.OpenFileOptions` in
+    // Zig 0.16 doesn't expose a no-follow knob, so pre-stat with
+    // `follow_symlinks = false` and reject anything that isn't a regular
+    // file. Callers in buildTreeInner already dispatch on entry.kind, but
+    // enforcing here means a caller that forgets the kind dispatch can't
+    // escape the tree.
+    const pre_stat = try dir.statFile(io, name, .{ .follow_symlinks = false });
+    if (pre_stat.kind != .file) return error.NotRegularFile;
+
     const file = try dir.openFile(io, name, .{});
     defer file.close(io);
 
@@ -112,6 +129,7 @@ pub fn hashFile(allocator: Allocator, io: std.Io, store: *store_mod.ObjectStore,
     const data = try allocator.alloc(u8, stat.size);
     defer allocator.free(data);
     const read = try file.readPositionalAll(io, data, 0);
+    if (read != data.len) return error.UnexpectedEof;
 
     const blob = object.Object{ .blob = .{ .data = data[0..read] } };
     return store.put(allocator, blob);
@@ -375,14 +393,15 @@ test "large file creates chunked blob" {
     // Create a file larger than chunk_threshold (1MB)
     const large_size = chunk_threshold + 1024; // just over 1MB
     const f = try tmp.dir.createFile(std.testing.io, "large.bin", .{});
-    // Write deterministic data
-    const buf = try allocator.alloc(u8, 4096);
-    defer allocator.free(buf);
-    @memset(buf, 0xAB);
+    const expected = try allocator.alloc(u8, large_size);
+    defer allocator.free(expected);
+    for (expected, 0..) |*byte, i| {
+        byte.* = @intCast((i * 131 + 17) % 251);
+    }
     var written: usize = 0;
     while (written < large_size) {
-        const to_write = @min(buf.len, large_size - written);
-        try f.writeStreamingAll(std.testing.io, buf[0..to_write]);
+        const to_write = @min(@as(usize, 4096), large_size - written);
+        try f.writeStreamingAll(std.testing.io, expected[written..][0..to_write]);
         written += to_write;
     }
     f.close(std.testing.io);
@@ -409,6 +428,17 @@ test "large file creates chunked blob" {
     try std.testing.expectEqual(@as(u32, 0), entry_obj.chunked_blob.chunk_size);
     // With CDC, there should be at least 1 chunk
     try std.testing.expect(entry_obj.chunked_blob.chunks.len >= 1);
+
+    var reconstructed: std.ArrayList(u8) = .empty;
+    defer reconstructed.deinit(allocator);
+    for (entry_obj.chunked_blob.chunks) |chunk_hash| {
+        var chunk_obj = try store.get(allocator, chunk_hash);
+        defer chunk_obj.deinit(allocator);
+        try std.testing.expectEqual(object.ObjectType.blob, chunk_obj.objectType());
+        try reconstructed.appendSlice(allocator, chunk_obj.blob.data);
+    }
+    try std.testing.expectEqual(@as(usize, large_size), reconstructed.items.len);
+    try std.testing.expectEqualSlices(u8, expected, reconstructed.items);
 }
 
 test "small file stays as regular blob" {

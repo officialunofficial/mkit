@@ -23,6 +23,12 @@ pub const default_ssh_strict_host_key_checking: []const u8 = "";
 pub const default_ssh_user_known_hosts_file: []const u8 = "";
 pub const default_ssh_identity_file: []const u8 = "";
 
+pub fn validateConfigValue(value: []const u8) error{InvalidConfigValue}!void {
+    for (value) |c| {
+        if (c < 0x20 or c == 0x7f) return error.InvalidConfigValue;
+    }
+}
+
 /// Legacy config keys from earlier mkit versions. These are no longer
 /// recognized by the CLI, but are tolerated (silently ignored) when
 /// encountered in an existing `.mkit/config` file so that old on-disk
@@ -194,6 +200,16 @@ pub fn readConfig(allocator: Allocator, io: std.Io, dir: std.Io.Dir) !Config {
 
 /// Write config to .mkit/config as key=value lines.
 pub fn writeConfig(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+    try validateConfigValue(config.user_identity);
+    try validateConfigValue(config.signing_key);
+    try validateConfigValue(config.default_branch);
+    try validateConfigValue(config.remote_endpoint);
+    try validateConfigValue(config.remote_bucket);
+    try validateConfigValue(config.remote_type);
+    try validateConfigValue(config.ssh_strict_host_key_checking);
+    try validateConfigValue(config.ssh_user_known_hosts_file);
+    try validateConfigValue(config.ssh_identity_file);
+
     const f = try dir.createFile(io, config_file, .{ .permissions = .fromMode(0o600) });
     defer f.close(io);
 
@@ -265,6 +281,7 @@ pub fn parseConfig(allocator: Allocator, content: []const u8) !Config {
         const eq_pos = std.mem.indexOfScalar(u8, trimmed, '=') orelse continue;
         const key = std.mem.trimEnd(u8, trimmed[0..eq_pos], " \t");
         const value = std.mem.trimStart(u8, trimmed[eq_pos + 1 ..], " \t");
+        try validateConfigValue(value);
 
         if (std.mem.eql(u8, key, "user.identity")) {
             if (config.user_identity.len > 0) allocator.free(config.user_identity);
@@ -468,6 +485,14 @@ test "config ignores unknown keys" {
     defer config.deinit();
 
     try std.testing.expectEqualStrings("foo.key", config.signing_key);
+}
+
+test "parseConfig rejects control characters in values" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(
+        error.InvalidConfigValue,
+        parseConfig(allocator, "signing_key = foo\tbar"),
+    );
 }
 
 test "parse remote config" {
@@ -753,6 +778,21 @@ test "userStatePath / userCachePath end in /mkit" {
     const c = try userCachePath(allocator);
     defer allocator.free(c);
     try std.testing.expect(std.mem.endsWith(u8, c, "/mkit"));
+}
+
+test "validateConfigValue rejects control characters" {
+    try std.testing.expectError(error.InvalidConfigValue, validateConfigValue("hello\nworld"));
+    try std.testing.expectError(error.InvalidConfigValue, validateConfigValue("bad\x00value"));
+}
+
+test "writeConfig rejects control characters in values" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, ".mkit");
+
+    var cfg = Config{};
+    cfg.signing_key = "line1\nline2";
+    try std.testing.expectError(error.InvalidConfigValue, writeConfig(std.testing.io, tmp.dir, cfg));
 }
 
 test "config roundtrip without ssh.* fields omits them" {

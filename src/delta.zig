@@ -101,13 +101,17 @@ pub fn computeDelta(allocator: Allocator, base: []const u8, target: []const u8) 
 }
 
 /// Apply delta instructions to `base` to produce the target.
-/// `result_size` is the expected output length; returns error.DeltaSizeMismatch if
-/// the reconstructed output does not match.
+/// `result_size_hint` is the expected output length; when non-zero, the
+/// reconstructed output MUST match exactly and any growth beyond the hint is
+/// rejected with error.DeltaSizeMismatch.
 /// Caller owns the returned slice.
 pub fn applyDelta(allocator: Allocator, base: []const u8, instructions: []const u8, result_size_hint: u32) ![]u8 {
-    _ = result_size_hint; // hint only; we grow dynamically
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
+    const expected_size: ?usize = if (result_size_hint == 0) null else @as(usize, result_size_hint);
+    if (expected_size) |size| {
+        try result.ensureTotalCapacityPrecise(allocator, size);
+    }
 
     var ii: usize = 0;
 
@@ -122,18 +126,26 @@ pub fn applyDelta(allocator: Allocator, base: []const u8, instructions: []const 
             const length = std.mem.readInt(u16, instructions[ii..][0..2], .little);
             ii += 2;
 
-            if (offset + length > base.len) return error.DeltaCorrupt;
+            const offset_usize: usize = offset;
+            const length_usize: usize = length;
+            if (offset_usize > base.len or length_usize > base.len - offset_usize) return error.DeltaCorrupt;
+            try ensureResultCanGrow(expected_size, result.items.len, length_usize);
 
-            try result.appendSlice(allocator, base[offset..][0..length]);
+            try result.appendSlice(allocator, base[offset_usize..][0..length_usize]);
         } else if (opcode > 0) {
             const length: usize = opcode;
             if (ii + length > instructions.len) return error.DeltaCorrupt;
+            try ensureResultCanGrow(expected_size, result.items.len, length);
 
             try result.appendSlice(allocator, instructions[ii..][0..length]);
             ii += length;
         } else {
             return error.DeltaCorrupt;
         }
+    }
+
+    if (expected_size) |size| {
+        if (result.items.len != size) return error.DeltaSizeMismatch;
     }
 
     return result.toOwnedSlice(allocator);
@@ -162,6 +174,13 @@ fn emitInsert(buf: *Buffer, allocator: Allocator, data: []const u8) !void {
     std.debug.assert(data.len > 0 and data.len <= MAX_INSERT_LEN);
     try buf.append(allocator, @intCast(data.len));
     try buf.appendSlice(allocator, data);
+}
+
+fn ensureResultCanGrow(expected_size: ?usize, current_len: usize, add_len: usize) !void {
+    if (expected_size) |size| {
+        const new_len = std.math.add(usize, current_len, add_len) catch return error.DeltaSizeMismatch;
+        if (new_len > size) return error.DeltaSizeMismatch;
+    }
 }
 
 // ============================================================
@@ -275,7 +294,7 @@ test "delta roundtrip real source" {
     try std.testing.expect(instructions.len < v2.len);
 }
 
-test "apply delta ignores size hint" {
+test "apply delta enforces expected result size" {
     const allocator = std.testing.allocator;
 
     const base = "hello";
@@ -284,10 +303,11 @@ test "apply delta ignores size hint" {
     const instructions = try computeDelta(allocator, base, target);
     defer allocator.free(instructions);
 
-    // Any size hint should produce correct result
-    const result = try applyDelta(allocator, base, instructions, 0);
+    const result = try applyDelta(allocator, base, instructions, @intCast(target.len));
     defer allocator.free(result);
     try std.testing.expectEqualStrings(target, result);
+
+    try std.testing.expectError(error.DeltaSizeMismatch, applyDelta(allocator, base, instructions, @intCast(target.len - 1)));
 }
 
 test "delta empty base" {
