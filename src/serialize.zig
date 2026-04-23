@@ -834,9 +834,13 @@ test "chunked blob CDC (chunk_size=0) roundtrip" {
 
 test "fuzz: deserialize does not crash on arbitrary bytes" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
+        // Why: 0.16 changed the fuzz callback signature. Input bytes now
+        // come from a *std.testing.Smith via smith.slice(&buf).
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             const allocator = std.heap.page_allocator;
-            var obj = deserialize(allocator, input) catch return;
+            var buf: [64 * 1024]u8 = undefined;
+            const len = smith.slice(&buf);
+            var obj = deserialize(allocator, buf[0..len]) catch return;
             obj.deinit(allocator);
         }
     }.run, .{});
@@ -844,9 +848,11 @@ test "fuzz: deserialize does not crash on arbitrary bytes" {
 
 test "fuzz: blob serialize-deserialize roundtrip" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             const allocator = std.heap.page_allocator;
-            const original = object.Object{ .blob = .{ .data = input } };
+            var buf: [64 * 1024]u8 = undefined;
+            const len = smith.slice(&buf);
+            const original = object.Object{ .blob = .{ .data = buf[0..len] } };
             const bytes = serialize(allocator, original) catch return;
             defer allocator.free(bytes);
             var parsed = deserialize(allocator, bytes) catch return;

@@ -105,10 +105,13 @@ pub const StreamingChunker = struct {
 
     /// Read the next chunk from the file. Returns a slice into the internal
     /// buffer (valid until the next call to nextChunk) or null at EOF.
-    pub fn nextChunk(self: *StreamingChunker, file: std.fs.File) !?[]const u8 {
+    ///
+    /// How: file reads in 0.16 go through `readStreaming`, which takes the
+    /// Io capability and a `[]const []u8` scatter vector.
+    pub fn nextChunk(self: *StreamingChunker, io: std.Io, file: std.Io.File) !?[]const u8 {
         // Fill buffer if needed
         while (!self.eof and self.buf_len < self.cdc.max_size) {
-            const n = try file.read(self.buf[self.buf_len..]);
+            const n = try file.readStreaming(io, &.{self.buf[self.buf_len..]});
             if (n == 0) {
                 self.eof = true;
                 break;
@@ -236,8 +239,8 @@ test "StreamingChunker matches ChunkIterator" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const f = try tmp.dir.createFile(std.testing.io, "test.bin", .{});
-    try f.writeAll(&data);
-    f.close();
+    try f.writeStreamingAll(std.testing.io, &data);
+    f.close(std.testing.io);
 
     // Collect boundaries from ChunkIterator
     var iter = ChunkIterator.init(cdc, &data);
@@ -252,11 +255,11 @@ test "StreamingChunker matches ChunkIterator" {
     defer chunker.deinit();
 
     var file = try tmp.dir.openFile(std.testing.io, "test.bin", .{});
-    defer file.close();
+    defer file.close(std.testing.io);
 
     var actual: std.ArrayList(usize) = .empty;
     defer actual.deinit(allocator);
-    while (try chunker.nextChunk(file)) |chunk| {
+    while (try chunker.nextChunk(std.testing.io, file)) |chunk| {
         try actual.append(allocator, chunk.len);
     }
 
@@ -350,8 +353,13 @@ test "cut on exactly min_size input" {
 
 test "fuzz: chunking covers all bytes" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, input: []const u8) anyerror!void {
+        // Why: 0.16 changed the fuzz callback signature from (ctx, []const u8)
+        // to (ctx, *std.testing.Smith). Input bytes come via smith.slice.
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             const cdc = FastCDC.init(64, 256, 1024);
+            var buf: [64 * 1024]u8 = undefined;
+            const len = smith.slice(&buf);
+            const input = buf[0..len];
             var iter = ChunkIterator.init(cdc, input);
             var total: usize = 0;
             while (iter.next()) |b| {
