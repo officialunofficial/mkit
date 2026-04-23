@@ -1,24 +1,31 @@
 # mkit
 
-A content-addressed version control toolkit written in Zig.
+A content-addressed version control toolkit written in Rust.
 
 `mkit` is a generic content-addressed VCS — Git-like commits, refs,
 transports — plus a native, predicate-agnostic attestation subsystem
 (in-toto v1 Statements wrapped in DSSE envelopes) that any downstream
 service can attach witness signatures to commits with.
 
+The current tree is the **Rust port** under `rust/`. The original Zig
+implementation remains under `src/` as a read-only reference; it will
+be archived to `legacy/zig/` in a follow-up once the Rust binary has
+soaked. Both produce byte-identical objects, packs, refs, and
+attestations — golden vectors under `rust/tests/golden/` pin the
+cross-implementation contract.
+
 ## Quick start
 
 ```sh
-# Build (Zig 0.16.0):
-zig build
+# Build (Rust 1.95, edition 2024 — pinned in rust/rust-toolchain.toml):
+cd rust && cargo build --release
 
 # Initialize a repo, generate a key, commit:
-./zig-out/bin/mkit init
-./zig-out/bin/mkit keygen
-./zig-out/bin/mkit add some-file.txt
-./zig-out/bin/mkit commit -m "first commit"
-./zig-out/bin/mkit log
+./target/release/mkit init
+./target/release/mkit keygen
+./target/release/mkit add some-file.txt
+./target/release/mkit commit -m "first commit"
+./target/release/mkit log
 ```
 
 To push to a remote, declare a strict URL scheme (`mkit+file://`,
@@ -33,18 +40,40 @@ See [`docs/CLI.md`](docs/CLI.md) for the full CLI reference.
 
 ## Build
 
-Requires **Zig 0.16.0**.
+Requires **Rust 1.95** (pinned in `rust/rust-toolchain.toml`; rustup
+will install it automatically on first build).
 
 ```sh
-zig build                       # mkit binary → zig-out/bin/mkit
-zig build test                  # unit tests
-zig build test-all              # unit + integration
-zig build bench                 # benchmarks (ReleaseFast)
-zig build -Djemalloc            # link jemalloc (if installed)
+cd rust
+cargo build --release                       # mkit binary → target/release/mkit
+cargo test --workspace                      # all crates
+cargo fmt --check                           # formatting gate (CI-enforced)
+cargo clippy --all-targets -- -D warnings   # lint gate
 ```
 
+Workspace crates:
+
+| Crate | Purpose |
+|---|---|
+| `mkit-core` | hash, object, serialize, store, sign, chunker, delta, pack, refs, index, worktree, ignore, repo_lock, ops, protocol |
+| `mkit-attest` | JCS, in-toto v1 Statement, DSSE envelope, signers, verify |
+| `mkit-transport-{memory,file,http,s3,ssh}` | Transport trait implementations |
+| `mkit-cli` | the `mkit` binary |
+| `mkit-fuzz` | bounded property tests (cargo-fuzz compatible) |
+
+### Zig reference build (retained during soak)
+
+```sh
+zig build                       # mkit binary → zig-out/bin/mkit (Zig 0.16.0)
+```
+
+The Zig tree remains buildable for byte-for-byte parity checks against
+the Rust port. Golden vectors are harvested from it by
+`scripts/harvest-golden-vectors.sh`.
+
 `scripts/verify-rename.sh` is the rename-gate enforced in CI; it greps
-for forbidden legacy strings across the public build surface.
+for forbidden legacy strings across the public build surface (both
+`rust/` and `src/`).
 
 ## Architecture
 

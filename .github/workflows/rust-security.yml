@@ -5,7 +5,11 @@ on:
     - cron: "0 6 * * 1"   # Every Monday at 06:00 UTC
   pull_request:
     branches:
+      - main
       - rewrite/rust
+  push:
+    branches:
+      - main
 
 env:
   CARGO_TERM_COLOR: always
