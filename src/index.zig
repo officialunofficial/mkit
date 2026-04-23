@@ -7,6 +7,7 @@ const worktree_mod = @import("worktree.zig");
 const ignore_mod = @import("ignore.zig");
 const Hash = hash_mod.Hash;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 pub const index_file = ".mkit/index";
 
@@ -39,7 +40,7 @@ pub const Index = struct {
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) Index {
-        return .{ .entries = .{}, .allocator = allocator };
+        return .{ .entries = .empty, .allocator = allocator };
     }
 
     pub fn deinit(self: *Index) void {
@@ -68,30 +69,30 @@ pub const Index = struct {
 };
 
 /// Read an index from `.mkit/index`. Returns an empty index if the file doesn't exist.
-pub fn readIndex(allocator: Allocator, dir: std.fs.Dir) !Index {
-    const file = dir.openFile(index_file, .{}) catch |err| switch (err) {
+pub fn readIndex(allocator: Allocator, io: Io, dir: Io.Dir) !Index {
+    const file = dir.openFile(io, index_file, .{}) catch |err| switch (err) {
         error.FileNotFound => return Index.init(allocator),
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
-    const stat = try file.stat();
-    if (stat.size == 0) return Index.init(allocator);
-    if (stat.size > 64 * 1024 * 1024) return error.IndexTooLarge; // 64MB safety limit
+    const len = try file.length(io);
+    if (len == 0) return Index.init(allocator);
+    if (len > 64 * 1024 * 1024) return error.IndexTooLarge; // 64MB safety limit
 
-    const data = try allocator.alloc(u8, stat.size);
+    const data = try allocator.alloc(u8, @intCast(len));
     defer allocator.free(data);
-    const read = try file.readAll(data);
-    if (read != stat.size) return error.UnexpectedEof;
+    const read = try file.readPositionalAll(io, data, 0);
+    if (read != len) return error.UnexpectedEof;
 
     return deserializeIndex(allocator, data[0..read]);
 }
 
 /// Write an index to `.mkit/index`.
-pub fn writeIndex(dir: std.fs.Dir, idx: *const Index) !void {
+pub fn writeIndex(io: Io, dir: Io.Dir, idx: *const Index) !void {
     const data = try serializeIndex(idx.allocator, idx);
     defer idx.allocator.free(data);
-    try writeAtomicFile(dir, index_file, data);
+    try writeAtomicFile(io, dir, index_file, data);
 }
 
 /// Serialize the index to bytes.
@@ -164,31 +165,34 @@ fn deserializeIndex(allocator: Allocator, data: []const u8) !Index {
     return idx;
 }
 
-fn writeAtomicFile(dir: std.fs.Dir, path: []const u8, data: []const u8) !void {
-    var write_buffer: [1024]u8 = undefined;
-    var atomic_file = try dir.atomicFile(path, .{
-        .mode = std.fs.File.default_mode,
-        .write_buffer = &write_buffer,
+fn writeAtomicFile(io: Io, dir: Io.Dir, path: []const u8, data: []const u8) !void {
+    // Why: 0.16 replaces dir.atomicFile with createFileAtomic + File.Atomic.replace.
+    var atomic_file = try dir.createFileAtomic(io, path, .{
+        .replace = true,
     });
-    defer atomic_file.deinit();
+    defer atomic_file.deinit(io);
 
-    try atomic_file.file_writer.interface.writeAll(data);
-    try atomic_file.flush();
-    try atomic_file.file_writer.file.sync();
-    try atomic_file.renameIntoPlace();
+    var write_buffer: [1024]u8 = undefined;
+    var file_writer = atomic_file.file.writer(io, &write_buffer);
+
+    try file_writer.interface.writeAll(data);
+    try file_writer.flush();
+    try file_writer.file.sync(io);
+    try atomic_file.replace(io);
 }
 
 /// Stage a single file by path. Reads the file, hashes it, stores the blob,
 /// and adds or updates the index entry.
 pub fn addFile(
     allocator: Allocator,
+    io: Io,
     store: *store_mod.ObjectStore,
-    dir: std.fs.Dir,
+    dir: Io.Dir,
     idx: *Index,
     path: []const u8,
 ) !void {
     if (!validateIndexPath(path)) return error.InvalidPath;
-    const h = try worktree_mod.hashFile(allocator, store, dir, path);
+    const h = try worktree_mod.hashFile(allocator, io, store, dir, path);
 
     if (idx.findEntry(path)) |i| {
         idx.entries.items[i].object_hash = h;
@@ -206,17 +210,18 @@ pub fn addFile(
 /// Stage all non-ignored files in the working directory.
 pub fn addAll(
     allocator: Allocator,
+    io: Io,
     store: *store_mod.ObjectStore,
-    dir: std.fs.Dir,
+    dir: Io.Dir,
     idx: *Index,
 ) !void {
-    var ignores = try ignore_mod.load(allocator, dir);
+    var ignores = try ignore_mod.load(allocator, io, dir);
     defer ignores.deinit();
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         const path = entry.path;
 
@@ -228,7 +233,7 @@ pub fn addAll(
         const basename = std.fs.path.basename(path);
         if (ignores.isIgnored(basename, false)) continue;
 
-        try addFile(allocator, store, dir, idx, path);
+        try addFile(allocator, io, store, dir, idx, path);
     }
 }
 
@@ -265,10 +270,12 @@ pub fn buildCommitTreeFromIndex(
     base_tree: ?Hash,
     idx: *const Index,
 ) !Hash {
-    var flat = std.StringArrayHashMap(FlatPathEntry).init(allocator);
+    // Why: 0.16 drops managed std.StringArrayHashMap in favor of the unmanaged variant
+    // that takes the allocator per call.
+    var flat: std.StringArrayHashMapUnmanaged(FlatPathEntry) = .empty;
     defer {
         for (flat.keys()) |path| allocator.free(path);
-        flat.deinit();
+        flat.deinit(allocator);
     }
 
     if (base_tree) |tree_hash| {
@@ -299,7 +306,7 @@ pub fn buildCommitTreeFromIndex(
             };
         } else {
             const duped = try allocator.dupe(u8, entry.path);
-            try flat.put(duped, .{
+            try flat.put(allocator, duped, .{
                 .path = duped,
                 .mode = mode,
                 .object_hash = entry.object_hash,
@@ -354,7 +361,7 @@ fn collectTreeEntries(
     store: *store_mod.ObjectStore,
     tree_hash: Hash,
     prefix: []const u8,
-    flat: *std.StringArrayHashMap(FlatPathEntry),
+    flat: *std.StringArrayHashMapUnmanaged(FlatPathEntry),
 ) !void {
     var obj = try store.get(allocator, tree_hash);
     defer obj.deinit(allocator);
@@ -371,7 +378,7 @@ fn collectTreeEntries(
             .tree => try collectTreeEntries(allocator, store, entry.object_hash, full_path, flat),
             .blob, .symlink, .executable => {
                 const owned = try allocator.dupe(u8, full_path);
-                try flat.put(owned, .{
+                try flat.put(allocator, owned, .{
                     .path = owned,
                     .mode = entry.mode,
                     .object_hash = entry.object_hash,
@@ -509,22 +516,24 @@ test "index serialize and deserialize roundtrip" {
 }
 
 test "index readIndex returns empty for missing file" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var idx = try readIndex(allocator, tmp.dir);
+    var idx = try readIndex(allocator, io, tmp.dir);
     defer idx.deinit();
     try std.testing.expectEqual(@as(usize, 0), idx.entries.items.len);
 }
 
 test "index writeIndex and readIndex roundtrip" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     // Create .mkit directory for index file
-    try tmp.dir.createDirPath(std.testing.io, ".mkit");
+    try tmp.dir.createDirPath(io, ".mkit");
 
     var idx = Index.init(allocator);
     defer idx.deinit();
@@ -533,9 +542,9 @@ test "index writeIndex and readIndex roundtrip" {
     const h = hash_mod.hash("test content");
     try idx.entries.append(allocator, .{ .path = path, .status = .blob, .object_hash = h });
 
-    try writeIndex(tmp.dir, &idx);
+    try writeIndex(io, tmp.dir, &idx);
 
-    var idx2 = try readIndex(allocator, tmp.dir);
+    var idx2 = try readIndex(allocator, io, tmp.dir);
     defer idx2.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), idx2.entries.items.len);
@@ -544,26 +553,27 @@ test "index writeIndex and readIndex roundtrip" {
 }
 
 test "index addFile stages a file" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     // Create a file to stage
-    const f = try tmp.dir.createFile(std.testing.io, "hello.txt", .{});
-    try f.writeAll("hello world");
-    f.close();
+    const f = try tmp.dir.createFile(io, "hello.txt", .{});
+    try f.writeStreamingAll(io, "hello world");
+    f.close(io);
 
     // Init object store
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(io, store_tmp.dir);
     defer store.close();
 
     var idx = Index.init(allocator);
     defer idx.deinit();
 
-    try addFile(allocator, &store, tmp.dir, &idx, "hello.txt");
+    try addFile(allocator, io, &store, tmp.dir, &idx, "hello.txt");
 
     try std.testing.expectEqual(@as(usize, 1), idx.entries.items.len);
     try std.testing.expectEqualStrings("hello.txt", idx.entries.items[0].path);
@@ -574,6 +584,7 @@ test "index addFile stages a file" {
 }
 
 test "index addFile updates existing entry" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});
@@ -581,26 +592,26 @@ test "index addFile updates existing entry" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(io, store_tmp.dir);
     defer store.close();
 
     // Create and stage a file
-    const f1 = try tmp.dir.createFile(std.testing.io, "hello.txt", .{});
-    try f1.writeAll("version 1");
-    f1.close();
+    const f1 = try tmp.dir.createFile(io, "hello.txt", .{});
+    try f1.writeStreamingAll(io, "version 1");
+    f1.close(io);
 
     var idx = Index.init(allocator);
     defer idx.deinit();
 
-    try addFile(allocator, &store, tmp.dir, &idx, "hello.txt");
+    try addFile(allocator, io, &store, tmp.dir, &idx, "hello.txt");
     const hash1 = idx.entries.items[0].object_hash;
 
     // Update the file and re-stage
-    const f2 = try tmp.dir.createFile(std.testing.io, "hello.txt", .{});
-    try f2.writeAll("version 2");
-    f2.close();
+    const f2 = try tmp.dir.createFile(io, "hello.txt", .{});
+    try f2.writeStreamingAll(io, "version 2");
+    f2.close(io);
 
-    try addFile(allocator, &store, tmp.dir, &idx, "hello.txt");
+    try addFile(allocator, io, &store, tmp.dir, &idx, "hello.txt");
 
     // Should still be 1 entry, but with a different hash
     try std.testing.expectEqual(@as(usize, 1), idx.entries.items.len);
@@ -658,11 +669,12 @@ test "index stagedCount excludes removed entries" {
 }
 
 test "index buildTreeFromIndex flat" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(io, store_tmp.dir);
     defer store.close();
 
     // Store some blobs
@@ -690,11 +702,12 @@ test "index buildTreeFromIndex flat" {
 }
 
 test "index buildTreeFromIndex nested directories" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(io, store_tmp.dir);
     defer store.close();
 
     const h1 = try store.put(allocator, object.Object{ .blob = .{ .data = "root file" } });
@@ -734,11 +747,12 @@ test "index buildTreeFromIndex nested directories" {
 }
 
 test "index buildTreeFromIndex excludes removed entries" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(io, store_tmp.dir);
     defer store.close();
 
     const h1 = try store.put(allocator, object.Object{ .blob = .{ .data = "kept" } });
@@ -761,39 +775,40 @@ test "index buildTreeFromIndex excludes removed entries" {
 }
 
 test "index addAll stages all non-ignored files" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     // Create files
-    const f1 = try tmp.dir.createFile(std.testing.io, "a.txt", .{});
-    try f1.writeAll("aaa");
-    f1.close();
-    const f2 = try tmp.dir.createFile(std.testing.io, "b.txt", .{});
-    try f2.writeAll("bbb");
-    f2.close();
+    const f1 = try tmp.dir.createFile(io, "a.txt", .{});
+    try f1.writeStreamingAll(io, "aaa");
+    f1.close(io);
+    const f2 = try tmp.dir.createFile(io, "b.txt", .{});
+    try f2.writeStreamingAll(io, "bbb");
+    f2.close(io);
 
     // Create an ignore file
-    const ig = try tmp.dir.createFile(std.testing.io, ".mkitignore", .{});
-    try ig.writeAll("*.log\n");
-    ig.close();
-    const f3 = try tmp.dir.createFile(std.testing.io, "debug.log", .{});
-    try f3.writeAll("log stuff");
-    f3.close();
+    const ig = try tmp.dir.createFile(io, ".mkitignore", .{});
+    try ig.writeStreamingAll(io, "*.log\n");
+    ig.close(io);
+    const f3 = try tmp.dir.createFile(io, "debug.log", .{});
+    try f3.writeStreamingAll(io, "log stuff");
+    f3.close(io);
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(io, store_tmp.dir);
     defer store.close();
 
     var idx = Index.init(allocator);
     defer idx.deinit();
 
-    var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
-    defer work_dir.close();
+    var work_dir = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer work_dir.close(io);
 
-    try addAll(allocator, &store, work_dir, &idx);
+    try addAll(allocator, io, &store, work_dir, &idx);
 
     // Should have a.txt, b.txt, and .mkitignore but NOT debug.log
     try std.testing.expectEqual(@as(usize, 3), idx.entries.items.len);
@@ -816,6 +831,7 @@ test "index corrupt data returns error" {
 }
 
 test "reject path traversal in staged paths" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});
@@ -823,22 +839,23 @@ test "reject path traversal in staged paths" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(io, store_tmp.dir);
     defer store.close();
 
     var idx = Index.init(allocator);
     defer idx.deinit();
 
-    try std.testing.expectError(error.InvalidPath, addFile(allocator, &store, tmp.dir, &idx, "../secret.txt"));
+    try std.testing.expectError(error.InvalidPath, addFile(allocator, io, &store, tmp.dir, &idx, "../secret.txt"));
     try std.testing.expectError(error.InvalidPath, removeFile(&idx, allocator, "../secret.txt"));
 }
 
 test "build commit tree preserves unstaged tracked files" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(io, tmp.dir);
     defer store.close();
 
     const base_a_hash = try store.put(allocator, object.Object{ .blob = .{ .data = "tracked-a" } });
@@ -873,11 +890,12 @@ test "build commit tree preserves unstaged tracked files" {
 }
 
 test "build commit tree applies staged removals without live additions" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(io, tmp.dir);
     defer store.close();
 
     const blob_hash = try store.put(allocator, object.Object{ .blob = .{ .data = "tracked" } });
@@ -904,11 +922,12 @@ test "build commit tree applies staged removals without live additions" {
 }
 
 test "build commit tree rejects conflicting staged paths" {
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(io, tmp.dir);
     defer store.close();
 
     const hash_a = try store.put(allocator, object.Object{ .blob = .{ .data = "a" } });
