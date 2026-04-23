@@ -421,6 +421,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkit-transport-file"
+version = "0.2.1"
+dependencies = [
+ "mkit-core",
+ "tempfile",
+]
+
+[[package]]
+name = "mkit-transport-memory"
+version = "0.2.1"
+dependencies = [
+ "mkit-core",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

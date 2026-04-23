@@ -1,0 +1,766 @@
+//! Local-filesystem [`Transport`] implementation for e2e tests.
+//!
+//! Port of `src/transport/file.zig` — stores pack files under
+//! `<root>/packs/<64-hex>` and ref files under `<root>/refs/...`,
+//! mirroring the layout used by the integration test scripts.
+//!
+//! ## On-disk layout
+//!
+//! ```text
+//! <root>/
+//!   packs/<64-hex>          — raw pack bytes, written atomically
+//!   refs/heads/main         — 65-byte wire (64-hex + '\n')
+//!   refs/tags/v1.0          — nested dirs created on demand
+//! ```
+//!
+//! ## CAS atomicity guarantees
+//!
+//! | Variant   | Mechanism                                              | Race behaviour |
+//! |-----------|--------------------------------------------------------|----------------|
+//! | `Any`     | `write_atomic`: tmp file → `fsync` → `rename` → parent | Last writer wins. Concurrent writers never expose a half-written file because `rename(2)` is atomic on POSIX. |
+//! | `Missing` | `write_create_new`: same tmp+fsync, then a hard-link    | Only the first writer succeeds. If two concurrent callers both see "absent" before writing, only one `link(2)` wins; the other gets `AlreadyExists` → `RefConflict`. |
+//! | `Match(H)`| `Mutex`-protected read-then-`write_atomic`              | Protected within a single process. Cross-process TOCTOU is a documented v1 gap (same as the local `refs` module). |
+//!
+//! The `Mutex` inside [`FileTransport`] serialises `Match` CAS within
+//! one process. Cross-process users that need true atomicity should use
+//! the HTTP or S3 transport.
+
+#![forbid(unsafe_code)]
+
+use std::fs;
+use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use mkit_core::hash::Hash;
+use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, TransportResult};
+use mkit_core::refs::{
+    Ref, decode_ref_wire, encode_ref_wire, validate_ref_name, validate_ref_prefix,
+};
+
+// We need write_atomic and write_create_new from mkit_core's private `atomic`
+// module. Since they are `pub(crate)`, we re-implement them locally here.
+// The logic is identical to `mkit_core::atomic`.
+
+use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Atomically write `bytes` to `dest` using a temp-file + fsync +
+/// rename + parent-dir-fsync sequence. Creates parent dirs when
+/// `make_parents` is `true`. Mirrors `mkit_core::atomic::write_atomic`.
+fn write_atomic(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result<()> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination path has no parent"))?;
+    if make_parents {
+        fs::create_dir_all(parent)?;
+    }
+
+    let file_name = dest
+        .file_name()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination has no file name"))?
+        .to_string_lossy();
+    let pid = process::id();
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
+    let tmp_path = parent.join(&tmp_name);
+
+    {
+        use std::io::Write;
+        let mut f = fs::File::create(&tmp_path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+
+    fs::rename(&tmp_path, dest)?;
+    let _ = sync_parent(parent); // best-effort
+    Ok(())
+}
+
+/// Exclusive-create variant: writes `bytes` to `dest` only if `dest`
+/// does not already exist. Returns `Ok(true)` on success, `Ok(false)`
+/// if the destination was already present. Mirrors
+/// `mkit_core::atomic::write_create_new`.
+fn write_create_new(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result<bool> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination path has no parent"))?;
+    if make_parents {
+        fs::create_dir_all(parent)?;
+    }
+
+    let file_name = dest
+        .file_name()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination has no file name"))?
+        .to_string_lossy();
+    let pid = process::id();
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
+    let tmp_path = parent.join(&tmp_name);
+
+    {
+        use std::io::Write;
+        let mut f = fs::File::create(&tmp_path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+
+    // Hard-link tmp → dest (atomic, fails with AlreadyExists if dest exists).
+    match fs::hard_link(&tmp_path, dest) {
+        Ok(()) => {
+            let _ = fs::remove_file(&tmp_path);
+            let _ = sync_parent(parent);
+            Ok(true)
+        }
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(&tmp_path);
+            Ok(false)
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path);
+            Err(e)
+        }
+    }
+}
+
+/// Best-effort fsync of a directory.
+fn sync_parent(dir: &Path) -> io::Result<()> {
+    let d = fs::File::open(dir)?;
+    d.sync_all()
+}
+
+// ---------------------------------------------------------------------------
+// FileTransport
+// ---------------------------------------------------------------------------
+
+/// Local-filesystem transport. Every instance holds a root `PathBuf`
+/// and a `Mutex` protecting the `Match` CAS read-then-write sequence.
+///
+/// The `Mutex` is unit-typed (zero overhead for lock/unlock when
+/// uncontended); all other operations (`Any`, `Missing`, pack I/O) do
+/// **not** acquire it.
+#[derive(Debug)]
+pub struct FileTransport {
+    root: PathBuf,
+    /// Serialises `Match` CAS within a single process.
+    cas_lock: Mutex<()>,
+}
+
+impl FileTransport {
+    /// Create a `FileTransport` rooted at `root`. The directory must
+    /// already exist; sub-directories (`packs/`, `refs/`) are created
+    /// on demand.
+    #[must_use]
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            cas_lock: Mutex::new(()),
+        }
+    }
+
+    fn pack_path(&self, key: &PackKey) -> PathBuf {
+        self.root.join("packs").join(key.to_hex())
+    }
+
+    fn ref_path(&self, name: &str) -> PathBuf {
+        self.root.join(name)
+    }
+}
+
+impl Transport for FileTransport {
+    // ------------------------------------------------------------------
+    // Pack verbs
+    // ------------------------------------------------------------------
+
+    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        let dest = self.pack_path(key);
+        write_atomic(&dest, bytes, true)
+            .map_err(|e| TransportError::RemoteError(format!("upload_pack I/O error: {e}")))
+    }
+
+    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        let path = self.pack_path(key);
+        match fs::read(&path) {
+            Ok(bytes) => Ok(bytes),
+            Err(e) if e.kind() == ErrorKind::NotFound => Err(TransportError::PackNotFound),
+            Err(e) => Err(TransportError::RemoteError(format!(
+                "download_pack I/O error: {e}"
+            ))),
+        }
+    }
+
+    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+        Ok(self.pack_path(key).exists())
+    }
+
+    // ------------------------------------------------------------------
+    // Ref verbs
+    // ------------------------------------------------------------------
+
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+    ) -> TransportResult<()> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.to_owned()));
+        }
+
+        let dest = self.ref_path(name);
+        let wire = encode_ref_wire(hash);
+
+        match condition {
+            RefWriteCondition::Any => {
+                // Unconditional atomic overwrite.
+                write_atomic(&dest, &wire, true).map_err(|e| {
+                    TransportError::RemoteError(format!("update_ref(Any) I/O error: {e}"))
+                })
+            }
+
+            RefWriteCondition::Missing => {
+                // Exclusive create: succeeds only when the file is absent.
+                match write_create_new(&dest, &wire, true) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(TransportError::RefConflict),
+                    Err(e) => Err(TransportError::RemoteError(format!(
+                        "update_ref(Missing) I/O error: {e}"
+                    ))),
+                }
+            }
+
+            RefWriteCondition::Match(expected) => {
+                // Serialise within-process with a Mutex, then read-check-write.
+                // Cross-process TOCTOU is a documented v1 gap.
+                let _guard = self
+                    .cas_lock
+                    .lock()
+                    .expect("FileTransport cas_lock poisoned");
+
+                let current = read_ref_raw(&dest).map_err(|e| {
+                    TransportError::RemoteError(format!("update_ref(Match) read error: {e}"))
+                })?;
+                match current {
+                    Some(c) if c == expected => {}
+                    _ => return Err(TransportError::RefConflict),
+                }
+
+                write_atomic(&dest, &wire, true).map_err(|e| {
+                    TransportError::RemoteError(format!("update_ref(Match) I/O error: {e}"))
+                })
+            }
+        }
+    }
+
+    fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.to_owned()));
+        }
+        let path = self.ref_path(name);
+        read_ref_raw(&path)
+            .map_err(|e| TransportError::RemoteError(format!("read_ref I/O error: {e}")))
+    }
+
+    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
+        if !validate_ref_prefix(prefix) {
+            return Err(TransportError::InvalidRef(prefix.to_owned()));
+        }
+
+        let prefix_trimmed = prefix.trim_end_matches('/');
+        let dir = if prefix_trimmed.is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(prefix_trimmed)
+        };
+
+        let mut out = Vec::new();
+        collect_refs(&dir, &dir, &mut out)?;
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Read and decode the hash from a ref file. Returns `None` if the
+/// file does not exist; propagates other I/O errors.
+fn read_ref_raw(path: &Path) -> io::Result<Option<Hash>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(decode_ref_wire(&bytes)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Recursively walk `dir`, collecting all ref files whose full logical
+/// name starts with `prefix`. Entries are pushed to `out` with the
+/// prefix stripped.
+///
+/// `root_dir` is the directory corresponding to `prefix_trimmed` (the
+/// first call uses `prefix_trimmed`'s directory). `current_dir` is the
+/// directory currently being iterated. We track the relative path from
+/// `root_dir` to each file to build the suffix name.
+fn collect_refs(root_dir: &Path, current_dir: &Path, out: &mut Vec<Ref>) -> TransportResult<()> {
+    let entries = match fs::read_dir(current_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(TransportError::RemoteError(format!(
+                "list_refs I/O error: {e}"
+            )));
+        }
+    };
+
+    for entry in entries {
+        let entry = entry
+            .map_err(|e| TransportError::RemoteError(format!("list_refs dir entry error: {e}")))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| TransportError::RemoteError(format!("list_refs file_type error: {e}")))?;
+
+        if file_type.is_dir() {
+            collect_refs(root_dir, &path, out)?;
+        } else if file_type.is_file() {
+            // Build the name relative to root_dir.
+            let rel = path
+                .strip_prefix(root_dir)
+                .expect("path is under root_dir")
+                .to_string_lossy()
+                .replace('\\', "/"); // normalise Windows separators
+
+            // Only include entries that are valid ref name segments.
+            if !validate_ref_name(&rel) {
+                continue;
+            }
+
+            if let Ok(bytes) = fs::read(&path)
+                && let Some(hash) = decode_ref_wire(&bytes)
+            {
+                out.push(Ref {
+                    name: rel,
+                    hash: Some(hash),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mkit_core::hash::hash as blake3_hash;
+    use mkit_core::protocol::RefWriteCondition;
+    use tempfile::TempDir;
+
+    fn tmp() -> TempDir {
+        tempfile::tempdir().expect("create tempdir")
+    }
+
+    fn pack_key_for(data: &[u8]) -> PackKey {
+        PackKey::from(blake3_hash(data))
+    }
+
+    // ------------------------------------------------------------------
+    // Pack verb tests (6 tests)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn upload_and_download_pack() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let data = b"hello packfile content";
+        let key = pack_key_for(data);
+        t.upload_pack(data, &key).unwrap();
+        let got = t.download_pack(&key).unwrap();
+        assert_eq!(got, data);
+    }
+
+    #[test]
+    fn download_missing_pack_returns_not_found() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let key = pack_key_for(b"nonexistent pack");
+        let err = t.download_pack(&key).unwrap_err();
+        assert!(matches!(err, TransportError::PackNotFound));
+    }
+
+    #[test]
+    fn upload_pack_creates_packs_directory() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        assert!(!dir.path().join("packs").exists());
+        let data = b"first pack";
+        let key = pack_key_for(data);
+        t.upload_pack(data, &key).unwrap();
+        assert!(dir.path().join("packs").is_dir());
+    }
+
+    #[test]
+    fn pack_exists_before_and_after_upload() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let data = b"exists test";
+        let key = pack_key_for(data);
+        assert!(!t.pack_exists(&key).unwrap());
+        t.upload_pack(data, &key).unwrap();
+        assert!(t.pack_exists(&key).unwrap());
+    }
+
+    #[test]
+    fn upload_pack_overwrites_idempotently() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let key = PackKey::new([0x77u8; 32]);
+        t.upload_pack(b"first", &key).unwrap();
+        t.upload_pack(b"second", &key).unwrap();
+        assert_eq!(t.download_pack(&key).unwrap(), b"second");
+    }
+
+    #[test]
+    fn pack_filename_is_64_hex_chars() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let data = b"hex filename test";
+        let key = pack_key_for(data);
+        t.upload_pack(data, &key).unwrap();
+        let expected_name = key.to_hex();
+        assert!(dir.path().join("packs").join(&expected_name).exists());
+        assert_eq!(expected_name.len(), 64);
+    }
+
+    // ------------------------------------------------------------------
+    // Ref verb tests (10 tests)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn write_and_read_ref() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"commit-data");
+        t.write_ref("refs/heads/main", &h).unwrap();
+        let read = t.read_ref("refs/heads/main").unwrap();
+        assert_eq!(read, Some(h));
+    }
+
+    #[test]
+    fn write_ref_creates_parent_dirs() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"deep-ref");
+        t.write_ref("refs/heads/feature/deep/branch", &h).unwrap();
+        // Intermediate dirs were created.
+        assert!(dir.path().join("refs/heads/feature/deep").is_dir());
+        assert_eq!(
+            t.read_ref("refs/heads/feature/deep/branch").unwrap(),
+            Some(h)
+        );
+    }
+
+    #[test]
+    fn read_missing_ref_returns_none() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        assert_eq!(t.read_ref("refs/heads/nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn write_ref_overwrites_previous() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h1 = blake3_hash(b"commit-v1");
+        let h2 = blake3_hash(b"commit-v2");
+        t.write_ref("refs/heads/main", &h1).unwrap();
+        t.write_ref("refs/heads/main", &h2).unwrap();
+        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h2));
+    }
+
+    #[test]
+    fn update_ref_match_success_writes_new_hash() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h_old = blake3_hash(b"cas-old");
+        let h_new = blake3_hash(b"cas-new");
+        t.write_ref("refs/heads/main", &h_old).unwrap();
+        t.update_ref("refs/heads/main", RefWriteCondition::Match(h_old), &h_new)
+            .unwrap();
+        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h_new));
+    }
+
+    #[test]
+    fn update_ref_match_stale_returns_conflict() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h_current = blake3_hash(b"current");
+        let h_stale = blake3_hash(b"stale");
+        let h_next = blake3_hash(b"next");
+        t.write_ref("refs/heads/main", &h_current).unwrap();
+        let err = t
+            .update_ref(
+                "refs/heads/main",
+                RefWriteCondition::Match(h_stale),
+                &h_next,
+            )
+            .unwrap_err();
+        assert!(matches!(err, TransportError::RefConflict));
+        // Ref unchanged.
+        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h_current));
+    }
+
+    #[test]
+    fn update_ref_missing_creates_when_absent() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"initial");
+        t.update_ref("refs/heads/main", RefWriteCondition::Missing, &h)
+            .unwrap();
+        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h));
+    }
+
+    #[test]
+    fn update_ref_missing_fails_when_present() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"initial");
+        t.update_ref("refs/heads/main", RefWriteCondition::Missing, &h)
+            .unwrap();
+        let err = t
+            .update_ref("refs/heads/main", RefWriteCondition::Missing, &h)
+            .unwrap_err();
+        assert!(matches!(err, TransportError::RefConflict));
+    }
+
+    #[test]
+    fn update_ref_invalid_name_returns_error() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"h");
+        let err = t.update_ref("", RefWriteCondition::Any, &h).unwrap_err();
+        assert!(matches!(err, TransportError::InvalidRef(_)));
+    }
+
+    #[test]
+    fn read_ref_invalid_name_returns_error() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let err = t.read_ref("/bad").unwrap_err();
+        assert!(matches!(err, TransportError::InvalidRef(_)));
+    }
+
+    // ------------------------------------------------------------------
+    // list_refs tests (8 tests)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn list_refs_returns_suffix_only() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        t.write_ref("refs/heads/main", &blake3_hash(b"c1")).unwrap();
+        t.write_ref("refs/heads/develop", &blake3_hash(b"c2"))
+            .unwrap();
+        t.write_ref("refs/tags/v1.0", &blake3_hash(b"c3")).unwrap();
+
+        let heads = t.list_refs("refs/heads").unwrap();
+        assert_eq!(heads.len(), 2);
+        let names: Vec<&str> = heads.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["develop", "main"]);
+    }
+
+    #[test]
+    fn list_refs_all_with_empty_prefix() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        t.write_ref("refs/heads/main", &blake3_hash(b"m")).unwrap();
+        t.write_ref("refs/tags/v1", &blake3_hash(b"t")).unwrap();
+        let all = t.list_refs("").unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn list_refs_returns_empty_when_dir_missing() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let refs = t.list_refs("refs/heads").unwrap();
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn list_refs_sorted_alphabetically() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"h");
+        t.write_ref("refs/heads/zebra", &h).unwrap();
+        t.write_ref("refs/heads/alpha", &h).unwrap();
+        t.write_ref("refs/heads/middle", &h).unwrap();
+        let refs = t.list_refs("refs/heads").unwrap();
+        assert_eq!(refs.len(), 3);
+        assert_eq!(refs[0].name, "alpha");
+        assert_eq!(refs[1].name, "middle");
+        assert_eq!(refs[2].name, "zebra");
+    }
+
+    #[test]
+    fn list_refs_invalid_prefix_returns_error() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let err = t.list_refs("/").unwrap_err();
+        assert!(matches!(err, TransportError::InvalidRef(_)));
+    }
+
+    #[test]
+    fn list_refs_with_trailing_slash_prefix() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        t.write_ref("refs/heads/main", &blake3_hash(b"m")).unwrap();
+        let refs = t.list_refs("refs/heads/").unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "main");
+    }
+
+    #[test]
+    fn list_refs_does_not_include_pack_dir() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        // Upload a pack (creates packs/ directory).
+        let data = b"some pack";
+        let key = pack_key_for(data);
+        t.upload_pack(data, &key).unwrap();
+        // list_refs("") should not return the pack hex file as a ref.
+        t.write_ref("refs/heads/main", &blake3_hash(b"m")).unwrap();
+        let all = t.list_refs("").unwrap();
+        // Should only include refs/heads/main, not the pack key.
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].name, "refs/heads/main");
+    }
+
+    #[test]
+    fn list_refs_no_tmp_files_leaked() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        t.write_ref("refs/heads/main", &blake3_hash(b"m")).unwrap();
+        // Overwrite a few times.
+        for i in 0..5u8 {
+            t.write_ref("refs/heads/main", &blake3_hash(&[i])).unwrap();
+        }
+        // No .tmp. files should remain.
+        let count = fs::read_dir(dir.path().join("refs/heads"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .count();
+        assert_eq!(count, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Full-interface integration test
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn full_interface_roundtrip() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+
+        // pack verbs
+        let pack_data = b"transport-vtable-test-payload";
+        let key = pack_key_for(pack_data);
+        assert!(!t.pack_exists(&key).unwrap());
+        t.upload_pack(pack_data, &key).unwrap();
+        assert!(t.pack_exists(&key).unwrap());
+        assert_eq!(t.download_pack(&key).unwrap(), pack_data);
+
+        // ref verbs
+        let h = blake3_hash(b"ref-data");
+        t.write_ref("refs/heads/main", &h).unwrap();
+        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h));
+        assert_eq!(t.read_ref("refs/heads/nope").unwrap(), None);
+
+        let refs = t.list_refs("refs/heads").unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "main");
+        assert_eq!(refs[0].hash, Some(h));
+    }
+
+    // ------------------------------------------------------------------
+    // Concurrent write test (write_ref Any never exposes truncated file)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_any_writes_never_expose_empty_file() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = tmp();
+        let t = Arc::new(FileTransport::new(dir.path()));
+
+        let h_old = blake3_hash(b"concurrent-old");
+        let h_new = blake3_hash(b"concurrent-new");
+        t.write_ref("refs/heads/main", &h_old).unwrap();
+
+        let t2 = Arc::clone(&t);
+        let writer = thread::spawn(move || {
+            for _ in 0..50 {
+                let _ = t2.write_ref("refs/heads/main", &h_new);
+            }
+        });
+
+        // Meanwhile, read and assert the ref is always one of the two valid hashes.
+        for _ in 0..50 {
+            if let Ok(Some(v)) = t.read_ref("refs/heads/main") {
+                assert!(v == h_old || v == h_new, "unexpected hash value");
+            }
+        }
+
+        writer.join().expect("writer thread panicked");
+
+        // Final state must be one of the two valid hashes.
+        let final_h = t.read_ref("refs/heads/main").unwrap();
+        assert!(
+            final_h == Some(h_old) || final_h == Some(h_new),
+            "unexpected final state"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Missing-race: two threads competing for Missing → only one wins
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_missing_only_one_writer_wins() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = tmp();
+        let t = Arc::new(FileTransport::new(dir.path()));
+        let h = blake3_hash(b"race-missing");
+
+        let results: Vec<_> = (0..4)
+            .map(|_| {
+                let t2 = Arc::clone(&t);
+                let h2 = h;
+                thread::spawn(move || {
+                    t2.update_ref("refs/heads/race", RefWriteCondition::Missing, &h2)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|jh| jh.join().expect("thread panicked"))
+            .collect();
+
+        let successes = results.iter().filter(|r| r.is_ok()).count();
+        let conflicts = results
+            .iter()
+            .filter(|r| matches!(r, Err(TransportError::RefConflict)))
+            .count();
+        assert_eq!(successes, 1, "exactly one Missing writer should succeed");
+        assert_eq!(conflicts, 3, "the other three should get RefConflict");
+    }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "mkit-transport-file"
+description = "mkit file:// transport — local-filesystem backend for e2e tests"
+keywords = ["mkit", "vcs", "transport"]
+categories = ["filesystem"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mkit-core = { path = "../mkit-core" }
+
+[dev-dependencies]
+tempfile = "3"
