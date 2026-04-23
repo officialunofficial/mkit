@@ -14,6 +14,7 @@ members = [
     "crates/mkit-transport-http",
     "crates/mkit-transport-s3",
     "crates/mkit-transport-ssh",
+    "crates/mkit-cli",
 ]
 
 [workspace.package]
