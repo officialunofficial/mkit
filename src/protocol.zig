@@ -152,7 +152,16 @@ pub const RemoteUrl = union(enum) {
 ///   http://host:port/v1                 → HTTP transport
 ///   ssh://user@host:port/path           → SSH transport
 ///   user@host:path                      → SSH transport (SCP-style)
-pub fn parseUrl(url: []const u8) !RemoteUrl {
+pub fn parseUrl(raw_url: []const u8) !RemoteUrl {
+    // Strict namespace: mkit remote URLs are prefixed with `mkit+<scheme>://`.
+    // Strip the `mkit+` prefix here so the legacy body below can match the
+    // unqualified scheme. Bare `file://` / `https://` / `ssh://` / etc. are
+    // still accepted for backwards-compat.
+    const url = if (std.mem.startsWith(u8, raw_url, "mkit+"))
+        raw_url["mkit+".len..]
+    else
+        raw_url;
+
     if (std.mem.startsWith(u8, url, "file://")) {
         const path = url["file://".len..];
         if (path.len == 0) return error.InvalidUrl;
