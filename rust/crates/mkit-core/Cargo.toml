@@ -1,0 +1,22 @@
+[package]
+name = "mkit-core"
+description = "mkit core: BLAKE3 hashing and canonical v1 object byte format"
+keywords = ["mkit", "vcs", "blake3", "content-addressed"]
+categories = ["data-structures", "encoding"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = "1"
+thiserror = "2"
+
+[dev-dependencies]
+hex = "0.4"
