@@ -48,7 +48,11 @@ pub fn stderrIsTty() bool {
 /// Returns the value portion of `NAME=VALUE`, or null if the name is not
 /// set. Never heap-allocates; the returned slice is valid for as long as
 /// the process does not mutate its environment.
-fn posixGetenv(name: []const u8) ?[]const u8 {
+///
+/// Exposed as `pub` so that main.zig's editor-resolution path can reach
+/// $EDITOR / $VISUAL after `std.posix.getenv` was removed from the stdlib
+/// in Zig 0.16.
+pub fn posixGetenv(name: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (std.c.environ[i]) |entry_ptr| : (i += 1) {
         const entry = std.mem.sliceTo(entry_ptr, 0);
