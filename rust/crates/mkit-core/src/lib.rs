@@ -36,6 +36,9 @@ pub mod refs;
 pub mod repo_lock;
 pub mod worktree;
 
+// Phase 7a — transport trait surface (vtable + SSH framing + retry policy).
+pub mod protocol;
+
 pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher};
 pub use object::{
     Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind, MAGIC,
@@ -80,6 +83,16 @@ pub use refs::{
 pub use repo_lock::{DEFAULT_TIMEOUT as LOCK_DEFAULT_TIMEOUT, LockError, LockResult, RepoLock};
 pub use worktree::{
     CHUNK_THRESHOLD, MAX_FILE_BYTES, WorktreeError, WorktreeResult, validate_symlink_target,
+};
+
+// Phase 7a — transport protocol re-exports.
+pub use protocol::{
+    BACKOFF_CAP, BACKOFF_INITIAL, BACKOFF_MAX_ATTEMPTS, BackoffIterator, COND_ANY, COND_MATCH,
+    COND_MISSING, FRAME_HEADER_LEN, HELLO_NAME_MAX, HELLO_VERSION_MAX, MAX_PAYLOAD_LEN, OP_CLOSE,
+    OP_DOWNLOAD_PACK, OP_HELLO, OP_LIST_REFS, OP_PACK_EXISTS, OP_READ_REF, OP_UPDATE_REF,
+    OP_UPLOAD_PACK, OP_WRITE_REF, PackKey, SSH_BINARY_NAME, SSH_PROTO_VERSION, STATUS_ERROR,
+    STATUS_NULL, STATUS_OK, STATUS_UNSUPPORTED, Transport, TransportError, TransportResult,
+    decode_frame, encode_frame, encode_hello_payload, is_retryable, pack_key_from_hex,
 };
 
 // Phase 5 — ops re-exports (OPS1: diff/graph/merge/cherry_pick).
