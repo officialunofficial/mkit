@@ -82,9 +82,11 @@ pub use worktree::{
     CHUNK_THRESHOLD, MAX_FILE_BYTES, WorktreeError, WorktreeResult, validate_symlink_target,
 };
 
-// Phase 5a — ops re-exports.
-// Pulled out at the crate root so downstream callers can write
-// `mkit_core::diff_trees` rather than `mkit_core::ops::diff::diff_trees`.
+// Phase 5 — ops re-exports (OPS1: diff/graph/merge/cherry_pick).
+// OPS2's rebase/bisect/blame/stash/restore are accessed via
+// `mkit_core::ops::{rebase, bisect, ...}` directly rather than re-exported
+// at the crate root — the submodule is typically the right import scope
+// for state-machine APIs.
 pub use ops::{
     CherryPickError, CherryPickResult, Conflict, ConflictKind, DiffEntry, DiffKind, DiffResult,
     MergeResult, cherry_pick, collect_ancestor_set, diff_trees, find_merge_base, is_ancestor,
