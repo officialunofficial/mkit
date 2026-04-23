@@ -80,6 +80,9 @@ pub const S3Transport = struct {
         .updateRef = updateRefImpl,
         .readRef = readRefImpl,
         .listRefs = listRefsImpl,
+        .uploadAttestation = uploadAttestationImpl,
+        .downloadAttestation = downloadAttestationImpl,
+        .listAttestations = listAttestationsImpl,
     };
 
     // -- Path helpers (pub for testing) --
@@ -106,6 +109,34 @@ pub const S3Transport = struct {
     /// Returns "list-type=2&prefix=<prefix>" (caller owns returned slice).
     pub fn buildListQuery(allocator: Allocator, prefix: []const u8) ![]u8 {
         return std.fmt.allocPrint(allocator, "list-type=2&prefix={s}", .{prefix});
+    }
+
+    /// Build the S3 object key for an attestation envelope:
+    /// `"attestations/<commit-hex>/<att-id-hex>.dsse"`.
+    pub fn attestationObjectKey(commit: Hash, att_id: Hash) [13 + 64 + 1 + 64 + 5]u8 {
+        return protocol.attestationKey(commit, att_id);
+    }
+
+    /// Build the `list-type=2&prefix=attestations/<commit-hex>/` query.
+    pub fn buildAttestationListQuery(allocator: Allocator, commit: Hash) ![]u8 {
+        const commit_hex = hash_mod.toHex(commit);
+        return std.fmt.allocPrint(
+            allocator,
+            "list-type=2&prefix=attestations/{s}/",
+            .{&commit_hex},
+        );
+    }
+
+    /// Parse an attestation id out of an S3 key like
+    /// `"attestations/<commit-hex>/<att-id-hex>.dsse"`. Returns null on junk.
+    pub fn parseAttestationKey(key: []const u8) ?Hash {
+        const prefix = "attestations/";
+        if (!std.mem.startsWith(u8, key, prefix)) return null;
+        const rest = key[prefix.len..];
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+        if (slash != 64) return null;
+        const fname = rest[slash + 1 ..];
+        return protocol.parseAttestationFilename(fname);
     }
 
     // -- HTTP response --
@@ -406,6 +437,146 @@ pub const S3Transport = struct {
             .forbidden => return error.AccessDenied,
             else => return error.ServerError,
         }
+    }
+
+    // -- Attestation verbs (SPEC-ATTESTATIONS §7.3) --
+    //
+    // Layout mirrors the on-disk spec: PUT/GET the key
+    // `attestations/<commit-hex>/<att-id-hex>.dsse` directly. Listing uses
+    // a ListObjectsV2 call scoped to `attestations/<commit-hex>/` and
+    // parses att-ids from the returned keys.
+
+    fn uploadAttestationImpl(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        commit: Hash,
+        envelope_bytes: []const u8,
+    ) anyerror!Hash {
+        const self: *S3Transport = @ptrCast(@alignCast(ptr));
+        if (envelope_bytes.len > 16 * 1024 * 1024) return error.PackTooLargeForSinglePut;
+        const att_id = hash_mod.hash(envelope_bytes);
+        const key = attestationObjectKey(commit, att_id);
+
+        var resp = try self.httpRequest(allocator, .PUT, &key, "", envelope_bytes, &.{}, SMALL_RESPONSE_LIMIT);
+        defer resp.deinit();
+
+        switch (resp.status) {
+            .ok, .created => return att_id,
+            .forbidden => return error.AccessDenied,
+            else => return error.ServerError,
+        }
+    }
+
+    fn downloadAttestationImpl(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        att_id: Hash,
+    ) anyerror![]u8 {
+        const self: *S3Transport = @ptrCast(@alignCast(ptr));
+        // S3 has no "find by id" without scanning buckets; we rely on the
+        // client knowing which commit(s) the id might belong to. For the
+        // mkit workflow the caller always uses `listAttestations` first and
+        // then downloads by the id they got back; but since S3 keys are
+        // commit-scoped, we implement download-by-id as a LIST of the whole
+        // attestations/ prefix + GET. This is expensive but correct, and
+        // integration-level callers will typically use the on-disk store
+        // helper (Agent C) instead.
+        const att_hex = hash_mod.toHex(att_id);
+
+        // List everything under attestations/ and find the matching key.
+        const query = try std.fmt.allocPrint(allocator, "list-type=2&prefix=attestations/", .{});
+        defer allocator.free(query);
+
+        var list_resp = try self.httpRequest(allocator, .GET, "", query, null, &.{}, REF_LIST_BODY_LIMIT);
+        defer list_resp.deinit();
+
+        if (list_resp.status != .ok) return error.AttestationNotFound;
+
+        const keys = try remote_mod.parseListXml(allocator, list_resp.body);
+        defer {
+            for (keys) |k| allocator.free(k);
+            allocator.free(keys);
+        }
+
+        var match_key: ?[]const u8 = null;
+        for (keys) |k| {
+            if (std.mem.endsWith(u8, k, &att_hex) or std.mem.indexOf(u8, k, &att_hex) != null) {
+                // Full match test: suffix must be `<att_hex>.dsse`.
+                var tail_buf: [64 + 5]u8 = undefined;
+                const tail = std.fmt.bufPrint(&tail_buf, "{s}.dsse", .{&att_hex}) catch return error.InvalidResponse;
+                if (std.mem.endsWith(u8, k, tail)) {
+                    match_key = k;
+                    break;
+                }
+            }
+        }
+        const key = match_key orelse return error.AttestationNotFound;
+
+        var resp = try self.httpRequest(allocator, .GET, key, "", null, &.{}, 16 * 1024 * 1024);
+        errdefer resp.deinit();
+
+        switch (resp.status) {
+            .ok => {
+                const body = resp.body;
+                resp.body = "";
+                return body;
+            },
+            .not_found => {
+                resp.deinit();
+                return error.AttestationNotFound;
+            },
+            .forbidden => {
+                resp.deinit();
+                return error.AccessDenied;
+            },
+            else => {
+                resp.deinit();
+                return error.ServerError;
+            },
+        }
+    }
+
+    fn listAttestationsImpl(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        commit: Hash,
+    ) anyerror![]Hash {
+        const self: *S3Transport = @ptrCast(@alignCast(ptr));
+        const query = try buildAttestationListQuery(allocator, commit);
+        defer allocator.free(query);
+
+        var resp = try self.httpRequest(allocator, .GET, "", query, null, &.{}, REF_LIST_BODY_LIMIT);
+        defer resp.deinit();
+
+        switch (resp.status) {
+            .ok => {},
+            .not_found => return allocator.alloc(Hash, 0),
+            .forbidden => return error.AccessDenied,
+            else => return error.ServerError,
+        }
+
+        const keys = try remote_mod.parseListXml(allocator, resp.body);
+        defer {
+            for (keys) |k| allocator.free(k);
+            allocator.free(keys);
+        }
+
+        var out: std.ArrayList(Hash) = .empty;
+        errdefer out.deinit(allocator);
+
+        for (keys) |k| {
+            if (parseAttestationKey(k)) |id| {
+                try out.append(allocator, id);
+            }
+        }
+
+        std.sort.pdq(Hash, out.items, {}, struct {
+            fn lt(_: void, a: Hash, b: Hash) bool {
+                return std.mem.order(u8, &a, &b) == .lt;
+            }
+        }.lt);
+
+        return out.toOwnedSlice(allocator);
     }
 
     fn listRefsImpl(ptr: *anyopaque, allocator: Allocator, prefix: []const u8) anyerror![]protocol.Ref {
@@ -741,6 +912,74 @@ test "retry helper: 412 returns immediately (no retry for CAS precondition)" {
     const status_code: u16 = 412;
     const status: std.http.Status = @enumFromInt(status_code);
     try std.testing.expect(!isRetryableStatus(status));
+}
+
+// -- Attestation path + parsing tests (SPEC-ATTESTATIONS §7.3) --
+
+test "attestation object key shape" {
+    const commit = hash_mod.hash("s3-att-commit");
+    const att = hash_mod.hash("s3-env");
+    const key = S3Transport.attestationObjectKey(commit, att);
+    try std.testing.expect(std.mem.startsWith(u8, &key, "attestations/"));
+    try std.testing.expect(std.mem.endsWith(u8, &key, ".dsse"));
+    const commit_hex = hash_mod.toHex(commit);
+    try std.testing.expect(std.mem.indexOf(u8, &key, &commit_hex) != null);
+}
+
+test "build attestation list query" {
+    const allocator = std.testing.allocator;
+    const commit = hash_mod.hash("s3-list-commit");
+    const query = try S3Transport.buildAttestationListQuery(allocator, commit);
+    defer allocator.free(query);
+    try std.testing.expect(std.mem.startsWith(u8, query, "list-type=2&prefix=attestations/"));
+    try std.testing.expect(std.mem.endsWith(u8, query, "/"));
+}
+
+test "parse attestation key round-trip" {
+    const commit = hash_mod.hash("s3-parse-commit");
+    const att = hash_mod.hash("s3-parse-env");
+    const key = S3Transport.attestationObjectKey(commit, att);
+    const parsed = S3Transport.parseAttestationKey(&key) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(att, parsed);
+}
+
+test "parse attestation key rejects junk" {
+    try std.testing.expect(S3Transport.parseAttestationKey("packs/abc") == null);
+    try std.testing.expect(S3Transport.parseAttestationKey("attestations/shortcommit/foo.dsse") == null);
+    try std.testing.expect(S3Transport.parseAttestationKey("") == null);
+}
+
+test "parse attestation list xml extracts ids" {
+    const allocator = std.testing.allocator;
+    const commit = hash_mod.hash("xml-commit");
+    const id_a = hash_mod.hash("xml-a");
+    const id_b = hash_mod.hash("xml-b");
+    const ka = S3Transport.attestationObjectKey(commit, id_a);
+    const kb = S3Transport.attestationObjectKey(commit, id_b);
+
+    var xml_buf: [1024]u8 = undefined;
+    const xml = try std.fmt.bufPrint(
+        &xml_buf,
+        "<ListBucketResult><Contents><Key>{s}</Key></Contents><Contents><Key>{s}</Key></Contents></ListBucketResult>",
+        .{ &ka, &kb },
+    );
+
+    const keys = try remote_mod.parseListXml(allocator, xml);
+    defer {
+        for (keys) |k| allocator.free(k);
+        allocator.free(keys);
+    }
+
+    var found_a = false;
+    var found_b = false;
+    for (keys) |k| {
+        if (S3Transport.parseAttestationKey(k)) |id| {
+            if (std.mem.eql(u8, &id, &id_a)) found_a = true;
+            if (std.mem.eql(u8, &id, &id_b)) found_b = true;
+        }
+    }
+    try std.testing.expect(found_a);
+    try std.testing.expect(found_b);
 }
 
 test "signing integration — pack upload signs correctly" {

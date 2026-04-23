@@ -68,6 +68,9 @@ pub const HttpTransport = struct {
         .updateRef = updateRefImpl,
         .readRef = readRefImpl,
         .listRefs = listRefsImpl,
+        .uploadAttestation = uploadAttestationImpl,
+        .downloadAttestation = downloadAttestationImpl,
+        .listAttestations = listAttestationsImpl,
     };
 
     // =========================================================================
@@ -90,6 +93,76 @@ pub const HttpTransport = struct {
     /// Build the URL for listing refs: "<base_url>/refs/?prefix=<prefix>"
     pub fn buildListUrl(allocator: Allocator, base_url: []const u8, prefix: []const u8) ![]u8 {
         return std.fmt.allocPrint(allocator, "{s}/refs/?prefix={s}", .{ base_url, prefix });
+    }
+
+    /// Build the URL for an attestation envelope:
+    /// `"<base_url>/attestations/<commit-hex>/<att-id-hex>.dsse"`.
+    pub fn buildAttestationUrl(
+        allocator: Allocator,
+        base_url: []const u8,
+        commit: Hash,
+        att_id: Hash,
+    ) ![]u8 {
+        const commit_hex = hash_mod.toHex(commit);
+        const att_hex = hash_mod.toHex(att_id);
+        return std.fmt.allocPrint(
+            allocator,
+            "{s}/attestations/{s}/{s}.dsse",
+            .{ base_url, &commit_hex, &att_hex },
+        );
+    }
+
+    /// Build the URL for downloading an attestation by id only (the server
+    /// resolves the commit): `"<base_url>/attestations/by-id/<att-id-hex>"`.
+    pub fn buildAttestationByIdUrl(
+        allocator: Allocator,
+        base_url: []const u8,
+        att_id: Hash,
+    ) ![]u8 {
+        const att_hex = hash_mod.toHex(att_id);
+        return std.fmt.allocPrint(
+            allocator,
+            "{s}/attestations/by-id/{s}",
+            .{ base_url, &att_hex },
+        );
+    }
+
+    /// Build the URL for listing attestations on a commit:
+    /// `"<base_url>/attestations/<commit-hex>/"`.
+    pub fn buildAttestationListUrl(
+        allocator: Allocator,
+        base_url: []const u8,
+        commit: Hash,
+    ) ![]u8 {
+        const commit_hex = hash_mod.toHex(commit);
+        return std.fmt.allocPrint(
+            allocator,
+            "{s}/attestations/{s}/",
+            .{ base_url, &commit_hex },
+        );
+    }
+
+    /// Parse a JSON attestation list response. Shape:
+    ///   {"attestations":["<att-id-hex>", "<att-id-hex>", ...]}
+    pub fn parseAttestationListJson(allocator: Allocator, json_body: []const u8) ![]Hash {
+        const Parsed = struct { attestations: [][]const u8 };
+        const parsed = std.json.parseFromSlice(Parsed, allocator, json_body, .{}) catch {
+            return error.InvalidJson;
+        };
+        defer parsed.deinit();
+
+        var out: std.ArrayList(Hash) = .empty;
+        errdefer out.deinit(allocator);
+        for (parsed.value.attestations) |hex_str| {
+            const id = hash_mod.fromHex(hex_str) catch return error.InvalidResponse;
+            try out.append(allocator, id);
+        }
+        std.sort.pdq(Hash, out.items, {}, struct {
+            fn lt(_: void, a: Hash, b: Hash) bool {
+                return std.mem.order(u8, &a, &b) == .lt;
+            }
+        }.lt);
+        return out.toOwnedSlice(allocator);
     }
 
     /// Parse a JSON ref listing response into protocol.Ref structs.
@@ -486,6 +559,100 @@ pub const HttpTransport = struct {
 
         return refs.toOwnedSlice(allocator);
     }
+
+    // -- Attestation verbs (SPEC-ATTESTATIONS §7.3) --
+    //
+    // The HTTP dialect lives at:
+    //   PUT  <base>/attestations/<commit-hex>/<att-id-hex>.dsse   upload
+    //   GET  <base>/attestations/by-id/<att-id-hex>              download
+    //   GET  <base>/attestations/<commit-hex>/                   list (JSON)
+    //
+    // Client computes att-id locally (BLAKE3 of envelope bytes) and puts to
+    // the fully-qualified URL; the server persists verbatim and returns 200.
+    // The att-id is also returned to the caller for cross-checking.
+
+    fn uploadAttestationImpl(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        commit: Hash,
+        envelope_bytes: []const u8,
+    ) anyerror!Hash {
+        const self: *HttpTransport = @ptrCast(@alignCast(ptr));
+        if (envelope_bytes.len > 16 * 1024 * 1024) return error.ResponseTooLarge;
+        const att_id = hash_mod.hash(envelope_bytes);
+        const url = try buildAttestationUrl(allocator, self.base_url, commit, att_id);
+        defer allocator.free(url);
+
+        var resp = try self.httpRequest(allocator, .PUT, url, envelope_bytes, &.{}, SMALL_RESPONSE_LIMIT);
+        defer resp.deinit();
+
+        switch (resp.status) {
+            .ok, .created => return att_id,
+            .not_found, .method_not_allowed => return error.UnsupportedOperation,
+            .forbidden, .unauthorized => return error.AccessDenied,
+            else => return error.ServerError,
+        }
+    }
+
+    fn downloadAttestationImpl(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        att_id: Hash,
+    ) anyerror![]u8 {
+        const self: *HttpTransport = @ptrCast(@alignCast(ptr));
+        const url = try buildAttestationByIdUrl(allocator, self.base_url, att_id);
+        defer allocator.free(url);
+
+        var resp = try self.httpRequest(allocator, .GET, url, null, &.{}, 16 * 1024 * 1024);
+        errdefer resp.deinit();
+
+        switch (resp.status) {
+            .ok => {
+                const body = resp.body;
+                resp.body = "";
+                return body;
+            },
+            .not_found => {
+                resp.deinit();
+                return error.AttestationNotFound;
+            },
+            .method_not_allowed => {
+                resp.deinit();
+                return error.UnsupportedOperation;
+            },
+            .forbidden, .unauthorized => {
+                resp.deinit();
+                return error.AccessDenied;
+            },
+            else => {
+                resp.deinit();
+                return error.ServerError;
+            },
+        }
+    }
+
+    fn listAttestationsImpl(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        commit: Hash,
+    ) anyerror![]Hash {
+        const self: *HttpTransport = @ptrCast(@alignCast(ptr));
+        const url = try buildAttestationListUrl(allocator, self.base_url, commit);
+        defer allocator.free(url);
+
+        var resp = try self.httpRequest(allocator, .GET, url, null, &.{}, REF_LIST_BODY_LIMIT);
+        defer resp.deinit();
+
+        switch (resp.status) {
+            .ok => {},
+            .not_found => return allocator.alloc(Hash, 0),
+            .method_not_allowed => return error.UnsupportedOperation,
+            .forbidden, .unauthorized => return error.AccessDenied,
+            else => return error.ServerError,
+        }
+
+        return try parseAttestationListJson(allocator, resp.body);
+    }
 };
 
 // =============================================================================
@@ -725,4 +892,78 @@ test "http retry: attempts are capped at RETRY_MAX_ATTEMPTS" {
     }
     try std.testing.expect(calls <= RETRY_MAX_ATTEMPTS);
     try std.testing.expect(calls == RETRY_MAX_ATTEMPTS);
+}
+
+// -- Attestation URL + JSON tests (SPEC-ATTESTATIONS §7.3) --
+
+test "build attestation url" {
+    const allocator = std.testing.allocator;
+    const commit = hash_mod.hash("http-att-commit");
+    const att = hash_mod.hash("envelope-bytes");
+    const url = try HttpTransport.buildAttestationUrl(allocator, "https://example.com/v1", commit, att);
+    defer allocator.free(url);
+    try std.testing.expect(std.mem.startsWith(u8, url, "https://example.com/v1/attestations/"));
+    try std.testing.expect(std.mem.endsWith(u8, url, ".dsse"));
+    const commit_hex = hash_mod.toHex(commit);
+    try std.testing.expect(std.mem.indexOf(u8, url, &commit_hex) != null);
+}
+
+test "build attestation by-id url" {
+    const allocator = std.testing.allocator;
+    const att = hash_mod.hash("envelope-bytes-by-id");
+    const url = try HttpTransport.buildAttestationByIdUrl(allocator, "https://example.com/v1", att);
+    defer allocator.free(url);
+    try std.testing.expect(std.mem.startsWith(u8, url, "https://example.com/v1/attestations/by-id/"));
+}
+
+test "build attestation list url" {
+    const allocator = std.testing.allocator;
+    const commit = hash_mod.hash("http-list-commit");
+    const url = try HttpTransport.buildAttestationListUrl(allocator, "https://example.com/v1", commit);
+    defer allocator.free(url);
+    try std.testing.expect(std.mem.endsWith(u8, url, "/"));
+    const commit_hex = hash_mod.toHex(commit);
+    try std.testing.expect(std.mem.indexOf(u8, url, &commit_hex) != null);
+}
+
+test "parse attestation list json" {
+    const allocator = std.testing.allocator;
+    const id_a = hash_mod.hash("aaa");
+    const id_b = hash_mod.hash("bbb");
+    const hex_a = hash_mod.toHex(id_a);
+    const hex_b = hash_mod.toHex(id_b);
+
+    var buf: [512]u8 = undefined;
+    const json = try std.fmt.bufPrint(
+        &buf,
+        "{{\"attestations\":[\"{s}\",\"{s}\"]}}",
+        .{ &hex_a, &hex_b },
+    );
+
+    const ids = try HttpTransport.parseAttestationListJson(allocator, json);
+    defer allocator.free(ids);
+    try std.testing.expectEqual(@as(usize, 2), ids.len);
+    // Byte-lexicographically sorted.
+    try std.testing.expect(std.mem.order(u8, &ids[0], &ids[1]) != .gt);
+}
+
+test "parse attestation list json empty" {
+    const allocator = std.testing.allocator;
+    const ids = try HttpTransport.parseAttestationListJson(allocator, "{\"attestations\":[]}");
+    defer allocator.free(ids);
+    try std.testing.expectEqual(@as(usize, 0), ids.len);
+}
+
+test "parse attestation list json bad hex" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(
+        error.InvalidResponse,
+        HttpTransport.parseAttestationListJson(allocator, "{\"attestations\":[\"zzz\"]}"),
+    );
+}
+
+test "parse attestation list json invalid" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidJson, HttpTransport.parseAttestationListJson(allocator, "not json"));
+    try std.testing.expectError(error.InvalidJson, HttpTransport.parseAttestationListJson(allocator, "{}"));
 }
