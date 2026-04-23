@@ -6,8 +6,8 @@
 # /usr/local/share/zsh/site-functions/_mkit on macOS Homebrew), then
 # restart zsh or run `compinit`.
 #
-# Scope for 0.1.0: subcommand completion + common flags. Argument-level
-# completion (branch names, remotes) is deferred.
+# Scope: subcommand completion + common flags. Argument-level completion
+# (branch names, remotes) is deferred.
 
 _mkit() {
     local -a commands

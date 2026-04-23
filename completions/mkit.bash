@@ -6,9 +6,9 @@
 #   cp mkit.bash /etc/bash_completion.d/              (most Linux)
 # or `source mkit.bash` from your ~/.bashrc.
 #
-# Scope for 0.1.0: subcommand completion + top-level flags. Completing
-# sub-options (branch names, remote URLs, etc.) is deferred so this file
-# stays small and easy to verify by eye.
+# Scope: subcommand completion + top-level flags. Completing sub-options
+# (branch names, remote URLs, etc.) is deferred so this file stays small
+# and easy to verify by eye.
 
 _mkit_complete() {
     local cur prev words cword
