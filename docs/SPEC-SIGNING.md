@@ -215,7 +215,34 @@ the host's equivalent access restriction.
 
 ---
 
-## 8. Test vectors (implementer MUST produce)
+## 8. One key, many roles
+
+The Ed25519 seed in `.mkit/keys/default.key` is suitable for use as an
+SSH identity as well. Implementations SHOULD encourage users to reuse
+one key across:
+
+- **Commit / remix signing** (this document, §§3-4).
+- **DSSE attestation signing** via the `repo-key` signer
+  (`SPEC-ATTESTATIONS.md` §6.2).
+- **SSH transport authentication** when pushing to `mkit+ssh://`
+  servers. OpenSSH 8.0+ accepts the same raw Ed25519 seed as its
+  `id_ed25519` private key.
+
+This is the idiomatic pattern Git/GitHub established: one keypair
+proves authorship, authorizes the push, and anchors an account. A
+downstream service (e.g. a forge that resolves pubkey → account) gets
+a single, consistent identity without needing passwords, tokens, or
+an mkit-specific auth protocol. `sshd`'s `AuthorizedKeysCommand` is
+the standard extension point on the server side; mkit core ships no
+custom push-auth primitive because none is needed.
+
+Nothing in the protocol REQUIRES a single key — separate signing and
+transport keys are valid. The recommendation is for operator
+ergonomics, not a security property.
+
+---
+
+## 9. Test vectors (implementer MUST produce)
 
 TO BE FIXED IN IMPLEMENTATION:
 
@@ -240,7 +267,7 @@ TO BE FIXED IN IMPLEMENTATION:
 
 ---
 
-## 9. Non-goals
+## 10. Non-goals
 
 - No PQ (post-quantum) signatures in v1. Ed25519 only.
 - No signer rotation at the core level. A new `signer` = a new commit.
