@@ -30,6 +30,23 @@ pub const Transport = struct {
         updateRef: *const fn (ptr: *anyopaque, allocator: Allocator, ref_name: []const u8, condition: RefWriteCondition, hash: Hash) anyerror!void,
         readRef: *const fn (ptr: *anyopaque, allocator: Allocator, ref_name: []const u8) anyerror!?Hash,
         listRefs: *const fn (ptr: *anyopaque, allocator: Allocator, prefix: []const u8) anyerror![]Ref,
+        // Attestation verbs (SPEC-ATTESTATIONS §7.3).
+        //
+        // `uploadAttestation` takes the commit hash + the serialised DSSE
+        // envelope bytes, stores them keyed by `BLAKE3(envelope_bytes)`, and
+        // returns the computed attestation id so the client can cross-check
+        // against its own local BLAKE3 of the bytes.
+        //
+        // `downloadAttestation` fetches an envelope by its attestation id
+        // (BLAKE3 of the bytes). Returns the raw envelope bytes — the
+        // transport does NOT parse them.
+        //
+        // `listAttestations` returns every attestation id currently stored
+        // against the given commit, byte-lexicographically sorted. Unknown
+        // commits return an empty slice, not an error.
+        uploadAttestation: *const fn (ptr: *anyopaque, allocator: Allocator, commit: Hash, envelope_bytes: []const u8) anyerror!Hash,
+        downloadAttestation: *const fn (ptr: *anyopaque, allocator: Allocator, att_id: Hash) anyerror![]u8,
+        listAttestations: *const fn (ptr: *anyopaque, allocator: Allocator, commit: Hash) anyerror![]Hash,
     };
 
     pub fn uploadPack(self: Transport, allocator: Allocator, bytes: []const u8, digest: Hash) !void {
@@ -59,7 +76,59 @@ pub const Transport = struct {
     pub fn listRefs(self: Transport, allocator: Allocator, prefix: []const u8) ![]Ref {
         return self.vtable.listRefs(self.ptr, allocator, prefix);
     }
+
+    pub fn uploadAttestation(self: Transport, allocator: Allocator, commit: Hash, envelope_bytes: []const u8) !Hash {
+        return self.vtable.uploadAttestation(self.ptr, allocator, commit, envelope_bytes);
+    }
+
+    pub fn downloadAttestation(self: Transport, allocator: Allocator, att_id: Hash) ![]u8 {
+        return self.vtable.downloadAttestation(self.ptr, allocator, att_id);
+    }
+
+    pub fn listAttestations(self: Transport, allocator: Allocator, commit: Hash) ![]Hash {
+        return self.vtable.listAttestations(self.ptr, allocator, commit);
+    }
 };
+
+// -- Attestation path helpers --
+
+pub const ATTESTATION_PREFIX = "attestations/";
+pub const ATTESTATION_EXT = ".dsse";
+
+/// Build the directory prefix for a commit's attestations:
+/// `"attestations/<64-char commit hex>/"` (trailing slash included so it
+/// doubles as an S3/list prefix).
+pub fn attestationDirPrefix(commit: Hash) [ATTESTATION_PREFIX.len + 64 + 1]u8 {
+    var buf: [ATTESTATION_PREFIX.len + 64 + 1]u8 = undefined;
+    @memcpy(buf[0..ATTESTATION_PREFIX.len], ATTESTATION_PREFIX);
+    const hex = hash_mod.toHex(commit);
+    @memcpy(buf[ATTESTATION_PREFIX.len..][0..64], &hex);
+    buf[ATTESTATION_PREFIX.len + 64] = '/';
+    return buf;
+}
+
+/// Build the full object key for a single attestation:
+/// `"attestations/<commit-hex>/<att-id-hex>.dsse"`.
+pub fn attestationKey(commit: Hash, att_id: Hash) [ATTESTATION_PREFIX.len + 64 + 1 + 64 + ATTESTATION_EXT.len]u8 {
+    var buf: [ATTESTATION_PREFIX.len + 64 + 1 + 64 + ATTESTATION_EXT.len]u8 = undefined;
+    @memcpy(buf[0..ATTESTATION_PREFIX.len], ATTESTATION_PREFIX);
+    const commit_hex = hash_mod.toHex(commit);
+    @memcpy(buf[ATTESTATION_PREFIX.len..][0..64], &commit_hex);
+    buf[ATTESTATION_PREFIX.len + 64] = '/';
+    const att_hex = hash_mod.toHex(att_id);
+    @memcpy(buf[ATTESTATION_PREFIX.len + 64 + 1 ..][0..64], &att_hex);
+    @memcpy(buf[ATTESTATION_PREFIX.len + 64 + 1 + 64 ..][0..ATTESTATION_EXT.len], ATTESTATION_EXT);
+    return buf;
+}
+
+/// Parse an attestation filename (`<att-id-hex>.dsse`) and return the att id.
+/// Returns null if the name does not match the expected shape.
+pub fn parseAttestationFilename(name: []const u8) ?Hash {
+    if (name.len != 64 + ATTESTATION_EXT.len) return null;
+    if (!std.mem.endsWith(u8, name, ATTESTATION_EXT)) return null;
+    const hex = name[0..64];
+    return hash_mod.fromHex(hex) catch null;
+}
 
 // -- Wire format --
 
@@ -767,6 +836,39 @@ test "fuzz: parseUrl does not crash" {
             _ = parseUrl(buf[0..n]) catch return;
         }
     }.run, .{});
+}
+
+test "attestationDirPrefix shape" {
+    const h = hash_mod.hash("some-commit");
+    const prefix = attestationDirPrefix(h);
+    try std.testing.expect(std.mem.startsWith(u8, &prefix, "attestations/"));
+    try std.testing.expectEqual(@as(u8, '/'), prefix[prefix.len - 1]);
+    const hex = hash_mod.toHex(h);
+    try std.testing.expectEqualStrings(&hex, prefix["attestations/".len..][0..64]);
+}
+
+test "attestationKey roundtrip" {
+    const commit = hash_mod.hash("c1");
+    const att = hash_mod.hash("envelope-bytes");
+    const key = attestationKey(commit, att);
+
+    try std.testing.expect(std.mem.startsWith(u8, &key, "attestations/"));
+    try std.testing.expect(std.mem.endsWith(u8, &key, ".dsse"));
+
+    const att_hex = hash_mod.toHex(att);
+    const fname = key[key.len - (64 + ".dsse".len) ..];
+    const parsed = parseAttestationFilename(fname) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(att, parsed);
+    _ = att_hex;
+}
+
+test "parseAttestationFilename rejects junk" {
+    try std.testing.expect(parseAttestationFilename("not-an-att.dsse") == null);
+    try std.testing.expect(parseAttestationFilename("abc.dsse") == null);
+    try std.testing.expect(parseAttestationFilename("") == null);
+    // 64 hex but wrong extension
+    const hex = [_]u8{'a'} ** 64;
+    try std.testing.expect(parseAttestationFilename(&hex) == null);
 }
 
 test "fuzz: validateRefName does not crash" {

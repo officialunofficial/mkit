@@ -18,6 +18,10 @@ pub const OP_WRITE_REF: u8 = 0x04;
 pub const OP_UPDATE_REF: u8 = 0x05;
 pub const OP_READ_REF: u8 = 0x06;
 pub const OP_LIST_REFS: u8 = 0x07;
+// Attestation verbs (SPEC-ATTESTATIONS §7.3).
+pub const OP_UPLOAD_ATTESTATION: u8 = 0x08;
+pub const OP_DOWNLOAD_ATTESTATION: u8 = 0x09;
+pub const OP_LIST_ATTESTATIONS: u8 = 0x0A;
 pub const OP_CLOSE: u8 = 0xFF;
 
 pub const STATUS_OK: u8 = 0;
@@ -368,6 +372,87 @@ pub fn decodeRefList(allocator: Allocator, data: []const u8) ![]protocol.Ref {
     return refs;
 }
 
+// -----------------------------------------------------------------------------
+// Attestation verb wire formats (SPEC-ATTESTATIONS §7.3)
+// -----------------------------------------------------------------------------
+//
+// OP_UPLOAD_ATTESTATION request:  [32-byte commit hash][envelope bytes...]
+// OP_UPLOAD_ATTESTATION response: STATUS_OK + [32-byte att-id]
+//                                 (att-id = BLAKE3(envelope bytes), server-computed)
+//
+// OP_DOWNLOAD_ATTESTATION request:  [32-byte att-id]
+// OP_DOWNLOAD_ATTESTATION response: STATUS_OK + envelope bytes
+//                                   STATUS_NULL on not-found
+//
+// OP_LIST_ATTESTATIONS request:  [32-byte commit hash]
+// OP_LIST_ATTESTATIONS response: STATUS_OK + [LE u32 count] + count × [32-byte att-id]
+//                                (server emits byte-lexicographically sorted)
+
+/// Maximum envelope size accepted by the server (16 MiB). Keeps one
+/// pathological client from OOM-ing the service; real envelopes are a few KiB.
+pub const MAX_ATTESTATION_ENVELOPE: usize = 16 * 1024 * 1024;
+
+pub fn encodeUploadAttestation(allocator: Allocator, commit: Hash, envelope_bytes: []const u8) ![]u8 {
+    const payload = try allocator.alloc(u8, 32 + envelope_bytes.len);
+    @memcpy(payload[0..32], &commit);
+    @memcpy(payload[32..], envelope_bytes);
+    return payload;
+}
+
+pub fn decodeUploadAttestation(payload: []const u8) !struct { commit: Hash, envelope: []const u8 } {
+    if (payload.len < 32) return error.PayloadTooShort;
+    return .{
+        .commit = payload[0..32].*,
+        .envelope = payload[32..],
+    };
+}
+
+pub fn encodeDownloadAttestation(att_id: Hash) [32]u8 {
+    return att_id;
+}
+
+pub fn decodeDownloadAttestation(payload: []const u8) !Hash {
+    if (payload.len < 32) return error.PayloadTooShort;
+    return payload[0..32].*;
+}
+
+pub fn encodeListAttestations(commit: Hash) [32]u8 {
+    return commit;
+}
+
+pub fn decodeListAttestations(payload: []const u8) !Hash {
+    if (payload.len < 32) return error.PayloadTooShort;
+    return payload[0..32].*;
+}
+
+pub fn encodeAttestationList(allocator: Allocator, ids: []const Hash) ![]u8 {
+    const total: usize = 4 + ids.len * 32;
+    const payload = try allocator.alloc(u8, total);
+    const count: u32 = @intCast(ids.len);
+    payload[0..4].* = std.mem.toBytes(std.mem.nativeToLittle(u32, count));
+    var pos: usize = 4;
+    for (ids) |id| {
+        @memcpy(payload[pos..][0..32], &id);
+        pos += 32;
+    }
+    return payload;
+}
+
+pub fn decodeAttestationList(allocator: Allocator, data: []const u8) ![]Hash {
+    if (data.len < 4) return error.PayloadTooShort;
+    const count = std.mem.littleToNative(u32, @bitCast(data[0..4].*));
+    const max_count = (data.len - 4) / 32;
+    if (count > max_count) return error.PayloadTooShort;
+    const ids = try allocator.alloc(Hash, count);
+    errdefer allocator.free(ids);
+    var pos: usize = 4;
+    for (0..count) |i| {
+        ids[i] = data[pos..][0..32].*;
+        pos += 32;
+    }
+    return ids;
+}
+
 pub fn encodeRequest(allocator: Allocator, opcode: u8, payload: []const u8) ![]u8 {
     const frame = try allocator.alloc(u8, 1 + 4 + payload.len);
     frame[0] = opcode;
@@ -619,6 +704,9 @@ pub const SshTransport = struct {
         .updateRef = updateRefImpl,
         .readRef = readRefImpl,
         .listRefs = listRefsImpl,
+        .uploadAttestation = uploadAttestationImpl,
+        .downloadAttestation = downloadAttestationImpl,
+        .listAttestations = listAttestationsImpl,
     };
 
     fn sendRequest(self: *SshTransport, opcode: u8, payload: []const u8) !void {
@@ -739,6 +827,60 @@ pub const SshTransport = struct {
         defer allocator.free(resp.data);
         if (resp.status == STATUS_ERROR) return error.RemoteError;
         return decodeRefList(allocator, resp.data);
+    }
+
+    fn uploadAttestationImpl(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        commit: Hash,
+        envelope_bytes: []const u8,
+    ) anyerror!Hash {
+        const self: *SshTransport = @ptrCast(@alignCast(ptr));
+        if (envelope_bytes.len > MAX_ATTESTATION_ENVELOPE) return error.PayloadTooLarge;
+        const payload = try encodeUploadAttestation(allocator, commit, envelope_bytes);
+        defer allocator.free(payload);
+        try self.sendRequest(OP_UPLOAD_ATTESTATION, payload);
+        const resp = try self.readResponse(allocator);
+        defer allocator.free(resp.data);
+        if (resp.status == STATUS_UNSUPPORTED) return error.UnsupportedOperation;
+        if (resp.status == STATUS_ERROR) return error.RemoteError;
+        if (resp.data.len < 32) return error.InvalidResponse;
+        return resp.data[0..32].*;
+    }
+
+    fn downloadAttestationImpl(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        att_id: Hash,
+    ) anyerror![]u8 {
+        const self: *SshTransport = @ptrCast(@alignCast(ptr));
+        const payload_arr = encodeDownloadAttestation(att_id);
+        try self.sendRequest(OP_DOWNLOAD_ATTESTATION, &payload_arr);
+        const resp = try self.readResponse(allocator);
+        if (resp.status == STATUS_UNSUPPORTED) {
+            allocator.free(resp.data);
+            return error.UnsupportedOperation;
+        }
+        if (resp.status == STATUS_NULL or resp.status == STATUS_ERROR) {
+            allocator.free(resp.data);
+            return error.AttestationNotFound;
+        }
+        return resp.data;
+    }
+
+    fn listAttestationsImpl(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        commit: Hash,
+    ) anyerror![]Hash {
+        const self: *SshTransport = @ptrCast(@alignCast(ptr));
+        const payload_arr = encodeListAttestations(commit);
+        try self.sendRequest(OP_LIST_ATTESTATIONS, &payload_arr);
+        const resp = try self.readResponse(allocator);
+        defer allocator.free(resp.data);
+        if (resp.status == STATUS_UNSUPPORTED) return error.UnsupportedOperation;
+        if (resp.status == STATUS_ERROR) return error.RemoteError;
+        return decodeAttestationList(allocator, resp.data);
     }
 };
 
@@ -1228,6 +1370,107 @@ test "hello handshake reject: server response garbled → IncompatiblePeer" {
     // Claims a 200-byte version string in a 10-byte payload.
     const bogus = [_]u8{ 0x01, 0xC8, 'x', 'y' };
     try std.testing.expectError(error.VersionTooLong, decodeHelloResponse(&bogus));
+}
+
+// -- Attestation wire-format tests (§7.3) --
+
+test "encodeUploadAttestation roundtrip" {
+    const allocator = std.testing.allocator;
+    const commit = hash_mod.hash("ssh-att-commit");
+    const env = "DSSE envelope bytes here";
+    const encoded = try encodeUploadAttestation(allocator, commit, env);
+    defer allocator.free(encoded);
+
+    const decoded = try decodeUploadAttestation(encoded);
+    try std.testing.expectEqual(commit, decoded.commit);
+    try std.testing.expectEqualStrings(env, decoded.envelope);
+}
+
+test "encodeDownloadAttestation roundtrip" {
+    const id = hash_mod.hash("ssh-att-id");
+    const encoded = encodeDownloadAttestation(id);
+    const decoded = try decodeDownloadAttestation(&encoded);
+    try std.testing.expectEqual(id, decoded);
+}
+
+test "encodeListAttestations roundtrip" {
+    const commit = hash_mod.hash("ssh-list-commit");
+    const encoded = encodeListAttestations(commit);
+    const decoded = try decodeListAttestations(&encoded);
+    try std.testing.expectEqual(commit, decoded);
+}
+
+test "encodeAttestationList roundtrip" {
+    const allocator = std.testing.allocator;
+    const ids = [_]Hash{
+        hash_mod.hash("a1"),
+        hash_mod.hash("a2"),
+        hash_mod.hash("a3"),
+    };
+    const encoded = try encodeAttestationList(allocator, &ids);
+    defer allocator.free(encoded);
+
+    const decoded = try decodeAttestationList(allocator, encoded);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqual(@as(usize, 3), decoded.len);
+    for (ids, 0..) |id, i| {
+        try std.testing.expectEqual(id, decoded[i]);
+    }
+}
+
+test "encodeAttestationList empty" {
+    const allocator = std.testing.allocator;
+    const ids = [_]Hash{};
+    const encoded = try encodeAttestationList(allocator, &ids);
+    defer allocator.free(encoded);
+    const decoded = try decodeAttestationList(allocator, encoded);
+    defer allocator.free(decoded);
+    try std.testing.expectEqual(@as(usize, 0), decoded.len);
+}
+
+test "decodeUploadAttestation too short" {
+    try std.testing.expectError(error.PayloadTooShort, decodeUploadAttestation("short"));
+}
+
+test "decodeDownloadAttestation too short" {
+    try std.testing.expectError(error.PayloadTooShort, decodeDownloadAttestation("x"));
+}
+
+test "decodeListAttestations too short" {
+    try std.testing.expectError(error.PayloadTooShort, decodeListAttestations("x"));
+}
+
+test "decodeAttestationList rejects impossible count" {
+    // count=1000 but only 4 bytes of payload — must fail before allocation.
+    const payload = [_]u8{ 0xE8, 0x03, 0, 0 }; // 1000 LE
+    try std.testing.expectError(error.PayloadTooShort, decodeAttestationList(std.testing.allocator, &payload));
+}
+
+test "decodeAttestationList preserves order" {
+    const allocator = std.testing.allocator;
+    // Build an intentionally-not-sorted payload and verify the decoder
+    // simply transports it verbatim (sorting is the server's responsibility).
+    var ids = [_]Hash{
+        hash_mod.hash("z"),
+        hash_mod.hash("a"),
+    };
+    const encoded = try encodeAttestationList(allocator, &ids);
+    defer allocator.free(encoded);
+    const decoded = try decodeAttestationList(allocator, encoded);
+    defer allocator.free(decoded);
+    try std.testing.expectEqual(ids[0], decoded[0]);
+    try std.testing.expectEqual(ids[1], decoded[1]);
+}
+
+test "OP_* constants have distinct values" {
+    // Sanity check: the three new opcodes don't collide with existing ones.
+    try std.testing.expectEqual(@as(u8, 0x08), OP_UPLOAD_ATTESTATION);
+    try std.testing.expectEqual(@as(u8, 0x09), OP_DOWNLOAD_ATTESTATION);
+    try std.testing.expectEqual(@as(u8, 0x0A), OP_LIST_ATTESTATIONS);
+    try std.testing.expect(OP_UPLOAD_ATTESTATION != OP_LIST_REFS);
+    try std.testing.expect(OP_DOWNLOAD_ATTESTATION != OP_CLOSE);
+    try std.testing.expect(OP_LIST_ATTESTATIONS != OP_CLOSE);
 }
 
 test "decodeHelloRequest rejects oversized binary name" {
