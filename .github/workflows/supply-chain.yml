@@ -22,7 +22,15 @@ permissions:
 jobs:
   dependency-review:
     name: Dependency review (PRs)
-    if: github.event_name == 'pull_request'
+    # TODO(ci): flip `false` → `github.event_name == 'pull_request'`
+    # once `actions/dependency-review-action` stops reporting
+    # "not supported on this repository". Enabling Dependency Graph in
+    # repo settings is necessary but not sufficient — GitHub Advanced
+    # Security (free for public repos but separately toggled at
+    # Settings → Code security) must also be on. Using `if: false`
+    # here skips the job entirely so the check does not surface as
+    # perpetually red on every PR.
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read

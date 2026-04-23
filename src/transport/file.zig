@@ -23,7 +23,7 @@ const LOCK_SLEEP_NS: u64 = 100 * std.time.ns_per_ms;
 // tmp-rename sequence is still crash-safe for the ref contents themselves.
 fn atomicWriteRef(root: std.fs.Dir, ref_name: []const u8, wire: []const u8) !void {
     var tmp_buf: [512]u8 = undefined;
-    const pid: i32 = @intCast(std.c.getpid());
+    const pid: i32 = @intCast(std.posix.system.getpid());
     const counter = tmp_counter.fetchAdd(1, .monotonic);
     const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.tmp.{d}.{d}", .{ ref_name, pid, counter }) catch return error.RefNameTooLong;
 
@@ -102,7 +102,7 @@ pub const FileTransport = struct {
         // Packs are content-addressed — safe to write via tmp+rename so a
         // crash mid-write cannot leave a zero-byte pack on disk.
         var tmp_buf: [128]u8 = undefined;
-        const pid: i32 = @intCast(std.c.getpid());
+        const pid: i32 = @intCast(std.posix.system.getpid());
         const counter = tmp_counter.fetchAdd(1, .monotonic);
         const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.tmp.{d}.{d}", .{ &key, pid, counter }) catch return error.RefNameTooLong;
         errdefer self.root.deleteFile(tmp_path) catch {};
