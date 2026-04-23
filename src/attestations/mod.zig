@@ -24,6 +24,7 @@ pub const signer_repo_key = @import("signer_repo_key.zig");
 pub const signer_external = @import("signer_external.zig");
 pub const signer_sigstore = @import("signer_sigstore.zig");
 pub const verify = @import("verify.zig");
+pub const store = @import("store.zig");
 
 /// Re-exports so callers can write `attestations.Statement`, etc.
 pub const Statement = statement.Statement;
@@ -64,4 +65,5 @@ test {
     _ = signer_external;
     _ = signer_sigstore;
     _ = verify;
+    _ = store;
 }
