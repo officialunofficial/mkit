@@ -43,6 +43,7 @@ pub const integration_test = @import("integration_test.zig");
 pub const fuzz_packfile = @import("fuzz_packfile.zig");
 pub const fuzz_tree = @import("fuzz_tree.zig");
 pub const fuzz_delta = @import("fuzz_delta.zig");
+pub const attestations = @import("attestations/mod.zig");
 
 test {
     _ = @import("test_helpers.zig");
@@ -90,4 +91,5 @@ test {
     _ = fuzz_packfile;
     _ = fuzz_tree;
     _ = fuzz_delta;
+    _ = attestations;
 }
