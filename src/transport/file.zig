@@ -18,29 +18,29 @@ const LOCK_SLEEP_NS: u64 = 100 * std.time.ns_per_ms;
 /// crash mid-write cannot leave the ref at zero bytes.
 ///
 /// Layout: `<ref_name>.tmp.<pid>.<counter>` → `<ref_name>` (atomic rename on POSIX).
-// TODO(W5): sync ref dir when stdlib supports — std.fs.Dir.sync does not
-// exist in Zig 0.15.2, so a containing-directory fsync is deferred. The
+// TODO(W5): sync ref dir when stdlib supports — Dir.sync is still unavailable
+// in Zig 0.16, so a containing-directory fsync is deferred. The
 // tmp-rename sequence is still crash-safe for the ref contents themselves.
-fn atomicWriteRef(root: std.fs.Dir, ref_name: []const u8, wire: []const u8) !void {
+fn atomicWriteRef(io: std.Io, root: std.Io.Dir, ref_name: []const u8, wire: []const u8) !void {
     var tmp_buf: [512]u8 = undefined;
     const pid: i32 = @intCast(std.posix.system.getpid());
     const counter = tmp_counter.fetchAdd(1, .monotonic);
     const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.tmp.{d}.{d}", .{ ref_name, pid, counter }) catch return error.RefNameTooLong;
 
     // Best-effort cleanup on any failure between createFile and rename.
-    errdefer root.deleteFile(tmp_path) catch {};
+    errdefer root.deleteFile(io, tmp_path) catch {};
 
     {
-        const file = try root.createFile(tmp_path, .{});
-        defer file.close();
-        try file.writeAll(wire);
+        const file = try root.createFile(io, tmp_path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, wire);
         // Best-effort fsync — a rename-over-rename is already atomic on POSIX.
         // On filesystems that do not support fsync (e.g. some tmpfs in CI) we
         // accept the weaker durability rather than failing the write.
-        file.sync() catch {};
+        file.sync(io) catch {};
     }
 
-    try root.rename(tmp_path, ref_name);
+    try root.rename(tmp_path, root, ref_name, io);
 }
 
 /// Local filesystem Transport implementation.
@@ -51,23 +51,24 @@ fn atomicWriteRef(root: std.fs.Dir, ref_name: []const u8, wire: []const u8) !voi
 ///   refs/heads/main             — ref files (65-byte wire format)
 ///   refs/tags/v1.0              — nested ref directories created on demand
 pub const FileTransport = struct {
-    root: std.fs.Dir,
+    root: std.Io.Dir,
     owns_root: bool, // true if we opened it (must close on deinit)
     allocator: Allocator,
+    io: std.Io,
 
     /// Open a FileTransport at the given filesystem path.
-    pub fn init(allocator: Allocator, path: []const u8) !FileTransport {
-        const dir = try std.fs.cwd().openDir(path, .{});
-        return .{ .root = dir, .owns_root = true, .allocator = allocator };
+    pub fn init(allocator: Allocator, io: std.Io, path: []const u8) !FileTransport {
+        const dir = try std.Io.Dir.cwd().openDir(io, path, .{});
+        return .{ .root = dir, .owns_root = true, .allocator = allocator, .io = io };
     }
 
     /// Create a FileTransport from an already-opened directory.
-    pub fn initFromDir(allocator: Allocator, dir: std.fs.Dir) FileTransport {
-        return .{ .root = dir, .owns_root = false, .allocator = allocator };
+    pub fn initFromDir(allocator: Allocator, io: std.Io, dir: std.Io.Dir) FileTransport {
+        return .{ .root = dir, .owns_root = false, .allocator = allocator, .io = io };
     }
 
     pub fn deinit(self: *FileTransport) void {
-        if (self.owns_root) self.root.close();
+        if (self.owns_root) self.root.close(self.io);
     }
 
     /// Return the vtable-based Transport interface for this FileTransport.
@@ -94,7 +95,7 @@ pub const FileTransport = struct {
         const key = protocol.packKey(digest);
 
         // Ensure packs/ directory exists
-        self.root.makeDir("packs") catch |err| switch (err) {
+        self.root.createDir(self.io, "packs", .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -105,31 +106,31 @@ pub const FileTransport = struct {
         const pid: i32 = @intCast(std.posix.system.getpid());
         const counter = tmp_counter.fetchAdd(1, .monotonic);
         const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.tmp.{d}.{d}", .{ &key, pid, counter }) catch return error.RefNameTooLong;
-        errdefer self.root.deleteFile(tmp_path) catch {};
+        errdefer self.root.deleteFile(self.io, tmp_path) catch {};
         {
-            const file = try self.root.createFile(tmp_path, .{});
-            defer file.close();
-            try file.writeAll(bytes);
-            file.sync() catch {};
+            const file = try self.root.createFile(self.io, tmp_path, .{});
+            defer file.close(self.io);
+            try file.writeStreamingAll(self.io, bytes);
+            file.sync(self.io) catch {};
         }
-        try self.root.rename(tmp_path, &key);
+        try self.root.rename(tmp_path, self.root, &key, self.io);
     }
 
     fn downloadPackImpl(ptr: *anyopaque, allocator: Allocator, digest: Hash) anyerror![]u8 {
         const self: *FileTransport = @ptrCast(@alignCast(ptr));
         const key = protocol.packKey(digest);
 
-        const file = self.root.openFile(&key, .{}) catch |err| switch (err) {
+        const file = self.root.openFile(self.io, &key, .{}) catch |err| switch (err) {
             error.FileNotFound => return error.PackNotFound,
             else => return err,
         };
-        defer file.close();
+        defer file.close(self.io);
 
-        const stat = try file.stat();
+        const stat = try file.stat(self.io);
         if (stat.size > 4 * 1024 * 1024 * 1024) return error.PackTooLarge; // 4GB limit
         const bytes = try allocator.alloc(u8, stat.size);
         errdefer allocator.free(bytes);
-        const read = try file.readAll(bytes);
+        const read = try file.readPositionalAll(self.io, bytes, 0);
         if (read != stat.size) {
             allocator.free(bytes);
             return error.UnexpectedEof;
@@ -140,7 +141,7 @@ pub const FileTransport = struct {
     fn packExistsImpl(ptr: *anyopaque, _: Allocator, digest: Hash) anyerror!bool {
         const self: *FileTransport = @ptrCast(@alignCast(ptr));
         const key = protocol.packKey(digest);
-        self.root.access(&key, .{}) catch return false;
+        self.root.access(self.io, &key, .{}) catch return false;
         return true;
     }
 
@@ -152,24 +153,24 @@ pub const FileTransport = struct {
     fn updateRefImpl(ptr: *anyopaque, allocator: Allocator, ref_name: []const u8, condition: protocol.RefWriteCondition, h: Hash) anyerror!void {
         const self: *FileTransport = @ptrCast(@alignCast(ptr));
         if (!protocol.validateRefName(ref_name)) return error.InvalidRef;
-        try ensureParentDirs(self.root, ref_name);
+        try ensureParentDirs(self.io, self.root, ref_name);
         const wire = protocol.formatRef(h);
 
         switch (condition) {
             .any => {
-                try atomicWriteRef(self.root, ref_name, &wire);
+                try atomicWriteRef(self.io, self.root, ref_name, &wire);
             },
             .missing => {
                 // exclusive create is itself atomic — no tmp-rename needed.
                 // (The file either exists after this call with the correct
                 // bytes, or we returned RefConflict / an I/O error.)
-                const file = self.root.createFile(ref_name, .{ .exclusive = true }) catch |err| switch (err) {
+                const file = self.root.createFile(self.io, ref_name, .{ .exclusive = true }) catch |err| switch (err) {
                     error.PathAlreadyExists => return error.RefConflict,
                     else => return err,
                 };
-                defer file.close();
-                try file.writeAll(&wire);
-                file.sync() catch {};
+                defer file.close(self.io);
+                try file.writeStreamingAll(self.io, &wire);
+                file.sync(self.io) catch {};
             },
             .match => |expected| {
                 // Read-then-write CAS needs a lock file so two concurrent
@@ -182,22 +183,24 @@ pub const FileTransport = struct {
                 var attempts: u32 = 0;
                 while (true) : (attempts += 1) {
                     if (attempts >= LOCK_MAX_ATTEMPTS) return error.RefConflict;
-                    const lock_file = self.root.createFile(lock_path, .{ .exclusive = true }) catch |err| switch (err) {
+                    const lock_file = self.root.createFile(self.io, lock_path, .{ .exclusive = true }) catch |err| switch (err) {
                         error.PathAlreadyExists => {
-                            std.Thread.sleep(LOCK_SLEEP_NS);
+                            // Why: std.Thread.sleep was removed in Zig 0.16;
+                            // wait via Io.
+                            std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(LOCK_SLEEP_NS)), .awake) catch {};
                             continue;
                         },
                         else => return err,
                     };
-                    lock_file.close();
+                    lock_file.close(self.io);
                     break;
                 }
                 // Always clean up the lock, even if the write or read fails.
-                defer self.root.deleteFile(lock_path) catch {};
+                defer self.root.deleteFile(self.io, lock_path) catch {};
 
                 const current = try readRefImpl(ptr, allocator, ref_name);
                 if (current == null or !std.mem.eql(u8, &current.?, &expected)) return error.RefConflict;
-                try atomicWriteRef(self.root, ref_name, &wire);
+                try atomicWriteRef(self.io, self.root, ref_name, &wire);
             },
         }
     }
@@ -205,14 +208,14 @@ pub const FileTransport = struct {
     fn readRefImpl(ptr: *anyopaque, _: Allocator, ref_name: []const u8) anyerror!?Hash {
         const self: *FileTransport = @ptrCast(@alignCast(ptr));
         if (!protocol.validateRefName(ref_name)) return error.InvalidRef;
-        const file = self.root.openFile(ref_name, .{}) catch |err| switch (err) {
+        const file = self.root.openFile(self.io, ref_name, .{}) catch |err| switch (err) {
             error.FileNotFound => return null,
             else => return err,
         };
-        defer file.close();
+        defer file.close(self.io);
 
         var buf: [128]u8 = undefined;
-        const read = try file.readAll(&buf);
+        const read = try file.readPositionalAll(self.io, &buf, 0);
         return protocol.parseRef(buf[0..read]) catch return null;
     }
 
@@ -229,7 +232,7 @@ pub const FileTransport = struct {
             refs.deinit(allocator);
         }
 
-        try collectRefs(self.root, allocator, normalized, normalized, &refs);
+        try collectRefs(self.io, self.root, allocator, normalized, normalized, &refs);
 
         // Sort alphabetically by name
         std.mem.sort(protocol.Ref, refs.items, {}, struct {
@@ -246,11 +249,11 @@ pub const FileTransport = struct {
     // =========================================================================
 
     /// Create all parent directories for a nested path like "refs/heads/main".
-    fn ensureParentDirs(dir: std.fs.Dir, path: []const u8) !void {
+    fn ensureParentDirs(io: std.Io, dir: std.Io.Dir, path: []const u8) !void {
         var i: usize = 0;
         while (std.mem.indexOfScalarPos(u8, path, i, '/')) |slash| {
             const sub_path = path[0..slash];
-            dir.makeDir(sub_path) catch |err| switch (err) {
+            dir.createDir(io, sub_path, .default_dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
                 else => return err,
             };
@@ -260,21 +263,22 @@ pub const FileTransport = struct {
 
     /// Recursively collect refs under a directory, building full ref names.
     fn collectRefs(
-        root: std.fs.Dir,
+        io: std.Io,
+        root: std.Io.Dir,
         allocator: Allocator,
         base_prefix: []const u8,
         dir_path: []const u8,
         refs: *std.ArrayList(protocol.Ref),
     ) anyerror!void {
         // Open the directory for this prefix. If it doesn't exist, that's fine — empty result.
-        var dir = root.openDir(dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        var dir = root.openDir(io, dir_path, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return,
             else => return err,
         };
-        defer dir.close();
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             // Build the full ref name: dir_path + "/" + entry.name
             const full_name = try hash_mod.joinPath(allocator, dir_path, entry.name);
 
@@ -285,14 +289,14 @@ pub const FileTransport = struct {
                         allocator.free(full_name);
                         continue;
                     }
-                    const file = dir.openFile(entry.name, .{}) catch {
+                    const file = dir.openFile(io, entry.name, .{}) catch {
                         allocator.free(full_name);
                         continue;
                     };
-                    defer file.close();
+                    defer file.close(io);
 
                     var buf: [128]u8 = undefined;
-                    const read = file.readAll(&buf) catch {
+                    const read = file.readPositionalAll(io, &buf, 0) catch {
                         allocator.free(full_name);
                         continue;
                     };
@@ -321,7 +325,7 @@ pub const FileTransport = struct {
                 },
                 .directory => {
                     // Recurse into subdirectory
-                    try collectRefs(root, allocator, base_prefix, full_name, refs);
+                    try collectRefs(io, root, allocator, base_prefix, full_name, refs);
                     allocator.free(full_name);
                 },
                 else => {
@@ -341,7 +345,7 @@ test "upload and download pack" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const data = "hello packfile content";
@@ -361,7 +365,7 @@ test "download missing pack" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const digest = hash_mod.hash("nonexistent pack");
@@ -375,11 +379,11 @@ test "pack creates directory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     // packs/ directory should not exist yet
-    tmp.dir.access("packs", .{}) catch |err| {
+    tmp.dir.access(std.testing.io, "packs", .{}) catch |err| {
         try std.testing.expect(err == error.FileNotFound);
     };
 
@@ -389,7 +393,7 @@ test "pack creates directory" {
     try t.uploadPack(allocator, data, digest);
 
     // Now packs/ directory should exist
-    tmp.dir.access("packs", .{}) catch {
+    tmp.dir.access(std.testing.io, "packs", .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -399,7 +403,7 @@ test "pack exists true and false" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const data = "exists test";
@@ -421,7 +425,7 @@ test "write and read ref" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const h = hash_mod.hash("commit-data");
@@ -439,7 +443,7 @@ test "write ref creates parent dirs" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const h = hash_mod.hash("deep-ref");
@@ -449,10 +453,10 @@ test "write ref creates parent dirs" {
     try t.writeRef(allocator, "refs/heads/feature/deep/branch", h);
 
     // Verify intermediate directories were created
-    tmp.dir.access("refs", .{}) catch return error.TestUnexpectedResult;
-    tmp.dir.access("refs/heads", .{}) catch return error.TestUnexpectedResult;
-    tmp.dir.access("refs/heads/feature", .{}) catch return error.TestUnexpectedResult;
-    tmp.dir.access("refs/heads/feature/deep", .{}) catch return error.TestUnexpectedResult;
+    tmp.dir.access(std.testing.io, "refs", .{}) catch return error.TestUnexpectedResult;
+    tmp.dir.access(std.testing.io, "refs/heads", .{}) catch return error.TestUnexpectedResult;
+    tmp.dir.access(std.testing.io, "refs/heads/feature", .{}) catch return error.TestUnexpectedResult;
+    tmp.dir.access(std.testing.io, "refs/heads/feature/deep", .{}) catch return error.TestUnexpectedResult;
 
     // Verify the ref is readable
     const read = try t.readRef(allocator, "refs/heads/feature/deep/branch");
@@ -465,7 +469,7 @@ test "read missing ref" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const t = ft.transport();
@@ -479,7 +483,7 @@ test "overwrite ref" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const h1 = hash_mod.hash("commit-v1");
@@ -499,7 +503,7 @@ test "update ref rejects stale expected hash" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const current = hash_mod.hash("current");
@@ -519,7 +523,7 @@ test "update ref creates only when missing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const h = hash_mod.hash("initial");
@@ -537,7 +541,7 @@ test "list refs" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const h1 = hash_mod.hash("c1");
@@ -573,7 +577,7 @@ test "list refs sorted" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const h = hash_mod.hash("sort-test");
@@ -601,7 +605,7 @@ test "list refs empty" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     const t = ft.transport();
@@ -616,7 +620,7 @@ test "transport interface" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
 
     // Use only the protocol.Transport interface — no direct FileTransport calls
@@ -664,7 +668,7 @@ test "atomic ref write: two refs written in sequence round-trip" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
     const t = ft.transport();
 
@@ -679,11 +683,11 @@ test "atomic ref write: two refs written in sequence round-trip" {
 
     // No leftover tmp files should remain.
     var dir = try tmp.dir.openDir(std.testing.io, "refs/heads", .{ .iterate = true });
-    defer dir.close();
+    defer dir.close(std.testing.io);
     var iter = dir.iterate();
     var leftover_tmp: usize = 0;
     var total: usize = 0;
-    while (try iter.next()) |entry| {
+    while (try iter.next(std.testing.io)) |entry| {
         total += 1;
         if (std.mem.indexOf(u8, entry.name, ".tmp.")) |_| leftover_tmp += 1;
         if (total > 100) break; // cap — test bounded
@@ -696,7 +700,7 @@ test "atomic ref write: concurrent writer never leaves empty/truncated file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
     const t = ft.transport();
 
@@ -748,7 +752,7 @@ test "updateRef(.match) success writes new hash" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
     const t = ft.transport();
 
@@ -763,7 +767,7 @@ test "updateRef(.match) success writes new hash" {
     try std.testing.expectEqual(h_new, r.?);
 
     // Lock file must have been cleaned up.
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("refs/heads/main.lock", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "refs/heads/main.lock", .{}));
 }
 
 test "updateRef(.match) wrong hash → RefConflict and cleans lock" {
@@ -771,7 +775,7 @@ test "updateRef(.match) wrong hash → RefConflict and cleans lock" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
     const t = ft.transport();
 
@@ -791,7 +795,7 @@ test "updateRef(.match) wrong hash → RefConflict and cleans lock" {
     try std.testing.expectEqual(h_current, r.?);
 
     // Lock file must have been cleaned up even on the RefConflict path.
-    try std.testing.expectError(error.FileNotFound, tmp.dir.access("refs/heads/main.lock", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "refs/heads/main.lock", .{}));
 }
 
 test "updateRef(.match) with pre-existing stale lock times out to RefConflict, never panics" {
@@ -799,7 +803,7 @@ test "updateRef(.match) with pre-existing stale lock times out to RefConflict, n
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var ft = FileTransport.initFromDir(allocator, tmp.dir);
+    var ft = FileTransport.initFromDir(allocator, std.testing.io, tmp.dir);
     defer ft.deinit();
     const t = ft.transport();
 
@@ -815,7 +819,7 @@ test "updateRef(.match) with pre-existing stale lock times out to RefConflict, n
     // timeout is the upper bound for this test.
     {
         const lock = try tmp.dir.createFile(std.testing.io, "refs/heads/main.lock", .{ .exclusive = true });
-        lock.close();
+        lock.close(std.testing.io);
     }
 
     try std.testing.expectError(
