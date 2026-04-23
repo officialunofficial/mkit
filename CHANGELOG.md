@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.2.0] - 2026-04-23
+
 ### Changed
 
 - **Toolchain bumped to Zig 0.16.0.** The `std.Io` overhaul is landed: every
@@ -27,6 +31,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the removed `std.time.nanoTimestamp`; every FUZZ.md invariant is
   preserved verbatim (≤100 iters, ≤64 KiB inputs, 2 MiB FBA, 100 ms cap,
   seeded DefaultPrng, no `std.testing.fuzz`).
+
+### Fixed
+
+- `mkit blame` no longer panics with `integer overflow` on non-opaque
+  authors. The slice-bound `tmp[0 .. take * 2]` in `formatAuthorShort`
+  tripped Zig 0.16's stricter int-inference; pinning `take: usize` and
+  lifting the multiplication into its own binding restores correct behaviour
+  for the default ed25519 identity mkit derives from the signing pubkey.
+- `parseUrl` now strips the `mkit+` scheme prefix before legacy-scheme
+  matching, so `mkit clone mkit+file:///path` routes to `FileTransport`
+  instead of falling through to an S3-style endpoint/bucket split that
+  surfaced as `error.ConnectionFailed` on the first ref op.
+
+### Added
+
+- `tests/e2e-ssh.sh` — wire-level e2e harness for `mkit+ssh://` transport,
+  running inside a `debian:12-slim` container with a loopback sshd. Covers
+  OP_HELLO handshake, ref read/write, and pack upload/download over a real
+  pipe — the piece of the 0.16 SSH rewrite that unit tests never touched.
+- `tests/e2e-file.sh` / `tests/e2e-https.sh` / `tests/e2e-r2.sh` now use
+  `mkit+<scheme>://` URLs, have the legacy `--project` notary flag removed,
+  and split clone → pull explicitly to match mkit's `clone = init + remote
+  set` semantics. `tests/e2e-file.sh` passes 64 / 64 locally.
+
+### Build
+
+- `build.zig` sets `link_libc = true` on every module (`lib_mod`, `exe_mod`,
+  `test_mod`, `integration_test_mod`, `bench_mod`), not just under
+  `-Djemalloc`. Needed for `std.c.isatty` / `std.c.environ` / `std.c.fchmod`
+  on Linux — macOS silently linked libc for any `std.c.*` reference so the
+  bug only surfaced on cross-compile.
+- Release modules (`optimize != .Debug`) get `strip = true` to drop the Zig
+  compiler's per-build cache-hash path from embedded DWARF, restoring
+  byte-reproducibility. Debug builds keep debug info for interactive use.
 
 ## [0.1.0] - 2026-04-22
 
@@ -109,17 +147,19 @@ Initial public release.
   packages; any new `build.zig.zon` entry must be `.hash`-pinned and
   reviewed by two maintainers.
 
-### Deferred to 0.2.0
+### Deferred
 
 - Windows support (Scoop manifest stub already in `contrib/scoop/`).
 - S3 multipart upload for >5 GiB packs.
 - Cross-transport conformance test matrix.
 - SSH operational-verb retry (hello handshake is deterministic).
-- File transport directory-fsync (not yet exposed in 0.16's `std.Io.Dir`).
+- File transport directory-fsync ([#12](https://github.com/officialunofficial/mkit/issues/12) — blocked on `std.Io.Dir.sync` upstream).
+- `-Djemalloc` CI matrix ([#13](https://github.com/officialunofficial/mkit/issues/13)).
 - Symlink-restore fuzz harness + SSH-wire fuzz harness.
-- Per-subcommand man pages (`mkit-commit(1)` etc.); 0.1.0 ships one
+- Per-subcommand man pages (`mkit-commit(1)` etc.); 0.2.0 still ships one
   comprehensive `mkit(1)`.
 - Fish shell completions.
 
-[Unreleased]: https://github.com/officialunofficial/mkit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/officialunofficial/mkit/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/officialunofficial/mkit/releases/tag/v0.2.0
 [0.1.0]: https://github.com/officialunofficial/mkit/releases/tag/v0.1.0
