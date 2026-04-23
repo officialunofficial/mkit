@@ -180,9 +180,11 @@ test "fuzz tree: random bytes never panic" {
         var fba = makeFba();
         const a = fba.allocator();
 
-        const start = std.time.nanoTimestamp();
+        // Why: std.time.nanoTimestamp was removed in 0.16; monotonic clock
+        // readings now come from the Io capability via std.testing.io.
+        const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         tryDeserialize(a, buf[0..len]);
-        const elapsed: u64 = @intCast(std.time.nanoTimestamp() - start);
+        const elapsed: u64 = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start);
         if (elapsed > PER_ITER_NS) return error.FuzzIterationTooSlow;
     }
 }
@@ -220,9 +222,9 @@ test "fuzz tree: bit-flips on valid tree header" {
         var fba = makeFba();
         const a = fba.allocator();
 
-        const start = std.time.nanoTimestamp();
+        const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         tryDeserialize(a, &bytes);
-        const elapsed: u64 = @intCast(std.time.nanoTimestamp() - start);
+        const elapsed: u64 = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start);
         if (elapsed > PER_ITER_NS) return error.FuzzIterationTooSlow;
     }
 }

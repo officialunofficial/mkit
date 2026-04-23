@@ -148,9 +148,11 @@ test "fuzz delta: random instructions never panic" {
         var fba = makeFba();
         const a = fba.allocator();
 
-        const start = std.time.nanoTimestamp();
+        // Why: std.time.nanoTimestamp was removed in 0.16; monotonic clock
+        // readings now come from the Io capability via std.testing.io.
+        const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         tryApply(a, base_buf[0..base_len], instr_buf[0..instr_len]);
-        const elapsed: u64 = @intCast(std.time.nanoTimestamp() - start);
+        const elapsed: u64 = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start);
         if (elapsed > PER_ITER_NS) return error.FuzzIterationTooSlow;
     }
 }
@@ -184,14 +186,14 @@ test "fuzz delta: COPY output never exceeds base bounds (when parse succeeds)" {
         var fba = makeFba();
         const a = fba.allocator();
 
-        const start = std.time.nanoTimestamp();
+        const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         const out = delta.applyDelta(a, base_buf[0..base_len], &instr, 0) catch |e| {
             // Only OutOfMemory is acceptable for a well-formed input here.
             try testing.expectEqual(error.OutOfMemory, e);
             continue;
         };
         defer a.free(out);
-        const elapsed: u64 = @intCast(std.time.nanoTimestamp() - start);
+        const elapsed: u64 = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start);
         if (elapsed > PER_ITER_NS) return error.FuzzIterationTooSlow;
 
         try testing.expectEqual(@as(usize, copy_len), out.len);

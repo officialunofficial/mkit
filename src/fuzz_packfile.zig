@@ -141,9 +141,12 @@ test "fuzz packfile: random bytes never panic" {
         var fba = makeFba();
         const a = fba.allocator();
 
-        const start = std.time.nanoTimestamp();
+        // Why: std.time.nanoTimestamp was removed in 0.16; monotonic clock
+        // readings now come from the Io capability. std.testing.io is the
+        // per-test threaded Io instance set up by the test runner.
+        const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         tryUnpack(a, buf[0..len]);
-        const elapsed: u64 = @intCast(std.time.nanoTimestamp() - start);
+        const elapsed: u64 = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start);
         if (elapsed > PER_ITER_NS) {
             std.debug.print(
                 "fuzz_packfile iter {d} took {d} ns — stopping early\n",
@@ -172,9 +175,9 @@ test "fuzz packfile: bit-flips on valid 12-byte pack" {
         var fba = makeFba();
         const a = fba.allocator();
 
-        const start = std.time.nanoTimestamp();
+        const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
         tryUnpack(a, &bytes);
-        const elapsed: u64 = @intCast(std.time.nanoTimestamp() - start);
+        const elapsed: u64 = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start);
         if (elapsed > PER_ITER_NS) return error.FuzzIterationTooSlow;
     }
 }
