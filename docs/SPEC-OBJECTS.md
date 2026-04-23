@@ -346,8 +346,6 @@ multi-version readers.
 
 ## 13. Test vectors (implementer MUST produce)
 
-TO BE FIXED IN IMPLEMENTATION:
-
 1. **Empty blob hash**: `BLAKE3(prologue{0x01,MKT1,0x01} ‖ u32(0))`
    — 10 bytes total input. Record the resulting hex digest.
 2. **Empty tree hash**: `BLAKE3(prologue{0x02,MKT1,0x01} ‖ u32(0))`
@@ -365,8 +363,12 @@ TO BE FIXED IN IMPLEMENTATION:
 7. **ChunkedBlob with `chunk_size=0` and 3 chunks**: verify prologue
    present and length=6+8+4+4+32*3=118.
 
-These vectors must be committed as golden files under `mkit/tests/vectors/`
-so external implementations can cross-verify byte-for-byte.
+These vectors are committed as golden files under
+`rust/tests/golden/phase1/` (with a `MANIFEST.txt` and per-vector
+`.json` sidecar carrying the BLAKE3 digest), so external implementations
+can cross-verify byte-for-byte. The fixtures are produced deterministically
+by `bash scripts/harvest-golden-vectors.sh`, which invokes the harness
+in `scripts/harvest/harvest.zig` against the live Zig reference.
 
 ---
 
