@@ -80,6 +80,29 @@ tooling. See
 [`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) for the full
 contract.
 
+## Identity & push auth — one key, many roles
+
+`.mkit/keys/default.key` is a raw Ed25519 seed. The same seed covers:
+
+- commit / remix signing (`docs/SPEC-SIGNING.md`);
+- DSSE attestation signing via the `repo-key` signer (`docs/SPEC-ATTESTATIONS.md` §6.2);
+- SSH transport authentication — OpenSSH 8.0+ accepts a raw Ed25519
+  seed as `id_ed25519`, so the same key authenticates your
+  `mkit push` over `mkit+ssh://`.
+
+For `mkit+ssh://` push authorisation the idiomatic pattern is Git's:
+the server's `sshd` runs an `AuthorizedKeysCommand` that maps an
+incoming pubkey to an account, and `mkit serve` executes as that
+account. mkit core ships **no custom push-auth protocol** — SSH's own
+KEX handshake already does the nonce/signature exchange, and
+`AuthorizedKeysCommand` is the standard server-side extension point
+for resolving `pubkey → account`. A downstream service can wire its
+own identity model (e.g. pubkey → on-chain owner address) through
+that hook without changing the wire protocol.
+
+See `docs/SPEC-SIGNING.md` §8 for the convention and
+`docs/SSH-SECURITY.md` for transport trust model.
+
 ## Documentation
 
 | Doc | Audience |
