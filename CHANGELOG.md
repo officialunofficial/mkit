@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- File transport now fsyncs the containing directory after a ref rename,
+  closing the crash-durability gap in `atomicWriteRef`. Previously flagged
+  as "deferred, blocked on `std.Io.Dir.sync`"; the block was wrong —
+  `std.Io.Dir.handle` is the raw `fd_t` and `std.c.fsync` (mkit links
+  libc unconditionally) works on directory descriptors on Linux and
+  Darwin. Classic atomic-write-through-rename pattern now complete.
 
 ## [0.2.0] - 2026-04-23
 
@@ -153,7 +160,6 @@ Initial public release.
 - S3 multipart upload for >5 GiB packs.
 - Cross-transport conformance test matrix.
 - SSH operational-verb retry (hello handshake is deterministic).
-- File transport directory-fsync ([#12](https://github.com/officialunofficial/mkit/issues/12) — blocked on `std.Io.Dir.sync` upstream).
 - `-Djemalloc` CI matrix ([#13](https://github.com/officialunofficial/mkit/issues/13)).
 - Symlink-restore fuzz harness + SSH-wire fuzz harness.
 - Per-subcommand man pages (`mkit-commit(1)` etc.); 0.2.0 still ships one
