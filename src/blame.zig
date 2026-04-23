@@ -473,7 +473,7 @@ test "blame single commit" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const commit_a = try makeFileCommit(
@@ -514,7 +514,7 @@ test "blame two commits" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Commit A: line1, line2, line3
@@ -563,7 +563,7 @@ test "blame tracks additions" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Commit A: line1, line2
@@ -612,7 +612,7 @@ test "blame tracks deletions" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Commit A: line1, line2, line3
@@ -656,7 +656,7 @@ test "blame file not found" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const commit_a = try makeFileCommit(
@@ -705,7 +705,7 @@ test "blame nested file path" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Create nested tree: src/main.txt
@@ -747,7 +747,7 @@ test "blame three commits progressive changes" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Commit A: a, b
@@ -808,7 +808,7 @@ test "findBlobInTree returns null for nonexistent path" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_hash = try th.makeBlob(allocator, &store, "data");
@@ -825,7 +825,7 @@ test "findBlobInTree finds file at root" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_hash = try th.makeBlob(allocator, &store, "data");

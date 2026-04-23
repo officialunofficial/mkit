@@ -475,7 +475,7 @@ test "restore empty tree" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -504,7 +504,7 @@ test "restore single file" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -535,7 +535,7 @@ test "restore nested directories" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -566,7 +566,7 @@ test "restore overwrites existing files" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -596,7 +596,7 @@ test "restore removes untracked files" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -629,7 +629,7 @@ test "restore preserves mkit directory" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -657,7 +657,7 @@ test "restore creates parent directories" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -693,7 +693,7 @@ test "restore is idempotent" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -741,7 +741,7 @@ test "restore with symlink" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -774,7 +774,7 @@ test "restore replaces mismatched kinds" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -835,7 +835,7 @@ test "restore rejects invalid symlink targets" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -857,7 +857,7 @@ test "restore clean false keeps untracked" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -891,7 +891,7 @@ test "restore chunked blob" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -1064,7 +1064,7 @@ test "sparse restore only restores matched files" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});
@@ -1117,7 +1117,7 @@ test "sparse restore with negation excludes subtree" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var target_tmp = std.testing.tmpDir(.{});

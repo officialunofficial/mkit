@@ -392,7 +392,7 @@ fn initTestRepo(_: Allocator) !struct {
 
     var store_tmp = std.testing.tmpDir(.{});
     errdefer store_tmp.cleanup();
-    const store = try store_mod.ObjectStore.init(store_tmp.dir);
+    const store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
 
     return .{
         .tmp = tmp,

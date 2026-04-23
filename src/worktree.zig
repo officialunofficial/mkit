@@ -163,7 +163,7 @@ test "build tree from empty directory" {
     // Init store in a separate temp dir
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Build tree from empty dir
@@ -190,7 +190,7 @@ test "build tree from single file" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
@@ -219,7 +219,7 @@ test "reject invalid symlink targets" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
@@ -244,7 +244,7 @@ test "build tree with nested directories" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
@@ -284,7 +284,7 @@ test "build tree skips .mkit directory" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
@@ -313,7 +313,7 @@ test "build tree is deterministic" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Build twice — must produce same hash
@@ -349,7 +349,7 @@ test "build tree respects mkitignore" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
@@ -389,7 +389,7 @@ test "large file creates chunked blob" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
@@ -424,7 +424,7 @@ test "small file stays as regular blob" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var work_dir = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });

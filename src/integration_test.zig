@@ -25,7 +25,7 @@ test "full commit workflow: store blob, build tree, create commit, read back" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Create blob
@@ -102,7 +102,7 @@ test "packfile roundtrip through memory transport" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Create several objects: blob -> tree -> commit
@@ -153,7 +153,7 @@ test "merge then cherry-pick composition" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Common ancestor with file "base.txt"
@@ -222,7 +222,7 @@ test "bisect through linear chain finds correct commit" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const tree = try th.makeSingleFileTree(allocator, &store, "f.txt", "data");
@@ -249,7 +249,7 @@ test "rebase produces new commit hashes" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const tree = try th.makeSingleFileTree(allocator, &store, "f.txt", "data");
@@ -277,7 +277,7 @@ test "diff between parent and child commit detects changes" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Parent commit with "a.txt" = "original"
@@ -309,7 +309,7 @@ test "sparse restore filters files correctly" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Create blobs

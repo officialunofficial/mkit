@@ -297,7 +297,7 @@ test "enumerateRange on a linear chain of 8 commits" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Create linear chain: C1 -> C2 -> C3 -> C4 -> C5 -> C6 -> C7 -> C8
@@ -402,7 +402,7 @@ test "enumerateRange with diamond merge" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const tree = try th.makeSingleFileTree(allocator, &store, "f.txt", "data");
@@ -427,7 +427,7 @@ test "enumerateRange same good and bad" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const tree = try th.makeSingleFileTree(allocator, &store, "f.txt", "data");

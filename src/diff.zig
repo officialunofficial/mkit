@@ -266,7 +266,7 @@ test "identical trees no diff" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Create a blob
@@ -288,7 +288,7 @@ test "added file detected" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_a = try putBlob(allocator, &store, "aaa");
@@ -322,7 +322,7 @@ test "removed file detected" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_a = try putBlob(allocator, &store, "aaa");
@@ -356,7 +356,7 @@ test "modified file detected" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_v1 = try putBlob(allocator, &store, "version 1");
@@ -387,7 +387,7 @@ test "mode change detected" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Same content, different mode (blob vs symlink)
@@ -418,7 +418,7 @@ test "nested tree diff" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_v1 = try putBlob(allocator, &store, "old content");
@@ -463,7 +463,7 @@ test "diff against empty tree" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_a = try putBlob(allocator, &store, "aaa");
@@ -491,7 +491,7 @@ test "empty tree against non-empty" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_a = try putBlob(allocator, &store, "aaa");
@@ -518,7 +518,7 @@ test "sorted output" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_a = try putBlob(allocator, &store, "a");
@@ -547,7 +547,7 @@ test "max-length entry names" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_hash = try putBlob(allocator, &store, "data");
@@ -579,7 +579,7 @@ test "status shows added file" {
     // Create object store in a separate temp dir
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Create workdir with {a.txt}; build a tree from it as the "old" HEAD tree
@@ -615,7 +615,7 @@ test "status shows removed file" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Create workdir with {a.txt, b.txt}; build old tree
@@ -652,7 +652,7 @@ test "status shows modified file" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Create workdir with {a.txt content="old"}; build old tree
@@ -688,7 +688,7 @@ test "status clean working directory" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Create workdir with {a.txt}; build old tree
@@ -717,7 +717,7 @@ test "status no commits" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Create workdir with some files, head_tree_hash = null (no commits yet)
@@ -749,7 +749,7 @@ test "status nested changes" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Create workdir with {src/a.txt}; build old tree

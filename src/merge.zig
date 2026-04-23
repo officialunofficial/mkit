@@ -568,7 +568,7 @@ test "merge identical trees" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_a = try th.makeBlob(allocator, &store, "aaa");
@@ -588,7 +588,7 @@ test "merge ours adds file" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_a = try th.makeBlob(allocator, &store, "aaa");
@@ -618,7 +618,7 @@ test "merge theirs adds file" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_a = try th.makeBlob(allocator, &store, "aaa");
@@ -648,7 +648,7 @@ test "merge both add different files" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_a = try th.makeBlob(allocator, &store, "aaa");
@@ -686,7 +686,7 @@ test "merge both add same file same content" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_a = try th.makeBlob(allocator, &store, "aaa");
@@ -722,7 +722,7 @@ test "merge both add same file different content" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_a = try th.makeBlob(allocator, &store, "aaa");
@@ -763,7 +763,7 @@ test "merge ours modifies" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_v1 = try th.makeBlob(allocator, &store, "v1");
@@ -790,7 +790,7 @@ test "merge theirs modifies" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_v1 = try th.makeBlob(allocator, &store, "v1");
@@ -817,7 +817,7 @@ test "merge both modify same way" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_v1 = try th.makeBlob(allocator, &store, "v1");
@@ -844,7 +844,7 @@ test "merge both modify differently" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_v1 = try th.makeBlob(allocator, &store, "v1");
@@ -883,7 +883,7 @@ test "merge ours deletes" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_a = try th.makeBlob(allocator, &store, "aaa");
@@ -912,7 +912,7 @@ test "merge theirs deletes" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_a = try th.makeBlob(allocator, &store, "aaa");
@@ -941,7 +941,7 @@ test "merge both delete" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_a = try th.makeBlob(allocator, &store, "aaa");
@@ -970,7 +970,7 @@ test "merge delete vs modify" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_a = try th.makeBlob(allocator, &store, "aaa");
@@ -1013,7 +1013,7 @@ test "merge nested tree changes" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_main_v1 = try th.makeBlob(allocator, &store, "fn main() {}");
@@ -1078,7 +1078,7 @@ test "merge nested conflict" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_v1 = try th.makeBlob(allocator, &store, "original");
@@ -1134,7 +1134,7 @@ test "merge empty base" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob_a = try th.makeBlob(allocator, &store, "aaa");
@@ -1169,7 +1169,7 @@ test "find merge base linear" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const empty_tree = try th.makeTree(allocator, &store, &[_]object.TreeEntry{});
@@ -1190,7 +1190,7 @@ test "find merge base root" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const empty_tree = try th.makeTree(allocator, &store, &[_]object.TreeEntry{});
@@ -1209,7 +1209,7 @@ test "find merge base no common ancestor" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const empty_tree = try th.makeTree(allocator, &store, &[_]object.TreeEntry{});
@@ -1226,7 +1226,7 @@ test "find merge base same commit" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const empty_tree = try th.makeTree(allocator, &store, &[_]object.TreeEntry{});
@@ -1252,7 +1252,7 @@ test "find merge base walks non-first parents" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const empty_tree = try th.makeTree(allocator, &store, &[_]object.TreeEntry{});
@@ -1272,7 +1272,7 @@ test "is ancestor walks merge parents" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const empty_tree = try th.makeTree(allocator, &store, &[_]object.TreeEntry{});

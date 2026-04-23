@@ -92,7 +92,7 @@ test "commit workflow no leaks" {
     // Separate temp dirs for store and working directory
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var work_tmp = std.testing.tmpDir(.{});
@@ -144,7 +144,7 @@ test "diff workflow no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_a = try storeBlob(allocator, &store, "content A");
@@ -178,7 +178,7 @@ test "status diff workflow no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var work_tmp = std.testing.tmpDir(.{});
@@ -222,7 +222,7 @@ test "merge workflow no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_base = try storeBlob(allocator, &store, "base content");
@@ -265,7 +265,7 @@ test "merge with conflicts no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     const blob_base = try storeBlob(allocator, &store, "base");
@@ -306,7 +306,7 @@ test "packfile roundtrip no leaks" {
     // Source store
     var src_tmp = std.testing.tmpDir(.{});
     defer src_tmp.cleanup();
-    var src_store = try store_mod.ObjectStore.init(src_tmp.dir);
+    var src_store = try store_mod.ObjectStore.init(std.testing.io, src_tmp.dir);
     defer src_store.close();
 
     // Create blob + tree + commit
@@ -329,7 +329,7 @@ test "packfile roundtrip no leaks" {
     // Destination store
     var dst_tmp = std.testing.tmpDir(.{});
     defer dst_tmp.cleanup();
-    var dst_store = try store_mod.ObjectStore.init(dst_tmp.dir);
+    var dst_store = try store_mod.ObjectStore.init(std.testing.io, dst_tmp.dir);
     defer dst_store.close();
 
     // Unpack into destination
@@ -360,7 +360,7 @@ test "restore workflow no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     // Build a tree with nested structure: src/main.zig, README.md
@@ -730,7 +730,7 @@ test "store lifecycle all types no leaks" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Store and retrieve a blob
@@ -793,7 +793,7 @@ test "end-to-end workflow no leaks" {
     // Create repo
     var repo_tmp = std.testing.tmpDir(.{});
     defer repo_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(repo_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, repo_tmp.dir);
     defer store.close();
     try refs.init(repo_tmp.dir);
 
@@ -899,7 +899,7 @@ test "stress repeated diff no leaks" {
 
     var store_tmp = std.testing.tmpDir(.{});
     defer store_tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(store_tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, store_tmp.dir);
     defer store.close();
 
     var prev_hash: ?Hash = null;

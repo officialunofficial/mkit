@@ -230,7 +230,7 @@ test "collectCommitsToReplay on a linear chain" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     // Create a linear chain: C1 -> C2 -> C3 -> C4
@@ -262,7 +262,7 @@ test "collectCommitsToReplay same commit returns empty" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const blob = try th.makeBlob(allocator, &store, "data");
@@ -409,7 +409,7 @@ test "collectCommitsToReplay Y-shape" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const tree = try th.makeSingleFileTree(allocator, &store, "f.txt", "data");
@@ -436,7 +436,7 @@ test "collectCommitsToReplay single commit onto itself" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store = try store_mod.ObjectStore.init(tmp.dir);
+    var store = try store_mod.ObjectStore.init(std.testing.io, tmp.dir);
     defer store.close();
 
     const tree = try th.makeSingleFileTree(allocator, &store, "f.txt", "data");
