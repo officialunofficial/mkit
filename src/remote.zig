@@ -169,8 +169,10 @@ pub fn configFromEnv(allocator: Allocator) !?RemoteConfig {
 /// Read RemoteConfig from .mkit/config file.
 /// Looks for keys: remote_endpoint, remote_bucket, remote_access_key, remote_secret_key, remote_region.
 /// Returns null if endpoint or bucket is missing. Caller must call deinit().
-pub fn configFromFile(allocator: Allocator, dir: std.fs.Dir) !?RemoteConfig {
-    const content = dir.readFileAlloc(allocator, config_mod.config_file, 8192) catch |err| switch (err) {
+pub fn configFromFile(allocator: Allocator, io: std.Io, dir: std.Io.Dir) !?RemoteConfig {
+    // Why: std.fs.Dir → std.Io.Dir in Zig 0.16; readFileAlloc now takes io
+    // and a typed Io.Limit instead of a raw usize max_size.
+    const content = dir.readFileAlloc(io, config_mod.config_file, allocator, .limited(8192)) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -361,8 +363,8 @@ test "config from file" {
 
     // Write a config file with remote fields
     const f = try tmp.dir.createFile(std.testing.io, config_mod.config_file, .{});
-    defer f.close();
-    try f.writeAll(
+    defer f.close(std.testing.io);
+    try f.writeStreamingAll(std.testing.io,
         \\author_mid = 42
         \\remote_endpoint = https://r2.test.com
         \\remote_bucket = test-bucket
@@ -372,7 +374,7 @@ test "config from file" {
         \\
     );
 
-    var cfg = (try configFromFile(allocator, tmp.dir)).?;
+    var cfg = (try configFromFile(allocator, std.testing.io, tmp.dir)).?;
     defer cfg.deinit();
 
     try std.testing.expectEqualStrings("https://r2.test.com", cfg.endpoint);
@@ -392,10 +394,10 @@ test "config from file missing required" {
 
     // Write a config file without remote fields
     const f = try tmp.dir.createFile(std.testing.io, config_mod.config_file, .{});
-    defer f.close();
-    try f.writeAll("author_mid = 1\n");
+    defer f.close(std.testing.io);
+    try f.writeStreamingAll(std.testing.io, "author_mid = 1\n");
 
-    const result = try configFromFile(allocator, tmp.dir);
+    const result = try configFromFile(allocator, std.testing.io, tmp.dir);
     try std.testing.expectEqual(@as(?RemoteConfig, null), result);
 }
 
@@ -409,14 +411,14 @@ test "config from file defaults" {
 
     // Write a config file with only endpoint and bucket (minimal required)
     const f = try tmp.dir.createFile(std.testing.io, config_mod.config_file, .{});
-    defer f.close();
-    try f.writeAll(
+    defer f.close(std.testing.io);
+    try f.writeStreamingAll(std.testing.io,
         \\remote_endpoint = https://r2.minimal.com
         \\remote_bucket = my-bucket
         \\
     );
 
-    var cfg = (try configFromFile(allocator, tmp.dir)).?;
+    var cfg = (try configFromFile(allocator, std.testing.io, tmp.dir)).?;
     defer cfg.deinit();
 
     try std.testing.expectEqualStrings("https://r2.minimal.com", cfg.endpoint);
@@ -435,7 +437,7 @@ test "config from file no file" {
     try tmp.dir.createDirPath(std.testing.io, ".mkit");
 
     // No config file exists
-    const result = try configFromFile(allocator, tmp.dir);
+    const result = try configFromFile(allocator, std.testing.io, tmp.dir);
     try std.testing.expectEqual(@as(?RemoteConfig, null), result);
 }
 
