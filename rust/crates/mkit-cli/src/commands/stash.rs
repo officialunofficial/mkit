@@ -1,9 +1,6 @@
 //! `mkit stash save|list|pop|drop|show` — stash working-directory
 //! changes. Port of `cmdStash` in the Zig CLI; backing logic lives in
 //! `mkit_core::ops::stash`.
-//!
-//! `show` needs diff formatting; we defer to a TODO for now and emit a
-//! clear message when invoked.
 
 use std::io::Write;
 
@@ -79,10 +76,17 @@ pub fn run(args: &[String]) -> u8 {
                 Err(e) => emit_err(&format!("stash drop: {e}"), exit::GENERAL_ERROR),
             }
         }
-        "show" => emit_err(
-            "stash show: diff rendering not yet implemented in the Rust port",
-            exit::TEMPFAIL,
-        ),
+        "show" => {
+            let idx = parse_idx(args);
+            match stash::render_stash_show(&store, &cwd, idx) {
+                Ok(output) => {
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = stdout.write_all(output.as_bytes());
+                    exit::OK
+                }
+                Err(e) => emit_err(&format!("stash show: {e}"), exit::GENERAL_ERROR),
+            }
+        }
         other => super::usage_error(&format!("unknown stash subcommand: {other}")),
     }
 }

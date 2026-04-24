@@ -2,6 +2,7 @@
 //! blame / stash / restore. Each test mirrors a Zig integration
 //! scenario from `src/{rebase,bisect,blame,stash,restore}.zig`.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -147,6 +148,7 @@ fn bisect_runs_to_completion_finds_first_bad_commit() {
         orig_branch: None,
         bad_hash: Some(commits[5]),
         good_hashes: vec![commits[0]],
+        skipped: BTreeSet::default(),
     };
     let mut iters = 0;
     let found = loop {
@@ -179,6 +181,7 @@ fn bisect_state_persists_to_disk() {
         orig_branch: Some("main".to_string()),
         bad_hash: Some(hash::hash(b"bad")),
         good_hashes: vec![hash::hash(b"g1")],
+        skipped: BTreeSet::default(),
     };
     bisect::write_state(&mkit, &state).unwrap();
     let back = bisect::read_state(&mkit).unwrap();
@@ -339,6 +342,82 @@ fn stash_index_out_of_range_errors() {
         err2,
         mkit_core::ops::stash::StashError::IndexOutOfRange(5)
     ));
+}
+
+// -- STASH SHOW -----------------------------------------------------------
+
+#[test]
+fn stash_show_golden_one_added_one_modified() {
+    // Deterministic fixture matching rust/tests/golden/phase5b/stash_show_simple.txt.
+    // Parent commit: existing.txt = "original content"
+    // Stash commit:  existing.txt = "modified content" + new.txt = "brand new file"
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let mkit_dir = repo.join(".mkit");
+    fs::create_dir_all(&mkit_dir).unwrap();
+    refs::init(&mkit_dir).unwrap();
+
+    let store_dir = TempDir::new().unwrap();
+    let store = fresh_store_in(store_dir.path());
+
+    // Build parent tree.
+    let blob_orig = put_blob(&store, b"original content");
+    let parent_tree = {
+        let obj = mkit_core::object::Object::Tree(mkit_core::object::Tree {
+            entries: vec![mkit_core::object::TreeEntry {
+                name: b"existing.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob_orig,
+            }],
+        });
+        store
+            .write(&mkit_core::serialize::serialize(&obj).unwrap())
+            .unwrap()
+    };
+    let parent_commit = put_commit(&store, parent_tree, vec![], 1_000_000);
+
+    // Build stash tree.
+    let blob_mod = put_blob(&store, b"modified content");
+    let blob_new = put_blob(&store, b"brand new file");
+    let stash_tree = {
+        let obj = mkit_core::object::Object::Tree(mkit_core::object::Tree {
+            entries: vec![
+                mkit_core::object::TreeEntry {
+                    name: b"existing.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob_mod,
+                },
+                mkit_core::object::TreeEntry {
+                    name: b"new.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob_new,
+                },
+            ],
+        });
+        store
+            .write(&mkit_core::serialize::serialize(&obj).unwrap())
+            .unwrap()
+    };
+    let stash_commit = put_commit(&store, stash_tree, vec![parent_commit], 1_000_001);
+
+    // Write a stash manifest.
+    let list = mkit_core::ops::stash::StashList {
+        entries: vec![mkit_core::ops::stash::StashEntry {
+            commit_hash: stash_commit,
+            parent_hash: parent_commit,
+            timestamp: 1_000_001_u32,
+            message: "WIP: stash message".to_string(),
+        }],
+    };
+    mkit_core::ops::stash::write_list_test_only(repo, &list);
+
+    let output = stash::render_stash_show(&store, repo, 0).unwrap();
+    let golden = read_golden("stash_show_simple.txt");
+    assert_eq!(
+        output,
+        String::from_utf8(golden).unwrap(),
+        "stash show output did not match golden"
+    );
 }
 
 // -- RESTORE --------------------------------------------------------------

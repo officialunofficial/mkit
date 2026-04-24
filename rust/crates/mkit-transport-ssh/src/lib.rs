@@ -503,9 +503,212 @@ fn build_ssh_command(target: &SshTarget, options: &SshOptions) -> Command {
 
 // ---------------------------------------------------------------------------
 // Verb payload encoders / decoders
+//
+// All encode_* and decode_* functions are public so the `mkit serve`
+// command (CLI-WIRE / PR #48) can import them from this crate instead of
+// inlining copies.  The public surface is flat:
+//   mkit_transport_ssh::decode_upload_pack
+//   mkit_transport_ssh::decode_download_pack
+//   mkit_transport_ssh::decode_pack_exists
+//   mkit_transport_ssh::decode_write_ref
+//   mkit_transport_ssh::decode_update_ref
+//   mkit_transport_ssh::decode_read_ref
+//   mkit_transport_ssh::decode_list_refs
+//   mkit_transport_ssh::decode_ref_list
+//   mkit_transport_ssh::encode_write_ref
+//   mkit_transport_ssh::encode_update_ref
+//   mkit_transport_ssh::encode_read_ref
+//   mkit_transport_ssh::encode_list_refs
 // ---------------------------------------------------------------------------
 
-fn encode_write_ref(name: &str, hash: &Hash) -> Vec<u8> {
+/// Returned by [`decode_upload_pack`]: the pack digest and raw pack bytes
+/// extracted from an `OP_UPLOAD_PACK` client request payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadPackRequest {
+    pub digest: Hash,
+    pub data: Vec<u8>,
+}
+
+/// Decode an `OP_UPLOAD_PACK` request payload sent by the client.
+///
+/// Wire format: `[32-byte digest][pack bytes...]`
+pub fn decode_upload_pack(payload: &[u8]) -> TransportResult<UploadPackRequest> {
+    if payload.len() < 32 {
+        return Err(TransportError::InvalidResponse);
+    }
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&payload[..32]);
+    Ok(UploadPackRequest {
+        digest,
+        data: payload[32..].to_vec(),
+    })
+}
+
+/// Decode an `OP_DOWNLOAD_PACK` request payload sent by the client.
+///
+/// Wire format: `[32-byte digest]`
+pub fn decode_download_pack(payload: &[u8]) -> TransportResult<Hash> {
+    if payload.len() < 32 {
+        return Err(TransportError::InvalidResponse);
+    }
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&payload[..32]);
+    Ok(h)
+}
+
+/// Decode an `OP_PACK_EXISTS` request payload sent by the client.
+///
+/// Wire format: `[32-byte digest]`
+pub fn decode_pack_exists(payload: &[u8]) -> TransportResult<Hash> {
+    if payload.len() < 32 {
+        return Err(TransportError::InvalidResponse);
+    }
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&payload[..32]);
+    Ok(h)
+}
+
+/// Returned by [`decode_write_ref`]: the ref name and new hash value from
+/// an `OP_WRITE_REF` client request payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteRefRequest {
+    pub name: String,
+    pub hash: Hash,
+}
+
+/// Decode an `OP_WRITE_REF` request payload sent by the client.
+///
+/// Wire format: `[u16 LE name_len][name bytes][32-byte hash]`
+pub fn decode_write_ref(payload: &[u8]) -> TransportResult<WriteRefRequest> {
+    if payload.len() < 2 {
+        return Err(TransportError::InvalidResponse);
+    }
+    let name_len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+    if payload.len() < 2 + name_len + 32 {
+        return Err(TransportError::InvalidResponse);
+    }
+    let name_bytes = &payload[2..2 + name_len];
+    let name = core::str::from_utf8(name_bytes)
+        .map_err(|_| TransportError::InvalidResponse)?
+        .to_string();
+    if !validate_ref_name(&name) {
+        return Err(TransportError::InvalidRef(name));
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&payload[2 + name_len..2 + name_len + 32]);
+    Ok(WriteRefRequest { name, hash })
+}
+
+/// Returned by [`decode_update_ref`]: the ref name, CAS condition, and new
+/// hash from an `OP_UPDATE_REF` client request payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateRefRequest {
+    pub name: String,
+    pub condition: RefWriteCondition,
+    pub hash: Hash,
+}
+
+/// Decode an `OP_UPDATE_REF` request payload sent by the client.
+///
+/// Wire format:
+/// - `[u8 cond_tag]` — `COND_ANY` (0x00), `COND_MISSING` (0x01), or `COND_MATCH` (0x02)
+/// - if `COND_MATCH`: `[32-byte expected hash]`
+/// - `[u16 LE name_len][name bytes][32-byte new hash]`
+pub fn decode_update_ref(payload: &[u8]) -> TransportResult<UpdateRefRequest> {
+    if payload.is_empty() {
+        return Err(TransportError::InvalidResponse);
+    }
+    let mut pos = 0usize;
+    let tag = payload[pos];
+    pos += 1;
+    let condition = match tag {
+        protocol::COND_ANY => RefWriteCondition::Any,
+        protocol::COND_MISSING => RefWriteCondition::Missing,
+        protocol::COND_MATCH => {
+            if pos + 32 > payload.len() {
+                return Err(TransportError::InvalidResponse);
+            }
+            let mut expected = [0u8; 32];
+            expected.copy_from_slice(&payload[pos..pos + 32]);
+            pos += 32;
+            RefWriteCondition::Match(expected)
+        }
+        _ => return Err(TransportError::ProtocolError),
+    };
+    if pos + 2 > payload.len() {
+        return Err(TransportError::InvalidResponse);
+    }
+    let name_len = u16::from_le_bytes([payload[pos], payload[pos + 1]]) as usize;
+    pos += 2;
+    if pos + name_len + 32 > payload.len() {
+        return Err(TransportError::InvalidResponse);
+    }
+    let name_bytes = &payload[pos..pos + name_len];
+    let name = core::str::from_utf8(name_bytes)
+        .map_err(|_| TransportError::InvalidResponse)?
+        .to_string();
+    if !validate_ref_name(&name) {
+        return Err(TransportError::InvalidRef(name));
+    }
+    pos += name_len;
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&payload[pos..pos + 32]);
+    Ok(UpdateRefRequest {
+        name,
+        condition,
+        hash,
+    })
+}
+
+/// Decode an `OP_READ_REF` request payload sent by the client.
+///
+/// Wire format: `[u16 LE name_len][name bytes]`
+///
+/// Returns the ref name as a `String`.
+pub fn decode_read_ref(payload: &[u8]) -> TransportResult<String> {
+    if payload.len() < 2 {
+        return Err(TransportError::InvalidResponse);
+    }
+    let name_len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+    if payload.len() < 2 + name_len {
+        return Err(TransportError::InvalidResponse);
+    }
+    let name = core::str::from_utf8(&payload[2..2 + name_len])
+        .map_err(|_| TransportError::InvalidResponse)?
+        .to_string();
+    if !validate_ref_name(&name) {
+        return Err(TransportError::InvalidRef(name));
+    }
+    Ok(name)
+}
+
+/// Decode an `OP_LIST_REFS` request payload sent by the client.
+///
+/// Wire format: `[u16 LE prefix_len][prefix bytes]`
+///
+/// Returns the prefix string (may be empty, which lists all refs).
+pub fn decode_list_refs(payload: &[u8]) -> TransportResult<String> {
+    if payload.len() < 2 {
+        return Err(TransportError::InvalidResponse);
+    }
+    let prefix_len = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+    if payload.len() < 2 + prefix_len {
+        return Err(TransportError::InvalidResponse);
+    }
+    let prefix = core::str::from_utf8(&payload[2..2 + prefix_len])
+        .map_err(|_| TransportError::InvalidResponse)?
+        .to_string();
+    if !prefix.is_empty() && !validate_ref_prefix(&prefix) {
+        return Err(TransportError::InvalidRef(prefix));
+    }
+    Ok(prefix)
+}
+
+/// Encode an `OP_WRITE_REF` request payload for the client.
+///
+/// Wire format: `[u16 LE name_len][name bytes][32-byte hash]`
+#[must_use]
+pub fn encode_write_ref(name: &str, hash: &Hash) -> Vec<u8> {
     let name_bytes = name.as_bytes();
     let name_len = u16::try_from(name_bytes.len()).unwrap_or(0);
     let mut out = Vec::with_capacity(2 + name_bytes.len() + 32);
@@ -515,7 +718,9 @@ fn encode_write_ref(name: &str, hash: &Hash) -> Vec<u8> {
     out
 }
 
-fn encode_update_ref(name: &str, condition: RefWriteCondition, hash: &Hash) -> Vec<u8> {
+/// Encode an `OP_UPDATE_REF` request payload for the client.
+#[must_use]
+pub fn encode_update_ref(name: &str, condition: RefWriteCondition, hash: &Hash) -> Vec<u8> {
     let name_bytes = name.as_bytes();
     let name_len = u16::try_from(name_bytes.len()).unwrap_or(0);
     let mut out = Vec::with_capacity(1 + 32 + 2 + name_bytes.len() + 32);
@@ -533,7 +738,9 @@ fn encode_update_ref(name: &str, condition: RefWriteCondition, hash: &Hash) -> V
     out
 }
 
-fn encode_read_ref(name: &str) -> Vec<u8> {
+/// Encode an `OP_READ_REF` request payload for the client.
+#[must_use]
+pub fn encode_read_ref(name: &str) -> Vec<u8> {
     let name_bytes = name.as_bytes();
     let name_len = u16::try_from(name_bytes.len()).unwrap_or(0);
     let mut out = Vec::with_capacity(2 + name_bytes.len());
@@ -542,7 +749,9 @@ fn encode_read_ref(name: &str) -> Vec<u8> {
     out
 }
 
-fn encode_list_refs(prefix: &str) -> Vec<u8> {
+/// Encode an `OP_LIST_REFS` request payload for the client.
+#[must_use]
+pub fn encode_list_refs(prefix: &str) -> Vec<u8> {
     let prefix_bytes = prefix.as_bytes();
     let prefix_len = u16::try_from(prefix_bytes.len()).unwrap_or(0);
     let mut out = Vec::with_capacity(2 + prefix_bytes.len());
@@ -551,9 +760,9 @@ fn encode_list_refs(prefix: &str) -> Vec<u8> {
     out
 }
 
-/// Decode the ref-list payload emitted by the server:
-/// `[u32 LE count][count × ([u16 LE name_len][name][32 hash])]`.
-fn decode_ref_list(data: &[u8]) -> TransportResult<Vec<Ref>> {
+/// Decode the ref-list payload emitted by the server in response to
+/// `OP_LIST_REFS`: `[u32 LE count][count × ([u16 LE name_len][name][32 hash])]`.
+pub fn decode_ref_list(data: &[u8]) -> TransportResult<Vec<Ref>> {
     if data.len() < 4 {
         return Err(TransportError::InvalidResponse);
     }
@@ -592,6 +801,27 @@ fn decode_ref_list(data: &[u8]) -> TransportResult<Vec<Ref>> {
         });
     }
     Ok(out)
+}
+
+/// Encode the `OP_LIST_REFS` response payload sent by the server.
+///
+/// Wire format: `[u32 LE count][count × ([u16 LE name_len][name][32 hash])]`
+///
+/// This is the complement of [`decode_ref_list`] and is used by the server
+/// to serialise the ref listing back to the client.
+#[must_use]
+pub fn encode_ref_list(refs: &[Ref]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + refs.len() * (2 + 32));
+    let count = u32::try_from(refs.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&count.to_le_bytes());
+    for r in refs {
+        let name_bytes = r.name.as_bytes();
+        let name_len = u16::try_from(name_bytes.len()).unwrap_or(u16::MAX);
+        out.extend_from_slice(&name_len.to_le_bytes());
+        out.extend_from_slice(name_bytes);
+        out.extend_from_slice(&r.hash.unwrap_or([0u8; 32]));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

@@ -11,7 +11,14 @@
 //! <good_hash_1>
 //! <good_hash_2>
 //! ...
+//! skip:<skipped_hash_1>
+//! skip:<skipped_hash_2>
+//! ...
 //! ```
+//!
+//! The `skip:` prefix lines are additive — old state files without them
+//! deserialize with an empty `skipped` set. [`pick_midpoint_skip`] skips
+//! over any candidate whose hash is in `skipped`, searching neighbors.
 //!
 //! Trailing whitespace on any line is tolerated on read.
 //!
@@ -21,7 +28,7 @@
 //! tester's verdict. [`BisectStep`] is a convenience response type that
 //! mirrors the Zig union.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -57,6 +64,10 @@ pub enum BisectError {
 pub type BisectResult<T> = Result<T, BisectError>;
 
 /// Persisted bisect state. Mirrors `src/bisect.zig::BisectState`.
+///
+/// The `skipped` field is an additive extension over the Zig original:
+/// commits in this set are excluded from midpoint selection. Old state
+/// files without `skip:` lines deserialize with an empty `skipped` set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BisectState {
     /// HEAD as it was when bisect started.
@@ -67,6 +78,10 @@ pub struct BisectState {
     pub bad_hash: Option<Hash>,
     /// All known-good commits.
     pub good_hashes: Vec<Hash>,
+    /// Commits explicitly skipped by `mkit bisect skip`. Excluded from
+    /// midpoint selection; neighbour search falls back to the nearest
+    /// non-skipped candidate.
+    pub skipped: BTreeSet<Hash>,
 }
 
 /// Outcome of a single bisect iteration.
@@ -135,16 +150,27 @@ pub fn read_state(mkit_dir: &Path) -> BisectResult<BisectState> {
     };
 
     let mut good_hashes = Vec::new();
+    let mut skipped = BTreeSet::new();
     for line in lines {
         let line = line.trim_end_matches(['\r', ' ']);
         if line.is_empty() {
             continue;
         }
-        if line.len() != HEX_LEN {
-            return Err(BisectError::InvalidBisectState);
+        if let Some(rest) = line.strip_prefix("skip:") {
+            // Skipped hash entry (additive extension; old parsers do not
+            // write these, so old state files get an empty skipped set).
+            if rest.len() != HEX_LEN {
+                return Err(BisectError::InvalidBisectState);
+            }
+            let h = hash::from_hex(rest).map_err(|_| BisectError::InvalidBisectState)?;
+            skipped.insert(h);
+        } else {
+            if line.len() != HEX_LEN {
+                return Err(BisectError::InvalidBisectState);
+            }
+            let h = hash::from_hex(line).map_err(|_| BisectError::InvalidBisectState)?;
+            good_hashes.push(h);
         }
-        let h = hash::from_hex(line).map_err(|_| BisectError::InvalidBisectState)?;
-        good_hashes.push(h);
     }
 
     Ok(BisectState {
@@ -152,6 +178,7 @@ pub fn read_state(mkit_dir: &Path) -> BisectResult<BisectState> {
         orig_branch,
         bad_hash,
         good_hashes,
+        skipped,
     })
 }
 
@@ -174,6 +201,11 @@ pub fn write_state(mkit_dir: &Path, state: &BisectState) -> BisectResult<()> {
     buf.push('\n');
     for g in &state.good_hashes {
         buf.push_str(&hash::to_hex(g));
+        buf.push('\n');
+    }
+    for s in &state.skipped {
+        buf.push_str("skip:");
+        buf.push_str(&hash::to_hex(s));
         buf.push('\n');
     }
     fs::write(mkit_dir.join(BISECT_FILE), buf.as_bytes())?;
@@ -250,6 +282,41 @@ pub fn pick_midpoint(candidates: &[Hash]) -> Hash {
     candidates[candidates.len() / 2]
 }
 
+/// Pick the midpoint commit, skipping over any commit in `skipped`.
+///
+/// Starts at `candidates[len/2]` (the natural midpoint). If that commit
+/// is in `skipped`, searches outward — alternating lower and upper
+/// neighbors — until a non-skipped candidate is found. Returns `ZERO`
+/// only when all candidates are skipped (or the list is empty).
+///
+/// This mirrors `src/bisect.zig::pickMidpoint` skip-neighbor logic.
+#[must_use]
+pub fn pick_midpoint_skip(candidates: &[Hash], skipped: &BTreeSet<Hash>) -> Hash {
+    if candidates.is_empty() {
+        return ZERO;
+    }
+    let mid = candidates.len() / 2;
+    // Walk outward from mid: try mid, mid-1, mid+1, mid-2, mid+2, …
+    for delta in 0..=candidates.len() {
+        // Positive direction: mid + delta
+        if let Some(idx) = mid.checked_add(delta).filter(|&i| i < candidates.len()) {
+            let h = candidates[idx];
+            if !skipped.contains(&h) {
+                return h;
+            }
+        }
+        // Negative direction: mid - delta (skip delta==0 to avoid double-check)
+        if let (true, Some(idx)) = (delta > 0, mid.checked_sub(delta)) {
+            let h = candidates[idx];
+            if !skipped.contains(&h) {
+                return h;
+            }
+        }
+    }
+    // All candidates are skipped.
+    ZERO
+}
+
 /// Drive a single bisect iteration: enumerate the range, then pick the
 /// midpoint or report completion.
 ///
@@ -274,10 +341,21 @@ pub fn next_step(store: &ObjectStore, state: &BisectState) -> BisectResult<Bisec
     if candidates.is_empty() {
         return Ok(BisectStep::Found(bad));
     }
-    if candidates.len() == 1 {
-        return Ok(BisectStep::Found(candidates[0]));
+    // Filter out skipped commits for the Found-check, but keep them in
+    // the candidate list for neighbor search.
+    let non_skipped: Vec<Hash> = candidates
+        .iter()
+        .copied()
+        .filter(|h| !state.skipped.contains(h))
+        .collect();
+    if non_skipped.len() == 1 {
+        return Ok(BisectStep::Found(non_skipped[0]));
     }
-    let mid = pick_midpoint(&candidates);
+    if non_skipped.is_empty() {
+        // All remaining commits are skipped; fall back to bad.
+        return Ok(BisectStep::Found(bad));
+    }
+    let mid = pick_midpoint_skip(&candidates, &state.skipped);
     Ok(BisectStep::Testing {
         hash: mid,
         remaining: candidates.len(),
@@ -365,6 +443,7 @@ mod tests {
             orig_branch: Some("main".to_string()),
             bad_hash: Some(hash::hash(b"bad")),
             good_hashes: vec![hash::hash(b"g1"), hash::hash(b"g2")],
+            skipped: BTreeSet::new(),
         };
         write_state(&mkit, &state).unwrap();
         let read = read_state(&mkit).unwrap();
@@ -381,10 +460,63 @@ mod tests {
             orig_branch: None,
             bad_hash: None,
             good_hashes: Vec::new(),
+            skipped: BTreeSet::new(),
         };
         write_state(&mkit, &state).unwrap();
         let read = read_state(&mkit).unwrap();
         assert_eq!(read, state);
+    }
+
+    #[test]
+    fn state_roundtrip_with_skipped_hashes() {
+        let tmp = TempDir::new().unwrap();
+        let mkit = tmp.path().join(".mkit");
+        fs::create_dir_all(&mkit).unwrap();
+        let s1 = hash::hash(b"skip1");
+        let s2 = hash::hash(b"skip2");
+        let mut skipped = BTreeSet::new();
+        skipped.insert(s1);
+        skipped.insert(s2);
+        let state = BisectState {
+            orig_head: hash::hash(b"head"),
+            orig_branch: Some("main".to_string()),
+            bad_hash: Some(hash::hash(b"bad")),
+            good_hashes: vec![hash::hash(b"good")],
+            skipped,
+        };
+        write_state(&mkit, &state).unwrap();
+        let read = read_state(&mkit).unwrap();
+        assert_eq!(read, state);
+        assert_eq!(read.skipped.len(), 2);
+        assert!(read.skipped.contains(&s1));
+        assert!(read.skipped.contains(&s2));
+    }
+
+    #[test]
+    fn old_state_file_without_skip_deserializes_with_empty_skipped() {
+        // Simulate a state file written by an old parser (no `skip:` lines).
+        let tmp = TempDir::new().unwrap();
+        let mkit = tmp.path().join(".mkit");
+        fs::create_dir_all(&mkit).unwrap();
+        let orig_head = hash::hash(b"orig");
+        let bad = hash::hash(b"bad");
+        let good = hash::hash(b"good");
+        // Write the old format manually (no skip: lines).
+        let content = format!(
+            "{}\n\n{}\n{}\n",
+            hash::to_hex(&orig_head),
+            hash::to_hex(&bad),
+            hash::to_hex(&good)
+        );
+        fs::write(mkit.join(BISECT_FILE), content.as_bytes()).unwrap();
+        let read = read_state(&mkit).unwrap();
+        assert_eq!(read.orig_head, orig_head);
+        assert_eq!(read.bad_hash, Some(bad));
+        assert_eq!(read.good_hashes, vec![good]);
+        assert!(
+            read.skipped.is_empty(),
+            "old files must deserialize with empty skipped"
+        );
     }
 
     #[test]
@@ -503,6 +635,7 @@ mod tests {
             orig_branch: None,
             bad_hash: None,
             good_hashes: vec![hash::hash(b"x")],
+            skipped: BTreeSet::new(),
         };
         assert_eq!(next_step(&store, &state).unwrap(), BisectStep::NeedMore);
     }
@@ -525,6 +658,7 @@ mod tests {
             orig_branch: None,
             bad_hash: Some(commits[5]),
             good_hashes: vec![commits[0]],
+            skipped: BTreeSet::new(),
         };
         // Drive the bisect, simulating a "first-bad = c4" scenario:
         // c1 good; c2..c5 unknown; c6 bad. Truth = c4 (index 3) is first bad.
@@ -553,5 +687,105 @@ mod tests {
                 BisectStep::NeedMore => panic!("unexpected NeedMore"),
             }
         }
+    }
+
+    #[test]
+    fn skip_advances_midpoint_to_neighbor() {
+        // Linear chain: c1 < c2 < c3 < c4 < c5 < c6
+        // good=c1, bad=c6, natural midpoint=c3 (index 2 of candidates c2..c6).
+        // Skip c3 → should pick neighbor (c2 or c4).
+        let (_d, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let tree = put_tree(&store, "f.txt", blob);
+        let mut commits = Vec::new();
+        commits.push(put_commit(&store, tree, vec![], 1)); // c1 = index 0
+        for i in 1..6 {
+            let parent = commits[i - 1];
+            commits.push(put_commit(&store, tree, vec![parent], (i + 1) as u64));
+        }
+        // Enumerate range first to know what the natural midpoint would be.
+        let cands = enumerate_range(&store, commits[5], &[commits[0]]).unwrap();
+        // Natural midpoint without skip.
+        let natural_mid = pick_midpoint(&cands);
+        assert_ne!(natural_mid, ZERO, "should have a natural midpoint");
+
+        // Now skip the natural midpoint.
+        let mut skipped = BTreeSet::new();
+        skipped.insert(natural_mid);
+
+        let skipped_mid = pick_midpoint_skip(&cands, &skipped);
+        assert_ne!(
+            skipped_mid, ZERO,
+            "should find a neighbor when mid is skipped"
+        );
+        assert_ne!(
+            skipped_mid, natural_mid,
+            "skip must advance past the natural midpoint"
+        );
+        assert!(
+            !skipped.contains(&skipped_mid),
+            "returned hash must not be in skipped set"
+        );
+    }
+
+    #[test]
+    fn next_step_skip_advances_then_finds() {
+        // 5-commit chain: c1 good, c6 bad, truth = c4 (index 3).
+        // Skip the first midpoint candidate; bisect should still converge.
+        let (_d, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let tree = put_tree(&store, "f.txt", blob);
+        let mut commits = Vec::new();
+        commits.push(put_commit(&store, tree, vec![], 1));
+        for i in 1..6 {
+            let p = commits[i - 1];
+            commits.push(put_commit(&store, tree, vec![p], (i + 1) as u64));
+        }
+        let truth = commits[3]; // c4
+
+        // Skip the natural first midpoint.
+        let cands = enumerate_range(&store, commits[5], &[commits[0]]).unwrap();
+        let first_natural = pick_midpoint(&cands);
+        let mut skipped = BTreeSet::new();
+        skipped.insert(first_natural);
+
+        let mut state = BisectState {
+            orig_head: commits[5],
+            orig_branch: None,
+            bad_hash: Some(commits[5]),
+            good_hashes: vec![commits[0]],
+            skipped,
+        };
+
+        let mut iters = 0;
+        loop {
+            assert!(iters < 10, "bisect with skip should converge");
+            iters += 1;
+            match next_step(&store, &state).unwrap() {
+                BisectStep::Found(_) => break,
+                BisectStep::Testing { hash, .. } => {
+                    let idx = commits.iter().position(|c| *c == hash).unwrap();
+                    let truth_idx = commits.iter().position(|c| *c == truth).unwrap();
+                    if idx < truth_idx {
+                        state.good_hashes.push(hash);
+                    } else {
+                        state.bad_hash = Some(hash);
+                    }
+                }
+                BisectStep::NeedMore => panic!("unexpected NeedMore"),
+            }
+        }
+    }
+
+    #[test]
+    fn pick_midpoint_skip_all_skipped_returns_zero() {
+        let c1 = hash::hash(b"c1");
+        let c2 = hash::hash(b"c2");
+        let c3 = hash::hash(b"c3");
+        let mut skipped = BTreeSet::new();
+        skipped.insert(c1);
+        skipped.insert(c2);
+        skipped.insert(c3);
+        assert_eq!(pick_midpoint_skip(&[c1, c2, c3], &skipped), ZERO);
     }
 }

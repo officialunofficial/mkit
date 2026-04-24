@@ -5,19 +5,22 @@
 //! The backing repo is accessed via `FileTransport`, which already
 //! implements [`mkit_core::protocol::Transport`]. Frame encoding is
 //! [`mkit_core::protocol::encode_frame`] / `decode_frame`; per-verb
-//! payload shapes are inlined here to match the wire format shipped
-//! by `mkit-transport-ssh` (its decoders are crate-private).
+//! payload decoders are provided by `mkit-transport-ssh` so this file
+//! does not need inlined copies.
 
 use std::io::{Read, Write};
 
-use mkit_core::hash::Hash;
 use mkit_core::protocol::{
     self, FRAME_HEADER_LEN, HELLO_NAME_MAX, HELLO_VERSION_MAX, MAX_PAYLOAD_LEN, OP_CLOSE,
     OP_DOWNLOAD_PACK, OP_HELLO, OP_LIST_REFS, OP_PACK_EXISTS, OP_READ_REF, OP_UPDATE_REF,
-    OP_UPLOAD_PACK, OP_WRITE_REF, PackKey, RefWriteCondition, SSH_BINARY_NAME, SSH_PROTO_VERSION,
-    STATUS_ERROR, STATUS_NULL, STATUS_OK, STATUS_UNSUPPORTED, Transport,
+    OP_UPLOAD_PACK, OP_WRITE_REF, PackKey, SSH_BINARY_NAME, SSH_PROTO_VERSION, STATUS_ERROR,
+    STATUS_NULL, STATUS_OK, STATUS_UNSUPPORTED, Transport,
 };
 use mkit_transport_file::FileTransport;
+use mkit_transport_ssh::{
+    decode_download_pack, decode_list_refs, decode_pack_exists, decode_read_ref, decode_update_ref,
+    decode_upload_pack, decode_write_ref, encode_ref_list,
+};
 
 use crate::cli::CLI_VERSION;
 use crate::exit;
@@ -82,54 +85,54 @@ fn handshake(r: &mut impl Read, w: &mut impl Write) -> bool {
 fn dispatch(tx: &FileTransport, op: u8, payload: &[u8]) -> (u8, Vec<u8>) {
     match op {
         OP_UPLOAD_PACK => match decode_upload_pack(payload) {
-            Some((data, key)) => match tx.upload_pack(data, &key) {
+            Ok(req) => match tx.upload_pack(&req.data, &PackKey(req.digest)) {
                 Ok(()) => (STATUS_OK, Vec::new()),
                 Err(_) => (STATUS_ERROR, b"upload failed".to_vec()),
             },
-            None => (STATUS_ERROR, b"decode error".to_vec()),
+            Err(_) => (STATUS_ERROR, b"decode error".to_vec()),
         },
-        OP_DOWNLOAD_PACK => match decode_hash32(payload) {
-            Some(h) => match tx.download_pack(&PackKey(h)) {
+        OP_DOWNLOAD_PACK => match decode_download_pack(payload) {
+            Ok(h) => match tx.download_pack(&PackKey(h)) {
                 Ok(bytes) => (STATUS_OK, bytes),
                 Err(_) => (STATUS_NULL, Vec::new()),
             },
-            None => (STATUS_ERROR, b"decode error".to_vec()),
+            Err(_) => (STATUS_ERROR, b"decode error".to_vec()),
         },
-        OP_PACK_EXISTS => match decode_hash32(payload) {
-            Some(h) => {
+        OP_PACK_EXISTS => match decode_pack_exists(payload) {
+            Ok(h) => {
                 let present = tx.pack_exists(&PackKey(h)).unwrap_or(false);
                 (STATUS_OK, vec![u8::from(present)])
             }
-            None => (STATUS_ERROR, b"decode error".to_vec()),
+            Err(_) => (STATUS_ERROR, b"decode error".to_vec()),
         },
         OP_WRITE_REF => match decode_write_ref(payload) {
-            Some((name, hash)) => match tx.write_ref(&name, &hash) {
+            Ok(req) => match tx.write_ref(&req.name, &req.hash) {
                 Ok(()) => (STATUS_OK, Vec::new()),
                 Err(_) => (STATUS_ERROR, b"write ref failed".to_vec()),
             },
-            None => (STATUS_ERROR, b"decode error".to_vec()),
+            Err(_) => (STATUS_ERROR, b"decode error".to_vec()),
         },
         OP_UPDATE_REF => match decode_update_ref(payload) {
-            Some((name, cond, hash)) => match tx.update_ref(&name, cond, &hash) {
+            Ok(req) => match tx.update_ref(&req.name, req.condition, &req.hash) {
                 Ok(()) => (STATUS_OK, Vec::new()),
                 Err(_) => (STATUS_ERROR, b"update ref failed".to_vec()),
             },
-            None => (STATUS_ERROR, b"decode error".to_vec()),
+            Err(_) => (STATUS_ERROR, b"decode error".to_vec()),
         },
-        OP_READ_REF => match decode_name(payload) {
-            Some(name) => match tx.read_ref(&name) {
+        OP_READ_REF => match decode_read_ref(payload) {
+            Ok(name) => match tx.read_ref(&name) {
                 Ok(Some(h)) => (STATUS_OK, h.to_vec()),
                 Ok(None) => (STATUS_NULL, Vec::new()),
                 Err(_) => (STATUS_ERROR, b"read ref failed".to_vec()),
             },
-            None => (STATUS_ERROR, b"decode error".to_vec()),
+            Err(_) => (STATUS_ERROR, b"decode error".to_vec()),
         },
-        OP_LIST_REFS => match decode_name(payload) {
-            Some(prefix) => match tx.list_refs(&prefix) {
+        OP_LIST_REFS => match decode_list_refs(payload) {
+            Ok(prefix) => match tx.list_refs(&prefix) {
                 Ok(refs) => (STATUS_OK, encode_ref_list(&refs)),
                 Err(_) => (STATUS_ERROR, b"list refs failed".to_vec()),
             },
-            None => (STATUS_ERROR, b"decode error".to_vec()),
+            Err(_) => (STATUS_ERROR, b"decode error".to_vec()),
         },
         _ => (STATUS_UNSUPPORTED, Vec::new()),
     }
@@ -162,7 +165,7 @@ fn write_status(w: &mut impl Write, status: u8, payload: &[u8]) -> std::io::Resu
     }
 }
 
-// -- Verb payload decoders (mirrors mkit-transport-ssh internals) ------------
+// -- HELLO handshake decoder (serve-side only; not exported from ssh crate) --
 
 struct HelloRequest<'a> {
     proto_version: u8,
@@ -189,94 +192,26 @@ fn decode_hello_request(p: &[u8]) -> Option<HelloRequest<'_>> {
     })
 }
 
-fn decode_upload_pack(p: &[u8]) -> Option<(&[u8], PackKey)> {
-    if p.len() < 32 {
-        return None;
-    }
-    let split = p.len() - 32;
-    let data = &p[..split];
-    let mut k = [0u8; 32];
-    k.copy_from_slice(&p[split..]);
-    Some((data, PackKey(k)))
-}
+// -- Public-decoder reachability test ----------------------------------------
 
-fn decode_hash32(p: &[u8]) -> Option<Hash> {
-    if p.len() != 32 {
-        return None;
+#[cfg(test)]
+mod tests {
+    /// Compile-time reachability check: assert each public per-verb decoder
+    /// symbol is accessible from outside `mkit-transport-ssh`.  No runtime
+    /// logic needed — if the crate compiles this function, the symbols exist.
+    #[test]
+    fn public_decoders_exist() {
+        let _ = mkit_transport_ssh::decode_upload_pack as fn(&[u8]) -> _;
+        let _ = mkit_transport_ssh::decode_download_pack as fn(&[u8]) -> _;
+        let _ = mkit_transport_ssh::decode_pack_exists as fn(&[u8]) -> _;
+        let _ = mkit_transport_ssh::decode_write_ref as fn(&[u8]) -> _;
+        let _ = mkit_transport_ssh::decode_update_ref as fn(&[u8]) -> _;
+        let _ = mkit_transport_ssh::decode_read_ref as fn(&[u8]) -> _;
+        let _ = mkit_transport_ssh::decode_list_refs as fn(&[u8]) -> _;
+        let _ = mkit_transport_ssh::decode_ref_list as fn(&[u8]) -> _;
+        let _ = mkit_transport_ssh::encode_write_ref as fn(&str, &_) -> _;
+        let _ = mkit_transport_ssh::encode_update_ref as fn(&str, _, &_) -> _;
+        let _ = mkit_transport_ssh::encode_read_ref as fn(&str) -> _;
+        let _ = mkit_transport_ssh::encode_list_refs as fn(&str) -> _;
     }
-    let mut h = [0u8; 32];
-    h.copy_from_slice(p);
-    Some(h)
-}
-
-fn decode_name(p: &[u8]) -> Option<String> {
-    if p.len() < 2 {
-        return None;
-    }
-    let name_len = u16::from_le_bytes([p[0], p[1]]) as usize;
-    if 2 + name_len != p.len() {
-        return None;
-    }
-    std::str::from_utf8(&p[2..]).ok().map(str::to_string)
-}
-
-fn decode_write_ref(p: &[u8]) -> Option<(String, Hash)> {
-    if p.len() < 2 + 32 {
-        return None;
-    }
-    let name_len = u16::from_le_bytes([p[0], p[1]]) as usize;
-    if 2 + name_len + 32 != p.len() {
-        return None;
-    }
-    let name = std::str::from_utf8(&p[2..2 + name_len]).ok()?.to_string();
-    let mut h = [0u8; 32];
-    h.copy_from_slice(&p[2 + name_len..2 + name_len + 32]);
-    Some((name, h))
-}
-
-fn decode_update_ref(p: &[u8]) -> Option<(String, RefWriteCondition, Hash)> {
-    if p.is_empty() {
-        return None;
-    }
-    let cond_byte = p[0];
-    let (cond, rest) = match cond_byte {
-        protocol::COND_ANY => (RefWriteCondition::Any, &p[1..]),
-        protocol::COND_MISSING => (RefWriteCondition::Missing, &p[1..]),
-        protocol::COND_MATCH => {
-            if p.len() < 1 + 32 {
-                return None;
-            }
-            let mut expected = [0u8; 32];
-            expected.copy_from_slice(&p[1..33]);
-            (RefWriteCondition::Match(expected), &p[33..])
-        }
-        _ => return None,
-    };
-    if rest.len() < 2 + 32 {
-        return None;
-    }
-    let name_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
-    if 2 + name_len + 32 != rest.len() {
-        return None;
-    }
-    let name = std::str::from_utf8(&rest[2..2 + name_len])
-        .ok()?
-        .to_string();
-    let mut h = [0u8; 32];
-    h.copy_from_slice(&rest[2 + name_len..]);
-    Some((name, cond, h))
-}
-
-fn encode_ref_list(refs: &[mkit_core::refs::Ref]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + refs.len() * (2 + 32));
-    let count = u32::try_from(refs.len()).unwrap_or(u32::MAX);
-    out.extend_from_slice(&count.to_le_bytes());
-    for r in refs {
-        let name_bytes = r.name.as_bytes();
-        let name_len = u16::try_from(name_bytes.len()).unwrap_or(u16::MAX);
-        out.extend_from_slice(&name_len.to_le_bytes());
-        out.extend_from_slice(name_bytes);
-        out.extend_from_slice(&r.hash.unwrap_or([0u8; 32]));
-    }
-    out
 }

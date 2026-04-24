@@ -25,6 +25,7 @@
 //! that exercised `show()` are dropped from this port; everything else
 //! mirrors the Zig coverage.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,7 @@ use crate::atomic;
 use crate::hash::{Hash, ZERO};
 use crate::index::{self, Index};
 use crate::object::{Commit, Identity, Object};
+use crate::ops::diff::{DiffKind, DiffResult, diff_trees};
 use crate::ops::restore::{self, RestoreOptions};
 use crate::refs;
 use crate::serialize;
@@ -81,9 +83,9 @@ pub enum StashError {
     #[error("stash commit object is not a Commit")]
     NotACommit,
     #[error(transparent)]
-    Object(#[from] crate::object::MkitError),
+    Diff(#[from] crate::store::StoreError),
     #[error(transparent)]
-    Store(#[from] crate::store::StoreError),
+    Object(#[from] crate::object::MkitError),
     #[error(transparent)]
     Refs(#[from] crate::refs::RefError),
     #[error(transparent)]
@@ -193,6 +195,95 @@ pub fn pop(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()>
     Ok(())
 }
 
+/// Render `stash show [<stash>]` output: header + unified-diff-style listing.
+///
+/// Output format (matches the Zig `show` output shape):
+/// ```text
+/// stash@{<idx>}: <message>
+/// Date: <unix-timestamp>
+///
+/// <A|M|D> <path>
+/// ...
+/// ```
+///
+/// # Errors
+/// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
+/// - [`StashError::NotACommit`] if the stored object is not a Commit.
+/// - Store/object errors if objects cannot be read.
+pub fn render_stash_show(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<String> {
+    let list = read_list(repo_root)?;
+    if idx >= list.entries.len() {
+        return Err(StashError::IndexOutOfRange(idx));
+    }
+    let entry = &list.entries[idx];
+
+    // Load the stash commit to get its tree.
+    let stash_obj = store.read_object(&entry.commit_hash)?;
+    let Object::Commit(stash_commit) = stash_obj else {
+        return Err(StashError::NotACommit);
+    };
+
+    // Resolve parent tree (None if parent is the zero hash or commit load fails).
+    let parent_tree: Option<Hash> = if entry.parent_hash == ZERO {
+        None
+    } else {
+        match store.read_object(&entry.parent_hash) {
+            Ok(Object::Commit(parent_commit)) => Some(parent_commit.tree_hash),
+            _ => None,
+        }
+    };
+
+    let diff = diff_trees(store, parent_tree, Some(stash_commit.tree_hash))?;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "stash@{{{idx}}}: {}", entry.message);
+    let _ = writeln!(out, "Date: {}", entry.timestamp);
+    let _ = writeln!(out);
+    for e in &diff.entries {
+        let tag = match e.kind {
+            DiffKind::Added => "A",
+            DiffKind::Removed => "D",
+            DiffKind::Modified => "M",
+            DiffKind::ModeChanged => "T",
+        };
+        let _ = writeln!(out, "{tag} {}", e.path);
+    }
+    Ok(out)
+}
+
+/// Show the diff for a stash entry (raw [`DiffResult`]).
+///
+/// # Errors
+/// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
+/// - [`StashError::NotACommit`] if the stash commit object is not a Commit.
+pub fn show_diff(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<DiffResult> {
+    let list = read_list(repo_root)?;
+    if idx >= list.entries.len() {
+        return Err(StashError::IndexOutOfRange(idx));
+    }
+    let entry = &list.entries[idx];
+
+    let stash_obj = store.read_object(&entry.commit_hash)?;
+    let Object::Commit(stash_commit) = stash_obj else {
+        return Err(StashError::NotACommit);
+    };
+
+    let parent_tree: Option<Hash> = if entry.parent_hash == ZERO {
+        None
+    } else {
+        match store.read_object(&entry.parent_hash) {
+            Ok(Object::Commit(parent_commit)) => Some(parent_commit.tree_hash),
+            _ => None,
+        }
+    };
+
+    Ok(diff_trees(
+        store,
+        parent_tree,
+        Some(stash_commit.tree_hash),
+    )?)
+}
+
 /// Drop a stash without applying it.
 ///
 /// # Errors
@@ -235,6 +326,14 @@ fn write_list(repo_root: &Path, list: &StashList) -> StashResult<()> {
     let path = stash_path(repo_root);
     atomic::write_atomic(&path, &bytes, true)?;
     Ok(())
+}
+
+/// Write a [`StashList`] to disk. Public only for integration-test goldens.
+///
+/// # Panics
+/// Panics if serialization or the write fails (test-only helper).
+pub fn write_list_test_only(repo_root: &Path, list: &StashList) {
+    write_list(repo_root, list).expect("write_list_test_only failed");
 }
 
 /// Encode a [`StashList`] as the on-disk manifest. Public for goldens.
@@ -325,6 +424,139 @@ fn unix_seconds_now() -> u64 {
 mod tests {
     use super::*;
     use crate::hash;
+    use crate::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use crate::ops::diff::DiffKind;
+    use crate::serialize;
+    use crate::store::ObjectStore;
+    use tempfile::TempDir;
+
+    fn fresh_store() -> (TempDir, ObjectStore) {
+        let dir = TempDir::new().unwrap();
+        let store = ObjectStore::init(dir.path()).unwrap();
+        (dir, store)
+    }
+
+    fn put_blob_data(store: &ObjectStore, data: &[u8]) -> Hash {
+        let obj = Object::Blob(Blob {
+            data: data.to_vec(),
+        });
+        store.write(&serialize::serialize(&obj).unwrap()).unwrap()
+    }
+
+    fn put_tree_entries(store: &ObjectStore, entries: Vec<TreeEntry>) -> Hash {
+        let obj = Object::Tree(Tree { entries });
+        store.write(&serialize::serialize(&obj).unwrap()).unwrap()
+    }
+
+    fn put_commit_obj(store: &ObjectStore, tree_h: Hash, parents: Vec<Hash>, ts: u64) -> Hash {
+        let commit = Object::Commit(Commit::new_unannotated(
+            tree_h,
+            parents,
+            Identity::ed25519([0u8; 32]),
+            [0u8; 32],
+            b"msg".to_vec(),
+            ts,
+            [0u8; 64],
+        ));
+        store
+            .write(&serialize::serialize(&commit).unwrap())
+            .unwrap()
+    }
+
+    /// Build a deterministic stash fixture: parent commit has `existing.txt`,
+    /// stash commit adds `new.txt` and modifies `existing.txt`.
+    fn build_stash_fixture(store: &ObjectStore, repo_root: &std::path::Path) {
+        // Parent tree: one file "existing.txt"
+        let blob_v1 = put_blob_data(store, b"original content");
+        let parent_tree = put_tree_entries(
+            store,
+            vec![TreeEntry {
+                name: b"existing.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob_v1,
+            }],
+        );
+        let parent_commit = put_commit_obj(store, parent_tree, vec![], 1_000_000);
+
+        // Stash tree: existing.txt modified + new.txt added
+        let blob_v2 = put_blob_data(store, b"modified content");
+        let blob_new = put_blob_data(store, b"brand new file");
+        let stash_tree = put_tree_entries(
+            store,
+            vec![
+                TreeEntry {
+                    name: b"existing.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob_v2,
+                },
+                TreeEntry {
+                    name: b"new.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob_new,
+                },
+            ],
+        );
+        let stash_commit = put_commit_obj(store, stash_tree, vec![parent_commit], 1_000_001);
+
+        let list = StashList {
+            entries: vec![StashEntry {
+                commit_hash: stash_commit,
+                parent_hash: parent_commit,
+                timestamp: 1_000_001_u32,
+                message: "WIP: stash message".to_string(),
+            }],
+        };
+        write_list(repo_root, &list).unwrap();
+    }
+
+    #[test]
+    fn show_diff_returns_correct_entries() {
+        let (tmp, store) = fresh_store();
+        build_stash_fixture(&store, tmp.path());
+
+        let diff = show_diff(&store, tmp.path(), 0).unwrap();
+        assert_eq!(diff.entries.len(), 2, "expected 2 diff entries");
+
+        let existing = diff.entries.iter().find(|e| e.path == "existing.txt");
+        let new_f = diff.entries.iter().find(|e| e.path == "new.txt");
+        assert!(existing.is_some(), "existing.txt must appear in diff");
+        assert!(new_f.is_some(), "new.txt must appear in diff");
+        assert_eq!(existing.unwrap().kind, DiffKind::Modified);
+        assert_eq!(new_f.unwrap().kind, DiffKind::Added);
+    }
+
+    #[test]
+    fn render_stash_show_header_and_entries() {
+        let (tmp, store) = fresh_store();
+        build_stash_fixture(&store, tmp.path());
+
+        let output = render_stash_show(&store, tmp.path(), 0).unwrap();
+        assert!(
+            output.contains("stash@{0}:"),
+            "missing stash header: {output}"
+        );
+        assert!(
+            output.contains("WIP: stash message"),
+            "missing message: {output}"
+        );
+        assert!(output.contains("Date:"), "missing date line: {output}");
+        assert!(
+            output.contains("M existing.txt"),
+            "missing modified entry: {output}"
+        );
+        assert!(
+            output.contains("A new.txt"),
+            "missing added entry: {output}"
+        );
+    }
+
+    #[test]
+    fn show_diff_out_of_range_returns_error() {
+        let (tmp, _store) = fresh_store();
+        let store = ObjectStore::open(tmp.path()).unwrap();
+        let err = show_diff(&store, tmp.path(), 0).unwrap_err();
+        assert!(matches!(err, StashError::IndexOutOfRange(0)));
+    }
 
     #[test]
     fn manifest_roundtrip_two_entries() {
