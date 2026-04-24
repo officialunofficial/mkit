@@ -22,7 +22,7 @@ export default function HomePage() {
         <Demo
           to='/attest'
           title='attest'
-          body='Wrap a commit hash in an in-toto Statement, seal it in a DSSE envelope, verify it back.'
+          body='Sign an in-toto Statement into a DSSE envelope with Ed25519, Secp256k1, or P-256 — then verify it back.'
         />
         <Demo
           to='/tree'

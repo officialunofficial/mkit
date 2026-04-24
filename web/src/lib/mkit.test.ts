@@ -3,6 +3,10 @@ import { mkit } from './mkit'
 
 const ZERO_SEED = '0000000000000000000000000000000000000000000000000000000000000000'
 const ONE_SEED = '0101010101010101010101010101010101010101010101010101010101010101'
+// Seeds for ECDSA tests — the constant-byte seeds above happen to land outside the valid scalar range for
+// secp256k1 / p256, so we use well-distributed 32-byte values that are unambiguously valid for all three algorithms.
+const SEED_A = '4a7c6b5a493827160908070605040302d1c0bfb8a79683726150403a2b1c0d0e'
+const SEED_B = 'f1e2d3c4b5a697887766554433221100ffeeddccbbaa99887766554433221100'
 
 describe('mkit-wasm wrapper', () => {
   it('blake3_hex returns a 64-char lowercase hex digest', async () => {
@@ -65,17 +69,26 @@ describe('mkit-wasm wrapper', () => {
     expect(m.commit_verify(tampered)).toBe(false)
   })
 
-  it('attest_build + attest_verify round-trips with the repo-key signer', async () => {
+  it.each([
+    { algo: 'ed25519', keyidRe: /^blake3:[0-9a-f]{64}$/, pubkeyRe: /^[0-9a-f]{64}$/ },
+    { algo: 'secp256k1', keyidRe: /^secp256k1:[0-9a-f]{66}$/, pubkeyRe: /^[0-9a-f]{66}$/ },
+    { algo: 'p256', keyidRe: /^p256:[0-9a-f]{66}$/, pubkeyRe: /^[0-9a-f]{66}$/ },
+  ])('attest_build + attest_verify round-trips under $algo', async ({ algo, keyidRe, pubkeyRe }) => {
     const m = await mkit()
-    const kp = m.keypair_from_seed(ONE_SEED)
+    const kp = m.attest_keypair(SEED_A, algo)
+    expect(kp.keyid).toMatch(keyidRe)
+    expect(kp.pubkey_hex).toMatch(pubkeyRe)
+    expect(kp.algo).toBe(algo)
+
     const commitHash = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'
     const predicate = new TextEncoder().encode('{"approved":true}')
-    const att = m.attest_build(commitHash, 'https://example.com/Review/v1', predicate, ONE_SEED)
-    expect(att.keyid).toMatch(/^blake3:[0-9a-f]{64}$/)
+    const att = m.attest_build(commitHash, 'https://example.com/Review/v1', predicate, SEED_A, algo)
+    expect(att.keyid).toBe(kp.keyid)
     expect(att.attestation_id_hex).toMatch(/^[0-9a-f]{64}$/)
-    expect(m.attest_verify(att.envelope_json, kp.pubkey_hex)).toBe(true)
-    // A different pubkey must fail.
-    const other = m.keypair_from_seed(ZERO_SEED)
-    expect(m.attest_verify(att.envelope_json, other.pubkey_hex)).toBe(false)
+    expect(m.attest_verify(att.envelope_json, kp.pubkey_hex, algo)).toBe(true)
+
+    // A different seed's pubkey must fail verification under the same algorithm.
+    const other = m.attest_keypair(SEED_B, algo)
+    expect(m.attest_verify(att.envelope_json, other.pubkey_hex, algo)).toBe(false)
   })
 })
