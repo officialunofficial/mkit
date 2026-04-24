@@ -219,19 +219,27 @@ pub fn verify_signature(
                 Err(Error::AlgorithmNotEnabled(Algorithm::Ed25519))
             }
         }
-        // Implemented in Team Kappa (secp256k1) PR: this arm will
-        // dispatch into a `verify_secp256k1` helper under
-        // `#[cfg(feature = "algo-secp256k1")]` and continue to return
-        // `Err(AlgorithmNotEnabled)` when the feature is off.
         Algorithm::Secp256k1 => {
-            let _ = (pubkey, msg, sig);
-            Err(Error::AlgorithmNotEnabled(Algorithm::Secp256k1))
+            #[cfg(feature = "algo-secp256k1")]
+            {
+                crate::signer_k256::verify_secp256k1(pubkey, msg, sig)
+            }
+            #[cfg(not(feature = "algo-secp256k1"))]
+            {
+                let _ = (pubkey, msg, sig);
+                Err(Error::AlgorithmNotEnabled(Algorithm::Secp256k1))
+            }
         }
-        // Implemented in Team Lambda (P-256) PR: same shape as the
-        // secp256k1 arm above.
         Algorithm::P256 => {
-            let _ = (pubkey, msg, sig);
-            Err(Error::AlgorithmNotEnabled(Algorithm::P256))
+            #[cfg(feature = "algo-p256")]
+            {
+                crate::signer_p256::verify_p256(pubkey, msg, sig)
+            }
+            #[cfg(not(feature = "algo-p256"))]
+            {
+                let _ = (pubkey, msg, sig);
+                Err(Error::AlgorithmNotEnabled(Algorithm::P256))
+            }
         }
     }
 }

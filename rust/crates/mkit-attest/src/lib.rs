@@ -38,6 +38,8 @@ pub mod envelope;
 pub mod jcs;
 pub mod signer;
 pub mod signer_external;
+#[cfg(feature = "algo-secp256k1")]
+pub mod signer_k256;
 #[cfg(feature = "algo-ed25519")]
 pub mod signer_repo_key;
 pub mod signer_sigstore;
@@ -129,4 +131,16 @@ pub enum Error {
     EnvelopeTooLarge { len: usize, max: usize },
     #[error("attestation store I/O: {0}")]
     Io(String),
+
+    // -- secp256k1 / ES256K (feature `algo-secp256k1`) --
+    //
+    // Flat variants (matching this enum's established style) rather than
+    // a single `Secp256k1(String)` aggregator, so callers can pattern-
+    // match on the specific failure mode without re-parsing strings.
+    #[error("secp256k1 key bytes are invalid (zero scalar, >= n, or bad PKCS#8)")]
+    Secp256k1KeyInvalid,
+    #[error("secp256k1 signature bytes are malformed (wrong length or not a valid (r, s))")]
+    Secp256k1SignatureInvalid,
+    #[error("secp256k1 signature did not verify against the given public key and message")]
+    Secp256k1VerifyFailed,
 }

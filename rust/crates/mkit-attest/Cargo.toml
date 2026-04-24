@@ -26,7 +26,7 @@ workspace = true
 # but carry no dep.
 default = ["algo-ed25519", "algo-secp256k1", "algo-p256"]
 algo-ed25519 = ["dep:ed25519-dalek"]
-algo-secp256k1 = []
+algo-secp256k1 = ["dep:k256", "dep:sha2"]
 algo-p256 = []
 
 [dependencies]
@@ -47,6 +47,13 @@ tempfile = "3"
 # Gated behind `algo-ed25519`: when disabled, `RepoKeySigner` and the
 # Ed25519 verifier dispatch compile out cleanly.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"], optional = true }
+# secp256k1 / ES256K (COSE -47) signer + verifier — gated behind
+# `algo-secp256k1`. Pinned to the `0.13` line shared across the
+# RustCrypto `ecdsa` ecosystem.
+k256 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+# ES256K / ES256 both sign SHA256(pae); pull in a standalone sha2 so the
+# signers don't rely on k256/p256 re-exports bleeding across features.
+sha2 = { version = "0.10", optional = true, default-features = false }
 
 [dev-dependencies]
 hex = "0.4"
