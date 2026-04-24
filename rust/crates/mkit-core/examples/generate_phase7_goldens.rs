@@ -34,10 +34,10 @@ fn main() -> std::io::Result<()> {
     //    connection. SPEC-TRANSPORT §7.4:
     //      proto_version = 0x01
     //      binary_name   = "mkit"
-    //      client_version = "mkit 0.2.1"
+    //      client_version = "mkit 0.1.0"
     //    wrapped in a standard [opcode][u32 LE len][payload] frame.
     let hello_payload =
-        encode_hello_payload(SSH_PROTO_VERSION, SSH_BINARY_NAME, "mkit 0.2.1").unwrap();
+        encode_hello_payload(SSH_PROTO_VERSION, SSH_BINARY_NAME, "mkit 0.1.0").unwrap();
     let hello_frame = encode_frame(OP_HELLO, &hello_payload).unwrap();
     write_vector(&out_dir, "frame_hello", &hello_frame)?;
 

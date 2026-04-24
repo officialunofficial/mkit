@@ -842,7 +842,7 @@ mod tests {
     fn server_hello_ok() -> Vec<u8> {
         let mut p = Vec::new();
         p.push(SSH_PROTO_VERSION);
-        let ver = b"mkit 0.2.1";
+        let ver = b"mkit 0.1.0";
         p.push(u8::try_from(ver.len()).unwrap());
         p.extend_from_slice(ver);
         server_frame(STATUS_OK, &p)
@@ -1002,7 +1002,7 @@ mod tests {
     #[test]
     fn smoke_hello_frame() {
         let payload =
-            encode_hello_payload(SSH_PROTO_VERSION, SSH_BINARY_NAME, "mkit 0.2.1").unwrap();
+            encode_hello_payload(SSH_PROTO_VERSION, SSH_BINARY_NAME, "mkit 0.1.0").unwrap();
         let hello = server_hello_ok();
         framing_roundtrip(OP_HELLO, &payload, STATUS_OK, &hello[FRAME_HEADER_LEN..]);
     }

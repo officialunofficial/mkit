@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn frame_roundtrip_hello() {
-        let payload = encode_hello_payload(SSH_PROTO_VERSION, "mkit", "mkit 0.2.1").unwrap();
+        let payload = encode_hello_payload(SSH_PROTO_VERSION, "mkit", "mkit 0.1.0").unwrap();
         let bytes = encode_frame(OP_HELLO, &payload).unwrap();
         let (op, got) = decode_frame(&bytes).unwrap();
         assert_eq!(op, OP_HELLO);

@@ -52,7 +52,7 @@ fn read_manifest_digest(name: &str) -> String {
 
 #[test]
 fn frame_hello_matches_golden() {
-    let payload = encode_hello_payload(SSH_PROTO_VERSION, SSH_BINARY_NAME, "mkit 0.2.1").unwrap();
+    let payload = encode_hello_payload(SSH_PROTO_VERSION, SSH_BINARY_NAME, "mkit 0.1.0").unwrap();
     let frame = encode_frame(OP_HELLO, &payload).unwrap();
     let golden = read_golden("frame_hello");
     assert_eq!(
@@ -61,14 +61,14 @@ fn frame_hello_matches_golden() {
     );
 
     // Spot-check the on-disk layout so a future editor sees the shape.
-    // [opcode=0x00][u32 LE len=17][proto=0x01][name_len=4]"mkit"[ver_len=10]"mkit 0.2.1"
+    // [opcode=0x00][u32 LE len=17][proto=0x01][name_len=4]"mkit"[ver_len=10]"mkit 0.1.0"
     assert_eq!(frame[0], OP_HELLO);
     assert_eq!(&frame[1..5], 17u32.to_le_bytes().as_slice());
     assert_eq!(frame[5], SSH_PROTO_VERSION);
     assert_eq!(frame[6], 4);
     assert_eq!(&frame[7..11], b"mkit");
     assert_eq!(frame[11], 10);
-    assert_eq!(&frame[12..], b"mkit 0.2.1");
+    assert_eq!(&frame[12..], b"mkit 0.1.0");
 }
 
 #[test]
