@@ -177,10 +177,10 @@ bytes) a stable function of the logical content. Implementation rules:
   are the bytes hashed for the attestation ID (§3) — no padding is
   appended.
 
-An in-tree JCS writer lives in `src/attestations/jcs.zig`. It is
-restricted to the JSON subset used by DSSE + in-toto (string, number
-as integer, bool, null, object, array) — no floating-point support,
-no JSON-number-that-is-really-a-u64-literal shenanigans.
+The JCS writer lives in the `mkit-attest` crate. It is restricted to
+the JSON subset used by DSSE + in-toto (string, number as integer,
+bool, null, object, array) — no floating-point support, no
+JSON-number-that-is-really-a-u64-literal shenanigans.
 
 ---
 
@@ -239,28 +239,17 @@ binding signatures to timestamps.
 
 ### 6.1 `Signer` trait
 
-Lives at `src/attestations/signer.zig`:
+The `Signer` trait has two methods:
 
-```zig
-pub const Signer = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        /// keyid identifies which trust root verifies this signer's output.
-        keyid:    *const fn (*anyopaque, Allocator) anyerror![]u8,
-        /// Sign the DSSE PAE. Implementation may prompt, network-call,
-        /// subprocess, etc. Returns raw signature bytes.
-        signDsse: *const fn (*anyopaque, Allocator, pae: []const u8) anyerror![]u8,
-    };
-};
-```
+- `keyid() -> String` — identifies which trust root verifies this
+  signer's output.
+- `sign_dsse(pae: &[u8]) -> Vec<u8>` — signs the DSSE PAE. Implementation
+  may prompt, network-call, subprocess, etc. Returns raw signature bytes.
 
 Verification is symmetric but NOT attached to the same trait, because
 the verifier often has no knowledge of how the signature was produced
 (e.g. for a Sigstore-keyless signature the verifier is Fulcio's cert
-chain, which no signer owns). Verifiers live at `src/attestations/verify.zig`
-and dispatch on `keyid` (§6.3).
+chain, which no signer owns). Verifiers dispatch on `keyid` (§6.3).
 
 ### 6.2 Built-in signers
 
@@ -363,15 +352,6 @@ predate attestations (e.g. a pre-0.3 server) return
 `STATUS_UNSUPPORTED` for the new opcodes; the client degrades to
 attestation-less pull with a `warning:` line on stderr.
 
-### 7.4 `Notary` trait removal
-
-`src/notary.zig` and `docs/NOTARY.md` are removed in the same commit
-series. Any downstream consumer previously relying on `Notary` should
-migrate to a custom `Signer` impl with a Makechain-specific
-`predicateType`.
-
----
-
 ## 8. CLI surface
 
 ```
@@ -445,7 +425,7 @@ Does NOT protect against:
 
 - **Revocation lists.** Out of scope; relies on transparency log or
   signer-level key rotation.
-- **Signed predicates as Zig structs.** We never parse `predicate`.
+- **Signed predicates as typed structs.** We never parse `predicate`.
 - **Automatic SLSA provenance generation.** Separate feature; if
   shipped, it'd be a predicate-type-specific emitter that drives
   `mkit attest` at build time.

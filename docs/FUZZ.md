@@ -1,158 +1,130 @@
 # Fuzzing
 
 mkit ships a small number of **bounded property tests** that exercise the
-binary parsers from adversarial inputs. They run as part of the default
-`zig build test` step — no separate fuzz harness, no external tooling.
+binary parsers from adversarial inputs. They live in the `mkit-fuzz`
+crate at `rust/fuzz/` and run in two modes:
 
-The property-test approach is deliberate: a previous attempt at coverage
-used `std.testing.fuzz` with `std.heap.page_allocator` and, under a
-`--fuzz`-style corpus run, allocated 192 GB and wedged the machine.
-Everything in this document exists to prevent that recurring.
+- `cargo test --manifest-path rust/fuzz/Cargo.toml` — plain unit-test
+  harness over the target bodies; stable Rust, no extra tooling. CI runs
+  this.
+- `cd rust/fuzz && cargo +nightly fuzz run <target>` — libfuzzer-sys
+  harness for coverage-guided runs. Same target bodies, same
+  guardrails.
+
+The property-test approach is deliberate: an earlier attempt that ran
+inputs through a page-backed allocator ballooned to hundreds of GiB on a
+pathological corpus. Everything in this document exists to prevent that
+from recurring.
 
 ## What is fuzzed
 
-| File                   | Target                                    |
-| ---------------------- | ----------------------------------------- |
-| `src/fuzz_packfile.zig`| `packfile.unpack`                         |
-| `src/fuzz_tree.zig`    | `serialize.deserialize` (tree objects)    |
-| `src/fuzz_delta.zig`   | `delta.applyDelta`                        |
+| Target file                    | Target function             |
+| ------------------------------ | --------------------------- |
+| `fuzz_targets/delta.rs`        | `delta::decode`             |
+| `fuzz_targets/pack.rs`         | `pack::PackReader::unpack`  |
+| `fuzz_targets/tree.rs`         | `serialize::deserialize`    |
 
 ## What is **not** fuzzed (deferred)
 
-- **`restore` (symlink resolution)** — the file-system side-effect surface
-  made it too easy to accidentally create symlink cycles. Revisit once we
-  have a virtual-FS shim to sandbox the target.
-- **SSH / URL parser wire decoding** — the SSH stack has just landed; we
-  keep the seam clean until it stabilises.
+- **`restore` (symlink resolution)** — the file-system side-effect
+  surface made it too easy to accidentally create symlink cycles.
+  Revisit once we have a virtual-FS shim to sandbox the target.
+- **SSH / URL parser wire decoding** — covered by crate-level unit
+  tests for now.
 
 ## Invariants per target
 
-All three targets share the same base invariants:
+All targets share the same base invariants:
 
-- No panic, no `unreachable`, no infinite loop.
-- No out-of-memory that is not an explicit `error.OutOfMemory` from the
-  target's own allocator. (The harness pins every run to a
-  `FixedBufferAllocator` backed by a 2 MiB static buffer — see below.)
+- No panic.
+- No out-of-memory that is not an explicit `Vec::with_capacity`-caught
+  allocation failure at the parser boundary.
 - Every iteration completes in under 100 ms of wall-clock.
 
 Target-specific invariants:
 
 - **Packfile**: declared entry count + declared entry lengths are
   bounds-checked against the actual input length *before* the parser
-  allocates the entries array. The most important regression test is
+  allocates the entries vector. The most important regression case is
   "pack header claims count = 9 999 999, body is 0 bytes": the parser
-  must reject or the FBA must return `OutOfMemory` — neither is allowed
-  to reserve real memory.
-- **Tree**: every `TreeEntry.name` accepted by the parser is non-empty,
-  contains no path separators and no NUL bytes, is not `.` or `..`, and
-  is at most 255 bytes. Every mode is one of the four enumerated values.
+  must reject before pre-allocating any large structure.
+- **Tree**: every `TreeEntry.name` accepted by the parser is
+  non-empty, contains no path separators and no NUL bytes, is not `.`
+  or `..`, and is at most 255 bytes. Every mode is one of the defined
+  enumerated values.
 - **Delta**: a `COPY` instruction's `offset + length` stays within the
   base slice; a truncated `COPY` header or `INSERT` literal produces
-  `error.DeltaCorrupt`; opcode `0x00` is always rejected.
+  `DeltaCorrupt`; opcode `0x00` is always rejected.
 
 ## How to run
 
 ```sh
-DEVELOPER_DIR=/Library/Developer/CommandLineTools zig build test
+cargo test --manifest-path rust/fuzz/Cargo.toml
 ```
 
-That includes the fuzz tests automatically. They add ~30 tests total,
-complete in well under a second combined, and each one is wall-clock
-capped so a regression that introduces an accidental loop aborts instead
-of hanging CI.
+That runs the target bodies as ordinary unit tests with a seeded
+PRNG — ~30 cases total, each wall-clock capped so a regression that
+introduces an accidental loop aborts rather than hanging CI.
 
-Deeper fuzz runs (millions of iterations, per-target corpora, coverage
-feedback) are intentionally **out of scope** for the bounded-property
-harnesses in this directory. When we add a dedicated fuzz step, each
-target here gains a matching `fuzz_<name>` build step and moves its body
-into a function callable from both `zig build test` and the fuzz runner.
+For coverage-guided runs (nightly toolchain required):
+
+```sh
+cd rust/fuzz
+cargo +nightly fuzz run delta
+cargo +nightly fuzz run pack
+cargo +nightly fuzz run tree
+```
 
 ## Guardrails (NON-NEGOTIABLE)
 
-Every fuzz test block in this repo must satisfy all six:
+Every target body must satisfy all six:
 
-1. **At most 100 iterations per test block.**
+1. **At most 100 iterations per invocation.**
 2. **Every iteration's input is at most 64 KiB.**
-3. **Every iteration runs under a `std.heap.FixedBufferAllocator` backed by a
-   2 MiB static `[2 * 1024 * 1024]u8` buffer.** Never `std.testing.allocator`,
-   never `std.heap.page_allocator` inside a fuzz body.
+3. **Bounded allocations.** Input cap (2) + per-op output caps inside
+   `mkit-core` keep the worst-case heap under ~1 MiB per iteration:
+   - `delta::decode` caps its initial `Vec::with_capacity` at
+     `result_len.min(base.len() + 2 * stream.len())` so a 9-byte
+     stream claiming `result_len = u32::MAX` cannot pre-allocate 4 GiB.
+   - `pack::PackReader` enforces `MAX_ENTRIES = 10_000_000` and
+     `MAX_PAYLOAD = 4 GiB` with count × entry-frame-length lower-bound
+     checks against the input slice before any `Vec::with_capacity`.
+   - The harness adds defensive pre-checks
+     (`claimed_result_len > MAX_INPUT * 4`,
+     `claimed_entries > 100_000`) that short-circuit before calling
+     into core, so the most pathological inputs don't even reach the
+     parsers.
 4. **Every iteration is timed; if it takes more than 100 ms the test
-   aborts the remainder** via `return error.FuzzIterationTooSlow`.
-5. **No `while (true)` without a bounded iteration counter.**
-6. **No `std.testing.fuzz`.** We drive inputs synchronously from
-   `std.Random.DefaultPrng` seeded with a fixed `u64` so failures
-   reproduce exactly. The standard-library fuzz harness was the original
-   source of the memory bomb; staying out of it is the whole point.
+   aborts the remainder.**
+5. **No `loop {}` or `while true {}` without a bounded iteration
+   counter.**
+6. **Seeded deterministic PRNG.** Inputs come from a splitmix64 seeded
+   with a fixed `u64` constant so any failure reproduces exactly.
 
 ## Known limitations
 
-- The 2 MiB FBA cap means bugs that only manifest above 2 MiB of
-  allocation are not caught here. If you suspect such a bug, write a
-  dedicated test with a larger allocator outside the fuzz file.
-- PRNG-driven coverage is shallow — 100 iterations of random bytes will
-  not find bugs that require deeply structured input. The fixed seed
-  cases exist to cover the structurally interesting shapes (oversize
-  counts, truncated headers, invalid modes, etc.) that random bytes
-  rarely hit.
+- PRNG-driven coverage is shallow — 100 iterations of random bytes
+  will not find bugs that require deeply structured input. The fixed
+  seed cases exist to cover the structurally interesting shapes
+  (oversize counts, truncated headers, invalid modes, etc.) that
+  random bytes rarely hit. Coverage-guided `cargo fuzz` runs fill in
+  the rest.
 - Fuzz outputs are only checked for "no panic, no runaway". We do not
   diff against a reference decoder.
 
-## Rust-adaptation (the `mkit-fuzz` crate)
-
-The Rust port at `rust/fuzz/` enforces the same six guardrails with one
-deliberate adaptation to **Guardrail #3**:
-
-- The Zig side uses `FixedBufferAllocator` because the Zig code is
-  explicit about the `Allocator` parameter everywhere — the fuzz harness
-  can swap in an FBA at the call site and every downstream allocation is
-  contained.
-- `mkit-core` (Rust) uses the global allocator in production. Threading
-  a custom `Allocator` trait through every public entry point **only for
-  the fuzz path** would make the fuzz harness execute a divergent code
-  path from the one users hit — defeating the point of fuzzing. It would
-  also require `#![feature(allocator_api)]`, which is nightly-only.
-- **We containerise allocations at the source instead.** Guardrail #3 is
-  satisfied in Rust by the combination of:
-  - Guardrail #2 (input ≤ 64 KiB).
-  - `delta::decode` caps its initial `Vec::with_capacity` at
-    `result_len.min(base.len() + 2 * stream.len())` so a 9-byte stream
-    claiming `result_len = u32::MAX` cannot pre-allocate 4 GiB.
-  - `pack::PackReader` enforces `MAX_ENTRIES = 10_000_000` and
-    `MAX_PAYLOAD = 4 GiB` with count × entry-frame-length lower-bound
-    checks against the input slice before any `Vec::with_capacity`.
-  - The fuzz harness (`rust/fuzz/src/lib.rs`) adds a second layer of
-    defensive pre-checks — `claimed_result_len > MAX_INPUT * 4` and
-    `claimed_entries > 100_000` — that short-circuit before calling
-    into core, so the most pathological inputs don't even reach the
-    parsers.
-- Net worst-case heap per iteration is ~1 MiB (two copies of the
-  input plus a small fixed overhead for temp directories / store state).
-  This is tighter than the Zig 2 MiB FBA budget.
-
-This adaptation is audited here rather than silently in the Rust code so
-that any future review reading `docs/FUZZ.md` finds the reasoning in one
-place.
-
 ## Adding a new target
 
-Use this checklist before you land a new `src/fuzz_<name>.zig`:
+Use this checklist before landing a new target:
 
-- [ ] Target is already compiled into the default `zig build test`
-  binary. (If not, wire it through `src/lib.zig` first.)
-- [ ] The fuzz file declares a static `fba_buf: [2 * 1024 * 1024]u8`.
-- [ ] Every `test` block allocates from
-  `std.heap.FixedBufferAllocator.init(&fba_buf).allocator()`.
-- [ ] Every iteration takes its input from a seeded
-  `std.Random.DefaultPrng`, **never** from `std.testing.fuzz`.
-- [ ] Every iteration caps input length at 64 KiB (or less).
-- [ ] Every iteration is wrapped in a `start = std.time.nanoTimestamp()`
-  / elapsed check, with `return error.FuzzIterationTooSlow` on breach.
-- [ ] The outer loop has an explicit iteration cap of at most 100.
-- [ ] Add an export in `src/lib.zig` (`pub const fuzz_<name> = ...`) and
-  a matching `_ = fuzz_<name>;` inside the top-level `test` block.
+- [ ] Pick a parser with a clear input → output contract.
+- [ ] Add the target body to `rust/fuzz/src/lib.rs` as a `pub fn
+      run_<name>(rng_seed: u64)` that enforces the six guardrails.
+- [ ] Add a libfuzzer shim under `fuzz_targets/<name>.rs` calling the
+      same body.
+- [ ] Add a `#[test]` shim that invokes the body with fixed seeds.
 - [ ] Add at least three hand-crafted fixed-seed cases: the happy path,
-  one structural malformation, and one bounds-stress case
-  (oversize-count / oversize-length style).
+      one structural malformation, and one bounds-stress case
+      (oversize-count / oversize-length style).
 
 If you cannot satisfy the guardrails, do not land the target — leave
 a note in this file explaining why it was deferred.

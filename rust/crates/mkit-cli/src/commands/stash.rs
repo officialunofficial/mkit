@@ -1,6 +1,5 @@
 //! `mkit stash save|list|pop|drop|show` — stash working-directory
-//! changes. Port of `cmdStash` in the Zig CLI; backing logic lives in
-//! `mkit_core::ops::stash`.
+//! changes. Backing logic lives in `mkit_core::ops::stash`.
 
 use std::io::Write;
 

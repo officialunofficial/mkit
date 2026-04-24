@@ -16,8 +16,8 @@
 //!   UTF-16 ordering table for non-ASCII. We assert ASCII at debug time
 //!   and treat sort-by-bytes as equivalent.
 //!
-//! Port of `src/attestations/jcs.zig`. Output bytes must be byte-identical
-//! to the Zig encoder; the Phase 8 golden vectors pin that contract.
+//! The golden vectors in `tests/golden_phase8.rs` pin the exact output
+//! bytes.
 
 use core::fmt::Write as _;
 
@@ -265,8 +265,8 @@ mod tests {
 
     #[test]
     fn nested_predicate_like_shape_is_byte_exact() {
-        // Mirrors the Zig "nested object with predicate-like shape" test
-        // — the byte sequence is the contract.
+        // Nested-object / predicate-like shape — the byte sequence is
+        // the contract.
         let nested = Value::Object(vec![
             Member::new(
                 "_type",

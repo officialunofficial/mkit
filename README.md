@@ -7,9 +7,8 @@ transports — plus a native, predicate-agnostic attestation subsystem
 (in-toto v1 Statements wrapped in DSSE envelopes) that any downstream
 service can attach witness signatures to commits with.
 
-Originally implemented in Zig 0.16; rewritten in Rust for this release.
-Golden vectors under `rust/tests/golden/` pin the v1 on-disk and wire
-formats byte-for-byte.
+The v1 on-disk and wire formats are pinned by golden vectors under
+`rust/tests/golden/`.
 
 ## Quick start
 

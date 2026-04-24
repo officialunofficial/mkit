@@ -24,11 +24,8 @@ everything written before the trailer itself. It is not a signature.
 Its purpose is defense-in-depth against bit-rot on transports that do
 not guarantee byte-exact delivery (e.g. S3 after a proxy).
 
-**Magic rename:** mkit used `"MKIT"` (`src/packfile.zig:12`).
-mkit v1 uses `"MKIT"`. There is no backward compatibility. All existing
-packs in mkit remotes MUST be re-packed or discarded before mkit reads
-them. Any reader encountering `"MKIT"` MUST fail with `InvalidMagic`
-(and MAY emit a diagnostic hinting at re-packing).
+The first four bytes MUST be the ASCII literal `"MKIT"`. Any reader
+encountering something else MUST fail with `InvalidMagic`.
 
 **Version byte rule:** the first four bytes MUST remain `"MKIT"` in
 every future version. Format evolution is signalled by the `version`
@@ -65,10 +62,7 @@ bounds-check every `payload_len` against the remaining packfile tail
 Notes:
 
 - `0x01` is **reserved** and MUST NOT be emitted by v1 writers. Readers
-  MUST reject it with `InvalidEntryType`. (In mkit v2 packfiles, `0x01`
-  was used as `delta`; in mkit v1 we re-number `delta` to `0x02` so the
-  numerical space cleanly separates "legacy mkit-shaped" from "mkit v1"
-  should anyone ever implement a lenient dual reader.)
+  MUST reject it with `InvalidEntryType`.
 - Any other value → `InvalidEntryType`.
 
 ### 3.1 `raw` (0x00)
@@ -99,9 +93,8 @@ stored.
 
 Delta encoding is the **v1 default** for blobs above 64 bytes when a
 suitable base is available. Writers SHOULD prefer delta entries for
-blob pairs whose delta is < 50% of the target size
-(`src/packfile.zig:786-809`). Writers MAY emit all-`raw` packs
-for simplicity; readers MUST handle both mixes.
+blob pairs whose delta is < 50% of the target size. Writers MAY emit
+all-`raw` packs for simplicity; readers MUST handle both mixes.
 
 ---
 
@@ -114,8 +107,7 @@ Base objects MUST precede their deltas. Specifically, for any
 2. An object already present at path `objects/<H>` in the destination
    store at unpack time.
 
-Must hold. Readers MUST NOT buffer undefined delta chains. (This
-matches the invariant at `src/packfile.zig:815-844`.)
+Must hold. Readers MUST NOT buffer undefined delta chains.
 
 Writers SHOULD emit non-blob objects first (commits, trees,
 chunked_blob, remix), then base blobs, then delta blobs. This lets a
@@ -125,10 +117,10 @@ streaming reader complete without buffering.
 
 ## 5. Size limits (v1)
 
-From current impl and preserved in v1:
+Normative:
 
-- `entry_count <= 10_000_000` (`src/packfile.zig:63`).
-- Sum of all `payload_len` <= **4 GiB** (`src/packfile.zig:74`).
+- `entry_count <= 10_000_000`.
+- Sum of all `payload_len` <= **4 GiB**.
 - Single entry `payload_len` must fit in a `u32` (≤ ~4 GiB).
 
 These are policy caps, not wire limits. Implementations MUST fail with
@@ -140,7 +132,7 @@ object cap; our 4 GiB cap stays under it. Larger packs require
 multipart upload, which is a v2 candidate (red-team R-14).
 
 **Known future relaxations** (not part of v1): streaming packs,
-multipart upload, removal of the 10 M entry count. Each requires a
+multipart upload, removal of the 10M entry count. Each requires a
 `version` bump.
 
 ---
@@ -148,9 +140,8 @@ multipart upload, removal of the 10 M entry count. Each requires a
 ## 6. Parsing model
 
 mkit v1 packfiles are **buffered**, not streamed. The reader reads the
-entire packfile into memory and then walks entries
-(`src/packfile.zig:54-91`, `:907-999`). This is a deliberate
-simplification. Consequences:
+entire packfile into memory and then walks entries. This is a
+deliberate simplification. Consequences:
 
 - Memory = packfile size (4 GiB worst-case).
 - Random access to entries is O(n) scan since no entry index exists.
@@ -168,14 +159,14 @@ are stored under the fixed key:
 packs/<64-char-hex-of-BLAKE3(pack_bytes)>    — 70 bytes total
 ```
 
-(`src/protocol.zig:108-114`.) Writers and readers MUST use this
-exact layout. Lowercase hex only; comparison is byte-exact.
+Writers and readers MUST use this exact layout. Lowercase hex only;
+comparison is byte-exact.
 
 The digest that names the pack is computed over the *entire packfile*
 including the 32-byte trailer. This is slightly redundant (trailer
-covers pack, digest covers trailer-covered bytes) but matches current
-impl and means `upload_pack` callers can pass the same `digest` they
-used to compute the trailer.
+covers pack, digest covers trailer-covered bytes) but it means
+`upload_pack` callers can pass the same `digest` they used to compute
+the trailer.
 
 ---
 

@@ -1,12 +1,11 @@
 #![allow(clippy::doc_markdown)]
-//! Phase 7d SigV4 golden-vector cross-check.
+//! Phase 7d SigV4 golden-vector check.
 //!
-//! Loads `rust/tests/golden/phase7/sigv4_basic.bin` (a JSON blob harvested
-//! from the Zig `src/s3.zig` signer) and asserts that the Rust signer
+//! Loads `rust/tests/golden/phase7/sigv4_basic.bin` (a JSON blob with
+//! fixed inputs + expected outputs) and asserts that the signer
 //! produces byte-identical `canonical_request`, `string_to_sign`, and
-//! final `signature_hex` for the same fixed inputs. If this test fails,
-//! the Rust signer has drifted from Zig — either fix the Rust code OR
-//! re-harvest the fixture and update both Zig + Rust in the same PR.
+//! final `signature_hex` for those inputs. If this test fails, either
+//! fix the code or re-generate the fixture intentionally.
 
 use std::path::PathBuf;
 
@@ -24,7 +23,7 @@ fn load_golden() -> Value {
 }
 
 #[test]
-fn sigv4_canonical_request_matches_zig() {
+fn sigv4_canonical_request_matches_golden() {
     let v = load_golden();
     let creds = Credentials {
         access_key_id: v["access_key_id"].as_str().unwrap().into(),
@@ -43,12 +42,12 @@ fn sigv4_canonical_request_matches_zig() {
     assert_eq!(
         signed.canonical_request,
         v["canonical_request"].as_str().unwrap(),
-        "canonical_request diverges from Zig"
+        "canonical_request diverges from golden"
     );
 }
 
 #[test]
-fn sigv4_string_to_sign_matches_zig() {
+fn sigv4_string_to_sign_matches_golden() {
     let v = load_golden();
     let creds = Credentials {
         access_key_id: v["access_key_id"].as_str().unwrap().into(),
@@ -67,12 +66,12 @@ fn sigv4_string_to_sign_matches_zig() {
     assert_eq!(
         signed.string_to_sign,
         v["string_to_sign"].as_str().unwrap(),
-        "string_to_sign diverges from Zig"
+        "string_to_sign diverges from golden"
     );
 }
 
 #[test]
-fn sigv4_signature_matches_zig() {
+fn sigv4_signature_matches_golden() {
     let v = load_golden();
     let creds = Credentials {
         access_key_id: v["access_key_id"].as_str().unwrap().into(),
@@ -91,7 +90,7 @@ fn sigv4_signature_matches_zig() {
     assert_eq!(
         signed.signature_hex,
         v["signature_hex"].as_str().unwrap(),
-        "signature_hex diverges from Zig"
+        "signature_hex diverges from golden"
     );
     // Also assert the Authorization header includes the expected signature.
     assert!(

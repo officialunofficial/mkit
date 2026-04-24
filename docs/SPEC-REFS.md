@@ -20,13 +20,10 @@ A single ref value on the wire is:
 
 Total: **65 bytes**.
 
-(Source: `src/protocol.zig:66-72`.)
-
 - Hex alphabet: `0-9` and `a-f` only. Uppercase is **forbidden**; writers
   MUST emit lowercase. Readers MUST reject uppercase input with
-  `InvalidRef`. (The current parser accepts mixed-case on read but v1
-  tightens this to lowercase-only for the byte-exact S3 ETag contract
-  in §5.)
+  `InvalidRef`. (v1 locks this down to lowercase-only for the byte-exact
+  S3 ETag contract in §5.)
 - The terminal `\n` is part of the wire format. Readers MAY tolerate a
   trailing `\r` (for Windows-origin files) or extra trailing whitespace
   when parsing ref *files* on local disk, but a transport that exposes
@@ -49,7 +46,7 @@ refs/tags/<name>     tag refs
 
 On local disk (`.mkit/refs/heads/<name>`, `.mkit/refs/tags/<name>`).
 On transports, the same path shape is used relative to the transport's
-root (`src/refs.zig:7-10`, `src/transport/file.zig:43-51`).
+root.
 
 `HEAD` is a special file at `.mkit/HEAD` containing either:
 
@@ -60,14 +57,13 @@ ref: refs/heads/<name>\n
 or a bare 64-char lowercase hex hash + `\n` (detached HEAD).
 
 The file `.mkit/shallow` contains one `<64-hex>\n` per line denoting
-commits beyond which the local repo does not have history
-(`src/refs.zig:317-346`).
+commits beyond which the local repo does not have history.
 
 ---
 
 ## 3. Ref name grammar
 
-From `src/protocol.zig:83-105`. Normative:
+Normative:
 
 ```
 ref_name    := segment ( '/' segment )*
@@ -93,8 +89,7 @@ Plus these rejections:
 - Case-sensitive: `main` and `Main` are distinct.
 
 This is a deliberately restrictive grammar to simplify cross-transport
-name validation. Red-team R-40 flags it as a UX gotcha; v1 keeps it and
-documents explicitly.
+name validation.
 
 Implementations MUST validate ref names with this grammar at **every**
 transport boundary — writing a ref, reading a ref, listing refs, and
@@ -146,10 +141,8 @@ Callers SHOULD pass prefixes that end at a path component boundary.
 Callers MUST NOT assume `prefix` includes a trailing `/`; the transport
 normalises either form.
 
-(Resolves red-team R-08. The current mkit impls diverge on this edge:
-memory strips unconditionally, file trims trailing `/`, http strips
-prefix no-separator. v1 pins the behavior above; transports MUST
-conform or fail conformance tests.)
+The spec pins the behaviour above; transports MUST conform or fail
+conformance tests.
 
 ### 4.1 Ordering and duplicates
 
@@ -161,7 +154,7 @@ empty slice, not null.
 
 The prefix itself must be empty or pass the same grammar as a ref name
 (§3), possibly with a single trailing `/`. Reject invalid prefixes with
-`InvalidRef`. (Current: `src/protocol.zig:100-105`.)
+`InvalidRef`.
 
 ---
 
@@ -200,21 +193,18 @@ documents this explicitly. Concurrent callers on the file transport MAY
 lose updates. Production deployments should use s3/http/ssh for CAS
 critical paths.
 
-### 5.2 ETag encoding divergence (resolves R-13)
+### 5.2 ETag encoding divergence
 
 The `.match(H)` condition is serialised differently by transport:
 
-- **S3** (`src/transport/s3.zig:181-188`): ETag value is
-  `"\"<md5_hex>\""` where `md5_hex` is the MD5 hash of the 65-byte ref
-  wire bytes for `H`. Enclosing double-quotes are part of the header
-  value.
-- **HTTP** (Worker flavour,
-  `src/transport/http.zig:199-226`): ETag value is
-  `"\"<hash_hex>\""` where `hash_hex` is the 64-char hex of `H`
-  directly. Enclosing double-quotes again.
+- **S3**: ETag value is `"\"<md5_hex>\""` where `md5_hex` is the MD5
+  hash of the 65-byte ref wire bytes for `H`. Enclosing double-quotes
+  are part of the header value.
+- **HTTP** (Worker flavour): ETag value is `"\"<hash_hex>\""` where
+  `hash_hex` is the 64-char hex of `H` directly. Enclosing double-quotes
+  again.
 - **SSH**: no ETag; the 32 raw bytes of `H` are sent in the
-  `CONDITION_MATCH` payload
-  (`src/transport/ssh.zig:115-120`).
+  `CONDITION_MATCH` payload.
 - **file / memory**: read-then-compare against `H`'s raw bytes
   in-process.
 
@@ -242,9 +232,8 @@ Clients requiring CAS MUST use `.match` explicitly.
 .mkit/shallow               one 65-byte wire per line (no hash in this case — just hex+newline)
 ```
 
-Writers MUST use atomic write-then-rename on local disk
-(`src/index.zig:166-178` pattern) to avoid torn reads. The mkit
-`FileTransport` currently does not (red-team R-24); v1 requires it.
+Writers MUST use atomic write-then-rename on local disk to avoid torn
+reads.
 
 ---
 

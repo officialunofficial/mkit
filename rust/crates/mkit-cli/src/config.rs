@@ -1,11 +1,8 @@
 //! `.mkit/config` parser / writer and XDG path helpers.
-//! Port of `src/config.zig` — the CLI-facing surface only. The full
-//! 813-line Zig module covers a number of legacy-compat paths and
-//! per-key setters that are exercised by `mkit config <k> <v>`; the
-//! Rust port keeps the same on-disk format (`key = value`, one per
-//! line, lines starting with `#` ignored) and the same user-facing
-//! short-hand values (`ed25519:<hex>`, `mid:<u64>`, raw hex) so
-//! existing `.mkit/config` files round-trip without migration.
+//!
+//! On-disk format: `key = value`, one per line, lines starting with `#`
+//! ignored. User-facing short-hand values for `user.identity`:
+//! `ed25519:<hex>`, `mid:<u64>`, or raw `[kind][len][bytes]` hex.
 
 use std::fs;
 use std::io;
@@ -60,7 +57,7 @@ pub enum ConfigError {
 }
 
 /// Validate a config value has no control bytes below 0x20 (except
-/// tab) and no 0x7f. Matches the Zig validator.
+/// tab) and no 0x7f.
 pub fn validate_value(v: &str) -> Result<(), ConfigError> {
     for b in v.bytes() {
         if b < 0x20 || b == 0x7f {
@@ -71,9 +68,8 @@ pub fn validate_value(v: &str) -> Result<(), ConfigError> {
 }
 
 /// Read `<root>/.mkit/config`. If the file is missing, returns a
-/// defaulted `Config`. Malformed lines are tolerated (skipped) to
-/// match the Zig behaviour — the CLI has to cope with hand-edited
-/// files.
+/// defaulted `Config`. Malformed lines are tolerated (skipped) — the
+/// CLI has to cope with hand-edited files.
 pub fn read_or_default(root: &Path) -> Result<Config, ConfigError> {
     let path = root.join(CONFIG_FILE);
     let text = match fs::read_to_string(&path) {

@@ -5,28 +5,28 @@ back to a small, auditable set of inputs. This document is the contract.
 
 ## Current state
 
-- **Zig packages:** zero. `build.zig.zon` has no `dependencies` table.
-  Every symbol in the binary is either ours or from the Zig standard
-  library.
-- **System libs:** the default static Zig build links only musl (Linux) or
-  the platform C runtime (macOS). We do not pull in openssl, libcurl, or
-  any other C library.
-- **Build inputs:** the Zig toolchain (version pinned in `.zigversion` and
-  in `release.yml`), the source tree at a tagged Git commit, and the set
-  of `-Dtarget=` / `-Doptimize=` flags documented in
+- **Rust dependencies:** fully pinned via `Cargo.lock`. Every transitive
+  dep is hash-pinned on each release build. The workspace's direct
+  deps are kept deliberately small — see `rust/Cargo.toml` and each
+  crate's `[dependencies]` section for the full list.
+- **System libs:** the release builds link musl (Linux) or the platform
+  C runtime (macOS). We do not pull in openssl, libcurl, or any other
+  native C library outside the platform toolchain.
+- **Build inputs:** the Rust toolchain (version pinned in
+  `rust-toolchain.toml`), the source tree at a tagged Git commit, and
+  the set of `--target=` / profile flags documented in
   `docs/release/REPRODUCIBILITY.md`.
 
-## Adding a Zig package dependency
+## Adding a Rust dependency
 
-Every new entry in `build.zig.zon`'s `dependencies` table must:
+Every new direct dependency added to a workspace `Cargo.toml` must:
 
-1. Be **hash-pinned**. `.hash = "..."` is mandatory; `.url` alone is not
-   enough.
-2. Have its source reviewed by **two maintainers**. Sign-off lives in the
-   PR description.
-3. Have a stated purpose. A PR that adds a dep must answer: what does mkit
-   gain, and what would implementing it in-tree cost? Default answer
-   should be "implement in-tree"; deps are the exception.
+1. Be **version-pinned** in `Cargo.toml` and reflected in `Cargo.lock`.
+2. Have its source reviewed by **two maintainers**. Sign-off lives in
+   the PR description.
+3. Have a stated purpose. A PR that adds a dep must answer: what does
+   mkit gain, and what would implementing it in-tree cost? Default
+   answer should be "implement in-tree"; deps are the exception.
 4. Be compatible with **MIT OR Apache-2.0**. The CI dependency-review
    action denies GPL and LGPL families outright.
 5. Have a cross-platform build. If the dep breaks on one of our four
@@ -35,18 +35,17 @@ Every new entry in `build.zig.zon`'s `dependencies` table must:
 ## GitHub Actions dependencies
 
 All third-party actions in `.github/workflows/` must be pinned to a major
-version tag (`@v4`) or to a full SHA. No `@main`, no `@latest`. Trusted
-publishers today:
+version tag (`@v4`) or to a full SHA. No `@main`, no `@latest`. Trusted publishers today:
 
 - `actions/*` (GitHub-owned)
-- `mlugg/setup-zig` (Zig toolchain installer)
+- `dtolnay/rust-toolchain` (Rust toolchain installer)
 - `sigstore/cosign-installer` (cosign)
 - `anchore/sbom-action` (SBOM)
 - `softprops/action-gh-release` (release creation)
 - `ossf/scorecard-action` (Scorecard)
 
 Any new action from an untrusted publisher needs the same two-maintainer
-review as a Zig dep.
+review as a Rust dep.
 
 ## Release artifact integrity
 

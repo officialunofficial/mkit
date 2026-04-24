@@ -1,6 +1,6 @@
 //! `mkit merge <branch>` — merge a branch into HEAD.
 //!
-//! Behaviour (mirrors `src/main.zig::cmdMerge`):
+//! Behaviour:
 //!
 //! 1. Resolve HEAD (ours) and the target ref (theirs).
 //! 2. If equal → "already up to date".
@@ -8,9 +8,8 @@
 //!    theirs and restore the worktree to theirs' tree.
 //! 4. Otherwise run a 3-way tree merge. If it reports conflicts, emit
 //!    a per-path summary on stderr and exit non-zero WITHOUT creating
-//!    a merge commit — matching the Zig reference. The merged tree is
-//!    still written to the object store, so a higher-level resolver
-//!    (not yet ported) could pick it up.
+//!    a merge commit. The merged tree is still written to the object
+//!    store, so a higher-level resolver could pick it up.
 //! 5. Clean merge: sign a new merge commit with two parents and
 //!    advance the current branch.
 

@@ -33,7 +33,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // Resolve <name> — try ref first (branch / tag), then fall back to
-    // a raw 64-char commit hash. Matches Zig semantics.
+    // a raw 64-char commit hash.
     let commit_hash: Hash = match refs::read_ref(&mkit_dir, name) {
         Ok(Some(h)) => h,
         Ok(None) => match refs::read_tag(&mkit_dir, name) {
@@ -68,11 +68,10 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("read commit: {e}"), exit::GENERAL_ERROR),
     };
 
-    // Materialise the tree. `clean=true` is the default — matches the
-    // Zig behaviour where `checkout` reshapes the worktree to the
-    // branch tip. `.mkitignore` is honoured inside the helper so
-    // locally-ignored files (editor swapfiles, build artefacts)
-    // survive the transition.
+    // Materialise the tree. `clean=true` is the default — `checkout`
+    // reshapes the worktree to the branch tip. `.mkitignore` is
+    // honoured inside the helper so locally-ignored files (editor
+    // swapfiles, build artefacts) survive the transition.
     let report =
         match restore_tree_to_worktree(&store, &tree_hash, &cwd, &RestoreOptions::default()) {
             Ok(r) => r,

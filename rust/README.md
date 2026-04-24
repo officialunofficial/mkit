@@ -1,8 +1,6 @@
-# mkit — Rust rewrite (in progress)
+# mkit (Rust workspace)
 
-This tree is the in-progress Rust port of `mkit`, tracked on the `rewrite/rust`
-branch. The Zig implementation on `main` remains the shipping binary until the
-Phase 10 cutover in the rewrite plan.
+This directory holds the `mkit` Cargo workspace.
 
 ## Toolchain
 
@@ -10,41 +8,50 @@ Phase 10 cutover in the rewrite plan.
 - **Edition** `2024` (workspace default)
 - **Resolver** `3`
 
-## Workspace layout (target)
+## Workspace layout
 
 ```
 rust/
 ├── crates/
 │   ├── mkit-core/              # hash, object, serialize, store, chunker,
-│   │                           # pack, delta, refs, index, ops/*, sign, protocol
+│   │                           # pack, delta, refs, index, worktree,
+│   │                           # ignore, repo_lock, ops/*, sign, protocol
 │   ├── mkit-transport-memory/
 │   ├── mkit-transport-file/
 │   ├── mkit-transport-http/
 │   ├── mkit-transport-s3/
 │   ├── mkit-transport-ssh/
-│   ├── mkit-attest/            # jcs, statement, envelope, signer, verify, store
-│   ├── mkit-cli/               # bin "mkit"
-│   └── mkit-bench/             # Criterion harness
-└── fuzz/                       # cargo-fuzz targets
+│   ├── mkit-attest/            # jcs, statement, envelope, signers, verify
+│   └── mkit-cli/               # bin "mkit"
+└── fuzz/                       # cargo-fuzz targets (delta, pack, tree)
 ```
 
-Phase 0 lands the workspace scaffold and golden-vector harvest. Subsequent
-phases (1–10) follow the TDD plan; see the draft PR for the checklist.
+## Gates
 
-## CI
+```sh
+cd rust
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --workspace
+```
 
-Two GitHub Actions workflows guard this branch:
+CI runs the above matrix on ubuntu-latest + macos-latest
+(`.github/workflows/rust.yml`). A weekly job runs `cargo audit` and
+`cargo deny check` (`.github/workflows/rust-security.yml`). A
+reproducible-build smoke test diffs two sequential release builds
+(`.github/workflows/reproducible-build.yml`).
 
-- **[`rust.yml`](../.github/workflows/rust.yml)** — runs on every push/PR to `rewrite/rust`. Matrix: `ubuntu-latest` + `macos-latest`. Steps: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build --locked`, `cargo test --locked`, and the rename gate (`scripts/verify-rename.sh`). A `rust-reproducible-build` job (ubuntu-only) compares `sha256sum` of two sequential release builds; it no-ops until `crates/mkit-cli` exists.
-- **[`rust-security.yml`](../.github/workflows/rust-security.yml)** — runs weekly (Monday 06:00 UTC) and on PRs. Runs `cargo audit` (via `rustsec/audit-check`) and `cargo deny check` (config in `deny.toml`).
+## Contracts
 
-## Non-negotiables
-
-- Every on-disk / wire byte must match the Zig v0.2.x output. Golden-vector
-  tests enforce this per phase.
-- `NullNotary` only in the public binary. No notary-submission CLI surface
-  (see `scripts/verify-rename.sh` for the forbidden-token list).
-- Fuzz guardrails from `docs/FUZZ.md` are carried over: ≤100 iterations,
-  ≤64 KiB input, fixed-size arena, 100 ms per-iteration wall-clock cap,
-  seeded PRNG, no unbounded loops.
-- `mkit version` must emit exactly `mkit <X.Y.Z>\n`.
+- Every on-disk / wire byte is pinned by golden vectors under
+  `tests/golden/`. Any change must update both the vector and the
+  relevant `docs/SPEC-*.md` in the same PR.
+- `mkit version` emits exactly `mkit <X.Y.Z>\n` — asserted by both a
+  snapshot test in `crates/mkit-cli/tests/version_snapshot.rs` and a CI
+  step that runs the release binary.
+- `scripts/verify-rename.sh` enforces the public-surface rename gate
+  on every push.
+- Fuzz harnesses enforce the six guardrails documented in
+  `docs/FUZZ.md` (≤100 iterations, ≤64 KiB input, bounded per-op
+  allocations, 100 ms per-iteration cap, no unbounded loops, seeded
+  PRNG).

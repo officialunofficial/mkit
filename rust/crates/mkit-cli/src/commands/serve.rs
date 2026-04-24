@@ -1,6 +1,5 @@
 //! `mkit serve <path>` — speak the 7-verb SSH transport wire protocol
-//! on stdin/stdout against a local repository. Port of the Zig
-//! `cmdServe` in `src/main.zig` plus `src/transport/ssh.zig::serve`.
+//! on stdin/stdout against a local repository.
 //!
 //! The backing repo is accessed via `FileTransport`, which already
 //! implements [`mkit_core::protocol::Transport`]. Frame encoding is

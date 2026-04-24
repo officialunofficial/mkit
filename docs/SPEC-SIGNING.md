@@ -13,12 +13,10 @@ bytes) and R-17 (cross-domain signature confusion).
 
 - **Hash:** BLAKE3 default mode (no keyed hashing, no derive-key at the
   signing layer). Output: 32 bytes.
-- **Signature:** Ed25519 per RFC 8032, using `std.crypto.sign.Ed25519`.
-  Public key 32 bytes, seed 32 bytes, signature 64 bytes.
-  (`src/sign.zig:7-38`.)
+- **Signature:** Ed25519 per RFC 8032. Public key 32 bytes, seed 32
+  bytes, signature 64 bytes.
 - Signers sign the BLAKE3 digest (32 bytes) rather than the raw signing
-  bytes. This is Ed25519 "PureEdDSA over a pre-hashed message" as used
-  by the mkit code at `src/sign.zig:104-110` and preserved in v1.
+  bytes. This is Ed25519 "PureEdDSA over a pre-hashed message".
 - No batched verification. Each verify is independent.
 
 ---
@@ -52,8 +50,7 @@ string **without the trailing `\x00`**:
 
 ### 2.2 Byte-prepend fallback
 
-Where `derive_key` is unavailable (Zig `std.crypto.hash.Blake3` does not
-expose it), implementations MUST use byte-prepend:
+Where `derive_key` is unavailable, implementations MUST use byte-prepend:
 
 ```
 digest = BLAKE3(domain || signing_bytes)
@@ -188,8 +185,6 @@ independent fields. Identity is an attribution claim; `signer` is the
 verification key. Pairing is adapter/application policy, not a core
 invariant.
 
-(Source: `src/sign.zig:125-146` for the verify flow; we preserve
-it and add domain separation.)
 
 ---
 
@@ -201,14 +196,12 @@ Contents:     raw 32 bytes (Ed25519 SEED — NOT expanded secret key)
 Permissions:  0600 (mandatory on POSIX)
 ```
 
-The seed is passed to `Ed25519.KeyPair.generateDeterministic(seed)` to
-recover `(public_key, secret_key)` on load
-(`src/sign.zig:27-33`). No PEM, no DER, no password wrapping in
-v1.
+The seed is passed to the Ed25519 deterministic key-pair constructor
+to recover `(public_key, secret_key)` on load. No PEM, no DER, no
+password wrapping in v1.
 
 Writers MUST `chmod 0600` the file immediately after creation and MUST
-fail keygen if they cannot set that mode on POSIX. (Resolves red-team
-7a / R-01-adjacent: mkit relied on umask.)
+fail keygen if they cannot set that mode on POSIX.
 
 On non-POSIX hosts this rule is advisory; implementations SHOULD use
 the host's equivalent access restriction.

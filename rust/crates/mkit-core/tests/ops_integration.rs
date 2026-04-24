@@ -7,7 +7,7 @@
 //! per-module unit tests under `src/ops/*.rs` cover edge cases in
 //! isolation; this file is the integration safety net.
 
-#![allow(clippy::many_single_char_names)] // mirrors the Zig test style
+#![allow(clippy::many_single_char_names)] // single-letter commit names keep the test tables compact
 #![allow(clippy::similar_names)] // `add_b` / `add_b_tree` is the natural pairing
 
 use mkit_core::{
@@ -228,8 +228,8 @@ fn cherry_pick_modify_modify_conflict_carries_message() {
 /// blob contents the merged tree's content-addressed hash is fully
 /// determined, and the cherry-pick result hashes likewise. If anything
 /// in the merge decision matrix or tree serialisation drifts, this
-/// test flips. See `rust/tests/golden/phase5a/README.md` for the
-/// rationale we don't pin Zig-harvested byte vectors at this layer.
+/// test flips. See `rust/tests/golden/phase5a/README.md` for why we
+/// pin hashes rather than byte vectors at this layer.
 #[test]
 fn merge_and_cherry_pick_are_byte_deterministic() {
     let (_d, s) = fresh();

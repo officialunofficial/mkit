@@ -1,9 +1,8 @@
-//! sysexits(3)-style exit codes for the mkit CLI. Port of `src/exit.zig`.
+//! sysexits(3)-style exit codes for the mkit CLI.
 //!
 //! Shell scripts that pipe `mkit ... || handle` use `$?` to distinguish
-//! usage errors from transient transport failures. We keep the
-//! constants byte-compatible with the Zig tree — see `docs/CLI.md`
-//! §"Exit codes".
+//! usage errors from transient transport failures. See `docs/CLI.md`
+//! §"Exit codes" for the documented contract.
 
 /// Successful termination.
 pub const OK: u8 = 0;

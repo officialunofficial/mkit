@@ -1,4 +1,4 @@
-//! `FastCDC` content-defined chunker — port of `src/fastcdc.zig`.
+//! `FastCDC` content-defined chunker.
 //!
 //! Spec reference: `docs/SPEC-FASTCDC.md`. Frozen v1 parameters:
 //!
@@ -12,10 +12,8 @@
 //! * Rolling hash: `h = (h << 1) +% gear[byte]`. Cut when `(h & mask) == 0`,
 //!   else force a cut at `MAX_SIZE`. Never cut before `MIN_SIZE`.
 //!
-//! The mkit-era Zig file derives the masks at runtime from `log2(avg_size)`;
-//! the spec hard-codes them. Both yield the same values for the v1
-//! parameters. We pin the spec constants here so any accidental change
-//! to one of them lights up cross-implementation tests immediately.
+//! The spec hard-codes the masks; we pin them as constants here so any
+//! accidental change lights up in the golden tests immediately.
 //!
 //! All chunk boundaries are fully determined by the input bytes plus the
 //! constants above. Any change breaks `chunked_blob` reproducibility
@@ -74,8 +72,8 @@ pub struct ChunkBoundary {
 }
 
 /// `FastCDC` chunker parameters. Construct with [`FastCdc::v1`] for the
-/// frozen v1 constants; other constructors exist mainly for the
-/// in-tree Zig parity tests at smaller sizes.
+/// frozen v1 constants; other constructors exist mainly for tests that
+/// exercise the algorithm at smaller sizes.
 #[derive(Debug, Clone, Copy)]
 pub struct FastCdc {
     min_size: usize,
@@ -100,10 +98,9 @@ impl FastCdc {
     }
 
     /// Construct a chunker with custom parameters. `avg_size` MUST be a
-    /// power of two; the strict/loose masks are derived the same way as
-    /// the Zig reference (`mask = (1 << log2(avg)) - 1; mask_s = mask |
-    /// (mask << 1); mask_l = mask >> 1`). Returns
-    /// [`MkitError::InvalidIdentity`] re-purposed as a generic
+    /// power of two; the strict/loose masks are derived as
+    /// `mask = (1 << log2(avg)) - 1; mask_s = mask | (mask << 1); mask_l = mask >> 1`.
+    /// Returns [`MkitError::InvalidIdentity`] re-purposed as a generic
     /// "bad parameter" error if the constraints are violated — but in
     /// practice this constructor is only used by tests, where the inputs
     /// are constants, so we panic instead for a clearer failure mode.
@@ -231,8 +228,7 @@ pub fn chunk_boundaries(data: &[u8]) -> Vec<usize> {
 
 /// Hash the entire 256-entry gear table as little-endian `u64` bytes
 /// (2 048 bytes total) with BLAKE3. Useful as a cheap "did we get the
-/// seed right" check in cross-implementation tests — see
-/// SPEC-FASTCDC §8 vector 1.
+/// seed right" check — see SPEC-FASTCDC §8 vector 1.
 #[must_use]
 pub fn gear_table_digest() -> [u8; 32] {
     let table = gear_table();
@@ -257,9 +253,8 @@ mod tests {
     use super::*;
 
     /// Deterministic xorshift64* PRNG for test-data generation. We avoid
-    /// `rand` here because the Zig parity tests use seeded
-    /// `DefaultPrng`s; using our own keeps test inputs explicit and
-    /// reproducible without committing to a specific `rand` version.
+    /// `rand` here to keep test inputs explicit and reproducible
+    /// without committing to a specific `rand` version.
     struct Prng(u64);
     impl Prng {
         fn new(seed: u64) -> Self {

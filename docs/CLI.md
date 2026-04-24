@@ -150,7 +150,7 @@ mkit <X.Y.Z>\n
 ```
 
 Downstream packagers (Homebrew, Scoop) assert on this substring. The
-format is pinned by a snapshot test in `src/cli_test.zig`.
+format is pinned by a snapshot test in the CLI crate.
 
 ## *nix conventions
 
@@ -175,8 +175,9 @@ Based on BSD `sysexits(3)`:
 | 77   | `noperm`         | Permission denied                            |
 | 78   | `config_error`   | Unknown config key or invalid value          |
 
-The constants live in `src/exit.zig`. Shell scripts can distinguish
-user typos (64) from transient failures (75) without parsing stderr.
+The constants live in `rust/crates/mkit-cli/src/exit.rs`. Shell scripts
+can distinguish user typos (64) from transient failures (75) without
+parsing stderr.
 
 ### Environment variables
 

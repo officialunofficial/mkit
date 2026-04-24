@@ -1,7 +1,6 @@
-//! Rebase state machine — port of `src/rebase.zig`.
+//! Rebase state machine.
 //!
-//! Persists rebase state under `.mkit/rebase-apply/` exactly the way
-//! the Zig original does, with five files:
+//! Persists rebase state under `.mkit/rebase-apply/` as five files:
 //!
 //! - `head-name`  : symbolic name of the branch being rebased
 //! - `orig-head`  : 64-hex BLAKE3 of the tip before rebase started
@@ -13,10 +12,9 @@
 //!
 //! [`collect_commits_to_replay`] walks the first-parent chain from
 //! the rebase head until it hits `onto` or any ancestor of `onto`.
-//! It returns commits in oldest-first order. To avoid pulling in the
-//! sibling-track `graph` module, the ancestor walk is inlined here
-//! as a private helper that mirrors `src/graph.zig::collectAncestorSet`
-//! (DFS, capped at `10_000` commits).
+//! It returns commits in oldest-first order. The ancestor walk is
+//! inlined here as a private helper (DFS, capped at `10_000` commits)
+//! to keep the module self-contained.
 
 use std::collections::HashSet;
 use std::fs;
@@ -41,7 +39,6 @@ const MAX_HASH_FILE_BYTES: u64 = 128;
 const MAX_HASH_LIST_BYTES: u64 = 1024 * 1024;
 
 /// Maximum commits walked by [`collect_commits_to_replay`] before bail-out.
-/// Mirrors the Zig safety cap.
 const MAX_REPLAY_DEPTH: usize = 10_000;
 
 /// Maximum commits visited by the inlined ancestor walk.
@@ -70,7 +67,7 @@ pub enum RebaseError {
 /// Result alias.
 pub type RebaseResult<T> = Result<T, RebaseError>;
 
-/// Persisted rebase state. Mirrors `src/rebase.zig::RebaseState`.
+/// Persisted rebase state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebaseState {
     /// Name of the branch being rebased (e.g. `main`, `feature/x`).
@@ -198,8 +195,8 @@ pub fn collect_commits_to_replay(
 
 // -- Internal helpers --------------------------------------------------------
 
-/// Inlined port of `src/graph.zig::collectAncestorSet`. Kept private so
-/// the sibling-track `graph` module owns the public surface.
+/// Private ancestor-set walk. Kept private so `ops::graph` owns the
+/// public surface.
 fn collect_ancestor_set(store: &ObjectStore, start: Hash, set: &mut HashSet<Hash>) {
     let mut stack: Vec<Hash> = vec![start];
     let mut count = 0usize;

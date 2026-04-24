@@ -101,7 +101,7 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
 /// of every object reachable from the branch tip that the remote does
 /// not already hold. Returns the count of refs pushed.
 ///
-/// Per-ref flow (mirrors `src/push.zig`):
+/// Per-ref flow:
 /// 1. Resolve the local branch tip.
 /// 2. Walk reachable objects (`ops::reachable_objects`).
 /// 3. Filter out any object the remote already has via

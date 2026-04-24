@@ -1,6 +1,5 @@
 //! `mkit sparse-checkout set|list|disable|reapply` — manage the sparse
-//! checkout pattern set at `.mkit/sparse-checkout`. Port of
-//! `cmdSparseCheckout` in the Zig CLI; pattern parsing +
+//! checkout pattern set at `.mkit/sparse-checkout`. Pattern parsing +
 //! tree-materialisation live in `mkit_core::ops::restore`.
 
 use std::fs;

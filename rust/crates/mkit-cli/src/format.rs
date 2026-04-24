@@ -1,9 +1,6 @@
 //! Human-oriented output formatters — the CLI's thin presentation
 //! layer. Anything that emits canonical on-disk or wire bytes belongs
-//! in `mkit-core` (`serialize.rs`, `pack.rs`, etc.), not here. Port of
-//! `src/format.zig` — only the helpers the wired commands need in the
-//! Rust port are included so far; the remainder will land alongside
-//! their commands in later phases.
+//! in `mkit-core` (`serialize.rs`, `pack.rs`, etc.), not here.
 
 use mkit_core::hash::Hash;
 

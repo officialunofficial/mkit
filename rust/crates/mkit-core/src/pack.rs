@@ -1,5 +1,4 @@
-//! Packfile writer / reader — port of `src/packfile.zig`, conformant
-//! to `docs/SPEC-PACKFILE.md`.
+//! Packfile writer / reader — conformant to `docs/SPEC-PACKFILE.md`.
 //!
 //! Layout (SPEC-PACKFILE §1, §2, §3, §8):
 //!
@@ -30,9 +29,9 @@
 //! already exist in the destination object store.
 //!
 //! The pack key (SPEC-PACKFILE §7) is `packs/<lower-hex BLAKE3 of entire
-//! pack>`. The trailer is then redundant w.r.t. that key, but matches
-//! the upstream Zig invariant and lets a streaming reader detect bit-rot
-//! before the whole pack has been hashed end-to-end.
+//! pack>`. The trailer is then redundant w.r.t. that key, but it lets a
+//! streaming reader detect bit-rot before the whole pack has been
+//! hashed end-to-end.
 
 use crate::delta;
 use crate::hash::{self, Hash};

@@ -1,14 +1,13 @@
-//! Commit-graph traversal helpers. Port of `src/graph.zig`.
+//! Commit-graph traversal helpers.
 //!
-//! The Zig original exposes a single function — `collectAncestorSet` —
-//! and that is what we mirror here. Higher-level walks (`is_ancestor`,
-//! `find_merge_base`) live in [`super::merge`] alongside the merge
-//! algorithm that consumes them, matching the Zig layout.
+//! This module exposes [`collect_ancestor_set`]. Higher-level walks
+//! (`is_ancestor`, `find_merge_base`) live in [`super::merge`] alongside
+//! the merge algorithm that consumes them.
 //!
-//! Bound: at most `MAX_ANCESTORS` (`10_000`) commits are visited per call,
-//! mirroring the `max_ancestors` constant in `src/graph.zig`. Beyond
-//! that the walk stops silently — callers asking about pathologically
-//! deep histories get a partial answer rather than an OOM.
+//! Bound: at most [`MAX_ANCESTORS`] (`10_000`) commits are visited per
+//! call. Beyond that the walk stops silently — callers asking about
+//! pathologically deep histories get a partial answer rather than an
+//! OOM.
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::hash::BuildHasher;
@@ -17,14 +16,14 @@ use crate::hash::Hash;
 use crate::object::Object;
 use crate::store::{ObjectStore, StoreError};
 
-/// Hard cap on commits visited per call. Matches `src/graph.zig`.
+/// Hard cap on commits visited per call.
 pub const MAX_ANCESTORS: usize = 10_000;
 
 /// Collect the set of all ancestor commits of `start`, including
 /// `start` itself, by DFS over `Commit::parents`. The walk:
 ///
 /// * Adds `start` to `set` even if its object is not in the store
-///   (matches Zig: the hash is recorded, then the missing-object error
+///   (the hash is recorded, then the missing-object error
 ///   short-circuits the parent walk for that node).
 /// * Treats non-commit objects at a hash as terminators (no parents to
 ///   follow).
@@ -34,7 +33,7 @@ pub const MAX_ANCESTORS: usize = 10_000;
 ///
 /// Only [`StoreError::Io`] / [`StoreError::HashMismatch`] /
 /// [`StoreError::ObjectTooLarge`] / [`StoreError::Decode`] propagate.
-/// `ObjectNotFound` is *swallowed* per Zig parity — see test
+/// `ObjectNotFound` is *swallowed* — see test
 /// `handles_non_existent_parent_gracefully`.
 pub fn collect_ancestor_set<S: BuildHasher>(
     store: &ObjectStore,
@@ -60,9 +59,8 @@ pub fn collect_ancestor_set<S: BuildHasher>(
                     stack.push(parent);
                 }
             }
-            // Non-commit (or unreadable) — same as Zig's `obj != .commit`
-            // / `store.get(...) catch continue` paths: stop walking from
-            // this node, but we keep the hash in `set`.
+            // Non-commit (or unreadable) — stop walking from this node,
+            // but we keep the hash in `set`.
             Ok(_) | Err(StoreError::ObjectNotFound(_)) => {}
             Err(e) => return Err(e),
         }
@@ -149,11 +147,11 @@ pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Ha
 }
 
 // =====================================================================
-// Tests — parity with Zig `graph.zig`.
+// Tests
 // =====================================================================
 
 #[cfg(test)]
-#[allow(clippy::many_single_char_names)] // mirrors the single-letter Zig test style intentionally
+#[allow(clippy::many_single_char_names)] // single-letter commit names keep the test tables compact
 mod tests {
     use super::*;
     use crate::hash;

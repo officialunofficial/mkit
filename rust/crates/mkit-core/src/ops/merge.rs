@@ -1,21 +1,18 @@
 //! 3-way tree merge + commit-graph merge-base + ancestry test.
-//! Port of `src/merge.zig`.
 //!
 //! `merge_trees` lockstep-walks the three sorted entry arrays
-//! (base / ours / theirs) and applies the same decision matrix Zig
-//! does — see the comment block above each branch in
-//! `merge_entries_recursive` for the case it handles. When all three
-//! sides have a path with `EntryMode::Tree`, we recurse into the three
-//! subtrees rather than emitting a tree-level conflict; this lets per-
-//! file conflicts inside a directory be reported at their full path
-//! (`src/main.zig` rather than `src`).
+//! (base / ours / theirs) and applies the decision matrix documented
+//! above each branch in `merge_entries_recursive`. When all three sides
+//! have a path with `EntryMode::Tree`, we recurse into the three
+//! subtrees rather than emitting a tree-level conflict; this lets
+//! per-file conflicts inside a directory be reported at their full path
+//! (`src/main.rs` rather than `src`).
 //!
 //! `find_merge_base` walks the full DAG on both sides — it is NOT
 //! limited to first-parent — so merge bases reachable only through a
-//! merge commit's secondary parent are still found. The Zig version's
-//! "best total depth" tie-breaker is preserved 1:1: among multiple
-//! common ancestors we pick the one with the smallest sum of (depth in
-//! A's ancestor tree) + (depth in B's BFS).
+//! merge commit's secondary parent are still found. Among multiple
+//! common ancestors we pick the one with the smallest total depth:
+//! (depth in A's ancestor tree) + (depth in B's BFS).
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -25,9 +22,7 @@ use crate::object::{EntryMode, Object, Tree, TreeEntry};
 use crate::serialize;
 use crate::store::{ObjectStore, StoreError};
 
-/// Distinct conflict kinds. Names match the Zig `ConflictKind` enum
-/// 1:1 so cross-implementation diagnostics (and any UI surface that
-/// reads them via JSON / debug fmt) stay consistent.
+/// Distinct conflict kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConflictKind {
     /// Both sides modified the same path to different content.
@@ -53,8 +48,8 @@ pub struct Conflict {
 
 /// Result of [`merge_trees`]. The `tree_hash` is always populated —
 /// even on conflict — using "ours wins in the merged tree" as the
-/// tie-breaker (matches Zig). Callers must check `has_conflicts()`
-/// before treating the result as a clean merge.
+/// tie-breaker. Callers must check `has_conflicts()` before treating
+/// the result as a clean merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeResult {
     pub tree_hash: Hash,
@@ -109,19 +104,17 @@ pub fn merge_trees(
 /// Find the lowest-cost common ancestor of two commits. Returns
 /// `Ok(None)` when the histories share no ancestor.
 ///
-/// Definition of "lowest-cost" matches Zig: walk B breadth-first; for
-/// every node also reachable from A (taken from a precomputed
-/// ancestor-depth map of A), the cost is `depth_in_A + depth_in_B`;
-/// take the candidate with smallest total depth, breaking ties by
-/// first-seen order in B's BFS. This is NOT necessarily a unique LCA
-/// when histories cross multiple times, but it matches the Zig
-/// behaviour the existing tests assert.
+/// Definition of "lowest-cost": walk B breadth-first; for every node
+/// also reachable from A (taken from a precomputed ancestor-depth map
+/// of A), the cost is `depth_in_A + depth_in_B`; take the candidate
+/// with smallest total depth, breaking ties by first-seen order in B's
+/// BFS. This is NOT necessarily a unique LCA when histories cross
+/// multiple times, but it is the behaviour the tests pin.
 ///
 /// # Errors
 ///
 /// Propagates [`StoreError`] from any commit-object read other than
-/// `ObjectNotFound`, which is treated as "this branch terminates here"
-/// for parity with Zig.
+/// `ObjectNotFound`, which is treated as "this branch terminates here".
 pub fn find_merge_base(store: &ObjectStore, a: Hash, b: Hash) -> Result<Option<Hash>, StoreError> {
     if a == b {
         return Ok(Some(a));
@@ -235,7 +228,7 @@ fn collect_ancestors_with_depth(
     while head < queue.len() {
         let (node, depth) = queue[head];
         head += 1;
-        // First-write-wins: matches Zig (`if (ancestors.contains(...)) continue;`).
+        // First-write-wins.
         if ancestors.contains_key(&node) {
             continue;
         }
@@ -551,11 +544,11 @@ fn merge_entries_recursive(
 }
 
 // =====================================================================
-// Tests — parity with Zig `merge.zig`.
+// Tests
 // =====================================================================
 
 #[cfg(test)]
-#[allow(clippy::many_single_char_names)] // mirrors the single-letter Zig test style intentionally
+#[allow(clippy::many_single_char_names)] // single-letter commit names keep the test tables compact
 mod tests {
     use super::*;
     use crate::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
@@ -897,15 +890,15 @@ mod tests {
         let main_v1 = put_blob(&s, b"fn main() {}");
         let main_v2 = put_blob(&s, b"fn main() { run(); }");
         let util = put_blob(&s, b"fn util() {}");
-        let base_sub = make_tree(&s, vec![entry(b"main.zig", EntryMode::Blob, main_v1)]);
+        let base_sub = make_tree(&s, vec![entry(b"main.rs", EntryMode::Blob, main_v1)]);
         let base = make_tree(&s, vec![entry(b"src", EntryMode::Tree, base_sub)]);
-        let ours_sub = make_tree(&s, vec![entry(b"main.zig", EntryMode::Blob, main_v2)]);
+        let ours_sub = make_tree(&s, vec![entry(b"main.rs", EntryMode::Blob, main_v2)]);
         let ours = make_tree(&s, vec![entry(b"src", EntryMode::Tree, ours_sub)]);
         let theirs_sub = make_tree(
             &s,
             vec![
-                entry(b"main.zig", EntryMode::Blob, main_v1),
-                entry(b"util.zig", EntryMode::Blob, util),
+                entry(b"main.rs", EntryMode::Blob, main_v1),
+                entry(b"util.rs", EntryMode::Blob, util),
             ],
         );
         let theirs = make_tree(&s, vec![entry(b"src", EntryMode::Tree, theirs_sub)]);
@@ -915,8 +908,8 @@ mod tests {
         assert_eq!(root.len(), 1);
         let src = tree_entries(&s, root[0].object_hash);
         assert_eq!(src.len(), 2);
-        assert_eq!(find_entry(&src, b"main.zig").unwrap().object_hash, main_v2);
-        assert_eq!(find_entry(&src, b"util.zig").unwrap().object_hash, util);
+        assert_eq!(find_entry(&src, b"main.rs").unwrap().object_hash, main_v2);
+        assert_eq!(find_entry(&src, b"util.rs").unwrap().object_hash, util);
     }
 
     #[test]
@@ -925,15 +918,15 @@ mod tests {
         let v1 = put_blob(&s, b"original");
         let v2 = put_blob(&s, b"ours-change");
         let v3 = put_blob(&s, b"theirs-change");
-        let base_sub = make_tree(&s, vec![entry(b"main.zig", EntryMode::Blob, v1)]);
+        let base_sub = make_tree(&s, vec![entry(b"main.rs", EntryMode::Blob, v1)]);
         let base = make_tree(&s, vec![entry(b"src", EntryMode::Tree, base_sub)]);
-        let ours_sub = make_tree(&s, vec![entry(b"main.zig", EntryMode::Blob, v2)]);
+        let ours_sub = make_tree(&s, vec![entry(b"main.rs", EntryMode::Blob, v2)]);
         let ours = make_tree(&s, vec![entry(b"src", EntryMode::Tree, ours_sub)]);
-        let theirs_sub = make_tree(&s, vec![entry(b"main.zig", EntryMode::Blob, v3)]);
+        let theirs_sub = make_tree(&s, vec![entry(b"main.rs", EntryMode::Blob, v3)]);
         let theirs = make_tree(&s, vec![entry(b"src", EntryMode::Tree, theirs_sub)]);
         let r = merge_trees(&s, Some(base), Some(ours), Some(theirs)).unwrap();
         assert!(r.has_conflicts());
-        assert_eq!(r.conflicts[0].path, "src/main.zig");
+        assert_eq!(r.conflicts[0].path, "src/main.rs");
         assert_eq!(r.conflicts[0].kind, ConflictKind::ModifyModify);
         assert_eq!(r.conflicts[0].base_hash, Some(v1));
         assert_eq!(r.conflicts[0].ours_hash, Some(v2));

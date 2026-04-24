@@ -123,10 +123,9 @@ fn reject_port_out_of_range_in_url_form() {
 #[test]
 fn non_numeric_port_falls_through_to_scp_form() {
     // Document a deliberate parser quirk: `user@host:token/path` where
-    // `token` is non-numeric is treated as SCP-style
-    // `host:<repo-path>` — the remote path is then `token/path`. This
-    // matches Zig `parseStrictSsh` and is covered end-to-end by
-    // `tests/e2e-ssh.sh`.
+    // `token` is non-numeric is treated as SCP-style `host:<repo-path>`
+    // — the remote path is then `token/path`. This is covered
+    // end-to-end by `tests/e2e-ssh.sh`.
     let t = parse_mkit_ssh_url("mkit+ssh://user@host:some-repo/branch").unwrap();
     assert_eq!(t.host, "host");
     assert_eq!(t.port, None);

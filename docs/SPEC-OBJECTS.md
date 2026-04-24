@@ -22,7 +22,7 @@ ObjectType (u8)         name
 0x06                    delta
 ```
 
-(Source ground truth: `src/object.zig:7-13`. Unchanged in v1.)
+Unchanged in v1.
 
 `delta` objects are **pack-only**. They MUST NOT appear in the object store
 and MUST NOT be served by `downloadObject`-style APIs. Deltas are resolved
@@ -45,9 +45,8 @@ offset  size  field              value
 
 The prologue applies to **all six object types**. Rationale:
 
-1. `mkit` shipped with *no* version byte anywhere
-   (`src/object.zig:7-13`, `src/serialize.zig:30-40`). Any field
-   addition silently shifts every hash.
+1. Without a version byte, any field addition silently shifts every
+   hash.
 2. Partial prologue (commit + remix only) leaves four object types
    unversioned and makes readers branch on type before they can detect a
    future format change. All-types prologue lets the prologue itself be
@@ -73,9 +72,9 @@ There is no v0. mkit does not read mkit-era bytes.
 ```
 
 No interpretation of `data`. `len = 0` is valid (empty blob). Upper bound
-is enforced at the storage layer: `ObjectStore.getRaw` rejects objects
-> 1 GiB (`src/store.zig:81`). A pack entry independently caps at the
-packfile total limit (see SPEC-PACKFILE).
+is enforced at the storage layer: the object store rejects objects
+> 1 GiB. A pack entry independently caps at the packfile total limit
+(see SPEC-PACKFILE).
 
 ---
 
@@ -91,12 +90,11 @@ repeat entry_count:
     [32 bytes object_hash]
 ```
 
-`entry_count > 1_000_000` → `TooManyEntries`
-(`src/serialize.zig:204`).
+`entry_count > 1_000_000` → `TooManyEntries`.
 
 ### 4.1 Entry name rules
 
-From `src/object.zig:127-134`. Normative:
+Normative:
 
 - `name_len` ∈ `[1, 255]`. Zero-length name is illegal.
 - Forbidden bytes **anywhere** in name: `0x00`, `/` (`0x2F`), `\` (`0x5C`).
@@ -106,9 +104,9 @@ From `src/object.zig:127-134`. Normative:
 
 Additionally, entries within a single tree MUST be sorted
 lexicographically (byte-wise ascending) by `name` with no duplicates.
-Readers MUST reject unsorted trees with `InvalidEntryOrder`
-(`src/serialize.zig:220-223`). This is load-bearing: tree hashes are
-only reproducible across implementations when ordering is canonical.
+Readers MUST reject unsorted trees with `InvalidEntryOrder`. This is
+load-bearing: tree hashes are only reproducible across implementations
+when ordering is canonical.
 
 ### 4.2 Entry mode
 
@@ -177,8 +175,7 @@ hash). Readers MUST NOT reject a commit because they are zero.
 ### 5.2 Root commits
 
 `parent_count = 0` is valid and denotes a root commit.
-`parent_count > 1_000` → `TooManyParents`
-(`src/serialize.zig:237`).
+`parent_count > 1_000` → `TooManyParents`.
 
 ---
 
@@ -202,14 +199,8 @@ repeat source_count:
 [64 bytes signature]                      Ed25519, see SPEC-SIGNING
 ```
 
-Differences from mkit:
-- `RemixSource.project_id` → `RemixSource.upstream_id`. Byte layout
-  unchanged (still 32 bytes at the same offset). Name transition only.
-  W3 must update both the sort comparator
-  (`src/object.zig:191-201`) and the deserialiser validator
-  (`src/serialize.zig:290-297`) in lockstep.
-- `author_mid: u64` → `Identity`.
-- `timestamp: u32` → `u64`.
+Naming: the 32-byte source identifier is called `upstream_id` in v1 (the
+byte layout is unchanged — the name transition is cosmetic).
 
 ### 6.1 Source sort invariant
 
@@ -244,8 +235,7 @@ SPEC-FASTCDC.
 Reassembly: concatenate each `chunk_hash` blob's contents in order.
 The concatenated length MUST equal `total_size`.
 
-`chunk_count > 1_000_000` → `TooManyChunks`
-(`src/serialize.zig:318`).
+`chunk_count > 1_000_000` → `TooManyChunks`.
 
 ---
 
@@ -285,8 +275,7 @@ Kinds:
 Rules:
 
 - `len = 0` is **illegal** for every kind → `InvalidIdentity`.
-- `len > 4096` → `IdentityTooLarge`. (New cap; not present in mkit
-  because identities were a fixed u64.)
+- `len > 4096` → `IdentityTooLarge`.
 - Unknown `kind` → `UnknownIdentityKind`.
 - Two identities compare equal iff `kind` and `payload` bytes are
   byte-equal. No case-folding, no canonicalisation.
@@ -296,38 +285,27 @@ and the signing bytes (see SPEC-SIGNING). The bytes are identical in both
 contexts. This means the identity length is variable at signing time,
 which is why the `len` field is always explicit.
 
-### 9.1 No legacy `author_mid`
-
-v1 has no representation for the mkit `u64 author_mid` field. Attempting
-to decode mkit-era bytes as v1 will fail at the `MKT1` magic check.
-
 ---
 
 ## 10. Storage
 
 Objects are stored at `.mkit/objects/<dd>/<rrrrrrrrr...r>` where `<dd>`
 is the lowercase-hex first byte of `BLAKE3(object bytes)` and `<r...>`
-is the remaining 62 hex chars (`src/hash.zig:52-58`,
-`src/store.zig:57-67`).
+is the remaining 62 hex chars.
 
 On read, the store MUST recompute BLAKE3 and fail `HashMismatch` if the
-computed hash does not match the path
-(`src/store.zig:87-89`). Objects > 1 GiB MUST be rejected
-(`src/store.zig:81`). v1 preserves both caps.
+computed hash does not match the path. Objects > 1 GiB MUST be rejected.
 
-`.mkit/` directory magic: unchanged from filesystem layout point of
-view — presence of `.mkit/objects` is the repository marker
-(`src/store.zig:17-20`, adapted). See SPEC-INDEX for the
-`.mkit/index` sidecar.
+`.mkit/` directory: presence of `.mkit/objects` is the repository
+marker. See SPEC-INDEX for the `.mkit/index` sidecar.
 
 ---
 
 ## 11. Trailing-byte rule
 
 Every object deserialiser MUST verify that after parsing the declared
-layout there are zero remaining bytes. Extra bytes → `TrailingData`
-(`src/serialize.zig:229`, `:251`, `:298`, etc.). This prevents
-trivial amplification and prologue-replay attacks.
+layout there are zero remaining bytes. Extra bytes → `TrailingData`.
+This prevents trivial amplification and prologue-replay attacks.
 
 ---
 
@@ -366,9 +344,7 @@ multi-version readers.
 These vectors are committed as golden files under
 `rust/tests/golden/phase1/` (with a `MANIFEST.txt` and per-vector
 `.json` sidecar carrying the BLAKE3 digest), so external implementations
-can cross-verify byte-for-byte. The fixtures are produced deterministically
-by `bash scripts/harvest-golden-vectors.sh`, which invokes the harness
-in `scripts/harvest/harvest.zig` against the live Zig reference.
+can cross-verify byte-for-byte.
 
 ---
 

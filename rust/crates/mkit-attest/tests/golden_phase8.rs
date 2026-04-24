@@ -1,16 +1,14 @@
-//! Phase 8 cross-implementation goldens.
+//! Phase 8 goldens.
 //!
-//! These vectors are produced by `scripts/harvest-golden-vectors-phase8.sh`
-//! from the Zig reference (`src/attestations/`). They pin two contracts:
+//! Fixed deterministic vectors pin two contracts:
 //!
-//! 1. **JCS-canonical Statement bytes** — the Rust `statement::for_commit`
-//!    encoder produces the exact same byte sequence as the Zig encoder
-//!    when given the same fixed inputs.
-//! 2. **DSSE envelope shape + signature acceptance** — the Rust
-//!    `envelope::decode` accepts the Zig-produced envelope, the embedded
-//!    payload re-encodes back to the canonical Statement bytes, and
-//!    `verify::verify_envelope` accepts the embedded Ed25519 signature
-//!    against the trust root recovered from the deterministic seed.
+//! 1. **JCS-canonical Statement bytes** — `statement::for_commit` emits
+//!    the pinned byte sequence for the fixed inputs.
+//! 2. **DSSE envelope shape + signature acceptance** — `envelope::decode`
+//!    accepts the pinned envelope, the embedded payload re-encodes
+//!    back to the canonical Statement bytes, and `verify::verify_envelope`
+//!    accepts the embedded Ed25519 signature against the trust root
+//!    recovered from the deterministic seed.
 //!
 //! See `docs/SPEC-ATTESTATIONS.md` and `rust/tests/golden/phase8/MANIFEST.txt`.
 
@@ -29,7 +27,7 @@ const ATTEST_PREDICATE_TYPE: &str = "https://example.com/predicate/v1";
 const ATTEST_PREDICATE_JCS: &[u8] = b"{}";
 const ATTEST_ED25519_SEED: [u8; 32] = [0xAB; 32];
 
-/// Derive the keyid string from the fixed seed, matching the Zig harvester.
+/// Derive the keyid string from the fixed seed.
 /// keyid = "blake3:" || hex(BLAKE3(pubkey)) where pubkey is derived from seed.
 fn attest_keyid() -> String {
     RepoKeySigner::new(KeyPair::from_seed(ATTEST_ED25519_SEED)).keyid_string()
@@ -47,9 +45,9 @@ fn golden_dir() -> PathBuf {
 }
 
 #[test]
-fn statement_basic_matches_zig_jcs_bytes() {
+fn statement_basic_matches_golden_jcs_bytes() {
     let golden = std::fs::read(golden_dir().join("statement_basic.json"))
-        .expect("read statement_basic.json (run scripts/harvest-golden-vectors-phase8.sh)");
+        .expect("read statement_basic.json");
 
     let got = statement::for_commit(
         &ATTEST_COMMIT_HASH,
@@ -61,7 +59,7 @@ fn statement_basic_matches_zig_jcs_bytes() {
     assert_eq!(
         got.as_bytes(),
         golden.as_slice(),
-        "Rust and Zig JCS encoders disagree on Statement bytes"
+        "JCS encoder output diverges from pinned golden"
     );
 }
 
@@ -83,15 +81,15 @@ fn statement_basic_built_via_struct_form_also_matches() {
 
 #[test]
 fn envelope_basic_decodes_and_signature_verifies() {
-    let golden = std::fs::read(golden_dir().join("envelope_basic.json"))
-        .expect("read envelope_basic.json (run scripts/harvest-golden-vectors-phase8.sh)");
+    let golden =
+        std::fs::read(golden_dir().join("envelope_basic.json")).expect("read envelope_basic.json");
 
-    // Strict decode of the Zig-produced envelope.
+    // Strict decode of the pinned envelope.
     let env = env_mod::decode(&golden).expect("decode envelope");
     assert_eq!(env.payload_type, PAYLOAD_TYPE_IN_TOTO);
     assert_eq!(env.signatures.len(), 1);
 
-    // Derive keyid from the fixed seed — same path the Zig harvester uses.
+    // Derive keyid from the fixed seed.
     let keyid = attest_keyid();
     assert_eq!(env.signatures[0].keyid, keyid);
 
@@ -107,7 +105,7 @@ fn envelope_basic_decodes_and_signature_verifies() {
     reg.add(&keyid, TrustRoot::Ed25519PubKey(pk));
 
     let r = verify::verify(&env, &reg).expect("verify");
-    assert!(r.any_verified, "Zig-produced signature must verify in Rust");
+    assert!(r.any_verified, "pinned signature must verify");
     assert_eq!(r.signatures[0].reason, Reason::Ok);
 }
 

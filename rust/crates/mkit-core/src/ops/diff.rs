@@ -1,4 +1,4 @@
-//! Tree-level structural diff. Port of `src/diff.zig`.
+//! Tree-level structural diff.
 //!
 //! Compares two trees identified by their object hash and returns the
 //! minimal list of leaf-level changes (`added` / `removed` / `modified`
@@ -8,7 +8,7 @@
 //! contained leaf.
 //!
 //! Also contains `status_diff` — the working-tree vs HEAD diff that
-//! powers `mkit status`. Ported from `src/diff.zig::statusDiff`.
+//! powers `mkit status`.
 
 use std::path::Path;
 
@@ -18,8 +18,7 @@ use crate::object::{EntryMode, Object, TreeEntry};
 use crate::store::{ObjectStore, StoreError};
 use crate::worktree::{self, WorktreeError};
 
-/// What kind of change a [`DiffEntry`] represents. Matches the Zig
-/// enum names 1:1 so cross-implementation diagnostics stay aligned.
+/// What kind of change a [`DiffEntry`] represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiffKind {
     /// Path was not present in the old tree, present in the new.
@@ -89,8 +88,7 @@ pub fn diff_trees(
     Ok(DiffResult { entries: out })
 }
 
-/// Lockstep walk of two name-sorted entry arrays. Mirrors
-/// `diffEntriesRecursive` in `src/diff.zig`.
+/// Lockstep walk of two name-sorted entry arrays.
 fn diff_entries_recursive(
     store: &ObjectStore,
     old_entries: &[TreeEntry],
@@ -217,13 +215,12 @@ fn load_tree(store: &ObjectStore, h: Hash) -> Result<Vec<TreeEntry>, StoreError>
 }
 
 /// Join a path prefix and an entry name with `/`. Lossy on non-UTF-8
-/// names (the Zig version is byte-pure but emits the result as
-/// `[]const u8`; we use `String` here because Rust's `Path` would force
-/// platform-specific separator handling we explicitly do not want). Tree
-/// names are constrained at the object layer to forbid `/` and `\\`, so
-/// the only lossy case is non-UTF-8 byte sequences in legacy data — the
-/// caller's `path` field will then be `String::from_utf8_lossy`'s
-/// replacement, which is acceptable for a diagnostic.
+/// names: we use `String` rather than `Path` to avoid platform-specific
+/// separator handling. Tree names are constrained at the object layer
+/// to forbid `/` and `\\`, so the only lossy case is non-UTF-8 byte
+/// sequences in legacy data — the caller's `path` field will then be
+/// `String::from_utf8_lossy`'s replacement, which is acceptable for a
+/// diagnostic.
 fn join_path(prefix: &str, name: &[u8]) -> String {
     let name_str = String::from_utf8_lossy(name);
     if prefix.is_empty() {
@@ -363,11 +360,11 @@ fn classify_staging(entry: &DiffEntry, index: &Index) -> StatusStaging {
 }
 
 // =====================================================================
-// Tests — mirror the Zig `diff.zig` test suite 1:1.
+// Tests
 // =====================================================================
 
 #[cfg(test)]
-#[allow(clippy::many_single_char_names)] // single-letter blob/entry names mirror the Zig tests
+#[allow(clippy::many_single_char_names)] // single-letter blob/entry names keep the tables compact
 mod tests {
     use super::*;
     use crate::object::{Blob, Tree};
@@ -589,7 +586,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // status_diff unit tests — mirror the Zig statusDiff test suite.
+    // status_diff unit tests
     // -----------------------------------------------------------------
 
     fn fresh_workdir() -> TempDir {

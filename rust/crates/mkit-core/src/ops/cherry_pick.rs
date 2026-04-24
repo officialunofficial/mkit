@@ -1,19 +1,13 @@
-//! Single-commit cherry-pick onto a different base tree. Port of
-//! `src/cherry_pick.zig`.
+//! Single-commit cherry-pick onto a different base tree.
 //!
 //! This is intentionally a *tree-level* operation: it computes the
 //! 3-way merge of `(target.parents[0].tree, ours_tree, target.tree)`
 //! and returns the resulting tree hash plus any conflicts. Building a
-//! new commit on top of the merged tree is the caller's job — it
-//! happens at the CLI layer in the Zig codebase too, and porting that
-//! belongs to a later phase that wires `refs` and the index together.
+//! new commit on top of the merged tree is the caller's job — the CLI
+//! layer wires refs and the index together.
 //!
-//! Notes vs the prompt's `CherryPickResult` enum: the Zig contract
-//! returns a struct with `tree_hash` + `conflicts` + `original_message`,
-//! and signals "the input wasn't a commit" with `error.NotACommit`.
-//! There's no `AlreadyAncestor` short-circuit in the Zig source — that's
-//! a higher-level decision the CLI makes before calling cherry-pick. We
-//! preserve the Zig contract verbatim and document the deviation here.
+//! There is no `AlreadyAncestor` short-circuit here — that is a
+//! higher-level decision the CLI makes before calling cherry-pick.
 
 use crate::hash::Hash;
 use crate::object::Object;
@@ -60,7 +54,7 @@ impl CherryPickResult {
 /// 1. Load the target commit. (Error if not a commit.)
 /// 2. Load the target's first parent's tree as the merge `base`. If
 ///    the target is a root commit (no parents), `base = None` (empty
-///    tree) — same as Zig.
+///    tree).
 /// 3. 3-way merge `(base, ours_tree, target.tree_hash)`.
 /// 4. Return the merged tree hash, any conflicts, and the target
 ///    commit's `message` so the caller can craft a new commit.
@@ -68,10 +62,9 @@ impl CherryPickResult {
 /// # Errors
 ///
 /// * [`CherryPickError::NotACommit`] when `target_hash` doesn't point
-///   at a commit object (mirrors Zig's `error.NotACommit`).
+///   at a commit object.
 /// * [`CherryPickError::ParentNotACommit`] when the parent hash points
-///   at something other than a commit (mirrors the `if (parent_obj !=
-///   .commit) return error.NotACommit` branch in `cherry_pick.zig`).
+///   at something other than a commit.
 /// * [`CherryPickError::Store`] for any wrapped store/serialize error.
 pub fn cherry_pick(
     store: &ObjectStore,
@@ -107,7 +100,7 @@ pub fn cherry_pick(
 }
 
 // =====================================================================
-// Tests — parity with Zig `cherry_pick.zig`.
+// Tests
 // =====================================================================
 
 #[cfg(test)]

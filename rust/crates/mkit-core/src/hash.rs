@@ -1,4 +1,4 @@
-//! BLAKE3 hashing helpers — port of `src/hash.zig`.
+//! BLAKE3 hashing helpers.
 //!
 //! A [`Hash`] is a fixed 32-byte digest. The canonical hex form is 64
 //! lowercase characters. Object-store paths split the digest into a
@@ -106,7 +106,6 @@ fn hex_nibble(b: u8) -> Result<u8, FromHexError> {
 }
 
 /// Object-store path split: `<first-byte-hex>/<remaining-62-hex>`.
-/// Mirrors `hash.zig::objectPath`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectPath {
     /// Two-char directory prefix, ASCII lowercase hex.
@@ -145,7 +144,6 @@ mod tests {
 
     #[test]
     fn known_vector_hello() {
-        // Cross-ports the `test "hash known value"` in src/hash.zig.
         let h = hash(b"hello");
         assert_eq!(
             to_hex(&h),

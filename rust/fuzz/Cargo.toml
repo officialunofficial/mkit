@@ -16,10 +16,9 @@
 #   2. <= 64 KiB input per iteration.
 #   3. Bounded allocations: input cap (2) + per-op output caps inside
 #      mkit-core bound the worst-case heap to ~1 MiB per iteration.
-#      (Rust adaptation of the Zig FixedBufferAllocator — mkit-core uses
-#      the global allocator in production, so wiring a custom allocator
-#      into only the fuzz path would make the fuzz harness divergent
-#      from production. Documented in docs/FUZZ.md §Rust-adaptation.)
+#      mkit-core uses the global allocator in production, so we do not
+#      swap in a custom allocator in the fuzz harness — that would make
+#      the harness diverge from production. See docs/FUZZ.md.
 #   4. 100 ms wall-clock cap per iteration.
 #   5. No unbounded loops; iteration counter mandatory.
 #   6. Seeded RNG so failures reproduce.

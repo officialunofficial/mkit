@@ -1,6 +1,6 @@
 //! `mkit clone <url> [<dir>]` — initialise a new repo and pull from
 //! the URL. The destination defaults to the final path segment of the
-//! URL when `<dir>` is omitted (matches the Zig behaviour).
+//! URL when `<dir>` is omitted.
 //!
 //! Dispatches to the same transport-open path used by `mkit pull` —
 //! `file://`, `https://`, `s3://`, and `ssh://` are all wired via
@@ -27,9 +27,7 @@ pub fn run(args: &[String]) -> u8 {
     while i < args.len() {
         let a = args[i].as_str();
         if a == "--depth" || a == "--sparse" {
-            return super::usage_error(&format!(
-                "mkit clone: {a} is a Phase 10 follow-up — not yet wired in the Rust port"
-            ));
+            return super::usage_error(&format!("mkit clone: {a} is not yet wired"));
         }
         if a.starts_with("--") {
             return super::usage_error(&format!("mkit clone: unknown flag {a}"));

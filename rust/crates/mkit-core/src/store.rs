@@ -1,4 +1,4 @@
-//! Local content-addressed object store — port of `src/store.zig`.
+//! Local content-addressed object store.
 //!
 //! Layout (rooted at the working-tree directory passed to [`ObjectStore::open`]
 //! / [`ObjectStore::init`]):
@@ -37,7 +37,7 @@ pub const MKIT_DIR: &str = ".mkit";
 /// Subdirectory under `.mkit/` that holds raw object files.
 pub const OBJECTS_DIR: &str = "objects";
 /// Hard cap on raw object size, enforced on both [`ObjectStore::write`]
-/// and [`ObjectStore::read`]. Mirrors `src/store.zig::MAX_RAW_OBJECT_SIZE`.
+/// and [`ObjectStore::read`].
 pub const MAX_RAW_OBJECT_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
 
 /// Errors raised by the [`ObjectStore`] surface. Distinct from
@@ -102,7 +102,6 @@ impl ObjectStore {
     }
 
     /// Returns `true` when `root` contains a `.mkit/objects` directory.
-    /// Mirrors `ObjectStore::isRepoRoot` in `src/store.zig`.
     #[must_use]
     pub fn is_repo_root(root: &Path) -> bool {
         root.join(MKIT_DIR).join(OBJECTS_DIR).is_dir()
@@ -206,7 +205,7 @@ impl ObjectStore {
 /// After a successful rename we `fsync` the parent directory on Unix to
 /// flush the dirent update — without this, the rename can survive a
 /// power loss only in the page cache and the file appears missing on
-/// reboot. Mirrors `src/store.zig`'s post-rename `syncDir`.
+/// reboot.
 fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = final_path.parent().expect("write_atomic: path has parent");
     let file_name = final_path

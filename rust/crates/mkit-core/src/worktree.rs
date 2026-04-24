@@ -1,20 +1,19 @@
-//! Worktree → tree-object builder — port of `src/worktree.zig`.
+//! Worktree → tree-object builder.
 //!
 //! Walks a directory, applies `.mkitignore`, hashes each file as a
 //! [`Blob`](crate::object::Blob), recurses on subdirectories, validates
 //! symlink targets against path-traversal, and writes a single root
 //! [`Tree`](crate::object::Tree) into the supplied [`ObjectStore`].
 //!
-//! Differences from the Zig original:
+//! Notes:
 //!
-//! - **No `FastCDC` chunking**. The `chunked_blob` path lives in the
-//!   PACK agent's scope (`src/chunker.rs` + `src/pack.rs`); this
-//!   module rejects files larger than [`CHUNK_THRESHOLD`] with
-//!   [`WorktreeError::FileTooLarge`] until the chunker is wired in.
-//!   v1 small-repo flows are unaffected.
+//! - **No `FastCDC` chunking in this module**. The `chunked_blob` path
+//!   lives in [`crate::chunker`] + [`crate::pack`]; this module rejects
+//!   files larger than [`CHUNK_THRESHOLD`] with
+//!   [`WorktreeError::FileTooLarge`]. v1 small-repo flows are
+//!   unaffected.
 //! - We never follow symlinks while walking. Linux/macOS `read_link`
-//!   reports the target verbatim and we hash it as a blob the same
-//!   way the Zig source does.
+//!   reports the target verbatim and we hash it as a blob.
 
 use std::fs;
 use std::io;
@@ -26,11 +25,10 @@ use crate::object::{EntryMode, Object, Tree, TreeEntry};
 use crate::serialize;
 use crate::store::ObjectStore;
 
-/// Files larger than this go through the (not-yet-ported) chunker.
-/// Mirrors the Zig `chunk_threshold` (1 MiB).
+/// Files larger than this go through the chunker (1 MiB).
 pub const CHUNK_THRESHOLD: u64 = 1024 * 1024;
 
-/// Hard cap on a single file. Matches the Zig source.
+/// Hard cap on a single file (1 GiB).
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Errors returned by this module.
@@ -65,7 +63,7 @@ pub enum WorktreeError {
 pub type WorktreeResult<T> = Result<T, WorktreeError>;
 
 /// Validate a symlink target: must be relative and contain no `..`
-/// segments. Mirrors `src/worktree.zig::validateSymlinkTarget`.
+/// segments.
 #[must_use]
 pub fn validate_symlink_target(target: &str) -> bool {
     if target.is_empty() {
@@ -107,8 +105,7 @@ fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> Wo
             .to_str()
             .ok_or(WorktreeError::InvalidUtf8)?
             .to_string();
-        // `symlink_metadata` does not follow symlinks — same effect as
-        // the Zig source's `follow_symlinks = false` stat.
+        // `symlink_metadata` does not follow symlinks.
         let meta = entry.path().symlink_metadata()?;
         let is_dir = meta.is_dir();
         if ignores.is_ignored(&name_str, is_dir) {
@@ -149,7 +146,7 @@ fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> Wo
                 object_hash: h,
             });
         } else {
-            // Block / char / fifo / socket — silently skip, same as Zig.
+            // Block / char / fifo / socket — silently skip.
         }
     }
 

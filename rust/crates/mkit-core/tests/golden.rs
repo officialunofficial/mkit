@@ -1,17 +1,15 @@
-//! Golden-vector cross-verification tests.
+//! Golden-vector tests for the canonical object byte format.
 //!
-//! Loads the byte fixtures harvested from the Zig reference into
-//! `rust/tests/golden/phase1/` and asserts that this Rust port:
+//! Loads the byte fixtures in `rust/tests/golden/phase1/` and asserts
+//! that this crate:
 //!
 //! 1. Re-serializes byte-for-byte the same fixture (proves the encoder
 //!    matches the spec, not just the decoder).
 //! 2. Round-trips the fixture through `deserialize` -> `serialize`.
-//! 3. Computes the same BLAKE3 digest the Zig harness recorded in the
-//!    sidecar `.json` (and in `MANIFEST.txt`).
+//! 3. Computes the BLAKE3 digest pinned in `MANIFEST.txt`.
 //!
-//! If you change byte layout in the spec or in either implementation,
-//! re-run `bash scripts/harvest-golden-vectors.sh` to refresh these
-//! fixtures, then re-run this suite.
+//! If you change byte layout in the spec, regenerate the fixtures
+//! intentionally and then re-run this suite.
 
 use std::fs;
 use std::path::PathBuf;
@@ -92,8 +90,7 @@ fn assert_identity_matches(name: &str, id: &Identity) {
     }
 }
 
-// The same constants the Zig harness uses. Keep these byte-identical
-// to scripts/harvest/harvest.zig.
+// Pinned test constants — changing these will break golden vectors.
 const PUBKEY_A: [u8; 32] = [0xAA; 32];
 const PUBKEY_B: [u8; 32] = [0xBB; 32];
 const SIGNER: [u8; 32] = [0x11; 32];

@@ -1,10 +1,7 @@
 //! Strict `mkit+ssh://` URL parser.
 //!
-//! This is the Rust port of the parts of `src/protocol.zig` that the
-//! PROTOCOL agent deferred to the SSH transport agent:
-//! `validateSshPath` and `parseStrictSsh`. SPEC-TRANSPORT §7 and
-//! SSH-SECURITY.md §2 are the authority for what is (and isn't) a
-//! legal `mkit+ssh://` URL.
+//! SPEC-TRANSPORT §7 and SSH-SECURITY.md §2 are the authority for what
+//! is (and isn't) a legal `mkit+ssh://` URL.
 //!
 //! Accepted forms (all with the mandatory `mkit+` prefix):
 //!
@@ -24,9 +21,8 @@
 use mkit_core::protocol::TransportError;
 
 /// Mandatory strict-namespace prefix for every mkit remote URL
-/// (`mkit+ssh://…`). Forbidding bare `ssh://…` is deliberate: the Zig
-/// CLI's strict parser (`parseRemoteUrl`) enforces the same thing, and
-/// we do not want the Rust port to silently accept a looser superset.
+/// (`mkit+ssh://…`). Forbidding bare `ssh://…` is deliberate: we do not
+/// want the parser to silently accept a looser superset.
 pub const MKIT_SSH_PREFIX: &str = "mkit+ssh://";
 
 /// A resolved `mkit+ssh://` target. All fields are owned so the struct
@@ -155,10 +151,9 @@ pub fn parse_mkit_ssh_url(url: &str) -> Result<SshTarget, TransportError> {
 
     // Forbid embedded slashes / colons / @ / whitespace in the user
     // field — these would escape the argv boundary when we build
-    // `user@host`. Zig's `parseStrictSsh` inherits this implicitly
-    // because it splits on the first `@`, but we restrict the user's
-    // byte set explicitly so a CRLF or ` -oProxyCommand=...` pasted into
-    // the user slot cannot reach `ssh(1)`.
+    // `user@host`. We restrict the user's byte set explicitly so a CRLF
+    // or ` -oProxyCommand=...` pasted into the user slot cannot reach
+    // `ssh(1)`.
     for &c in user.as_bytes() {
         let ok = c.is_ascii_alphanumeric() || c == b'.' || c == b'_' || c == b'-' || c == b'+';
         if !ok {
@@ -280,11 +275,10 @@ fn parse_host_port(user: &str, host_port: &str, path: &str) -> Result<SshTarget,
     })
 }
 
-/// Restrict hostnames to a conservative ASCII subset. The Zig reference
-/// parser does not enforce this — it relies on `ssh(1)` to reject bogus
-/// hostnames — but a defence-in-depth check here prevents trivially
-/// hostile inputs (CRLF, NUL, embedded argv separators) from reaching
-/// the child process argv.
+/// Restrict hostnames to a conservative ASCII subset. Defence-in-depth:
+/// prevents trivially hostile inputs (CRLF, NUL, embedded argv
+/// separators) from reaching the child process argv, even though
+/// `ssh(1)` would also reject them.
 fn validate_host(host: &str) -> Result<(), TransportError> {
     if host.is_empty() {
         return Err(TransportError::InvalidRef("ssh host empty".into()));

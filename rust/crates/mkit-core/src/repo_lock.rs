@@ -1,18 +1,17 @@
-//! Repo-level lockfile helper — port of `src/lock.zig` (Rust module
-//! renamed to `repo_lock` to avoid collision with `std::sync::*Lock`).
+//! Repo-level lockfile helper (named `repo_lock` to avoid collision
+//! with `std::sync::*Lock`).
 //!
 //! Pattern: `O_EXCL`-create a sentinel file, hold an OS-level exclusive
 //! advisory lock on it, then delete on release. The lockfile is visible
 //! on disk so a stale lock left behind by a SIGKILL'd `mkit` is
 //! debuggable (`ls .mkit/*.lock`) and removable by hand.
 //!
-//! Compared to the Zig original (`src/lock.zig`) we additionally take an
-//! exclusive `flock(2)`-equivalent on the file via `std::fs::File::lock`
-//! so concurrent acquirers within the same OS block on the kernel
-//! instead of spinning on `EEXIST`. The `O_EXCL` create still wins the
-//! file-creation race on the first attempt; on the wait path we open
-//! the existing file read-only and call `lock()` to wait for the
-//! current holder to release.
+//! We take an exclusive `flock(2)`-equivalent on the file via
+//! `std::fs::File::lock` so concurrent acquirers within the same OS
+//! block on the kernel instead of spinning on `EEXIST`. The `O_EXCL`
+//! create still wins the file-creation race on the first attempt; on
+//! the wait path we open the existing file read-only and call `lock()`
+//! to wait for the current holder to release.
 //!
 //! POSIX-only intent (macOS + Linux). `std::fs::File::lock` is also
 //! supported on Windows since Rust 1.89, so this works there too — the

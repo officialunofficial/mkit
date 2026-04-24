@@ -1,9 +1,9 @@
 //! mkit HTTP/HTTPS transport.
 //!
-//! Rust port of `src/transport/http.zig` (~944 LOC) speaking a simple
-//! JSON REST dialect against a mkit VCS Worker (e.g. Cloudflare Worker +
-//! R2). User-facing URL shape: `mkit+https://<host>/<project>`. The
-//! `mkit+` prefix is stripped before the inner reqwest call.
+//! Speaks a simple JSON REST dialect against a mkit VCS Worker (e.g.
+//! Cloudflare Worker + R2). User-facing URL shape:
+//! `mkit+https://<host>/<project>`. The `mkit+` prefix is stripped
+//! before the inner reqwest call.
 //!
 //! Wire contract (SPEC-TRANSPORT §6):
 //!
@@ -184,8 +184,8 @@ impl HttpTransport {
             .map_err(|()| TransportError::InvalidResponse)?
             .pop_if_empty()
             .push("refs");
-        // Always set prefix=, even when empty, for server-side parity with
-        // the Zig transport's `?prefix=` query.
+        // Always set `prefix=`, even when empty, so the Worker can
+        // distinguish "list all refs" from a missing query parameter.
         u.query_pairs_mut().clear().append_pair("prefix", prefix);
         Ok(u)
     }
