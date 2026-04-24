@@ -3,6 +3,7 @@
 //! the Zig CLI; backing state + search logic live in
 //! `mkit_core::ops::bisect`.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 
 use mkit_core::hash::{self, Hash};
@@ -62,6 +63,7 @@ fn start(mkit_dir: &std::path::Path) -> u8 {
         orig_branch,
         bad_hash: None,
         good_hashes: Vec::new(),
+        skipped: BTreeSet::default(),
     };
     if let Err(e) = write_state(mkit_dir, &state) {
         return emit_err(&format!("write state: {e}"), exit::CANTCREAT);
@@ -107,13 +109,33 @@ fn skip(store: &ObjectStore, mkit_dir: &std::path::Path) -> u8 {
     if !is_bisect_in_progress(mkit_dir) {
         return emit_err("no bisect in progress", exit::GENERAL_ERROR);
     }
-    // "skip" is a light marker: we leave the state unchanged and re-run
-    // the search; resolving skips into a proper exclusion set is a
-    // library-side follow-up (see TODO in PR body).
-    let state = match read_state(mkit_dir) {
+    let mut state = match read_state(mkit_dir) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
+    // Determine the current midpoint to skip.
+    let current_mid = match next_step(store, &state) {
+        Ok(BisectStep::Testing { hash, .. }) => hash,
+        Ok(_) => {
+            // Nothing to skip: either already found or not enough data.
+            let mut stdout = std::io::stdout().lock();
+            let _ = writeln!(stdout, "bisect skip: no current candidate to skip");
+            return exit::OK;
+        }
+        Err(e) => return emit_err(&format!("bisect skip: {e}"), exit::GENERAL_ERROR),
+    };
+    // Add the current midpoint to the exclusion set, then advance.
+    state.skipped.insert(current_mid);
+    if let Err(e) = write_state(mkit_dir, &state) {
+        return emit_err(&format!("persist state: {e}"), exit::CANTCREAT);
+    }
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(
+        stdout,
+        "skipped {}; advancing to next candidate",
+        format::short_hash(&current_mid, 12)
+    );
+    drop(stdout);
     report_step(store, &state)
 }
 
