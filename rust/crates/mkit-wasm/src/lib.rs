@@ -9,7 +9,10 @@
 
 use wasm_bindgen::prelude::*;
 
+use mkit_attest::algorithm::Algorithm;
 use mkit_attest::envelope::{Envelope, Sig};
+use mkit_attest::signer_k256::Secp256k1Signer;
+use mkit_attest::signer_p256::P256Signer;
 use mkit_attest::statement::{Statement, Subject, encode as encode_statement};
 use mkit_attest::verify::{Registry, TrustRoot, verify_envelope};
 use mkit_attest::{PAYLOAD_TYPE_IN_TOTO, Signer, signer_repo_key::RepoKeySigner};
@@ -32,6 +35,13 @@ fn parse_hash_hex(hex: &str) -> Result<[u8; 32], JsValue> {
 
 fn parse_fixed<const N: usize>(bytes: &[u8]) -> Result<[u8; N], JsValue> {
     <[u8; N]>::try_from(bytes).map_err(|_| js_err(format!("expected {N} bytes")))
+}
+
+/// Parse `"ed25519" | "secp256k1" | "p256"` into the attestation-side `Algorithm` tag. These are the only three
+/// algorithms the attestation verifier dispatches on today.
+fn parse_algo(s: &str) -> Result<Algorithm, JsValue> {
+    s.parse::<Algorithm>()
+        .map_err(|e| js_err(format!("unknown algorithm: {}", e.0)))
 }
 
 // ---------------------------------------------------------------------
@@ -208,25 +218,74 @@ pub fn verify_bytes_commit_domain(pubkey_hex: &str, bytes: &[u8], sig_hex: &str)
 // 3. Attestations — in-toto v1 Statement wrapped in a DSSE envelope
 // ---------------------------------------------------------------------
 
-/// Build a DSSE-wrapped in-toto v1 attestation over a commit hash.
+/// Derive the pubkey + canonical keyid for the given attestation algorithm from a 32-byte seed. `algo` is one of
+/// `"ed25519" | "secp256k1" | "p256"`. Deterministic: same seed + same algorithm always produces the same pubkey.
+///
+/// Pubkey encoding depends on the algorithm:
+///   * `ed25519`   — 32-byte raw pubkey
+///   * `secp256k1` — 33-byte compressed SEC1 (`0x02`/`0x03` prefix + x)
+///   * `p256`      — 33-byte compressed SEC1 (same shape)
+///
+/// `keyid` follows the canonical `<prefix>:<hex-pubkey>` form described in SPEC-ATTESTATIONS §6.3 for ES256K / ES256,
+/// and the legacy `blake3:<hex-of-blake3(pubkey)>` form for Ed25519 (what `RepoKeySigner` emits; verifier accepts).
+#[wasm_bindgen]
+pub fn attest_keypair(seed_hex: &str, algo: &str) -> Result<AttestKeyPairJs, JsValue> {
+    let seed = parse_hash_hex(seed_hex)?;
+    let alg = parse_algo(algo)?;
+    match alg {
+        Algorithm::Ed25519 => {
+            let kp = KeyPair::from_seed(seed);
+            let signer = RepoKeySigner::new(kp.clone());
+            let keyid = signer.keyid().map_err(|e| js_err(format!("keyid: {e}")))?;
+            Ok(AttestKeyPairJs {
+                seed_hex: seed_hex.to_string(),
+                pubkey_hex: hex::encode(kp.public.0),
+                keyid,
+                algo: "ed25519".to_string(),
+            })
+        }
+        Algorithm::Secp256k1 => {
+            let s = Secp256k1Signer::new(seed).map_err(|e| js_err(format!("secp256k1: {e}")))?;
+            Ok(AttestKeyPairJs {
+                seed_hex: seed_hex.to_string(),
+                pubkey_hex: hex::encode(s.public_key_sec1()),
+                keyid: s.keyid_string(),
+                algo: "secp256k1".to_string(),
+            })
+        }
+        Algorithm::P256 => {
+            let s = P256Signer::new(seed).map_err(|e| js_err(format!("p256: {e}")))?;
+            Ok(AttestKeyPairJs {
+                seed_hex: seed_hex.to_string(),
+                pubkey_hex: hex::encode(s.public_key_sec1()),
+                keyid: s.keyid(),
+                algo: "p256".to_string(),
+            })
+        }
+    }
+}
+
+/// Build a DSSE-wrapped in-toto v1 attestation over a commit hash, signed with the chosen algorithm.
 ///
 /// * `predicate_type` is a URI like `https://example.com/Review/v1`.
-/// * `predicate_jcs` is the predicate body as already-canonical JCS
-///   bytes (must start with `{` and end with `}`).
-/// * `seed_hex` is a 32-byte Ed25519 seed. The signer is mkit's
-///   `RepoKeySigner`: `keyid = "blake3:" || hex(BLAKE3(pubkey))`.
+/// * `predicate_jcs` is the predicate body as already-canonical JCS bytes (must start with `{` and end with `}`).
+/// * `seed_hex` is a 32-byte seed. How it's interpreted depends on `algo`:
+///   * `ed25519`   — raw Ed25519 seed
+///   * `secp256k1` — raw 32-byte scalar
+///   * `p256`      — raw 32-byte scalar
 ///
-/// Returns `{ envelope_json, keyid, attestation_id_hex }`.
+/// Returns `{ envelope_json, keyid, attestation_id_hex }`. The keyid's prefix reveals which algorithm was used.
 #[wasm_bindgen]
 pub fn attest_build(
     commit_hash_hex: &str,
     predicate_type: &str,
     predicate_jcs: &[u8],
     seed_hex: &str,
+    algo: &str,
 ) -> Result<AttestationJs, JsValue> {
-    // Validate the commit hash; we don't decode the commit, just the hex.
     let _ = parse_hash_hex(commit_hash_hex)?;
     let seed = parse_hash_hex(seed_hex)?;
+    let alg = parse_algo(algo)?;
 
     let stmt = Statement {
         subjects: vec![Subject {
@@ -239,20 +298,32 @@ pub fn attest_build(
     let statement_json = encode_statement(&stmt).map_err(|e| js_err(format!("statement: {e}")))?;
     let payload = statement_json.into_bytes();
 
-    let kp = KeyPair::from_seed(seed);
-    let mut signer = RepoKeySigner::new(kp);
-    let keyid = signer.keyid().map_err(|e| js_err(format!("keyid: {e}")))?;
-
-    // Build PAE, sign it, assemble the envelope.
     let mut env = Envelope {
         payload_type: PAYLOAD_TYPE_IN_TOTO.to_string(),
         payload,
         signatures: Vec::new(),
     };
     let pae = env.pae();
-    let sig_bytes = signer
-        .sign(&pae)
-        .map_err(|e| js_err(format!("sign: {e}")))?;
+
+    let (keyid, sig_bytes) = match alg {
+        Algorithm::Ed25519 => {
+            let mut signer = RepoKeySigner::new(KeyPair::from_seed(seed));
+            let keyid = signer.keyid().map_err(|e| js_err(format!("keyid: {e}")))?;
+            let sig = signer.sign(&pae).map_err(|e| js_err(format!("sign: {e}")))?;
+            (keyid, sig)
+        }
+        Algorithm::Secp256k1 => {
+            let s = Secp256k1Signer::new(seed).map_err(|e| js_err(format!("secp256k1: {e}")))?;
+            let sig = s.sign_dsse(&pae).map_err(|e| js_err(format!("sign: {e}")))?;
+            (s.keyid_string(), sig)
+        }
+        Algorithm::P256 => {
+            let s = P256Signer::new(seed).map_err(|e| js_err(format!("p256: {e}")))?;
+            let sig = s.sign_dsse(&pae).map_err(|e| js_err(format!("sign: {e}")))?;
+            (s.keyid(), sig)
+        }
+    };
+
     env.signatures.push(Sig {
         keyid: keyid.clone(),
         sig: sig_bytes,
@@ -270,24 +341,43 @@ pub fn attest_build(
     })
 }
 
-/// Verify a DSSE envelope against a single Ed25519 trust root.
+/// Verify a DSSE envelope against a single trust root of the given algorithm.
 ///
-/// * `envelope_json` is the canonical DSSE envelope JSON emitted by
-///   [`attest_build`] (or mkit's native attestation store).
-/// * `pubkey_hex` is the raw 32-byte Ed25519 public key, hex-encoded.
+/// * `envelope_json` is the canonical DSSE envelope JSON emitted by [`attest_build`].
+/// * `pubkey_hex` is the public key, hex-encoded:
+///   * `ed25519`   — 32-byte raw pubkey (64 hex chars)
+///   * `secp256k1` — 33-byte compressed SEC1 (66 hex chars) or 65-byte uncompressed (130 hex chars)
+///   * `p256`      — same shape as `secp256k1`
+/// * `algo` selects which trust-root variant the registry dispatches on.
 ///
-/// Returns `true` iff at least one signature in the envelope verifies
-/// under the supplied pubkey's `blake3:<hex-of-pubkey>` keyid.
+/// Returns `true` iff at least one signature in the envelope verifies.
 #[wasm_bindgen]
 #[must_use]
-pub fn attest_verify(envelope_json: &str, pubkey_hex: &str) -> bool {
-    let Ok(pk) = parse_hash_hex(pubkey_hex) else {
+pub fn attest_verify(envelope_json: &str, pubkey_hex: &str, algo: &str) -> bool {
+    let Ok(alg) = parse_algo(algo) else { return false };
+    let Ok(pubkey_bytes) = hex::decode(pubkey_hex) else {
         return false;
     };
 
     let mut registry = Registry::new();
-    let keyid = format!("blake3:{}", to_hex(&hash(&pk)));
-    registry.add(keyid, TrustRoot::Ed25519PubKey(pk));
+    match alg {
+        Algorithm::Ed25519 => {
+            let Ok(pk) = <[u8; 32]>::try_from(pubkey_bytes.as_slice()) else {
+                return false;
+            };
+            // RepoKeySigner (what we emit for ed25519) uses the legacy `blake3:<hex-of-blake3(pubkey)>` form.
+            let keyid = format!("blake3:{}", to_hex(&hash(&pk)));
+            registry.add(keyid, TrustRoot::Ed25519PubKey(pk));
+        }
+        Algorithm::Secp256k1 => {
+            let keyid = format!("secp256k1:{}", hex::encode(&pubkey_bytes));
+            registry.add(keyid, TrustRoot::Secp256k1PubKeySec1(pubkey_bytes));
+        }
+        Algorithm::P256 => {
+            let keyid = format!("p256:{}", hex::encode(&pubkey_bytes));
+            registry.add(keyid, TrustRoot::P256PubKeySec1(pubkey_bytes));
+        }
+    }
 
     match verify_envelope(envelope_json.as_bytes(), &registry) {
         Ok(r) => r.any_verified,
@@ -365,6 +455,39 @@ impl KeyPairJs {
     #[must_use]
     pub fn pubkey_hex(&self) -> String {
         self.pubkey_hex.clone()
+    }
+}
+
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct AttestKeyPairJs {
+    seed_hex: String,
+    pubkey_hex: String,
+    keyid: String,
+    algo: String,
+}
+
+#[wasm_bindgen]
+impl AttestKeyPairJs {
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn seed_hex(&self) -> String {
+        self.seed_hex.clone()
+    }
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn pubkey_hex(&self) -> String {
+        self.pubkey_hex.clone()
+    }
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn keyid(&self) -> String {
+        self.keyid.clone()
+    }
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn algo(&self) -> String {
+        self.algo.clone()
     }
 }
 

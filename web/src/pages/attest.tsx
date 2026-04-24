@@ -25,6 +25,12 @@ export default function AttestPage() {
           </a>
           . The JCS encoder is hand-rolled per RFC 8785 — serde won't satisfy its sort and number rules.
         </p>
+        <p className='max-w-prose text-sm text-[--color-muted]'>
+          Pick a signing algorithm below: <code className='font-mono text-xs'>Ed25519</code> (default),{' '}
+          <code className='font-mono text-xs'>Secp256k1/ES256K</code> for wallet-style clients, or{' '}
+          <code className='font-mono text-xs'>P-256/ES256</code> for Secure Enclave / WebAuthn. The verifier dispatches
+          on the <code className='font-mono text-xs'>keyid</code> prefix per SPEC-ATTESTATIONS §6.3.
+        </p>
       </header>
       <DemoBoundary>
         <AttestDemo />
