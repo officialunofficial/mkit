@@ -30,6 +30,72 @@ pub struct Config {
     pub ssh_strict_host_key_checking: String,
     pub ssh_user_known_hosts_file: String,
     pub ssh_identity_file: String,
+    /// `[attest]` section. Separate struct so new attest knobs don't
+    /// balloon the flat `Config`.
+    pub attest: AttestConfig,
+}
+
+/// `[attest]` section of `.mkit/config`. All fields optional with
+/// documented defaults; a fresh repo's config file has none of them set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttestConfig {
+    /// One of `"ed25519"`, `"secp256k1"`, `"p256"`. Empty = `"ed25519"`.
+    pub default_algorithm: String,
+    /// One of `"repo-key"`, `"external"`. Empty = `"repo-key"`.
+    pub signer: String,
+    /// Absolute path to the external signer binary. Required when
+    /// `signer = "external"`.
+    pub external_signer_path: String,
+    /// Per-algorithm repo-key paths for non-ed25519 signing. Relative
+    /// to the repo root; default values are filled in by
+    /// [`AttestConfig::secp256k1_key_path_or_default`] /
+    /// [`AttestConfig::p256_key_path_or_default`].
+    pub secp256k1_key_path: String,
+    pub p256_key_path: String,
+}
+
+impl AttestConfig {
+    /// Resolve the default algorithm, falling back to `"ed25519"` when
+    /// unset.
+    #[must_use]
+    pub fn default_algorithm_or_fallback(&self) -> &str {
+        if self.default_algorithm.is_empty() {
+            "ed25519"
+        } else {
+            self.default_algorithm.as_str()
+        }
+    }
+
+    /// Resolve the signer kind, falling back to `"repo-key"` when unset.
+    #[must_use]
+    pub fn signer_or_fallback(&self) -> &str {
+        if self.signer.is_empty() {
+            "repo-key"
+        } else {
+            self.signer.as_str()
+        }
+    }
+
+    /// Resolve the secp256k1 key path, defaulting to
+    /// `.mkit/keys/secp256k1.key`.
+    #[must_use]
+    pub fn secp256k1_key_path_or_default(&self) -> &str {
+        if self.secp256k1_key_path.is_empty() {
+            ".mkit/keys/secp256k1.key"
+        } else {
+            self.secp256k1_key_path.as_str()
+        }
+    }
+
+    /// Resolve the p256 key path, defaulting to `.mkit/keys/p256.key`.
+    #[must_use]
+    pub fn p256_key_path_or_default(&self) -> &str {
+        if self.p256_key_path.is_empty() {
+            ".mkit/keys/p256.key"
+        } else {
+            self.p256_key_path.as_str()
+        }
+    }
 }
 
 impl Config {
@@ -98,6 +164,14 @@ pub fn read_or_default(root: &Path) -> Result<Config, ConfigError> {
             "ssh.strict_host_key_checking" => cfg.ssh_strict_host_key_checking = val,
             "ssh.user_known_hosts_file" => cfg.ssh_user_known_hosts_file = val,
             "ssh.identity_file" => cfg.ssh_identity_file = val,
+            // `[attest]` knobs — all optional, dot-namespaced so they
+            // slot into the existing flat `key = value` grammar without
+            // needing a section header parser.
+            "attest.default_algorithm" => cfg.attest.default_algorithm = val,
+            "attest.signer" => cfg.attest.signer = val,
+            "attest.external_signer_path" => cfg.attest.external_signer_path = val,
+            "attest.secp256k1_key_path" => cfg.attest.secp256k1_key_path = val,
+            "attest.p256_key_path" => cfg.attest.p256_key_path = val,
             // Legacy keys — silently ignored so 0.1.x configs keep working.
             "author_mid" | "project_id" | "network" => {}
             _ if key.ends_with("_url") => {} // legacy keys retired upstream
@@ -315,6 +389,45 @@ mod tests {
         assert!(validate_value("hello world").is_ok());
         assert!(validate_value("bad\x01char").is_err());
         assert!(validate_value("\x7fdel").is_err());
+    }
+
+    #[test]
+    fn attest_config_defaults_are_empty() {
+        let cfg = Config::with_defaults();
+        assert_eq!(cfg.attest.default_algorithm, "");
+        assert_eq!(cfg.attest.signer, "");
+        assert_eq!(cfg.attest.default_algorithm_or_fallback(), "ed25519");
+        assert_eq!(cfg.attest.signer_or_fallback(), "repo-key");
+        assert_eq!(
+            cfg.attest.secp256k1_key_path_or_default(),
+            ".mkit/keys/secp256k1.key"
+        );
+        assert_eq!(cfg.attest.p256_key_path_or_default(), ".mkit/keys/p256.key");
+    }
+
+    #[test]
+    fn attest_config_reads_fields_from_file() {
+        let td = TempDir::new().unwrap();
+        fs::create_dir_all(td.path().join(".mkit")).unwrap();
+        fs::write(
+            td.path().join(CONFIG_FILE),
+            "attest.default_algorithm = p256\n\
+             attest.signer = external\n\
+             attest.external_signer_path = /usr/local/bin/mkit-signer\n\
+             attest.secp256k1_key_path = custom/secp.key\n\
+             attest.p256_key_path = custom/p256.key\n",
+        )
+        .unwrap();
+        let cfg = read_or_default(td.path()).unwrap();
+        assert_eq!(cfg.attest.default_algorithm, "p256");
+        assert_eq!(cfg.attest.signer, "external");
+        assert_eq!(
+            cfg.attest.external_signer_path,
+            "/usr/local/bin/mkit-signer"
+        );
+        assert_eq!(cfg.attest.secp256k1_key_path, "custom/secp.key");
+        assert_eq!(cfg.attest.p256_key_path, "custom/p256.key");
+        assert_eq!(cfg.attest.default_algorithm_or_fallback(), "p256");
     }
 
     #[test]

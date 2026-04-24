@@ -15,6 +15,12 @@ members = [
     "crates/mkit-transport-s3",
     "crates/mkit-transport-ssh",
     "crates/mkit-cli",
+    # Reference external-signer binary — lives under contrib/ (outside
+    # `rust/`) because it is a third-party-integration reference, not a
+    # core crate. Kept a workspace member so it builds / tests with
+    # `cargo test --workspace` and shares the workspace's lint config
+    # and dependency pins. See docs/SPEC-EXTERNAL-SIGNER.md.
+    "../contrib/signers/mkit-sign-file",
 ]
 
 [workspace.package]

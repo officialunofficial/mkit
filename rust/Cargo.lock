@@ -1032,6 +1032,8 @@ name = "mkit-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ed25519-dalek",
+ "k256",
  "mkit-attest",
  "mkit-core",
  "mkit-transport-file",
@@ -1040,6 +1042,7 @@ dependencies = [
  "mkit-transport-s3",
  "mkit-transport-ssh",
  "mockito",
+ "p256",
  "tempfile",
  "thiserror",
 ]
@@ -1063,6 +1066,18 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "mkit-core",
+ "tempfile",
+]
+
+[[package]]
+name = "mkit-sign-file"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "mkit-attest",
+ "mkit-core",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

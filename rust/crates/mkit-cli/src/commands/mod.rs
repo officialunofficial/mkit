@@ -5,6 +5,8 @@
 //! crates; this module is the thin presentation shim.
 
 pub mod add;
+pub mod attest;
+pub mod attest_factory;
 pub mod bisect;
 pub mod blame;
 pub mod branch;
@@ -33,6 +35,7 @@ pub mod status;
 pub mod tag;
 pub mod tree;
 pub mod verify;
+pub mod verify_attest;
 
 use crate::exit;
 use std::io::Write;
