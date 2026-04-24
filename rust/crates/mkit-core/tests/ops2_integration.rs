@@ -2,6 +2,7 @@
 //! blame / stash / restore. Each test mirrors a Zig integration
 //! scenario from `src/{rebase,bisect,blame,stash,restore}.zig`.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -147,6 +148,7 @@ fn bisect_runs_to_completion_finds_first_bad_commit() {
         orig_branch: None,
         bad_hash: Some(commits[5]),
         good_hashes: vec![commits[0]],
+        skipped: BTreeSet::default(),
     };
     let mut iters = 0;
     let found = loop {
@@ -179,6 +181,7 @@ fn bisect_state_persists_to_disk() {
         orig_branch: Some("main".to_string()),
         bad_hash: Some(hash::hash(b"bad")),
         good_hashes: vec![hash::hash(b"g1")],
+        skipped: BTreeSet::default(),
     };
     bisect::write_state(&mkit, &state).unwrap();
     let back = bisect::read_state(&mkit).unwrap();
