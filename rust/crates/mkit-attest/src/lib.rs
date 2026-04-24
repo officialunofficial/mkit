@@ -69,6 +69,8 @@ pub enum Error {
     PredicateMustBeJsonObject,
     #[error("predicate body is not valid UTF-8")]
     PredicateNotUtf8,
+    #[error("predicate body is not parseable as a JSON object")]
+    PredicateNotJsonObject,
 
     // -- Envelope --
     #[error("DSSE envelope needs at least one signature")]

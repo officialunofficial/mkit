@@ -52,14 +52,27 @@ pub struct Statement<'a> {
 /// # Errors
 ///
 /// * [`Error::PredicateMustBeJsonObject`] if `predicate_jcs` doesn't
-///   start with `{` and end with `}`.
+///   start with `{` and end with `}` (cheap boundary check).
 /// * [`Error::PredicateNotUtf8`] if `predicate_jcs` is not valid UTF-8.
+/// * [`Error::PredicateNotJsonObject`] if `predicate_jcs` passes the
+///   boundary check but fails a full JSON parse — covers `{garbage}`,
+///   trailing-comma objects, unterminated strings, and other shapes
+///   that would slip past a pure-boundary test. We parse-and-discard
+///   via `serde_json::Value` (already a dep) and verify the top-level
+///   is `Value::Object`.
 pub fn encode(stmt: &Statement<'_>) -> Result<String, Error> {
     let pj = stmt.predicate_jcs;
     if pj.len() < 2 || pj[0] != b'{' || pj[pj.len() - 1] != b'}' {
         return Err(Error::PredicateMustBeJsonObject);
     }
     let predicate_str = core::str::from_utf8(pj).map_err(|_| Error::PredicateNotUtf8)?;
+    // Full parse-and-discard. Keeps mkit predicate-type-agnostic (we
+    // don't inspect the contents) but rejects malformed JSON that the
+    // boundary check alone would pass through to the signer.
+    match serde_json::from_slice::<serde_json::Value>(pj) {
+        Ok(serde_json::Value::Object(_)) => {}
+        _ => return Err(Error::PredicateNotJsonObject),
+    }
 
     let mut out = String::new();
     out.push('{');
@@ -213,6 +226,68 @@ mod tests {
         ));
         assert!(matches!(mk(b""), Err(Error::PredicateMustBeJsonObject)));
         assert!(matches!(mk(b"{"), Err(Error::PredicateMustBeJsonObject)));
+    }
+
+    /// Finding H5: the boundary check (`pj[0]=='{'` && `pj[last]=='}'`)
+    /// accepted arbitrary junk between the braces. Parsing via
+    /// `serde_json` tightens this: object-in-syntax-only (e.g. `{garbage}`
+    /// or `{"unterminated":...`) must now be rejected.
+    #[test]
+    fn rejects_predicate_with_braces_but_invalid_json() {
+        let mk = |body: &[u8]| {
+            encode(&Statement {
+                subjects: vec![Subject {
+                    name: None,
+                    digest_blake3_hex: "00".into(),
+                }],
+                predicate_type: "x".into(),
+                predicate_jcs: body,
+            })
+        };
+        // Starts `{`, ends `}`, but body is garbage.
+        assert!(matches!(
+            mk(b"{garbage}"),
+            Err(Error::PredicateNotJsonObject)
+        ));
+        // Trailing comma — invalid JSON even though it boundary-checks.
+        assert!(matches!(
+            mk(b"{\"a\":1,}"),
+            Err(Error::PredicateNotJsonObject)
+        ));
+    }
+
+    /// JSON array wrapped in an object-shaped envelope must still be
+    /// rejected — the top-level JSON VALUE must be an object. A
+    /// forward-parsed `[1,2,3]` is a JSON array, not an object, so it
+    /// now goes through the stricter (`PredicateMustBeJsonObject`)
+    /// path above.
+    #[test]
+    fn rejects_non_object_top_level() {
+        // A valid JSON number wrapped as an "object-like" string
+        // (`{42}`) isn't legal JSON; it will hit PredicateNotJsonObject.
+        let got = encode(&Statement {
+            subjects: vec![Subject {
+                name: None,
+                digest_blake3_hex: "00".into(),
+            }],
+            predicate_type: "x".into(),
+            predicate_jcs: b"{42}",
+        });
+        assert!(matches!(got, Err(Error::PredicateNotJsonObject)));
+    }
+
+    #[test]
+    fn accepts_canonical_object_predicate() {
+        let got = encode(&Statement {
+            subjects: vec![Subject {
+                name: None,
+                digest_blake3_hex: "00".into(),
+            }],
+            predicate_type: "x".into(),
+            predicate_jcs: b"{\"k\":\"v\"}",
+        })
+        .unwrap();
+        assert!(got.contains("\"predicate\":{\"k\":\"v\"}"));
     }
 
     #[test]
