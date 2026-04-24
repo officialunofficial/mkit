@@ -29,9 +29,9 @@ pub mod restore;
 pub mod stash;
 
 pub use cherry_pick::{CherryPickError, CherryPickResult, cherry_pick};
-// Phase 5a-statusdiff: append-only addition of status_diff surface.
 pub use diff::{
     DiffEntry, DiffError, DiffKind, DiffResult, StatusEntry, StatusStaging, diff_trees, status_diff,
 };
-pub use graph::collect_ancestor_set;
+pub use graph::{collect_ancestor_set, reachable_objects};
 pub use merge::{Conflict, ConflictKind, MergeResult, find_merge_base, is_ancestor, merge_trees};
+pub use restore::{RestoreOptions, RestoreReport, restore_tree_to_worktree};

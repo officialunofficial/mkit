@@ -11,6 +11,7 @@
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod editor;
 pub mod exit;
 pub mod format;
 pub mod remote_dispatch;

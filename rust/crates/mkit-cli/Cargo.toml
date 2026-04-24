@@ -33,6 +33,7 @@ mkit-transport-ssh = { path = "../mkit-transport-ssh" }
 # is deterministic — we render help ourselves from a compile-time const
 # that cli_test.zig in the Zig tree snapshot-matches byte-for-byte.
 clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage"] }
+tempfile = "3"
 thiserror = "2"
 
 [build-dependencies]
