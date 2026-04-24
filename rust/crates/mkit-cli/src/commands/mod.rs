@@ -35,6 +35,7 @@ pub mod status;
 pub mod tag;
 pub mod tree;
 pub mod verify;
+pub mod verify_attest;
 
 use crate::exit;
 use std::io::Write;

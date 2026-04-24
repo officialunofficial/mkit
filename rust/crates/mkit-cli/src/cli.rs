@@ -68,6 +68,8 @@ commands:
   verify <hash>     Verify the signature on a commit or remix
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
                     Produce a signed DSSE attestation for a commit
+  verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>]
+                    Verify every attestation attached to a commit
   version           Print version
 ";
 

@@ -68,6 +68,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "diff" => commands::diff::run(&rest),
         "verify" => commands::verify::run(&rest),
         "attest" => commands::attest::run(&rest),
+        "verify-attest" => commands::verify_attest::run(&rest),
         "config" => commands::config_cmd::run(&rest),
         "remote" => commands::remote::run(&rest),
         "push" => commands::push::run(&rest),
