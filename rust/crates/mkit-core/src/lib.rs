@@ -101,7 +101,7 @@ pub use protocol::{
 // at the crate root — the submodule is typically the right import scope
 // for state-machine APIs.
 pub use ops::{
-    CherryPickError, CherryPickResult, Conflict, ConflictKind, DiffEntry, DiffKind, DiffResult,
-    MergeResult, cherry_pick, collect_ancestor_set, diff_trees, find_merge_base, is_ancestor,
-    merge_trees,
+    CherryPickError, CherryPickResult, Conflict, ConflictKind, DiffEntry, DiffError, DiffKind,
+    DiffResult, MergeResult, StatusEntry, StatusStaging, cherry_pick, collect_ancestor_set,
+    diff_trees, find_merge_base, is_ancestor, merge_trees, status_diff,
 };
