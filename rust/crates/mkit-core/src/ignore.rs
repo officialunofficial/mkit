@@ -72,7 +72,9 @@ impl IgnoreList {
     #[must_use]
     pub fn is_ignored(&self, path: &str, is_dir: bool) -> bool {
         // Hard-coded ignores — always skip `.mkit` and `.git`.
-        if path == ".mkit" || path == ".git" {
+        // ASCII case-insensitive so `.MKIT` / `.Git` can't bypass on
+        // case-insensitive filesystems (Git CVE-2021-21300 family).
+        if path.eq_ignore_ascii_case(".mkit") || path.eq_ignore_ascii_case(".git") {
             return true;
         }
         // Walk patterns in order; last match wins.

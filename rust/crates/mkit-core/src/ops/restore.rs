@@ -638,7 +638,11 @@ fn clean_directory(
             .to_str()
             .ok_or(RestoreError::InvalidUtf8)?
             .to_string();
-        if name_str == ".mkit" || name_str == ".git" {
+        // Hard-coded repo-metadata guard. Compared ASCII case-insensitively
+        // so case-insensitive filesystems (macOS default, Windows) can't
+        // smuggle a `.MKIT` or `.Git` entry past the sweep (Git CVE-
+        // 2021-21300 family).
+        if name_str.eq_ignore_ascii_case(".mkit") || name_str.eq_ignore_ascii_case(".git") {
             continue;
         }
         let mut found = false;
@@ -711,7 +715,8 @@ fn clean_directory_with_ignore(
             .to_str()
             .ok_or(RestoreError::InvalidUtf8)?
             .to_string();
-        if name_str == ".mkit" || name_str == ".git" {
+        // Hard-coded repo-metadata guard, ASCII case-insensitive.
+        if name_str.eq_ignore_ascii_case(".mkit") || name_str.eq_ignore_ascii_case(".git") {
             continue;
         }
         let mut found = false;
@@ -1017,6 +1022,49 @@ mod tests {
         assert_eq!(
             fs::read(target.path().join(".mkit/config")).unwrap(),
             b"important"
+        );
+    }
+
+    #[test]
+    fn clean_directory_preserves_case_variant_mkit_and_git() {
+        // Regression for Git CVE-2021-21300 family: on case-insensitive
+        // filesystems a worktree directory named `.MKIT` or `.Git` must
+        // never be swept by `clean_directory`, otherwise a hostile tree
+        // entry could trick restore into deleting repo metadata.
+        let target = TempDir::new().unwrap();
+        fs::create_dir_all(target.path().join(".MKIT")).unwrap();
+        fs::write(target.path().join(".MKIT/config"), b"meta").unwrap();
+        fs::create_dir_all(target.path().join(".Git")).unwrap();
+        fs::write(target.path().join(".Git/HEAD"), b"ref").unwrap();
+        // Empty tree — without the case-insensitive guard, everything
+        // unknown is removed.
+        clean_directory(target.path(), &[], None, "").unwrap();
+        assert!(
+            target.path().join(".MKIT/config").exists(),
+            ".MKIT swept by clean_directory (case-fold bypass)"
+        );
+        assert!(
+            target.path().join(".Git/HEAD").exists(),
+            ".Git swept by clean_directory (case-fold bypass)"
+        );
+    }
+
+    #[test]
+    fn clean_directory_with_ignore_preserves_case_variant_mkit_and_git() {
+        let target = TempDir::new().unwrap();
+        fs::create_dir_all(target.path().join(".MKIT")).unwrap();
+        fs::write(target.path().join(".MKIT/config"), b"meta").unwrap();
+        fs::create_dir_all(target.path().join(".GIT")).unwrap();
+        fs::write(target.path().join(".GIT/HEAD"), b"ref").unwrap();
+        let ignore = crate::ignore::IgnoreList::new();
+        clean_directory_with_ignore(target.path(), &[], None, "", &ignore).unwrap();
+        assert!(
+            target.path().join(".MKIT/config").exists(),
+            ".MKIT swept by clean_directory_with_ignore (case-fold bypass)"
+        );
+        assert!(
+            target.path().join(".GIT/HEAD").exists(),
+            ".GIT swept by clean_directory_with_ignore (case-fold bypass)"
         );
     }
 
