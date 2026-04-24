@@ -7,12 +7,9 @@ transports — plus a native, predicate-agnostic attestation subsystem
 (in-toto v1 Statements wrapped in DSSE envelopes) that any downstream
 service can attach witness signatures to commits with.
 
-The current tree is the **Rust port** under `rust/`. The original Zig
-implementation remains under `src/` as a read-only reference; it will
-be archived to `legacy/zig/` in a follow-up once the Rust binary has
-soaked. Both produce byte-identical objects, packs, refs, and
-attestations — golden vectors under `rust/tests/golden/` pin the
-cross-implementation contract.
+Originally implemented in Zig 0.16; rewritten in Rust for this release.
+Golden vectors under `rust/tests/golden/` pin the v1 on-disk and wire
+formats byte-for-byte.
 
 ## Quick start
 
@@ -61,19 +58,10 @@ Workspace crates:
 | `mkit-cli` | the `mkit` binary |
 | `mkit-fuzz` | bounded property tests (cargo-fuzz compatible) |
 
-### Zig reference build (retained during soak)
-
-```sh
-zig build                       # mkit binary → zig-out/bin/mkit (Zig 0.16.0)
-```
-
-The Zig tree remains buildable for byte-for-byte parity checks against
-the Rust port. Golden vectors are harvested from it by
-`scripts/harvest-golden-vectors.sh`.
-
 `scripts/verify-rename.sh` is the rename-gate enforced in CI; it greps
-for forbidden legacy strings across the public build surface (both
-`rust/` and `src/`).
+the public build surface (`rust/`) for forbidden legacy strings that
+should never appear in the generic `mkit` utility (see the script's
+`FORBIDDEN` array for the full list).
 
 ## Architecture
 

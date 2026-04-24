@@ -66,5 +66,5 @@ In scope:
 
 Out of scope (please report to upstream instead):
 
-- Vulnerabilities in the Zig compiler / standard library.
+- Vulnerabilities in the Rust compiler / standard library.
 - Vulnerabilities in operating-system libraries linked at runtime.
