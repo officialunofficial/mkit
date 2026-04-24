@@ -47,12 +47,14 @@ const EXPECT_PUBKEY_SEC1_HEX: &str =
 /// fresh-build run of this crate's own `sign_dsse` — any subsequent
 /// change to nonce generation, hash choice, or s-normalization breaks
 /// this test immediately.
-const EXPECT_SIG_HEX: &str =
-    "834cd126c1bcadb2998d6881e3dd35f6c10b87905b3dd5ba4714f59fcb018d79\
+const EXPECT_SIG_HEX: &str = "834cd126c1bcadb2998d6881e3dd35f6c10b87905b3dd5ba4714f59fcb018d79\
      085c75876fd776083affcf1fc5c982b1e2bea4f0cfc14876ca4305de964521c9";
 
 fn expect_sig_hex_nospace() -> String {
-    EXPECT_SIG_HEX.chars().filter(|c| !c.is_whitespace()).collect()
+    EXPECT_SIG_HEX
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect()
 }
 
 #[test]

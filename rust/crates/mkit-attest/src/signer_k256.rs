@@ -45,8 +45,8 @@ impl Secp256k1Signer {
     /// # Errors
     /// [`Error::Secp256k1KeyInvalid`] if the scalar is zero or >= n.
     pub fn new(secret: [u8; 32]) -> Result<Self, Error> {
-        let sk = SigningKey::from_bytes((&secret).into())
-            .map_err(|_| Error::Secp256k1KeyInvalid)?;
+        let sk =
+            SigningKey::from_bytes((&secret).into()).map_err(|_| Error::Secp256k1KeyInvalid)?;
         Ok(Self { sk })
     }
 
@@ -98,7 +98,10 @@ impl Secp256k1Signer {
         // resulting (r, s) pair has s < n/2.
         let mut h = Sha256::new();
         h.update(pae);
-        let sig: K256Sig = self.sk.try_sign_digest(h).map_err(|_| Error::Secp256k1SignatureInvalid)?;
+        let sig: K256Sig = self
+            .sk
+            .try_sign_digest(h)
+            .map_err(|_| Error::Secp256k1SignatureInvalid)?;
         // `to_bytes` yields the 64-byte compact form (r || s, big-endian).
         Ok(sig.to_bytes().to_vec())
     }
@@ -134,13 +137,8 @@ impl crate::signer::Signer for Secp256k1Signer {
 /// * [`Error::Secp256k1VerifyFailed`] — signature is well-formed but
 ///   does not verify against the pubkey + message.
 #[cfg(feature = "algo-secp256k1")]
-pub fn verify_secp256k1(
-    pubkey_sec1: &[u8],
-    msg: &[u8],
-    sig_compact: &[u8],
-) -> Result<(), Error> {
-    let vk = VerifyingKey::from_sec1_bytes(pubkey_sec1)
-        .map_err(|_| Error::Secp256k1KeyInvalid)?;
+pub fn verify_secp256k1(pubkey_sec1: &[u8], msg: &[u8], sig_compact: &[u8]) -> Result<(), Error> {
+    let vk = VerifyingKey::from_sec1_bytes(pubkey_sec1).map_err(|_| Error::Secp256k1KeyInvalid)?;
     if sig_compact.len() != 64 {
         return Err(Error::Secp256k1SignatureInvalid);
     }
@@ -245,8 +243,7 @@ mod tests {
 
     #[test]
     fn signer_trait_dispatch() {
-        let mut signer: Box<dyn Signer> =
-            Box::new(Secp256k1Signer::new(fixed_secret()).unwrap());
+        let mut signer: Box<dyn Signer> = Box::new(Secp256k1Signer::new(fixed_secret()).unwrap());
         let kid = signer.keyid().unwrap();
         assert!(kid.starts_with("secp256k1:"));
         let sig = signer.sign(FIXED_PAE).unwrap();
