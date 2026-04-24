@@ -1,0 +1,52 @@
+[package]
+name = "mkit-sign-file"
+# Crate lives outside `rust/`, so Cargo cannot auto-discover the
+# workspace root. Point at it explicitly so the `*.workspace = true`
+# inheritance below resolves against `rust/Cargo.toml`.
+workspace = "../../../rust"
+description = "Reference external-signer binary: signs a DSSE PAE with a raw key read from disk. NOT a production signer — see SPEC-EXTERNAL-SIGNER.md"
+keywords = ["mkit", "attestation", "signer", "reference"]
+categories = ["command-line-utilities", "cryptography"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Reference / test implementation for third-party signer integrators.
+# Not shipped to crates.io. Not intended for production use — it reads
+# a raw private key off the filesystem with a permissions check only.
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mkit-sign-file"
+path = "src/main.rs"
+
+[dependencies]
+# Link the attest crate to reuse the canonical Algorithm enum, the
+# typed errors, and the per-algorithm signer implementations. All
+# three algo features are enabled so a single binary can sign under
+# ed25519 / secp256k1 / p256 depending on the request.
+mkit-attest = { path = "../../../rust/crates/mkit-attest", default-features = false, features = ["algo-ed25519", "algo-secp256k1", "algo-p256"] }
+# `mkit-core` is pulled in for `KeyPair::from_seed` — the Ed25519
+# branch constructs a mkit-core KeyPair and hands it to RepoKeySigner.
+# No new dependency on `mkit-attest` itself, per task-rule #3.
+mkit-core = { path = "../../../rust/crates/mkit-core" }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# End-to-end test spawns the binary as a subprocess and verifies via
+# mkit-attest's own verifier paths. `mkit-attest` is already a runtime
+# dep; repeating it here as a dev-dep is a no-op but matches the test
+# code's explicit import block for clarity.
+mkit-attest = { path = "../../../rust/crates/mkit-attest", default-features = false, features = ["algo-ed25519", "algo-secp256k1", "algo-p256"] }
+mkit-core = { path = "../../../rust/crates/mkit-core" }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"

@@ -1070,6 +1070,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkit-sign-file"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "mkit-attest",
+ "mkit-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mkit-transport-file"
 version = "0.1.0"
 dependencies = [
