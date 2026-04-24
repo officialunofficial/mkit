@@ -715,9 +715,8 @@ fn ref_name_len_u16(name: &str) -> TransportResult<u16> {
         )));
     }
     // `len <= MAX_REF_NAME (4096)` so the cast is in range of u16.
-    u16::try_from(len).map_err(|_| {
-        TransportError::InvalidRef(format!("ref name too long: got {len}"))
-    })
+    u16::try_from(len)
+        .map_err(|_| TransportError::InvalidRef(format!("ref name too long: got {len}")))
 }
 
 /// Encode an `OP_WRITE_REF` request payload for the client.

@@ -318,7 +318,7 @@ mod tests {
         assert!(resolved.join(".mkit").is_dir());
     }
 
-// --- A14: per-connection byte/frame budget ---------------------------
+    // --- A14: per-connection byte/frame budget ---------------------------
 
     /// Build a handshake-complete input stream, then append enough no-op
     /// OP_HELLO-shaped frames to blow the frame budget.

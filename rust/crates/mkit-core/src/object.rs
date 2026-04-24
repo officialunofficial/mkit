@@ -226,8 +226,7 @@ fn is_windows_reserved_stem(stem: &[u8]) -> bool {
             let head = &stem[..3];
             let tail = stem[3];
             let is_digit_1_9 = matches!(tail, b'1'..=b'9');
-            is_digit_1_9
-                && (head.eq_ignore_ascii_case(b"COM") || head.eq_ignore_ascii_case(b"LPT"))
+            is_digit_1_9 && (head.eq_ignore_ascii_case(b"COM") || head.eq_ignore_ascii_case(b"LPT"))
         }
         _ => false,
     }

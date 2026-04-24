@@ -870,8 +870,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn write_ref_rejects_symlink_escaping_root() {
-        use std::os::unix::fs::symlink;
         use mkit_core::hash::hash as blake3_hash;
+        use std::os::unix::fs::symlink;
 
         let dir = tmp();
         let outside = tmp();

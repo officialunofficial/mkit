@@ -56,7 +56,10 @@ fn run_serve(env: &[(&str, &Path)], arg: &str) -> std::process::ExitStatus {
     }
     let out = child.wait_with_output().expect("wait mkit serve");
     if !out.stderr.is_empty() {
-        eprintln!("mkit serve stderr: {}", String::from_utf8_lossy(&out.stderr));
+        eprintln!(
+            "mkit serve stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     out.status
 }
