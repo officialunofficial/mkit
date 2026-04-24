@@ -60,7 +60,7 @@ jobs:
         env:
           RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
         run: |
-          cargo build --release --locked --target-dir target-r1
+          cargo build --release --locked -p mkit-cli --target-dir target-r1
           sha256sum target-r1/release/${{ env.BINARY_NAME }} | tee /tmp/hash1.txt
 
       - name: Build pass 2
@@ -68,7 +68,7 @@ jobs:
         env:
           RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
         run: |
-          cargo build --release --locked --target-dir target-r2
+          cargo build --release --locked -p mkit-cli --target-dir target-r2
           sha256sum target-r2/release/${{ env.BINARY_NAME }} | tee /tmp/hash2.txt
 
       - name: Compare outputs (SHA256)
