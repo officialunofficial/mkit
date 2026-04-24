@@ -543,6 +543,17 @@ fn create_symlink(target: &str, link: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_file(target, link)
 }
 
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(_target: &str, _link: &Path) -> io::Result<()> {
+    // Targets without a filesystem (notably `wasm32-unknown-unknown`)
+    // cannot materialise symlinks. The demo wasm crate does not exercise
+    // the restore path; this stub exists so the crate still compiles.
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symlink creation is not supported on this target",
+    ))
+}
+
 fn write_file_atomic(dir: &Path, name: &str, data: &[u8], executable: bool) -> io::Result<()> {
     let tmp_name = make_tmp_sibling_name(name);
     let tmp_path = dir.join(&tmp_name);

@@ -20,7 +20,9 @@
 //! Unix-only `fsync` of the containing commit directory afterwards so
 //! the dirent update survives a power loss.
 
-use std::fs::{self, File};
+use std::fs;
+#[cfg(unix)]
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;

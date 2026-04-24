@@ -6,7 +6,9 @@
 //! independently and so future changes to one don't ripple into the
 //! other. The behaviour is identical.
 
-use std::fs::{self, File};
+use std::fs;
+#[cfg(unix)]
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process;
