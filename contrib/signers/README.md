@@ -1,0 +1,123 @@
+# mkit external signers
+
+Third-party signer implementations for mkit's `external` signer slot
+live here. They all speak the same wire protocol:
+
+> [**SPEC-EXTERNAL-SIGNER.md**](../../docs/SPEC-EXTERNAL-SIGNER.md) — v1 JSON-over-stdin/stdout
+
+Write your signer to that spec and mkit will drive it via
+`attest.external_signer = /abs/path/to/your-binary` in
+`.mkit/config`.
+
+---
+
+## What lives here
+
+| Path                                | Status         | Summary                                                                 |
+|-------------------------------------|----------------|-------------------------------------------------------------------------|
+| `mkit-sign-file/`                   | **reference**  | Raw 32-byte key on disk. Ed25519 / secp256k1 / P-256. Not production.   |
+| `secure-enclave/` *(planned)*       | not yet        | Apple Secure Enclave signer (Swift). P-256 only, biometric-gated.       |
+| `ledger/` *(planned)*               | not yet        | Ledger Nano X/S via HID. secp256k1 + Ed25519. User button confirmation. |
+| `webauthn/` *(planned)*             | not yet        | WebAuthn/CTAP authenticator, pure Rust. P-256. Browser or roaming auth. |
+| `metamask-bridge/` *(planned)*      | not yet        | JSON-RPC bridge to a running MetaMask. secp256k1, `personal_sign`.      |
+
+The reference signer is the one integrators should read first — it's
+short enough (~250 lines) to be the shortest possible demonstration
+of the protocol, and its end-to-end test is the contract test any
+conforming implementation should pass.
+
+---
+
+## Reference signer: `mkit-sign-file`
+
+A tiny Rust binary that signs a DSSE PAE using a 32-byte raw private
+key read from disk. All three algorithms (`ed25519`, `secp256k1`,
+`p256`) are supported.
+
+**Not a production signer.** The secret lives on disk as raw bytes;
+there is no unwrap, no passphrase, no audit log. Use it to:
+
+- Validate your mkit config and env plumbing end-to-end.
+- Sanity-check a signer protocol implementation you're porting to
+  another language.
+- As a copy-and-modify starting point for a "real" signer.
+
+### Build
+
+```console
+$ cd rust
+$ cargo build --release -p mkit-sign-file
+$ ls target/release/mkit-sign-file
+target/release/mkit-sign-file
+```
+
+The binary is a workspace member, so `cargo test --workspace` from
+`rust/` runs its end-to-end test alongside the rest of the tree.
+
+### Usage
+
+```console
+$ # Generate a 32-byte key. `openssl rand` or any CSPRNG works.
+$ openssl rand 32 > /tmp/mkit-ref.key
+$ chmod 0600 /tmp/mkit-ref.key
+
+$ # Point mkit at it.
+$ mkit config attest.signer external
+$ mkit config attest.external_signer "$(pwd)/target/release/mkit-sign-file"
+
+$ # The binary itself needs --key plumbed in. Two options:
+$ #   (a) wrap it in a shell script that adds --key <path>
+$ #   (b) set MKIT_SIGN_FILE_KEY=/tmp/mkit-ref.key in mkit's env
+$ export MKIT_SIGN_FILE_KEY=/tmp/mkit-ref.key
+```
+
+The spawn contract is "absolute path, no argv" — a signer that wants
+argv has to be wrapped in a shell script or set its own defaults via
+env vars (`mkit-sign-file` does the latter via
+`MKIT_SIGN_FILE_KEY`).
+
+### Direct invocation (for testing)
+
+```console
+$ echo '{"pae_base64":"RFNTRXYxIDI4IGFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24gMiB7fQ==","algorithm":"ed25519"}' \
+    | ./target/release/mkit-sign-file --key /tmp/mkit-ref.key
+{"keyid":"blake3:…","sig_base64":"…"}
+```
+
+Exit 0 and a one-line JSON response on success; non-zero with a
+stderr message on any error.
+
+---
+
+## Writing your own signer
+
+1. Read [`docs/SPEC-EXTERNAL-SIGNER.md`](../../docs/SPEC-EXTERNAL-SIGNER.md).
+   It's ~400 lines and covers invocation, wire format, errors,
+   timeouts, and the security model.
+2. Copy `mkit-sign-file/tests/end_to_end.rs` as a contract test. It
+   spawns the binary as a subprocess, pipes a request in, and
+   verifies the signature via `mkit_attest::verify_signature`. Port
+   the same checks to your language of choice — if the test passes,
+   your signer is protocol-conforming.
+3. Handle the permission + locking / user-confirmation bits that are
+   relevant to your platform:
+   - Secure Enclave: biometric gate (LAContext / Face ID / Touch ID).
+   - Ledger: user presses both buttons.
+   - WebAuthn: user gesture + optional user verification (PIN).
+   - Wallet bridge: the wallet's own `personal_sign` prompt.
+4. Decide your keyid convention. `<algorithm-prefix>:<hex>` is the
+   default and easy to verify; platform-specific schemes like
+   `webauthn:<credential-id>` or `makechain:0x…` are allowed when the
+   verifier side knows how to dispatch.
+
+---
+
+## Security reminder
+
+The external signer runs as a child process under mkit's user. It
+holds the key. mkit trusts it completely for the duration of a
+signing call — there's no sandbox beyond OS user isolation. Treat
+the `attest.external_signer` config key as a code-execution sink
+(same class as `git config core.editor` or shell-profile hooks) and
+make sure the binary is on a non-user-writable path in any environment
+where the threat model warrants it.
