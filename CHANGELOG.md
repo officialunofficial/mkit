@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — WIRE/SIGNATURE BREAK
+
+- **`sign::domain_digest` now includes a 2-byte little-endian length
+  prefix** in front of the domain label, so the hash input is
+  `len_le16(domain) || domain || signing_bytes` instead of
+  `domain || signing_bytes`. Closes a latent ambiguity where two
+  distinct `(domain, signing_bytes)` splits could in principle
+  produce identical hash input (finding H4). Commit and remix
+  signatures produced by v0.1.0 **will NOT verify under this
+  change**, and vice versa. Ship this in a coordinated release —
+  there are no shipped artefacts to migrate, but downstream signers
+  and pre-built test vectors must be regenerated.
+- Golden signing hashes (`rust/crates/mkit-core/tests/golden_sign.rs`
+  `signing_hashes_are_stable`) were re-pinned for the new digest
+  shape.
+
 ## [0.1.0] — 2026-04-24
 
 Initial release.
