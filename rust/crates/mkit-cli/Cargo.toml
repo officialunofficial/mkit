@@ -43,3 +43,7 @@ thiserror = "2"
 [dev-dependencies]
 tempfile = "3"
 mkit-transport-memory = { path = "../mkit-transport-memory" }
+# Integration tests for HTTP/S3 scheme dispatch use a local mockito
+# server. SSH dispatch tests only cover URL parsing (no live subprocess
+# in CI), so the `mkit-transport-ssh` exports are enough on their own.
+mockito = "1"

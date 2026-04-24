@@ -3,11 +3,10 @@
 //! URL when `<dir>` is omitted (matches the Zig behaviour).
 //!
 //! Dispatches to the same transport-open path used by `mkit pull` —
-//! `file://` is wired; `https`, `s3`, and `ssh` return
-//! `UnsupportedScheme` until full argv / netrc / SSH-config plumbing
-//! lands. Shallow and sparse clone flags (`--depth`, `--sparse`) are
-//! recognised but deferred; we reject them with a clear message rather
-//! than silently ignoring.
+//! `file://`, `https://`, `s3://`, and `ssh://` are all wired via
+//! `remote_dispatch::open`. Shallow and sparse clone flags (`--depth`,
+//! `--sparse`) are recognised but deferred; we reject them with a clear
+//! message rather than silently ignoring.
 
 use std::fs;
 use std::io::Write;

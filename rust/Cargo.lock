@@ -880,6 +880,7 @@ dependencies = [
  "mkit-transport-memory",
  "mkit-transport-s3",
  "mkit-transport-ssh",
+ "mockito",
  "tempfile",
  "thiserror",
 ]
