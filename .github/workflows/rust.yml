@@ -41,6 +41,15 @@ jobs:
         with:
           workspaces: rust -> rust/target
 
+      # Native packages needed by optional signers when --all-features
+      # turns them on across the workspace. macOS gates these deps out
+      # via target_os, so we only install on Linux:
+      #   libtss2-dev   → mkit-sign-tpm's `tpm2` feature (tss-esapi)
+      #   libudev-dev   → mkit-sign-ctap (via hidapi → libudev)
+      - name: Install native signer deps (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev
+
       - name: Check formatting
         working-directory: rust
         run: cargo fmt --check
