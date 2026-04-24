@@ -21,6 +21,11 @@ members = [
     # `cargo test --workspace` and shares the workspace's lint config
     # and dependency pins. See docs/SPEC-EXTERNAL-SIGNER.md.
     "../contrib/signers/mkit-sign-file",
+    # Protocol v1.1 FIDO2/WebAuthn reference signer. Workspace member
+    # for the same reasons as mkit-sign-file — share lint config, dep
+    # pins, and let `cargo test --workspace` cover its protocol-shape
+    # tests. Hardware-gated e2e lives in `tests/e2e.sh`.
+    "../contrib/signers/mkit-sign-ctap",
 ]
 
 [workspace.package]

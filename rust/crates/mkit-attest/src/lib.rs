@@ -48,6 +48,11 @@ pub mod signer_sigstore;
 pub mod statement;
 pub mod store;
 pub mod verify;
+// Protocol v1.1 — WebAuthn signature wrapping. Gated on `algo-p256`
+// because WebAuthn authenticators emit ECDSA over NIST P-256; all
+// roaming-authenticator dispatch compiles out when `algo-p256` is off.
+#[cfg(feature = "algo-p256")]
+pub mod webauthn;
 
 pub use algorithm::Algorithm;
 pub use envelope::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, attestation_id, pae_of};
@@ -60,6 +65,8 @@ pub use statement::{IN_TOTO_TYPE, Statement, Subject};
 pub use verify::{
     Reason, Registry, SignatureResult, TrustRoot, VerifyResult, verify_envelope, verify_signature,
 };
+#[cfg(feature = "algo-p256")]
+pub use webauthn::{WebAuthnWrapping, build_client_data_json, verify_webauthn_wrapping};
 
 /// Errors surfaced by the mkit-attest crate.
 ///
@@ -153,4 +160,26 @@ pub enum Error {
     P256SignatureInvalid,
     #[error("P-256 signature verification failed")]
     P256VerifyFailed,
+
+    // -- WebAuthn Protocol v1.1 wrapping (feature `algo-p256`) --
+    //
+    // Distinct variants per failure mode so a downstream verifier can
+    // surface "challenge did not match PAE" to a human differently
+    // from "the client_data was garbage". These are NOT subsumed into
+    // P256VerifyFailed because the WebAuthn wrapping protocol has
+    // binding semantics the raw ECDSA layer cannot see.
+    #[error(
+        "WebAuthn clientDataJSON.challenge does not match base64url(PAE) — wrapping not bound to this payload"
+    )]
+    WebAuthnChallengeMismatch,
+    #[error(
+        "WebAuthn clientDataJSON is not a valid UTF-8 JSON object with string `type` + `challenge`, or `type` is not `webauthn.get`"
+    )]
+    WebAuthnBadClientDataJson,
+    #[error("WebAuthn authenticatorData is malformed (less than 37 bytes or bad base64url)")]
+    WebAuthnBadAuthenticatorData,
+    #[error(
+        "WebAuthn signature did not verify against the reconstructed authenticatorData || SHA256(clientDataJSON)"
+    )]
+    WebAuthnSignatureFailed,
 }
