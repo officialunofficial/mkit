@@ -1,15 +1,22 @@
 //! URL-scheme → `Transport` dispatch for `mkit push` / `mkit pull`.
 //!
-//! The Rust 0.2.x binary wires `mkit+file://`; the memory transport is
-//! in-process only, so it is reached via [`push_all_with`] /
-//! [`pull_all_with`] rather than URL-based construction. Integration
-//! tests in the `mkit-cli` crate exercise the memory path directly to
-//! satisfy the Phase 9 test matrix without resorting to file I/O.
+//! The Rust binary wires all five shipping schemes here: `mkit+file://`,
+//! `mkit+https://` (and `mkit+http://` for local dev), `mkit+s3://`, and
+//! `mkit+ssh://`. The memory transport is in-process only, so it is
+//! reached via [`push_all`] / [`pull_all`] with an `Arc<MemoryTransport>`
+//! constructed in-process rather than URL-based construction. Integration
+//! tests in the `mkit-cli` crate exercise the memory path directly.
 //!
-//! The remaining schemes (`mkit+https`, `mkit+s3`, `mkit+ssh`) are
-//! deferred to the Phase 10 cutover, where the binary grows argv /
-//! netrc / SSH-config integration. Their transport crates already
-//! implement the trait, so the dispatch here is a one-line extension.
+//! Credentials / environment sources:
+//! - HTTP(S): optional `MKIT_API_TOKEN` bearer.
+//! - S3/R2: `MKIT_R2_ACCESS_KEY_ID` + `MKIT_R2_SECRET_ACCESS_KEY` (plus
+//!   optional `MKIT_R2_REGION`, default `auto`). Missing creds do NOT
+//!   fail at connect time; the first signed request returns
+//!   `TransportError::AccessDenied`.
+//! - SSH: spawns `ssh(1)` subprocess — inherits the user's agent / keys /
+//!   `~/.ssh/config`. Per-repo `.mkit/config` SSH options (host-key
+//!   checking, known-hosts path, identity file) are wired through via
+//!   `SshTransport::connect_with_options` when config is loaded.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -21,6 +28,9 @@ use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
 use mkit_transport_file::FileTransport;
+use mkit_transport_http::HttpTransport;
+use mkit_transport_s3::S3Transport;
+use mkit_transport_ssh::{SshInitError, SshTransport};
 
 /// Errors returned by the push / pull helpers. Mapped to exit codes by
 /// the commands themselves.
@@ -42,6 +52,8 @@ pub enum DispatchError {
     Store(#[from] StoreError),
     #[error("pack: {0}")]
     Pack(#[from] PackError),
+    #[error("ssh init: {0}")]
+    SshInit(#[from] SshInitError),
 }
 
 /// Open a transport for the given URL. Returns a type-erased `Arc`
@@ -60,13 +72,27 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
             "mkit+memory:// must be driven via in-process harness (see tests)".to_string(),
         ));
     }
-    if url.starts_with("mkit+https://")
-        || url.starts_with("mkit+s3://")
-        || url.starts_with("mkit+ssh://")
-    {
-        return Err(DispatchError::UnsupportedScheme(format!(
-            "{url} — Phase 10 follow-up (transport crates exist; argv wiring deferred)"
-        )));
+    if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
+        // HttpTransport::connect strips the `mkit+` prefix itself and
+        // reads MKIT_API_TOKEN from the environment.
+        let tx = HttpTransport::connect(url)?;
+        return Ok(Arc::new(tx));
+    }
+    if url.starts_with("mkit+s3://") {
+        // S3Transport::connect reads MKIT_R2_ACCESS_KEY_ID /
+        // MKIT_R2_SECRET_ACCESS_KEY from the environment. Missing
+        // credentials surface as AccessDenied on the first signed call,
+        // not at connect time.
+        let tx = S3Transport::connect(url)?;
+        return Ok(Arc::new(tx));
+    }
+    if url.starts_with("mkit+ssh://") {
+        // SshTransport::connect parses the URL, spawns `ssh(1)`, and
+        // performs the OP_HELLO handshake. Any failure here tears the
+        // child down before returning, so callers never see a
+        // half-initialised transport.
+        let tx = SshTransport::connect(url)?;
+        return Ok(Arc::new(tx));
     }
     Err(DispatchError::MalformedUrl(url.to_string()))
 }
