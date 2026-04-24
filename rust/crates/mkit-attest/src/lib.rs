@@ -33,23 +33,29 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::multiple_crate_versions)]
 
+pub mod algorithm;
 pub mod envelope;
 pub mod jcs;
 pub mod signer;
 pub mod signer_external;
+#[cfg(feature = "algo-ed25519")]
 pub mod signer_repo_key;
 pub mod signer_sigstore;
 pub mod statement;
 pub mod store;
 pub mod verify;
 
+pub use algorithm::Algorithm;
 pub use envelope::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, attestation_id, pae_of};
 pub use signer::Signer;
 pub use signer_external::ExternalSigner;
+#[cfg(feature = "algo-ed25519")]
 pub use signer_repo_key::{KEYID_PREFIX, RepoKeySigner};
 pub use signer_sigstore::SigstoreSigner;
 pub use statement::{IN_TOTO_TYPE, Statement, Subject};
-pub use verify::{Reason, Registry, SignatureResult, TrustRoot, VerifyResult, verify_envelope};
+pub use verify::{
+    Reason, Registry, SignatureResult, TrustRoot, VerifyResult, verify_envelope, verify_signature,
+};
 
 /// Errors surfaced by the mkit-attest crate.
 ///
@@ -111,6 +117,12 @@ pub enum Error {
     ExternalSignerRelativePath(String),
     #[error("sigstore signer is not yet implemented")]
     SigstoreNotImplemented,
+
+    // -- Algorithm dispatch --
+    #[error("signature algorithm {0} is not enabled in this build")]
+    AlgorithmNotEnabled(Algorithm),
+    #[error("unknown keyid prefix: {0}")]
+    UnknownKeyidPrefix(String),
 
     // -- Store --
     #[error("envelope is {len} bytes, exceeds the {max}-byte cap")]

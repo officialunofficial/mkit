@@ -2,6 +2,11 @@
 //! payload, verify with `mkit_core::sign::verify` directly over the PAE
 //! (NOT through the attest verifier — this guards against the two
 //! crates diverging on what they consider "the signed bytes").
+//!
+//! Feature-gated on `algo-ed25519` because `RepoKeySigner` itself is
+//! gated on it; with that feature off the entire file compiles out.
+
+#![cfg(feature = "algo-ed25519")]
 
 use ed25519_dalek::{Signature as DalekSig, Verifier, VerifyingKey};
 

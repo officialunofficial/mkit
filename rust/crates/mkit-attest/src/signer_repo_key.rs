@@ -13,10 +13,15 @@
 use ed25519_dalek::{Signer as _, SigningKey};
 
 use crate::Error;
+use crate::algorithm::Algorithm;
 use crate::signer::Signer;
 use mkit_core::sign::KeyPair;
 
 /// Prefix prepended to the BLAKE3-of-pubkey hex to form the keyid.
+///
+/// The `blake3:` prefix is preserved for backward compatibility with
+/// attestations produced before the multi-algorithm split. The verifier
+/// recognises it and maps it to [`Algorithm::Ed25519`].
 pub const KEYID_PREFIX: &str = "blake3:";
 
 #[derive(Debug)]
@@ -40,6 +45,10 @@ impl RepoKeySigner {
 }
 
 impl Signer for RepoKeySigner {
+    fn algorithm(&self) -> Algorithm {
+        Algorithm::Ed25519
+    }
+
     fn keyid(&self) -> Result<String, Error> {
         Ok(self.keyid_string())
     }

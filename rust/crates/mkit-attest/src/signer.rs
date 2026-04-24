@@ -18,11 +18,20 @@
 //! verifier often has no knowledge of how the signature was produced.
 
 use crate::Error;
+use crate::algorithm::Algorithm;
 
 /// Dynamic-dispatch Signer. Used as a `&dyn Signer` so attest pipelines
 /// can hold heterogeneous signer collections without genericising every
 /// call site.
 pub trait Signer {
+    /// The signature algorithm this signer produces.
+    ///
+    /// Callers use this to (a) pick the right verifier path on the
+    /// receive side without reparsing the keyid, and (b) record the
+    /// algorithm in per-signature metadata. Required — no default;
+    /// every signer implementation must report its algorithm.
+    fn algorithm(&self) -> Algorithm;
+
     /// Return an identifier the verifier registry uses to look up this
     /// signer's trust root. Conventions in SPEC-ATTESTATIONS §6.3 (e.g.
     /// `"blake3:<hex>"` for repo-key).
@@ -60,6 +69,9 @@ mod tests {
         kid: String,
     }
     impl Signer for Stub {
+        fn algorithm(&self) -> Algorithm {
+            Algorithm::Ed25519
+        }
         fn keyid(&self) -> Result<String, Error> {
             Ok(self.kid.clone())
         }
@@ -73,6 +85,7 @@ mod tests {
         let mut s: Box<dyn Signer> = Box::new(Stub {
             kid: "stub:keyid".into(),
         });
+        assert_eq!(s.algorithm(), Algorithm::Ed25519);
         assert_eq!(s.keyid().unwrap(), "stub:keyid");
         let sig = s.sign(b"DSSEv1 4 test 2 ok").unwrap();
         assert_eq!(sig, b"DSSEv1 4 test 2 ok");

@@ -21,6 +21,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde::Deserialize;
 
 use crate::Error;
+use crate::algorithm::Algorithm;
 use crate::signer::Signer;
 
 /// Cap for each of child-stdout and child-stderr. 1 MiB is generous —
@@ -31,6 +32,7 @@ const MAX_DRAIN: usize = 1024 * 1024;
 pub struct ExternalSigner {
     binary_path: PathBuf,
     cached_keyid: Option<String>,
+    algorithm: Algorithm,
 }
 
 impl ExternalSigner {
@@ -49,6 +51,23 @@ impl ExternalSigner {
     /// [`Error::ExternalSignerRelativePath`] if `binary_path` is not
     /// absolute.
     pub fn new(binary_path: impl Into<PathBuf>) -> Result<Self, Error> {
+        Self::with_algorithm(binary_path, Algorithm::Ed25519)
+    }
+
+    /// Like [`Self::new`] but records a caller-asserted algorithm.
+    ///
+    /// The subprocess protocol (SPEC-ATTESTATIONS §6.2) does not carry
+    /// an algorithm field on the wire, so the host declares it at
+    /// construction time. Defaults to [`Algorithm::Ed25519`] via
+    /// [`Self::new`] for backward compatibility.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::new`].
+    pub fn with_algorithm(
+        binary_path: impl Into<PathBuf>,
+        algorithm: Algorithm,
+    ) -> Result<Self, Error> {
         let binary_path = binary_path.into();
         if !binary_path.is_absolute() {
             return Err(Error::ExternalSignerRelativePath(
@@ -58,11 +77,16 @@ impl ExternalSigner {
         Ok(Self {
             binary_path,
             cached_keyid: None,
+            algorithm,
         })
     }
 }
 
 impl Signer for ExternalSigner {
+    fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+
     fn keyid(&self) -> Result<String, Error> {
         self.cached_keyid
             .clone()

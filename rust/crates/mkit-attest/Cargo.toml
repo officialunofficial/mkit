@@ -17,6 +17,18 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# Default ships all three algorithms so a `cargo add mkit-attest` client
+# gets ed25519 / secp256k1 / p256 support out of the box. The
+# corresponding compile-time crypto deps (k256, p256) are wired by
+# teams Kappa and Lambda in follow-up PRs; until then `algo-secp256k1`
+# and `algo-p256` are tag-only features that toggle verifier dispatch
+# but carry no dep.
+default = ["algo-ed25519", "algo-secp256k1", "algo-p256"]
+algo-ed25519 = ["dep:ed25519-dalek"]
+algo-secp256k1 = []
+algo-p256 = []
+
 [dependencies]
 mkit-core = { path = "../mkit-core" }
 blake3 = "1"
@@ -32,7 +44,12 @@ tempfile = "3"
 # Re-used directly so signer_repo_key + verify can talk to the SAME dalek
 # version mkit-core::sign already pulls in. We inherit the same default-
 # features = false + std posture so the dep graph does not widen.
-ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+# Gated behind `algo-ed25519`: when disabled, `RepoKeySigner` and the
+# Ed25519 verifier dispatch compile out cleanly.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 hex = "0.4"
+# Tests that hand-build signing keys need dalek unconditionally, so pull
+# it in as a dev-dep separate from the feature-gated runtime dep.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
