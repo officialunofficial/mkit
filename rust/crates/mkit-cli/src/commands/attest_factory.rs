@@ -142,7 +142,8 @@ fn build_external_signer(
         ));
     }
     let ext = ExternalSigner::with_algorithm(&config.external_signer_path, algorithm)
-        .map_err(|e| FactoryError::ExternalSignerPath(e.to_string()))?;
+        .map_err(|e| FactoryError::ExternalSignerPath(e.to_string()))?
+        .with_args(config.external_signer_args.clone());
     Ok(Box::new(ext))
 }
 

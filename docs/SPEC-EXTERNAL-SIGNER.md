@@ -45,7 +45,7 @@ Out of scope (explicitly):
 ## 2. Invocation
 
 mkit spawns the signer as a child process. The binary path comes from
-the `attest.external_signer` key in `.mkit/config` and **MUST be
+the `attest.external_signer_path` key in `.mkit/config` and **MUST be
 absolute** — relative paths are rejected at config-load time to close
 a path-search TOCTOU (see `ExternalSigner::new` in
 `rust/crates/mkit-attest/src/signer_external.rs`).
@@ -53,11 +53,15 @@ a path-search TOCTOU (see `ExternalSigner::new` in
 Argv and environment:
 
 - **argv[0]**: the binary path as configured.
-- **argv[1..]**: empty by default. A signer MAY accept further
-  arguments of its own; mkit passes none unless a future protocol
-  version adds them. Signers SHOULD define argv flags so that a
-  zero-argv invocation is a well-defined default (e.g. read key from
-  a standard env var or fall back to a per-platform default location).
+- **argv[1..]**: empty by default. The host MAY pass additional argv
+  tokens verbatim to the child — see SPEC-ATTESTATIONS §6.2 for
+  mkit's config + CLI surface (`attest.external_signer_args`,
+  `--external-signer-arg`, multi-sig `args=` clause). No shell
+  interpolation happens; each host-supplied token is one argv entry.
+  Signers SHOULD still accept a zero-argv invocation as a well-defined
+  default (e.g. read key from a standard env var or fall back to a
+  per-platform default location) so hosts that don't drive argv keep
+  working.
 - **env**: inherited from mkit unmodified. Signers are free to read
   their own env vars (`MKIT_SIGN_FILE_KEY`, `LEDGER_PATH`, etc.).
 - **cwd**: inherited from mkit.
@@ -373,7 +377,7 @@ mkit cannot defend against:
 - A signer that exfiltrates the PAE contents to a network server.
 
 Operational consequence: users MUST vet the external signer binary
-they configure. `attest.external_signer` is a code-execution
+they configure. `attest.external_signer_path` is a code-execution
 configuration — treat it with the same care as
 `git config core.editor` or a shell-profile hook. The install path
 SHOULD be root-owned and on a non-user-writable filesystem where the

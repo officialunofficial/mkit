@@ -6,7 +6,7 @@ live here. They all speak the same wire protocol:
 > [**SPEC-EXTERNAL-SIGNER.md**](../../docs/SPEC-EXTERNAL-SIGNER.md) — v1 JSON-over-stdin/stdout
 
 Write your signer to that spec and mkit will drive it via
-`attest.external_signer = /abs/path/to/your-binary` in
+`attest.external_signer_path = /abs/path/to/your-binary` in
 `.mkit/config`.
 
 ---
@@ -68,18 +68,23 @@ $ chmod 0600 /tmp/mkit-ref.key
 
 $ # Point mkit at it.
 $ mkit config attest.signer external
-$ mkit config attest.external_signer "$(pwd)/target/release/mkit-sign-file"
+$ mkit config attest.external_signer_path "$(pwd)/target/release/mkit-sign-file"
 
-$ # The binary itself needs --key plumbed in. Two options:
-$ #   (a) wrap it in a shell script that adds --key <path>
-$ #   (b) set MKIT_SIGN_FILE_KEY=/tmp/mkit-ref.key in mkit's env
-$ export MKIT_SIGN_FILE_KEY=/tmp/mkit-ref.key
+$ # Plumb --key into the subprocess. Three options, in order of
+$ # preference:
+$ #   (a) config: attest.external_signer_args = --key|/tmp/mkit-ref.key
+$ #   (b) flag:   mkit attest --external-signer-arg --key \
+$ #                           --external-signer-arg /tmp/mkit-ref.key
+$ #   (c) env:    export MKIT_SIGN_FILE_KEY=/tmp/mkit-ref.key
+$ mkit config attest.external_signer_args "--key|/tmp/mkit-ref.key"
 ```
 
-The spawn contract is "absolute path, no argv" — a signer that wants
-argv has to be wrapped in a shell script or set its own defaults via
-env vars (`mkit-sign-file` does the latter via
-`MKIT_SIGN_FILE_KEY`).
+The argv pass-through (a/b) is the recommended path — it works for
+any signer binary without env-var plumbing and supports per-invocation
+overrides via `--external-signer-arg`. The pipe (`|`) is used on disk
+because commas are reserved for `--additional-signer` multi-sig specs.
+Env vars (c) still work when a wrapper layer (CI, systemd unit) owns
+the environment and you don't want argv in `.mkit/config`.
 
 ### Direct invocation (for testing)
 
@@ -123,7 +128,7 @@ stderr message on any error.
 The external signer runs as a child process under mkit's user. It
 holds the key. mkit trusts it completely for the duration of a
 signing call — there's no sandbox beyond OS user isolation. Treat
-the `attest.external_signer` config key as a code-execution sink
+the `attest.external_signer_path` config key as a code-execution sink
 (same class as `git config core.editor` or shell-profile hooks) and
 make sure the binary is on a non-user-writable path in any environment
 where the threat model warrants it.

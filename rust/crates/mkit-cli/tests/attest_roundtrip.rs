@@ -16,6 +16,34 @@ fn mkit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mkit")
 }
 
+/// Locate `mkit-sign-file` in the same `target/<profile>/` directory
+/// `mkit` lives in. Assumes `cargo test --workspace` (or at least a
+/// previous `cargo build -p mkit-sign-file`) has populated it; the
+/// workspace CI target does so by construction, and a direct
+/// `cargo test -p mkit-cli --test attest_roundtrip` triggers the build
+/// via the explicit `CARGO_BIN_EXE_mkit` dependency — we mirror that
+/// target dir here.
+fn mkit_sign_file_bin() -> std::path::PathBuf {
+    let mkit = std::path::PathBuf::from(mkit_bin());
+    let target_dir = mkit.parent().expect("mkit_bin has a parent");
+    let candidate = target_dir.join(if cfg!(windows) {
+        "mkit-sign-file.exe"
+    } else {
+        "mkit-sign-file"
+    });
+    if !candidate.exists() {
+        // The CI matrix always builds the whole workspace, but an
+        // individual `cargo test -p mkit-cli` invocation might not.
+        // Fall back to an on-the-fly build rather than silently skipping.
+        let status = Command::new(env!("CARGO"))
+            .args(["build", "-p", "mkit-sign-file"])
+            .status()
+            .expect("spawn cargo");
+        assert!(status.success(), "cargo build -p mkit-sign-file failed");
+    }
+    candidate
+}
+
 fn run_in(cwd: &Path, args: &[&str]) -> Output {
     Command::new(mkit_bin())
         .args(args)
@@ -325,5 +353,218 @@ fn attest_malformed_predicate_file_errors() {
     assert!(
         stderr.contains("predicate") || stderr.contains("JSON") || stderr.contains("json"),
         "error did not mention predicate: {stderr}"
+    );
+}
+
+// -- External-signer argv pass-through ---------------------------------
+//
+// The following three tests cover the gap that motivated PR #66 + #68:
+// previously, `mkit attest --signer external` spawned the signer with
+// zero argv and forced wrapper shell scripts. Each test drives the real
+// `mkit-sign-file` reference binary, which takes `--key <path>` on
+// argv — without the pass-through there's no way for the attest to
+// reach the key file short of setting `MKIT_SIGN_FILE_KEY` in env.
+
+/// Write a 32-byte ed25519 secret to `path` with mode 0600. Returns
+/// the matching 32-byte pubkey bytes.
+fn write_ed25519_key(path: &Path, secret: &[u8; 32]) -> Vec<u8> {
+    write_key(path, secret);
+    ed25519_pubkey(secret)
+}
+
+/// Shared skeleton for all three pass-through tests: init a repo with a
+/// commit, write a 32-byte ed25519 key outside .mkit/ (so the CLI has to
+/// reach it via argv), and return `(root, key_path, pubkey)`.
+fn fixture_for_external_ed25519() -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().to_path_buf();
+    init_repo_with_commit(&root);
+    let key_path = root.join("external-signer.key");
+    let mut secret = [0u8; 32];
+    secret[31] = 9;
+    let pk = write_ed25519_key(&key_path, &secret);
+    (td, key_path, pk)
+}
+
+/// Turn a 32-byte ed25519 pubkey into the `blake3:<hex>` keyid mkit-sign-file
+/// emits for that key.
+fn blake3_keyid(pk: &[u8]) -> String {
+    let h = mkit_core::hash::hash(pk);
+    format!("blake3:{}", mkit_core::hash::to_hex(&h))
+}
+
+#[test]
+fn attest_external_cli_flag_passes_argv() {
+    // `--external-signer-arg --key --external-signer-arg <path>` must
+    // reach `mkit-sign-file`'s `Args::parse`. Without pass-through the
+    // binary errors with "no key path".
+    let (td, key_path, pk) = fixture_for_external_ed25519();
+    let root = td.path();
+    let signer_bin = mkit_sign_file_bin();
+
+    // Point the CLI at the signer binary via on-disk config — same
+    // plumbing users have today for `external_signer_path`.
+    fs::create_dir_all(root.join(".mkit")).unwrap();
+    fs::write(
+        root.join(".mkit/config"),
+        format!(
+            "attest.external_signer_path = {}\n",
+            signer_bin.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let out = run_in(
+        root,
+        &[
+            "attest",
+            "--algorithm",
+            "ed25519",
+            "--signer",
+            "external",
+            "--external-signer-arg",
+            "--key",
+            "--external-signer-arg",
+            key_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "attest failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Prove the attestation verifies against the key we wrote.
+    let toml = format!(
+        "[[trust_root]]\n\
+         keyid = \"{}\"\n\
+         kind = \"ed25519\"\n\
+         pubkey_hex = \"{}\"\n",
+        blake3_keyid(&pk),
+        hex_lower(&pk)
+    );
+    fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+    let out = run_in(root, &["verify-attest"]);
+    assert!(
+        out.status.success(),
+        "verify failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attest_external_config_args_pass_through() {
+    // Same workflow via `attest.external_signer_args` in .mkit/config.
+    let (td, key_path, pk) = fixture_for_external_ed25519();
+    let root = td.path();
+    let signer_bin = mkit_sign_file_bin();
+
+    fs::create_dir_all(root.join(".mkit")).unwrap();
+    fs::write(
+        root.join(".mkit/config"),
+        format!(
+            "attest.external_signer_path = {}\n\
+             attest.external_signer_args = --key|{}\n",
+            signer_bin.to_str().unwrap(),
+            key_path.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+
+    let out = run_in(
+        root,
+        &["attest", "--algorithm", "ed25519", "--signer", "external"],
+    );
+    assert!(
+        out.status.success(),
+        "attest failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let toml = format!(
+        "[[trust_root]]\n\
+         keyid = \"{}\"\n\
+         kind = \"ed25519\"\n\
+         pubkey_hex = \"{}\"\n",
+        blake3_keyid(&pk),
+        hex_lower(&pk)
+    );
+    fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+    let out = run_in(root, &["verify-attest"]);
+    assert!(out.status.success());
+}
+
+#[test]
+fn attest_additional_signer_args_clause_pass_through() {
+    // Multi-sig: primary is repo-key ed25519 (auto-generated), additional
+    // signer is external ed25519 via mkit-sign-file + `args=` clause.
+    // Both signatures must land in the envelope and verify.
+    let (td, key_path, pk_ext) = fixture_for_external_ed25519();
+    let root = td.path();
+    let signer_bin = mkit_sign_file_bin();
+
+    // Primary (repo-key) ed25519 is whatever `.mkit/keys/default.key`
+    // the commit step created. Read it to derive its pubkey.
+    let primary_secret = fs::read(root.join(".mkit/keys/default.key")).unwrap();
+    let mut primary = [0u8; 32];
+    primary.copy_from_slice(&primary_secret);
+    let pk_primary = ed25519_pubkey(&primary);
+
+    // No need for a config — the additional-signer spec carries its
+    // own path=.
+    let spec = format!(
+        "algorithm=ed25519,signer=external,path={},args=--key|{}",
+        signer_bin.to_str().unwrap(),
+        key_path.to_str().unwrap()
+    );
+    let out = run_in(
+        root,
+        &[
+            "attest",
+            "--algorithm",
+            "ed25519",
+            "--signer",
+            "repo-key",
+            "--additional-signer",
+            &spec,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "attest failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("2 signature(s)"),
+        "expected envelope to carry two signatures; got: {stdout}"
+    );
+
+    // Trust roots must list BOTH keys so verify-attest accepts both.
+    let toml = format!(
+        "[[trust_root]]\n\
+         keyid = \"{}\"\n\
+         kind = \"ed25519\"\n\
+         pubkey_hex = \"{}\"\n\
+         \n\
+         [[trust_root]]\n\
+         keyid = \"{}\"\n\
+         kind = \"ed25519\"\n\
+         pubkey_hex = \"{}\"\n",
+        blake3_keyid(&pk_primary),
+        hex_lower(&pk_primary),
+        blake3_keyid(&pk_ext),
+        hex_lower(&pk_ext),
+    );
+    fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+    let out = run_in(root, &["verify-attest"]);
+    assert!(
+        out.status.success(),
+        "verify failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
 }

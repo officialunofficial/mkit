@@ -280,8 +280,53 @@ stdout  (one-line JSON):  {"keyid": "...", "sig_base64": "..."}
 exit 0  on success, non-zero on error (stderr surfaces to the user).
 ```
 
-The binary path comes from `attest.external_signer` in `.mkit/config`.
-A reference implementation lives at `contrib/signers/mkit-sign-file/`.
+The binary path comes from `attest.external_signer_path` in
+`.mkit/config`. A reference implementation lives at
+`contrib/signers/mkit-sign-file/`.
+
+**Signer argv.** The subprocess is spawned with an optional argv
+vector in addition to the stdin JSON. By default that vector is
+empty (backward-compatible with pre-argv mkit). There are three
+ways to populate it, each overriding the previous:
+
+1. `attest.external_signer_args` in `.mkit/config` — a pipe-separated
+   list (`sign|--tag|prod`). Pipe instead of comma because the
+   multi-sig spec already uses `,` as its key=value separator.
+2. `--external-signer-arg <V>` on `mkit attest`, repeatable. When
+   any instance appears, the collected values REPLACE (not append
+   to) the config value — per-invocation override for "sign with
+   tag X just this once."
+3. `args=<a>|<b>|<c>` on `--additional-signer` for the multi-sig
+   envelope — see §6.2.1 below.
+
+Every token is passed verbatim to `Command::args` — no shell
+interpolation, no splitting on whitespace. This closes the gap
+where a signer that wanted subcommand shape (`mkit-sign-se sign
+--tag prod`) had to be wrapped in a shell script that hardcoded
+the tag, blocking multi-key workflows.
+
+#### 6.2.1 Multi-sig spec: `args=` clause
+
+`mkit attest --additional-signer` takes a comma-separated
+`key=value` spec. The recognised keys are:
+
+| Key         | Meaning                                                    |
+|-------------|------------------------------------------------------------|
+| `algorithm` | `ed25519` / `secp256k1` / `p256`. Required.                |
+| `signer`    | `repo-key` / `external`. Required.                         |
+| `path`      | Overrides key path (repo-key) or binary path (external).   |
+| `args`      | Pipe-separated argv for external signers only (optional).  |
+
+Example:
+
+```
+mkit attest --additional-signer \
+  "algorithm=p256,signer=external,path=/usr/local/bin/mkit-sign-se,args=sign|--tag|demo"
+```
+
+`|` is used inside `args=` because `,` is the outer separator.
+When `args=` is present it overrides `attest.external_signer_args`
+for this signer only; absent means "fall through to config."
 
 ### 6.3 `keyid` conventions
 
@@ -394,9 +439,10 @@ unchanged (§`mkit version`).
 New keys in `.mkit/config` (validated by `config.validateConfigValue`):
 
 ```
-attest.signer           = "repo-key" | "sigstore-keyless" | "external"  (default: repo-key)
-attest.external_signer  = /abs/path/to/binary   (required when signer = external)
-attest.auto_sign_commit = false                 (default — mkit doesn't auto-attest on commit)
+attest.signer               = "repo-key" | "sigstore-keyless" | "external"  (default: repo-key)
+attest.external_signer_path = /abs/path/to/binary   (required when signer = external)
+attest.external_signer_args = a|b|c                 (pipe-separated argv, optional; default empty)
+attest.auto_sign_commit     = false                 (default — mkit doesn't auto-attest on commit)
 ```
 
 `attest.auto_sign_commit = true` attaches a minimal attestation with

@@ -4,8 +4,15 @@
 //! mkit attest [--commit <hash>] [--algorithm ed25519|secp256k1|p256]
 //!             [--signer repo-key|external]
 //!             [--predicate-type <URI>] [--predicate-file <path>]
+//!             [--external-signer-arg <V>]...
 //!             [--additional-signer "<spec>"]...
 //! ```
+//!
+//! `--external-signer-arg` is repeatable; each instance adds one
+//! argv token to the external signer subprocess. If any are passed,
+//! they REPLACE (not append to) `attest.external_signer_args` from
+//! `.mkit/config` — per-invocation override for "sign with tag X
+//! this one time" that avoids shell-quoting hell.
 //!
 //! Defaults:
 //! * `--commit` — HEAD.
@@ -19,8 +26,14 @@
 //! a comma-separated `key=value` list:
 //!
 //! ```text
-//! --additional-signer "algorithm=<algo>,signer=<kind>[,path=<file-or-binary>]"
+//! --additional-signer "algorithm=<algo>,signer=<kind>[,path=<file-or-binary>][,args=<a>|<b>|<c>]"
 //! ```
+//!
+//! The optional `args=` clause is pipe-separated (commas would clash
+//! with the outer key=value separator) and applies only when
+//! `signer=external`. Each pipe-separated token becomes one argv
+//! entry for the child process, same as `--external-signer-arg` on
+//! the primary signer.
 //!
 //! Signers are invoked in order (primary first, then each
 //! `--additional-signer` as they appear on the command line) and the
@@ -44,6 +57,7 @@ use crate::exit;
 /// Default predicate type URI — placeholder; real callers pass their own.
 const DEFAULT_PREDICATE_TYPE: &str = "https://mkit.io/predicate/empty/v1";
 
+#[allow(clippy::struct_field_names)]
 struct Args {
     commit: Option<String>,
     algorithm: Option<String>,
@@ -51,6 +65,13 @@ struct Args {
     predicate_type: Option<String>,
     predicate_file: Option<String>,
     additional_signers: Vec<String>,
+    /// Repeatable `--external-signer-arg <V>`. If any instance appears,
+    /// these REPLACE (not append to) `attest.external_signer_args` from
+    /// config — per-invocation override for "sign with this tag just
+    /// once" without editing `.mkit/config`. An empty `Vec` means the
+    /// flag was not passed (fall through to config); to force zero argv
+    /// when config has some, the user can `config unset` the key.
+    external_signer_args: Option<Vec<String>>,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
@@ -61,6 +82,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         predicate_type: None,
         predicate_file: None,
         additional_signers: Vec::new(),
+        external_signer_args: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -89,6 +111,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 out.additional_signers.push(args[i + 1].clone());
                 i += 2;
             }
+            "--external-signer-arg" if i + 1 < args.len() => {
+                out.external_signer_args
+                    .get_or_insert_with(Vec::new)
+                    .push(args[i + 1].clone());
+                i += 2;
+            }
             other => {
                 return Err(format!("unknown argument: {other}"));
             }
@@ -106,12 +134,18 @@ struct SignerSpec {
     algorithm: Algorithm,
     signer_kind: String,
     path: Option<String>,
+    /// Parsed `args=a|b|c` clause. `None` ⇒ fall through to
+    /// `attest.external_signer_args`; `Some(vec)` ⇒ override for this
+    /// signer only. Pipe-separated on the wire because comma is the
+    /// spec's key=value separator.
+    args: Option<Vec<String>>,
 }
 
 fn parse_signer_spec(s: &str) -> Result<SignerSpec, String> {
     let mut algorithm: Option<Algorithm> = None;
     let mut signer_kind: Option<String> = None;
     let mut path: Option<String> = None;
+    let mut args: Option<Vec<String>> = None;
     for part in s.split(',') {
         let part = part.trim();
         if part.is_empty() {
@@ -142,6 +176,15 @@ fn parse_signer_spec(s: &str) -> Result<SignerSpec, String> {
             "path" => {
                 path = Some(v.trim().to_owned());
             }
+            "args" => {
+                // Pipe-separator is a deliberate divergence from the
+                // `,`-separator used between spec keys: `,` is already
+                // taken, and `|` is the shortest ASCII separator that
+                // doesn't need shell-quoting. An empty value means
+                // "zero argv" and is valid (overrides a non-empty
+                // config explicitly).
+                args = Some(crate::config::parse_pipe_list(v.trim()));
+            }
             other => {
                 return Err(format!("--additional-signer: unknown spec key '{other}'"));
             }
@@ -155,6 +198,7 @@ fn parse_signer_spec(s: &str) -> Result<SignerSpec, String> {
         algorithm,
         signer_kind,
         path,
+        args,
     })
 }
 
@@ -168,7 +212,8 @@ pub fn run(args: &[String]) -> u8 {
                 &format!(
                     "{e}\nusage: mkit attest [--commit <hash>] [--algorithm ed25519|secp256k1|p256] \
                      [--signer repo-key|external] [--predicate-type <URI>] [--predicate-file <path>] \
-                     [--additional-signer \"algorithm=<a>,signer=<k>[,path=<p>]\"]..."
+                     [--external-signer-arg <V>]... \
+                     [--additional-signer \"algorithm=<a>,signer=<k>[,path=<p>][,args=<a>|<b>|<c>]\"]..."
                 ),
                 exit::USAGE,
             );
@@ -184,10 +229,18 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err("not a mkit repo", exit::GENERAL_ERROR);
     }
 
-    let cfg = match crate::config::read_or_default(&cwd) {
+    let mut cfg = match crate::config::read_or_default(&cwd) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
+
+    // `--external-signer-arg` REPLACES `attest.external_signer_args`
+    // when present. Per-invocation override, intentionally not additive
+    // so a user can cleanly reproduce `mkit-sign-se sign --tag demo`
+    // without having to remember (or clobber) whatever's in config.
+    if let Some(argv) = parsed.external_signer_args.clone() {
+        cfg.attest.external_signer_args = argv;
+    }
 
     // --- Resolve commit. --------------------------------------------
     let commit_hash = match resolve_commit(&mkit_dir, parsed.commit.as_deref()) {
@@ -360,6 +413,13 @@ fn build_additional_signer(
             if let Some(p) = spec.path.as_deref() {
                 p.clone_into(&mut cfg.external_signer_path);
             }
+            // Per-spec `args=...` REPLACES the config-level argv so
+            // multi-sig specs can independently drive different
+            // external binaries. Absent `args=` ⇒ inherit the primary
+            // signer's config value, matching how `path=` falls through.
+            if let Some(argv) = spec.args.as_ref() {
+                cfg.external_signer_args.clone_from(argv);
+            }
             attest_factory::build_signer(root, spec.algorithm, "external", &cfg)
         }
         other => Err(FactoryError::UnknownSignerKind(other.to_owned())),
@@ -430,6 +490,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_collects_repeatable_external_signer_args() {
+        let args = vec![
+            "--external-signer-arg".into(),
+            "sign".into(),
+            "--external-signer-arg".into(),
+            "--tag".into(),
+            "--external-signer-arg".into(),
+            "demo".into(),
+        ];
+        let p = parse_args(&args).unwrap();
+        let expected = vec!["sign".to_owned(), "--tag".to_owned(), "demo".to_owned()];
+        assert_eq!(p.external_signer_args, Some(expected));
+    }
+
+    #[test]
+    fn parse_args_external_signer_arg_none_when_absent() {
+        // Distinguishes "flag not passed" (None → fall through to config)
+        // from "flag passed with no values" (impossible: the flag needs
+        // a value).
+        let p = parse_args(&[]).unwrap();
+        assert!(p.external_signer_args.is_none());
+    }
+
+    #[test]
     fn parse_args_collects_multiple_additional_signers() {
         let args = vec![
             "--additional-signer".into(),
@@ -454,6 +538,30 @@ mod tests {
         assert_eq!(s.algorithm, Algorithm::Secp256k1);
         assert_eq!(s.signer_kind, "repo-key");
         assert_eq!(s.path.as_deref(), Some("k.key"));
+    }
+
+    #[test]
+    fn parse_signer_spec_with_args() {
+        let s = parse_signer_spec(
+            "algorithm=p256,signer=external,path=/usr/bin/signer,args=sign|--tag|demo",
+        )
+        .unwrap();
+        assert_eq!(s.algorithm, Algorithm::P256);
+        assert_eq!(s.signer_kind, "external");
+        assert_eq!(s.path.as_deref(), Some("/usr/bin/signer"));
+        assert_eq!(
+            s.args.as_deref(),
+            Some(["sign".to_owned(), "--tag".to_owned(), "demo".to_owned()].as_slice())
+        );
+    }
+
+    #[test]
+    fn parse_signer_spec_args_empty_means_zero_argv() {
+        // `args=` with no value is a valid override that means "this
+        // signer gets zero argv, regardless of config." Distinct from
+        // omitting `args=` entirely (which inherits from config).
+        let s = parse_signer_spec("algorithm=ed25519,signer=external,args=").unwrap();
+        assert_eq!(s.args.as_deref(), Some([].as_slice()));
     }
 
     #[test]
