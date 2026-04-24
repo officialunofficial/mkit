@@ -36,6 +36,31 @@ pub const HEADER_LEN: usize = 1 + 4 + 4;
 /// alignment math. Not part of the wire format — readers don't care.
 const BLOCK_SIZE: usize = 16;
 
+/// Multiplier applied to `stream.len()` when bounding the decoder's
+/// initial `Vec::with_capacity`. The worst-case expansion of a COPY op
+/// is 7 bytes of stream → `u16::MAX` output bytes (≈ 9363×), but in
+/// practice stream-sized * 256 dwarfs real deltas and still keeps the
+/// attacker's reach tiny: a 9-byte stream can only request ≤ 2304
+/// bytes of pre-allocation, independent of `base.len()` or the
+/// declared `result_len`. The final `result_len` self-consistency
+/// check still catches inflated payloads.
+pub(crate) const CAP_MULTIPLIER: usize = 256;
+
+/// Compute the decoder's initial capacity hint.
+///
+/// This is a small, explicitly attacker-resistant helper, exposed to
+/// the crate so that the regression test can pin down the bound
+/// without reaching into `decode`. The hint is the smaller of:
+///
+/// * the declared `result_len` (can't exceed declared output), and
+/// * `stream.len() * CAP_MULTIPLIER` (attacker bounded by on-wire size).
+///
+/// Crucially, `base.len()` does NOT appear here — see SEC finding G5.
+#[inline]
+pub(crate) fn compute_cap_hint(result_len: usize, _base_len: usize, stream_len: usize) -> usize {
+    result_len.min(stream_len.saturating_mul(CAP_MULTIPLIER))
+}
+
 /// Build a v1 delta stream that reconstructs `result` from `base`.
 ///
 /// The writer is an FNV-1a-on-16-byte-blocks scan. Any conformant
@@ -144,18 +169,14 @@ pub fn decode(base: &[u8], stream: &[u8]) -> Result<Vec<u8>, MkitError> {
         return Err(MkitError::TrailingData);
     }
 
-    // Bound the pre-allocation against attacker-controlled `result_len`.
-    // An upper bound derivable from the stream itself is (base.len() +
-    // instructions_remaining): COPY ops can fan a single 7-byte op into
-    // up to u16::MAX output bytes sourced from `base`, and INSERT ops
-    // are byte-for-byte. So the largest output the stream can legally
-    // produce is bounded by (base.len() × (instructions/7)) + literals —
-    // but (base.len() + stream.len() × 65535 / 7) already dwarfs any
-    // real payload. Rather than model this exactly, cap the initial
-    // capacity at the actual on-wire maximum we'll ever encode: 4 GiB
-    // minus one. This prevents a 4 GiB pre-allocation from a 9-byte
-    // header. Final `result_len` mismatch is still enforced below.
-    let cap_hint = result_len.min(base.len().saturating_add(stream.len().saturating_mul(2)));
+    // Bound the pre-allocation against attacker-controlled length fields.
+    // See [`compute_cap_hint`]: the hint is strictly a function of
+    // `stream.len()` (with `result_len` as an upper bound) — `base.len()`
+    // MUST NOT appear, because a 1 GiB base + 9-byte crafted stream
+    // otherwise triggers a ≈ 1 GiB allocation (SEC finding G5). The
+    // final `result_len` equality check below still enforces wire-level
+    // self-consistency.
+    let cap_hint = compute_cap_hint(result_len, base.len(), stream.len());
     let mut out: Vec<u8> = Vec::with_capacity(cap_hint);
     let mut pos = HEADER_LEN;
     while pos < stream.len() {
@@ -424,5 +445,27 @@ mod tests {
         let stream = encode(b"", target);
         let restored = decode(b"", &stream).unwrap();
         assert_eq!(restored, target);
+    }
+
+    #[test]
+    fn cap_hint_does_not_scale_with_base_len() {
+        // G5 regression: the decoder's pre-allocation must be bounded by
+        // `stream.len()`, not by `base.len()`. Previously a 9-byte stream
+        // with a 1 GiB base could drive `Vec::with_capacity` to ~1 GiB.
+        //
+        // Assert: for a huge base + tiny stream, cap_hint is tiny.
+        let huge_base = 1usize << 30; // 1 GiB
+        let tiny_stream = 9usize; // just the header
+        let declared_result = u32::MAX as usize;
+        let cap = super::compute_cap_hint(declared_result, huge_base, tiny_stream);
+        assert!(
+            cap <= tiny_stream.saturating_mul(CAP_MULTIPLIER),
+            "cap_hint {cap} must be bounded by stream.len() * CAP_MULTIPLIER, \
+             not by base.len()",
+        );
+        assert!(
+            cap < 1024 * 1024,
+            "cap_hint {cap} must stay well below 1 MiB for a 9-byte stream",
+        );
     }
 }
