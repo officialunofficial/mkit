@@ -36,5 +36,30 @@ const obsChanged = JSON.stringify(config.observability) !== JSON.stringify(merge
 config.observability = merged
 if (obsChanged) changes.push('observability')
 
+// Custom Domain(s). Listed patterns are attached to the Worker as Cloudflare Custom Domains — Wrangler auto-creates
+// the proxied DNS record and issues a cert on `wrangler deploy` as long as the zone is on the same account. Routes
+// are idempotent: re-running the patcher on an already-routed deploy is a no-op.
+const DESIRED_ROUTES = [{ pattern: 'mkit.makechain.net', custom_domain: true }]
+const currentRoutes = Array.isArray(config.routes) ? config.routes : []
+const hasRoute = (r) =>
+  currentRoutes.some((c) => c && c.pattern === r.pattern && Boolean(c.custom_domain) === Boolean(r.custom_domain))
+const missing = DESIRED_ROUTES.filter((r) => !hasRoute(r))
+if (missing.length) {
+  config.routes = [...currentRoutes, ...missing]
+  changes.push(`routes+=${missing.map((r) => r.pattern).join(',')}`)
+}
+
+// Keep the `*.workers.dev` subdomain live alongside the Custom Domain so preview links and smoke tests that target
+// `mkit-demo-web.<account>.workers.dev` keep working. Without this, Wrangler disables `workers.dev` the moment any
+// route is declared.
+if (config.workers_dev !== true) {
+  config.workers_dev = true
+  changes.push('workers_dev=true')
+}
+if (config.preview_urls !== true) {
+  config.preview_urls = true
+  changes.push('preview_urls=true')
+}
+
 writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`)
 console.log(`patched ${configPath}: ${changes.length ? changes.join(', ') : 'no changes (already up-to-date)'}`)
