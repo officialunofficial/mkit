@@ -105,6 +105,8 @@ pub enum Error {
     ExternalSignerBadResponse,
     #[error("external signer output exceeded the 1 MiB cap")]
     ExternalSignerOutputTooLarge,
+    #[error("external signer binary path must be absolute: {0}")]
+    ExternalSignerRelativePath(String),
     #[error("sigstore signer is not yet implemented")]
     SigstoreNotImplemented,
 
