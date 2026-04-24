@@ -27,6 +27,17 @@
 //! the helpers. Real TPM operations panic with a clear error message
 //! when the feature is off.
 
+// Pedantic lints intentionally relaxed for this crate: CLI binaries
+// trade some clippy purity for readable top-level flow. Each allow is
+// for a specific pedantic family that fires on cosmetic patterns
+// (identical match arms on distinct semantic intents, doc-list
+// indentation in module docs, etc.). Real correctness lints remain on.
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::items_after_statements)]
+#![allow(clippy::cast_possible_truncation)]
+
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
@@ -542,7 +553,15 @@ impl From<DerError> for SignerError {
 // directing the user to rebuild with `--features tpm2`. Unit tests
 // exercise the pure helpers above without touching this module.
 
-#[cfg(not(feature = "tpm2"))]
+// Fallback module. Used when either the `tpm2` feature is off OR we're
+// on a target where `tss-esapi-sys` refuses to build (anything other
+// than Linux/Windows — notably macOS). The runtime error message is
+// identical in both cases: rebuild on a supported platform with the
+// feature enabled.
+#[cfg(any(
+    not(feature = "tpm2"),
+    not(any(target_os = "linux", target_os = "windows"))
+))]
 mod tpm {
     use super::SignerError;
 
@@ -570,7 +589,7 @@ mod tpm {
     }
 }
 
-#[cfg(feature = "tpm2")]
+#[cfg(all(feature = "tpm2", any(target_os = "linux", target_os = "windows")))]
 mod tpm {
     //! Real tss-esapi-backed implementation. This module is only
     //! compiled when the consumer opts into `--features tpm2`, which

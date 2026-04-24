@@ -1,3 +1,6 @@
+#![allow(clippy::items_after_statements)]
+#![allow(clippy::cast_possible_truncation)]
+
 //! Integration test — spawn `mkit-sign-tpm` as a subprocess and
 //! round-trip one signature, verifying it via openssl in-process (no
 //! extra mkit-attest dependency to keep the default `cargo test`

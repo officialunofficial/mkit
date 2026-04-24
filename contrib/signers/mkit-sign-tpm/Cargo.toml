@@ -45,13 +45,14 @@ base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-# Pinned to 7.7 (the most recent stable minor on crates.io at the time
-# of writing). The 8.0 series is still in alpha. `tss-esapi` wraps the
-# upstream tpm2-tss C library; see README for the native package list
-# (`libtss2-dev` on Debian/Ubuntu, `tpm2-tss-devel` on Fedora).
-#
-# Optional so a macOS developer with no TPM stack installed can still
-# build / test the non-TPM paths with `cargo test -p mkit-sign-tpm`.
+
+# `tss-esapi-sys` hard-rejects non-Linux/Windows targets in its build
+# script ("compilation target tuple (aarch64, darwin) is not part of
+# the supported tuples"). Gate the optional dep by target so that
+# `--all-features` on macOS still builds — it just doesn't link the
+# TPM backend (which is fine; Linux/Windows are the platforms that
+# ship real TPMs anyway). Pinned to 7.7; the 8.0 series is alpha.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 tss-esapi = { version = "7.7", optional = true }
 
 [dev-dependencies]
