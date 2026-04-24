@@ -5,6 +5,7 @@
 //! crates; this module is the thin presentation shim.
 
 pub mod add;
+pub mod attest_factory;
 pub mod bisect;
 pub mod blame;
 pub mod branch;

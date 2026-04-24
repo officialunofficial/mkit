@@ -36,6 +36,12 @@ pub enum TrustRoot {
     /// uncompressed, our in-process signer ships compressed.
     #[cfg(feature = "algo-p256")]
     P256PubKeySec1(Vec<u8>),
+    /// SEC1-encoded secp256k1 public key. Compressed (33 bytes,
+    /// `0x02`/`0x03` prefix) and uncompressed (65 bytes, `0x04`
+    /// prefix) are both accepted — wallet / browser-crypto clients
+    /// typically ship compressed.
+    #[cfg(feature = "algo-secp256k1")]
+    Secp256k1PubKeySec1(Vec<u8>),
     /// Scaffold — sigstore verification needs a Rekor + Fulcio walk
     /// that this crate does not yet ship. See SPEC-ATTESTATIONS §6.2.
     /// Any signature dispatched to this trust root reports
@@ -171,6 +177,17 @@ pub fn verify(env: &Envelope, registry: &Registry) -> Result<VerifyResult, Error
             #[cfg(feature = "algo-p256")]
             Some(TrustRoot::P256PubKeySec1(pk)) => {
                 row.reason = match crate::signer_p256::verify_p256(pk, &pae, &s.sig) {
+                    Ok(()) => Reason::Ok,
+                    Err(_) => Reason::SignatureMismatch,
+                };
+                if row.reason == Reason::Ok {
+                    row.verified = true;
+                    any_verified = true;
+                }
+            }
+            #[cfg(feature = "algo-secp256k1")]
+            Some(TrustRoot::Secp256k1PubKeySec1(pk)) => {
+                row.reason = match crate::signer_k256::verify_secp256k1(pk, &pae, &s.sig) {
                     Ok(()) => Reason::Ok,
                     Err(_) => Reason::SignatureMismatch,
                 };
