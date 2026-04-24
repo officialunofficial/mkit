@@ -10,6 +10,7 @@
 //! and `x-amz-date`. This matches the Zig side; adding more signed headers is
 //! a wire-format change and MUST touch both.
 
+use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
