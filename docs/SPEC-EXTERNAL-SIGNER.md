@@ -404,6 +404,156 @@ Relation to the DSSE / in-toto / verify layers:
 
 ---
 
+## 14. Protocol v1.1 — WebAuthn extension
+
+Status: **Draft extension** to v1. Strictly backward-compatible:
+a v1 signer that does not emit the new field is a conforming v1.1
+signer too; a v1 verifier that does not understand the extension
+will (correctly) reject a wrapped signature as a crypto mismatch —
+see §14.5.
+
+### 14.1 Motivation
+
+FIDO2 / WebAuthn roaming authenticators (YubiKey, Nitrokey, SoloKey,
+platform authenticators behind `navigator.credentials.get`) do NOT
+sign arbitrary byte strings. The authenticator firmware always signs:
+
+```text
+signature = ECDSA(privkey, authenticatorData || SHA256(clientDataJSON))
+```
+
+where `clientDataJSON` is a UTF-8 JSON object containing the caller's
+`challenge` as a base64url-no-pad string. Because the authenticator
+cannot be reprogrammed, any signer that drives a WebAuthn credential
+MUST feed the PAE through the WebAuthn wrapping and then return the
+wrapping material to the verifier so the verifier can reconstruct what
+was actually signed. This section defines that wrapping.
+
+### 14.2 Response shape
+
+A v1.1 signer MAY include an optional top-level `webauthn` object in
+its response. When present, the response has this shape:
+
+```json
+{
+  "keyid": "p256:<hex>",
+  "sig_base64": "<base64(compact r||s)>",
+  "webauthn": {
+    "authenticator_data": "<base64url, no pad>",
+    "client_data_json":   "<base64url, no pad>"
+  }
+}
+```
+
+Semantics when `webauthn` is present:
+
+- `algorithm` (from the request, §3) MUST be `"p256"`. All shipping
+  WebAuthn authenticators use ECDSA over NIST P-256; other curves
+  are out of scope for v1.1.
+- `sig_base64` decodes to a 64-byte compact `r || s`, low-S
+  normalised (same as v1 P-256).
+- `webauthn.authenticator_data` is the raw `authenticatorData` as
+  returned by the authenticator, encoded base64url-no-pad per WebAuthn
+  spec convention.
+- `webauthn.client_data_json` is the raw UTF-8 bytes of the
+  `clientDataJSON` the authenticator signed, encoded base64url-no-pad.
+- The signature was produced as:
+  `ECDSA(privkey, authenticator_data_raw || SHA256(client_data_json_raw))`.
+
+Semantics when `webauthn` is absent: pure v1 behaviour — the signer
+signed `SHA256(pae)` directly and no wrapping is in play.
+
+### 14.3 `clientDataJSON` body
+
+The signer constructs the body itself before handing it to the
+authenticator. The body MUST be a UTF-8 JSON object containing at
+least:
+
+| Key         | Value                                                               |
+|-------------|---------------------------------------------------------------------|
+| `type`      | Literal string `"webauthn.get"` (assertions; `webauthn.create` is for enrollment and is NOT accepted on the verify path). |
+| `challenge` | `base64url_nopad(pae_bytes)` — this BINDS the WebAuthn ceremony to the DSSE PAE. |
+| `origin`    | String identifying the RP — e.g. `"https://mkit.local"`. Not load-bearing for the verify step. |
+
+Additional fields MAY appear (browsers emit `crossOrigin`, some emit
+`tokenBinding`, some emit `topOrigin`) and MUST be passed through
+unmodified — they contribute to the hash under the signature.
+
+### 14.4 Verifier contract
+
+A v1.1-aware verifier, given a decoded `webauthn` object and the PAE
+bytes, MUST:
+
+1. base64url-no-pad decode `authenticator_data` and `client_data_json`.
+2. Parse `client_data_json` as UTF-8 JSON; assert it is an object.
+3. Assert `type == "webauthn.get"`. The `create` type is a different
+   ceremony and MUST NOT be accepted for signature verification.
+4. Assert `challenge == base64url_nopad(pae_bytes)` — this is the
+   per-payload binding.
+5. Reconstruct signed bytes: `signed = authenticator_data ||
+   SHA256(client_data_json)`.
+6. Verify the 64-byte compact ECDSA signature against the advertised
+   P-256 pubkey over `signed`.
+
+Step 4 is the critical security property: without it a replayed
+signature from any unrelated WebAuthn ceremony would satisfy the crypto
+check. The helper in `mkit-attest` is
+`verify_webauthn_wrapping(pae, wrapping, pubkey_sec1, sig_compact)`;
+see `rust/crates/mkit-attest/src/webauthn.rs` for the reference
+implementation.
+
+### 14.5 Absence semantics and interop
+
+- A v1.0 verifier does not understand the `webauthn` object and
+  verifies the signature directly against `SHA256(pae)`. That verify
+  MUST fail (the signature was over `auth_data || SHA256(cdj)`, not
+  `SHA256(pae)`), surfacing as `Reason::SignatureMismatch`. The
+  failure is loud and safe: no wrapping means no verdict.
+- A v1.0 signer never emits a `webauthn` object; a v1.1 verifier
+  seeing no `webauthn` field behaves exactly as v1.0. This keeps the
+  upgrade fully one-sided — deploy new signers first, then new
+  verifiers, with no flag day.
+- The `webauthn` field travels OUTSIDE the DSSE envelope proper. For
+  mkit attestations the signer places it inside the in-toto
+  Statement's `predicate` under a reserved `_webauthn_wrapping` key
+  so the DSSE signature is over a PAE that already includes the
+  wrapping bytes — i.e. the binding is attested by the DSSE layer.
+
+### 14.6 Reference signer
+
+`contrib/signers/mkit-sign-ctap/` drives a plugged-in roaming
+authenticator via CTAP-HID and emits v1.1 responses. See its
+`README.md` for the argv surface; its end-to-end test exercises the
+wire format against any physical authenticator on the host and skips
+with a clear message when none is attached.
+
+### 14.7 Worked example (mock, no hardware)
+
+Request (stdin) — identical to a v1 P-256 request:
+
+```json
+{"algorithm":"p256","pae_base64":"RFNTRXYxIDI4IGFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24gMiB7fQ=="}
+```
+
+Response (stdout, one line, whitespace added here only for display):
+
+```json
+{
+  "keyid": "p256:036b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
+  "sig_base64": "<88 base64 chars>",
+  "webauthn": {
+    "authenticator_data": "<base64url of 37+ bytes>",
+    "client_data_json":   "<base64url of {\"type\":\"webauthn.get\",\"challenge\":\"RFNTRXYxIDI4IGFwcGxpY2F0aW9uL3ZuZC5pbi10b3RvK2pzb24gMiB7fQ\",\"origin\":\"https://mkit.local\",\"crossOrigin\":false}>"
+  }
+}
+```
+
+(Note the `challenge` is base64url-no-pad of the PAE, which differs
+from the standard-base64 `pae_base64` in the request only by padding
+and alphabet for the `+`/`/` vs `-`/`_` positions.)
+
+---
+
 ## Table of contents
 
 1. Scope
@@ -419,3 +569,4 @@ Relation to the DSSE / in-toto / verify layers:
 11. Test vectors
 12. Security model
 13. Compatibility
+14. Protocol v1.1 — WebAuthn extension — 14.1 Motivation; 14.2 Response shape; 14.3 clientDataJSON; 14.4 Verifier contract; 14.5 Absence semantics; 14.6 Reference signer; 14.7 Worked example
