@@ -3,5 +3,5 @@
   "description": "DSSE envelope wrapping statement_basic; one Ed25519 sig over PAE",
   "bin": "envelope_basic.json",
   "size": 559,
-  "blake3": "b1f995e6c6a959d968c55d057149d4c655e5f52e8dbf67da2b2b93e425171565"
+  "blake3": "e0dcd6fa098c6e7de2f9f7ebfbea441b93c91b19638852718670657e4c0fbebc"
 }
