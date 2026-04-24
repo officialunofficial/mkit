@@ -138,20 +138,45 @@ See `docs/SPEC-SIGNING.md` §8 for the convention and
 
 ## Installing
 
-When `v0.1.0` is published, prebuilt binaries will be available via:
+Prebuilt binaries are cosign-signed and published to the GitHub
+Releases page for macOS (arm64 + x86_64) and Linux (x86_64 + arm64).
 
-- **Homebrew** (macOS + Linux):
-  ```sh
-  brew tap officialunofficial/tap
-  brew install mkit
-  ```
-  Tap publication flow: [`contrib/homebrew/README.md`](contrib/homebrew/README.md).
+### One-liner (macOS + Linux)
 
-- **GitHub Releases** — cosign-keyless-signed archives for macOS
-  (arm64 + x86_64) and Linux (x86_64 + arm64):
-  <https://github.com/officialunofficial/mkit/releases>
+```sh
+curl -sSfL https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh | sh
+```
 
-  Verification steps: [`docs/release/SIGNING.md`](docs/release/SIGNING.md).
+Installs into `~/.local/bin/mkit`. Override with `--prefix <dir>`,
+pin a version with `--version v0.1.0`, or require a cosign signature
+check with `--cosign` (needs `cosign` in `PATH`).
+
+### `cargo binstall`
+
+If you already have [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall):
+
+```sh
+cargo binstall --git https://github.com/officialunofficial/mkit mkit-cli
+```
+
+Reads the `[package.metadata.binstall]` block in `mkit-cli/Cargo.toml`
+and fetches the same release archive the one-liner does.
+
+### Homebrew tap (planned)
+
+```sh
+brew tap officialunofficial/tap
+brew install mkit
+```
+
+Tap repo and formula land in a follow-up.
+
+### Manual
+
+Raw archives at <https://github.com/officialunofficial/mkit/releases>.
+Each has a `.sha256` sum and a `.cosign.bundle` for keyless OIDC
+verification — see [`docs/release/SIGNING.md`](docs/release/SIGNING.md)
+for the `cosign verify-blob` incantation.
 
 ## Status
 
