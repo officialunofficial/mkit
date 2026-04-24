@@ -1032,6 +1032,8 @@ name = "mkit-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ed25519-dalek",
+ "k256",
  "mkit-attest",
  "mkit-core",
  "mkit-transport-file",
@@ -1040,6 +1042,7 @@ dependencies = [
  "mkit-transport-s3",
  "mkit-transport-ssh",
  "mockito",
+ "p256",
  "tempfile",
  "thiserror",
 ]

@@ -67,3 +67,9 @@ mkit-transport-memory = { path = "../mkit-transport-memory" }
 # server. SSH dispatch tests only cover URL parsing (no live subprocess
 # in CI), so the `mkit-transport-ssh` exports are enough on their own.
 mockito = "1"
+# `attest_roundtrip` tests derive per-algorithm public keys at test time
+# to build trust-roots TOML files. Dev-only: the CLI binary itself never
+# imports these directly — signing goes through the mkit-attest signers.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
