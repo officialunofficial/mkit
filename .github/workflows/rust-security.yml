@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
       - name: Detect Cargo.lock
         id: lock
@@ -35,13 +35,13 @@ jobs:
 
       - name: Install Rust toolchain
         if: steps.lock.outputs.has_lock == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           toolchain: "1.95.0"
 
       - name: Cache cargo artifacts
         if: steps.lock.outputs.has_lock == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           workspaces: rust -> rust/target
 
@@ -64,7 +64,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
       - name: Detect workspace members
         id: workspace
@@ -78,7 +78,7 @@ jobs:
 
       - name: cargo deny check
         if: steps.workspace.outputs.has_members == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb  # v2
         with:
           manifest-path: rust/Cargo.toml
           command: check
