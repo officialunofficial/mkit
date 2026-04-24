@@ -1,0 +1,1 @@
+{"_type":"https://in-toto.io/Statement/v1","predicate":{},"predicateType":"https://example.com/predicate/v1","subject":[{"digest":{"blake3":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"name":"commit"}]}

@@ -1,0 +1,46 @@
+# cargo-deny schema v2 (EmbarkStudios/cargo-deny >= 0.16). Severity keywords
+# moved from per-check settings to the top level; what remains here are
+# "scope" values: which dep set each check applies to.
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "Zlib",
+    # libfuzzer-sys ships its LLVM-derived C shim under NCSA alongside
+    # its Rust MIT/Apache-2.0. Pulled in only when --features libfuzzer
+    # is enabled (not our default).
+    "NCSA",
+    # webpki-roots / cert bundles used by rustls ship under the
+    # Community Data License (CDLA) Permissive 2.0 — an OSI-aligned
+    # permissive data license for the Mozilla CA trust store snapshot.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace crates depend on each other via `path = "..."` without a
+# version pin, which cargo-deny treats as a wildcard. This is the normal
+# shape for a Rust workspace that never publishes; whitelist it.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

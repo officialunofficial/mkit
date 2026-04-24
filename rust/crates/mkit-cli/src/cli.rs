@@ -1,0 +1,166 @@
+//! CLI surface constants shared by the main dispatcher and the snapshot
+//! tests. Port of `src/cli.zig`.
+//!
+//! `CLI_VERSION` MUST equal `env!("CARGO_PKG_VERSION")` — `build.rs`
+//! enforces this at compile time so cosmetic edits to `Cargo.toml` can
+//! never desync the Homebrew / Scoop contract documented in
+//! `docs/CLI.md`. `mkit version` MUST emit exactly `"mkit <X.Y.Z>\n"`.
+
+/// Version string rendered by `mkit version`. Pinned to the package
+/// version at compile time via `env!`.
+pub const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Full help text for `mkit --help` / `mkit help` / `mkit` (with no
+/// args). Kept verbatim in sync with `src/cli.zig` so downstream
+/// tooling that greps the binary output does not need to know which
+/// language the binary happens to be written in this week.
+pub const HELP_TEXT: &str = "\
+usage: mkit <command> [args]
+
+commands:
+  init              Create a new mkit repository
+  add <path>        Stage a file for the next commit
+  add .             Stage all files (respects .mkitignore)
+  rm <path>         Mark a file for removal in the next commit
+  hash <file>       Hash a file and store it as a blob
+  cat <hash>        Display an object by its hash
+  tree              Snapshot working directory as a tree object
+  commit [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
+  log [--oneline] [--graph] [-n N]  Show commit history
+  status            Show staged and working tree changes
+  diff              Show changes (HEAD vs workdir, or two trees)
+  branch            List branches (* marks current)
+  branch <name>     Create a branch at HEAD
+  branch -d <name>  Delete a branch
+  checkout <branch> Switch HEAD to a branch and restore files
+  tag               List, create, or delete tags
+  config            Show or set configuration values
+  config user.identity <value>  Set author Identity
+                        (ed25519:<hex>, mid:<N>, or raw [kind][len][bytes] hex)
+  config ssh.strict_host_key_checking <yes|no|accept-new>  Override SSH host policy
+  config ssh.user_known_hosts_file <path>  Custom SSH known_hosts file
+  config ssh.identity_file <path>  SSH private key file
+  merge <branch>    Merge a branch into HEAD
+  push [--dry-run]  Push refs and packs to the configured remote
+  pull              Pull changes from remote
+  fetch             Download from remote without merging
+  stash             Stash working dir changes (save WIP)
+  stash save -m <msg>  Stash with a message
+  stash list        List stash entries
+  stash pop [N]     Apply and remove stash entry N (default 0)
+  stash drop [N]    Remove stash entry N without applying
+  stash show [N]    Show diff of stash entry N
+  clone [--depth N] [--sparse ...] <url>  Clone a repository
+  remote            Show remote configuration
+  remote add <url>  Add remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
+  remote set <url>  Alias for 'remote add'
+  keygen            Generate a new Ed25519 signing keypair
+  cherry-pick <hash> Apply a commit to the current branch
+  rebase <branch>    Replay commits onto a different base
+  rebase --continue  Continue rebase after conflict resolution
+  rebase --abort     Abort rebase and restore original state
+  bisect start       Begin binary search for a bug
+  bisect good [hash] Mark a commit as good
+  bisect bad [hash]  Mark a commit as bad
+  bisect reset       End bisect and restore original state
+  sparse-checkout    Manage sparse checkout patterns
+  serve <path>       Start SSH transport server (internal)
+  blame <file>      Show line-level commit attribution
+  verify <hash>     Verify the signature on a commit or remix
+  version           Print version
+";
+
+/// Strip lines beginning with `#` (after any leading whitespace) and
+/// trim surrounding whitespace. Used by `mkit commit` when
+/// `.mkit/COMMIT_EDITMSG` is edited via `$EDITOR`.
+#[must_use]
+pub fn strip_comments_and_trim(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for line in input.split('\n') {
+        let leading = line.trim_start_matches([' ', '\t']);
+        if leading.starts_with('#') {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim_matches([' ', '\t', '\r', '\n']).to_owned()
+}
+
+/// Template written into `.mkit/COMMIT_EDITMSG` before spawning
+/// `$EDITOR`. Matches `src/cli.zig` so snapshots line up byte-for-byte.
+pub const COMMIT_EDITMSG_TEMPLATE: &str = "\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored, and an empty message aborts the commit.\n";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_matches_package_version() {
+        assert_eq!(CLI_VERSION, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn help_contains_every_documented_subcommand() {
+        // Every top-level subcommand enumerated in docs/CLI.md — this
+        // doubles as a reminder to refresh HELP_TEXT whenever CLI.md
+        // grows a new command.
+        let required = [
+            "init",
+            "add",
+            "rm",
+            "hash",
+            "cat",
+            "tree",
+            "commit",
+            "log",
+            "status",
+            "diff",
+            "branch",
+            "checkout",
+            "tag",
+            "config",
+            "merge",
+            "push",
+            "pull",
+            "fetch",
+            "stash",
+            "clone",
+            "remote",
+            "keygen",
+            "cherry-pick",
+            "rebase",
+            "bisect",
+            "sparse-checkout",
+            "serve",
+            "blame",
+            "verify",
+            "version",
+        ];
+        for cmd in required {
+            assert!(
+                HELP_TEXT.contains(cmd),
+                "HELP_TEXT missing documented subcommand: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_comments_drops_hash_lines_and_trims() {
+        let input = "\nhello\n# a comment\nworld\n   # indented\n\n";
+        assert_eq!(strip_comments_and_trim(input), "hello\nworld");
+    }
+
+    #[test]
+    fn strip_comments_all_comments_is_empty() {
+        assert_eq!(strip_comments_and_trim("# only\n# comments\n"), "");
+    }
+
+    #[test]
+    fn strip_comments_preserves_interior_blank_lines() {
+        assert_eq!(
+            strip_comments_and_trim("title\n\nbody\n# comment\n"),
+            "title\n\nbody"
+        );
+    }
+}

@@ -8,6 +8,13 @@ name: Supply chain
 #      uploaded as an artifact.
 #
 # Policy lives in docs/release/SUPPLY-CHAIN.md.
+#
+# Post-Rust-cutover audit (Phase 10):
+#   - dependency-review: left disabled (if: false) pending GHAS toggle.
+#   - scorecard: language-agnostic; no changes needed.
+#   - sbom-refresh: anchore/sbom-action (Syft) auto-detects Cargo.lock;
+#     scanning path: . picks up rust/Cargo.lock correctly. No changes needed.
+#   - cargo-audit: handled by rust-security.yml; not duplicated here.
 
 on:
   pull_request:

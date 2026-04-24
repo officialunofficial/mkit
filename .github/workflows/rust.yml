@@ -1,0 +1,75 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - main
+      - rewrite/rust
+      - "rewrite/rust/**"
+  pull_request:
+    branches:
+      - main
+      - rewrite/rust
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> rust/target
+
+      - name: Check formatting
+        working-directory: rust
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: rust
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        working-directory: rust
+        run: cargo build --locked
+
+      - name: Test
+        working-directory: rust
+        run: cargo test --locked --workspace
+
+      - name: Rename gate
+        run: bash scripts/verify-rename.sh
+
+      - name: Version contract
+        working-directory: rust
+        shell: bash
+        run: |
+          cargo build --release --locked -p mkit-cli
+          out=$(./target/release/mkit version)
+          expected="mkit $(awk -F\" '/^version/ {print $2; exit}' Cargo.toml)"
+          echo "stdout:   [$out]"
+          echo "expected: [$expected]"
+          if [ "$out" != "$expected" ]; then
+            echo "::error::mkit version contract violated — stdout is not exactly 'mkit <X.Y.Z>\\n'"
+            exit 1
+          fi

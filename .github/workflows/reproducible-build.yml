@@ -16,10 +16,13 @@ name: Reproducible Build Smoke Test
 on:
   pull_request:
     paths:
-      - 'src/**'
-      - 'build.zig'
-      - 'build.zig.zon'
-      - '.zigversion'
+      - 'rust/**'
+      - '.github/workflows/reproducible-build.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'rust/**'
       - '.github/workflows/reproducible-build.yml'
   schedule:
     # Mondays at 12:00 UTC — weekly drift check on main.
@@ -30,7 +33,8 @@ permissions:
   contents: read
 
 env:
-  ZIG_VERSION: "0.16.0"
+  RUST_VERSION: "1.95.0"
+  BINARY_NAME: mkit
 
 jobs:
   two-pass-build:
@@ -40,43 +44,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Zig ${{ env.ZIG_VERSION }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${{ env.ZIG_VERSION }}"
-          curl -fsSL --retry 3 --retry-delay 5 \
-            "https://ziglang.org/download/${VERSION}/zig-x86_64-linux-${VERSION}.tar.xz" \
-            -o /tmp/zig.tar.xz
-          mkdir -p "$HOME/.local/zig"
-          tar -xJf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
-          echo "$HOME/.local/zig" >> "$GITHUB_PATH"
-          "$HOME/.local/zig/zig" version
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> rust/target
+          key: reproducible-build
 
       - name: Build pass 1
+        working-directory: rust
+        env:
+          RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
         run: |
-          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux
-          mkdir -p out/pass1
-          cp zig-out/bin/mkit out/pass1/mkit
-          rm -rf zig-out .zig-cache
+          cargo build --release --locked --target-dir target-r1
+          sha256sum target-r1/release/${{ env.BINARY_NAME }} | tee /tmp/hash1.txt
 
       - name: Build pass 2
+        working-directory: rust
+        env:
+          RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
         run: |
-          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux
-          mkdir -p out/pass2
-          cp zig-out/bin/mkit out/pass2/mkit
+          cargo build --release --locked --target-dir target-r2
+          sha256sum target-r2/release/${{ env.BINARY_NAME }} | tee /tmp/hash2.txt
 
       - name: Compare outputs (SHA256)
         id: compare
         run: |
-          H1=$(sha256sum out/pass1/mkit | awk '{print $1}')
-          H2=$(sha256sum out/pass2/mkit | awk '{print $1}')
+          H1=$(awk '{print $1}' /tmp/hash1.txt)
+          H2=$(awk '{print $1}' /tmp/hash2.txt)
           echo "pass1=${H1}"
           echo "pass2=${H2}"
           if [ "${H1}" != "${H2}" ]; then
             echo "::error::Non-deterministic build. pass1=${H1} pass2=${H2}"
             # Fall back to a byte-level cmp to show the first differing offset.
-            cmp out/pass1/mkit out/pass2/mkit || true
+            cmp rust/target-r1/release/${{ env.BINARY_NAME }} \
+                rust/target-r2/release/${{ env.BINARY_NAME }} || true
             exit 1
           fi
           echo "Build is byte-reproducible: ${H1}"
@@ -87,7 +93,10 @@ jobs:
       #   run: sudo apt-get update && sudo apt-get install -y --no-install-recommends diffoscope
       # - name: Diffoscope report
       #   if: failure()
-      #   run: diffoscope --html diffoscope-report.html out/pass1/mkit out/pass2/mkit || true
+      #   run: |
+      #     diffoscope --html diffoscope-report.html \
+      #       rust/target-r1/release/${{ env.BINARY_NAME }} \
+      #       rust/target-r2/release/${{ env.BINARY_NAME }} || true
       # - uses: actions/upload-artifact@v4
       #   if: failure()
       #   with:

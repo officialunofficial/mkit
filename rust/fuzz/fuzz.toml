@@ -1,0 +1,7 @@
+# cargo-fuzz config — keep runs short. Each fuzz target body enforces
+# its own iteration cap (see docs/FUZZ.md guardrails 1, 4, 5), so this
+# only matters when a developer explicitly runs `cargo +nightly fuzz run`.
+[fuzz]
+# Default to a small max_total_time so stray invocations don't burn
+# CPU for hours.
+max_total_time = 60

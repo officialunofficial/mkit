@@ -91,8 +91,12 @@ pre-hashes with BLAKE3 at a lower level; see §7.)
   `BLAKE3(envelope-bytes)` where the bytes are the serialised DSSE
   envelope (§4). Makes the filename deterministic from the envelope
   contents, so reposting an identical attestation is idempotent.
-- File contents — the DSSE envelope as JCS-canonical JSON (§4),
-  terminating with a single `\n`.
+- File contents — UTF-8 JSON bytes of the DSSE envelope (§4). **No
+  trailing newline.** The attestation file ID is `BLAKE3(file_bytes)`
+  hex, so any trailing whitespace would change the ID and break the
+  content-addressing invariant. Implementations that want to append `\n`
+  for human-readable viewing MUST compute the ID over the unpadded bytes
+  first.
 
 There is no index file, no central manifest. `ls .mkit/attestations/<commit-hash>/`
 lists every attestation attached to that commit. This is the same
@@ -169,9 +173,9 @@ bytes) a stable function of the logical content. Implementation rules:
   exponent, no `+` on positive exponents).
 - Strings per JCS §3.2.3 (short-form escapes, `\uXXXX` only for
   control chars).
-- No trailing whitespace; no trailing newline in the serialised form
-  used for hashing, but a single `\n` is appended when written to disk
-  (so `cat` and `diff` behave).
+- No trailing whitespace; no trailing newline. The bytes written to disk
+  are the bytes hashed for the attestation ID (§3) — no padding is
+  appended.
 
 An in-tree JCS writer lives in `src/attestations/jcs.zig`. It is
 restricted to the JSON subset used by DSSE + in-toto (string, number

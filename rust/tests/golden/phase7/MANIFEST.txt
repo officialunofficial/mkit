@@ -1,0 +1,5 @@
+# Phase 7a golden vectors (deterministic)
+# Produced by examples/generate_phase7_goldens.rs
+# Format: <name> <blake3-hex-of-bin-bytes>
+frame_hello f26e000800fbe36217f95c4fe52ae2b50d1e657487ad1ca5b63066c56de89305
+frame_upload_pack ba7a0c2b3be073c9dac237e740e727c61666140cd7dbfcb4df64910746e4afcf

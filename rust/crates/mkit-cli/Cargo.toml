@@ -1,0 +1,45 @@
+[package]
+name = "mkit-cli"
+description = "mkit command-line binary"
+keywords = ["mkit", "vcs", "cli"]
+categories = ["command-line-utilities"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Binary crate — not published to crates.io during the Rust port.
+publish = false
+default-run = "mkit"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mkit"
+path = "src/main.rs"
+
+[dependencies]
+mkit-core = { path = "../mkit-core" }
+mkit-attest = { path = "../mkit-attest" }
+mkit-transport-memory = { path = "../mkit-transport-memory" }
+mkit-transport-file = { path = "../mkit-transport-file" }
+mkit-transport-http = { path = "../mkit-transport-http" }
+mkit-transport-s3 = { path = "../mkit-transport-s3" }
+mkit-transport-ssh = { path = "../mkit-transport-ssh" }
+
+# `derive` and `wrap_help` are intentionally disabled so help-text output
+# is deterministic — we render help ourselves from a compile-time const
+# that cli_test.zig in the Zig tree snapshot-matches byte-for-byte.
+clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage"] }
+tempfile = "3"
+thiserror = "2"
+
+[build-dependencies]
+# build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by
+# reading src/cli.rs. No external deps — plain file I/O + string match.
+
+[dev-dependencies]
+tempfile = "3"
+mkit-transport-memory = { path = "../mkit-transport-memory" }

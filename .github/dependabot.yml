@@ -1,12 +1,5 @@
 # Dependabot configuration
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-#
-# Zig ecosystem note: Dependabot does not currently support Zig
-# `build.zig.zon` dependencies. mkit ships with zero external Zig
-# packages (see docs/release/SUPPLY-CHAIN.md), so the only upstream
-# dependency surface worth tracking automatically today is the GitHub
-# Actions pinned in .github/workflows/. Add further ecosystems here
-# once Dependabot supports them or once mkit grows deps in them.
 
 version: 2
 updates:
@@ -29,6 +22,26 @@ updates:
       # the reviewer load stays low; open separate PRs only for major
       # bumps (where a breaking change review matters).
       actions-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "cargo"
+    directory: "/rust"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "deps(rust)"
+      include: "scope"
+    groups:
+      cargo-minor:
         update-types:
           - "minor"
           - "patch"

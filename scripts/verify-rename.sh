@@ -27,12 +27,10 @@ FORBIDDEN=(
 
 # Paths scanned. Docs and the changelog are intentionally excluded —
 # they carry historical references to the upstream "zmit" project name
-# as part of the project's provenance. The public build surface (src/,
-# build files, CI workflows, contrib, man, completions) MUST be clean.
+# as part of the project's provenance. The public build surface
+# (rust/, CI workflows, contrib, man, completions) MUST be clean.
 SCAN_PATHS=(
-  src/
-  build.zig
-  build.zig.zon
+  rust/
   contrib/
   completions/
   man/
@@ -43,8 +41,7 @@ SCAN_PATHS=(
 
 EXCLUDES=(
   --exclude-dir=.git
-  --exclude-dir=.zig-cache
-  --exclude-dir=zig-out
+  --exclude-dir=target
   --exclude=verify-rename.sh
 )
 

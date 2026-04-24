@@ -1,0 +1,85 @@
+name: Rust Security
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Every Monday at 06:00 UTC
+  pull_request:
+    branches:
+      - main
+      - rewrite/rust
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Cargo.lock
+        id: lock
+        shell: bash
+        run: |
+          if [ -f rust/Cargo.lock ]; then
+            echo "has_lock=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_lock=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust toolchain
+        if: steps.lock.outputs.has_lock == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+
+      - name: Cache cargo artifacts
+        if: steps.lock.outputs.has_lock == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> rust/target
+
+      # rustsec/audit-check@v1 does not accept a working-directory input
+      # (silently dropped; the action then `cargo generate-lockfile`s at the
+      # repo root, which has no Cargo.toml, and fails with exit 101). Install
+      # cargo-audit ourselves and point it at rust/Cargo.lock directly.
+      - name: Install cargo-audit
+        if: steps.lock.outputs.has_lock == 'true'
+        run: cargo install --locked cargo-audit
+
+      - name: cargo audit
+        if: steps.lock.outputs.has_lock == 'true'
+        working-directory: rust
+        run: cargo audit --deny warnings
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect workspace members
+        id: workspace
+        shell: bash
+        run: |
+          if ls rust/crates/*/Cargo.toml >/dev/null 2>&1; then
+            echo "has_members=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_members=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: cargo deny check
+        if: steps.workspace.outputs.has_members == 'true'
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: rust/Cargo.toml
+          command: check
+          arguments: --all-features

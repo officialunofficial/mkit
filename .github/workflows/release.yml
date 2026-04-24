@@ -4,7 +4,7 @@ name: Release
 #
 # This workflow:
 #   1. Builds static mkit binaries for macOS (arm64/x86_64) and Linux (x86_64/arm64)
-#      with a pinned Zig toolchain.
+#      with a pinned Rust toolchain (see rust/rust-toolchain.toml).
 #   2. Produces a CycloneDX SBOM (sbom.cdx.json).
 #   3. Signs the per-platform SHA256SUMS with cosign OIDC keyless
 #      (transparency log: Rekor).
@@ -21,10 +21,9 @@ on:
     tags:
       - 'v*.*.*'
   # Manual escape hatch. GitHub occasionally de-dupes tag-push events when
-  # a prior workflow for a nearby tag is still active or recently cancelled
-  # — we hit this between v0.2.0 (cancelled after macos-13 retirement
-  # stuck it) and v0.2.1 (never auto-fired). workflow_dispatch lets us
-  # force a release build against an existing tag from the Actions UI.
+  # a prior workflow for a nearby tag is still active or recently cancelled.
+  # workflow_dispatch lets us force a release build against an existing tag
+  # from the Actions UI.
   workflow_dispatch:
     inputs:
       tag:
@@ -38,7 +37,7 @@ permissions:
   attestations: write   # supply-chain attestations
 
 env:
-  ZIG_VERSION: "0.16.0"
+  RUST_VERSION: "1.95.0"
   BINARY_NAME: mkit
 
 jobs:
@@ -49,22 +48,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-macos
+          - target: aarch64-apple-darwin
             runner: macos-14
             archive_ext: tar.gz
-          # GitHub retired the `macos-13` runner image in ~March 2026, so
-          # x86_64-macos jobs pinned to it queue forever. The fix: run on
-          # the arm64 host (`macos-14`) and let Zig cross-compile Mach-O
-          # to x86_64. The `zig build -Dtarget=x86_64-macos` step below
-          # handles it for free — no toolchain tricks needed, Zig was
-          # designed cross-compile-first.
-          - target: x86_64-macos
+          # x86_64 macOS built on the arm64 host via rustup cross-compile.
+          - target: x86_64-apple-darwin
             runner: macos-14
             archive_ext: tar.gz
-          - target: x86_64-linux
+          - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             archive_ext: tar.gz
-          - target: aarch64-linux
+          - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             archive_ext: tar.gz
     outputs:
@@ -74,8 +68,6 @@ jobs:
         id: meta
         shell: bash
         run: |
-          # On a tag push, GITHUB_REF_NAME is the tag. On workflow_dispatch,
-          # use the inputs.tag the operator supplied.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ inputs.tag }}"
           else
@@ -97,48 +89,46 @@ jobs:
           ref: ${{ steps.meta.outputs.tag }}
           fetch-depth: 0
 
-      - name: Install Zig ${{ env.ZIG_VERSION }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${{ env.ZIG_VERSION }}"
-          arch="$(uname -m)"
-          case "${{ runner.os }}-$arch" in
-            macOS-arm64)     tarball="zig-aarch64-macos-${VERSION}.tar.xz" ;;
-            macOS-x86_64)    tarball="zig-x86_64-macos-${VERSION}.tar.xz" ;;
-            Linux-x86_64)    tarball="zig-x86_64-linux-${VERSION}.tar.xz" ;;
-            Linux-aarch64)   tarball="zig-aarch64-linux-${VERSION}.tar.xz" ;;
-            *) echo "unsupported platform: ${{ runner.os }}-$arch"; exit 1 ;;
-          esac
-          url="https://ziglang.org/download/${VERSION}/${tarball}"
-          echo "Downloading $url"
-          curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/zig.tar.xz
-          mkdir -p "$HOME/.local/zig"
-          tar -xJf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
-          echo "$HOME/.local/zig" >> "$GITHUB_PATH"
-          "$HOME/.local/zig/zig" version
+      - name: Install Rust ${{ env.RUST_VERSION }} + target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+          components: rustfmt,clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> rust/target
+          key: release-${{ matrix.target }}
 
       - name: Build release binary
         shell: bash
+        working-directory: rust
+        env:
+          # codegen-units=1 + strip = reproducible-build friendly; mirrors
+          # [profile.release] in rust/Cargo.toml.
+          RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
         run: |
-          zig build \
-            -Doptimize=ReleaseSafe \
-            -Dtarget=${{ matrix.target }} \
-            --summary all
+          cargo build \
+            --release \
+            --locked \
+            --target ${{ matrix.target }} \
+            --bin ${{ env.BINARY_NAME }}
 
       - name: Stage archive contents
         shell: bash
         run: |
           STAGE="${{ steps.meta.outputs.stage }}"
           mkdir -p "${STAGE}"
-          # Locate the produced binary. Zig emits to zig-out/bin/ by default.
-          if [ -f "zig-out/bin/${{ env.BINARY_NAME }}" ]; then
-            cp "zig-out/bin/${{ env.BINARY_NAME }}" "${STAGE}/"
-          elif [ -f "zig-out/bin/${{ env.BINARY_NAME }}.exe" ]; then
-            cp "zig-out/bin/${{ env.BINARY_NAME }}.exe" "${STAGE}/"
+          BIN_SRC="rust/target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+          if [ -f "${BIN_SRC}" ]; then
+            cp "${BIN_SRC}" "${STAGE}/"
+          elif [ -f "${BIN_SRC}.exe" ]; then
+            cp "${BIN_SRC}.exe" "${STAGE}/"
           else
-            echo "ERROR: mkit binary not found in zig-out/bin/" >&2
-            ls -la zig-out/bin/ || true
+            echo "ERROR: ${{ env.BINARY_NAME }} binary not found at ${BIN_SRC}" >&2
+            ls -la "rust/target/${{ matrix.target }}/release/" || true
             exit 1
           fi
           cp LICENSE-MIT LICENSE-APACHE README.md "${STAGE}/"
@@ -361,5 +351,6 @@ jobs:
 
             ### SBOM
 
-            A CycloneDX SBOM (`sbom.cdx.json`) is attached. Zero external Zig
-            packages today — the SBOM reflects toolchain + OS libraries only.
+            A CycloneDX SBOM (`sbom.cdx.json`) is attached. Reflects the
+            Rust crate graph (blake3, reqwest/rustls, ed25519-dalek, etc.)
+            plus toolchain and OS libraries.
