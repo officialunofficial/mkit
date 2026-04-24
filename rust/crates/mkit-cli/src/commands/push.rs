@@ -1,9 +1,8 @@
 //! `mkit push` — push refs/packs to the configured remote.
 //!
-//! The Rust port wires `mkit+memory://` and `mkit+file://` end-to-end;
-//! the remaining schemes (http/s3/ssh) dispatch into their respective
-//! transport crates in Phase 10 once the binary-level plumbing has
-//! settled.
+//! Scheme dispatch lives in `remote_dispatch::open`, which now covers
+//! `mkit+file://`, `mkit+https://` (and `mkit+http://`), `mkit+s3://`,
+//! and `mkit+ssh://`. `mkit+memory://` remains in-process only.
 
 use std::io::Write;
 
