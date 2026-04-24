@@ -239,9 +239,9 @@ impl Transport for SshTransport {
         }
         let (opcode, payload) = if matches!(condition, RefWriteCondition::Any) {
             // `write_ref` wire shape: no condition byte.
-            (OP_WRITE_REF, encode_write_ref(name, hash))
+            (OP_WRITE_REF, encode_write_ref(name, hash)?)
         } else {
-            (OP_UPDATE_REF, encode_update_ref(name, condition, hash))
+            (OP_UPDATE_REF, encode_update_ref(name, condition, hash)?)
         };
         let (status, _data) = self.exchange(opcode, &payload)?;
         match status {
@@ -267,7 +267,7 @@ impl Transport for SshTransport {
         if name.len() > MAX_REF_NAME {
             return Err(TransportError::InvalidRef("ref name too long".into()));
         }
-        let payload = encode_read_ref(name);
+        let payload = encode_read_ref(name)?;
         let (status, data) = self.exchange(OP_READ_REF, &payload)?;
         match status {
             STATUS_NULL => Ok(None),
@@ -291,7 +291,7 @@ impl Transport for SshTransport {
         if prefix.len() > MAX_REF_NAME {
             return Err(TransportError::InvalidRef("ref prefix too long".into()));
         }
-        let payload = encode_list_refs(prefix);
+        let payload = encode_list_refs(prefix)?;
         let (status, data) = self.exchange(OP_LIST_REFS, &payload)?;
         match status {
             STATUS_OK => decode_ref_list(&data),
@@ -703,25 +703,53 @@ pub fn decode_list_refs(payload: &[u8]) -> TransportResult<String> {
     Ok(prefix)
 }
 
+/// Check `name.len() <= MAX_REF_NAME` and coerce to `u16`. The encoder
+/// enforces this cap even if the Transport impl has already checked —
+/// we don't want a silent truncation path for any caller of the public
+/// encoder surface. Returns an `InvalidRef` error mentioning the cap.
+fn ref_name_len_u16(name: &str) -> TransportResult<u16> {
+    let len = name.len();
+    if len > MAX_REF_NAME {
+        return Err(TransportError::InvalidRef(format!(
+            "ref name exceeds {MAX_REF_NAME}-byte cap: got {len}"
+        )));
+    }
+    // `len <= MAX_REF_NAME (4096)` so the cast is in range of u16.
+    u16::try_from(len).map_err(|_| {
+        TransportError::InvalidRef(format!("ref name too long: got {len}"))
+    })
+}
+
 /// Encode an `OP_WRITE_REF` request payload for the client.
 ///
 /// Wire format: `[u16 LE name_len][name bytes][32-byte hash]`
-#[must_use]
-pub fn encode_write_ref(name: &str, hash: &Hash) -> Vec<u8> {
+///
+/// # Errors
+/// Returns [`TransportError::InvalidRef`] if `name.len()` exceeds
+/// `MAX_REF_NAME` (4096 bytes). The encoder enforces this cap
+/// independently of any caller-side check.
+pub fn encode_write_ref(name: &str, hash: &Hash) -> TransportResult<Vec<u8>> {
     let name_bytes = name.as_bytes();
-    let name_len = u16::try_from(name_bytes.len()).unwrap_or(0);
+    let name_len = ref_name_len_u16(name)?;
     let mut out = Vec::with_capacity(2 + name_bytes.len() + 32);
     out.extend_from_slice(&name_len.to_le_bytes());
     out.extend_from_slice(name_bytes);
     out.extend_from_slice(hash);
-    out
+    Ok(out)
 }
 
 /// Encode an `OP_UPDATE_REF` request payload for the client.
-#[must_use]
-pub fn encode_update_ref(name: &str, condition: RefWriteCondition, hash: &Hash) -> Vec<u8> {
+///
+/// # Errors
+/// Returns [`TransportError::InvalidRef`] if `name.len()` exceeds
+/// `MAX_REF_NAME` (4096 bytes).
+pub fn encode_update_ref(
+    name: &str,
+    condition: RefWriteCondition,
+    hash: &Hash,
+) -> TransportResult<Vec<u8>> {
     let name_bytes = name.as_bytes();
-    let name_len = u16::try_from(name_bytes.len()).unwrap_or(0);
+    let name_len = ref_name_len_u16(name)?;
     let mut out = Vec::with_capacity(1 + 32 + 2 + name_bytes.len() + 32);
     match condition {
         RefWriteCondition::Any => out.push(protocol::COND_ANY),
@@ -734,29 +762,35 @@ pub fn encode_update_ref(name: &str, condition: RefWriteCondition, hash: &Hash) 
     out.extend_from_slice(&name_len.to_le_bytes());
     out.extend_from_slice(name_bytes);
     out.extend_from_slice(hash);
-    out
+    Ok(out)
 }
 
 /// Encode an `OP_READ_REF` request payload for the client.
-#[must_use]
-pub fn encode_read_ref(name: &str) -> Vec<u8> {
+///
+/// # Errors
+/// Returns [`TransportError::InvalidRef`] if `name.len()` exceeds
+/// `MAX_REF_NAME` (4096 bytes).
+pub fn encode_read_ref(name: &str) -> TransportResult<Vec<u8>> {
     let name_bytes = name.as_bytes();
-    let name_len = u16::try_from(name_bytes.len()).unwrap_or(0);
+    let name_len = ref_name_len_u16(name)?;
     let mut out = Vec::with_capacity(2 + name_bytes.len());
     out.extend_from_slice(&name_len.to_le_bytes());
     out.extend_from_slice(name_bytes);
-    out
+    Ok(out)
 }
 
 /// Encode an `OP_LIST_REFS` request payload for the client.
-#[must_use]
-pub fn encode_list_refs(prefix: &str) -> Vec<u8> {
+///
+/// # Errors
+/// Returns [`TransportError::InvalidRef`] if `prefix.len()` exceeds
+/// `MAX_REF_NAME` (4096 bytes).
+pub fn encode_list_refs(prefix: &str) -> TransportResult<Vec<u8>> {
     let prefix_bytes = prefix.as_bytes();
-    let prefix_len = u16::try_from(prefix_bytes.len()).unwrap_or(0);
+    let prefix_len = ref_name_len_u16(prefix)?;
     let mut out = Vec::with_capacity(2 + prefix_bytes.len());
     out.extend_from_slice(&prefix_len.to_le_bytes());
     out.extend_from_slice(prefix_bytes);
-    out
+    Ok(out)
 }
 
 /// Decode the ref-list payload emitted by the server in response to
@@ -808,19 +842,24 @@ pub fn decode_ref_list(data: &[u8]) -> TransportResult<Vec<Ref>> {
 ///
 /// This is the complement of [`decode_ref_list`] and is used by the server
 /// to serialise the ref listing back to the client.
-#[must_use]
-pub fn encode_ref_list(refs: &[Ref]) -> Vec<u8> {
+///
+/// # Errors
+/// - [`TransportError::InvalidRef`] if any entry's name exceeds
+///   `MAX_REF_NAME` (4096 bytes).
+/// - [`TransportError::InvalidResponse`] if `refs.len()` does not fit
+///   in a `u32`.
+pub fn encode_ref_list(refs: &[Ref]) -> TransportResult<Vec<u8>> {
     let mut out = Vec::with_capacity(4 + refs.len() * (2 + 32));
-    let count = u32::try_from(refs.len()).unwrap_or(u32::MAX);
+    let count = u32::try_from(refs.len()).map_err(|_| TransportError::InvalidResponse)?;
     out.extend_from_slice(&count.to_le_bytes());
     for r in refs {
         let name_bytes = r.name.as_bytes();
-        let name_len = u16::try_from(name_bytes.len()).unwrap_or(u16::MAX);
+        let name_len = ref_name_len_u16(&r.name)?;
         out.extend_from_slice(&name_len.to_le_bytes());
         out.extend_from_slice(name_bytes);
         out.extend_from_slice(&r.hash.unwrap_or([0u8; 32]));
     }
-    out
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -853,7 +892,7 @@ mod tests {
     fn encode_write_ref_shape() {
         let name = "refs/heads/main";
         let h = [0xABu8; 32];
-        let got = encode_write_ref(name, &h);
+        let got = encode_write_ref(name, &h).unwrap();
         // Expected wire: [u16 LE name_len][name][32 hash].
         assert_eq!(got.len(), 2 + name.len() + 32);
         let name_len = u16::from_le_bytes([got[0], got[1]]);
@@ -866,7 +905,7 @@ mod tests {
     fn encode_update_ref_any_variant() {
         let name = "refs/heads/dev";
         let h = [1u8; 32];
-        let got = encode_update_ref(name, RefWriteCondition::Any, &h);
+        let got = encode_update_ref(name, RefWriteCondition::Any, &h).unwrap();
         assert_eq!(got[0], protocol::COND_ANY);
         let name_len = u16::from_le_bytes([got[1], got[2]]);
         assert_eq!(name_len as usize, name.len());
@@ -879,7 +918,7 @@ mod tests {
         let name = "refs/heads/main";
         let h = [2u8; 32];
         let expected = [0x5Au8; 32];
-        let got = encode_update_ref(name, RefWriteCondition::Match(expected), &h);
+        let got = encode_update_ref(name, RefWriteCondition::Match(expected), &h).unwrap();
         assert_eq!(got[0], protocol::COND_MATCH);
         assert_eq!(&got[1..33], &expected);
         let name_len = u16::from_le_bytes([got[33], got[34]]);
@@ -890,7 +929,7 @@ mod tests {
 
     #[test]
     fn encode_read_ref_shape() {
-        let got = encode_read_ref("refs/tags/v1.0");
+        let got = encode_read_ref("refs/tags/v1.0").unwrap();
         let name_len = u16::from_le_bytes([got[0], got[1]]);
         assert_eq!(name_len as usize, "refs/tags/v1.0".len());
         assert_eq!(&got[2..], b"refs/tags/v1.0");
@@ -898,7 +937,7 @@ mod tests {
 
     #[test]
     fn encode_list_refs_shape() {
-        let got = encode_list_refs("refs/heads/");
+        let got = encode_list_refs("refs/heads/").unwrap();
         let len = u16::from_le_bytes([got[0], got[1]]);
         assert_eq!(len as usize, "refs/heads/".len());
         assert_eq!(&got[2..], b"refs/heads/");
@@ -1028,7 +1067,7 @@ mod tests {
 
     #[test]
     fn smoke_write_ref_frame() {
-        let payload = encode_write_ref("refs/heads/main", &[0xDDu8; 32]);
+        let payload = encode_write_ref("refs/heads/main", &[0xDDu8; 32]).unwrap();
         framing_roundtrip(OP_WRITE_REF, &payload, STATUS_OK, &[]);
     }
 
@@ -1038,19 +1077,20 @@ mod tests {
             "refs/heads/main",
             RefWriteCondition::Match([0xEEu8; 32]),
             &[0xFFu8; 32],
-        );
+        )
+        .unwrap();
         framing_roundtrip(OP_UPDATE_REF, &payload, STATUS_OK, &[]);
     }
 
     #[test]
     fn smoke_read_ref_frame() {
-        let payload = encode_read_ref("refs/heads/main");
+        let payload = encode_read_ref("refs/heads/main").unwrap();
         framing_roundtrip(OP_READ_REF, &payload, STATUS_OK, &[0x42u8; 32]);
     }
 
     #[test]
     fn smoke_list_refs_frame() {
-        let payload = encode_list_refs("refs/heads/");
+        let payload = encode_list_refs("refs/heads/").unwrap();
         let mut reply = Vec::new();
         reply.extend_from_slice(&0u32.to_le_bytes());
         framing_roundtrip(OP_LIST_REFS, &payload, STATUS_OK, &reply);
@@ -1123,5 +1163,67 @@ mod tests {
         // When the user explicitly pinned StrictHostKeyChecking, we do
         // NOT also add the accept-new fallback.
         assert!(!args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"));
+    }
+
+    // ------------------------------------------------------------------
+    // E8: encoders must refuse oversize names instead of truncating
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn encode_write_ref_rejects_oversize_name() {
+        let name = "a".repeat(70_000);
+        let h = [0u8; 32];
+        let err = encode_write_ref(&name, &h)
+            .expect_err("70_000-byte name must error, not silently truncate");
+        assert!(matches!(err, TransportError::InvalidRef(_)));
+    }
+
+    #[test]
+    fn encode_write_ref_rejects_name_at_max_ref_name() {
+        // MAX_REF_NAME = 4096; the encoder must reject > MAX_REF_NAME
+        // even without relying on the Transport impl to have pre-checked.
+        // 4097 bytes is one past the cap.
+        let name = "a".repeat(MAX_REF_NAME + 1);
+        let h = [0u8; 32];
+        assert!(encode_write_ref(&name, &h).is_err());
+    }
+
+    #[test]
+    fn encode_write_ref_accepts_short_name() {
+        // Regression: 100-byte valid name still round-trips.
+        let name = "a".repeat(100);
+        let h = [0u8; 32];
+        let got = encode_write_ref(&name, &h).expect("short name encodes");
+        let name_len = u16::from_le_bytes([got[0], got[1]]);
+        assert_eq!(name_len as usize, 100);
+    }
+
+    #[test]
+    fn encode_update_ref_rejects_oversize_name() {
+        let name = "a".repeat(70_000);
+        let h = [0u8; 32];
+        assert!(encode_update_ref(&name, RefWriteCondition::Any, &h).is_err());
+    }
+
+    #[test]
+    fn encode_read_ref_rejects_oversize_name() {
+        let name = "a".repeat(70_000);
+        assert!(encode_read_ref(&name).is_err());
+    }
+
+    #[test]
+    fn encode_list_refs_rejects_oversize_prefix() {
+        let prefix = "a".repeat(70_000);
+        assert!(encode_list_refs(&prefix).is_err());
+    }
+
+    #[test]
+    fn encode_ref_list_rejects_oversize_name_entry() {
+        let long = "a".repeat(70_000);
+        let refs = vec![Ref {
+            name: long,
+            hash: Some([0u8; 32]),
+        }];
+        assert!(encode_ref_list(&refs).is_err());
     }
 }

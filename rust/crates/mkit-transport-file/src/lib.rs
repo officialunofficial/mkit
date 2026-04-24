@@ -143,6 +143,12 @@ fn sync_parent(dir: &Path) -> io::Result<()> {
 #[derive(Debug)]
 pub struct FileTransport {
     root: PathBuf,
+    /// Canonicalised `root` (if it exists on the filesystem at construction
+    /// time). Used by the path-escape guard to reject ref paths that resolve
+    /// outside the transport tree via a pre-existing symlink. Falls back to
+    /// `root` itself when canonicalisation fails (e.g. the dir does not
+    /// exist yet); in that case the guard matches on the literal prefix.
+    canonical_root: PathBuf,
     /// Serialises `Match` CAS within a single process.
     cas_lock: Mutex<()>,
 }
@@ -153,8 +159,11 @@ impl FileTransport {
     /// on demand.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root: PathBuf = root.into();
+        let canonical_root = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
         Self {
-            root: root.into(),
+            root,
+            canonical_root,
             cas_lock: Mutex::new(()),
         }
     }
@@ -165,6 +174,54 @@ impl FileTransport {
 
     fn ref_path(&self, name: &str) -> PathBuf {
         self.root.join(name)
+    }
+
+    /// Path-escape guard: verify that `path` (whether it already exists
+    /// or not) resolves under `self.canonical_root`. Returns the path
+    /// unchanged on success, or a `RemoteError` if the operation would
+    /// escape the transport tree via a pre-existing symlink.
+    ///
+    /// - If `path` exists, `canonicalize(path)` is compared against
+    ///   `canonical_root`.
+    /// - If `path` does not exist yet, we canonicalise the closest
+    ///   existing ancestor and require it to sit under
+    ///   `canonical_root`. This catches writes into a symlinked parent
+    ///   directory.
+    fn check_ref_path(&self, path: &Path) -> TransportResult<()> {
+        let resolved = if path.exists() {
+            fs::canonicalize(path).map_err(|e| {
+                TransportError::RemoteError(format!("canonicalize ref path failed: {e}"))
+            })?
+        } else {
+            // Walk up to the closest existing ancestor and canonicalise it.
+            let mut anchor = path.parent();
+            loop {
+                match anchor {
+                    Some(p) if p.exists() => {
+                        break fs::canonicalize(p).map_err(|e| {
+                            TransportError::RemoteError(format!(
+                                "canonicalize ref parent failed: {e}"
+                            ))
+                        })?;
+                    }
+                    Some(p) => anchor = p.parent(),
+                    None => {
+                        // Nothing on-disk matches; fall back to the
+                        // literal prefix check below using `path` itself.
+                        break path.to_path_buf();
+                    }
+                }
+            }
+        };
+
+        if resolved.starts_with(&self.canonical_root) {
+            Ok(())
+        } else {
+            Err(TransportError::RemoteError(format!(
+                "path escape: {} resolves outside transport root",
+                path.display()
+            )))
+        }
     }
 }
 
@@ -209,6 +266,7 @@ impl Transport for FileTransport {
         }
 
         let dest = self.ref_path(name);
+        self.check_ref_path(&dest)?;
         let wire = encode_ref_wire(hash);
 
         match condition {
@@ -258,6 +316,12 @@ impl Transport for FileTransport {
             return Err(TransportError::InvalidRef(name.to_owned()));
         }
         let path = self.ref_path(name);
+        // Path-escape guard: if the file already exists, it must
+        // canonicalise under the transport root. If it does not exist
+        // the read will return `None` via `read_ref_raw` unchanged.
+        if path.exists() {
+            self.check_ref_path(&path)?;
+        }
         read_ref_raw(&path)
             .map_err(|e| TransportError::RemoteError(format!("read_ref I/O error: {e}")))
     }
@@ -761,5 +825,73 @@ mod tests {
             .count();
         assert_eq!(successes, 1, "exactly one Missing writer should succeed");
         assert_eq!(conflicts, 3, "the other three should get RefConflict");
+    }
+
+    // ------------------------------------------------------------------
+    // E7: path-escape guard — symlink inside refs/ cannot escape root
+    // ------------------------------------------------------------------
+
+    /// A pre-existing symlink in `<root>/refs/...` that points outside
+    /// `<root>/` MUST NOT allow read/write to escape the transport root.
+    /// The transport must refuse the operation with a `RemoteError`
+    /// mentioning the path-escape guard.
+    #[cfg(unix)]
+    #[test]
+    fn read_ref_rejects_symlink_escaping_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tmp();
+        let outside = tmp();
+        let outside_file = outside.path().join("secret");
+        fs::write(&outside_file, b"outside content").unwrap();
+
+        // Create refs/heads/, then a symlink evil -> outside_file.
+        let refs_heads = dir.path().join("refs").join("heads");
+        fs::create_dir_all(&refs_heads).unwrap();
+        symlink(&outside_file, refs_heads.join("evil")).unwrap();
+
+        let t = FileTransport::new(dir.path());
+        let err = t
+            .read_ref("refs/heads/evil")
+            .expect_err("read_ref on path-escape symlink must return an error");
+        match err {
+            TransportError::RemoteError(msg) => {
+                assert!(
+                    msg.to_lowercase().contains("escape"),
+                    "error should mention path escape: {msg}"
+                );
+            }
+            other => panic!("expected RemoteError with path-escape, got {other:?}"),
+        }
+    }
+
+    /// Write side: a symlink that already exists inside `<root>/` but
+    /// points outside it MUST NOT be followed by an unconditional write.
+    #[cfg(unix)]
+    #[test]
+    fn write_ref_rejects_symlink_escaping_root() {
+        use std::os::unix::fs::symlink;
+        use mkit_core::hash::hash as blake3_hash;
+
+        let dir = tmp();
+        let outside = tmp();
+        let outside_file = outside.path().join("target");
+        fs::write(&outside_file, b"old").unwrap();
+
+        let refs_heads = dir.path().join("refs").join("heads");
+        fs::create_dir_all(&refs_heads).unwrap();
+        symlink(&outside_file, refs_heads.join("evil")).unwrap();
+
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"should-not-write");
+        let err = t
+            .update_ref("refs/heads/evil", RefWriteCondition::Any, &h)
+            .expect_err("update_ref on path-escape symlink must return an error");
+        assert!(matches!(err, TransportError::RemoteError(_)));
+
+        // The outside file must NOT have been overwritten with the new
+        // ref wire.
+        let after = fs::read(&outside_file).unwrap();
+        assert_eq!(after, b"old", "outside file was clobbered despite guard");
     }
 }

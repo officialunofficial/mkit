@@ -192,7 +192,10 @@ fn dispatch(tx: &FileTransport, op: u8, payload: &[u8]) -> (u8, Vec<u8>) {
         },
         OP_LIST_REFS => match decode_list_refs(payload) {
             Ok(prefix) => match tx.list_refs(&prefix) {
-                Ok(refs) => (STATUS_OK, encode_ref_list(&refs)),
+                Ok(refs) => match encode_ref_list(&refs) {
+                    Ok(body) => (STATUS_OK, body),
+                    Err(_) => (STATUS_ERROR, b"encode error".to_vec()),
+                },
                 Err(_) => (STATUS_ERROR, b"list refs failed".to_vec()),
             },
             Err(_) => (STATUS_ERROR, b"decode error".to_vec()),
@@ -282,10 +285,14 @@ mod tests {
         let _ = mkit_transport_ssh::decode_read_ref as fn(&[u8]) -> _;
         let _ = mkit_transport_ssh::decode_list_refs as fn(&[u8]) -> _;
         let _ = mkit_transport_ssh::decode_ref_list as fn(&[u8]) -> _;
-        let _ = mkit_transport_ssh::encode_write_ref as fn(&str, &_) -> _;
-        let _ = mkit_transport_ssh::encode_update_ref as fn(&str, _, &_) -> _;
-        let _ = mkit_transport_ssh::encode_read_ref as fn(&str) -> _;
-        let _ = mkit_transport_ssh::encode_list_refs as fn(&str) -> _;
+        let _ = mkit_transport_ssh::encode_write_ref
+            as fn(&str, &_) -> mkit_core::protocol::TransportResult<_>;
+        let _ = mkit_transport_ssh::encode_update_ref
+            as fn(&str, _, &_) -> mkit_core::protocol::TransportResult<_>;
+        let _ = mkit_transport_ssh::encode_read_ref
+            as fn(&str) -> mkit_core::protocol::TransportResult<_>;
+        let _ = mkit_transport_ssh::encode_list_refs
+            as fn(&str) -> mkit_core::protocol::TransportResult<_>;
     }
 
     // --- A1: path containment --------------------------------------------

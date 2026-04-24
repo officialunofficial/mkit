@@ -37,6 +37,7 @@
 #![deny(unsafe_code)]
 
 use std::env;
+use std::io::Read;
 use std::thread;
 use std::time::Duration;
 
@@ -50,7 +51,8 @@ use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, IF_MATCH, IF_NONE_MATCH};
 use serde::{Deserialize, Serialize};
-use url::Url;
+use std::net::{Ipv4Addr, Ipv6Addr};
+use url::{Host, Url};
 
 /// Environment variable consulted at [`HttpTransport::connect`] time for
 /// an optional Bearer token.
@@ -64,6 +66,45 @@ pub const TOKEN_ENV: &str = "MKIT_API_TOKEN";
 /// mapping to the seconds-based SPEC-TRANSPORT §8 ladder.
 #[allow(clippy::duration_suboptimal_units)]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Upper bound on a single `download_pack` response body, matching the
+/// S3 transport's `PACK_BODY_LIMIT`. Prevents an unbounded allocation if
+/// a misbehaving server streams an oversize response.
+pub const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Validate that `url` uses either `https://` (always allowed) or plain
+/// `http://` pointing at a loopback host (`127.0.0.1`, `::1`, or
+/// `localhost`). Any other combination is refused with
+/// [`TransportError::InsecureScheme`].
+///
+/// # Errors
+/// - [`TransportError::InsecureScheme`] if `url.scheme()` is `http` and
+///   the host is not a recognised loopback literal.
+/// - [`TransportError::InvalidResponse`] if the scheme is neither
+///   `http` nor `https`.
+pub fn validate_http_scheme(url: &Url) -> TransportResult<()> {
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            // Accept `127.0.0.1`, `::1`, and `localhost` (case-insensitive)
+            // and nothing else. We match on the parsed `Host` to avoid
+            // spelling-dependent checks on `host_str()` (which returns
+            // `[::1]` for bracketed IPv6 literals on some url versions).
+            let ok = match url.host() {
+                Some(Host::Ipv4(ip)) => ip == Ipv4Addr::LOCALHOST,
+                Some(Host::Ipv6(ip)) => ip == Ipv6Addr::LOCALHOST,
+                Some(Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+                None => false,
+            };
+            if ok {
+                Ok(())
+            } else {
+                Err(TransportError::InsecureScheme)
+            }
+        }
+        _ => Err(TransportError::InvalidResponse),
+    }
+}
 
 /// Blocking HTTP transport for the mkit VCS Worker dialect.
 ///
@@ -97,10 +138,7 @@ impl HttpTransport {
             .ok_or(TransportError::InvalidResponse)?;
 
         let base = Url::parse(stripped).map_err(|_| TransportError::InvalidResponse)?;
-        match base.scheme() {
-            "http" | "https" => {}
-            _ => return Err(TransportError::InvalidResponse),
-        }
+        validate_http_scheme(&base)?;
 
         let client = Client::builder()
             .timeout(DEFAULT_TIMEOUT)
@@ -372,9 +410,37 @@ impl Transport for HttpTransport {
         if !status.is_success() {
             return Err(map_status(status, TransportError::PackNotFound));
         }
-        resp.bytes()
-            .map(|b| b.to_vec())
-            .map_err(|_| TransportError::ConnectionFailed)
+        // Pre-check: if the server advertises a Content-Length greater
+        // than our cap, refuse immediately without buffering any body.
+        // A missing Content-Length falls through to the streaming
+        // counter below.
+        if let Some(len) = resp.content_length()
+            && len > PACK_BODY_LIMIT
+        {
+            return Err(TransportError::PayloadTooLarge(
+                usize::try_from(len).unwrap_or(usize::MAX),
+            ));
+        }
+
+        // Stream the body with a running counter. `Read` is the portable
+        // path here; reqwest's blocking `Response` implements it directly.
+        let mut reader = resp;
+        let cap = usize::try_from(PACK_BODY_LIMIT).unwrap_or(usize::MAX);
+        let mut buf = Vec::new();
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let n = reader
+                .read(&mut chunk)
+                .map_err(|_| TransportError::ConnectionFailed)?;
+            if n == 0 {
+                break;
+            }
+            if buf.len().saturating_add(n) > cap {
+                return Err(TransportError::PayloadTooLarge(buf.len() + n));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        Ok(buf)
     }
 
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
@@ -1006,5 +1072,91 @@ mod tests {
     #[test]
     fn http_transport_is_object_safe() {
         fn _takes(_t: Box<dyn Transport>) {}
+    }
+
+    // ----------------------------------------------------------------------
+    // E9: http:// restricted to loopback, download_pack body cap
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn connect_rejects_http_non_loopback_as_insecure() {
+        unsafe { env::remove_var(TOKEN_ENV) };
+        let err = HttpTransport::connect("mkit+http://example.com/proj")
+            .expect_err("non-loopback http must be refused");
+        assert!(
+            matches!(err, TransportError::InsecureScheme),
+            "expected InsecureScheme, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn connect_accepts_http_on_loopback_ipv4() {
+        unsafe { env::remove_var(TOKEN_ENV) };
+        let t = HttpTransport::connect("mkit+http://127.0.0.1:1234/p").unwrap();
+        assert_eq!(t.base().scheme(), "http");
+        assert_eq!(t.base().host_str(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn connect_accepts_http_on_loopback_ipv6() {
+        unsafe { env::remove_var(TOKEN_ENV) };
+        let t = HttpTransport::connect("mkit+http://[::1]:1234/p").unwrap();
+        assert_eq!(t.base().scheme(), "http");
+    }
+
+    #[test]
+    fn connect_accepts_http_on_localhost_name() {
+        unsafe { env::remove_var(TOKEN_ENV) };
+        let t = HttpTransport::connect("mkit+http://localhost:8787/p").unwrap();
+        assert_eq!(t.base().scheme(), "http");
+    }
+
+    #[test]
+    fn validate_http_scheme_helper_behaves() {
+        // Direct helper test: https is always OK, http only on loopback.
+        let https = Url::parse("https://example.com/").unwrap();
+        assert!(validate_http_scheme(&https).is_ok());
+
+        let http_pub = Url::parse("http://example.com/").unwrap();
+        assert!(matches!(
+            validate_http_scheme(&http_pub),
+            Err(TransportError::InsecureScheme)
+        ));
+
+        for ok in [
+            "http://127.0.0.1/",
+            "http://[::1]/",
+            "http://localhost/",
+            "http://LOCALHOST/",
+        ] {
+            let u = Url::parse(ok).unwrap();
+            assert!(validate_http_scheme(&u).is_ok(), "{ok} should be allowed");
+        }
+    }
+
+    #[test]
+    fn pack_body_limit_is_4_gib() {
+        // Matches the s3 transport's existing cap, documenting that the
+        // two transports agree on the same upper bound for a single
+        // pack download.
+        assert_eq!(PACK_BODY_LIMIT, 4 * 1024 * 1024 * 1024);
+    }
+
+    /// Regression: a normal-sized body that arrives with an accurate
+    /// content-length smaller than `PACK_BODY_LIMIT` must still return
+    /// the full bytes. This exercises the streaming copy path.
+    #[test]
+    fn download_pack_under_limit_still_returns_body() {
+        let mut server = Server::new();
+        let key = sample_key(0x78);
+        let path = format!("/myproj/packs/{}", key.to_hex());
+        let body: Vec<u8> = (0..4096u32).map(|i| (i & 0xFF) as u8).collect();
+        let _m = server
+            .mock("GET", path.as_str())
+            .with_status(200)
+            .with_body(body.clone())
+            .create();
+        let t = make_transport(&server, None);
+        assert_eq!(t.download_pack(&key).unwrap(), body);
     }
 }
