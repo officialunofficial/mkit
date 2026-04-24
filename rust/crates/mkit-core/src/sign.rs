@@ -29,7 +29,7 @@ use std::path::Path;
 
 use ed25519_dalek::{
     PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH, SIGNATURE_LENGTH, Signature as DalekSignature, Signer,
-    SigningKey, Verifier, VerifyingKey,
+    SigningKey, VerifyingKey,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -132,6 +132,22 @@ impl KeyPair {
 
 /// Verify a signature over `BLAKE3(domain || signing_bytes)` against the
 /// embedded public key. Returns `Ok(())` on success.
+///
+/// Uses [`VerifyingKey::verify_strict`], which enforces ZIP-215 / RFC 8032
+/// strict-verification semantics:
+///
+/// - The signature's `R` component is checked to be a canonical (i.e.
+///   least-representation) encoding of a curve point — torsion-component
+///   malleability is rejected.
+/// - The signature's `s` component is checked to be canonical mod the
+///   group order — high-s malleability is rejected.
+/// - The public key's `A` component is checked to be canonical — small-
+///   subgroup attacks are rejected.
+///
+/// The looser default [`VerifyingKey::verify`] accepts non-canonical
+/// encodings for backwards compat with older Ed25519 implementations;
+/// mkit has no such compat constraint (golden vectors are regenerated
+/// from our own signer) so we hold the stricter line.
 pub fn verify(
     public: &PublicKey,
     domain: &[u8],
@@ -141,7 +157,7 @@ pub fn verify(
     let vk = VerifyingKey::from_bytes(&public.0).map_err(|_| MkitError::InvalidPublicKey)?;
     let dalek_sig = DalekSignature::from_bytes(&sig.0);
     let digest = domain_digest(domain, signing_bytes);
-    vk.verify(&digest, &dalek_sig)
+    vk.verify_strict(&digest, &dalek_sig)
         .map_err(|_| MkitError::SignatureInvalid)
 }
 
@@ -425,6 +441,37 @@ mod tests {
             verify(&kp2.public, COMMIT_DOMAIN, bytes, &sig),
             Err(MkitError::SignatureInvalid)
         ));
+    }
+
+    /// Regression guard on strict-verification compliance.
+    ///
+    /// Our `verify()` uses [`ed25519_dalek::VerifyingKey::verify_strict`],
+    /// which rejects the Ed25519 malleability vectors documented at
+    /// <https://hdevalence.ca/blog/2020-10-04-its-25519am>. This test
+    /// asserts that signatures produced by our own signer pass the
+    /// strict check — if `ed25519-dalek` ever starts producing
+    /// non-canonical `R` or high-`s` signatures, this fails first.
+    #[test]
+    fn our_signatures_pass_strict_verify() {
+        let kp = fixed_kp();
+        // Sample the signature space across several different inputs;
+        // a subtle drift in `s` normalization (e.g. if the underlying
+        // crate changed its reduction strategy) would surface on at
+        // least one of these.
+        for (i, input) in [
+            b"" as &[u8],
+            b"a",
+            b"00000000000000000000000000000000",
+            &[0xff; 64],
+            &(0u8..=255).collect::<Vec<u8>>(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let sig = kp.sign(COMMIT_DOMAIN, input);
+            verify(&kp.public, COMMIT_DOMAIN, input, &sig)
+                .unwrap_or_else(|e| panic!("input #{i} failed strict verify: {e:?}"));
+        }
     }
 
     // ------------------------------------------------------------------

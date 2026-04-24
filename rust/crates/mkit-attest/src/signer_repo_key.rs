@@ -56,7 +56,7 @@ impl Signer for RepoKeySigner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signature as DalekSig, Verifier, VerifyingKey};
+    use ed25519_dalek::{Signature as DalekSig, VerifyingKey};
 
     #[test]
     fn signature_verifies_with_dalek() {
@@ -69,11 +69,14 @@ mod tests {
 
         let vk = VerifyingKey::from_bytes(&kp.public.0).unwrap();
         let sig = DalekSig::from_bytes(sig_bytes.as_slice().try_into().unwrap());
-        vk.verify(pae, &sig).expect("verify");
+        // verify_strict: if our signer ever produces a non-canonical
+        // signature (high-s, non-canonical R, etc.) this assertion fails
+        // — a regression guard on the signer output.
+        vk.verify_strict(pae, &sig).expect("verify");
 
         // Tampered PAE must break verification.
         let tampered = b"DSSEv1 28 application/vnd.in-toto+json 2 {X";
-        assert!(vk.verify(tampered, &sig).is_err());
+        assert!(vk.verify_strict(tampered, &sig).is_err());
     }
 
     #[test]
