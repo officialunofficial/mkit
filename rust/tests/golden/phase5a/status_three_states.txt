@@ -1,0 +1,8 @@
+on branch main
+
+Changes to be committed:
+  A  c.txt
+
+Changes not staged for commit:
+  M  a.txt
+  D  b.txt

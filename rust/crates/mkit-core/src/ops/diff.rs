@@ -7,13 +7,16 @@
 //! differ, and treats added/removed subtrees as bulk operations on every
 //! contained leaf.
 //!
-//! The Zig `statusDiff` helper (working-tree → committed-tree) is NOT
-//! ported here — it depends on `worktree.buildTree`, which is part of an
-//! as-yet-unmerged track. Bring this back when that lands.
+//! Also contains `status_diff` — the working-tree vs HEAD diff that
+//! powers `mkit status`. Ported from `src/diff.zig::statusDiff`.
+
+use std::path::Path;
 
 use crate::hash::Hash;
+use crate::index::Index;
 use crate::object::{EntryMode, Object, TreeEntry};
 use crate::store::{ObjectStore, StoreError};
+use crate::worktree::{self, WorktreeError};
 
 /// What kind of change a [`DiffEntry`] represents. Matches the Zig
 /// enum names 1:1 so cross-implementation diagnostics stay aligned.
@@ -231,6 +234,131 @@ fn join_path(prefix: &str, name: &[u8]) -> String {
         s.push('/');
         s.push_str(&name_str);
         s
+    }
+}
+
+// =====================================================================
+// status_diff — working-tree vs HEAD (for `mkit status`)
+// =====================================================================
+
+/// Staging state of a [`StatusEntry`] relative to the index.
+///
+/// When no index is passed to [`status_diff`], every entry has
+/// `StatusStaging::Unstaged`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusStaging {
+    /// Change is not staged (worktree differs from HEAD, not in index).
+    Unstaged,
+    /// Change is staged (in the index, matching the worktree).
+    Staged,
+    /// Change exists in both index and worktree with different content
+    /// (partially staged scenario).
+    PartiallyStaged,
+}
+
+/// One entry in the `mkit status` output. Combines a [`DiffEntry`] with
+/// index-awareness so the caller can render three-way status output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusEntry {
+    /// Underlying diff entry (path, kind, old/new hashes).
+    pub diff: DiffEntry,
+    /// Relationship of this entry to the staging index.
+    pub staging: StatusStaging,
+}
+
+/// Error type for [`status_diff`].
+#[derive(Debug, thiserror::Error)]
+pub enum DiffError {
+    /// Underlying object-store error.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// Error building the worktree snapshot.
+    #[error(transparent)]
+    Worktree(#[from] WorktreeError),
+}
+
+/// Compare the working tree against `head_tree` and return a list of
+/// [`StatusEntry`] annotated with index staging state.
+///
+/// - Builds a temporary tree from `worktree_root` via
+///   [`worktree::build_tree`].
+/// - Diffs it against `head_tree` via [`diff_trees`].
+/// - If `index` is supplied, each entry is classified as `Staged`,
+///   `Unstaged`, or `PartiallyStaged` by checking whether the index
+///   contains the path and whether the index hash matches the worktree
+///   hash.
+///
+/// # Errors
+///
+/// Propagates [`WorktreeError`] (I/O, symlink validation, chunker
+/// limit) and [`StoreError`] (missing or corrupt objects).
+pub fn status_diff(
+    store: &ObjectStore,
+    head_tree: Option<&Hash>,
+    worktree_root: &Path,
+    index: Option<&Index>,
+) -> Result<Vec<StatusEntry>, DiffError> {
+    // Snapshot the working directory into the object store.
+    let work_tree_hash = worktree::build_tree(store, worktree_root)?;
+
+    // Tree-vs-tree diff: HEAD vs worktree snapshot.
+    let diff = diff_trees(store, head_tree.copied(), Some(work_tree_hash))?;
+
+    // Annotate each entry with its staging state.
+    let entries = diff
+        .entries
+        .into_iter()
+        .map(|entry| {
+            let staging = if let Some(idx) = index {
+                classify_staging(&entry, idx)
+            } else {
+                StatusStaging::Unstaged
+            };
+            StatusEntry {
+                diff: entry,
+                staging,
+            }
+        })
+        .collect();
+
+    Ok(entries)
+}
+
+/// Determine the [`StatusStaging`] for a single diff entry by
+/// inspecting the index.
+///
+/// Rules (mirror Git's logic for a two-area model):
+///
+/// 1. If the path is not in the index at all → `Unstaged`.
+/// 2. If the path is in the index and the index hash matches the
+///    worktree `new_hash` → `Staged` (the worktree change was staged).
+/// 3. If the path is in the index but the index hash differs from the
+///    worktree `new_hash` → `PartiallyStaged` (staged something, but
+///    the worktree has additional changes).
+fn classify_staging(entry: &DiffEntry, index: &Index) -> StatusStaging {
+    let Some(idx_pos) = index.find_entry(&entry.path) else {
+        return StatusStaging::Unstaged;
+    };
+    let idx_entry = &index.entries[idx_pos];
+    // For a removed entry the worktree new_hash is None. If the index
+    // still has the file (non-zero hash) it is not staged for removal.
+    match entry.new_hash {
+        Some(wt_hash) => {
+            if idx_entry.object_hash == wt_hash {
+                StatusStaging::Staged
+            } else {
+                StatusStaging::PartiallyStaged
+            }
+        }
+        None => {
+            // Worktree deletion. If index has a zero hash for this path
+            // the deletion was staged; otherwise it is unstaged.
+            if idx_entry.object_hash == [0u8; crate::hash::HASH_LEN] {
+                StatusStaging::Staged
+            } else {
+                StatusStaging::PartiallyStaged
+            }
+        }
     }
 }
 
@@ -458,5 +586,161 @@ mod tests {
         let (_d, s) = fresh_store();
         let r = diff_trees(&s, None, None).unwrap();
         assert!(r.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // status_diff unit tests — mirror the Zig statusDiff test suite.
+    // -----------------------------------------------------------------
+
+    fn fresh_workdir() -> TempDir {
+        TempDir::new().unwrap()
+    }
+
+    #[test]
+    fn status_empty_worktree_no_head() {
+        // Empty worktree, no HEAD → nothing to report.
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        let result = status_diff(&store, None, work.path(), None).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn status_worktree_equals_head_is_clean() {
+        // Worktree identical to HEAD → no changes.
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("a.txt"), b"hello").unwrap();
+        // Build a tree from the worktree and use it as HEAD.
+        let head_hash = worktree::build_tree(&store, work.path()).unwrap();
+        let result = status_diff(&store, Some(&head_hash), work.path(), None).unwrap();
+        assert!(result.is_empty(), "expected clean, got {result:?}");
+    }
+
+    #[test]
+    fn status_added_only() {
+        // HEAD has {a.txt}; worktree has {a.txt, b.txt} → b.txt added.
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("a.txt"), b"hello").unwrap();
+        let head_hash = worktree::build_tree(&store, work.path()).unwrap();
+        std::fs::write(work.path().join("b.txt"), b"world").unwrap();
+        let result = status_diff(&store, Some(&head_hash), work.path(), None).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].diff.path, "b.txt");
+        assert_eq!(result[0].diff.kind, DiffKind::Added);
+        assert_eq!(result[0].staging, StatusStaging::Unstaged);
+    }
+
+    #[test]
+    fn status_removed_only() {
+        // HEAD has {a.txt, b.txt}; worktree has only {a.txt} → b.txt removed.
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("a.txt"), b"hello").unwrap();
+        std::fs::write(work.path().join("b.txt"), b"world").unwrap();
+        let head_hash = worktree::build_tree(&store, work.path()).unwrap();
+        std::fs::remove_file(work.path().join("b.txt")).unwrap();
+        let result = status_diff(&store, Some(&head_hash), work.path(), None).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].diff.path, "b.txt");
+        assert_eq!(result[0].diff.kind, DiffKind::Removed);
+        assert_eq!(result[0].staging, StatusStaging::Unstaged);
+    }
+
+    #[test]
+    fn status_modified_only() {
+        // HEAD has {a.txt="old"}; worktree has {a.txt="new"} → a.txt modified.
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("a.txt"), b"old").unwrap();
+        let head_hash = worktree::build_tree(&store, work.path()).unwrap();
+        std::fs::write(work.path().join("a.txt"), b"new").unwrap();
+        let result = status_diff(&store, Some(&head_hash), work.path(), None).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].diff.path, "a.txt");
+        assert_eq!(result[0].diff.kind, DiffKind::Modified);
+        assert_eq!(result[0].staging, StatusStaging::Unstaged);
+    }
+
+    #[test]
+    fn status_mixed_changes() {
+        // HEAD: {a.txt, b.txt}. Worktree: a.txt modified, b.txt removed, c.txt added.
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("a.txt"), b"original").unwrap();
+        std::fs::write(work.path().join("b.txt"), b"stays").unwrap();
+        let head_hash = worktree::build_tree(&store, work.path()).unwrap();
+        std::fs::write(work.path().join("a.txt"), b"changed").unwrap();
+        std::fs::remove_file(work.path().join("b.txt")).unwrap();
+        std::fs::write(work.path().join("c.txt"), b"new").unwrap();
+        let result = status_diff(&store, Some(&head_hash), work.path(), None).unwrap();
+        assert_eq!(result.len(), 3);
+        let paths: Vec<&str> = result.iter().map(|e| e.diff.path.as_str()).collect();
+        assert!(paths.contains(&"a.txt"), "missing a.txt: {paths:?}");
+        assert!(paths.contains(&"b.txt"), "missing b.txt: {paths:?}");
+        assert!(paths.contains(&"c.txt"), "missing c.txt: {paths:?}");
+    }
+
+    #[test]
+    fn status_no_head_shows_all_as_added() {
+        // No HEAD (initial repo state) → every file shows as added.
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("a.txt"), b"aaa").unwrap();
+        std::fs::write(work.path().join("b.txt"), b"bbb").unwrap();
+        let result = status_diff(&store, None, work.path(), None).unwrap();
+        assert_eq!(result.len(), 2);
+        for e in &result {
+            assert_eq!(e.diff.kind, DiffKind::Added);
+            assert_eq!(e.staging, StatusStaging::Unstaged);
+        }
+    }
+
+    #[test]
+    fn status_staged_entry_is_classified_staged() {
+        use crate::index::{EntryStatus, Index, IndexEntry};
+        // Worktree adds b.txt; index already has b.txt with the same hash.
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("a.txt"), b"old").unwrap();
+        let head_hash = worktree::build_tree(&store, work.path()).unwrap();
+        std::fs::write(work.path().join("b.txt"), b"world").unwrap();
+        // Hash b.txt to the store so we can populate the index.
+        let b_hash = worktree::hash_file(&store, &work.path().join("b.txt")).unwrap();
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "b.txt".to_string(),
+            status: EntryStatus::Blob,
+            object_hash: b_hash,
+        });
+        let result = status_diff(&store, Some(&head_hash), work.path(), Some(&idx)).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].diff.path, "b.txt");
+        assert_eq!(result[0].staging, StatusStaging::Staged);
+    }
+
+    #[test]
+    fn status_partially_staged_entry() {
+        use crate::index::{EntryStatus, Index, IndexEntry};
+        // Worktree has b.txt="v2"; index has b.txt hashed at "v1" content.
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("a.txt"), b"old").unwrap();
+        let head_hash = worktree::build_tree(&store, work.path()).unwrap();
+        // Write v1 to disk, hash it, then overwrite with v2.
+        std::fs::write(work.path().join("b.txt"), b"v1").unwrap();
+        let b_v1_hash = worktree::hash_file(&store, &work.path().join("b.txt")).unwrap();
+        std::fs::write(work.path().join("b.txt"), b"v2").unwrap();
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "b.txt".to_string(),
+            status: EntryStatus::Blob,
+            object_hash: b_v1_hash,
+        });
+        let result = status_diff(&store, Some(&head_hash), work.path(), Some(&idx)).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].diff.path, "b.txt");
+        assert_eq!(result[0].staging, StatusStaging::PartiallyStaged);
     }
 }
