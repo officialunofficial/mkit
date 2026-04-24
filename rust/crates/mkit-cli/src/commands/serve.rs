@@ -8,6 +8,7 @@
 //! does not need inlined copies.
 
 use std::io::{Read, Write};
+use std::path::PathBuf;
 
 use mkit_core::protocol::{
     self, FRAME_HEADER_LEN, HELLO_NAME_MAX, HELLO_VERSION_MAX, MAX_PAYLOAD_LEN, OP_CLOSE,
@@ -24,27 +25,90 @@ use mkit_transport_ssh::{
 use crate::cli::CLI_VERSION;
 use crate::exit;
 
+// -- Per-connection resource caps (finding A14) ------------------------------
+//
+// A single `mkit serve` invocation is driven by a remote client via an SSH
+// forced command. Bounding cumulative work prevents a misbehaving or
+// malicious client from pinning the sshd-spawned process indefinitely:
+//
+//   * `MAX_FRAMES_PER_CONN` — hard cap on frames (excluding HELLO).
+//   * `MAX_BYTES_PER_CONN`  — hard cap on cumulative payload bytes read
+//     after HELLO.
+//
+// Each cap trips returns `STATUS_ERROR` to the client then closes the
+// connection with `exit::PROTOCOL_ERROR`.
+pub(crate) const MAX_FRAMES_PER_CONN: u32 = 10_000;
+pub(crate) const MAX_BYTES_PER_CONN: u64 = 1024 * 1024 * 1024; // 1 GiB
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
     let Some(path) = args.first() else {
         return super::usage_error("usage: mkit serve <path>");
     };
-    let tx = FileTransport::new(std::path::Path::new(path));
+
+    let repo_root = match resolve_repo_path(path) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let tx = FileTransport::new(&repo_root);
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut r = stdin.lock();
     let mut w = stdout.lock();
 
-    if !handshake(&mut r, &mut w) {
+    serve_loop(&tx, &mut r, &mut w)
+}
+
+/// Resolve and validate the on-disk path supplied to `mkit serve`.
+///
+/// Returns an sysexits-style exit code on failure:
+///
+/// * [`exit::NOINPUT`] — path does not exist / cannot be canonicalised.
+/// * [`exit::DATAERR`] — path exists but is not a directory, or the
+///   directory does not look like a mkit repository (no `.mkit/` child).
+/// * [`exit::NOPERM`]  — `MKIT_SERVE_ROOT` is set and the resolved path
+///   escapes that containment root (`..` / absolute-path traversal).
+///
+/// The containment check compares canonicalised paths, so symlinks that
+/// would leave the serve-root are rejected.
+pub(crate) fn resolve_repo_path(path: &str) -> Result<PathBuf, u8> {
+    let resolved = std::fs::canonicalize(path).map_err(|_| exit::NOINPUT)?;
+    if !resolved.is_dir() {
+        return Err(exit::DATAERR);
+    }
+    if !resolved.join(".mkit").is_dir() {
+        return Err(exit::DATAERR);
+    }
+    if let Ok(root) = std::env::var("MKIT_SERVE_ROOT") {
+        let pinned = std::fs::canonicalize(&root).map_err(|_| exit::NOPERM)?;
+        if !resolved.starts_with(&pinned) {
+            return Err(exit::NOPERM);
+        }
+    }
+    Ok(resolved)
+}
+
+/// Core serve loop, factored out so it can be driven by in-process tests
+/// with a synthetic reader/writer (see finding A14).
+pub(crate) fn serve_loop(tx: &FileTransport, r: &mut impl Read, w: &mut impl Write) -> u8 {
+    if !handshake(r, w) {
         return exit::PROTOCOL_ERROR;
     }
-    while let Some((op, payload)) = read_frame(&mut r) {
+    let mut frame_count: u32 = 0;
+    let mut byte_count: u64 = 0;
+    while let Some((op, payload)) = read_frame(r) {
+        frame_count = frame_count.saturating_add(1);
+        byte_count = byte_count.saturating_add(payload.len() as u64);
+        if frame_count > MAX_FRAMES_PER_CONN || byte_count > MAX_BYTES_PER_CONN {
+            let _ = write_status(w, STATUS_ERROR, b"per-connection budget exceeded");
+            return exit::PROTOCOL_ERROR;
+        }
         if op == OP_CLOSE {
             break;
         }
-        let (status, body) = dispatch(&tx, op, &payload);
-        if write_status(&mut w, status, &body).is_err() {
+        let (status, body) = dispatch(tx, op, &payload);
+        if write_status(w, status, &body).is_err() {
             break;
         }
     }
@@ -195,6 +259,16 @@ fn decode_hello_request(p: &[u8]) -> Option<HelloRequest<'_>> {
 
 #[cfg(test)]
 mod tests {
+    use super::{resolve_repo_path, serve_loop};
+    use crate::exit;
+    use mkit_core::protocol::{
+        FRAME_HEADER_LEN, OP_CLOSE, OP_HELLO, SSH_BINARY_NAME, SSH_PROTO_VERSION, STATUS_OK,
+        encode_frame, encode_hello_payload,
+    };
+    use mkit_transport_file::FileTransport;
+    use std::fs;
+    use std::io::Cursor;
+
     /// Compile-time reachability check: assert each public per-verb decoder
     /// symbol is accessible from outside `mkit-transport-ssh`.  No runtime
     /// logic needed — if the crate compiles this function, the symbols exist.
@@ -212,5 +286,103 @@ mod tests {
         let _ = mkit_transport_ssh::encode_update_ref as fn(&str, _, &_) -> _;
         let _ = mkit_transport_ssh::encode_read_ref as fn(&str) -> _;
         let _ = mkit_transport_ssh::encode_list_refs as fn(&str) -> _;
+    }
+
+    // --- A1: path containment --------------------------------------------
+
+    #[test]
+    fn resolve_repo_path_rejects_missing_path() {
+        let err = resolve_repo_path("/definitely/does/not/exist/xyzzy").unwrap_err();
+        assert_eq!(err, exit::NOINPUT);
+    }
+
+    #[test]
+    fn resolve_repo_path_rejects_non_repo_dir() {
+        let td = tempfile::tempdir().unwrap();
+        let err = resolve_repo_path(td.path().to_str().unwrap()).unwrap_err();
+        assert_eq!(err, exit::DATAERR);
+    }
+
+    #[test]
+    fn resolve_repo_path_accepts_repo_dir() {
+        let td = tempfile::tempdir().unwrap();
+        fs::create_dir_all(td.path().join(".mkit")).unwrap();
+        let resolved = resolve_repo_path(td.path().to_str().unwrap()).unwrap();
+        assert!(resolved.join(".mkit").is_dir());
+    }
+
+// --- A14: per-connection byte/frame budget ---------------------------
+
+    /// Build a handshake-complete input stream, then append enough no-op
+    /// OP_HELLO-shaped frames to blow the frame budget.
+    #[test]
+    fn serve_loop_enforces_frame_budget() {
+        let td = tempfile::tempdir().unwrap();
+        fs::create_dir_all(td.path().join(".mkit")).unwrap();
+        let tx = FileTransport::new(td.path());
+
+        // Client HELLO that will pass handshake.
+        let hello = encode_hello_payload(SSH_PROTO_VERSION, SSH_BINARY_NAME, "test/1")
+            .expect("hello payload");
+        let mut input = encode_frame(OP_HELLO, &hello).expect("hello frame");
+
+        // Append more than MAX_FRAMES_PER_CONN unsupported-but-well-formed
+        // frames. Use op=0xFE (not a valid verb) with empty payload so
+        // dispatch replies STATUS_UNSUPPORTED and keeps reading.
+        for _ in 0..=super::MAX_FRAMES_PER_CONN {
+            input.extend_from_slice(&encode_frame(0xFE, &[]).expect("frame"));
+        }
+
+        let mut r = Cursor::new(input);
+        let mut w = Vec::new();
+        let code = serve_loop(&tx, &mut r, &mut w);
+        assert_eq!(code, exit::PROTOCOL_ERROR, "should trip frame budget");
+    }
+
+    #[test]
+    fn serve_loop_enforces_byte_budget() {
+        let td = tempfile::tempdir().unwrap();
+        fs::create_dir_all(td.path().join(".mkit")).unwrap();
+        let tx = FileTransport::new(td.path());
+
+        let hello = encode_hello_payload(SSH_PROTO_VERSION, SSH_BINARY_NAME, "test/1")
+            .expect("hello payload");
+        let mut input = encode_frame(OP_HELLO, &hello).expect("hello frame");
+
+        // Each frame carries a big payload so we exceed MAX_BYTES_PER_CONN
+        // well before MAX_FRAMES_PER_CONN. 16 MiB is MAX_PAYLOAD_LEN; use
+        // 8 MiB blobs. 128 of them = 1 GiB, trigger point.
+        let blob = vec![0u8; 8 * 1024 * 1024];
+        let needed = (super::MAX_BYTES_PER_CONN / blob.len() as u64 + 1)
+            .min(u64::from(super::MAX_FRAMES_PER_CONN));
+        for _ in 0..needed {
+            input.extend_from_slice(&encode_frame(0xFE, &blob).expect("frame"));
+        }
+        // Sanity: test is meaningful only if we stayed under the frame cap.
+        assert!(needed < u64::from(super::MAX_FRAMES_PER_CONN));
+
+        let mut r = Cursor::new(input);
+        let mut w = Vec::new();
+        let code = serve_loop(&tx, &mut r, &mut w);
+        assert_eq!(code, exit::PROTOCOL_ERROR, "should trip byte budget");
+    }
+
+    #[test]
+    fn serve_loop_close_returns_ok_within_budget() {
+        let td = tempfile::tempdir().unwrap();
+        fs::create_dir_all(td.path().join(".mkit")).unwrap();
+        let tx = FileTransport::new(td.path());
+
+        let hello = encode_hello_payload(SSH_PROTO_VERSION, SSH_BINARY_NAME, "test/1")
+            .expect("hello payload");
+        let mut input = encode_frame(OP_HELLO, &hello).expect("hello frame");
+        input.extend_from_slice(&encode_frame(OP_CLOSE, &[]).expect("close frame"));
+
+        let mut r = Cursor::new(input);
+        let mut w = Vec::new();
+        let code = serve_loop(&tx, &mut r, &mut w);
+        assert_eq!(code, exit::OK);
+        assert!(w.len() >= FRAME_HEADER_LEN);
+        assert_eq!(w[0], STATUS_OK, "server hello ok");
     }
 }
