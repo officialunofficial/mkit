@@ -1,0 +1,5 @@
+# SwiftPM build output
+.build/
+.swiftpm/
+Package.resolved
+DerivedData/
