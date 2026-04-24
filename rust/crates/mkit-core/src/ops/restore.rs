@@ -34,6 +34,7 @@ use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::hash::Hash;
+use crate::ignore::{self, IgnoreList};
 use crate::object::{self, EntryMode, Object, TreeEntry};
 use crate::store::ObjectStore;
 use crate::worktree;
@@ -241,6 +242,152 @@ fn path_matches_pattern(pattern: &str, path: &str) -> bool {
         }
     }
     false
+}
+
+/// Summary of a [`restore_tree_to_worktree`] call. Counts mirror the
+/// material the caller (`mkit checkout`) prints to the user, and the
+/// integration tests assert on these counts directly so the CLI output
+/// is trustable without scraping stdout.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RestoreReport {
+    /// Number of regular / executable files materialised.
+    pub files_written: u32,
+    /// Number of symlinks materialised.
+    pub symlinks_written: u32,
+    /// Number of directories created (or that already existed as dirs).
+    pub directories_created: u32,
+    /// Number of tree entries skipped because they matched `.mkitignore`.
+    pub skipped_by_ignore: u32,
+}
+
+/// Materialise `tree_hash` into `root` as a working tree.
+///
+/// Thin wrapper around [`restore_tree`] that additionally:
+/// 1. Loads `<root>/.mkitignore` and skips any matched entries — the
+///    checkout path MUST NOT overwrite files the user deliberately
+///    ignored (editor swapfiles, local-only build artefacts, …).
+/// 2. Returns a [`RestoreReport`] with counts the `mkit checkout` UX
+///    prints for the user.
+///
+/// Symlink safety is inherited from [`restore_tree`] /
+/// [`worktree::validate_symlink_target`]: targets are validated BEFORE
+/// the symlink is created, and any target that is absolute or contains
+/// `..` is rejected with [`RestoreError::InvalidSymlinkTarget`]. The
+/// net effect is that no symlink produced by this function can point
+/// outside `root`.
+///
+/// # Errors
+///
+/// Same variants as [`restore_tree`]. [`RestoreError::InvalidSymlinkTarget`]
+/// on a rejected target is the load-bearing "outside-of-root" check.
+pub fn restore_tree_to_worktree(
+    store: &ObjectStore,
+    tree: &Hash,
+    root: &Path,
+    opts: &RestoreOptions,
+) -> RestoreResult<RestoreReport> {
+    // Load the root-level ignore list. Missing = empty list.
+    let ignore_list = match ignore::load(root) {
+        Ok(il) => il,
+        Err(_) => IgnoreList::new(),
+    };
+    fs::create_dir_all(root)?;
+    let mut report = RestoreReport::default();
+    restore_tree_to_worktree_inner(store, *tree, root, opts, "", &ignore_list, &mut report)?;
+    Ok(report)
+}
+
+fn restore_tree_to_worktree_inner(
+    store: &ObjectStore,
+    tree_hash: Hash,
+    target_dir: &Path,
+    options: &RestoreOptions,
+    path_prefix: &str,
+    ignore: &IgnoreList,
+    report: &mut RestoreReport,
+) -> RestoreResult<()> {
+    let obj = store.read_object(&tree_hash)?;
+    let Object::Tree(tree) = obj else {
+        return Err(RestoreError::NotATree);
+    };
+
+    if options.clean {
+        clean_directory_with_ignore(
+            target_dir,
+            &tree.entries,
+            options.sparse_patterns.as_deref(),
+            path_prefix,
+            ignore,
+        )?;
+    }
+
+    for entry in &tree.entries {
+        if !crate::object::TreeEntry::validate_name(&entry.name) {
+            continue;
+        }
+        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+        let full_path = if path_prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{path_prefix}/{name}")
+        };
+        let is_dir = entry.mode == EntryMode::Tree;
+        // `is_ignored` matches against a basename per `src/ignore.zig`.
+        if ignore.is_ignored(name, is_dir) {
+            report.skipped_by_ignore += 1;
+            continue;
+        }
+        match entry.mode {
+            EntryMode::Blob | EntryMode::Executable => {
+                if let Some(patterns) = options.sparse_patterns.as_deref()
+                    && !matches_sparse(patterns, &full_path, false)
+                {
+                    continue;
+                }
+                restore_blob(
+                    store,
+                    target_dir,
+                    name,
+                    entry.object_hash,
+                    entry.mode == EntryMode::Executable,
+                )?;
+                report.files_written += 1;
+            }
+            EntryMode::Tree => {
+                if let Some(patterns) = options.sparse_patterns.as_deref()
+                    && !could_match_descendant(patterns, &full_path)
+                {
+                    continue;
+                }
+                ensure_directory(target_dir, name)?;
+                report.directories_created += 1;
+                let dir_path = target_dir.join(name);
+                let dir_meta = fs::symlink_metadata(&dir_path)?;
+                if !dir_meta.is_dir() {
+                    return Err(RestoreError::NotADirectory(dir_path));
+                }
+                restore_tree_to_worktree_inner(
+                    store,
+                    entry.object_hash,
+                    &dir_path,
+                    options,
+                    &full_path,
+                    ignore,
+                    report,
+                )?;
+            }
+            EntryMode::Symlink => {
+                if let Some(patterns) = options.sparse_patterns.as_deref()
+                    && !matches_sparse(patterns, &full_path, false)
+                {
+                    continue;
+                }
+                restore_symlink(store, target_dir, name, entry.object_hash)?;
+                report.symlinks_written += 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Materialise `tree_hash` into `target_dir`. See module docs for the
@@ -507,6 +654,83 @@ fn clean_directory(
         }
         let meta = entry.metadata()?;
         let is_dir = meta.is_dir();
+        if let Some(patterns) = sparse_patterns {
+            let full_path = if path_prefix.is_empty() {
+                name_str.clone()
+            } else {
+                format!("{path_prefix}/{name_str}")
+            };
+            let allow = matches_sparse(patterns, &full_path, is_dir)
+                || (is_dir && could_match_descendant(patterns, &full_path));
+            if !allow {
+                continue;
+            }
+        }
+        to_delete.push(CleanItem {
+            name: name_str,
+            is_dir,
+        });
+    }
+
+    for item in to_delete {
+        let path = target_dir.join(&item.name);
+        if item.is_dir {
+            let _ = fs::remove_dir_all(&path);
+        } else {
+            let _ = fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
+/// Like [`clean_directory`] but additionally skips filesystem entries
+/// whose basename matches the `ignore` list — used by the worktree
+/// checkout path so locally-ignored artefacts (editor swapfiles, build
+/// outputs) survive the cleanup.
+fn clean_directory_with_ignore(
+    target_dir: &Path,
+    tree_entries: &[TreeEntry],
+    sparse_patterns: Option<&[SparsePattern]>,
+    path_prefix: &str,
+    ignore: &IgnoreList,
+) -> RestoreResult<()> {
+    struct CleanItem {
+        name: String,
+        is_dir: bool,
+    }
+    let mut to_delete: Vec<CleanItem> = Vec::new();
+
+    let read = match fs::read_dir(target_dir) {
+        Ok(r) => r,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(RestoreError::Io(e)),
+    };
+    for entry in read {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let name_str = file_name
+            .to_str()
+            .ok_or(RestoreError::InvalidUtf8)?
+            .to_string();
+        if name_str == ".mkit" || name_str == ".git" {
+            continue;
+        }
+        let mut found = false;
+        for te in tree_entries {
+            if te.name.as_slice() == name_str.as_bytes() {
+                found = true;
+                break;
+            }
+        }
+        if found {
+            continue;
+        }
+        let meta = entry.metadata()?;
+        let is_dir = meta.is_dir();
+        // Respect `.mkitignore` — don't touch locally-ignored files.
+        if ignore.is_ignored(&name_str, is_dir) {
+            continue;
+        }
         if let Some(patterns) = sparse_patterns {
             let full_path = if path_prefix.is_empty() {
                 name_str.clone()
@@ -1001,5 +1225,107 @@ mod tests {
         fs::create_dir_all(target.path().join(".mkit")).unwrap();
         let p = load_sparse_checkout(target.path()).unwrap();
         assert!(p.is_none());
+    }
+
+    // =================================================================
+    // restore_tree_to_worktree — checkout-facing wrapper.
+    // =================================================================
+
+    #[test]
+    fn worktree_restore_counts_files_and_dirs() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let blob_a = put_blob(&store, b"a");
+        let blob_b = put_blob(&store, b"b");
+        let sub = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"b.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob_b,
+            }],
+        );
+        let root = put_tree_with(
+            &store,
+            vec![
+                TreeEntry {
+                    name: b"a.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob_a,
+                },
+                TreeEntry {
+                    name: b"sub".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: sub,
+                },
+            ],
+        );
+        let report =
+            restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default())
+                .unwrap();
+        assert_eq!(report.files_written, 2);
+        assert_eq!(report.directories_created, 1);
+        assert!(target.path().join("a.txt").exists());
+        assert!(target.path().join("sub/b.txt").exists());
+    }
+
+    #[test]
+    fn worktree_restore_respects_mkitignore() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        // Pre-seed an ignore file + a locally-present-but-ignored file
+        // that must NOT be deleted.
+        fs::write(target.path().join(".mkitignore"), "secret.txt\n").unwrap();
+        fs::write(target.path().join("secret.txt"), b"local-only").unwrap();
+        let secret_blob = put_blob(&store, b"COMMITTED-SECRET");
+        let ok_blob = put_blob(&store, b"ok");
+        let root = put_tree_with(
+            &store,
+            vec![
+                TreeEntry {
+                    name: b"ok.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: ok_blob,
+                },
+                TreeEntry {
+                    name: b"secret.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: secret_blob,
+                },
+            ],
+        );
+        // With `clean=true` (default) the checkout sweep must still
+        // leave the ignored file alone: the ignore check covers both
+        // tree-entry restoration AND the cleanup sweep.
+        let report =
+            restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default())
+                .unwrap();
+        assert_eq!(report.files_written, 1);
+        assert_eq!(report.skipped_by_ignore, 1);
+        assert_eq!(
+            fs::read(target.path().join("secret.txt")).unwrap(),
+            b"local-only"
+        );
+        assert_eq!(fs::read(target.path().join("ok.txt")).unwrap(), b"ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_restore_rejects_escaping_symlink() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let bad = put_blob(&store, b"../outside");
+        let root = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"link".to_vec(),
+                mode: EntryMode::Symlink,
+                object_hash: bad,
+            }],
+        );
+        let err =
+            restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default())
+                .unwrap_err();
+        assert!(matches!(err, RestoreError::InvalidSymlinkTarget(_)));
     }
 }
