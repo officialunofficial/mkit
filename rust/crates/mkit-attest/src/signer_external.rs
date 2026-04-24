@@ -3,7 +3,7 @@
 //! Protocol (SPEC-ATTESTATIONS §6.2):
 //!
 //! ```text
-//! spawn  <binary>                       (no args)
+//! spawn  <binary> [args...]             (args empty by default; see `with_args`)
 //! write  {"pae_base64":"<...>"}\n       to child stdin, then close stdin
 //! read   {"keyid":"<...>","sig_base64":"<...>"} on child stdout
 //! wait   exit 0 on success; non-zero surfaces ExternalSignerFailed
@@ -33,6 +33,11 @@ pub struct ExternalSigner {
     binary_path: PathBuf,
     cached_keyid: Option<String>,
     algorithm: Algorithm,
+    /// Extra argv tokens passed verbatim to the child process via
+    /// `Command::args`. Empty by default — matches the zero-argv
+    /// default documented in SPEC-EXTERNAL-SIGNER §2. Populated by
+    /// [`ExternalSigner::with_args`].
+    args: Vec<String>,
 }
 
 impl ExternalSigner {
@@ -78,7 +83,29 @@ impl ExternalSigner {
             binary_path,
             cached_keyid: None,
             algorithm,
+            args: Vec::new(),
         })
+    }
+
+    /// Attach extra argv tokens to be passed verbatim to the child
+    /// process on every sign call. Each element is one argv entry —
+    /// no shell interpolation, no splitting on whitespace. Calling
+    /// this replaces any previously-set args.
+    ///
+    /// Use this when the external signer binary needs per-invocation
+    /// flags (`sign --tag prod`, `--key /path/to/key`, etc.) that
+    /// the zero-argv default doesn't cover. Motivated by multi-key
+    /// workflows where wrapping the real signer in a shell script
+    /// just to hardcode an argv is clumsy. See SPEC-EXTERNAL-SIGNER
+    /// §2 for the argv contract.
+    #[must_use]
+    pub fn with_args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args = args.into_iter().map(Into::into).collect();
+        self
     }
 }
 
@@ -97,6 +124,7 @@ impl Signer for ExternalSigner {
         let request = format!("{{\"pae_base64\":\"{}\"}}\n", B64.encode(pae));
 
         let mut child = Command::new(&self.binary_path)
+            .args(&self.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -275,6 +303,27 @@ mod tests {
     #[test]
     fn new_accepts_absolute_path() {
         ExternalSigner::new("/usr/bin/foo").expect("absolute path accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passes_argv_entries_to_child() {
+        // Helper script: writes its own argv (joined by pipes) as the
+        // keyid, and returns a fixed dummy signature. Proves each
+        // `with_args` entry becomes a separate argv token, verbatim.
+        let body = "cat >/dev/null; \
+                    kid=\"argv:$1|$2|$3\"; \
+                    printf '{\"keyid\":\"%s\",\"sig_base64\":\"AQID\"}\\n' \"$kid\"";
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_script(tmp.path(), "argvecho.sh", body);
+
+        let mut ext = ExternalSigner::new(path)
+            .expect("tempdir path is absolute")
+            .with_args(["sign", "--tag", "demo"]);
+
+        let _ = sign_retry_on_etxtbsy(&mut ext, b"DSSEv1 4 test 0 ").unwrap();
+        let kid = ext.keyid().unwrap();
+        assert_eq!(kid, "argv:sign|--tag|demo");
     }
 
     #[cfg(unix)]
