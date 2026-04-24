@@ -636,9 +636,10 @@ mod tpm {
     fn tcti() -> Result<TctiNameConf, SignerError> {
         // `TctiNameConf::from_environment_variable` reads `TCTI` and
         // returns a parse result. On failure we default to `device:/dev/tpmrm0`.
+        use std::str::FromStr as _;
         match TctiNameConf::from_environment_variable() {
             Ok(t) => Ok(t),
-            Err(_) => TctiNameConf::try_from("device:/dev/tpmrm0".to_string())
+            Err(_) => TctiNameConf::from_str("device:/dev/tpmrm0")
                 .map_err(|e| SignerError::Tpm(format!("no TCTI and /dev/tpmrm0 unavailable: {e}"))),
         }
     }
@@ -728,8 +729,8 @@ mod tpm {
         };
         let mut x = [0u8; 32];
         let mut y = [0u8; 32];
-        copy_param_left_padded(x_param.as_bytes(), &mut x)?;
-        copy_param_left_padded(y_param.as_bytes(), &mut y)?;
+        copy_param_left_padded(x_param.value(), &mut x)?;
+        copy_param_left_padded(y_param.value(), &mut y)?;
         Ok(compress_sec1(&x, &y).to_vec())
     }
 
@@ -825,8 +826,8 @@ mod tpm {
         // the same DER path keeps the wire-shape unit tests meaningful.)
         let (r_bytes, s_bytes) = match sig {
             tss_esapi::structures::Signature::EcDsa(ecdsa) => (
-                ecdsa.signature_r().as_bytes().to_vec(),
-                ecdsa.signature_s().as_bytes().to_vec(),
+                ecdsa.signature_r().value().to_vec(),
+                ecdsa.signature_s().value().to_vec(),
             ),
             _ => {
                 return Err(SignerError::Tpm(
