@@ -445,6 +445,14 @@ pub enum MkitError {
     /// variant size small.
     #[error("key file I/O error: {0}")]
     KeyIo(String),
+    /// Delta encode input exceeds the v1 wire-format `u32` length cap
+    /// (base or result > 4 GiB - 1). SPEC-PACKFILE holds individual
+    /// payloads under this bound, so this is a caller-programming
+    /// error, not a normal runtime condition — but saturating instead
+    /// of erroring silently produced a stream `decode()` would reject
+    /// with a misleading "length mismatch".
+    #[error("delta length {len} exceeds u32::MAX for field `{field}`")]
+    DeltaLengthOverflow { field: &'static str, len: usize },
 }
 
 impl fmt::Display for Object {

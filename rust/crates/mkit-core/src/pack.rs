@@ -407,7 +407,7 @@ mod tests {
         let base_hash = hash::hash(&base_obj);
         let target_hash = hash::hash(&target_obj);
 
-        let stream = delta::encode(&base_obj, &target_obj);
+        let stream = delta::encode(&base_obj, &target_obj).unwrap();
 
         let mut w = PackWriter::new();
         w.push_raw(base_hash, base_obj.clone()).unwrap();
@@ -590,7 +590,7 @@ mod tests {
         content_target[100] = 0xAA;
         let target_obj = write_blob_via_serialize(&content_target);
         let target_hash = hash::hash(&target_obj);
-        let stream = delta::encode(&base_obj, &target_obj);
+        let stream = delta::encode(&base_obj, &target_obj).unwrap();
 
         let mut w = PackWriter::new();
         w.push_delta(&base_hash, &stream).unwrap();
