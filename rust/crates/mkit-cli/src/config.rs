@@ -442,13 +442,13 @@ mod tests {
         fs::write(
             td.path().join(CONFIG_FILE),
             "attest.external_signer_path = /usr/local/bin/mkit-sign-se\n\
-             attest.external_signer_args = sign|--tag|makechain-prod\n",
+             attest.external_signer_args = sign|--tag|demo-prod\n",
         )
         .unwrap();
         let cfg = read_or_default(td.path()).unwrap();
         assert_eq!(
             cfg.attest.external_signer_args,
-            vec!["sign", "--tag", "makechain-prod"]
+            vec!["sign", "--tag", "demo-prod"]
         );
     }
 
