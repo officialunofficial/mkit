@@ -23,7 +23,7 @@
 //!
 //! Use it to validate your mkit + external-signer setup end-to-end, and
 //! as a starting point for your own signer (Secure Enclave, Ledger,
-//! WebAuthn, MetaMask bridge, HSM, …). See SPEC-EXTERNAL-SIGNER.md §12
+//! `WebAuthn`, `MetaMask` bridge, HSM, …). See SPEC-EXTERNAL-SIGNER.md §12
 //! for the security model.
 
 use std::io::{Read, Write};
@@ -44,11 +44,11 @@ use serde::Deserialize;
 /// per SPEC-EXTERNAL-SIGNER §5.
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        // Treat a `--help` request as a successful early exit: help text
-        // was already printed to stderr inside `Args::parse` so the
-        // caller's stdout is guaranteed clean.
-        Err(SignerError::HelpRequested) => ExitCode::SUCCESS,
+        // Both `Ok(())` and a `--help` early-exit are success cases:
+        // on help, the text was already printed to stderr inside
+        // `Args::parse` and stdout was never touched, so exiting 0
+        // leaves callers with a clean read-buffer.
+        Ok(()) | Err(SignerError::HelpRequested) => ExitCode::SUCCESS,
         Err(e) => {
             // Never write to stdout on the error path — the spec says
             // "stdout SHOULD be empty on error" and mkit treats a
@@ -81,8 +81,8 @@ fn run() -> Result<(), SignerError> {
         return Err(SignerError::RequestTooLarge);
     }
 
-    let req: Request = serde_json::from_slice(trim_trailing_newline(&buf))
-        .map_err(|_| SignerError::BadRequest)?;
+    let req: Request =
+        serde_json::from_slice(trim_trailing_newline(&buf)).map_err(|_| SignerError::BadRequest)?;
 
     // `--algorithm` override lets a caller force a different algorithm
     // than the request asks for. Useful for testing; in normal use
@@ -181,7 +181,9 @@ impl Args {
         while let Some(a) = it.next() {
             match a.as_str() {
                 "--key" => {
-                    let v = it.next().ok_or(SignerError::BadArgs("--key needs a path"))?;
+                    let v = it
+                        .next()
+                        .ok_or(SignerError::BadArgs("--key needs a path"))?;
                     out.key = Some(PathBuf::from(v));
                 }
                 "--algorithm" => {
@@ -290,7 +292,10 @@ impl std::fmt::Display for SignerError {
                 "key file permissions 0{mode:o} — must be 0600 (chmod 600 <path>)"
             ),
             Self::KeyBadLength(n) => {
-                write!(f, "key file is {n} bytes — reference signer expects exactly 32")
+                write!(
+                    f,
+                    "key file is {n} bytes — reference signer expects exactly 32"
+                )
             }
             Self::Io(s) => write!(f, "io: {s}"),
             Self::Attest(e) => write!(f, "attest: {e}"),
