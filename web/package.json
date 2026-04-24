@@ -1,0 +1,42 @@
+{
+  "name": "mkit-demo-web",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "wasm:build": "cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir pkg --release",
+    "dev": "waku dev",
+    "build": "CLOUDFLARE=1 waku build",
+    "start": "waku start",
+    "deploy": "pnpm build && wrangler deploy -c dist/server/wrangler.json",
+    "preview": "pnpm build && wrangler dev -c dist/server/wrangler.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "oxlint src",
+    "fmt": "oxfmt src",
+    "fmt:check": "oxfmt --check src",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.12.14",
+    "mkit-wasm": "file:../rust/crates/mkit-wasm/pkg",
+    "react": "~19.2.5",
+    "react-dom": "~19.2.5",
+    "react-server-dom-webpack": "~19.2.5",
+    "waku": "1.0.0-alpha.8"
+  },
+  "devDependencies": {
+    "@rolldown/plugin-babel": "^0.2.3",
+    "@tailwindcss/vite": "4.2.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "babel-plugin-react-compiler": "^1.0.0",
+    "oxfmt": "^0.46.0",
+    "oxlint": "^1.61.0",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5",
+    "wrangler": "^4.83.0"
+  }
+}

@@ -1,0 +1,9 @@
+node_modules
+dist
+.wrangler
+wrangler.jsonc
+.env*
+*.tsbuildinfo
+.cache
+.DS_Store
+*.pem
