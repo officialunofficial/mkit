@@ -13,6 +13,26 @@ authors.workspace = true
 publish = false
 default-run = "mkit"
 
+# `cargo binstall mkit-cli` metadata. Points cargo-binstall at the
+# GitHub Release archive layout so users can install the prebuilt
+# binary without building from source — even though this crate is
+# not on crates.io, cargo-binstall can be told to fetch the manifest
+# directly from the repo:
+#
+#     cargo binstall --git https://github.com/officialunofficial/mkit mkit-cli
+#
+# Archive layout pinned by release.yml:
+#   mkit-<version>-<target>.tar.gz
+#     └── mkit-<version>-<target>/mkit
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/mkit-{ version }-{ target }.{ archive-format }"
+pkg-fmt = "tgz"
+bin-dir = "mkit-{ version }-{ target }/{ bin }{ binary-ext }"
+# Cosign bundle / SHA256 sidecar files live next to the tarball.
+# cargo-binstall will pull the .sha256 automatically via the same URL
+# pattern + ".sha256" suffix. Cosign verification is out-of-band.
+pub-key = ""
+
 [lints]
 workspace = true
 
