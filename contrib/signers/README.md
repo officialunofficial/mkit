@@ -13,18 +13,23 @@ Write your signer to that spec and mkit will drive it via
 
 ## What lives here
 
-| Path                                | Status         | Summary                                                                 |
-|-------------------------------------|----------------|-------------------------------------------------------------------------|
-| `mkit-sign-file/`                   | **reference**  | Raw 32-byte key on disk. Ed25519 / secp256k1 / P-256. Not production.   |
-| `secure-enclave/` *(planned)*       | not yet        | Apple Secure Enclave signer (Swift). P-256 only, biometric-gated.       |
-| `ledger/` *(planned)*               | not yet        | Ledger Nano X/S via HID. secp256k1 + Ed25519. User button confirmation. |
-| `webauthn/` *(planned)*             | not yet        | WebAuthn/CTAP authenticator, pure Rust. P-256. Browser or roaming auth. |
-| `metamask-bridge/` *(planned)*      | not yet        | JSON-RPC bridge to a running MetaMask. secp256k1, `personal_sign`.      |
+| Path                                          | Status                  | Summary                                                                             |
+|-----------------------------------------------|-------------------------|-------------------------------------------------------------------------------------|
+| [`mkit-sign-file/`](mkit-sign-file/)          | **reference** (Rust)    | Raw 32-byte key on disk. Ed25519 / secp256k1 / P-256. Not production.               |
+| [`mkit-sign-se/`](mkit-sign-se/README.md)     | **reference** (Swift)   | Apple Secure Enclave, P-256 only, optional biometric gate. Production-viable on Apple Silicon / T2. |
+| `ledger/` *(planned)*                         | not yet                 | Ledger Nano X/S via HID. secp256k1 + Ed25519. User button confirmation.             |
+| `webauthn/` *(planned)*                       | not yet                 | WebAuthn/CTAP authenticator, pure Rust. P-256. Browser or roaming auth.             |
+| `wallet-bridge/` *(planned)*                  | not yet                 | JSON-RPC bridge to a running browser wallet. secp256k1, `personal_sign`.            |
 
-The reference signer is the one integrators should read first — it's
-short enough (~250 lines) to be the shortest possible demonstration
-of the protocol, and its end-to-end test is the contract test any
-conforming implementation should pass.
+`mkit-sign-file` is the one integrators should read first — it's short
+enough (~250 lines) to be the shortest possible demonstration of the
+protocol, and its end-to-end test is the contract test any conforming
+implementation should pass. `mkit-sign-se` is the first
+platform-specific signer and the blueprint for the rest of the
+`ledger` / `webauthn` / wallet-bridge lineup: argv subcommand shape,
+keychain-backed tag storage, "reject non-native algorithms explicitly"
+stance, and a self-contained `tests/e2e.sh` that proves wire-format
+conformance without a built `mkit`.
 
 ---
 
