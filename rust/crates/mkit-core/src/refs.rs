@@ -12,8 +12,11 @@
 //!
 //! Ref name grammar (SPEC-REFS §3): `[A-Za-z0-9._-]+` segments joined
 //! by `/`, with no leading/trailing `/`, no `.`/`..` segments, no
-//! backslashes, no NULs. We share the validator with the future
-//! transport layer via [`validate_ref_name`] / [`validate_ref_prefix`].
+//! backslashes, no NULs. In addition, no segment may end in `.lock`
+//! (the canonical lock-file suffix) and the final segment may not be
+//! the literal `HEAD` (which would shadow the repo-level HEAD
+//! pointer). We share the validator with the future transport layer
+//! via [`validate_ref_name`] / [`validate_ref_prefix`].
 //!
 //! CAS variants for [`update_ref`] follow SPEC-REFS §5: `Any` (clobber),
 //! `Missing` (fail if it exists), `Match(H)` (fail if current value !=
@@ -128,6 +131,9 @@ pub struct Ref {
 /// - No `.` or `..` segments. No empty segments (no `//`, no leading
 ///   `/`, no trailing `/`).
 /// - No `\\` or NUL bytes.
+/// - No segment may end in `.lock` (the canonical lock-file suffix).
+/// - The final segment may not be the literal `HEAD`, since that
+///   would shadow the repo-level `HEAD` pointer.
 #[must_use]
 pub fn validate_ref_name(name: &str) -> bool {
     if name.is_empty() {
@@ -136,11 +142,20 @@ pub fn validate_ref_name(name: &str) -> bool {
     if name.starts_with('/') {
         return false;
     }
+    let mut last_part: &str = "";
     for part in name.split('/') {
         if part.is_empty() {
             return false;
         }
         if part == "." || part == ".." {
+            return false;
+        }
+        // Reject the canonical lock-file suffix. Byte-level check so
+        // clippy's case-sensitive file-extension lint (which assumes a
+        // path extension) does not fire — ref segments are not paths
+        // and `.lock` is a spec-mandated exact-match suffix.
+        let bytes = part.as_bytes();
+        if bytes.len() >= 5 && &bytes[bytes.len() - 5..] == b".lock" {
             return false;
         }
         for &c in part.as_bytes() {
@@ -152,6 +167,10 @@ pub fn validate_ref_name(name: &str) -> bool {
                 return false;
             }
         }
+        last_part = part;
+    }
+    if last_part == "HEAD" {
+        return false;
     }
     true
 }
@@ -710,6 +729,34 @@ mod tests {
         assert!(!validate_ref_name("main@v1"));
         assert!(!validate_ref_name("feat\\branch"));
         assert!(!validate_ref_name("with space"));
+    }
+
+    #[test]
+    fn validate_rejects_lock_suffix() {
+        assert!(!validate_ref_name("refs/heads/main.lock"));
+    }
+
+    #[test]
+    fn validate_rejects_head_final_segment() {
+        assert!(!validate_ref_name("refs/heads/HEAD"));
+        assert!(!validate_ref_name("HEAD"));
+    }
+
+    #[test]
+    fn validate_accepts_main_regression() {
+        assert!(validate_ref_name("refs/heads/main"));
+    }
+
+    #[test]
+    fn validate_accepts_non_lock_suffix_regression() {
+        // Only trailing ".lock" should reject; "lockfile" is fine.
+        assert!(validate_ref_name("refs/heads/lockfile"));
+    }
+
+    #[test]
+    fn validate_accepts_headless_regression() {
+        // Only the exact final segment "HEAD" is rejected.
+        assert!(validate_ref_name("refs/heads/HEADless"));
     }
 
     #[test]
