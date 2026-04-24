@@ -46,6 +46,17 @@ pub struct AttestConfig {
     /// Absolute path to the external signer binary. Required when
     /// `signer = "external"`.
     pub external_signer_path: String,
+    /// Extra argv tokens to pass to the external signer subprocess.
+    /// Each `Vec` entry is one argv entry — the stored list maps 1:1
+    /// to `std::process::Command::args`. On disk, encoded as a
+    /// pipe-separated string: `attest.external_signer_args = sign|--tag|demo`.
+    ///
+    /// Pipe was chosen over comma/space because the in-line
+    /// `--additional-signer "...,args=a|b"` clause already uses `|`
+    /// (commas are taken as the spec's key=value separator), and
+    /// sharing a parser keeps the two code paths consistent. Default
+    /// is empty — matches the zero-argv behaviour prior to this knob.
+    pub external_signer_args: Vec<String>,
     /// Per-algorithm repo-key paths for non-ed25519 signing. Relative
     /// to the repo root; default values are filled in by
     /// [`AttestConfig::secp256k1_key_path_or_default`] /
@@ -122,6 +133,20 @@ pub enum ConfigError {
     InvalidUserIdentity(&'static str),
 }
 
+/// Split a pipe-separated argv string into argv tokens. Empty-string
+/// input yields an empty `Vec` (distinct from `vec![""]`). Whitespace
+/// within tokens is preserved — only `|` splits.
+///
+/// Used by `attest.external_signer_args` and the `--additional-signer
+/// args=...` clause so both sources feed `Command::args` identically.
+#[must_use]
+pub fn parse_pipe_list(s: &str) -> Vec<String> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    s.split('|').map(str::to_owned).collect()
+}
+
 /// Validate a config value has no control bytes below 0x20 (except
 /// tab) and no 0x7f.
 pub fn validate_value(v: &str) -> Result<(), ConfigError> {
@@ -170,6 +195,9 @@ pub fn read_or_default(root: &Path) -> Result<Config, ConfigError> {
             "attest.default_algorithm" => cfg.attest.default_algorithm = val,
             "attest.signer" => cfg.attest.signer = val,
             "attest.external_signer_path" => cfg.attest.external_signer_path = val,
+            "attest.external_signer_args" => {
+                cfg.attest.external_signer_args = parse_pipe_list(&val);
+            }
             "attest.secp256k1_key_path" => cfg.attest.secp256k1_key_path = val,
             "attest.p256_key_path" => cfg.attest.p256_key_path = val,
             // Legacy keys — silently ignored so 0.1.x configs keep working.
@@ -403,6 +431,31 @@ mod tests {
             ".mkit/keys/secp256k1.key"
         );
         assert_eq!(cfg.attest.p256_key_path_or_default(), ".mkit/keys/p256.key");
+    }
+
+    #[test]
+    fn attest_config_reads_external_signer_args() {
+        // Pipe-separated so `mkit attest --additional-signer "...,args=a|b"`
+        // and `attest.external_signer_args` can share a single parser.
+        let td = TempDir::new().unwrap();
+        fs::create_dir_all(td.path().join(".mkit")).unwrap();
+        fs::write(
+            td.path().join(CONFIG_FILE),
+            "attest.external_signer_path = /usr/local/bin/mkit-sign-se\n\
+             attest.external_signer_args = sign|--tag|makechain-prod\n",
+        )
+        .unwrap();
+        let cfg = read_or_default(td.path()).unwrap();
+        assert_eq!(
+            cfg.attest.external_signer_args,
+            vec!["sign", "--tag", "makechain-prod"]
+        );
+    }
+
+    #[test]
+    fn attest_config_external_signer_args_default_empty() {
+        let cfg = Config::with_defaults();
+        assert!(cfg.attest.external_signer_args.is_empty());
     }
 
     #[test]
