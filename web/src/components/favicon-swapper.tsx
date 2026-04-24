@@ -10,6 +10,7 @@ import { renderGridSvg } from '../lib/grid-svg'
  */
 export function FaviconSwapper() {
   useEffect(() => {
+    // Visual variation only; not security-sensitive, Math.random is fine.
     const svg = renderGridSvg(Math.random, 8, 12)
     const href = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
     const link = document.querySelector<HTMLLinkElement>('link[rel~="icon"]') ?? makeLink()

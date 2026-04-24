@@ -6,7 +6,7 @@
   "scripts": {
     "wasm:build": "cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir pkg --release",
     "dev": "waku dev",
-    "build": "CLOUDFLARE=1 waku build",
+    "build": "CLOUDFLARE=1 waku build && node scripts/patch-worker-config.mjs",
     "start": "waku start",
     "deploy": "pnpm build && wrangler deploy -c dist/server/wrangler.json",
     "preview": "pnpm build && wrangler dev -c dist/server/wrangler.json",
