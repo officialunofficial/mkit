@@ -11,6 +11,12 @@
 //!    recovered from the deterministic seed.
 //!
 //! See `docs/SPEC-ATTESTATIONS.md` and `rust/tests/golden/phase8/MANIFEST.txt`.
+//!
+//! Feature-gated on `algo-ed25519` because the pinned vectors here are
+//! Ed25519 signatures produced by `RepoKeySigner`, which is gated on
+//! that feature. With `algo-ed25519` off, the file compiles out.
+
+#![cfg(feature = "algo-ed25519")]
 
 use std::path::PathBuf;
 

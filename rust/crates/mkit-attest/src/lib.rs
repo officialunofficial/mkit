@@ -33,23 +33,33 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::multiple_crate_versions)]
 
+pub mod algorithm;
 pub mod envelope;
 pub mod jcs;
 pub mod signer;
 pub mod signer_external;
+#[cfg(feature = "algo-secp256k1")]
+pub mod signer_k256;
+#[cfg(feature = "algo-p256")]
+pub mod signer_p256;
+#[cfg(feature = "algo-ed25519")]
 pub mod signer_repo_key;
 pub mod signer_sigstore;
 pub mod statement;
 pub mod store;
 pub mod verify;
 
+pub use algorithm::Algorithm;
 pub use envelope::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, attestation_id, pae_of};
 pub use signer::Signer;
 pub use signer_external::ExternalSigner;
+#[cfg(feature = "algo-ed25519")]
 pub use signer_repo_key::{KEYID_PREFIX, RepoKeySigner};
 pub use signer_sigstore::SigstoreSigner;
 pub use statement::{IN_TOTO_TYPE, Statement, Subject};
-pub use verify::{Reason, Registry, SignatureResult, TrustRoot, VerifyResult, verify_envelope};
+pub use verify::{
+    Reason, Registry, SignatureResult, TrustRoot, VerifyResult, verify_envelope, verify_signature,
+};
 
 /// Errors surfaced by the mkit-attest crate.
 ///
@@ -112,9 +122,35 @@ pub enum Error {
     #[error("sigstore signer is not yet implemented")]
     SigstoreNotImplemented,
 
+    // -- Algorithm dispatch --
+    #[error("signature algorithm {0} is not enabled in this build")]
+    AlgorithmNotEnabled(Algorithm),
+    #[error("unknown keyid prefix: {0}")]
+    UnknownKeyidPrefix(String),
+
     // -- Store --
     #[error("envelope is {len} bytes, exceeds the {max}-byte cap")]
     EnvelopeTooLarge { len: usize, max: usize },
     #[error("attestation store I/O: {0}")]
     Io(String),
+
+    // -- secp256k1 / ES256K (feature `algo-secp256k1`) --
+    //
+    // Flat variants (matching this enum's established style) rather than
+    // a single `Secp256k1(String)` aggregator, so callers can pattern-
+    // match on the specific failure mode without re-parsing strings.
+    #[error("secp256k1 key bytes are invalid (zero scalar, >= n, or bad PKCS#8)")]
+    Secp256k1KeyInvalid,
+    #[error("secp256k1 signature bytes are malformed (wrong length or not a valid (r, s))")]
+    Secp256k1SignatureInvalid,
+    #[error("secp256k1 signature did not verify against the given public key and message")]
+    Secp256k1VerifyFailed,
+
+    // -- P-256 / ES256 (feature `algo-p256`) --
+    #[error("P-256 private key is invalid (scalar out of range or malformed PKCS#8)")]
+    P256KeyInvalid,
+    #[error("P-256 signature is malformed (wrong length, non-canonical, or high-S)")]
+    P256SignatureInvalid,
+    #[error("P-256 signature verification failed")]
+    P256VerifyFailed,
 }

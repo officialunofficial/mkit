@@ -7,6 +7,7 @@
 //! branch.
 
 use crate::Error;
+use crate::algorithm::Algorithm;
 use crate::signer::Signer;
 
 #[derive(Debug, Default)]
@@ -20,6 +21,11 @@ impl SigstoreSigner {
 }
 
 impl Signer for SigstoreSigner {
+    fn algorithm(&self) -> Algorithm {
+        // Sigstore Fulcio issues P-256 certificates by default; record
+        // that even though `sign` is still a scaffold.
+        Algorithm::P256
+    }
     fn keyid(&self) -> Result<String, Error> {
         Err(Error::SigstoreNotImplemented)
     }
