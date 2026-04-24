@@ -26,6 +26,11 @@ members = [
     # pins, and let `cargo test --workspace` cover its protocol-shape
     # tests. Hardware-gated e2e lives in `tests/e2e.sh`.
     "../contrib/signers/mkit-sign-ctap",
+    # TPM 2.0 P-256 signer — pure-Rust analog of mkit-sign-se for
+    # Linux/Windows hosts with a TPM. The `tss-esapi` dep is behind the
+    # `tpm2` feature (default off) so workspace builds on macOS / CI
+    # without libtss2-dev still succeed. See docs/SPEC-EXTERNAL-SIGNER.md.
+    "../contrib/signers/mkit-sign-tpm",
 ]
 
 [workspace.package]

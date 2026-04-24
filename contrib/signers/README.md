@@ -18,22 +18,24 @@ Write your signer to that spec and mkit will drive it via
 | [`mkit-sign-file/`](mkit-sign-file/)          | **reference** (Rust)    | Raw 32-byte key on disk. Ed25519 / secp256k1 / P-256. Not production.               |
 | [`mkit-sign-se/`](mkit-sign-se/README.md)     | **reference** (Swift)   | Apple Secure Enclave, P-256 only, optional biometric gate. Production-viable on Apple Silicon / T2. |
 | [`mkit-sign-ctap/`](mkit-sign-ctap/)          | **reference** (Rust)    | FIDO2/WebAuthn roaming authenticator over CTAP-HID (YubiKey, Nitrokey, SoloKey). P-256 only. Speaks Protocol **v1.1** with WebAuthn wrapping — see SPEC-EXTERNAL-SIGNER §14. |
+| [`mkit-sign-tpm/`](mkit-sign-tpm/README.md)   | **reference** (Rust)    | TPM 2.0 persistent-handle P-256 key. Linux/Windows-native. `tss-esapi` under the hood. |
 | `ledger/` *(planned)*                         | not yet                 | Ledger Nano X/S via HID. secp256k1 + Ed25519. User button confirmation.             |
 | `wallet-bridge/` *(planned)*                  | not yet                 | JSON-RPC bridge to a running browser wallet. secp256k1, `personal_sign`.            |
 
 `mkit-sign-file` is the one integrators should read first — it's short
 enough (~250 lines) to be the shortest possible demonstration of the
 protocol, and its end-to-end test is the contract test any conforming
-implementation should pass. `mkit-sign-se` is the first
-platform-specific signer and the blueprint for the rest of the
-`ledger` / wallet-bridge lineup: argv subcommand shape,
-keychain-backed tag storage, "reject non-native algorithms explicitly"
+implementation should pass. `mkit-sign-se` (Apple Secure Enclave),
+`mkit-sign-tpm` (TPM 2.0), and `mkit-sign-ctap` (FIDO2/WebAuthn) are
+the first platform-specific signers and the joint blueprint for the
+rest of the `ledger` / wallet-bridge lineup: argv subcommand shape,
+hardware-handle storage, "reject non-native algorithms explicitly"
 stance, and a self-contained `tests/e2e.sh` that proves wire-format
-conformance without a built `mkit`. `mkit-sign-ctap` follows the same
-shape and is the reference for **Protocol v1.1** — signers that cannot
-sign arbitrary bytes (WebAuthn authenticators, some browser wallets)
-and need to wrap the PAE inside a per-ceremony transport (here:
-`clientDataJSON`).
+conformance without a built `mkit`. `mkit-sign-ctap` additionally
+demonstrates **Protocol v1.1** — the wrapping mode for signers that
+cannot sign arbitrary bytes (WebAuthn authenticators, some browser
+wallets) and need to wrap the PAE inside a per-ceremony transport
+(here: `clientDataJSON`).
 
 ## Protocol v1.1: WebAuthn wrapping
 
