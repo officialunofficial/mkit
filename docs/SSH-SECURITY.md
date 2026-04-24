@@ -115,10 +115,8 @@ affected, not every SSH session on your machine.
 - **No timeout on initial hello (server side).** A misbehaving client
   that connects and sends nothing will block the server's
   `mkit serve` process until the SSH channel times out at the
-  transport layer. Flagged as `TODO(W5.5)` in
-  `src/main.zig:cmdServe`; implementing it requires a portable
-  per-handle read timeout, which Zig 0.16's `std.Io` does not yet
-  expose in a stable form.
+  transport layer. Implementing a per-handle read timeout is deferred
+  work.
 
 ---
 
@@ -160,11 +158,10 @@ as `%f` / user as `%u`); see `sshd_config(5)` for the full token list.
 
 Candidate future work (non-binding):
 
-- A native SSH implementation (pure-Zig port or libssh binding), so
-  mkit owns host-key verification and we can ship fingerprint pinning
-  in `.mkit/config`.
-- Server-side read deadline on the hello handshake, once Zig exposes a
-  portable per-handle timeout or we drop to raw `poll(2)`.
+- A native SSH implementation (e.g. via `russh`), so mkit owns
+  host-key verification and we can ship fingerprint pinning in
+  `.mkit/config`.
+- Server-side read deadline on the hello handshake.
 - `mkit fingerprint` CLI for verifying and storing remote host keys.
 
 Until then: rely on `ssh(1)` and the pinning keys above.

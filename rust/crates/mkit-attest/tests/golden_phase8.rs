@@ -27,7 +27,7 @@ const ATTEST_PREDICATE_TYPE: &str = "https://example.com/predicate/v1";
 const ATTEST_PREDICATE_JCS: &[u8] = b"{}";
 const ATTEST_ED25519_SEED: [u8; 32] = [0xAB; 32];
 
-/// Derive the keyid string from the fixed seed, matching the Zig harvester.
+/// Derive the keyid string from the fixed seed.
 /// keyid = "blake3:" || hex(BLAKE3(pubkey)) where pubkey is derived from seed.
 fn attest_keyid() -> String {
     RepoKeySigner::new(KeyPair::from_seed(ATTEST_ED25519_SEED)).keyid_string()
@@ -45,9 +45,9 @@ fn golden_dir() -> PathBuf {
 }
 
 #[test]
-fn statement_basic_matches_zig_jcs_bytes() {
+fn statement_basic_matches_golden_jcs_bytes() {
     let golden = std::fs::read(golden_dir().join("statement_basic.json"))
-        .expect("read statement_basic.json (run scripts/harvest-golden-vectors-phase8.sh)");
+        .expect("read statement_basic.json");
 
     let got = statement::for_commit(
         &ATTEST_COMMIT_HASH,
@@ -59,7 +59,7 @@ fn statement_basic_matches_zig_jcs_bytes() {
     assert_eq!(
         got.as_bytes(),
         golden.as_slice(),
-        "Rust and Zig JCS encoders disagree on Statement bytes"
+        "JCS encoder output diverges from pinned golden"
     );
 }
 
@@ -81,15 +81,15 @@ fn statement_basic_built_via_struct_form_also_matches() {
 
 #[test]
 fn envelope_basic_decodes_and_signature_verifies() {
-    let golden = std::fs::read(golden_dir().join("envelope_basic.json"))
-        .expect("read envelope_basic.json (run scripts/harvest-golden-vectors-phase8.sh)");
+    let golden =
+        std::fs::read(golden_dir().join("envelope_basic.json")).expect("read envelope_basic.json");
 
-    // Strict decode of the Zig-produced envelope.
+    // Strict decode of the pinned envelope.
     let env = env_mod::decode(&golden).expect("decode envelope");
     assert_eq!(env.payload_type, PAYLOAD_TYPE_IN_TOTO);
     assert_eq!(env.signatures.len(), 1);
 
-    // Derive keyid from the fixed seed — same path the Zig harvester uses.
+    // Derive keyid from the fixed seed.
     let keyid = attest_keyid();
     assert_eq!(env.signatures[0].keyid, keyid);
 
@@ -105,7 +105,7 @@ fn envelope_basic_decodes_and_signature_verifies() {
     reg.add(&keyid, TrustRoot::Ed25519PubKey(pk));
 
     let r = verify::verify(&env, &reg).expect("verify");
-    assert!(r.any_verified, "Zig-produced signature must verify in Rust");
+    assert!(r.any_verified, "pinned signature must verify");
     assert_eq!(r.signatures[0].reason, Reason::Ok);
 }
 

@@ -15,8 +15,7 @@ and size limits).
 
 ## 1. The 7 verbs
 
-All transports implement the same abstract vtable
-(`src/protocol.zig:20-61`):
+All transports implement the same abstract vtable:
 
 ```
 uploadPack(bytes, digest)      upload a pack under "packs/<hex>"
@@ -31,8 +30,7 @@ listRefs(prefix) -> [Ref]      enumerate refs (see SPEC-REFS §4)
 `writeRef` is defined as `updateRef(name, .any, hash)` and MUST be
 implemented that way.
 
-The abstract errors surfaced by the vtable are (lowercase in Zig,
-SPEC-DOC here uses PascalCase):
+The abstract errors surfaced by the vtable:
 
 ```
 PackNotFound         downloadPack on absent digest
@@ -63,7 +61,7 @@ See SPEC-REFS §5.1 for the ref-write matrix. For pack-write:
 
 ---
 
-## 3. memory transport (`transport/memory.zig`)
+## 3. memory transport
 
 In-process `StringHashMap<Hash, Vec<u8>>`. Single-threaded contract.
 No wire format — function calls only. Exists for tests.
@@ -73,7 +71,7 @@ read-then-write (non-atomic across threads; documented).
 
 ---
 
-## 4. file transport (`transport/file.zig`)
+## 4. file transport
 
 Directory-rooted local filesystem. Writes are plain `createFile +
 writeAll`. No fsync in v1 (known gap — SPEC-REFS §6 requires
@@ -88,8 +86,7 @@ atomic-rename for local refs, which W4 adds; pack writes remain plain
 <root>/refs/tags/<name>             ref file
 ```
 
-`ensureParentDirs` creates subdirectories on demand
-(`src/transport/file.zig:176-186`). Refs under nested names
+Subdirectories are created on demand. Refs under nested names
 (e.g. `refs/heads/feat/x`) create the `feat` directory as needed.
 
 ### 4.2 `updateRef` semantics
@@ -105,7 +102,7 @@ filesystem MUST use an external lock.
 
 ---
 
-## 5. s3 transport (`transport/s3.zig`)
+## 5. s3 transport
 
 AWS Signature Version 4 PUT/GET/HEAD. Target backends: AWS S3, Cloudflare
 R2, and MinIO-style S3-compatible. Uses `rustls`-backed HTTP client;
@@ -115,8 +112,8 @@ no OpenSSL.
 
 `region = "auto"` for R2; `region = "us-east-1"` (or the bucket's
 home region) for AWS. Silent SigV4 failure if the wrong region is
-configured (red-team R-16). Implementations SHOULD document this and
-fail fast on SigV4 rejection with a readable error.
+configured. Implementations SHOULD document this and fail fast on
+SigV4 rejection with a readable error.
 
 ### 5.2 Wire
 
@@ -150,10 +147,8 @@ Per SPEC-REFS §5.2:
 
 ### 5.4 listRefs
 
-XML `list-type=2` output parsed to strip the prefix per SPEC-REFS §4
-(`src/transport/s3.zig:301-316`). Implementations MUST handle
-pagination (`<NextContinuationToken>`). Current mkit implementation
-assumes a single page; v1 clarifies this is a bug to fix in W4.
+XML `list-type=2` output parsed to strip the prefix per SPEC-REFS §4.
+Implementations MUST handle pagination (`<NextContinuationToken>`).
 
 ### 5.5 Size limit
 
@@ -163,7 +158,7 @@ stay under this. Multipart upload is not implemented in v1.
 
 ---
 
-## 6. http transport (`transport/http.zig`)
+## 6. http transport
 
 Worker-flavoured HTTP API. This is NOT a generic S3-compatible HTTP
 layer; it assumes a server that implements mkit's specific endpoint
@@ -181,7 +176,7 @@ GET    <base>/<ref-name>                read ref
 GET    <base>/refs/?prefix=<prefix>    list refs; JSON response
 ```
 
-JSON listing response (`src/transport/http.zig:79-112`):
+JSON listing response:
 
 ```json
 {"refs":["refs/heads/main","refs/heads/feature/x"]}
@@ -207,12 +202,11 @@ Per SPEC-REFS §5.2:
 
 **This is incompatible with generic S3-style ETag semantics.** A bare
 S3 + nginx server will compute the MD5 of the body for its ETag and
-reject the hex-hash `If-Match`. Known and documented (red-team R-12,
-R-13).
+reject the hex-hash `If-Match`.
 
 ---
 
-## 7. ssh transport (`transport/ssh.zig`)
+## 7. ssh transport
 
 Process-exec SSH: the client invokes
 `ssh [-p port] [user@]host mkit serve <path>` and speaks a custom
@@ -229,11 +223,9 @@ Every request and response is framed as:
 [payload_len bytes payload]
 ```
 
-`payload_len` max: 16 MiB (`MAX_PAYLOAD`,
-`src/transport/ssh.zig:28`). Larger payloads (e.g. packs
-> 16 MiB) use repeated frames — SSH transport does NOT fragment; v1
-clarifies this is an intentional limit. Large packs over SSH require a
-v2 fragmented protocol or a switch to S3/HTTP for transfer.
+`payload_len` max: 16 MiB (`MAX_PAYLOAD`). The SSH transport does NOT
+fragment: larger packs require a future fragmented protocol or a
+switch to S3/HTTP for transfer.
 
 ### 7.2 Opcodes (client → server)
 

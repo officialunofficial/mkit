@@ -6,12 +6,12 @@ One page. Run top to bottom. Do not skip steps.
 
 - [ ] `main` is green in CI (build + test + verify-rename).
 - [ ] `bash scripts/verify-rename.sh` exits 0 locally.
-- [ ] `zig build test-all` passes on a fresh clone.
-- [ ] `zig build` passes for each release target:
-  - [ ] `-Dtarget=aarch64-macos`
-  - [ ] `-Dtarget=x86_64-macos`
-  - [ ] `-Dtarget=x86_64-linux`
-  - [ ] `-Dtarget=aarch64-linux`
+- [ ] `cd rust && cargo test --workspace` passes on a fresh clone.
+- [ ] `cargo build --release` passes for each release target:
+  - [ ] `--target=aarch64-apple-darwin`
+  - [ ] `--target=x86_64-apple-darwin`
+  - [ ] `--target=x86_64-unknown-linux-gnu`
+  - [ ] `--target=aarch64-unknown-linux-gnu`
 - [ ] `CHANGELOG.md` has an entry for this version; move items from
       `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD`.
 - [ ] Version bumped wherever it is hard-coded (README install snippets,

@@ -58,8 +58,6 @@ for each of 256 entries:
     table[i] = z
 ```
 
-(Current mkit: `src/fastcdc.zig:9-21`.)
-
 ### 3.1 Seed decision (v1)
 
 The seed ASCII is **`"MKITFCDC"`**, frozen for the lifetime of v1.
@@ -75,8 +73,8 @@ mechanism for this.
 
 ## 4. Chunking parameters
 
-Hard-coded defaults (used by `hashFileChunked` in
-`src/worktree.zig:122-126`):
+Hard-coded defaults (applied whenever the worktree takes the chunked
+path):
 
 ```
 min_size =  16 * 1024   =   16 KiB
@@ -98,7 +96,7 @@ used.
 
 ## 5. Mask derivation and cut algorithm
 
-From `src/fastcdc.zig:32-42`:
+Mask derivation:
 
 ```
 bits   = log2(avg_size)
@@ -115,7 +113,7 @@ mask_s = 0x0001_FFFF
 mask_l = 0x0000_7FFF
 ```
 
-Cut algorithm (normative, `src/fastcdc.zig:49-64`):
+Cut algorithm (normative):
 
 ```
 cut(data) -> length:
