@@ -263,15 +263,25 @@ mkit ships three. Each is opt-in; the CLI picks the signer via
 | `external` | Subprocess — JSON-over-stdin/stdout to a caller-supplied binary | Whatever the external process's trust model is. |
 
 `external` is the extension point Makechain, a future blockchain
-attestor, or an internal tool wraps. Protocol:
+attestor, or an internal tool wraps. The full wire contract —
+invocation, request/response JSON, error semantics, size caps,
+timeout, determinism, versioning — is specified normatively in
+[**`SPEC-EXTERNAL-SIGNER.md`**](./SPEC-EXTERNAL-SIGNER.md). Protocol
+version is **v1**; that document is the source of truth for any new
+signer implementation, and the multi-algorithm `algorithm` field
+added in phase-1 of the Rust port lives there rather than being
+re-specified here.
+
+TL;DR for readers who just want the shape:
 
 ```
-stdin   (one-line JSON):  {"pae_base64": "..."}
+stdin   (one-line JSON):  {"pae_base64": "...", "algorithm": "ed25519|secp256k1|p256"}
 stdout  (one-line JSON):  {"keyid": "...", "sig_base64": "..."}
 exit 0  on success, non-zero on error (stderr surfaces to the user).
 ```
 
 The binary path comes from `attest.external_signer` in `.mkit/config`.
+A reference implementation lives at `contrib/signers/mkit-sign-file/`.
 
 ### 6.3 `keyid` conventions
 
