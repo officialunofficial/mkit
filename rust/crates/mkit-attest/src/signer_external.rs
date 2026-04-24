@@ -163,14 +163,41 @@ mod tests {
 
     fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
         let p = dir.join(name);
-        let mut f = std::fs::File::create(&p).expect("create");
-        f.write_all(b"#!/bin/sh\n").unwrap();
-        f.write_all(body.as_bytes()).unwrap();
-        f.write_all(b"\n").unwrap();
+        {
+            let mut f = std::fs::File::create(&p).expect("create");
+            f.write_all(b"#!/bin/sh\n").unwrap();
+            f.write_all(body.as_bytes()).unwrap();
+            f.write_all(b"\n").unwrap();
+            // Drop `f` at end of this block so the kernel considers the file
+            // closed before the caller exec()s it. Without this, Linux can
+            // return ETXTBSY ("Text file busy") when a parallel cargo-test
+            // harness races the write-then-spawn window.
+            f.sync_all().unwrap();
+        }
         let mut perm = std::fs::metadata(&p).unwrap().permissions();
         perm.set_mode(0o755);
         std::fs::set_permissions(&p, perm).unwrap();
         p
+    }
+
+    /// Retry wrapper around `ExternalSigner::sign` that tolerates the
+    /// one transient failure mode tests can hit on Linux: ETXTBSY
+    /// ("Text file busy") surfacing through `ExternalSignerSpawn`. The
+    /// error can fire briefly after writing the script even when the
+    /// File handle has been dropped, because the kernel hasn't flushed
+    /// the close-vs-exec ordering yet under load. Retry up to 5 times
+    /// with 20ms backoff before bubbling up.
+    #[cfg(unix)]
+    fn sign_retry_on_etxtbsy(ext: &mut ExternalSigner, pae: &[u8]) -> Result<Vec<u8>, Error> {
+        for _ in 0..5 {
+            match ext.sign(pae) {
+                Err(Error::ExternalSignerSpawn(msg)) if msg.contains("Text file busy") => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
+        ext.sign(pae)
     }
 
     #[cfg(unix)]
@@ -189,7 +216,7 @@ mod tests {
             Err(Error::KeyIdNotKnownUntilFirstSign)
         ));
 
-        let sig = ext.sign(b"DSSEv1 4 test 0 ").unwrap();
+        let sig = sign_retry_on_etxtbsy(&mut ext, b"DSSEv1 4 test 0 ").unwrap();
         assert_eq!(sig, vec![0x01, 0x02, 0x03]);
 
         let kid = ext.keyid().unwrap();
@@ -204,7 +231,7 @@ mod tests {
         let path = write_script(tmp.path(), "bad.sh", body);
 
         let mut ext = ExternalSigner::new(path);
-        match ext.sign(b"DSSEv1 4 test 0 ") {
+        match sign_retry_on_etxtbsy(&mut ext, b"DSSEv1 4 test 0 ") {
             Err(Error::ExternalSignerFailed(msg)) => assert!(msg.contains("boom")),
             other => panic!("expected ExternalSignerFailed, got {other:?}"),
         }
