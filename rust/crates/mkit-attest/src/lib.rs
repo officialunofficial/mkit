@@ -40,6 +40,8 @@ pub mod signer;
 pub mod signer_external;
 #[cfg(feature = "algo-secp256k1")]
 pub mod signer_k256;
+#[cfg(feature = "algo-p256")]
+pub mod signer_p256;
 #[cfg(feature = "algo-ed25519")]
 pub mod signer_repo_key;
 pub mod signer_sigstore;
@@ -143,4 +145,12 @@ pub enum Error {
     Secp256k1SignatureInvalid,
     #[error("secp256k1 signature did not verify against the given public key and message")]
     Secp256k1VerifyFailed,
+
+    // -- P-256 / ES256 (feature `algo-p256`) --
+    #[error("P-256 private key is invalid (scalar out of range or malformed PKCS#8)")]
+    P256KeyInvalid,
+    #[error("P-256 signature is malformed (wrong length, non-canonical, or high-S)")]
+    P256SignatureInvalid,
+    #[error("P-256 signature verification failed")]
+    P256VerifyFailed,
 }

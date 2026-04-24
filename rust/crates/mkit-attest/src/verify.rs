@@ -30,6 +30,12 @@ use mkit_core::hash::{HASH_LEN, HEX_LEN, from_hex};
 pub enum TrustRoot {
     /// Raw 32-byte Ed25519 public key.
     Ed25519PubKey([u8; 32]),
+    /// SEC1-encoded P-256 public key. Compressed (33 bytes,
+    /// `0x02`/`0x03` prefix) and uncompressed (65 bytes, `0x04`
+    /// prefix) are both accepted — `WebAuthn` authenticators ship
+    /// uncompressed, our in-process signer ships compressed.
+    #[cfg(feature = "algo-p256")]
+    P256PubKeySec1(Vec<u8>),
     /// Scaffold — sigstore verification needs a Rekor + Fulcio walk
     /// that this crate does not yet ship. See SPEC-ATTESTATIONS §6.2.
     /// Any signature dispatched to this trust root reports
@@ -157,6 +163,17 @@ pub fn verify(env: &Envelope, registry: &Registry) -> Result<VerifyResult, Error
             }
             Some(TrustRoot::Ed25519PubKey(pk)) => {
                 row.reason = dispatch_ed25519(*pk, &s.sig, &pae);
+                if row.reason == Reason::Ok {
+                    row.verified = true;
+                    any_verified = true;
+                }
+            }
+            #[cfg(feature = "algo-p256")]
+            Some(TrustRoot::P256PubKeySec1(pk)) => {
+                row.reason = match crate::signer_p256::verify_p256(pk, &pae, &s.sig) {
+                    Ok(()) => Reason::Ok,
+                    Err(_) => Reason::SignatureMismatch,
+                };
                 if row.reason == Reason::Ok {
                     row.verified = true;
                     any_verified = true;
@@ -621,24 +638,53 @@ mod tests {
         assert!(verify_signature(Algorithm::Ed25519, &pk, msg, &sig).is_ok());
     }
 
-    /// `verify_signature` returns `Err(AlgorithmNotEnabled)` for an
-    /// algorithm whose backend is compiled out. Since Kappa/Lambda
-    /// haven't wired their deps yet, secp256k1 and p256 always hit
-    /// this arm today.
+    /// `verify_signature` returns `Err(AlgorithmNotEnabled)` only when
+    /// the algorithm's backend is truly compiled out. With all features
+    /// enabled (the default), every arm has a real verifier that
+    /// surfaces its own typed error on malformed input.
+    #[cfg(not(any(feature = "algo-secp256k1", feature = "algo-p256")))]
     #[test]
-    fn verify_signature_stub_algorithms_return_not_enabled() {
+    fn verify_signature_disabled_algorithms_return_not_enabled() {
         let pk = [0u8; 33];
         let msg = b"anything";
         let sig = [0u8; 64];
 
+        #[cfg(not(feature = "algo-secp256k1"))]
         match verify_signature(Algorithm::Secp256k1, &pk, msg, &sig) {
             Err(Error::AlgorithmNotEnabled(Algorithm::Secp256k1)) => {}
             other => panic!("expected AlgorithmNotEnabled(Secp256k1), got {other:?}"),
         }
+        #[cfg(not(feature = "algo-p256"))]
         match verify_signature(Algorithm::P256, &pk, msg, &sig) {
             Err(Error::AlgorithmNotEnabled(Algorithm::P256)) => {}
             other => panic!("expected AlgorithmNotEnabled(P256), got {other:?}"),
         }
+        let _ = (pk, msg, sig);
+    }
+
+    /// With the backend compiled in, `verify_signature` surfaces the
+    /// backend's own typed error on malformed inputs instead of
+    /// `AlgorithmNotEnabled`. This is what every in-tree build hits by
+    /// default since all three algorithms are on.
+    #[cfg(feature = "algo-secp256k1")]
+    #[test]
+    fn verify_signature_secp256k1_enabled_surfaces_backend_error() {
+        let pk = [0u8; 33];
+        let msg = b"anything";
+        let sig = [0u8; 64];
+        assert!(matches!(
+            verify_signature(Algorithm::Secp256k1, &pk, msg, &sig),
+            Err(Error::Secp256k1KeyInvalid)
+        ));
+    }
+
+    #[cfg(feature = "algo-p256")]
+    #[test]
+    fn verify_signature_p256_enabled_surfaces_backend_error() {
+        let pk = [0u8; 33];
+        let msg = b"anything";
+        let sig = [0u8; 64];
+        assert!(verify_signature(Algorithm::P256, &pk, msg, &sig).is_err());
     }
 
     /// `verify_signature` collapses crypto-mismatch into the same
