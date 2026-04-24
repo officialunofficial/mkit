@@ -34,12 +34,31 @@ pub struct ExternalSigner {
 }
 
 impl ExternalSigner {
-    #[must_use]
-    pub fn new(binary_path: impl Into<PathBuf>) -> Self {
-        Self {
-            binary_path: binary_path.into(),
-            cached_keyid: None,
+    /// Construct an external signer wrapping `binary_path`.
+    ///
+    /// The path MUST be absolute. A relative path is rejected with
+    /// [`Error::ExternalSignerRelativePath`]: at spawn time, a
+    /// relative path would resolve against the current `PATH` (or
+    /// CWD on Windows) and pick up a same-named binary planted by an
+    /// attacker earlier in the search order. Forcing absolute paths
+    /// at construction closes that TOCTOU hole and makes the
+    /// resolution deterministic at config-time rather than spawn-time.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ExternalSignerRelativePath`] if `binary_path` is not
+    /// absolute.
+    pub fn new(binary_path: impl Into<PathBuf>) -> Result<Self, Error> {
+        let binary_path = binary_path.into();
+        if !binary_path.is_absolute() {
+            return Err(Error::ExternalSignerRelativePath(
+                binary_path.display().to_string(),
+            ));
         }
+        Ok(Self {
+            binary_path,
+            cached_keyid: None,
+        })
     }
 }
 
@@ -208,7 +227,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = write_script(tmp.path(), "signer.sh", body);
 
-        let mut ext = ExternalSigner::new(path);
+        let mut ext = ExternalSigner::new(path).expect("tempdir path is absolute");
         // keyid before any sign call → error.
         assert!(matches!(
             ext.keyid(),
@@ -222,6 +241,18 @@ mod tests {
         assert_eq!(kid, "test:abc");
     }
 
+    #[test]
+    fn new_rejects_relative_path() {
+        let err = ExternalSigner::new("mkit-signer").unwrap_err();
+        assert!(matches!(err, Error::ExternalSignerRelativePath(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_accepts_absolute_path() {
+        ExternalSigner::new("/usr/bin/foo").expect("absolute path accepted");
+    }
+
     #[cfg(unix)]
     #[test]
     fn nonzero_exit_surfaces_failed() {
@@ -229,7 +260,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = write_script(tmp.path(), "bad.sh", body);
 
-        let mut ext = ExternalSigner::new(path);
+        let mut ext = ExternalSigner::new(path).expect("tempdir path is absolute");
         match sign_retry_on_etxtbsy(&mut ext, b"DSSEv1 4 test 0 ") {
             Err(Error::ExternalSignerFailed(msg)) => assert!(msg.contains("boom")),
             other => panic!("expected ExternalSignerFailed, got {other:?}"),

@@ -111,7 +111,7 @@ fn fastcdc_iterator_total_equals_input_length() {
 fn delta_basic_pin_bytes_and_roundtrip() {
     // SPEC-DELTA pure-INSERT pin: base="aaa", target="zzz".
     // Stream MUST be: [0x01][3,0,0,0][3,0,0,0][3]['z','z','z'] = 13 bytes.
-    let stream = delta::encode(b"aaa", b"zzz");
+    let stream = delta::encode(b"aaa", b"zzz").unwrap();
     let expected: [u8; 13] = [
         0x01, // version
         0x03, 0x00, 0x00, 0x00, // base_len = 3

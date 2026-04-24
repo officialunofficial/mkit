@@ -15,3 +15,13 @@ zig-out/
 # Test-generated private keys (older path; retained to avoid accidental leaks)
 mkit/test-key
 .claude/
+
+# Keys, secrets, and local env files — never commit these
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+secrets.*
+credentials.*

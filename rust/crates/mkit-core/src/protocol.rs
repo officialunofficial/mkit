@@ -157,6 +157,12 @@ pub enum TransportError {
         /// Bytes actually available after the header.
         actual: usize,
     },
+    /// An insecure URL scheme (plain `http://`) was supplied for a
+    /// non-loopback host. Plain HTTP is restricted to loopback addresses
+    /// (`127.0.0.1`, `::1`, `localhost`) so production traffic is never
+    /// transported in the clear.
+    #[error("insecure scheme: plain http:// is allowed only for loopback hosts")]
+    InsecureScheme,
 }
 
 /// Result alias used throughout this module.

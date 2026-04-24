@@ -69,6 +69,8 @@ pub enum Error {
     PredicateMustBeJsonObject,
     #[error("predicate body is not valid UTF-8")]
     PredicateNotUtf8,
+    #[error("predicate body is not parseable as a JSON object")]
+    PredicateNotJsonObject,
 
     // -- Envelope --
     #[error("DSSE envelope needs at least one signature")]
@@ -105,6 +107,8 @@ pub enum Error {
     ExternalSignerBadResponse,
     #[error("external signer output exceeded the 1 MiB cap")]
     ExternalSignerOutputTooLarge,
+    #[error("external signer binary path must be absolute: {0}")]
+    ExternalSignerRelativePath(String),
     #[error("sigstore signer is not yet implemented")]
     SigstoreNotImplemented,
 

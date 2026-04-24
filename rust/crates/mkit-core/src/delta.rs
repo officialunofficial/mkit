@@ -36,20 +36,55 @@ pub const HEADER_LEN: usize = 1 + 4 + 4;
 /// alignment math. Not part of the wire format — readers don't care.
 const BLOCK_SIZE: usize = 16;
 
+/// Multiplier applied to `stream.len()` when bounding the decoder's
+/// initial `Vec::with_capacity`. The worst-case expansion of a COPY op
+/// is 7 bytes of stream → `u16::MAX` output bytes (≈ 9363×), but in
+/// practice stream-sized * 256 dwarfs real deltas and still keeps the
+/// attacker's reach tiny: a 9-byte stream can only request ≤ 2304
+/// bytes of pre-allocation, independent of `base.len()` or the
+/// declared `result_len`. The final `result_len` self-consistency
+/// check still catches inflated payloads.
+pub(crate) const CAP_MULTIPLIER: usize = 256;
+
+/// Compute the decoder's initial capacity hint.
+///
+/// This is a small, explicitly attacker-resistant helper, exposed to
+/// the crate so that the regression test can pin down the bound
+/// without reaching into `decode`. The hint is the smaller of:
+///
+/// * the declared `result_len` (can't exceed declared output), and
+/// * `stream.len() * CAP_MULTIPLIER` (attacker bounded by on-wire size).
+///
+/// Crucially, `base.len()` does NOT appear here — see SEC finding G5.
+#[inline]
+pub(crate) fn compute_cap_hint(result_len: usize, _base_len: usize, stream_len: usize) -> usize {
+    result_len.min(stream_len.saturating_mul(CAP_MULTIPLIER))
+}
+
 /// Build a v1 delta stream that reconstructs `result` from `base`.
 ///
 /// The writer is an FNV-1a-on-16-byte-blocks scan. Any conformant
 /// writer is acceptable; this one is greedy. Output is always at least
 /// [`HEADER_LEN`] bytes.
 ///
+/// # Errors
+///
+/// Returns [`MkitError::DeltaLengthOverflow`] if either `base.len()`
+/// or `result.len()` exceeds `u32::MAX`. SPEC-PACKFILE caps individual
+/// payloads under this bound, so this is a programmer error rather
+/// than a normal runtime condition — but silently saturating (the
+/// old behaviour) produced a stream that `decode()` rejected with a
+/// confusing "length mismatch" far from the actual source.
+///
 /// # Panics
 ///
 /// Panics only on invariant violations in the writer's bookkeeping
 /// (insert-buffer length > 127, match length > `u16::MAX`); both are
 /// guarded above and unreachable for any valid input.
-#[must_use]
-pub fn encode(base: &[u8], result: &[u8]) -> Vec<u8> {
+pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, MkitError> {
     use std::collections::HashMap;
+
+    check_length_bounds(base.len(), result.len())?;
 
     let mut out = Vec::with_capacity(HEADER_LEN + result.len());
     write_header(&mut out, base.len(), result.len());
@@ -111,7 +146,26 @@ pub fn encode(base: &[u8], result: &[u8]) -> Vec<u8> {
         }
     }
     flush_insert(&mut out, &mut insert_buf);
-    out
+    Ok(out)
+}
+
+/// Validate that `base_len` and `result_len` both fit in the v1 wire
+/// format's `u32` cap. Extracted as a helper so tests can exercise
+/// the bound without actually allocating multi-gigabyte buffers.
+pub(crate) fn check_length_bounds(base_len: usize, result_len: usize) -> Result<(), MkitError> {
+    if u32::try_from(base_len).is_err() {
+        return Err(MkitError::DeltaLengthOverflow {
+            field: "base_len",
+            len: base_len,
+        });
+    }
+    if u32::try_from(result_len).is_err() {
+        return Err(MkitError::DeltaLengthOverflow {
+            field: "result_len",
+            len: result_len,
+        });
+    }
+    Ok(())
 }
 
 /// Apply a v1 delta stream to `base`, returning the reconstructed bytes.
@@ -144,18 +198,14 @@ pub fn decode(base: &[u8], stream: &[u8]) -> Result<Vec<u8>, MkitError> {
         return Err(MkitError::TrailingData);
     }
 
-    // Bound the pre-allocation against attacker-controlled `result_len`.
-    // An upper bound derivable from the stream itself is (base.len() +
-    // instructions_remaining): COPY ops can fan a single 7-byte op into
-    // up to u16::MAX output bytes sourced from `base`, and INSERT ops
-    // are byte-for-byte. So the largest output the stream can legally
-    // produce is bounded by (base.len() × (instructions/7)) + literals —
-    // but (base.len() + stream.len() × 65535 / 7) already dwarfs any
-    // real payload. Rather than model this exactly, cap the initial
-    // capacity at the actual on-wire maximum we'll ever encode: 4 GiB
-    // minus one. This prevents a 4 GiB pre-allocation from a 9-byte
-    // header. Final `result_len` mismatch is still enforced below.
-    let cap_hint = result_len.min(base.len().saturating_add(stream.len().saturating_mul(2)));
+    // Bound the pre-allocation against attacker-controlled length fields.
+    // See [`compute_cap_hint`]: the hint is strictly a function of
+    // `stream.len()` (with `result_len` as an upper bound) — `base.len()`
+    // MUST NOT appear, because a 1 GiB base + 9-byte crafted stream
+    // otherwise triggers a ≈ 1 GiB allocation (SEC finding G5). The
+    // final `result_len` equality check below still enforces wire-level
+    // self-consistency.
+    let cap_hint = compute_cap_hint(result_len, base.len(), stream.len());
     let mut out: Vec<u8> = Vec::with_capacity(cap_hint);
     let mut pos = HEADER_LEN;
     while pos < stream.len() {
@@ -214,11 +264,12 @@ pub fn decode(base: &[u8], stream: &[u8]) -> Result<Vec<u8>, MkitError> {
 // --- helpers ---
 
 fn write_header(out: &mut Vec<u8>, base_len: usize, result_len: usize) {
-    // Lengths >= u32::MAX are out of scope for v1 (SPEC-PACKFILE caps a
-    // single payload at 4 GiB). Saturate rather than panic — the caller
-    // will hit a length-mismatch error when decode runs.
-    let bl: u32 = u32::try_from(base_len).unwrap_or(u32::MAX);
-    let rl: u32 = u32::try_from(result_len).unwrap_or(u32::MAX);
+    // `check_length_bounds` has already been called by `encode`, so
+    // both fit in u32. The `expect()`s are invariant-preserving
+    // rather than user-facing: reaching them means the caller
+    // bypassed `encode`.
+    let bl: u32 = u32::try_from(base_len).expect("base_len <= u32::MAX (checked)");
+    let rl: u32 = u32::try_from(result_len).expect("result_len <= u32::MAX (checked)");
     out.push(STREAM_VERSION);
     out.extend_from_slice(&bl.to_le_bytes());
     out.extend_from_slice(&rl.to_le_bytes());
@@ -269,7 +320,7 @@ mod tests {
     #[test]
     fn identity_roundtrip() {
         let data = b"0123456789abcdef".repeat(4); // 64 bytes
-        let stream = encode(&data, &data);
+        let stream = encode(&data, &data).unwrap();
         let restored = decode(&data, &stream).unwrap();
         assert_eq!(restored, data);
     }
@@ -278,7 +329,7 @@ mod tests {
     fn pure_insert_roundtrip() {
         let base = b"aaa";
         let target = b"zzz";
-        let stream = encode(base, target);
+        let stream = encode(base, target).unwrap();
         // After the 9-byte header, the very next byte is the INSERT length.
         assert_eq!(stream[HEADER_LEN] & 0x80, 0);
         assert_eq!(stream[HEADER_LEN], 3);
@@ -309,7 +360,7 @@ mod tests {
         let v1 = include_str!("delta.rs"); // any sizable text
         let mut v2 = String::from(v1);
         v2.push_str("\n// trailing edit\n");
-        let stream = encode(v1.as_bytes(), v2.as_bytes());
+        let stream = encode(v1.as_bytes(), v2.as_bytes()).unwrap();
         let restored = decode(v1.as_bytes(), &stream).unwrap();
         assert_eq!(restored, v2.as_bytes());
         assert!(stream.len() < v2.len(), "delta should be smaller than v2");
@@ -421,8 +472,54 @@ mod tests {
     #[test]
     fn empty_base_pure_insert() {
         let target = b"all new content here!";
-        let stream = encode(b"", target);
+        let stream = encode(b"", target).unwrap();
         let restored = decode(b"", &stream).unwrap();
         assert_eq!(restored, target);
+    }
+
+    #[test]
+    fn cap_hint_does_not_scale_with_base_len() {
+        // G5 regression: the decoder's pre-allocation must be bounded by
+        // `stream.len()`, not by `base.len()`. Previously a 9-byte stream
+        // with a 1 GiB base could drive `Vec::with_capacity` to ~1 GiB.
+        //
+        // Assert: for a huge base + tiny stream, cap_hint is tiny.
+        let huge_base = 1usize << 30; // 1 GiB
+        let tiny_stream = 9usize; // just the header
+        let declared_result = u32::MAX as usize;
+        let cap = super::compute_cap_hint(declared_result, huge_base, tiny_stream);
+        assert!(
+            cap <= tiny_stream.saturating_mul(CAP_MULTIPLIER),
+            "cap_hint {cap} must be bounded by stream.len() * CAP_MULTIPLIER, \
+             not by base.len()",
+        );
+        assert!(
+            cap < 1024 * 1024,
+            "cap_hint {cap} must stay well below 1 MiB for a 9-byte stream",
+        );
+    }
+
+    /// Finding H8: `encode()` used to saturate `base_len`/`result_len` to
+    /// `u32::MAX` for inputs over 4 GiB, silently producing a stream
+    /// that `decode()` would reject with a confusing "length mismatch".
+    /// Now `check_length_bounds` errors out explicitly with
+    /// `DeltaLengthOverflow` so misuse surfaces at the call site.
+    #[test]
+    fn check_length_bounds_rejects_over_u32() {
+        // base_len above u32::MAX.
+        let over = (u32::MAX as usize).saturating_add(1);
+        assert!(matches!(
+            check_length_bounds(over, 0),
+            Err(MkitError::DeltaLengthOverflow { .. })
+        ));
+        // result_len above u32::MAX.
+        assert!(matches!(
+            check_length_bounds(0, over),
+            Err(MkitError::DeltaLengthOverflow { .. })
+        ));
+        // Exactly at u32::MAX is fine.
+        assert!(check_length_bounds(u32::MAX as usize, u32::MAX as usize).is_ok());
+        // Small is fine.
+        assert!(check_length_bounds(1, 1).is_ok());
     }
 }

@@ -164,10 +164,29 @@ pub fn verify(
 // Signing-bytes builders
 // -------------------------------------------------------------------
 
-/// Compute `BLAKE3(domain || signing_bytes)`. Always 32 bytes.
+/// Compute `BLAKE3(len_le16(domain) || domain || signing_bytes)`.
+/// Always 32 bytes.
+///
+/// The 2-byte little-endian length prefix closes a latent ambiguity
+/// that `BLAKE3(domain || signing_bytes)` alone would carry: without
+/// a length prefix, the concatenation `domain || signing_bytes` is
+/// not uniquely parseable back into its two halves. Two distinct
+/// `(domain, signing_bytes)` pairs could in principle produce the
+/// same input to the hash (e.g. `("ab", "cX")` vs `("abc", "X")`).
+///
+/// Domain strings are fixed constants (`COMMIT_DOMAIN` /
+/// `REMIX_DOMAIN`) and always fit in `u16`; construction-time asserts
+/// this in `sign()` / `verify()` call sites.
+///
+/// NOTE: This is a wire/signature change vs the original v0.1.0
+/// format. Any signatures produced before this change do NOT verify
+/// under the new digest. A coordinated CHANGELOG entry documents the
+/// break; there are no shipped artefacts to migrate.
 #[must_use]
 fn domain_digest(domain: &[u8], signing_bytes: &[u8]) -> [u8; HASH_LEN] {
     let mut h = blake3::Hasher::new();
+    let domain_len = u16::try_from(domain.len()).expect("domain <= u16::MAX");
+    h.update(&domain_len.to_le_bytes());
     h.update(domain);
     h.update(signing_bytes);
     *h.finalize().as_bytes()
@@ -367,13 +386,13 @@ pub fn save_key(path: &Path, kp: &KeyPair) -> Result<(), MkitError> {
             .map_err(|e| MkitError::KeyIo(format!("write: {e}")))?;
         f.sync_all()
             .map_err(|e| MkitError::KeyIo(format!("fsync: {e}")))?;
-        // If the file pre-existed with a wider mode, reset it.
-        let mut perm = std::fs::metadata(path)
-            .map_err(|e| MkitError::KeyIo(format!("stat: {e}")))?
-            .permissions();
-        perm.set_mode(0o600);
-        std::fs::set_permissions(path, perm)
-            .map_err(|e| MkitError::KeyIo(format!("chmod: {e}")))?;
+        // If the file pre-existed with a wider mode, reset it. Set
+        // the permissions on the OPEN File handle, not by path — that
+        // removes a TOCTOU window in which an attacker could `rename(2)`
+        // a different inode in between `open()` and a path-based
+        // `set_permissions()`, and have us loosen their file.
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| MkitError::KeyIo(format!("fchmod: {e}")))?;
     }
     #[cfg(not(unix))]
     {
@@ -495,6 +514,33 @@ mod tests {
         let a = domain_digest(COMMIT_DOMAIN, bytes);
         let b = domain_digest(REMIX_DOMAIN, bytes);
         assert_ne!(a, b);
+    }
+
+    /// Finding H4: `domain_digest` now hashes a 2-byte LE length
+    /// prefix before the domain label, so
+    /// `BLAKE3(len_le16(D) || D || M)` — not `BLAKE3(D || M)`. This
+    /// closes a latent ambiguity between a domain `"ab"` + message
+    /// `"cX"` vs domain `"abc"` + message `"X"` (same concatenation).
+    ///
+    /// Regression guard: compute the expected digest by hand and
+    /// assert it matches. If anyone reverts the length prefix this
+    /// trips before any golden-vector drift is noticed.
+    #[test]
+    fn domain_digest_includes_length_prefix() {
+        let domain = b"ab";
+        let msg = b"cX";
+        let got = domain_digest(domain, msg);
+        let mut want = blake3::Hasher::new();
+        let len = u16::try_from(domain.len()).unwrap();
+        want.update(&len.to_le_bytes());
+        want.update(domain);
+        want.update(msg);
+        assert_eq!(got, *want.finalize().as_bytes());
+
+        // And the ambiguous case with different domain/message split
+        // MUST produce a different digest.
+        let other = domain_digest(b"abc", b"X");
+        assert_ne!(got, other);
     }
 
     // ------------------------------------------------------------------
@@ -644,6 +690,36 @@ mod tests {
         let p = dir.join("default.key");
         let kp = KeyPair::from_seed([0x33; 32]);
         save_key(&p, &kp).unwrap();
+        let meta = std::fs::metadata(&p).unwrap();
+        assert_eq!(meta.mode() & 0o777, 0o600);
+    }
+
+    /// Regression for finding H3. If the key file already exists with
+    /// a wider mode (e.g. from an older mkit that wrote 0o644), saving
+    /// again MUST tighten it to 0o600. The hardened path sets
+    /// permissions on the open File handle, not by path, so there is
+    /// no window in which an attacker could `rename(2)` in a different
+    /// inode between `open()` and `set_permissions()`.
+    #[cfg(unix)]
+    #[test]
+    fn save_key_tightens_preexisting_wide_mode_to_0600() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempdir();
+        let p = dir.join("default.key");
+        // Pre-seed a wide-mode file at the target path.
+        std::fs::write(&p, b"old contents").unwrap();
+        let mut perm = std::fs::metadata(&p).unwrap().permissions();
+        perm.set_mode(0o644);
+        std::fs::set_permissions(&p, perm).unwrap();
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().mode() & 0o777,
+            0o644,
+            "sanity: pre-seeded 0o644"
+        );
+
+        let kp = KeyPair::from_seed([0x55; 32]);
+        save_key(&p, &kp).unwrap();
+
         let meta = std::fs::metadata(&p).unwrap();
         assert_eq!(meta.mode() & 0o777, 0o600);
     }

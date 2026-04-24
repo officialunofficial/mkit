@@ -19,6 +19,13 @@ use crate::hash::{self, Hash};
 use crate::object::{EntryMode, Identity, Object};
 use crate::store::ObjectStore;
 
+/// Hard cap on the per-side line count fed to the LCS matcher. The DP
+/// table is O(m*n) u32 entries: at 100 000 lines × 100 000 lines this
+/// is ≈ 40 GiB, so we refuse anything past this limit rather than let
+/// an attacker-supplied blob drive the decoder into swap/OOM. See SEC
+/// finding G13.
+pub const BLAME_MAX_LINES: usize = 100_000;
+
 /// Per-line blame attribution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlameLine {
@@ -50,6 +57,11 @@ pub enum BlameError {
     NotABlob,
     #[error("file '{0}' was not found at any commit in history")]
     FileNotFound(String),
+    /// Either side of the LCS input exceeded [`BLAME_MAX_LINES`].
+    /// Returned rather than allocating a DP table proportional to the
+    /// attacker-supplied line counts (SEC finding G13).
+    #[error("file has too many lines for blame ({lines} > {max})", max = BLAME_MAX_LINES)]
+    FileTooLarge { lines: usize },
     #[error(transparent)]
     Object(#[from] crate::object::MkitError),
     #[error(transparent)]
@@ -65,6 +77,8 @@ pub type BlameResult2<T> = Result<T, BlameError>;
 /// # Errors
 /// - [`BlameError::FileNotFound`] if the file does not exist at `head_hash`.
 /// - [`BlameError::NotACommit`] if `head_hash` is not a commit object.
+/// - [`BlameError::FileTooLarge`] if any blob on the history chain has
+///   more than [`BLAME_MAX_LINES`] lines.
 ///
 /// # Panics
 /// Panics only on internal logic violations: it is unreachable for the
@@ -139,7 +153,7 @@ pub fn blame_file(
 
             let old_lines = load_blob_lines(store, older.blob_hash)?;
             let new_lines = load_blob_lines(store, newer.blob_hash)?;
-            let mapping = match_lines(&old_lines, &new_lines);
+            let mapping = match_lines_checked(&old_lines, &new_lines)?;
 
             let mut new_attrs: Vec<Attribution> = Vec::with_capacity(new_lines.len());
             for (ni, _) in new_lines.iter().enumerate() {
@@ -255,8 +269,38 @@ fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
+/// Size-checked wrapper around [`match_lines`]. Returns
+/// [`BlameError::FileTooLarge`] if either side exceeds
+/// [`BLAME_MAX_LINES`] rather than allocating an O(m*n) DP table. This
+/// is the entry point used by [`blame_file`]; direct callers of
+/// `match_lines` below are opt-in unbounded.
+///
+/// # Errors
+/// - [`BlameError::FileTooLarge`] if `old_lines.len()` or
+///   `new_lines.len()` exceeds [`BLAME_MAX_LINES`].
+pub fn match_lines_checked<T: AsRef<[u8]>>(
+    old_lines: &[T],
+    new_lines: &[T],
+) -> BlameResult2<Vec<Option<usize>>> {
+    if old_lines.len() > BLAME_MAX_LINES {
+        return Err(BlameError::FileTooLarge {
+            lines: old_lines.len(),
+        });
+    }
+    if new_lines.len() > BLAME_MAX_LINES {
+        return Err(BlameError::FileTooLarge {
+            lines: new_lines.len(),
+        });
+    }
+    Ok(match_lines(old_lines, new_lines))
+}
+
 /// LCS line matching. For each line in `new_lines`, returns the index
 /// in `old_lines` it corresponds to, or `None` for inserted/changed.
+///
+/// NOTE: This function allocates an O(m*n) DP table. Callers dealing
+/// with attacker-controlled inputs MUST use [`match_lines_checked`]
+/// instead.
 #[must_use]
 pub fn match_lines<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<usize>> {
     let m = old_lines.len();
@@ -499,5 +543,29 @@ mod tests {
         assert_eq!(found, Some(blob));
         let missing = find_blob_in_tree(&store, outer_h, "src/none.txt").unwrap();
         assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn match_lines_rejects_oversize_inputs() {
+        // G13 regression: the LCS DP table allocation is O(m*n). For
+        // attacker-controlled blobs with millions of lines this means
+        // gigabytes of heap. Cap both dimensions with BLAME_MAX_LINES
+        // and return a FileTooLarge error rather than over-allocating.
+        let n = super::BLAME_MAX_LINES + 1;
+        let old: Vec<&[u8]> = vec![b"x"; n];
+        let new: Vec<&[u8]> = vec![b"y"; 1];
+        let err = super::match_lines_checked(&old, &new).unwrap_err();
+        assert!(
+            matches!(err, BlameError::FileTooLarge { lines } if lines == n),
+            "got {err:?}"
+        );
+
+        let old2: Vec<&[u8]> = vec![b"a"; 1];
+        let new2: Vec<&[u8]> = vec![b"b"; n];
+        let err2 = super::match_lines_checked(&old2, &new2).unwrap_err();
+        assert!(
+            matches!(err2, BlameError::FileTooLarge { lines } if lines == n),
+            "got {err2:?}"
+        );
     }
 }

@@ -84,20 +84,20 @@ jobs:
           echo "stage=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           ref: ${{ steps.meta.outputs.tag }}
           fetch-depth: 0
 
       - name: Install Rust ${{ env.RUST_VERSION }} + target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
           components: rustfmt,clippy
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           workspaces: rust -> rust/target
           key: release-${{ matrix.target }}
@@ -164,7 +164,7 @@ jobs:
           cat "${{ steps.meta.outputs.archive }}.sha256"
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3
         with:
           cosign-release: v2.4.1
 
@@ -212,7 +212,7 @@ jobs:
           echo "Scaffold step: no-op until the TODO above is implemented."
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: build-${{ matrix.target }}
           path: |
@@ -230,10 +230,10 @@ jobs:
     needs: build
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
       - name: Generate CycloneDX SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0
         with:
           path: .
           format: cyclonedx-json
@@ -242,7 +242,7 @@ jobs:
           upload-artifact: false
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: sbom
           path: sbom.cdx.json
@@ -255,12 +255,12 @@ jobs:
     needs: [build, sbom]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           fetch-depth: 0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           path: artifacts
 
@@ -280,7 +280,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3
         with:
           cosign-release: v2.4.1
 
@@ -311,7 +311,7 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: mkit ${{ steps.meta.outputs.version }}

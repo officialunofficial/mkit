@@ -80,6 +80,10 @@ Plus these rejections:
 - Empty segment (i.e. `//`, trailing `/`, leading `/`) → invalid.
 - Any byte in `{0x00, '\\'}` → invalid.
 - Any byte outside the grammar → invalid.
+- Any segment ending in `.lock` → invalid (the canonical lock-file
+  suffix; e.g. `refs/heads/main.lock` is reserved).
+- Final segment equal to `HEAD` → invalid (shadows the repo-level
+  `HEAD` pointer; e.g. `HEAD` and `refs/heads/HEAD` are rejected).
 
 **Notable divergences from Git ref naming:**
 

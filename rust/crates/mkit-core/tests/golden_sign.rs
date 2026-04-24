@@ -89,11 +89,16 @@ fn remix_2sources_signing_bytes_match_golden() {
     assert_eq!(to_hex(&hash(&want)), want_hex);
 }
 
-/// Pin the canonical signing hashes (`BLAKE3(domain || signing_bytes)`)
-/// for the two harvested fixtures. These are the actual values that
+/// Pin the canonical signing hashes
+/// (`BLAKE3(len_le16(domain) || domain || signing_bytes)`) for the
+/// two harvested fixtures. These are the actual values that
 /// `Ed25519.sign()` covers, so any silent drift in domain handling
-/// (wrong terminator byte, swapped domain, accidental `derive_key`,
-/// etc.) breaks this test.
+/// (wrong terminator byte, missing length prefix, swapped domain,
+/// accidental `derive_key`, etc.) breaks this test.
+///
+/// NOTE: values re-generated in finding H4 when the 2-byte LE length
+/// prefix was added in front of the domain. See CHANGELOG under
+/// `Unreleased` for the wire-break notice.
 #[test]
 fn signing_hashes_are_stable() {
     use mkit_core::sign::{commit_signing_hash, remix_signing_hash};
@@ -107,10 +112,10 @@ fn signing_hashes_are_stable() {
     };
     assert_eq!(
         to_hex(&commit_signing_hash(&c).unwrap()),
-        "a2bcc8f3f1ee0b4877a6dce4aa8ddb2e45ba649c767d7380b075b33a2aacc66f",
+        "49a867dcecfbca9df2448756f7ae5ba31bfc29a96fc9186b279fa914c0d6c376",
     );
     assert_eq!(
         to_hex(&remix_signing_hash(&r).unwrap()),
-        "80b0abe7aa35957185e9033d74a070efa01145ee948d26ed8265b013509d51fc",
+        "7803d2c97cb0f7d5cc8d1a2c8b586472a34444d64926148963ffb1e8ae8a93c7",
     );
 }

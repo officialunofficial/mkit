@@ -183,6 +183,16 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
         return Err(IndexError::UnsupportedVersion(data[4]));
     }
     let count = u32::from_le_bytes([data[5], data[6], data[7], data[8]]) as usize;
+    // Reject an attacker-supplied `count` that is impossible given the
+    // remaining bytes. The minimum wire-length of an entry is 35 bytes
+    // (status + 32B hash + 2B path_len, with empty path). Without this
+    // up-front check the loop would walk `count` iterations before
+    // failing — trivially triggered with a 9-byte buffer declaring
+    // `count = u32::MAX`. Mirrors the pattern used in `serialize.rs`.
+    // See SEC finding G11.
+    if (count as u64).saturating_mul(35) > data.len() as u64 {
+        return Err(IndexError::Corrupt);
+    }
     let mut entries = Vec::with_capacity(count.min(1024)); // bound initial alloc
     let mut offset = 9usize;
     for _ in 0..count {
@@ -509,6 +519,21 @@ mod tests {
             object_hash: seed_hash("c"),
         });
         assert_eq!(idx.staged_count(), 2);
+    }
+
+    #[test]
+    fn rejects_bogus_huge_count_before_loop() {
+        // G11 regression: a 13-byte buffer whose header declares
+        // count = u32::MAX must be rejected up-front — the
+        // deserializer must NOT spin through u32::MAX iterations
+        // (or allocate Vec::with_capacity(count)).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.push(FORMAT_VERSION);
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        // No entries follow — buffer is just the 9-byte header.
+        let err = deserialize(&bytes).unwrap_err();
+        assert!(matches!(err, IndexError::Corrupt));
     }
 
     #[test]

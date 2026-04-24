@@ -45,6 +45,12 @@ pub const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 /// Maximum stash message length (`u16` on the wire).
 pub const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
 
+/// Minimum on-wire entry size, used to sanity-check attacker-supplied
+/// `count` up-front during deserialise (SEC finding G12). Layout:
+/// `commit_hash` (32) + `parent_hash` (32) + `timestamp` (4) +
+/// `msg_len` (2) + message (0).
+const MIN_ENTRY_BYTES: u64 = 32 + 32 + 4 + 2;
+
 /// One entry in the stash stack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StashEntry {
@@ -373,6 +379,14 @@ pub fn deserialize_list(data: &[u8]) -> StashResult<StashList> {
         return Err(StashError::InvalidFormat);
     }
     let count = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+    // Reject an attacker-supplied `count` that cannot possibly fit in
+    // the remaining body. With [`MIN_ENTRY_BYTES`] = 70 (empty message)
+    // an 8-byte header declaring count = u32::MAX is rejected here
+    // instead of driving `Vec::with_capacity(u32::MAX)`. See SEC
+    // finding G12.
+    if (count as u64).saturating_mul(MIN_ENTRY_BYTES) > data.len() as u64 {
+        return Err(StashError::InvalidFormat);
+    }
     let mut entries = Vec::with_capacity(count);
     let mut pos = 8usize;
     for _ in 0..count {
@@ -584,6 +598,22 @@ mod tests {
     fn deserialize_rejects_bad_magic() {
         assert!(matches!(
             deserialize_list(&[b'X', b'Y', b'Z', b'W', 0, 0, 0, 0]),
+            Err(StashError::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn deserialize_rejects_bogus_huge_count() {
+        // G12 regression: an 8-byte manifest whose header declares
+        // count = u32::MAX must be rejected up-front — the decoder
+        // must NOT call `Vec::with_capacity(u32::MAX)` nor loop that
+        // many times.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC.as_slice());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        // No entries follow.
+        assert!(matches!(
+            deserialize_list(&bytes),
             Err(StashError::InvalidFormat)
         ));
     }

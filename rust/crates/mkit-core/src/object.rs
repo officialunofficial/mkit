@@ -163,6 +163,20 @@ pub struct TreeEntry {
 
 impl TreeEntry {
     /// Validate an entry name per §4.1.
+    ///
+    /// In addition to the base spec (no `\0 / \\`, not `.` / `..`, 1..=255
+    /// bytes), this rejects names that alias repo metadata or exploit
+    /// platform quirks:
+    ///
+    /// - `.mkit` / `.git` case-insensitively (Git CVE-2021-21300 family).
+    /// - Trailing `.` or space, which Windows strips, causing aliasing.
+    /// - Reserved Windows device names (`CON`, `PRN`, `AUX`, `NUL`,
+    ///   `COM1`-`COM9`, `LPT1`-`LPT9`), with or without an extension,
+    ///   case-insensitively.
+    ///
+    /// ASCII case-folding is sufficient because all other byte-level
+    /// rules above are ASCII-only; names with non-ASCII bytes bypass
+    /// these extra checks but remain constrained by the base rules.
     #[must_use]
     pub fn validate_name(name: &[u8]) -> bool {
         if name.is_empty() || name.len() > 255 {
@@ -171,7 +185,50 @@ impl TreeEntry {
         if name == b"." || name == b".." {
             return false;
         }
-        !name.iter().any(|&b| matches!(b, 0 | b'/' | b'\\'))
+        if name.iter().any(|&b| matches!(b, 0 | b'/' | b'\\')) {
+            return false;
+        }
+        // Trailing `.` or space — Windows strips these, causing aliasing
+        // with another entry of the same bare name.
+        if matches!(name.last(), Some(b'.' | b' ')) {
+            return false;
+        }
+        // Case-insensitive `.mkit` / `.git`.
+        if name.eq_ignore_ascii_case(b".mkit") || name.eq_ignore_ascii_case(b".git") {
+            return false;
+        }
+        // Reserved Windows device names — the stem (before the first `.`)
+        // is compared case-insensitively.
+        let stem = match name.iter().position(|&b| b == b'.') {
+            Some(i) => &name[..i],
+            None => name,
+        };
+        if is_windows_reserved_stem(stem) {
+            return false;
+        }
+        true
+    }
+}
+
+/// Returns `true` when `stem` (ASCII bytes, case-insensitive) matches a
+/// reserved Windows device name. The caller has already split on the
+/// first `.` so an extension is ignored.
+fn is_windows_reserved_stem(stem: &[u8]) -> bool {
+    match stem.len() {
+        3 => {
+            stem.eq_ignore_ascii_case(b"CON")
+                || stem.eq_ignore_ascii_case(b"PRN")
+                || stem.eq_ignore_ascii_case(b"AUX")
+                || stem.eq_ignore_ascii_case(b"NUL")
+        }
+        4 => {
+            // COM1-COM9 / LPT1-LPT9 only. 0 is not reserved.
+            let head = &stem[..3];
+            let tail = stem[3];
+            let is_digit_1_9 = matches!(tail, b'1'..=b'9');
+            is_digit_1_9 && (head.eq_ignore_ascii_case(b"COM") || head.eq_ignore_ascii_case(b"LPT"))
+        }
+        _ => false,
     }
 }
 
@@ -388,6 +445,14 @@ pub enum MkitError {
     /// variant size small.
     #[error("key file I/O error: {0}")]
     KeyIo(String),
+    /// Delta encode input exceeds the v1 wire-format `u32` length cap
+    /// (base or result > 4 GiB - 1). SPEC-PACKFILE holds individual
+    /// payloads under this bound, so this is a caller-programming
+    /// error, not a normal runtime condition — but saturating instead
+    /// of erroring silently produced a stream `decode()` would reject
+    /// with a misleading "length mismatch".
+    #[error("delta length {len} exceeds u32::MAX for field `{field}`")]
+    DeltaLengthOverflow { field: &'static str, len: usize },
 }
 
 impl fmt::Display for Object {
@@ -465,6 +530,68 @@ mod tests {
     fn tree_entry_name_rejects_over_255() {
         let long = vec![b'a'; 256];
         assert!(!TreeEntry::validate_name(&long));
+    }
+
+    #[test]
+    fn tree_entry_name_rejects_dot_mkit_and_dot_git_case_insensitive() {
+        // Exact-case basics
+        assert!(!TreeEntry::validate_name(b".mkit"));
+        assert!(!TreeEntry::validate_name(b".git"));
+        // Mixed/upper case — must also be rejected on case-insensitive FS.
+        assert!(!TreeEntry::validate_name(b".MKIT"));
+        assert!(!TreeEntry::validate_name(b".Mkit"));
+        assert!(!TreeEntry::validate_name(b".GIT"));
+        assert!(!TreeEntry::validate_name(b".Git"));
+        // Unrelated names starting with `.m` or `.g` are fine.
+        assert!(TreeEntry::validate_name(b".mkitignore"));
+        assert!(TreeEntry::validate_name(b".gitignore"));
+    }
+
+    #[test]
+    fn tree_entry_name_rejects_trailing_dot_or_space() {
+        // Windows strips trailing `.` and ` `, causing aliasing with
+        // another entry of the same bare name.
+        assert!(!TreeEntry::validate_name(b"foo."));
+        assert!(!TreeEntry::validate_name(b"foo "));
+        assert!(!TreeEntry::validate_name(b"foo..."));
+        assert!(!TreeEntry::validate_name(b"foo   "));
+        // Trailing dot/space only at end — interior dots and spaces are OK.
+        assert!(TreeEntry::validate_name(b"foo.bar"));
+        assert!(TreeEntry::validate_name(b"foo bar"));
+    }
+
+    #[test]
+    fn tree_entry_name_rejects_windows_reserved_device_names() {
+        for n in [
+            b"CON".as_slice(),
+            b"PRN",
+            b"AUX",
+            b"NUL",
+            b"COM1",
+            b"COM9",
+            b"LPT1",
+            b"LPT9",
+            // case-insensitive
+            b"con",
+            b"Nul",
+            b"lpt3",
+            // with extension
+            b"CON.txt",
+            b"nul.log",
+            b"COM1.dat",
+        ] {
+            assert!(
+                !TreeEntry::validate_name(n),
+                "expected Windows reserved name rejected: {:?}",
+                std::str::from_utf8(n).unwrap_or("?")
+            );
+        }
+        // Non-reserved lookalikes must still be accepted.
+        assert!(TreeEntry::validate_name(b"COM0"));
+        assert!(TreeEntry::validate_name(b"LPT0"));
+        assert!(TreeEntry::validate_name(b"COM10"));
+        assert!(TreeEntry::validate_name(b"CONSOLE"));
+        assert!(TreeEntry::validate_name(b"NULL"));
     }
 
     #[test]
