@@ -121,7 +121,18 @@ impl Signer for ExternalSigner {
     }
 
     fn sign(&mut self, pae: &[u8]) -> Result<Vec<u8>, Error> {
-        let request = format!("{{\"pae_base64\":\"{}\"}}\n", B64.encode(pae));
+        // SPEC-EXTERNAL-SIGNER §3 defines the request as
+        //   {"pae_base64":"<...>","algorithm":"<...>"}
+        // and makes `algorithm` required in v1. A prior revision
+        // of this module shipped without the field, which silently
+        // broke interop with every reference signer (they reject
+        // the request as malformed). We restore the spec-compliant
+        // shape here so `ExternalSigner` + `mkit-sign-file` round-trip.
+        let request = format!(
+            "{{\"pae_base64\":\"{}\",\"algorithm\":\"{}\"}}\n",
+            B64.encode(pae),
+            self.algorithm
+        );
 
         let mut child = Command::new(&self.binary_path)
             .args(&self.args)
