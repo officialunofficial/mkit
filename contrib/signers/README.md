@@ -107,8 +107,9 @@ stderr message on any error.
    - Wallet bridge: the wallet's own `personal_sign` prompt.
 4. Decide your keyid convention. `<algorithm-prefix>:<hex>` is the
    default and easy to verify; platform-specific schemes like
-   `webauthn:<credential-id>` or `makechain:0x…` are allowed when the
-   verifier side knows how to dispatch.
+   `webauthn:<credential-id>`, `yubikey:<serial>`, or
+   `tpm2:<handle>` are allowed when the verifier side knows how to
+   dispatch.
 
 ---
 
