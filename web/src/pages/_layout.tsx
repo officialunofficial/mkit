@@ -1,47 +1,57 @@
-import "../styles.css";
+import '../styles.css'
 
-import type { ReactNode } from "react";
-import { Footer } from "../components/footer";
-import { Header } from "../components/header";
+import type { ReactNode } from 'react'
+import { FaviconSwapper } from '../components/favicon-swapper'
+import { Footer } from '../components/footer'
+import { Header } from '../components/header'
+import { MkitPreloader } from '../components/mkit-preloader'
+import { PointerTracker } from '../components/pointer-tracker'
 
-type RootLayoutProps = { children: ReactNode };
+type RootLayoutProps = { children: ReactNode }
 
 export default async function RootLayout({ children }: RootLayoutProps) {
-  const data = await getData();
+  const data = await getData()
 
   return (
     <div>
-      <meta name="description" content={data.description} />
-      <link rel="icon" type="image/png" href={data.icon} />
-      <link rel="preconnect" href="https://fonts.googleapis.com" />
-      <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
-      {/* Geist (sans) + Geist Mono, matching searchartwith.art. */}
+      <meta name='description' content={data.description} />
+      <link rel='icon' type='image/png' href={data.icon} />
+      <link rel='preconnect' href='https://fonts.googleapis.com' />
+      <link rel='preconnect' href='https://fonts.gstatic.com' crossOrigin='' />
+      {/* Geist + Geist Mono. */}
       <link
-        rel="stylesheet"
-        href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap"
-        precedence="font"
+        rel='stylesheet'
+        href='https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap'
+        precedence='font'
       />
+      {/* Header and footer span edge-to-edge; the middle column lives
+          inside `<main>` so every page shares the same width. Pages
+          don't re-apply `max-w-*` themselves. */}
+      <PointerTracker />
+      <MkitPreloader />
+      <FaviconSwapper />
       <Header />
-      {/* Editorial layout: full-width top-aligned, generous horizontal
-          padding, no centered card. Matches the searchartwith.art
-          container feel — content flows top-down, header sticky. */}
-      <main className="px-6 pt-6 pb-24 sm:px-12">{children}</main>
+      {/* Slightly wider container than editorial default (48rem →
+          64rem) so pages that benefit from a two-column layout have
+          room, while prose-heavy sections re-constrain themselves
+          via `max-w-prose` at the page level. */}
+      <main className='mx-auto w-full max-w-5xl px-6 pt-8 pb-24'>{children}</main>
       <Footer />
     </div>
-  );
+  )
 }
 
 const getData = async () => {
   const data = {
-    description: "An internet website!",
-    icon: "/images/favicon.png",
-  };
+    description: 'A content-addressed VCS in Rust — mkit demos in your browser.',
+    icon: '/images/favicon.png',
+  }
 
-  return data;
-};
+  return data
+}
 
 export const getConfig = async () => {
   return {
-    render: "static",
-  } as const;
-};
+    render: 'static',
+  } as const
+}

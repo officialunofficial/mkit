@@ -7,18 +7,18 @@
 // be pulled into the browser bundle — call `registerNodeInit()` from
 // a vitest setup file only.
 
-import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import init, * as Wasm from "mkit-wasm";
-import { __setMkitInit, type MkitApi } from "./mkit";
+import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import init, * as Wasm from 'mkit-wasm'
+import { __setMkitInit, type MkitApi } from './mkit'
 
 export function registerNodeInit(): void {
   const p: Promise<MkitApi> = (async () => {
-    const requireFn = createRequire(import.meta.url);
-    const wasmPath = requireFn.resolve("mkit-wasm/mkit_wasm_bg.wasm");
-    const bytes = await readFile(wasmPath);
-    await init({ module_or_path: bytes });
-    return Wasm;
-  })();
-  __setMkitInit(p);
+    const requireFn = createRequire(import.meta.url)
+    const wasmPath = requireFn.resolve('mkit-wasm/mkit_wasm_bg.wasm')
+    const bytes = await readFile(wasmPath)
+    await init({ module_or_path: bytes })
+    return Wasm
+  })()
+  __setMkitInit(p)
 }
