@@ -309,17 +309,23 @@ pub fn attest_build(
         Algorithm::Ed25519 => {
             let mut signer = RepoKeySigner::new(KeyPair::from_seed(seed));
             let keyid = signer.keyid().map_err(|e| js_err(format!("keyid: {e}")))?;
-            let sig = signer.sign(&pae).map_err(|e| js_err(format!("sign: {e}")))?;
+            let sig = signer
+                .sign(&pae)
+                .map_err(|e| js_err(format!("sign: {e}")))?;
             (keyid, sig)
         }
         Algorithm::Secp256k1 => {
             let s = Secp256k1Signer::new(seed).map_err(|e| js_err(format!("secp256k1: {e}")))?;
-            let sig = s.sign_dsse(&pae).map_err(|e| js_err(format!("sign: {e}")))?;
+            let sig = s
+                .sign_dsse(&pae)
+                .map_err(|e| js_err(format!("sign: {e}")))?;
             (s.keyid_string(), sig)
         }
         Algorithm::P256 => {
             let s = P256Signer::new(seed).map_err(|e| js_err(format!("p256: {e}")))?;
-            let sig = s.sign_dsse(&pae).map_err(|e| js_err(format!("sign: {e}")))?;
+            let sig = s
+                .sign_dsse(&pae)
+                .map_err(|e| js_err(format!("sign: {e}")))?;
             (s.keyid(), sig)
         }
     };
@@ -354,7 +360,9 @@ pub fn attest_build(
 #[wasm_bindgen]
 #[must_use]
 pub fn attest_verify(envelope_json: &str, pubkey_hex: &str, algo: &str) -> bool {
-    let Ok(alg) = parse_algo(algo) else { return false };
+    let Ok(alg) = parse_algo(algo) else {
+        return false;
+    };
     let Ok(pubkey_bytes) = hex::decode(pubkey_hex) else {
         return false;
     };
