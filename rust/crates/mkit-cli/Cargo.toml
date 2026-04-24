@@ -55,6 +55,9 @@ mkit-transport-ssh = { path = "../mkit-transport-ssh" }
 clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage"] }
 tempfile = "3"
 thiserror = "2"
+# Used by `mkit keygen` to generate raw 32-byte secrets for non-ed25519
+# algorithms (secp256k1 / p256). Same version mkit-core already pulls in.
+getrandom = "0.4"
 
 [build-dependencies]
 # build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by
