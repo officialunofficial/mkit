@@ -172,10 +172,14 @@ pub enum Error {
         "WebAuthn clientDataJSON.challenge does not match base64url(PAE) — wrapping not bound to this payload"
     )]
     WebAuthnChallengeMismatch,
-    #[error("WebAuthn clientDataJSON is not a valid UTF-8 JSON object with string `type` + `challenge`, or `type` is not `webauthn.get`")]
+    #[error(
+        "WebAuthn clientDataJSON is not a valid UTF-8 JSON object with string `type` + `challenge`, or `type` is not `webauthn.get`"
+    )]
     WebAuthnBadClientDataJson,
     #[error("WebAuthn authenticatorData is malformed (less than 37 bytes or bad base64url)")]
     WebAuthnBadAuthenticatorData,
-    #[error("WebAuthn signature did not verify against the reconstructed authenticatorData || SHA256(clientDataJSON)")]
+    #[error(
+        "WebAuthn signature did not verify against the reconstructed authenticatorData || SHA256(clientDataJSON)"
+    )]
     WebAuthnSignatureFailed,
 }

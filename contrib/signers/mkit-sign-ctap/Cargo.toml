@@ -1,0 +1,55 @@
+[package]
+name = "mkit-sign-ctap"
+# Crate lives outside `rust/`; point at the workspace root explicitly.
+workspace = "../../../rust"
+description = "Reference external-signer binary: FIDO2/WebAuthn roaming authenticator (YubiKey / Nitrokey / SoloKey) over CTAP-HID. Speaks mkit protocol v1.1 with WebAuthn wrapping."
+keywords = ["mkit", "attestation", "signer", "webauthn", "fido2"]
+categories = ["command-line-utilities", "cryptography"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Reference implementation — not published to crates.io. Requires a
+# physical FIDO2 authenticator plugged in to produce real signatures.
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mkit-sign-ctap"
+path = "src/main.rs"
+
+[dependencies]
+# The verifier helper + Protocol v1.1 types live here. We consume
+# `verify_webauthn_wrapping`, `WebAuthnWrapping`, `build_client_data_json`
+# and the typed errors. Only `algo-p256` is strictly needed, but we
+# inherit the default feature set for simplicity — the ctap signer is
+# a binary, not a library, so dep tree shape doesn't bleed downstream.
+mkit-attest = { path = "../../../rust/crates/mkit-attest" }
+# CTAP-HID driver. Pure Rust on the wire (uses `hidapi` which is a thin
+# FFI shim that we cannot avoid — no hand-rolled C). `ring` is its
+# default crypto backend.
+ctap-hid-fido2 = "3.5"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# Key store for the enrolled credential_id + pubkey mapping. Plain JSON
+# under $HOME/.mkit-sign-ctap/credentials.json; no keyring dep — the
+# authenticator holds the private key, the store is just metadata.
+dirs = "5"
+
+[dev-dependencies]
+mkit-attest = { path = "../../../rust/crates/mkit-attest" }
+# For the crypto cross-check in tests/protocol_shape.rs — generate a
+# P-256 signature in-process so we don't need hardware just to lock
+# down the wire shape.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+sha2 = { version = "0.10", default-features = false }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"

@@ -2,8 +2,8 @@
 //!
 //! See `docs/SPEC-EXTERNAL-SIGNER.md` §14 for the normative description.
 //!
-//! Background: FIDO2/`WebAuthn` roaming authenticators (YubiKey,
-//! Nitrokey, SoloKey) do NOT sign arbitrary byte strings. They sign
+//! Background: FIDO2/`WebAuthn` roaming authenticators (`YubiKey`,
+//! `Nitrokey`, `SoloKey`) do NOT sign arbitrary byte strings. They sign
 //! `authenticatorData || SHA256(clientDataJSON)` where the challenge
 //! is embedded inside the `clientDataJSON` under `challenge`
 //! (base64url-no-pad). To integrate with mkit's DSSE external-signer
@@ -22,9 +22,7 @@
 #![cfg(feature = "algo-p256")]
 
 use base64::Engine as _;
-use base64::engine::general_purpose::{
-    STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL_NOPAD,
-};
+use base64::engine::general_purpose::{STANDARD as B64_STD, URL_SAFE_NO_PAD as B64_URL_NOPAD};
 use sha2::{Digest, Sha256};
 
 use crate::Error;
@@ -112,7 +110,7 @@ impl WebAuthnWrapping {
 ///   is shorter than the 37-byte minimum (rpIdHash + flags + signCount).
 /// * [`Error::WebAuthnSignatureFailed`] — crypto verdict says no. The
 ///   underlying `verify_p256` error is folded into this one variant so
-///   callers have a single "the WebAuthn signature didn't verify"
+///   callers have a single "the `WebAuthn` signature didn't verify"
 ///   branch.
 pub fn verify_webauthn_wrapping(
     pae: &[u8],
@@ -164,12 +162,12 @@ pub fn verify_webauthn_wrapping(
     // signer inside the authenticator hashed THAT with SHA-256 before
     // applying ECDSA. Our `verify_p256` takes the pre-hash message
     // and hashes internally, so we pass the concatenation directly.
-    let mut signed = Vec::with_capacity(wrapping.authenticator_data.len() + 32);
-    signed.extend_from_slice(&wrapping.authenticator_data);
+    let mut to_verify = Vec::with_capacity(wrapping.authenticator_data.len() + 32);
+    to_verify.extend_from_slice(&wrapping.authenticator_data);
     let cd_hash = Sha256::digest(&wrapping.client_data_json);
-    signed.extend_from_slice(&cd_hash);
+    to_verify.extend_from_slice(&cd_hash);
 
-    verify_p256(pubkey_sec1, &signed, sig_compact).map_err(|_| Error::WebAuthnSignatureFailed)
+    verify_p256(pubkey_sec1, &to_verify, sig_compact).map_err(|_| Error::WebAuthnSignatureFailed)
 }
 
 /// Convenience: build a `clientDataJSON` body for a given PAE + origin.
@@ -262,21 +260,26 @@ mod tests {
         out
     }
 
-    /// End-to-end mock of what a WebAuthn authenticator does, using
+    /// End-to-end mock of what a `WebAuthn` authenticator does, using
     /// our in-process P-256 signer as the "authenticator". Returns
     /// `(wrapping, sig)` so tests can poke individual fields without
     /// re-deriving everything.
-    fn sign_webauthn(pae: &[u8], rp_id: &str, origin: &str, secret: [u8; 32]) -> (WebAuthnWrapping, Vec<u8>) {
+    fn sign_webauthn(
+        pae: &[u8],
+        rp_id: &str,
+        origin: &str,
+        secret: [u8; 32],
+    ) -> (WebAuthnWrapping, Vec<u8>) {
         let auth_data = mock_auth_data(rp_id);
         let cdj = build_client_data_json(pae, origin, false);
 
         // WebAuthn signs authenticatorData || SHA256(clientDataJSON).
-        let mut signed = Vec::with_capacity(auth_data.len() + 32);
-        signed.extend_from_slice(&auth_data);
-        signed.extend_from_slice(&Sha256::digest(&cdj));
+        let mut to_sign = Vec::with_capacity(auth_data.len() + 32);
+        to_sign.extend_from_slice(&auth_data);
+        to_sign.extend_from_slice(&Sha256::digest(&cdj));
 
         let sk = SigningKey::from_bytes(&secret.into()).unwrap();
-        let sig: P256Sig = sk.sign(&signed);
+        let sig: P256Sig = sk.sign(&to_sign);
         let sig = sig.normalize_s().unwrap_or(sig);
         (
             WebAuthnWrapping {
@@ -325,7 +328,10 @@ mod tests {
 
         let err = verify_webauthn_wrapping(pae, &wrap, &signer.public_key_sec1(), &sig)
             .expect_err("must reject non-JSON clientDataJSON");
-        assert!(matches!(err, Error::WebAuthnBadClientDataJson), "got {err:?}");
+        assert!(
+            matches!(err, Error::WebAuthnBadClientDataJson),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -342,12 +348,12 @@ mod tests {
         );
         let auth_data = mock_auth_data("mkit.local");
 
-        let mut signed = Vec::new();
-        signed.extend_from_slice(&auth_data);
-        signed.extend_from_slice(&Sha256::digest(cdj.as_bytes()));
+        let mut to_sign = Vec::new();
+        to_sign.extend_from_slice(&auth_data);
+        to_sign.extend_from_slice(&Sha256::digest(cdj.as_bytes()));
 
         let sk = SigningKey::from_bytes(&TEST_SECRET.into()).unwrap();
-        let sig: P256Sig = sk.sign(&signed);
+        let sig: P256Sig = sk.sign(&to_sign);
         let sig = sig.normalize_s().unwrap_or(sig).to_bytes().to_vec();
 
         let wrap = WebAuthnWrapping {
@@ -356,7 +362,10 @@ mod tests {
         };
         let err = verify_webauthn_wrapping(pae, &wrap, &signer.public_key_sec1(), &sig)
             .expect_err("must reject webauthn.create type");
-        assert!(matches!(err, Error::WebAuthnBadClientDataJson), "got {err:?}");
+        assert!(
+            matches!(err, Error::WebAuthnBadClientDataJson),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -377,7 +386,10 @@ mod tests {
         wrap.authenticator_data.truncate(20);
         let err = verify_webauthn_wrapping(pae, &wrap, &signer.public_key_sec1(), &sig)
             .expect_err("short auth_data must be rejected");
-        assert!(matches!(err, Error::WebAuthnBadAuthenticatorData), "got {err:?}");
+        assert!(
+            matches!(err, Error::WebAuthnBadAuthenticatorData),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -402,7 +414,10 @@ mod tests {
             "got {err:?}"
         );
         let err = WebAuthnWrapping::from_b64url_fields("abcd", "!not base64!").unwrap_err();
-        assert!(matches!(err, Error::WebAuthnBadClientDataJson), "got {err:?}");
+        assert!(
+            matches!(err, Error::WebAuthnBadClientDataJson),
+            "got {err:?}"
+        );
     }
 
     #[test]
