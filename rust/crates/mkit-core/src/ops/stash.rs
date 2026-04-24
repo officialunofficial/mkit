@@ -328,6 +328,14 @@ fn write_list(repo_root: &Path, list: &StashList) -> StashResult<()> {
     Ok(())
 }
 
+/// Write a [`StashList`] to disk. Public only for integration-test goldens.
+///
+/// # Panics
+/// Panics if serialization or the write fails (test-only helper).
+pub fn write_list_test_only(repo_root: &Path, list: &StashList) {
+    write_list(repo_root, list).expect("write_list_test_only failed");
+}
+
 /// Encode a [`StashList`] as the on-disk manifest. Public for goldens.
 ///
 /// # Errors
