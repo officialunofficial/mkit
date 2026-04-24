@@ -367,13 +367,13 @@ pub fn save_key(path: &Path, kp: &KeyPair) -> Result<(), MkitError> {
             .map_err(|e| MkitError::KeyIo(format!("write: {e}")))?;
         f.sync_all()
             .map_err(|e| MkitError::KeyIo(format!("fsync: {e}")))?;
-        // If the file pre-existed with a wider mode, reset it.
-        let mut perm = std::fs::metadata(path)
-            .map_err(|e| MkitError::KeyIo(format!("stat: {e}")))?
-            .permissions();
-        perm.set_mode(0o600);
-        std::fs::set_permissions(path, perm)
-            .map_err(|e| MkitError::KeyIo(format!("chmod: {e}")))?;
+        // If the file pre-existed with a wider mode, reset it. Set
+        // the permissions on the OPEN File handle, not by path — that
+        // removes a TOCTOU window in which an attacker could `rename(2)`
+        // a different inode in between `open()` and a path-based
+        // `set_permissions()`, and have us loosen their file.
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| MkitError::KeyIo(format!("fchmod: {e}")))?;
     }
     #[cfg(not(unix))]
     {
@@ -644,6 +644,36 @@ mod tests {
         let p = dir.join("default.key");
         let kp = KeyPair::from_seed([0x33; 32]);
         save_key(&p, &kp).unwrap();
+        let meta = std::fs::metadata(&p).unwrap();
+        assert_eq!(meta.mode() & 0o777, 0o600);
+    }
+
+    /// Regression for finding H3. If the key file already exists with
+    /// a wider mode (e.g. from an older mkit that wrote 0o644), saving
+    /// again MUST tighten it to 0o600. The hardened path sets
+    /// permissions on the open File handle, not by path, so there is
+    /// no window in which an attacker could `rename(2)` in a different
+    /// inode between `open()` and `set_permissions()`.
+    #[cfg(unix)]
+    #[test]
+    fn save_key_tightens_preexisting_wide_mode_to_0600() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempdir();
+        let p = dir.join("default.key");
+        // Pre-seed a wide-mode file at the target path.
+        std::fs::write(&p, b"old contents").unwrap();
+        let mut perm = std::fs::metadata(&p).unwrap().permissions();
+        perm.set_mode(0o644);
+        std::fs::set_permissions(&p, perm).unwrap();
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().mode() & 0o777,
+            0o644,
+            "sanity: pre-seeded 0o644"
+        );
+
+        let kp = KeyPair::from_seed([0x55; 32]);
+        save_key(&p, &kp).unwrap();
+
         let meta = std::fs::metadata(&p).unwrap();
         assert_eq!(meta.mode() & 0o777, 0o600);
     }
