@@ -4,6 +4,7 @@
 //! mkit attest [--commit <hash>] [--algorithm ed25519|secp256k1|p256]
 //!             [--signer repo-key|external]
 //!             [--predicate-type <URI>] [--predicate-file <path>]
+//!             [--additional-signer "<spec>"]...
 //! ```
 //!
 //! Defaults:
@@ -13,16 +14,31 @@
 //! * `--predicate-type` — `https://mkit.io/predicate/empty/v1`.
 //! * `--predicate-file` — omitted ⇒ `{}`.
 //!
+//! Multi-signature envelopes are produced by passing one or more
+//! `--additional-signer` flags after the primary signer. Each spec is
+//! a comma-separated `key=value` list:
+//!
+//! ```text
+//! --additional-signer "algorithm=<algo>,signer=<kind>[,path=<file-or-binary>]"
+//! ```
+//!
+//! Signers are invoked in order (primary first, then each
+//! `--additional-signer` as they appear on the command line) and the
+//! resulting `{keyid, sig}` tuples are written into one envelope in
+//! that same order. Any signer failure aborts the attest — no
+//! partial envelopes are written to disk.
+//!
 //! On success, prints the att-id (64 hex chars) and exits 0.
 
 use std::io::Write;
 use std::path::Path;
 
-use mkit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, statement, store};
+use mkit_attest::{Algorithm, Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, Signer, statement, store};
 use mkit_core::hash::Hash;
 use mkit_core::{hash as hash_mod, refs};
 
 use crate::commands::attest_factory::{self, FactoryError};
+use crate::config::AttestConfig;
 use crate::exit;
 
 /// Default predicate type URI — placeholder; real callers pass their own.
@@ -34,6 +50,7 @@ struct Args {
     signer: Option<String>,
     predicate_type: Option<String>,
     predicate_file: Option<String>,
+    additional_signers: Vec<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
@@ -43,6 +60,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         signer: None,
         predicate_type: None,
         predicate_file: None,
+        additional_signers: Vec::new(),
     };
     let mut i = 0;
     while i < args.len() {
@@ -67,12 +85,77 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 out.predicate_file = Some(args[i + 1].clone());
                 i += 2;
             }
+            "--additional-signer" if i + 1 < args.len() => {
+                out.additional_signers.push(args[i + 1].clone());
+                i += 2;
+            }
             other => {
                 return Err(format!("unknown argument: {other}"));
             }
         }
     }
     Ok(out)
+}
+
+/// Parsed `--additional-signer` spec. The `path` field overrides the
+/// per-algorithm key path (for `repo-key`) or the external-signer
+/// binary path (for `external`); if unset we fall back to the
+/// `[attest]` config section just like the primary signer does.
+#[derive(Debug, PartialEq, Eq)]
+struct SignerSpec {
+    algorithm: Algorithm,
+    signer_kind: String,
+    path: Option<String>,
+}
+
+fn parse_signer_spec(s: &str) -> Result<SignerSpec, String> {
+    let mut algorithm: Option<Algorithm> = None;
+    let mut signer_kind: Option<String> = None;
+    let mut path: Option<String> = None;
+    for part in s.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = part.split_once('=') else {
+            return Err(format!(
+                "--additional-signer spec part '{part}' is not key=value"
+            ));
+        };
+        match k.trim() {
+            "algorithm" => {
+                let v = v.trim();
+                let alg = attest_factory::parse_algorithm(v).map_err(|_| {
+                    format!("--additional-signer: unknown algorithm '{v}' — expected one of: ed25519, secp256k1, p256")
+                })?;
+                algorithm = Some(alg);
+            }
+            "signer" => {
+                let v = v.trim();
+                if !matches!(v, "repo-key" | "external") {
+                    return Err(format!(
+                        "--additional-signer: unknown signer '{v}' — expected one of: repo-key, external"
+                    ));
+                }
+                signer_kind = Some(v.to_owned());
+            }
+            "path" => {
+                path = Some(v.trim().to_owned());
+            }
+            other => {
+                return Err(format!("--additional-signer: unknown spec key '{other}'"));
+            }
+        }
+    }
+    let algorithm =
+        algorithm.ok_or_else(|| "--additional-signer: missing algorithm=...".to_owned())?;
+    let signer_kind =
+        signer_kind.ok_or_else(|| "--additional-signer: missing signer=...".to_owned())?;
+    Ok(SignerSpec {
+        algorithm,
+        signer_kind,
+        path,
+    })
 }
 
 #[must_use]
@@ -83,7 +166,9 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => {
             return emit_err(
                 &format!(
-                    "{e}\nusage: mkit attest [--commit <hash>] [--algorithm ed25519|secp256k1|p256] [--signer repo-key|external] [--predicate-type <URI>] [--predicate-file <path>]"
+                    "{e}\nusage: mkit attest [--commit <hash>] [--algorithm ed25519|secp256k1|p256] \
+                     [--signer repo-key|external] [--predicate-type <URI>] [--predicate-file <path>] \
+                     [--additional-signer \"algorithm=<a>,signer=<k>[,path=<p>]\"]..."
                 ),
                 exit::USAGE,
             );
@@ -110,7 +195,7 @@ pub fn run(args: &[String]) -> u8 {
         Err((msg, code)) => return emit_err(&msg, code),
     };
 
-    // --- Resolve algorithm + signer. --------------------------------
+    // --- Resolve primary algorithm + signer. ------------------------
     let alg_str = parsed
         .algorithm
         .clone()
@@ -130,20 +215,32 @@ pub fn run(args: &[String]) -> u8 {
         .clone()
         .unwrap_or_else(|| cfg.attest.signer_or_fallback().to_owned());
 
-    let mut signer = match attest_factory::build_signer(&cwd, algorithm, &signer_kind, &cfg.attest)
-    {
-        Ok(s) => s,
-        Err(e) => {
-            let code = match &e {
-                FactoryError::UnknownSignerKind(_) | FactoryError::UnknownAlgorithm(_) => {
-                    exit::USAGE
-                }
-                FactoryError::MissingKeyFile { .. } => exit::NOINPUT,
-                _ => exit::CONFIG_ERROR,
-            };
-            return emit_err(&format!("{e}"), code);
+    let primary_signer =
+        match attest_factory::build_signer(&cwd, algorithm, &signer_kind, &cfg.attest) {
+            Ok(s) => s,
+            Err(e) => return emit_err(&format!("{e}"), factory_error_code(&e)),
+        };
+
+    // --- Resolve additional signers. --------------------------------
+    // Parse ALL specs before building ANY signer so a malformed spec
+    // surfaces as a USAGE error without any crypto happening.
+    let mut additional_specs: Vec<SignerSpec> = Vec::with_capacity(parsed.additional_signers.len());
+    for spec_str in &parsed.additional_signers {
+        match parse_signer_spec(spec_str) {
+            Ok(s) => additional_specs.push(s),
+            Err(e) => return emit_err(&e, exit::USAGE),
         }
-    };
+    }
+
+    let mut signers: Vec<Box<dyn Signer>> = Vec::with_capacity(1 + additional_specs.len());
+    signers.push(primary_signer);
+    for spec in &additional_specs {
+        let signer = match build_additional_signer(&cwd, spec, &cfg.attest) {
+            Ok(s) => s,
+            Err(e) => return emit_err(&format!("{e}"), factory_error_code(&e)),
+        };
+        signers.push(signer);
+    }
 
     // --- Build predicate bytes. ------------------------------------
     let predicate_bytes: Vec<u8> = match parsed.predicate_file.as_deref() {
@@ -157,9 +254,7 @@ pub fn run(args: &[String]) -> u8 {
         .predicate_type
         .unwrap_or_else(|| DEFAULT_PREDICATE_TYPE.to_owned());
 
-    // --- Build Statement. statement::encode enforces that predicate
-    //     bytes are a valid JSON object; a malformed file bubbles up as
-    //     a DATAERR-class failure with a clear message.
+    // --- Build Statement. ------------------------------------------
     let stmt_bytes = match statement::for_commit(&commit_hash, &predicate_type, &predicate_bytes) {
         Ok(s) => s.into_bytes(),
         Err(
@@ -175,24 +270,38 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("statement: {e}"), exit::DATAERR),
     };
 
-    // --- Sign. -----------------------------------------------------
+    // --- Sign with every signer, aborting on the first failure. -----
     let pae = mkit_attest::pae_of(PAYLOAD_TYPE_IN_TOTO, &stmt_bytes);
-    let sig_bytes = match signer.sign(&pae) {
-        Ok(b) => b,
-        Err(e) => return emit_err(&format!("sign: {e}"), exit::GENERAL_ERROR),
-    };
-    let keyid = match signer.keyid() {
-        Ok(k) => k,
-        Err(e) => return emit_err(&format!("keyid: {e}"), exit::GENERAL_ERROR),
-    };
+    let mut signatures: Vec<Sig> = Vec::with_capacity(signers.len());
+    for (idx, signer) in signers.iter_mut().enumerate() {
+        let sig_bytes = match signer.sign(&pae) {
+            Ok(b) => b,
+            Err(e) => {
+                return emit_err(
+                    &format!("sign (signer #{}): {e}", idx + 1),
+                    exit::GENERAL_ERROR,
+                );
+            }
+        };
+        let keyid = match signer.keyid() {
+            Ok(k) => k,
+            Err(e) => {
+                return emit_err(
+                    &format!("keyid (signer #{}): {e}", idx + 1),
+                    exit::GENERAL_ERROR,
+                );
+            }
+        };
+        signatures.push(Sig {
+            keyid,
+            sig: sig_bytes,
+        });
+    }
 
     let envelope = Envelope {
         payload_type: PAYLOAD_TYPE_IN_TOTO.to_owned(),
         payload: stmt_bytes,
-        signatures: vec![Sig {
-            keyid,
-            sig: sig_bytes,
-        }],
+        signatures,
     };
     let encoded = match envelope.encode() {
         Ok(s) => s,
@@ -207,11 +316,71 @@ pub fn run(args: &[String]) -> u8 {
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(
         stdout,
-        "attested {} → {}",
+        "attested {} → {} ({} signature(s))",
         hash_mod::to_hex(&att_id),
-        path.display()
+        path.display(),
+        envelope.signatures.len()
     );
     exit::OK
+}
+
+/// Build an additional signer from a parsed spec.
+///
+/// `path` overrides the per-algorithm key path (repo-key) or the
+/// external-signer binary path (external); if unset we fall through to
+/// the same `[attest]` config the primary signer uses.
+fn build_additional_signer(
+    root: &Path,
+    spec: &SignerSpec,
+    config: &AttestConfig,
+) -> Result<Box<dyn Signer>, FactoryError> {
+    match spec.signer_kind.as_str() {
+        "repo-key" => {
+            // A per-spec path overrides the config-level key path; we
+            // synthesise a one-off AttestConfig to feed the factory so
+            // it still does the load-and-validate dance we want.
+            let mut cfg = config.clone();
+            if let Some(p) = spec.path.as_deref() {
+                match spec.algorithm {
+                    Algorithm::Ed25519 => {
+                        // For Ed25519 the factory hard-codes
+                        // `.mkit/keys/default.key`; honour the override
+                        // by invoking the signer directly from this
+                        // path instead.
+                        return build_ed25519_repo_key_from_path(&root.join(p));
+                    }
+                    Algorithm::Secp256k1 => p.clone_into(&mut cfg.secp256k1_key_path),
+                    Algorithm::P256 => p.clone_into(&mut cfg.p256_key_path),
+                }
+            }
+            attest_factory::build_signer(root, spec.algorithm, "repo-key", &cfg)
+        }
+        "external" => {
+            let mut cfg = config.clone();
+            if let Some(p) = spec.path.as_deref() {
+                p.clone_into(&mut cfg.external_signer_path);
+            }
+            attest_factory::build_signer(root, spec.algorithm, "external", &cfg)
+        }
+        other => Err(FactoryError::UnknownSignerKind(other.to_owned())),
+    }
+}
+
+fn build_ed25519_repo_key_from_path(path: &Path) -> Result<Box<dyn Signer>, FactoryError> {
+    use mkit_core::sign;
+    let kp = sign::load_key(path).map_err(|e| FactoryError::InvalidKeyFile {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })?;
+    Ok(Box::new(mkit_attest::RepoKeySigner::new(kp)))
+}
+
+fn factory_error_code(e: &FactoryError) -> u8 {
+    match e {
+        FactoryError::UnknownSignerKind(_) | FactoryError::UnknownAlgorithm(_) => exit::USAGE,
+        FactoryError::MissingKeyFile { .. } => exit::NOINPUT,
+        _ => exit::CONFIG_ERROR,
+    }
 }
 
 /// Parse `--commit` value or fall back to HEAD.
@@ -257,12 +426,76 @@ mod tests {
         assert_eq!(p.signer.as_deref(), Some("external"));
         assert_eq!(p.predicate_type.as_deref(), Some("https://example.com/p"));
         assert_eq!(p.predicate_file.as_deref(), Some("/tmp/x.json"));
+        assert!(p.additional_signers.is_empty());
+    }
+
+    #[test]
+    fn parse_args_collects_multiple_additional_signers() {
+        let args = vec![
+            "--additional-signer".into(),
+            "algorithm=ed25519,signer=repo-key".into(),
+            "--additional-signer".into(),
+            "algorithm=p256,signer=external,path=/x".into(),
+        ];
+        let p = parse_args(&args).unwrap();
+        assert_eq!(p.additional_signers.len(), 2);
+        assert_eq!(p.additional_signers[0], "algorithm=ed25519,signer=repo-key");
     }
 
     #[test]
     fn parse_args_rejects_unknown() {
         let args = vec!["--bogus".into(), "x".into()];
         assert!(parse_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_signer_spec_ok() {
+        let s = parse_signer_spec("algorithm=secp256k1,signer=repo-key,path=k.key").unwrap();
+        assert_eq!(s.algorithm, Algorithm::Secp256k1);
+        assert_eq!(s.signer_kind, "repo-key");
+        assert_eq!(s.path.as_deref(), Some("k.key"));
+    }
+
+    #[test]
+    fn parse_signer_spec_without_path() {
+        let s = parse_signer_spec("algorithm=p256,signer=external").unwrap();
+        assert_eq!(s.algorithm, Algorithm::P256);
+        assert_eq!(s.signer_kind, "external");
+        assert!(s.path.is_none());
+    }
+
+    #[test]
+    fn parse_signer_spec_missing_algorithm() {
+        let e = parse_signer_spec("signer=repo-key").unwrap_err();
+        assert!(e.contains("algorithm"), "{e}");
+    }
+
+    #[test]
+    fn parse_signer_spec_missing_signer() {
+        let e = parse_signer_spec("algorithm=ed25519").unwrap_err();
+        assert!(e.contains("signer"), "{e}");
+    }
+
+    #[test]
+    fn parse_signer_spec_unknown_algorithm() {
+        let e = parse_signer_spec("algorithm=rsa,signer=repo-key").unwrap_err();
+        assert!(e.contains("rsa"), "{e}");
+    }
+
+    #[test]
+    fn parse_signer_spec_unknown_signer_kind() {
+        let e = parse_signer_spec("algorithm=ed25519,signer=sigstore").unwrap_err();
+        assert!(e.contains("sigstore"), "{e}");
+    }
+
+    #[test]
+    fn parse_signer_spec_not_key_value() {
+        // Missing comma between key=value pairs — `split_once('=')` swallows
+        // the rest into the value of the first key. This surfaces as an
+        // "unknown algorithm" error for the bogus algorithm value, which is
+        // clear enough for the user to fix.
+        let e = parse_signer_spec("algorithm=ed25519 signer=repo-key").unwrap_err();
+        assert!(e.contains("algorithm") || e.contains("key=value"), "{e}");
     }
 
     #[test]
@@ -273,5 +506,6 @@ mod tests {
         assert!(p.signer.is_none());
         assert!(p.predicate_type.is_none());
         assert!(p.predicate_file.is_none());
+        assert!(p.additional_signers.is_empty());
     }
 }
