@@ -1,20 +1,16 @@
-//! Phase 6 (signing) cross-implementation goldens.
+//! Phase 6 (signing) goldens.
 //!
 //! For every fixture we:
 //!
-//! 1. Load the matching commit/remix object bytes from the existing
-//!    Phase 1 fixtures (`commit_0parent.bin`, `remix_2sources.bin`).
+//! 1. Load the matching commit/remix object bytes from the Phase 1
+//!    fixtures (`commit_0parent.bin`, `remix_2sources.bin`).
 //! 2. Deserialize via `mkit_core::serialize::deserialize`.
 //! 3. Re-derive the signing bytes via `commit_signing_bytes` /
 //!    `remix_signing_bytes`.
-//! 4. Compare byte-for-byte against the harvested `_signing_bytes.bin`
-//!    file (produced by the Zig reference implementation).
+//! 4. Compare byte-for-byte against the pinned `_signing_bytes.bin`
+//!    fixture.
 //! 5. Re-derive `BLAKE3(domain || signing_bytes)` and assert it matches
 //!    the recorded MANIFEST digest of the same domain-prefixed input.
-//!
-//! If anyone changes either implementation's signing-bytes layout, this
-//! test catches the drift even if the signing-bytes-only digest in
-//! MANIFEST does not (the bytes themselves are pinned in `.bin` form).
 
 use std::fs;
 use std::path::PathBuf;
@@ -57,7 +53,7 @@ fn manifest_digest(name: &str) -> Option<String> {
 }
 
 #[test]
-fn commit_0parent_signing_bytes_match_zig() {
+fn commit_0parent_signing_bytes_match_golden() {
     let obj_bytes = load("commit_0parent.bin");
     let obj = deserialize(&obj_bytes).expect("commit_0parent decodes");
     let Object::Commit(c) = obj else {
@@ -67,7 +63,7 @@ fn commit_0parent_signing_bytes_match_zig() {
     let want = load("commit_0parent_signing_bytes.bin");
     assert_eq!(
         derived, want,
-        "commit signing bytes diverge from Zig harvest"
+        "commit signing bytes diverge from pinned golden"
     );
     // Manifest digest cross-check (BLAKE3 of the raw signing-bytes file
     // — NOT the domain-prefixed signing hash; that one is computed at
@@ -77,7 +73,7 @@ fn commit_0parent_signing_bytes_match_zig() {
 }
 
 #[test]
-fn remix_2sources_signing_bytes_match_zig() {
+fn remix_2sources_signing_bytes_match_golden() {
     let obj_bytes = load("remix_2sources.bin");
     let obj = deserialize(&obj_bytes).expect("remix_2sources decodes");
     let Object::Remix(r) = obj else {
@@ -87,7 +83,7 @@ fn remix_2sources_signing_bytes_match_zig() {
     let want = load("remix_2sources_signing_bytes.bin");
     assert_eq!(
         derived, want,
-        "remix signing bytes diverge from Zig harvest"
+        "remix signing bytes diverge from pinned golden"
     );
     let want_hex = manifest_digest("remix_2sources_signing_bytes").expect("manifest entry present");
     assert_eq!(to_hex(&hash(&want)), want_hex);

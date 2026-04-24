@@ -1,8 +1,7 @@
 //! `mkit remote` — show / add / set the configured remote.
 //!
 //! URL validation: only `mkit+<scheme>://` is accepted. Recognised
-//! schemes: `file`, `https`, `s3`, `ssh`, `memory`. Matches the Zig
-//! implementation in `main.zig::cmdRemote`.
+//! schemes: `file`, `https`, `s3`, `ssh`, `memory`.
 
 use std::io::Write;
 

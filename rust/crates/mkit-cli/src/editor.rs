@@ -1,11 +1,9 @@
-//! `$EDITOR` / `$VISUAL` spawn helper for `mkit commit` — port of the
-//! Zig `spawnEditor` helper in `src/main.zig`.
+//! `$EDITOR` / `$VISUAL` spawn helper for `mkit commit`.
 //!
-//! Behaviour (matches Zig modulo platform shim):
+//! Behaviour:
 //! * Honour `$GIT_EDITOR` first, then `$EDITOR`, then `$VISUAL`.
 //! * Fall back to `vi` on Unix / `notepad` on Windows when no env var
-//!   is set — the Zig port refuses-loud, but shipping a fallback makes
-//!   `mkit commit` work out-of-the-box on a freshly-provisioned box.
+//!   is set, so `mkit commit` works out-of-the-box.
 //! * Write `template` to a tempfile, spawn the editor, wait, read the
 //!   file back, strip any line whose first non-whitespace byte is `#`,
 //!   and return the trimmed message.
@@ -15,8 +13,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Maximum commit-message file size read back from the editor. Matches
-/// the Zig helper's 1 MiB bound.
+/// Maximum commit-message file size read back from the editor (1 MiB).
 pub const MAX_COMMIT_MSG_BYTES: u64 = 1024 * 1024;
 
 /// Spawn the user's editor on a tempfile pre-populated with `template`,
@@ -116,7 +113,7 @@ fn pick_editor_with(resolver: impl Fn(&str) -> Option<String>) -> String {
 }
 
 /// Strip all lines whose first non-whitespace byte is `#`, then trim
-/// trailing whitespace. Matches `src/cli.zig::stripCommentsAndTrim`.
+/// trailing whitespace.
 #[must_use]
 pub fn strip_comments_and_trim(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
@@ -133,8 +130,6 @@ pub fn strip_comments_and_trim(input: &str) -> String {
 }
 
 /// Template rendered into the tempfile before spawning the editor.
-/// Matches the Zig `commit_editmsg_template` modulo the `\n` prefix
-/// (Rust's string literal keeps the leading newline cleaner).
 pub const COMMIT_EDITMSG_TEMPLATE: &str = "\n\
 # Please enter the commit message for your changes. Lines starting\n\
 # with '#' will be ignored, and an empty message aborts the commit.\n";

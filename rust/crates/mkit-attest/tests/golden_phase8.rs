@@ -1,16 +1,14 @@
-//! Phase 8 cross-implementation goldens.
+//! Phase 8 goldens.
 //!
-//! These vectors are produced by `scripts/harvest-golden-vectors-phase8.sh`
-//! from the Zig reference (`src/attestations/`). They pin two contracts:
+//! Fixed deterministic vectors pin two contracts:
 //!
-//! 1. **JCS-canonical Statement bytes** — the Rust `statement::for_commit`
-//!    encoder produces the exact same byte sequence as the Zig encoder
-//!    when given the same fixed inputs.
-//! 2. **DSSE envelope shape + signature acceptance** — the Rust
-//!    `envelope::decode` accepts the Zig-produced envelope, the embedded
-//!    payload re-encodes back to the canonical Statement bytes, and
-//!    `verify::verify_envelope` accepts the embedded Ed25519 signature
-//!    against the trust root recovered from the deterministic seed.
+//! 1. **JCS-canonical Statement bytes** — `statement::for_commit` emits
+//!    the pinned byte sequence for the fixed inputs.
+//! 2. **DSSE envelope shape + signature acceptance** — `envelope::decode`
+//!    accepts the pinned envelope, the embedded payload re-encodes
+//!    back to the canonical Statement bytes, and `verify::verify_envelope`
+//!    accepts the embedded Ed25519 signature against the trust root
+//!    recovered from the deterministic seed.
 //!
 //! See `docs/SPEC-ATTESTATIONS.md` and `rust/tests/golden/phase8/MANIFEST.txt`.
 

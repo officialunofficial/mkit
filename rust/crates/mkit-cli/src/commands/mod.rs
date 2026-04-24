@@ -1,6 +1,5 @@
 //! Subcommand implementations. Each top-level command is its own
-//! module, matching the Zig split of `src/main.zig` into per-command
-//! `cmdFoo` functions.
+//! module.
 //!
 //! Dispatch lives in `main.rs`; business logic lives in library
 //! crates; this module is the thin presentation shim.
@@ -38,18 +37,14 @@ pub mod verify;
 use crate::exit;
 use std::io::Write;
 
-/// Shared helper: emit a "not yet wired in the Rust port" notice and
-/// return the tempfail exit code. The Rust CLI exists primarily to get
-/// the binary, version contract, and plumbing in place for Phase 10;
-/// commands whose backing state-machines have not been ported yet say
-/// so honestly rather than pretending to work.
+/// Shared helper: emit a "not yet wired" notice and return the
+/// tempfail exit code. Commands whose backing state-machines haven't
+/// been wired into the CLI yet say so honestly rather than pretending
+/// to work.
 #[must_use]
 pub fn not_yet_ported(cmd: &str) -> u8 {
     let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "error: `mkit {cmd}` is not yet wired in the Rust port (Phase 10 follow-up)"
-    );
+    let _ = writeln!(stderr, "error: `mkit {cmd}` is not yet wired");
     exit::TEMPFAIL
 }
 

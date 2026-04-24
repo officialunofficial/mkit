@@ -10,11 +10,9 @@
 //! 3. **Bounded allocations** — the input cap above plus per-op output
 //!    caps inside `mkit-core` (`delta::decode` caps initial capacity,
 //!    `pack::PackReader` enforces `MAX_ENTRIES` and `MAX_PAYLOAD`)
-//!    keep the worst-case heap to ~1 MiB per iteration. This is the
-//!    Rust adaptation of the Zig FixedBufferAllocator — see
-//!    `docs/FUZZ.md §Rust-adaptation` for why we don't thread a custom
-//!    allocator through `mkit-core`. Defensive pre-checks in the
-//!    harness refuse obviously-malicious headers before invoking core.
+//!    keep the worst-case heap to ~1 MiB per iteration. Defensive
+//!    pre-checks in the harness refuse obviously-malicious headers
+//!    before invoking core.
 //! 4. `PER_ITER = Duration::from_millis(100)` — wall-clock cap; abort on overrun.
 //! 5. No `loop {}` / `while true {}` — we use `for i in 0..MAX_ITER` exclusively.
 //! 6. Seeded deterministic PRNG (splitmix64) — `RNG_SEED` is a constant.

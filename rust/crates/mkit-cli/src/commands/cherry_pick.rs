@@ -2,7 +2,7 @@
 //!
 //! On a clean merge we create a new commit on the current branch using
 //! the original commit's message; on conflict we report per-path and
-//! exit non-zero, matching the Zig reference.
+//! exit non-zero.
 
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};

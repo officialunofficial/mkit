@@ -1,5 +1,4 @@
 //! Terminal helpers — ANSI color gating and POSIX getenv wrappers.
-//! Port of the tiny slice of `src/term.zig` the CLI actually uses.
 //!
 //! Color policy: `NO_COLOR` (any value, including empty) disables
 //! color; `CLICOLOR_FORCE=1` forces it even when stdout is piped.

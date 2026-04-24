@@ -1,7 +1,8 @@
-//! `mkit` — Rust port of the Zig CLI binary. See `src/main.zig` for
-//! the original. The dispatch itself lives in `mkit_cli::dispatch` so
-//! integration tests can drive the same code path in-process without
-//! spawning a subprocess.
+//! `mkit` — CLI binary entry point.
+//!
+//! The dispatch itself lives in `mkit_cli::dispatch` so integration
+//! tests can drive the same code path in-process without spawning a
+//! subprocess.
 
 use std::process::ExitCode;
 

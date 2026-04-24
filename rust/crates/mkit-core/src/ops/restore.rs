@@ -1,4 +1,4 @@
-//! Restore — port of `src/restore.zig`.
+//! Restore.
 //!
 //! Materialises a stored [`Tree`](crate::object::Tree) into a target
 //! directory: writes blobs as files, recurses into subtrees as
@@ -17,7 +17,7 @@
 //!
 //! When `RestoreOptions.sparse_patterns` is set, only files whose
 //! computed full path (relative to the root) matches the pattern set
-//! are restored. The pattern grammar mirrors the Zig source:
+//! are restored. Pattern grammar:
 //!
 //! - Lines beginning with `#` are comments. Empty lines are skipped.
 //! - Leading `!` negates the pattern.
@@ -80,8 +80,7 @@ pub struct SparsePattern {
 #[derive(Debug, Clone)]
 pub struct RestoreOptions {
     /// If `true`, delete anything in the target dir that is not in the
-    /// tree (preserving `.mkit/` and `.git/`). Default `true` (matches
-    /// the Zig source).
+    /// tree (preserving `.mkit/` and `.git/`). Default `true`.
     pub clean: bool,
     /// If `Some`, only restore entries whose path matches the patterns.
     pub sparse_patterns: Option<Vec<SparsePattern>>,
@@ -332,7 +331,7 @@ fn restore_tree_to_worktree_inner(
             format!("{path_prefix}/{name}")
         };
         let is_dir = entry.mode == EntryMode::Tree;
-        // `is_ignored` matches against a basename per `src/ignore.zig`.
+        // `is_ignored` matches against a basename per `crate::ignore`.
         if ignore.is_ignored(name, is_dir) {
             report.skipped_by_ignore += 1;
             continue;
@@ -808,8 +807,8 @@ mod tests {
             negated: false,
             dir_only: false,
         }];
-        assert!(matches_sparse(&p, "src/main.zig", false));
-        assert!(matches_sparse(&p, "src/lib/util.zig", false));
+        assert!(matches_sparse(&p, "src/main.rs", false));
+        assert!(matches_sparse(&p, "src/lib/util.rs", false));
         assert!(!matches_sparse(&p, "tests/foo", false));
     }
 
@@ -827,7 +826,7 @@ mod tests {
                 dir_only: false,
             },
         ];
-        assert!(matches_sparse(&p, "src/main.zig", false));
+        assert!(matches_sparse(&p, "src/main.rs", false));
         assert!(!matches_sparse(&p, "src/secret/key.pem", false));
     }
 
@@ -856,7 +855,7 @@ mod tests {
                 dir_only: false,
             },
         ];
-        assert!(!matches_sparse(&p, "src/main.zig", false));
+        assert!(!matches_sparse(&p, "src/main.rs", false));
     }
 
     #[test]
@@ -919,7 +918,7 @@ mod tests {
         let inner = put_tree_with(
             &store,
             vec![TreeEntry {
-                name: b"main.zig".to_vec(),
+                name: b"main.rs".to_vec(),
                 mode: EntryMode::Blob,
                 object_hash: blob,
             }],
@@ -933,7 +932,7 @@ mod tests {
             }],
         );
         restore_tree(&store, root, target.path(), &RestoreOptions::default()).unwrap();
-        let content = fs::read(target.path().join("src/main.zig")).unwrap();
+        let content = fs::read(target.path().join("src/main.rs")).unwrap();
         assert_eq!(content, b"const main = 0;");
     }
 
@@ -1104,7 +1103,7 @@ mod tests {
         let src = put_tree_with(
             &store,
             vec![TreeEntry {
-                name: b"main.zig".to_vec(),
+                name: b"main.rs".to_vec(),
                 mode: EntryMode::Blob,
                 object_hash: main,
             }],
@@ -1112,7 +1111,7 @@ mod tests {
         let tests = put_tree_with(
             &store,
             vec![TreeEntry {
-                name: b"test.zig".to_vec(),
+                name: b"test.rs".to_vec(),
                 mode: EntryMode::Blob,
                 object_hash: test,
             }],
@@ -1146,8 +1145,8 @@ mod tests {
             }]),
         };
         restore_tree(&store, root, target.path(), &opts).unwrap();
-        assert!(target.path().join("src/main.zig").exists());
-        assert!(!target.path().join("tests/test.zig").exists());
+        assert!(target.path().join("src/main.rs").exists());
+        assert!(!target.path().join("tests/test.rs").exists());
         assert!(!target.path().join("README.md").exists());
     }
 
@@ -1169,7 +1168,7 @@ mod tests {
             &store,
             vec![
                 TreeEntry {
-                    name: b"main.zig".to_vec(),
+                    name: b"main.rs".to_vec(),
                     mode: EntryMode::Blob,
                     object_hash: main,
                 },
@@ -1204,7 +1203,7 @@ mod tests {
             ]),
         };
         restore_tree(&store, root, target.path(), &opts).unwrap();
-        assert!(target.path().join("src/main.zig").exists());
+        assert!(target.path().join("src/main.rs").exists());
         assert!(!target.path().join("src/secret/key.pem").exists());
     }
 

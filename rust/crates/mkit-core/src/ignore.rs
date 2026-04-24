@@ -1,4 +1,4 @@
-//! `.mkitignore` glob patterns — port of `src/ignore.zig`.
+//! `.mkitignore` glob patterns.
 //!
 //! Grammar (subset of `gitignore`):
 //! - One pattern per line.
@@ -13,14 +13,14 @@
 //! `.mkit` and `.git` are *always* ignored regardless of patterns.
 //!
 //! Matching is performed on the **basename** of the path, not on full
-//! paths — same shape as the Zig original. Multi-segment globs (e.g.
-//! `foo/**/bar`) are out of scope for v1.
+//! paths. Multi-segment globs (e.g. `foo/**/bar`) are out of scope
+//! for v1.
 
 use std::fs;
 use std::io;
 use std::path::Path;
 
-/// Hard cap on a `.mkitignore` file (1 MiB) — matches `src/ignore.zig`.
+/// Hard cap on a `.mkitignore` file (1 MiB).
 pub const MAX_IGNORE_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Errors returned by [`load`].
@@ -110,8 +110,7 @@ pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
 }
 
 /// Parse `.mkitignore` content into a list of patterns. Never fails:
-/// malformed-looking lines are silently skipped (matches the Zig
-/// behaviour).
+/// malformed-looking lines are silently skipped.
 #[must_use]
 pub fn parse(content: &str) -> IgnoreList {
     let mut patterns = Vec::new();
@@ -149,7 +148,7 @@ pub fn parse(content: &str) -> IgnoreList {
 
 /// Match a basename `name` against a glob `pattern`. Supports `*`
 /// (any run of non-`/` chars), `?` (one non-`/` char), and exact
-/// literal matches. Mirrors `src/ignore.zig::globMatch`.
+/// literal matches.
 #[must_use]
 pub fn glob_match(pattern: &str, name: &str) -> bool {
     let pat = pattern.as_bytes();
@@ -275,8 +274,8 @@ mod tests {
 
     #[test]
     fn glob_match_star() {
-        assert!(glob_match("*.zig", "main.zig"));
-        assert!(!glob_match("*.zig", "main.txt"));
+        assert!(glob_match("*.rs", "main.rs"));
+        assert!(!glob_match("*.rs", "main.txt"));
         assert!(glob_match("test*", "testing"));
         assert!(glob_match("*", "anything"));
     }

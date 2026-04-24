@@ -3,7 +3,7 @@
 //!
 //! The rebase state machine lives in `mkit_core::ops::rebase`. This
 //! shim loads / writes that state and drives the replay loop via
-//! [`mkit_core::ops::cherry_pick`], mirroring the Zig semantics.
+//! [`mkit_core::ops::cherry_pick`].
 //!
 //! Scope: fast-forward-on-conflict stop is implemented; `--continue`
 //! resumes by consuming the head of `todo` (after the caller resolved

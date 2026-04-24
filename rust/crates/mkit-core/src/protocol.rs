@@ -1,15 +1,8 @@
 //! mkit transport protocol — the 7-verb abstract interface, error
 //! taxonomy, SSH wire framing, and retry/backoff policy.
 //!
-//! This is the Rust port of `src/protocol.zig` (the vtable, errors, and
-//! framing constants) plus the SSH framing constants that lived in
-//! `src/transport/ssh.zig`. Wire-format authority:
-//! `docs/SPEC-TRANSPORT.md` — change the spec and this module in the
-//! same PR.
-//!
-//! Phase 7a scope: the trait surface only. Concrete transports
-//! (memory, file, http, s3, ssh) land in Phase 7b–e and will implement
-//! [`Transport`] using the helpers here.
+//! Wire-format authority: `docs/SPEC-TRANSPORT.md` — change the spec
+//! and this module in the same PR.
 //!
 //! The trait is object-safe: method signatures do not introduce
 //! generics, so callers can hold a `Box<dyn Transport>` and swap
@@ -106,8 +99,7 @@ pub const HELLO_VERSION_MAX: usize = 64;
 /// Errors that any transport may surface across the [`Transport`]
 /// boundary. Implementations MAY wrap transport-specific errors
 /// internally but MUST map them to one of these variants before
-/// returning. Variant names mirror the Zig `TransportError` enum
-/// one-for-one so the spec cross-references hold.
+/// returning.
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     /// `download_pack` called on a digest the remote does not hold.
@@ -445,8 +437,7 @@ impl Iterator for BackoffIterator {
 /// Every transport (memory, file, HTTP, S3, SSH) implements this trait.
 /// Methods are synchronous and take `&self`; transports that need
 /// interior mutability (e.g. connection pools) MUST use a `Mutex` /
-/// `RwLock` internally. This keeps the trait object-safe and matches
-/// the Zig vtable shape.
+/// `RwLock` internally. This keeps the trait object-safe.
 ///
 /// All implementations MUST honour the retry policy in
 /// SPEC-TRANSPORT §8 internally OR document that the caller is

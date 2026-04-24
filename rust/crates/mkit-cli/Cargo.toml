@@ -9,7 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Binary crate — not published to crates.io during the Rust port.
+# Binary crate — not published to crates.io.
 publish = false
 default-run = "mkit"
 
@@ -31,7 +31,7 @@ mkit-transport-ssh = { path = "../mkit-transport-ssh" }
 
 # `derive` and `wrap_help` are intentionally disabled so help-text output
 # is deterministic — we render help ourselves from a compile-time const
-# that cli_test.zig in the Zig tree snapshot-matches byte-for-byte.
+# pinned by snapshot tests.
 clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage"] }
 tempfile = "3"
 thiserror = "2"

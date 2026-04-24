@@ -1,5 +1,5 @@
-//! Delta instruction stream — port of `src/delta.zig`, upgraded to the
-//! versioned format required by `docs/SPEC-DELTA.md`.
+//! Delta instruction stream — implements the versioned format required
+//! by `docs/SPEC-DELTA.md`.
 //!
 //! Stream layout (SPEC-DELTA §2):
 //!
@@ -20,10 +20,6 @@
 //!   multiple INSERTs; there is no extended-length form in v1.
 //!
 //! `0x00` is **reserved** and MUST be rejected.
-//!
-//! The Zig reference (`src/delta.zig`) predates SPEC-DELTA — its stream
-//! has no version byte and no length header. The Rust port is the
-//! conformant implementation.
 
 use crate::object::MkitError;
 
@@ -42,11 +38,9 @@ const BLOCK_SIZE: usize = 16;
 
 /// Build a v1 delta stream that reconstructs `result` from `base`.
 ///
-/// The writer is the same FNV-1a-on-16-byte-blocks scan as the Zig
-/// reference (`src/delta.zig`). Any conformant writer is acceptable;
-/// this one is greedy and produces byte-identical output to the Zig
-/// implementation when paired with the SPEC-DELTA header. Output is
-/// always at least [`HEADER_LEN`] bytes.
+/// The writer is an FNV-1a-on-16-byte-blocks scan. Any conformant
+/// writer is acceptable; this one is greedy. Output is always at least
+/// [`HEADER_LEN`] bytes.
 ///
 /// # Panics
 ///
@@ -247,7 +241,7 @@ fn flush_insert(out: &mut Vec<u8>, buf: &mut Vec<u8>) {
 }
 
 fn block_hash(block: &[u8]) -> u64 {
-    // FNV-1a 64-bit. Same primitive as the Zig reference.
+    // FNV-1a 64-bit.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in block {
         h ^= u64::from(b);

@@ -51,7 +51,6 @@ use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_pr
 pub use crate::url::{MKIT_SSH_PREFIX, SshTarget, parse_mkit_ssh_url, validate_ssh_path};
 
 /// Maximum combined ref / prefix name length accepted over the wire.
-/// Matches `MAX_REF_NAME` in `src/transport/ssh.zig`.
 const MAX_REF_NAME: usize = 4096;
 
 /// Client version string sent in the `OP_HELLO` payload. Crate version
@@ -60,8 +59,8 @@ const MAX_REF_NAME: usize = 4096;
 const CLIENT_VERSION: &str = concat!("mkit ", env!("CARGO_PKG_VERSION"));
 
 /// Optional SSH CLI knobs threaded from `.mkit/config`. All fields default
-/// to empty, which means "inherit the user's `ssh(1)` defaults". Mirrors
-/// the Zig `SshOptions` struct and SPEC-TRANSPORT §7.5.
+/// to empty, which means "inherit the user's `ssh(1)` defaults". See
+/// SPEC-TRANSPORT §7.5 for the canonical field list.
 #[derive(Debug, Default, Clone)]
 pub struct SshOptions {
     /// `-o StrictHostKeyChecking=<value>`. Empty → do not pass.
@@ -347,7 +346,7 @@ fn read_frame(r: &mut ChildStdout) -> TransportResult<(u8, Vec<u8>)> {
 /// Peek `[opcode/status][u32 LE payload_len]` from a 5-byte header
 /// buffer. Equivalent to calling [`decode_frame`] on `header` followed
 /// by a second read for the payload — but avoids an intermediate
-/// allocation and matches the Zig implementation's read pattern.
+/// allocation.
 fn peek_header(header: [u8; FRAME_HEADER_LEN]) -> TransportResult<(u8, usize)> {
     // Delegate to the core decoder so encode/decode parity is enforced
     // in one place. `decode_frame` tolerates extra bytes after the
@@ -851,7 +850,7 @@ mod tests {
     // --- Payload encoders -------------------------------------------------
 
     #[test]
-    fn encode_write_ref_matches_zig_shape() {
+    fn encode_write_ref_shape() {
         let name = "refs/heads/main";
         let h = [0xABu8; 32];
         let got = encode_write_ref(name, &h);

@@ -93,8 +93,7 @@ impl Signer for ExternalSigner {
 
         if !status.success() {
             // Surface the child's stderr to the caller via the error
-            // payload (the Zig version uses `std.debug.print`; we keep
-            // the bytes inside the error so the caller can decide).
+            // payload so the caller can decide what to log.
             let msg = String::from_utf8_lossy(&stderr).into_owned();
             return Err(Error::ExternalSignerFailed(msg));
         }

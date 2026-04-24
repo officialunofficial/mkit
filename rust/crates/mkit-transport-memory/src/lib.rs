@@ -1,10 +1,8 @@
 //! In-memory [`Transport`] implementation for tests and fuzz harnesses.
 //!
-//! Port of `src/transport/memory.zig` — a `HashMap`-backed store that
-//! holds pack bytes and refs entirely in RAM. Attestation verbs are
-//! omitted: the Rust port has not ported the attestation subsystem yet
-//! (it lives in `mkit-attest`); the 7-verb [`Transport`] trait does not
-//! include attestation methods.
+//! A `HashMap`-backed store that holds pack bytes and refs entirely in
+//! RAM. The 7-verb [`Transport`] trait does not include attestation
+//! methods; those live in `mkit-attest`.
 //!
 //! ## CAS guarantees
 //!
@@ -98,8 +96,8 @@ impl Transport for MemoryTransport {
 
     /// Insert or overwrite a pack. The caller is responsible for
     /// providing a [`PackKey`] that matches `BLAKE3(bytes)`; this
-    /// implementation does **not** re-hash to verify (matching the Zig
-    /// original, which trusts the caller's digest for performance).
+    /// implementation does **not** re-hash to verify, trusting the
+    /// caller's digest for performance.
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
         let mut g = self.inner.lock().expect("MemoryTransport mutex poisoned");
         g.packs.insert(*key, bytes.to_vec());

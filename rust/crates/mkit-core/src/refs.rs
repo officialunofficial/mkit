@@ -1,4 +1,4 @@
-//! Refs subsystem — port of `src/refs.zig`.
+//! Refs subsystem.
 //!
 //! Implements the local-disk side of `docs/SPEC-REFS.md`: ref names,
 //! the 65-byte wire encoding, the symbolic-or-detached `HEAD` file, and
@@ -49,7 +49,7 @@ const HEAD_MAX_BYTES: u64 = 4 * 1024;
 /// file picked up extra whitespace, but anything pathological is
 /// rejected.
 const REF_FILE_MAX_BYTES: u64 = 128;
-/// Hard cap on `.mkit/shallow` (1 MiB — same as Zig).
+/// Hard cap on `.mkit/shallow` (1 MiB).
 const SHALLOW_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Errors raised by this module.
@@ -86,8 +86,7 @@ pub enum RefError {
 /// Result alias used throughout this module.
 pub type RefResult<T> = Result<T, RefError>;
 
-/// CAS condition for [`update_ref`] — exact mirror of
-/// `protocol.RefWriteCondition` in the Zig source.
+/// CAS condition for [`update_ref`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefWriteCondition {
     /// Unconditional write — clobbers any existing value.
@@ -594,9 +593,9 @@ const MAX_REF_DEPTH: usize = 32;
 
 fn collect_refs(root: &Path, prefix: &str, out: &mut Vec<Ref>, depth: usize) -> RefResult<()> {
     if depth > MAX_REF_DEPTH {
-        // Silently stop — matches the Zig "skip malformed" posture below
-        // for individual files. Callers get a partial result rather than
-        // a stack overflow on adversarial input.
+        // Silently stop — same "skip malformed" posture as below for
+        // individual files. Callers get a partial result rather than a
+        // stack overflow on adversarial input.
         return Ok(());
     }
     let dir_path = if prefix.is_empty() {
@@ -631,7 +630,7 @@ fn collect_refs(root: &Path, prefix: &str, out: &mut Vec<Ref>, depth: usize) -> 
         if !validate_ref_name(&child_name) {
             continue;
         }
-        // Read & decode; silently skip malformed files (matches Zig).
+        // Read & decode; silently skip malformed files.
         let Ok(bytes) = fs::read(entry.path()) else {
             continue;
         };

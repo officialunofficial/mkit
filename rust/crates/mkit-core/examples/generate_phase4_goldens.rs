@@ -5,12 +5,9 @@
 //! every input is a fixed constant; re-running emits byte-identical
 //! files.
 //!
-//! There is no Zig harness for this phase because the Zig 0.16
-//! toolchain is not yet pinned in `.zigversion` (the project pin is
-//! still 0.15.2). Once 0.16 lands we can re-derive these from the Zig
-//! source as cross-implementation checks; until then this generator is
-//! the source of truth and the lib's unit tests prove the bytes match
-//! the parser.
+//! This generator is the source of truth for these vectors; the
+//! crate's unit tests prove the same bytes round-trip through the
+//! parser.
 
 use std::fmt::Write as _;
 use std::fs;

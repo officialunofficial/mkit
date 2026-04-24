@@ -17,8 +17,7 @@ use tempfile::NamedTempFile;
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Atomically write `bytes` to `final_path`. Creates the parent
-/// directory if `make_parents` is `true`. Mirrors
-/// `src/refs.zig::writeAtomicFile` and `src/index.zig::writeAtomicFile`.
+/// directory if `make_parents` is `true`.
 pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8], make_parents: bool) -> io::Result<()> {
     let parent = final_path
         .parent()

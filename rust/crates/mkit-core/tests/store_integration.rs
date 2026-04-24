@@ -1,9 +1,9 @@
-//! Integration test: write a harvested-from-Zig golden blob through the
-//! Rust [`ObjectStore`] and confirm the resulting on-disk path and hash
-//! match what the Zig reference implementation would produce.
+//! Integration test: write a pinned golden blob through the
+//! [`ObjectStore`] and confirm the resulting on-disk path and hash are
+//! stable.
 //!
 //! Cross-binds the store layout (`docs/SPEC-OBJECTS.md` §10) to the
-//! canonical byte format already pinned by `tests/golden.rs`.
+//! canonical byte format pinned by `tests/golden.rs`.
 
 use std::fs;
 use std::path::PathBuf;

@@ -1,4 +1,4 @@
-//! mkit object types — port of `src/object.zig`.
+//! mkit object types.
 //!
 //! Spec reference: `docs/SPEC-OBJECTS.md` §1–§9. Briefly:
 //!
@@ -324,8 +324,7 @@ impl Object {
 }
 
 /// All decode / validation errors raised by the serialize module, plus
-/// a small number of construction-time errors. Mirrors the Zig error
-/// set 1:1 so cross-implementation test vectors can pin specific kinds.
+/// a small number of construction-time errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MkitError {
     #[error("input is shorter than the 6-byte v1 prologue")]

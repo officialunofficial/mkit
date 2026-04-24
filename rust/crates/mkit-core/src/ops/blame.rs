@@ -1,13 +1,13 @@
-//! Blame — port of `src/blame.zig`.
+//! Blame.
 //!
 //! Walks the first-parent chain from a head commit, collecting the
 //! `(commit, blob)` pair for the file path at each step. Then replays
 //! the diffs forward (oldest → newest), attributing each line in the
 //! final blob to the commit that introduced it.
 //!
-//! Line matching uses a simple LCS DP table — same as the Zig
-//! original. For typical source files (a few thousand lines) this is
-//! fine; binary blobs / generated code are not in scope.
+//! Line matching uses a simple LCS DP table. For typical source files
+//! (a few thousand lines) this is fine; binary blobs / generated code
+//! are not in scope.
 //!
 //! Output formatting (used by goldens) is `<short>\t<line_num>\t<text>`,
 //! where `<short>` is the 12-char prefix of the commit hash. See

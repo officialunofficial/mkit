@@ -1,4 +1,4 @@
-//! Stash — port of `src/stash.zig`.
+//! Stash.
 //!
 //! On-disk format (`<repo_root>/.mkit/stash`) is a tagged binary
 //! manifest:
@@ -15,15 +15,6 @@
 //! ```
 //!
 //! New stashes are prepended (LIFO).
-//!
-//! ### Deviation from Zig
-//!
-//! `show()` in the Zig original returns a `diff::DiffResult` that
-//! requires the diff/graph subsystem (sibling-track OPS1). This Rust
-//! port omits `show()` for the moment; the on-disk manifest is
-//! identical so it can be added later without a format change. Tests
-//! that exercised `show()` are dropped from this port; everything else
-//! mirrors the Zig coverage.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -102,7 +93,7 @@ pub enum StashError {
 pub type StashResult<T> = Result<T, StashError>;
 
 /// Save the worktree as a stash entry, then reset the worktree to
-/// HEAD. Mirrors `src/stash.zig::save` exactly:
+/// HEAD:
 ///
 /// 1. Build a tree from `repo_root` (skipping `.mkit/`).
 /// 2. Resolve HEAD to a parent (or none for first commit).
@@ -197,7 +188,7 @@ pub fn pop(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()>
 
 /// Render `stash show [<stash>]` output: header + unified-diff-style listing.
 ///
-/// Output format (matches the Zig `show` output shape):
+/// Output format:
 /// ```text
 /// stash@{<idx>}: <message>
 /// Date: <unix-timestamp>

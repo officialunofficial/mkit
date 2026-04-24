@@ -5,13 +5,9 @@
 //! every input is a fixed constant; re-running emits byte-identical
 //! files.
 //!
-//! The Zig `scripts/harvest/harvest.zig` harness does NOT yet emit
-//! these vectors — the Zig `protocol.zig` does not own the SSH framing
-//! bytes (they live in `src/transport/ssh.zig`), and harvesting them
-//! would require pulling a live SSH transport into the harness. The
-//! Rust generator is therefore the source of truth for Phase 7a; the
-//! SSH transport agent (Phase 7e) will cross-check its emitter against
-//! these bytes as part of that PR's test plan.
+//! This generator is the source of truth for the Phase 7a vectors;
+//! the SSH transport's emitter is cross-checked against these bytes by
+//! the transport test suite.
 
 use std::fmt::Write as _;
 use std::fs;

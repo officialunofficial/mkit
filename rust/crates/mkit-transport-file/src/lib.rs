@@ -1,8 +1,7 @@
 //! Local-filesystem [`Transport`] implementation for e2e tests.
 //!
-//! Port of `src/transport/file.zig` — stores pack files under
-//! `<root>/packs/<64-hex>` and ref files under `<root>/refs/...`,
-//! mirroring the layout used by the integration test scripts.
+//! Stores pack files under `<root>/packs/<64-hex>` and ref files under
+//! `<root>/refs/...`.
 //!
 //! ## On-disk layout
 //!

@@ -1,9 +1,8 @@
 //! Canonical byte (de)serialization for [`Object`].
 //!
-//! Spec: `docs/SPEC-OBJECTS.md`. The byte layout produced here MUST be
-//! byte-for-byte identical to the Zig reference in `src/serialize.zig`
-//! — that contract is enforced by the golden-vector tests in
-//! `tests/golden.rs`.
+//! Spec: `docs/SPEC-OBJECTS.md`. The byte layout produced here is the
+//! v1 on-disk format; the golden-vector tests in `tests/golden.rs` pin
+//! it byte-for-byte.
 //!
 //! Every deserializer:
 //! * Validates the 6-byte v1 prologue first.
@@ -434,8 +433,7 @@ fn read_remix(r: &mut Reader<'_>) -> Result<Remix, MkitError> {
     let timestamp = r.read_u64()?;
     let signer = r.read_fixed::<32>()?;
     let signature = r.read_fixed::<64>()?;
-    // Sort check matches src/serialize.zig: strict ascending by
-    // (upstream_id, commit_hash).
+    // Sort check: strict ascending by (upstream_id, commit_hash).
     if sources.len() > 1 {
         for w in sources.windows(2) {
             let a = &w[0];

@@ -1,10 +1,9 @@
-//! Ed25519 commit / remix signing — port of `src/sign.zig`.
+//! Ed25519 commit / remix signing.
 //!
 //! Spec: `docs/SPEC-SIGNING.md`. The exact bytes covered by an Ed25519
 //! signature, and the domain separator used, are normative; this module
-//! reproduces them byte-for-byte. The Zig reference is checked for
-//! cross-implementation parity by the `phase6_*` golden tests in
-//! `tests/golden_sign.rs`.
+//! reproduces them byte-for-byte. The golden tests in
+//! `tests/golden_sign.rs` pin the output.
 //!
 //! Briefly:
 //!

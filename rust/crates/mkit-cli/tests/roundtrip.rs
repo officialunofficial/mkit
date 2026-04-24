@@ -2,13 +2,12 @@
 //! the real `mkit` binary in a fresh temp directory so they exercise
 //! the full argv → dispatch → library-crate path.
 //!
-//! Coverage (per the Phase 9 mandate):
+//! Coverage:
 //!   - `init`
 //!   - `keygen`
 //!   - `add` + `commit` + `log` roundtrip
-//!   - `show <hash>` round-trip (here: `mkit cat <hash>` — the Rust
-//!     CLI exposes `cat` since that matches the documented Zig
-//!     command name; `show` is an alias we do not port for 0.2.x).
+//!   - `show <hash>` round-trip (here: `mkit cat <hash>`; `show` is an
+//!     alias we do not expose).
 
 use std::fs;
 use std::process::Command;

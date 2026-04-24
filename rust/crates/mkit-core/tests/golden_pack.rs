@@ -1,27 +1,19 @@
-//! Phase 3 cross-implementation goldens.
+//! Phase 3 goldens.
 //!
 //! These tests assert that:
 //!
-//! 1. The Rust [`mkit_core::chunker`] produces byte-identical chunk
-//!    boundaries to the Zig reference (`src/fastcdc.zig`) for the same
-//!    splitmix64-derived inputs. Boundaries are harvested into
-//!    `rust/tests/golden/phase3/fastcdc_boundaries_*.bin` by
-//!    `scripts/harvest-golden-vectors.sh`.
+//! 1. [`mkit_core::chunker`] produces the pinned chunk boundaries for
+//!    the splitmix64-derived inputs stored at
+//!    `rust/tests/golden/phase3/fastcdc_boundaries_*.bin`.
+//! 2. [`mkit_core::delta`] encodes a SPEC-DELTA stream that round-trips
+//!    through [`mkit_core::delta::decode`] and pins to a fixed byte
+//!    prefix for a deterministic input.
+//! 3. [`mkit_core::pack`] writes a SPEC-PACKFILE v1 pack that the
+//!    reader resolves end-to-end and that pins to a fixed byte prefix
+//!    for a deterministic input.
 //!
-//! 2. The Rust [`mkit_core::delta`] encoder produces a SPEC-DELTA
-//!    stream that round-trips through [`mkit_core::delta::decode`] and
-//!    pins to a fixed byte prefix for a deterministic input. (No Zig
-//!    counterpart — the Zig delta predates SPEC-DELTA — so the pin
-//!    is on the Rust impl directly.)
-//!
-//! 3. The Rust [`mkit_core::pack`] writer produces a SPEC-PACKFILE v1
-//!    pack that the reader resolves end-to-end and that pins to a
-//!    fixed byte prefix for a deterministic input. (Same provenance
-//!    note as #2.)
-//!
-//! Goldens for #2 / #3 do NOT live on disk — they're inline byte arrays
-//! so the spec change → test failure feedback is immediate without a
-//! re-harvest step.
+//! Goldens for #2 / #3 do NOT live on disk — they're inline byte
+//! arrays so the spec change → test failure feedback is immediate.
 
 use std::fs;
 use std::path::PathBuf;
@@ -42,8 +34,8 @@ fn phase3_dir() -> PathBuf {
     d
 }
 
-/// Splitmix64 byte stream — must match `scripts/harvest/harvest.zig`
-/// exactly, otherwise the boundary goldens diverge.
+/// Splitmix64 byte stream. Pinned — changing this invalidates the
+/// checked-in boundary goldens.
 fn splitmix_bytes(seed: u64, total: usize) -> Vec<u8> {
     let mut buf = vec![0u8; total];
     let mut state: u64 = seed;
@@ -80,28 +72,28 @@ fn parse_boundaries_json(s: &str) -> Vec<usize> {
 }
 
 #[test]
-fn fastcdc_boundaries_1mib_match_zig() {
+fn fastcdc_boundaries_1mib_match_golden() {
     let raw = fs::read_to_string(phase3_dir().join("fastcdc_boundaries_1mib.bin"))
-        .expect("missing fastcdc_boundaries_1mib.bin (run scripts/harvest-golden-vectors.sh)");
+        .expect("missing fastcdc_boundaries_1mib.bin");
     let expected = parse_boundaries_json(&raw);
     let data = splitmix_bytes(0xA5A5_F00D_DEAD_BEEF, 1024 * 1024);
     let actual = chunk_boundaries(&data);
     assert_eq!(
         actual, expected,
-        "1 MiB FastCDC boundaries diverged from Zig"
+        "1 MiB FastCDC boundaries diverged from pinned golden"
     );
 }
 
 #[test]
-fn fastcdc_boundaries_256k_match_zig() {
+fn fastcdc_boundaries_256k_match_golden() {
     let raw = fs::read_to_string(phase3_dir().join("fastcdc_boundaries_256k.bin"))
-        .expect("missing fastcdc_boundaries_256k.bin (run scripts/harvest-golden-vectors.sh)");
+        .expect("missing fastcdc_boundaries_256k.bin");
     let expected = parse_boundaries_json(&raw);
     let data = splitmix_bytes(0xCAFE_BABE_1234_5678, 256 * 1024);
     let actual = chunk_boundaries(&data);
     assert_eq!(
         actual, expected,
-        "256 KiB FastCDC boundaries diverged from Zig"
+        "256 KiB FastCDC boundaries diverged from pinned golden"
     );
 }
 

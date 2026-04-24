@@ -1,7 +1,6 @@
-//! Rebase state machine — port of `src/rebase.zig`.
+//! Rebase state machine.
 //!
-//! Persists rebase state under `.mkit/rebase-apply/` exactly the way
-//! the Zig original does, with five files:
+//! Persists rebase state under `.mkit/rebase-apply/` as five files:
 //!
 //! - `head-name`  : symbolic name of the branch being rebased
 //! - `orig-head`  : 64-hex BLAKE3 of the tip before rebase started

@@ -133,11 +133,10 @@ pub fn attestation_id(envelope_bytes: &[u8]) -> Hash {
 // ---------------------------------------------------------------------------
 // Decoder — strict, matches exactly the byte shape our `encode` produces.
 //
-// Rationale (mirrors the Zig comment in src/attestations/envelope.zig):
-// the on-disk attestations mkit creates always come from this encoder, so
-// we accept only its exact byte shape and reject anything with non-JCS
-// spacing. If we ever need to ingest third-party DSSE envelopes we can
-// re-canonicalise via serde + this writer before storing.
+// The on-disk attestations mkit creates always come from this encoder,
+// so we accept only its exact byte shape and reject anything with
+// non-JCS spacing. If we ever need to ingest third-party DSSE envelopes
+// we can re-canonicalise via serde + this writer before storing.
 // ---------------------------------------------------------------------------
 
 /// Decode a JCS-canonical DSSE envelope produced by [`encode`].

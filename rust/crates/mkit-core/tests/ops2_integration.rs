@@ -1,6 +1,5 @@
 //! End-to-end integration tests for Phase 5b — rebase / bisect /
-//! blame / stash / restore. Each test mirrors a Zig integration
-//! scenario from `src/{rebase,bisect,blame,stash,restore}.zig`.
+//! blame / stash / restore.
 
 use std::collections::BTreeSet;
 use std::fs;

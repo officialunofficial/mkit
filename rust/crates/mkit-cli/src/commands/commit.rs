@@ -1,6 +1,6 @@
 //! `mkit commit` — build a signed commit object from the worktree.
 //!
-//! Scope (current Rust port):
+//! Scope:
 //! 1. Accept `-m <msg>` OR spawn `$EDITOR` on a tempfile pre-filled
 //!    with [`editor::COMMIT_EDITMSG_TEMPLATE`]. An empty message
 //!    aborts.

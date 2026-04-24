@@ -1,10 +1,9 @@
 //! mkit S3 / Cloudflare R2 transport.
 //!
-//! Port of `src/transport/s3.zig`. Implements the 7-verb [`Transport`]
-//! trait on top of a reqwest blocking client with our own SigV4 signer
-//! (see [`sigv4`]). Designed for Cloudflare R2 — AWS S3 also works, but
-//! CAS semantics only match the R2 behaviour of returning the body MD5
-//! as the `ETag` on `PUT`.
+//! Implements the 7-verb [`Transport`] trait on top of a reqwest
+//! blocking client with our own SigV4 signer (see [`sigv4`]). Designed
+//! for Cloudflare R2 — AWS S3 also works, but CAS semantics only match
+//! the R2 behaviour of returning the body MD5 as the `ETag` on `PUT`.
 //!
 //! URL shape: `mkit+s3://<endpoint>/<bucket>[/prefix]` — credentials are
 //! pulled from the `MKIT_R2_ACCESS_KEY_ID` / `MKIT_R2_SECRET_ACCESS_KEY`
@@ -39,15 +38,15 @@ use reqwest::blocking::{Client, Response};
 
 use crate::sigv4::{Credentials, SignedRequest, sign_request};
 
-/// Per SPEC-TRANSPORT §5 + Zig source, single PUT is capped at 5 GiB;
-/// anything larger requires multipart upload (deferred).
+/// Per SPEC-TRANSPORT §5, a single PUT is capped at 5 GiB; anything
+/// larger requires multipart upload (deferred).
 pub const S3_SINGLE_PUT_MAX: u64 = 5 * 1024 * 1024 * 1024;
 
-/// Body-size cap for a pack download — matches Zig `PACK_BODY_LIMIT`.
+/// Body-size cap for a pack download (4 GiB).
 const PACK_BODY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
 /// Body-size cap for a ref body (64 hex + newline + slack).
 const REF_BODY_LIMIT: usize = 256;
-/// Cap for list XML / small responses — matches Zig `REF_LIST_BODY_LIMIT`.
+/// Cap for list XML / small responses (16 MiB).
 const REF_LIST_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
 /// HTTP `PUT`-return body cap when we don't care about the response.
@@ -189,7 +188,7 @@ impl S3Transport {
         self.backoff = backoff;
     }
 
-    // -- Path / key builders — mirror the Zig helpers byte-for-byte --
+    // -- Path / key builders --
 
     /// Build the S3 object key for a pack: `packs/<64-char hex digest>`.
     #[must_use]
@@ -584,8 +583,8 @@ fn parse_ref_body(body: &[u8]) -> TransportResult<Hash> {
 }
 
 /// Minimal ListBucketResult XML parser — extracts every `<Key>...</Key>`.
-/// Matches the Zig `remote.parseListXml` behaviour byte-for-byte: no XML
-/// validation, no entity decoding (S3 never URL-encodes keys in the XML).
+/// No XML validation, no entity decoding (S3 never URL-encodes keys in
+/// the XML).
 #[must_use]
 pub fn parse_list_xml(xml: &[u8]) -> Vec<String> {
     let Ok(s) = std::str::from_utf8(xml) else {

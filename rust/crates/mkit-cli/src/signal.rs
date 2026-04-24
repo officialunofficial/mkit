@@ -1,23 +1,20 @@
 //! Signal handling — SIGINT / SIGTERM set a graceful-shutdown flag;
 //! SIGPIPE is ignored so `mkit log | head -1` exits cleanly.
 //!
-//! The Rust port keeps the behaviour dependency-free: we use the
-//! `Arc<AtomicBool>` pattern and rely on libc's default SIGPIPE policy
-//! (which the process inherits from the shell) rather than pulling in
-//! `signal-hook` just for this. The long-running commands (push / pull
-//! / clone) are not yet wired into the Rust CLI, so `install()` is a
-//! no-op placeholder that lives here to match the Zig module layout —
-//! the porting plan promotes it to real signal handling in Phase 10
-//! once `mkit-transport-*` crates gain interruptible poll loops.
+//! This module is dependency-free: we use the `Arc<AtomicBool>` pattern
+//! and rely on libc's default SIGPIPE policy (which the process inherits
+//! from the shell) rather than pulling in `signal-hook`. `install()` is
+//! a no-op placeholder — it will gain real signal handling once
+//! long-running transport verbs grow interruptible poll loops.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-/// Install SIGINT/SIGTERM/SIGPIPE handlers. Idempotent; cheap. On
-/// 0.2.x this is a no-op — see module docs. Callers (push/pull/clone)
-/// should still call `interrupted()` at natural checkpoints so the
-/// eventual Phase 10 wiring is transparent.
+/// Install SIGINT/SIGTERM/SIGPIPE handlers. Idempotent; cheap. Today
+/// this is a no-op — see module docs. Callers (push/pull/clone) should
+/// still call `interrupted()` at natural checkpoints so a later wiring
+/// is transparent.
 pub fn install() {
     // Intentionally empty — see module docs.
 }

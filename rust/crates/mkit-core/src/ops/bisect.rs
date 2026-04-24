@@ -1,8 +1,7 @@
-//! Bisect — port of `src/bisect.zig`.
+//! Bisect.
 //!
-//! Stores state in `.mkit/bisect` (a single file, NOT a directory),
-//! exactly the way the Zig original does. The on-disk format is a
-//! plain-text manifest:
+//! Stores state in `.mkit/bisect` (a single file, NOT a directory). The
+//! on-disk format is a plain-text manifest:
 //!
 //! ```text
 //! <orig_head_hex>
@@ -25,8 +24,7 @@
 //! [`enumerate_range`] and [`pick_midpoint`] form the search core; the
 //! caller drives the loop, calling `pick_midpoint` on the candidates
 //! returned by `enumerate_range` and updating `bad`/`good` based on the
-//! tester's verdict. [`BisectStep`] is a convenience response type that
-//! mirrors the Zig union.
+//! tester's verdict. [`BisectStep`] is a convenience response type.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
@@ -63,10 +61,9 @@ pub enum BisectError {
 /// Result alias.
 pub type BisectResult<T> = Result<T, BisectError>;
 
-/// Persisted bisect state. Mirrors `src/bisect.zig::BisectState`.
+/// Persisted bisect state.
 ///
-/// The `skipped` field is an additive extension over the Zig original:
-/// commits in this set are excluded from midpoint selection. Old state
+/// Commits in `skipped` are excluded from midpoint selection. Old state
 /// files without `skip:` lines deserialize with an empty `skipped` set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BisectState {
@@ -273,7 +270,7 @@ pub fn enumerate_range(
 }
 
 /// Pick the midpoint commit. Returns `Hash::ZERO` when `candidates` is
-/// empty (matches Zig `pickMidpoint`).
+/// empty.
 #[must_use]
 pub fn pick_midpoint(candidates: &[Hash]) -> Hash {
     if candidates.is_empty() {
@@ -289,7 +286,7 @@ pub fn pick_midpoint(candidates: &[Hash]) -> Hash {
 /// neighbors — until a non-skipped candidate is found. Returns `ZERO`
 /// only when all candidates are skipped (or the list is empty).
 ///
-/// This mirrors `src/bisect.zig::pickMidpoint` skip-neighbor logic.
+/// This implements a skip-neighbor scan.
 #[must_use]
 pub fn pick_midpoint_skip(candidates: &[Hash], skipped: &BTreeSet<Hash>) -> Hash {
     if candidates.is_empty() {

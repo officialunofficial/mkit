@@ -1,5 +1,5 @@
 //! CLI surface constants shared by the main dispatcher and the snapshot
-//! tests. Port of `src/cli.zig`.
+//! tests.
 //!
 //! `CLI_VERSION` MUST equal `env!("CARGO_PKG_VERSION")` — `build.rs`
 //! enforces this at compile time so cosmetic edits to `Cargo.toml` can
@@ -11,9 +11,8 @@
 pub const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Full help text for `mkit --help` / `mkit help` / `mkit` (with no
-/// args). Kept verbatim in sync with `src/cli.zig` so downstream
-/// tooling that greps the binary output does not need to know which
-/// language the binary happens to be written in this week.
+/// args). Pinned by snapshot tests so downstream tooling that greps the
+/// binary output sees a stable surface.
 pub const HELP_TEXT: &str = "\
 usage: mkit <command> [args]
 
@@ -88,7 +87,7 @@ pub fn strip_comments_and_trim(input: &str) -> String {
 }
 
 /// Template written into `.mkit/COMMIT_EDITMSG` before spawning
-/// `$EDITOR`. Matches `src/cli.zig` so snapshots line up byte-for-byte.
+/// `$EDITOR`. Pinned by snapshot tests.
 pub const COMMIT_EDITMSG_TEMPLATE: &str = "\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored, and an empty message aborts the commit.\n";
 
 #[cfg(test)]

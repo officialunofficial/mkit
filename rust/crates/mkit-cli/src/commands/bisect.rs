@@ -1,7 +1,6 @@
 //! `mkit bisect start|good|bad|reset|skip` — binary-search a history
-//! for the commit that introduced a regression. Port of `cmdBisect` in
-//! the Zig CLI; backing state + search logic live in
-//! `mkit_core::ops::bisect`.
+//! for the commit that introduced a regression. Backing state + search
+//! logic live in `mkit_core::ops::bisect`.
 
 use std::collections::BTreeSet;
 use std::io::Write;

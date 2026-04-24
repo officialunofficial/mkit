@@ -1,9 +1,8 @@
 //! mkit-attest — JCS + in-toto v1 Statement + DSSE envelope + signers.
 //!
-//! Rust port of the Zig modules under `src/attestations/` on the `main`
-//! branch. The wire format and on-disk layout this crate produces are
-//! defined, normatively, in `docs/SPEC-ATTESTATIONS.md` — any change to
-//! this crate MUST update the spec in the same PR.
+//! The wire format and on-disk layout this crate produces are defined,
+//! normatively, in `docs/SPEC-ATTESTATIONS.md` — any change to this
+//! crate MUST update the spec in the same PR.
 //!
 //! The crate is layered as follows (each module's doc-comment has the
 //! deeper detail):

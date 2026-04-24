@@ -1,4 +1,4 @@
-//! Staging-area index — port of `src/index.zig`.
+//! Staging-area index.
 //!
 //! On-disk layout per `docs/SPEC-INDEX.md`:
 //!
@@ -7,13 +7,11 @@
 //! entry := [1B status][32B object_hash][2B LE path_len][path_len UTF-8 bytes]
 //! ```
 //!
-//! The `MKIX` magic is the deliberate rename from the Zig-era `ZMIX`
-//! marker; SPEC-INDEX §2 is normative on this point. Readers MUST
-//! reject any other magic.
+//! SPEC-INDEX §2 is normative on the magic value — readers MUST reject
+//! any other magic.
 //!
-//! Path rules (SPEC-INDEX §2 + Zig `validateIndexPath`): non-empty,
-//! no leading `/`, no `.`/`..` segments, no NULs/backslashes, and
-//! never under `.mkit/` or `.git/`.
+//! Path rules (SPEC-INDEX §2): non-empty, no leading `/`, no `.`/`..`
+//! segments, no NULs/backslashes, and never under `.mkit/` or `.git/`.
 
 use std::fs;
 use std::io;
@@ -92,7 +90,7 @@ impl Index {
         }
     }
 
-    /// Find an entry by path. `O(n)` — matches the Zig original.
+    /// Find an entry by path. `O(n)`.
     #[must_use]
     pub fn find_entry(&self, path: &str) -> Option<usize> {
         self.entries.iter().position(|e| e.path == path)
@@ -170,8 +168,7 @@ pub enum IndexError {
 /// Result alias used throughout this module.
 pub type IndexResult<T> = Result<T, IndexError>;
 
-/// Deserialise bytes into an [`Index`]. Mirrors `deserializeIndex` in
-/// the Zig source.
+/// Deserialise bytes into an [`Index`].
 ///
 /// # Errors
 /// See [`IndexError`].
@@ -255,8 +252,7 @@ pub fn index_path(root: &Path) -> PathBuf {
 }
 
 /// Validate a staged path: non-empty, relative, no traversal, no NUL,
-/// no backslash, never under `.mkit/` or `.git/`. Mirrors
-/// `src/index.zig::validateIndexPath`.
+/// no backslash, never under `.mkit/` or `.git/`.
 #[must_use]
 pub fn validate_index_path(path: &str) -> bool {
     if path.is_empty() {

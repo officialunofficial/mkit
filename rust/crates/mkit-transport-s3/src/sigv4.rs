@@ -1,14 +1,13 @@
-//! AWS Signature V4 signer, ported byte-for-byte from `src/s3.zig`.
+//! AWS Signature V4 signer.
 //!
-//! This is a minimal, deterministic SigV4 implementation used by the S3 /
-//! Cloudflare R2 transport. The **canonical request** and **string-to-sign**
-//! strings emitted here MUST be byte-identical to those produced by the Zig
-//! signer — `rust/tests/golden/phase7/sigv4_basic.json` pins a harvested
-//! fixture used as the cross-check.
+//! Minimal, deterministic SigV4 implementation used by the S3 /
+//! Cloudflare R2 transport. The golden vector at
+//! `rust/tests/golden/phase7/sigv4_basic.json` pins the exact bytes of
+//! the canonical request, string-to-sign, and final signature.
 //!
-//! The signer only ever signs the three headers `host`, `x-amz-content-sha256`,
-//! and `x-amz-date`. This matches the Zig side; adding more signed headers is
-//! a wire-format change and MUST touch both.
+//! The signer only ever signs the three headers `host`,
+//! `x-amz-content-sha256`, and `x-amz-date`. Adding more signed headers
+//! is a wire-format change.
 
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
@@ -16,8 +15,7 @@ use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// S3 credentials. Mirrors the signing-relevant subset of the Zig
-/// `RemoteConfig`.
+/// S3 credentials used by the SigV4 signer.
 #[derive(Debug, Clone)]
 pub struct Credentials {
     pub access_key_id: String,
@@ -81,7 +79,7 @@ pub fn derive_signing_key(secret: &str, date: &str, region: &str) -> [u8; 32] {
 }
 
 /// Strip the `https://` / `http://` prefix from an endpoint URL to produce
-/// the `host:` header value the signer needs. Mirrors the Zig `parseHost`.
+/// the `host:` header value the signer needs.
 #[must_use]
 pub fn parse_host(endpoint: &str) -> &str {
     if let Some(rest) = endpoint.strip_prefix("https://") {
@@ -108,7 +106,7 @@ pub fn format_date(timestamp: i64) -> String {
 }
 
 /// Convert a Unix timestamp to calendar parts using the civil-from-days
-/// algorithm (Howard Hinnant / `date`). Matches the Zig `unixToCalendar`.
+/// algorithm (Howard Hinnant / `date`).
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -166,7 +164,7 @@ pub fn sign_request(
     let datetime = format_iso8601(timestamp);
     let host = parse_host(endpoint);
 
-    // Canonical request — MUST match the Zig multi-line literal exactly.
+    // Canonical request — bytes pinned by the golden vector.
     let canonical_request = format!(
         "{method}\n{path}\n{query}\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{datetime}\n\n{SIGNED_HEADERS}\n{payload_hash}"
     );
@@ -251,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_signing_key_matches_zig() {
+    fn derive_signing_key_kat() {
         let key = derive_signing_key(
             "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
             "20120215",
@@ -285,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_put_matches_zig_shape() {
+    fn sign_put_shape() {
         let sig = sign_request(
             &demo_creds(),
             "PUT",
@@ -383,10 +381,9 @@ mod tests {
     // host + x-amz-content-sha256 + x-amz-date form are reproduced here.
     #[test]
     fn aws_kat_get_object_minimal_signed_headers() {
-        // The AWS docs pin the signing key + string-to-sign combo for this
-        // example. Because Zig also uses only `host;x-amz-content-sha256;x-amz-date`,
-        // we reuse the same inputs as the Zig known-answer and confirm the
-        // signature is stable across any future refactor.
+        // The AWS docs pin the signing key + string-to-sign combo for
+        // this example. Using the same inputs confirms the signature is
+        // stable across any future refactor.
         let creds = Credentials {
             access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
@@ -404,9 +401,9 @@ mod tests {
         );
         // Signature must be byte-stable across runs (full determinism).
         assert_eq!(sig.x_amz_date, "20130909T233600Z");
-        // The derived-key + canonical-request shape is verified against
-        // Zig byte-for-byte in the golden fixture test below; this KAT
-        // pins the full header so a refactor can't silently drift.
+        // The derived-key + canonical-request shape is pinned
+        // byte-for-byte by the golden fixture test; this KAT pins the
+        // full header so a refactor can't silently drift.
         assert!(sig.authorization.starts_with(
             "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130909/us-east-1/s3/aws4_request"
         ));

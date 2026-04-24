@@ -1,8 +1,7 @@
 //! `mkit pull` — fetch refs from the configured remote and update
-//! local ref pointers. No merge yet — same scope limitation as the
-//! Zig port in early 0.2.x. The Rust binary only dispatches when the
-//! URL is `mkit+memory://` or `mkit+file://`; the remaining schemes
-//! are Phase 10 follow-ups.
+//! local ref pointers. No merge yet. The binary only dispatches when
+//! the URL is `mkit+memory://` or `mkit+file://`; the remaining schemes
+//! are follow-ups.
 
 use std::io::Write;
 

@@ -1,6 +1,6 @@
 //! `mkit status` — show working-tree changes relative to HEAD.
 //!
-//! Output format (verbatim port of the Zig CLI output):
+//! Output format:
 //!
 //! ```text
 //! on branch <name>      (or "detached HEAD at <hash>", or "no HEAD yet")
