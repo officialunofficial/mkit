@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use ed25519_dalek::{Signature as DalekSig, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature as DalekSig, VerifyingKey};
 use serde::Deserialize;
 
 use crate::Error;
@@ -155,7 +155,13 @@ fn verify_ed25519(pk: [u8; 32], sig_bytes: &[u8], pae: &[u8]) -> Reason {
         return Reason::SignatureMismatch;
     };
     let sig = DalekSig::from_bytes(&arr);
-    if vk.verify(pae, &sig).is_ok() {
+    // verify_strict: enforces canonical R, s mod L, and canonical A encoding.
+    // Rejects the Ed25519 malleability vectors documented at
+    // https://hdevalence.ca/blog/2020-10-04-its-25519am — attestation
+    // verification MUST be deterministic (all honest verifiers reach
+    // the same verdict on the same signature), which the default
+    // loose verify() does not guarantee.
+    if vk.verify_strict(pae, &sig).is_ok() {
         Reason::Ok
     } else {
         Reason::SignatureMismatch
