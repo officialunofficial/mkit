@@ -66,6 +66,8 @@ commands:
   serve <path>       Start SSH transport server (internal)
   blame <file>      Show line-level commit attribution
   verify <hash>     Verify the signature on a commit or remix
+  attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
+                    Produce a signed DSSE attestation for a commit
   version           Print version
 ";
 
