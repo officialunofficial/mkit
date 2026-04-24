@@ -1,21 +1,32 @@
 export const Footer = () => {
   return (
-    <footer className="p-6 text-sm text-gray-600 lg:fixed lg:right-0 lg:bottom-0">
-      <div>
-        source:{" "}
-        <a
-          href="https://github.com/officialunofficial/mkit"
-          target="_blank"
-          rel="noreferrer"
-          className="underline"
-        >
-          officialunofficial/mkit
-        </a>{" "}
-        · built with{" "}
-        <a href="https://waku.gg/" target="_blank" rel="noreferrer" className="underline">
-          waku
-        </a>
-        , deployed on Cloudflare Workers
+    // Fixed to bottom-right with muted text, matching the editorial
+    // footer style on searchartwith.art (small, unobtrusive, muted).
+    <footer className="border-t border-[--color-hairline] px-4 py-6 text-xs text-[--color-muted] sm:px-12">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <span>
+          source:{" "}
+          <a
+            href="https://github.com/officialunofficial/mkit"
+            target="_blank"
+            rel="noreferrer"
+            className="underline underline-offset-4 transition-opacity duration-300 hover:opacity-70"
+          >
+            officialunofficial/mkit
+          </a>
+        </span>
+        <span>
+          built with{" "}
+          <a
+            href="https://waku.gg/"
+            target="_blank"
+            rel="noreferrer"
+            className="underline underline-offset-4 transition-opacity duration-300 hover:opacity-70"
+          >
+            waku
+          </a>
+          , deployed on Cloudflare Workers
+        </span>
       </div>
     </footer>
   );

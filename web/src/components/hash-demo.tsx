@@ -29,66 +29,69 @@ export function HashDemo() {
     }
   }, [m, text, message]);
 
-  if (m.status === "loading") return <p>Loading wasm…</p>;
+  if (m.status === "loading") return <p className="text-[--color-muted]">Loading wasm…</p>;
   if (m.status === "error")
     return <p className="text-red-600">wasm init failed: {m.error.message}</p>;
   if (!output) return null;
   if ("error" in output) return <p className="text-red-600">{output.error}</p>;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <label className="block">
-        <span className="mb-1 block text-sm font-medium">Blob contents</span>
+        <span className="mb-2 block text-sm text-[--color-muted]">Blob contents</span>
         <textarea
-          className="w-full rounded-sm border border-gray-300 p-2 font-mono text-sm"
+          className="w-full rounded-md border border-[--color-hairline] bg-transparent p-2.5 font-mono text-sm outline-none focus:border-[--color-fg] transition-colors"
           rows={3}
           value={text}
           onChange={(e) => setText(e.target.value)}
         />
       </label>
       <label className="block">
-        <span className="mb-1 block text-sm font-medium">Commit message</span>
+        <span className="mb-2 block text-sm text-[--color-muted]">Commit message</span>
         <input
-          className="w-full rounded-sm border border-gray-300 p-2 font-mono text-sm"
+          className="w-full rounded-md border border-[--color-hairline] bg-transparent p-2.5 font-mono text-sm outline-none focus:border-[--color-fg] transition-colors"
           value={message}
           onChange={(e) => setMessage(e.target.value)}
         />
       </label>
-      <Field label="Blob hash (BLAKE3 of v1 bytes)">
-        <Mono>{output.blobHash}</Mono>
-      </Field>
-      <Field label="Blob bytes (first 48)">
-        <Mono>{output.blobPreview}</Mono>
-      </Field>
-      <Field label="Tree hash (wrapping README.md → blob)">
-        <Mono>{output.treeHash}</Mono>
-      </Field>
-      <Field label="Tree bytes (first 48)">
-        <Mono>{output.treePreview}</Mono>
-      </Field>
-      <Field label="Commit hash (signed)">
-        <Mono>{output.commitHash}</Mono>
-      </Field>
-      <Field label="Commit verifies under the demo key">
-        <span className={output.commitVerified ? "text-green-700" : "text-red-600"}>
-          {output.commitVerified ? "yes ✓" : "no ✗"}
-        </span>
-      </Field>
+
+      <dl className="divide-y divide-[--color-hairline] border-y border-[--color-hairline]">
+        <Field label="Blob hash (BLAKE3 of v1 bytes)">
+          <Mono>{output.blobHash}</Mono>
+        </Field>
+        <Field label="Blob bytes (first 48)">
+          <Mono>{output.blobPreview}</Mono>
+        </Field>
+        <Field label="Tree hash (wrapping README.md → blob)">
+          <Mono>{output.treeHash}</Mono>
+        </Field>
+        <Field label="Tree bytes (first 48)">
+          <Mono>{output.treePreview}</Mono>
+        </Field>
+        <Field label="Commit hash (signed)">
+          <Mono>{output.commitHash}</Mono>
+        </Field>
+        <Field label="Commit verifies under the demo key">
+          <span className={output.commitVerified ? "text-green-700" : "text-red-600"}>
+            {output.commitVerified ? "yes ✓" : "no ✗"}
+          </span>
+        </Field>
+      </dl>
     </div>
   );
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div>
-      <div className="mb-1 text-sm font-medium text-gray-700">{label}</div>
-      <div className="break-all">{children}</div>
+    <div className="grid gap-1 py-4 sm:grid-cols-[minmax(0,14rem),1fr] sm:gap-6">
+      <dt className="text-sm text-[--color-muted]">{label}</dt>
+      <dd className="min-w-0 break-all">{children}</dd>
     </div>
   );
 }
 
 function Mono({ children }: { children: React.ReactNode }) {
-  return <code className="block rounded-sm bg-gray-100 p-2 font-mono text-xs">{children}</code>;
+  return <code className="font-mono text-sm">{children}</code>;
 }
 
 function previewBytes(bytes: Uint8Array): string {

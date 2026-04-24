@@ -10,20 +10,22 @@ export default async function RootLayout({ children }: RootLayoutProps) {
   const data = await getData();
 
   return (
-    <div className="font-['Nunito']">
+    <div>
       <meta name="description" content={data.description} />
       <link rel="icon" type="image/png" href={data.icon} />
       <link rel="preconnect" href="https://fonts.googleapis.com" />
       <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
+      {/* Geist (sans) + Geist Mono, matching searchartwith.art. */}
       <link
         rel="stylesheet"
-        href="https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,700;1,400;1,700&display=swap"
+        href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap"
         precedence="font"
       />
       <Header />
-      <main className="m-6 flex items-center *:min-h-64 *:min-w-64 lg:m-0 lg:min-h-svh lg:justify-center">
-        {children}
-      </main>
+      {/* Editorial layout: full-width top-aligned, generous horizontal
+          padding, no centered card. Matches the searchartwith.art
+          container feel — content flows top-down, header sticky. */}
+      <main className="px-6 pt-6 pb-24 sm:px-12">{children}</main>
       <Footer />
     </div>
   );

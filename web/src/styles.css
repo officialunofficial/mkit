@@ -1,1 +1,44 @@
 @import "tailwindcss";
+
+/* Design tokens lifted verbatim from searchartwith.art (OKLCH triplet of
+   1 / 0.145 / 0.922 for bg / fg / hairline). Geist Variable is the
+   sans; we skip the site's DaVinci serif deliberately. */
+@theme {
+  --color-bg: oklch(1 0 0);
+  --color-fg: oklch(0.145 0 0);
+  --color-muted: oklch(0.556 0 0);
+  --color-hairline: oklch(0.922 0 0);
+  --font-sans: "Geist", "Geist Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  html {
+    /* Crisper type on macOS; no-op elsewhere. */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Body copy avoids widow/orphan lines; headings get `balance`. */
+    text-wrap: pretty;
+    /* Dynamic numbers (counters, hex columns) stay layout-stable. */
+    font-variant-numeric: tabular-nums;
+    font-family: var(--font-sans);
+    color: var(--color-fg);
+    background: var(--color-bg);
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+    /* Geist looks better a notch tighter than its 1.5 body default at
+       heading sizes. */
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+}

@@ -2,27 +2,35 @@ import { Link } from "waku";
 
 export default function HomePage() {
   return (
-    <div className="max-w-prose space-y-6">
+    <div className="mx-auto max-w-3xl space-y-10 py-8">
       <title>mkit demo</title>
-      <h1 className="text-4xl font-bold tracking-tight">mkit, in a browser</h1>
-      <p>
-        <a href="https://github.com/officialunofficial/mkit" className="underline">
-          mkit
-        </a>{" "}
-        is a content-addressed version control toolkit written in Rust. This site takes the pure
-        portions of <code>mkit-core</code> and <code>mkit-attest</code>, compiles them to
-        WebAssembly, and exposes three interactive demos so you can poke at the mechanics without
-        installing anything.
-      </p>
-      <p className="text-sm text-gray-600">
-        The site itself is a{" "}
-        <a href="https://waku.gg/" className="underline">
-          Waku
-        </a>{" "}
-        React app served by Cloudflare Workers Static Assets. All wasm calls run client-side.
-      </p>
+      <section className="space-y-4">
+        <h1 className="text-5xl font-semibold tracking-tight">mkit, in a browser</h1>
+        <p className="text-base text-[--color-fg]">
+          <a
+            href="https://github.com/officialunofficial/mkit"
+            className="underline underline-offset-4 transition-opacity duration-300 hover:opacity-70"
+          >
+            mkit
+          </a>{" "}
+          is a content-addressed version control toolkit written in Rust. This page compiles the
+          pure portions of <code className="font-mono text-sm">mkit-core</code> and{" "}
+          <code className="font-mono text-sm">mkit-attest</code> to WebAssembly and exposes three
+          interactive demos you can poke at without installing anything.
+        </p>
+        <p className="text-sm text-[--color-muted]">
+          The site is a{" "}
+          <a
+            href="https://waku.gg/"
+            className="underline underline-offset-4 transition-opacity duration-300 hover:opacity-70"
+          >
+            Waku
+          </a>{" "}
+          React app served by Cloudflare Workers Static Assets. All wasm calls run client-side.
+        </p>
+      </section>
 
-      <ul className="space-y-3">
+      <ul className="divide-y divide-[--color-hairline] border-y border-[--color-hairline]">
         <Demo
           to="/hash"
           title="Content-addressed objects"
@@ -46,9 +54,23 @@ export default function HomePage() {
 function Demo({ to, title, body }: { to: string; title: string; body: string }) {
   return (
     <li>
-      <Link to={to} className="block rounded-sm border border-gray-300 p-3 hover:border-black">
-        <span className="block font-semibold">{title} →</span>
-        <span className="text-sm text-gray-700">{body}</span>
+      {/* Editorial row, inspired by the searchartwith.art card style:
+          flat, thin-divider separated, opacity on hover — no shadows,
+          no radius. Arrow nudges right on hover as tactile affordance. */}
+      <Link
+        to={to}
+        className="group flex items-start justify-between gap-6 py-5 transition-opacity duration-300 hover:opacity-70"
+      >
+        <div className="space-y-1">
+          <div className="text-base font-medium">{title}</div>
+          <p className="max-w-prose text-sm text-[--color-muted]">{body}</p>
+        </div>
+        <span
+          aria-hidden
+          className="mt-0.5 shrink-0 text-base transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] group-hover:translate-x-1"
+        >
+          →
+        </span>
       </Link>
     </li>
   );
