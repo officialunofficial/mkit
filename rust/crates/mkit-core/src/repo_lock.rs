@@ -45,6 +45,11 @@ pub enum LockError {
     /// `name` is empty or longer than the platform-safe filename cap.
     #[error("lock name length {0} is invalid (must be 1..={MAX_NAME_LEN})")]
     NameLength(usize),
+    /// `name` contains a path separator (`/`, `\`) or a NUL byte. A
+    /// length-based classification would be misleading here — the
+    /// value's length is fine; it's the contents that are wrong.
+    #[error("lock name contains an invalid character (`/`, `\\`, or NUL): {0:?}")]
+    InvalidName(String),
     /// Underlying filesystem failure (disk full, permission denied, …).
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -113,14 +118,19 @@ impl Drop for RepoLock {
 /// - [`LockError::Busy`] if `timeout` elapses without the lock becoming
 ///   available.
 /// - [`LockError::NameLength`] if `name` is empty or longer than 255.
+/// - [`LockError::InvalidName`] if `name` contains a path separator
+///   (`/`, `\`) or a NUL byte.
 /// - [`LockError::Io`] for underlying filesystem failures.
 pub fn acquire(dir: &Path, name: &str, timeout: Duration) -> LockResult<RepoLock> {
     if name.is_empty() || name.len() > MAX_NAME_LEN {
         return Err(LockError::NameLength(name.len()));
     }
-    // Reject path separators so callers cannot escape `dir`.
+    // Reject path separators and NUL so callers cannot escape `dir`
+    // nor embed bytes the platform filesystem treats specially. These
+    // are CONTENT violations, not LENGTH violations — hence a
+    // dedicated variant.
     if name.contains('/') || name.contains('\\') || name.contains('\0') {
-        return Err(LockError::NameLength(name.len()));
+        return Err(LockError::InvalidName(name.to_string()));
     }
     let path = dir.join(name);
     let start = Instant::now();
@@ -217,11 +227,24 @@ mod tests {
         let dir = TempDir::new().unwrap();
         assert!(matches!(
             acquire(dir.path(), "../escape", DEFAULT_TIMEOUT).unwrap_err(),
-            LockError::NameLength(_)
+            LockError::InvalidName(_)
         ));
         assert!(matches!(
             acquire(dir.path(), "sub/lock", DEFAULT_TIMEOUT).unwrap_err(),
-            LockError::NameLength(_)
+            LockError::InvalidName(_)
+        ));
+    }
+
+    #[test]
+    fn acquire_rejects_backslash_and_nul() {
+        let dir = TempDir::new().unwrap();
+        assert!(matches!(
+            acquire(dir.path(), "has\\backslash", DEFAULT_TIMEOUT).unwrap_err(),
+            LockError::InvalidName(_)
+        ));
+        assert!(matches!(
+            acquire(dir.path(), "has\0nul", DEFAULT_TIMEOUT).unwrap_err(),
+            LockError::InvalidName(_)
         ));
     }
 
