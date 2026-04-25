@@ -42,13 +42,13 @@ export function SignDemo() {
   return (
     <div className='space-y-6'>
       <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>Ed25519 seed (32 bytes, 64 hex chars)</span>
+        <span className='mb-2 block text-sm text-[--color-muted]'>Private key</span>
         <input className={INPUT_CLASSES_XS} value={seed} onChange={(e) => setSeed(e.target.value.trim())} />
       </label>
-      <Button onClick={fresh}>Generate fresh seed</Button>
+      <Button onClick={fresh}>Generate a new key</Button>
 
       <FieldList>
-        <Field label='Derived public key'>
+        <Field label='Public key'>
           {'error' in keypair ? (
             <span className='text-red-600'>{keypair.error}</span>
           ) : (
@@ -58,9 +58,7 @@ export function SignDemo() {
       </FieldList>
 
       <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>
-          Message to sign (under <code className='font-mono text-xs'>mkit.commit\0</code> domain)
-        </span>
+        <span className='mb-2 block text-sm text-[--color-muted]'>Message</span>
         <input
           className={INPUT_CLASSES}
           value={message}
@@ -77,7 +75,7 @@ export function SignDemo() {
       {sig ? (
         <>
           <FieldList>
-            <Field label='Signature (Ed25519, 64 bytes hex)'>
+            <Field label='Signature'>
               <code className='font-mono text-xs break-all'>{sig}</code>
             </Field>
           </FieldList>
@@ -88,14 +86,12 @@ export function SignDemo() {
               checked={tamper}
               onChange={(e) => setTamper(e.target.checked)}
             />
-            Tamper last byte of message before verify
+            Tamper with the message before verifying
           </label>
           <FieldList>
-            <Field label='Verify verdict'>
+            <Field label='Verifies'>
               {verdict === null ? null : (
-                <span className={verdict ? 'text-green-700' : 'text-red-600'}>
-                  {verdict ? 'signature valid ✓' : 'signature rejected ✗'}
-                </span>
+                <span className={verdict ? 'text-green-700' : 'text-red-600'}>{verdict ? 'yes ✓' : 'no ✗'}</span>
               )}
             </Field>
           </FieldList>

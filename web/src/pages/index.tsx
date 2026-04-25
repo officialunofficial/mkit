@@ -7,8 +7,8 @@ export default function HomePage() {
       <section className='space-y-5'>
         <h1 className='text-5xl font-semibold tracking-tight'>A content-addressed VCS.</h1>
         <p className='max-w-prose text-lg text-[--color-fg]'>
-          Every object BLAKE3-addressed. Every commit Ed25519-signed. Every review a portable, signed claim anyone can
-          verify. Written in Rust — here it runs in your browser.
+          Every file is named by a BLAKE3 hash of its bytes. Every commit is signed. Every review is a portable, signed
+          claim anyone can verify. Written in Rust — here it runs in your browser.
         </p>
       </section>
 
@@ -16,18 +16,22 @@ export default function HomePage() {
         <Demo
           to='/hash'
           title='hash'
-          body='Edit a blob. Watch its BLAKE3 id and the enclosing tree and commit hashes rewrite live.'
+          body='Edit a file and watch the BLAKE3 hashes of every container that holds it — folder, parent folder, commit — rewrite live.'
         />
-        <Demo to='/sign' title='sign' body='Generate an Ed25519 key, sign a message, flip a byte, watch verify fail.' />
+        <Demo
+          to='/sign'
+          title='sign'
+          body='Generate a key, sign a message, flip a character, watch the verifier reject it.'
+        />
         <Demo
           to='/attest'
           title='attest'
-          body='Sign a claim about a commit with Ed25519, Secp256k1, or P-256, wrap it in an envelope, verify it back.'
+          body='Attach a signed statement to a commit so anyone with your public key can verify it later.'
         />
         <Demo
           to='/tree'
           title='tree'
-          body='Nest a tree inside a tree; watch the parent hash rewrite as children shuffle and rename.'
+          body='A Merkle tree of BLAKE3 hashes — edit any file and the hashes ripple up to the commit at the root.'
         />
       </ul>
     </div>

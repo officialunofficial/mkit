@@ -104,6 +104,94 @@
     scrollbar-gutter: auto;
   }
 
+  /* Top-down Merkle tree using the classic ::before/::after CSS-tree
+     pattern. Each node carries a half-elbow on each side; first/last
+     children clip the outer half; the parent's own ::before draws the
+     stub up from the node into the row of elbows above. Hairline
+     `--color-hairline` keeps the connectors subtle so the coloured
+     squares remain the dominant signal. */
+  .merkle,
+  .merkle ul {
+    position: relative;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    justify-content: center;
+    list-style: none;
+  }
+  .merkle ul {
+    padding-top: 18px;
+  }
+  /* Vertical stub from parent's node DOWN to the children's elbow row.
+     Sits inside the children-ul's padding-top, centred horizontally —
+     `display: flex; justify-content: center` puts the ul's centre on
+     the parent's centre, so this 1px line connects them cleanly. */
+  .merkle ul::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 50%;
+    height: 18px;
+    border-left: 1px solid var(--color-subtle);
+  }
+  .merkle li {
+    list-style: none;
+    position: relative;
+    padding: 18px 8px 0 8px;
+    text-align: center;
+  }
+  .merkle li::before,
+  .merkle li::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    height: 18px;
+    width: 50%;
+    border-top: 1px solid var(--color-subtle);
+  }
+  .merkle li::before {
+    right: 50%;
+  }
+  .merkle li::after {
+    left: 50%;
+  }
+  .merkle li:only-child::before,
+  .merkle li:only-child::after {
+    display: none;
+  }
+  .merkle li:only-child {
+    padding-top: 18px;
+  }
+  .merkle li:first-child::before,
+  .merkle li:last-child::after {
+    border: 0 none;
+  }
+  /* Vertical stub from the elbow row down to each child square. The
+     button is `position: static` so this pseudo's containing block is
+     the LI — `top: 0` puts it at the elbow row, `height: 18px` ends
+     it exactly at the LI's padding-top edge, where the button (and
+     the square inside it) starts. Because the line is anchored to the
+     LI and not the button, the button's hover/active transforms can
+     scale the inner content without dragging the connector with it. */
+  .merkle li > .merkle__node::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 50%;
+    height: 18px;
+    border-left: 1px solid var(--color-subtle);
+  }
+  .merkle > li {
+    padding-top: 0;
+  }
+  .merkle > li::before,
+  .merkle > li::after {
+    display: none;
+  }
+  .merkle > li > .merkle__node::before {
+    display: none;
+  }
+
   /* Utility for applying the brand gradient as text fill. Used on the
      landing hero only — kept off secondary headings so the colour still
      reads as an accent rather than a default. */

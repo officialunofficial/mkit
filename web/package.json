@@ -1,8 +1,8 @@
 {
   "name": "mkit-demo-web",
   "version": "0.0.0",
-  "type": "module",
   "private": true,
+  "type": "module",
   "scripts": {
     "wasm:build": "cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir pkg --release",
     "dev": "waku dev",

@@ -1,38 +1,27 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Field, FieldList, INPUT_CLASSES_XS } from './result-panel'
+import { Field, FieldList, INPUT_CLASSES, INPUT_CLASSES_XS } from './result-panel'
 import { DEMO_SEED, TEXT_ENCODER, useMkit } from './use-mkit'
 
 type Algo = 'ed25519' | 'secp256k1' | 'p256'
 
-const ALGOS: ReadonlyArray<{ value: Algo; label: string; cose: string; note: string }> = [
-  { value: 'ed25519', label: 'Ed25519', cose: 'COSE -19', note: 'default mkit signer; 32-byte pubkey' },
-  {
-    value: 'secp256k1',
-    label: 'Secp256k1 (ES256K)',
-    cose: 'COSE -47',
-    note: 'wallet / Ethereum lineage; 33-byte compressed SEC1',
-  },
-  {
-    value: 'p256',
-    label: 'P-256 (ES256)',
-    cose: 'COSE -7',
-    note: 'iOS Secure Enclave / WebAuthn; 33-byte compressed SEC1',
-  },
+const ALGOS: ReadonlyArray<{ value: Algo; label: string; note: string }> = [
+  { value: 'ed25519', label: 'Ed25519', note: 'Fast, the mkit default.' },
+  { value: 'secp256k1', label: 'Secp256k1', note: 'What crypto wallets use.' },
+  { value: 'p256', label: 'P-256', note: 'What hardware keys, passkeys, and Secure Enclave use.' },
 ]
 
-// A high-entropy default seed that happens to be a valid scalar for all three algorithms. The DEMO_SEED constant
-// (0x0101…01) works for Ed25519 but is not a valid ECDSA private key for secp256k1 / p256, so we swap it in when the
-// user selects one of the ECDSA algorithms.
+// Same seed works for Ed25519 but is out-of-range for secp256k1 / p256, so we keep one default per family and swap
+// when the user flips algorithms. Implementation detail — never surfaced in the UI.
 const ECDSA_SEED = '4a7c6b5a493827160908070605040302d1c0bfb8a79683726150403a2b1c0d0e'
+const SAMPLE_COMMIT = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'
 
 export function AttestDemo() {
   const api = useMkit()
-  const [commitHash, setCommitHash] = useState('abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789')
-  const [predicateType, setPredicateType] = useState('https://example.com/Review/v1')
-  const [predicateJcs, setPredicateJcs] = useState('{"approved":true}')
+  const [claim, setClaim] = useState('{"approved":true,"reviewer":"alice"}')
   const [algo, setAlgo] = useState<Algo>('ed25519')
+  const [commitHash, setCommitHash] = useState(SAMPLE_COMMIT)
   const [seed, setSeed] = useState(DEMO_SEED)
 
   const keypair = useMemo(() => {
@@ -48,8 +37,8 @@ export function AttestDemo() {
     try {
       const att = api.attest_build(
         commitHash.trim(),
-        predicateType.trim(),
-        TEXT_ENCODER.encode(predicateJcs.trim()),
+        'https://example.com/Review/v1',
+        TEXT_ENCODER.encode(claim.trim()),
         seed.trim(),
         algo,
       )
@@ -57,7 +46,7 @@ export function AttestDemo() {
     } catch (e) {
       return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
     }
-  }, [api, commitHash, predicateType, predicateJcs, seed, algo, keypair])
+  }, [api, commitHash, claim, seed, algo, keypair])
 
   const verdict = useMemo(() => {
     if (!built.ok || !keypair.ok) return null
@@ -66,8 +55,6 @@ export function AttestDemo() {
 
   const onAlgoChange = (next: Algo) => {
     setAlgo(next)
-    // If the current seed is the ed25519 default, swap to the ECDSA-safe default on pivot (and vice versa) so the
-    // demo never lands in "invalid scalar" state when the user first flips the selector.
     if (next === 'ed25519' && seed === ECDSA_SEED) setSeed(DEMO_SEED)
     else if (next !== 'ed25519' && seed === DEMO_SEED) setSeed(ECDSA_SEED)
   }
@@ -75,7 +62,12 @@ export function AttestDemo() {
   return (
     <div className='space-y-6'>
       <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>Signing algorithm</span>
+        <span className='mb-2 block text-sm text-[--color-muted]'>What you're claiming</span>
+        <textarea className={INPUT_CLASSES} rows={2} value={claim} onChange={(e) => setClaim(e.target.value)} />
+      </label>
+
+      <div className='block'>
+        <span className='mb-2 block text-sm text-[--color-muted]'>Signed with</span>
         <div className='grid gap-2'>
           {ALGOS.map((a) => (
             <label
@@ -91,61 +83,43 @@ export function AttestDemo() {
                 className='mt-0.5 accent-[--color-fg]'
               />
               <span className='flex-1 space-y-0.5 text-sm'>
-                <span className='block font-medium'>
-                  {a.label} <span className='text-[--color-muted]'>· {a.cose}</span>
-                </span>
+                <span className='block font-medium'>{a.label}</span>
                 <span className='block text-xs text-[--color-muted]'>{a.note}</span>
               </span>
             </label>
           ))}
         </div>
-      </label>
+      </div>
 
-      <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>Subject commit hash (64 hex)</span>
-        <input className={INPUT_CLASSES_XS} value={commitHash} onChange={(e) => setCommitHash(e.target.value)} />
-      </label>
-      <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>predicateType URI</span>
-        <input className={INPUT_CLASSES_XS} value={predicateType} onChange={(e) => setPredicateType(e.target.value)} />
-      </label>
-      <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>
-          Predicate body (must be JCS-canonical JSON object)
-        </span>
-        <textarea
-          className={INPUT_CLASSES_XS}
-          rows={3}
-          value={predicateJcs}
-          onChange={(e) => setPredicateJcs(e.target.value)}
-        />
-      </label>
-      <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>Signer seed (32 bytes, 64 hex)</span>
-        <input className={INPUT_CLASSES_XS} value={seed} onChange={(e) => setSeed(e.target.value)} />
-      </label>
+      <details className='group'>
+        <summary className='cursor-pointer text-sm text-[--color-muted] select-none hover:text-[--color-fg]'>
+          <span className='inline-block transition-transform group-open:rotate-90'>›</span> Advanced
+        </summary>
+        <div className='mt-3 space-y-4'>
+          <label className='block'>
+            <span className='mb-2 block text-sm text-[--color-muted]'>Commit being attested (64 hex)</span>
+            <input className={INPUT_CLASSES_XS} value={commitHash} onChange={(e) => setCommitHash(e.target.value)} />
+          </label>
+          <label className='block'>
+            <span className='mb-2 block text-sm text-[--color-muted]'>Private key (32 bytes, 64 hex)</span>
+            <input className={INPUT_CLASSES_XS} value={seed} onChange={(e) => setSeed(e.target.value)} />
+          </label>
+        </div>
+      </details>
 
       {built.ok && keypair.ok ? (
         <FieldList>
-          <Field label='Derived public key'>
+          <Field label='Public key'>
             <code className='font-mono text-sm break-all'>{keypair.kp.pubkey_hex}</code>
           </Field>
-          <Field label='keyid'>
-            <code className='font-mono text-sm break-all'>{built.att.keyid}</code>
-          </Field>
-          <Field label='Attestation id (BLAKE3 of envelope bytes)'>
-            <code className='font-mono text-sm break-all'>{built.att.attestation_id_hex}</code>
-          </Field>
-          <Field label='Signed envelope'>
+          <Field label='Signed attestation'>
             <code className='block font-mono text-xs break-all whitespace-pre-wrap'>
               {pretty(built.att.envelope_json)}
             </code>
           </Field>
-          <Field label='Verify verdict'>
+          <Field label='Verifies'>
             {verdict === null ? null : (
-              <span className={verdict ? 'text-green-700' : 'text-red-600'}>
-                {verdict ? 'signature valid ✓' : 'signature rejected ✗'}
-              </span>
+              <span className={verdict ? 'text-green-700' : 'text-red-600'}>{verdict ? 'yes ✓' : 'no ✗'}</span>
             )}
           </Field>
         </FieldList>

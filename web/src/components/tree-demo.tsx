@@ -1,7 +1,8 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { INPUT_CLASSES, Row, Section } from './result-panel'
+import { MerkleTree, type MerkleNode } from './merkle-tree'
+import { HashChip, INPUT_CLASSES, ObjectRow, Section } from './result-panel'
 import { DEMO_SEED, previewBytes, sanitizeTreeName, TEXT_ENCODER, useMkit } from './use-mkit'
 
 type BlobNode = { kind: 'blob'; name: string; content: string }
@@ -159,6 +160,38 @@ export function TreeDemo() {
 
   const rows = useMemo(() => flattenForNav(tree, expanded), [tree, expanded])
 
+  // path → hash lookup for the nav chips. Root folder lives at '' so empty
+  // paths stay coherent if anything ever needs it.
+  const hashByPath = useMemo(() => {
+    const m = new Map<string, string>()
+    if ('error' in encoded) return m
+    m.set(encoded.root.path, encoded.root.hash)
+    for (const t of encoded.subtrees) m.set(t.path, t.hash)
+    for (const b of encoded.blobs) m.set(b.path, b.hash)
+    return m
+  }, [encoded])
+
+  // commit → root → … : a literal Merkle tree where every node carries
+  // the hash of the bytes below it. We mirror the user's folder shape so
+  // the visualisation matches the navigator on the left.
+  const merkle = useMemo<MerkleNode | null>(() => {
+    if ('error' in encoded || !commit) return null
+    const build = (node: TreeNode2, path: string): MerkleNode => {
+      const hash = hashByPath.get(path) ?? ''
+      const label = node.kind === 'tree' ? (path === '' ? '/' : `${node.name}/`) : node.name
+      if (node.kind !== 'tree') return { hash, label }
+      const children = node.children
+        .toSorted((a, b) => (a.name < b.name ? -1 : 1))
+        .map((c) => build(c, path === '' ? c.name : `${path}/${c.name}`))
+      return { hash, label, children }
+    }
+    return {
+      hash: commit.hash,
+      label: 'commit',
+      children: [build(tree, '')],
+    }
+  }, [encoded, commit, hashByPath, tree])
+
   // Imperatively focus the DOM node for `focusedPath` whenever it
   // changes — the roving tabindex is driven by state. MUST stay above
   // any early return so the hook order is stable across loading →
@@ -255,7 +288,7 @@ export function TreeDemo() {
         </label>
 
         <div className='block'>
-          <span className='mb-2 block text-sm text-[--color-muted]'>Tree</span>
+          <span className='mb-2 block text-sm text-[--color-muted]'>Files</span>
           {/* role=tree + roving tabindex + full APG keyboard map. Each
               row is a treeitem with aria-expanded for folders, aria-
               selected for the current blob, aria-level for depth. */}
@@ -313,6 +346,11 @@ export function TreeDemo() {
                   <span aria-hidden className='mx-1.5 flex size-4 shrink-0 items-center text-[--color-subtle]'>
                     {row.node.kind !== 'tree' ? <FileIcon /> : isExpanded ? <FolderOpenIcon /> : <FolderIcon />}
                   </span>
+                  {hashByPath.has(row.path) ? (
+                    <span className='mr-1.5 flex shrink-0 items-center'>
+                      <HashChip hash={hashByPath.get(row.path)!} size={10} />
+                    </span>
+                  ) : null}
                   <span className='truncate'>{row.node.name}</span>
                 </li>
               )
@@ -338,36 +376,34 @@ export function TreeDemo() {
           <p className='mb-4 text-red-600'>wasm encode failed: {encoded.error}</p>
         ) : (
           <div className='divide-y-2 divide-[--color-hairline] border-y-2 border-[--color-hairline]'>
-            {commit ? (
-              <Section
-                title='Commit'
-                description='BLAKE3(mkit.commit\0 || signing bytes) signed with an Ed25519 demo key.'
-              >
-                <Row label='Hash (signed)' value={commit.hash} />
-                <div className='space-y-1.5 py-1'>
-                  <div className='text-xs text-[--color-muted]'>Verify under the demo key</div>
-                  <div className={commit.verified ? 'text-green-700' : 'text-red-600'}>
-                    {commit.verified ? 'yes ✓' : 'no ✗'}
-                  </div>
-                </div>
+            {merkle ? (
+              <Section title='Merkle tree' description='Each square is the BLAKE3 of everything beneath it.'>
+                <MerkleTree root={merkle} />
               </Section>
             ) : null}
-            <Section title='Root tree' description='Top-level lex-sorted list wrapping every top-level entry.'>
-              <Row label='Hash' value={encoded.root.hash} />
-              <Row label='Bytes (first 48)' value={encoded.root.preview} />
+            <Section title='Objects' description='Every commit, folder, and file under this commit.'>
+              <div className='divide-y divide-[--color-hairline]'>
+                {commit ? (
+                  <ObjectRow
+                    hash={commit.hash}
+                    label='commit'
+                    meta='signed'
+                    trailing={
+                      <span className={`text-xs ${commit.verified ? 'text-green-700' : 'text-red-600'}`}>
+                        {commit.verified ? 'verified ✓' : 'invalid ✗'}
+                      </span>
+                    }
+                  />
+                ) : null}
+                <ObjectRow hash={encoded.root.hash} label='/' meta='root folder' />
+                {encoded.subtrees.map((t) => (
+                  <ObjectRow key={t.path} hash={t.hash} label={`${t.path}/`} meta='folder' />
+                ))}
+                {encoded.blobs.map((b) => (
+                  <ObjectRow key={b.path} hash={b.hash} label={b.path} meta={`${b.byteCount} B`} />
+                ))}
+              </div>
             </Section>
-            {encoded.subtrees.map((t) => (
-              <Section key={t.path} title={t.path} description={`Lex-sorted list of children at ${t.path}/.`}>
-                <Row label='Hash' value={t.hash} />
-                <Row label='Bytes (first 48)' value={t.preview} />
-              </Section>
-            ))}
-            {encoded.blobs.map((b) => (
-              <Section key={b.path} title={b.path} description={`${b.byteCount} bytes of v1 blob payload.`}>
-                <Row label='Hash' value={b.hash} />
-                <Row label='Bytes (first 48)' value={b.preview} />
-              </Section>
-            ))}
           </div>
         )}
       </div>
