@@ -352,7 +352,7 @@ into):
 - `https://in-toto.io/attestation/vuln/v0.1` — vuln-scan results.
 - `https://mkit.io/predicate/review/v1` — code review sign-off. *[to
   be defined in `docs/PREDICATE-REVIEW.md` if we actually ship it.]*
-- Third-party (e.g. `https://makechain.io/settlement/v1`) — entirely
+- Third-party (e.g. `https://makechain.net/settlement/v1`) — entirely
   opaque to mkit.
 
 ---
