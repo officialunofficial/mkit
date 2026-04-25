@@ -2,8 +2,9 @@
 
 import { useMemo, useRef, useState } from 'react'
 import { mulberry32, renderGridSvg } from '../lib/grid-svg'
-import { INPUT_CLASSES, Row, Section } from './result-panel'
-import { DEMO_SEED, previewBytes, TEXT_ENCODER, sanitizeTreeName, useMkit } from './use-mkit'
+import { MerkleTree, type MerkleNode } from './merkle-tree'
+import { INPUT_CLASSES, ObjectRow, Section } from './result-panel'
+import { DEMO_SEED, TEXT_ENCODER, sanitizeTreeName, useMkit } from './use-mkit'
 
 // Fixed seed so the default grid is identical on every render — no hydration mismatch, reliable baseline hash.
 const DEFAULT_SVG = renderGridSvg(mulberry32(0xc0de_cafe))
@@ -46,12 +47,10 @@ export function HashDemo() {
       )
       return {
         textHash: textBlob.hash_hex,
-        textPreview: previewBytes(textBlob.bytes),
+        textSize: TEXT_ENCODER.encode(text).byteLength,
         imageHash: imageBlob.hash_hex,
         imageSize: image.bytes.byteLength,
-        imagePreview: previewBytes(imageBlob.bytes),
         treeHash: treeObj.hash_hex,
-        treePreview: previewBytes(treeObj.bytes),
       }
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) }
@@ -63,6 +62,24 @@ export function HashDemo() {
     const c = api.commit_encode_and_sign(tree.treeHash, '', message, 0n, DEMO_SEED)
     return { hash: c.hash_hex, verified: api.commit_verify(c.bytes) }
   }, [api, tree, message])
+
+  const merkle = useMemo<MerkleNode | null>(() => {
+    if ('error' in tree || !commit) return null
+    return {
+      hash: commit.hash,
+      label: 'commit',
+      children: [
+        {
+          hash: tree.treeHash,
+          label: '/',
+          children: [
+            { hash: tree.textHash, label: 'README.md' },
+            { hash: tree.imageHash, label: image.name },
+          ],
+        },
+      ],
+    }
+  }, [tree, commit, image.name])
 
   if ('error' in tree) return <p className='text-red-600'>{tree.error}</p>
   if (!commit) return null
@@ -87,12 +104,12 @@ export function HashDemo() {
         </label>
 
         <label className='block'>
-          <span className='mb-2 block text-sm text-[--color-muted]'>Text blob (README.md)</span>
+          <span className='mb-2 block text-sm text-[--color-muted]'>README.md</span>
           <textarea className={INPUT_CLASSES} rows={3} value={text} onChange={(e) => setText(e.target.value)} />
         </label>
 
         <div>
-          <span className='block text-sm text-[--color-muted]'>Image blob</span>
+          <span className='block text-sm text-[--color-muted]'>Image</span>
           <p className='mb-3 text-xs text-[--color-muted]'>
             {image.name} · {image.mime || 'application/octet-stream'} · {formatBytes(image.bytes.byteLength)}
           </p>
@@ -138,26 +155,27 @@ export function HashDemo() {
       </div>
 
       <div className='divide-y-2 divide-[--color-hairline] border-y-2 border-[--color-hairline]'>
-        <Section title='Commit' description='BLAKE3(mkit.commit\0 || signing bytes) signed with an Ed25519 demo key.'>
-          <Row label='Hash (signed)' value={commit.hash} />
-          <div className='space-y-1.5 py-1'>
-            <div className='text-xs text-[--color-muted]'>Verify under the demo key</div>
-            <div className={commit.verified ? 'text-green-700' : 'text-red-600'}>
-              {commit.verified ? 'yes ✓' : 'no ✗'}
-            </div>
+        {merkle ? (
+          <Section title='Merkle tree' description='Each square is the BLAKE3 of everything beneath it.'>
+            <MerkleTree root={merkle} />
+          </Section>
+        ) : null}
+        <Section title='Objects' description='Every hash in this commit. Edit anything above and they all change.'>
+          <div className='divide-y divide-[--color-hairline]'>
+            <ObjectRow
+              hash={commit.hash}
+              label='commit'
+              meta='signed'
+              trailing={
+                <span className={`text-xs ${commit.verified ? 'text-green-700' : 'text-red-600'}`}>
+                  {commit.verified ? 'verified ✓' : 'invalid ✗'}
+                </span>
+              }
+            />
+            <ObjectRow hash={tree.treeHash} label='/' meta='folder' />
+            <ObjectRow hash={tree.textHash} label='README.md' meta={formatBytes(tree.textSize)} />
+            <ObjectRow hash={tree.imageHash} label={image.name} meta={formatBytes(tree.imageSize)} />
           </div>
-        </Section>
-        <Section title='Tree' description='A single lex-sorted list wrapping README.md + the image.'>
-          <Row label='Hash' value={tree.treeHash} />
-          <Row label='Bytes (first 48)' value={tree.treePreview} />
-        </Section>
-        <Section title='Text blob' description='README.md body bytes, wrapped in a v1 blob object.'>
-          <Row label='Hash' value={tree.textHash} />
-          <Row label='Bytes (first 48)' value={tree.textPreview} />
-        </Section>
-        <Section title='Image blob' description='The image file bytes, wrapped in the same v1 blob envelope as text.'>
-          <Row label='Hash' value={tree.imageHash} />
-          <Row label={`Bytes (first 48 of ${formatBytes(tree.imageSize)})`} value={tree.imagePreview} />
         </Section>
       </div>
     </div>

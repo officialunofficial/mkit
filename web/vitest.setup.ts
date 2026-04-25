@@ -1,3 +1,3 @@
-import { registerNodeInit } from "./src/lib/mkit.node";
+import { registerNodeInit } from './src/lib/mkit.node'
 
-registerNodeInit();
+registerNodeInit()

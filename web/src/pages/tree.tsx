@@ -7,12 +7,11 @@ export default function TreePage() {
     <div className='space-y-8'>
       <title>mkit — tree</title>
       <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>Nested trees</h1>
+        <h1 className='text-4xl font-semibold tracking-tight'>Folders, all the way down</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
-          A tree is a lex-sorted list of <code className='font-mono text-sm'>(name, mode, hash)</code> entries — each
-          hash pointing to a blob or another tree. Because entries address their children by BLAKE3 id, nesting composes
-          naturally: a tree containing a tree is just another row whose <code className='font-mono text-sm'>mode</code>{' '}
-          is <code className='font-mono text-sm'>tree</code>.
+          A folder is a list of files and other folders, each named by a BLAKE3 hash. A parent's hash is computed from
+          its children's hashes, so the structure is a Merkle tree: edit any file and every hash above it rewrites —
+          file → folder → parent folder → commit. The root hash is a fingerprint of everything below.
         </p>
       </header>
       <DemoBoundary>
