@@ -133,15 +133,15 @@ export function AttestDemo() {
           <Field label='keyid'>
             <code className='font-mono text-sm break-all'>{built.att.keyid}</code>
           </Field>
-          <Field label='attestation_id (BLAKE3 of envelope bytes)'>
+          <Field label='Attestation id (BLAKE3 of envelope bytes)'>
             <code className='font-mono text-sm break-all'>{built.att.attestation_id_hex}</code>
           </Field>
-          <Field label='DSSE envelope (JCS-canonical)'>
+          <Field label='Signed envelope'>
             <code className='block font-mono text-xs break-all whitespace-pre-wrap'>
               {pretty(built.att.envelope_json)}
             </code>
           </Field>
-          <Field label='verify_envelope verdict'>
+          <Field label='Verify verdict'>
             {verdict === null ? null : (
               <span className={verdict ? 'text-green-700' : 'text-red-600'}>
                 {verdict ? 'signature valid ✓' : 'signature rejected ✗'}

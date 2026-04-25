@@ -9,27 +9,11 @@ export default function AttestPage() {
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Attestations</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
-          An{' '}
-          <a
-            href='https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md'
-            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-          >
-            in-toto v1 Statement
-          </a>{' '}
-          names the commit as its subject, wrapped in a{' '}
-          <a
-            href='https://github.com/secure-systems-lab/dsse/blob/master/envelope.md'
-            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-          >
-            DSSE envelope
-          </a>
-          . The JCS encoder is hand-rolled per RFC 8785 — serde won't satisfy its sort and number rules.
-        </p>
-        <p className='max-w-prose text-sm text-[--color-muted]'>
-          Pick a signing algorithm below: <code className='font-mono text-xs'>Ed25519</code> (default),{' '}
-          <code className='font-mono text-xs'>Secp256k1/ES256K</code> for wallet-style clients, or{' '}
-          <code className='font-mono text-xs'>P-256/ES256</code> for Secure Enclave / WebAuthn. The verifier dispatches
-          on the <code className='font-mono text-xs'>keyid</code> prefix per SPEC-ATTESTATIONS §6.3.
+          A signed claim about a commit. The claim names the commit as its subject; the envelope wraps it with one or
+          more signatures so anyone holding the public key can verify it later. Pick a signing algorithm —{' '}
+          <code className='font-mono text-sm'>Ed25519</code> by default,{' '}
+          <code className='font-mono text-sm'>Secp256k1</code> for wallet clients, or{' '}
+          <code className='font-mono text-sm'>P-256</code> for Secure Enclave / WebAuthn.
         </p>
       </header>
       <DemoBoundary>
