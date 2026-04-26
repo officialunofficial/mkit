@@ -67,8 +67,15 @@ fn run_signer(key_path: &Path, request_json: &str) -> (String, String, std::proc
         .expect("spawn mkit-sign-file");
     {
         let stdin = child.stdin.as_mut().expect("stdin piped");
-        stdin.write_all(request_json.as_bytes()).unwrap();
-        stdin.write_all(b"\n").unwrap();
+        // Tolerate BrokenPipe: the child may reject the request before
+        // reading (e.g. when the key file's permissions are too loose
+        // and the signer exits non-zero immediately). The Linux pipe
+        // semantics flush this race differently than macOS, so the
+        // BrokenPipe path shows up mainly on Ubuntu CI. Either way,
+        // the test exercises the child's exit code, not whether the
+        // parent's write landed.
+        let _ = stdin.write_all(request_json.as_bytes());
+        let _ = stdin.write_all(b"\n");
     }
     let out = child.wait_with_output().expect("wait");
     (
