@@ -115,7 +115,7 @@ function Button({
       type='button'
       onClick={onClick}
       disabled={disabled}
-      className='inline-flex h-9 shrink-0 items-center justify-center rounded-lg border border-[--color-hairline] bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-[--color-fg] active:translate-y-px disabled:pointer-events-none disabled:opacity-50'
+      className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-[--color-hairline] bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-[--color-fg] active:translate-y-px disabled:pointer-events-none disabled:opacity-50 sm:h-9'
     >
       {children}
     </button>

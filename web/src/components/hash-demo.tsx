@@ -96,7 +96,9 @@ export function HashDemo() {
   const resetImage = () => setImage(DEFAULT_IMAGE)
 
   return (
-    <div className='grid gap-10 lg:grid-cols-[minmax(0,20rem)_1fr] lg:gap-12'>
+    // Mobile-first ordering: outputs above controls. `flex-col-reverse` reverses sidebar/main below `lg`, then
+    // `lg:grid` takes over for the desktop two-column where source order doesn't matter.
+    <div className='flex flex-col-reverse gap-10 lg:grid lg:grid-cols-[minmax(0,20rem)_1fr] lg:gap-12'>
       <div className='space-y-6 lg:sticky lg:top-24 lg:self-start'>
         <label className='block'>
           <span className='mb-2 block text-sm text-[--color-muted]'>Commit message</span>
@@ -126,7 +128,7 @@ export function HashDemo() {
               <button
                 type='button'
                 onClick={() => fileRef.current?.click()}
-                className='inline-flex h-9 shrink-0 items-center justify-center rounded-lg border border-[--color-hairline] bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-[--color-fg] active:translate-y-px'
+                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-[--color-hairline] bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-[--color-fg] active:translate-y-px sm:h-9'
               >
                 Replace image
               </button>
@@ -134,7 +136,7 @@ export function HashDemo() {
                 type='button'
                 onClick={resetImage}
                 disabled={!customised}
-                className='inline-flex h-9 shrink-0 items-center justify-center rounded-lg px-2 text-sm text-[--color-muted] transition-opacity duration-200 hover:opacity-70 active:translate-y-px disabled:pointer-events-none disabled:opacity-30'
+                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg px-2 text-sm text-[--color-muted] transition-opacity duration-200 hover:opacity-70 active:translate-y-px disabled:pointer-events-none disabled:opacity-30 sm:h-9'
               >
                 Reset
               </button>

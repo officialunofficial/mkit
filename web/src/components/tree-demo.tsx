@@ -280,7 +280,9 @@ export function TreeDemo() {
   }
 
   return (
-    <div className='grid gap-10 lg:grid-cols-[minmax(0,20rem)_1fr] lg:gap-12'>
+    // Mobile-first ordering: outputs above controls. See `hash-demo.tsx` for the same flex-col-reverse → lg:grid
+    // pattern.
+    <div className='flex flex-col-reverse gap-10 lg:grid lg:grid-cols-[minmax(0,20rem)_1fr] lg:gap-12'>
       <div className='space-y-6 lg:sticky lg:top-24 lg:self-start'>
         <label className='block'>
           <span className='mb-2 block text-sm text-[--color-muted]'>Commit message</span>
