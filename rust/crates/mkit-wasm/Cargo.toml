@@ -30,6 +30,11 @@ mkit-core = { path = "../mkit-core" }
 mkit-attest = { path = "../mkit-attest" }
 wasm-bindgen = "0.2"
 hex = "0.4"
+# Verified streaming via BLAKE3 tree hashing (outboard + slice proof).
+# Drives the `/streaming` demo's Bao view. `blake3 = "1"` is already the
+# workspace pin (via mkit-core); the transitive re-export in
+# `bao::Hash` matches, so no second major shows up in the tree.
+bao = "0.13"
 
 # Activate the browser randomness backends for every getrandom in the
 # dep graph when compiling for `wasm32-unknown-unknown`. Two major

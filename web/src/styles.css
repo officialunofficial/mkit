@@ -68,10 +68,13 @@
   /* WebKit ignores `::-webkit-scrollbar-*` on native form controls
      unless their appearance is reset — without this, `<textarea>`
      falls back to the OS-native chrome scrollbar. Safari, iOS WebView,
-     and Chrome all require the override. */
+     and Chrome all require the override. Range inputs are deliberately
+     excluded: stripping their appearance hides the track + thumb
+     entirely (browsers need explicit ::-webkit-slider-* rules to
+     re-draw them), so we keep their native chrome. */
   textarea,
   select,
-  input {
+  input:not([type='range']) {
     -webkit-appearance: none;
     appearance: none;
   }

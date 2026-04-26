@@ -33,6 +33,11 @@ export default function HomePage() {
           title='tree'
           body='A Merkle tree of BLAKE3 hashes — edit any file and the hashes ripple up to the commit at the root.'
         />
+        <Demo
+          to='/streaming'
+          title='streaming'
+          body='Why git stops working on a 2 GB video — and how mkit handles it in 40 KB.'
+        />
       </ul>
     </div>
   )
@@ -40,7 +45,7 @@ export default function HomePage() {
 
 // `to` is narrowed to the concrete route literals Waku emits — a plain
 // `string` is too wide for Waku 1.0.0-alpha.8's typed Link.
-type DemoRoute = '/hash' | '/sign' | '/attest' | '/tree'
+type DemoRoute = '/hash' | '/sign' | '/attest' | '/tree' | '/streaming'
 
 function Demo({ to, title, body }: { to: DemoRoute; title: string; body: string }) {
   return (
