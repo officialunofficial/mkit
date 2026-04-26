@@ -7,8 +7,8 @@ export default function HomePage() {
       <section className='space-y-5'>
         <h1 className='text-5xl font-semibold tracking-tight'>A content-addressed VCS.</h1>
         <p className='max-w-prose text-lg text-[--color-fg]'>
-          Every object BLAKE3-addressed. Every commit Ed25519-signed. Every review a DSSE attestation. Written in Rust —
-          here it runs in your browser.
+          Every object BLAKE3-addressed. Every commit Ed25519-signed. Every review a portable, signed claim anyone can
+          verify. Written in Rust — here it runs in your browser.
         </p>
       </section>
 
@@ -22,7 +22,7 @@ export default function HomePage() {
         <Demo
           to='/attest'
           title='attest'
-          body='Sign an in-toto Statement into a DSSE envelope with Ed25519, Secp256k1, or P-256 — then verify it back.'
+          body='Sign a claim about a commit with Ed25519, Secp256k1, or P-256, wrap it in an envelope, verify it back.'
         />
         <Demo
           to='/tree'
