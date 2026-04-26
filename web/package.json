@@ -1,12 +1,12 @@
 {
   "name": "mkit-demo-web",
   "version": "0.0.0",
-  "type": "module",
   "private": true,
+  "type": "module",
   "scripts": {
     "wasm:build": "cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir pkg --release",
     "dev": "waku dev",
-    "build": "CLOUDFLARE=1 waku build && node scripts/patch-worker-config.mjs",
+    "build": "CLOUDFLARE=1 waku build && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",
     "start": "waku start",
     "deploy": "pnpm build && wrangler deploy -c dist/server/wrangler.json",
     "preview": "pnpm build && wrangler dev -c dist/server/wrangler.json",

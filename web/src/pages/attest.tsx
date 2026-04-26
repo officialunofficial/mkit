@@ -7,13 +7,10 @@ export default function AttestPage() {
     <div className='space-y-8'>
       <title>mkit — attest</title>
       <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>Attestations</h1>
+        <h1 className='text-4xl font-semibold tracking-tight'>Sign a claim about a commit</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
-          A signed claim about a commit. The claim names the commit as its subject; the envelope wraps it with one or
-          more signatures so anyone holding the public key can verify it later. Pick a signing algorithm —{' '}
-          <code className='font-mono text-sm'>Ed25519</code> by default,{' '}
-          <code className='font-mono text-sm'>Secp256k1</code> for wallet clients, or{' '}
-          <code className='font-mono text-sm'>P-256</code> for Secure Enclave / WebAuthn.
+          Attach a signed statement — &ldquo;reviewed&rdquo;, &ldquo;deployed&rdquo;, &ldquo;tested&rdquo; — to any
+          commit. Anyone holding your public key can verify it later, on any tool that reads the same envelope.
         </p>
       </header>
       <DemoBoundary>

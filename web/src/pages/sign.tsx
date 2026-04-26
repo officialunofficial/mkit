@@ -7,11 +7,10 @@ export default function SignPage() {
     <div className='space-y-8'>
       <title>mkit — sign</title>
       <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>Ed25519 signing</h1>
+        <h1 className='text-4xl font-semibold tracking-tight'>Sign a message, verify it back</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
-          Strict ZIP-215 / RFC 8032 over <code className='font-mono text-sm'>BLAKE3(domain || signing_bytes)</code>. The{' '}
-          <code className='font-mono text-sm'>mkit.commit\0</code> domain prefix keeps commit signatures from replaying
-          as remix signatures.
+          A private key signs a message; the matching public key verifies it. Anyone can confirm the message hasn't been
+          changed and that you signed it. Flip a single character below and the verifier rejects it.
         </p>
       </header>
       <DemoBoundary>
