@@ -118,7 +118,9 @@ export function StreamingDemo() {
   }
 
   return (
-    <div className='grid gap-10 lg:grid-cols-[minmax(0,20rem)_1fr] lg:gap-12'>
+    // Mobile-first ordering: live sections above the file sidebar so a phone landing on /streaming sees the chunker
+    // changing immediately, then scrolls down to the file controls. See `hash-demo.tsx` for the same pattern.
+    <div className='flex flex-col-reverse gap-10 lg:grid lg:grid-cols-[minmax(0,20rem)_1fr] lg:gap-12'>
       <div className='space-y-6 lg:sticky lg:top-24 lg:self-start'>
         <FileSidebar
           current={currentFile}
@@ -228,7 +230,7 @@ function FileSidebar({
           type='button'
           onClick={onToggleAutoEdit}
           aria-pressed={autoEdit}
-          className={`inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition-all duration-200 active:scale-[0.96] ${
+          className={`inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition-all duration-200 active:scale-[0.96] sm:h-9 ${
             autoEdit
               ? 'border-[--color-fg] bg-[--color-fg] text-[--color-bg]'
               : 'border-[--color-hairline] hover:border-[--color-fg]'
@@ -562,14 +564,14 @@ function StreamingBaoVerify({ file }: { file: FileAsset }) {
           type='button'
           onClick={start}
           disabled={playing}
-          className='inline-flex h-9 items-center justify-center rounded-lg border border-[--color-hairline] px-3 text-sm font-medium transition-colors hover:border-[--color-fg] active:translate-y-px disabled:opacity-40'
+          className='inline-flex h-10 items-center justify-center rounded-lg border border-[--color-hairline] px-3 text-sm font-medium transition-colors hover:border-[--color-fg] active:translate-y-px disabled:opacity-40 sm:h-9'
         >
           {playing ? 'Streaming…' : 'Start stream'}
         </button>
         <button
           type='button'
           onClick={reset}
-          className='inline-flex h-9 items-center justify-center rounded-lg px-3 text-sm text-[--color-muted] transition-opacity hover:opacity-70 active:translate-y-px'
+          className='inline-flex h-10 items-center justify-center rounded-lg px-3 text-sm text-[--color-muted] transition-opacity hover:opacity-70 active:translate-y-px sm:h-9'
         >
           Reset
         </button>
