@@ -432,7 +432,7 @@ jobs:
       - name: Publish to npm with provenance
         working-directory: rust/crates/mkit-wasm/pkg
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.MKIT_NPM_TOKEN }}
         run: npm publish --provenance --access public
 
       - name: Stage WASM bundle for GitHub Release

@@ -48,19 +48,19 @@ produces:
 
 | Secret | Purpose | Required for |
 | --- | --- | --- |
-| `NPM_TOKEN` | npm publish auth (Automation token, 2FA-bypass) | `publish-wasm` |
+| `MKIT_NPM_TOKEN` | npm publish auth (Automation token, 2FA-bypass) | `publish-wasm` |
 | `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` | macOS notarization | macOS archives (gated; no-op until set) |
 
 cosign keyless and npm provenance both run on the GitHub OIDC token;
 no extra secrets needed.
 
-## One-time setup: `NPM_TOKEN`
+## One-time setup: `MKIT_NPM_TOKEN`
 
 `mkit-wasm` is currently unclaimed on the npm registry. Steps for the
 human cutting the first release:
 
 1. **Create an npm org / user.** The package will publish under the
-   account that owns `NPM_TOKEN`. Recommended: a machine account or
+   account that owns `MKIT_NPM_TOKEN`. Recommended: a machine account or
    a maintainer account with the package added to a 2FA-protected org.
 2. **Generate an Automation token** (`npmjs.com → Access Tokens → New
    Granular Token` or a classic Automation token). Required scopes:
@@ -68,7 +68,7 @@ human cutting the first release:
    prompt that would otherwise block CI.
 3. **Add to GitHub repo secrets:**
    `Settings → Secrets and variables → Actions → New repository secret`
-   - Name: `NPM_TOKEN`
+   - Name: `MKIT_NPM_TOKEN`
    - Value: the token from step 2.
 4. **Claim the package name (one-time).** Until the first successful
    `npm publish`, the name `mkit-wasm` remains unclaimed. Two options:
@@ -85,12 +85,12 @@ human cutting the first release:
      Subsequent publishes go through Actions.
 5. Verify with `npm view mkit-wasm` after the first publish.
 
-## TODO: migrate to Trusted Publishers (drop `NPM_TOKEN`)
+## TODO: migrate to Trusted Publishers (drop `MKIT_NPM_TOKEN`)
 
 npm now supports
 [Trusted Publishers (OIDC)](https://docs.npmjs.com/trusted-publishers).
 With Trusted Publishers configured, the `publish-wasm` job authenticates
-via the GitHub Actions OIDC token directly — no `NPM_TOKEN` secret to
+via the GitHub Actions OIDC token directly — no `MKIT_NPM_TOKEN` secret to
 rotate, leak, or revoke.
 
 Migration plan:
@@ -100,7 +100,7 @@ Migration plan:
    workflow.
 2. Drop the `NODE_AUTH_TOKEN` env on the publish step in
    `.github/workflows/release.yml`.
-3. Delete the `NPM_TOKEN` secret from the repo.
+3. Delete the `MKIT_NPM_TOKEN` secret from the repo.
 4. Cut a patch release to validate the OIDC flow end-to-end.
 
 This is a strict-improvement follow-up; defer until after at least one
