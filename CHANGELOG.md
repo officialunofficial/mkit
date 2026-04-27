@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Hardened key file handling: `O_NOFOLLOW` on open, atomic
+  tmp+fsync+rename writes, owner-check against the running euid,
+  parent directory enforced `0700`. Applies to the Ed25519 seed and
+  the secp256k1 / P-256 key files selected via
+  `attest.secp256k1_key_path` / `attest.p256_key_path`.
+- Per-repo `.mkit/config` no longer accepts security-sensitive keys.
+  `signing_key`, `attest.external_signer_path`,
+  `attest.external_signer_args`, `attest.secp256k1_key_path`,
+  `attest.p256_key_path`, `ssh.strict_host_key_checking`,
+  `ssh.user_known_hosts_file`, and `ssh.identity_file` are now
+  user-scoped only (`$XDG_CONFIG_HOME/mkit/config`); a repo config
+  that sets them is rejected with a warning.
+- `mkit verify-attest` default trust-roots path moved from a
+  repo-local file to `$XDG_CONFIG_HOME/mkit/trust-roots.toml`.
+- Auto-keygen on `mkit commit` removed. `mkit keygen` is now a
+  required, explicit step before signing the first commit.
+
+### Changed
+
+- **BREAKING (library):** `KeyPair::from_seed` now takes
+  `Zeroizing<[u8;32]>` instead of `[u8;32]`, so seed buffers cannot
+  escape into a non-zeroising owner. CLI consumers are unaffected.
+
+### Added
+
+- `docs/THREAT-MODEL.md` — attacker models, scope split, key-file
+  contract, and verification gates.
+- `docs/ARCHITECTURE.md` — workspace map and read-the-source guide.
+- Governance scaffolding: `CODE_OF_CONDUCT.md`, `MAINTAINERS.md`,
+  `.github/PULL_REQUEST_TEMPLATE.md`, issue-template forms,
+  `.gitattributes`, `rustfmt.toml`, `clippy.toml`, fish completion.
+
 ## [0.2.0] - 2026-04-27
 
 ### Wire/Signature break
