@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed — WIRE/SIGNATURE BREAK
+## [0.2.0] - 2026-04-27
+
+### Wire/Signature break
 
 - **`sign::domain_digest` now includes a 2-byte little-endian length
   prefix** in front of the domain label, so the hash input is
@@ -22,6 +24,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Golden signing hashes (`rust/crates/mkit-core/tests/golden_sign.rs`
   `signing_hashes_are_stable`) were re-pinned for the new digest
   shape.
+- DSSE envelope `Sig`-bearing structure unchanged; external-signer
+  Protocol v1.1 adds an *optional* `webauthn` field that v1
+  verifiers ignore.
+
+### Added
+
+- Multi-algorithm signing foundation: Ed25519 + secp256k1 + P-256
+  (`mkit-attest::Algorithm`, COSE-aligned IDs −19 / −47 / −7), with
+  algorithm-agnostic signer trait + verifier dispatch ([#65](https://github.com/officialunofficial/mkit/pull/65), [#67](https://github.com/officialunofficial/mkit/pull/67)).
+- `mkit attest` and `mkit verify-attest` CLI subcommands, plus
+  `[attest]` config block and signer factory ([#66](https://github.com/officialunofficial/mkit/pull/66)).
+- Multi-signature DSSE envelope emission via `--additional-signer`
+  (with `args=` clause for argv pass-through) ([#67](https://github.com/officialunofficial/mkit/pull/67), [#69](https://github.com/officialunofficial/mkit/pull/69)).
+- `mkit keygen --algorithm {ed25519|secp256k1|p256}` with
+  `--print-pubkey` and `--force` flags ([#67](https://github.com/officialunofficial/mkit/pull/67)).
+- External-signer Protocol v1 — formal spec at
+  `docs/SPEC-EXTERNAL-SIGNER.md` ([#66](https://github.com/officialunofficial/mkit/pull/66)).
+- External-signer Protocol v1.1 — WebAuthn wrapping extension
+  (`docs/SPEC-EXTERNAL-SIGNER.md` §14) plus
+  `mkit_attest::webauthn::verify_webauthn_wrapping` helper ([#71](https://github.com/officialunofficial/mkit/pull/71)).
+- Reference signer `mkit-sign-file` — file-backed Rust binary, the
+  conformance baseline for the protocol ([#66](https://github.com/officialunofficial/mkit/pull/66)).
+- Reference signer `mkit-sign-se` — Apple Secure Enclave (Swift /
+  CryptoKit, P-256) ([#68](https://github.com/officialunofficial/mkit/pull/68)).
+- Reference signer `mkit-sign-tpm` — Linux/Windows TPM 2.0 (Rust +
+  `tss-esapi`, P-256, behind `tpm2` feature) ([#70](https://github.com/officialunofficial/mkit/pull/70)).
+- Reference signer `mkit-sign-ctap` — FIDO2 / WebAuthn roaming
+  authenticator (Rust + `ctap-hid-fido2`, Protocol v1.1) ([#71](https://github.com/officialunofficial/mkit/pull/71)).
+- `mkit-wasm` crate — WASM bindings for browser / Cloudflare Worker
+  consumers, with a multi-algorithm attestation demo site ([#73](https://github.com/officialunofficial/mkit/pull/73)).
+- `--external-signer-arg` CLI flag, `attest.external_signer_args`
+  config key, and `args=` clause on `--additional-signer` for
+  passing argv to subprocess signers ([#69](https://github.com/officialunofficial/mkit/pull/69)).
+- Config schema: `attest.secp256k1_key_path`,
+  `attest.p256_key_path`, and `[[trust_root]]` table ([#66](https://github.com/officialunofficial/mkit/pull/66)).
+
+### Changed
+
+- `Signer` trait now requires an `algorithm()` method; all in-tree
+  implementations updated ([#65](https://github.com/officialunofficial/mkit/pull/65)).
+- `verify::TrustRoot` enum gained `Secp256k1PubKeySec1` and
+  `P256PubKeySec1` variants ([#65](https://github.com/officialunofficial/mkit/pull/65), [#66](https://github.com/officialunofficial/mkit/pull/66)).
+- `ExternalSigner::new()` rejects relative paths (finding H2) ([#63](https://github.com/officialunofficial/mkit/pull/63)).
+
+### Security
+
+Sixteen findings from the comprehensive security review, plus one
+post-review external-signer conformance bug ([#63](https://github.com/officialunofficial/mkit/pull/63), [#69](https://github.com/officialunofficial/mkit/pull/69)):
+
+- Critical / wire-shape: `serve` path containment + per-connection
+  byte budget (A1, A14); case-insensitive `.mkit` / `.git` rejection
+  in tree entries + restore sweep (B2, B3); bounded attacker-
+  controlled allocations in delta / index / stash / blame parsers
+  (G5, G11, G12, G13); SHA-pinned third-party CI actions (Z4).
+- Important: transport hardening — file path-escape guard, SSH
+  encoder strictness, HTTP loopback-only + body cap (E7, E8, E9);
+  ref-name validation rejects `.lock` suffix and `HEAD` as branch
+  (D6); signal-handler `install` documented + `is_shutdown` exposed
+  (H1); `ExternalSigner::new` rejects relative paths (H2);
+  key-file permissions set on `File` handle, not path (H3); JCS
+  predicate full-parse instead of `{...}` boundary scan (H5);
+  `repo_lock` distinguishes invalid name from bad length (H6);
+  `delta::encode` returns `Result` on `>u32` lengths (H8).
+- Hygiene: `.gitignore` patterns for keys / secrets (H7).
+- Bugfix: `ExternalSigner` now includes the `algorithm` field per
+  SPEC-EXTERNAL-SIGNER §3 — broke conformance with reference
+  signers since the protocol shipped ([#69](https://github.com/officialunofficial/mkit/pull/69)).
+
+### Fixed
+
+- `mkit-sign-file` integration test tolerates `BrokenPipe` on stdin
+  write — race observed on Linux ([#82](https://github.com/officialunofficial/mkit/pull/82)).
+- Various `rustfmt` and `clippy` fixups across the multi-algorithm,
+  Secure-Enclave, TPM, and CTAP signer integrations.
 
 ## [0.1.0] — 2026-04-24
 
@@ -126,5 +202,6 @@ Initial release.
   aarch64-unknown-linux-gnu), cosign keyless OIDC signatures, and a
   CycloneDX SBOM.
 
-[Unreleased]: https://github.com/officialunofficial/mkit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/officialunofficial/mkit/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/officialunofficial/mkit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/officialunofficial/mkit/releases/tag/v0.1.0

@@ -1,21 +1,24 @@
 [package]
 name = "mkit-transport-file"
-description = "mkit file:// transport — local-filesystem backend for e2e tests"
-keywords = ["mkit", "vcs", "transport"]
-categories = ["filesystem"]
+description = "File-system transport for mkit, used in tests and local content-addressed repositories"
+keywords = ["mkit", "vcs", "transport", "filesystem"]
+categories = ["filesystem", "data-structures"]
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-publish = false
+# Publishable to crates.io. `publish` left unset (cargo default = true).
 
 [lints]
 workspace = true
 
 [dependencies]
-mkit-core = { path = "../mkit-core" }
+# Inter-workspace dep needs an explicit `version = ...` alongside the
+# path so `cargo publish` accepts it.
+mkit-core = { version = "0.2", path = "../mkit-core" }
 
 [dev-dependencies]
 tempfile = "3"

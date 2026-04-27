@@ -1,12 +1,19 @@
 [package]
 name = "mkit-wasm"
-description = "WASM bindings over mkit-core / mkit-attest for the demo site"
+description = "WebAssembly bindings for mkit — content-addressed VCS primitives (BLAKE3 hashing, Ed25519 commit signing, in-toto attestations, FastCDC chunking, delta encoding, and Bao verified streaming) for use from JavaScript bundlers, browsers, and edge runtimes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "README.md"
+keywords = ["mkit", "vcs", "wasm", "blake3", "ed25519"]
+categories = ["wasm", "cryptography"]
+# Not published to crates.io — published to npm as `mkit-wasm` from
+# .github/workflows/release.yml. wasm-pack copies the metadata above
+# (description / keywords / repository / license / readme) into the
+# generated package.json.
 publish = false
 
 [lib]

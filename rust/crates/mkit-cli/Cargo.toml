@@ -1,16 +1,17 @@
 [package]
 name = "mkit-cli"
-description = "mkit command-line binary"
-keywords = ["mkit", "vcs", "cli"]
-categories = ["command-line-utilities"]
+description = "The mkit command-line tool: a content-addressed VCS with native attestation support"
+keywords = ["mkit", "vcs", "cli", "attestation", "content-addressed"]
+categories = ["command-line-utilities", "cryptography"]
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Binary crate — not published to crates.io.
-publish = false
+# Publishable to crates.io as a binary crate so users can run
+# `cargo install mkit-cli`. `publish` left unset (cargo default = true).
 default-run = "mkit"
 
 # `cargo binstall mkit-cli` metadata. Points cargo-binstall at the
@@ -41,13 +42,16 @@ name = "mkit"
 path = "src/main.rs"
 
 [dependencies]
-mkit-core = { path = "../mkit-core" }
-mkit-attest = { path = "../mkit-attest" }
-mkit-transport-memory = { path = "../mkit-transport-memory" }
-mkit-transport-file = { path = "../mkit-transport-file" }
-mkit-transport-http = { path = "../mkit-transport-http" }
-mkit-transport-s3 = { path = "../mkit-transport-s3" }
-mkit-transport-ssh = { path = "../mkit-transport-ssh" }
+# Inter-workspace deps need explicit `version = ...` alongside the
+# path so `cargo publish` accepts them; path-only deps are rejected by
+# the registry. Track workspace.package.version (currently 0.1.0).
+mkit-core = { version = "0.2", path = "../mkit-core" }
+mkit-attest = { version = "0.2", path = "../mkit-attest" }
+mkit-transport-memory = { version = "0.2", path = "../mkit-transport-memory" }
+mkit-transport-file = { version = "0.2", path = "../mkit-transport-file" }
+mkit-transport-http = { version = "0.2", path = "../mkit-transport-http" }
+mkit-transport-s3 = { version = "0.2", path = "../mkit-transport-s3" }
+mkit-transport-ssh = { version = "0.2", path = "../mkit-transport-ssh" }
 
 # `derive` and `wrap_help` are intentionally disabled so help-text output
 # is deterministic — we render help ourselves from a compile-time const

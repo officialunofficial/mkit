@@ -1,8 +1,8 @@
 [package]
 name = "mkit-transport-ssh"
-description = "mkit SSH transport: framed wire protocol over a system ssh(1) child process"
+description = "SSH transport for mkit using a forced-command server pattern over a system ssh(1) child process"
 keywords = ["mkit", "vcs", "ssh", "transport"]
-categories = ["data-structures", "network-programming"]
+categories = ["network-programming", "data-structures"]
 readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
@@ -10,13 +10,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-publish = false
+# Publishable to crates.io. `publish` left unset (cargo default = true).
 
 [lints]
 workspace = true
 
 [dependencies]
-mkit-core = { path = "../mkit-core" }
+# Inter-workspace dep needs an explicit `version = ...` alongside the
+# path so `cargo publish` accepts it.
+mkit-core = { version = "0.2", path = "../mkit-core" }
 thiserror = "2"
 
 [dev-dependencies]

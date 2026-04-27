@@ -1,6 +1,6 @@
 [package]
 name = "mkit-attest"
-description = "mkit attestations: JCS + in-toto v1 Statement + DSSE envelope + signers"
+description = "DSSE + in-toto v1 attestations for mkit, with multi-algorithm signers (Ed25519, secp256k1, P-256) and an RFC 8785 JCS encoder"
 keywords = ["mkit", "attestation", "in-toto", "dsse", "jcs"]
 categories = ["cryptography", "encoding"]
 readme = "../../README.md"
@@ -10,9 +10,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Internal monorepo crate; not published to crates.io during the Rust
-# port. Flip to `true` once the 1.0 cutover freezes the public API.
-publish = false
+# Publishable to crates.io. The `publish` key is left unset (cargo
+# default = `true`) so a future `cargo publish -p mkit-attest` works
+# without further metadata changes.
 
 [lints]
 workspace = true
@@ -30,7 +30,10 @@ algo-secp256k1 = ["dep:k256", "dep:sha2"]
 algo-p256 = ["dep:p256", "dep:sha2"]
 
 [dependencies]
-mkit-core = { path = "../mkit-core" }
+# Inter-workspace dep needs an explicit `version = ...` alongside the
+# path so `cargo publish` accepts it; path-only deps are rejected by
+# the registry. Track the workspace.package.version (currently 0.1.0).
+mkit-core = { version = "0.2", path = "../mkit-core" }
 blake3 = "1"
 base64 = "0.22"
 thiserror = "2"

@@ -12,16 +12,10 @@ The v1 on-disk and wire formats are pinned by golden vectors under
 
 ## Quick start
 
-```sh
-# Build (Rust 1.95, edition 2024 — pinned in rust/rust-toolchain.toml):
-cd rust && cargo build --release
+Install (see [Installing](#installing) for all four channels):
 
-# Initialize a repo, generate a key, commit:
-./target/release/mkit init
-./target/release/mkit keygen
-./target/release/mkit add some-file.txt
-./target/release/mkit commit -m "first commit"
-./target/release/mkit log
+```sh
+cargo install --git https://github.com/officialunofficial/mkit mkit-cli
 ```
 
 To push to a remote, declare a strict URL scheme (`mkit+file://`,
@@ -123,6 +117,7 @@ See `docs/SPEC-SIGNING.md` §8 for the convention and
 
 | Doc | Audience |
 |---|---|
+| [`docs/INSTALL.md`](docs/INSTALL.md) | End users — install channels, verification, hardware signers |
 | [`docs/CLI.md`](docs/CLI.md) | End users — subcommands, env vars, exit codes |
 | [`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) | Implementers + integrators — native attestation primitive (in-toto v1 + DSSE) |
 | [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) | Implementers of compatible tools — on-disk format |
@@ -138,45 +133,86 @@ See `docs/SPEC-SIGNING.md` §8 for the convention and
 
 ## Installing
 
-Prebuilt binaries are cosign-signed and published to the GitHub
-Releases page for macOS (arm64 + x86_64) and Linux (x86_64 + arm64).
+Four channels. Pick one. Long-form guide with verification steps in
+[`docs/INSTALL.md`](docs/INSTALL.md).
 
-### One-liner (macOS + Linux)
-
-```sh
-curl -sSfL https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh | sh
-```
-
-Installs into `~/.local/bin/mkit`. Override with `--prefix <dir>`,
-pin a version with `--version v0.1.0`, or require a cosign signature
-check with `--cosign` (needs `cosign` in `PATH`).
-
-### `cargo binstall`
-
-If you already have [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall):
+### From source (works today)
 
 ```sh
-cargo binstall --git https://github.com/officialunofficial/mkit mkit-cli
+cargo install --git https://github.com/officialunofficial/mkit mkit-cli
 ```
 
-Reads the `[package.metadata.binstall]` block in `mkit-cli/Cargo.toml`
-and fetches the same release archive the one-liner does.
+Requires Rust 1.95 (rustup picks it up from `rust/rust-toolchain.toml`
+on first build). Drops `mkit` into `~/.cargo/bin/`.
 
-### Homebrew tap (planned)
+### From GitHub Releases (works today)
+
+Cosign-signed archives for macOS (arm64 + x86_64) and Linux (x86_64 +
+arm64) on every `v*.*.*` tag:
 
 ```sh
-brew tap officialunofficial/tap
-brew install mkit
+curl -L https://github.com/officialunofficial/mkit/releases/latest/download/mkit-aarch64-apple-darwin.tar.gz | tar xz
 ```
 
-Tap repo and formula land in a follow-up.
+The one-liner `curl -sSfL …/install.sh | sh` picks the right archive
+and can verify the cosign bundle (`--cosign`).
 
-### Manual
+### WASM for browsers and Cloudflare Workers (available from v0.2.0+)
 
-Raw archives at <https://github.com/officialunofficial/mkit/releases>.
-Each has a `.sha256` sum and a `.cosign.bundle` for keyless OIDC
-verification — see [`docs/release/SIGNING.md`](docs/release/SIGNING.md)
-for the `cosign verify-blob` incantation.
+```sh
+bun add mkit-wasm     # or: npm i mkit-wasm
+```
+
+TypeScript + Workers examples in
+[`docs/INSTALL.md`](docs/INSTALL.md#wasm--npm).
+
+### Hardware signers (optional)
+
+External signers are separate binaries that mkit drives over the
+[v1 stdio protocol](docs/SPEC-EXTERNAL-SIGNER.md):
+
+```sh
+# File-backed reference signer (any platform)
+cargo install --git https://github.com/officialunofficial/mkit --bin mkit-sign-file
+
+# TPM 2.0 (Linux/Windows; install libtss2-dev first on Debian/Ubuntu)
+cargo install --git https://github.com/officialunofficial/mkit --bin mkit-sign-tpm --features tpm2
+
+# Apple Secure Enclave (macOS, Swift)
+cd contrib/signers/mkit-sign-se && swift build -c release \
+  && cp .build/release/mkit-sign-se /usr/local/bin/
+
+# FIDO2 / WebAuthn (CTAP-HID)
+cargo install --git https://github.com/officialunofficial/mkit --bin mkit-sign-ctap
+```
+
+Each signer ships its own README under
+[`contrib/signers/`](contrib/signers/) with setup notes.
+
+## Getting started
+
+```sh
+mkit init
+mkit keygen
+mkit add file.txt
+mkit commit -m "first commit"
+mkit log
+```
+
+Multi-algo attestation flow — sign with two algorithms at once and
+verify against trust roots:
+
+```sh
+mkit keygen --algorithm p256 --print-pubkey
+mkit attest --algorithm ed25519 \
+            --additional-signer "algorithm=p256,signer=repo-key" \
+            --predicate-type https://example.com/sign-off/v1
+mkit verify-attest --trust-roots .mkit/attest-trust-roots.toml
+```
+
+See [`docs/CLI.md`](docs/CLI.md) for every subcommand and
+[`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) for the
+attestation contract.
 
 ## Status
 
