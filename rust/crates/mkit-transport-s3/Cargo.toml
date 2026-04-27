@@ -18,7 +18,7 @@ workspace = true
 [dependencies]
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it.
-mkit-core = { version = "0.1", path = "../mkit-core" }
+mkit-core = { version = "0.2", path = "../mkit-core" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 sha2 = "0.11"
 hmac = "0.13"
