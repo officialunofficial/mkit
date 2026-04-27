@@ -7,11 +7,11 @@ No filesystem or network access is performed inside the wasm module. It is a sta
 ## Install
 
 ```sh
-bun add mkit-wasm
+bun add @makechain/mkit-wasm
 # or
-npm i mkit-wasm
+npm i @makechain/mkit-wasm
 # or
-pnpm add mkit-wasm
+pnpm add @makechain/mkit-wasm
 ```
 
 The published package is built with `wasm-pack --target bundler`. It works out of the box with esbuild, Wrangler, Vite, webpack, and Rollup. For direct `<script type="module">` usage without a bundler, build the crate yourself with `--target web`.
@@ -24,7 +24,7 @@ import init, {
   commit_verify,
   attest_build,
   attest_verify,
-} from "mkit-wasm";
+} from "@makechain/mkit-wasm";
 
 await init();
 
@@ -66,7 +66,7 @@ TypeScript declarations shipped in the package for full signatures.
 This package is generated from the `mkit-wasm` crate inside the
 [mkit Rust workspace](https://github.com/officialunofficial/mkit/tree/main/rust/crates/mkit-wasm).
 Each npm release is built from a tagged commit of the upstream repo;
-the npm version matches the upstream `vX.Y.Z` tag, so `mkit-wasm@0.1.0`
+the npm version matches the upstream `vX.Y.Z` tag, so `@makechain/mkit-wasm@0.1.0`
 on npm corresponds to `v0.1.0` on GitHub.
 
 The wasm bundle wraps the same Rust crates the native `mkit` CLI uses,

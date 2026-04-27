@@ -20,7 +20,7 @@ verify the result.
 |---------------------------------------|--------------------------------------|------------------------------------------------------------------------------------------------------|
 | CLI on a dev machine                  | Release archive or `cargo install --git` | `curl -sSfL …/install.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
 | CI / backend (pin a version)          | Release archive                      | `curl -L …/releases/download/<tag>/mkit-<tag>-<target>.tar.gz \| tar xz`                              |
-| Browser / Cloudflare Worker           | npm (v0.2.0+)                        | `bun add mkit-wasm`                                                                                  |
+| Browser / Cloudflare Worker           | npm (v0.2.0+)                        | `bun add @makechain/mkit-wasm`                                                                                  |
 | Library inside another Rust crate     | Path or git dependency (crates.io is planned) | `mkit-core = { git = "https://github.com/officialunofficial/mkit" }`                                 |
 
 Pick the leftmost channel that satisfies your constraints — release
@@ -131,11 +131,11 @@ Full reproducibility, signing, and supply-chain notes live under
 **Install (v0.2.0+):**
 
 ```sh
-bun add mkit-wasm
+bun add @makechain/mkit-wasm
 # or
-npm i mkit-wasm
+npm i @makechain/mkit-wasm
 # or
-pnpm add mkit-wasm
+pnpm add @makechain/mkit-wasm
 ```
 
 **Why `wasm-pack` with `--target bundler`.** mkit-wasm targets the
@@ -148,7 +148,7 @@ wrangler's bundler will inline the `.wasm` import.
 **TypeScript usage:**
 
 ```ts
-import init, { hash, parse_envelope } from "mkit-wasm";
+import init, { hash, parse_envelope } from "@makechain/mkit-wasm";
 
 await init();
 const id = hash(new TextEncoder().encode("hello"));
@@ -158,7 +158,7 @@ console.log(id);
 **Cloudflare Workers (ESM modules format):**
 
 ```ts
-import init, { hash } from "mkit-wasm";
+import init, { hash } from "@makechain/mkit-wasm";
 import wasmModule from "mkit-wasm/mkit_wasm_bg.wasm";
 
 export default {

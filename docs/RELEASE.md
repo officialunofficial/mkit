@@ -19,7 +19,7 @@ produces:
    alongside per-archive `.sig`/`.crt`/`.cosign.bundle`, an aggregate
    `SHA256SUMS` (also cosign-signed), and a CycloneDX `sbom.cdx.json`.
 
-2. **npm package** `mkit-wasm@X.Y.Z` (unscoped). Built with
+2. **npm package** `@makechain/mkit-wasm@X.Y.Z` (unscoped). Built with
    `wasm-pack --target bundler` and published with
    `npm publish --provenance` so each release carries a Sigstore-backed
    attestation tied to the workflow run. The pkg tarball is also
@@ -83,7 +83,7 @@ human cutting the first release:
      npm publish --access public
      ```
      Subsequent publishes go through Actions.
-5. Verify with `npm view mkit-wasm` after the first publish.
+5. Verify with `npm view @makechain/mkit-wasm` after the first publish.
 
 ## TODO: migrate to Trusted Publishers (drop `MKIT_NPM_TOKEN`)
 
@@ -109,8 +109,8 @@ successful token-based release so the runbook is exercised.
 ## Package name decision
 
 `mkit-wasm` (unscoped). Verified available via
-`npm view mkit-wasm` (404). Unscoped is what consumers will type
-without a registry-scope prefix and reads cleanly as `bun add mkit-wasm`.
+`npm view @makechain/mkit-wasm` (404). Unscoped is what consumers will type
+without a registry-scope prefix and reads cleanly as `bun add @makechain/mkit-wasm`.
 
 If the unscoped name is ever lost or squatted, fall back to
 `@officialunofficial/mkit-wasm` and update:
