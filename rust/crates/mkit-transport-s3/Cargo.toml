@@ -1,21 +1,24 @@
 [package]
 name = "mkit-transport-s3"
-description = "mkit S3 / Cloudflare R2 transport — SigV4-signed HTTPS backend"
-keywords = ["mkit", "vcs", "transport", "s3", "r2"]
+description = "S3-compatible transport for mkit, with SigV4 signing over rustls, tuned for Cloudflare R2"
+keywords = ["mkit", "transport", "s3", "r2", "sigv4"]
 categories = ["network-programming"]
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-publish = false
+# Publishable to crates.io. `publish` left unset (cargo default = true).
 
 [lints]
 workspace = true
 
 [dependencies]
-mkit-core = { path = "../mkit-core" }
+# Inter-workspace dep needs an explicit `version = ...` alongside the
+# path so `cargo publish` accepts it.
+mkit-core = { version = "0.1", path = "../mkit-core" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 sha2 = "0.11"
 hmac = "0.13"

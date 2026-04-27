@@ -1,18 +1,21 @@
 [package]
 name = "mkit-transport-memory"
-description = "mkit in-memory transport — HashMap-backed, for tests and fuzz harnesses"
-keywords = ["mkit", "vcs", "transport"]
-categories = ["data-structures"]
+description = "In-memory transport for mkit, HashMap-backed, used in unit tests and fuzz harnesses"
+keywords = ["mkit", "vcs", "transport", "in-memory", "testing"]
+categories = ["data-structures", "development-tools::testing"]
+readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-publish = false
+# Publishable to crates.io. `publish` left unset (cargo default = true).
 
 [lints]
 workspace = true
 
 [dependencies]
-mkit-core = { path = "../mkit-core" }
+# Inter-workspace dep needs an explicit `version = ...` alongside the
+# path so `cargo publish` accepts it.
+mkit-core = { version = "0.1", path = "../mkit-core" }

@@ -1,8 +1,8 @@
 [package]
 name = "mkit-core"
-description = "mkit core: BLAKE3 hashing and canonical v1 object byte format"
-keywords = ["mkit", "vcs", "blake3", "content-addressed"]
-categories = ["data-structures", "encoding"]
+description = "Content-addressed VCS primitives for mkit: BLAKE3 hashing, canonical objects, refs, packs, and transport traits"
+keywords = ["mkit", "vcs", "blake3", "content-addressed", "version-control"]
+categories = ["data-structures", "encoding", "cryptography"]
 readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
@@ -10,9 +10,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Internal monorepo crate; not published to crates.io during the Rust
-# port. Flip to `true` once the 1.0 cutover freezes the public API.
-publish = false
+# Publishable to crates.io. Metadata-only PR — actual `cargo publish`
+# is gated behind a separate release process. The `publish` key is
+# left unset (cargo default = `true`) so a future `cargo publish -p
+# mkit-core` works without further metadata changes.
 
 [lints]
 workspace = true
