@@ -160,7 +160,7 @@ and can verify the cosign bundle (`--cosign`).
 ### WASM for browsers and Cloudflare Workers (available from v0.2.0+)
 
 ```sh
-bun add mkit-wasm     # or: npm i mkit-wasm
+bun add @makechain/mkit-wasm     # or: npm i @makechain/mkit-wasm
 ```
 
 TypeScript + Workers examples in
