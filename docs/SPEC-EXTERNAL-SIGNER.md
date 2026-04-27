@@ -1,3 +1,10 @@
+---
+spec: SPEC-EXTERNAL-SIGNER
+version: 1
+status: draft
+audience: integrators shipping a signer for a platform mkit does not ship natively (HSM, Secure Enclave, TPM, WebAuthn, KMS)
+---
+
 # SPEC-EXTERNAL-SIGNER — mkit external signer protocol v1
 
 Status: **Draft** (protocol version `v1`). This document defines the

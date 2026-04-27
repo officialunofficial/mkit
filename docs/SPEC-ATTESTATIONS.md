@@ -1,3 +1,10 @@
+---
+spec: SPEC-ATTESTATIONS
+version: 1
+status: draft
+audience: implementers and integrators producing or verifying native mkit attestations (in-toto v1 + DSSE)
+---
+
 # SPEC-ATTESTATIONS — mkit v1 attestation format
 
 Status: **Draft**. This document defines a native attestation primitive

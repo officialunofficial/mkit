@@ -1,3 +1,10 @@
+---
+spec: SPEC-INDEX
+version: 1
+status: draft
+audience: implementers of the staging area; advisory and local-only (not exchanged between peers)
+---
+
 # SPEC-INDEX — mkit v1 repo-local index file
 
 Status: **Advisory** for mkit v1. Local-only; not exchanged between

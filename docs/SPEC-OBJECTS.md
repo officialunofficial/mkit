@@ -1,3 +1,10 @@
+---
+spec: SPEC-OBJECTS
+version: 1
+status: stable
+audience: implementers of compatible tools producing or consuming mkit on-disk objects
+---
+
 # SPEC-OBJECTS — mkit v1 on-disk object format
 
 Status: **Normative** for mkit v1.

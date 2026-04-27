@@ -1,3 +1,10 @@
+---
+spec: SPEC-REFS
+version: 1
+status: draft
+audience: implementers of compatible ref stores and transports
+---
+
 # SPEC-REFS — mkit v1 ref wire format and semantics
 
 Status: **Normative** for mkit v1.

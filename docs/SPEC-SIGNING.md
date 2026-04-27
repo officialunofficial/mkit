@@ -1,3 +1,10 @@
+---
+spec: SPEC-SIGNING
+version: 1
+status: draft
+audience: implementers of compatible commit / remix signers and verifiers
+---
+
 # SPEC-SIGNING — mkit v1 signature domains
 
 Status: **Normative** for mkit v1.

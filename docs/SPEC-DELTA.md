@@ -1,3 +1,10 @@
+---
+spec: SPEC-DELTA
+version: 1
+status: draft
+audience: implementers of compatible packfile readers and writers
+---
+
 # SPEC-DELTA — mkit v1 delta instruction format
 
 Status: **Normative** for mkit v1.

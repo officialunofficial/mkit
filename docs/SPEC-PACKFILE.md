@@ -1,3 +1,10 @@
+---
+spec: SPEC-PACKFILE
+version: 1
+status: draft
+audience: implementers of compatible packfile readers and writers; transport implementers
+---
+
 # SPEC-PACKFILE — mkit v1 packfile format
 
 Status: **Normative** for mkit v1.

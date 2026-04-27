@@ -27,10 +27,11 @@ us — notifications can drop.
 
 Only the latest minor line receives security fixes.
 
-| Version | Supported |
-| ------- | --------- |
-| 0.1.x   | Yes       |
-| < 0.1   | No        |
+| Version | Supported                            |
+| ------- | ------------------------------------ |
+| 0.2.x   | Yes (current)                        |
+| 0.1.x   | No (superseded; upgrade to 0.2.x)    |
+| < 0.1   | No                                   |
 
 Pre-1.0 releases may ship breaking format changes alongside security
 fixes. Read the CHANGELOG before upgrading.
@@ -46,6 +47,26 @@ fixes. Read the CHANGELOG before upgrading.
 
 We will not pursue legal action against researchers who follow this
 process in good faith, including accidental disclosure during testing.
+
+## Hardened in 0.3.0
+
+The 0.3.0 release narrows the local attack surface around keys and
+config. Briefly:
+
+- **Per-repo config attack surface partitioned.** Security-sensitive
+  keys (key paths, external-signer path/argv, SSH trust knobs) are
+  now user-scoped only. A `<repo>/.mkit/config` that tries to set
+  them is rejected with a warning and the value is ignored.
+- **Key file handling.** Key files are opened with `O_NOFOLLOW`,
+  written atomically (tmp + fsync + rename + parent fsync), and
+  owner-checked against the running euid. Parent directory is
+  enforced `0700`.
+- **Trust roots scope-corrected.** `mkit verify-attest` defaults to
+  `$XDG_CONFIG_HOME/mkit/trust-roots.toml`, not a repo-local path,
+  so a hostile clone cannot choose its own verifier.
+
+Full description, attacker models, and verification gates in
+[`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 
 ## PGP / signed reports
 
