@@ -423,11 +423,11 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          # Override the npm package name to scope it under @makechain.
-          # The Rust crate stays unscoped (`mkit-wasm`); the npm
-          # distribution name is `@makechain/mkit-wasm` because the
-          # release token is a Granular token scoped to `@makechain`.
-          # See docs/RELEASE.md for the rationale and rotation steps.
+          # Override the npm package name to the scoped form. The Rust
+          # crate stays unscoped (`mkit-wasm`); the npm distribution
+          # name is `@makechain/mkit-wasm` because the release token
+          # is a Granular Access Token scoped to that npm org.
+          # See docs/RELEASE.md for rationale + rotation steps.
           npm pkg set name=@makechain/mkit-wasm
           # Force-align the package.json version to the git tag.
           npm version --no-git-tag-version --allow-same-version "$VERSION"
