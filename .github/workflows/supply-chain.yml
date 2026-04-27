@@ -32,13 +32,18 @@ permissions:
 jobs:
   dependency-review:
     name: Dependency review (PRs)
-    # Public-repo Dependency Graph gives us the advisory feed for free;
-    # license enforcement requires GHAS but advisory enforcement does
-    # not. If GHAS is off the action still runs and reports advisories;
-    # license `deny-licenses` checks may no-op silently. That's an
-    # acceptable failure mode: we'd rather get the vulnerability gate
-    # than nothing.
-    if: github.event_name == 'pull_request'
+    # GHAS / Dependency Graph is NOT enabled on this repo, which makes
+    # `actions/dependency-review-action` fail closed with
+    # "Dependency review is not supported on this repository". Until a
+    # maintainer turns on Dependency Graph in
+    # `.../settings/security_analysis`, the job is gated off so it does
+    # not block PRs. The vulnerability gate is meanwhile covered by:
+    #   - cargo-audit (rust-security.yml, runs on every push + weekly)
+    #   - cargo-deny advisories (deny.toml, gates `cargo deny check`)
+    # When Dependency Graph is enabled, change the `if:` below to
+    # `github.event_name == 'pull_request'` and the job will start
+    # gating PRs again — the rest of the configuration is correct.
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
