@@ -32,11 +32,14 @@ algo-p256 = ["dep:p256", "dep:sha2"]
 [dependencies]
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it; path-only deps are rejected by
-# the registry. Track the workspace.package.version (currently 0.1.0).
+# the registry. Track the workspace.package.version.
 mkit-core = { version = "0.2", path = "../mkit-core" }
 blake3 = "1"
 base64 = "0.22"
 thiserror = "2"
+# Used by the secp256k1/p256 signers to scrub raw 32-byte secrets
+# from stack memory before they leave the constructor frame.
+zeroize = { version = "1", features = ["derive"] }
 # `serde` + `serde_json` are used ONLY on the parsing side (envelope decode +
 # external-signer response). The canonical JCS encoder is hand-rolled per
 # RFC 8785 — `serde_json::to_string` does NOT satisfy JCS sort/escape rules.

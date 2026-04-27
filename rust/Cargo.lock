@@ -1343,6 +1343,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
@@ -1353,6 +1354,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.2",
  "k256",
+ "libc",
  "mkit-attest",
  "mkit-core",
  "mkit-transport-file",
@@ -1364,6 +1366,7 @@ dependencies = [
  "p256",
  "tempfile",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
@@ -1374,6 +1377,8 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.2",
  "hex",
+ "libc",
+ "subtle",
  "tempfile",
  "thiserror 2.0.18",
  "zeroize",
