@@ -6,13 +6,22 @@ name: Release
 #   1. Builds static mkit binaries for macOS (arm64/x86_64) and Linux (x86_64/arm64)
 #      with a pinned Rust toolchain (see rust/rust-toolchain.toml).
 #   2. Produces a CycloneDX SBOM (sbom.cdx.json).
-#   3. Signs the per-platform SHA256SUMS with cosign OIDC keyless
-#      (transparency log: Rekor).
-#   4. Optionally notarizes macOS binaries when Apple secrets are present.
-#   5. Aggregates all artifacts into a GitHub Release.
+#   3. Signs every archive with cosign OIDC keyless (transparency log: Rekor)
+#      and signs the aggregated SHA256SUMS the same way.
+#   4. Aggregates all artifacts into a GitHub Release.
 #
-# Secrets (all optional — gated steps no-op without them):
-#   APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID   (macOS notarization)
+# macOS binaries are intentionally NOT codesigned or notarized — we do not
+# hold an Apple Developer ID. Trust is established via cosign keyless
+# signatures, which are verified by `install.sh` and documented in
+# docs/release/SIGNING.md. Users who launch the binary by double-clicking
+# in Finder will hit Gatekeeper; running from a terminal works.
+#
+# Cache safety: every Swatinem/rust-cache invocation here uses a release-
+# specific `prefix-key`, partitioned away from the keys that PR-event
+# workflows write to. This prevents a malicious PR from poisoning a cache
+# that this workflow (which carries `secrets.MKIT_NPM_TOKEN` and
+# `id-token: write`) would later deserialize. See the Phase-10
+# cache-poisoning audit note.
 #
 # No secrets are needed for cosign keyless — OIDC token comes from GitHub.
 
@@ -100,7 +109,11 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           workspaces: rust -> rust/target
+          # Partition release caches away from PR-event workflow caches —
+          # see header note on cache poisoning.
+          prefix-key: "rust-release-${{ matrix.target }}"
           key: release-${{ matrix.target }}
+          cache-on-failure: false
 
       - name: Build release binary
         shell: bash
@@ -182,34 +195,11 @@ jobs:
             "${ARCHIVE}"
           echo "Signed ${ARCHIVE}; transparency log entries visible at https://search.sigstore.dev/"
 
-      - name: Notarize macOS binary (gated on secrets)
-        # Only runs on macOS runners when Apple secrets are configured.
-        if: runner.os == 'macOS' && env.APPLE_ID != '' && env.APPLE_APP_SPECIFIC_PASSWORD != '' && env.APPLE_TEAM_ID != ''
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          ARCHIVE: ${{ steps.meta.outputs.archive }}
-        shell: bash
-        run: |
-          # TODO(notarization): codesign + notarize + staple.
-          # This block is intentionally a scaffold — fill in when:
-          #   1. A Developer ID Application certificate is imported into the runner keychain
-          #      (via apple-actions/import-codesign-certs).
-          #   2. The mkit binary is codesigned:
-          #        codesign --force --options runtime --timestamp \
-          #          --sign "Developer ID Application: <NAME> (${APPLE_TEAM_ID})" \
-          #          "<path to mkit>"
-          #   3. A notarization zip is submitted and stapled:
-          #        xcrun notarytool submit notarize.zip \
-          #          --apple-id "${APPLE_ID}" \
-          #          --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
-          #          --team-id "${APPLE_TEAM_ID}" \
-          #          --wait
-          #        xcrun stapler staple "<path to mkit>"
-          #   4. Re-tar the archive after stapling so the stapled ticket is included.
-          echo "Apple secrets present — notarization would run here."
-          echo "Scaffold step: no-op until the TODO above is implemented."
+      # NOTE: macOS binaries are deliberately not codesigned or notarized.
+      # We rely on cosign keyless signatures (signed above) for trust.
+      # If/when an Apple Developer ID is provisioned, add codesign +
+      # `xcrun notarytool submit … --wait` + `xcrun stapler staple` here
+      # and re-tar the archive AFTER stapling so the ticket is embedded.
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
@@ -341,13 +331,23 @@ jobs:
             transparency log entry is public. See `docs/release/SIGNING.md`
             in the repo for full verification steps.
 
+            The verifier regex below is anchored: it pins the exact workflow
+            path and accepts only strict semver tags (with optional
+            pre-release suffix like `-rc.1`).
+
             ```sh
             cosign verify-blob \
-              --certificate-identity-regexp "https://github.com/officialunofficial/mkit/.github/workflows/release.yml@refs/tags/v.*" \
+              --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
               --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
               --bundle <archive>.cosign.bundle \
               <archive>
             ```
+
+            ### Platform notes
+
+            macOS binaries are **not codesigned or notarized**. Trust is
+            established via the cosign signature above. Running from a
+            terminal works; double-clicking in Finder hits Gatekeeper.
 
             ### SBOM
 
@@ -399,7 +399,9 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           workspaces: rust -> rust/target
+          prefix-key: "rust-release-wasm32"
           key: release-wasm32
+          cache-on-failure: false
 
       - name: Setup Node.js (npm registry)
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0

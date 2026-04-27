@@ -44,6 +44,8 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           workspaces: rust -> rust/target
+          prefix-key: "rust-security-audit"
+          cache-on-failure: false
 
       # rustsec/audit-check@v1 does not accept a working-directory input
       # (silently dropped; the action then `cargo generate-lockfile`s at the

@@ -1,0 +1,71 @@
+name: Fuzz smoke
+
+# Nightly libfuzzer smoke run for the cargo-fuzz targets under
+# rust/fuzz/fuzz_targets/. Each target runs for ~60 s; this is a
+# spot-check, not a campaign. Failures are surfaced but do not block
+# anything because (a) cargo-fuzz needs nightly so toolchain churn is
+# a known source of flakes, and (b) we have not yet wired corpus
+# persistence. Tighten `continue-on-error` once the harness is stable.
+#
+# Manual repro:
+#   cd rust/fuzz && cargo +nightly fuzz run delta -- -max_total_time=60
+
+on:
+  schedule:
+    # 04:00 UTC daily — pick a low-contention window.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [delta, pack, tree]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable action, nightly toolchain
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          # cargo-fuzz builds inside rust/fuzz with its own target dir,
+          # but pulls workspace deps from rust/. Cache both.
+          workspaces: |
+            rust -> rust/target
+            rust/fuzz -> rust/fuzz/target
+          prefix-key: "rust-fuzz-${{ matrix.target }}"
+          cache-on-failure: false
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run fuzz target (${{ matrix.target }}, 60s)
+        working-directory: rust/fuzz
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
+
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: |
+            rust/fuzz/fuzz/artifacts/**
+            rust/fuzz/artifacts/**
+          if-no-files-found: ignore
+          retention-days: 14

@@ -10,7 +10,10 @@ name: Supply chain
 # Policy lives in docs/release/SUPPLY-CHAIN.md.
 #
 # Post-Rust-cutover audit (Phase 10):
-#   - dependency-review: left disabled (if: false) pending GHAS toggle.
+#   - dependency-review: enabled on pull_request events. Public-repo
+#     Dependency Graph is sufficient for the advisory feed; license
+#     blocking degrades to no-op without GHAS but we still get the
+#     vulnerability gate, which is the priority.
 #   - scorecard: language-agnostic; no changes needed.
 #   - sbom-refresh: anchore/sbom-action (Syft) auto-detects Cargo.lock;
 #     scanning path: . picks up rust/Cargo.lock correctly. No changes needed.
@@ -29,15 +32,13 @@ permissions:
 jobs:
   dependency-review:
     name: Dependency review (PRs)
-    # TODO(ci): flip `false` → `github.event_name == 'pull_request'`
-    # once `actions/dependency-review-action` stops reporting
-    # "not supported on this repository". Enabling Dependency Graph in
-    # repo settings is necessary but not sufficient — GitHub Advanced
-    # Security (free for public repos but separately toggled at
-    # Settings → Code security) must also be on. Using `if: false`
-    # here skips the job entirely so the check does not surface as
-    # perpetually red on every PR.
-    if: false
+    # Public-repo Dependency Graph gives us the advisory feed for free;
+    # license enforcement requires GHAS but advisory enforcement does
+    # not. If GHAS is off the action still runs and reports advisories;
+    # license `deny-licenses` checks may no-op silently. That's an
+    # acceptable failure mode: we'd rather get the vulnerability gate
+    # than nothing.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read

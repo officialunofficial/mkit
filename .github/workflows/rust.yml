@@ -36,10 +36,17 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
 
+      # Cache key is partitioned per-workflow + per-runner so a malicious
+      # PR cannot poison a key that a privileged workflow (release.yml,
+      # which runs with secrets + id-token: write) later reads. See
+      # docs/release/SUPPLY-CHAIN.md and the Phase-10 cache-poisoning
+      # audit note.
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           workspaces: rust -> rust/target
+          prefix-key: "rust-ci-${{ matrix.os }}"
+          cache-on-failure: false
 
       # Native packages needed by optional signers when --all-features
       # turns them on across the workspace. macOS gates these deps out
@@ -82,3 +89,47 @@ jobs:
             echo "::error::mkit version contract violated — stdout is not exactly 'mkit <X.Y.Z>\\n'"
             exit 1
           fi
+
+  # Minimum-supported Rust version gate. Reads `rust-version` from
+  # rust/Cargo.toml so the source of truth stays in one place; if a dep
+  # bump pulls in something that requires a newer rustc, this job fails
+  # before users on the pinned MSRV are affected.
+  msrv:
+    name: MSRV check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Resolve MSRV from rust/Cargo.toml
+        id: msrv
+        shell: bash
+        run: |
+          # Pulls the first `rust-version = "X.Y"` line from the
+          # workspace package table. Quote-stripped via awk -F'"'.
+          MSRV=$(awk -F'"' '/^[[:space:]]*rust-version[[:space:]]*=/ {print $2; exit}' rust/Cargo.toml)
+          if [ -z "${MSRV}" ]; then
+            echo "::error::could not read rust-version from rust/Cargo.toml"
+            exit 1
+          fi
+          echo "msrv=${MSRV}" >> "$GITHUB_OUTPUT"
+          echo "MSRV resolved to ${MSRV}"
+
+      - name: Install Rust ${{ steps.msrv.outputs.msrv }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.msrv }}
+
+      - name: Install native signer deps
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: rust -> rust/target
+          prefix-key: "rust-msrv-${{ steps.msrv.outputs.msrv }}"
+          cache-on-failure: false
+
+      - name: cargo check (workspace, locked)
+        working-directory: rust
+        run: cargo check --workspace --locked --all-targets
