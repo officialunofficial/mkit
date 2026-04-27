@@ -418,6 +418,15 @@ jobs:
             --target bundler \
             --out-dir pkg
 
+      - name: Patch bundler glue for Bun / Workers compat (issue #90)
+        # wasm-pack 0.13's auto-init `__wbg_set_wasm(wasm)` call breaks
+        # under Bun + Cloudflare Workers (their bundler resolution stores
+        # a WebAssembly.Module / path-shim, not the wasm-bindgen exports
+        # namespace). The patcher additively exports `mkit_wasm_init(module)`
+        # so consumers on broken bundlers can recover with a one-liner.
+        # Strictly additive — esbuild/webpack/vite consumers are untouched.
+        run: node scripts/patch-wasm-bundler-glue.mjs rust/crates/mkit-wasm/pkg
+
       - name: Set npm package name + version
         working-directory: rust/crates/mkit-wasm/pkg
         env:
