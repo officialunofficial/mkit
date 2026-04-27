@@ -32,15 +32,25 @@ fn commit_without_message_honours_editor_env_var() {
     }
 
     let td = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
     Command::new(mkit_bin())
         .args(["init"])
         .current_dir(td.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .status()
+        .unwrap();
+    // 0.3.0 removed auto-keygen on `mkit commit`.
+    Command::new(mkit_bin())
+        .args(["keygen"])
+        .current_dir(td.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
         .status()
         .unwrap();
     fs::write(td.path().join("hello.txt"), b"hi\n").unwrap();
     Command::new(mkit_bin())
         .args(["add", "."])
         .current_dir(td.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
         .status()
         .unwrap();
 
@@ -48,6 +58,7 @@ fn commit_without_message_honours_editor_env_var() {
     let out = Command::new(mkit_bin())
         .args(["commit"])
         .current_dir(td.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
         .env("EDITOR", script.as_os_str())
         .env_remove("GIT_EDITOR")
         .env_remove("VISUAL")
@@ -73,15 +84,24 @@ fn commit_without_message_and_empty_editor_output_aborts() {
     }
 
     let td = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
     Command::new(mkit_bin())
         .args(["init"])
         .current_dir(td.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .status()
+        .unwrap();
+    Command::new(mkit_bin())
+        .args(["keygen"])
+        .current_dir(td.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
         .status()
         .unwrap();
     fs::write(td.path().join("f.txt"), b"x").unwrap();
     Command::new(mkit_bin())
         .args(["add", "."])
         .current_dir(td.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
         .status()
         .unwrap();
 
@@ -90,6 +110,7 @@ fn commit_without_message_and_empty_editor_output_aborts() {
     let out = Command::new(mkit_bin())
         .args(["commit"])
         .current_dir(td.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
         .env("EDITOR", script.as_os_str())
         .env_remove("GIT_EDITOR")
         .env_remove("VISUAL")

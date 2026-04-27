@@ -18,15 +18,21 @@ fn mkit_bin() -> &'static str {
 }
 
 fn run_in(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(mkit_bin())
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let out = Command::new(mkit_bin())
         .args(args)
         .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg.path())
         .output()
-        .expect("spawn mkit")
+        .expect("spawn mkit");
+    drop(xdg);
+    out
 }
 
 fn init_repo_with_commit(cwd: &Path) {
     assert!(run_in(cwd, &["init"]).status.success());
+    // 0.3.0: explicit keygen required (auto-keygen on commit removed).
+    assert!(run_in(cwd, &["keygen"]).status.success());
     fs::write(cwd.join("README.md"), b"hello\n").unwrap();
     assert!(run_in(cwd, &["add", "README.md"]).status.success());
     assert!(run_in(cwd, &["commit", "-m", "init"]).status.success());
@@ -64,17 +70,70 @@ fn keygen_secp256k1_writes_32_byte_key_with_mode_0600() {
 
 #[test]
 fn keygen_p256_writes_to_custom_config_path() {
+    // 0.3.0: `attest.p256_key_path` is user-scoped only — a per-repo
+    // value would let a hostile clone redirect where keys land. We
+    // honour it from `$XDG_CONFIG_HOME/mkit/config` and ignore it
+    // from `<repo>/.mkit/config` (with a stderr warning).
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
-    init_repo_with_commit(root);
-
+    let xdg = tempfile::tempdir().unwrap();
+    let xdg_path = xdg.path().to_path_buf();
+    let cfg_dir = xdg_path.join("mkit");
+    fs::create_dir_all(&cfg_dir).unwrap();
     fs::write(
-        root.join(".mkit/config"),
+        cfg_dir.join("config"),
         b"attest.p256_key_path = .mkit/keys/custom-p256.key\n",
     )
     .unwrap();
 
-    let out = run_in(root, &["keygen", "--algorithm", "p256"]);
+    // init + keygen (ed25519 default, populates .mkit/keys/default.key
+    // for the upcoming commit).
+    assert!(
+        Command::new(mkit_bin())
+            .args(["init"])
+            .current_dir(root)
+            .env("XDG_CONFIG_HOME", &xdg_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new(mkit_bin())
+            .args(["keygen"])
+            .current_dir(root)
+            .env("XDG_CONFIG_HOME", &xdg_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(root.join("README.md"), b"hello\n").unwrap();
+    assert!(
+        Command::new(mkit_bin())
+            .args(["add", "README.md"])
+            .current_dir(root)
+            .env("XDG_CONFIG_HOME", &xdg_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new(mkit_bin())
+            .args(["commit", "-m", "init"])
+            .current_dir(root)
+            .env("XDG_CONFIG_HOME", &xdg_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    // Now keygen --algorithm p256 — should land at the custom path
+    // configured in user-scoped config.
+    let out = Command::new(mkit_bin())
+        .args(["keygen", "--algorithm", "p256"])
+        .current_dir(root)
+        .env("XDG_CONFIG_HOME", &xdg_path)
+        .output()
+        .expect("spawn mkit");
     assert!(
         out.status.success(),
         "keygen failed: stderr={}",
@@ -272,7 +331,14 @@ fn keygen_secp256k1_produces_usable_key_for_attest() {
     );
     fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
 
-    let v = run_in(root, &["verify-attest"]);
+    let v = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
     assert!(
         v.status.success(),
         "verify-attest failed: stdout={} stderr={}",
@@ -421,7 +487,14 @@ fn attest_three_way_envelope_ed25519_secp256k1_p256() {
     );
     fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
 
-    let v = run_in(root, &["verify-attest"]);
+    let v = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
     assert!(
         v.status.success(),
         "verify-attest failed: stdout={} stderr={}",

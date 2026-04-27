@@ -45,18 +45,52 @@ fn mkit_sign_file_bin() -> std::path::PathBuf {
 }
 
 fn run_in(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(mkit_bin())
+    run_in_with_user_config(cwd, args, None)
+}
+
+/// Run `mkit` with `XDG_CONFIG_HOME` pointed at a per-call tempdir so
+/// the developer's real user config does not leak into the test, and
+/// optionally seed a `mkit/config` under that tempdir. Mirrors the
+/// 0.3.0 split where security-sensitive keys live in user-scoped
+/// config and per-repo `.mkit/config` cannot set them.
+fn run_in_with_user_config(cwd: &Path, args: &[&str], user_cfg: Option<&str>) -> Output {
+    let xdg_root = tempfile::tempdir().expect("xdg tempdir");
+    if let Some(text) = user_cfg {
+        let cfg_dir = xdg_root.path().join("mkit");
+        fs::create_dir_all(&cfg_dir).unwrap();
+        fs::write(cfg_dir.join("config"), text).unwrap();
+    }
+    let out = Command::new(mkit_bin())
         .args(args)
         .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg_root.path())
         .output()
-        .expect("spawn mkit")
+        .expect("spawn mkit");
+    // Keep `xdg_root` alive until after the process completes — the
+    // child reads the file lazily; if `xdg_root` dropped before this
+    // line, the file would be removed mid-run.
+    drop(xdg_root);
+    out
 }
 
 fn init_repo_with_commit(cwd: &Path) {
     assert!(run_in(cwd, &["init"]).status.success());
+    // 0.3.0 removed auto-keygen on `mkit commit`; tests now create
+    // the signing key explicitly.
+    let kg = run_in(cwd, &["keygen"]);
+    assert!(
+        kg.status.success(),
+        "keygen failed: {}",
+        String::from_utf8_lossy(&kg.stderr)
+    );
     fs::write(cwd.join("README.md"), b"hello\n").unwrap();
     assert!(run_in(cwd, &["add", "README.md"]).status.success());
-    assert!(run_in(cwd, &["commit", "-m", "init"]).status.success());
+    let c = run_in(cwd, &["commit", "-m", "init"]);
+    assert!(
+        c.status.success(),
+        "commit failed: {}",
+        String::from_utf8_lossy(&c.stderr)
+    );
 }
 
 /// Write a 32-byte raw key file with mode 0600.
@@ -137,7 +171,14 @@ fn attest_and_verify_ed25519_roundtrip() {
     let trust_path = root.join(".mkit/attest-trust-roots.toml");
     fs::write(&trust_path, toml).unwrap();
 
-    let out = run_in(root, &["verify-attest"]);
+    let out = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
     assert!(
         out.status.success(),
         "verify-attest failed: status={:?} stdout={} stderr={}",
@@ -206,7 +247,14 @@ fn attest_and_verify_secp256k1_roundtrip() {
     );
     fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
 
-    let out = run_in(root, &["verify-attest"]);
+    let out = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
     assert!(
         out.status.success(),
         "verify-attest failed: status={:?} stdout={} stderr={}",
@@ -272,7 +320,14 @@ fn attest_and_verify_p256_roundtrip() {
     );
     fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
 
-    let out = run_in(root, &["verify-attest"]);
+    let out = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
     assert!(
         out.status.success(),
         "verify-attest failed: status={:?} stdout={} stderr={}",
@@ -398,22 +453,19 @@ fn attest_external_cli_flag_passes_argv() {
     // `--external-signer-arg --key --external-signer-arg <path>` must
     // reach `mkit-sign-file`'s `Args::parse`. Without pass-through the
     // binary errors with "no key path".
+    //
+    // 0.3.0: `attest.external_signer_path` is user-scoped, NOT
+    // per-repo, so we point XDG_CONFIG_HOME at a tempdir and write
+    // the config there.
     let (td, key_path, pk) = fixture_for_external_ed25519();
     let root = td.path();
     let signer_bin = mkit_sign_file_bin();
 
-    // Point the CLI at the signer binary via on-disk config — same
-    // plumbing users have today for `external_signer_path`.
-    fs::create_dir_all(root.join(".mkit")).unwrap();
-    fs::write(
-        root.join(".mkit/config"),
-        format!(
-            "attest.external_signer_path = {}\n",
-            signer_bin.to_str().unwrap()
-        ),
-    )
-    .unwrap();
-    let out = run_in(
+    let user_cfg = format!(
+        "attest.external_signer_path = {}\n",
+        signer_bin.to_str().unwrap()
+    );
+    let out = run_in_with_user_config(
         root,
         &[
             "attest",
@@ -426,6 +478,7 @@ fn attest_external_cli_flag_passes_argv() {
             "--external-signer-arg",
             key_path.to_str().unwrap(),
         ],
+        Some(&user_cfg),
     );
     assert!(
         out.status.success(),
@@ -444,7 +497,14 @@ fn attest_external_cli_flag_passes_argv() {
         hex_lower(&pk)
     );
     fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
-    let out = run_in(root, &["verify-attest"]);
+    let out = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
     assert!(
         out.status.success(),
         "verify failed: stdout={} stderr={}",
@@ -455,26 +515,25 @@ fn attest_external_cli_flag_passes_argv() {
 
 #[test]
 fn attest_external_config_args_pass_through() {
-    // Same workflow via `attest.external_signer_args` in .mkit/config.
+    // Same workflow via `attest.external_signer_args` in user-scoped
+    // config. The per-repo path was an attack vector and is rejected
+    // with a warning; this test verifies the legitimate user-scoped
+    // configuration still works end-to-end.
     let (td, key_path, pk) = fixture_for_external_ed25519();
     let root = td.path();
     let signer_bin = mkit_sign_file_bin();
 
-    fs::create_dir_all(root.join(".mkit")).unwrap();
-    fs::write(
-        root.join(".mkit/config"),
-        format!(
-            "attest.external_signer_path = {}\n\
-             attest.external_signer_args = --key|{}\n",
-            signer_bin.to_str().unwrap(),
-            key_path.to_str().unwrap()
-        ),
-    )
-    .unwrap();
+    let user_cfg = format!(
+        "attest.external_signer_path = {}\n\
+         attest.external_signer_args = --key|{}\n",
+        signer_bin.to_str().unwrap(),
+        key_path.to_str().unwrap()
+    );
 
-    let out = run_in(
+    let out = run_in_with_user_config(
         root,
         &["attest", "--algorithm", "ed25519", "--signer", "external"],
+        Some(&user_cfg),
     );
     assert!(
         out.status.success(),
@@ -492,7 +551,14 @@ fn attest_external_config_args_pass_through() {
         hex_lower(&pk)
     );
     fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
-    let out = run_in(root, &["verify-attest"]);
+    let out = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
     assert!(out.status.success());
 }
 
@@ -560,7 +626,14 @@ fn attest_additional_signer_args_clause_pass_through() {
         hex_lower(&pk_ext),
     );
     fs::write(root.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
-    let out = run_in(root, &["verify-attest"]);
+    let out = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
     assert!(
         out.status.success(),
         "verify failed: stdout={} stderr={}",

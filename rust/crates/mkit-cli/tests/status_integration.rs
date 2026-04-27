@@ -9,11 +9,15 @@ fn mkit_bin() -> &'static str {
 }
 
 fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(mkit_bin())
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let out = Command::new(mkit_bin())
         .args(args)
         .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg.path())
         .output()
-        .expect("spawn mkit")
+        .expect("spawn mkit");
+    drop(xdg);
+    out
 }
 
 /// Initialise a fresh repo and make an initial commit containing `files`.
@@ -21,6 +25,8 @@ fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
 fn init_with_commit(files: &[(&str, &[u8])]) -> tempfile::TempDir {
     let td = tempfile::tempdir().unwrap();
     assert!(run_in(td.path(), &["init"]).status.success());
+    // 0.3.0: explicit keygen required.
+    assert!(run_in(td.path(), &["keygen"]).status.success());
     for (name, content) in files {
         fs::write(td.path().join(name), content).unwrap();
         assert!(
