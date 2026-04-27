@@ -4,8 +4,8 @@
 //! Background: wasm-pack 0.13's bundler-target output has an import-
 //! time `__wbg_set_wasm(wasm)` call that breaks under Bun + Cloudflare
 //! Workers (their bundler resolution stores the wrong thing in `wasm`,
-//! leaving every export at "__wbindgen_add_to_stack_pointer is not a
-//! function"). The fix is strictly additive: the auto-init still runs
+//! leaving every export at "`__wbindgen_add_to_stack_pointer` is not
+//! a function"). The fix is strictly additive: the auto-init still runs
 //! for working bundlers (esbuild, webpack, vite-with-plugin); broken
 //! bundlers call `mkit_wasm_init(module)` explicitly to recover.
 //!
@@ -48,8 +48,7 @@ fn patch_bundler_glue(source: &str) -> String {
         return source.to_string();
     }
 
-    let import_pattern =
-        "import { __wbg_set_wasm } from \"./mkit_wasm_bg.js\";";
+    let import_pattern = "import { __wbg_set_wasm } from \"./mkit_wasm_bg.js\";";
     assert!(
         source.contains(import_pattern),
         "fixture missing the wasm-pack import line — wasm-pack output shape changed?"

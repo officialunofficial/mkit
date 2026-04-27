@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-27
+
+### Added
+
+- `mkit-wasm`: three raw Ed25519 exports — `ed25519_verify(sig, msg,
+  pubkey) -> bool`, `ed25519_sign(msg, seed) -> Uint8Array`, and
+  `ed25519_pubkey_from_seed(seed) -> Uint8Array`. Lets
+  `@makechain/mkit-wasm` consumers drop a separate `@noble/ed25519`
+  dependency: every Ed25519 op now routes through the same
+  `ed25519-dalek` crate mkit's commit-signing path uses, with
+  `verify_strict` semantics (canonical R, s mod L, canonical A; rejects
+  hdevalence/ed25519consensus malleability vectors). Closes [#90](https://github.com/officialunofficial/mkit/issues/90).
+- `mkit-wasm`: explicit `mkit_wasm_init(module: WebAssembly.Module)`
+  export for bundlers that mis-resolve the wasm-pack auto-init step
+  (Bun, Cloudflare Workers / Wrangler). Strictly additive — auto-init
+  still runs at import for esbuild / webpack / vite consumers; broken
+  bundlers recover with a two-line shim. Surfaced from the downstream
+  consumer's PR #502 hit when v0.2.0 shipped.
+- `mkit-attest::verify::verify_ed25519` is promoted from `pub(crate)`
+  to `pub` so `mkit-wasm` (and any other downstream) can share the
+  exact strict verifier without re-implementing it.
+
 ## [0.2.0] - 2026-04-27
 
 ### Wire/Signature break

@@ -293,9 +293,11 @@ pub fn ed25519_sign(msg: &[u8], seed: &[u8]) -> Result<Vec<u8>, JsValue> {
 /// signer uses, so a key minted here interoperates 1:1 with on-disk
 /// `.mkit/keys/default.key` material.
 #[wasm_bindgen]
-pub fn ed25519_pubkey_from_seed(seed: &[u8]) -> Result<Vec<u8>, JsError> {
-    let seed_arr: [u8; 32] = <[u8; 32]>::try_from(seed)
-        .map_err(|_| JsError::new("seed must be exactly 32 bytes"))?;
+pub fn ed25519_pubkey_from_seed(seed: &[u8]) -> Result<Vec<u8>, JsValue> {
+    // `JsValue` flavour (rather than `JsError`) for the same native-test
+    // reason as `ed25519_sign`. JS-side shape is identical.
+    let seed_arr: [u8; 32] =
+        parse_fixed::<32>(seed).map_err(|_| js_err("seed must be exactly 32 bytes"))?;
     let kp = KeyPair::from_seed(seed_arr);
     Ok(kp.public.0.to_vec())
 }
