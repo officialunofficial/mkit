@@ -42,6 +42,11 @@ hex = "0.4"
 # workspace pin (via mkit-core); the transitive re-export in
 # `bao::Hash` matches, so no second major shows up in the tree.
 bao = "0.13"
+# Direct dep for the raw Ed25519 wasm exports (`ed25519_sign`,
+# `ed25519_pubkey_from_seed`). Same major as the transitive copy
+# mkit-core::sign + mkit-attest already pull in (default-features off,
+# `std` on) — keeps the dep graph at a single dalek version.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 
 # Activate the browser randomness backends for every getrandom in the
 # dep graph when compiling for `wasm32-unknown-unknown`. Two major
@@ -53,3 +58,7 @@ bao = "0.13"
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+# dalek is a regular dependency above (see `[dependencies]`); tests
+# (`tests/ed25519.rs`) reach the same crate without a separate
+# `[dev-dependencies]` entry, which would risk a duplicate dep version.
