@@ -1,8 +1,13 @@
-//! `mkit config` — show or set values in `.mkit/config`.
+//! `mkit config` — show or set values.
+//!
+//! Most keys live in the per-repo `<repo>/.mkit/config`. Security-
+//! sensitive keys (see [`config::REPO_FORBIDDEN_KEYS`]) live in the
+//! user-scoped `$XDG_CONFIG_HOME/mkit/config` and are written there
+//! when set via this command. Unknown keys are rejected.
 
 use std::io::Write;
 
-use crate::config::{self, Config};
+use crate::config::{self, Config, REPO_FORBIDDEN_KEYS};
 use crate::exit;
 
 #[must_use]
@@ -28,6 +33,16 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);
     }
+    // Path-traversal validation for any key whose value is a filesystem
+    // path. Catches `..` even on the user-scoped path.
+    if is_path_key(key)
+        && let Err(e) = config::validate_key_path(value)
+    {
+        return emit_err(&format!("{e}"), exit::CONFIG_ERROR);
+    }
+    if REPO_FORBIDDEN_KEYS.contains(&key.as_str()) {
+        return write_user_scoped(key, value);
+    }
     if let Err(code) = apply(&mut cfg, key, value) {
         return code;
     }
@@ -37,6 +52,42 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
+fn is_path_key(key: &str) -> bool {
+    matches!(
+        key,
+        "signing_key"
+            | "ssh.user_known_hosts_file"
+            | "ssh.identity_file"
+            | "attest.external_signer_path"
+            | "attest.secp256k1_key_path"
+            | "attest.p256_key_path"
+    )
+}
+
+fn write_user_scoped(key: &str, value: &str) -> u8 {
+    match config::write_user_kv(key, value) {
+        Ok(()) => {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "wrote `{key}` to user-scoped config at {}",
+                config::user_config_path().display()
+            );
+            exit::OK
+        }
+        Err(e) => emit_err(
+            &format!(
+                "write user config at {}: {e}",
+                config::user_config_path().display()
+            ),
+            exit::CANTCREAT,
+        ),
+    }
+}
+
+/// Apply a key/value to the in-memory `Config`. Only repo-safe keys
+/// are reachable here — security-sensitive keys are intercepted by
+/// [`run`] and routed to user-scoped storage before this is called.
 fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
     match key {
         "user.identity" => {
@@ -44,14 +95,12 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
                 .map_err(|e| emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR))?;
             cfg.user_identity = canon;
         }
-        "signing_key" => value.clone_into(&mut cfg.signing_key),
         "default_branch" => value.clone_into(&mut cfg.default_branch),
         "remote_endpoint" => value.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => value.clone_into(&mut cfg.remote_bucket),
         "remote_type" => value.clone_into(&mut cfg.remote_type),
-        "ssh.strict_host_key_checking" => value.clone_into(&mut cfg.ssh_strict_host_key_checking),
-        "ssh.user_known_hosts_file" => value.clone_into(&mut cfg.ssh_user_known_hosts_file),
-        "ssh.identity_file" => value.clone_into(&mut cfg.ssh_identity_file),
+        "attest.default_algorithm" => value.clone_into(&mut cfg.attest.default_algorithm),
+        "attest.signer" => value.clone_into(&mut cfg.attest.signer),
         "author_mid" => {
             return Err(emit_err(
                 "config key `author_mid` has been removed; use `user.identity` (mid:<N>)",
