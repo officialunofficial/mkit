@@ -22,9 +22,19 @@ workspace = true
 blake3 = "1"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 getrandom = "0.4"
+# `subtle` is a constant-time-equality primitive used by the Ed25519
+# `SecretSeed` PartialEq. dalek pulls it transitively but we depend on
+# it directly so the constant-time guarantee is explicit at this crate
+# boundary instead of relying on a transitive pin.
+subtle = { version = "2", default-features = false }
 tempfile = "3"
 thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
+
+# POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
+# Windows path uses default ACLs as documented in `docs/SPEC-SIGNING.md`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 hex = "0.4"
