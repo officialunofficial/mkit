@@ -146,14 +146,10 @@ fn load_signing_key(
     cwd: &std::path::Path,
     rel_signing_key_path: &str,
 ) -> Result<KeyPair, (String, u8)> {
-    // Belt-and-braces path-traversal guard. The config layer already
-    // refuses `..` in any *_key_path, but a user-scoped config edited
-    // by hand could still produce one and we'd rather surface a clear
-    // error than build a path that escapes the repo.
-    if let Err(e) = crate::config::validate_key_path(rel_signing_key_path) {
-        return Err((format!("{e}"), exit::CONFIG_ERROR));
-    }
-    let key_path = cwd.join(rel_signing_key_path);
+    let key_path = match crate::config::resolve_key_path(cwd, rel_signing_key_path) {
+        Ok(p) => p,
+        Err(e) => return Err((format!("{e}"), exit::CONFIG_ERROR)),
+    };
     if !key_path.exists() {
         return Err((
             format!(

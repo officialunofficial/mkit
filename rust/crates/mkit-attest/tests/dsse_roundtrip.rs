@@ -23,7 +23,8 @@ const SEED: [u8; 32] = [0x42; 32];
 
 fn build_envelope_signed_with_repo_key() -> (Envelope, [u8; 32], String) {
     let kp = KeyPair::from_seed(SEED);
-    let mut signer = RepoKeySigner::new(kp.clone());
+    let pk = kp.public.0;
+    let mut signer = RepoKeySigner::new(kp);
     let keyid = signer.keyid().expect("keyid");
 
     // Build the payload (in-toto Statement) and the PAE we sign.
@@ -40,7 +41,7 @@ fn build_envelope_signed_with_repo_key() -> (Envelope, [u8; 32], String) {
             sig: sig_bytes,
         }],
     };
-    (env, kp.public.0, keyid)
+    (env, pk, keyid)
 }
 
 #[test]
@@ -103,11 +104,9 @@ fn wrong_keyid_falls_back_to_unknown() {
 #[test]
 fn keyid_matches_blake3_of_pubkey() {
     let kp = KeyPair::from_seed(SEED);
-    let signer = RepoKeySigner::new(kp.clone());
+    let pk = kp.public.0;
+    let signer = RepoKeySigner::new(kp);
     let kid = signer.keyid().unwrap();
-    let expected = format!(
-        "{KEYID_PREFIX}{}",
-        to_hex(&mkit_core::hash::hash(&kp.public.0))
-    );
+    let expected = format!("{KEYID_PREFIX}{}", to_hex(&mkit_core::hash::hash(&pk)));
     assert_eq!(kid, expected);
 }
