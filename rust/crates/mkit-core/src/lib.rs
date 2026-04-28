@@ -7,7 +7,12 @@
 //! The library depends on `std` to keep the code readable. No `serde`,
 //! no `anyhow`, no panics on unchecked input.
 
-#![forbid(unsafe_code)]
+// `deny(unsafe_code)` rather than `forbid` so a single, justified
+// `#[allow(unsafe_code)]` callsite can use `libc::geteuid()` in
+// `sign::load_key` for the POSIX uid check. Every other module
+// remains under the same prohibition; a code-review gate (CONTRIBUTING)
+// requires SAFETY notes on any new `unsafe` block.
+#![deny(unsafe_code)]
 // `ed25519-dalek` v2.2 still pulls in older sha2/cpufeatures (and
 // rand_core 0.6 which transitively wants getrandom 0.2). These are
 // transitive duplicates we cannot dedupe without forking dalek; allow

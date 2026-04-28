@@ -28,11 +28,15 @@ fn mkit_bin() -> &'static str {
 }
 
 fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(mkit_bin())
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let out = Command::new(mkit_bin())
         .args(args)
         .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg.path())
         .output()
-        .expect("spawn mkit")
+        .expect("spawn mkit");
+    drop(xdg);
+    out
 }
 
 #[test]
@@ -82,6 +86,7 @@ fn push_roundtrip_against_mockito_http_server() {
 
     let td = tempfile::tempdir().unwrap();
     assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
     std::fs::write(td.path().join("hello.txt"), b"hello\n").unwrap();
     assert!(run_in(td.path(), &["add", "hello.txt"]).status.success());
     let out = run_in(td.path(), &["commit", "-m", "init"]);

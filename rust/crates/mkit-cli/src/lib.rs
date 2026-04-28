@@ -6,7 +6,11 @@
 //! `mkit-cli` is explicitly `publish = false` — it is monorepo-internal
 //! plumbing, not a stable API.
 
-#![forbid(unsafe_code)]
+// `deny` rather than `forbid` so the keygen `secp256k1`/`p256` raw-32
+// load path can call `libc::geteuid` for an owner check (single
+// SAFETY-noted block in `commands/keygen.rs`). All other modules
+// remain effectively `forbid`'d via review.
+#![deny(unsafe_code)]
 
 pub mod cli;
 pub mod commands;

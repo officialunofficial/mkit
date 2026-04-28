@@ -7,6 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-28
+
+> Coordinated security release. Three GitHub Security Advisories
+> (Critical / High / Medium) ship alongside this tag. Operators on
+> `0.1.x` or `0.2.x` should upgrade. Drafts under
+> `docs/advisories/`; published advisories at
+> <https://github.com/officialunofficial/mkit/security/advisories>.
+
+### Security
+
+- **Per-repo `.mkit/config` is no longer trusted with sensitive
+  keys.** A hostile clone could previously redirect the signing
+  key, point an external-signer subprocess at any binary, flip the
+  signer selector to weaponise a user-scoped HSM, or disable SSH
+  host-key checking. The full list of keys now rejected from
+  `<repo>/.mkit/config` (and accepted from
+  `$XDG_CONFIG_HOME/mkit/config` instead): `signing_key`,
+  `attest.signer`, `attest.default_algorithm`,
+  `attest.external_signer_path`, `attest.external_signer_args`,
+  `attest.secp256k1_key_path`, `attest.p256_key_path`,
+  `ssh.strict_host_key_checking`, `ssh.user_known_hosts_file`,
+  `ssh.identity_file`. Setting any of them in a repo config now
+  produces a stderr warning and the value is dropped.
+  ([advisory: GHSA-001](docs/advisories/GHSA-001-per-repo-config.md))
+- **`mkit verify-attest` default trust-roots moved to
+  `$XDG_CONFIG_HOME/mkit/trust-roots.toml`** so a hostile clone
+  cannot ship its own trust-roots and have verification print
+  "ok" against attacker keys. An explicit `--trust-roots` always
+  wins. In-repo paths require the explicit flag.
+  ([advisory: GHSA-002](docs/advisories/GHSA-002-trust-roots-scope.md))
+- **Hardened key-file handling** in `mkit-core::sign`:
+  - `load_key` opens with `O_NOFOLLOW`, fstats the open handle
+    (closes the path-based stat-then-read TOCTOU), enforces mode
+    `0600`, owner uid `==` running euid, and parent directory
+    mode `<= 0700`.
+  - `save_key` writes via tmp + `fsync` + atomic `rename` + parent
+    directory `fsync`. Power loss and SIGINT no longer leave a
+    0-byte key file. `O_EXCL | O_NOFOLLOW` on the tmp open.
+  - `read_exact` into a stack `[u8; 32]` instead of `fs::read` —
+    no heap residue of secret bytes.
+  - `SecretSeed::eq` switched from a hand-rolled XOR-OR loop to
+    `subtle::ConstantTimeEq`.
+  - Same `O_NOFOLLOW` + atomic-write hardening applied to the
+    raw 32-byte secp256k1 / P-256 paths in `mkit keygen`. Their
+    secrets travel inside `Zeroizing<[u8; 32]>` from
+    `getrandom::fill` through the signer constructor and the disk
+    write.
+  - New error variants: `InsecureKeyOwner`, `InsecureKeyDir`,
+    `KeyPathIsSymlink`.
+  ([advisory: GHSA-003](docs/advisories/GHSA-003-key-file-handling.md))
+- **No command silently creates a signing key any more.**
+  `mkit commit` and `mkit attest --signer repo-key` previously
+  auto-generated the key file when missing — combined with a
+  hostile-config redirect this produced an arbitrary-file
+  overwrite primitive (32 random bytes, mode 0600). Both commands
+  now refuse with a clear `run mkit keygen first` hint.
+  `mkit keygen`, `mkit commit`, and `mkit attest` (Ed25519,
+  repo-key) all resolve the key path through `cfg.signing_key`,
+  so a user with a custom path in user-scoped config sees
+  consistent behaviour across the three.
+
+### Changed
+
+- **BREAKING (CLI):** `mkit commit` against a fresh repo now
+  errors instead of auto-generating an Ed25519 key. Run
+  `mkit keygen` once, then commit. CI flows that depended on the
+  implicit keygen need an explicit step.
+- **BREAKING (CLI):** `mkit attest --signer repo-key` against a
+  fresh repo errors the same way; same fix.
+- **BREAKING (CLI):** `mkit verify-attest` no longer reads
+  `<repo>/.mkit/attest-trust-roots.toml` by default. Existing
+  flows must pass `--trust-roots <path>` explicitly or move the
+  file to `$XDG_CONFIG_HOME/mkit/trust-roots.toml`.
+- **BREAKING (config):** Repo configs that set any key in the
+  `REPO_FORBIDDEN_KEYS` list now log a warning and the value is
+  ignored. Move them to user-scoped config.
+- **BREAKING (config):** `mkit config <forbidden-key> <value>`
+  now writes to `$XDG_CONFIG_HOME/mkit/config` (and prints where).
+  Previously it wrote to `<repo>/.mkit/config`.
+- **BREAKING (library):** `mkit-core::MkitError` gains three
+  variants; downstream consumers that exhaustively match must
+  handle `InsecureKeyOwner`, `InsecureKeyDir`,
+  `KeyPathIsSymlink`.
+- **BREAKING (library):** `mkit_cli::commands::attest_factory::build_signer`
+  now takes `&Config` instead of `&AttestConfig`. Internal CLI
+  plumbing; not part of any documented stable surface.
+
+### Added
+
+- `docs/THREAT-MODEL.md` — attacker models, scope split, key-file
+  contract, and verification gates.
+- `docs/ARCHITECTURE.md` — workspace map and read-the-source guide.
+- `docs/advisories/{GHSA-001,002,003}.md` — published security
+  advisory drafts shipping with this release.
+- Governance scaffolding: `CODE_OF_CONDUCT.md`, `MAINTAINERS.md`,
+  `.github/PULL_REQUEST_TEMPLATE.md`, issue-template forms,
+  `.gitattributes`, `rustfmt.toml`, `clippy.toml`, fish completion.
+- CI: per-workflow `prefix-key` cache partition (closes a
+  pull-request → tag-push cache-poisoning vector), MSRV check,
+  nightly fuzz smoke, dependency-review job (currently gated off
+  pending Dependency Graph activation).
+- `install.sh` rewrite: cosign verification default-on, atomic
+  `mktemp + chmod + rename` install, working `--help` under
+  `curl | sh`, downgrade detection via `~/.local/state/mkit/installed-tag`.
+
+### Removed
+
+- `release.yml` notarization scaffold (was a documented TODO that
+  shipped unsigned macOS binaries while logging "notarization
+  would run"). macOS binaries are unsigned/un-notarized; trust is
+  via cosign keyless signatures.
+
 ## [0.2.1] - 2026-04-27
 
 ### Added

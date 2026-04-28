@@ -42,11 +42,22 @@ pub struct Secp256k1Signer {
 impl Secp256k1Signer {
     /// Build from a raw 32-byte secret scalar.
     ///
+    /// The parameter is taken `mut` so we can scrub it before this
+    /// constructor returns — the underlying `SigningKey` zeroizes its
+    /// own internal scalar on drop, but our parameter copy lives on
+    /// the function's stack frame until the frame is reused. Callers
+    /// that hold the secret on their own stack are still expected to
+    /// scrub their copy after this call returns; we cannot reach back
+    /// across the call boundary.
+    ///
     /// # Errors
     /// [`Error::Secp256k1KeyInvalid`] if the scalar is zero or >= n.
-    pub fn new(secret: [u8; 32]) -> Result<Self, Error> {
-        let sk =
-            SigningKey::from_bytes((&secret).into()).map_err(|_| Error::Secp256k1KeyInvalid)?;
+    pub fn new(mut secret: [u8; 32]) -> Result<Self, Error> {
+        use zeroize::Zeroize;
+        let result =
+            SigningKey::from_bytes((&secret).into()).map_err(|_| Error::Secp256k1KeyInvalid);
+        secret.zeroize();
+        let sk = result?;
         Ok(Self { sk })
     }
 

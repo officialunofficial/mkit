@@ -1,3 +1,10 @@
+---
+spec: SPEC-FASTCDC
+version: 1
+status: draft
+audience: implementers of compatible chunkers; anyone reproducing chunked_blob hashes across producers
+---
+
 # SPEC-FASTCDC — mkit v1 content-defined chunking
 
 Status: **Normative** for mkit v1 (content-defined chunking of large

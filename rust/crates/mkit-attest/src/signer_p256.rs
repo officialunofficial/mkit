@@ -52,10 +52,17 @@ impl P256Signer {
     /// values (zero or ≥ n) are rejected by the underlying crate and
     /// surface as [`Error::P256KeyInvalid`].
     ///
+    /// The parameter is taken `mut` so the constructor can scrub it
+    /// before returning — see [`super::signer_k256::Secp256k1Signer::new`]
+    /// for the rationale.
+    ///
     /// # Errors
     /// [`Error::P256KeyInvalid`] if the scalar is invalid.
-    pub fn new(secret: [u8; 32]) -> Result<Self, Error> {
-        let sk = SigningKey::from_bytes(&secret.into()).map_err(|_| Error::P256KeyInvalid)?;
+    pub fn new(mut secret: [u8; 32]) -> Result<Self, Error> {
+        use zeroize::Zeroize;
+        let result = SigningKey::from_bytes(&secret.into()).map_err(|_| Error::P256KeyInvalid);
+        secret.zeroize();
+        let sk = result?;
         Ok(Self { sk })
     }
 

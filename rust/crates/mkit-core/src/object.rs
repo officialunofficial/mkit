@@ -438,6 +438,22 @@ pub enum MkitError {
     /// access (POSIX `mode & 0o077 != 0`). Refuses to load.
     #[error("key file mode {actual:#o} is broader than 0600")]
     InsecureKeyPermissions { actual: u32 },
+    /// Key file is owned by a different uid than the calling process.
+    /// Could mean a planted file from a tar extraction or a malicious
+    /// bind mount. Refuse with the observed uid for diagnostics.
+    #[error("key file owner uid {actual} does not match process euid {euid}")]
+    InsecureKeyOwner { actual: u32, euid: u32 },
+    /// Parent directory of the key file is group/world-accessible.
+    /// `.mkit/keys/` MUST be 0700 to keep `inotify`-style swap attacks
+    /// out of reach.
+    #[error("key directory mode {actual:#o} is broader than 0700")]
+    InsecureKeyDir { actual: u32 },
+    /// Key path resolves through a symlink. We refuse symlinks at the
+    /// open(2) layer (`O_NOFOLLOW`) — this variant fires when the
+    /// kernel returns ELOOP. An attacker who can pre-create the path
+    /// as a symlink could otherwise redirect us to a key they control.
+    #[error("key path {0} is a symlink — refused")]
+    KeyPathIsSymlink(String),
     /// Key file length is not exactly 32 bytes.
     #[error("key file size {actual} is not 32 bytes (raw Ed25519 seed)")]
     InvalidKeyLength { actual: usize },

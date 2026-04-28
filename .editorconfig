@@ -1,0 +1,39 @@
+; mkit — editor configuration
+; https://editorconfig.org
+;
+; Single source of truth for whitespace conventions across the
+; workspace. `rustfmt.toml` still owns formatting for *.rs files; this
+; file is for editors and the non-Rust portions of the tree.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Rust uses 4 spaces (rustfmt default). Listed explicitly so editors
+# without a rustfmt integration still do the right thing.
+[*.rs]
+indent_size = 4
+
+# TOML, YAML, JSON, and Markdown lists conventionally use 2 spaces.
+[*.{toml,yml,yaml,json,md}]
+indent_size = 2
+
+# Shell scripts: 2 spaces is the project convention (matches install.sh,
+# scripts/verify-rename.sh).
+[*.{sh,bash,zsh,fish}]
+indent_size = 2
+
+# Makefiles require literal tabs for recipe lines.
+[Makefile]
+indent_style = tab
+
+# Generated / vendored files we don't own; let the upstream tool decide.
+[rust/Cargo.lock]
+insert_final_newline = unset
+trim_trailing_whitespace = unset

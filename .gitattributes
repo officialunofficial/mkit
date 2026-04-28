@@ -1,0 +1,33 @@
+# Default: treat all files as text, normalise line endings to LF on
+# checkin, and check out with LF on every platform. This avoids CRLF
+# noise on Windows clones and keeps golden vectors byte-stable.
+* text=auto eol=lf
+
+# Shell scripts and Rust sources are always LF, regardless of the
+# auto-detection above.
+*.sh   text eol=lf
+*.bash text eol=lf
+*.zsh  text eol=lf
+*.fish text eol=lf
+*.rs   text eol=lf
+
+# Cargo.lock is dense, machine-generated, and noisy in diffs. Treat it
+# as binary so `git diff` skips the body by default; tools that need
+# the full diff can pass `--text` explicitly.
+Cargo.lock -diff
+
+# Files excluded from `git archive` tarballs. Release tarballs ship
+# only the buildable source tree; CI config, test fixtures, fuzz
+# harnesses, the web demo site, contributor scripts, and release-only
+# documentation are dropped.
+.github/         export-ignore
+.gitattributes   export-ignore
+.gitignore       export-ignore
+.editorconfig    export-ignore
+rust/fuzz/       export-ignore
+rust/tests/      export-ignore
+tests/           export-ignore
+web/             export-ignore
+scripts/         export-ignore
+contrib/         export-ignore
+docs/release/    export-ignore

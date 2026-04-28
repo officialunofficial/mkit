@@ -93,10 +93,23 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // --- Build Registry. --------------------------------------------
+    //
+    // Trust-roots default to the **user-scoped** path
+    // `$XDG_CONFIG_HOME/mkit/trust-roots.toml`. A repo-local default
+    // would let a hostile clone ship its own trust-roots and have
+    // `mkit verify-attest` print "ok" against attacker keys; see
+    // `docs/THREAT-MODEL.md` §"Trust-roots scope". An explicit
+    // `--trust-roots <path>` always wins so CI flows can point at a
+    // pinned file.
     let trust_path = parsed
         .trust_roots
         .as_deref()
-        .map_or_else(|| mkit_dir.join("attest-trust-roots.toml"), PathBuf::from);
+        .map_or_else(default_trust_roots_path, PathBuf::from);
+    if let Err(code) =
+        warn_if_unsafe_trust_roots(&trust_path, &mkit_dir, parsed.trust_roots.is_some())
+    {
+        return code;
+    }
     let registry = match load_trust_roots(&trust_path) {
         Ok(r) => r,
         Err((msg, code)) => return emit_err(&msg, code),
@@ -200,6 +213,49 @@ pub fn run(args: &[String]) -> u8 {
         let _ = writeln!(stdout, "bad: at least one attestation failed verification");
         exit::DATAERR
     }
+}
+
+/// Resolve the user-scoped default trust-roots path:
+/// `$XDG_CONFIG_HOME/mkit/trust-roots.toml`.
+fn default_trust_roots_path() -> PathBuf {
+    crate::config::xdg_config_home().join("mkit/trust-roots.toml")
+}
+
+/// Refuse to verify against an in-repo trust-roots file unless the user
+/// passed `--trust-roots` explicitly. Without this gate, a hostile
+/// cloned repo could ship `<repo>/.mkit/attest-trust-roots.toml` listing
+/// attacker keys and `mkit verify-attest` would print "ok".
+fn warn_if_unsafe_trust_roots(
+    trust_path: &Path,
+    mkit_dir: &Path,
+    user_provided_flag: bool,
+) -> Result<(), u8> {
+    if user_provided_flag {
+        return Ok(());
+    }
+    if trust_path.starts_with(mkit_dir) {
+        return Err(emit_err(
+            &format!(
+                "refusing to use in-repo trust-roots at {} — pass `--trust-roots` \
+                 explicitly or move the file to {}",
+                trust_path.display(),
+                default_trust_roots_path().display()
+            ),
+            exit::CONFIG_ERROR,
+        ));
+    }
+    if !trust_path.exists() {
+        // Print a hint, but do NOT silently fall back to the in-repo
+        // path. Empty registry → no signatures will pass; the loop
+        // below prints the per-attestation failure.
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "note: trust-roots file not found at {} — no keys loaded",
+            trust_path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Shorten a keyid for display: `<prefix>:<first-16-hex>…`.

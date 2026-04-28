@@ -1,0 +1,10 @@
+# clippy configuration for the mkit workspace.
+
+msrv = "1.95"
+
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold = 8
+
+disallowed-methods = [
+    { path = "std::env::set_var", reason = "races other threads on POSIX; set env at process start" },
+]

@@ -16,11 +16,15 @@ fn mkit_bin() -> &'static str {
 }
 
 fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(mkit_bin())
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let out = Command::new(mkit_bin())
         .args(args)
         .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg.path())
         .output()
-        .expect("spawn mkit")
+        .expect("spawn mkit");
+    drop(xdg);
+    out
 }
 
 fn encode_ed25519_user_identity(pubkey: &[u8; 32]) -> String {
@@ -37,6 +41,8 @@ fn encode_ed25519_user_identity(pubkey: &[u8; 32]) -> String {
 fn commit_uses_config_user_identity_when_set() {
     let td = tempfile::tempdir().unwrap();
     assert!(run_in(td.path(), &["init"]).status.success());
+    // 0.3.0: explicit keygen required.
+    assert!(run_in(td.path(), &["keygen"]).status.success());
 
     // Pick a deterministic, known-non-signing-key identity and pin it
     // into `.mkit/config`. 0xAA repeated is distinct from whatever
@@ -81,6 +87,8 @@ fn commit_uses_config_user_identity_when_set() {
 fn commit_author_flag_overrides_config_and_default() {
     let td = tempfile::tempdir().unwrap();
     assert!(run_in(td.path(), &["init"]).status.success());
+    // 0.3.0: explicit keygen required.
+    assert!(run_in(td.path(), &["keygen"]).status.success());
 
     // Seed config with identity A — the flag must win over it.
     let cfg_identity = [0x11u8; 32];
@@ -130,6 +138,8 @@ fn commit_author_flag_overrides_config_and_default() {
 fn commit_falls_back_to_pubkey_when_no_identity_set() {
     let td = tempfile::tempdir().unwrap();
     assert!(run_in(td.path(), &["init"]).status.success());
+    // 0.3.0: explicit keygen required.
+    assert!(run_in(td.path(), &["keygen"]).status.success());
     // No user.identity in config.
 
     fs::write(td.path().join("f.txt"), b"hi").unwrap();

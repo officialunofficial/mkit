@@ -1,3 +1,10 @@
+---
+spec: SPEC-TRANSPORT
+version: 1
+status: draft
+audience: implementers of compatible transport clients and servers
+---
+
 # SPEC-TRANSPORT — mkit v1 transport protocols
 
 Status: **Normative** for mkit v1.

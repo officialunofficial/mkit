@@ -13,15 +13,23 @@ fn mkit_bin() -> &'static str {
 }
 
 fn run_in(cwd: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(mkit_bin())
+    // Empty XDG_CONFIG_HOME per call so the developer's real user
+    // config does not bleed into tests.
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let out = Command::new(mkit_bin())
         .args(args)
         .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg.path())
         .output()
-        .expect("spawn mkit")
+        .expect("spawn mkit");
+    drop(xdg);
+    out
 }
 
 fn init_repo(td: &Path) {
     assert!(run_in(td, &["init"]).status.success());
+    // 0.3.0 removed auto-keygen on `mkit commit`.
+    assert!(run_in(td, &["keygen"]).status.success());
 }
 
 fn make_commit(td: &Path, file: &str, body: &[u8], msg: &str) {

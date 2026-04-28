@@ -44,14 +44,14 @@ path = "src/main.rs"
 [dependencies]
 # Inter-workspace deps need explicit `version = ...` alongside the
 # path so `cargo publish` accepts them; path-only deps are rejected by
-# the registry. Track workspace.package.version (currently 0.1.0).
-mkit-core = { version = "0.2", path = "../mkit-core" }
-mkit-attest = { version = "0.2", path = "../mkit-attest" }
-mkit-transport-memory = { version = "0.2", path = "../mkit-transport-memory" }
-mkit-transport-file = { version = "0.2", path = "../mkit-transport-file" }
-mkit-transport-http = { version = "0.2", path = "../mkit-transport-http" }
-mkit-transport-s3 = { version = "0.2", path = "../mkit-transport-s3" }
-mkit-transport-ssh = { version = "0.2", path = "../mkit-transport-ssh" }
+# the registry. Track workspace.package.version.
+mkit-core = { version = "0.3", path = "../mkit-core" }
+mkit-attest = { version = "0.3", path = "../mkit-attest" }
+mkit-transport-memory = { version = "0.3", path = "../mkit-transport-memory" }
+mkit-transport-file = { version = "0.3", path = "../mkit-transport-file" }
+mkit-transport-http = { version = "0.3", path = "../mkit-transport-http" }
+mkit-transport-s3 = { version = "0.3", path = "../mkit-transport-s3" }
+mkit-transport-ssh = { version = "0.3", path = "../mkit-transport-ssh" }
 
 # `derive` and `wrap_help` are intentionally disabled so help-text output
 # is deterministic — we render help ourselves from a compile-time const
@@ -62,6 +62,16 @@ thiserror = "2"
 # Used by `mkit keygen` to generate raw 32-byte secrets for non-ed25519
 # algorithms (secp256k1 / p256). Same version mkit-core already pulls in.
 getrandom = "0.4"
+# Wraps the raw 32-byte secrets keygen pulls out of the RNG until they
+# land inside the algorithm signer (which has its own scrubbing).
+zeroize = "1"
+
+# POSIX uid + O_NOFOLLOW for keygen.rs's raw-32 load/save paths
+# (secp256k1, p256). The Ed25519 path uses mkit_core::sign which has
+# its own libc dependency; the cli's non-Ed25519 paths reach through
+# the same primitives, so we add libc here too.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [build-dependencies]
 # build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by

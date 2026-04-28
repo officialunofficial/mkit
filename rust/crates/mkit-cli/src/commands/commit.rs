@@ -72,8 +72,8 @@ pub fn run(args: &[String]) -> u8 {
         },
     };
 
-    // ---- Load / generate signing key. ------------------------------
-    let kp = match load_or_generate_key(&cwd, &cfg.signing_key) {
+    // ---- Load signing key. -----------------------------------------
+    let kp = match load_signing_key(&cwd, &cfg.signing_key) {
         Ok(kp) => kp,
         Err((msg, code)) => return emit_err(&msg, code),
     };
@@ -131,21 +131,39 @@ pub fn run(args: &[String]) -> u8 {
     exit::OK
 }
 
-/// Load or auto-generate the Ed25519 signing key. Returns a mapped
-/// (message, exit-code) pair on failure so the caller can route the
-/// error through its usual `emit_err` path.
-fn load_or_generate_key(
+/// Load the Ed25519 signing key. Returns a mapped (message,
+/// exit-code) pair on failure so the caller can route the error
+/// through its usual `emit_err` path.
+///
+/// Auto-generation was removed in 0.3.0: combined with a non-atomic
+/// `save_key`, an interrupted keygen could silently rotate the user's
+/// identity (subsequent commits no longer share a signer with prior
+/// ones). The save path is now atomic, but auto-keygen also masks
+/// genuine path-misconfigurations and tooling errors. Users run
+/// `mkit keygen` once, explicitly, and a missing key on `mkit commit`
+/// is now an error.
+fn load_signing_key(
     cwd: &std::path::Path,
     rel_signing_key_path: &str,
 ) -> Result<KeyPair, (String, u8)> {
-    let key_path = cwd.join(rel_signing_key_path);
-    if key_path.exists() {
-        sign::load_key(&key_path).map_err(|e| (format!("load key: {e}"), exit::NOPERM))
-    } else {
-        let kp = KeyPair::generate().map_err(|e| (format!("rng: {e}"), exit::GENERAL_ERROR))?;
-        sign::save_key(&key_path, &kp).map_err(|e| (format!("save key: {e}"), exit::CANTCREAT))?;
-        Ok(kp)
+    // Belt-and-braces path-traversal guard. The config layer already
+    // refuses `..` in any *_key_path, but a user-scoped config edited
+    // by hand could still produce one and we'd rather surface a clear
+    // error than build a path that escapes the repo.
+    if let Err(e) = crate::config::validate_key_path(rel_signing_key_path) {
+        return Err((format!("{e}"), exit::CONFIG_ERROR));
     }
+    let key_path = cwd.join(rel_signing_key_path);
+    if !key_path.exists() {
+        return Err((
+            format!(
+                "no signing key at {} — run `mkit keygen` to create one",
+                key_path.display()
+            ),
+            exit::NOINPUT,
+        ));
+    }
+    sign::load_key(&key_path).map_err(|e| (format!("load key: {e}"), exit::NOPERM))
 }
 
 /// Advance the branch pointed to by HEAD (or HEAD itself, if detached)

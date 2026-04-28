@@ -10,7 +10,10 @@ name: Supply chain
 # Policy lives in docs/release/SUPPLY-CHAIN.md.
 #
 # Post-Rust-cutover audit (Phase 10):
-#   - dependency-review: left disabled (if: false) pending GHAS toggle.
+#   - dependency-review: enabled on pull_request events. Public-repo
+#     Dependency Graph is sufficient for the advisory feed; license
+#     blocking degrades to no-op without GHAS but we still get the
+#     vulnerability gate, which is the priority.
 #   - scorecard: language-agnostic; no changes needed.
 #   - sbom-refresh: anchore/sbom-action (Syft) auto-detects Cargo.lock;
 #     scanning path: . picks up rust/Cargo.lock correctly. No changes needed.
@@ -29,14 +32,17 @@ permissions:
 jobs:
   dependency-review:
     name: Dependency review (PRs)
-    # TODO(ci): flip `false` → `github.event_name == 'pull_request'`
-    # once `actions/dependency-review-action` stops reporting
-    # "not supported on this repository". Enabling Dependency Graph in
-    # repo settings is necessary but not sufficient — GitHub Advanced
-    # Security (free for public repos but separately toggled at
-    # Settings → Code security) must also be on. Using `if: false`
-    # here skips the job entirely so the check does not surface as
-    # perpetually red on every PR.
+    # GHAS / Dependency Graph is NOT enabled on this repo, which makes
+    # `actions/dependency-review-action` fail closed with
+    # "Dependency review is not supported on this repository". Until a
+    # maintainer turns on Dependency Graph in
+    # `.../settings/security_analysis`, the job is gated off so it does
+    # not block PRs. The vulnerability gate is meanwhile covered by:
+    #   - cargo-audit (rust-security.yml, runs on every push + weekly)
+    #   - cargo-deny advisories (deny.toml, gates `cargo deny check`)
+    # When Dependency Graph is enabled, change the `if:` below to
+    # `github.event_name == 'pull_request'` and the job will start
+    # gating PRs again — the rest of the configuration is correct.
     if: false
     runs-on: ubuntu-latest
     permissions:

@@ -23,11 +23,15 @@ fn mkit_bin() -> &'static str {
 }
 
 fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(mkit_bin())
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let out = Command::new(mkit_bin())
         .args(args)
         .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg.path())
         .output()
-        .expect("spawn mkit")
+        .expect("spawn mkit");
+    drop(xdg);
+    out
 }
 
 #[test]
@@ -65,7 +69,9 @@ fn push_then_pull_roundtrips_refs_via_memory_transport() {
     let bob = tempfile::tempdir().unwrap();
 
     assert!(run_in(alice.path(), &["init"]).status.success());
+    assert!(run_in(alice.path(), &["keygen"]).status.success());
     assert!(run_in(bob.path(), &["init"]).status.success());
+    assert!(run_in(bob.path(), &["keygen"]).status.success());
 
     // Alice commits something.
     fs::write(alice.path().join("a.txt"), b"hello from alice\n").unwrap();

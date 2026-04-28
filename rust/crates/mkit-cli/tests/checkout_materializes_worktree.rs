@@ -10,11 +10,18 @@ fn mkit_bin() -> &'static str {
 }
 
 fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(mkit_bin())
+    // Each invocation gets an empty XDG_CONFIG_HOME so the developer's
+    // real `~/.config/mkit/config` does not leak into tests (e.g. by
+    // overriding `signing_key`).
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    let out = Command::new(mkit_bin())
         .args(args)
         .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg.path())
         .output()
-        .expect("spawn mkit")
+        .expect("spawn mkit");
+    drop(xdg);
+    out
 }
 
 #[test]
@@ -22,6 +29,8 @@ fn checkout_restores_files_that_were_removed_from_worktree() {
     let td = tempfile::tempdir().unwrap();
 
     assert!(run_in(td.path(), &["init"]).status.success());
+    // 0.3.0 removed auto-keygen on commit.
+    assert!(run_in(td.path(), &["keygen"]).status.success());
     fs::write(td.path().join("a.txt"), b"alpha\n").unwrap();
     fs::write(td.path().join("b.txt"), b"bravo\n").unwrap();
     fs::create_dir_all(td.path().join("sub")).unwrap();
@@ -51,6 +60,7 @@ fn checkout_respects_mkitignore() {
     let td = tempfile::tempdir().unwrap();
 
     assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
     // Commit a file we will later locally-ignore.
     fs::write(td.path().join("tracked.txt"), b"v1").unwrap();
     assert!(run_in(td.path(), &["add", "."]).status.success());
