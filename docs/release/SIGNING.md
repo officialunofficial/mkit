@@ -9,11 +9,14 @@ log](https://docs.sigstore.dev/logging/overview/).
 No private keys are held by any human. No private keys are stored in
 GitHub Secrets. If someone steals a release signature, they cannot reuse
 it on any other artifact — the signature is bound to the artifact hash.
+The installer (`install.sh`) enforces this same trust boundary by
+default.
 
 ## Artifacts attached to every release
 
 For each of the four target archives
-(`aarch64-macos`, `x86_64-macos`, `x86_64-linux`, `aarch64-linux`):
+(`aarch64-apple-darwin`, `x86_64-apple-darwin`,
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`):
 
 | File                            | Purpose                                 |
 | ------------------------------- | --------------------------------------- |
@@ -33,16 +36,17 @@ Plus one top-level set for the aggregate:
 
 ## Verify a downloaded archive
 
-Install cosign: <https://docs.sigstore.dev/cosign/system_config/installation/>
+Install cosign: <https://docs.sigstore.dev/cosign/installation/>
 
 Then:
 
 ```sh
-ARCHIVE=mkit-0.2.0-aarch64-macos.tar.gz
-TAG=v0.2.0
+VERSION=0.3.0
+TARGET=aarch64-apple-darwin
+ARCHIVE="mkit-${VERSION}-${TARGET}.tar.gz"
 
 cosign verify-blob \
-  --certificate-identity-regexp "https://github.com/officialunofficial/mkit/.github/workflows/release.yml@refs/tags/v.*" \
+  --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   --bundle "${ARCHIVE}.cosign.bundle" \
   "${ARCHIVE}"
@@ -55,13 +59,17 @@ mkit's release workflow. If a signature was produced by any other workflow
 (including a fork, a branch build, or a locally-run cosign), verification
 will fail.
 
+The archive's sibling `.sha256` file is not an authenticity signal on
+its own because it is served from the same origin as the archive. Treat
+it as defense-in-depth after cosign, not instead of cosign.
+
 ## Inspect the Rekor transparency log entry
 
 The `.cosign.bundle` contains a Rekor log index. To view the public entry:
 
 ```sh
 cosign verify-blob \
-  --certificate-identity-regexp "https://github.com/officialunofficial/mkit/.github/workflows/release.yml@refs/tags/v.*" \
+  --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   --bundle "${ARCHIVE}.cosign.bundle" \
   --rekor-url "https://rekor.sigstore.dev" \
@@ -81,22 +89,27 @@ top-level `SHA256SUMS` is itself cosign-signed. So the chain is:
 
 ```sh
 cosign verify-blob \
-  --certificate-identity-regexp "https://github.com/officialunofficial/mkit/.github/workflows/release.yml@refs/tags/v.*" \
+  --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   --bundle SHA256SUMS.cosign.bundle \
   SHA256SUMS
 
-grep sbom.cdx.json SHA256SUMS | sha256sum -c -
+grep ' sbom.cdx.json$' SHA256SUMS > sbom.cdx.json.sha256
+sha256sum -c sbom.cdx.json.sha256 || shasum -a 256 -c sbom.cdx.json.sha256
 ```
 
-## macOS notarization (future)
+## macOS Gatekeeper
 
-The release workflow has a scaffolded notarization step gated on three
-secrets: `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`.
-Until an Apple Developer ID is configured on this repo, macOS binaries
-are **cosign-signed but not notarized**. Users on Ventura+ will see a
-Gatekeeper warning; override with
-`xattr -d com.apple.quarantine /path/to/mkit` after cosign verification.
+macOS binaries are **not Developer ID-signed and not notarized**. That
+is the current shipping state; the trust boundary is the cosign
+verification above, not Apple notarization. Users on Ventura+ may see a
+Gatekeeper warning when launching a freshly-downloaded binary from
+Finder. After you verify the archive, either run `mkit` from a terminal
+or clear quarantine explicitly:
 
-Once notarization is enabled, the archive will carry a stapled ticket and
-Gatekeeper will accept it without intervention.
+```sh
+xattr -d com.apple.quarantine /path/to/mkit
+```
+
+If notarized macOS releases ever ship, the release notes and this
+document will say so explicitly.

@@ -28,7 +28,8 @@ Every new direct dependency added to a workspace `Cargo.toml` must:
    mkit gain, and what would implementing it in-tree cost? Default
    answer should be "implement in-tree"; deps are the exception.
 4. Be compatible with **MIT OR Apache-2.0**. The CI dependency-review
-   action denies GPL and LGPL families outright.
+   action denies GPL and LGPL families outright when the repo has
+   Dependency Graph enabled and `ENABLE_DEPENDENCY_REVIEW=1`.
 5. Have a cross-platform build. If the dep breaks on one of our four
    release targets, it doesn't land.
 

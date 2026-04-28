@@ -19,7 +19,7 @@ verify the result.
 | Use case                              | Channel                              | Command                                                                                              |
 |---------------------------------------|--------------------------------------|------------------------------------------------------------------------------------------------------|
 | CLI on a dev machine                  | Release archive or `cargo install --git` | `curl -sSfL …/install.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
-| CI / backend (pin a version)          | Release archive                      | `curl -L …/releases/download/<tag>/mkit-<tag>-<target>.tar.gz \| tar xz`                              |
+| CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-<VERSION>-<target>.tar.gz && tar -xzf mkit-<VERSION>-<target>.tar.gz` |
 | Browser / Cloudflare Worker           | npm (v0.2.0+)                        | `bun add @makechain/mkit-wasm`                                                                                  |
 | Library inside another Rust crate     | Path or git dependency (crates.io is planned) | `mkit-core = { git = "https://github.com/officialunofficial/mkit" }`                                 |
 
@@ -84,36 +84,48 @@ Targets shipped today:
 - `x86_64-unknown-linux-gnu` (Linux x86_64)
 - `aarch64-unknown-linux-gnu` (Linux arm64)
 
-**Download the latest release for your platform:**
+If you want "latest", use `install.sh`; it resolves the current tag,
+fetches the matching archive for your platform, and verifies cosign by
+default. Direct release URLs are best when you want a pinned artifact.
+
+**Download a pinned release for your platform:**
 
 ```sh
-curl -L https://github.com/officialunofficial/mkit/releases/latest/download/mkit-aarch64-apple-darwin.tar.gz | tar xz
+VERSION=0.3.0
+TARGET=aarch64-apple-darwin
+curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/mkit-${VERSION}-${TARGET}.tar.gz"
+tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 ```
 
 **Pin a version (recommended for CI):**
 
 ```sh
-VERSION=v0.1.0
+VERSION=0.3.0
 TARGET=x86_64-unknown-linux-gnu
-URL=https://github.com/officialunofficial/mkit/releases/download/${VERSION}/mkit-${VERSION}-${TARGET}.tar.gz
-curl -L "$URL" | tar xz
+TAG="v${VERSION}"
+URL="https://github.com/officialunofficial/mkit/releases/download/${TAG}/mkit-${VERSION}-${TARGET}.tar.gz"
+curl -LO "$URL"
+tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 ```
 
 **Verify the SHA256.** Each archive ships with a sibling `.sha256`:
 
 ```sh
-curl -LO "$URL"
-curl -LO "$URL.sha256"
-shasum -a 256 -c "mkit-${VERSION}-${TARGET}.tar.gz.sha256"
+curl -LO "${URL}.sha256"
+sha256sum -c "mkit-${VERSION}-${TARGET}.tar.gz.sha256" || \
+  shasum -a 256 -c "mkit-${VERSION}-${TARGET}.tar.gz.sha256"
 ```
 
-**Verify the cosign signature.** Keyless OIDC, no public key needed —
-the signer identity is bound to the GitHub Actions OIDC issuer:
+**Verify the cosign signature.** Keyless OIDC, no public key needed.
+This is the real authenticity check: it proves the archive was signed by
+this repo's `release.yml` workflow on a strict-semver tag. The sibling
+`.sha256` file is same-origin defense in depth only.
 
 ```sh
+curl -LO "${URL}.cosign.bundle"
 cosign verify-blob \
   --bundle "mkit-${VERSION}-${TARGET}.tar.gz.cosign.bundle" \
-  --certificate-identity-regexp 'https://github.com/officialunofficial/mkit/' \
+  --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "mkit-${VERSION}-${TARGET}.tar.gz"
 ```
