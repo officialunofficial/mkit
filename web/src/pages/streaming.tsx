@@ -7,7 +7,7 @@ export default function StreamingPage() {
     <div className='space-y-8'>
       <title>mkit — streaming</title>
       <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>Stream big files, verify as they arrive</h1>
+        <h1 className='text-4xl font-semibold tracking-tight'>Verifiable at gigabyte scale</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
           Content-addressed storage only works on big files if you can chunk, diff, and stream-verify them. Drop a file
           (or use the default) and watch four streaming primitives: FastCDC chunking, ChunkedBlob, the delta wire

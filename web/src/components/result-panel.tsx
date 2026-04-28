@@ -82,7 +82,7 @@ export function Section({
   return (
     <section className='py-6 scroll-mt-24' id={hash ? sectionAnchor(hash) : undefined}>
       <header className='mb-5 space-y-1'>
-        <h2 className='flex items-center gap-2 text-sm font-medium'>
+        <h2 className='flex items-center gap-2 text-sm font-semibold'>
           {hash ? <HashChip hash={hash} /> : null}
           <span>{title}</span>
         </h2>

@@ -7,7 +7,7 @@ export default function SignPage() {
     <div className='space-y-8'>
       <title>mkit — sign</title>
       <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>Sign a message, verify it back</h1>
+        <h1 className='text-4xl font-semibold tracking-tight'>Who signed this?</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
           A private key signs a message; the matching public key verifies it. Anyone can confirm the message hasn't been
           changed and that you signed it. Flip a single character below and the verifier rejects it.
