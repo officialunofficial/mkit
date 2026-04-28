@@ -18,10 +18,10 @@ export default async function RootLayout({ children }: RootLayoutProps) {
       <link rel='icon' type='image/png' href={data.icon} />
       <link rel='preconnect' href='https://fonts.googleapis.com' />
       <link rel='preconnect' href='https://fonts.gstatic.com' crossOrigin='' />
-      {/* Geist + Geist Mono. */}
+      {/* DM Sans + DM Mono. */}
       <link
         rel='stylesheet'
-        href='https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap'
+        href='https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap'
         precedence='font'
       />
       {/* Header and footer span edge-to-edge; the middle column lives
