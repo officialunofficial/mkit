@@ -41,6 +41,9 @@ pub const DEFAULT_BRANCH: &str = "main";
 ///
 /// * redirect `signing_key` to overwrite arbitrary files on disk or to
 ///   sign attacker-chosen content with the user's real key,
+/// * spoof the commit author by pinning `user.identity` to attacker-
+///   chosen bytes while the victim's real signing key still signs the
+///   object,
 /// * point `attest.external_signer_path` / `_args` at any binary on the
 ///   host (RCE under the user's UID),
 /// * **select** a user-scoped external signer or non-Ed25519 algorithm
@@ -52,6 +55,7 @@ pub const DEFAULT_BRANCH: &str = "main";
 ///
 /// They are accepted from the user-scoped config only.
 pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
+    "user.identity",
     "signing_key",
     "ssh.strict_host_key_checking",
     "ssh.user_known_hosts_file",
@@ -178,15 +182,15 @@ pub enum ConfigError {
     UnknownKey(String),
     #[error("invalid user.identity: {0}")]
     InvalidUserIdentity(&'static str),
-    #[error("key path must not contain `..` components or escape the repo: {0}")]
+    #[error(
+        "key path must not contain `..`; relative paths must stay under `.mkit/keys/` and absolute paths must stay under `$HOME`: {0}"
+    )]
     InvalidKeyPath(String),
 }
 
 /// Validate that a key-file path (`signing_key`, `attest.*_key_path`,
-/// `ssh.*_file`) cannot escape via `..` traversal. Absolute paths are
-/// allowed because user-scoped config legitimately wants to point at a
-/// shared key under `$HOME`. Empty strings pass — callers fall back to
-/// the documented default.
+/// `ssh.*_file`) cannot escape via `..` traversal. Empty strings pass
+/// — callers fall back to the documented default.
 pub fn validate_key_path(value: &str) -> Result<(), ConfigError> {
     if value.is_empty() {
         return Ok(());
@@ -198,6 +202,33 @@ pub fn validate_key_path(value: &str) -> Result<(), ConfigError> {
         }
     }
     Ok(())
+}
+
+/// Resolve a configured signing-key path against `root`.
+///
+/// Policy from the security hardening follow-up:
+/// - relative paths are allowed only under `<repo>/.mkit/keys/`
+/// - absolute paths are allowed only under `$HOME`
+pub fn resolve_key_path(root: &Path, value: &str) -> Result<PathBuf, ConfigError> {
+    validate_key_path(value)?;
+    let path = Path::new(value);
+    if path.is_absolute() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return Err(ConfigError::InvalidKeyPath(value.to_owned()));
+        };
+        return if path.starts_with(&home) {
+            Ok(path.to_path_buf())
+        } else {
+            Err(ConfigError::InvalidKeyPath(value.to_owned()))
+        };
+    }
+
+    let joined = root.join(path);
+    let repo_keys = root.join(".mkit/keys");
+    if !joined.starts_with(&repo_keys) {
+        return Err(ConfigError::InvalidKeyPath(value.to_owned()));
+    }
+    Ok(joined)
 }
 
 /// Split a pipe-separated argv string into argv tokens.
@@ -332,7 +363,6 @@ pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
     // signer or non-Ed25519 key path against attacker-chosen content.
     let mut out = String::new();
     for (k, v) in [
-        ("user.identity", cfg.user_identity.as_str()),
         ("default_branch", cfg.default_branch.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
@@ -558,11 +588,13 @@ mod tests {
         let td = TempDir::new().unwrap();
         fs::create_dir_all(td.path().join(".mkit")).unwrap();
         let mut cfg = Config::with_defaults();
+        cfg.user_identity = "01200011".into();
         cfg.signing_key = "/should/not/be/written".into();
         cfg.ssh_strict_host_key_checking = "no".into();
         cfg.attest.external_signer_path = "/usr/local/bin/evil".into();
         write(td.path(), &cfg).unwrap();
         let on_disk = fs::read_to_string(td.path().join(CONFIG_FILE)).unwrap();
+        assert!(!on_disk.contains("user.identity"));
         assert!(!on_disk.contains("signing_key"));
         assert!(!on_disk.contains("ssh.strict_host_key_checking"));
         assert!(!on_disk.contains("external_signer_path"));
@@ -579,6 +611,12 @@ mod tests {
         );
         assert_eq!(cfg.signing_key, DEFAULT_SIGNING_KEY);
         assert_eq!(cfg.remote_type, "file");
+    }
+
+    #[test]
+    fn repo_user_identity_is_rejected() {
+        let cfg = layer(Some("user.identity = 012000aaaaaaaa\n"), None);
+        assert!(cfg.user_identity.is_empty());
     }
 
     #[test]
@@ -683,6 +721,19 @@ mod tests {
         assert!(validate_key_path("").is_ok());
         assert!(validate_key_path(".mkit/keys/default.key").is_ok());
         assert!(validate_key_path("/home/user/.mkit/global.key").is_ok());
+    }
+
+    #[test]
+    fn resolve_key_path_rejects_relative_path_outside_repo_keys() {
+        let td = TempDir::new().unwrap();
+        assert!(resolve_key_path(td.path(), ".mkit/custom/global.key").is_err());
+    }
+
+    #[test]
+    fn resolve_key_path_accepts_relative_path_under_repo_keys() {
+        let td = TempDir::new().unwrap();
+        let out = resolve_key_path(td.path(), ".mkit/keys/custom/global.key").unwrap();
+        assert_eq!(out, td.path().join(".mkit/keys/custom/global.key"));
     }
 
     #[test]

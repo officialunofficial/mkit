@@ -33,17 +33,25 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);
     }
+    let normalized_value = if key == "user.identity" {
+        match config::expand_user_identity(value) {
+            Ok(v) => v,
+            Err(e) => return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR),
+        }
+    } else {
+        value.clone()
+    };
     // Path-traversal validation for any key whose value is a filesystem
     // path. Catches `..` even on the user-scoped path.
     if is_path_key(key)
-        && let Err(e) = config::validate_key_path(value)
+        && let Err(e) = config::validate_key_path(&normalized_value)
     {
         return emit_err(&format!("{e}"), exit::CONFIG_ERROR);
     }
     if REPO_FORBIDDEN_KEYS.contains(&key.as_str()) {
-        return write_user_scoped(key, value);
+        return write_user_scoped(key, &normalized_value);
     }
-    if let Err(code) = apply(&mut cfg, key, value) {
+    if let Err(code) = apply(&mut cfg, key, &normalized_value) {
         return code;
     }
     match config::write(&cwd, &cfg) {
@@ -86,15 +94,11 @@ fn write_user_scoped(key: &str, value: &str) -> u8 {
 }
 
 /// Apply a key/value to the in-memory `Config`. Only repo-safe keys
-/// are reachable here — security-sensitive keys are intercepted by
-/// [`run`] and routed to user-scoped storage before this is called.
+/// are reachable here — security-sensitive keys (including
+/// `user.identity`) are intercepted by [`run`] via `REPO_FORBIDDEN_KEYS`
+/// and routed to user-scoped storage before this is called.
 fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
     match key {
-        "user.identity" => {
-            let canon = config::expand_user_identity(value)
-                .map_err(|e| emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR))?;
-            cfg.user_identity = canon;
-        }
         "default_branch" => value.clone_into(&mut cfg.default_branch),
         "remote_endpoint" => value.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => value.clone_into(&mut cfg.remote_bucket),

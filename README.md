@@ -151,11 +151,15 @@ Cosign-signed archives for macOS (arm64 + x86_64) and Linux (x86_64 +
 arm64) on every `v*.*.*` tag:
 
 ```sh
-curl -L https://github.com/officialunofficial/mkit/releases/latest/download/mkit-aarch64-apple-darwin.tar.gz | tar xz
+VERSION=0.3.0
+TARGET=aarch64-apple-darwin
+curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/mkit-${VERSION}-${TARGET}.tar.gz"
+tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 ```
 
 The one-liner `curl -sSfL …/install.sh | sh` picks the right archive
-and can verify the cosign bundle (`--cosign`).
+and verifies the cosign bundle by default. Pass `--version vX.Y.Z` to
+pin an exact release.
 
 ### WASM for browsers and Cloudflare Workers (available from v0.2.0+)
 

@@ -10,10 +10,9 @@ name: Supply chain
 # Policy lives in docs/release/SUPPLY-CHAIN.md.
 #
 # Post-Rust-cutover audit (Phase 10):
-#   - dependency-review: enabled on pull_request events. Public-repo
-#     Dependency Graph is sufficient for the advisory feed; license
-#     blocking degrades to no-op without GHAS but we still get the
-#     vulnerability gate, which is the priority.
+#   - dependency-review: opt-in via `ENABLE_DEPENDENCY_REVIEW=1` so
+#     forks / mirrors without Dependency Graph do not fail closed.
+#     Once enabled, it gates PRs on new vulns + blocked licenses.
 #   - scorecard: language-agnostic; no changes needed.
 #   - sbom-refresh: anchore/sbom-action (Syft) auto-detects Cargo.lock;
 #     scanning path: . picks up rust/Cargo.lock correctly. No changes needed.
@@ -31,19 +30,23 @@ permissions:
 
 jobs:
   dependency-review:
-    name: Dependency review (PRs)
-    # GHAS / Dependency Graph is NOT enabled on this repo, which makes
-    # `actions/dependency-review-action` fail closed with
-    # "Dependency review is not supported on this repository". Until a
-    # maintainer turns on Dependency Graph in
-    # `.../settings/security_analysis`, the job is gated off so it does
-    # not block PRs. The vulnerability gate is meanwhile covered by:
+    name: Dependency review (PRs, opt-in)
+    # This action fails closed with "Dependency review is not supported
+    # on this repository" when Dependency Graph is unavailable. To keep
+    # the workflow reusable across forks and internal mirrors, the job is
+    # guarded by a repo/org Actions variable instead of a hardcoded
+    # `if: false`.
+    #
+    # Safe default:
+    #   - Leave `ENABLE_DEPENDENCY_REVIEW` unset (or != '1') on repos
+    #     that do not expose Dependency Graph. The job stays skipped.
+    #   - Set `ENABLE_DEPENDENCY_REVIEW=1` after Dependency Graph is
+    #     available in Settings -> Security -> Dependency graph.
+    #
+    # The vulnerability gate is meanwhile covered by:
     #   - cargo-audit (rust-security.yml, runs on every push + weekly)
     #   - cargo-deny advisories (deny.toml, gates `cargo deny check`)
-    # When Dependency Graph is enabled, change the `if:` below to
-    # `github.event_name == 'pull_request'` and the job will start
-    # gating PRs again — the rest of the configuration is correct.
-    if: false
+    if: github.event_name == 'pull_request' && vars.ENABLE_DEPENDENCY_REVIEW == '1'
     runs-on: ubuntu-latest
     permissions:
       contents: read

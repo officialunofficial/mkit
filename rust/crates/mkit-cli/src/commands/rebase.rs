@@ -151,7 +151,11 @@ fn replay(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
-    let kp: KeyPair = match sign::load_key(&cwd.join(&cfg.signing_key)) {
+    let key_path = match config::resolve_key_path(cwd, &cfg.signing_key) {
+        Ok(p) => p,
+        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+    };
+    let kp: KeyPair = match sign::load_key(&key_path) {
         Ok(k) => k,
         Err(e) => return emit_err(&format!("load key: {e}"), exit::NOPERM),
     };

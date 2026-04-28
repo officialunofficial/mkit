@@ -323,11 +323,12 @@ pub fn attest_keypair(seed_hex: &str, algo: &str) -> Result<AttestKeyPairJs, JsV
     match alg {
         Algorithm::Ed25519 => {
             let kp = KeyPair::from_seed(seed);
-            let signer = RepoKeySigner::new(kp.clone());
+            let pk = kp.public.0;
+            let signer = RepoKeySigner::new(kp);
             let keyid = signer.keyid().map_err(|e| js_err(format!("keyid: {e}")))?;
             Ok(AttestKeyPairJs {
                 seed_hex: seed_hex.to_string(),
-                pubkey_hex: hex::encode(kp.public.0),
+                pubkey_hex: hex::encode(pk),
                 keyid,
                 algo: "ed25519".to_string(),
             })

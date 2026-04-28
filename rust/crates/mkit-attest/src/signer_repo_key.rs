@@ -70,13 +70,14 @@ mod tests {
     #[test]
     fn signature_verifies_with_dalek() {
         let kp = KeyPair::from_seed([0x42; 32]);
-        let mut s = RepoKeySigner::new(kp.clone());
+        let pk = kp.public.0;
+        let mut s = RepoKeySigner::new(kp);
 
         let pae = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
         let sig_bytes = s.sign(pae).unwrap();
         assert_eq!(sig_bytes.len(), 64);
 
-        let vk = VerifyingKey::from_bytes(&kp.public.0).unwrap();
+        let vk = VerifyingKey::from_bytes(&pk).unwrap();
         let sig = DalekSig::from_bytes(sig_bytes.as_slice().try_into().unwrap());
         // verify_strict: if our signer ever produces a non-canonical
         // signature (high-s, non-canonical R, etc.) this assertion fails
@@ -91,7 +92,8 @@ mod tests {
     #[test]
     fn keyid_shape_blake3_of_pubkey() {
         let kp = KeyPair::from_seed([0x11; 32]);
-        let s = RepoKeySigner::new(kp.clone());
+        let pk = kp.public.0;
+        let s = RepoKeySigner::new(kp);
         let kid = s.keyid().unwrap();
 
         assert_eq!(kid.len(), 71);
@@ -104,7 +106,7 @@ mod tests {
                 .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
         );
 
-        let expected = mkit_core::hash::to_hex(&mkit_core::hash::hash(&kp.public.0));
+        let expected = mkit_core::hash::to_hex(&mkit_core::hash::hash(&pk));
         assert_eq!(hex, expected);
     }
 

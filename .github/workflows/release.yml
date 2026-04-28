@@ -86,8 +86,10 @@ jobs:
             echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
             exit 1
           fi
+          REF="refs/tags/${TAG}"
           VERSION="${TAG#v}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "archive=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}.${{ matrix.archive_ext }}" >> "$GITHUB_OUTPUT"
           echo "stage=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
@@ -95,7 +97,7 @@ jobs:
       - name: Checkout (at resolved tag)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
-          ref: ${{ steps.meta.outputs.tag }}
+          ref: ${{ steps.meta.outputs.ref }}
           fetch-depth: 0
 
       - name: Install Rust ${{ env.RUST_VERSION }} + target
@@ -219,8 +221,30 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Checkout
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [ -z "${TAG}" ]; then
+            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
+            exit 1
+          fi
+          REF="refs/tags/${TAG}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout (at resolved tag)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
+          fetch-depth: 0
 
       - name: Generate CycloneDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0
@@ -244,9 +268,29 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build, sbom]
     steps:
-      - name: Checkout
+      - name: Resolve version
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [ -z "${TAG}" ]; then
+            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
+            exit 1
+          fi
+          REF="refs/tags/${TAG}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout (at resolved tag)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
+          ref: ${{ steps.meta.outputs.ref }}
           fetch-depth: 0
 
       - name: Download all artifacts
@@ -286,19 +330,6 @@ jobs:
             --output-signature SHA256SUMS.sig \
             --output-certificate SHA256SUMS.crt \
             SHA256SUMS
-
-      - name: Resolve version
-        id: meta
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          VERSION="${TAG#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3
@@ -379,14 +410,20 @@ jobs:
           else
             TAG="${GITHUB_REF_NAME}"
           fi
+          if [ -z "${TAG}" ]; then
+            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
+            exit 1
+          fi
+          REF="refs/tags/${TAG}"
           VERSION="${TAG#v}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
-          ref: ${{ steps.meta.outputs.tag }}
+          ref: ${{ steps.meta.outputs.ref }}
           fetch-depth: 0
 
       - name: Install Rust ${{ env.RUST_VERSION }} + wasm32 target

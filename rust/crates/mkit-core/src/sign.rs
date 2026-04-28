@@ -89,7 +89,7 @@ impl fmt::Debug for Signature {
 }
 
 /// Ed25519 keypair: seed plus the deterministically-derived public key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct KeyPair {
     pub public: PublicKey,
     pub secret: SecretSeed,
@@ -358,15 +358,23 @@ pub fn verify_remix(r: &Remix) -> Result<(), MkitError> {
 /// callers should keep keys under `%USERPROFILE%` and rely on default
 /// ACLs (documented in `docs/SPEC-SIGNING.md` §7).
 pub fn load_key(path: &Path) -> Result<KeyPair, MkitError> {
+    let seed = load_raw_32(path)?;
+    Ok(KeyPair::from_seed(*seed))
+}
+
+/// Load a raw 32-byte secret from `path` with the same Unix hardening
+/// `load_key` uses for the Ed25519 seed path.
+///
+/// `O_NOFOLLOW` refuses a symlink at the *final* component only. Guarding
+/// against symlinks higher up the path needs `openat2(RESOLVE_NO_SYMLINKS)`
+/// (Linux-only) or a dirfd-based walk; that hardening is tracked
+/// separately. Today the parent-dir mode + owner check below is what
+/// bounds the risk on the dirs we manage.
+pub fn load_raw_32(path: &Path) -> Result<zeroize::Zeroizing<[u8; 32]>, MkitError> {
     #[cfg(unix)]
     {
         use std::io::Read as _;
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        // O_NOFOLLOW: the kernel returns ELOOP if the final component
-        // is a symlink. We cannot guard against symlinks higher up the
-        // path without `openat2(RESOLVE_NO_SYMLINKS)` (Linux-only); the
-        // parent-dir mode check is what bounds that risk on the dirs
-        // we manage.
         let mut f = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
@@ -415,12 +423,8 @@ pub fn load_key(path: &Path) -> Result<KeyPair, MkitError> {
             check_parent_dir_secure(parent)?;
         }
 
-        // read_exact straight into a stack array — avoids the
-        // `fs::read` reallocation residue that would leave secret
-        // bytes in freed heap chunks.
-        let mut seed = [0u8; SECRET_KEY_LENGTH];
-        if let Err(e) = f.read_exact(&mut seed) {
-            seed.zeroize();
+        let mut seed = zeroize::Zeroizing::new([0u8; SECRET_KEY_LENGTH]);
+        if let Err(e) = f.read_exact(seed.as_mut_slice()) {
             return if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 Err(MkitError::InvalidKeyLength {
                     actual: usize::try_from(meta.len()).unwrap_or(usize::MAX),
@@ -434,15 +438,11 @@ pub fn load_key(path: &Path) -> Result<KeyPair, MkitError> {
         // mkit seed.
         let mut probe = [0u8; 1];
         if f.read(&mut probe).unwrap_or(0) != 0 {
-            seed.zeroize();
             return Err(MkitError::InvalidKeyLength {
                 actual: usize::try_from(meta.len()).unwrap_or(usize::MAX),
             });
         }
-
-        let kp = KeyPair::from_seed(seed);
-        seed.zeroize();
-        Ok(kp)
+        Ok(seed)
     }
     #[cfg(not(unix))]
     {
@@ -450,13 +450,11 @@ pub fn load_key(path: &Path) -> Result<KeyPair, MkitError> {
         if raw.len() != SECRET_KEY_LENGTH {
             return Err(MkitError::InvalidKeyLength { actual: raw.len() });
         }
-        let mut seed = [0u8; SECRET_KEY_LENGTH];
+        let mut seed = zeroize::Zeroizing::new([0u8; SECRET_KEY_LENGTH]);
         seed.copy_from_slice(&raw);
         let mut raw = raw;
         raw.zeroize();
-        let kp = KeyPair::from_seed(seed);
-        seed.zeroize();
-        Ok(kp)
+        Ok(seed)
     }
 }
 
@@ -492,6 +490,11 @@ fn check_parent_dir_secure(parent: &Path) -> Result<(), MkitError> {
 /// On Windows the file is written with default ACLs; users should keep
 /// `.mkit/keys/` inside `%USERPROFILE%` (SPEC-SIGNING §7).
 pub fn save_key(path: &Path, kp: &KeyPair) -> Result<(), MkitError> {
+    save_raw_32(path, &kp.secret.0)
+}
+
+/// Persist a raw 32-byte secret to `path` crash-atomically.
+pub fn save_raw_32(path: &Path, secret: &[u8; 32]) -> Result<(), MkitError> {
     let parent: &Path = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -503,9 +506,11 @@ pub fn save_key(path: &Path, kp: &KeyPair) -> Result<(), MkitError> {
     {
         use std::io::Write as _;
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        // Tighten parent dir to 0700. `set_permissions` follows
-        // symlinks; if `parent` is a symlink to somewhere else, we
-        // refuse to chmod its target. Detect via `symlink_metadata`.
+        // Tighten the immediate parent dir to 0700 before writing.
+        // `set_permissions` follows symlinks; if `parent` is a symlink
+        // to somewhere else, we refuse to chmod its target. Detect via
+        // `symlink_metadata`. Ancestors above `parent` are out of scope
+        // here — that's installer/setup policy.
         let pmeta = std::fs::symlink_metadata(parent)
             .map_err(|e| MkitError::KeyIo(format!("lstat parent: {e}")))?;
         if pmeta.file_type().is_symlink() {
@@ -536,7 +541,7 @@ pub fn save_key(path: &Path, kp: &KeyPair) -> Result<(), MkitError> {
             .mode(0o600)
             .open(&tmp_path)
             .map_err(|e| MkitError::KeyIo(format!("open tmp {}: {e}", tmp_path.display())))?;
-        if let Err(e) = f.write_all(&kp.secret.0) {
+        if let Err(e) = f.write_all(secret) {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(MkitError::KeyIo(format!("write: {e}")));
         }
@@ -573,7 +578,7 @@ pub fn save_key(path: &Path, kp: &KeyPair) -> Result<(), MkitError> {
         tmp_name.push(filename);
         tmp_name.push(format!(".tmp.{}", std::process::id()));
         let tmp_path = parent.join(&tmp_name);
-        std::fs::write(&tmp_path, &kp.secret.0)
+        std::fs::write(&tmp_path, secret)
             .map_err(|e| MkitError::KeyIo(format!("write tmp: {e}")))?;
         if let Err(e) = std::fs::rename(&tmp_path, path) {
             let _ = std::fs::remove_file(&tmp_path);
