@@ -100,16 +100,29 @@ pub fn run(args: &[String]) -> u8 {
         );
     };
 
-    // Resolve the target key path from config.
+    // Resolve the target key path from config. Each algorithm reads
+    // its own config knob so `mkit keygen`, `mkit commit`, and
+    // `mkit attest` agree on where the key lives — a user with
+    // `signing_key = /home/u/.mkit/global.key` in their user-scoped
+    // config gets that path written/read consistently.
     let cfg = match crate::config::read_or_default(&cwd) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
-    let rel_path = match algorithm {
-        Algorithm::Ed25519 => crate::config::DEFAULT_SIGNING_KEY,
+    let rel_path: &str = match algorithm {
+        Algorithm::Ed25519 => {
+            if cfg.signing_key.is_empty() {
+                crate::config::DEFAULT_SIGNING_KEY
+            } else {
+                cfg.signing_key.as_str()
+            }
+        }
         Algorithm::Secp256k1 => cfg.attest.secp256k1_key_path_or_default(),
         Algorithm::P256 => cfg.attest.p256_key_path_or_default(),
     };
+    if let Err(e) = crate::config::validate_key_path(rel_path) {
+        return emit_err(&format!("{e}"), exit::CONFIG_ERROR);
+    }
     let key_path = cwd.join(rel_path);
 
     match algorithm {

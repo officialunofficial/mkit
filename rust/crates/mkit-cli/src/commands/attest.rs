@@ -51,7 +51,7 @@ use mkit_core::hash::Hash;
 use mkit_core::{hash as hash_mod, refs};
 
 use crate::commands::attest_factory::{self, FactoryError};
-use crate::config::AttestConfig;
+use crate::config::Config;
 use crate::exit;
 
 /// Default predicate type URI — placeholder; real callers pass their own.
@@ -268,11 +268,10 @@ pub fn run(args: &[String]) -> u8 {
         .clone()
         .unwrap_or_else(|| cfg.attest.signer_or_fallback().to_owned());
 
-    let primary_signer =
-        match attest_factory::build_signer(&cwd, algorithm, &signer_kind, &cfg.attest) {
-            Ok(s) => s,
-            Err(e) => return emit_err(&format!("{e}"), factory_error_code(&e)),
-        };
+    let primary_signer = match attest_factory::build_signer(&cwd, algorithm, &signer_kind, &cfg) {
+        Ok(s) => s,
+        Err(e) => return emit_err(&format!("{e}"), factory_error_code(&e)),
+    };
 
     // --- Resolve additional signers. --------------------------------
     // Parse ALL specs before building ANY signer so a malformed spec
@@ -288,7 +287,7 @@ pub fn run(args: &[String]) -> u8 {
     let mut signers: Vec<Box<dyn Signer>> = Vec::with_capacity(1 + additional_specs.len());
     signers.push(primary_signer);
     for spec in &additional_specs {
-        let signer = match build_additional_signer(&cwd, spec, &cfg.attest) {
+        let signer = match build_additional_signer(&cwd, spec, &cfg) {
             Ok(s) => s,
             Err(e) => return emit_err(&format!("{e}"), factory_error_code(&e)),
         };
@@ -385,54 +384,50 @@ pub fn run(args: &[String]) -> u8 {
 fn build_additional_signer(
     root: &Path,
     spec: &SignerSpec,
-    config: &AttestConfig,
+    base: &Config,
 ) -> Result<Box<dyn Signer>, FactoryError> {
     match spec.signer_kind.as_str() {
         "repo-key" => {
             // A per-spec path overrides the config-level key path; we
-            // synthesise a one-off AttestConfig to feed the factory so
-            // it still does the load-and-validate dance we want.
-            let mut cfg = config.clone();
+            // synthesise a one-off Config to feed the factory so it
+            // still does the load-and-validate dance we want.
+            let mut cfg = base.clone();
             if let Some(p) = spec.path.as_deref() {
+                // Path-traversal guard at the spec layer, mirroring the
+                // user-config validator. A per-spec `path=...` value
+                // can come from `--additional-signer` argv or, in the
+                // multi-sig flow, from a CI-controlled string. Either
+                // way `..` traversal is rejected.
+                if let Err(e) = crate::config::validate_key_path(p) {
+                    return Err(FactoryError::InvalidKeyFile {
+                        path: p.to_owned(),
+                        reason: e.to_string(),
+                    });
+                }
                 match spec.algorithm {
-                    Algorithm::Ed25519 => {
-                        // For Ed25519 the factory hard-codes
-                        // `.mkit/keys/default.key`; honour the override
-                        // by invoking the signer directly from this
-                        // path instead.
-                        return build_ed25519_repo_key_from_path(&root.join(p));
-                    }
-                    Algorithm::Secp256k1 => p.clone_into(&mut cfg.secp256k1_key_path),
-                    Algorithm::P256 => p.clone_into(&mut cfg.p256_key_path),
+                    Algorithm::Ed25519 => p.clone_into(&mut cfg.signing_key),
+                    Algorithm::Secp256k1 => p.clone_into(&mut cfg.attest.secp256k1_key_path),
+                    Algorithm::P256 => p.clone_into(&mut cfg.attest.p256_key_path),
                 }
             }
             attest_factory::build_signer(root, spec.algorithm, "repo-key", &cfg)
         }
         "external" => {
-            let mut cfg = config.clone();
+            let mut cfg = base.clone();
             if let Some(p) = spec.path.as_deref() {
-                p.clone_into(&mut cfg.external_signer_path);
+                p.clone_into(&mut cfg.attest.external_signer_path);
             }
             // Per-spec `args=...` REPLACES the config-level argv so
             // multi-sig specs can independently drive different
             // external binaries. Absent `args=` ⇒ inherit the primary
             // signer's config value, matching how `path=` falls through.
             if let Some(argv) = spec.args.as_ref() {
-                cfg.external_signer_args.clone_from(argv);
+                cfg.attest.external_signer_args.clone_from(argv);
             }
             attest_factory::build_signer(root, spec.algorithm, "external", &cfg)
         }
         other => Err(FactoryError::UnknownSignerKind(other.to_owned())),
     }
-}
-
-fn build_ed25519_repo_key_from_path(path: &Path) -> Result<Box<dyn Signer>, FactoryError> {
-    use mkit_core::sign;
-    let kp = sign::load_key(path).map_err(|e| FactoryError::InvalidKeyFile {
-        path: path.display().to_string(),
-        reason: e.to_string(),
-    })?;
-    Ok(Box::new(mkit_attest::RepoKeySigner::new(kp)))
 }
 
 fn factory_error_code(e: &FactoryError) -> u8 {
