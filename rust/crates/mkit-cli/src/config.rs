@@ -43,6 +43,11 @@ pub const DEFAULT_BRANCH: &str = "main";
 ///   sign attacker-chosen content with the user's real key,
 /// * point `attest.external_signer_path` / `_args` at any binary on the
 ///   host (RCE under the user's UID),
+/// * **select** a user-scoped external signer or non-Ed25519 algorithm
+///   to confused-deputy through it: even though the path is
+///   user-scoped, the *selector* (`attest.signer`,
+///   `attest.default_algorithm`) is enough to weaponize an existing
+///   user-trusted binary or key against attacker-chosen content,
 /// * disable SSH host-key verification on `mkit push` (MITM).
 ///
 /// They are accepted from the user-scoped config only.
@@ -51,6 +56,8 @@ pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "ssh.strict_host_key_checking",
     "ssh.user_known_hosts_file",
     "ssh.identity_file",
+    "attest.signer",
+    "attest.default_algorithm",
     "attest.external_signer_path",
     "attest.external_signer_args",
     "attest.secp256k1_key_path",
@@ -317,6 +324,12 @@ pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Only repo-safe keys are emitted. Anything in `REPO_FORBIDDEN_KEYS`
+    // is explicitly NOT serialised to `<repo>/.mkit/config` — it lives
+    // in `$XDG_CONFIG_HOME/mkit/config` via `write_user_kv`. Note
+    // `attest.{signer,default_algorithm}` are forbidden too because
+    // they're the *selectors* that weaponise a user-scoped external
+    // signer or non-Ed25519 key path against attacker-chosen content.
     let mut out = String::new();
     for (k, v) in [
         ("user.identity", cfg.user_identity.as_str()),
@@ -324,11 +337,6 @@ pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),
-        (
-            "attest.default_algorithm",
-            cfg.attest.default_algorithm.as_str(),
-        ),
-        ("attest.signer", cfg.attest.signer.as_str()),
     ] {
         if !v.is_empty() {
             out.push_str(k);
@@ -585,10 +593,51 @@ mod tests {
         );
         assert!(cfg.attest.external_signer_path.is_empty());
         assert!(cfg.attest.external_signer_args.is_empty());
-        // `attest.signer` is NOT in the forbidden list — it picks
-        // which signer kind to use; the dangerous bit is the external
-        // path, which is user-scoped only.
-        assert_eq!(cfg.attest.signer, "external");
+        // `attest.signer` is also forbidden from per-repo: even though
+        // the path itself is user-scoped, letting the per-repo file
+        // SELECT the external signer is enough to weaponise a
+        // user-trusted binary against attacker-chosen content. Same
+        // confused-deputy shape as the C2 finding closed for
+        // `signing_key`, just routed through the selector.
+        assert_eq!(cfg.attest.signer, "");
+    }
+
+    /// User has set up a legitimate external HSM signer in their
+    /// user-scoped config (path + args). A hostile clone ships a
+    /// per-repo `attest.signer = external` to flip the selector and
+    /// have the user's HSM sign the clone's commit. After this fix,
+    /// the per-repo selector is dropped with a stderr warning and
+    /// the user's `repo-key` default holds.
+    #[test]
+    fn repo_attest_signer_selector_cannot_weaponise_user_external_signer() {
+        let cfg = layer(
+            Some("attest.signer = external\n"),
+            Some(
+                "attest.external_signer_path = /home/user/bin/yubikey-sign\n\
+                 attest.external_signer_args = sign\n",
+            ),
+        );
+        // User's path stays, BUT the repo-supplied selector that
+        // would route signing through that path is rejected. The
+        // signer falls back to `repo-key` (the default).
+        assert_eq!(
+            cfg.attest.external_signer_path,
+            "/home/user/bin/yubikey-sign"
+        );
+        assert_eq!(cfg.attest.signer, "");
+        assert_eq!(cfg.attest.signer_or_fallback(), "repo-key");
+    }
+
+    /// Companion: hostile clone tries to flip
+    /// `attest.default_algorithm` to whichever non-Ed25519 key the
+    /// user happens to have set up, to confused-deputy through it.
+    /// Selector is rejected from per-repo.
+    #[test]
+    fn repo_attest_default_algorithm_is_rejected() {
+        let cfg = layer(Some("attest.default_algorithm = secp256k1\n"), None);
+        assert_eq!(cfg.attest.default_algorithm, "");
+        // Default fallback is ed25519, regardless of repo wishes.
+        assert_eq!(cfg.attest.default_algorithm_or_fallback(), "ed25519");
     }
 
     #[test]

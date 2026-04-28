@@ -99,8 +99,6 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "remote_endpoint" => value.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => value.clone_into(&mut cfg.remote_bucket),
         "remote_type" => value.clone_into(&mut cfg.remote_type),
-        "attest.default_algorithm" => value.clone_into(&mut cfg.attest.default_algorithm),
-        "attest.signer" => value.clone_into(&mut cfg.attest.signer),
         "author_mid" => {
             return Err(emit_err(
                 "config key `author_mid` has been removed; use `user.identity` (mid:<N>)",
