@@ -178,7 +178,12 @@ fn advance_head(
 }
 
 /// Resolve the commit author. See [`run`] for precedence order.
-fn resolve_author(
+///
+/// Exposed to sibling commands (`cherry_pick`, `merge`) so they apply
+/// the same precedence as `commit`: `--author` flag (if any) → user-
+/// scoped `user.identity` config → signer pubkey fallback. They pass
+/// `None` for `author_flag` because they don't accept that flag.
+pub(super) fn resolve_author(
     author_flag: Option<&str>,
     cfg_user_identity: &str,
     kp: &KeyPair,

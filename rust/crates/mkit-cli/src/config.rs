@@ -208,12 +208,15 @@ pub fn validate_key_path(value: &str) -> Result<(), ConfigError> {
 ///
 /// Policy from the security hardening follow-up:
 /// - relative paths are allowed only under `<repo>/.mkit/keys/`
-/// - absolute paths are allowed only under `$HOME`
+/// - absolute paths are allowed only under the home directory of the
+///   process's effective uid (looked up via `getpwuid_r(geteuid())`,
+///   not `$HOME`, so a hostile parent can't set `HOME=/` and admit
+///   every absolute path).
 pub fn resolve_key_path(root: &Path, value: &str) -> Result<PathBuf, ConfigError> {
     validate_key_path(value)?;
     let path = Path::new(value);
     if path.is_absolute() {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        let Some(home) = home_dir_for_euid() else {
             return Err(ConfigError::InvalidKeyPath(value.to_owned()));
         };
         return if path.starts_with(&home) {
@@ -229,6 +232,73 @@ pub fn resolve_key_path(root: &Path, value: &str) -> Result<PathBuf, ConfigError
         return Err(ConfigError::InvalidKeyPath(value.to_owned()));
     }
     Ok(joined)
+}
+
+/// Resolve the home directory of the current effective uid via
+/// `getpwuid_r`, ignoring `$HOME`.
+///
+/// `$HOME` is part of the parent process's environment and a malicious
+/// parent can set it to anything (`/`, `/tmp`, an attacker-owned dir)
+/// before exec'ing `mkit`. The kernel-side passwd database, by
+/// contrast, is rooted in the system's user store and tracks the same
+/// uid used elsewhere in the security checks (`load_raw_32`'s owner
+/// check, parent-dir mode check, etc.). Falling back to `$HOME` would
+/// re-introduce the exact attack we're trying to close, so we don't.
+#[cfg(unix)]
+fn home_dir_for_euid() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStringExt;
+
+    // `getpwuid_r` writes into caller-provided buffers. 4 KiB matches
+    // the `_SC_GETPW_R_SIZE_MAX` advisory size on Linux/macOS and is
+    // far more than any real passwd entry needs; if it ever overflows
+    // we fail closed (the caller treats `None` as "refuse the absolute
+    // path") rather than retrying with a larger buffer.
+    //
+    // SAFETY: `getpwuid_r` is the thread-safe / reentrant variant of
+    // `getpwuid`. `pwd` and `buf` are valid stack memory of known size
+    // for the duration of the call; `result` is set to either `&pwd`
+    // (entry found) or NULL (no entry). `geteuid` is parameterless and
+    // infallible. We only read `pwd.pw_dir` when `result == &pwd`, and
+    // the bytes we hand out come from copying through `CStr`, not from
+    // continuing to dereference `pwd` after the unsafe block ends.
+    // Reviewed alongside the matching `geteuid` block in
+    // `mkit_core::sign`.
+    #[allow(unsafe_code)]
+    let pw_dir_owned = unsafe {
+        let mut buf = [0i8; 4096];
+        let mut pwd: libc::passwd = std::mem::zeroed();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let rc = libc::getpwuid_r(
+            libc::geteuid(),
+            std::ptr::addr_of_mut!(pwd),
+            buf.as_mut_ptr().cast::<libc::c_char>(),
+            buf.len(),
+            std::ptr::addr_of_mut!(result),
+        );
+        if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
+            None
+        } else {
+            // Copy the C string out before `buf` / `pwd` go out of
+            // scope. `to_bytes` does not include the trailing NUL.
+            Some(CStr::from_ptr(pwd.pw_dir).to_bytes().to_vec())
+        }
+    };
+    let bytes = pw_dir_owned?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+#[cfg(not(unix))]
+fn home_dir_for_euid() -> Option<PathBuf> {
+    // Windows: there's no `getpwuid` equivalent. `%USERPROFILE%` is
+    // the conventional environment variable but is no more
+    // tamper-resistant than `$HOME` on Unix. Document the gap and
+    // accept it — the user-vs-attacker threat model on Windows is
+    // bounded by the user-profile ACL, not by this check.
+    std::env::var_os("USERPROFILE").map(PathBuf::from)
 }
 
 /// Split a pipe-separated argv string into argv tokens.
@@ -734,6 +804,32 @@ mod tests {
         let td = TempDir::new().unwrap();
         let out = resolve_key_path(td.path(), ".mkit/keys/custom/global.key").unwrap();
         assert_eq!(out, td.path().join(".mkit/keys/custom/global.key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_dir_for_euid_is_independent_of_home_env() {
+        // The whole point of `home_dir_for_euid`: a hostile parent
+        // process setting `HOME=/` must NOT widen the absolute-path
+        // policy. We can't safely mutate the process environment
+        // mid-test (other threads in the harness may race
+        // `getenv`), so just confirm the function returns *something*
+        // and that what it returns matches the passwd entry for the
+        // current uid — i.e. it isn't reading `$HOME`.
+        let from_passwd = home_dir_for_euid().expect("getpwuid_r should succeed");
+        assert!(from_passwd.is_absolute());
+        // Sanity: the path the OS returned must agree with `whoami`'s
+        // notion of the user. We can't probe the passwd entry directly
+        // without re-implementing the helper, but we can at least
+        // assert that an absolute key path under the returned home is
+        // accepted by `resolve_key_path` and that one diverging from
+        // it is rejected.
+        let td = TempDir::new().unwrap();
+        let inside = from_passwd.join(".mkit/test-inside.key");
+        assert!(resolve_key_path(td.path(), inside.to_str().unwrap()).is_ok());
+        // `/__definitely_not_a_home_dir__` cannot be under any real
+        // passwd `pw_dir` on a sane system.
+        assert!(resolve_key_path(td.path(), "/__definitely_not_a_home_dir__/x.key").is_err());
     }
 
     #[test]

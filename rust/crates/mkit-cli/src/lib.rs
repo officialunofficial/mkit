@@ -6,10 +6,14 @@
 //! `mkit-cli` is explicitly `publish = false` — it is monorepo-internal
 //! plumbing, not a stable API.
 
-// `deny` rather than `forbid` so the keygen `secp256k1`/`p256` raw-32
-// load path can call `libc::geteuid` for an owner check (single
-// SAFETY-noted block in `commands/keygen.rs`). All other modules
-// remain effectively `forbid`'d via review.
+// `deny` rather than `forbid` so the (currently single) `getpwuid_r`
+// home-dir lookup in `config::home_dir_for_euid` can call libc. That
+// function defeats the `HOME=/` parent-process trick when validating
+// an absolute `signing_key` path: env-derived home would admit every
+// path; passwd-derived home is bound to the same uid the file-mode
+// checks use. All other modules remain effectively `forbid`'d via
+// review; new `unsafe` sites need both an `#[allow]` opt-in and a
+// SAFETY comment on the block.
 #![deny(unsafe_code)]
 
 pub mod cli;

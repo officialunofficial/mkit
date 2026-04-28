@@ -17,7 +17,7 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mkit_core::hash::Hash;
-use mkit_core::object::{Commit, Identity, Object};
+use mkit_core::object::{Commit, Object};
 use mkit_core::ops::merge::{ConflictKind, find_merge_base, merge_trees};
 use mkit_core::ops::restore::{self, RestoreOptions};
 use mkit_core::refs::{self, Head};
@@ -135,7 +135,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(k) => k,
         Err(e) => return emit_err(&format!("load key: {e}"), exit::NOPERM),
     };
-    let author = Identity::ed25519(kp.public.0);
+    let author = match super::commit::resolve_author(None, &cfg.user_identity, &kp) {
+        Ok(id) => id,
+        Err(e) => return emit_err(&format!("author: {e}"), exit::CONFIG_ERROR),
+    };
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
