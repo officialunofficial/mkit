@@ -619,7 +619,7 @@ function Section({
   return (
     <section id={id} className='space-y-4 scroll-mt-24'>
       <header className='space-y-1'>
-        <h2 className='text-sm font-medium'>{title}</h2>
+        <h2 className='text-sm font-semibold'>{title}</h2>
         <p className='text-sm text-[--color-subtle]'>{description}</p>
       </header>
       {children}

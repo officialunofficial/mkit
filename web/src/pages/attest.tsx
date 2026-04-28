@@ -7,7 +7,7 @@ export default function AttestPage() {
     <div className='space-y-8'>
       <title>mkit — attest</title>
       <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>Sign a claim about a commit</h1>
+        <h1 className='text-4xl font-semibold tracking-tight'>Statements, signed</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
           Attach a signed statement — &ldquo;reviewed&rdquo;, &ldquo;deployed&rdquo;, &ldquo;tested&rdquo; — to any
           commit. Anyone holding your public key can verify it later, on any tool that reads the same envelope.

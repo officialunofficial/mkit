@@ -7,7 +7,7 @@ export default function HashPage() {
     <div className='space-y-8'>
       <title>mkit — hash</title>
       <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>Edit content, watch its hash rewrite</h1>
+        <h1 className='text-4xl font-semibold tracking-tight'>What&rsquo;s in a hash?</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
           Every file, every folder, every commit is named by a BLAKE3 hash of its bytes — change a single character and
           the hash changes too. This page builds a tiny commit out of two files and shows every hash along the way.
