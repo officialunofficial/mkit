@@ -45,13 +45,13 @@ path = "src/main.rs"
 # Inter-workspace deps need explicit `version = ...` alongside the
 # path so `cargo publish` accepts them; path-only deps are rejected by
 # the registry. Track workspace.package.version.
-mkit-core = { version = "0.2", path = "../mkit-core" }
-mkit-attest = { version = "0.2", path = "../mkit-attest" }
-mkit-transport-memory = { version = "0.2", path = "../mkit-transport-memory" }
-mkit-transport-file = { version = "0.2", path = "../mkit-transport-file" }
-mkit-transport-http = { version = "0.2", path = "../mkit-transport-http" }
-mkit-transport-s3 = { version = "0.2", path = "../mkit-transport-s3" }
-mkit-transport-ssh = { version = "0.2", path = "../mkit-transport-ssh" }
+mkit-core = { version = "0.3", path = "../mkit-core" }
+mkit-attest = { version = "0.3", path = "../mkit-attest" }
+mkit-transport-memory = { version = "0.3", path = "../mkit-transport-memory" }
+mkit-transport-file = { version = "0.3", path = "../mkit-transport-file" }
+mkit-transport-http = { version = "0.3", path = "../mkit-transport-http" }
+mkit-transport-s3 = { version = "0.3", path = "../mkit-transport-s3" }
+mkit-transport-ssh = { version = "0.3", path = "../mkit-transport-ssh" }
 
 # `derive` and `wrap_help` are intentionally disabled so help-text output
 # is deterministic — we render help ourselves from a compile-time const

@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-attest"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "blake3",
@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "ed25519-dalek",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-sign-ctap"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "ctap-hid-fido2",
@@ -1411,7 +1411,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-sign-file"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "mkit-attest",
@@ -1423,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-sign-tpm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "serde",
@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-file"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mkit-core",
  "tempfile",
@@ -1442,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-http"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mkit-core",
  "mockito",
@@ -1455,14 +1455,14 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-memory"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mkit-core",
 ]
 
 [[package]]
 name = "mkit-transport-s3"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hex",
  "hmac 0.13.0",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-ssh"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hex",
  "mkit-core",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-wasm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bao",
  "getrandom 0.2.17",
