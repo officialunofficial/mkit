@@ -365,16 +365,14 @@ pub fn load_key(path: &Path) -> Result<KeyPair, MkitError> {
 /// Load a raw 32-byte secret from `path` with the same Unix hardening
 /// `load_key` uses for the Ed25519 seed path.
 ///
-/// `O_NOFOLLOW` refuses a symlink at the *final* component only. Guarding
-/// against symlinks higher up the path needs `openat2(RESOLVE_NO_SYMLINKS)`
-/// (Linux-only) or a dirfd-based walk; that hardening is tracked
-/// separately. Today the parent-dir mode + owner check below is what
-/// bounds the risk on the dirs we manage.
+/// On Unix this rejects symlinks both at the final component and in any
+/// existing ancestor above it.
 pub fn load_raw_32(path: &Path) -> Result<zeroize::Zeroizing<[u8; 32]>, MkitError> {
     #[cfg(unix)]
     {
         use std::io::Read as _;
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        ensure_no_symlink_ancestors(path)?;
         let mut f = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
@@ -473,6 +471,46 @@ fn check_parent_dir_secure(parent: &Path) -> Result<(), MkitError> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn ensure_no_symlink_ancestors(path: &Path) -> Result<(), MkitError> {
+    let mut current = path.parent();
+    for _ in 0..3 {
+        let Some(dir) = current else {
+            break;
+        };
+        if dir.as_os_str().is_empty() {
+            break;
+        }
+        match std::fs::symlink_metadata(dir) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(MkitError::KeyPathIsSymlink(dir.display().to_string()));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(MkitError::KeyIo(format!("lstat {}: {e}", dir.display()))),
+        }
+        current = dir.parent();
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        return Err(MkitError::KeyPathIsSymlink(path.display().to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_secure_dir_all(parent: &Path) -> Result<(), MkitError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    ensure_no_symlink_ancestors(parent)?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| MkitError::KeyIo(format!("mkdir {}: {e}", parent.display())))?;
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| MkitError::KeyIo(format!("chmod parent: {e}")))?;
+    Ok(())
+}
+
 /// Persist a keypair to `path` as the raw 32-byte seed.
 ///
 /// **Atomicity contract.** The write is crash-safe:
@@ -499,25 +537,12 @@ pub fn save_raw_32(path: &Path, secret: &[u8; 32]) -> Result<(), MkitError> {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    std::fs::create_dir_all(parent)
-        .map_err(|e| MkitError::KeyIo(format!("mkdir {}: {e}", parent.display())))?;
 
     #[cfg(unix)]
     {
         use std::io::Write as _;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        // Tighten the immediate parent dir to 0700 before writing.
-        // `set_permissions` follows symlinks; if `parent` is a symlink
-        // to somewhere else, we refuse to chmod its target. Detect via
-        // `symlink_metadata`. Ancestors above `parent` are out of scope
-        // here — that's installer/setup policy.
-        let pmeta = std::fs::symlink_metadata(parent)
-            .map_err(|e| MkitError::KeyIo(format!("lstat parent: {e}")))?;
-        if pmeta.file_type().is_symlink() {
-            return Err(MkitError::KeyPathIsSymlink(parent.display().to_string()));
-        }
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| MkitError::KeyIo(format!("chmod parent: {e}")))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        create_secure_dir_all(parent)?;
 
         let filename = path
             .file_name()
@@ -568,6 +593,8 @@ pub fn save_raw_32(path: &Path, secret: &[u8; 32]) -> Result<(), MkitError> {
     }
     #[cfg(not(unix))]
     {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| MkitError::KeyIo(format!("mkdir {}: {e}", parent.display())))?;
         // Windows path: write to a tmp file in the same directory, then
         // rename. No POSIX permission knobs; the user-profile ACL is
         // the only protection.
@@ -978,6 +1005,29 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn load_key_rejects_symlinked_ancestor() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        let real_parent = dir.join("realkeys");
+        std::fs::create_dir_all(&real_parent).unwrap();
+        let mut parent_perm = std::fs::metadata(&real_parent).unwrap().permissions();
+        parent_perm.set_mode(0o700);
+        std::fs::set_permissions(&real_parent, parent_perm).unwrap();
+
+        let real = real_parent.join("default.key");
+        let kp = KeyPair::from_seed([0xBC; 32]);
+        save_key(&real, &kp).unwrap();
+
+        let symlink_parent = dir.join("symlink-keys");
+        std::os::unix::fs::symlink(&real_parent, &symlink_parent).unwrap();
+        match load_key(&symlink_parent.join("default.key")) {
+            Err(MkitError::KeyPathIsSymlink(_)) => {}
+            other => panic!("expected KeyPathIsSymlink, got {other:?}"),
+        }
+    }
+
     /// 0.3.0: `load_key` refuses when the immediate parent directory
     /// is group/world-accessible — `inotify`-watch + symlink-swap
     /// attacks are out of scope, but we don't make them easy.
@@ -1030,6 +1080,21 @@ mod tests {
         assert_eq!(meta_after.mode() & 0o777, 0o600);
         let kp_loaded = load_key(&p).unwrap();
         assert_eq!(kp_loaded.public.0, kp2.public.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_key_rejects_symlinked_ancestor() {
+        let dir = tempdir();
+        let real_parent = dir.join("realkeys");
+        std::fs::create_dir_all(&real_parent).unwrap();
+        let symlink_parent = dir.join("symlink-keys");
+        std::os::unix::fs::symlink(&real_parent, &symlink_parent).unwrap();
+        let kp = KeyPair::from_seed([0x44; 32]);
+        match save_key(&symlink_parent.join("default.key"), &kp) {
+            Err(MkitError::KeyPathIsSymlink(_)) => {}
+            other => panic!("expected KeyPathIsSymlink, got {other:?}"),
+        }
     }
 
     // Tiny self-contained tempdir helper — we don't want to pull in the

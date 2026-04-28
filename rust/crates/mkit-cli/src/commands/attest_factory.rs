@@ -27,6 +27,7 @@
 use std::path::Path;
 
 use mkit_attest::{Algorithm, ExternalSigner, Signer};
+use zeroize::Zeroizing;
 
 use crate::config::Config;
 
@@ -119,7 +120,12 @@ fn build_repo_key_signer(
             // they get the same `MissingKeyFile` error as
             // `mkit keygen` would point them to.
             let rel = cfg.signing_key.as_str();
-            let path = root.join(rel);
+            let path = crate::config::resolve_key_path(root, rel).map_err(|e| {
+                FactoryError::InvalidKeyFile {
+                    path: rel.to_owned(),
+                    reason: e.to_string(),
+                }
+            })?;
             if !path.exists() {
                 return Err(FactoryError::MissingKeyFile {
                     algorithm,
@@ -136,14 +142,14 @@ fn build_repo_key_signer(
         Algorithm::Secp256k1 => {
             let rel = cfg.attest.secp256k1_key_path_or_default();
             let secret = load_raw_secret(root, rel, algorithm)?;
-            let signer = mkit_attest::signer_k256::Secp256k1Signer::new(secret)
+            let signer = mkit_attest::signer_k256::Secp256k1Signer::new(*secret)
                 .map_err(|e| FactoryError::Signer(e.to_string()))?;
             Ok(Box::new(signer))
         }
         Algorithm::P256 => {
             let rel = cfg.attest.p256_key_path_or_default();
             let secret = load_raw_secret(root, rel, algorithm)?;
-            let signer = mkit_attest::signer_p256::P256Signer::new(secret)
+            let signer = mkit_attest::signer_p256::P256Signer::new(*secret)
                 .map_err(|e| FactoryError::Signer(e.to_string()))?;
             Ok(Box::new(signer))
         }
@@ -172,27 +178,23 @@ fn load_raw_secret(
     root: &Path,
     rel_path: &str,
     algorithm: Algorithm,
-) -> Result<[u8; 32], FactoryError> {
-    let path = root.join(rel_path);
+) -> Result<Zeroizing<[u8; 32]>, FactoryError> {
+    let path = crate::config::resolve_key_path(root, rel_path).map_err(|e| {
+        FactoryError::InvalidKeyFile {
+            path: rel_path.to_owned(),
+            reason: e.to_string(),
+        }
+    })?;
     if !path.exists() {
         return Err(FactoryError::MissingKeyFile {
             algorithm,
             path: rel_path.to_owned(),
         });
     }
-    let bytes = std::fs::read(&path).map_err(|e| FactoryError::InvalidKeyFile {
+    mkit_core::sign::load_raw_32(&path).map_err(|e| FactoryError::InvalidKeyFile {
         path: rel_path.to_owned(),
         reason: e.to_string(),
-    })?;
-    if bytes.len() != 32 {
-        return Err(FactoryError::InvalidKeyFile {
-            path: rel_path.to_owned(),
-            reason: format!("expected 32 bytes, got {}", bytes.len()),
-        });
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+    })
 }
 
 #[cfg(test)]
@@ -280,10 +282,10 @@ mod tests {
     #[test]
     fn repo_key_ed25519_honours_signing_key_config() {
         let td = tempfile::tempdir().unwrap();
-        let key_path = td.path().join(".mkit/custom/global.key");
+        let key_path = td.path().join(".mkit/keys/custom-global.key");
         write_ed25519_key(&key_path, &[0xEFu8; 32]);
         let mut cfg = Config::with_defaults();
-        cfg.signing_key = ".mkit/custom/global.key".into();
+        cfg.signing_key = ".mkit/keys/custom-global.key".into();
         let signer = build_signer(td.path(), Algorithm::Ed25519, "repo-key", &cfg)
             .expect("custom signing_key path should load");
         assert_eq!(signer.algorithm(), Algorithm::Ed25519);
@@ -310,6 +312,16 @@ mod tests {
         let mut secret = [0u8; 32];
         secret[31] = 3;
         fs::write(td.path().join(".mkit/keys/p256.key"), secret).unwrap();
+        let mut perm = fs::metadata(td.path().join(".mkit/keys/p256.key"))
+            .unwrap()
+            .permissions();
+        perm.set_mode(0o600);
+        fs::set_permissions(td.path().join(".mkit/keys/p256.key"), perm).unwrap();
+        let mut dperm = fs::metadata(td.path().join(".mkit/keys"))
+            .unwrap()
+            .permissions();
+        dperm.set_mode(0o700);
+        fs::set_permissions(td.path().join(".mkit/keys"), dperm).unwrap();
 
         let cfg = Config::with_defaults();
         let signer = build_signer(td.path(), Algorithm::P256, "repo-key", &cfg)
@@ -322,6 +334,16 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         fs::create_dir_all(td.path().join(".mkit/keys")).unwrap();
         fs::write(td.path().join(".mkit/keys/secp256k1.key"), b"short").unwrap();
+        let mut perm = fs::metadata(td.path().join(".mkit/keys/secp256k1.key"))
+            .unwrap()
+            .permissions();
+        perm.set_mode(0o600);
+        fs::set_permissions(td.path().join(".mkit/keys/secp256k1.key"), perm).unwrap();
+        let mut dperm = fs::metadata(td.path().join(".mkit/keys"))
+            .unwrap()
+            .permissions();
+        dperm.set_mode(0o700);
+        fs::set_permissions(td.path().join(".mkit/keys"), dperm).unwrap();
 
         let cfg = Config::with_defaults();
         match build_signer(td.path(), Algorithm::Secp256k1, "repo-key", &cfg) {

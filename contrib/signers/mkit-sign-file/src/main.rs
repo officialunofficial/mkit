@@ -148,22 +148,15 @@ fn run() -> Result<(), SignerError> {
 /// permissive allows other users on a multi-user box to read the key
 /// out of band; we fail closed.
 fn load_key(path: &Path) -> Result<[u8; 32], SignerError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(path).map_err(|e| SignerError::KeyIo(e.to_string()))?;
-        let mode = meta.permissions().mode() & 0o777;
-        if mode != 0o600 {
-            return Err(SignerError::KeyBadPermissions(mode));
-        }
-    }
-    let bytes = std::fs::read(path).map_err(|e| SignerError::KeyIo(e.to_string()))?;
-    if bytes.len() != 32 {
-        return Err(SignerError::KeyBadLength(bytes.len()));
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+    mkit_core::sign::load_raw_32(path)
+        .map_err(|e| match e {
+            mkit_core::MkitError::InsecureKeyPermissions { actual } => {
+                SignerError::KeyBadPermissions(actual)
+            }
+            mkit_core::MkitError::InvalidKeyLength { actual } => SignerError::KeyBadLength(actual),
+            other => SignerError::KeyIo(other.to_string()),
+        })
+        .map(|secret| *secret)
 }
 
 // -- Argv / errors --------------------------------------------------------
