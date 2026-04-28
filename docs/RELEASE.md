@@ -19,12 +19,18 @@ produces:
    alongside per-archive `.sig`/`.crt`/`.cosign.bundle`, an aggregate
    `SHA256SUMS` (also cosign-signed), and a CycloneDX `sbom.cdx.json`.
 
-2. **npm package** `@makechain/mkit-wasm@X.Y.Z` (unscoped). Built with
-   `wasm-pack --target bundler` and published with
-   `npm publish --provenance` so each release carries a Sigstore-backed
-   attestation tied to the workflow run. The pkg tarball is also
-   attached to the GitHub Release as
-   `mkit-wasm-X.Y.Z-npm.tar.gz` for offline mirroring.
+2. **npm package** `@makechain/mkit-wasm@X.Y.Z`. Built with
+   `wasm-pack --target bundler` and published with `npm publish
+   --access public`. The pkg tarball is also attached to the GitHub
+   Release as `mkit-wasm-X.Y.Z-npm.tar.gz` for offline mirroring.
+
+   *Provenance is currently disabled* — `--provenance` requires the
+   source GitHub repo to be `public`, but this one is `internal`.
+   The workflow code path is intact (the `id-token: write` permission
+   is still set); just re-add `--provenance` to the `npm publish`
+   line once the repo is flipped to public. Sigstore attestation
+   will then bind each release to the GitHub Actions run that
+   produced it.
 
 ## Cutting a release
 

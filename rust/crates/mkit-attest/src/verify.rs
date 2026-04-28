@@ -286,8 +286,16 @@ pub fn verify_signature(
 /// attestation verification MUST be deterministic (all honest verifiers
 /// reach the same verdict on the same signature), which the default
 /// loose `verify()` does not guarantee.
+///
+/// Returns [`Reason::Ok`] on success and [`Reason::SignatureMismatch`]
+/// on any failure (malformed `pk`, wrong `sig_bytes` length, or strict
+/// verification reject). Public so downstream consumers — notably the
+/// `mkit-wasm` `ed25519_verify` export — can share this exact strict
+/// verifier instead of re-implementing it (and re-relitigating which
+/// malleability cases to reject).
 #[cfg(feature = "algo-ed25519")]
-pub(crate) fn verify_ed25519(pk: [u8; 32], sig_bytes: &[u8], pae: &[u8]) -> Reason {
+#[must_use]
+pub fn verify_ed25519(pk: [u8; 32], sig_bytes: &[u8], pae: &[u8]) -> Reason {
     if sig_bytes.len() != ed25519_dalek::SIGNATURE_LENGTH {
         return Reason::SignatureMismatch;
     }
