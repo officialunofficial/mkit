@@ -9,8 +9,8 @@
 //! There are two layered config files. Higher-priority values win:
 //!
 //! 1. **Repo-scoped** (`<repo>/.mkit/config`) — per-project knobs that
-//!    travel with a clone: branch defaults, remote endpoints,
-//!    user.identity. Security-sensitive keys are rejected here, see
+//!    travel with a clone: branch defaults and remote endpoints.
+//!    Security-sensitive keys are rejected here, see
 //!    [`REPO_FORBIDDEN_KEYS`].
 //! 2. **User-scoped** (`$XDG_CONFIG_HOME/mkit/config`, default
 //!    `~/.config/mkit/config`) — per-user knobs that decide what gets
@@ -51,11 +51,14 @@ pub const DEFAULT_BRANCH: &str = "main";
 ///   user-scoped, the *selector* (`attest.signer`,
 ///   `attest.default_algorithm`) is enough to weaponize an existing
 ///   user-trusted binary or key against attacker-chosen content,
+/// * mark a repo-controlled HTTP/S3 remote as trusted for ambient
+///   environment credentials,
 /// * disable SSH host-key verification on `mkit push` (MITM).
 ///
 /// They are accepted from the user-scoped config only.
 pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "user.identity",
+    "trusted_remote_endpoint",
     "signing_key",
     "ssh.strict_host_key_checking",
     "ssh.user_known_hosts_file",
@@ -86,6 +89,9 @@ pub struct Config {
     /// Hex-encoded Identity: `[kind:u8][len:u16 LE][bytes]`. Empty =
     /// derive from the signing key's public key at commit time.
     pub user_identity: String,
+    /// Exact remote endpoint the user has explicitly trusted for
+    /// ambient HTTP/S3 environment credentials. User-scoped only.
+    pub trusted_remote_endpoint: String,
     pub signing_key: String,
     pub default_branch: String,
     pub remote_endpoint: String,
@@ -97,6 +103,16 @@ pub struct Config {
     /// `[attest]` section. Separate struct so new attest knobs don't
     /// balloon the flat `Config`.
     pub attest: AttestConfig,
+}
+
+/// Parsed config with per-layer provenance preserved so callers can
+/// distinguish "repo configured this" from "user explicitly trusted
+/// this".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LayeredConfig {
+    pub merged: Config,
+    pub user: Config,
+    pub repo: Config,
 }
 
 /// `[attest]` section. All fields optional with documented defaults; a
@@ -342,6 +358,23 @@ pub fn read_or_default(root: &Path) -> Result<Config, ConfigError> {
     Ok(cfg)
 }
 
+/// Read both raw layers plus the merged config.
+pub fn read_layered(root: &Path) -> Result<LayeredConfig, ConfigError> {
+    let mut merged = Config::with_defaults();
+    let user_path = user_config_path();
+    let repo_path = root.join(CONFIG_FILE);
+    apply_file_inner(&mut merged, &user_path, ConfigScope::User, true)?;
+    apply_file_inner(&mut merged, &repo_path, ConfigScope::Repo, true)?;
+
+    let mut user = Config::default();
+    apply_file_inner(&mut user, &user_path, ConfigScope::User, false)?;
+
+    let mut repo = Config::default();
+    apply_file_inner(&mut repo, &repo_path, ConfigScope::Repo, false)?;
+
+    Ok(LayeredConfig { merged, user, repo })
+}
+
 /// Apply a single config file to `cfg` under the given scope. Missing
 /// file → no-op (returns `Ok`). Malformed lines are tolerated.
 ///
@@ -352,6 +385,15 @@ pub(crate) fn apply_file(
     cfg: &mut Config,
     path: &Path,
     scope: ConfigScope,
+) -> Result<(), ConfigError> {
+    apply_file_inner(cfg, path, scope, true)
+}
+
+fn apply_file_inner(
+    cfg: &mut Config,
+    path: &Path,
+    scope: ConfigScope,
+    warn_on_forbidden: bool,
 ) -> Result<(), ConfigError> {
     let text = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -369,7 +411,9 @@ pub(crate) fn apply_file(
         let key = k.trim();
         let val = v.trim();
         if scope == ConfigScope::Repo && REPO_FORBIDDEN_KEYS.contains(&key) {
-            warn_forbidden_repo_key(path, key);
+            if warn_on_forbidden {
+                warn_forbidden_repo_key(path, key);
+            }
             continue;
         }
         apply_kv(cfg, key, val);
@@ -394,6 +438,7 @@ fn warn_forbidden_repo_key(path: &Path, key: &str) {
 fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
     match key {
         "user.identity" => val.clone_into(&mut cfg.user_identity),
+        "trusted_remote_endpoint" => val.clone_into(&mut cfg.trusted_remote_endpoint),
         "signing_key" => val.clone_into(&mut cfg.signing_key),
         "default_branch" => val.clone_into(&mut cfg.default_branch),
         "remote_endpoint" => val.clone_into(&mut cfg.remote_endpoint),
@@ -447,6 +492,54 @@ pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
     }
     fs::write(&path, out)?;
     Ok(())
+}
+
+/// Refuse to use ambient HTTP/S3 environment credentials with a
+/// repo-configured endpoint unless the user has explicitly trusted that
+/// exact remote in user-scoped config.
+pub fn enforce_trusted_remote_endpoint(cfg: &LayeredConfig) -> Result<(), String> {
+    match trusted_remote_error_with(cfg, &|name| {
+        std::env::var(name).ok().filter(|value| !value.is_empty())
+    }) {
+        Some(msg) => Err(msg),
+        None => Ok(()),
+    }
+}
+
+fn trusted_remote_error_with<F>(cfg: &LayeredConfig, getenv: &F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let endpoint = cfg.merged.remote_endpoint.trim();
+    if endpoint.is_empty() || cfg.repo.remote_endpoint.trim() != endpoint {
+        return None;
+    }
+    if cfg.user.trusted_remote_endpoint.trim() == endpoint {
+        return None;
+    }
+
+    if endpoint.starts_with("mkit+http://") || endpoint.starts_with("mkit+https://") {
+        if getenv(mkit_transport_http::TOKEN_ENV).is_some() {
+            return Some(format!(
+                "refusing repo-configured remote `{endpoint}` with ambient {} bearer token; trust it explicitly with `mkit config trusted_remote_endpoint {endpoint}` (writes {})",
+                mkit_transport_http::TOKEN_ENV,
+                user_config_path().display()
+            ));
+        }
+        return None;
+    }
+
+    if endpoint.starts_with("mkit+s3://")
+        && (getenv(mkit_transport_s3::ENV_ACCESS_KEY).is_some()
+            || getenv(mkit_transport_s3::ENV_SECRET_KEY).is_some())
+    {
+        return Some(format!(
+            "refusing repo-configured remote `{endpoint}` with ambient S3/R2 credentials; trust it explicitly with `mkit config trusted_remote_endpoint {endpoint}` (writes {})",
+            user_config_path().display()
+        ));
+    }
+
+    None
 }
 
 /// Write a single user-scoped key/value to `$XDG_CONFIG_HOME/mkit/config`.
@@ -629,6 +722,26 @@ mod tests {
         cfg
     }
 
+    fn layered(repo_text: Option<&str>, user_text: Option<&str>) -> LayeredConfig {
+        let td = TempDir::new().unwrap();
+        let user_path = td.path().join("user_config");
+        let repo_path = td.path().join("repo_config");
+        if let Some(text) = user_text {
+            fs::write(&user_path, text).unwrap();
+        }
+        if let Some(text) = repo_text {
+            fs::write(&repo_path, text).unwrap();
+        }
+        let mut merged = Config::with_defaults();
+        apply_file_inner(&mut merged, &user_path, ConfigScope::User, false).unwrap();
+        apply_file_inner(&mut merged, &repo_path, ConfigScope::Repo, false).unwrap();
+        let mut user = Config::default();
+        let mut repo = Config::default();
+        apply_file_inner(&mut user, &user_path, ConfigScope::User, false).unwrap();
+        apply_file_inner(&mut repo, &repo_path, ConfigScope::Repo, false).unwrap();
+        LayeredConfig { merged, user, repo }
+    }
+
     #[test]
     fn read_default_when_missing() {
         let td = TempDir::new().unwrap();
@@ -687,6 +800,15 @@ mod tests {
     fn repo_user_identity_is_rejected() {
         let cfg = layer(Some("user.identity = 012000aaaaaaaa\n"), None);
         assert!(cfg.user_identity.is_empty());
+    }
+
+    #[test]
+    fn repo_trusted_remote_endpoint_is_rejected() {
+        let cfg = layer(
+            Some("trusted_remote_endpoint = mkit+https://attacker.invalid/repo\n"),
+            None,
+        );
+        assert!(cfg.trusted_remote_endpoint.is_empty());
     }
 
     #[test]
@@ -765,6 +887,45 @@ mod tests {
     fn user_signing_key_is_honored() {
         let cfg = layer(None, Some("signing_key = /home/user/.mkit/global.key\n"));
         assert_eq!(cfg.signing_key, "/home/user/.mkit/global.key");
+    }
+
+    #[test]
+    fn repo_http_remote_with_token_requires_user_trust() {
+        let cfg = layered(
+            Some("remote_endpoint = mkit+https://example.invalid/repo\n"),
+            None,
+        );
+        let msg = trusted_remote_error_with(&cfg, &|name| {
+            (name == mkit_transport_http::TOKEN_ENV).then(|| "token".to_string())
+        })
+        .expect("repo-scoped HTTP remote with token must be rejected");
+        assert!(msg.contains("trusted_remote_endpoint"));
+    }
+
+    #[test]
+    fn trusted_http_remote_is_allowed() {
+        let cfg = layered(
+            Some("remote_endpoint = mkit+https://example.invalid/repo\n"),
+            Some("trusted_remote_endpoint = mkit+https://example.invalid/repo\n"),
+        );
+        let msg = trusted_remote_error_with(&cfg, &|name| {
+            (name == mkit_transport_http::TOKEN_ENV).then(|| "token".to_string())
+        });
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn repo_s3_remote_with_env_creds_requires_user_trust() {
+        let cfg = layered(
+            Some("remote_endpoint = mkit+s3://r2.example.com/bucket/proj\n"),
+            None,
+        );
+        let msg = trusted_remote_error_with(&cfg, &|name| match name {
+            mkit_transport_s3::ENV_ACCESS_KEY => Some("AKIA...".to_string()),
+            _ => None,
+        })
+        .expect("repo-scoped S3 remote with env creds must be rejected");
+        assert!(msg.contains("trusted_remote_endpoint"));
     }
 
     #[test]
