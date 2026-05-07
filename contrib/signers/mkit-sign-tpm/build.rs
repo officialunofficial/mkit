@@ -28,8 +28,16 @@ fn main() {
     }
 
     // Rebuild when the user's TPM stack changes. The device-presence
-    // check is path-existence only.
+    // check is path-existence only, so emit `rerun-if-changed`
+    // directives for both candidate device paths — Cargo will then
+    // re-invoke this script when either appears or disappears (e.g.
+    // user starts/stops `swtpm`, or boots into a TPM-equipped kernel).
+    // We also honor an opt-in env var so devs can force re-detection
+    // without a `cargo clean -p mkit-sign-tpm`.
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=/dev/tpmrm0");
+    println!("cargo:rerun-if-changed=/dev/tpm0");
+    println!("cargo:rerun-if-env-changed=MKIT_TPM_AVAILABLE_NONCE");
 }
 
 fn has_tpm_device() -> bool {

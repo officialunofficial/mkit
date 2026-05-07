@@ -168,7 +168,7 @@ fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> Wo
 /// - [`WorktreeError::Io`] on a [`crate::object::TreeEntry::validate_name`]
 ///   failure (the path's leaf segment is reserved or alias-prone).
 /// - Wraps [`crate::MkitError`] surfaced by `serialize` / `store.write`.
-#[allow(clippy::items_after_statements)]
+#[allow(clippy::items_after_statements, clippy::too_many_lines)]
 pub fn build_tree_from_index(
     store: &ObjectStore,
     index: &crate::index::Index,
@@ -218,13 +218,48 @@ pub fn build_tree_from_index(
         }
 
         let mut node = &mut root;
+        let mut walked = String::new();
         for seg in dirs {
             if seg.is_empty() {
                 return Err(WorktreeError::Io(io::Error::other(
                     "empty path segment in index",
                 )));
             }
+            // Collision: this segment was previously staged as a blob
+            // (e.g. earlier index entry was `a` as a file, this one
+            // is `a/b`). Tree object format requires unique entry
+            // names per directory; emitting both would produce an
+            // invalid tree the deserializer rejects under its strict
+            // ascending-name rule.
+            if node.leaves.contains_key(*seg) {
+                let conflicting = if walked.is_empty() {
+                    (*seg).to_string()
+                } else {
+                    format!("{walked}/{seg}")
+                };
+                return Err(WorktreeError::Io(io::Error::other(format!(
+                    "index path conflict: '{conflicting}' is staged as both a file and a directory"
+                ))));
+            }
+            walked = if walked.is_empty() {
+                (*seg).to_string()
+            } else {
+                format!("{walked}/{seg}")
+            };
             node = node.children.entry((*seg).to_string()).or_default();
+        }
+        // The reverse collision: this entry's leaf name already exists
+        // as a child directory under the same parent (an earlier
+        // entry staged `a/b` and now this one stages `a` as a file).
+        if node.children.contains_key(*leaf) {
+            let conflicting = if walked.is_empty() {
+                (*leaf).to_string()
+            } else {
+                format!("{walked}/{leaf}")
+            };
+            return Err(WorktreeError::Io(io::Error::other(format!(
+                "index path conflict: '{conflicting}' is staged as both a file and a directory"
+            ))));
         }
         node.leaves
             .insert((*leaf).to_string(), (mode, entry.object_hash));
@@ -750,6 +785,78 @@ mod tests {
         };
         assert_eq!(t.entries[0].name, b"e.txt");
         assert_eq!(t.entries[0].object_hash, h);
+    }
+
+    /// Path-collision: an index that stakes the same name as both a
+    /// blob and a directory MUST be rejected. Without the check the
+    /// builder would happily emit two `TreeEntries` with name `a`
+    /// (one Blob, one Tree), which the deserializer rejects under
+    /// its strict ascending-name rule. We catch it earlier with a
+    /// clearer error so the user knows which path needs unstaging.
+    /// (Reviewer finding 2 on PR #103.)
+    #[test]
+    fn from_index_rejects_blob_then_subdir_collision() {
+        let (_sd, store) = fresh_store();
+        let h = write_blob(&store, b"x");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "a".into(),
+            status: EntryStatus::Blob,
+            object_hash: h,
+        });
+        idx.entries.push(IndexEntry {
+            path: "a/b".into(),
+            status: EntryStatus::Blob,
+            object_hash: h,
+        });
+        let err = build_tree_from_index(&store, &idx).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("conflict") || msg.contains("collision") || msg.contains("'a'"),
+            "expected collision error mentioning the path, got: {msg}"
+        );
+    }
+
+    /// Same collision in the opposite stage order: subdir entry
+    /// staged first, then a blob at the parent.
+    #[test]
+    fn from_index_rejects_subdir_then_blob_collision() {
+        let (_sd, store) = fresh_store();
+        let h = write_blob(&store, b"x");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "a/b".into(),
+            status: EntryStatus::Blob,
+            object_hash: h,
+        });
+        idx.entries.push(IndexEntry {
+            path: "a".into(),
+            status: EntryStatus::Blob,
+            object_hash: h,
+        });
+        assert!(build_tree_from_index(&store, &idx).is_err());
+    }
+
+    /// All-Removed index → empty root tree, NOT an error.
+    /// (Reviewer finding 1 on PR #103.) `staged_count()` excludes
+    /// Removed entries by design; the tree builder does too. The
+    /// resulting empty tree is a valid commit target — applying a
+    /// removals-only changeset to a tree that previously contained
+    /// those paths produces an empty root.
+    #[test]
+    fn from_index_all_removed_produces_empty_tree() {
+        let (_sd, store) = fresh_store();
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "gone.txt".into(),
+            status: EntryStatus::Removed,
+            object_hash: [0; 32],
+        });
+        let h = build_tree_from_index(&store, &idx).unwrap();
+        let Object::Tree(t) = store.read_object(&h).unwrap() else {
+            panic!();
+        };
+        assert!(t.entries.is_empty());
     }
 
     /// Sanity: `ObjectType::Tree` is what we materialise. Pin so a

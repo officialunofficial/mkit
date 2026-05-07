@@ -274,89 +274,99 @@ pub enum DiffError {
     Worktree(#[from] WorktreeError),
 }
 
-/// Compare the working tree against `head_tree` and return a list of
-/// [`StatusEntry`] annotated with index staging state.
+/// Compare HEAD ↔ index and index ↔ worktree, returning a list of
+/// [`StatusEntry`] grouped by staging state.
 ///
-/// - Builds a temporary tree from `worktree_root` via
-///   [`worktree::build_tree`].
-/// - Diffs it against `head_tree` via [`diff_trees`].
-/// - If `index` is supplied, each entry is classified as `Staged`,
-///   `Unstaged`, or `PartiallyStaged` by checking whether the index
-///   contains the path and whether the index hash matches the worktree
-///   hash.
+/// Pre-#102 this function diffed only HEAD↔worktree and annotated
+/// each entry with index-state. That hid one hazard: a path staged
+/// to the index whose worktree was later reverted to match HEAD
+/// would diff to nothing — but `mkit commit` (which signs HEAD↔
+/// index post-#102) would still commit the staged content. The
+/// staged change was invisible to `mkit status`.
+///
+/// New shape:
+///
+/// - `Staged` — path differs between HEAD and the index-built tree
+///   (the change is what `mkit commit` will sign).
+/// - `Unstaged` — path differs between the index-built tree and the
+///   worktree (changes the user has not yet `mkit add`-ed).
+/// - When the same path appears in both legs (e.g. staged v2, then
+///   worktree edited to v3), one entry is emitted per leg so callers
+///   render both sections — matching git's two-section layout. The
+///   `PartiallyStaged` enum variant is retained for back-compat but
+///   no longer produced by this function.
+///
+/// When `index` is `None`, falls back to the legacy HEAD↔worktree
+/// diff and labels every entry `Unstaged` — used by callers that
+/// haven't initialized a staging index yet.
 ///
 /// # Errors
 ///
 /// Propagates [`WorktreeError`] (I/O, symlink validation, chunker
 /// limit) and [`StoreError`] (missing or corrupt objects).
+#[allow(clippy::too_many_lines)]
 pub fn status_diff(
     store: &ObjectStore,
     head_tree: Option<&Hash>,
     worktree_root: &Path,
     index: Option<&Index>,
 ) -> Result<Vec<StatusEntry>, DiffError> {
-    // Snapshot the working directory into the object store.
+    // Always snapshot the worktree — the index↔worktree leg uses it.
     let work_tree_hash = worktree::build_tree(store, worktree_root)?;
 
-    // Tree-vs-tree diff: HEAD vs worktree snapshot.
-    let diff = diff_trees(store, head_tree.copied(), Some(work_tree_hash))?;
+    let Some(idx) = index else {
+        // Legacy fallback: HEAD↔worktree, everything labeled Unstaged.
+        let diff = diff_trees(store, head_tree.copied(), Some(work_tree_hash))?;
+        return Ok(diff
+            .entries
+            .into_iter()
+            .map(|d| StatusEntry {
+                diff: d,
+                staging: StatusStaging::Unstaged,
+            })
+            .collect());
+    };
 
-    // Annotate each entry with its staging state.
-    let entries = diff
-        .entries
-        .into_iter()
-        .map(|entry| {
-            let staging = if let Some(idx) = index {
-                classify_staging(&entry, idx)
-            } else {
-                StatusStaging::Unstaged
-            };
-            StatusEntry {
-                diff: entry,
-                staging,
+    // Build the index tree exactly the way `mkit commit` builds it.
+    // This is the authoritative "what would be committed right now."
+    let index_tree = worktree::build_tree_from_index(store, idx)?;
+
+    let staged = diff_trees(store, head_tree.copied(), Some(index_tree))?;
+    let unstaged = diff_trees(store, Some(index_tree), Some(work_tree_hash))?;
+
+    // Emit one entry per (path, leg). A path appearing in both legs
+    // produces two entries — one `Staged` and one `Unstaged` — so the
+    // status renderer shows it under BOTH "Changes to be committed"
+    // and "Changes not staged for commit", matching git's two-section
+    // layout. The `PartiallyStaged` enum variant is retained for API
+    // back-compat but no longer produced.
+    let mut out: Vec<StatusEntry> =
+        Vec::with_capacity(staged.entries.len() + unstaged.entries.len());
+    for d in staged.entries {
+        out.push(StatusEntry {
+            diff: d,
+            staging: StatusStaging::Staged,
+        });
+    }
+    for d in unstaged.entries {
+        out.push(StatusEntry {
+            diff: d,
+            staging: StatusStaging::Unstaged,
+        });
+    }
+    out.sort_by(|a, b| {
+        // Stable rendering order: by path, then staged before unstaged.
+        a.diff.path.cmp(&b.diff.path).then_with(|| {
+            #[allow(clippy::match_same_arms)]
+            match (a.staging, b.staging) {
+                (StatusStaging::Staged, StatusStaging::Staged) => std::cmp::Ordering::Equal,
+                (StatusStaging::Staged, _) => std::cmp::Ordering::Less,
+                (_, StatusStaging::Staged) => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
             }
         })
-        .collect();
-
-    Ok(entries)
-}
-
-/// Determine the [`StatusStaging`] for a single diff entry by
-/// inspecting the index.
-///
-/// Rules (mirror Git's logic for a two-area model):
-///
-/// 1. If the path is not in the index at all → `Unstaged`.
-/// 2. If the path is in the index and the index hash matches the
-///    worktree `new_hash` → `Staged` (the worktree change was staged).
-/// 3. If the path is in the index but the index hash differs from the
-///    worktree `new_hash` → `PartiallyStaged` (staged something, but
-///    the worktree has additional changes).
-fn classify_staging(entry: &DiffEntry, index: &Index) -> StatusStaging {
-    let Some(idx_pos) = index.find_entry(&entry.path) else {
-        return StatusStaging::Unstaged;
-    };
-    let idx_entry = &index.entries[idx_pos];
-    // For a removed entry the worktree new_hash is None. If the index
-    // still has the file (non-zero hash) it is not staged for removal.
-    match entry.new_hash {
-        Some(wt_hash) => {
-            if idx_entry.object_hash == wt_hash {
-                StatusStaging::Staged
-            } else {
-                StatusStaging::PartiallyStaged
-            }
-        }
-        None => {
-            // Worktree deletion. If index has a zero hash for this path
-            // the deletion was staged; otherwise it is unstaged.
-            if idx_entry.object_hash == [0u8; crate::hash::HASH_LEN] {
-                StatusStaging::Staged
-            } else {
-                StatusStaging::PartiallyStaged
-            }
-        }
-    }
+    });
+    Ok(out)
 }
 
 // =====================================================================
@@ -694,16 +704,16 @@ mod tests {
         }
     }
 
+    /// HEAD is empty; index has b.txt; worktree has b.txt with the
+    /// same content. The HEAD↔index leg picks up b.txt as Added
+    /// (Staged); the index↔worktree leg sees no delta. Single Staged
+    /// entry.
     #[test]
     fn status_staged_entry_is_classified_staged() {
         use crate::index::{EntryStatus, Index, IndexEntry};
-        // Worktree adds b.txt; index already has b.txt with the same hash.
         let (_sd, store) = fresh_store();
         let work = fresh_workdir();
-        std::fs::write(work.path().join("a.txt"), b"old").unwrap();
-        let head_hash = worktree::build_tree(&store, work.path()).unwrap();
         std::fs::write(work.path().join("b.txt"), b"world").unwrap();
-        // Hash b.txt to the store so we can populate the index.
         let b_hash = worktree::hash_file(&store, &work.path().join("b.txt")).unwrap();
         let mut idx = Index::new();
         idx.entries.push(IndexEntry {
@@ -711,21 +721,25 @@ mod tests {
             status: EntryStatus::Blob,
             object_hash: b_hash,
         });
-        let result = status_diff(&store, Some(&head_hash), work.path(), Some(&idx)).unwrap();
+        // No HEAD — first commit scenario.
+        let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].diff.path, "b.txt");
         assert_eq!(result[0].staging, StatusStaging::Staged);
     }
 
+    /// HEAD empty; index has b.txt at v1; worktree has b.txt at v2.
+    /// The HEAD↔index leg yields one Added (Staged) entry; the
+    /// index↔worktree leg yields one Modified (Unstaged) entry. Same
+    /// path appears in both sections — git's two-section layout.
+    /// Pre-fix this collapsed to a single `PartiallyStaged` entry
+    /// which hid the staged-vs-worktree distinction.
     #[test]
-    fn status_partially_staged_entry() {
+    fn status_partially_staged_entry_emits_both_legs() {
         use crate::index::{EntryStatus, Index, IndexEntry};
-        // Worktree has b.txt="v2"; index has b.txt hashed at "v1" content.
         let (_sd, store) = fresh_store();
         let work = fresh_workdir();
-        std::fs::write(work.path().join("a.txt"), b"old").unwrap();
-        let head_hash = worktree::build_tree(&store, work.path()).unwrap();
-        // Write v1 to disk, hash it, then overwrite with v2.
+        // Write v1, hash it, then overwrite with v2.
         std::fs::write(work.path().join("b.txt"), b"v1").unwrap();
         let b_v1_hash = worktree::hash_file(&store, &work.path().join("b.txt")).unwrap();
         std::fs::write(work.path().join("b.txt"), b"v2").unwrap();
@@ -735,9 +749,11 @@ mod tests {
             status: EntryStatus::Blob,
             object_hash: b_v1_hash,
         });
-        let result = status_diff(&store, Some(&head_hash), work.path(), Some(&idx)).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].diff.path, "b.txt");
-        assert_eq!(result[0].staging, StatusStaging::PartiallyStaged);
+        let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
+        assert_eq!(result.len(), 2, "expected staged + unstaged entries");
+        let stagings: Vec<_> = result.iter().map(|e| e.staging).collect();
+        assert!(stagings.contains(&StatusStaging::Staged));
+        assert!(stagings.contains(&StatusStaging::Unstaged));
+        assert!(result.iter().all(|e| e.diff.path == "b.txt"));
     }
 }

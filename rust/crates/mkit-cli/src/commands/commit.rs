@@ -96,15 +96,19 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("author: {e}"), exit::CONFIG_ERROR),
     };
 
-    // Read the staging index. An absent file or zero non-removed
-    // entries is a hard error — see module docs and issue #102.
+    // Read the staging index. An absent file OR a totally empty
+    // entries vector is a hard error — see module docs and issue
+    // #102. An all-Removed index, by contrast, is a meaningful
+    // changeset (the user is committing deletions) and produces an
+    // empty-tree commit, so we DON'T gate on `staged_count()` (which
+    // excludes Removed entries by design).
     let Ok(idx) = index::read_index(&cwd) else {
         return emit_err(
             "nothing staged: run `mkit add <path>` (or `mkit add .`) before commit",
             exit::USAGE,
         );
     };
-    if idx.staged_count() == 0 {
+    if idx.entries.is_empty() {
         return emit_err(
             "nothing staged: index is empty; run `mkit add <path>` (or `mkit add .`) before commit",
             exit::USAGE,

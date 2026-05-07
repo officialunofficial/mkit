@@ -152,6 +152,40 @@ fn add_dot_then_commit_reproduces_full_worktree_snapshot() {
     assert!(body.contains("sub"));
 }
 
+/// Reviewer finding 1 (PR #103): an index whose only entries are
+/// `Removed` is a meaningful changeset — the user is committing
+/// removals — and must produce an empty-tree commit, not an error.
+/// Pre-fix, `commit.rs` checked `staged_count() == 0` (which excludes
+/// Removed) and rejected the operation with "nothing staged".
+#[test]
+fn rm_only_index_commits_an_empty_tree() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("a.txt"), b"alpha").unwrap();
+    ok(p, &["add", "a.txt"]);
+    ok(p, &["commit", "-m", "first"]);
+
+    // Remove the only file, leaving an all-Removed index.
+    ok(p, &["rm", "a.txt"]);
+    let out = run(p, &["commit", "-m", "drop everything"]);
+    assert!(
+        out.status.success(),
+        "all-Removed commit must succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let commit = head_commit(p);
+    let tree = tree_of_commit(p, &commit);
+    let cat = ok(p, &["cat", &tree]);
+    let body = String::from_utf8(cat.stdout).unwrap();
+    // Empty tree has no entries.
+    assert!(
+        !body.contains("a.txt"),
+        "empty-tree commit unexpectedly references the removed file: {body}"
+    );
+}
+
 #[test]
 fn rm_then_commit_excludes_the_removed_path() {
     let td = init_repo();
