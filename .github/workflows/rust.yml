@@ -17,13 +17,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.95.0"
-  # sccache + GitHub Actions cache backend. Compile-output cache layered
-  # on top of Swatinem/rust-cache (which still handles the cargo
-  # registry + lockfile-keyed target/). sccache hits across branches
-  # whose Cargo.lock has not changed even when Swatinem's lockfile-hash
-  # cache misses.
-  RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
   # Disable incremental compilation in CI — sccache's hashing model
   # works against per-codegen-unit cache keys, and incremental codegen's
   # hashed-paths interfere with cross-job reuse.
@@ -47,11 +40,23 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
 
-      # sccache compile-output cache. Pinned by commit-SHA (action's
-      # own GHA permissions are read-only on `actions/cache` so the
-      # cache-poisoning posture matches Swatinem's per-workflow keying).
+      # sccache compile-output cache. Tolerates GHA cache-backend
+      # outages: if the action fails to start sccache, we leave
+      # RUSTC_WRAPPER unset and Swatinem alone handles the artifact
+      # cache. Pinned by commit-SHA (action's own GHA permissions are
+      # read-only on `actions/cache` so the cache-poisoning posture
+      # matches Swatinem's per-workflow keying).
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@054db53350805f83040bf3e6e9b8cf5a139aa7c9  # v0.0.7
+
+      - name: Configure RUSTC_WRAPPER if sccache started
+        if: steps.sccache.outcome == 'success'
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
 
       # Registry + lockfile-keyed target cache. Layered with sccache:
       # Swatinem owns the cargo registry/index/git stores and keys the
@@ -137,10 +142,11 @@ jobs:
             exit 1
           fi
 
-      # Surface sccache stats so cache-hit-rate regressions are visible
-      # in the job log without us having to grep.
+      # Surface sccache stats so cache-hit-rate regressions are
+      # visible without us having to grep. Skipped when sccache failed
+      # to start (continue-on-error).
       - name: sccache stats
-        if: always()
+        if: always() && steps.sccache.outcome == 'success'
         run: sccache --show-stats
 
   # Minimum-supported Rust version gate. Reads `rust-version` from
@@ -174,7 +180,16 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.msrv }}
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@054db53350805f83040bf3e6e9b8cf5a139aa7c9  # v0.0.7
+
+      - name: Configure RUSTC_WRAPPER if sccache started
+        if: steps.sccache.outcome == 'success'
+        shell: bash
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
 
       - name: Install native deps + protoc
         run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev protobuf-compiler
@@ -189,11 +204,9 @@ jobs:
       - name: cargo check (workspace, locked)
         working-directory: rust
         env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
           CARGO_INCREMENTAL: 0
         run: cargo check --workspace --locked --all-targets
 
       - name: sccache stats
-        if: always()
+        if: always() && steps.sccache.outcome == 'success'
         run: sccache --show-stats
