@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`mkit commit` now reads the staging index** (`.mkit/index`)
+  instead of recursively snapshotting the worktree.
+  ([#102](https://github.com/officialunofficial/mkit/issues/102))
+  Pre-fix, `mkit add` and `mkit rm` wrote to the index but `mkit
+  commit` ignored it — a half-state that surprised any user reasoning
+  by analogy from git. Post-fix, `mkit add` (or `mkit add .`) is
+  required before `mkit commit`; an empty index is now a hard error.
+  The "snapshot the whole worktree" workflow is `mkit add . && mkit
+  commit -m "..."`.
+
+  New helper: `mkit_core::worktree::build_tree_from_index`. Pinned
+  invariant: for a worktree whose contents match an index entry-for-
+  entry, `build_tree` and `build_tree_from_index` produce the same
+  root tree hash, so attestations signed under either path
+  cross-verify against trees built under the other.
+
 ## [0.1.0] - 2026-05-07
 
 Initial public release. mkit is a content-addressed VCS for creative

@@ -63,19 +63,34 @@ jobs:
           version: '31.0'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # `--remap-path-prefix` rewrites embedded source paths to a
+      # stable virtual prefix so two build passes from different
+      # `--target-dir` values can still produce byte-identical
+      # binaries. Without it, debug-info-stripped release builds STILL
+      # leak the absolute build-dir (e.g. via $OUT_DIR-derived symbol
+      # names that buffa codegen + thiserror inlines into rodata).
+      #
+      # We map both:
+      #   - the source dir (`$PWD`) to `/src` — same in both passes
+      #   - each pass's per-pass target dir to `/target` — different
+      #     argv per pass, same string in the binary
       - name: Build pass 1
         working-directory: rust
-        env:
-          RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
         run: |
+          export RUSTFLAGS="-C codegen-units=1 -C strip=symbols \
+            --remap-path-prefix=$(pwd)=/src \
+            --remap-path-prefix=$(pwd)/target-r1=/target \
+            --remap-path-prefix=$HOME/.cargo=/cargo"
           cargo build --release --locked -p mkit-cli --target-dir target-r1
           sha256sum target-r1/release/${{ env.BINARY_NAME }} | tee /tmp/hash1.txt
 
       - name: Build pass 2
         working-directory: rust
-        env:
-          RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
         run: |
+          export RUSTFLAGS="-C codegen-units=1 -C strip=symbols \
+            --remap-path-prefix=$(pwd)=/src \
+            --remap-path-prefix=$(pwd)/target-r2=/target \
+            --remap-path-prefix=$HOME/.cargo=/cargo"
           cargo build --release --locked -p mkit-cli --target-dir target-r2
           sha256sum target-r2/release/${{ env.BINARY_NAME }} | tee /tmp/hash2.txt
 

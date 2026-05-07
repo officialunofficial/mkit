@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 
 use crate::atomic::write_atomic;
 use crate::hash::{HASH_LEN, Hash};
+use crate::object::{EntryMode, Object};
+use crate::store::{ObjectStore, StoreError};
 
 /// Magic bytes — ASCII `"MKIX"`.
 pub const MAGIC: [u8; 4] = *b"MKIX";
@@ -163,6 +165,12 @@ pub enum IndexError {
     /// Underlying I/O failure.
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// Object store lookup/decoding failed while deriving an index from a tree.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// A tree walk found a non-tree object where a tree hash was expected.
+    #[error("object is not a tree")]
+    NotTree,
 }
 
 /// Result alias used throughout this module.
@@ -252,6 +260,61 @@ pub fn read_index(root: &Path) -> IndexResult<Index> {
 pub fn write_index(root: &Path, idx: &Index) -> IndexResult<()> {
     let path = root.join(INDEX_FILE);
     write_atomic(&path, &idx.serialize(), true)?;
+    Ok(())
+}
+
+/// Materialize a staging index from a committed tree.
+///
+/// This is used after commands that move `HEAD` and restore the
+/// worktree so the index keeps matching the new commit snapshot. Tree
+/// entries are recursively flattened into leaf paths; removed entries
+/// are not represented because a committed tree has no tombstones.
+///
+/// # Errors
+/// Propagates object-store errors and returns [`IndexError::NotTree`]
+/// if `tree_hash` does not point at a tree object.
+pub fn from_tree(store: &ObjectStore, tree_hash: Hash) -> IndexResult<Index> {
+    let mut idx = Index::new();
+    push_tree_entries(store, tree_hash, "", &mut idx)?;
+    Ok(idx)
+}
+
+fn push_tree_entries(
+    store: &ObjectStore,
+    tree_hash: Hash,
+    prefix: &str,
+    idx: &mut Index,
+) -> IndexResult<()> {
+    let Object::Tree(tree) = store.read_object(&tree_hash)? else {
+        return Err(IndexError::NotTree);
+    };
+    for entry in tree.entries {
+        let name = String::from_utf8(entry.name).map_err(|_| IndexError::InvalidPathEncoding)?;
+        let path = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        match entry.mode {
+            EntryMode::Tree => push_tree_entries(store, entry.object_hash, &path, idx)?,
+            EntryMode::Blob | EntryMode::Executable | EntryMode::Symlink => {
+                if !validate_index_path(&path) {
+                    return Err(IndexError::InvalidPath(path));
+                }
+                let status = match entry.mode {
+                    EntryMode::Blob => EntryStatus::Blob,
+                    EntryMode::Executable => EntryStatus::Executable,
+                    EntryMode::Symlink => EntryStatus::Symlink,
+                    EntryMode::Tree => unreachable!("handled above"),
+                };
+                idx.entries.push(IndexEntry {
+                    path,
+                    status,
+                    object_hash: entry.object_hash,
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -551,5 +614,114 @@ mod tests {
         assert!(!validate_index_path(".git/HEAD"));
         assert!(!validate_index_path("a\\b"));
         assert!(!validate_index_path("a//b"));
+    }
+
+    #[test]
+    fn from_tree_flattens_tree_entries() {
+        use crate::object::{Blob, EntryMode, Object, Tree, TreeEntry};
+        use crate::serialize;
+        use crate::store::ObjectStore;
+
+        fn put(store: &ObjectStore, obj: &Object) -> Hash {
+            let bytes = serialize::serialize(obj).unwrap();
+            store.write(&bytes).unwrap()
+        }
+
+        let dir = TempDir::new().unwrap();
+        let store = ObjectStore::init(dir.path()).unwrap();
+        let file = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"file".to_vec(),
+            }),
+        );
+        let exec = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"exec".to_vec(),
+            }),
+        );
+        let link = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"target".to_vec(),
+            }),
+        );
+        let sub = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"run".to_vec(),
+                    mode: EntryMode::Executable,
+                    object_hash: exec,
+                }],
+            }),
+        );
+        let root = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![
+                    TreeEntry {
+                        name: b"file.txt".to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: file,
+                    },
+                    TreeEntry {
+                        name: b"link".to_vec(),
+                        mode: EntryMode::Symlink,
+                        object_hash: link,
+                    },
+                    TreeEntry {
+                        name: b"sub".to_vec(),
+                        mode: EntryMode::Tree,
+                        object_hash: sub,
+                    },
+                ],
+            }),
+        );
+
+        let idx = from_tree(&store, root).unwrap();
+        assert_eq!(idx.entries.len(), 3);
+        assert_eq!(idx.entries[0].path, "file.txt");
+        assert_eq!(idx.entries[0].status, EntryStatus::Blob);
+        assert_eq!(idx.entries[1].path, "link");
+        assert_eq!(idx.entries[1].status, EntryStatus::Symlink);
+        assert_eq!(idx.entries[2].path, "sub/run");
+        assert_eq!(idx.entries[2].status, EntryStatus::Executable);
+    }
+
+    #[test]
+    fn from_tree_round_trips_through_worktree_builder() {
+        use crate::object::{Blob, EntryMode, Object, Tree, TreeEntry};
+        use crate::serialize;
+        use crate::store::ObjectStore;
+
+        fn put(store: &ObjectStore, obj: &Object) -> Hash {
+            let bytes = serialize::serialize(obj).unwrap();
+            store.write(&bytes).unwrap()
+        }
+
+        let dir = TempDir::new().unwrap();
+        let store = ObjectStore::init(dir.path()).unwrap();
+        let blob = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"content".to_vec(),
+            }),
+        );
+        let tree = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"a.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob,
+                }],
+            }),
+        );
+
+        let idx = from_tree(&store, tree).unwrap();
+        let rebuilt = crate::worktree::build_tree_from_index(&store, &idx).unwrap();
+        assert_eq!(rebuilt, tree);
     }
 }

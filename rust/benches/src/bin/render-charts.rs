@@ -369,7 +369,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             ""
         };
-        let title = format!("{} — {}{suffix}", category_title(category), humanize_axis(axis));
+        let title = format!(
+            "{} — {}{suffix}",
+            category_title(category),
+            humanize_axis(axis)
+        );
         let svg = render_chart(&title, render_unit, display_unit, &rows);
         let path = charts_dir.join(format!("{}-{}.svg", slug(category), slug(axis)));
         fs::write(&path, svg)?;

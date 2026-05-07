@@ -181,3 +181,57 @@ fn status_no_head_shows_all_as_changes() {
         "x.txt missing from status: {stdout}"
     );
 }
+
+/// Reviewer finding 3 (PR #103): `mkit commit` now signs HEAD↔index,
+/// but `mkit status` was still computing HEAD↔worktree. A user who
+/// stages a change and then reverts the worktree to match HEAD would
+/// see "nothing to commit" while `mkit commit` happily commits the
+/// staged-but-no-longer-on-disk content. Status must show the staged
+/// change.
+#[test]
+fn staged_change_remains_visible_after_worktree_revert() {
+    let td = init_with_commit(&[("a.txt", b"v1")]);
+    let p = td.path();
+
+    // Stage a new version.
+    fs::write(p.join("a.txt"), b"v2").unwrap();
+    assert!(run_in(p, &["add", "a.txt"]).status.success());
+
+    // Now revert the worktree to v1 (matches HEAD).
+    fs::write(p.join("a.txt"), b"v1").unwrap();
+
+    // Status MUST surface the staged delta — the index still has v2.
+    let out = run_in(p, &["status"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !stdout.contains("nothing to commit"),
+        "status hid a staged change behind a worktree revert: {stdout}"
+    );
+    assert!(
+        stdout.contains("a.txt"),
+        "staged a.txt missing from status: {stdout}"
+    );
+    assert!(
+        stdout.contains("Changes to be committed"),
+        "expected staged-section header, got: {stdout}"
+    );
+}
+
+#[test]
+fn missing_index_with_clean_head_is_reported_clean() {
+    let td = init_with_commit(&[("a.txt", b"v1")]);
+    fs::remove_file(td.path().join(".mkit/index")).unwrap();
+
+    let out = run_in(td.path(), &["status"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("nothing to commit"),
+        "missing/empty index should not look like staged removals: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Changes to be committed"),
+        "missing/empty index unexpectedly created staged changes: {stdout}"
+    );
+}
