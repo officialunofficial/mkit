@@ -4,10 +4,12 @@
 use std::io::Write;
 use std::path::Path;
 
+use mkit_core::ignore::{self, IgnoreList};
 use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
 use mkit_core::object::{Blob, Object};
 use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
+use mkit_core::worktree;
 
 use crate::exit;
 
@@ -29,7 +31,11 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
     if target == "." {
-        if let Err(code) = add_tree(&cwd, &cwd, &store, &mut idx) {
+        let ignores = match ignore::load(&cwd) {
+            Ok(i) => i,
+            Err(e) => return emit_err(&format!(".mkitignore: {e}"), exit::GENERAL_ERROR),
+        };
+        if let Err(code) = add_tree(&cwd, &cwd, &store, &mut idx, &ignores) {
             return code;
         }
     } else if let Err(code) = add_one(&cwd, Path::new(target), &store, &mut idx) {
@@ -47,12 +53,33 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
     } else {
         root.join(rel)
     };
-    if !abs.is_file() {
+    let meta = abs
+        .symlink_metadata()
+        .map_err(|e| emit_err(&format!("metadata {}: {e}", abs.display()), exit::NOINPUT))?;
+    let (status, bytes) = if meta.file_type().is_file() {
+        let bytes = std::fs::read(&abs)
+            .map_err(|e| emit_err(&format!("read {}: {e}", abs.display()), exit::NOINPUT))?;
+        (EntryStatus::Blob, bytes)
+    } else if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(&abs)
+            .map_err(|e| emit_err(&format!("read link {}: {e}", abs.display()), exit::NOINPUT))?;
+        let target_str = match target.to_str() {
+            Some(t) => t.to_string(),
+            None => return Err(emit_err("symlink target is not valid UTF-8", exit::DATAERR)),
+        };
+        if !worktree::validate_symlink_target(&target_str) {
+            return Err(emit_err(
+                &format!("invalid symlink target: {target_str}"),
+                exit::DATAERR,
+            ));
+        }
+        (EntryStatus::Symlink, target_str.into_bytes())
+    } else {
         return Err(emit_err(
             &format!("not a regular file: {}", abs.display()),
             exit::NOINPUT,
         ));
-    }
+    };
     let rel_str = abs
         .strip_prefix(root)
         .unwrap_or(rel)
@@ -61,8 +88,6 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
     if !index::validate_index_path(&rel_str) {
         return Err(emit_err(&format!("invalid path: {rel_str}"), exit::DATAERR));
     }
-    let bytes = std::fs::read(&abs)
-        .map_err(|e| emit_err(&format!("read {}: {e}", abs.display()), exit::NOINPUT))?;
     let blob = Object::Blob(Blob { data: bytes });
     let ser = serialize::serialize(&blob)
         .map_err(|e| emit_err(&format!("serialize: {e}"), exit::DATAERR))?;
@@ -71,7 +96,7 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
         .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
     let entry = IndexEntry {
         path: rel_str,
-        status: EntryStatus::Blob,
+        status,
         object_hash: h,
     };
     if let Some(existing) = idx.find_entry(&entry.path) {
@@ -82,19 +107,29 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
     Ok(())
 }
 
-fn add_tree(root: &Path, dir: &Path, store: &ObjectStore, idx: &mut Index) -> Result<(), u8> {
+fn add_tree(
+    root: &Path,
+    dir: &Path,
+    store: &ObjectStore,
+    idx: &mut Index,
+    ignores: &IgnoreList,
+) -> Result<(), u8> {
     let rd = std::fs::read_dir(dir)
         .map_err(|e| emit_err(&format!("read dir {}: {e}", dir.display()), exit::NOINPUT))?;
     for ent in rd.flatten() {
         let p = ent.path();
         let name = ent.file_name();
         let name_s = name.to_string_lossy();
-        if name_s == ".mkit" || name_s == ".git" {
+        let meta = p
+            .symlink_metadata()
+            .map_err(|e| emit_err(&format!("metadata {}: {e}", p.display()), exit::NOINPUT))?;
+        let is_dir = meta.file_type().is_dir();
+        if ignores.is_ignored(&name_s, is_dir) {
             continue;
         }
-        if p.is_dir() {
-            add_tree(root, &p, store, idx)?;
-        } else if p.is_file() {
+        if meta.file_type().is_dir() {
+            add_tree(root, &p, store, idx, ignores)?;
+        } else if meta.file_type().is_file() || meta.file_type().is_symlink() {
             add_one(root, &p, store, idx)?;
         }
     }

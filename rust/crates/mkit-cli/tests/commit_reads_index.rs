@@ -76,6 +76,13 @@ fn head_commit(cwd: &Path) -> String {
     fs::read_to_string(&head_path).unwrap().trim().to_string()
 }
 
+fn head_tree_body(cwd: &Path) -> String {
+    let commit = head_commit(cwd);
+    let tree = tree_of_commit(cwd, &commit);
+    let cat = ok(cwd, &["cat", &tree]);
+    String::from_utf8(cat.stdout).unwrap()
+}
+
 #[test]
 fn unstaged_files_are_excluded_from_commit_tree() {
     let td = init_repo();
@@ -150,6 +157,109 @@ fn add_dot_then_commit_reproduces_full_worktree_snapshot() {
     assert!(body.contains("a.txt"));
     assert!(body.contains("b.txt"));
     assert!(body.contains("sub"));
+}
+
+#[test]
+fn add_dot_respects_mkitignore_before_commit() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join(".mkitignore"), b"secret.txt\n").unwrap();
+    fs::write(p.join("public.txt"), b"safe").unwrap();
+    fs::write(p.join("secret.txt"), b"do not commit").unwrap();
+
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "respect ignore"]);
+
+    let body = head_tree_body(p);
+    assert!(body.contains("public.txt"));
+    assert!(body.contains(".mkitignore"));
+    assert!(
+        !body.contains("secret.txt"),
+        "ignored file was committed by add .: {body}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn add_dot_rejects_absolute_symlink_instead_of_staging_target_bytes() {
+    use std::os::unix::fs::symlink;
+
+    let td = init_repo();
+    let p = td.path();
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    fs::write(outside.path(), b"outside secret").unwrap();
+    symlink(outside.path(), p.join("secret-link")).unwrap();
+
+    let out = run(p, &["add", "."]);
+    assert!(
+        !out.status.success(),
+        "add . must reject absolute symlink targets"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("symlink") || stderr.contains("target"),
+        "error should explain the symlink rejection, got: {stderr}"
+    );
+
+    let commit = run(p, &["commit", "-m", "should fail"]);
+    assert!(
+        !commit.status.success(),
+        "failed add . must not leave staged target bytes behind"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn add_one_preserves_safe_symlink_mode() {
+    use std::os::unix::fs::symlink;
+
+    let td = init_repo();
+    let p = td.path();
+    fs::write(p.join("target.txt"), b"target contents").unwrap();
+    symlink("target.txt", p.join("link")).unwrap();
+
+    ok(p, &["add", "link"]);
+    ok(p, &["commit", "-m", "stage symlink"]);
+
+    let body = head_tree_body(p);
+    let line = body
+        .lines()
+        .find(|line| line.ends_with(" link"))
+        .unwrap_or_else(|| panic!("missing symlink entry: {body}"));
+    assert!(
+        line.starts_with("03 "),
+        "link should be committed as symlink mode, got: {line}"
+    );
+    let target_hash = line.split_whitespace().nth(1).unwrap();
+    let target = ok(p, &["cat", target_hash]);
+    assert_eq!(String::from_utf8(target.stdout).unwrap(), "target.txt");
+}
+
+#[cfg(unix)]
+#[test]
+fn add_dot_stages_symlinked_directory_without_recursing() {
+    use std::os::unix::fs::symlink;
+
+    let td = init_repo();
+    let p = td.path();
+    fs::create_dir(p.join("real-dir")).unwrap();
+    fs::write(p.join("real-dir/inside.txt"), b"inside").unwrap();
+    symlink("real-dir", p.join("dirlink")).unwrap();
+
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "stage dir symlink"]);
+
+    let body = head_tree_body(p);
+    assert!(body.contains("dirlink"));
+    let line = body
+        .lines()
+        .find(|line| line.ends_with(" dirlink"))
+        .unwrap_or_else(|| panic!("missing dirlink entry: {body}"));
+    assert!(
+        line.starts_with("03 "),
+        "dirlink should be committed as symlink mode, got: {line}"
+    );
 }
 
 /// Reviewer finding 1 (PR #103): an index whose only entries are
