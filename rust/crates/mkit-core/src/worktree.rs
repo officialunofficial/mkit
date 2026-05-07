@@ -205,6 +205,12 @@ pub fn build_tree_from_index(
             }
             EntryStatus::Removed => unreachable!("filtered above"),
         };
+        if !matches!(store.read_object(&entry.object_hash)?, Object::Blob(_)) {
+            return Err(WorktreeError::Io(io::Error::other(format!(
+                "index entry '{}' points to a non-blob object",
+                entry.path
+            ))));
+        }
 
         // Split "a/b/c.txt" into ["a", "b"] + "c.txt".
         let segments: Vec<&str> = entry.path.split('/').collect();
@@ -868,5 +874,40 @@ mod tests {
         let h = build_tree_from_index(&store, &idx).unwrap();
         let obj = store.read_object(&h).unwrap();
         assert_eq!(obj.object_type(), ObjectType::Tree);
+    }
+
+    #[test]
+    fn from_index_rejects_missing_blob_object() {
+        let (_sd, store) = fresh_store();
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "missing.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: [42; 32],
+        });
+
+        let err = build_tree_from_index(&store, &idx).unwrap_err();
+        assert!(matches!(err, WorktreeError::Store(_)));
+    }
+
+    #[test]
+    fn from_index_rejects_non_blob_object_for_blob_status() {
+        let (_sd, store) = fresh_store();
+        let tree = Object::Tree(Tree { entries: vec![] });
+        let body = serialize::serialize(&tree).unwrap();
+        let tree_hash = store.write(&body).unwrap();
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "not-a-blob.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: tree_hash,
+        });
+
+        let err = build_tree_from_index(&store, &idx).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("non-blob"),
+            "expected non-blob index object error, got: {msg}"
+        );
     }
 }

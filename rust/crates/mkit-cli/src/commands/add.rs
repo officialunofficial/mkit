@@ -41,7 +41,7 @@ pub fn run(args: &[String]) -> u8 {
         if let Err(code) = add_tree(&cwd, &cwd, &store, &mut idx, &ignores, &mut seen) {
             return code;
         }
-        mark_absent_paths_removed(&mut idx, &seen);
+        mark_missing_paths_removed(&cwd, &mut idx, &seen);
     } else {
         match add_one(&cwd, Path::new(target), &store, &mut idx) {
             Ok(_) => {}
@@ -145,9 +145,18 @@ fn add_tree(
     Ok(())
 }
 
-fn mark_absent_paths_removed(idx: &mut Index, seen: &HashSet<String>) {
+fn mark_missing_paths_removed(root: &Path, idx: &mut Index, seen: &HashSet<String>) {
     for entry in &mut idx.entries {
-        if entry.status != EntryStatus::Removed && !seen.contains(&entry.path) {
+        if entry.status != EntryStatus::Removed
+            && !seen.contains(&entry.path)
+            && matches!(
+                root.join(&entry.path).symlink_metadata(),
+                Err(e) if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                )
+            )
+        {
             entry.status = EntryStatus::Removed;
             entry.object_hash = ZERO;
         }

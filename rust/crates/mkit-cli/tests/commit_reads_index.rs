@@ -202,6 +202,77 @@ fn add_dot_respects_mkitignore_before_commit() {
     );
 }
 
+#[test]
+fn add_dot_keeps_existing_tracked_file_that_is_now_ignored() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("public.txt"), b"safe").unwrap();
+    fs::write(p.join("secret.txt"), b"already tracked").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "track secret"]);
+
+    fs::write(p.join(".mkitignore"), b"secret.txt\n").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "ignore future secrets"]);
+
+    let body = head_tree_body(p);
+    assert!(body.contains("public.txt"));
+    assert!(body.contains(".mkitignore"));
+    assert!(
+        body.contains("secret.txt"),
+        "add . staged deletion for an existing tracked ignored file: {body}"
+    );
+}
+
+#[test]
+fn add_dot_removes_tracked_ignored_file_when_it_is_missing() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("secret.txt"), b"already tracked").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "track secret"]);
+
+    fs::write(p.join(".mkitignore"), b"secret.txt\n").unwrap();
+    fs::remove_file(p.join("secret.txt")).unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "drop secret"]);
+
+    let body = head_tree_body(p);
+    assert!(body.contains(".mkitignore"));
+    assert!(
+        !body.contains("secret.txt"),
+        "add . failed to stage an actual tracked deletion: {body}"
+    );
+}
+
+#[test]
+fn add_dot_stages_file_replacing_tracked_directory() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::create_dir(p.join("a")).unwrap();
+    fs::write(p.join("a/b.txt"), b"nested").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "track directory"]);
+
+    fs::remove_dir_all(p.join("a")).unwrap();
+    fs::write(p.join("a"), b"now a file").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "replace directory"]);
+
+    let body = head_tree_body(p);
+    let a_line = body
+        .lines()
+        .find(|line| line.ends_with(" a"))
+        .unwrap_or_else(|| panic!("missing replacement file entry: {body}"));
+    assert!(
+        a_line.starts_with("01 "),
+        "replacement should be a blob entry, got: {a_line}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn add_dot_rejects_absolute_symlink_instead_of_staging_target_bytes() {
@@ -340,6 +411,76 @@ fn rm_then_commit_excludes_the_removed_path() {
     assert!(
         !body.contains("b.txt"),
         "removed file still present in tree: {body}"
+    );
+}
+
+#[test]
+fn rm_normalizes_path_before_replacing_index_entry() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("a.txt"), b"alpha").unwrap();
+    fs::write(p.join("b.txt"), b"beta").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "first"]);
+
+    ok(p, &["rm", "./b.txt"]);
+    ok(p, &["commit", "-m", "drop b"]);
+
+    let body = head_tree_body(p);
+    assert!(body.contains("a.txt"));
+    assert!(
+        !body.contains("b.txt"),
+        "rm ./b.txt wrote a non-matching tombstone: {body}"
+    );
+}
+
+#[test]
+fn rm_accepts_absolute_in_repo_path() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("a.txt"), b"alpha").unwrap();
+    fs::write(p.join("b.txt"), b"beta").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "first"]);
+
+    let b_path = p.join("b.txt");
+    let b_arg = b_path.to_str().unwrap();
+    ok(p, &["rm", b_arg]);
+    ok(p, &["commit", "-m", "drop b"]);
+
+    let body = head_tree_body(p);
+    assert!(body.contains("a.txt"));
+    assert!(
+        !body.contains("b.txt"),
+        "rm absolute path wrote a non-matching tombstone: {body}"
+    );
+}
+
+#[test]
+fn rm_accepts_absolute_path_after_parent_directory_was_deleted() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("keep.txt"), b"keep").unwrap();
+    fs::create_dir(p.join("sub")).unwrap();
+    fs::write(p.join("sub/file.txt"), b"drop").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "first"]);
+
+    let removed_path = p.join("sub/file.txt");
+    let removed_arg = removed_path.to_str().unwrap();
+    fs::remove_dir_all(p.join("sub")).unwrap();
+
+    ok(p, &["rm", removed_arg]);
+    ok(p, &["commit", "-m", "drop sub file"]);
+
+    let body = head_tree_body(p);
+    assert!(body.contains("keep.txt"));
+    assert!(
+        !body.contains("sub"),
+        "rm absolute path with missing parent left subtree behind: {body}"
     );
 }
 
