@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="178" viewBox="0 0 800 178">
+  <style>
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+.title { font-size: 16px; font-weight: 600; fill: #24292f; }
+.label { font-size: 12px; fill: #24292f; }
+.value { font-size: 11px; fill: #57606a; }
+.axis-label { font-size: 11px; fill: #57606a; }
+.grid { stroke: #d0d7de; stroke-width: 0.5; }
+</style>
+  <rect width="100%" height="100%" fill="white"/>
+  <text x="400.0" y="30" text-anchor="middle" class="title">Pack Create Wallclock — 10 × 1 MiB</text>
+  <line x1="200.0" y1="52.0" x2="200.0" y2="138.0" class="grid"/>
+  <text x="200.0" y="152.0" text-anchor="middle" class="axis-label">0</text>
+  <line x1="304.0" y1="52.0" x2="304.0" y2="138.0" class="grid"/>
+  <text x="304.0" y="152.0" text-anchor="middle" class="axis-label">50</text>
+  <line x1="408.0" y1="52.0" x2="408.0" y2="138.0" class="grid"/>
+  <text x="408.0" y="152.0" text-anchor="middle" class="axis-label">100</text>
+  <line x1="512.0" y1="52.0" x2="512.0" y2="138.0" class="grid"/>
+  <text x="512.0" y="152.0" text-anchor="middle" class="axis-label">150</text>
+  <line x1="616.0" y1="52.0" x2="616.0" y2="138.0" class="grid"/>
+  <text x="616.0" y="152.0" text-anchor="middle" class="axis-label">200</text>
+  <line x1="720.0" y1="52.0" x2="720.0" y2="138.0" class="grid"/>
+  <text x="720.0" y="152.0" text-anchor="middle" class="axis-label">250</text>
+  <text x="460.0" y="168.0" text-anchor="middle" class="axis-label">ms</text>
+  <text x="190.0" y="77.2" text-anchor="end" class="label">mkit (BLAKE3)</text>
+  <rect x="200.0" y="60.0" width="448.4" height="18.2" rx="2" fill="#4C78A8"/>
+  <text x="656.4" y="77.2" class="value">4.64 ms</text>
+  <text x="190.0" y="103.2" text-anchor="end" class="label">git2 (libgit2)</text>
+  <rect x="200.0" y="86.0" width="137.5" height="18.2" rx="2" fill="#E45756"/>
+  <text x="345.5" y="103.2" class="value">15.13 ms</text>
+  <text x="190.0" y="129.2" text-anchor="end" class="label">git pack-objects</text>
+  <rect x="200.0" y="112.0" width="4.2" height="18.2" rx="2" fill="#9D7660"/>
+  <text x="212.2" y="129.2" class="value">498.49 ms</text>
+</svg>

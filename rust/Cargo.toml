@@ -17,6 +17,7 @@ members = [
     "crates/mkit-cli",
     "crates/mkit-rpc",
     "crates/mkit-wasm",
+    "benches",
     # Reference external-signer binary — lives under contrib/ (outside
     # `rust/`) because it is a third-party-integration reference, not a
     # core crate. Kept a workspace member so it builds / tests with

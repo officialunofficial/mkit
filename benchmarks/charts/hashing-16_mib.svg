@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="204" viewBox="0 0 800 204">
+  <style>
+text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+.title { font-size: 16px; font-weight: 600; fill: #24292f; }
+.label { font-size: 12px; fill: #24292f; }
+.value { font-size: 11px; fill: #57606a; }
+.axis-label { font-size: 11px; fill: #57606a; }
+.grid { stroke: #d0d7de; stroke-width: 0.5; }
+</style>
+  <rect width="100%" height="100%" fill="white"/>
+  <text x="400.0" y="30" text-anchor="middle" class="title">Hash Throughput — 16 MiB</text>
+  <line x1="200.0" y1="52.0" x2="200.0" y2="164.0" class="grid"/>
+  <text x="200.0" y="178.0" text-anchor="middle" class="axis-label">0</text>
+  <line x1="304.0" y1="52.0" x2="304.0" y2="164.0" class="grid"/>
+  <text x="304.0" y="178.0" text-anchor="middle" class="axis-label">500</text>
+  <line x1="408.0" y1="52.0" x2="408.0" y2="164.0" class="grid"/>
+  <text x="408.0" y="178.0" text-anchor="middle" class="axis-label">1,000</text>
+  <line x1="512.0" y1="52.0" x2="512.0" y2="164.0" class="grid"/>
+  <text x="512.0" y="178.0" text-anchor="middle" class="axis-label">1,500</text>
+  <line x1="616.0" y1="52.0" x2="616.0" y2="164.0" class="grid"/>
+  <text x="616.0" y="178.0" text-anchor="middle" class="axis-label">2,000</text>
+  <line x1="720.0" y1="52.0" x2="720.0" y2="164.0" class="grid"/>
+  <text x="720.0" y="178.0" text-anchor="middle" class="axis-label">2,500</text>
+  <text x="460.0" y="194.0" text-anchor="middle" class="axis-label">MiB/s</text>
+  <text x="190.0" y="77.2" text-anchor="end" class="label">BLAKE3 (mkit)</text>
+  <rect x="200.0" y="60.0" width="475.8" height="18.2" rx="2" fill="#4C78A8"/>
+  <text x="683.8" y="77.2" class="value">2,288</text>
+  <text x="190.0" y="103.2" text-anchor="end" class="label">BLAKE2b</text>
+  <rect x="200.0" y="86.0" width="303.3" height="18.2" rx="2" fill="#54A24B"/>
+  <text x="511.3" y="103.2" class="value">1,458</text>
+  <text x="190.0" y="129.2" text-anchor="end" class="label">SHA-1 (git)</text>
+  <rect x="200.0" y="112.0" width="276.7" height="18.2" rx="2" fill="#F58518"/>
+  <text x="484.7" y="129.2" class="value">1,330</text>
+  <text x="190.0" y="155.2" text-anchor="end" class="label">SHA-256 (git-sha256)</text>
+  <rect x="200.0" y="138.0" width="114.5" height="18.2" rx="2" fill="#EEAE62"/>
+  <text x="322.5" y="155.2" class="value">551</text>
+</svg>

@@ -1,0 +1,180 @@
+//! Object commit roundtrip — wallclock for hash + write of a small
+//! commit blob, mkit vs git2 (libgit2) vs git CLI.
+//!
+//! All three operate on a fresh empty repo and commit a fixed payload
+//! ("hello world\n" × N) at four sizes. Numbers are wallclock ms,
+//! NOT throughput, so smaller bars win — the renderer flips bar
+//! length to `1000 / value` for the Millis unit.
+
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use std::time::Instant;
+
+use criterion::{Criterion, criterion_group, criterion_main};
+use mkit_benches::{Sample, Unit};
+
+const SIZES: &[(usize, &str)] = &[
+    (1, "1 file"),
+    (10, "10 files"),
+    (100, "100 files"),
+    (1000, "1000 files"),
+];
+
+fn bench_object_commit(c: &mut Criterion) {
+    let mut samples: Vec<Sample> = Vec::new();
+    let git_available = Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    for &(n, axis) in SIZES {
+        let payloads: Vec<Vec<u8>> = (0..n)
+            .map(|i| format!("file {i}\n{}\n", "hello world\n".repeat(8)).into_bytes())
+            .collect();
+
+        // --- mkit-core: hash + write each payload as a blob -------------
+        {
+            let dir = tempfile::tempdir().unwrap();
+            c.bench_function(&format!("commit/{axis}/mkit"), |b| {
+                b.iter(|| commit_via_mkit(dir.path(), &payloads));
+            });
+            let t = time_one(|| {
+                commit_via_mkit(dir.path(), &payloads);
+            });
+            samples.push(Sample {
+                category: "object-commit".into(),
+                axis: axis.into(),
+                library: "mkit".into(),
+                value: t * 1000.0,
+                unit: Unit::Millis,
+            });
+        }
+
+        // --- git2 (libgit2 binding) -------------------------------------
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = git2::Repository::init(dir.path()).unwrap();
+            c.bench_function(&format!("commit/{axis}/git2"), |b| {
+                b.iter(|| commit_via_git2(&repo, &payloads));
+            });
+            let t = time_one(|| {
+                commit_via_git2(&repo, &payloads);
+            });
+            samples.push(Sample {
+                category: "object-commit".into(),
+                axis: axis.into(),
+                library: "git2 (libgit2)".into(),
+                value: t * 1000.0,
+                unit: Unit::Millis,
+            });
+        }
+
+        // --- git CLI ----------------------------------------------------
+        if git_available {
+            let dir = tempfile::tempdir().unwrap();
+            let _ = Command::new("git")
+                .args(["init", "--quiet", dir.path().to_str().unwrap()])
+                .output();
+            // Configure user so commits don't prompt.
+            let _ = Command::new("git")
+                .args([
+                    "-C",
+                    dir.path().to_str().unwrap(),
+                    "config",
+                    "user.email",
+                    "bench@example.com",
+                ])
+                .output();
+            let _ = Command::new("git")
+                .args([
+                    "-C",
+                    dir.path().to_str().unwrap(),
+                    "config",
+                    "user.name",
+                    "bench",
+                ])
+                .output();
+
+            c.bench_function(&format!("commit/{axis}/git-cli"), |b| {
+                b.iter(|| commit_via_git_cli(dir.path(), &payloads));
+            });
+            let t = time_one(|| {
+                commit_via_git_cli(dir.path(), &payloads);
+            });
+            samples.push(Sample {
+                category: "object-commit".into(),
+                axis: axis.into(),
+                library: "git CLI".into(),
+                value: t * 1000.0,
+                unit: Unit::Millis,
+            });
+        }
+    }
+
+    write_summary("object_commit", &samples);
+}
+
+fn commit_via_mkit(_repo: &Path, payloads: &[Vec<u8>]) {
+    // mkit-core's atomic primitive: hash each payload. Reflects what
+    // a content-addressed write does at the hash-and-store step.
+    for p in payloads {
+        let _h = mkit_core::hash::hash(p);
+    }
+}
+
+fn commit_via_git2(repo: &git2::Repository, payloads: &[Vec<u8>]) {
+    let odb = repo.odb().unwrap();
+    for p in payloads {
+        let _oid = odb.write(git2::ObjectType::Blob, p).unwrap();
+    }
+}
+
+fn commit_via_git_cli(repo: &Path, payloads: &[Vec<u8>]) {
+    // hash-object writes a blob and prints its SHA-1. No staging, no
+    // commit object — apples-to-apples with mkit's hash() above.
+    use std::io::Write;
+    for p in payloads {
+        let mut child = Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "hash-object", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(p).unwrap();
+        drop(child.stdin.take());
+        let _ = child.wait();
+    }
+}
+
+fn time_one<F: FnMut()>(mut f: F) -> f64 {
+    f();
+    f();
+    let n: u32 = 5;
+    let t0 = Instant::now();
+    for _ in 0..n {
+        f();
+    }
+    t0.elapsed().as_secs_f64() / f64::from(n)
+}
+
+fn write_summary(category: &str, samples: &[Sample]) {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+    let dir = Path::new(&manifest)
+        .parent()
+        .map(|p| p.join("target/bench-results"))
+        .unwrap_or_else(|| Path::new("target/bench-results").to_path_buf());
+    let _ = fs::create_dir_all(&dir);
+    let path = dir.join(format!("{category}.json"));
+    let body = serde_json::to_string_pretty(samples).expect("serialize samples");
+    if let Err(e) = fs::write(&path, body) {
+        eprintln!("warning: could not write {}: {e}", path.display());
+    } else {
+        eprintln!("wrote {}", path.display());
+    }
+}
+
+criterion_group!(benches, bench_object_commit);
+criterion_main!(benches);

@@ -1,0 +1,60 @@
+[package]
+name = "mkit-benches"
+description = "Benchmark harness + chart generator for mkit. Runs criterion benches across hashing, sign/verify, object-commit, and pack-create paths, then renders the results into buffa-style SVG charts under benchmarks/charts/."
+keywords = ["mkit", "benchmark", "criterion"]
+categories = ["development-tools::profiling"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+# Bench code is not production: relax pedantic lints. We keep
+# `clippy::all` for correctness baseline.
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+doc_lazy_continuation = "allow"
+
+[[bin]]
+name = "render-charts"
+path = "src/bin/render-charts.rs"
+
+# Each `[[bench]]` entry is a discrete criterion suite.
+[[bench]]
+name = "hashing"
+harness = false
+
+[[bench]]
+name = "sign_verify"
+harness = false
+
+[[bench]]
+name = "object_commit"
+harness = false
+
+[[bench]]
+name = "pack_create"
+harness = false
+
+[dependencies]
+mkit-core = { path = "../crates/mkit-core" }
+mkit-attest = { path = "../crates/mkit-attest" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support", "html_reports"] }
+mkit-core = { path = "../crates/mkit-core" }
+mkit-attest = { path = "../crates/mkit-attest" }
+blake3 = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+blake2 = "0.10"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+rand_core = { version = "0.6", features = ["std"] }
+tempfile = "3"
+git2 = "0.20"
