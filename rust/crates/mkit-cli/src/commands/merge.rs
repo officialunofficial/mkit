@@ -79,6 +79,9 @@ pub fn run(args: &[String]) -> u8 {
         {
             return emit_err(&format!("restore worktree: {e}"), exit::GENERAL_ERROR);
         }
+        if let Err(e) = super::sync_index_to_tree(&cwd, &store, theirs_tree) {
+            return emit_err(&e, exit::CANTCREAT);
+        }
         if let Err(e) = advance_head(&mkit_dir, &theirs) {
             return emit_err(&e, exit::CANTCREAT);
         }
@@ -173,6 +176,9 @@ pub fn run(args: &[String]) -> u8 {
         restore::restore_tree(&store, result.tree_hash, &cwd, &RestoreOptions::default())
     {
         return emit_err(&format!("restore worktree: {e}"), exit::GENERAL_ERROR);
+    }
+    if let Err(e) = super::sync_index_to_tree(&cwd, &store, result.tree_hash) {
+        return emit_err(&e, exit::CANTCREAT);
     }
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(

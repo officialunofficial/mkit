@@ -210,3 +210,29 @@ fn rm_then_commit_excludes_the_removed_path() {
         "removed file still present in tree: {body}"
     );
 }
+
+#[test]
+fn add_with_missing_index_seeds_from_head_before_commit() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("a.txt"), b"alpha").unwrap();
+    fs::write(p.join("b.txt"), b"beta").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "first"]);
+
+    fs::remove_file(p.join(".mkit/index")).unwrap();
+    fs::write(p.join("a.txt"), b"alpha v2").unwrap();
+    ok(p, &["add", "a.txt"]);
+    ok(p, &["commit", "-m", "update a"]);
+
+    let commit = head_commit(p);
+    let tree = tree_of_commit(p, &commit);
+    let cat = ok(p, &["cat", &tree]);
+    let body = String::from_utf8(cat.stdout).unwrap();
+    assert!(body.contains("a.txt"));
+    assert!(
+        body.contains("b.txt"),
+        "missing-index add dropped unchanged tracked file: {body}"
+    );
+}

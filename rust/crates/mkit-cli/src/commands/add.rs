@@ -24,9 +24,9 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mut idx = match index::read_index(&cwd) {
+    let mut idx = match super::read_or_seed_index_from_head(&cwd, &store) {
         Ok(i) => i,
-        Err(_) => Index::new(),
+        Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
     if target == "." {
         if let Err(code) = add_tree(&cwd, &cwd, &store, &mut idx) {

@@ -105,6 +105,9 @@ fn start(
     if let Err(e) = restore::restore_tree(store, onto_tree, cwd, &RestoreOptions::default()) {
         return emit_err(&format!("restore worktree: {e}"), exit::GENERAL_ERROR);
     }
+    if let Err(e) = super::sync_index_to_tree(cwd, store, onto_tree) {
+        return emit_err(&e, exit::CANTCREAT);
+    }
     replay(cwd, mkit_dir, store)
 }
 
@@ -131,6 +134,7 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     }
     if let Ok(tree) = load_tree_hash(store, state.orig_head) {
         let _ = restore::restore_tree(store, tree, cwd, &RestoreOptions::default());
+        let _ = super::sync_index_to_tree(cwd, store, tree);
     }
     let _ = cleanup_rebase(mkit_dir);
     let mut stdout = std::io::stdout().lock();
@@ -207,6 +211,9 @@ fn replay(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore
             restore::restore_tree(store, result.tree_hash, cwd, &RestoreOptions::default())
         {
             return emit_err(&format!("restore worktree: {e}"), exit::GENERAL_ERROR);
+        }
+        if let Err(e) = super::sync_index_to_tree(cwd, store, result.tree_hash) {
+            return emit_err(&e, exit::CANTCREAT);
         }
         state.done.push(target);
         state.todo.remove(0);

@@ -77,6 +77,9 @@ pub fn run(args: &[String]) -> u8 {
             Ok(r) => r,
             Err(e) => return emit_err(&format!("restore: {e}"), exit::CANTCREAT),
         };
+    if let Err(e) = super::sync_index_to_tree(&cwd, &store, tree_hash) {
+        return emit_err(&e, exit::CANTCREAT);
+    }
 
     // Update HEAD last. If the input was a ref name we know we saw a
     // branch/tag above; for tags + bare commit hashes we go detached.

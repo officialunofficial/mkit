@@ -3,7 +3,8 @@
 use std::io::Write;
 
 use mkit_core::hash::ZERO;
-use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
+use mkit_core::index::{self, EntryStatus, IndexEntry};
+use mkit_core::store::ObjectStore;
 
 use crate::exit;
 
@@ -16,9 +17,13 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mut idx = match index::read_index(&cwd) {
+    let store = match ObjectStore::open(&cwd) {
+        Ok(s) => s,
+        Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
+    };
+    let mut idx = match super::read_or_seed_index_from_head(&cwd, &store) {
         Ok(i) => i,
-        Err(_) => Index::new(),
+        Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
     let entry = IndexEntry {
         path: path.clone(),

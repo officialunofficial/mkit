@@ -150,6 +150,9 @@ pub fn run(args: &[String]) -> u8 {
     if let Err((m, c)) = advance_head(&mkit_dir, &commit_hash) {
         return emit_err(&m, c);
     }
+    if let Err(e) = super::sync_index_to_tree(&cwd, &store, tree_hash) {
+        return emit_err(&e, exit::CANTCREAT);
+    }
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(
         stdout,

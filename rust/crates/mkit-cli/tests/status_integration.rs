@@ -217,3 +217,21 @@ fn staged_change_remains_visible_after_worktree_revert() {
         "expected staged-section header, got: {stdout}"
     );
 }
+
+#[test]
+fn missing_index_with_clean_head_is_reported_clean() {
+    let td = init_with_commit(&[("a.txt", b"v1")]);
+    fs::remove_file(td.path().join(".mkit/index")).unwrap();
+
+    let out = run_in(td.path(), &["status"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("nothing to commit"),
+        "missing/empty index should not look like staged removals: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Changes to be committed"),
+        "missing/empty index unexpectedly created staged changes: {stdout}"
+    );
+}

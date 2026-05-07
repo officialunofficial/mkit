@@ -66,7 +66,9 @@ pub fn run(_args: &[String]) -> u8 {
     };
 
     // --- Load index (best-effort) -------------------------------------
-    let idx = index::read_index(&cwd).ok();
+    let idx = index::read_index(&cwd)
+        .ok()
+        .filter(|idx| !idx.entries.is_empty());
 
     // --- Compute status -----------------------------------------------
     let entries = match status_diff(&store, head_tree.as_ref(), &cwd, idx.as_ref()) {
