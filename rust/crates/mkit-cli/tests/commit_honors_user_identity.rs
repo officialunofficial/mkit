@@ -158,18 +158,26 @@ fn commit_ignores_repo_scoped_user_identity() {
 #[test]
 fn commit_author_flag_overrides_config_and_default() {
     let td = tempfile::tempdir().unwrap();
-    assert!(run_in(td.path(), &["init"]).status.success());
+    let xdg = tempfile::tempdir().unwrap();
+    assert!(
+        run_in_with_xdg(td.path(), xdg.path(), &["init"])
+            .status
+            .success()
+    );
     // 0.3.0: explicit keygen required.
-    assert!(run_in(td.path(), &["keygen"]).status.success());
+    assert!(
+        run_in_with_xdg(td.path(), xdg.path(), &["keygen"])
+            .status
+            .success()
+    );
 
     // Seed config with identity A — the flag must win over it.
     let cfg_identity = [0x11u8; 32];
     let cfg_hex = encode_ed25519_user_identity(&cfg_identity);
+    fs::create_dir_all(xdg.path().join("mkit")).unwrap();
     fs::write(
-        td.path().join(".mkit/config"),
-        format!(
-            "signing_key = .mkit/keys/default.key\ndefault_branch = main\nuser.identity = {cfg_hex}\n"
-        ),
+        xdg.path().join("mkit/config"),
+        format!("user.identity = {cfg_hex}\n"),
     )
     .unwrap();
 
@@ -181,9 +189,14 @@ fn commit_author_flag_overrides_config_and_default() {
     }
 
     fs::write(td.path().join("f.txt"), b"hi").unwrap();
-    assert!(run_in(td.path(), &["add", "."]).status.success());
-    let out = run_in(
+    assert!(
+        run_in_with_xdg(td.path(), xdg.path(), &["add", "."])
+            .status
+            .success()
+    );
+    let out = run_in_with_xdg(
         td.path(),
+        xdg.path(),
         &[
             "commit",
             "-m",

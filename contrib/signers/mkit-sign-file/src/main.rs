@@ -38,6 +38,7 @@ use mkit_attest::signer_p256::P256Signer;
 use mkit_attest::signer_repo_key::RepoKeySigner;
 use mkit_core::sign::KeyPair;
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 /// Top-level entry. Routes every error through a single stderr-and-exit
 /// path so a non-zero exit always carries a human-readable one-liner
@@ -106,23 +107,24 @@ fn run() -> Result<(), SignerError> {
             // the Ed25519 pubkey from the 32-byte seed. The keyid it
             // emits is `blake3:<hex-of-pubkey-hash>` — legacy-compat
             // form, accepted by the verifier (see Algorithm::from_keyid).
-            let kp = KeyPair::from_seed(secret);
+            let kp = KeyPair::from_seed(*secret);
             let mut s = RepoKeySigner::new(kp);
             let sig = <RepoKeySigner as mkit_attest::Signer>::sign(&mut s, &pae)
                 .map_err(SignerError::Attest)?;
             (s.keyid_string(), sig)
         }
         Algorithm::Secp256k1 => {
-            let s = Secp256k1Signer::new(secret).map_err(SignerError::Attest)?;
+            let s = Secp256k1Signer::new(*secret).map_err(SignerError::Attest)?;
             let sig = s.sign_dsse(&pae).map_err(SignerError::Attest)?;
             (s.keyid_string(), sig)
         }
         Algorithm::P256 => {
-            let s = P256Signer::new(secret).map_err(SignerError::Attest)?;
+            let s = P256Signer::new(*secret).map_err(SignerError::Attest)?;
             let sig = s.sign_dsse(&pae).map_err(SignerError::Attest)?;
             (s.keyid(), sig)
         }
     };
+    drop(secret);
 
     // Single-line JSON response, trailing newline. Emitting keys in
     // `keyid` then `sig_base64` order matches every example in the
@@ -147,23 +149,14 @@ fn run() -> Result<(), SignerError> {
 /// "only the owning user can read this file." A mode of 0644 or more
 /// permissive allows other users on a multi-user box to read the key
 /// out of band; we fail closed.
-fn load_key(path: &Path) -> Result<[u8; 32], SignerError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(path).map_err(|e| SignerError::KeyIo(e.to_string()))?;
-        let mode = meta.permissions().mode() & 0o777;
-        if mode != 0o600 {
-            return Err(SignerError::KeyBadPermissions(mode));
+fn load_key(path: &Path) -> Result<Zeroizing<[u8; 32]>, SignerError> {
+    mkit_core::sign::load_raw_32(path).map_err(|e| match e {
+        mkit_core::MkitError::InsecureKeyPermissions { actual } => {
+            SignerError::KeyBadPermissions(actual)
         }
-    }
-    let bytes = std::fs::read(path).map_err(|e| SignerError::KeyIo(e.to_string()))?;
-    if bytes.len() != 32 {
-        return Err(SignerError::KeyBadLength(bytes.len()));
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+        mkit_core::MkitError::InvalidKeyLength { actual } => SignerError::KeyBadLength(actual),
+        other => SignerError::KeyIo(other.to_string()),
+    })
 }
 
 // -- Argv / errors --------------------------------------------------------

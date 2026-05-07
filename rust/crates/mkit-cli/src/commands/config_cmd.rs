@@ -122,6 +122,11 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
 fn show_all(cfg: &Config) -> u8 {
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "user.identity = {}", cfg.user_identity);
+    let _ = writeln!(
+        stdout,
+        "trusted_remote_endpoint = {}",
+        cfg.trusted_remote_endpoint
+    );
     let _ = writeln!(stdout, "signing_key = {}", cfg.signing_key);
     let _ = writeln!(stdout, "default_branch = {}", cfg.default_branch);
     let _ = writeln!(stdout, "remote_endpoint = {}", cfg.remote_endpoint);
@@ -144,6 +149,7 @@ fn show_all(cfg: &Config) -> u8 {
 fn show_one(cfg: &Config, key: &str) -> u8 {
     let v = match key {
         "user.identity" => &cfg.user_identity,
+        "trusted_remote_endpoint" => &cfg.trusted_remote_endpoint,
         "signing_key" => &cfg.signing_key,
         "default_branch" => &cfg.default_branch,
         "remote_endpoint" => &cfg.remote_endpoint,

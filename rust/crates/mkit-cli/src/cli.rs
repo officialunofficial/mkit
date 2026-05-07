@@ -36,6 +36,7 @@ commands:
   config            Show or set configuration values
   config user.identity <value>  Set author Identity
                         (ed25519:<hex>, mid:<N>, or raw [kind][len][bytes] hex)
+  config trusted_remote_endpoint <url>  Trust an HTTP/S3 remote for ambient env credentials
   config ssh.strict_host_key_checking <yes|no|accept-new>  Override SSH host policy
   config ssh.user_known_hosts_file <path>  Custom SSH known_hosts file
   config ssh.identity_file <path>  SSH private key file

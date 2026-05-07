@@ -46,6 +46,9 @@ fn write_key(tmp: &Path, bytes: &[u8; 32]) -> PathBuf {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let mut d = std::fs::metadata(tmp).unwrap().permissions();
+        d.set_mode(0o700);
+        std::fs::set_permissions(tmp, d).unwrap();
         let mut p = std::fs::metadata(&path).unwrap().permissions();
         p.set_mode(0o600);
         std::fs::set_permissions(&path, p).unwrap();
@@ -229,6 +232,9 @@ fn rejects_key_with_world_readable_permissions() {
     std::fs::write(&path, [0x22u8; 32]).unwrap();
 
     // 0644 = owner rw, group r, world r. Classic leak.
+    let mut dperm = std::fs::metadata(tmp.path()).unwrap().permissions();
+    dperm.set_mode(0o700);
+    std::fs::set_permissions(tmp.path(), dperm).unwrap();
     let mut perm = std::fs::metadata(&path).unwrap().permissions();
     perm.set_mode(0o644);
     std::fs::set_permissions(&path, perm).unwrap();

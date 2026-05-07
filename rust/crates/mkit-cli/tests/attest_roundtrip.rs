@@ -97,6 +97,13 @@ fn init_repo_with_commit(cwd: &Path) {
 fn write_key(path: &Path, bytes: &[u8; 32]) {
     if let Some(p) = path.parent() {
         fs::create_dir_all(p).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut dir_perm = fs::metadata(p).unwrap().permissions();
+            dir_perm.set_mode(0o700);
+            fs::set_permissions(p, dir_perm).unwrap();
+        }
     }
     fs::write(path, bytes).unwrap();
     #[cfg(unix)]

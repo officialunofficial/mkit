@@ -14,16 +14,19 @@ pub fn run(_args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let cfg = match config::read_or_default(&cwd) {
+    let cfg = match config::read_layered(&cwd) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
-    let endpoint = cfg.remote_endpoint.trim();
+    let endpoint = cfg.merged.remote_endpoint.trim();
     if endpoint.is_empty() {
         return emit_err(
             "no remote configured — use `mkit remote add <url>`",
             exit::CONFIG_ERROR,
         );
+    }
+    if let Err(msg) = config::enforce_trusted_remote_endpoint(&cfg) {
+        return emit_err(&msg, exit::CONFIG_ERROR);
     }
     match remote_dispatch::open(endpoint) {
         Ok(tx) => match remote_dispatch::fetch_all(&cwd, tx.as_ref()) {
