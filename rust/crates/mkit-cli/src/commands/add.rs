@@ -1,9 +1,11 @@
 //! `mkit add <path>` / `mkit add .` — stage a file (or the whole
 //! worktree) into `.mkit/index`.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
+use mkit_core::hash::ZERO;
 use mkit_core::ignore::{self, IgnoreList};
 use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
 use mkit_core::object::{Blob, Object};
@@ -35,11 +37,16 @@ pub fn run(args: &[String]) -> u8 {
             Ok(i) => i,
             Err(e) => return emit_err(&format!(".mkitignore: {e}"), exit::GENERAL_ERROR),
         };
-        if let Err(code) = add_tree(&cwd, &cwd, &store, &mut idx, &ignores) {
+        let mut seen = HashSet::new();
+        if let Err(code) = add_tree(&cwd, &cwd, &store, &mut idx, &ignores, &mut seen) {
             return code;
         }
-    } else if let Err(code) = add_one(&cwd, Path::new(target), &store, &mut idx) {
-        return code;
+        mark_absent_paths_removed(&mut idx, &seen);
+    } else {
+        match add_one(&cwd, Path::new(target), &store, &mut idx) {
+            Ok(_) => {}
+            Err(code) => return code,
+        }
     }
     match index::write_index(&cwd, &idx) {
         Ok(()) => exit::OK,
@@ -47,7 +54,7 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
-fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Result<(), u8> {
+fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Result<String, u8> {
     let abs = if rel.is_absolute() {
         rel.to_path_buf()
     } else {
@@ -95,7 +102,7 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
         .write(&ser)
         .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
     let entry = IndexEntry {
-        path: rel_str,
+        path: rel_str.clone(),
         status,
         object_hash: h,
     };
@@ -104,7 +111,7 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
     } else {
         idx.entries.push(entry);
     }
-    Ok(())
+    Ok(rel_str)
 }
 
 fn add_tree(
@@ -113,6 +120,7 @@ fn add_tree(
     store: &ObjectStore,
     idx: &mut Index,
     ignores: &IgnoreList,
+    seen: &mut HashSet<String>,
 ) -> Result<(), u8> {
     let rd = std::fs::read_dir(dir)
         .map_err(|e| emit_err(&format!("read dir {}: {e}", dir.display()), exit::NOINPUT))?;
@@ -128,12 +136,22 @@ fn add_tree(
             continue;
         }
         if meta.file_type().is_dir() {
-            add_tree(root, &p, store, idx, ignores)?;
+            add_tree(root, &p, store, idx, ignores, seen)?;
         } else if meta.file_type().is_file() || meta.file_type().is_symlink() {
-            add_one(root, &p, store, idx)?;
+            let rel = add_one(root, &p, store, idx)?;
+            seen.insert(rel);
         }
     }
     Ok(())
+}
+
+fn mark_absent_paths_removed(idx: &mut Index, seen: &HashSet<String>) {
+    for entry in &mut idx.entries {
+        if entry.status != EntryStatus::Removed && !seen.contains(&entry.path) {
+            entry.status = EntryStatus::Removed;
+            entry.object_hash = ZERO;
+        }
+    }
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {

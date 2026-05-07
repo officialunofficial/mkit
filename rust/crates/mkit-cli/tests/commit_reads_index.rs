@@ -160,6 +160,28 @@ fn add_dot_then_commit_reproduces_full_worktree_snapshot() {
 }
 
 #[test]
+fn add_dot_stages_tracked_deletions() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("a.txt"), b"alpha").unwrap();
+    fs::write(p.join("b.txt"), b"beta").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "first"]);
+
+    fs::remove_file(p.join("b.txt")).unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "drop b"]);
+
+    let body = head_tree_body(p);
+    assert!(body.contains("a.txt"));
+    assert!(
+        !body.contains("b.txt"),
+        "add . failed to stage tracked deletion: {body}"
+    );
+}
+
+#[test]
 fn add_dot_respects_mkitignore_before_commit() {
     let td = init_repo();
     let p = td.path();
