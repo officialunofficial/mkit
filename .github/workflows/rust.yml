@@ -82,15 +82,15 @@ jobs:
           tool: cargo-nextest
 
       # protoc is a build-time requirement of mkit-rpc (via buffa-build
-      # which shells out to `protoc` for descriptor-set generation).
-      # Pin a stable distro release; the schemas use Edition 2023 so any
-      # protoc ≥ 26 works.
+      # which shells out to `protoc`). The .proto schemas use Edition
+      # 2023, which needs protoc ≥ 25; apt's protobuf-compiler on
+      # ubuntu-latest is too old. arduino/setup-protoc fetches an
+      # upstream release binary and works on every runner.
       - name: Install protoc
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Install protoc (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Native packages needed by optional signers when --all-features
       # turns them on across the workspace. macOS gates these deps out
@@ -101,7 +101,7 @@ jobs:
       #                   when -F tpm-mssim is enabled
       - name: Install native signer deps (Linux only)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y libtss2-dev libudev-dev swtpm
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev swtpm
 
       - name: Check formatting
         working-directory: rust
@@ -191,8 +191,13 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
 
-      - name: Install native deps + protoc
-        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev protobuf-compiler
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install native deps
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
