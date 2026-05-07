@@ -273,6 +273,88 @@ fn add_dot_stages_file_replacing_tracked_directory() {
     );
 }
 
+#[test]
+fn add_one_stages_file_replacing_tracked_directory() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::create_dir(p.join("a")).unwrap();
+    fs::write(p.join("a/b.txt"), b"nested").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "track directory"]);
+
+    fs::remove_dir_all(p.join("a")).unwrap();
+    fs::write(p.join("a"), b"now a file").unwrap();
+    ok(p, &["add", "a"]);
+    ok(p, &["commit", "-m", "replace directory"]);
+
+    let body = head_tree_body(p);
+    let a_line = body
+        .lines()
+        .find(|line| line.ends_with(" a"))
+        .unwrap_or_else(|| panic!("missing replacement file entry: {body}"));
+    assert!(
+        a_line.starts_with("01 "),
+        "replacement should be a blob entry, got: {a_line}"
+    );
+}
+
+#[test]
+fn add_one_stages_nested_file_replacing_tracked_file() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("a"), b"was a file").unwrap();
+    ok(p, &["add", "a"]);
+    ok(p, &["commit", "-m", "track file"]);
+
+    fs::remove_file(p.join("a")).unwrap();
+    fs::create_dir(p.join("a")).unwrap();
+    fs::write(p.join("a/b.txt"), b"now nested").unwrap();
+    ok(p, &["add", "a/b.txt"]);
+    ok(p, &["commit", "-m", "replace file"]);
+
+    let body = head_tree_body(p);
+    let a_line = body
+        .lines()
+        .find(|line| line.ends_with(" a"))
+        .unwrap_or_else(|| panic!("missing replacement directory entry: {body}"));
+    assert!(
+        a_line.starts_with("02 "),
+        "replacement should be a tree entry, got: {a_line}"
+    );
+    let a_tree = a_line.split_whitespace().nth(1).unwrap();
+    let nested = ok(p, &["cat", a_tree]);
+    let nested_body = String::from_utf8(nested.stdout).unwrap();
+    assert!(nested_body.contains("b.txt"));
+}
+
+#[test]
+fn add_dot_stages_directory_replacing_tracked_file() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("a"), b"was a file").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "track file"]);
+
+    fs::remove_file(p.join("a")).unwrap();
+    fs::create_dir(p.join("a")).unwrap();
+    fs::write(p.join("a/b.txt"), b"now nested").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "replace file"]);
+
+    let body = head_tree_body(p);
+    let a_line = body
+        .lines()
+        .find(|line| line.ends_with(" a"))
+        .unwrap_or_else(|| panic!("missing replacement directory entry: {body}"));
+    assert!(
+        a_line.starts_with("02 "),
+        "replacement should be a tree entry, got: {a_line}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn add_dot_rejects_absolute_symlink_instead_of_staging_target_bytes() {
@@ -411,6 +493,28 @@ fn rm_then_commit_excludes_the_removed_path() {
     assert!(
         !body.contains("b.txt"),
         "removed file still present in tree: {body}"
+    );
+}
+
+#[test]
+fn rm_directory_stages_tracked_descendants() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("keep.txt"), b"keep").unwrap();
+    fs::create_dir(p.join("sub")).unwrap();
+    fs::write(p.join("sub/file.txt"), b"drop").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "first"]);
+
+    ok(p, &["rm", "sub"]);
+    ok(p, &["commit", "-m", "drop sub"]);
+
+    let body = head_tree_body(p);
+    assert!(body.contains("keep.txt"));
+    assert!(
+        !body.contains("sub"),
+        "rm sub left tracked descendants in the tree: {body}"
     );
 }
 

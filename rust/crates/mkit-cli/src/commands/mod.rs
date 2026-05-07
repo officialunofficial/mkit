@@ -63,6 +63,16 @@ pub fn usage_error(msg: &str) -> u8 {
     exit::USAGE
 }
 
+pub(crate) fn index_path_matches_or_descends(path: &str, base: &str) -> bool {
+    path == base || index_path_descends_from(path, base)
+}
+
+pub(crate) fn index_path_descends_from(path: &str, base: &str) -> bool {
+    path.len() > base.len()
+        && path.starts_with(base)
+        && path.as_bytes().get(base.len()) == Some(&b'/')
+}
+
 /// Rewrite `.mkit/index` so it exactly mirrors `tree_hash`.
 ///
 /// `mkit commit` now signs the index, so commands that move HEAD and

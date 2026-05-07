@@ -31,15 +31,20 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&e, exit::DATAERR),
     };
-    let entry = IndexEntry {
-        path: rel_path.clone(),
-        status: EntryStatus::Removed,
-        object_hash: ZERO,
-    };
-    if let Some(at) = idx.find_entry(&rel_path) {
-        idx.entries[at] = entry;
-    } else {
-        idx.entries.push(entry);
+    let mut matched = false;
+    for entry in &mut idx.entries {
+        if super::index_path_matches_or_descends(&entry.path, &rel_path) {
+            entry.status = EntryStatus::Removed;
+            entry.object_hash = ZERO;
+            matched = true;
+        }
+    }
+    if !matched {
+        idx.entries.push(IndexEntry {
+            path: rel_path,
+            status: EntryStatus::Removed,
+            object_hash: ZERO,
+        });
     }
     match index::write_index(&cwd, &idx) {
         Ok(()) => exit::OK,

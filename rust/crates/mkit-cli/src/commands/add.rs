@@ -106,12 +106,21 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
         status,
         object_hash: h,
     };
+    remove_file_directory_conflicts(idx, &entry.path);
     if let Some(existing) = idx.find_entry(&entry.path) {
         idx.entries[existing] = entry;
     } else {
         idx.entries.push(entry);
     }
     Ok(rel_str)
+}
+
+fn remove_file_directory_conflicts(idx: &mut Index, path: &str) {
+    idx.entries.retain(|entry| {
+        entry.path == path
+            || (!super::index_path_descends_from(&entry.path, path)
+                && !super::index_path_descends_from(path, &entry.path))
+    });
 }
 
 fn add_tree(
