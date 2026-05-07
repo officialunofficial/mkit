@@ -59,8 +59,10 @@ cargo install sccache                          # compile-output cache
 export RUSTC_WRAPPER=sccache                   # in your shell rc / .envrc
 ```
 
-CI uses `sccache` with the GitHub Actions cache backend; setting it
-locally just gives you the same speedup across branches.
+CI does not currently use sccache (the GitHub Actions cache backend
+that powers `SCCACHE_GHA_ENABLED` has had transient outages we don't
+want to gate the build on). Local sccache still gives you faster
+incremental rebuilds.
 
 ### Workspace layout
 

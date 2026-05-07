@@ -17,9 +17,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.95.0"
-  # Disable incremental compilation in CI — sccache's hashing model
-  # works against per-codegen-unit cache keys, and incremental codegen's
-  # hashed-paths interfere with cross-job reuse.
+  # Match Swatinem/rust-cache's expectations.
   CARGO_INCREMENTAL: 0
 
 jobs:
@@ -40,32 +38,11 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
 
-      # sccache compile-output cache. Tolerates GHA cache-backend
-      # outages: if the action fails to start sccache, we leave
-      # RUSTC_WRAPPER unset and Swatinem alone handles the artifact
-      # cache. Pinned by commit-SHA (action's own GHA permissions are
-      # read-only on `actions/cache` so the cache-poisoning posture
-      # matches Swatinem's per-workflow keying).
-      - name: Set up sccache
-        id: sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@054db53350805f83040bf3e6e9b8cf5a139aa7c9  # v0.0.7
-
-      - name: Configure RUSTC_WRAPPER if sccache started
-        if: steps.sccache.outcome == 'success'
-        shell: bash
-        run: |
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-
-      # Registry + lockfile-keyed target cache. Layered with sccache:
-      # Swatinem owns the cargo registry/index/git stores and keys the
-      # whole-target cache to Cargo.lock + toolchain, while sccache
-      # serves finer-grained compile-output reuse for individual crate
-      # units. Cache key partitioned per-workflow + per-runner so a
-      # malicious PR cannot poison a key that a privileged workflow
-      # (release.yml, which runs with secrets + id-token: write) later
-      # reads. See docs/release/SUPPLY-CHAIN.md.
+      # Registry + lockfile-keyed target cache. Cache key partitioned
+      # per-workflow + per-runner so a malicious PR cannot poison a key
+      # that a privileged workflow (release.yml, which carries
+      # secrets.MKIT_NPM_TOKEN + id-token: write) later reads. See
+      # docs/release/SUPPLY-CHAIN.md.
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
@@ -142,12 +119,6 @@ jobs:
             exit 1
           fi
 
-      # Surface sccache stats so cache-hit-rate regressions are
-      # visible without us having to grep. Skipped when sccache failed
-      # to start (continue-on-error).
-      - name: sccache stats
-        if: always() && steps.sccache.outcome == 'success'
-        run: sccache --show-stats
 
   # Minimum-supported Rust version gate. Reads `rust-version` from
   # rust/Cargo.toml so the source of truth stays in one place; if a dep
@@ -179,18 +150,6 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.msrv }}
 
-      - name: Set up sccache
-        id: sccache
-        continue-on-error: true
-        uses: mozilla-actions/sccache-action@054db53350805f83040bf3e6e9b8cf5a139aa7c9  # v0.0.7
-
-      - name: Configure RUSTC_WRAPPER if sccache started
-        if: steps.sccache.outcome == 'success'
-        shell: bash
-        run: |
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-
       - name: Install protoc
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
         with:
@@ -212,6 +171,3 @@ jobs:
           CARGO_INCREMENTAL: 0
         run: cargo check --workspace --locked --all-targets
 
-      - name: sccache stats
-        if: always() && steps.sccache.outcome == 'success'
-        run: sccache --show-stats
