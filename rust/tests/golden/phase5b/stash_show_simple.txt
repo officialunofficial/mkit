@@ -1,0 +1,5 @@
+stash@{0}: WIP: stash message
+Date: 1000001
+
+M existing.txt
+A new.txt

@@ -1,0 +1,358 @@
+---
+spec: SPEC-OBJECTS
+version: 1
+status: stable
+audience: implementers of compatible tools producing or consuming mkit on-disk objects
+---
+
+# SPEC-OBJECTS — mkit v1 on-disk object format
+
+Status: **Normative** for mkit v1.
+Scope: `.mkit/objects/` content and the byte layout of every object type.
+Endianness: **little-endian** throughout. All hashes are 32-byte BLAKE3.
+
+This document defines what W2 (on-disk V1 bump) and W3 (identity / remix
+generalisation) must implement. External tools MUST be able to produce and
+consume these bytes with only this document.
+
+---
+
+## 1. Object types
+
+```
+ObjectType (u8)         name
+0x01                    blob
+0x02                    tree
+0x03                    commit
+0x04                    remix
+0x05                    chunked_blob
+0x06                    delta
+```
+
+Unchanged in v1.
+
+`delta` objects are **pack-only**. They MUST NOT appear in the object store
+and MUST NOT be served by `downloadObject`-style APIs. Deltas are resolved
+during pack unpacking into a materialised base type (`blob`, `tree`,
+`commit`, etc.).
+
+---
+
+## 2. V1 prologue — every object
+
+Every stored object begins with:
+
+```
+offset  size  field              value
+0       1     object_type        one of 0x01..0x06 (see §1)
+1       4     magic              ASCII "MKT1" = 0x4D 0x4B 0x54 0x31
+5       1     schema_version     0x01
+6       …     body               type-specific (see §3-§8)
+```
+
+The prologue applies to **all six object types**. Rationale:
+
+1. Without a version byte, any field addition silently shifts every
+   hash.
+2. Partial prologue (commit + remix only) leaves four object types
+   unversioned and makes readers branch on type before they can detect a
+   future format change. All-types prologue lets the prologue itself be
+   the single branching point.
+3. Cost: 5 bytes per object. Negligible against the 33-byte minimum
+   overhead a stored blob already carries.
+
+Readers MUST reject any of:
+- `object_type` not in `0x01..0x06` → `InvalidObjectType`
+- `magic` != `"MKT1"` → `InvalidMagic`
+- `schema_version` != `0x01` → `UnsupportedObjectVersion`
+
+There is no v0. mkit does not read mkit-era bytes.
+
+---
+
+## 3. Blob (`0x01`)
+
+```
+[prologue 6]
+[u32 LE len]
+[len bytes data]
+```
+
+No interpretation of `data`. `len = 0` is valid (empty blob). Upper bound
+is enforced at the storage layer: the object store rejects objects
+> 1 GiB. A pack entry independently caps at the packfile total limit
+(see SPEC-PACKFILE).
+
+---
+
+## 4. Tree (`0x02`)
+
+```
+[prologue 6]
+[u32 LE entry_count]                      0..=1_000_000
+repeat entry_count:
+    [u32 LE name_len]                     1..=255
+    [name_len bytes name]                 UTF-8 (see §4.1)
+    [u8 mode]                             see §4.2
+    [32 bytes object_hash]
+```
+
+`entry_count > 1_000_000` → `TooManyEntries`.
+
+### 4.1 Entry name rules
+
+Normative:
+
+- `name_len` ∈ `[1, 255]`. Zero-length name is illegal.
+- Forbidden bytes **anywhere** in name: `0x00`, `/` (`0x2F`), `\` (`0x5C`).
+- Forbidden exact names: `"."`, `".."`.
+- No further Unicode validation performed. Implementations SHOULD reject
+  input that is not well-formed UTF-8 but MAY pass it through byte-for-byte.
+
+Additionally, entries within a single tree MUST be sorted
+lexicographically (byte-wise ascending) by `name` with no duplicates.
+Readers MUST reject unsorted trees with `InvalidEntryOrder`. This is
+load-bearing: tree hashes are only reproducible across implementations
+when ordering is canonical.
+
+### 4.2 Entry mode
+
+```
+0x01    blob         regular file content
+0x02    tree         subdirectory
+0x03    symlink      symbolic link; object_hash points to a blob whose
+                     data is the link target path
+0x04    executable   regular file, executable bit set (POSIX 0o755)
+```
+
+Mode `0x04` is new in v1 (previously absent; see red-team R-41 — silent
+data-loss bug for any POSIX workflow). Writers MUST emit `0x04` for any
+file with the POSIX executable bit set at staging time. Non-POSIX hosts
+MAY round-trip `0x04` bytes opaquely.
+
+Any other mode byte → `InvalidEntryMode`.
+
+### 4.3 Rename detection
+
+mkit v1 does not detect renames or copies. Diff and merge treat renames
+as (delete, add) pairs. This is a documented departure from Git; see
+red-team R-21.
+
+---
+
+## 5. Commit (`0x03`)
+
+```
+[prologue 6]
+[32 bytes tree_hash]
+[u32 LE parent_count]                     0..=1_000
+repeat parent_count:
+    [32 bytes parent_hash]
+[Identity author]                         see §9
+[u32 LE message_len]
+[message_len bytes message]               UTF-8, NOT null-terminated
+[u64 LE timestamp]                        seconds since Unix epoch
+[32 bytes signer]                         Ed25519 public key
+[32 bytes message_hash]                   may be zero (see §5.1)
+[32 bytes content_digest]                 may be zero (see §5.1)
+[64 bytes signature]                      Ed25519, see SPEC-SIGNING
+```
+
+Differences from mkit:
+- `author_mid: u64` → `Identity` tagged union (§9). (W2.)
+- `timestamp: u32` → `u64`. Avoids 2106 overflow (red-team 7d / Team Lead
+  7d).
+- Relative field order of `signer` and `message` is preserved.
+
+### 5.1 `message_hash` / `content_digest`
+
+These remain **core fields** on `Commit` but are
+**NOT part of the commit signing bytes** (see SPEC-SIGNING §3). They are
+optional off-chain annotation slots for downstream consumers. Core
+stores them because:
+1. They are 32 bytes each and carry a stable meaning regardless of any
+   consumer.
+2. Stripping them from core would require a sidecar file per commit and
+   break in-place round-trip.
+
+Writers with no annotation to record MUST emit them as `0x00`*32 (zero
+hash). Readers MUST NOT reject a commit because they are zero.
+(This resolves red-team R-45.)
+
+### 5.2 Root commits
+
+`parent_count = 0` is valid and denotes a root commit.
+`parent_count > 1_000` → `TooManyParents`.
+
+---
+
+## 6. Remix (`0x04`)
+
+```
+[prologue 6]
+[32 bytes tree_hash]
+[u32 LE parent_count]                     0..=1_000
+repeat parent_count:
+    [32 bytes parent_hash]
+[u32 LE source_count]                     0..=10_000
+repeat source_count:
+    [32 bytes upstream_id]                was project_id in mkit
+    [32 bytes commit_hash]
+[Identity author]                         see §9
+[u32 LE message_len]
+[message_len bytes message]
+[u64 LE timestamp]                        widened from u32 (see §5)
+[32 bytes signer]                         Ed25519 public key
+[64 bytes signature]                      Ed25519, see SPEC-SIGNING
+```
+
+Naming: the 32-byte source identifier is called `upstream_id` in v1 (the
+byte layout is unchanged — the name transition is cosmetic).
+
+### 6.1 Source sort invariant
+
+Sources MUST be sorted lexicographically by `(upstream_id, commit_hash)`,
+primary key `upstream_id`. Duplicate `(upstream_id, commit_hash)` pairs
+are illegal. Readers reject unsorted sources with `InvalidSourceOrder`.
+
+`RemixSource` is **opaque in core**: `upstream_id` is 32 bytes of caller-
+chosen content. Typical values include `BLAKE3(repo_url)` or any other
+32-byte identifier that uniquely names the upstream. Core never
+interprets it.
+
+---
+
+## 7. Chunked blob (`0x05`)
+
+```
+[prologue 6]
+[u64 LE total_size]
+[u32 LE chunk_size]                       0 == content-defined (FastCDC)
+[u32 LE chunk_count]                      0..=1_000_000
+repeat chunk_count:
+    [32 bytes chunk_hash]                 each chunk stored as its own blob
+```
+
+`chunk_size = 0` indicates the manifest was produced by FastCDC and
+chunk lengths are recovered by re-reading each chunk blob. See
+SPEC-FASTCDC.
+`chunk_size > 0` indicates fixed-size chunking with the stated size
+(final chunk may be shorter).
+
+Reassembly: concatenate each `chunk_hash` blob's contents in order.
+The concatenated length MUST equal `total_size`.
+
+`chunk_count > 1_000_000` → `TooManyChunks`.
+
+---
+
+## 8. Delta (`0x06`)
+
+Pack-only. See SPEC-DELTA for the instruction format and SPEC-PACKFILE
+for framing. The on-disk layout (if ever serialised alone, which
+implementations SHOULD NOT do) is:
+
+```
+[prologue 6]
+[32 bytes base_hash]
+[u32 LE result_size]
+[u32 LE instr_len]
+[instr_len bytes instructions]
+```
+
+---
+
+## 9. Identity — tagged union
+
+```
+[u8 kind]
+[u16 LE len]
+[len bytes payload]
+```
+
+Kinds:
+
+```
+0x01    ed25519         len MUST be 32; payload = raw 32-byte Ed25519 public key
+0x02    did_key         len >= 1;       payload = UTF-8 `did:key:...` string, minus the scheme prefix
+                                        (i.e. the multibase-encoded key material, starting with 'z')
+0x03    opaque          len >= 1;       payload = arbitrary bytes defined by adapter
+```
+
+Rules:
+
+- `len = 0` is **illegal** for every kind → `InvalidIdentity`.
+- `len > 4096` → `IdentityTooLarge`.
+- Unknown `kind` → `UnknownIdentityKind`.
+- Two identities compare equal iff `kind` and `payload` bytes are
+  byte-equal. No case-folding, no canonicalisation.
+
+Identity serialisation is used in **both** the on-wire serialised commit
+and the signing bytes (see SPEC-SIGNING). The bytes are identical in both
+contexts. This means the identity length is variable at signing time,
+which is why the `len` field is always explicit.
+
+---
+
+## 10. Storage
+
+Objects are stored at `.mkit/objects/<dd>/<rrrrrrrrr...r>` where `<dd>`
+is the lowercase-hex first byte of `BLAKE3(object bytes)` and `<r...>`
+is the remaining 62 hex chars.
+
+On read, the store MUST recompute BLAKE3 and fail `HashMismatch` if the
+computed hash does not match the path. Objects > 1 GiB MUST be rejected.
+
+`.mkit/` directory: presence of `.mkit/objects` is the repository
+marker. See SPEC-INDEX for the `.mkit/index` sidecar.
+
+---
+
+## 11. Trailing-byte rule
+
+Every object deserialiser MUST verify that after parsing the declared
+layout there are zero remaining bytes. Extra bytes → `TrailingData`.
+This prevents trivial amplification and prologue-replay attacks.
+
+---
+
+## 12. Version history
+
+| Version | Released | Changes                                                          |
+|---------|----------|------------------------------------------------------------------|
+| `0x01`  | v1.0     | First mkit format. See §2 for prologue. No v0 compatibility.     |
+
+Future versions MUST increment `schema_version` and MUST preserve the
+`"MKT1"` magic prefix. The magic byte string is normative — readers are
+allowed to route on `magic` before consulting `schema_version`, enabling
+multi-version readers.
+
+---
+
+## 13. Test vectors (implementer MUST produce)
+
+1. **Empty blob hash**: `BLAKE3(prologue{0x01,MKT1,0x01} ‖ u32(0))`
+   — 10 bytes total input. Record the resulting hex digest.
+2. **Empty tree hash**: `BLAKE3(prologue{0x02,MKT1,0x01} ‖ u32(0))`
+   — 10 bytes total input.
+3. **Canonical single-file tree**: one entry `{name="README.md",
+   mode=0x01, object_hash=<hash of §13.1>}`. Record both the serialised
+   bytes and the resulting BLAKE3 digest.
+4. **Identity round-trip**: encode `Identity{kind=0x01, len=32,
+   payload=[0xAA; 32]}` → must be exactly 35 bytes.
+5. **Root commit with zero message_hash/content_digest and Ed25519
+   identity**: serialise and record signing bytes hex +
+   cross-domain-verification-negative hex.
+6. **Remix with two sources (identical upstream_id, distinct
+   commit_hash)**: verify sort orders by secondary key.
+7. **ChunkedBlob with `chunk_size=0` and 3 chunks**: verify prologue
+   present and length=6+8+4+4+32*3=118.
+
+These vectors are committed as golden files under
+`rust/tests/golden/phase1/` (with a `MANIFEST.txt` and per-vector
+`.json` sidecar carrying the BLAKE3 digest), so external implementations
+can cross-verify byte-for-byte.
+
+---
+
+*~1750 words.*

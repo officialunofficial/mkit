@@ -1,0 +1,380 @@
+//! Cross-transport types: error taxonomy, the [`Transport`] trait, the
+//! [`PackKey`] digest wrapper, and the retry/backoff helpers used by
+//! every transport implementation (memory, file, HTTP, S3, SSH).
+//!
+//! The SSH wire format is defined in `mkit-rpc`'s `ssh.proto` and
+//! lives in [`mkit_rpc::mkit::rpc::v1::ssh`]; transport-ssh consumes
+//! the schema directly. The hand-rolled `OP_HELLO` byte format that
+//! used to live in this module has been retired.
+
+// SPEC-TRANSPORT §8 calls out the exponential ladder in seconds
+// (1, 2, 4, …, 300). Expressing those values with `Duration::from_secs`
+// is deliberate — switching to `from_mins` loses the one-to-one match
+// with the spec text.
+#![allow(clippy::duration_suboptimal_units)]
+
+use core::fmt;
+use core::time::Duration;
+
+use crate::hash::{FromHexError, Hash, to_hex};
+use crate::refs::Ref;
+pub use crate::refs::RefWriteCondition;
+
+// ---------------------------------------------------------------------------
+// Error taxonomy
+// ---------------------------------------------------------------------------
+
+/// Errors that any transport may surface across the [`Transport`]
+/// boundary. Implementations MAY wrap transport-specific errors
+/// internally but MUST map them to one of these variants before
+/// returning.
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    /// `download_pack` called on a digest the remote does not hold.
+    #[error("pack not found on remote")]
+    PackNotFound,
+    /// Authentication or ACL failure (HTTP 401/403, SSH auth refusal,
+    /// S3 `SignatureDoesNotMatch`, …).
+    #[error("access denied by remote")]
+    AccessDenied,
+    /// Catch-all remote-side failure carrying an advisory message. The
+    /// message is for operators; programs MUST NOT pattern-match on its
+    /// contents.
+    #[error("remote error: {0}")]
+    RemoteError(String),
+    /// `update_ref` CAS precondition was not satisfied. Per
+    /// SPEC-TRANSPORT §8, callers MUST treat this as
+    /// "possibly-success on retry" for `.missing` / `.match` and
+    /// confirm with `read_ref`.
+    #[error("ref CAS precondition failed")]
+    RefConflict,
+    /// Caller passed a ref name failing SPEC-REFS §3.
+    #[error("invalid ref name: {0}")]
+    InvalidRef(String),
+    /// Network-level failure: DNS, TCP connect, TLS handshake, SSH
+    /// subprocess spawn. Retryable (see [`is_retryable`]).
+    #[error("connection to remote failed")]
+    ConnectionFailed,
+    /// Unexpected HTTP status or transport-protocol error. 5xx and 429
+    /// are retryable; 4xx (except 401/403/404/409/412) is not.
+    #[error("server error (status {status})")]
+    ServerError {
+        /// Numeric status code. HTTP uses its native codes; transports
+        /// without a status integer use `0`.
+        status: u16,
+    },
+    /// Server response did not match the wire contract (truncated
+    /// frame, unknown opcode, bad JSON, …).
+    #[error("invalid response from remote")]
+    InvalidResponse,
+    /// Generic protocol-level failure — malformed frame, unexpected
+    /// opcode order, or failed handshake.
+    #[error("protocol error")]
+    ProtocolError,
+    /// Payload exceeded a transport-specific cap.
+    #[error("payload too large: {0} bytes")]
+    PayloadTooLarge(usize),
+    /// An insecure URL scheme (plain `http://`) was supplied for a
+    /// non-loopback host. Plain HTTP is restricted to loopback addresses
+    /// (`127.0.0.1`, `::1`, `localhost`) so production traffic is never
+    /// transported in the clear.
+    #[error("insecure scheme: plain http:// is allowed only for loopback hosts")]
+    InsecureScheme,
+}
+
+/// Result alias used throughout this module.
+pub type TransportResult<T> = Result<T, TransportError>;
+
+// ---------------------------------------------------------------------------
+// PackKey — 32-byte digest wrapper
+// ---------------------------------------------------------------------------
+
+/// A 32-byte pack digest used as the content-address for an uploaded
+/// pack. This is the same 32 bytes as [`Hash`] but wrapped so pack
+/// digests and object hashes do not silently cross purposes at API
+/// boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PackKey(pub [u8; 32]);
+
+impl PackKey {
+    /// Build a [`PackKey`] from a raw 32-byte digest.
+    #[must_use]
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the underlying 32 bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Lowercase 64-char hex.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        to_hex(&self.0)
+    }
+
+    /// Build a [`PackKey`] from a [`Hash`] (alias for [`From`]).
+    #[must_use]
+    pub const fn from_hash(h: Hash) -> Self {
+        Self(h)
+    }
+
+    /// Convert back to a plain [`Hash`].
+    #[must_use]
+    pub const fn into_hash(self) -> Hash {
+        self.0
+    }
+}
+
+impl From<Hash> for PackKey {
+    fn from(h: Hash) -> Self {
+        Self(h)
+    }
+}
+
+impl From<PackKey> for Hash {
+    fn from(k: PackKey) -> Hash {
+        k.0
+    }
+}
+
+impl fmt::Display for PackKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_hex())
+    }
+}
+
+/// Parse a [`PackKey`] from a 64-char lowercase hex string.
+///
+/// Accepts uppercase too (matches the permissive [`crate::hash::from_hex`]
+/// semantics); callers that require lowercase MUST validate the input
+/// independently.
+pub fn pack_key_from_hex(s: &str) -> Result<PackKey, FromHexError> {
+    let h = crate::hash::from_hex(s)?;
+    Ok(PackKey(h))
+}
+
+// ---------------------------------------------------------------------------
+// Retry / backoff
+// ---------------------------------------------------------------------------
+
+/// Return `true` if a transport should retry after seeing `err`.
+///
+/// Retryable per SPEC-TRANSPORT §8:
+/// - [`TransportError::ConnectionFailed`]
+/// - [`TransportError::ServerError`] with a 5xx status OR HTTP 429.
+///
+/// Explicitly non-retryable:
+/// - [`TransportError::PackNotFound`]
+/// - [`TransportError::AccessDenied`]
+/// - [`TransportError::RefConflict`] (CAS retry is a caller-level policy)
+/// - [`TransportError::InvalidRef`]
+/// - [`TransportError::InvalidResponse`] / [`TransportError::ProtocolError`]
+/// - [`TransportError::PayloadTooLarge`]
+/// - [`TransportError::RemoteError`] — the remote chose not to be specific;
+///   we do not guess.
+/// - [`TransportError::ServerError`] with any 4xx status.
+#[must_use]
+pub fn is_retryable(err: &TransportError) -> bool {
+    match err {
+        TransportError::ConnectionFailed => true,
+        TransportError::ServerError { status } => *status >= 500 || *status == 429,
+        _ => false,
+    }
+}
+
+/// Max attempts for the default backoff ladder.
+///
+/// SPEC-TRANSPORT §8: `attempt = 1; while attempt ≤ 5`.
+pub const BACKOFF_MAX_ATTEMPTS: u32 = 5;
+
+/// Initial sleep between attempts.
+pub const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+
+/// Upper bound on any individual sleep.
+pub const BACKOFF_CAP: Duration = Duration::from_secs(300);
+
+/// Exponential-backoff iterator used by all transports.
+///
+/// Yields `[1s, 2s, 4s, 8s, 16s]` (5 attempts) for the default ladder,
+/// doubling each step and capping at 300s. This is the ladder mandated
+/// by SPEC-TRANSPORT §8 for `ConnectionFailed`, 5xx, and HTTP 429.
+///
+/// The iterator is self-contained — it holds no reference to a clock,
+/// so it can be constructed in tests and exhaustively enumerated.
+#[derive(Debug, Clone)]
+pub struct BackoffIterator {
+    next_delay: Duration,
+    attempts_remaining: u32,
+    cap: Duration,
+}
+
+impl BackoffIterator {
+    /// Default ladder: 5 attempts, starting at 1s, doubling, capped at 300s.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            next_delay: BACKOFF_INITIAL,
+            attempts_remaining: BACKOFF_MAX_ATTEMPTS,
+            cap: BACKOFF_CAP,
+        }
+    }
+
+    /// Custom ladder for tests.
+    #[must_use]
+    pub const fn with(initial: Duration, cap: Duration, attempts: u32) -> Self {
+        Self {
+            next_delay: initial,
+            attempts_remaining: attempts,
+            cap,
+        }
+    }
+}
+
+impl Default for BackoffIterator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Iterator for BackoffIterator {
+    type Item = Duration;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.attempts_remaining == 0 {
+            return None;
+        }
+        self.attempts_remaining -= 1;
+        let current = self.next_delay;
+        let doubled = current.saturating_mul(2);
+        self.next_delay = if doubled > self.cap {
+            self.cap
+        } else {
+            doubled
+        };
+        Some(current)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transport trait
+// ---------------------------------------------------------------------------
+
+/// The mkit transport vtable.
+///
+/// Every transport (memory, file, HTTP, S3, SSH) implements this trait.
+/// Methods are synchronous and take `&self`; transports that need
+/// interior mutability (e.g. connection pools) MUST use a `Mutex` /
+/// `RwLock` internally. This keeps the trait object-safe.
+///
+/// All implementations MUST honour the retry policy in
+/// SPEC-TRANSPORT §8 internally OR document that the caller is
+/// responsible — the abstract trait takes no position. The
+/// [`is_retryable`] and [`BackoffIterator`] helpers are provided for
+/// implementations that embed the policy.
+pub trait Transport: Send + Sync {
+    /// Upload a pack. The digest is computed by the caller (BLAKE3 of
+    /// the full pack bytes) and used as the object key — servers MAY
+    /// dedupe on this key.
+    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()>;
+
+    /// Download a pack by its digest.
+    ///
+    /// Returns [`TransportError::PackNotFound`] if the remote does not
+    /// hold this digest.
+    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>>;
+
+    /// HEAD-check a pack. Cheaper than [`Self::download_pack`] on
+    /// network transports.
+    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool>;
+
+    /// Unconditional ref write — equivalent to
+    /// `update_ref(name, RefWriteCondition::Any, hash)`.
+    ///
+    /// Default impl delegates to [`Self::update_ref`] so transports only
+    /// implement one entry point.
+    fn write_ref(&self, name: &str, hash: &Hash) -> TransportResult<()> {
+        self.update_ref(name, RefWriteCondition::Any, hash)
+    }
+
+    /// CAS ref write. See [`RefWriteCondition`].
+    ///
+    /// On `.missing` / `.match` CAS failure, returns
+    /// [`TransportError::RefConflict`]. Callers retrying after a
+    /// timeout MUST follow up with [`Self::read_ref`] to confirm
+    /// whether the first attempt actually landed (SPEC-TRANSPORT §8).
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+    ) -> TransportResult<()>;
+
+    /// Read the current value of a ref, or `None` if it does not exist.
+    fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>>;
+
+    /// List refs whose full name starts with `prefix`. Returned names
+    /// have `prefix` stripped per SPEC-REFS §4. An empty prefix lists
+    /// every ref.
+    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>>;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pack_key_hex_roundtrip() {
+        let bytes = [0x42u8; 32];
+        let pk = PackKey::new(bytes);
+        let hex = pk.to_hex();
+        assert_eq!(hex.len(), 64);
+        let pk2 = pack_key_from_hex(&hex).unwrap();
+        assert_eq!(pk, pk2);
+    }
+
+    #[test]
+    fn is_retryable_matches_spec() {
+        assert!(is_retryable(&TransportError::ConnectionFailed));
+        assert!(is_retryable(&TransportError::ServerError { status: 500 }));
+        assert!(is_retryable(&TransportError::ServerError { status: 503 }));
+        assert!(is_retryable(&TransportError::ServerError { status: 429 }));
+        assert!(!is_retryable(&TransportError::ServerError { status: 404 }));
+        assert!(!is_retryable(&TransportError::ServerError { status: 401 }));
+        assert!(!is_retryable(&TransportError::PackNotFound));
+        assert!(!is_retryable(&TransportError::AccessDenied));
+        assert!(!is_retryable(&TransportError::RefConflict));
+    }
+
+    #[test]
+    fn backoff_default_ladder_is_1_2_4_8_16() {
+        let delays: Vec<Duration> = BackoffIterator::new().collect();
+        assert_eq!(
+            delays,
+            vec![
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+                Duration::from_secs(16),
+            ]
+        );
+    }
+
+    #[test]
+    fn backoff_caps_at_max() {
+        let cap = Duration::from_secs(10);
+        let delays: Vec<Duration> = BackoffIterator::with(Duration::from_secs(8), cap, 5).collect();
+        // 8s, then cap (16s would exceed 10s cap; clamped to 10s)
+        assert_eq!(delays[0], Duration::from_secs(8));
+        for d in &delays[1..] {
+            assert!(*d <= cap);
+        }
+    }
+}

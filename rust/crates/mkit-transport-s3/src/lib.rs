@@ -1,0 +1,713 @@
+//! mkit S3 / Cloudflare R2 transport.
+//!
+//! Implements the 7-verb [`Transport`] trait on top of a reqwest
+//! blocking client with our own SigV4 signer (see [`sigv4`]). Designed
+//! for Cloudflare R2 — AWS S3 also works, but CAS semantics only match
+//! the R2 behaviour of returning the body MD5 as the `ETag` on `PUT`.
+//!
+//! URL shape: `mkit+s3://<endpoint>/<bucket>[/prefix]` — credentials are
+//! pulled from the `MKIT_R2_ACCESS_KEY_ID` / `MKIT_R2_SECRET_ACCESS_KEY`
+//! environment at [`connect`] time. An unset pair does not fail
+//! construction; the first signed call surfaces
+//! [`TransportError::AccessDenied`].
+//!
+//! Retry policy mirrors SPEC-TRANSPORT §8 via
+//! [`mkit_core::protocol::BackoffIterator`]: 5xx and HTTP 429 retry up to
+//! 5 attempts; `412 Precondition Failed` NEVER retries so CAS writes
+//! can't silently turn into duplicate PUTs.
+
+// Narrative-heavy module docs fight `doc_markdown`; the
+// `duration_suboptimal_units` lint insists on `from_mins(1)` for our 60s
+// HTTP timeout which obscures intent (we mean seconds, not minutes).
+#![allow(clippy::doc_markdown, clippy::duration_suboptimal_units)]
+
+pub mod sigv4;
+
+use std::env;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use md5::{Digest as _, Md5};
+use mkit_core::hash::{Hash, to_hex};
+use mkit_core::protocol::{
+    BackoffIterator, PackKey, Transport, TransportError, TransportResult, is_retryable,
+};
+use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
+use reqwest::Method;
+use reqwest::blocking::{Client, Response};
+
+use crate::sigv4::{Credentials, SignedRequest, sign_request};
+
+/// Per SPEC-TRANSPORT §5, a single PUT is capped at 5 GiB; anything
+/// larger requires multipart upload (deferred).
+pub const S3_SINGLE_PUT_MAX: u64 = 5 * 1024 * 1024 * 1024;
+
+/// Body-size cap for a pack download (4 GiB).
+const PACK_BODY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
+/// Body-size cap for a ref body (64 hex + newline + slack).
+const REF_BODY_LIMIT: usize = 256;
+/// Cap for list XML / small responses (16 MiB).
+const REF_LIST_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// HTTP `PUT`-return body cap when we don't care about the response.
+const SMALL_RESPONSE_LIMIT: usize = 4 * 1024;
+
+/// Environment variable names for credentials.
+pub const ENV_ACCESS_KEY: &str = "MKIT_R2_ACCESS_KEY_ID";
+pub const ENV_SECRET_KEY: &str = "MKIT_R2_SECRET_ACCESS_KEY";
+
+// ---------------------------------------------------------------------------
+// Connect / construction
+// ---------------------------------------------------------------------------
+
+/// The transport implementation. Clone-safe — the underlying reqwest
+/// client is cheap to share across threads.
+pub struct S3Transport {
+    endpoint: String,
+    bucket: String,
+    prefix: Option<String>,
+    creds: Credentials,
+    client: Client,
+    /// Test-only clock override so unit tests are deterministic.
+    clock: Clock,
+    /// Test-only sleep override so retry tests don't block the suite.
+    sleeper: Sleeper,
+    /// Backoff ladder constructor — swapped in tests to tighten delays.
+    backoff: fn() -> BackoffIterator,
+}
+
+impl std::fmt::Debug for S3Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Transport")
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .field("region", &self.creds.region)
+            .finish_non_exhaustive()
+    }
+}
+
+type Clock = fn() -> i64;
+type Sleeper = fn(Duration);
+
+fn default_clock() -> i64 {
+    // Pre-1970 wall clock collapses to `0`, which the signer accepts
+    // (maps to 1970-01-01). `as i64` can only wrap past year 2262 — we
+    // explicitly accept that far-future saturation.
+    #[allow(clippy::cast_possible_wrap)]
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(_) => 0,
+    }
+}
+
+fn default_sleeper(d: Duration) {
+    thread::sleep(d);
+}
+
+impl S3Transport {
+    /// Parse a `mkit+s3://<endpoint>/<bucket>[/prefix]` URL and build a
+    /// transport. Credentials come from the environment (see
+    /// [`ENV_ACCESS_KEY`] / [`ENV_SECRET_KEY`]); if either is unset the
+    /// credentials default to empty strings and the first signed call
+    /// returns [`TransportError::AccessDenied`].
+    ///
+    /// The endpoint is the host component in the URL; we rebuild it as
+    /// `https://<host>` because R2 only speaks HTTPS.
+    pub fn connect(url: &str) -> Result<Self, TransportError> {
+        let parsed = parse_s3_url(url)?;
+        let endpoint = format!("https://{}", parsed.host);
+        let bucket = parsed.bucket;
+        let prefix = parsed.prefix;
+        let access_key_id = env::var(ENV_ACCESS_KEY).unwrap_or_default();
+        let secret_access_key = env::var(ENV_SECRET_KEY).unwrap_or_default();
+        let region = env::var("MKIT_R2_REGION").unwrap_or_else(|_| "auto".into());
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+
+        Ok(Self {
+            endpoint,
+            bucket,
+            prefix,
+            creds: Credentials {
+                access_key_id,
+                secret_access_key,
+                region,
+            },
+            client,
+            clock: default_clock,
+            sleeper: default_sleeper,
+            backoff: BackoffIterator::new,
+        })
+    }
+
+    /// Construct a transport directly against an endpoint URL, for tests
+    /// (mockito hands us a plain `http://127.0.0.1:PORT` base). The path
+    /// component of `endpoint` MUST be empty — only scheme+host[:port].
+    pub fn with_parts(
+        endpoint: impl Into<String>,
+        bucket: impl Into<String>,
+        prefix: Option<String>,
+        creds: Credentials,
+    ) -> Result<Self, TransportError> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        Ok(Self {
+            endpoint: endpoint.into(),
+            bucket: bucket.into(),
+            prefix,
+            creds,
+            client,
+            clock: default_clock,
+            sleeper: default_sleeper,
+            backoff: BackoffIterator::new,
+        })
+    }
+
+    /// Test-only: install a fake clock. The clock returns Unix seconds.
+    #[doc(hidden)]
+    pub fn set_clock(&mut self, clock: Clock) {
+        self.clock = clock;
+    }
+
+    /// Test-only: install a fake sleeper so backoff doesn't block the
+    /// test suite.
+    #[doc(hidden)]
+    pub fn set_sleeper(&mut self, sleeper: Sleeper) {
+        self.sleeper = sleeper;
+    }
+
+    /// Test-only: install a tighter backoff ladder.
+    #[doc(hidden)]
+    pub fn set_backoff(&mut self, backoff: fn() -> BackoffIterator) {
+        self.backoff = backoff;
+    }
+
+    // -- Path / key builders --
+
+    /// Build the S3 object key for a pack: `packs/<64-char hex digest>`.
+    #[must_use]
+    pub fn pack_object_key(digest: &Hash) -> String {
+        format!("packs/{}", to_hex(digest))
+    }
+
+    /// Build the S3 path `/<bucket>/<key>` that the signer will sign
+    /// and the client will request.
+    fn build_path(&self, key: &str) -> String {
+        if key.is_empty() {
+            return format!("/{}", self.bucket);
+        }
+        format!("/{}/{}", self.bucket, key)
+    }
+
+    /// Build the canonical query string for `ListObjectsV2` scoped to a
+    /// prefix. `prefix` MAY be empty to list every key.
+    #[must_use]
+    pub fn build_list_query(prefix: &str) -> String {
+        format!("list-type=2&prefix={prefix}")
+    }
+
+    // -- HTTP core --
+
+    /// Make a signed HTTP request with exponential-backoff retry on
+    /// 5xx / 429 / connection failures. 4xx other than 429 returns
+    /// immediately.
+    fn http_request(
+        &self,
+        method: &Method,
+        key: &str,
+        query: &str,
+        payload: Option<&[u8]>,
+        extra_headers: &[(&'static str, String)],
+        body_limit: Option<usize>,
+    ) -> TransportResult<HttpResponse> {
+        let mut iter = (self.backoff)();
+        loop {
+            match self.http_request_once(method, key, query, payload, extra_headers, body_limit) {
+                Ok(resp) => {
+                    let status = resp.status;
+                    // Retry on 5xx / 429.
+                    if is_retryable(&TransportError::ServerError { status })
+                        && let Some(d) = iter.next()
+                    {
+                        (self.sleeper)(d);
+                        continue;
+                    }
+                    return Ok(resp);
+                }
+                Err(TransportError::ConnectionFailed) => {
+                    if let Some(d) = iter.next() {
+                        (self.sleeper)(d);
+                        continue;
+                    }
+                    return Err(TransportError::ConnectionFailed);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn http_request_once(
+        &self,
+        method: &Method,
+        key: &str,
+        query: &str,
+        payload: Option<&[u8]>,
+        extra_headers: &[(&'static str, String)],
+        body_limit: Option<usize>,
+    ) -> TransportResult<HttpResponse> {
+        let path = self.build_path(key);
+        let method_str = method_to_str(method);
+        let ts = (self.clock)();
+        let payload_bytes: &[u8] = payload.unwrap_or(&[]);
+
+        let signed: SignedRequest = sign_request(
+            &self.creds,
+            method_str,
+            &path,
+            query,
+            payload_bytes,
+            &self.endpoint,
+            ts,
+        );
+
+        let url = if query.is_empty() {
+            format!("{}{}", self.endpoint, path)
+        } else {
+            format!("{}{}?{}", self.endpoint, path, query)
+        };
+
+        let mut builder = self
+            .client
+            .request(method.clone(), &url)
+            .header("Authorization", signed.authorization)
+            .header("x-amz-date", signed.x_amz_date)
+            .header("x-amz-content-sha256", signed.x_amz_content_sha256);
+        for (name, value) in extra_headers {
+            builder = builder.header(*name, value);
+        }
+        if let Some(bytes) = payload {
+            builder = builder
+                .header("Content-Length", bytes.len().to_string())
+                .body(bytes.to_vec());
+        }
+
+        let resp = builder
+            .send()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        extract_response(resp, body_limit, method == Method::HEAD)
+    }
+}
+
+struct HttpResponse {
+    status: u16,
+    body: Vec<u8>,
+    /// Reserved for future ETag-based CAS reconciliation. Reqwest lowercases
+    /// header names, and R2 returns the MD5 ETag on both `PUT` and `GET`.
+    #[allow(dead_code)]
+    etag: Option<String>,
+}
+
+fn extract_response(
+    resp: Response,
+    body_limit: Option<usize>,
+    is_head: bool,
+) -> TransportResult<HttpResponse> {
+    let status = resp.status().as_u16();
+    let etag = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let body = if is_head {
+        Vec::new()
+    } else if let Some(limit) = body_limit {
+        // Pull into memory with an upper bound — reqwest's `bytes()` is
+        // unbounded, so we cap manually.
+        let all = resp.bytes().map_err(|_| TransportError::ConnectionFailed)?;
+        if all.len() > limit {
+            return Err(TransportError::ServerError { status: 507 });
+        }
+        all.to_vec()
+    } else {
+        // Body not needed (e.g. `HEAD` response already has no body, or
+        // the status is retryable and the caller discards).
+        Vec::new()
+    };
+    Ok(HttpResponse { status, body, etag })
+}
+
+fn method_to_str(m: &Method) -> &'static str {
+    match *m {
+        Method::PUT => "PUT",
+        Method::HEAD => "HEAD",
+        Method::DELETE => "DELETE",
+        Method::POST => "POST",
+        // Default to "GET" for GET (and any unrecognised method) — the S3
+        // transport only issues the five verbs above so any other value
+        // here indicates a bug, but we prefer a safe default to a panic.
+        _ => "GET",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// URL parsing
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct ParsedS3Url {
+    host: String,
+    bucket: String,
+    prefix: Option<String>,
+}
+
+/// Accept `mkit+s3://<host>/<bucket>[/prefix]` and return host/bucket/prefix.
+/// The host component stays intact so we can rebuild the HTTPS endpoint.
+fn parse_s3_url(url: &str) -> Result<ParsedS3Url, TransportError> {
+    let rest = url
+        .strip_prefix("mkit+s3://")
+        .ok_or_else(|| TransportError::InvalidRef(format!("not an mkit+s3 URL: {url}")))?;
+    let Some((host, tail)) = rest.split_once('/') else {
+        return Err(TransportError::InvalidRef(
+            "mkit+s3 URL missing bucket".into(),
+        ));
+    };
+    if host.is_empty() {
+        return Err(TransportError::InvalidRef("mkit+s3 URL empty host".into()));
+    }
+    let (bucket, prefix) = match tail.split_once('/') {
+        Some((b, p)) if !p.is_empty() => (b, Some(p.to_owned())),
+        Some((b, _)) => (b, None),
+        None => (tail, None),
+    };
+    if bucket.is_empty() {
+        return Err(TransportError::InvalidRef(
+            "mkit+s3 URL empty bucket".into(),
+        ));
+    }
+    Ok(ParsedS3Url {
+        host: host.to_owned(),
+        bucket: bucket.to_owned(),
+        prefix,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// MD5 of wire-format ref — ETag for CAS on R2
+// ---------------------------------------------------------------------------
+
+/// Format a hash as the on-the-wire ref body: 64 hex chars + LF.
+fn format_ref_wire(h: &Hash) -> Vec<u8> {
+    let mut out = Vec::with_capacity(65);
+    out.extend_from_slice(to_hex(h).as_bytes());
+    out.push(b'\n');
+    out
+}
+
+/// Wrap `value` in double quotes to produce the `"<md5>"` ETag R2 returns.
+fn quoted_md5(wire: &[u8]) -> String {
+    let mut h = Md5::new();
+    h.update(wire);
+    let digest = h.finalize();
+    format!("\"{}\"", hex::encode(digest))
+}
+
+// ---------------------------------------------------------------------------
+// Transport impl
+// ---------------------------------------------------------------------------
+
+impl Transport for S3Transport {
+    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        if bytes.len() as u64 > S3_SINGLE_PUT_MAX || bytes.len() > PACK_BODY_LIMIT {
+            return Err(TransportError::ServerError { status: 413 });
+        }
+        let object_key = Self::pack_object_key(key.as_bytes());
+        let resp = self.http_request(
+            &Method::PUT,
+            &object_key,
+            "",
+            Some(bytes),
+            &[],
+            Some(SMALL_RESPONSE_LIMIT),
+        )?;
+        match resp.status {
+            200 | 201 => Ok(()),
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+
+    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        let object_key = Self::pack_object_key(key.as_bytes());
+        let resp = self.http_request(
+            &Method::GET,
+            &object_key,
+            "",
+            None,
+            &[],
+            Some(PACK_BODY_LIMIT),
+        )?;
+        match resp.status {
+            200 => Ok(resp.body),
+            404 => Err(TransportError::PackNotFound),
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+
+    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+        let object_key = Self::pack_object_key(key.as_bytes());
+        let resp = self.http_request(&Method::HEAD, &object_key, "", None, &[], None)?;
+        match resp.status {
+            200 => Ok(true),
+            404 => Ok(false),
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+    ) -> TransportResult<()> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.to_owned()));
+        }
+        let wire = format_ref_wire(hash);
+        let mut extra: Vec<(&'static str, String)> = Vec::new();
+        match condition {
+            RefWriteCondition::Any => {}
+            RefWriteCondition::Missing => {
+                extra.push(("If-None-Match", "*".into()));
+            }
+            RefWriteCondition::Match(expected) => {
+                let expected_wire = format_ref_wire(&expected);
+                extra.push(("If-Match", quoted_md5(&expected_wire)));
+            }
+        }
+        let resp = self.http_request(
+            &Method::PUT,
+            name,
+            "",
+            Some(&wire),
+            &extra,
+            Some(SMALL_RESPONSE_LIMIT),
+        )?;
+        match resp.status {
+            200 | 201 => Ok(()),
+            409 | 412 => Err(TransportError::RefConflict),
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+
+    fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.to_owned()));
+        }
+        let resp = self.http_request(&Method::GET, name, "", None, &[], Some(REF_BODY_LIMIT))?;
+        match resp.status {
+            200 => parse_ref_body(&resp.body).map(Some),
+            404 => Ok(None),
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+
+    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
+        if !validate_ref_prefix(prefix) {
+            return Err(TransportError::InvalidRef(prefix.to_owned()));
+        }
+        let query = Self::build_list_query(prefix);
+        let resp = self.http_request(
+            &Method::GET,
+            "",
+            &query,
+            None,
+            &[],
+            Some(REF_LIST_BODY_LIMIT),
+        )?;
+        match resp.status {
+            200 => {}
+            403 | 401 => return Err(TransportError::AccessDenied),
+            s => return Err(TransportError::ServerError { status: s }),
+        }
+        let keys = parse_list_xml(&resp.body);
+        let mut out: Vec<Ref> = Vec::new();
+        for key in keys {
+            if !validate_ref_name(&key) {
+                continue;
+            }
+            // Resolve each key to its hash via a second GET.
+            let ref_resp =
+                self.http_request(&Method::GET, &key, "", None, &[], Some(REF_BODY_LIMIT))?;
+            if ref_resp.status != 200 {
+                continue;
+            }
+            let Ok(h) = parse_ref_body(&ref_resp.body) else {
+                continue;
+            };
+            let suffix = if key.len() > prefix.len() && key.starts_with(prefix) {
+                &key[prefix.len()..]
+            } else {
+                key.as_str()
+            };
+            if !validate_ref_name(suffix) {
+                continue;
+            }
+            out.push(Ref {
+                name: suffix.to_owned(),
+                hash: Some(h),
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+}
+
+fn parse_ref_body(body: &[u8]) -> TransportResult<Hash> {
+    // Ref wire format is 64 hex chars + optional trailing whitespace.
+    let s = std::str::from_utf8(body).map_err(|_| TransportError::InvalidResponse)?;
+    let trimmed = s.trim_end_matches(['\n', '\r', ' ', '\t']);
+    if trimmed.len() != 64 {
+        return Err(TransportError::InvalidResponse);
+    }
+    mkit_core::hash::from_hex(trimmed).map_err(|_| TransportError::InvalidResponse)
+}
+
+/// Minimal ListBucketResult XML parser — extracts every `<Key>...</Key>`.
+/// No XML validation, no entity decoding (S3 never URL-encodes keys in
+/// the XML).
+#[must_use]
+pub fn parse_list_xml(xml: &[u8]) -> Vec<String> {
+    let Ok(s) = std::str::from_utf8(xml) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < s.len() {
+        let Some(start) = s[cursor..].find("<Key>") else {
+            break;
+        };
+        let abs_start = cursor + start + "<Key>".len();
+        let Some(end) = s[abs_start..].find("</Key>") else {
+            break;
+        };
+        let abs_end = abs_start + end;
+        out.push(s[abs_start..abs_end].to_owned());
+        cursor = abs_end + "</Key>".len();
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pack_object_key_shape() {
+        let digest = [0xABu8; 32];
+        let key = S3Transport::pack_object_key(&digest);
+        assert!(key.starts_with("packs/"));
+        assert_eq!(key.len(), "packs/".len() + 64);
+    }
+
+    #[test]
+    fn list_query_format() {
+        assert_eq!(
+            S3Transport::build_list_query("refs/heads/"),
+            "list-type=2&prefix=refs/heads/"
+        );
+        assert_eq!(S3Transport::build_list_query(""), "list-type=2&prefix=");
+    }
+
+    #[test]
+    fn url_parse_ok_no_prefix() {
+        let p = parse_s3_url("mkit+s3://abc.r2.cloudflarestorage.com/bucket").unwrap();
+        assert_eq!(p.host, "abc.r2.cloudflarestorage.com");
+        assert_eq!(p.bucket, "bucket");
+        assert!(p.prefix.is_none());
+    }
+
+    #[test]
+    fn url_parse_ok_with_prefix() {
+        let p = parse_s3_url("mkit+s3://host.example/bucket/project-a").unwrap();
+        assert_eq!(p.prefix.as_deref(), Some("project-a"));
+    }
+
+    #[test]
+    fn url_parse_rejects_non_mkit_scheme() {
+        assert!(matches!(
+            parse_s3_url("s3://bucket"),
+            Err(TransportError::InvalidRef(_))
+        ));
+    }
+
+    #[test]
+    fn url_parse_rejects_empty_bucket() {
+        assert!(matches!(
+            parse_s3_url("mkit+s3://host.example"),
+            Err(TransportError::InvalidRef(_))
+        ));
+    }
+
+    #[test]
+    fn list_xml_extracts_keys() {
+        let xml = b"<ListBucketResult><Contents><Key>refs/heads/main</Key></Contents><Contents><Key>refs/tags/v1</Key></Contents></ListBucketResult>";
+        assert_eq!(
+            parse_list_xml(xml),
+            vec!["refs/heads/main".to_owned(), "refs/tags/v1".to_owned()]
+        );
+    }
+
+    #[test]
+    fn list_xml_empty() {
+        assert!(parse_list_xml(b"<ListBucketResult></ListBucketResult>").is_empty());
+    }
+
+    #[test]
+    fn format_ref_wire_is_65_bytes() {
+        let h = [0x11u8; 32];
+        let w = format_ref_wire(&h);
+        assert_eq!(w.len(), 65);
+        assert_eq!(w[64], b'\n');
+    }
+
+    #[test]
+    fn quoted_md5_has_surrounding_quotes() {
+        let got = quoted_md5(b"hello");
+        assert!(got.starts_with('"') && got.ends_with('"'));
+        // 32 hex + 2 quotes.
+        assert_eq!(got.len(), 34);
+    }
+
+    #[test]
+    fn parse_ref_body_accepts_trailing_newline() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"0101010101010101010101010101010101010101010101010101010101010101");
+        body.push(b'\n');
+        let h = parse_ref_body(&body).unwrap();
+        assert_eq!(h[0], 0x01);
+    }
+
+    #[test]
+    fn parse_ref_body_rejects_short() {
+        assert!(parse_ref_body(b"deadbeef").is_err());
+    }
+
+    #[test]
+    fn connect_rejects_bad_url() {
+        assert!(S3Transport::connect("not-a-url").is_err());
+    }
+}

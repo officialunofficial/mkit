@@ -1,0 +1,94 @@
+[package]
+name = "mkit-cli"
+description = "The mkit command-line tool: a content-addressed VCS with native attestation support"
+keywords = ["mkit", "vcs", "cli", "attestation", "content-addressed"]
+categories = ["command-line-utilities", "cryptography"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Publishable to crates.io as a binary crate so users can run
+# `cargo install mkit-cli`. `publish` left unset (cargo default = true).
+default-run = "mkit"
+
+# `cargo binstall mkit-cli` metadata. Points cargo-binstall at the
+# GitHub Release archive layout so users can install the prebuilt
+# binary without building from source — even though this crate is
+# not on crates.io, cargo-binstall can be told to fetch the manifest
+# directly from the repo:
+#
+#     cargo binstall --git https://github.com/officialunofficial/mkit mkit-cli
+#
+# Archive layout pinned by release.yml:
+#   mkit-<version>-<target>.tar.gz
+#     └── mkit-<version>-<target>/mkit
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/mkit-{ version }-{ target }.{ archive-format }"
+pkg-fmt = "tgz"
+bin-dir = "mkit-{ version }-{ target }/{ bin }{ binary-ext }"
+# Cosign bundle / SHA256 sidecar files live next to the tarball.
+# cargo-binstall will pull the .sha256 automatically via the same URL
+# pattern + ".sha256" suffix. Cosign verification is out-of-band.
+pub-key = ""
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mkit"
+path = "src/main.rs"
+
+[dependencies]
+# Inter-workspace deps need explicit `version = ...` alongside the
+# path so `cargo publish` accepts them; path-only deps are rejected by
+# the registry. Track workspace.package.version.
+mkit-core = { version = "0.1", path = "../mkit-core" }
+mkit-attest = { version = "0.1", path = "../mkit-attest" }
+mkit-transport-memory = { version = "0.1", path = "../mkit-transport-memory" }
+mkit-transport-file = { version = "0.1", path = "../mkit-transport-file" }
+mkit-transport-http = { version = "0.1", path = "../mkit-transport-http" }
+mkit-transport-s3 = { version = "0.1", path = "../mkit-transport-s3" }
+mkit-transport-ssh = { version = "0.1", path = "../mkit-transport-ssh" }
+mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
+buffa = "0.5"
+
+# `derive` and `wrap_help` are intentionally disabled so help-text output
+# is deterministic — we render help ourselves from a compile-time const
+# pinned by snapshot tests.
+clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage"] }
+tempfile = "3"
+thiserror = "2"
+# Used by `mkit keygen` to generate raw 32-byte secrets for non-ed25519
+# algorithms (secp256k1 / p256). Same version mkit-core already pulls in.
+getrandom = "0.4"
+# Wraps the raw 32-byte secrets keygen pulls out of the RNG until they
+# land inside the algorithm signer (which has its own scrubbing).
+zeroize = "1"
+
+# POSIX uid + O_NOFOLLOW for keygen.rs's raw-32 load/save paths
+# (secp256k1, p256). The Ed25519 path uses mkit_core::sign which has
+# its own libc dependency; the cli's non-Ed25519 paths reach through
+# the same primitives, so we add libc here too.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[build-dependencies]
+# build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by
+# reading src/cli.rs. No external deps — plain file I/O + string match.
+
+[dev-dependencies]
+tempfile = "3"
+mkit-transport-memory = { path = "../mkit-transport-memory" }
+# Integration tests for HTTP/S3 scheme dispatch use a local mockito
+# server. SSH dispatch tests only cover URL parsing (no live subprocess
+# in CI), so the `mkit-transport-ssh` exports are enough on their own.
+mockito = "1"
+# `attest_roundtrip` tests derive per-algorithm public keys at test time
+# to build trust-roots TOML files. Dev-only: the CLI binary itself never
+# imports these directly — signing goes through the mkit-attest signers.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }

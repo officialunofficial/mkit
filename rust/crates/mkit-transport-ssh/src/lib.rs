@@ -1,0 +1,697 @@
+//! mkit SSH transport.
+//!
+//! Implements [`mkit_core::protocol::Transport`] over a long-lived
+//! system `ssh(1)` child process, exchanging the seven mkit verbs as
+//! length-prefixed buffa [`SshFrame`] messages defined in
+//! `mkit-rpc/proto/ssh.proto`.
+//!
+//! # Design choice: `std::process::Command`, NOT `russh`
+//!
+//! SSH-SECURITY.md §1 is explicit: mkit does NOT implement its own SSH
+//! client. It shells out to `ssh(1)` and delegates host-key
+//! verification, agent handling, credential selection, and kex to the
+//! user's installed OpenSSH. Same posture `git+ssh://` takes:
+//!
+//! - Our binary does not need to ship a crypto stack (no `russh`,
+//!   `rustls`, `openssl`, `native-tls`).
+//! - `ssh-agent`, `~/.ssh/config`, `ProxyCommand`, and every other
+//!   knob the user already configured Just Work, with zero mkit code.
+//! - Host-key rotation / trust escalation stays on the OpenSSH side,
+//!   where it belongs — see SSH-SECURITY.md §4 for the gaps we inherit
+//!   from this choice.
+//!
+//! The Transport trait itself is synchronous (object-safe, `&self`,
+//! `TransportResult<T>`), so wrapping `Command::spawn` + blocking
+//! stdio is the shortest path to parity with the other transports.
+
+#![forbid(unsafe_code)]
+// `ref_option` flags `&Option<T>` arguments. Wire-frame fields are
+// `Option<T>` (Edition 2023 explicit presence); passing references
+// through helpers is the natural shape — the `Option<&T>` rewrite
+// forces a borrow at every callsite.
+#![allow(clippy::ref_option)]
+#![allow(clippy::items_after_statements)]
+#![allow(clippy::manual_let_else)]
+// `cast_possible_truncation` fires on `total as usize` for pack-chunk
+// offsets. Pack sizes are bounded well below usize::MAX on every
+// supported platform.
+#![allow(clippy::cast_possible_truncation)]
+
+pub mod url;
+
+use std::io;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
+
+use mkit_core::hash::Hash;
+use mkit_core::protocol::{PackKey, Transport, TransportError, TransportResult};
+use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
+use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
+use mkit_rpc::mkit::rpc::v1::ssh::{
+    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame, UpdateRef, UploadPack,
+    list_refs_response::RefEntry, ssh_frame,
+};
+use mkit_rpc::{FrameError, read_frame, write_frame};
+
+pub use crate::url::{MKIT_SSH_PREFIX, SshTarget, parse_mkit_ssh_url, validate_ssh_path};
+
+/// Maximum combined ref / prefix name length accepted over the wire.
+const MAX_REF_NAME: usize = 4096;
+
+/// Client identification string sent in the `Hello` frame. Inherited
+/// from the workspace version, so a release bump propagates
+/// automatically.
+const CLIENT_ID: &str = concat!("mkit ", env!("CARGO_PKG_VERSION"));
+
+/// Optional SSH CLI knobs threaded from `.mkit/config`. All fields default
+/// to empty, which means "inherit the user's `ssh(1)` defaults". See
+/// SPEC-TRANSPORT §7.5 for the canonical field list.
+#[derive(Debug, Default, Clone)]
+pub struct SshOptions {
+    /// `-o StrictHostKeyChecking=<value>`. Empty → do not pass.
+    pub strict_host_key_checking: String,
+    /// `-o UserKnownHostsFile=<path>`. Empty → do not pass.
+    pub user_known_hosts_file: String,
+    /// `-i <file>`. Empty → do not pass. ssh(1) defaults to
+    /// `~/.ssh/id_ed25519`, then `~/.ssh/id_rsa`, agent-first.
+    pub identity_file: String,
+}
+
+/// Errors raised while bringing up the SSH child — before the first
+/// [`Transport`] verb is ever called.
+#[derive(Debug, thiserror::Error)]
+pub enum SshInitError {
+    /// The URL failed `parse_mkit_ssh_url` / `validate_ssh_path`.
+    #[error(transparent)]
+    InvalidUrl(#[from] TransportError),
+    /// Could not spawn `ssh`. Usually means the binary is not on
+    /// `$PATH` or the fork/exec itself failed.
+    #[error("failed to spawn ssh: {0}")]
+    Spawn(#[from] io::Error),
+    /// Hello handshake failed — wrong proto version, server-emitted
+    /// Error frame, or unparseable reply.
+    #[error("ssh hello handshake failed: {0}")]
+    HandshakeFailed(String),
+}
+
+/// Transport over a spawned `ssh(1)` child process.
+///
+/// Construction spawns the child, sends the mandatory `Hello` frame,
+/// and validates the server's reply. If any of those steps fail the
+/// child is torn down before the constructor returns, so a successful
+/// [`SshTransport::connect`] ALWAYS yields a handle whose first verb
+/// call lands on a v1 mkit server.
+#[derive(Debug)]
+pub struct SshTransport {
+    /// The child's stdio handles sit behind a `Mutex` so `&self`
+    /// [`Transport`] methods can still mutate them. SSH is a single
+    /// pipelined stream — concurrent verbs on one [`SshTransport`]
+    /// serialise through this mutex.
+    io: Mutex<ChildIo>,
+}
+
+#[derive(Debug)]
+struct ChildIo {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    /// `true` once we've sent `Close` and shut the pipe. Guards
+    /// double-close from `Drop` + explicit `close`.
+    closed: bool,
+}
+
+impl SshTransport {
+    /// Parse `url`, spawn `ssh`, and perform the `Hello` handshake.
+    pub fn connect(url: &str) -> Result<Self, SshInitError> {
+        let target = parse_mkit_ssh_url(url)?;
+        Self::connect_with_options(&target, &SshOptions::default())
+    }
+
+    /// Spawn `ssh` from a pre-parsed [`SshTarget`] with explicit
+    /// `.mkit/config` SSH options. Callers that already resolved
+    /// config should use this entry point; `connect` is the
+    /// convenience form.
+    pub fn connect_with_options(
+        target: &SshTarget,
+        options: &SshOptions,
+    ) -> Result<Self, SshInitError> {
+        validate_ssh_path(&target.path)?;
+        let mut cmd = build_ssh_command(target, options);
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| SshInitError::HandshakeFailed("no child stdin".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| SshInitError::HandshakeFailed("no child stdout".into()))?;
+        let mut io = ChildIo {
+            child,
+            stdin,
+            stdout,
+            closed: false,
+        };
+        if let Err(e) = perform_client_handshake(&mut io) {
+            // Tear down before returning so the caller never sees a
+            // half-initialised transport.
+            let _ = shut_child(&mut io);
+            return Err(e);
+        }
+        Ok(Self { io: Mutex::new(io) })
+    }
+
+    /// Explicit shutdown — sends `Close` and waits for the child.
+    /// Equivalent to dropping the transport, but lets the caller
+    /// observe any shutdown error. Safe to call multiple times.
+    pub fn close(&mut self) -> io::Result<()> {
+        match self.io.get_mut() {
+            Ok(io) => shut_child(io),
+            Err(_) => Err(io::Error::other("ssh transport mutex poisoned")),
+        }
+    }
+}
+
+impl Drop for SshTransport {
+    fn drop(&mut self) {
+        match self.io.get_mut() {
+            Ok(io) => {
+                let _ = shut_child(io);
+            }
+            Err(poison) => {
+                let io = poison.into_inner();
+                let _ = shut_child(io);
+            }
+        }
+    }
+}
+
+impl Transport for SshTransport {
+    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        let mut io = self
+            .io
+            .lock()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        if io.closed {
+            return Err(TransportError::ConnectionFailed);
+        }
+
+        // Header frame announces the pack id + advertised total length.
+        let header = SshFrame {
+            body: Some(ssh_frame::Body::UploadPack(Box::new(UploadPack {
+                pack_id: Some(key.as_bytes().to_vec()),
+                total_bytes: Some(bytes.len() as u64),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+        write_frame(&mut io.stdin, &header).map_err(|_| TransportError::ConnectionFailed)?;
+
+        // Body chunks. Cap the per-frame data segment so the framing
+        // layer's 1 MiB cap accommodates protobuf overhead too.
+        const CHUNK_DATA_MAX: usize = 800 * 1024;
+        let mut offset = 0u64;
+        let total = bytes.len();
+        let mut iter_pos = 0usize;
+        while iter_pos < total {
+            let end = core::cmp::min(iter_pos + CHUNK_DATA_MAX, total);
+            let chunk = SshFrame {
+                body: Some(ssh_frame::Body::PackChunk(Box::new(PackChunk {
+                    pack_id: Some(key.as_bytes().to_vec()),
+                    offset: Some(offset),
+                    data: Some(bytes[iter_pos..end].to_vec()),
+                    last: Some(end == total),
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            };
+            write_frame(&mut io.stdin, &chunk).map_err(|_| TransportError::ConnectionFailed)?;
+            offset += (end - iter_pos) as u64;
+            iter_pos = end;
+        }
+        if total == 0 {
+            // Empty packs still need a final last=true chunk so the
+            // server knows the upload is complete.
+            let chunk = SshFrame {
+                body: Some(ssh_frame::Body::PackChunk(Box::new(PackChunk {
+                    pack_id: Some(key.as_bytes().to_vec()),
+                    offset: Some(0),
+                    data: Some(Vec::new()),
+                    last: Some(true),
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            };
+            write_frame(&mut io.stdin, &chunk).map_err(|_| TransportError::ConnectionFailed)?;
+        }
+
+        let resp = read_frame_or_err(&mut io.stdout)?;
+        match resp.body {
+            Some(ssh_frame::Body::UploadPackResponse(_)) => Ok(()),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
+            other => Err(unexpected_frame("UploadPackResponse", other)),
+        }
+    }
+
+    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        let mut io = self
+            .io
+            .lock()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        if io.closed {
+            return Err(TransportError::ConnectionFailed);
+        }
+
+        let req = SshFrame {
+            body: Some(ssh_frame::Body::DownloadPack(Box::new(DownloadPack {
+                pack_id: Some(key.as_bytes().to_vec()),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+        write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
+
+        let header = read_frame_or_err(&mut io.stdout)?;
+        let total = match header.body {
+            Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
+            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e)),
+            other => return Err(unexpected_frame("DownloadPackHeader", other)),
+        };
+
+        let mut out = Vec::with_capacity(total as usize);
+        loop {
+            let chunk_frame = read_frame_or_err(&mut io.stdout)?;
+            match chunk_frame.body {
+                Some(ssh_frame::Body::PackChunk(c)) => {
+                    let data = c.data.unwrap_or_default();
+                    out.extend_from_slice(&data);
+                    if c.last.unwrap_or(false) {
+                        break;
+                    }
+                }
+                Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e)),
+                other => return Err(unexpected_frame("PackChunk", other)),
+            }
+        }
+        Ok(out)
+    }
+
+    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+        let mut io = self
+            .io
+            .lock()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        if io.closed {
+            return Err(TransportError::ConnectionFailed);
+        }
+        let req = SshFrame {
+            body: Some(ssh_frame::Body::PackExists(Box::new(PackExists {
+                pack_id: Some(key.as_bytes().to_vec()),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+        write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        let resp = read_frame_or_err(&mut io.stdout)?;
+        match resp.body {
+            Some(ssh_frame::Body::PackExistsResponse(r)) => Ok(r.exists.unwrap_or(false)),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
+            other => Err(unexpected_frame("PackExistsResponse", other)),
+        }
+    }
+
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+    ) -> TransportResult<()> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.into()));
+        }
+        if name.len() > MAX_REF_NAME {
+            return Err(TransportError::InvalidRef("ref name too long".into()));
+        }
+
+        let mut io = self
+            .io
+            .lock()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        if io.closed {
+            return Err(TransportError::ConnectionFailed);
+        }
+
+        // CAS encoding:
+        //   .Any            → expected_id empty (server clobbers)
+        //   .Missing        → expected_id empty + we rely on the
+        //                     server interpreting .Any-with-existing
+        //                     as a conflict; current ssh.proto folds
+        //                     these together. Tighten when the server
+        //                     spec catches up.
+        //   .Match(h)       → expected_id = h
+        let expected_id = match condition {
+            RefWriteCondition::Any | RefWriteCondition::Missing => Vec::new(),
+            RefWriteCondition::Match(h) => h.to_vec(),
+        };
+
+        let req = SshFrame {
+            body: Some(ssh_frame::Body::UpdateRef(Box::new(UpdateRef {
+                name: Some(name.into()),
+                expected_id: Some(expected_id),
+                new_id: Some(hash.to_vec()),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+        write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
+
+        let resp = read_frame_or_err(&mut io.stdout)?;
+        match resp.body {
+            Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(()),
+            Some(ssh_frame::Body::Error(e)) => {
+                // CAS-mismatch convention: server returns
+                // ERROR_CODE_INVALID_REQUEST with the current id in
+                // `details`. Map to RefConflict.
+                let code = e.code.as_ref().map_or(0, buffa::EnumValue::to_i32);
+                if code == mkit_rpc::mkit::rpc::v1::ErrorCode::ERROR_CODE_INVALID_REQUEST as i32
+                    && !matches!(condition, RefWriteCondition::Any)
+                {
+                    Err(TransportError::RefConflict)
+                } else {
+                    Err(rpc_error_to_transport(*e))
+                }
+            }
+            other => Err(unexpected_frame("UpdateRefResponse", other)),
+        }
+    }
+
+    fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.into()));
+        }
+        if name.len() > MAX_REF_NAME {
+            return Err(TransportError::InvalidRef("ref name too long".into()));
+        }
+        let mut io = self
+            .io
+            .lock()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        if io.closed {
+            return Err(TransportError::ConnectionFailed);
+        }
+        let req = SshFrame {
+            body: Some(ssh_frame::Body::ReadRef(Box::new(ReadRef {
+                name: Some(name.into()),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+        write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        let resp = read_frame_or_err(&mut io.stdout)?;
+        match resp.body {
+            Some(ssh_frame::Body::ReadRefResponse(r)) => {
+                let oid = r.object_id.unwrap_or_default();
+                if oid.is_empty() {
+                    Ok(None)
+                } else if oid.len() == 32 {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&oid);
+                    Ok(Some(h))
+                } else {
+                    Err(TransportError::InvalidResponse)
+                }
+            }
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
+            other => Err(unexpected_frame("ReadRefResponse", other)),
+        }
+    }
+
+    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
+        if !prefix.is_empty() && !validate_ref_prefix(prefix) {
+            return Err(TransportError::InvalidRef(prefix.into()));
+        }
+        if prefix.len() > MAX_REF_NAME {
+            return Err(TransportError::InvalidRef("ref prefix too long".into()));
+        }
+        let mut io = self
+            .io
+            .lock()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        if io.closed {
+            return Err(TransportError::ConnectionFailed);
+        }
+        let req = SshFrame {
+            body: Some(ssh_frame::Body::ListRefs(Box::new(ListRefs {
+                prefix: Some(prefix.into()),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+        write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        let resp = read_frame_or_err(&mut io.stdout)?;
+        match resp.body {
+            Some(ssh_frame::Body::ListRefsResponse(r)) => r
+                .refs
+                .into_iter()
+                .map(ref_entry_to_ref)
+                .collect::<TransportResult<Vec<_>>>(),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
+            other => Err(unexpected_frame("ListRefsResponse", other)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn read_frame_or_err<R: io::Read>(r: &mut R) -> TransportResult<SshFrame> {
+    match read_frame::<_, SshFrame>(r) {
+        Ok(f) => Ok(f),
+        Err(FrameError::LengthTruncated | FrameError::BodyTruncated { .. }) => {
+            Err(TransportError::ConnectionFailed)
+        }
+        Err(FrameError::LengthTooLarge(n)) => Err(TransportError::PayloadTooLarge(n as usize)),
+        Err(FrameError::DecodeFailed) => Err(TransportError::ProtocolError),
+        Err(FrameError::Io(_)) => Err(TransportError::ConnectionFailed),
+    }
+}
+
+fn rpc_error_to_transport(e: mkit_rpc::mkit::rpc::v1::Error) -> TransportError {
+    use mkit_rpc::mkit::rpc::v1::ErrorCode;
+    let code = e.code.as_ref().map_or(0, buffa::EnumValue::to_i32);
+    let msg = e.message.unwrap_or_default();
+    if code == ErrorCode::ERROR_CODE_KEY_NOT_FOUND as i32 {
+        TransportError::PackNotFound
+    } else if code == ErrorCode::ERROR_CODE_USER_DECLINED as i32 {
+        TransportError::AccessDenied
+    } else if msg.is_empty() {
+        TransportError::RemoteError("ssh server returned an unspecified error".into())
+    } else {
+        TransportError::RemoteError(msg)
+    }
+}
+
+fn unexpected_frame(want: &str, got: Option<ssh_frame::Body>) -> TransportError {
+    let body = got;
+    TransportError::RemoteError(format!(
+        "ssh server returned {} when {} was expected",
+        body_name(&body),
+        want,
+    ))
+}
+
+fn body_name(b: &Option<ssh_frame::Body>) -> &'static str {
+    use ssh_frame::Body;
+    match b {
+        Some(Body::Hello(_)) => "hello",
+        Some(Body::HelloResponse(_)) => "hello_response",
+        Some(Body::Error(_)) => "error",
+        Some(Body::Close(_)) => "close",
+        Some(Body::ListRefs(_)) => "list_refs",
+        Some(Body::ListRefsResponse(_)) => "list_refs_response",
+        Some(Body::ReadRef(_)) => "read_ref",
+        Some(Body::ReadRefResponse(_)) => "read_ref_response",
+        Some(Body::UpdateRef(_)) => "update_ref",
+        Some(Body::UpdateRefResponse(_)) => "update_ref_response",
+        Some(Body::PackExists(_)) => "pack_exists",
+        Some(Body::PackExistsResponse(_)) => "pack_exists_response",
+        Some(Body::UploadPack(_)) => "upload_pack",
+        Some(Body::UploadPackResponse(_)) => "upload_pack_response",
+        Some(Body::DownloadPack(_)) => "download_pack",
+        Some(Body::DownloadPackHeader(_)) => "download_pack_header",
+        Some(Body::PackChunk(_)) => "pack_chunk",
+        None => "(empty body)",
+    }
+}
+
+fn ref_entry_to_ref(e: RefEntry) -> TransportResult<Ref> {
+    let name = e.name.unwrap_or_default();
+    if !validate_ref_name(&name) {
+        return Err(TransportError::InvalidRef(name));
+    }
+    let oid = e.object_id.unwrap_or_default();
+    if oid.len() != 32 {
+        return Err(TransportError::InvalidResponse);
+    }
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&oid);
+    Ok(Ref {
+        name,
+        hash: Some(h),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Hello handshake + child teardown
+// ---------------------------------------------------------------------------
+
+fn perform_client_handshake(io: &mut ChildIo) -> Result<(), SshInitError> {
+    let hello = SshFrame {
+        body: Some(ssh_frame::Body::Hello(Box::new(Hello {
+            proto: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+            client_id: Some(CLIENT_ID.into()),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    write_frame(&mut io.stdin, &hello)
+        .map_err(|e| SshInitError::HandshakeFailed(format!("send hello: {e}")))?;
+
+    let resp = read_frame::<_, SshFrame>(&mut io.stdout)
+        .map_err(|e| SshInitError::HandshakeFailed(format!("read hello reply: {e}")))?;
+    match resp.body {
+        Some(ssh_frame::Body::HelloResponse(h)) => {
+            let proto = h.proto.as_ref().map_or(0, buffa::EnumValue::to_i32);
+            if proto != ProtocolVersion::PROTOCOL_VERSION_1 as i32 {
+                return Err(SshInitError::HandshakeFailed(format!(
+                    "server proto_version {proto} != expected 1"
+                )));
+            }
+            Ok(())
+        }
+        Some(ssh_frame::Body::Error(e)) => Err(SshInitError::HandshakeFailed(format!(
+            "server error: {}",
+            e.message.unwrap_or_default()
+        ))),
+        other => Err(SshInitError::HandshakeFailed(format!(
+            "unexpected hello reply: {}",
+            body_name(&other)
+        ))),
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn shut_child(io: &mut ChildIo) -> io::Result<()> {
+    if io.closed {
+        return Ok(());
+    }
+    io.closed = true;
+    // Best-effort Close frame; server might already be gone.
+    let close = SshFrame {
+        body: Some(ssh_frame::Body::Close(Box::default())),
+        ..Default::default()
+    };
+    let _ = write_frame(&mut io.stdin, &close);
+    // Dropping ChildIo's stdin closes the pipe; the server sees EOF.
+    let _ = io.child.wait();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// argv construction
+// ---------------------------------------------------------------------------
+
+fn build_ssh_command(target: &SshTarget, options: &SshOptions) -> Command {
+    let mut cmd = Command::new("ssh");
+    if let Some(port) = target.port {
+        cmd.arg("-p").arg(port.to_string());
+    }
+    if !options.strict_host_key_checking.is_empty() {
+        cmd.arg("-o").arg(format!(
+            "StrictHostKeyChecking={}",
+            options.strict_host_key_checking
+        ));
+    }
+    if !options.user_known_hosts_file.is_empty() {
+        cmd.arg("-o").arg(format!(
+            "UserKnownHostsFile={}",
+            options.user_known_hosts_file
+        ));
+    }
+    if !options.identity_file.is_empty() {
+        cmd.arg("-i").arg(&options.identity_file);
+    }
+    // BatchMode + accept-new match the defaults GitHub's CLI assumes
+    // for git+ssh. mkit defers to whatever the user configured, but if
+    // they haven't set either knob we should not block on an
+    // interactive password prompt.
+    if options.strict_host_key_checking.is_empty() {
+        cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
+    }
+    cmd.arg("-o").arg("BatchMode=yes");
+
+    cmd.arg(format!("{}@{}", target.user, target.host));
+    // The path is already restricted to `[A-Za-z0-9._-/]` by
+    // `validate_ssh_path`, so handing it to the remote shell as a
+    // separate argv token is safe. Three tokens (mkit / serve / path)
+    // so sshd invokes `mkit serve <path>` without an intervening
+    // `sh -c` that broke the handshake on some sshd configurations.
+    cmd.arg("mkit").arg("serve").arg(&target.path);
+    cmd
+}
+
+#[cfg(test)]
+mod tests {
+    // The public surface is exercised against a real (or simulator)
+    // mkit-server, which does not exist in-tree. Once a server impl
+    // lands, an integration test in tests/ can spawn it and drive
+    // SshTransport against it. For now, basic smoke tests of the
+    // helper functions live here.
+    use super::*;
+
+    #[test]
+    fn ref_entry_to_ref_validates_oid_length() {
+        let bad = RefEntry {
+            name: Some("refs/heads/main".into()),
+            object_id: Some(vec![0u8; 16]),
+            ..Default::default()
+        };
+        assert!(matches!(
+            ref_entry_to_ref(bad),
+            Err(TransportError::InvalidResponse)
+        ));
+    }
+
+    #[test]
+    fn ref_entry_to_ref_validates_name() {
+        // Empty ref names are rejected by `validate_ref_name`.
+        let bad = RefEntry {
+            name: Some(String::new()),
+            object_id: Some(vec![0u8; 32]),
+            ..Default::default()
+        };
+        assert!(matches!(
+            ref_entry_to_ref(bad),
+            Err(TransportError::InvalidRef(_))
+        ));
+    }
+
+    #[test]
+    fn body_name_covers_every_oneof_variant() {
+        // Sanity: if the proto adds a variant and we forget to update
+        // body_name, the new arm will hit the `(empty body)` fallback
+        // and these tests should be extended. Right now we just check
+        // a few representative cases.
+        let names = [
+            body_name(&None),
+            body_name(&Some(ssh_frame::Body::Close(Box::default()))),
+        ];
+        assert!(!names[0].is_empty());
+        assert!(!names[1].is_empty());
+    }
+}

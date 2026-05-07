@@ -1,0 +1,65 @@
+[package]
+name = "mkit-sign-tpm"
+# Crate lives outside `rust/`, so Cargo cannot auto-discover the
+# workspace root. Point at it explicitly so the `*.workspace = true`
+# inheritance below resolves against `rust/Cargo.toml`. Same trick
+# mkit-sign-file uses.
+workspace = "../../../rust"
+description = "External-signer binary: signs a DSSE PAE with a P-256 key held inside a TPM 2.0 device. Linux-native analog of mkit-sign-se."
+keywords = ["mkit", "attestation", "signer", "tpm", "tpm2"]
+categories = ["command-line-utilities", "cryptography"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Reference Rust signer for TPM 2.0 hardware. Not shipped to crates.io:
+# consumers build from source so the TCTI linkage resolves against
+# their host's `tss2-esys` stack.
+publish = false
+# Build script detects `pkg-config --exists tss2-esys` at compile time
+# and sets the `tpm_available` cfg so integration tests can gate
+# themselves without breaking compilation on TPM-less hosts (macOS,
+# stripped CI images).
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mkit-sign-tpm"
+path = "src/main.rs"
+
+[features]
+# `tpm2` gates the real `tss-esapi` dependency. Default is OFF so
+# `cargo build --workspace` / `cargo test --workspace` from `rust/`
+# still works on macOS and on CI runners without libtss2-dev
+# installed. Unit tests (ASN.1 ↔ compact conversion, SEC1 encoding,
+# protocol JSON round-trip) do NOT need this feature.
+default = []
+tpm2 = ["dep:tss-esapi"]
+
+[dependencies]
+# mkit-rpc owns the wire schemas + length-prefixed framing.
+mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
+buffa = "0.5"
+base64 = "0.22"
+sha2 = "0.10"
+thiserror = "2"
+
+# `tss-esapi-sys` hard-rejects non-Linux/Windows targets in its build
+# script ("compilation target tuple (aarch64, darwin) is not part of
+# the supported tuples"). Gate the optional dep by target so that
+# `--all-features` on macOS still builds — it just doesn't link the
+# TPM backend (which is fine; Linux/Windows are the platforms that
+# ship real TPMs anyway). Pinned to 7.7; the 8.0 series is alpha.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+tss-esapi = { version = "7.7", optional = true }
+
+[dev-dependencies]
+mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
+buffa = "0.5"
+base64 = "0.22"
+# In-process P-256 signer for protocol-shape unit tests.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }

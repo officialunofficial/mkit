@@ -1,0 +1,57 @@
+# mkit (Rust workspace)
+
+This directory holds the `mkit` Cargo workspace.
+
+## Toolchain
+
+- **Rust** `1.95.0` (pinned in `rust-toolchain.toml`)
+- **Edition** `2024` (workspace default)
+- **Resolver** `3`
+
+## Workspace layout
+
+```
+rust/
+├── crates/
+│   ├── mkit-core/              # hash, object, serialize, store, chunker,
+│   │                           # pack, delta, refs, index, worktree,
+│   │                           # ignore, repo_lock, ops/*, sign, protocol
+│   ├── mkit-transport-memory/
+│   ├── mkit-transport-file/
+│   ├── mkit-transport-http/
+│   ├── mkit-transport-s3/
+│   ├── mkit-transport-ssh/
+│   ├── mkit-attest/            # jcs, statement, envelope, signers, verify
+│   └── mkit-cli/               # bin "mkit"
+└── fuzz/                       # cargo-fuzz targets (delta, pack, tree)
+```
+
+## Gates
+
+```sh
+cd rust
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --workspace
+```
+
+CI runs the above matrix on ubuntu-latest + macos-latest
+(`.github/workflows/rust.yml`). A weekly job runs `cargo audit` and
+`cargo deny check` (`.github/workflows/rust-security.yml`). A
+reproducible-build smoke test diffs two sequential release builds
+(`.github/workflows/reproducible-build.yml`).
+
+## Contracts
+
+- Every on-disk / wire byte is pinned by golden vectors under
+  `tests/golden/`. Any change must update both the vector and the
+  relevant `docs/SPEC-*.md` in the same PR.
+- `mkit version` emits exactly `mkit <X.Y.Z>\n` — asserted by both a
+  snapshot test in `crates/mkit-cli/tests/version_snapshot.rs` and a CI
+  step that runs the release binary.
+- `scripts/verify-rename.sh` enforces the public-surface rename gate
+  on every push.
+- Fuzz harnesses enforce the six guardrails documented in
+  `docs/FUZZ.md` (≤100 iterations, ≤64 KiB input, bounded per-op
+  allocations, 100 ms per-iteration cap, no unbounded loops, seeded
+  PRNG).

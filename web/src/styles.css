@@ -1,0 +1,209 @@
+@import 'tailwindcss';
+
+/* Design tokens lifted verbatim from searchartwith.art (OKLCH triplet of
+   1 / 0.145 / 0.922 for bg / fg / hairline). Geist Variable is the
+   sans; we skip the site's DaVinci serif deliberately. */
+@theme {
+  --color-bg: oklch(1 0 0);
+  --color-fg: oklch(0.145 0 0);
+  --color-muted: oklch(0.556 0 0);
+  /* `subtle` sits between `muted` and `hairline` — used for descriptive
+     copy that should read as secondary without fully fading out. */
+  --color-subtle: oklch(0.68 0 0);
+  --color-hairline: oklch(0.922 0 0);
+  --font-sans: 'Geist', 'Geist Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Brand gradient lifted from the official-unofficial logo. Stops
+     are carried verbatim so the chroma matches across surfaces. Two
+     directional tokens: `-h` for horizontal rules, `-v` for text
+     clipping (which stays vertical like the logo itself). */
+  --gradient-h: linear-gradient(to right, #fa7cfa 0%, #f5ca23 30%, #00d2a8 66%, #7a3bf7 97%);
+  --gradient-v: linear-gradient(to bottom, #fa7cfa 0%, #f5ca23 30%, #00d2a8 66%, #7a3bf7 97%);
+}
+
+@layer base {
+  html {
+    /* Crisper type on macOS; no-op elsewhere. */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Body copy avoids widow/orphan lines; headings get `balance`. */
+    text-wrap: pretty;
+    /* Dynamic numbers (counters, hex columns) stay layout-stable. */
+    font-variant-numeric: tabular-nums;
+    /* Reserve the scrollbar gutter so pages that don't scroll
+       horizontally-align with pages that do. Without this, content
+       jumps a few px when navigating from a short page to a tall one. */
+    scrollbar-gutter: stable;
+    font-family: var(--font-sans);
+    color: var(--color-fg);
+    background: var(--color-bg);
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+    /* Geist looks better a notch tighter than its 1.5 body default at
+       heading sizes. */
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: var(--font-mono);
+  }
+
+  /* Minimal scrollbar applied to every scrollable surface. Standard
+     `scrollbar-*` properties cover Firefox 64+, Chromium 121+, and
+     Safari 18.2+; the `::-webkit-scrollbar-*` block beneath is kept
+     for older WebKit (iOS < 18.2 etc.) and no-ops on Firefox. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-hairline) transparent;
+  }
+
+  /* WebKit ignores `::-webkit-scrollbar-*` on native form controls
+     unless their appearance is reset — without this, `<textarea>`
+     falls back to the OS-native chrome scrollbar. Safari, iOS WebView,
+     and Chrome all require the override. Range inputs are deliberately
+     excluded: stripping their appearance hides the track + thumb
+     entirely (browsers need explicit ::-webkit-slider-* rules to
+     re-draw them), so we keep their native chrome. */
+  textarea,
+  select,
+  input:not([type='range']) {
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--color-hairline);
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-muted);
+  }
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  /* `scrollbar-gutter: stable` reserves classic-scrollbar width
+     (~15px) even when `scrollbar-width: thin` is set, so leaving it on
+     textareas would waste horizontal space inside each input. Scope
+     the gutter reservation to the page only (html, above). */
+  textarea,
+  pre,
+  [class*='overflow-'] {
+    scrollbar-gutter: auto;
+  }
+
+  /* Top-down Merkle tree using the classic ::before/::after CSS-tree
+     pattern. Each node carries a half-elbow on each side; first/last
+     children clip the outer half; the parent's own ::before draws the
+     stub up from the node into the row of elbows above. Hairline
+     `--color-hairline` keeps the connectors subtle so the coloured
+     squares remain the dominant signal. */
+  .merkle,
+  .merkle ul {
+    position: relative;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    justify-content: center;
+    list-style: none;
+  }
+  .merkle ul {
+    padding-top: 18px;
+  }
+  /* Vertical stub from parent's node DOWN to the children's elbow row.
+     Sits inside the children-ul's padding-top, centred horizontally —
+     `display: flex; justify-content: center` puts the ul's centre on
+     the parent's centre, so this 1px line connects them cleanly. */
+  .merkle ul::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 50%;
+    height: 18px;
+    border-left: 1px solid var(--color-subtle);
+  }
+  .merkle li {
+    list-style: none;
+    position: relative;
+    padding: 18px 8px 0 8px;
+    text-align: center;
+  }
+  .merkle li::before,
+  .merkle li::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    height: 18px;
+    width: 50%;
+    border-top: 1px solid var(--color-subtle);
+  }
+  .merkle li::before {
+    right: 50%;
+  }
+  .merkle li::after {
+    left: 50%;
+  }
+  .merkle li:only-child::before,
+  .merkle li:only-child::after {
+    display: none;
+  }
+  .merkle li:only-child {
+    padding-top: 18px;
+  }
+  .merkle li:first-child::before,
+  .merkle li:last-child::after {
+    border: 0 none;
+  }
+  /* Vertical stub from the elbow row down to each child square. The
+     button is `position: static` so this pseudo's containing block is
+     the LI — `top: 0` puts it at the elbow row, `height: 18px` ends
+     it exactly at the LI's padding-top edge, where the button (and
+     the square inside it) starts. Because the line is anchored to the
+     LI and not the button, the button's hover/active transforms can
+     scale the inner content without dragging the connector with it. */
+  .merkle li > .merkle__node::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 50%;
+    height: 18px;
+    border-left: 1px solid var(--color-subtle);
+  }
+  .merkle > li {
+    padding-top: 0;
+  }
+  .merkle > li::before,
+  .merkle > li::after {
+    display: none;
+  }
+  .merkle > li > .merkle__node::before {
+    display: none;
+  }
+
+  /* Utility for applying the brand gradient as text fill. Used on the
+     landing hero only — kept off secondary headings so the colour still
+     reads as an accent rather than a default. */
+  .text-gradient {
+    background-image: var(--gradient-v);
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+    /* Preserve legibility for assistive tech and out-of-context views. */
+    -webkit-text-fill-color: transparent;
+  }
+}

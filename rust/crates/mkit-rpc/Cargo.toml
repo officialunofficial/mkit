@@ -1,0 +1,36 @@
+[package]
+name = "mkit-rpc"
+description = "Versioned wire protocols for mkit cross-system speech: external signers (signer.proto), SSH transport frames (ssh.proto), shared types (common.proto). Schemas defined in protobuf via buffa, with length-prefixed framing."
+keywords = ["mkit", "rpc", "protobuf", "buffa"]
+categories = ["encoding", "data-structures"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# buffa-generated code inherits docstrings from our .proto comments,
+# which clippy flags for missing backticks around protocol-name
+# tokens (WebAuthn, ClientDataJSON, ED25519, …). The .proto is the
+# source of truth and we don't want to backtick-hell the human
+# documentation there. Override the workspace lint set for this crate
+# only.
+[lints.clippy]
+# Drop pedantic + nursery + cargo for this crate. The buffa-generated
+# code (~640 KiB into $OUT_DIR) inherits docstrings from our .proto
+# files and uses code patterns that pedantic flags hundreds of times.
+# We keep `clippy::all` (the correctness + style baseline) and our
+# own hand-written code in src/ stays under it.
+all = { level = "warn", priority = -1 }
+
+[dependencies]
+buffa = "0.5"
+thiserror = "2"
+
+[build-dependencies]
+buffa-build = "0.5"
+
+[dev-dependencies]
+hex = "0.4"

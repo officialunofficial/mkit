@@ -1,0 +1,7 @@
+{
+  "name": "statement_basic",
+  "description": "in-toto v1 Statement; commit subject 0xCC*32, predicate {} (JCS-canonical)",
+  "bin": "statement_basic.json",
+  "size": 226,
+  "blake3": "f16487164072097ed704c4d8687e2069dadc6dfcba453d14b45db1ceb7eba59f"
+}

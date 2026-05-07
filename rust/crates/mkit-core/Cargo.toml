@@ -1,0 +1,40 @@
+[package]
+name = "mkit-core"
+description = "Content-addressed VCS primitives for mkit: BLAKE3 hashing, canonical objects, refs, packs, and transport traits"
+keywords = ["mkit", "vcs", "blake3", "content-addressed", "version-control"]
+categories = ["data-structures", "encoding", "cryptography"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Publishable to crates.io. Metadata-only PR — actual `cargo publish`
+# is gated behind a separate release process. The `publish` key is
+# left unset (cargo default = `true`) so a future `cargo publish -p
+# mkit-core` works without further metadata changes.
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = "1"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+getrandom = "0.4"
+# `subtle` is a constant-time-equality primitive used by the Ed25519
+# `SecretSeed` PartialEq. dalek pulls it transitively but we depend on
+# it directly so the constant-time guarantee is explicit at this crate
+# boundary instead of relying on a transitive pin.
+subtle = { version = "2", default-features = false }
+tempfile = "3"
+thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
+
+# POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
+# Windows path uses default ACLs as documented in `docs/SPEC-SIGNING.md`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+hex = "0.4"

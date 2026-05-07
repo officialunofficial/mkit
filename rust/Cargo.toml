@@ -1,0 +1,73 @@
+[workspace]
+resolver = "3"
+# `fuzz` is the cargo-fuzz crate. It's a workspace member so
+# `cargo test -p mkit-fuzz` runs its plain-unit-test fallback path
+# (without libfuzzer / nightly). The libfuzzer-driven binaries under
+# `fuzz/fuzz_targets/` are gated behind `--features libfuzzer` so the
+# default `cargo build` skips them.
+members = [
+    "crates/mkit-core",
+    "crates/mkit-attest",
+    "fuzz",
+    "crates/mkit-transport-memory",
+    "crates/mkit-transport-file",
+    "crates/mkit-transport-http",
+    "crates/mkit-transport-s3",
+    "crates/mkit-transport-ssh",
+    "crates/mkit-cli",
+    "crates/mkit-rpc",
+    "crates/mkit-wasm",
+    # Reference external-signer binary — lives under contrib/ (outside
+    # `rust/`) because it is a third-party-integration reference, not a
+    # core crate. Kept a workspace member so it builds / tests with
+    # `cargo test --workspace` and shares the workspace's lint config
+    # and dependency pins. See docs/SPEC-EXTERNAL-SIGNER.md.
+    "../contrib/signers/mkit-sign-file",
+    # Protocol v1.1 FIDO2/WebAuthn reference signer. Workspace member
+    # for the same reasons as mkit-sign-file — share lint config, dep
+    # pins, and let `cargo test --workspace` cover its protocol-shape
+    # tests. Hardware-gated e2e lives in `tests/e2e.sh`.
+    "../contrib/signers/mkit-sign-ctap",
+    # TPM 2.0 P-256 signer — pure-Rust analog of mkit-sign-se for
+    # Linux/Windows hosts with a TPM. The `tss-esapi` dep is behind the
+    # `tpm2` feature (default off) so workspace builds on macOS / CI
+    # without libtss2-dev still succeed. See docs/SPEC-EXTERNAL-SIGNER.md.
+    "../contrib/signers/mkit-sign-tpm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/officialunofficial/mkit"
+authors = ["mkit contributors"]
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+# `doc_lazy_continuation` fires on style-only indentation in module docs.
+# We use it intentionally for vertically-aligned bullet lists — the
+# auto-fix rewrites prose into one-line-per-item form which hurts
+# readability. Silence at the workspace root.
+doc_lazy_continuation = "allow"
+# `module_inception` is fine for our generated buffa modules.
+module_inception = "allow"
+# Downstream transitive deps (wit-bindgen via getrandom, hashbrown via tempfile)
+# carry their own duplicate-version baggage we do not control. Revisit once
+# the ecosystem converges.
+multiple_crate_versions = "allow"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+panic = "abort"
+overflow-checks = true

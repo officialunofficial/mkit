@@ -1,0 +1,227 @@
+---
+spec: SPEC-TRANSPORT
+version: 1
+status: draft
+audience: implementers of compatible transport clients and servers
+---
+
+# SPEC-TRANSPORT — mkit v1 transport protocols
+
+mkit talks to remote stores through a small set of pluggable
+transports (memory, file, HTTP, S3, SSH). All speak the same
+[`Transport`](../rust/crates/mkit-core/src/protocol.rs) trait —
+seven verbs over a synchronous, object-safe interface — but the wire
+shape differs per scheme.
+
+The wire format used by the SSH transport is defined in
+[`SPEC-RPC`](SPEC-RPC.md). This document covers the transport-level
+concerns: URL parsing, retry policy, content-addressing, the
+forced-command server pattern, and the cross-transport error
+taxonomy.
+
+---
+
+## 1. Verbs
+
+Every transport implements the same seven verbs:
+
+| Verb | Purpose |
+|---|---|
+| `upload_pack(bytes, key)` | Store a packfile keyed by its 32-byte BLAKE3 digest. |
+| `download_pack(key)` | Fetch a packfile by digest. |
+| `pack_exists(key)` | HEAD-check a pack by digest. |
+| `update_ref(name, condition, hash)` | Atomic CAS ref write. |
+| `read_ref(name)` | Read a ref's current hash, or `None` if absent. |
+| `list_refs(prefix)` | List refs whose full name starts with `prefix`. |
+| `write_ref(name, hash)` | Convenience: `update_ref` with `Any` condition. |
+
+`update_ref`'s condition is one of:
+
+- `Any` — clobber.
+- `Missing` — write only if the ref is absent.
+- `Match(expected)` — write only if the ref currently contains `expected`.
+
+CAS failure (Missing on an existing ref, or Match on a mismatched
+hash) returns `TransportError::RefConflict`. Per §6, callers retrying
+after a network timeout MUST follow up with `read_ref` to confirm
+whether the first attempt landed before treating `RefConflict` as a
+true conflict.
+
+---
+
+## 2. Error taxonomy
+
+```rust
+TransportError::PackNotFound       // download_pack on missing digest
+TransportError::AccessDenied       // 401/403, SSH auth refusal, S3 SignatureDoesNotMatch
+TransportError::RemoteError(msg)   // catch-all remote failure
+TransportError::RefConflict        // update_ref CAS preconditions failed
+TransportError::InvalidRef(name)   // ref name failed SPEC-REFS §3
+TransportError::ConnectionFailed   // DNS / TCP / TLS / SSH spawn
+TransportError::ServerError{status} // unexpected status code
+TransportError::InvalidResponse    // truncated, unknown opcode, bad JSON
+TransportError::ProtocolError      // failed handshake, malformed frame
+TransportError::PayloadTooLarge(n) // payload exceeded transport cap
+TransportError::InsecureScheme     // plain http:// to a non-loopback host
+```
+
+Implementations MAY wrap transport-specific errors internally but
+MUST surface one of these variants at the trait boundary.
+
+---
+
+## 3. URL schemes
+
+| Scheme | Transport |
+|---|---|
+| `mkit+memory://…` | In-memory (test / fuzz) |
+| `mkit+file://path` | Filesystem |
+| `https://…` / `http://localhost…` | HTTP (REST + JSON over rustls) |
+| `mkit+s3://bucket/prefix` | S3-compatible (SigV4, R2-friendly) |
+| `mkit+ssh://user@host:port/path` | SSH child + `mkit serve` |
+
+Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`,
+`localhost`); production traffic over plain HTTP returns
+`InsecureScheme`.
+
+---
+
+## 4. SSH transport
+
+mkit's SSH transport spawns a long-lived `ssh(1)` child process and
+exchanges length-prefixed buffa `SshFrame` messages on its
+stdin/stdout. The wire format is defined by
+[`SshFrame`](../rust/crates/mkit-rpc/proto/ssh.proto) per
+[SPEC-RPC §1](SPEC-RPC.md#1-wire-framing).
+
+### 4.1 Forced-command server pattern
+
+Server-side, the user configures their `~/.ssh/authorized_keys` to
+force `mkit serve <repo-path>` on connection:
+
+```
+command="mkit serve /srv/mkit/myrepo",no-port-forwarding,no-X11-forwarding,no-agent-forwarding ecdsa-sha2-nistp256 AAAA…
+```
+
+This binds an SSH key to a single repository on the server side. The
+server process never sees a shell prompt; sshd hands it an open
+stdin/stdout pair against the user's authorized_keys-resolved
+command.
+
+### 4.2 Conversation
+
+```
+client → server:    Hello { proto = PROTOCOL_VERSION_1, client_id }
+server → client:    HelloResponse { proto, server_id }
+                      OR
+                    Error
+
+client → server:    one of: ListRefs, ReadRef, UpdateRef,
+                            PackExists, UploadPack (+ PackChunks),
+                            DownloadPack, Close
+server → client:    matching response, OR Error
+```
+
+Pack uploads stream as `UploadPack { pack_id, total_bytes }` followed
+by one or more `PackChunk { pack_id, offset, data, last }` frames.
+Server emits `UploadPackResponse{}` once `last = true` is observed
+and the bytes verify against the announced digest.
+
+Pack downloads: client sends `DownloadPack { pack_id }`; server
+replies with `DownloadPackHeader { total_bytes }` followed by a
+sequence of `PackChunk`s ending in `last = true`. If the pack is
+absent the server replies with `Error { code = ERROR_CODE_KEY_NOT_FOUND }`.
+
+### 4.3 Trust model
+
+SSH transport security is delegated to the user's `ssh(1)` CLI:
+
+- Host-key verification → `ssh(1)`.
+- Identity selection → `ssh-agent` / `~/.ssh/config`.
+- Kex / cipher / auth → `ssh(1)` / sshd.
+
+Three `.mkit/config` keys override `ssh(1)` defaults for the mkit SSH
+child only:
+
+```
+ssh.strict_host_key_checking = yes
+ssh.user_known_hosts_file    = /path/to/project.known_hosts
+ssh.identity_file            = /path/to/id_ed25519
+```
+
+These plumb to `-o StrictHostKeyChecking=…`, `-o
+UserKnownHostsFile=…`, `-i …` respectively. See
+[`SSH-SECURITY.md`](SSH-SECURITY.md) for the full trust model.
+
+### 4.4 Resource caps
+
+The `mkit serve` server enforces per-connection budgets to bound a
+misbehaving or malicious client:
+
+- `MAX_FRAMES_PER_CONN = 10_000` — hard cap on frames after Hello.
+- `MAX_BYTES_PER_CONN  = 1 GiB`  — cap on cumulative request payload
+  bytes.
+
+Each cap trips returns an `Error{ ERROR_CODE_INVALID_REQUEST }`
+followed by connection close with `exit::PROTOCOL_ERROR`.
+
+The framing layer's per-frame `MAX_FRAME_BYTES = 1 MiB` cap (per
+[SPEC-RPC §1](SPEC-RPC.md#1-wire-framing)) bounds individual frame
+sizes; pack data flows through `PackChunk` streams to stay under the
+per-frame cap.
+
+---
+
+## 5. HTTP transport
+
+[OUT OF SCOPE for v0.1.0 narrative — see
+`rust/crates/mkit-transport-http/` for the rustls + reqwest
+implementation. Verbs map directly to REST endpoints; payloads are
+JSON for refs, raw bytes for packs.]
+
+---
+
+## 6. Retry / idempotency
+
+All transports MUST retry the following errors with exponential
+backoff: `ConnectionFailed`, `ServerError{status >= 500}`,
+`ServerError{status == 429}`. The default ladder is `1s, 2s, 4s, 8s,
+16s` (5 attempts), exposed via
+[`BackoffIterator`](../rust/crates/mkit-core/src/protocol.rs).
+
+`update_ref` with `Missing` or `Match` is NOT idempotent across
+retries: a network timeout after the server applied the write looks
+identical to a write that never landed. After a retried `update_ref`
+returns `RefConflict`, callers MUST follow up with `read_ref` to
+disambiguate.
+
+`upload_pack` IS idempotent (content-addressed: re-uploading the same
+bytes produces the same digest and is a no-op on the server side).
+
+`download_pack` and `pack_exists` are pure reads; no idempotency
+concerns.
+
+---
+
+## 7. Pack format
+
+`upload_pack` and `download_pack` move opaque pack bytes. The pack
+format itself (object index + delta encoding + chunk store) is
+defined in [SPEC-PACKFILE](SPEC-PACKFILE.md). Transport implementations
+MUST NOT inspect or rewrite pack bytes.
+
+The 32-byte pack digest is the BLAKE3 hash of the full pack-bytes
+buffer.
+
+---
+
+## 8. Versioning
+
+This document and `ssh.proto` are jointly v1. The cross-transport
+trait surface (`Transport`, `TransportError`, `PackKey`) is API-stable
+within the v0.1.x line. See [SPEC-RPC §2](SPEC-RPC.md#2-versioning)
+for SSH wire-format versioning.
+
+A native SSH implementation (with in-process host-key pinning) is a
+future enhancement; SSH-SECURITY.md tracks the gaps we inherit from
+delegating to `ssh(1)`.

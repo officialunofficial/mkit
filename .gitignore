@@ -1,0 +1,27 @@
+.zig-cache/
+zig-cache/
+zig-out/
+.wrangler/
+*.log
+.DS_Store
+
+# Rust (rewrite/rust branch)
+/rust/target/
+/rust/**/target/
+/rust/Cargo.lock.bak
+/rust/fuzz/corpus/
+/rust/fuzz/artifacts/
+
+# Test-generated private keys (older path; retained to avoid accidental leaks)
+mkit/test-key
+.claude/
+
+# Keys, secrets, and local env files — never commit these
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+secrets.*
+credentials.*

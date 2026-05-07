@@ -1,0 +1,75 @@
+[package]
+name = "mkit-attest"
+description = "DSSE + in-toto v1 attestations for mkit, with multi-algorithm signers (Ed25519, secp256k1, P-256) and an RFC 8785 JCS encoder"
+keywords = ["mkit", "attestation", "in-toto", "dsse", "jcs"]
+categories = ["cryptography", "encoding"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Publishable to crates.io. The `publish` key is left unset (cargo
+# default = `true`) so a future `cargo publish -p mkit-attest` works
+# without further metadata changes.
+
+[lints]
+workspace = true
+
+[features]
+# Default ships all three algorithms so a `cargo add mkit-attest` client
+# gets ed25519 / secp256k1 / p256 support out of the box. The
+# corresponding compile-time crypto deps (k256, p256) are wired by
+# teams Kappa and Lambda in follow-up PRs; until then `algo-secp256k1`
+# and `algo-p256` are tag-only features that toggle verifier dispatch
+# but carry no dep.
+default = ["algo-ed25519", "algo-secp256k1", "algo-p256"]
+algo-ed25519 = ["dep:ed25519-dalek"]
+algo-secp256k1 = ["dep:k256", "dep:sha2"]
+algo-p256 = ["dep:p256", "dep:sha2"]
+
+[dependencies]
+# Inter-workspace dep needs an explicit `version = ...` alongside the
+# path so `cargo publish` accepts it; path-only deps are rejected by
+# the registry. Track the workspace.package.version.
+mkit-core = { version = "0.1", path = "../mkit-core" }
+# mkit-rpc owns signer.proto + framing helpers used by ExternalSigner.
+mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
+buffa = "0.5"
+blake3 = "1"
+base64 = "0.22"
+thiserror = "2"
+# Used by the secp256k1/p256 signers to scrub raw 32-byte secrets
+# from stack memory before they leave the constructor frame.
+zeroize = { version = "1", features = ["derive"] }
+# `serde` + `serde_json` are used ONLY on the parsing side (envelope decode +
+# external-signer response). The canonical JCS encoder is hand-rolled per
+# RFC 8785 — `serde_json::to_string` does NOT satisfy JCS sort/escape rules.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Atomic-rename writes for `store::save`; mirrors mkit-core::store.
+tempfile = "3"
+# Re-used directly so signer_repo_key + verify can talk to the SAME dalek
+# version mkit-core::sign already pulls in. We inherit the same default-
+# features = false + std posture so the dep graph does not widen.
+# Gated behind `algo-ed25519`: when disabled, `RepoKeySigner` and the
+# Ed25519 verifier dispatch compile out cleanly.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"], optional = true }
+# secp256k1 / ES256K (COSE -47) signer + verifier — gated behind
+# `algo-secp256k1`. Pinned to the `0.13` line shared across the
+# RustCrypto `ecdsa` ecosystem.
+k256 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+# P-256 / secp256r1 / prime256v1 (COSE -7) — WebAuthn, Apple Secure
+# Enclave, Android Keystore, iOS CryptoKit, browser WebCrypto. Gated
+# behind `algo-p256`. Same `0.13` RustCrypto major as k256.
+p256 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+# ES256K / ES256 both sign SHA256(pae); pull in a standalone sha2 so the
+# signers don't rely on k256/p256 re-exports bleeding across features.
+sha2 = { version = "0.10", optional = true, default-features = false }
+
+[dev-dependencies]
+hex = "0.4"
+# Tests that hand-build signing keys need dalek unconditionally, so pull
+# it in as a dev-dep separate from the feature-gated runtime dep.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }

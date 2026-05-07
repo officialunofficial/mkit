@@ -1,0 +1,64 @@
+[package]
+name = "mkit-wasm"
+description = "WebAssembly bindings for mkit — content-addressed VCS primitives (BLAKE3 hashing, Ed25519 commit signing, in-toto attestations, FastCDC chunking, delta encoding, and Bao verified streaming) for use from JavaScript bundlers, browsers, and edge runtimes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["mkit", "vcs", "wasm", "blake3", "ed25519"]
+categories = ["wasm", "cryptography"]
+# Not published to crates.io — published to npm as `mkit-wasm` from
+# .github/workflows/release.yml. wasm-pack copies the metadata above
+# (description / keywords / repository / license / readme) into the
+# generated package.json.
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The bundled wasm-opt in `wasm-pack` predates bulk-memory ops and
+# rejects rustc's 1.95 codegen. Skip it — the blob is already small
+# enough (< 1 MiB) for the demo, and we can run a newer wasm-opt in CI
+# if size becomes a concern.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = false
+
+[lints]
+workspace = true
+
+[dependencies]
+mkit-core = { path = "../mkit-core" }
+mkit-attest = { path = "../mkit-attest" }
+wasm-bindgen = "0.2"
+hex = "0.4"
+# Verified streaming via BLAKE3 tree hashing (outboard + slice proof).
+# Drives the `/streaming` demo's Bao view. `blake3 = "1"` is already the
+# workspace pin (via mkit-core); the transitive re-export in
+# `bao::Hash` matches, so no second major shows up in the tree.
+bao = "0.13"
+# Direct dep for the raw Ed25519 wasm exports (`ed25519_sign`,
+# `ed25519_pubkey_from_seed`). Same major as the transitive copy
+# mkit-core::sign + mkit-attest already pull in (default-features off,
+# `std` on) — keeps the dep graph at a single dalek version.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+
+# Activate the browser randomness backends for every getrandom in the
+# dep graph when compiling for `wasm32-unknown-unknown`. Two major
+# versions coexist today: getrandom 0.4 (used directly by mkit-core /
+# ed25519-dalek via their updated deps) and getrandom 0.2 (pulled in
+# transitively by the `k256`/`p256` stack that `mkit-attest` uses for
+# FIDO2/WebAuthn verification paths). Each major takes a different
+# feature name, so we enable both here without polluting native builds.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+# dalek is a regular dependency above (see `[dependencies]`); tests
+# (`tests/ed25519.rs`) reach the same crate without a separate
+# `[dev-dependencies]` entry, which would risk a duplicate dep version.

@@ -1,0 +1,7 @@
+{
+  "name": "remix_2sources",
+  "description": "remix with two sources sorted by (upstream_id, commit_hash)",
+  "bin": "remix_2sources.bin",
+  "size": 326,
+  "blake3": "5ee0001c2da4c49f7f71f9d34b3b7f224b28e7858117e23e763f75016ac10452"
+}

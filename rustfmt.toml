@@ -1,0 +1,17 @@
+# rustfmt configuration for the mkit workspace.
+#
+# Stable-only options. The toolchain is pinned at 1.95 stable
+# (`rust/rust-toolchain.toml`); nightly-only knobs are commented out
+# at the bottom and can be enabled in a single diff once they
+# stabilise.
+
+edition = "2024"
+newline_style = "Unix"
+use_field_init_shorthand = true
+
+# [nightly only — enable when toolchain has them]
+# imports_granularity = "Crate"
+# group_imports = "StdExternalCrate"
+# wrap_comments = true
+# comment_width = 80
+# format_strings = true

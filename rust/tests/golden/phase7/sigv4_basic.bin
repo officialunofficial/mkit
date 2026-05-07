@@ -1,0 +1,14 @@
+{
+  "method": "PUT",
+  "path": "/mkit-storage/packs/0101010101010101010101010101010101010101010101010101010101010101",
+  "query": "",
+  "payload": "mkit-sigv4-golden-payload",
+  "endpoint": "https://abc123.r2.cloudflarestorage.com",
+  "region": "auto",
+  "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+  "secret_access_key": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+  "timestamp": 1711300000,
+  "canonical_request": "PUT\n/mkit-storage/packs/0101010101010101010101010101010101010101010101010101010101010101\n\nhost:abc123.r2.cloudflarestorage.com\nx-amz-content-sha256:e8375c033ede7782d005ec8661d77a5c125445ed6e9ee074874a1bcda9c85672\nx-amz-date:20240324T170640Z\n\nhost;x-amz-content-sha256;x-amz-date\ne8375c033ede7782d005ec8661d77a5c125445ed6e9ee074874a1bcda9c85672",
+  "string_to_sign": "AWS4-HMAC-SHA256\n20240324T170640Z\n20240324/auto/s3/aws4_request\n4cb55a4c8c18a2af692b51c97beb5999a371ededae6961bac1542628bb33e995",
+  "signature_hex": "72a33a8342eb75bac49f681d839de8e33ddb8ffa58e8fe82f7661b7e0d4c9fe5"
+}

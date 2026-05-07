@@ -1,0 +1,7 @@
+{
+  "name": "commit_2parent",
+  "description": "merge commit with two parents, ed25519 identity",
+  "bin": "commit_2parent.bin",
+  "size": 318,
+  "blake3": "8786689ef47103e994cbe1dc4641dd756f0a23720c42db5099d53437dbdff0c7"
+}

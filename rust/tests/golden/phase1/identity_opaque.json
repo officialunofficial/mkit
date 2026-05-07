@@ -1,0 +1,7 @@
+{
+  "name": "identity_opaque",
+  "description": "opaque 8-byte LE u64=42 identity (raw wire form)",
+  "bin": "identity_opaque.bin",
+  "size": 11,
+  "blake3": "6bbae9c0b99e12256d561acda3af4860c112595b6f565f04220a4d45a1287105"
+}

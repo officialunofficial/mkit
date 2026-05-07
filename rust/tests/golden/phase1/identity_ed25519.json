@@ -1,0 +1,7 @@
+{
+  "name": "identity_ed25519",
+  "description": "ed25519 identity, 32-byte pubkey 0xAA*32 (raw wire form)",
+  "bin": "identity_ed25519.bin",
+  "size": 35,
+  "blake3": "0e4105b396214ae3a593f1a564766f7ad0fbc71fc045c6a62fdd128401ea4bb6"
+}

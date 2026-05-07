@@ -1,0 +1,35 @@
+[package]
+name = "mkit-transport-http"
+description = "HTTP/HTTPS transport for mkit, with rustls TLS, JSON REST dialect, and bounded body sizes"
+keywords = ["mkit", "transport", "http", "https", "reqwest"]
+categories = ["network-programming"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Publishable to crates.io. `publish` left unset (cargo default = true).
+
+[lints]
+workspace = true
+
+[dependencies]
+# Inter-workspace dep needs an explicit `version = ...` alongside the
+# path so `cargo publish` accepts it.
+mkit-core = { version = "0.1", path = "../mkit-core" }
+# rustls-only — the whole point of this crate is no system TLS baggage.
+# default-features = false drops default-tls (native-tls on desktop).
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "blocking",
+    "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = "2"
+
+[dev-dependencies]
+mockito = "1"

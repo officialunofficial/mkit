@@ -1,0 +1,7 @@
+{
+  "name": "blob",
+  "description": "11-byte UTF-8 blob 'hello mkit\n'",
+  "bin": "blob.bin",
+  "size": 21,
+  "blake3": "d32e281aaaae1a9a6bea109926e4ecef8c962ff8e6add5628c511752154e862c"
+}

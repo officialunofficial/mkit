@@ -1,0 +1,7 @@
+{
+  "name": "empty_tree",
+  "description": "zero-entry tree; SPEC-OBJECTS §13.2 (10 bytes total)",
+  "bin": "empty_tree.bin",
+  "size": 10,
+  "blake3": "3d4ec631bb7a4e245ea18c4c3e2c42e76ac7929312576568a8c9a552bc3aafb7"
+}

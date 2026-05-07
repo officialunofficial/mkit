@@ -1,0 +1,7 @@
+{
+  "name": "commit_1parent",
+  "description": "commit with one parent, ed25519 identity",
+  "bin": "commit_1parent.bin",
+  "size": 287,
+  "blake3": "b2a97b376cc3bd1ecb60b4fa5acc17f21ef7f806ee128712f72118a47d063cdc"
+}

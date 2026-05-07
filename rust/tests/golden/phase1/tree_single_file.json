@@ -1,0 +1,7 @@
+{
+  "name": "tree_single_file",
+  "description": "single-entry tree pointing at the empty blob; SPEC-OBJECTS §13.3",
+  "bin": "tree_single_file.bin",
+  "size": 56,
+  "blake3": "aa216c3b83227acddfe4c1790f489fd42dd718f080130ef602a66ae5d2e1552b"
+}

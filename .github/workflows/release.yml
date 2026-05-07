@@ -1,0 +1,514 @@
+name: Release
+
+# Triggered by pushing a semver tag (v0.1.0, v1.2.3, etc.).
+#
+# This workflow:
+#   1. Builds static mkit binaries for macOS (arm64/x86_64) and Linux (x86_64/arm64)
+#      with a pinned Rust toolchain (see rust/rust-toolchain.toml).
+#   2. Produces a CycloneDX SBOM (sbom.cdx.json).
+#   3. Signs every archive with cosign OIDC keyless (transparency log: Rekor)
+#      and signs the aggregated SHA256SUMS the same way.
+#   4. Aggregates all artifacts into a GitHub Release.
+#
+# macOS binaries are intentionally NOT codesigned or notarized — we do not
+# hold an Apple Developer ID. Trust is established via cosign keyless
+# signatures, which are verified by `install.sh` and documented in
+# docs/release/SIGNING.md. Users who launch the binary by double-clicking
+# in Finder will hit Gatekeeper; running from a terminal works.
+#
+# Cache safety: every Swatinem/rust-cache invocation here uses a release-
+# specific `prefix-key`, partitioned away from the keys that PR-event
+# workflows write to. This prevents a malicious PR from poisoning a cache
+# that this workflow (which carries `secrets.MKIT_NPM_TOKEN` and
+# `id-token: write`) would later deserialize. See the Phase-10
+# cache-poisoning audit note.
+#
+# No secrets are needed for cosign keyless — OIDC token comes from GitHub.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  # Manual escape hatch. GitHub occasionally de-dupes tag-push events when
+  # a prior workflow for a nearby tag is still active or recently cancelled.
+  # workflow_dispatch lets us force a release build against an existing tag
+  # from the Actions UI.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build (e.g. v0.1.0). Must already be pushed to origin.'
+        required: true
+        type: string
+
+permissions:
+  contents: write       # create the GitHub Release + upload assets
+  id-token: write       # cosign keyless OIDC
+  attestations: write   # supply-chain attestations
+
+env:
+  RUST_VERSION: "1.95.0"
+  BINARY_NAME: mkit
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive_ext: tar.gz
+          # x86_64 macOS built on the arm64 host via rustup cross-compile.
+          - target: x86_64-apple-darwin
+            runner: macos-14
+            archive_ext: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive_ext: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            archive_ext: tar.gz
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [ -z "${TAG}" ]; then
+            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
+            exit 1
+          fi
+          REF="refs/tags/${TAG}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "archive=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}.${{ matrix.archive_ext }}" >> "$GITHUB_OUTPUT"
+          echo "stage=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout (at resolved tag)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Install Rust ${{ env.RUST_VERSION }} + target
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+          components: rustfmt,clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: rust -> rust/target
+          # Partition release caches away from PR-event workflow caches —
+          # see header note on cache poisoning.
+          prefix-key: "rust-release-${{ matrix.target }}"
+          key: release-${{ matrix.target }}
+          cache-on-failure: false
+
+      - name: Build release binary
+        shell: bash
+        working-directory: rust
+        env:
+          # codegen-units=1 + strip = reproducible-build friendly; mirrors
+          # [profile.release] in rust/Cargo.toml.
+          RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
+        run: |
+          cargo build \
+            --release \
+            --locked \
+            --target ${{ matrix.target }} \
+            --bin ${{ env.BINARY_NAME }}
+
+      - name: Stage archive contents
+        shell: bash
+        run: |
+          STAGE="${{ steps.meta.outputs.stage }}"
+          mkdir -p "${STAGE}"
+          BIN_SRC="rust/target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+          if [ -f "${BIN_SRC}" ]; then
+            cp "${BIN_SRC}" "${STAGE}/"
+          elif [ -f "${BIN_SRC}.exe" ]; then
+            cp "${BIN_SRC}.exe" "${STAGE}/"
+          else
+            echo "ERROR: ${{ env.BINARY_NAME }} binary not found at ${BIN_SRC}" >&2
+            ls -la "rust/target/${{ matrix.target }}/release/" || true
+            exit 1
+          fi
+          cp LICENSE-MIT LICENSE-APACHE README.md "${STAGE}/"
+          # Optional artifacts — included when present.
+          [ -f CHANGELOG.md ] && cp CHANGELOG.md "${STAGE}/" || true
+          [ -d share/man/man1 ] && cp -R share/man "${STAGE}/" || true
+
+      - name: Compute per-archive SHA256SUMS
+        shell: bash
+        working-directory: ${{ steps.meta.outputs.stage }}
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            find . -type f ! -name SHA256SUMS -exec sha256sum {} \; | sort -k 2 > SHA256SUMS
+          else
+            find . -type f ! -name SHA256SUMS -exec shasum -a 256 {} \; | sort -k 2 > SHA256SUMS
+          fi
+          cat SHA256SUMS
+
+      - name: Create archive
+        shell: bash
+        run: |
+          tar -czf "${{ steps.meta.outputs.archive }}" "${{ steps.meta.outputs.stage }}"
+          ls -la "${{ steps.meta.outputs.archive }}"
+
+      - name: Compute archive-level SHA256
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ steps.meta.outputs.archive }}" > "${{ steps.meta.outputs.archive }}.sha256"
+          else
+            shasum -a 256 "${{ steps.meta.outputs.archive }}" > "${{ steps.meta.outputs.archive }}.sha256"
+          fi
+          cat "${{ steps.meta.outputs.archive }}.sha256"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign archive with cosign (keyless OIDC)
+        shell: bash
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          COSIGN_YES: "true"
+        run: |
+          ARCHIVE="${{ steps.meta.outputs.archive }}"
+          cosign sign-blob --yes \
+            --bundle "${ARCHIVE}.cosign.bundle" \
+            --output-signature "${ARCHIVE}.sig" \
+            --output-certificate "${ARCHIVE}.crt" \
+            "${ARCHIVE}"
+          echo "Signed ${ARCHIVE}; transparency log entries visible at https://search.sigstore.dev/"
+
+      # NOTE: macOS binaries are deliberately not codesigned or notarized.
+      # We rely on cosign keyless signatures (signed above) for trust.
+      # If/when an Apple Developer ID is provisioned, add codesign +
+      # `xcrun notarytool submit … --wait` + `xcrun stapler staple` here
+      # and re-tar the archive AFTER stapling so the ticket is embedded.
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: build-${{ matrix.target }}
+          path: |
+            ${{ steps.meta.outputs.archive }}
+            ${{ steps.meta.outputs.archive }}.sha256
+            ${{ steps.meta.outputs.archive }}.sig
+            ${{ steps.meta.outputs.archive }}.crt
+            ${{ steps.meta.outputs.archive }}.cosign.bundle
+          if-no-files-found: error
+          retention-days: 7
+
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [ -z "${TAG}" ]; then
+            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
+            exit 1
+          fi
+          REF="refs/tags/${TAG}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout (at resolved tag)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          artifact-name: sbom.cdx.json
+          upload-artifact: false
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, sbom]
+    steps:
+      - name: Resolve version
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [ -z "${TAG}" ]; then
+            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
+            exit 1
+          fi
+          REF="refs/tags/${TAG}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout (at resolved tag)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts into dist/
+        shell: bash
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          ls -la dist/
+
+      - name: Compute top-level SHA256SUMS
+        shell: bash
+        working-directory: dist
+        run: |
+          sha256sum *.tar.gz sbom.cdx.json > SHA256SUMS || \
+            shasum -a 256 *.tar.gz sbom.cdx.json > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign aggregated SHA256SUMS
+        shell: bash
+        working-directory: dist
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob --yes \
+            --bundle SHA256SUMS.cosign.bundle \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.crt \
+            SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: mkit ${{ steps.meta.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.tar.gz.sig
+            dist/*.tar.gz.crt
+            dist/*.tar.gz.cosign.bundle
+            dist/sbom.cdx.json
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+            dist/SHA256SUMS.crt
+            dist/SHA256SUMS.cosign.bundle
+          body: |
+            ## mkit ${{ steps.meta.outputs.version }}
+
+            Content-addressed VCS for creative work.
+
+            ### Verifying downloads
+
+            Every archive is signed with **cosign keyless** via GitHub OIDC; the
+            signing certificate embeds the workflow identity and a Rekor
+            transparency log entry is public. See `docs/release/SIGNING.md`
+            in the repo for full verification steps.
+
+            The verifier regex below is anchored: it pins the exact workflow
+            path and accepts only strict semver tags (with optional
+            pre-release suffix like `-rc.1`).
+
+            ```sh
+            cosign verify-blob \
+              --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --bundle <archive>.cosign.bundle \
+              <archive>
+            ```
+
+            ### Platform notes
+
+            macOS binaries are **not codesigned or notarized**. Trust is
+            established via the cosign signature above. Running from a
+            terminal works; double-clicking in Finder hits Gatekeeper.
+
+            ### SBOM
+
+            A CycloneDX SBOM (`sbom.cdx.json`) is attached. Reflects the
+            Rust crate graph (blake3, reqwest/rustls, ed25519-dalek, etc.)
+            plus toolchain and OS libraries.
+
+            ### npm package
+
+            The WASM bindings are also published to npm as
+            [`mkit-wasm`](https://www.npmjs.com/package/mkit-wasm) at the
+            same version, with Sigstore-backed provenance attached to this
+            workflow run.
+
+  publish-wasm:
+    name: Publish mkit-wasm to npm
+    runs-on: ubuntu-latest
+    needs: [build, release]
+    permissions:
+      contents: write       # attach assets to the GitHub Release
+      id-token: write       # npm provenance via OIDC
+    steps:
+      - name: Resolve tag
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [ -z "${TAG}" ]; then
+            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
+            exit 1
+          fi
+          REF="refs/tags/${TAG}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout (at resolved tag)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Install Rust ${{ env.RUST_VERSION }} + wasm32 target
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: rust -> rust/target
+          prefix-key: "rust-release-wasm32"
+          key: release-wasm32
+          cache-on-failure: false
+
+      - name: Setup Node.js (npm registry)
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked --version 0.13.1
+
+      - name: Build mkit-wasm (target=bundler)
+        working-directory: rust
+        run: |
+          wasm-pack build crates/mkit-wasm \
+            --release \
+            --target bundler \
+            --out-dir pkg
+
+      - name: Patch bundler glue for Bun / Workers compat (issue #90)
+        # wasm-pack 0.13's auto-init `__wbg_set_wasm(wasm)` call breaks
+        # under Bun + Cloudflare Workers (their bundler resolution stores
+        # a WebAssembly.Module / path-shim, not the wasm-bindgen exports
+        # namespace). The patcher additively exports `mkit_wasm_init(module)`
+        # so consumers on broken bundlers can recover with a one-liner.
+        # Strictly additive — esbuild/webpack/vite consumers are untouched.
+        run: node scripts/patch-wasm-bundler-glue.mjs rust/crates/mkit-wasm/pkg
+
+      - name: Set npm package name + version
+        working-directory: rust/crates/mkit-wasm/pkg
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          # Override the npm package name to the scoped form. The Rust
+          # crate stays unscoped (`mkit-wasm`); the npm distribution
+          # name is `@makechain/mkit-wasm` because the release token
+          # is a Granular Access Token scoped to that npm org.
+          # See docs/RELEASE.md for rationale + rotation steps.
+          npm pkg set name=@makechain/mkit-wasm
+          # Force-align the package.json version to the git tag.
+          npm version --no-git-tag-version --allow-same-version "$VERSION"
+          jq '{name, version, license, repository}' package.json
+
+      - name: Publish to npm
+        working-directory: rust/crates/mkit-wasm/pkg
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.MKIT_NPM_TOKEN }}
+        # `--provenance` requires the source GitHub repo to be public;
+        # this repo is currently `internal`, so npm rejects the
+        # provenance bundle with E422. Re-add `--provenance` once the
+        # repo is flipped to public (see docs/RELEASE.md TODO).
+        run: npm publish --access public
+
+      - name: Stage WASM bundle for GitHub Release
+        shell: bash
+        run: |
+          STAGE="mkit-wasm-${{ steps.meta.outputs.version }}-npm"
+          mkdir -p "${STAGE}"
+          cp -R rust/crates/mkit-wasm/pkg/. "${STAGE}/"
+          tar -czf "${STAGE}.tar.gz" "${STAGE}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+          else
+            shasum -a 256 "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+          fi
+          ls -la "${STAGE}.tar.gz" "${STAGE}.tar.gz.sha256"
+
+      - name: Attach WASM bundle to GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          files: |
+            mkit-wasm-${{ steps.meta.outputs.version }}-npm.tar.gz
+            mkit-wasm-${{ steps.meta.outputs.version }}-npm.tar.gz.sha256

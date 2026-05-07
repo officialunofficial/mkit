@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// Shared types for mkit-rpc protocols. Used by signer.proto and ssh.proto.
+//
+// Versioning: this file is v1 of the shared vocabulary. Wire-compatible
+// additions (new enum values, new fields with default values) ship as
+// patches. Breaking changes (renumbered fields, removed values) bump
+// the file to common2.proto and consumers opt in explicitly.
+
+edition = "2023";
+
+package mkit.rpc.v1;
+
+// ----------------------------------------------------------------------------
+// Algorithms — every signature algorithm mkit speaks. Wire numbers are
+// load-bearing. Do NOT renumber. New algorithms append.
+
+enum Algorithm {
+  ALGORITHM_UNSPECIFIED = 0;
+
+  // Ed25519 over raw signing payload. The default for mkit commit/ref
+  // signing.
+  ALGORITHM_ED25519 = 1;
+
+  // ECDSA over secp256k1 with SHA-256 (Bitcoin-flavoured curve, NOT
+  // secp256r1). DSSE compatible.
+  ALGORITHM_SECP256K1 = 2;
+
+  // ECDSA over P-256 with SHA-256 (NIST-flavoured curve, also called
+  // secp256r1 / prime256v1). DSSE compatible.
+  ALGORITHM_P256 = 3;
+
+  // Ed25519, but the signing input is wrapped in a WebAuthn
+  // ClientDataJSON + authenticatorData per CTAP2. Used by the
+  // FIDO2/WebAuthn signer.
+  ALGORITHM_ED25519_WEBAUTHN = 4;
+}
+
+// How the secret is presented to the signer. Some signers operate on
+// raw bytes; others on opaque handles to keys held inside hardware.
+
+enum KeyForm {
+  KEY_FORM_UNSPECIFIED = 0;
+
+  // 32 raw private-key bytes (Ed25519 / k256 / p256 seed or scalar).
+  // Only used by the file signer; rejected by hardware signers.
+  KEY_FORM_RAW_BYTES = 1;
+
+  // PKCS#8 v1 DER (RFC 5958). Accepted by the file signer.
+  KEY_FORM_PKCS8_DER = 2;
+
+  // Opaque handle (TPM persistent handle, CTAP credentialId, SE label).
+  // The signer interprets the bytes; mkit treats them as opaque.
+  KEY_FORM_OPAQUE_HANDLE = 3;
+}
+
+// ----------------------------------------------------------------------------
+// Errors. Every protocol response that can fail has an `Error` field;
+// callers MUST check `code` before using any other field.
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+
+  // The request was structurally invalid (missing required fields,
+  // unknown algorithm number, payload too large for this transport).
+  ERROR_CODE_INVALID_REQUEST = 1;
+
+  // The signer does not support the requested algorithm.
+  ERROR_CODE_UNSUPPORTED_ALGORITHM = 2;
+
+  // The signer does not support the requested key form.
+  ERROR_CODE_UNSUPPORTED_KEY_FORM = 3;
+
+  // The named key (by `key_id` or path) was not present.
+  ERROR_CODE_KEY_NOT_FOUND = 4;
+
+  // The user explicitly declined (touched the cancel button on a FIDO2
+  // key, refused the TPM auth prompt, etc.).
+  ERROR_CODE_USER_DECLINED = 5;
+
+  // Authentication required (PIN, biometric, presence) and the signer
+  // is asking the caller to satisfy it via a follow-up request.
+  ERROR_CODE_AUTHENTICATION_REQUIRED = 6;
+
+  // The hardware did not respond, returned a vendor-specific error,
+  // or is in an unrecoverable state. `Error.message` carries detail.
+  ERROR_CODE_HARDWARE_ERROR = 7;
+
+  // The operation timed out before the user satisfied a presence
+  // check or PIN prompt.
+  ERROR_CODE_TIMEOUT = 8;
+
+  // Something went wrong inside the signer that we cannot map to a
+  // more specific code. Should be rare. `Error.message` MUST be set.
+  ERROR_CODE_INTERNAL = 99;
+}
+
+message Error {
+  ErrorCode code = 1;
+
+  // Human-readable message, English, suitable for direct display.
+  // Length-capped at 1 KiB by the framing layer.
+  string message = 2;
+
+  // Vendor-specific bytes, opaque to mkit. May carry a CTAP CBOR
+  // status, a TPM TPM_RC code, an HSM PKCS#11 CKR_*, etc.
+  bytes details = 3;
+}
+
+// ----------------------------------------------------------------------------
+// Version negotiation. Every protocol begins with a Hello/HelloResponse
+// pair. The protocol_version on the wire is a single u32 — we do NOT
+// use a `Version{major,minor,patch}` struct because there is no
+// semver-compatible upgrade path: mkit-rpc is wire-stable per integer
+// version. v1 is the only thing v0.1.x speaks; a future breaking
+// revision will introduce PROTOCOL_VERSION_2 and a sibling
+// signer2.proto / ssh2.proto rather than mutating the v1 schemas.
+
+enum ProtocolVersion {
+  PROTOCOL_VERSION_UNSPECIFIED = 0;
+
+  // The mkit-rpc protocol shipped in mkit v0.1.0.
+  PROTOCOL_VERSION_1 = 1;
+}

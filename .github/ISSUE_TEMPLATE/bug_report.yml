@@ -1,0 +1,58 @@
+name: Bug report
+description: Report a defect in mkit.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. **Do not use this
+        form for security vulnerabilities** — see
+        [SECURITY.md](https://github.com/officialunofficial/mkit/blob/main/SECURITY.md)
+        for the private disclosure path.
+  - type: input
+    id: version
+    attributes:
+      label: mkit version
+      description: Output of `mkit version`.
+      placeholder: "mkit 0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      description: Output of `uname -a` on Unix, or your Windows build / shell.
+      placeholder: "Darwin host 24.0.0 arm64"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal command sequence or script. If on-disk state matters, attach a redacted repo.
+      placeholder: |
+        1. mkit init
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behaviour
+      description: Include exit codes and exact error text.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, traces, backtraces
+      description: Paste any relevant output. `RUST_BACKTRACE=1` is appreciated for crashes.
+      render: text
+    validations:
+      required: false

@@ -1,0 +1,199 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - main
+      - rewrite/rust
+      - "rewrite/rust/**"
+  pull_request:
+    branches:
+      - main
+      - rewrite/rust
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+  # sccache + GitHub Actions cache backend. Compile-output cache layered
+  # on top of Swatinem/rust-cache (which still handles the cargo
+  # registry + lockfile-keyed target/). sccache hits across branches
+  # whose Cargo.lock has not changed even when Swatinem's lockfile-hash
+  # cache misses.
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  # Disable incremental compilation in CI — sccache's hashing model
+  # works against per-codegen-unit cache keys, and incremental codegen's
+  # hashed-paths interfere with cross-job reuse.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+
+      # sccache compile-output cache. Pinned by commit-SHA (action's
+      # own GHA permissions are read-only on `actions/cache` so the
+      # cache-poisoning posture matches Swatinem's per-workflow keying).
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@054db53350805f83040bf3e6e9b8cf5a139aa7c9  # v0.0.7
+
+      # Registry + lockfile-keyed target cache. Layered with sccache:
+      # Swatinem owns the cargo registry/index/git stores and keys the
+      # whole-target cache to Cargo.lock + toolchain, while sccache
+      # serves finer-grained compile-output reuse for individual crate
+      # units. Cache key partitioned per-workflow + per-runner so a
+      # malicious PR cannot poison a key that a privileged workflow
+      # (release.yml, which runs with secrets + id-token: write) later
+      # reads. See docs/release/SUPPLY-CHAIN.md.
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: rust -> rust/target
+          prefix-key: "rust-ci-${{ matrix.os }}"
+          cache-on-failure: false
+
+      # cargo-nextest: faster + structured test runner. Replaces
+      # `cargo test`. Pinned via taiki-e/install-action which fetches a
+      # cosign-signed prebuilt binary from the cargo-nextest release.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@a416ddeedbd372e614cc1386e8b642692f66865e  # v2
+        with:
+          tool: cargo-nextest
+
+      # protoc is a build-time requirement of mkit-rpc (via buffa-build
+      # which shells out to `protoc` for descriptor-set generation).
+      # Pin a stable distro release; the schemas use Edition 2023 so any
+      # protoc ≥ 26 works.
+      - name: Install protoc
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      # Native packages needed by optional signers when --all-features
+      # turns them on across the workspace. macOS gates these deps out
+      # via target_os, so we only install on Linux:
+      #   libtss2-dev   → mkit-sign-tpm's `tpm2` feature (tss-esapi)
+      #   libudev-dev   → mkit-sign-ctap (via hidapi → libudev)
+      #   swtpm         → integration tests against a software TPM
+      #                   when -F tpm-mssim is enabled
+      - name: Install native signer deps (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libtss2-dev libudev-dev swtpm
+
+      - name: Check formatting
+        working-directory: rust
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: rust
+        run: cargo clippy --all-targets --all-features --workspace -- -D warnings
+
+      - name: Build
+        working-directory: rust
+        run: cargo build --locked --workspace
+
+      - name: Test (nextest)
+        working-directory: rust
+        run: cargo nextest run --locked --workspace --all-features
+
+      # Doctests are not run by `cargo nextest`. Run them separately so
+      # docstring examples still get exercised.
+      - name: Doctests
+        working-directory: rust
+        run: cargo test --locked --doc --workspace
+
+      - name: Rename gate
+        run: bash scripts/verify-rename.sh
+
+      - name: Version contract
+        working-directory: rust
+        shell: bash
+        run: |
+          cargo build --release --locked -p mkit-cli
+          out=$(./target/release/mkit version)
+          expected="mkit $(awk -F\" '/^version/ {print $2; exit}' Cargo.toml)"
+          echo "stdout:   [$out]"
+          echo "expected: [$expected]"
+          if [ "$out" != "$expected" ]; then
+            echo "::error::mkit version contract violated — stdout is not exactly 'mkit <X.Y.Z>\\n'"
+            exit 1
+          fi
+
+      # Surface sccache stats so cache-hit-rate regressions are visible
+      # in the job log without us having to grep.
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # Minimum-supported Rust version gate. Reads `rust-version` from
+  # rust/Cargo.toml so the source of truth stays in one place; if a dep
+  # bump pulls in something that requires a newer rustc, this job fails
+  # before users on the pinned MSRV are affected.
+  msrv:
+    name: MSRV check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Resolve MSRV from rust/Cargo.toml
+        id: msrv
+        shell: bash
+        run: |
+          # Pulls the first `rust-version = "X.Y"` line from the
+          # workspace package table. Quote-stripped via awk -F'"'.
+          MSRV=$(awk -F'"' '/^[[:space:]]*rust-version[[:space:]]*=/ {print $2; exit}' rust/Cargo.toml)
+          if [ -z "${MSRV}" ]; then
+            echo "::error::could not read rust-version from rust/Cargo.toml"
+            exit 1
+          fi
+          echo "msrv=${MSRV}" >> "$GITHUB_OUTPUT"
+          echo "MSRV resolved to ${MSRV}"
+
+      - name: Install Rust ${{ steps.msrv.outputs.msrv }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.msrv }}
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@054db53350805f83040bf3e6e9b8cf5a139aa7c9  # v0.0.7
+
+      - name: Install native deps + protoc
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev protobuf-compiler
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: rust -> rust/target
+          prefix-key: "rust-msrv-${{ steps.msrv.outputs.msrv }}"
+          cache-on-failure: false
+
+      - name: cargo check (workspace, locked)
+        working-directory: rust
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_INCREMENTAL: 0
+        run: cargo check --workspace --locked --all-targets
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

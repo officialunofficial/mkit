@@ -1,0 +1,27 @@
+[package]
+name = "mkit-transport-ssh"
+description = "SSH transport for mkit using a forced-command server pattern over a system ssh(1) child process"
+keywords = ["mkit", "vcs", "ssh", "transport"]
+categories = ["network-programming", "data-structures"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Publishable to crates.io. `publish` left unset (cargo default = true).
+
+[lints]
+workspace = true
+
+[dependencies]
+# Inter-workspace dep needs an explicit `version = ...` alongside the
+# path so `cargo publish` accepts it.
+mkit-core = { version = "0.1", path = "../mkit-core" }
+mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
+buffa = "0.5"
+thiserror = "2"
+
+[dev-dependencies]
+hex = "0.4"
