@@ -1,20 +1,30 @@
-//! `mkit commit` — build a signed commit object from the worktree.
+//! `mkit commit` — build a signed commit object from the staging
+//! index.
 //!
 //! Scope:
 //! 1. Accept `-m <msg>` OR spawn `$EDITOR` on a tempfile pre-filled
 //! with [`editor::COMMIT_EDITMSG_TEMPLATE`]. An empty message
 //! aborts.
-//! 2. Build a tree from the working directory via [`worktree::build_tree`].
+//! 2. Read `.mkit/index` and build a tree via
+//! [`worktree::build_tree_from_index`]. An empty / missing index is
+//! an error — `mkit add <path>` (or `mkit add .`) must come first.
 //! 3. Resolve the author identity in this order:
 //! a. `--author <spec>` CLI flag (overrides everything).
 //! b. `config.user_identity` in `.mkit/config`.
 //! c. Derived from the signing key's public key (default).
 //! 4. Sign the commit, write the `Commit` object, advance
 //! `refs/heads/<current>` and `HEAD`.
+//!
+//! Pre-issue-#102 `mkit commit` walked the worktree directly via
+//! `worktree::build_tree`, ignoring the index entirely. That made
+//! `mkit add` write-only state with no reader and surprised any user
+//! reasoning by analogy from git. Post-#102, the staging area is
+//! load-bearing: only paths in the index land in the commit's tree.
 
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use mkit_core::index;
 use mkit_core::object::{Commit, Identity, IdentityKind, Object};
 use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
@@ -27,6 +37,7 @@ use crate::exit;
 use crate::format;
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
     let mut message: Option<String> = None;
     let mut author_spec: Option<String> = None;
@@ -85,7 +96,21 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("author: {e}"), exit::CONFIG_ERROR),
     };
 
-    let tree_hash = match worktree::build_tree(&store, &cwd) {
+    // Read the staging index. An absent file or zero non-removed
+    // entries is a hard error — see module docs and issue #102.
+    let Ok(idx) = index::read_index(&cwd) else {
+        return emit_err(
+            "nothing staged: run `mkit add <path>` (or `mkit add .`) before commit",
+            exit::USAGE,
+        );
+    };
+    if idx.staged_count() == 0 {
+        return emit_err(
+            "nothing staged: index is empty; run `mkit add <path>` (or `mkit add .`) before commit",
+            exit::USAGE,
+        );
+    }
+    let tree_hash = match worktree::build_tree_from_index(&store, &idx) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("build tree: {e}"), exit::GENERAL_ERROR),
     };

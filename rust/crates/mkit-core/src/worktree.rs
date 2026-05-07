@@ -156,6 +156,124 @@ fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> Wo
     Ok(store.write(&bytes)?)
 }
 
+/// Build a tree object from an [`Index`] (the staging area).
+///
+/// Walks the flat list of entries, groups them by directory, and
+/// recursively materialises sub-tree objects so the on-disk shape
+/// matches what [`build_tree`] would produce for the same set of
+/// paths. Entries with [`crate::index::EntryStatus::Removed`] are
+/// excluded; everything else maps to an [`EntryMode`] one-to-one.
+///
+/// # Errors
+/// - [`WorktreeError::Io`] on a [`crate::object::TreeEntry::validate_name`]
+///   failure (the path's leaf segment is reserved or alias-prone).
+/// - Wraps [`crate::MkitError`] surfaced by `serialize` / `store.write`.
+#[allow(clippy::items_after_statements)]
+pub fn build_tree_from_index(
+    store: &ObjectStore,
+    index: &crate::index::Index,
+) -> WorktreeResult<Hash> {
+    use crate::index::EntryStatus;
+
+    // Build an in-memory directory tree. Each node is either a leaf
+    // (one staged blob/symlink) or a directory containing children.
+    #[derive(Default)]
+    struct Node {
+        // Subdirectory name → child node.
+        children: std::collections::BTreeMap<String, Node>,
+        // Leaf entries directly under this dir: name → (mode, hash).
+        leaves: std::collections::BTreeMap<String, (EntryMode, Hash)>,
+    }
+
+    let mut root = Node::default();
+
+    for entry in &index.entries {
+        if entry.status == EntryStatus::Removed {
+            continue;
+        }
+        let mode = match entry.status {
+            EntryStatus::Blob => EntryMode::Blob,
+            EntryStatus::Executable => EntryMode::Executable,
+            EntryStatus::Symlink => EntryMode::Symlink,
+            EntryStatus::Tree => {
+                // Reserved-but-unused per SPEC-INDEX §3. Reject for
+                // now; if a subtree-staging design lands later it
+                // can populate this branch.
+                return Err(WorktreeError::Io(io::Error::other(
+                    "index entry uses reserved Tree status (subtree staging not implemented)",
+                )));
+            }
+            EntryStatus::Removed => unreachable!("filtered above"),
+        };
+
+        // Split "a/b/c.txt" into ["a", "b"] + "c.txt".
+        let segments: Vec<&str> = entry.path.split('/').collect();
+        let Some((leaf, dirs)) = segments.split_last() else {
+            return Err(WorktreeError::Io(io::Error::other("empty index path")));
+        };
+        if leaf.is_empty() {
+            return Err(WorktreeError::Io(io::Error::other(
+                "trailing slash in index path",
+            )));
+        }
+
+        let mut node = &mut root;
+        for seg in dirs {
+            if seg.is_empty() {
+                return Err(WorktreeError::Io(io::Error::other(
+                    "empty path segment in index",
+                )));
+            }
+            node = node.children.entry((*seg).to_string()).or_default();
+        }
+        node.leaves
+            .insert((*leaf).to_string(), (mode, entry.object_hash));
+    }
+
+    fn write_node(store: &ObjectStore, node: &Node) -> WorktreeResult<Hash> {
+        let mut entries: Vec<TreeEntry> = Vec::new();
+
+        // Subdirectories first (alphabetical via BTreeMap).
+        for (name, child) in &node.children {
+            let h = write_node(store, child)?;
+            let bytes = name.as_bytes().to_vec();
+            if !crate::object::TreeEntry::validate_name(&bytes) {
+                return Err(WorktreeError::Io(io::Error::other(format!(
+                    "invalid tree entry name: {name:?}"
+                ))));
+            }
+            entries.push(TreeEntry {
+                name: bytes,
+                mode: EntryMode::Tree,
+                object_hash: h,
+            });
+        }
+
+        // Then leaves.
+        for (name, (mode, hash)) in &node.leaves {
+            let bytes = name.as_bytes().to_vec();
+            if !crate::object::TreeEntry::validate_name(&bytes) {
+                return Err(WorktreeError::Io(io::Error::other(format!(
+                    "invalid tree entry name: {name:?}"
+                ))));
+            }
+            entries.push(TreeEntry {
+                name: bytes,
+                mode: *mode,
+                object_hash: *hash,
+            });
+        }
+
+        // Tree-entry order is name-ascending per SPEC-OBJECTS §4.
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        let tree = Object::Tree(Tree { entries });
+        let bytes = serialize::serialize(&tree)?;
+        Ok(store.write(&bytes)?)
+    }
+
+    write_node(store, &root)
+}
+
 /// Read a file from disk, hash it as a [`Blob`](crate::object::Blob),
 /// store it, and return the hash. Rejects files larger than
 /// [`CHUNK_THRESHOLD`] with [`WorktreeError::NeedsChunker`] until the
@@ -351,5 +469,297 @@ mod tests {
         fs::write(work.path().join("big.bin"), &big).unwrap();
         let err = build_tree(&store, work.path()).unwrap_err();
         assert!(matches!(err, WorktreeError::NeedsChunker(_)));
+    }
+
+    // ---- build_tree_from_index — the staging-area path -------------
+
+    use crate::index::{EntryStatus, Index, IndexEntry};
+
+    fn write_blob(store: &ObjectStore, bytes: &[u8]) -> Hash {
+        let blob = Object::Blob(crate::object::Blob {
+            data: bytes.to_vec(),
+        });
+        let body = serialize::serialize(&blob).unwrap();
+        store.write(&body).unwrap()
+    }
+
+    #[test]
+    fn from_index_empty_returns_empty_tree() {
+        let (_sd, store) = fresh_store();
+        let idx = Index::new();
+        let h = build_tree_from_index(&store, &idx).unwrap();
+        let Object::Tree(t) = store.read_object(&h).unwrap() else {
+            panic!("expected tree");
+        };
+        assert!(t.entries.is_empty());
+    }
+
+    #[test]
+    fn from_index_single_file_at_root() {
+        let (_sd, store) = fresh_store();
+        let blob_hash = write_blob(&store, b"hello world");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "hello.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: blob_hash,
+        });
+        let h = build_tree_from_index(&store, &idx).unwrap();
+        let Object::Tree(t) = store.read_object(&h).unwrap() else {
+            panic!();
+        };
+        assert_eq!(t.entries.len(), 1);
+        assert_eq!(t.entries[0].name, b"hello.txt");
+        assert_eq!(t.entries[0].mode, EntryMode::Blob);
+        assert_eq!(t.entries[0].object_hash, blob_hash);
+    }
+
+    #[test]
+    fn from_index_nested_paths_build_subtrees() {
+        let (_sd, store) = fresh_store();
+        let a = write_blob(&store, b"file a");
+        let b = write_blob(&store, b"file b");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "a.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: a,
+        });
+        idx.entries.push(IndexEntry {
+            path: "subdir/b.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: b,
+        });
+        let root_hash = build_tree_from_index(&store, &idx).unwrap();
+        let Object::Tree(root) = store.read_object(&root_hash).unwrap() else {
+            panic!();
+        };
+        assert_eq!(root.entries.len(), 2);
+        assert_eq!(root.entries[0].name, b"a.txt");
+        assert_eq!(root.entries[0].mode, EntryMode::Blob);
+        assert_eq!(root.entries[1].name, b"subdir");
+        assert_eq!(root.entries[1].mode, EntryMode::Tree);
+
+        let Object::Tree(sub) = store.read_object(&root.entries[1].object_hash).unwrap() else {
+            panic!();
+        };
+        assert_eq!(sub.entries.len(), 1);
+        assert_eq!(sub.entries[0].name, b"b.txt");
+        assert_eq!(sub.entries[0].object_hash, b);
+    }
+
+    #[test]
+    fn from_index_removed_entries_are_skipped() {
+        let (_sd, store) = fresh_store();
+        let a = write_blob(&store, b"keep me");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "keep.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: a,
+        });
+        idx.entries.push(IndexEntry {
+            path: "drop.txt".into(),
+            status: EntryStatus::Removed,
+            object_hash: [0; 32],
+        });
+        let h = build_tree_from_index(&store, &idx).unwrap();
+        let Object::Tree(t) = store.read_object(&h).unwrap() else {
+            panic!();
+        };
+        assert_eq!(t.entries.len(), 1);
+        assert_eq!(t.entries[0].name, b"keep.txt");
+    }
+
+    #[test]
+    fn from_index_executable_and_symlink_modes_pass_through() {
+        let (_sd, store) = fresh_store();
+        let exec = write_blob(&store, b"#!/bin/sh");
+        let link = write_blob(&store, b"target.txt");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "run.sh".into(),
+            status: EntryStatus::Executable,
+            object_hash: exec,
+        });
+        idx.entries.push(IndexEntry {
+            path: "link".into(),
+            status: EntryStatus::Symlink,
+            object_hash: link,
+        });
+        let h = build_tree_from_index(&store, &idx).unwrap();
+        let Object::Tree(t) = store.read_object(&h).unwrap() else {
+            panic!();
+        };
+        let by_name: std::collections::HashMap<&[u8], &TreeEntry> =
+            t.entries.iter().map(|e| (e.name.as_slice(), e)).collect();
+        assert_eq!(by_name[&b"run.sh"[..]].mode, EntryMode::Executable);
+        assert_eq!(by_name[&b"link"[..]].mode, EntryMode::Symlink);
+    }
+
+    #[test]
+    fn from_index_entries_are_sorted_by_name() {
+        let (_sd, store) = fresh_store();
+        let a = write_blob(&store, b"x");
+        let mut idx = Index::new();
+        // Insert out-of-order; the on-disk Tree must still be sorted
+        // (SPEC-OBJECTS §4 normative).
+        idx.entries.push(IndexEntry {
+            path: "z.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: a,
+        });
+        idx.entries.push(IndexEntry {
+            path: "a.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: a,
+        });
+        idx.entries.push(IndexEntry {
+            path: "m.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: a,
+        });
+        let h = build_tree_from_index(&store, &idx).unwrap();
+        let Object::Tree(t) = store.read_object(&h).unwrap() else {
+            panic!();
+        };
+        let names: Vec<&[u8]> = t.entries.iter().map(|e| e.name.as_slice()).collect();
+        assert_eq!(names, vec![&b"a.txt"[..], b"m.txt", b"z.txt"]);
+    }
+
+    #[test]
+    fn from_index_rejects_trailing_slash() {
+        let (_sd, store) = fresh_store();
+        let h = write_blob(&store, b"x");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "dir/".into(),
+            status: EntryStatus::Blob,
+            object_hash: h,
+        });
+        let err = build_tree_from_index(&store, &idx).unwrap_err();
+        assert!(matches!(err, WorktreeError::Io(_)));
+    }
+
+    #[test]
+    fn from_index_rejects_empty_segment() {
+        let (_sd, store) = fresh_store();
+        let h = write_blob(&store, b"x");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "a//b.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: h,
+        });
+        let err = build_tree_from_index(&store, &idx).unwrap_err();
+        assert!(matches!(err, WorktreeError::Io(_)));
+    }
+
+    #[test]
+    fn from_index_rejects_reserved_name() {
+        let (_sd, store) = fresh_store();
+        let h = write_blob(&store, b"x");
+        let mut idx = Index::new();
+        // ".mkit" is rejected by TreeEntry::validate_name as repo
+        // metadata aliasing.
+        idx.entries.push(IndexEntry {
+            path: ".mkit".into(),
+            status: EntryStatus::Blob,
+            object_hash: h,
+        });
+        let err = build_tree_from_index(&store, &idx).unwrap_err();
+        assert!(matches!(err, WorktreeError::Io(_)));
+    }
+
+    /// The most important invariant: for a worktree whose contents
+    /// match the index entry-for-entry, `build_tree` and
+    /// `build_tree_from_index` MUST produce the identical root hash.
+    /// If this drifts, attestations signed under one path won't
+    /// verify against trees built under the other.
+    #[test]
+    fn from_index_matches_build_tree_for_equivalent_worktree() {
+        let (_sd, store) = fresh_store();
+
+        // Build the same content two ways:
+        //   1. drop files on disk, call build_tree.
+        //   2. write blobs to the store directly, populate an index,
+        //      call build_tree_from_index.
+        let work = TempDir::new().unwrap();
+        fs::write(work.path().join("a.txt"), b"alpha").unwrap();
+        fs::create_dir(work.path().join("dir")).unwrap();
+        fs::write(work.path().join("dir/b.txt"), b"beta").unwrap();
+        fs::write(work.path().join("dir/c.txt"), b"gamma").unwrap();
+        let worktree_root = build_tree(&store, work.path()).unwrap();
+
+        let a = write_blob(&store, b"alpha");
+        let b = write_blob(&store, b"beta");
+        let c = write_blob(&store, b"gamma");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "a.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: a,
+        });
+        idx.entries.push(IndexEntry {
+            path: "dir/b.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: b,
+        });
+        idx.entries.push(IndexEntry {
+            path: "dir/c.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: c,
+        });
+        let index_root = build_tree_from_index(&store, &idx).unwrap();
+
+        assert_eq!(
+            worktree_root, index_root,
+            "build_tree_from_index must produce the same root hash as build_tree for equivalent contents"
+        );
+    }
+
+    #[test]
+    fn from_index_deeply_nested_paths_build_chain_of_subtrees() {
+        let (_sd, store) = fresh_store();
+        let h = write_blob(&store, b"deep");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "a/b/c/d/e.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: h,
+        });
+        let root = build_tree_from_index(&store, &idx).unwrap();
+        let Object::Tree(t) = store.read_object(&root).unwrap() else {
+            panic!();
+        };
+        assert_eq!(t.entries.len(), 1);
+        assert_eq!(t.entries[0].name, b"a");
+        assert_eq!(t.entries[0].mode, EntryMode::Tree);
+        // Walk down to the leaf.
+        let mut cursor = t.entries[0].object_hash;
+        for seg in [b"b" as &[u8], b"c", b"d"] {
+            let Object::Tree(t) = store.read_object(&cursor).unwrap() else {
+                panic!();
+            };
+            assert_eq!(t.entries.len(), 1);
+            assert_eq!(t.entries[0].name, seg);
+            cursor = t.entries[0].object_hash;
+        }
+        let Object::Tree(t) = store.read_object(&cursor).unwrap() else {
+            panic!();
+        };
+        assert_eq!(t.entries[0].name, b"e.txt");
+        assert_eq!(t.entries[0].object_hash, h);
+    }
+
+    /// Sanity: `ObjectType::Tree` is what we materialise. Pin so a
+    /// future enum reshuffle catches us.
+    #[test]
+    fn from_index_root_is_a_tree_object() {
+        let (_sd, store) = fresh_store();
+        let idx = Index::new();
+        let h = build_tree_from_index(&store, &idx).unwrap();
+        let obj = store.read_object(&h).unwrap();
+        assert_eq!(obj.object_type(), ObjectType::Tree);
     }
 }
