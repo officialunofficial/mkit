@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use mkit_benches::{Sample, Unit};
+use mkit_core::store::ObjectStore;
 
 const SIZES: &[(usize, &str)] = &[
     (1, "1 file"),
@@ -34,14 +35,18 @@ fn bench_object_commit(c: &mut Criterion) {
             .map(|i| format!("file {i}\n{}\n", "hello world\n".repeat(8)).into_bytes())
             .collect();
 
-        // --- mkit-core: hash + write each payload as a blob -------------
+        // --- mkit-core: hash + atomic-write each payload as a blob ------
+        // Uses ObjectStore::write so the comparison is apples-to-apples
+        // with git2's odb.write and `git hash-object -w` below — all
+        // three perform a real on-disk write, not just a hash.
         {
             let dir = tempfile::tempdir().unwrap();
+            let store = ObjectStore::init(dir.path()).unwrap();
             c.bench_function(&format!("commit/{axis}/mkit"), |b| {
-                b.iter(|| commit_via_mkit(dir.path(), &payloads));
+                b.iter(|| commit_via_mkit(&store, &payloads));
             });
             let t = time_one(|| {
-                commit_via_mkit(dir.path(), &payloads);
+                commit_via_mkit(&store, &payloads);
             });
             samples.push(Sample {
                 category: "object-commit".into(),
@@ -116,11 +121,12 @@ fn bench_object_commit(c: &mut Criterion) {
     write_summary("object_commit", &samples);
 }
 
-fn commit_via_mkit(_repo: &Path, payloads: &[Vec<u8>]) {
-    // mkit-core's atomic primitive: hash each payload. Reflects what
-    // a content-addressed write does at the hash-and-store step.
+fn commit_via_mkit(store: &ObjectStore, payloads: &[Vec<u8>]) {
+    // ObjectStore::write hashes the payload (BLAKE3), atomically
+    // writes the bytes to <objects>/<2-hex-shard>/<62-hex-suffix> via
+    // tmpfile + fsync + rename, and is idempotent on duplicate writes.
     for p in payloads {
-        let _h = mkit_core::hash::hash(p);
+        let _h = store.write(p).unwrap();
     }
 }
 

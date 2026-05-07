@@ -8,27 +8,31 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Ar
 .grid { stroke: #d0d7de; stroke-width: 0.5; }
 </style>
   <rect width="100%" height="100%" fill="white"/>
-  <text x="400.0" y="30" text-anchor="middle" class="title">Object Commit Wallclock — 100 files</text>
+  <text x="400.0" y="30" text-anchor="middle" class="title">Object Commit Wallclock — 100 files (ops/s — higher is better)</text>
   <line x1="200.0" y1="52.0" x2="200.0" y2="138.0" class="grid"/>
   <text x="200.0" y="152.0" text-anchor="middle" class="axis-label">0</text>
-  <line x1="304.0" y1="52.0" x2="304.0" y2="138.0" class="grid"/>
-  <text x="304.0" y="152.0" text-anchor="middle" class="axis-label">20,000</text>
-  <line x1="408.0" y1="52.0" x2="408.0" y2="138.0" class="grid"/>
-  <text x="408.0" y="152.0" text-anchor="middle" class="axis-label">40,000</text>
-  <line x1="512.0" y1="52.0" x2="512.0" y2="138.0" class="grid"/>
-  <text x="512.0" y="152.0" text-anchor="middle" class="axis-label">60,000</text>
-  <line x1="616.0" y1="52.0" x2="616.0" y2="138.0" class="grid"/>
-  <text x="616.0" y="152.0" text-anchor="middle" class="axis-label">80,000</text>
+  <line x1="274.3" y1="52.0" x2="274.3" y2="138.0" class="grid"/>
+  <text x="274.3" y="152.0" text-anchor="middle" class="axis-label">1,000</text>
+  <line x1="348.6" y1="52.0" x2="348.6" y2="138.0" class="grid"/>
+  <text x="348.6" y="152.0" text-anchor="middle" class="axis-label">2,000</text>
+  <line x1="422.9" y1="52.0" x2="422.9" y2="138.0" class="grid"/>
+  <text x="422.9" y="152.0" text-anchor="middle" class="axis-label">3,000</text>
+  <line x1="497.1" y1="52.0" x2="497.1" y2="138.0" class="grid"/>
+  <text x="497.1" y="152.0" text-anchor="middle" class="axis-label">4,000</text>
+  <line x1="571.4" y1="52.0" x2="571.4" y2="138.0" class="grid"/>
+  <text x="571.4" y="152.0" text-anchor="middle" class="axis-label">5,000</text>
+  <line x1="645.7" y1="52.0" x2="645.7" y2="138.0" class="grid"/>
+  <text x="645.7" y="152.0" text-anchor="middle" class="axis-label">6,000</text>
   <line x1="720.0" y1="52.0" x2="720.0" y2="138.0" class="grid"/>
-  <text x="720.0" y="152.0" text-anchor="middle" class="axis-label">100,000</text>
-  <text x="460.0" y="168.0" text-anchor="middle" class="axis-label">ms</text>
+  <text x="720.0" y="152.0" text-anchor="middle" class="axis-label">7,000</text>
+  <text x="460.0" y="168.0" text-anchor="middle" class="axis-label">ops/s</text>
   <text x="190.0" y="77.2" text-anchor="end" class="label">mkit</text>
-  <rect x="200.0" y="60.0" width="509.8" height="18.2" rx="2" fill="#4C78A8"/>
-  <text x="717.8" y="77.2" class="value">0.01 ms</text>
+  <rect x="200.0" y="60.0" width="493.3" height="18.2" rx="2" fill="#4C78A8"/>
+  <text x="701.3" y="77.2" class="value">151 µs</text>
   <text x="190.0" y="103.2" text-anchor="end" class="label">git2 (libgit2)</text>
-  <rect x="200.0" y="86.0" width="2.9" height="18.2" rx="2" fill="#E45756"/>
-  <text x="210.9" y="103.2" class="value">1.77 ms</text>
+  <rect x="200.0" y="86.0" width="44.4" height="18.2" rx="2" fill="#E45756"/>
+  <text x="252.4" y="103.2" class="value">1.67 ms</text>
   <text x="190.0" y="129.2" text-anchor="end" class="label">git CLI</text>
-  <rect x="200.0" y="112.0" width="0.0" height="18.2" rx="2" fill="#B279A2"/>
-  <text x="208.0" y="129.2" class="value">1130.51 ms</text>
+  <rect x="200.0" y="112.0" width="0.1" height="18.2" rx="2" fill="#B279A2"/>
+  <text x="208.1" y="129.2" class="value">999 ms</text>
 </svg>

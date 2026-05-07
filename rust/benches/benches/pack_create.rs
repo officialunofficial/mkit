@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use mkit_benches::{Sample, Unit};
+use mkit_core::store::ObjectStore;
 
 const SIZES: &[(usize, usize, &str)] = &[
     // (file_count, file_size, axis_label)
@@ -33,11 +34,15 @@ fn bench_pack(c: &mut Criterion) {
     for &(count, size, axis) in SIZES {
         let blobs = build_blobs(count, size);
 
-        // --- mkit: hash + write per blob via the content-addressed primitive
+        // --- mkit: hash + atomic-write each blob via ObjectStore -------
+        // Apples-to-apples with git2's odb.write below: real on-disk
+        // writes, not just hashing.
+        let mkit_dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(mkit_dir.path()).unwrap();
         c.bench_function(&format!("pack/{axis}/mkit"), |b| {
-            b.iter(|| pack_via_mkit(&blobs));
+            b.iter(|| pack_via_mkit(&store, &blobs));
         });
-        let t = time_one(|| pack_via_mkit(&blobs));
+        let t = time_one(|| pack_via_mkit(&store, &blobs));
         samples.push(Sample {
             category: "pack-create".into(),
             axis: axis.into(),
@@ -98,9 +103,9 @@ fn build_blobs(count: usize, size: usize) -> Vec<Vec<u8>> {
     out
 }
 
-fn pack_via_mkit(blobs: &[Vec<u8>]) {
+fn pack_via_mkit(store: &ObjectStore, blobs: &[Vec<u8>]) {
     for b in blobs {
-        let _h = mkit_core::hash::hash(b);
+        let _h = store.write(b).unwrap();
     }
 }
 

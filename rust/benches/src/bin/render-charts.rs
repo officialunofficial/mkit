@@ -98,7 +98,17 @@ fn fmt_value(v: f64, unit: Unit) -> String {
                 format!("{:.0}", v)
             }
         }
-        Unit::Millis => format!("{v:.2} ms"),
+        Unit::Millis => {
+            // Show µs for sub-millisecond latencies — "0.00 ms" is
+            // useless, "133 µs" carries information.
+            if v < 1.0 {
+                format!("{:.0} µs", v * 1000.0)
+            } else if v < 100.0 {
+                format!("{v:.2} ms")
+            } else {
+                format!("{v:.0} ms")
+            }
+        }
     }
 }
 
@@ -129,7 +139,9 @@ fn fmt_axis(v: f64) -> String {
 
 /// Bar length is throughput (longer = better) for MibPerSec /
 /// OpsPerSec. For Millis (wallclock; smaller = better), we plot
-/// `1000.0 / value` so the bar still grows with goodness.
+/// `1000.0 / value` so the bar still grows with goodness, AND we
+/// override the unit at chart time to OpsPerSec so the axis label
+/// matches what the bar represents.
 fn bar_metric(s: &Sample) -> f64 {
     match s.unit {
         Unit::MibPerSec | Unit::OpsPerSec => s.value,
@@ -137,9 +149,19 @@ fn bar_metric(s: &Sample) -> f64 {
     }
 }
 
+/// What the axis should label itself as. Millis → ops/s, since the
+/// bar metric IS ops/s.
+fn axis_unit(stored: Unit) -> Unit {
+    match stored {
+        Unit::Millis => Unit::OpsPerSec,
+        other => other,
+    }
+}
+
 fn render_chart(
     title: &str,
-    unit: Unit,
+    axis_unit: Unit,
+    display_unit: Unit,
     libraries: &[(String, f64, f64)], // (label, raw value, bar metric)
 ) -> String {
     let width = 800.0;
@@ -198,7 +220,7 @@ fn render_chart(
         "  <text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" class=\"axis-label\">{}</text>\n",
         bar_x + bar_max / 2.0,
         chart_bottom + 30.0,
-        unit.axis_label()
+        axis_unit.axis_label()
     ));
 
     // Rows.
@@ -218,12 +240,14 @@ fn render_chart(
             row_h * 0.7,
             color_for(label)
         ));
-        // Value.
+        // Value (printed in the unit the user wants to read, even
+        // when the bar metric is something else — e.g. millis benches
+        // plot ops/s but print "13.72 ms" for human latency feel).
         svg.push_str(&format!(
             "  <text x=\"{:.1}\" y=\"{:.1}\" class=\"value\">{}</text>\n",
             bar_x + bar_w + 8.0,
             y + row_h * 0.66,
-            fmt_value(*raw, unit)
+            fmt_value(*raw, display_unit)
         ));
     }
 
@@ -322,7 +346,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut written = 0usize;
     for ((category, axis), samples) in &groups {
-        let unit = samples.first().map(|s| s.unit).unwrap_or(Unit::MibPerSec);
+        let stored_unit = samples.first().map(|s| s.unit).unwrap_or(Unit::MibPerSec);
+        let render_unit = axis_unit(stored_unit);
+        let display_unit = stored_unit;
         let mut rows: Vec<(String, f64, f64)> = samples
             .iter()
             .map(|s| (s.library.clone(), s.value, bar_metric(s)))
@@ -338,8 +364,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-        let title = format!("{} — {}", category_title(category), humanize_axis(axis));
-        let svg = render_chart(&title, unit, &rows);
+        let suffix = if matches!(stored_unit, Unit::Millis) {
+            " (ops/s — higher is better)"
+        } else {
+            ""
+        };
+        let title = format!("{} — {}{suffix}", category_title(category), humanize_axis(axis));
+        let svg = render_chart(&title, render_unit, display_unit, &rows);
         let path = charts_dir.join(format!("{}-{}.svg", slug(category), slug(axis)));
         fs::write(&path, svg)?;
         written += 1;
