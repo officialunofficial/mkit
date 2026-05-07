@@ -117,6 +117,13 @@ jobs:
           key: release-${{ matrix.target }}
           cache-on-failure: false
 
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
       - name: Build release binary
         shell: bash
         working-directory: rust
@@ -439,6 +446,9 @@ jobs:
           prefix-key: "rust-release-wasm32"
           key: release-wasm32
           cache-on-failure: false
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Setup Node.js (npm registry)
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
