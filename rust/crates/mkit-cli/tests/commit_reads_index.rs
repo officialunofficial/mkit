@@ -99,6 +99,14 @@ fn head_blob_body(cwd: &Path, file: &str) -> String {
     String::from_utf8(cat.stdout).unwrap()
 }
 
+fn head_tree_line(cwd: &Path, file: &str) -> String {
+    let body = head_tree_body(cwd);
+    body.lines()
+        .find(|line| line.ends_with(&format!(" {file}")))
+        .unwrap_or_else(|| panic!("missing {file} in tree: {body}"))
+        .to_string()
+}
+
 #[test]
 fn unstaged_files_are_excluded_from_commit_tree() {
     let td = init_repo();
@@ -249,6 +257,106 @@ fn commit_all_does_not_add_untracked_files() {
     assert!(
         !body.contains("untracked.txt"),
         "commit -a added an untracked file: {body}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn commit_all_tracks_executable_bit_changes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let td = init_repo();
+    let p = td.path();
+    let script = p.join("run.sh");
+
+    fs::write(&script, b"#!/bin/sh\n").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "first"]);
+
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    fs::set_permissions(&script, perms).unwrap();
+    ok(p, &["commit", "-a", "-m", "make executable"]);
+    let executable_line = head_tree_line(p, "run.sh");
+    assert!(
+        executable_line.starts_with("04 "),
+        "commit -a did not stage executable mode: {executable_line}"
+    );
+
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(perms.mode() & !0o111);
+    fs::set_permissions(&script, perms).unwrap();
+    ok(p, &["commit", "-a", "-m", "make regular"]);
+    let blob_line = head_tree_line(p, "run.sh");
+    assert!(
+        blob_line.starts_with("01 "),
+        "commit -a did not stage removal of executable mode: {blob_line}"
+    );
+}
+
+#[cfg(not(unix))]
+#[test]
+fn commit_all_preserves_existing_executable_mode_on_non_unix() {
+    use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
+    use mkit_core::object::{Blob, Object};
+    use mkit_core::serialize;
+    use mkit_core::store::ObjectStore;
+
+    let td = init_repo();
+    let p = td.path();
+    let script = p.join("run.sh");
+
+    fs::write(&script, b"v1").unwrap();
+    let store = ObjectStore::open(p).unwrap();
+    let blob = Object::Blob(Blob {
+        data: b"v1".to_vec(),
+    });
+    let bytes = serialize::serialize(&blob).unwrap();
+    let hash = store.write(&bytes).unwrap();
+    let mut idx = Index::new();
+    idx.entries.push(IndexEntry {
+        path: "run.sh".into(),
+        status: EntryStatus::Executable,
+        object_hash: hash,
+    });
+    index::write_index(p, &idx).unwrap();
+    ok(p, &["commit", "-m", "first"]);
+
+    fs::write(&script, b"v2").unwrap();
+    ok(p, &["commit", "-a", "-m", "update executable"]);
+
+    let line = head_tree_line(p, "run.sh");
+    assert!(
+        line.starts_with("04 "),
+        "non-Unix commit -a should preserve executable mode: {line}"
+    );
+    assert_eq!(head_blob_body(p, "run.sh"), "v2");
+}
+
+#[test]
+fn commit_all_rejects_invalid_index_path_before_refreshing() {
+    use mkit_core::hash::ZERO;
+    use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
+
+    let td = init_repo();
+    let p = td.path();
+    let mut idx = Index::new();
+    idx.entries.push(IndexEntry {
+        path: "../outside.txt".into(),
+        status: EntryStatus::Blob,
+        object_hash: ZERO,
+    });
+    index::write_index(p, &idx).unwrap();
+
+    let out = run(p, &["commit", "-a", "-m", "should fail"]);
+    assert!(
+        !out.status.success(),
+        "commit -a with invalid index path must fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid index path"),
+        "error should report invalid index path before refreshing, got: {stderr}"
     );
 }
 

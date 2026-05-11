@@ -27,6 +27,9 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
         if entry.status == EntryStatus::Removed {
             continue;
         }
+        if !index::validate_index_path(&entry.path) {
+            return Err(format!("invalid index path: {}", entry.path));
+        }
 
         let abs = root.join(&entry.path);
         let meta = match abs.symlink_metadata() {
@@ -46,12 +49,7 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
 
         let (status, bytes) = if meta.file_type().is_file() {
             let bytes = std::fs::read(&abs).map_err(|e| format!("read {}: {e}", abs.display()))?;
-            let status = if entry.status == EntryStatus::Executable {
-                EntryStatus::Executable
-            } else {
-                EntryStatus::Blob
-            };
-            (status, bytes)
+            (file_status_from_meta(&meta, entry.status), bytes)
         } else if meta.file_type().is_symlink() {
             let target = std::fs::read_link(&abs)
                 .map_err(|e| format!("read link {}: {e}", abs.display()))?;
@@ -76,6 +74,26 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
     }
 
     index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
+}
+
+#[cfg(unix)]
+fn file_status_from_meta(meta: &std::fs::Metadata, _previous: EntryStatus) -> EntryStatus {
+    use std::os::unix::fs::PermissionsExt;
+
+    if meta.permissions().mode() & 0o111 != 0 {
+        EntryStatus::Executable
+    } else {
+        EntryStatus::Blob
+    }
+}
+
+#[cfg(not(unix))]
+fn file_status_from_meta(_meta: &std::fs::Metadata, previous: EntryStatus) -> EntryStatus {
+    if previous == EntryStatus::Executable {
+        EntryStatus::Executable
+    } else {
+        EntryStatus::Blob
+    }
 }
 
 #[must_use]
