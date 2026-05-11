@@ -15,6 +15,87 @@ use mkit_core::worktree;
 
 use crate::exit;
 
+/// Refresh already-tracked index entries from the worktree.
+///
+/// This backs `mkit commit -a`: it mirrors Git's tracked-only shortcut
+/// by updating modified tracked files and staging tracked deletions,
+/// without adding untracked paths.
+pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<(), String> {
+    let mut idx = super::read_or_seed_index_from_head(root, store)?;
+
+    for entry in &mut idx.entries {
+        if entry.status == EntryStatus::Removed {
+            continue;
+        }
+        if !index::validate_index_path(&entry.path) {
+            return Err(format!("invalid index path: {}", entry.path));
+        }
+
+        let abs = root.join(&entry.path);
+        let meta = match abs.symlink_metadata() {
+            Ok(meta) => meta,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                entry.status = EntryStatus::Removed;
+                entry.object_hash = ZERO;
+                continue;
+            }
+            Err(e) => return Err(format!("metadata {}: {e}", abs.display())),
+        };
+
+        let (status, bytes) = if meta.file_type().is_file() {
+            let bytes = std::fs::read(&abs).map_err(|e| format!("read {}: {e}", abs.display()))?;
+            (file_status_from_meta(&meta, entry.status), bytes)
+        } else if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&abs)
+                .map_err(|e| format!("read link {}: {e}", abs.display()))?;
+            let target_str = target
+                .to_str()
+                .ok_or_else(|| "symlink target is not valid UTF-8".to_string())?;
+            if !worktree::validate_symlink_target(target_str) {
+                return Err(format!("invalid symlink target: {target_str}"));
+            }
+            (EntryStatus::Symlink, target_str.as_bytes().to_vec())
+        } else {
+            entry.status = EntryStatus::Removed;
+            entry.object_hash = ZERO;
+            continue;
+        };
+
+        let blob = Object::Blob(Blob { data: bytes });
+        let ser = serialize::serialize(&blob).map_err(|e| format!("serialize: {e}"))?;
+        let h = store.write(&ser).map_err(|e| format!("store: {e}"))?;
+        entry.status = status;
+        entry.object_hash = h;
+    }
+
+    index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
+}
+
+#[cfg(unix)]
+fn file_status_from_meta(meta: &std::fs::Metadata, _previous: EntryStatus) -> EntryStatus {
+    use std::os::unix::fs::PermissionsExt;
+
+    if meta.permissions().mode() & 0o111 != 0 {
+        EntryStatus::Executable
+    } else {
+        EntryStatus::Blob
+    }
+}
+
+#[cfg(not(unix))]
+fn file_status_from_meta(_meta: &std::fs::Metadata, previous: EntryStatus) -> EntryStatus {
+    if previous == EntryStatus::Executable {
+        EntryStatus::Executable
+    } else {
+        EntryStatus::Blob
+    }
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
     let Some(target) = args.first() else {

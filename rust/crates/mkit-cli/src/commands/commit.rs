@@ -36,25 +36,19 @@ use crate::editor::{COMMIT_EDITMSG_TEMPLATE, spawn_editor};
 use crate::exit;
 use crate::format;
 
+struct CommitOptions {
+    message: Option<String>,
+    author_spec: Option<String>,
+    all: bool,
+}
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
-    let mut message: Option<String> = None;
-    let mut author_spec: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-m" if i + 1 < args.len() => {
-                message = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--author" if i + 1 < args.len() => {
-                author_spec = Some(args[i + 1].clone());
-                i += 2;
-            }
-            _ => i += 1,
-        }
-    }
+    let opts = match parse_options(args) {
+        Ok(opts) => opts,
+        Err(e) => return emit_err(&e, exit::USAGE),
+    };
 
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
@@ -72,7 +66,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // ---- Resolve / prompt for message. -----------------------------
-    let msg = match message {
+    let msg = match opts.message {
         Some(m) => m,
         None => match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
             Ok(m) if !m.is_empty() => m,
@@ -91,10 +85,16 @@ pub fn run(args: &[String]) -> u8 {
 
     // ---- Resolve author. -------------------------------------------
     // Precedence: --author flag → config.user_identity → pubkey-derived.
-    let author = match resolve_author(author_spec.as_deref(), &cfg.user_identity, &kp) {
+    let author = match resolve_author(opts.author_spec.as_deref(), &cfg.user_identity, &kp) {
         Ok(id) => id,
         Err(e) => return emit_err(&format!("author: {e}"), exit::CONFIG_ERROR),
     };
+
+    if opts.all
+        && let Err(e) = super::add::stage_tracked_changes(&cwd, &store)
+    {
+        return emit_err(&format!("stage tracked changes: {e}"), exit::GENERAL_ERROR);
+    }
 
     // Read the staging index. An absent file OR a totally empty
     // entries vector is a hard error — see module docs and issue
@@ -161,6 +161,48 @@ pub fn run(args: &[String]) -> u8 {
         msg.lines().next().unwrap_or("")
     );
     exit::OK
+}
+
+fn parse_options(args: &[String]) -> Result<CommitOptions, String> {
+    let mut opts = CommitOptions {
+        message: None,
+        author_spec: None,
+        all: false,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-a" | "--all" => {
+                opts.all = true;
+                i += 1;
+            }
+            "-m" if i + 1 < args.len() => {
+                opts.message = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--author" if i + 1 < args.len() => {
+                opts.author_spec = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "-am" => {
+                if i + 1 >= args.len() {
+                    return Err(
+                        "usage: mkit commit [-a|--all] [-m <msg>] [--author <spec>]".to_string()
+                    );
+                }
+                opts.all = true;
+                opts.message = Some(args[i + 1].clone());
+                i += 2;
+            }
+            arg if arg.starts_with("-am") && arg.len() > 3 => {
+                opts.all = true;
+                opts.message = Some(arg[3..].to_string());
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(opts)
 }
 
 /// Load the Ed25519 signing key. Returns a mapped (message,

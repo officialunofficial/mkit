@@ -24,7 +24,7 @@ commands:
   hash <file>       Hash a file and store it as a blob
   cat <hash>        Display an object by its hash
   tree              Snapshot working directory as a tree object
-  commit [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
+  commit [-a] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
   log [--oneline] [--graph] [-n N]  Show commit history
   status            Show staged and working tree changes
   diff              Show changes (HEAD vs workdir, or two trees)

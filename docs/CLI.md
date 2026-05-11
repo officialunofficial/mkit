@@ -36,10 +36,13 @@ Working-tree commands:
 
 History / commits:
 
-- `mkit commit -m <msg>` — create a signed commit from the staging
-  index. The index is built by `mkit add` / `mkit rm`; `commit` with
-  an empty index is an error. Use `mkit add .` to snapshot the whole
-  worktree before committing.
+- `mkit commit [-a|--all] -m <msg>` — create a signed commit from the
+  staging index. The index is built by `mkit add` / `mkit rm`; `commit`
+  with an empty index is an error. Use `mkit add .` to snapshot the
+  whole worktree before committing. `-a` / `--all` follows Git's
+  tracked-only shortcut: it stages modified tracked files and tracked
+  deletions before committing, but does not add untracked files.
+  `mkit commit -am <msg>` is accepted as shorthand for `-a -m <msg>`.
 - `mkit log [--oneline] [--graph] [-n N]` — show commit history.
 - `mkit blame <file>` — show line-level commit attribution.
 - `mkit verify <hash>` — verify the signature on a commit or remix.

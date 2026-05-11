@@ -59,7 +59,10 @@ _mkit() {
         args)
             case $words[1] in
                 commit)
-                    _arguments '-m[commit message]:message:' '--help[show help]'
+                    _arguments \
+                        '(-a --all)'{-a,--all}'[stage tracked changes before committing]' \
+                        '-m[commit message]:message:' \
+                        '--help[show help]'
                     ;;
                 log)
                     _arguments \
