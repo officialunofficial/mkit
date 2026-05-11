@@ -47,8 +47,17 @@ Stage files for the next commit. Respects
 .Pa .mkitignore .
 .It Cm rm Ar path ...
 Mark a file for deletion in the next commit.
-.It Cm commit Op Fl m Ar message
-Create a signed commit. If
+.It Cm commit Op Fl a | Fl Fl all Op Fl m Ar message
+Create a signed commit. With
+.Fl a
+or
+.Fl Fl all ,
+first stage modified tracked files and tracked deletions, but do not add
+untracked files. The combined
+.Fl am Ar message
+form is accepted as shorthand for
+.Fl a Fl m Ar message .
+If
 .Fl m
 is omitted,
 .Nm

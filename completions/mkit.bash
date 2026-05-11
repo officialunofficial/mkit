@@ -32,7 +32,7 @@ _mkit_complete() {
     # users get tab-completion for the common fast-path.
     case "${words[1]}" in
         commit)
-            COMPREPLY=( $(compgen -W "-m --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-a --all -m --help" -- "$cur") )
             ;;
         log)
             COMPREPLY=( $(compgen -W "--oneline --graph -n --help" -- "$cur") )

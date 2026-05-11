@@ -32,6 +32,8 @@ complete -c mkit -n "not __fish_seen_subcommand_from $__mkit_subcommands" \
 
 # Per-subcommand flags (kept minimal, mirrors mkit.bash).
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
+    -l all -s a -d "Stage tracked changes"
+complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -s m -d "Commit message" -r
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"

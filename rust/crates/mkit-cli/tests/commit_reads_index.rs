@@ -83,6 +83,22 @@ fn head_tree_body(cwd: &Path) -> String {
     String::from_utf8(cat.stdout).unwrap()
 }
 
+fn head_blob_body(cwd: &Path, file: &str) -> String {
+    let body = head_tree_body(cwd);
+    let hash = body
+        .lines()
+        .find_map(|line| {
+            let mut parts = line.split_whitespace();
+            let _mode = parts.next()?;
+            let hash = parts.next()?;
+            let name = parts.next()?;
+            (name == file).then_some(hash.to_string())
+        })
+        .unwrap_or_else(|| panic!("missing {file} in tree: {body}"));
+    let cat = ok(cwd, &["cat", &hash]);
+    String::from_utf8(cat.stdout).unwrap()
+}
+
 #[test]
 fn unstaged_files_are_excluded_from_commit_tree() {
     let td = init_repo();
@@ -157,6 +173,102 @@ fn add_dot_then_commit_reproduces_full_worktree_snapshot() {
     assert!(body.contains("a.txt"));
     assert!(body.contains("b.txt"));
     assert!(body.contains("sub"));
+}
+
+#[test]
+fn commit_all_stages_modified_tracked_file() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("a.txt"), b"alpha").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "first"]);
+
+    fs::write(p.join("a.txt"), b"alpha v2").unwrap();
+    ok(p, &["commit", "-a", "-m", "update tracked"]);
+
+    assert_eq!(head_blob_body(p, "a.txt"), "alpha v2");
+}
+
+#[test]
+fn commit_dash_am_stages_modified_tracked_file() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("a.txt"), b"alpha").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "first"]);
+
+    fs::write(p.join("a.txt"), b"alpha v2").unwrap();
+    let out = ok(p, &["commit", "-am", "update tracked"]);
+
+    assert_eq!(head_blob_body(p, "a.txt"), "alpha v2");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("update tracked"),
+        "-am message was not used: {stdout}"
+    );
+}
+
+#[test]
+fn commit_all_stages_tracked_deletion() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("a.txt"), b"alpha").unwrap();
+    fs::write(p.join("b.txt"), b"beta").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "first"]);
+
+    fs::remove_file(p.join("b.txt")).unwrap();
+    ok(p, &["commit", "--all", "-m", "drop tracked"]);
+
+    let body = head_tree_body(p);
+    assert!(body.contains("a.txt"));
+    assert!(
+        !body.contains("b.txt"),
+        "commit -a did not stage tracked deletion: {body}"
+    );
+}
+
+#[test]
+fn commit_all_does_not_add_untracked_files() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("tracked.txt"), b"tracked").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "first"]);
+
+    fs::write(p.join("tracked.txt"), b"tracked v2").unwrap();
+    fs::write(p.join("untracked.txt"), b"do not add").unwrap();
+    ok(p, &["commit", "-a", "-m", "tracked only"]);
+
+    let body = head_tree_body(p);
+    assert!(body.contains("tracked.txt"));
+    assert!(
+        !body.contains("untracked.txt"),
+        "commit -a added an untracked file: {body}"
+    );
+}
+
+#[test]
+fn commit_all_with_only_untracked_files_is_an_error() {
+    let td = init_repo();
+    let p = td.path();
+
+    fs::write(p.join("orphan.txt"), b"not tracked").unwrap();
+    let out = run(p, &["commit", "-a", "-m", "should fail"]);
+
+    assert!(
+        !out.status.success(),
+        "commit -a with only untracked files must fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("index") || stderr.contains("staged") || stderr.contains("nothing"),
+        "stderr should hint at the empty index. got: {stderr}"
+    );
 }
 
 #[test]
