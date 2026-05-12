@@ -131,10 +131,14 @@ pub fn run(args: &[String]) -> u8 {
         Ok(v) => v,
         Err(e) => return emit_err(&format!("list attestations: {e}"), exit::NOINPUT),
     };
-    let mut stdout = std::io::stdout().lock();
+    // All `verify-attest` report lines are human-readable prose; the
+    // verdict is conveyed via the exit code (OK / DATAERR /
+    // GENERAL_ERROR). Route the entire report to stderr so stdout
+    // stays clean for a future `--format=json` output mode.
+    let mut report = std::io::stderr().lock();
     if envelopes.is_empty() {
         let _ = writeln!(
-            stdout,
+            report,
             "no attestations for commit {}",
             hash_mod::to_hex(&commit_hash)
         );
@@ -142,7 +146,7 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     let _ = writeln!(
-        stdout,
+        report,
         "verifying {} attestation(s) for commit {}",
         envelopes.len(),
         hash_mod::to_hex(&commit_hash)
@@ -153,7 +157,7 @@ pub fn run(args: &[String]) -> u8 {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
-                let _ = writeln!(stdout, "  {}: read error: {e}", path.display());
+                let _ = writeln!(report, "  {}: read error: {e}", path.display());
                 all_ok = false;
                 continue;
             }
@@ -163,7 +167,7 @@ pub fn run(args: &[String]) -> u8 {
             Ok(r) => r,
             Err(e) => {
                 let _ = writeln!(
-                    stdout,
+                    report,
                     "  {}: malformed envelope: {e}",
                     hash_mod::to_hex(&att_id)
                 );
@@ -172,7 +176,7 @@ pub fn run(args: &[String]) -> u8 {
             }
         };
         let _ = writeln!(
-            stdout,
+            report,
             "  attestation {}: {} signature(s)",
             hash_mod::to_hex(&att_id),
             result.signatures.len()
@@ -193,13 +197,13 @@ pub fn run(args: &[String]) -> u8 {
                 format!("FAILED ({:?})", sig.reason)
             };
             let _ = writeln!(
-                stdout,
+                report,
                 "    [{alg_str}] {} — {verdict}",
                 short_keyid(&sig.keyid)
             );
         }
         if !any_shown && filter.is_some() {
-            let _ = writeln!(stdout, "    (no signatures matched --algorithm filter)");
+            let _ = writeln!(report, "    (no signatures matched --algorithm filter)");
         }
         if !result.any_verified {
             all_ok = false;
@@ -207,10 +211,10 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     if all_ok {
-        let _ = writeln!(stdout, "ok: all attestations verified");
+        let _ = writeln!(report, "ok: all attestations verified");
         exit::OK
     } else {
-        let _ = writeln!(stdout, "bad: at least one attestation failed verification");
+        let _ = writeln!(report, "bad: at least one attestation failed verification");
         exit::DATAERR
     }
 }

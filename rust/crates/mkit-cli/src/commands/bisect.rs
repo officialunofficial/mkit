@@ -67,9 +67,9 @@ fn start(mkit_dir: &std::path::Path) -> u8 {
     if let Err(e) = write_state(mkit_dir, &state) {
         return emit_err(&format!("write state: {e}"), exit::CANTCREAT);
     }
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
-        stdout,
+        stderr,
         "bisect started; mark endpoints with `mkit bisect good <hash>` and `mkit bisect bad <hash>`"
     );
     exit::OK
@@ -117,9 +117,9 @@ fn skip(store: &ObjectStore, mkit_dir: &std::path::Path) -> u8 {
         Ok(BisectStep::Testing { hash, .. }) => hash,
         Ok(_) => {
             // Nothing to skip: either already found or not enough data.
-            // This is a user error (skip invoked when bisect has no
-            // current candidate); USAGE rather than OK so scripts see
-            // the failure.
+            // User error (skip invoked when bisect has no current
+            // candidate); USAGE rather than OK so scripts see the
+            // failure.
             return emit_err("bisect skip: no current candidate to skip", exit::USAGE);
         }
         Err(e) => return emit_err(&format!("bisect skip: {e}"), exit::GENERAL_ERROR),
@@ -129,13 +129,13 @@ fn skip(store: &ObjectStore, mkit_dir: &std::path::Path) -> u8 {
     if let Err(e) = write_state(mkit_dir, &state) {
         return emit_err(&format!("persist state: {e}"), exit::CANTCREAT);
     }
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
-        stdout,
+        stderr,
         "skipped {}; advancing to next candidate",
         format::short_hash(&current_mid, 12)
     );
-    drop(stdout);
+    drop(stderr);
     report_step(store, &state)
 }
 
@@ -153,38 +153,39 @@ fn reset(mkit_dir: &std::path::Path) -> u8 {
         let _ = refs::write_head_detached(mkit_dir, &state.orig_head);
     }
     let _ = cleanup_bisect(mkit_dir);
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "bisect reset");
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "bisect reset");
     exit::OK
 }
 
 fn report_step(store: &ObjectStore, state: &BisectState) -> u8 {
     match next_step(store, state) {
         Ok(BisectStep::NeedMore) => {
-            let mut stdout = std::io::stdout().lock();
+            let mut stderr = std::io::stderr().lock();
             let _ = writeln!(
-                stdout,
+                stderr,
                 "need at least one good and a bad commit to start searching"
             );
             exit::OK
         }
         Ok(BisectStep::Testing { hash, remaining }) => {
+            // Progress prose to stderr; the candidate hash itself to
+            // stdout so `H=$(mkit bisect good)` keeps working.
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "bisect: testing ({remaining} candidates remaining)");
+            drop(stderr);
             let mut stdout = std::io::stdout().lock();
-            let _ = writeln!(
-                stdout,
-                "bisect: testing {} ({} candidates remaining)",
-                format::short_hash(&hash, 12),
-                remaining
-            );
+            let _ = writeln!(stdout, "{}", format::short_hash(&hash, 12));
             exit::OK
         }
         Ok(BisectStep::Found(h)) => {
+            // The "found" result is genuinely a data point — emit the
+            // hash on stdout and the prose on stderr.
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "bisect found first bad commit:");
+            drop(stderr);
             let mut stdout = std::io::stdout().lock();
-            let _ = writeln!(
-                stdout,
-                "bisect found first bad commit: {}",
-                format::short_hash(&h, 12)
-            );
+            let _ = writeln!(stdout, "{}", format::short_hash(&h, 12));
             exit::OK
         }
         Err(e) => emit_err(&format!("bisect: {e}"), exit::GENERAL_ERROR),

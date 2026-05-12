@@ -193,10 +193,10 @@ fn attest_and_verify_ed25519_roundtrip() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stdout.contains("verified") || stdout.contains("Ok"),
-        "verify-attest did not report verified signature: {stdout}"
+        stderr.contains("verified") || stderr.contains("Ok"),
+        "verify-attest did not report verified signature: {stderr}"
     );
 }
 
@@ -269,10 +269,10 @@ fn attest_and_verify_secp256k1_roundtrip() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stdout.contains("verified") || stdout.contains("Ok"),
-        "verify-attest did not report verified signature: {stdout}"
+        stderr.contains("verified") || stderr.contains("Ok"),
+        "verify-attest did not report verified signature: {stderr}"
     );
 }
 
@@ -342,10 +342,10 @@ fn attest_and_verify_p256_roundtrip() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stdout.contains("verified") || stdout.contains("Ok"),
-        "verify-attest did not report verified signature: {stdout}"
+        stderr.contains("verified") || stderr.contains("Ok"),
+        "verify-attest did not report verified signature: {stderr}"
     );
 }
 
@@ -610,10 +610,10 @@ fn attest_additional_signer_args_clause_pass_through() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stdout.contains("2 signature(s)"),
-        "expected envelope to carry two signatures; got: {stdout}"
+        stderr.contains("2 signature(s)"),
+        "expected envelope to carry two signatures; got: {stderr}"
     );
 
     // Trust roots must list BOTH keys so verify-attest accepts both.

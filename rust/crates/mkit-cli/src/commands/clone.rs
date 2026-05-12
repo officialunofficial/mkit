@@ -80,9 +80,9 @@ pub fn run(args: &[String]) -> u8 {
     match remote_dispatch::open(url) {
         Ok(tx) => match remote_dispatch::pull_all(&target, tx.as_ref()) {
             Ok(n) => {
-                let mut stdout = std::io::stdout().lock();
+                let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(
-                    stdout,
+                    stderr,
                     "cloned {n} ref(s) from {url} into {}",
                     target.display()
                 );

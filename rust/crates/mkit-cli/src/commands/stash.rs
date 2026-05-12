@@ -27,8 +27,8 @@ pub fn run(args: &[String]) -> u8 {
             let msg = parse_save_message(args);
             match stash::save(&store, &cwd, &msg) {
                 Ok(()) => {
-                    let mut stdout = std::io::stdout().lock();
-                    let _ = writeln!(stdout, "stashed: {msg}");
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(stderr, "stashed: {msg}");
                     exit::OK
                 }
                 Err(e) => emit_err(&format!("stash save: {e}"), exit::GENERAL_ERROR),
@@ -36,11 +36,16 @@ pub fn run(args: &[String]) -> u8 {
         }
         "list" => match stash::list(&cwd) {
             Ok(list) => {
-                let mut stdout = std::io::stdout().lock();
                 if list.entries.is_empty() {
-                    let _ = writeln!(stdout, "(no stash entries)");
+                    // Empty listing → empty stdout (match the
+                    // "no result" convention; the human note goes
+                    // to stderr).
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(stderr, "(no stash entries)");
                     return exit::OK;
                 }
+                // Entries ARE the data — keep on stdout.
+                let mut stdout = std::io::stdout().lock();
                 for (i, e) in list.entries.iter().enumerate() {
                     let _ = writeln!(
                         stdout,
@@ -57,8 +62,8 @@ pub fn run(args: &[String]) -> u8 {
             let idx = parse_idx(args);
             match stash::pop(&store, &cwd, idx) {
                 Ok(()) => {
-                    let mut stdout = std::io::stdout().lock();
-                    let _ = writeln!(stdout, "popped stash@{{{idx}}}");
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(stderr, "popped stash@{{{idx}}}");
                     exit::OK
                 }
                 Err(e) => emit_err(&format!("stash pop: {e}"), exit::GENERAL_ERROR),
@@ -68,8 +73,8 @@ pub fn run(args: &[String]) -> u8 {
             let idx = parse_idx(args);
             match stash::drop(&cwd, idx) {
                 Ok(()) => {
-                    let mut stdout = std::io::stdout().lock();
-                    let _ = writeln!(stdout, "dropped stash@{{{idx}}}");
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(stderr, "dropped stash@{{{idx}}}");
                     exit::OK
                 }
                 Err(e) => emit_err(&format!("stash drop: {e}"), exit::GENERAL_ERROR),

@@ -25,9 +25,9 @@ pub fn run(_args: &[String]) -> u8 {
     if let Err(e) = refs::init(&cwd.join(mkit_core::MKIT_DIR)) {
         return emit_err(&format!("refs init failed: {e}"), exit::CANTCREAT);
     }
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
-        stdout,
+        stderr,
         "initialized empty mkit repository in {}/.mkit/",
         display(&cwd)
     );

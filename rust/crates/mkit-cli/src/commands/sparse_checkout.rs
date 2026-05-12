@@ -51,8 +51,9 @@ fn list_patterns(cwd: &std::path::Path) -> u8 {
             exit::OK
         }
         Ok(None) => {
-            let mut stdout = std::io::stdout().lock();
-            let _ = writeln!(stdout, "(no sparse-checkout patterns)");
+            // Empty listing → empty stdout; the human note goes to stderr.
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "(no sparse-checkout patterns)");
             exit::OK
         }
         Err(e) => emit_err(&format!("load sparse-checkout: {e}"), exit::GENERAL_ERROR),
@@ -99,8 +100,8 @@ fn reapply(cwd: &std::path::Path) -> u8 {
     };
     match restore::restore_tree(&store, tree_hash, cwd, &opts) {
         Ok(()) => {
-            let mut stdout = std::io::stdout().lock();
-            let _ = writeln!(stdout, "sparse-checkout applied");
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "sparse-checkout applied");
             exit::OK
         }
         Err(e) => emit_err(&format!("restore: {e}"), exit::GENERAL_ERROR),

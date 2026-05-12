@@ -122,10 +122,11 @@ fn merge_fast_forwards_when_current_is_ancestor() {
     // Only assert merge ran; check it claims fast-forward.
     let out = run_in(td.path(), &["merge", "feature"]);
     assert!(out.status.success(), "merge failed: {out:?}");
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    // Confirmation prose now lives on stderr.
+    let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stdout.contains("fast-forward") || stdout.contains("already up to date"),
-        "unexpected merge output: {stdout}"
+        stderr.contains("fast-forward") || stderr.contains("already up to date"),
+        "unexpected merge output: {stderr}"
     );
     // main should have moved off c1.
     assert_ne!(head_hash(td.path()), c1);
@@ -162,10 +163,11 @@ fn rebase_onto_same_head_is_noop() {
     assert!(run_in(td.path(), &["branch", "feature"]).status.success());
     let out = run_in(td.path(), &["rebase", "feature"]);
     assert!(out.status.success(), "rebase failed: {out:?}");
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    // Confirmation prose lives on stderr.
+    let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stdout.contains("rebased 0") || stdout.contains("rebased"),
-        "unexpected rebase output: {stdout}"
+        stderr.contains("rebased 0") || stderr.contains("rebased"),
+        "unexpected rebase output: {stderr}"
     );
 }
 
@@ -199,8 +201,15 @@ fn stash_list_on_empty_repo_prints_none_marker() {
     init_repo(td.path());
     let out = run_in(td.path(), &["stash", "list"]);
     assert!(out.status.success(), "stash list failed: {out:?}");
+    // Empty stash listing → empty stdout; the "(no stash entries)"
+    // marker is human-readable diagnostic on stderr.
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("no stash"));
+    assert!(
+        stdout.is_empty(),
+        "empty stash list must produce empty stdout: {stdout:?}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("no stash"));
 }
 
 #[test]

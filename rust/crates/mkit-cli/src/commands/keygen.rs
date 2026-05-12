@@ -160,16 +160,20 @@ fn run_ed25519(key_path: &Path, force: bool, print_pubkey: bool) -> u8 {
     if let Err(e) = save_key(key_path, &kp) {
         return emit_err(&format!("save key: {e}"), exit::CANTCREAT);
     }
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "generated signing key at {}", key_path.display());
     let pk_hex = hex32(&kp.public.0);
-    let _ = writeln!(stdout, "public:  ed25519:{pk_hex}");
-    let _ = writeln!(
-        stdout,
-        "identity: {}",
-        format::short_identity(&mkit_core::Identity::ed25519(kp.public.0))
-    );
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "generated signing key at {}", key_path.display());
+        let _ = writeln!(stderr, "public:  ed25519:{pk_hex}");
+        let _ = writeln!(
+            stderr,
+            "identity: {}",
+            format::short_identity(&mkit_core::Identity::ed25519(kp.public.0))
+        );
+    }
     if print_pubkey {
+        // The key string IS the data when --print-pubkey is set.
+        let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "ed25519:{pk_hex}");
     }
     exit::OK
@@ -218,10 +222,13 @@ fn run_secp256k1(key_path: &Path, force: bool, print_pubkey: bool) -> u8 {
     drop(secret);
 
     let pk = signer.public_key_sec1();
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "generated signing key at {}", key_path.display());
-    let _ = writeln!(stdout, "public:  secp256k1:{}", hex_lower(&pk));
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "generated signing key at {}", key_path.display());
+        let _ = writeln!(stderr, "public:  secp256k1:{}", hex_lower(&pk));
+    }
     if print_pubkey {
+        let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "secp256k1:{}", hex_lower(&pk));
     }
     exit::OK
@@ -262,10 +269,13 @@ fn run_p256(key_path: &Path, force: bool, print_pubkey: bool) -> u8 {
     drop(secret);
 
     let pk = signer.public_key_sec1();
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "generated signing key at {}", key_path.display());
-    let _ = writeln!(stdout, "public:  p256:{}", hex_lower(&pk));
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "generated signing key at {}", key_path.display());
+        let _ = writeln!(stderr, "public:  p256:{}", hex_lower(&pk));
+    }
     if print_pubkey {
+        let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "p256:{}", hex_lower(&pk));
     }
     exit::OK
