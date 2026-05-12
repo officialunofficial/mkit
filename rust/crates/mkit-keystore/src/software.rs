@@ -387,7 +387,7 @@ pub struct SoftwareSigner {
 }
 
 impl SoftwareSigner {
-    fn new(
+    pub(crate) fn new(
         label: String,
         backend: BackendKind,
         algorithm: Algorithm,

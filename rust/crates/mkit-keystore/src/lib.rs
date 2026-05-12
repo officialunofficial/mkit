@@ -6,12 +6,16 @@
 #![forbid(unsafe_code)]
 
 mod backend;
+#[cfg(all(target_os = "macos", feature = "macos-keychain"))]
+mod backend_macos_keychain;
 mod encrypted_record;
 mod error;
 mod software;
 mod types;
 
 pub use backend::open_backend;
+#[cfg(all(target_os = "macos", feature = "macos-keychain"))]
+pub use backend_macos_keychain::MacosKeychainKeystore;
 pub use error::{Error, Result};
 pub use software::{SoftwareKeystore, SoftwareRawKeystore, SoftwareSigner};
 pub use types::{

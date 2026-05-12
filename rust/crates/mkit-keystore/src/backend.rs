@@ -10,10 +10,24 @@ pub fn open_backend(kind: BackendKind) -> Result<Box<dyn Keystore>> {
     match kind {
         BackendKind::Software => Ok(Box::new(SoftwareKeystore::new()?)),
         BackendKind::SoftwareRaw => Ok(Box::new(SoftwareRawKeystore::new()?)),
+        BackendKind::MacosKeychain => open_macos_keychain_backend(),
         other => Err(Error::BackendUnavailable(format!(
             "backend `{other}` is not implemented in this build"
         ))),
     }
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-keychain"))]
+#[allow(clippy::unnecessary_wraps)]
+fn open_macos_keychain_backend() -> Result<Box<dyn Keystore>> {
+    Ok(Box::new(crate::MacosKeychainKeystore::new()))
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-keychain")))]
+fn open_macos_keychain_backend() -> Result<Box<dyn Keystore>> {
+    Err(Error::BackendUnavailable(
+        "macOS Keychain backend requires macOS and the `macos-keychain` feature".into(),
+    ))
 }
 
 #[cfg(test)]
