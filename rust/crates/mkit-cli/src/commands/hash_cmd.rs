@@ -2,18 +2,29 @@
 
 use std::io::Write;
 
+use clap::Parser;
 use mkit_core::object::{Blob, Object};
 use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::exit;
 use crate::format;
 
+#[derive(Debug, Parser)]
+#[command(name = "mkit hash", about = "Hash a file as a blob and store it.")]
+struct HashOpts {
+    /// File to hash and store.
+    file: String,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let Some(path) = args.first() else {
-        return super::usage_error("usage: mkit hash <file>");
+    let opts = match clap_shim::parse::<HashOpts>("mkit hash", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
+    let path = &opts.file;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),

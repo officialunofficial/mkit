@@ -2,18 +2,29 @@
 
 use std::io::Write;
 
+use clap::Parser;
 use mkit_core::hash::from_hex;
 use mkit_core::object::Object;
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::exit;
 use crate::format;
 
+#[derive(Debug, Parser)]
+#[command(name = "mkit cat", about = "Display an object by its hash.")]
+struct CatOpts {
+    /// 64-char hex object hash.
+    hash: String,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let Some(hash_hex) = args.first() else {
-        return super::usage_error("usage: mkit cat <hash>");
+    let opts = match clap_shim::parse::<CatOpts>("mkit cat", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
+    let hash_hex = &opts.hash;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),

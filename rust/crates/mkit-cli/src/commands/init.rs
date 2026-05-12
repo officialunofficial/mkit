@@ -3,13 +3,25 @@
 use std::io::Write;
 use std::path::Path;
 
+use clap::Parser;
 use mkit_core::refs;
 use mkit_core::store::{ObjectStore, StoreError};
 
+use crate::clap_shim;
 use crate::exit;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit init",
+    about = "Create a new mkit repository in the current directory."
+)]
+struct InitOpts {}
+
 #[must_use]
-pub fn run(_args: &[String]) -> u8 {
+pub fn run(args: &[String]) -> u8 {
+    if let Err(code) = clap_shim::parse::<InitOpts>("mkit init", args) {
+        return code;
+    }
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cannot read cwd: {e}"), exit::NOINPUT),
