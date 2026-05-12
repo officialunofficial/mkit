@@ -42,6 +42,14 @@ pub enum FactoryError {
     /// The per-algorithm keyfile is missing. Error message points the
     /// user at `mkit keygen --algorithm <algo>`.
     MissingKeyFile { algorithm: Algorithm, path: String },
+    /// The selected keystore key is missing. Error message points the user at
+    /// `mkit key generate --algorithm <algo> --label <label>`.
+    MissingKeystoreKey {
+        algorithm: Algorithm,
+        key_ref: String,
+        label: String,
+        reason: String,
+    },
     /// Keyfile exists but is not a 32-byte raw secret.
     InvalidKeyFile { path: String, reason: String },
     /// `attest.external_signer_path` is empty / relative / unusable.
@@ -67,6 +75,15 @@ impl std::fmt::Display for FactoryError {
             Self::MissingKeyFile { algorithm, path } => write!(
                 f,
                 "{algorithm} key file not found at '{path}' — run `mkit keygen --algorithm {algorithm}` first"
+            ),
+            Self::MissingKeystoreKey {
+                algorithm,
+                key_ref,
+                label,
+                reason,
+            } => write!(
+                f,
+                "missing keystore signing key `{key_ref}` — run `mkit key generate --algorithm {algorithm} --label {label}` first: {reason}"
             ),
             Self::InvalidKeyFile { path, reason } => {
                 write!(f, "invalid key file '{path}': {reason}")
@@ -126,11 +143,19 @@ fn build_keystore_signer(
     let store = mkit_keystore::SoftwareKeystore::new()
         .map_err(|error| FactoryError::Keystore(error.to_string()))?;
     let keystore_algorithm = to_keystore_algorithm(algorithm);
-    let selector = KeySelector::new(key_ref.label, Some(keystore_algorithm))
+    let key_ref_string = key_ref.to_string();
+    let label = key_ref.label;
+    let selector = KeySelector::new(label.clone(), Some(keystore_algorithm))
         .map_err(|error| FactoryError::Keystore(error.to_string()))?;
-    let signer = store
-        .open(&selector)
-        .map_err(|error| FactoryError::Keystore(error.to_string()))?;
+    let signer = store.open(&selector).map_err(|error| match error {
+        mkit_keystore::Error::KeyNotFound(_) => FactoryError::MissingKeystoreKey {
+            algorithm,
+            key_ref: key_ref_string,
+            label,
+            reason: error.to_string(),
+        },
+        other => FactoryError::Keystore(other.to_string()),
+    })?;
     Ok(Box::new(KeystoreAttestSigner { algorithm, signer }))
 }
 

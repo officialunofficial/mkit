@@ -244,11 +244,13 @@ pub struct SoftwareSigner {
 }
 
 impl SoftwareSigner {
-    fn new(label: String, algorithm: Algorithm, secret: [u8; 32]) -> Result<Self> {
+    fn new(label: String, algorithm: Algorithm, mut secret: [u8; 32]) -> Result<Self> {
         validate_secret(algorithm, &secret)?;
+        let wrapped = SecretKey::new(algorithm, secret);
+        secret.zeroize();
         Ok(Self {
             label,
-            secret: SecretKey::new(algorithm, secret),
+            secret: wrapped,
         })
     }
 }

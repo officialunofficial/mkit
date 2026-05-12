@@ -140,6 +140,38 @@ fn key_generate_prints_stable_keyid_line() {
 }
 
 #[test]
+fn key_default_ref_drives_unlabeled_commands() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+    let cfg_dir = td.path().join("config/mkit");
+    std::fs::create_dir_all(&cfg_dir).expect("config dir");
+    std::fs::write(
+        cfg_dir.join("config"),
+        "key.default_ref = software:shared\n",
+    )
+    .expect("user config");
+
+    let secret = "04".repeat(32);
+    let import = run(
+        td.path(),
+        &["key", "import", "--algorithm", "ed25519", "--hex", &secret],
+    );
+    assert!(
+        import.status.success(),
+        "import stderr: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+
+    let list = run(td.path(), &["key", "list"]);
+    assert!(list.status.success());
+    let stdout = String::from_utf8(list.stdout).expect("stdout utf8");
+    assert!(
+        stdout.contains("software shared ed25519 ed25519:"),
+        "default ref label should be used: {stdout}"
+    );
+}
+
+#[test]
 fn commit_can_use_keystore_signer_without_legacy_keygen() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(td.path().join("repo")).expect("repo dir");
@@ -192,6 +224,39 @@ fn commit_can_use_keystore_signer_without_legacy_keygen() {
         verify.status.success(),
         "verify stderr: {}",
         String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+#[test]
+fn keystore_commit_missing_key_fails_without_generation() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+    assert!(run(td.path(), &["init"]).status.success());
+
+    let cfg_dir = td.path().join("config/mkit");
+    std::fs::create_dir_all(&cfg_dir).expect("config dir");
+    std::fs::write(
+        cfg_dir.join("config"),
+        "signer = keystore\nkey.ed25519_ref = software:missing\n",
+    )
+    .expect("user config");
+
+    std::fs::write(td.path().join("repo/README.md"), b"hello\n").expect("README");
+    assert!(run(td.path(), &["add", "README.md"]).status.success());
+    let commit = run(td.path(), &["commit", "-m", "missing keystore key"]);
+    assert_eq!(commit.status.code(), Some(66));
+    let stderr = String::from_utf8_lossy(&commit.stderr);
+    assert!(
+        stderr.contains("mkit key generate"),
+        "stderr should point to key generation: {stderr}"
+    );
+    assert!(
+        !td.path().join("repo/.mkit/keys/default.key").exists(),
+        "keystore commit must not silently create the legacy key"
+    );
+    assert!(
+        !td.path().join("data/mkit/keys").exists(),
+        "keystore commit must not silently create a keystore key"
     );
 }
 

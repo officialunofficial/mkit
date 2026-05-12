@@ -128,11 +128,23 @@ fn show_all(cfg: &Config) -> u8 {
         cfg.trusted_remote_endpoint
     );
     let _ = writeln!(stdout, "signer = {}", cfg.signer);
-    let _ = writeln!(stdout, "key.backend = {}", cfg.key.backend);
-    let _ = writeln!(stdout, "key.default_ref = {}", cfg.key.default_ref);
-    let _ = writeln!(stdout, "key.ed25519_ref = {}", cfg.key.ed25519_ref);
-    let _ = writeln!(stdout, "key.secp256k1_ref = {}", cfg.key.secp256k1_ref);
-    let _ = writeln!(stdout, "key.p256_ref = {}", cfg.key.p256_ref);
+    let _ = writeln!(stdout, "key.backend = {}", cfg.key.backend_or_fallback());
+    let _ = writeln!(
+        stdout,
+        "key.default_ref = {}",
+        cfg.key.default_ref_or_fallback()
+    );
+    let _ = writeln!(
+        stdout,
+        "key.ed25519_ref = {}",
+        cfg.key.ed25519_ref_or_fallback()
+    );
+    let _ = writeln!(
+        stdout,
+        "key.secp256k1_ref = {}",
+        cfg.key.secp256k1_ref_or_fallback()
+    );
+    let _ = writeln!(stdout, "key.p256_ref = {}", cfg.key.p256_ref_or_fallback());
     let _ = writeln!(stdout, "signing_key = {}", cfg.signing_key);
     let _ = writeln!(stdout, "default_branch = {}", cfg.default_branch);
     let _ = writeln!(stdout, "remote_endpoint = {}", cfg.remote_endpoint);
@@ -157,11 +169,11 @@ fn show_one(cfg: &Config, key: &str) -> u8 {
         "user.identity" => &cfg.user_identity,
         "trusted_remote_endpoint" => &cfg.trusted_remote_endpoint,
         "signer" => &cfg.signer,
-        "key.backend" => &cfg.key.backend,
-        "key.default_ref" => &cfg.key.default_ref,
-        "key.ed25519_ref" => &cfg.key.ed25519_ref,
-        "key.secp256k1_ref" => &cfg.key.secp256k1_ref,
-        "key.p256_ref" => &cfg.key.p256_ref,
+        "key.backend" => cfg.key.backend_or_fallback(),
+        "key.default_ref" => cfg.key.default_ref_or_fallback(),
+        "key.ed25519_ref" => cfg.key.ed25519_ref_or_fallback(),
+        "key.secp256k1_ref" => cfg.key.secp256k1_ref_or_fallback(),
+        "key.p256_ref" => cfg.key.p256_ref_or_fallback(),
         "signing_key" => &cfg.signing_key,
         "default_branch" => &cfg.default_branch,
         "remote_endpoint" => &cfg.remote_endpoint,

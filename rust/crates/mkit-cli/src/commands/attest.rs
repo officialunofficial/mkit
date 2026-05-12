@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! mkit attest [--commit <hash>] [--algorithm ed25519|secp256k1|p256]
-//!             [--signer repo-key|external]
+//!             [--signer repo-key|external|keystore]
 //!             [--predicate-type <URI>] [--predicate-file <path>]
 //!             [--external-signer-arg <V>]...
 //!             [--additional-signer "<spec>"]...
@@ -211,7 +211,7 @@ pub fn run(args: &[String]) -> u8 {
             return emit_err(
                 &format!(
                     "{e}\nusage: mkit attest [--commit <hash>] [--algorithm ed25519|secp256k1|p256] \
-                     [--signer repo-key|external] [--predicate-type <URI>] [--predicate-file <path>] \
+                     [--signer repo-key|external|keystore] [--predicate-type <URI>] [--predicate-file <path>] \
                      [--external-signer-arg <V>]... \
                      [--additional-signer \"algorithm=<a>,signer=<k>[,path=<p>][,args=<a>|<b>|<c>]\"]..."
                 ),
@@ -433,7 +433,9 @@ fn build_additional_signer(
 fn factory_error_code(e: &FactoryError) -> u8 {
     match e {
         FactoryError::UnknownSignerKind(_) | FactoryError::UnknownAlgorithm(_) => exit::USAGE,
-        FactoryError::MissingKeyFile { .. } => exit::NOINPUT,
+        FactoryError::MissingKeyFile { .. } | FactoryError::MissingKeystoreKey { .. } => {
+            exit::NOINPUT
+        }
         _ => exit::CONFIG_ERROR,
     }
 }

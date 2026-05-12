@@ -108,3 +108,41 @@ fn attest_with_keystore_ed25519_roundtrip() {
         String::from_utf8_lossy(&verify.stderr)
     );
 }
+
+#[test]
+fn attest_with_keystore_missing_key_fails_without_generation() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let repo = td.path().join("repo");
+    fs::create_dir(&repo).expect("repo dir");
+
+    assert!(run(td.path(), &["init"]).status.success());
+    assert!(run(td.path(), &["keygen"]).status.success());
+    fs::write(repo.join("README.md"), b"hello\n").expect("write README");
+    assert!(run(td.path(), &["add", "README.md"]).status.success());
+    let commit = run(td.path(), &["commit", "-m", "init"]);
+    assert!(
+        commit.status.success(),
+        "commit stderr: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    let cfg_dir = td.path().join("config/mkit");
+    fs::create_dir_all(&cfg_dir).expect("config dir");
+    fs::write(
+        cfg_dir.join("config"),
+        "attest.signer = keystore\nkey.ed25519_ref = software:missing\n",
+    )
+    .expect("user config");
+
+    let attest = run(td.path(), &["attest", "--algorithm", "ed25519"]);
+    assert_eq!(attest.status.code(), Some(66));
+    let stderr = String::from_utf8_lossy(&attest.stderr);
+    assert!(
+        stderr.contains("mkit key generate"),
+        "stderr should point to key generation: {stderr}"
+    );
+    assert!(
+        !td.path().join("data/mkit/keys").exists(),
+        "keystore attest must not silently create a keystore key"
+    );
+}

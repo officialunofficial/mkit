@@ -166,7 +166,11 @@ impl KeyConfig {
     #[must_use]
     pub fn secp256k1_ref_or_fallback(&self) -> &str {
         if self.secp256k1_ref.is_empty() {
-            DEFAULT_SECP256K1_KEY_REF
+            if self.default_ref.is_empty() {
+                DEFAULT_SECP256K1_KEY_REF
+            } else {
+                self.default_ref.as_str()
+            }
         } else {
             self.secp256k1_ref.as_str()
         }
@@ -175,7 +179,11 @@ impl KeyConfig {
     #[must_use]
     pub fn p256_ref_or_fallback(&self) -> &str {
         if self.p256_ref.is_empty() {
-            DEFAULT_P256_KEY_REF
+            if self.default_ref.is_empty() {
+                DEFAULT_P256_KEY_REF
+            } else {
+                self.default_ref.as_str()
+            }
         } else {
             self.p256_ref.as_str()
         }
@@ -198,7 +206,7 @@ pub struct LayeredConfig {
 pub struct AttestConfig {
     /// One of `"ed25519"`, `"secp256k1"`, `"p256"`. Empty = `"ed25519"`.
     pub default_algorithm: String,
-    /// One of `"repo-key"`, `"external"`. Empty = `"repo-key"`.
+    /// One of `"repo-key"`, `"external"`, `"keystore"`. Empty = `"repo-key"`.
     pub signer: String,
     /// Absolute path to the external signer binary. Required when
     /// `signer = "external"`. User-scoped only.
@@ -263,10 +271,10 @@ impl Config {
             signer: DEFAULT_SIGNER.to_owned(),
             key: KeyConfig {
                 backend: DEFAULT_KEY_BACKEND.to_owned(),
-                default_ref: DEFAULT_KEY_REF.to_owned(),
-                ed25519_ref: DEFAULT_KEY_REF.to_owned(),
-                secp256k1_ref: DEFAULT_SECP256K1_KEY_REF.to_owned(),
-                p256_ref: DEFAULT_P256_KEY_REF.to_owned(),
+                default_ref: String::new(),
+                ed25519_ref: String::new(),
+                secp256k1_ref: String::new(),
+                p256_ref: String::new(),
             },
             ..Self::default()
         }
@@ -981,10 +989,13 @@ mod tests {
         );
         assert_eq!(cfg.signer, DEFAULT_SIGNER);
         assert_eq!(cfg.key.backend, DEFAULT_KEY_BACKEND);
-        assert_eq!(cfg.key.default_ref, DEFAULT_KEY_REF);
-        assert_eq!(cfg.key.ed25519_ref, DEFAULT_KEY_REF);
-        assert_eq!(cfg.key.secp256k1_ref, DEFAULT_SECP256K1_KEY_REF);
-        assert_eq!(cfg.key.p256_ref, DEFAULT_P256_KEY_REF);
+        assert_eq!(cfg.key.default_ref_or_fallback(), DEFAULT_KEY_REF);
+        assert_eq!(cfg.key.ed25519_ref_or_fallback(), DEFAULT_KEY_REF);
+        assert_eq!(
+            cfg.key.secp256k1_ref_or_fallback(),
+            DEFAULT_SECP256K1_KEY_REF
+        );
+        assert_eq!(cfg.key.p256_ref_or_fallback(), DEFAULT_P256_KEY_REF);
     }
 
     #[test]
@@ -1006,6 +1017,32 @@ mod tests {
         assert_eq!(cfg.key.ed25519_ref_or_fallback(), "software:user-ed");
         assert_eq!(cfg.key.secp256k1_ref_or_fallback(), "software:user-k1");
         assert_eq!(cfg.key.p256_ref_or_fallback(), "software:user-p256");
+    }
+
+    #[test]
+    fn user_default_key_ref_is_generic_fallback() {
+        let cfg = layer(None, Some("key.default_ref = software:release\n"));
+        assert_eq!(cfg.key.default_ref_or_fallback(), "software:release");
+        assert_eq!(cfg.key.ed25519_ref_or_fallback(), "software:release");
+        assert_eq!(cfg.key.secp256k1_ref_or_fallback(), "software:release");
+        assert_eq!(cfg.key.p256_ref_or_fallback(), "software:release");
+    }
+
+    #[test]
+    fn algorithm_key_refs_override_default_key_ref() {
+        let cfg = layer(
+            None,
+            Some(
+                "key.default_ref = software:release\n\
+                 key.ed25519_ref = software:ed\n\
+                 key.secp256k1_ref = software:k1\n\
+                 key.p256_ref = software:p256\n",
+            ),
+        );
+        assert_eq!(cfg.key.default_ref_or_fallback(), "software:release");
+        assert_eq!(cfg.key.ed25519_ref_or_fallback(), "software:ed");
+        assert_eq!(cfg.key.secp256k1_ref_or_fallback(), "software:k1");
+        assert_eq!(cfg.key.p256_ref_or_fallback(), "software:p256");
     }
 
     #[test]
@@ -1166,6 +1203,10 @@ mod tests {
         assert_eq!(cfg.signer, DEFAULT_SIGNER);
         assert_eq!(cfg.key.backend_or_fallback(), DEFAULT_KEY_BACKEND);
         assert_eq!(cfg.key.default_ref_or_fallback(), DEFAULT_KEY_REF);
+        assert!(cfg.key.default_ref.is_empty());
+        assert!(cfg.key.ed25519_ref.is_empty());
+        assert!(cfg.key.secp256k1_ref.is_empty());
+        assert!(cfg.key.p256_ref.is_empty());
         assert_eq!(cfg.key.ed25519_ref_or_fallback(), DEFAULT_KEY_REF);
         assert_eq!(
             cfg.key.secp256k1_ref_or_fallback(),
