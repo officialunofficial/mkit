@@ -218,3 +218,26 @@ fn keyring_backend_error(operation: &str, error: keyring_core::Error) -> Error {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capabilities_are_backend_accurate() {
+        let capabilities = WindowsCredentialKeystore::new().capabilities();
+        assert_eq!(capabilities.backend, BackendKind::WindowsCredentialManager);
+        assert_eq!(
+            capabilities.algorithms,
+            vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256]
+        );
+        assert!(capabilities.can_generate);
+        assert!(capabilities.can_import);
+        assert!(capabilities.can_export);
+        assert!(capabilities.can_delete);
+        assert!(!capabilities.supports_listing);
+        assert!(!capabilities.supports_user_presence);
+        assert!(!capabilities.supports_device_bound);
+        assert!(!capabilities.supports_non_extractable);
+    }
+}

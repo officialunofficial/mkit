@@ -888,6 +888,38 @@ mod tests {
             &[9; 32]
         );
     }
+
+    #[test]
+    fn software_capabilities_are_backend_accurate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (store, backend) in [
+            (
+                Box::new(SoftwareKeystore::with_root(dir.path().join("software")))
+                    as Box<dyn Keystore>,
+                BackendKind::Software,
+            ),
+            (
+                Box::new(SoftwareRawKeystore::with_root(dir.path().join("raw")))
+                    as Box<dyn Keystore>,
+                BackendKind::SoftwareRaw,
+            ),
+        ] {
+            let capabilities = store.capabilities();
+            assert_eq!(capabilities.backend, backend);
+            assert_eq!(
+                capabilities.algorithms,
+                vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256]
+            );
+            assert!(capabilities.can_generate);
+            assert!(capabilities.can_import);
+            assert!(capabilities.can_export);
+            assert!(capabilities.can_delete);
+            assert!(capabilities.supports_listing);
+            assert!(!capabilities.supports_user_presence);
+            assert!(!capabilities.supports_device_bound);
+            assert!(!capabilities.supports_non_extractable);
+        }
+    }
 }
 
 #[cfg(all(test, feature = "attest"))]

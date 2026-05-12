@@ -224,6 +224,8 @@ mod tests {
         assert!(capabilities.can_export);
         assert!(capabilities.can_delete);
         assert!(!capabilities.supports_listing);
+        assert!(!capabilities.supports_user_presence);
+        assert!(!capabilities.supports_device_bound);
         assert!(!capabilities.supports_non_extractable);
     }
 }
