@@ -5,12 +5,13 @@ description: "On-disk object format for mkit: Blob, Tree, Commit, Remix, Chunked
 
 # Objects
 
-Status: **Normative** for mkit v1.
-Scope: `.mkit/objects/` content and the byte layout of every object type.
-Endianness: **little-endian** throughout. All hashes are 32-byte BLAKE3.
+:badge[Normative · v1]{success}
 
-This document defines whatv1 must implement. External tools MUST be able to produce and
-consume these bytes with only this document.
+The contents of `.mkit/objects/` and the byte layout of every object
+type. External tools MUST be able to produce and consume these bytes
+using only this document.
+
+All integers are little-endian. All hashes are 32-byte BLAKE3.
 
 ---
 

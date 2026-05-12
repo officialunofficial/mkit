@@ -5,6 +5,8 @@ description: "Seven-verb transport protocol shared by mkit's file, http, s3, and
 
 # Transport
 
+:badge[Normative · v1]{success}
+
 mkit talks to remote stores through a small set of pluggable
 transports (memory, file, HTTP, S3, SSH). All speak the same
 [`Transport`](https://github.com/officialunofficial/mkit/blob/main/rust/crates/mkit-core/src/protocol.rs) trait —
@@ -12,7 +14,7 @@ seven verbs over a synchronous, object-safe interface — but the wire
 shape differs per scheme.
 
 The wire format used by the SSH transport is defined in
-[`SPEC-RPC`](/docs/spec/rpc). This document covers the transport-level
+[RPC](/docs/spec/rpc). This document covers the transport-level
 concerns: URL parsing, retry policy, content-addressing, the
 forced-command server pattern, and the cross-transport error
 taxonomy.

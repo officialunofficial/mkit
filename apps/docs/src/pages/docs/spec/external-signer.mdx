@@ -5,16 +5,18 @@ description: "v1 stdio protocol between mkit and an out-of-process signer binary
 
 # External signer
 
+:badge[Normative · v1]{success}
+
 The wire contract between the mkit host process and a user-supplied
 external signer binary. Implementations that follow this spec are
 drop-in compatible with the `external` signer selector referenced in
-[[Attestations](/docs/spec/attestations)](/docs/spec/attestations) §6.2.
+[Attestations](/docs/spec/attestations) §6.2.
 
-Audience: integrators shipping a signer for a platform mkit does not
+For integrators shipping a signer for a platform mkit does not
 ship natively — Apple Secure Enclave, Ledger / Trezor, WebAuthn/CTAP,
 MetaMask / EVM wallet bridges, Makechain, HSMs, etc.
 
-The wire format itself is defined in [`SPEC-RPC`](/docs/spec/rpc). This
+The wire format itself is defined in [RPC](/docs/spec/rpc). This
 document covers the signer-specific aspects: process invocation,
 conversation flow, capability advertisement, and reference signer
 behaviours.

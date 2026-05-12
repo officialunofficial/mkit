@@ -5,16 +5,16 @@ description: "Native in-toto v1 + DSSE attestation primitive for mkit: predicate
 
 # Attestations
 
-Status: **Draft**. This document defines a native attestation primitive
-for mkit: the on-disk layout, the wire envelope, the signing contract,
-the CLI, and the transport additions. It supersedes `docs/NOTARY.md`
-(removed in the same commit series that implements this spec).
+:badge[Draft]{warning}
 
-Scope: everything about how mkit produces, stores, transports, and
-verifies an attestation about a commit. **Not** in scope: what an
-attestation *means* — that's the business of the predicate-type URI,
-which is chosen by whoever makes the claim (mkit itself, Makechain,
-GitHub, a user's build server, etc.).
+The native attestation primitive for mkit: how attestations are
+produced, stored, transported, and verified, including the on-disk
+layout, the wire envelope, the signing contract, the CLI, and the
+transport additions.
+
+Out of scope: what an attestation *means* — that's the business of
+the predicate-type URI, which is chosen by whoever makes the claim
+(mkit itself, Makechain, GitHub, a user's build server, and so on).
 
 ---
 
