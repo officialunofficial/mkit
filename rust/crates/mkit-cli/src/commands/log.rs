@@ -8,30 +8,79 @@
 //!   commit. Suitable for piping into `jq`.
 //!
 //! `--graph` is silently accepted as a no-op pending Phase 10.
+//!
+//! Argument parsing is delegated to clap-derive via
+//! [`crate::clap_shim::parse`]; clap emits standard diagnostics on
+//! errors and the shim maps them to mkit sysexits (`USAGE` for
+//! unknown flags, `DATAERR` for malformed `-n` values, etc.).
 
 use std::io::Write;
 
+use clap::{Parser, ValueEnum};
 use mkit_core::object::Object;
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::exit;
 use crate::format;
 use crate::signal;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Format {
     Default,
     Oneline,
     Json,
 }
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit log",
+    about = "Show commit history.",
+    disable_help_flag = false,
+    disable_version_flag = true
+)]
+struct LogOpts {
+    /// Compact one-line-per-commit output. Equivalent to
+    /// `--format=oneline`; if both are given, `--format` wins.
+    #[arg(long)]
+    oneline: bool,
+
+    /// Output format.
+    #[arg(long, value_enum)]
+    format: Option<Format>,
+
+    /// Cap the number of commits printed.
+    #[arg(short = 'n')]
+    limit: Option<usize>,
+
+    /// Render an ASCII graph. Accepted for compatibility; Phase-10
+    /// follow-up.
+    #[arg(long)]
+    graph: bool,
+}
+
+impl LogOpts {
+    /// Resolve `(oneline, format)` into the single `Format` the
+    /// renderer consumes. Explicit `--format` wins over `--oneline`.
+    fn render_format(&self) -> Format {
+        match self.format {
+            Some(f) => f,
+            None if self.oneline => Format::Oneline,
+            None => Format::Default,
+        }
+    }
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let (fmt, limit) = match parse_args(args) {
-        Ok(v) => v,
+    let opts = match clap_shim::parse::<LogOpts>("mkit log", args) {
+        Ok(o) => o,
         Err(code) => return code,
     };
+    let fmt = opts.render_format();
+    let _ = opts.graph; // accepted, currently no-op.
+
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -42,8 +91,6 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
     let Ok(Some(start)) = refs::resolve_head(&mkit_dir) else {
-        // No HEAD: emit nothing on stdout (JSON callers see an empty
-        // stream; human callers see a note on stderr).
         if matches!(fmt, Format::Default | Format::Oneline) {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "no commits yet");
@@ -57,7 +104,7 @@ pub fn run(args: &[String]) -> u8 {
         if signal::is_shutdown() {
             return exit::TEMPFAIL;
         }
-        if let Some(lim) = limit
+        if let Some(lim) = opts.limit
             && shown >= lim
         {
             break;
@@ -154,47 +201,57 @@ fn emit_json_entry(
     let _ = out.write_all(b"}\n");
 }
 
-fn parse_args(args: &[String]) -> Result<(Format, Option<usize>), u8> {
-    let mut fmt = Format::Default;
-    let mut limit: Option<usize> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--oneline" => fmt = Format::Oneline,
-            "--format=json" => fmt = Format::Json,
-            "--format" if i + 1 < args.len() => {
-                match args[i + 1].as_str() {
-                    "json" => fmt = Format::Json,
-                    "oneline" => fmt = Format::Oneline,
-                    "default" => fmt = Format::Default,
-                    other => {
-                        return Err(super::usage_error(&format!(
-                            "unknown --format value: {other} (expected: default, oneline, json)"
-                        )));
-                    }
-                }
-                i += 1;
-            }
-            "-n" if i + 1 < args.len() => {
-                limit = args[i + 1].parse().ok();
-                i += 1;
-            }
-            "--graph" => {
-                // Silently accept for now — presentation-only flag.
-            }
-            other => {
-                return Err(super::usage_error(&format!(
-                    "unknown flag for log: {other}"
-                )));
-            }
-        }
-        i += 1;
-    }
-    Ok((fmt, limit))
-}
-
 fn emit_err(msg: &str, code: u8) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "error: {msg}");
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_format_explicit_format_wins_over_oneline() {
+        let opts = LogOpts {
+            oneline: true,
+            format: Some(Format::Default),
+            limit: None,
+            graph: false,
+        };
+        assert_eq!(opts.render_format(), Format::Default);
+    }
+
+    #[test]
+    fn render_format_oneline_alone_resolves_to_oneline() {
+        let opts = LogOpts {
+            oneline: true,
+            format: None,
+            limit: None,
+            graph: false,
+        };
+        assert_eq!(opts.render_format(), Format::Oneline);
+    }
+
+    #[test]
+    fn render_format_default_when_no_flags() {
+        let opts = LogOpts {
+            oneline: false,
+            format: None,
+            limit: None,
+            graph: false,
+        };
+        assert_eq!(opts.render_format(), Format::Default);
+    }
+
+    #[test]
+    fn render_format_json_via_format_flag() {
+        let opts = LogOpts {
+            oneline: false,
+            format: Some(Format::Json),
+            limit: None,
+            graph: false,
+        };
+        assert_eq!(opts.render_format(), Format::Json);
+    }
 }
