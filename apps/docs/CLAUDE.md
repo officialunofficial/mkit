@@ -1,0 +1,1 @@
+This is the Vocs `next` docs site for mkit. Source pages live in `src/pages/`. Run `pnpm dev` from this directory. Deploy is Cloudflare Pages via `wrangler pages deploy dist/public --project-name=mkit-docs`. See `/docs/VOCS-MIGRATION.md` at the repo root for the canonical plan and authoring rules.

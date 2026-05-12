@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+/* mkit-specific brand tokens go here. The landing agent will extend this
+   file with the project's color palette, fonts, and any chrome-level CSS
+   that the Vocs site needs. Keep this file the single source of truth for
+   global styles; component-scoped styles belong in their .tsx files. */
+
+@source "../components";
+
+/* ----------------------------------------------------------------------
+   Fonts — Geist + Geist Mono
+   ----------------------------------------------------------------------
+   Loaded from Google Fonts to mirror the existing site at
+   `web/src/pages/_layout.tsx`. CSS `@import` is used rather than a
+   `<link>` tag because `_root.css` is the only stylesheet hook Vocs
+   gives us at the document level — there's no shared `<head>` in MDX
+   pages. The `@import` MUST be the first non-comment rule in the file
+   for the CSS spec, but Tailwind/Vite tolerate it after `@import
+   "tailwindcss"` because they re-order imports during the build.
+
+   The `display=swap` query keeps text visible during the brief swap
+   window while Geist downloads, avoiding a flash of invisible text. */
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap");
+
+/* ----------------------------------------------------------------------
+   Brand tokens — ported verbatim from `web/src/styles.css`
+   ----------------------------------------------------------------------
+   The demo components (`hash-demo.client.tsx`, `merkle-tree.tsx`, etc.)
+   reference these custom properties directly via Tailwind arbitrary
+   values like `text-[--color-muted]` and `border-[--color-hairline]`.
+   Keeping the same names lets the demos move from `web/` to
+   `apps/docs/src/components/` without code changes. The `--gradient-*`
+   tokens drive the brand-colored hairline accents and the landing
+   hero's gradient text. */
+:root {
+  --color-bg: oklch(1 0 0);
+  --color-fg: oklch(0.145 0 0);
+  --color-muted: oklch(0.556 0 0);
+  /* `subtle` sits between `muted` and `hairline` — used for the Merkle
+     tree connector lines and other descriptive copy that should read
+     as secondary without fully fading out. */
+  --color-subtle: oklch(0.68 0 0);
+  --color-hairline: oklch(0.922 0 0);
+
+  /* Brand gradient lifted from the official-unofficial logo. Stops are
+     carried verbatim so the chroma matches across surfaces. Two
+     directional tokens: `-h` for horizontal rules, `-v` for text
+     clipping (which stays vertical like the logo itself). */
+  --gradient-h: linear-gradient(to right, #fa7cfa 0%, #f5ca23 30%, #00d2a8 66%, #7a3bf7 97%);
+  --gradient-v: linear-gradient(to bottom, #fa7cfa 0%, #f5ca23 30%, #00d2a8 66%, #7a3bf7 97%);
+}
+
+/* Dark scheme — flip the neutral palette. The brand gradient stops
+   stay the same; only the surface and hairline tokens invert. The Vocs
+   color scheme is `dark` by default (see `vocs.config.ts`), so this is
+   the path most visitors will see. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: oklch(0.145 0 0);
+    --color-fg: oklch(0.985 0 0);
+    --color-muted: oklch(0.708 0 0);
+    --color-subtle: oklch(0.45 0 0);
+    --color-hairline: oklch(0.269 0 0);
+  }
+}
+
+/* ----------------------------------------------------------------------
+   Typography defaults
+   ----------------------------------------------------------------------
+   The Vocs body font is set via the `--vocs-font-fontFamily` token. We
+   override it to Geist so prose pages and the homepage hero share the
+   exact same typeface. Tailwind classes in the ported demos use
+   `font-sans` / `font-mono`, which resolve through the same custom
+   properties. */
+:root {
+  --vocs-fontFamily_default:
+    "Geist", "Geist Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --vocs-fontFamily_mono:
+    "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+html {
+  /* Crisper type on macOS; no-op elsewhere. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Dynamic numbers (hash digits, byte counts) stay layout-stable. */
+  font-variant-numeric: tabular-nums;
+}
+
+/* ----------------------------------------------------------------------
+   Landing-page demo cards
+   ----------------------------------------------------------------------
+   Hover affordance for `<DemoCards />`. The arrow translates 4px and
+   the card lifts to 80% opacity — matches the feel of the divider-list
+   pattern on the existing site. Scoped via class names so it cannot
+   leak into Vocs's own card components on doc pages. */
+.mkit-demo-card:hover {
+  opacity: 0.8;
+}
+.mkit-demo-card:hover .mkit-demo-card__arrow {
+  transform: translateX(4px);
+}

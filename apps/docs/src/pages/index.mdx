@@ -1,0 +1,31 @@
+---
+layout: minimal
+title: mkit — A content-addressed VCS in Rust
+description: BLAKE3-addressed objects, Ed25519-signed commits, portable in-toto v1 attestations. A Git-shaped VCS, rebuilt from first principles.
+showAskAi: false
+showLogo: false
+---
+
+import { HomePage } from "vocs";
+import { DemoCards } from "../components/demo-cards.client.tsx";
+
+<HomePage.Root>
+  {/* TODO(brand): <HomePage.Logo /> once mkit wordmark SVG ships in apps/docs/public/. */}
+  <HomePage.Tagline>A content-addressed VCS.</HomePage.Tagline>
+  <HomePage.Description>
+    Every file is named by a BLAKE3 hash of its bytes. Every commit
+    is signed. Every review is a portable, signed claim anyone can
+    verify. Written in Rust — here it runs in your browser.
+  </HomePage.Description>
+  <HomePage.Buttons>
+    <HomePage.Button href="/docs/install" variant="accent">Install</HomePage.Button>
+    <HomePage.Button href="/docs">Docs</HomePage.Button>
+    <HomePage.Button href="/demos/hash">Try it</HomePage.Button>
+  </HomePage.Buttons>
+</HomePage.Root>
+
+```bash
+cargo install --git https://github.com/officialunofficial/mkit mkit-cli
+```
+
+<DemoCards />

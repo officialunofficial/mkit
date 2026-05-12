@@ -1,0 +1,41 @@
+---
+title: Tree — mkit
+description: A Merkle tree of BLAKE3 hashes — edit any file and the hashes ripple up to the commit at the root.
+layout: docs
+---
+
+import { TreeDemo } from "../../components/tree-demo.client.tsx";
+
+# Tree
+
+A folder is a list of files and other folders, each named by a BLAKE3
+hash. A parent's hash is computed from its children's hashes, so the
+structure is a Merkle tree: edit any file and every hash above it
+rewrites — file → folder → parent folder → commit. The root hash is a
+fingerprint of everything below.
+
+<TreeDemo />
+
+## How it works
+
+The file navigator on the left mirrors a small Rust project. Click any
+file to edit its contents; the panel on the right encodes every blob
+and every tree and shows the resulting hashes. The Merkle visualisation
+makes the ripple visible: tweak `src/lib.rs` and watch the `src/`
+folder's hash change, then the root's, then the commit's.
+
+Each tree object is a canonical encoding — entries sorted by name,
+fixed prologue, no whitespace — so two clients independently encoding
+the same logical tree always agree on the bytes, and therefore the
+hash. Tree entries carry a kind tag (`blob` or `tree`) so the verifier
+knows what shape to expect at the referenced hash without dereferencing
+it first.
+
+The commit at the root carries a single tree pointer plus parent
+pointers (none here, so this is a root commit), an author timestamp,
+and a message. Sign the commit and the signature transitively commits
+to every byte in every blob beneath it.
+
+The tree-encoding rules, naming constraints, and parent-pointer wire
+format live in [packfile](/docs/spec/packfile) and the
+[objects spec](/docs/spec/objects).

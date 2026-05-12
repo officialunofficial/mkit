@@ -1,0 +1,37 @@
+---
+title: Sign — mkit
+description: Generate a key, sign a message, flip a character, watch the verifier reject it.
+layout: docs
+---
+
+import { SignDemo } from "../../components/sign-demo.client.tsx";
+
+# Sign
+
+A private key signs a message; the matching public key verifies it.
+Anyone can confirm the message hasn't been changed and that you signed
+it. Flip a single character below and the verifier rejects it.
+
+<SignDemo />
+
+## How it works
+
+The private key here is a 32-byte seed. mkit derives an Ed25519 keypair
+from it deterministically — the same seed always gives the same
+`(secret, public)` pair, so the demo can ship a fixed seed and still
+demonstrate signing without persisting any state. Press "Generate a new
+key" to mint a fresh random seed.
+
+Signing runs the message through Ed25519 under mkit's commit signing
+domain — a domain-separation tag prepended to the message so a
+signature on a commit can never accidentally validate as a signature on
+anything else. Verifying re-runs the same domain prefix, hashes, and
+checks the signature against the public key. Toggle "Tamper with the
+message" to flip the last character before verification; the verifier
+rejects it because the bytes — and therefore the hash being signed —
+no longer match.
+
+Ed25519, the wire format, and the domain-separation rules are spelled
+out in the [signing spec](/docs/spec/signing). The
+[attestations](/docs/spec/attestations) page covers the same primitive
+used to sign structured claims rather than commits.

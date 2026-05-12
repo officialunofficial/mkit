@@ -1,0 +1,49 @@
+---
+title: Streaming — mkit
+description: Why git stops working on a 2 GB video — and how mkit handles it in 40 KB.
+layout: docs
+---
+
+import { StreamingDemo } from "../../components/streaming-demo.client.tsx";
+
+# Streaming
+
+Content-addressed storage only works on big files if you can chunk,
+diff, and stream-verify them. Drop a file (or use the default) and
+watch four streaming primitives: FastCDC chunking, ChunkedBlob, the
+delta wire format, and Bao verified slices.
+
+<StreamingDemo />
+
+## How it works
+
+**Chunker (FastCDC).** A rolling hash slides across the bytes; chunk
+boundaries are defined by local content, not absolute offsets. Edit a
+byte in the middle of the file and only the chunk containing that byte
+changes — the chunker re-aligns on the same rolling-hash signal and
+re-anchors the chunks downstream. Drag the slider to pick a byte; the
+strip highlights the single chunk that would re-hash if you flipped
+it.
+
+**ChunkedBlob.** A manifest object listing every chunk's hash in
+order, with the manifest itself addressed by BLAKE3. The root hash
+commits to the chunk list, which commits to the chunk bytes — same
+Merkle property as commits and trees, but applied to the streaming
+shape.
+
+**Delta.** When the file changes, the delta wire format ships only the
+chunks the receiver doesn't already have, plus a tiny instruction
+stream pointing at the ones it does. The "% saved" readout is the
+real number: bytes-on-wire vs full re-upload. Edit the same file (let
+the auto-edit loop drift the default, or replace and edit by hand) and
+the savings stay high.
+
+**Bao streaming verify.** The Bao tree format gives you incremental
+verification: each chunk verifies against the root hash as it lands,
+no need to wait for the entire file. The demo streams chunks one at a
+time; tamper any chunk in the dropdown and the verifier rejects that
+chunk on arrival — without affecting the others.
+
+The chunking constants, ChunkedBlob layout, delta wire format, and Bao
+tree shape are documented in [fastcdc](/docs/spec/fastcdc) and
+[delta](/docs/spec/delta).

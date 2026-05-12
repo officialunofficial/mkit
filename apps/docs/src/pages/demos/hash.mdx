@@ -1,0 +1,35 @@
+---
+title: Hash — mkit
+description: Edit a file and watch the BLAKE3 hashes of every container that holds it — folder, parent folder, commit — rewrite live.
+layout: docs
+---
+
+import { HashDemo } from "../../components/hash-demo.client.tsx";
+
+# Hash
+
+Every file, every folder, every commit is named by a BLAKE3 hash of its
+bytes — change a single character and the hash changes too. This page
+builds a tiny commit out of two files and shows every hash along the
+way.
+
+<HashDemo />
+
+## How it works
+
+A blob is just bytes plus a prologue: type tag, magic `MKT1`, schema
+version. BLAKE3 over those bytes is the blob's name. A tree is a sorted
+list of `(name, kind, hash)` entries; BLAKE3 over the tree's encoded
+bytes is the tree's name. A commit references the root tree by hash and
+is signed with an Ed25519 key, so the commit hash transitively commits
+to everything beneath it.
+
+Edit the `README.md` field above and you'll see four hashes shift in
+lockstep: the blob (its bytes changed), the tree (one of its entries
+points at a new blob hash), and the commit (its tree pointer changed).
+The image and the commit message work the same way — every input is
+content-addressed.
+
+The exact byte layout for each object kind is documented in the
+[objects spec](/docs/spec/objects), and the commit-signing flow lives in
+[signing](/docs/spec/signing).

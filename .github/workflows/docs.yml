@@ -1,0 +1,125 @@
+name: Docs CI
+
+# Verifies that `apps/docs` builds. Cloudflare Pages does its own
+# deploys from this repo via the Git integration; this workflow only
+# fails the PR if the build is broken, so an operator never has to
+# discover the failure from a red Pages deployment.
+#
+# Path filter is duplicated under `pull_request` and `push: main`
+# because GitHub Actions does not share `paths` between event keys.
+on:
+  pull_request:
+    paths:
+      - 'apps/docs/**'
+      - 'docs/**'
+      - 'pnpm-workspace.yaml'
+      - 'package.json'
+      - 'rust/crates/mkit-wasm/**'
+      - '.github/workflows/docs.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/docs/**'
+      - 'docs/**'
+      - 'pnpm-workspace.yaml'
+      - 'package.json'
+      - 'rust/crates/mkit-wasm/**'
+      - '.github/workflows/docs.yml'
+
+# Read-only; this workflow never writes back to the repo. Cloudflare
+# Pages handles deploys directly from `main`, so no deploy secrets
+# are needed here either.
+permissions:
+  contents: read
+
+# One run per ref; new pushes cancel the in-flight build.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Match `rust.yml`'s pinned toolchain. The docs build only needs
+  # the wasm32 target, but bumping in lockstep avoids drift.
+  RUST_VERSION: "1.95.0"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: Build docs site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # `apps/docs/package.json` references mkit-wasm as
+      # `file:../../rust/crates/mkit-wasm/pkg`, so the wasm artifact
+      # must exist before `pnpm install` resolves the workspace.
+      - name: Install Rust ${{ env.RUST_VERSION }} (wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+
+      # Cache the cargo registry + the wasm32 target dir. Keyed on
+      # `Cargo.lock` so a dep bump invalidates cleanly. Partitioned
+      # per-workflow + per-runner so a malicious PR cannot poison a
+      # key that release.yml (carries publish secrets) later reads.
+      - name: Cache cargo registry and wasm target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.cargo/bin/
+            rust/target/
+          key: docs-wasm-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            docs-wasm-${{ runner.os }}-
+
+      - name: Install wasm-pack
+        run: |
+          if ! command -v wasm-pack >/dev/null 2>&1; then
+            cargo install wasm-pack --locked --version 0.13.1
+          fi
+
+      # The docs site consumes `mkit-wasm` via wasm-bindgen's
+      # `target=web` glue (see apps/docs/src/lib/mkit.ts). `release.yml`
+      # builds the `bundler` target for npm publish; the two targets
+      # generate different JS shims, so the docs CI builds its own.
+      - name: Build mkit-wasm (target=web)
+        working-directory: rust/crates/mkit-wasm
+        run: wasm-pack build --target web --out-dir pkg --release
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.25.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm --filter mkit-docs typecheck
+
+      - name: Build
+        run: pnpm --filter mkit-docs build
+
+      # On push-to-main, retain the built site for 14 days so an
+      # operator can roll back by hand if Cloudflare Pages misbehaves
+      # mid-deploy. PR builds don't upload — they only verify.
+      - name: Upload built site
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mkit-docs-dist
+          path: apps/docs/dist/public
+          retention-days: 14
+          if-no-files-found: error

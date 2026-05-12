@@ -1,0 +1,13 @@
+{
+  "name": "mkit-monorepo",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter mkit-docs dev",
+    "build": "pnpm --filter mkit-docs build",
+    "preview": "pnpm --filter mkit-docs preview",
+    "deploy": "pnpm --filter mkit-docs deploy",
+    "typecheck": "pnpm --filter mkit-docs typecheck"
+  },
+  "packageManager": "pnpm@10.25.0",
+  "devDependencies": {}
+}

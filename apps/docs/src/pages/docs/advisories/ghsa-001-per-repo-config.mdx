@@ -1,0 +1,113 @@
+---
+title: "GHSA-001: per-repo config"
+description: "Advisory describing the per-repo config trust escalation path and the user-scoped config fix that closes it."
+---
+
+# GHSA-001 — Per-repo `.mkit/config` allows attacker-controlled signing, signer selection, and SSH transport policy
+
+| | |
+|---|---|
+| **Severity** | Critical |
+| **CVSS v3.1** | 9.1 (`AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N`) — local attack vector with user interaction (clone), high confidentiality + integrity impact, scope changed (the user's identity / external binary). |
+| **Affected** | `mkit-cli` `< 0.3.0` |
+| **Patched in** | `0.3.0` |
+| **CWE** | CWE-426 (Untrusted Search Path), CWE-441 (Confused Deputy) |
+| **Discoverer** | mkit maintainers, internal review |
+
+## Summary
+
+A hostile clone of an `mkit` repository can ship a per-repo
+`<repo>/.mkit/config` containing security-sensitive keys. mkit's
+config layer reads them unconditionally. Concrete impact depends on
+which knob is set:
+
+- `signing_key = <attacker-chosen-path>` → arbitrary-file overwrite
+  (32 random bytes, mode 0600) and/or signing of attacker-chosen
+  content with the user's real Ed25519 key.
+- `attest.external_signer_path = <attacker-chosen-binary>` plus
+  `attest.external_signer_args = ...` → arbitrary subprocess
+  execution with attacker-chosen argv under the user's UID.
+- `attest.signer = external` (with the user already having a
+  legitimate user-scoped HSM/external signer configured) → the user's
+  HSM signs attacker-chosen content. Same shape applies to
+  `attest.default_algorithm` against any user-set non-Ed25519 key.
+- `ssh.strict_host_key_checking = no` and friends → MITM-able
+  `mkit push`.
+
+## Affected behaviour
+
+The first time the victim runs **any** of `mkit commit`,
+`mkit attest`, `mkit verify-attest`, or `mkit push` inside a hostile
+clone, the per-repo config takes effect.
+
+- `mkit commit` was previously additionally vulnerable because it
+  auto-generated the signing key when the file was missing — the
+  attacker-controlled path then became the destination of the
+  `O_TRUNC | O_CREAT` write.
+
+## Reproducer (do not run on your own system)
+
+```sh
+mkdir hostile-repo && cd hostile-repo
+mkit init
+mkdir -p .mkit
+cat > .mkit/config <<'EOF'
+signing_key = ../../../../home/victim/.ssh/authorized_keys
+EOF
+# A clone of `hostile-repo`, when the victim runs `mkit commit`,
+# truncates and overwrites `~/.ssh/authorized_keys` with 32 random
+# bytes mode 0600.
+```
+
+A second variant uses
+`attest.external_signer_path = /usr/bin/curl` plus crafted argv to
+exfiltrate the victim's other key material via DNS or HTTP.
+
+## Mitigation in 0.3.0
+
+The fix is structural, not a single bug fix. mkit now layers config
+in three tiers:
+
+1. **Built-in defaults**.
+2. **User-scoped** (`$XDG_CONFIG_HOME/mkit/config`).
+3. **Repo-scoped** (`<repo>/.mkit/config`) — *filtered*: any key in
+   `REPO_FORBIDDEN_KEYS` is rejected with a stderr warning.
+
+`REPO_FORBIDDEN_KEYS` lists every knob whose abuse this advisory
+covers:
+
+- `signing_key`
+- `ssh.strict_host_key_checking`, `ssh.user_known_hosts_file`,
+  `ssh.identity_file`
+- `attest.signer`, `attest.default_algorithm`,
+  `attest.external_signer_path`, `attest.external_signer_args`,
+  `attest.secp256k1_key_path`, `attest.p256_key_path`
+
+Auto-keygen on `mkit commit` and `mkit attest` is removed — both
+require an explicit `mkit keygen` first, eliminating the
+"hostile-config + missing-key" path that produced the file-overwrite
+primitive.
+
+See `docs/THREAT-MODEL.md` for the threat model that motivates the
+split.
+
+## Workarounds for users on `< 0.3.0`
+
+- **Treat every clone as untrusted** until upgraded. Inspect
+  `.mkit/config` before running any mkit command in a clone.
+- **Do not place key paths in repo configs** — move them to
+  `~/.config/mkit/config` manually if you have legitimate overrides.
+- The most reliable workaround is to upgrade.
+
+## Credit
+
+Found in-house during the 0.3.0 hardening review. The
+`attest.signer` selector variant was caught by an adversarial pass
+on the original fix and is folded into this advisory because it is
+the same vulnerability class.
+
+## References
+
+- Patch: <https://github.com/officialunofficial/mkit/pull/91>
+- Threat model: `docs/THREAT-MODEL.md`
+- Spec changes: `docs/SPEC-ATTESTATIONS.md`

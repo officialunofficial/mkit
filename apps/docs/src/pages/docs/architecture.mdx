@@ -1,0 +1,182 @@
+---
+title: Architecture
+description: "Code map of the mkit Rust workspace, data-flow between objects, packs, refs and transports, and the attestation pipeline."
+---
+
+# ARCHITECTURE — mkit code map
+
+Status: **Informative**. Audience: contributors and integrators who
+need to find where something lives and how the pieces connect.
+
+This document is the index. Normative shape lives in `SPEC-*.md`.
+
+---
+
+## 1. Workspace layout
+
+The Rust workspace lives under `rust/`. Crate boundaries match
+responsibility boundaries — there is no "common" or "utils" crate.
+
+| Crate                          | Path                                  | Purpose                                                                |
+|--------------------------------|---------------------------------------|------------------------------------------------------------------------|
+| `mkit-core`                    | `rust/crates/mkit-core/`              | Object store, packs, refs, index, worktree, ignore, repo lock, ops, signing, protocol framing |
+| `mkit-attest`                  | `rust/crates/mkit-attest/`            | JCS canonical JSON, in-toto v1 Statement, DSSE envelope, signers, verifiers |
+| `mkit-transport-memory`        | `rust/crates/mkit-transport-memory/`  | In-process transport, used by tests                                    |
+| `mkit-transport-file`          | `rust/crates/mkit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
+| `mkit-transport-http`          | `rust/crates/mkit-transport-http/`    | reqwest + rustls transport with bearer auth and `If-Match` CAS         |
+| `mkit-transport-s3`            | `rust/crates/mkit-transport-s3/`      | Hand-rolled SigV4 transport (R2 + S3-compatible)                       |
+| `mkit-transport-ssh`           | `rust/crates/mkit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
+| `mkit-cli`                     | `rust/crates/mkit-cli/`               | The `mkit` binary; thin glue over the library crates                   |
+| `mkit-wasm`                    | `rust/crates/mkit-wasm/`              | WASM bindings for browsers and Cloudflare Workers                      |
+| `mkit-fuzz`                    | `rust/fuzz/`                          | cargo-fuzz harnesses (`docs/FUZZ.md`)                                  |
+| `mkit-sign-file` (contrib)     | `contrib/signers/mkit-sign-file/`     | Reference external signer; protocol conformance baseline               |
+| `mkit-sign-se` (contrib)       | `contrib/signers/mkit-sign-se/`       | Apple Secure Enclave signer (Swift / CryptoKit)                        |
+| `mkit-sign-tpm` (contrib)      | `contrib/signers/mkit-sign-tpm/`      | TPM 2.0 P-256 signer (Linux/Windows)                                   |
+| `mkit-sign-ctap` (contrib)     | `contrib/signers/mkit-sign-ctap/`     | FIDO2/WebAuthn roaming-authenticator signer                            |
+
+The `contrib/signers/*` crates are workspace members so they share
+lint config and dependency pins, but they are not part of the
+`mkit` binary's link graph. They communicate over the protocol
+defined in `SPEC-EXTERNAL-SIGNER.md`.
+
+---
+
+## 2. Data flow: object → pack → ref → transport
+
+```
+write path                                read path
+==========                                =========
+
+bytes                                     transport
+  │                                         │
+  ▼                                         ▼
+chunker (FastCDC)                         pack reader
+  │   SPEC-FASTCDC                          │   SPEC-PACKFILE
+  ▼                                         ▼
+object encoder                            object decoder + verify
+  │   SPEC-OBJECTS §2 prologue              │   BLAKE3 verify on read
+  ▼                                         ▼
+content-addressed store                   refs
+  │   .mkit/objects/<dd>/<hex62>            │   SPEC-REFS
+  ▼                                         ▼
+pack writer                               worktree materialize
+  │   SPEC-PACKFILE                          │   symlink containment
+  ▼                                         ▼
+transport                                 user
+  └─── SPEC-TRANSPORT 7-verb wire ──────────┘
+```
+
+Every stage validates the previous stage's output. Decoders refuse
+oversized allocations; the FastCDC chunker is fully deterministic
+(seed `MKITFCDC`); object readers re-hash bytes before returning.
+
+---
+
+## 3. Attestation flow
+
+Attestations are a separate resource class from objects. A commit
+without attestations and a commit with five are indistinguishable
+at the commit layer.
+
+```
+predicate JSON  ── caller-supplied
+       │
+       ▼
+in-toto v1 Statement   (subject = commit BLAKE3, predicateType = URI)
+       │   SPEC-ATTESTATIONS §4.2
+       ▼
+JCS canonical bytes    (RFC 8785; mkit-attest hand-rolled writer)
+       │
+       ▼
+PAE("application/vnd.in-toto+json", payload)
+       │   SPEC-ATTESTATIONS §2.1
+       ▼
+Signer ────► sig bytes        Signer is one of:
+       │                        - repo-key  (Ed25519, .mkit/keys/default.key)
+       │                        - external  (subprocess; SPEC-EXTERNAL-SIGNER)
+       │                        - sigstore-keyless (Fulcio/Rekor; planned)
+       ▼
+DSSE envelope ─► JCS ─► BLAKE3 → attestation id
+       │
+       ▼
+.mkit/attestations/<commit-hex>/<att-id>.dsse
+       │
+       ▼
+transport (OP_UPLOAD_ATTESTATION / DOWNLOAD / LIST)
+```
+
+`mkit verify-attest` walks the envelope, dispatches each signature
+to a verifier keyed on `keyid`, and consults trust roots from
+`$XDG_CONFIG_HOME/mkit/trust-roots.toml` (see
+`THREAT-MODEL.md` §5).
+
+---
+
+## 4. External signer protocol
+
+The contract is `docs/SPEC-EXTERNAL-SIGNER.md` (Protocol v1, v1.1
+adds optional WebAuthn wrapping). Shape:
+
+```
+mkit attest ──► spawn binary at attest.external_signer_path
+            ──► stdin:  one-line JSON {"pae_base64": …, "algorithm": …}
+            ──► stdout: one-line JSON {"keyid": …, "sig_base64": …}
+            ──► exit 0 on success
+```
+
+Argv comes from `attest.external_signer_args` (user-scoped config —
+see `THREAT-MODEL.md` §4) or per-invocation flags. Every reference
+signer in `contrib/signers/` is a conformance test for this
+contract.
+
+---
+
+## 5. Where to start reading
+
+Pick the closest match.
+
+### "I'm modifying the parser for an on-disk object."
+Start at `rust/crates/mkit-core/src/serialize.rs`, then read
+`docs/SPEC-OBJECTS.md`. Update the matching golden vector under
+`rust/tests/golden/`. If you change the wire shape, version it.
+
+### "I'm adding a new transport."
+Start at `rust/crates/mkit-core/src/protocol.rs` for the `Transport`
+trait, then read `docs/SPEC-TRANSPORT.md` for the seven verbs. Use
+`mkit-transport-memory` as the smallest implementation reference.
+
+### "I'm adding a new signer algorithm or implementation."
+For an in-tree algorithm, edit `mkit-attest`'s `Algorithm` enum and
+the verifier dispatch. For an out-of-tree signer (HSM, KMS, hardware
+token), implement `docs/SPEC-EXTERNAL-SIGNER.md` and ship a binary —
+see `contrib/signers/mkit-sign-file/` for a minimal example.
+
+### "I'm changing the wire format."
+Bump the spec version in the relevant `docs/SPEC-*.md`, write a
+new golden vector alongside the old one, and gate the new shape
+behind a version field. Do not delete the old vector until a major
+release window.
+
+### "I'm changing key handling, signing, or trust roots."
+Read `docs/THREAT-MODEL.md` first. Crypto and key-handling changes
+require a second reviewer per `CONTRIBUTING.md`, plus a CHANGELOG
+entry under `### Security` and a note on which threat-model section
+the change affects.
+
+---
+
+## 6. Cross-references
+
+- `SPEC-OBJECTS.md` — on-disk object format
+- `SPEC-PACKFILE.md` — packfile wire format
+- `SPEC-DELTA.md` — delta encoding
+- `SPEC-FASTCDC.md` — content-defined chunking
+- `SPEC-REFS.md` — ref names, CAS variants
+- `SPEC-INDEX.md` — repo-local index
+- `SPEC-TRANSPORT.md` — seven-verb wire protocol
+- `SPEC-SIGNING.md` — commit / remix signing
+- `SPEC-ATTESTATIONS.md` — DSSE + in-toto v1
+- `SPEC-EXTERNAL-SIGNER.md` — external signer subprocess protocol
+- `SSH-SECURITY.md` — SSH trust model (informative)
+- `THREAT-MODEL.md` — security boundaries (informative)
+- `FUZZ.md` — fuzz harness conventions

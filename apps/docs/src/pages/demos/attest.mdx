@@ -1,0 +1,40 @@
+---
+title: Attest — mkit
+description: Attach a signed statement to a commit so anyone with your public key can verify it later.
+layout: docs
+---
+
+import { AttestDemo } from "../../components/attest-demo.client.tsx";
+
+# Attest
+
+Attach a signed statement — "reviewed", "deployed", "tested" — to any
+commit. Anyone holding your public key can verify it later, on any tool
+that reads the same envelope.
+
+<AttestDemo />
+
+## How it works
+
+The envelope is [in-toto v1](https://in-toto.io/) wrapped in
+[DSSE](https://github.com/secure-systems-lab/dsse). The statement
+points at a commit by BLAKE3 hash (the `subject`) and carries an
+arbitrary JSON payload (the `predicate`) under a stable predicate type
+URI. DSSE wraps the canonicalised statement in a "Pre-Authentication
+Encoding" — a domain prefix + length-prefixed body — so the signature
+can never collide with a signature on anything else of the same shape.
+
+The demo lets you pick the signing algorithm: Ed25519 (mkit's default),
+secp256k1 (the curve crypto wallets use), and P-256 (what hardware
+keys, passkeys, and Apple's Secure Enclave use). The envelope shape is
+identical across all three — only the `keyid` prefix and signature
+algorithm change — so verifiers can route on `keyid` without parsing
+the payload.
+
+Open "Advanced" to point the attestation at a different commit hash or
+use a different seed. The "Verifies" row recomputes on every keystroke;
+anything that breaks the signature — a different pubkey, a tampered
+payload, a wrong algorithm — flips it to red.
+
+The full envelope spec, predicate-type conventions, and verifier rules
+are in [attestations](/docs/spec/attestations).

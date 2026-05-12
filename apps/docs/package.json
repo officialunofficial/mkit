@@ -1,0 +1,31 @@
+{
+  "name": "mkit-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vocs dev",
+    "build": "vite build",
+    "preview": "vite preview --outDir dist/public",
+    "deploy": "pnpm build && wrangler pages deploy dist/public --project-name=mkit-docs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "mkit-wasm": "file:../../rust/crates/mkit-wasm/pkg",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "vocs": "https://pkg.pr.new/wevm/vocs@e5ad67e",
+    "waku": "1.0.0-alpha.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.8",
+    "@types/node": "^22",
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^5.0.0",
+    "tailwindcss": "^4.1.8",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.0",
+    "vite-plugin-node-polyfills": "^0.24.0",
+    "wrangler": "^4.82.2"
+  }
+}

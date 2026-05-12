@@ -1,0 +1,225 @@
+---
+title: Delta
+description: "Delta encoding used inside mkit packfiles for cross-blob compression."
+---
+
+:::info[Spec metadata]
+- **spec** — SPEC-DELTA
+- **version** — 1
+- **status** — draft
+- **audience** — implementers of compatible packfile readers and writers
+:::
+
+# SPEC-DELTA — mkit v1 delta instruction format
+
+Status: **Normative** for mkit v1.
+Scope: the byte layout of the delta instruction stream referenced by
+packfile `0x02 delta` entries (see SPEC-PACKFILE §3.2).
+
+Resolves red-team R-19 (no delta format spec, no version byte).
+
+---
+
+## 1. Framing context
+
+Delta streams appear exclusively inside packfile entries. The
+enclosing entry provides:
+
+- `base_hash` (32 bytes) — the BLAKE3 of the full serialised base
+  object (including its SPEC-OBJECTS prologue).
+- Byte range containing the delta stream.
+
+There is no standalone delta file. There is no per-entry `result_size`
+in v1 (the unpacker discovers it from the actual reconstruction). If a
+caller needs result-size verification, the outer SPEC-OBJECTS delta
+object (§8) supplies a `result_size` field; pack entries do not.
+
+---
+
+## 2. Stream layout
+
+```
+[u8 stream_version]     == 0x01
+[u32 LE base_len]       length of the base object in bytes
+[u32 LE result_len]     expected length of the reconstructed object
+[instructions …]        concatenation of opcodes, see §3
+```
+
+The `stream_version` byte is required: readers use it to reject any
+future format they don't recognise.
+
+Readers MUST reject `stream_version != 0x01` with
+`UnsupportedDeltaVersion`.
+
+`base_len` and `result_len` enable readers to validate the stream
+before executing. Writers MUST populate both fields correctly; readers
+MUST verify:
+
+- Every `COPY(offset, length)` satisfies `offset + length <= base_len`.
+- The sum of all emitted bytes equals `result_len` at end-of-stream.
+
+Mismatches yield `DeltaCorrupt`.
+
+---
+
+## 3. Instructions
+
+Two opcodes, distinguished by the top bit of the first byte:
+
+### 3.1 `COPY` — top bit set
+
+```
+[u8 opcode]             opcode & 0x80 != 0; remaining 7 bits reserved, MUST be 0 in v1
+[u32 LE offset]         offset into base
+[u16 LE length]         1 .. 65_535 bytes
+```
+
+Total size: 7 bytes. Semantics: append `base[offset .. offset+length]`
+to the reconstruction buffer.
+
+`length == 0` is illegal (writers MUST NOT emit, readers MUST reject as
+`DeltaCorrupt`).
+
+Currently v1 always emits `opcode == 0x80` with low 7 bits zero. Any
+other COPY opcode byte is reserved.
+
+### 3.2 `INSERT` — top bit clear, non-zero length
+
+```
+[u8 length]             1 .. 127
+[length bytes literal]
+```
+
+Total size: `1 + length` bytes. Semantics: append `literal` to the
+reconstruction buffer.
+
+`length == 0` (i.e. the opcode byte itself is 0) is illegal and MUST be
+rejected with `DeltaCorrupt`. This reserves the all-zero byte sequence,
+which is both a robustness check and prevents a trivial stream that
+produces empty output.
+
+Long literals are split into multiple INSERTs of up to 127 bytes each.
+There is no 2-byte or 4-byte extended INSERT form in v1.
+
+---
+
+## 4. Reconstruction algorithm
+
+Reference implementation (pseudo-code):
+
+```
+fn apply(base: &[u8], stream: &[u8]) -> Vec<u8>:
+    assert stream[0] == 0x01                    # stream version
+    assert len(base) == le_u32(stream[1..5])
+    result_len = le_u32(stream[5..9])
+    pos = 9
+    out = Vec::with_capacity(result_len)
+    while pos < len(stream):
+        op = stream[pos]; pos += 1
+        if op & 0x80 != 0:                      # COPY
+            if op & 0x7F != 0: fail DeltaCorrupt  # reserved bits
+            if pos + 6 > len(stream): fail DeltaCorrupt
+            offset = le_u32(stream[pos..pos+4]); pos += 4
+            length = le_u16(stream[pos..pos+2]); pos += 2
+            if length == 0: fail DeltaCorrupt
+            if offset + length > len(base): fail DeltaCorrupt
+            out.extend(base[offset..offset+length])
+        elif op > 0:                            # INSERT
+            if pos + op > len(stream): fail DeltaCorrupt
+            out.extend(stream[pos..pos+op])
+            pos += op
+        else:
+            fail DeltaCorrupt                   # opcode 0x00 reserved
+    if len(out) != result_len: fail DeltaCorrupt
+    return out
+```
+
+---
+
+## 5. Writing algorithm (informative)
+
+The reference writer uses a 16-byte block hash-table scan over the base,
+extends matches greedily, and emits INSERTs for unmatched runs. The
+block hash is FNV-1a 64-bit.
+
+This algorithm is not normative. Any writer that produces a stream that
+passes the v1 verify rules in §4 is conformant. In particular, a writer
+that emits a single all-INSERTs stream (no COPY) is valid (and trivially
+correct, just wasteful). A writer that emits only COPY instructions
+covering `[0, base_len)` is valid iff `result_len == base_len` and the
+reconstructed bytes equal the target.
+
+---
+
+## 6. What the delta stream is NOT
+
+- **Not signed.** The delta bytes are not covered by any commit
+  signature. Integrity comes from:
+  1. The packfile trailer (SPEC-PACKFILE §8) — end-to-end pack hash.
+  2. The reconstructed object's hash matching the path under which it
+     is stored in the object store.
+  3. The commit signature over the reconstructed tree hash etc.
+
+- **Not independently verifiable.** A delta stream must be paired with
+  its declared base. Tamper detection is transitive through the pack
+  trailer and the object-store hash check.
+
+- **Not a transport format.** Deltas are only meaningful inside pack
+  entries. Any API that returned a raw delta stream would be
+  mis-designed; mkit does not expose one.
+
+---
+
+## 7. Size limits
+
+- Stream header: fixed 9 bytes.
+- Per-INSERT literal: 1..127 bytes.
+- Per-COPY: 7 bytes, `length <= 65_535`.
+- Overall stream length: implicit cap equal to the enclosing packfile
+  entry's `payload_len - 32` (see SPEC-PACKFILE §3.2). Practical cap
+  is the packfile's 4 GiB total.
+- `result_len`: any `u32` value, but bounded by SPEC-OBJECTS object
+  limits (1 GiB per stored object).
+
+---
+
+## 8. Test vectors (implementer MUST produce)
+
+TO BE FIXED IN IMPLEMENTATION:
+
+1. **Identity delta**: base = 64 byte string of "0123456789abcdef" × 4;
+   target = same bytes. Stream must reconstruct verbatim. Record stream
+   bytes.
+2. **Pure INSERT**: base = "aaa"; target = "zzz". Stream begins with
+   byte `0x03` (length 3) followed by `"zzz"`. No COPY opcodes.
+3. **Pure COPY**: base = 128-byte pattern; target = base[0..64]. Stream
+   is one COPY(0, 64). Total = 9 + 7 = 16 bytes.
+4. **Mixed**: base = source-code-like text, target = near-duplicate
+   with a small insert in the middle. Expected: delta smaller than
+   target.
+5. **Reject 0x00 opcode**: stream `"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"` → `DeltaCorrupt`.
+6. **Reject COPY past base_len**: COPY(0x1000, 0x10) over a 16-byte base
+   → `DeltaCorrupt`.
+7. **Reject stream_version 0x02** → `UnsupportedDeltaVersion`.
+8. **Reject result_len mismatch**: stream whose INSERTs sum to 100 but
+   header says `result_len = 99` → `DeltaCorrupt` at end-of-stream.
+9. **Fuzz harness**: `apply(base, arbitrary_bytes)` MUST NOT panic,
+   MUST NOT read out of bounds, MUST either succeed or return a
+   well-defined error (see red-team R-18).
+
+---
+
+## 9. Future work (non-v1)
+
+- 4-byte extended INSERT length (would consume opcode `0x00` for
+  escape).
+- COPY length extension to `u32` (would use the currently-reserved 7
+  low bits of the COPY opcode byte).
+- Multi-base deltas (a delta that references two or more bases).
+
+Any of these require a `stream_version` bump; backward readers MUST
+refuse unknown versions.
+
+---
+
+*~1000 words.*

@@ -1,0 +1,286 @@
+---
+title: Signing
+description: "Commit and remix signing format for mkit: canonicalization, signature bytes, and verifier dispatch."
+---
+
+:::info[Spec metadata]
+- **spec** — SPEC-SIGNING
+- **version** — 1
+- **status** — draft
+- **audience** — implementers of compatible commit / remix signers and verifiers
+:::
+
+# SPEC-SIGNING — mkit v1 signature domains
+
+Status: **Normative** for mkit v1.
+Scope: the exact bytes covered by an Ed25519 signature on a commit or
+remix, and the domain separator used.
+
+This document resolves red-team risks R-04 (no version / magic in signing
+bytes) and R-17 (cross-domain signature confusion).
+
+---
+
+## 1. Signing primitives
+
+- **Hash:** BLAKE3 default mode (no keyed hashing, no derive-key at the
+  signing layer). Output: 32 bytes.
+- **Signature:** Ed25519 per RFC 8032. Public key 32 bytes, seed 32
+  bytes, signature 64 bytes.
+- Signers sign the BLAKE3 digest (32 bytes) rather than the raw signing
+  bytes. This is Ed25519 "PureEdDSA over a pre-hashed message".
+- No batched verification. Each verify is independent.
+
+---
+
+## 2. Domain separation
+
+mkit defines two distinct signing domains. They MUST produce disjoint
+signable byte strings for any possible input.
+
+```
+COMMIT_DOMAIN   = "mkit.commit\x00"       (12 bytes)
+REMIX_DOMAIN    = "mkit.remix\x00"        (11 bytes)
+```
+
+The terminal `\x00` is part of the domain string. It is there to ensure
+no well-formed domain is a prefix of another (critical for
+length-extension-resistance in BLAKE3 is not strictly required, since
+BLAKE3 is not susceptible, but the null makes the prefix property
+obvious to static analysis).
+
+`COMMIT_DOMAIN` covers commits and `REMIX_DOMAIN` covers remixes.
+
+### 2.1 Preferred derivation
+
+Implementations SHOULD use BLAKE3 `derive_key(context, signing_bytes)`
+where the standard library exposes it. The context string is the domain
+string **without the trailing `\x00`**:
+
+- context = `"mkit.commit"` → 32-byte digest over `signing_bytes`.
+- context = `"mkit.remix"`.
+
+### 2.2 Byte-prepend fallback
+
+Where `derive_key` is unavailable, implementations MUST use byte-prepend:
+
+```
+digest = BLAKE3(domain || signing_bytes)
+```
+
+Where `domain` is the full domain string *including* the trailing
+`\x00`. This is the shape we commit to on the wire and in test vectors.
+
+Both paths MUST produce identical digests for the same input. The
+reference implementation uses byte-prepend.
+
+---
+
+## 3. Commit signing bytes
+
+For a commit C (as defined in SPEC-OBJECTS §5), the canonical signing
+bytes are:
+
+```
+signing_bytes = PROLOGUE
+              || tree_hash
+              || u32 LE(parent_count) || parent_hash * parent_count
+              || Identity(author)
+              || u32 LE(message_len) || message_bytes
+              || u64 LE(timestamp)
+              || signer_pubkey
+```
+
+Where `PROLOGUE` is the 6 bytes defined in SPEC-OBJECTS §2:
+`[object_type=0x03] [magic="MKT1"] [schema_version=0x01]`.
+
+**Included fields, in order:**
+
+1. Object prologue (6 bytes) — binds the signature to the object type
+   and schema version.
+2. `tree_hash` (32 bytes) — content the commit points at.
+3. `parent_count` (4 LE) and `parent_count` × `parent_hash` (32 each) —
+   commit history.
+4. `Identity author` (variable; see SPEC-OBJECTS §9) — length-prefixed,
+   so field length ambiguity is impossible.
+5. `message_len` (4 LE) and message bytes — length-prefixed.
+6. `timestamp` (8 LE).
+7. `signer` (32 bytes) — the public key that will verify the signature.
+
+**Excluded fields and why:**
+
+- `signature` (64 bytes) — a signature cannot cover itself.
+- `message_hash` (32 bytes) — optional off-chain annotation field;
+  irrelevant to core commit identity. Including it would mean any
+  downstream re-computation shifts the commit hash.
+- `content_digest` (32 bytes) — same reasoning: downstream pack-digest
+  annotation. Not a commit identity input.
+
+These two exclusions resolve red-team R-45. They are the only commit-
+struct fields excluded from signing bytes.
+
+The **signing hash** is then:
+
+```
+signing_hash = BLAKE3("mkit.commit\x00" || signing_bytes)
+```
+
+And the commit's `signature` field is `Ed25519.sign(signer_seed,
+signing_hash)`.
+
+---
+
+## 4. Remix signing bytes
+
+For a remix R (SPEC-OBJECTS §6):
+
+```
+signing_bytes = PROLOGUE                   // object_type=0x04
+              || tree_hash
+              || u32 LE(parent_count) || parent_hash * parent_count
+              || u32 LE(source_count) || (upstream_id || commit_hash) * source_count
+              || Identity(author)
+              || u32 LE(message_len) || message_bytes
+              || u64 LE(timestamp)
+              || signer_pubkey
+```
+
+Excluded: `signature`.
+
+```
+signing_hash = BLAKE3("mkit.remix\x00" || signing_bytes)
+```
+
+---
+
+## 5. Cross-domain collision proof sketch
+
+Commit signing input always begins with the 12-byte domain string
+`"mkit.commit\x00"`; remix signing input begins with the 11-byte string
+`"mkit.remix\x00"`.
+
+- `"mkit.commit\x00"` and `"mkit.remix\x00"` share 5 bytes and differ at
+  byte 5 (`c` 0x63 vs `r` 0x72).
+
+Because the first differing byte occurs strictly before any possible
+user-controlled content (domains are compile-time constants), no user
+input can make one domain's hash input equal another's. BLAKE3 is
+collision-resistant, so distinct inputs have (cryptographically)
+distinct digests.
+
+Therefore, a signature over a commit-domain digest cannot be replayed as
+a signature over a remix-domain digest, nor vice versa.
+
+This is the defence against R-17. The previous scheme used only the
+ObjectType tag byte (0x03/0x04) as separator — one byte of domain — and
+was fragile. v1 uses ≥ 11 bytes of high-entropy ASCII plus a null
+terminator.
+
+---
+
+## 6. Verification algorithm
+
+Given a commit C retrieved from the store:
+
+1. Check object prologue (SPEC-OBJECTS §2).
+2. Re-build signing bytes per §3. (It's the caller's responsibility to
+   retrieve the exact `signer` field from C; the verifier does not
+   accept a public key from elsewhere.)
+3. Compute `signing_hash = BLAKE3("mkit.commit\x00" || signing_bytes)`.
+4. Parse `signer` as an Ed25519 public key. Invalid point → verify fails.
+5. `Ed25519.verify(signer, signing_hash, C.signature)`. Any failure →
+   verify fails.
+
+A verifier MUST NOT accept a signature merely because the `Identity
+author` field's payload matches the `signer` public key. Those are two
+independent fields. Identity is an attribution claim; `signer` is the
+verification key. Pairing is adapter/application policy, not a core
+invariant.
+
+
+---
+
+## 7. Key file format
+
+```
+Path:         .mkit/keys/default.key
+Contents:     raw 32 bytes (Ed25519 SEED — NOT expanded secret key)
+Permissions:  0600 (mandatory on POSIX)
+```
+
+The seed is passed to the Ed25519 deterministic key-pair constructor
+to recover `(public_key, secret_key)` on load. No PEM, no DER, no
+password wrapping in v1.
+
+Writers MUST `chmod 0600` the file immediately after creation and MUST
+fail keygen if they cannot set that mode on POSIX.
+
+On non-POSIX hosts this rule is advisory; implementations SHOULD use
+the host's equivalent access restriction.
+
+---
+
+## 8. One key, many roles
+
+The Ed25519 seed in `.mkit/keys/default.key` is suitable for use as an
+SSH identity as well. Implementations SHOULD encourage users to reuse
+one key across:
+
+- **Commit / remix signing** (this document, §§3-4).
+- **DSSE attestation signing** via the `repo-key` signer
+  (`SPEC-ATTESTATIONS.md` §6.2).
+- **SSH transport authentication** when pushing to `mkit+ssh://`
+  servers. OpenSSH 8.0+ accepts the same raw Ed25519 seed as its
+  `id_ed25519` private key.
+
+This is the idiomatic pattern Git/GitHub established: one keypair
+proves authorship, authorizes the push, and anchors an account. A
+downstream service (e.g. a forge that resolves pubkey → account) gets
+a single, consistent identity without needing passwords, tokens, or
+an mkit-specific auth protocol. `sshd`'s `AuthorizedKeysCommand` is
+the standard extension point on the server side; mkit core ships no
+custom push-auth primitive because none is needed.
+
+Nothing in the protocol REQUIRES a single key — separate signing and
+transport keys are valid. The recommendation is for operator
+ergonomics, not a security property.
+
+---
+
+## 9. Test vectors (implementer MUST produce)
+
+TO BE FIXED IN IMPLEMENTATION:
+
+1. **Deterministic commit signing bytes**: fixed-input commit with
+   `Identity{kind=0x01, len=32, payload=[0xAA;32]}`, zero
+   `message_hash`/`content_digest`, timestamp `1_700_000_000`,
+   empty message, zero tree_hash, zero parents, signer = identity
+   payload. Record the exact `signing_bytes` hex and `signing_hash` hex.
+2. **Ed25519 sign over vector 1** using seed `[0x01;32]` → record
+   64-byte signature hex.
+3. **Verify tampered message**: flip one bit in the message, verify
+   MUST fail.
+4. **Domain confusion negative test**: attempt to verify a signed commit
+   using `"mkit.remix\x00"` domain (or any other string). MUST fail.
+5. **Zero `message_hash`/`content_digest` do not affect signing hash**:
+   two commits differing only in those fields MUST produce identical
+   signing_hash bytes.
+6. **Remix signing vector**: two-source remix sorted correctly,
+   fixed author, fixed message, fixed timestamp. Record hash.
+7. **Key file roundtrip**: generate keypair, write seed, re-load,
+   sign-then-verify a commit. Round-trip stable.
+
+---
+
+## 10. Non-goals
+
+- No PQ (post-quantum) signatures in v1. Ed25519 only.
+- No signer rotation at the core level. A new `signer` = a new commit.
+- No timestamp authority. `timestamp` is self-reported and unverified.
+- No partial / threshold signatures.
+- No nested signatures (signing a signature) — always sign a BLAKE3
+  digest directly.
+
+---
+
+*~1400 words.*
