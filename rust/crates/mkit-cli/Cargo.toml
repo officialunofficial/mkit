@@ -76,6 +76,15 @@ zeroize = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+mkit-keystore = { version = "0.1", path = "../mkit-keystore", features = ["backend-macos-keychain"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mkit-keystore = { version = "0.1", path = "../mkit-keystore", features = ["backend-linux-secret-service", "backend-systemd-creds"] }
+
+[target.'cfg(windows)'.dependencies]
+mkit-keystore = { version = "0.1", path = "../mkit-keystore", features = ["backend-windows-credential"] }
+
 [build-dependencies]
 # build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by
 # reading src/cli.rs. No external deps — plain file I/O + string match.
