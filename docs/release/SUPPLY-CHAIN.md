@@ -58,6 +58,11 @@ Issue #104 adds optional backend and envelope-encryption dependencies to
 | `der = 0.8.0` | DER parsing for YubiKey PIV certificates | `backend-yubikey` | Apache-2.0 OR MIT | RustCrypto format crate; used to extract P-256 public keys from existing certificates. |
 | `yubikey = 0.9.0-pre.0` | YubiKey PIV certificate discovery and signing | `backend-yubikey` | BSD-2-Clause | Accepted because V1 PIV support needs mature PIV APDUs and no stable alternative matched the API. Risk is contained by optional feature gating, existing-key-only support, fail-closed behavior, CI feature builds, and manual hardware validation. |
 
+T27 also exact-pinned the remaining direct `mkit-keystore` support dependencies
+that were previously semver ranges: `ed25519-dalek = 2.2.0`, `getrandom =
+0.4.2`, `k256 = 0.13.4`, `p256 = 0.13.2`, `sha2 = 0.10.9`, `thiserror =
+2.0.18`, and dev-only `tempfile = 3.27.0`.
+
 `cargo deny check` currently finishes with `advisories ok, bans ok, licenses ok,
 sources ok`. Remaining warnings are duplicate crate versions from existing
 ecosystem splits and optional YubiKey/RustCrypto prerelease transitive stacks,
