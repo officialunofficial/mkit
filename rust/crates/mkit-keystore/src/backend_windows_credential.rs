@@ -296,4 +296,9 @@ mod tests {
             r"^.+\.dev\.mkit\.keystore\.signing-key\.v1$"
         );
     }
+
+    #[test]
+    fn live_backend_create_open_list_export_delete_roundtrip() {
+        crate::native_list::run_native_backend_roundtrip_test(&WindowsCredentialKeystore::new());
+    }
 }

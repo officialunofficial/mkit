@@ -54,6 +54,77 @@ pub(crate) fn parse_account(account: &str) -> Option<(Algorithm, String)> {
 }
 
 #[cfg(test)]
+pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> Result<()> {
+    let label = unique_test_label();
+    let selector = crate::KeySelector::new(label.clone(), Some(Algorithm::Ed25519))?;
+    let _ = store.delete(&selector);
+
+    let result = (|| -> Result<()> {
+        let seed = [0x36; 32];
+        let mut signer = store.import(
+            &label,
+            SecretKey::new(Algorithm::Ed25519, seed),
+            crate::KeyAttrs::default(),
+            crate::ImportOptions { overwrite: false },
+        )?;
+        assert_eq!(signer.algorithm(), Algorithm::Ed25519);
+        assert_eq!(signer.label(), label);
+        assert_eq!(signer.sign(b"native backend roundtrip")?.len(), 64);
+
+        let opened = store.open(&selector)?;
+        assert_eq!(opened.metadata()?.label, label);
+
+        let listed = store.list()?;
+        assert!(
+            listed
+                .iter()
+                .any(|metadata| metadata.label == label && metadata.algorithm == Algorithm::Ed25519),
+            "created key must appear in native backend listing"
+        );
+
+        let exported = store.export(&selector)?;
+        assert_eq!(exported.expose_secret(), &seed);
+
+        store.delete(&selector)?;
+        assert!(matches!(store.open(&selector), Err(Error::KeyNotFound(_))));
+        Ok(())
+    })();
+
+    let cleanup = store.delete(&selector);
+    if result.is_ok()
+        && !matches!(cleanup, Ok(()) | Err(Error::KeyNotFound(_)))
+        && let Err(error) = cleanup
+    {
+        return Err(error);
+    }
+    result
+}
+
+#[cfg(test)]
+pub(crate) fn run_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
+    if std::env::var_os("MKIT_RUN_NATIVE_KEYSTORE_TESTS").as_deref() != Some("1".as_ref()) {
+        eprintln!("skipping native backend roundtrip; set MKIT_RUN_NATIVE_KEYSTORE_TESTS=1 to run");
+        return;
+    }
+
+    match exercise_native_backend_roundtrip(store) {
+        Ok(()) => {}
+        Err(Error::BackendUnavailable(message)) => {
+            eprintln!("skipping native backend roundtrip: {message}");
+        }
+        Err(error) => panic!("native backend roundtrip failed: {error:?}"),
+    }
+}
+
+#[cfg(test)]
+fn unique_test_label() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    format!("t36-{}-{nanos}", std::process::id())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
