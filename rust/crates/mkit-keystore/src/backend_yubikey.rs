@@ -54,12 +54,15 @@ enum YubiKeySigningKey {
 impl YubiKeyKeystore {
     /// Create a `YubiKey` backend instance and fail closed when no usable card is present.
     pub fn new() -> Result<Self> {
-        let cards = discover_openpgp_signing_keys()?;
-        if cards.is_empty() {
-            return Err(Error::BackendUnavailable(
-                "no OpenPGP Ed25519 signing key found on a YubiKey-compatible card".into(),
-            ));
-        }
+        let (openpgp_count, openpgp_error) = match discover_openpgp_signing_keys() {
+            Ok(keys) => (keys.len(), None),
+            Err(error) => (0, Some(error.to_string())),
+        };
+        let (piv_count, piv_error) = match discover_piv_signing_keys() {
+            Ok(keys) => (keys.len(), None),
+            Err(error) => (0, Some(error.to_string())),
+        };
+        ensure_any_signing_key(openpgp_count, piv_count, openpgp_error, piv_error)?;
         Ok(Self)
     }
 
@@ -71,6 +74,28 @@ impl YubiKeyKeystore {
             Algorithm::Secp256k1 => Err(Error::UnsupportedAlgorithm(Algorithm::Secp256k1)),
         }
     }
+}
+
+fn ensure_any_signing_key(
+    openpgp_count: usize,
+    piv_count: usize,
+    openpgp_error: Option<String>,
+    piv_error: Option<String>,
+) -> Result<()> {
+    if openpgp_count > 0 || piv_count > 0 {
+        return Ok(());
+    }
+    let mut message =
+        "no OpenPGP Ed25519 or PIV P-256 signing key found on a YubiKey-compatible card".to_owned();
+    if let Some(error) = openpgp_error {
+        message.push_str("; OpenPGP discovery: ");
+        message.push_str(&error);
+    }
+    if let Some(error) = piv_error {
+        message.push_str("; PIV discovery: ");
+        message.push_str(&error);
+    }
+    Err(Error::BackendUnavailable(message))
 }
 
 impl Keystore for YubiKeyKeystore {
@@ -568,6 +593,27 @@ mod tests {
         assert!(capabilities.supports_user_presence);
         assert!(capabilities.supports_device_bound);
         assert!(capabilities.supports_non_extractable);
+    }
+
+    #[test]
+    fn availability_accepts_piv_only_signing_keys() {
+        ensure_any_signing_key(0, 1, None, None).expect("PIV-only YubiKey is usable");
+    }
+
+    #[test]
+    fn availability_accepts_openpgp_only_signing_keys() {
+        ensure_any_signing_key(1, 0, None, None).expect("OpenPGP-only YubiKey is usable");
+    }
+
+    #[test]
+    fn availability_fails_when_no_yubikey_signing_key_exists() {
+        match ensure_any_signing_key(0, 0, Some("openpgp unavailable".into()), None) {
+            Err(Error::BackendUnavailable(message)) => {
+                assert!(message.contains("OpenPGP Ed25519 or PIV P-256"));
+                assert!(message.contains("openpgp unavailable"));
+            }
+            other => panic!("unexpected availability result: {other:?}"),
+        }
     }
 
     #[test]
