@@ -42,6 +42,13 @@ pub enum DispatchError {
     MalformedUrl(String),
     #[error("no HEAD branch to push")]
     NoHead,
+    /// A poll-loop checkpoint observed `signal::is_shutdown() == true`
+    /// and aborted partway through. Callers should map this to
+    /// `exit::TEMPFAIL` (75) so retries are safe — the transfer is
+    /// half-finished but the remote is unmodified for any ref we
+    /// hadn't reached yet.
+    #[error("interrupted")]
+    Interrupted,
     #[error("transport: {0}")]
     Transport(#[from] TransportError),
     #[error("refs: {0}")]
@@ -116,6 +123,9 @@ pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> 
     let refs_list = refs::list_refs(&mkit_dir)?;
     let mut n = 0;
     for r in refs_list {
+        if crate::signal::is_shutdown() {
+            return Err(DispatchError::Interrupted);
+        }
         let Some(h) = r.hash else { continue };
         let full_name = format!("refs/heads/{}", r.name);
 
@@ -127,6 +137,9 @@ pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> 
         // check against the same key we'd upload under.
         let reachable = reachable_objects(&store, &h)?;
         for obj in &reachable {
+            if crate::signal::is_shutdown() {
+                return Err(DispatchError::Interrupted);
+            }
             let key = PackKey::from_hash(*obj);
             if tx.pack_exists(&key)? {
                 continue;
@@ -177,6 +190,9 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError>
     let remote_refs = tx.list_refs("refs/heads/")?;
     let mut n = 0;
     for r in remote_refs {
+        if crate::signal::is_shutdown() {
+            return Err(DispatchError::Interrupted);
+        }
         let Some(h) = r.hash else { continue };
         // Download the pack the remote uploaded for this ref. The
         // per-object fallback below handles the case where the pack
@@ -213,6 +229,9 @@ fn fetch_object_closure(
     let mut seen = std::collections::HashSet::new();
 
     while let Some(h) = queue.pop_front() {
+        if crate::signal::is_shutdown() {
+            return Err(DispatchError::Interrupted);
+        }
         if !seen.insert(h) {
             continue;
         }

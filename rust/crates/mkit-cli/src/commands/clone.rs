@@ -88,6 +88,9 @@ pub fn run(args: &[String]) -> u8 {
                 );
                 exit::OK
             }
+            Err(remote_dispatch::DispatchError::Interrupted) => {
+                emit_err("clone: interrupted", exit::TEMPFAIL)
+            }
             Err(e) => emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),
         },
         Err(e) => emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),

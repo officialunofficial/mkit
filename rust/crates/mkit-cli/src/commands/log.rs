@@ -9,6 +9,7 @@ use mkit_core::store::ObjectStore;
 
 use crate::exit;
 use crate::format;
+use crate::signal;
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
@@ -49,6 +50,9 @@ pub fn run(args: &[String]) -> u8 {
     let mut cur = start;
     let mut shown = 0usize;
     loop {
+        if signal::is_shutdown() {
+            return exit::TEMPFAIL;
+        }
         if let Some(lim) = limit
             && shown >= lim
         {

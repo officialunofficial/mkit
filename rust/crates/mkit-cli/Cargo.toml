@@ -72,8 +72,14 @@ zeroize = "1"
 # (secp256k1, p256). The Ed25519 path uses mkit_core::sign which has
 # its own libc dependency; the cli's non-Ed25519 paths reach through
 # the same primitives, so we add libc here too.
+#
+# signal-hook installs SIGINT/SIGTERM handlers via sigaction(2) for
+# cooperative shutdown. We use only the `flag` module (atomic-bool
+# stores; async-signal-safe) so this crate stays
+# `#![deny(unsafe_code)]` — see signal.rs.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+signal-hook = { version = "0.3", default-features = false }
 
 [build-dependencies]
 # build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by
