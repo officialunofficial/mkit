@@ -8,6 +8,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+use clap::Parser;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport};
 use mkit_rpc::mkit::rpc::v1::ssh::{
     DownloadPackHeader, HelloResponse, ListRefsResponse, PackChunk, PackExistsResponse,
@@ -17,8 +18,19 @@ use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode, ProtocolVersion};
 use mkit_rpc::{FrameError, read_frame, write_frame};
 use mkit_transport_file::FileTransport;
 
+use crate::clap_shim;
 use crate::cli::CLI_VERSION;
 use crate::exit;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit serve",
+    about = "Speak the mkit-rpc SSH protocol on stdin/stdout (internal)."
+)]
+struct ServeOpts {
+    /// Path to the repository to serve.
+    path: String,
+}
 
 // -- Per-connection resource caps -------------------------------------------
 //
@@ -35,11 +47,12 @@ const PACK_CHUNK_DATA_MAX: usize = 800 * 1024;
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let Some(path) = args.first() else {
-        return super::usage_error("usage: mkit serve <path>");
+    let opts = match clap_shim::parse::<ServeOpts>("mkit serve", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
 
-    let repo_root = match resolve_repo_path(path) {
+    let repo_root = match resolve_repo_path(&opts.path) {
         Ok(p) => p,
         Err(code) => return code,
     };

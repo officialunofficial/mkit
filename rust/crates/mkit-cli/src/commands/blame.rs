@@ -12,19 +12,41 @@
 
 use std::io::Write;
 
+use clap::{Parser, ValueEnum};
 use mkit_core::ops::blame::{BlameResult, blame_file, format_blame_text};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::exit;
 use crate::format;
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BlameFormat {
+    Default,
+    Json,
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "mkit blame", about = "Show line-level commit attribution.")]
+struct BlameOpts {
+    /// Output format. Default emits `<short12>\t<line_num>\t<text>`
+    /// per line; `json` emits JSONL with `hash`, `line_num`,
+    /// `author`, `timestamp`, `text` keys.
+    #[arg(long, value_enum, default_value = "default")]
+    format: BlameFormat,
+    /// File to blame against HEAD.
+    file: String,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let (file, json) = match parse_args(args) {
-        Ok(v) => v,
+    let opts = match clap_shim::parse::<BlameOpts>("mkit blame", args) {
+        Ok(o) => o,
         Err(code) => return code,
     };
+    let json = matches!(opts.format, BlameFormat::Json);
+    let file = &opts.file;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -82,44 +104,6 @@ fn render_json(result: &BlameResult) -> u8 {
         let _ = stdout.write_all(b"}\n");
     }
     exit::OK
-}
-
-fn parse_args(args: &[String]) -> Result<(&str, bool), u8> {
-    let mut file: Option<&str> = None;
-    let mut json = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--format=json" => json = true,
-            "--format" if i + 1 < args.len() => {
-                match args[i + 1].as_str() {
-                    "json" => json = true,
-                    "default" => json = false,
-                    other => {
-                        return Err(super::usage_error(&format!(
-                            "unknown --format value: {other} (expected: default, json)"
-                        )));
-                    }
-                }
-                i += 1;
-            }
-            other if !other.starts_with("--") && file.is_none() => {
-                file = Some(other);
-            }
-            other => {
-                return Err(super::usage_error(&format!(
-                    "unknown argument for blame: {other}"
-                )));
-            }
-        }
-        i += 1;
-    }
-    let Some(f) = file else {
-        return Err(super::usage_error(
-            "usage: mkit blame [--format=json] <file>",
-        ));
-    };
-    Ok((f, json))
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {

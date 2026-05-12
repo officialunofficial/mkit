@@ -54,7 +54,10 @@ fn clone_errors_on_missing_url() {
     let out = run_in(td.path(), &["clone"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("usage"));
+    assert!(
+        stderr.to_lowercase().contains("usage"),
+        "expected usage diagnostic on stderr, got: {stderr}"
+    );
 }
 
 #[test]
@@ -256,11 +259,17 @@ fn blame_on_single_commit_attributes_every_line_to_it() {
 #[test]
 fn serve_errors_on_missing_path() {
     // `mkit serve` without a path should fail with a usage error.
+    // Clap renders "Usage:" (capital U) in its error output; match
+    // case-insensitively so the test isn't tied to clap's exact
+    // formatting.
     let td = tempfile::tempdir().unwrap();
     let out = run_in(td.path(), &["serve"]);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("usage"));
+    assert!(
+        stderr.to_lowercase().contains("usage"),
+        "expected usage diagnostic on stderr, got: {stderr}"
+    );
 }
 
 #[test]

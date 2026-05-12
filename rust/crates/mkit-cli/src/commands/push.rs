@@ -6,13 +6,31 @@
 
 use std::io::Write;
 
+use clap::Parser;
+
+use crate::clap_shim;
 use crate::config;
 use crate::exit;
 use crate::remote_dispatch;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit push",
+    about = "Push refs and packs to the configured remote."
+)]
+struct PushOpts {
+    /// Print what would be pushed without contacting the remote.
+    #[arg(long)]
+    dry_run: bool,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let dry_run = args.iter().any(|a| a == "--dry-run");
+    let opts = match clap_shim::parse::<PushOpts>("mkit push", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    let dry_run = opts.dry_run;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
