@@ -61,13 +61,17 @@ pub fn run(args: &[String]) -> u8 {
         let obj = match store.read_object(&cur) {
             Ok(o) => o,
             Err(e) => {
-                let _ = writeln!(stdout, "(read error: {e})");
-                break;
+                return emit_err(
+                    &format!("read {}: {e}", format::hex_hash(&cur)),
+                    exit::DATAERR,
+                );
             }
         };
         let Object::Commit(c) = obj else {
-            let _ = writeln!(stdout, "(not a commit: {})", format::hex_hash(&cur));
-            break;
+            return emit_err(
+                &format!("not a commit: {}", format::hex_hash(&cur)),
+                exit::DATAERR,
+            );
         };
         let title = String::from_utf8_lossy(&c.message);
         let title = title.lines().next().unwrap_or("");
