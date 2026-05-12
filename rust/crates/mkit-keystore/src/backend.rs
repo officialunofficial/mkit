@@ -12,6 +12,7 @@ pub fn open_backend(kind: BackendKind) -> Result<Box<dyn Keystore>> {
         BackendKind::SoftwareRaw => Ok(Box::new(SoftwareRawKeystore::new()?)),
         BackendKind::MacosKeychain => open_macos_keychain_backend(),
         BackendKind::WindowsCredentialManager => open_windows_credential_backend(),
+        BackendKind::LinuxSecretService => open_linux_secret_service_backend(),
         other => Err(Error::BackendUnavailable(format!(
             "backend `{other}` is not implemented in this build"
         ))),
@@ -45,6 +46,19 @@ fn open_windows_credential_backend() -> Result<Box<dyn Keystore>> {
     ))
 }
 
+#[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
+#[allow(clippy::unnecessary_wraps)]
+fn open_linux_secret_service_backend() -> Result<Box<dyn Keystore>> {
+    Ok(Box::new(crate::LinuxSecretServiceKeystore::new()))
+}
+
+#[cfg(not(all(target_os = "linux", feature = "linux-secret-service")))]
+fn open_linux_secret_service_backend() -> Result<Box<dyn Keystore>> {
+    Err(Error::BackendUnavailable(
+        "Linux Secret Service backend requires Linux and the `linux-secret-service` feature".into(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +76,16 @@ mod tests {
     #[test]
     fn windows_backend_fails_closed_when_unavailable() {
         match open_backend(BackendKind::WindowsCredentialManager) {
+            Err(Error::BackendUnavailable(_)) => {}
+            Err(error) => panic!("unexpected error: {error}"),
+            Ok(_) => panic!("unexpected backend"),
+        }
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "linux-secret-service")))]
+    #[test]
+    fn linux_secret_service_backend_fails_closed_when_unavailable() {
+        match open_backend(BackendKind::LinuxSecretService) {
             Err(Error::BackendUnavailable(_)) => {}
             Err(error) => panic!("unexpected error: {error}"),
             Ok(_) => panic!("unexpected backend"),

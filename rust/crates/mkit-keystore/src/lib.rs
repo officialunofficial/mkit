@@ -6,6 +6,8 @@
 #![forbid(unsafe_code)]
 
 mod backend;
+#[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
+mod backend_linux_secret_service;
 #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
 mod backend_macos_keychain;
 #[cfg(all(windows, feature = "windows-credential"))]
@@ -16,6 +18,8 @@ mod software;
 mod types;
 
 pub use backend::open_backend;
+#[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
+pub use backend_linux_secret_service::LinuxSecretServiceKeystore;
 #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
 pub use backend_macos_keychain::MacosKeychainKeystore;
 #[cfg(all(windows, feature = "windows-credential"))]

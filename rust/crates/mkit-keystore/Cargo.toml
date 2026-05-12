@@ -17,6 +17,11 @@ workspace = true
 [features]
 default = []
 attest = ["dep:mkit-attest"]
+linux-secret-service = [
+  "dep:keyring-core",
+  "dep:zbus-secret-service-keyring-store",
+  "zbus-secret-service-keyring-store/rt-async-io-crypto-rust",
+]
 macos-keychain = ["dep:security-framework"]
 windows-credential = ["dep:keyring-core", "dep:windows-native-keyring-store"]
 
@@ -26,6 +31,7 @@ mkit-attest = { version = "0.1", path = "../mkit-attest", optional = true }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 getrandom = "0.4"
+keyring-core = { version = "1", optional = true }
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 sha2 = { version = "0.10", default-features = false }
@@ -35,8 +41,10 @@ zeroize = "1"
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", optional = true }
+
 [target.'cfg(windows)'.dependencies]
-keyring-core = { version = "1", optional = true }
 windows-native-keyring-store = { version = "1", optional = true }
 
 [dev-dependencies]
