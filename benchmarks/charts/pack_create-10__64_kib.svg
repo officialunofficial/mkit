@@ -28,11 +28,11 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Ar
   <text x="460.0" y="168.0" text-anchor="middle" class="axis-label">ops/s</text>
   <text x="190.0" y="77.2" text-anchor="end" class="label">mkit (BLAKE3)</text>
   <rect x="200.0" y="60.0" width="499.5" height="18.2" rx="2" fill="#4C78A8"/>
-  <text x="707.5" y="77.2" class="value">297 µs</text>
+  <text x="707.5" y="77.2" class="value">3,367 ops/s (297 µs)</text>
   <text x="190.0" y="103.2" text-anchor="end" class="label">git2 (libgit2)</text>
   <rect x="200.0" y="86.0" width="143.8" height="18.2" rx="2" fill="#E45756"/>
-  <text x="351.8" y="103.2" class="value">1.03 ms</text>
+  <text x="351.8" y="103.2" class="value">971 ops/s (1.03 ms)</text>
   <text x="190.0" y="129.2" text-anchor="end" class="label">git pack-objects</text>
   <rect x="200.0" y="112.0" width="4.1" height="18.2" rx="2" fill="#9D7660"/>
-  <text x="212.1" y="129.2" class="value">36.38 ms</text>
+  <text x="212.1" y="129.2" class="value">27 ops/s (36.38 ms)</text>
 </svg>
