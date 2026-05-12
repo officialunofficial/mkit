@@ -118,6 +118,10 @@ Workspace integration:
 - Default features must build on Linux and macOS CI without native service
   daemons, TPM libraries, smartcard libraries, or OS-specific SDK setup beyond
   what the target already provides.
+- `mkit-keystore` default features remain empty/lean. Production `mkit-cli`
+  builds, packages, and CI release gates must enable the platform-appropriate
+  encrypted software protector feature so the configured `software` default is
+  usable on supported targets while the library crate remains feature-gated.
 
 Allowed dependencies:
 
@@ -525,6 +529,9 @@ Requirements:
 
 - Store extractable software keys as Keychain generic password or keychain key
   items under a stable service/account scheme.
+- Implement deterministic listing of keys created by the mkit service/account
+  scheme so `mkit key list --backend macos-keychain` works for issue-complete
+  V1.
 - Default accessibility for device-bound keys:
   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
 - Synchronization must default to disabled:
@@ -544,6 +551,8 @@ Requirements:
 
 - Use Windows-native user-bound storage, either Credential Manager with DPAPI
   protection or CNG key storage.
+- Implement deterministic listing of keys created by the mkit target-name scheme
+  so `mkit key list --backend windows-credential` works for issue-complete V1.
 - Report TPM/provider-backed behavior only when actually using a TPM-capable
   provider such as `MS_PLATFORM_CRYPTO_PROVIDER`.
 - Ed25519 hardware support must be capability-detected, not assumed.
@@ -557,6 +566,9 @@ Default target: Linux desktop only.
 Requirements:
 
 - Use the Secret Service API through a reviewed dependency or a small adapter.
+- Implement deterministic listing of keys created by the mkit service/attribute
+  scheme so `mkit key list --backend linux-secret-service` works for
+  issue-complete V1.
 - Must fail clearly when no service is available or the session is locked.
 - Must not be selected by default for headless/server mode.
 
@@ -1175,6 +1187,9 @@ CLI and integrations:
 
 - `mkit key {generate,list,import,export,delete}` works against every required
   backend where the backend supports the requested operation.
+- macOS Keychain, Windows Credential Manager, Linux Secret Service, and
+  `systemd-creds` must support deterministic listing for keys created through
+  their V1 mkit backend schemes.
 - `mkit-attest` accepts a keystore-backed signer for every supported algorithm
   and backend combination that can sign that algorithm.
 - Ed25519 commit signing can use every backend that advertises Ed25519 signing.
@@ -1185,6 +1200,9 @@ Tests and CI:
   Linux headless/server-compatible paths, and Windows.
 - Backend-specific tests are target- and feature-gated so unsupported backends
   do not break unrelated platforms.
+- OS-native backend tests create unique labels, exercise supported create, list,
+  open, export, and delete paths, and clean up without relying on
+  developer-specific keychain state.
 - Golden vectors cover deterministic software/importable backends.
 - Hardware and OS ECDSA backends are tested for verification equivalence, not
   byte equality, unless the backend guarantees deterministic signatures.
