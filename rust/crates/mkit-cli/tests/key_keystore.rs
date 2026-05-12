@@ -172,6 +172,81 @@ fn key_default_ref_drives_unlabeled_commands() {
 }
 
 #[test]
+fn unlabeled_key_commands_use_key_backend_not_ref_backend() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+    let cfg_dir = td.path().join("config/mkit");
+    std::fs::create_dir_all(&cfg_dir).expect("config dir");
+    std::fs::write(
+        cfg_dir.join("config"),
+        "key.backend = yubikey\nkey.default_ref = software:shared\n",
+    )
+    .expect("user config");
+
+    let secret = "05".repeat(32);
+    let import = run(
+        td.path(),
+        &["key", "import", "--algorithm", "ed25519", "--hex", &secret],
+    );
+    assert!(!import.status.success());
+    let stderr = String::from_utf8_lossy(&import.stderr);
+    assert!(
+        stderr.contains("backend `yubikey` is not supported"),
+        "stderr should show key.backend was selected: {stderr}"
+    );
+
+    let import = run(
+        td.path(),
+        &[
+            "key",
+            "import",
+            "--backend",
+            "software",
+            "--algorithm",
+            "ed25519",
+            "--hex",
+            &secret,
+        ],
+    );
+    assert!(
+        import.status.success(),
+        "explicit backend should override config: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+
+    let list = run(td.path(), &["key", "list", "--backend", "software"]);
+    assert!(list.status.success());
+    let stdout = String::from_utf8(list.stdout).expect("stdout utf8");
+    assert!(
+        stdout.contains("software shared ed25519 ed25519:"),
+        "default ref label should still be used: {stdout}"
+    );
+}
+
+#[test]
+fn config_shows_attest_signer() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+    let cfg_dir = td.path().join("config/mkit");
+    std::fs::create_dir_all(&cfg_dir).expect("config dir");
+    std::fs::write(cfg_dir.join("config"), "attest.signer = keystore\n").expect("user config");
+
+    let show_one = run(td.path(), &["config", "attest.signer"]);
+    assert!(show_one.status.success());
+    assert_eq!(
+        String::from_utf8(show_one.stdout)
+            .expect("stdout utf8")
+            .trim(),
+        "keystore"
+    );
+
+    let show_all = run(td.path(), &["config"]);
+    assert!(show_all.status.success());
+    let stdout = String::from_utf8(show_all.stdout).expect("stdout utf8");
+    assert!(stdout.contains("attest.signer = keystore"));
+}
+
+#[test]
 fn commit_can_use_keystore_signer_without_legacy_keygen() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(td.path().join("repo")).expect("repo dir");

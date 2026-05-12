@@ -394,11 +394,9 @@ fn selection_for(
     label: Option<String>,
     algorithm: Option<Algorithm>,
 ) -> Result<Selection, u8> {
+    let backend = backend.unwrap_or_else(|| cfg.key.backend_or_fallback().to_owned());
     if let Some(label) = label {
-        return Ok(Selection {
-            backend: backend.unwrap_or_else(|| cfg.key.backend_or_fallback().to_owned()),
-            label,
-        });
+        return Ok(Selection { backend, label });
     }
     let key_ref =
         match configured_ref(cfg, algorithm.unwrap_or(Algorithm::Ed25519)).parse::<KeyRef>() {
@@ -411,7 +409,7 @@ fn selection_for(
             }
         };
     Ok(Selection {
-        backend: backend.unwrap_or_else(|| key_ref.backend.to_string()),
+        backend,
         label: key_ref.label,
     })
 }

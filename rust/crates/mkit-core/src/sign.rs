@@ -618,6 +618,27 @@ pub fn save_raw_32(path: &Path, secret: &[u8; 32]) -> Result<(), MkitError> {
     Ok(())
 }
 
+/// Persist a raw 32-byte secret only if `path` does not already exist.
+///
+/// Returns `Ok(true)` when the key was created and `Ok(false)` when the
+/// destination already existed. The successful write path is crash-atomic and
+/// preserves the same parent-directory hardening as [`save_raw_32`].
+pub fn save_raw_32_create_new(path: &Path, secret: &[u8; 32]) -> Result<bool, MkitError> {
+    let parent: &Path = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+
+    #[cfg(unix)]
+    create_secure_dir_all(parent)?;
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(parent)
+        .map_err(|e| MkitError::KeyIo(format!("mkdir {}: {e}", parent.display())))?;
+
+    crate::atomic::write_create_new(path, secret, false)
+        .map_err(|e| MkitError::KeyIo(format!("create key: {e}")))
+}
+
 // -------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------
@@ -1083,6 +1104,15 @@ mod tests {
         assert_eq!(meta_after.mode() & 0o777, 0o600);
         let kp_loaded = load_key(&p).unwrap();
         assert_eq!(kp_loaded.public.0, kp2.public.0);
+    }
+
+    #[test]
+    fn save_raw_32_create_new_refuses_existing_key() {
+        let dir = tempdir();
+        let p = dir.join("default.key");
+        assert!(save_raw_32_create_new(&p, &[0x11; 32]).unwrap());
+        assert!(!save_raw_32_create_new(&p, &[0x22; 32]).unwrap());
+        assert_eq!(&*load_raw_32(&p).unwrap(), &[0x11; 32]);
     }
 
     #[cfg(unix)]

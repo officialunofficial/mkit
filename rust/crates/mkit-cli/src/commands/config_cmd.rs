@@ -145,6 +145,11 @@ fn show_all(cfg: &Config) -> u8 {
         cfg.key.secp256k1_ref_or_fallback()
     );
     let _ = writeln!(stdout, "key.p256_ref = {}", cfg.key.p256_ref_or_fallback());
+    let _ = writeln!(
+        stdout,
+        "attest.signer = {}",
+        cfg.attest.signer_or_fallback()
+    );
     let _ = writeln!(stdout, "signing_key = {}", cfg.signing_key);
     let _ = writeln!(stdout, "default_branch = {}", cfg.default_branch);
     let _ = writeln!(stdout, "remote_endpoint = {}", cfg.remote_endpoint);
@@ -174,6 +179,7 @@ fn show_one(cfg: &Config, key: &str) -> u8 {
         "key.ed25519_ref" => cfg.key.ed25519_ref_or_fallback(),
         "key.secp256k1_ref" => cfg.key.secp256k1_ref_or_fallback(),
         "key.p256_ref" => cfg.key.p256_ref_or_fallback(),
+        "attest.signer" => cfg.attest.signer_or_fallback(),
         "signing_key" => &cfg.signing_key,
         "default_branch" => &cfg.default_branch,
         "remote_endpoint" => &cfg.remote_endpoint,

@@ -133,13 +133,18 @@ impl Keystore for SoftwareKeystore {
         validate_label(label)?;
         validate_secret(secret.algorithm(), secret.expose_secret())?;
         let path = self.path_for(label, secret.algorithm())?;
-        if path.exists() && !options.overwrite {
-            return Err(Error::KeyAlreadyExists {
-                label: label.into(),
-                algorithm: secret.algorithm(),
-            });
+        if options.overwrite {
+            mkit_core::sign::save_raw_32(&path, secret.expose_secret()).map_err(core_error)?;
+        } else {
+            let created = mkit_core::sign::save_raw_32_create_new(&path, secret.expose_secret())
+                .map_err(core_error)?;
+            if !created {
+                return Err(Error::KeyAlreadyExists {
+                    label: label.into(),
+                    algorithm: secret.algorithm(),
+                });
+            }
         }
-        mkit_core::sign::save_raw_32(&path, secret.expose_secret()).map_err(core_error)?;
         Ok(Box::new(SoftwareSigner::new(
             label.into(),
             secret.algorithm(),
@@ -550,6 +555,44 @@ mod tests {
             store.export(&selector).expect("export").expose_secret(),
             &[4; 32]
         );
+    }
+
+    #[test]
+    fn software_backend_concurrent_import_without_force_allows_one_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SoftwareKeystore::with_root(dir.path().join("keys"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for seed in [[3; 32], [4; 32]] {
+            let store = store.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.import(
+                    "default",
+                    SecretKey::new(Algorithm::Ed25519, seed),
+                    KeyAttrs::default(),
+                    ImportOptions::default(),
+                )
+            }));
+        }
+        barrier.wait();
+
+        let mut successes = 0;
+        let mut already_exists = 0;
+        for handle in handles {
+            match handle.join().expect("thread should not panic") {
+                Ok(_) => successes += 1,
+                Err(Error::KeyAlreadyExists { .. }) => already_exists += 1,
+                Err(error) => panic!("unexpected import error: {error}"),
+            }
+        }
+        assert_eq!(successes, 1);
+        assert_eq!(already_exists, 1);
+
+        let selector = KeySelector::new("default", Some(Algorithm::Ed25519)).expect("selector");
+        let exported = store.export(&selector).expect("export");
+        assert!(matches!(exported.expose_secret(), [3 | 4, ..]));
     }
 
     #[test]
