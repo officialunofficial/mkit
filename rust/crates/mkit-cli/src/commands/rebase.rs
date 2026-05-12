@@ -137,9 +137,9 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
         let _ = super::sync_index_to_tree(cwd, store, tree);
     }
     let _ = cleanup_rebase(mkit_dir);
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
-        stdout,
+        stderr,
         "rebase aborted; HEAD restored to {}",
         &state.head_name
     );
@@ -234,9 +234,9 @@ fn replay(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore
         return emit_err(&format!("reattach HEAD: {e}"), exit::CANTCREAT);
     }
     let _ = cleanup_rebase(mkit_dir);
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
-        stdout,
+        stderr,
         "rebased {} commit(s) onto {}",
         state.done.len(),
         format::short_hash(&state.onto, 8)

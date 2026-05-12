@@ -31,8 +31,8 @@ pub fn run(_args: &[String]) -> u8 {
     match remote_dispatch::open(endpoint) {
         Ok(tx) => match remote_dispatch::fetch_all(&cwd, tx.as_ref()) {
             Ok(n) => {
-                let mut stdout = std::io::stdout().lock();
-                let _ = writeln!(stdout, "fetched {n} ref(s) from {endpoint}");
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "fetched {n} ref(s) from {endpoint}");
                 exit::OK
             }
             Err(remote_dispatch::DispatchError::Interrupted) => {

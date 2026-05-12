@@ -93,18 +93,18 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT);
     }
 
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     if is_branch {
-        let _ = writeln!(stdout, "switched to branch {name}");
+        let _ = writeln!(stderr, "switched to branch {name}");
     } else {
         let _ = writeln!(
-            stdout,
+            stderr,
             "switched to detached {}",
             format::short_hash(&commit_hash, 8)
         );
     }
     let _ = writeln!(
-        stdout,
+        stderr,
         "  {} file(s), {} dir(s), {} symlink(s) restored ({} ignored)",
         report.files_written,
         report.directories_created,

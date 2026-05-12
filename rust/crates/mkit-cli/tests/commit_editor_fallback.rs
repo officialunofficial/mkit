@@ -70,10 +70,11 @@ fn commit_without_message_honours_editor_env_var() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Confirmation line `committed <hash> (<title>)` lives on stderr.
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains("commit-from-editor"),
-        "commit message from $EDITOR not reflected in output, got: {stdout}"
+        stderr.contains("commit-from-editor"),
+        "commit message from $EDITOR not reflected in output, got: {stderr}"
     );
 }
 

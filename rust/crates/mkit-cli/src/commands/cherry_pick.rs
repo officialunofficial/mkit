@@ -128,9 +128,9 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = super::sync_index_to_tree(&cwd, &store, result.tree_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
-        stdout,
+        stderr,
         "cherry-picked {} onto {} as {}",
         format::short_hash(&target, 8),
         format::short_hash(&ours, 8),

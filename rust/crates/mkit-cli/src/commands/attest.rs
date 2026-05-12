@@ -365,9 +365,9 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("store: {e}"), exit::CANTCREAT),
     };
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
-        stdout,
+        stderr,
         "attested {} → {} ({} signature(s))",
         hash_mod::to_hex(&att_id),
         path.display(),

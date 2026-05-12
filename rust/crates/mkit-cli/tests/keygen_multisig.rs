@@ -160,10 +160,12 @@ fn keygen_default_ed25519_behavior_preserved() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(root.join(".mkit/keys/default.key").exists());
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    // Without `--print-pubkey` the pubkey line is human prose on
+    // stderr. With `--print-pubkey` it would be on stdout.
+    let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stdout.contains("ed25519:"),
-        "default keygen should print ed25519 pubkey line: {stdout}"
+        stderr.contains("ed25519:"),
+        "default keygen should print ed25519 pubkey line: {stderr}"
     );
 }
 
@@ -501,12 +503,12 @@ fn attest_three_way_envelope_ed25519_secp256k1_p256() {
         String::from_utf8_lossy(&v.stdout),
         String::from_utf8_lossy(&v.stderr)
     );
-    let vstdout = String::from_utf8(v.stdout).unwrap();
-    // All three signatures should be reported as verified.
-    let verified_count = vstdout.matches("verified").count();
+    // `verify-attest` report prose lives on stderr.
+    let vstderr = String::from_utf8(v.stderr).unwrap();
+    let verified_count = vstderr.matches("verified").count();
     assert!(
         verified_count >= 3,
-        "expected 3 verified lines, got: {vstdout}"
+        "expected 3 verified lines, got: {vstderr}"
     );
 }
 

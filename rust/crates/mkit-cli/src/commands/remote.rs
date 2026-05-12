@@ -66,13 +66,16 @@ fn validate_url(url: &str) -> Option<&'static str> {
 }
 
 fn show(cfg: &Config) -> u8 {
-    let mut stdout = std::io::stdout().lock();
     if cfg.remote_endpoint.is_empty() {
-        let _ = writeln!(stdout, "(no remote configured)");
-    } else {
-        let _ = writeln!(stdout, "remote_endpoint = {}", cfg.remote_endpoint);
-        let _ = writeln!(stdout, "remote_type = {}", cfg.remote_type);
+        // Empty listing → empty stdout. The human note goes to stderr.
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "(no remote configured)");
+        return exit::OK;
     }
+    // Config values ARE the data — keep on stdout.
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "remote_endpoint = {}", cfg.remote_endpoint);
+    let _ = writeln!(stdout, "remote_type = {}", cfg.remote_type);
     exit::OK
 }
 

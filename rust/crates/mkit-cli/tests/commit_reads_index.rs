@@ -211,10 +211,11 @@ fn commit_dash_am_stages_modified_tracked_file() {
     let out = ok(p, &["commit", "-am", "update tracked"]);
 
     assert_eq!(head_blob_body(p, "a.txt"), "alpha v2");
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    // Confirmation prose lives on stderr.
+    let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stdout.contains("update tracked"),
-        "-am message was not used: {stdout}"
+        stderr.contains("update tracked"),
+        "-am message was not used: {stderr}"
     );
 }
 
