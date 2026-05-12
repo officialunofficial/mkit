@@ -46,10 +46,12 @@
 use std::io::Write;
 use std::path::Path;
 
+use clap::Parser;
 use mkit_attest::{Algorithm, Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, Signer, statement, store};
 use mkit_core::hash::Hash;
 use mkit_core::{hash as hash_mod, refs};
 
+use crate::clap_shim;
 use crate::commands::attest_factory::{self, FactoryError};
 use crate::config::Config;
 use crate::exit;
@@ -57,72 +59,60 @@ use crate::exit;
 /// Default predicate type URI — placeholder; real callers pass their own.
 const DEFAULT_PREDICATE_TYPE: &str = "https://mkit.io/predicate/empty/v1";
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit attest",
+    about = "Produce a signed DSSE attestation for a commit."
+)]
 #[allow(clippy::struct_field_names)]
 struct Args {
+    /// Commit hash to attest. Defaults to HEAD.
+    #[arg(long, value_name = "HASH")]
     commit: Option<String>,
+    /// Algorithm: `ed25519`, `secp256k1`, or `p256`.
+    #[arg(long, value_name = "ALG")]
     algorithm: Option<String>,
+    /// Signer kind: `repo-key` (default) or `external`.
+    #[arg(long, value_name = "KIND")]
     signer: Option<String>,
+    /// Predicate type URI.
+    #[arg(long = "predicate-type", value_name = "URI")]
     predicate_type: Option<String>,
+    /// Path to a JSON predicate body.
+    #[arg(long = "predicate-file", value_name = "PATH")]
     predicate_file: Option<String>,
+    /// Repeatable `--additional-signer "<spec>"`. Each spec is a
+    /// comma-separated `key=value` list parsed downstream — see the
+    /// module docstring.
+    #[arg(long = "additional-signer", value_name = "SPEC")]
     additional_signers: Vec<String>,
-    /// Repeatable `--external-signer-arg <V>`. If any instance appears,
-    /// these REPLACE (not append to) `attest.external_signer_args` from
-    /// config — per-invocation override for "sign with this tag just
-    /// once" without editing `.mkit/config`. An empty `Vec` means the
-    /// flag was not passed (fall through to config); to force zero argv
-    /// when config has some, the user can `config unset` the key.
-    external_signer_args: Option<Vec<String>>,
+    /// Repeatable `--external-signer-arg <V>`. If any instance is
+    /// supplied, the full list REPLACES `attest.external_signer_args`
+    /// from config (not appended). Empty list ⇒ flag was not passed.
+    ///
+    /// `allow_hyphen_values` is set so users can pass values that
+    /// start with `-` / `--` (e.g. `--external-signer-arg --tag`)
+    /// without quoting — the hand-rolled parser this replaces
+    /// accepted those literally and we preserve that.
+    #[arg(
+        long = "external-signer-arg",
+        value_name = "ARG",
+        allow_hyphen_values = true
+    )]
+    external_signer_args_vec: Vec<String>,
 }
 
-fn parse_args(args: &[String]) -> Result<Args, String> {
-    let mut out = Args {
-        commit: None,
-        algorithm: None,
-        signer: None,
-        predicate_type: None,
-        predicate_file: None,
-        additional_signers: Vec::new(),
-        external_signer_args: None,
-    };
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--commit" if i + 1 < args.len() => {
-                out.commit = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--algorithm" if i + 1 < args.len() => {
-                out.algorithm = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--signer" if i + 1 < args.len() => {
-                out.signer = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--predicate-type" if i + 1 < args.len() => {
-                out.predicate_type = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--predicate-file" if i + 1 < args.len() => {
-                out.predicate_file = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--additional-signer" if i + 1 < args.len() => {
-                out.additional_signers.push(args[i + 1].clone());
-                i += 2;
-            }
-            "--external-signer-arg" if i + 1 < args.len() => {
-                out.external_signer_args
-                    .get_or_insert_with(Vec::new)
-                    .push(args[i + 1].clone());
-                i += 2;
-            }
-            other => {
-                return Err(format!("unknown argument: {other}"));
-            }
+impl Args {
+    /// Convert the raw `Vec<String>` form into `Option<Vec<…>>`:
+    /// `None` means "flag was not passed; fall back to config";
+    /// `Some(_)` means "flag was passed with these values".
+    fn external_signer_args(&self) -> Option<Vec<String>> {
+        if self.external_signer_args_vec.is_empty() {
+            None
+        } else {
+            Some(self.external_signer_args_vec.clone())
         }
     }
-    Ok(out)
 }
 
 /// Parsed `--additional-signer` spec. The `path` field overrides the
@@ -205,19 +195,9 @@ fn parse_signer_spec(s: &str) -> Result<SignerSpec, String> {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
-    let parsed = match parse_args(args) {
-        Ok(p) => p,
-        Err(e) => {
-            return emit_err(
-                &format!(
-                    "{e}\nusage: mkit attest [--commit <hash>] [--algorithm ed25519|secp256k1|p256] \
-                     [--signer repo-key|external] [--predicate-type <URI>] [--predicate-file <path>] \
-                     [--external-signer-arg <V>]... \
-                     [--additional-signer \"algorithm=<a>,signer=<k>[,path=<p>][,args=<a>|<b>|<c>]\"]..."
-                ),
-                exit::USAGE,
-            );
-        }
+    let parsed = match clap_shim::parse::<Args>("mkit attest", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
 
     let cwd = match std::env::current_dir() {
@@ -238,7 +218,7 @@ pub fn run(args: &[String]) -> u8 {
     // when present. Per-invocation override, intentionally not additive
     // so a user can cleanly reproduce `mkit-sign-se sign --tag demo`
     // without having to remember (or clobber) whatever's in config.
-    if let Some(argv) = parsed.external_signer_args.clone() {
+    if let Some(argv) = parsed.external_signer_args() {
         cfg.attest.external_signer_args = argv;
     }
 
@@ -460,6 +440,15 @@ fn emit_err(msg: &str, code: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    /// Test-only adapter: drive the clap-derive parser with just the
+    /// trailing args (no `mkit attest` argv[0]).
+    fn parse_args(args: &[String]) -> Result<Args, clap::Error> {
+        let mut full: Vec<String> = vec!["mkit attest".into()];
+        full.extend_from_slice(args);
+        Args::try_parse_from(full)
+    }
 
     #[test]
     fn parse_args_accepts_all_flags() {
@@ -496,7 +485,7 @@ mod tests {
         ];
         let p = parse_args(&args).unwrap();
         let expected = vec!["sign".to_owned(), "--tag".to_owned(), "demo".to_owned()];
-        assert_eq!(p.external_signer_args, Some(expected));
+        assert_eq!(p.external_signer_args(), Some(expected));
     }
 
     #[test]
@@ -505,7 +494,7 @@ mod tests {
         // from "flag passed with no values" (impossible: the flag needs
         // a value).
         let p = parse_args(&[]).unwrap();
-        assert!(p.external_signer_args.is_none());
+        assert!(p.external_signer_args().is_none());
     }
 
     #[test]

@@ -32,22 +32,40 @@ use mkit_core::sign::{self, KeyPair};
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 
+use clap::Parser;
+
+use crate::clap_shim;
 use crate::editor::{COMMIT_EDITMSG_TEMPLATE, spawn_editor};
 use crate::exit;
 use crate::format;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit commit",
+    about = "Create a signed commit from the staging index."
+)]
 struct CommitOptions {
+    /// Commit message. If omitted, `$EDITOR` is launched.
+    #[arg(short, long)]
     message: Option<String>,
+    /// Override the author Identity for this commit.
+    #[arg(long = "author", value_name = "SPEC")]
     author_spec: Option<String>,
+    /// Stage every tracked-and-modified file before committing
+    /// (mirrors `git commit -a`).
+    #[arg(short = 'a', long)]
     all: bool,
 }
 
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match parse_options(args) {
-        Ok(opts) => opts,
-        Err(e) => return emit_err(&e, exit::USAGE),
+    // Split fused `-am<msg>` / `-am <msg>` shortcuts into the
+    // equivalent `-a -m <msg>` so clap sees only canonical forms.
+    let normalised = expand_dash_am(args);
+    let opts = match clap_shim::parse::<CommitOptions>("mkit commit", &normalised) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
 
     let cwd = match std::env::current_dir() {
@@ -163,46 +181,62 @@ pub fn run(args: &[String]) -> u8 {
     exit::OK
 }
 
-fn parse_options(args: &[String]) -> Result<CommitOptions, String> {
-    let mut opts = CommitOptions {
-        message: None,
-        author_spec: None,
-        all: false,
-    };
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-a" | "--all" => {
-                opts.all = true;
-                i += 1;
-            }
-            "-m" if i + 1 < args.len() => {
-                opts.message = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--author" if i + 1 < args.len() => {
-                opts.author_spec = Some(args[i + 1].clone());
-                i += 2;
-            }
+/// Pre-process `args` to canonicalize the legacy `-am<msg>` /
+/// `-am <msg>` shortcut into `-a -m <msg>`. Everything else passes
+/// through unchanged. Clap then sees only canonical forms.
+fn expand_dash_am(args: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(args.len() + 2);
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
+        match a.as_str() {
             "-am" => {
-                if i + 1 >= args.len() {
-                    return Err(
-                        "usage: mkit commit [-a|--all] [-m <msg>] [--author <spec>]".to_string()
-                    );
+                out.push("-a".to_owned());
+                out.push("-m".to_owned());
+                if let Some(next) = iter.next() {
+                    out.push(next.clone());
                 }
-                opts.all = true;
-                opts.message = Some(args[i + 1].clone());
-                i += 2;
             }
-            arg if arg.starts_with("-am") && arg.len() > 3 => {
-                opts.all = true;
-                opts.message = Some(arg[3..].to_string());
-                i += 1;
+            s if s.starts_with("-am") && s.len() > 3 => {
+                out.push("-a".to_owned());
+                out.push("-m".to_owned());
+                out.push(s[3..].to_owned());
             }
-            _ => i += 1,
+            _ => out.push(a.clone()),
         }
     }
-    Ok(opts)
+    out
+}
+
+#[cfg(test)]
+mod expand_dash_am_tests {
+    use super::expand_dash_am;
+
+    fn to_strs(args: &[String]) -> Vec<&str> {
+        args.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn fused_dash_am_with_inline_message() {
+        let out = expand_dash_am(&["-amhello".to_owned()]);
+        assert_eq!(to_strs(&out), &["-a", "-m", "hello"]);
+    }
+
+    #[test]
+    fn spaced_dash_am_with_following_message() {
+        let out = expand_dash_am(&["-am".to_owned(), "hello".to_owned()]);
+        assert_eq!(to_strs(&out), &["-a", "-m", "hello"]);
+    }
+
+    #[test]
+    fn unrelated_args_pass_through() {
+        let out = expand_dash_am(&[
+            "-m".to_owned(),
+            "msg".to_owned(),
+            "--author".to_owned(),
+            "id".to_owned(),
+        ]);
+        assert_eq!(to_strs(&out), &["-m", "msg", "--author", "id"]);
+    }
 }
 
 /// Load the Ed25519 signing key. Returns a mapped (message,
