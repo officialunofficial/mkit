@@ -74,11 +74,12 @@ jobs:
       # via target_os, so we only install on Linux:
       #   libtss2-dev   → mkit-sign-tpm's `tpm2` feature (tss-esapi)
       #   libudev-dev   → mkit-sign-ctap (via hidapi → libudev)
+      #   libpcsclite-dev → mkit-keystore `backend-yubikey` PC/SC support
       #   swtpm         → integration tests against a software TPM
       #                   when -F tpm-mssim is enabled
       - name: Install native signer deps (Linux only)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev swtpm
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config swtpm
 
       - name: Check formatting
         working-directory: rust
@@ -118,6 +119,53 @@ jobs:
             echo "::error::mkit version contract violated — stdout is not exactly 'mkit <X.Y.Z>\\n'"
             exit 1
           fi
+
+  keystore-backends:
+    name: Keystore backends (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-keychain-yubikey
+            os: macos-latest
+            features: macos-keychain backend-yubikey
+          - name: windows-credential
+            os: windows-latest
+            features: windows-credential
+          - name: linux-secret-systemd-yubikey
+            os: ubuntu-latest
+            features: linux-secret-service systemd-creds backend-yubikey
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: rust -> rust/target
+          prefix-key: "rust-keystore-${{ matrix.name }}"
+          cache-on-failure: false
+
+      - name: Install Linux keystore native deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev pkg-config
+
+      - name: Test keystore backend feature set
+        working-directory: rust
+        shell: bash
+        run: cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
+
+      - name: Clippy keystore backend feature set
+        working-directory: rust
+        shell: bash
+        run: cargo clippy --locked -p mkit-keystore --features "${{ matrix.features }}" --all-targets -- -D warnings
 
 
   # Minimum-supported Rust version gate. Reads `rust-version` from
@@ -170,4 +218,3 @@ jobs:
         env:
           CARGO_INCREMENTAL: 0
         run: cargo check --workspace --locked --all-targets
-
