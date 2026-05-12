@@ -108,12 +108,103 @@ pub(crate) fn run_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
         return;
     }
 
-    match exercise_native_backend_roundtrip(store) {
+    match exercise_native_backend_roundtrip(store)
+        .and_then(|()| exercise_native_backend_ecdsa_verification(store))
+    {
         Ok(()) => {}
         Err(Error::BackendUnavailable(message)) => {
             eprintln!("skipping native backend roundtrip: {message}");
         }
         Err(error) => panic!("native backend roundtrip failed: {error:?}"),
+    }
+}
+
+#[cfg(test)]
+fn exercise_native_backend_ecdsa_verification(store: &dyn crate::Keystore) -> Result<()> {
+    for algorithm in [Algorithm::Secp256k1, Algorithm::P256] {
+        let label = unique_test_label();
+        let selector = crate::KeySelector::new(label.clone(), Some(algorithm))?;
+        let _ = store.delete(&selector);
+
+        let result = (|| -> Result<()> {
+            let mut seed = [0u8; 32];
+            seed[31] = 1;
+            let mut signer = store.import(
+                &label,
+                SecretKey::new(algorithm, seed),
+                crate::KeyAttrs::default(),
+                crate::ImportOptions { overwrite: false },
+            )?;
+            let message = b"native backend ecdsa verification equivalence";
+            let signature = signer.sign(message)?;
+            verify_ecdsa_signature(algorithm, &signer.public_key()?, message, &signature)?;
+
+            let mut opened = store.open(&selector)?;
+            let reopened_signature = opened.sign(message)?;
+            verify_ecdsa_signature(
+                algorithm,
+                &opened.public_key()?,
+                message,
+                &reopened_signature,
+            )?;
+
+            let listed = store.list()?;
+            assert!(
+                listed
+                    .iter()
+                    .any(|metadata| metadata.label == label && metadata.algorithm == algorithm),
+                "created ECDSA key must appear in native backend listing"
+            );
+            assert_eq!(store.export(&selector)?.expose_secret(), &seed);
+            store.delete(&selector)
+        })();
+
+        let cleanup = store.delete(&selector);
+        if result.is_ok()
+            && !matches!(cleanup, Ok(()) | Err(Error::KeyNotFound(_)))
+            && let Err(error) = cleanup
+        {
+            return Err(error);
+        }
+        result?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn verify_ecdsa_signature(
+    algorithm: Algorithm,
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    match algorithm {
+        Algorithm::Secp256k1 => {
+            use k256::ecdsa::signature::DigestVerifier as _;
+            use sha2::Digest as _;
+
+            let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(public_key)
+                .map_err(|error| Error::Encoding(format!("secp256k1 public key: {error}")))?;
+            let signature = k256::ecdsa::Signature::from_slice(signature)
+                .map_err(|error| Error::Encoding(format!("secp256k1 signature: {error}")))?;
+            let mut digest = sha2::Sha256::new();
+            digest.update(message);
+            verifying_key
+                .verify_digest(digest, &signature)
+                .map_err(|error| Error::Internal(format!("secp256k1 signature verify: {error}")))
+        }
+        Algorithm::P256 => {
+            use p256::ecdsa::signature::Verifier as _;
+
+            let verifying_key = p256::ecdsa::VerifyingKey::from_sec1_bytes(public_key)
+                .map_err(|error| Error::Encoding(format!("P-256 public key: {error}")))?;
+            let signature = p256::ecdsa::Signature::from_slice(signature)
+                .map_err(|error| Error::Encoding(format!("P-256 signature: {error}")))?;
+            verifying_key
+                .verify(message, &signature)
+                .map_err(|error| Error::Internal(format!("P-256 signature verify: {error}")))
+        }
+        Algorithm::Ed25519 => Err(Error::UnsupportedAlgorithm(Algorithm::Ed25519)),
     }
 }
 
@@ -182,5 +273,25 @@ mod tests {
         assert_eq!(metadata[1].label, "a");
         assert_eq!(metadata[1].algorithm, Algorithm::P256);
         assert_eq!(metadata[2].label, "z");
+    }
+
+    #[test]
+    fn ecdsa_verification_accepts_valid_signatures() {
+        for algorithm in [Algorithm::Secp256k1, Algorithm::P256] {
+            let mut seed = [0u8; 32];
+            seed[31] = 1;
+            let mut signer =
+                SoftwareSigner::new("ecdsa".into(), BackendKind::Software, algorithm, seed)
+                    .unwrap();
+            let message = b"verify ecdsa instead of comparing bytes";
+            let signature = signer.sign(message).unwrap();
+            verify_ecdsa_signature(
+                algorithm,
+                &signer.public_key().unwrap(),
+                message,
+                &signature,
+            )
+            .unwrap();
+        }
     }
 }
