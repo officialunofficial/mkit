@@ -38,7 +38,7 @@ Currently the canonical channel: the workspace is on GitHub and Cargo
 can fetch + build it directly.
 
 **Toolchain.** Rust 1.95, edition 2024, pinned by
-[`rust/rust-toolchain.toml`](../rust/rust-toolchain.toml). `rustup` will
+[`rust/rust-toolchain.toml`](https://github.com/officialunofficial/mkit/blob/main/rust/rust-toolchain.toml). `rustup` will
 auto-install on the first build.
 
 **Install the CLI:**
@@ -60,7 +60,7 @@ cargo test --workspace       # all crates, all tests
 ```
 
 **Workspace layout.** The Rust tree is one Cargo workspace under
-[`rust/`](../rust/). The publishable surface is in `rust/crates/`:
+[`rust/`](https://github.com/officialunofficial/mkit/tree/main/rust/). The publishable surface is in `rust/crates/`:
 
 | Crate                                | Role                                                       |
 |--------------------------------------|------------------------------------------------------------|
@@ -72,7 +72,7 @@ cargo test --workspace       # all crates, all tests
 
 ## From GitHub Releases
 
-The [`release.yml`](../.github/workflows/release.yml) workflow fires on
+The [`release.yml`](https://github.com/officialunofficial/mkit/blob/main/.github/workflows/release.yml) workflow fires on
 every `v*.*.*` tag and produces a per-target archive plus signing
 material:
 
@@ -140,7 +140,7 @@ Full reproducibility, signing, and supply-chain notes live under
 
 ## WASM / npm
 
-The `mkit-wasm` crate ([`rust/crates/mkit-wasm`](../rust/crates/mkit-wasm))
+The `mkit-wasm` crate ([`rust/crates/mkit-wasm`](https://github.com/officialunofficial/mkit/tree/main/rust/crates/mkit-wasm))
 is built with `wasm-pack` and published to npm as
 `@makechain/mkit-wasm`.
 
@@ -267,7 +267,7 @@ mkit 0.1.0
 
 The exact format `mkit <X.Y.Z>\n` (no extra whitespace, no banner) is
 contract-tested in
-[`.github/workflows/rust.yml`](../.github/workflows/rust.yml) under the
+[`.github/workflows/rust.yml`](https://github.com/officialunofficial/mkit/blob/main/.github/workflows/rust.yml) under the
 `Version contract` step — if you ever see anything else, the binary
 on your `PATH` is not a release build of this repo.
 

@@ -14,7 +14,7 @@ description: "Seven-verb transport protocol shared by mkit's file, http, s3, and
 
 mkit talks to remote stores through a small set of pluggable
 transports (memory, file, HTTP, S3, SSH). All speak the same
-[`Transport`](../rust/crates/mkit-core/src/protocol.rs) trait —
+[`Transport`](https://github.com/officialunofficial/mkit/blob/main/rust/crates/mkit-core/src/protocol.rs) trait —
 seven verbs over a synchronous, object-safe interface — but the wire
 shape differs per scheme.
 
@@ -96,7 +96,7 @@ Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`,
 mkit's SSH transport spawns a long-lived `ssh(1)` child process and
 exchanges length-prefixed buffa `SshFrame` messages on its
 stdin/stdout. The wire format is defined by
-[`SshFrame`](../rust/crates/mkit-rpc/proto/ssh.proto) per
+[`SshFrame`](https://github.com/officialunofficial/mkit/blob/main/rust/crates/mkit-rpc/proto/ssh.proto) per
 [SPEC-RPC §1](/docs/spec/rpc#1-wire-framing).
 
 ### 4.1 Forced-command server pattern
@@ -192,7 +192,7 @@ All transports MUST retry the following errors with exponential
 backoff: `ConnectionFailed`, `ServerError{status >= 500}`,
 `ServerError{status == 429}`. The default ladder is `1s, 2s, 4s, 8s,
 16s` (5 attempts), exposed via
-[`BackoffIterator`](../rust/crates/mkit-core/src/protocol.rs).
+[`BackoffIterator`](https://github.com/officialunofficial/mkit/blob/main/rust/crates/mkit-core/src/protocol.rs).
 
 `update_ref` with `Missing` or `Match` is NOT idempotent across
 retries: a network timeout after the server applied the write looks
