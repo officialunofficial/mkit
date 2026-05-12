@@ -10,6 +10,8 @@ mod backend;
 mod backend_linux_secret_service;
 #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
 mod backend_macos_keychain;
+#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
+mod backend_systemd_creds;
 #[cfg(all(windows, feature = "windows-credential"))]
 mod backend_windows_credential;
 mod encrypted_record;
@@ -22,6 +24,8 @@ pub use backend::open_backend;
 pub use backend_linux_secret_service::LinuxSecretServiceKeystore;
 #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
 pub use backend_macos_keychain::MacosKeychainKeystore;
+#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
+pub use backend_systemd_creds::SystemdCredsKeystore;
 #[cfg(all(windows, feature = "windows-credential"))]
 pub use backend_windows_credential::WindowsCredentialKeystore;
 pub use error::{Error, Result};

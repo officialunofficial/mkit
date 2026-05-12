@@ -23,6 +23,7 @@ linux-secret-service = [
   "zbus-secret-service-keyring-store/rt-async-io-crypto-rust",
 ]
 macos-keychain = ["dep:security-framework"]
+systemd-creds = []
 windows-credential = ["dep:keyring-core", "dep:windows-native-keyring-store"]
 
 [dependencies]
