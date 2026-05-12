@@ -37,6 +37,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "pull",
     "push",
     "serve",
+    "key",
     "keygen",
     "config",
     "version",

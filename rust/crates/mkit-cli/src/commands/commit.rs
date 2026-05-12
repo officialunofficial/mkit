@@ -31,7 +31,9 @@ use mkit_core::serialize;
 use mkit_core::sign::{self, KeyPair};
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
+use mkit_keystore::{BackendKind, KeyRef, KeySelector, Keystore as _};
 
+use crate::config::Config;
 use crate::editor::{COMMIT_EDITMSG_TEMPLATE, spawn_editor};
 use crate::exit;
 use crate::format;
@@ -77,15 +79,23 @@ pub fn run(args: &[String]) -> u8 {
         },
     };
 
-    // ---- Load signing key. -----------------------------------------
-    let kp = match load_signing_key(&cwd, &cfg.signing_key) {
-        Ok(kp) => kp,
+    // ---- Load signer. ----------------------------------------------
+    let mut signer = match load_commit_signer(&cwd, &cfg) {
+        Ok(signer) => signer,
+        Err((msg, code)) => return emit_err(&msg, code),
+    };
+    let signer_public = match signer.public_key() {
+        Ok(public) => public,
         Err((msg, code)) => return emit_err(&msg, code),
     };
 
     // ---- Resolve author. -------------------------------------------
     // Precedence: --author flag → config.user_identity → pubkey-derived.
-    let author = match resolve_author(opts.author_spec.as_deref(), &cfg.user_identity, &kp) {
+    let author = match resolve_author(
+        opts.author_spec.as_deref(),
+        &cfg.user_identity,
+        &signer_public,
+    ) {
         Ok(id) => id,
         Err(e) => return emit_err(&format!("author: {e}"), exit::CONFIG_ERROR),
     };
@@ -129,16 +139,16 @@ pub fn run(args: &[String]) -> u8 {
         tree_hash,
         parents,
         author,
-        kp.public.0,
+        signer_public,
         msg.as_bytes().to_vec(),
         timestamp,
         [0u8; 64],
     );
-    let sig = match sign::sign_commit(&unsigned, &kp) {
+    let sig = match signer.sign_commit(&unsigned) {
         Ok(s) => s,
-        Err(e) => return emit_err(&format!("sign: {e}"), exit::GENERAL_ERROR),
+        Err((msg, code)) => return emit_err(&msg, code),
     };
-    unsigned.signature = sig.0;
+    unsigned.signature = sig;
     let bytes = match serialize::serialize(&Object::Commit(unsigned)) {
         Ok(b) => b,
         Err(e) => return emit_err(&format!("serialize commit: {e}"), exit::DATAERR),
@@ -236,6 +246,105 @@ fn load_signing_key(
     sign::load_key(&key_path).map_err(|e| (format!("load key: {e}"), exit::NOPERM))
 }
 
+pub(super) enum CommitSigner {
+    Legacy(KeyPair),
+    Keystore(Box<dyn mkit_keystore::KeySigner>),
+}
+
+impl CommitSigner {
+    pub(super) fn public_key(&self) -> Result<[u8; 32], (String, u8)> {
+        match self {
+            Self::Legacy(kp) => Ok(kp.public.0),
+            Self::Keystore(signer) => {
+                let public = signer
+                    .public_key()
+                    .map_err(|error| (format!("keystore public key: {error}"), exit::DATAERR))?;
+                public.try_into().map_err(|public: Vec<u8>| {
+                    (
+                        format!(
+                            "keystore Ed25519 public key must be 32 bytes, got {}",
+                            public.len()
+                        ),
+                        exit::DATAERR,
+                    )
+                })
+            }
+        }
+    }
+
+    pub(super) fn sign_commit(&mut self, commit: &Commit) -> Result<[u8; 64], (String, u8)> {
+        match self {
+            Self::Legacy(kp) => sign::sign_commit(commit, kp)
+                .map(|signature| signature.0)
+                .map_err(|error| (format!("sign: {error}"), exit::GENERAL_ERROR)),
+            Self::Keystore(signer) => {
+                let digest = sign::commit_signing_hash(commit)
+                    .map_err(|error| (format!("commit signing hash: {error}"), exit::DATAERR))?;
+                let signature = signer
+                    .sign(&digest)
+                    .map_err(|error| (format!("keystore sign: {error}"), exit::DATAERR))?;
+                signature.try_into().map_err(|signature: Vec<u8>| {
+                    (
+                        format!(
+                            "keystore Ed25519 signature must be 64 bytes, got {}",
+                            signature.len()
+                        ),
+                        exit::DATAERR,
+                    )
+                })
+            }
+        }
+    }
+}
+
+pub(super) fn load_commit_signer(
+    cwd: &std::path::Path,
+    cfg: &Config,
+) -> Result<CommitSigner, (String, u8)> {
+    match cfg.signer.as_str() {
+        "" | "legacy" => load_signing_key(cwd, &cfg.signing_key).map(CommitSigner::Legacy),
+        "keystore" => load_keystore_commit_signer(cfg),
+        other => Err((
+            format!("unknown signer `{other}` — expected `legacy` or `keystore`"),
+            exit::CONFIG_ERROR,
+        )),
+    }
+}
+
+fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8)> {
+    let key_ref = cfg
+        .key
+        .ed25519_ref_or_fallback()
+        .parse::<KeyRef>()
+        .map_err(|error| (format!("key.ed25519_ref: {error}"), exit::CONFIG_ERROR))?;
+    if key_ref.backend != BackendKind::Software {
+        return Err((
+            format!(
+                "key backend `{}` is not supported in Foundation V1",
+                key_ref.backend
+            ),
+            exit::UNAVAILABLE,
+        ));
+    }
+    let store = mkit_keystore::SoftwareKeystore::new()
+        .map_err(|error| (format!("software keystore: {error}"), exit::UNAVAILABLE))?;
+    let selector = KeySelector::new(
+        key_ref.label.clone(),
+        Some(mkit_keystore::Algorithm::Ed25519),
+    )
+    .map_err(|error| (format!("key.ed25519_ref: {error}"), exit::CONFIG_ERROR))?;
+    let signer = store.open(&selector).map_err(|error| {
+        (
+            format!(
+                "missing keystore signing key `{}` — run `mkit key generate --algorithm ed25519 --label {}` first, or set `signer = legacy` and use `mkit keygen`: {error}",
+                cfg.key.ed25519_ref_or_fallback(), key_ref.label
+            ),
+            exit::NOINPUT,
+        )
+    })?;
+    Ok(CommitSigner::Keystore(signer))
+}
+
 /// Advance the branch pointed to by HEAD (or HEAD itself, if detached)
 /// to `commit_hash`.
 fn advance_head(
@@ -260,7 +369,7 @@ fn advance_head(
 pub(super) fn resolve_author(
     author_flag: Option<&str>,
     cfg_user_identity: &str,
-    kp: &KeyPair,
+    signer_public: &[u8; 32],
 ) -> Result<Identity, String> {
     if let Some(spec) = author_flag {
         return parse_author_spec(spec);
@@ -268,7 +377,7 @@ pub(super) fn resolve_author(
     if !cfg_user_identity.is_empty() {
         return decode_user_identity_hex(cfg_user_identity);
     }
-    Ok(Identity::ed25519(kp.public.0))
+    Ok(Identity::ed25519(*signer_public))
 }
 
 /// Parse a `--author` flag value.
@@ -439,7 +548,7 @@ mod tests {
             s.push_str(&"33".repeat(32));
             s
         };
-        let id = resolve_author(Some(&spec), &cfg_hex, &kp).unwrap();
+        let id = resolve_author(Some(&spec), &cfg_hex, &kp.public.0).unwrap();
         assert!(id.bytes.iter().all(|&b| b == 0x22));
     }
 
@@ -448,7 +557,7 @@ mod tests {
         let kp = KeyPair::generate().unwrap();
         let mut cfg_hex = String::from("012000");
         cfg_hex.push_str(&"44".repeat(32));
-        let id = resolve_author(None, &cfg_hex, &kp).unwrap();
+        let id = resolve_author(None, &cfg_hex, &kp.public.0).unwrap();
         assert_eq!(id.kind, IdentityKind::Ed25519);
         assert!(id.bytes.iter().all(|&b| b == 0x44));
     }
@@ -456,8 +565,42 @@ mod tests {
     #[test]
     fn resolve_author_falls_back_to_pubkey() {
         let kp = KeyPair::generate().unwrap();
-        let id = resolve_author(None, "", &kp).unwrap();
+        let id = resolve_author(None, "", &kp.public.0).unwrap();
         assert_eq!(id.kind, IdentityKind::Ed25519);
         assert_eq!(id.bytes, kp.public.0.to_vec());
+    }
+
+    #[test]
+    fn keystore_commit_signature_matches_legacy_keypair_signature() {
+        let seed = [0x5a; 32];
+        let kp = KeyPair::from_seed(seed);
+        let store_root = tempfile::tempdir().unwrap();
+        let store = mkit_keystore::SoftwareKeystore::with_root(store_root.path().join("keys"));
+        store
+            .import(
+                "committer",
+                mkit_keystore::SecretKey::new(mkit_keystore::Algorithm::Ed25519, seed),
+                mkit_keystore::KeyAttrs::default(),
+                mkit_keystore::ImportOptions::default(),
+            )
+            .unwrap();
+        let selector =
+            mkit_keystore::KeySelector::new("committer", Some(mkit_keystore::Algorithm::Ed25519))
+                .unwrap();
+        let mut signer = CommitSigner::Keystore(store.open(&selector).unwrap());
+        let signer_public = signer.public_key().unwrap();
+        let commit = Commit::new_unannotated(
+            [1; 32],
+            vec![[2; 32]],
+            Identity::ed25519(signer_public),
+            signer_public,
+            b"same commit".to_vec(),
+            123,
+            [0; 64],
+        );
+
+        let keystore_sig = signer.sign_commit(&commit).unwrap();
+        let legacy_sig = sign::sign_commit(&commit, &kp).unwrap().0;
+        assert_eq!(keystore_sig, legacy_sig);
     }
 }

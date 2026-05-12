@@ -61,6 +61,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
             exit::OK
         }
         "init" => commands::init::run(&rest),
+        "key" => commands::key::run(&rest),
         "keygen" => commands::keygen::run(&rest),
         "hash" => commands::hash_cmd::run(&rest),
         "cat" => commands::cat::run(&rest),

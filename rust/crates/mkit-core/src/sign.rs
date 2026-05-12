@@ -135,7 +135,8 @@ impl KeyPair {
     }
 
     /// Sign `signing_bytes` under the given domain. The actual Ed25519
-    /// input is `BLAKE3(domain || signing_bytes)` — see SPEC §2.2.
+    /// input is `BLAKE3(len_le16(domain) || domain || signing_bytes)` — see
+    /// SPEC §2.2.
     #[must_use]
     pub fn sign(&self, domain: &[u8], signing_bytes: &[u8]) -> Signature {
         let digest = domain_digest(domain, signing_bytes);
@@ -145,8 +146,8 @@ impl KeyPair {
     }
 }
 
-/// Verify a signature over `BLAKE3(domain || signing_bytes)` against the
-/// embedded public key. Returns `Ok(())` on success.
+/// Verify a signature over `BLAKE3(len_le16(domain) || domain || signing_bytes)`
+/// against the embedded public key. Returns `Ok(())` on success.
 ///
 /// Uses [`VerifyingKey::verify_strict`], which enforces ZIP-215 / RFC 8032
 /// strict-verification semantics:
@@ -208,13 +209,15 @@ fn domain_digest(domain: &[u8], signing_bytes: &[u8]) -> [u8; HASH_LEN] {
     *h.finalize().as_bytes()
 }
 
-/// Public helper: `BLAKE3(COMMIT_DOMAIN || commit_signing_bytes(c))`.
+/// Public helper:
+/// `BLAKE3(len_le16(COMMIT_DOMAIN) || COMMIT_DOMAIN || commit_signing_bytes(c))`.
 pub fn commit_signing_hash(c: &Commit) -> Result<Hash, MkitError> {
     let sb = commit_signing_bytes(c)?;
     Ok(domain_digest(COMMIT_DOMAIN, &sb))
 }
 
-/// Public helper: `BLAKE3(REMIX_DOMAIN || remix_signing_bytes(r))`.
+/// Public helper:
+/// `BLAKE3(len_le16(REMIX_DOMAIN) || REMIX_DOMAIN || remix_signing_bytes(r))`.
 pub fn remix_signing_hash(r: &Remix) -> Result<Hash, MkitError> {
     let sb = remix_signing_bytes(r)?;
     Ok(domain_digest(REMIX_DOMAIN, &sb))

@@ -81,7 +81,8 @@ mkit defends:
   user-scoped trust-roots file (§5), not from the cloned repo.
 - Choice of key material and external processes. Per §4, a hostile
   `.mkit/config` cannot select which key file is read, which binary
-  is spawned as an external signer, or what argv it gets.
+  is spawned as an external signer, which keystore backend/key ref is
+  used, or what argv an external signer gets.
 
 mkit does NOT defend:
 
@@ -174,7 +175,15 @@ ignored.
 
 | Key                                 | Scope     | Rationale                                                 |
 |-------------------------------------|-----------|-----------------------------------------------------------|
+| `signer`                            | **User**  | Selects legacy raw-file vs keystore commit signing.       |
+| `key.backend`                       | **User**  | Selects the keystore backend family.                      |
+| `key.default_ref`                   | **User**  | Selects a private signing key reference.                  |
+| `key.ed25519_ref`                   | **User**  | Selects the Ed25519 private signing key reference.        |
+| `key.secp256k1_ref`                 | **User**  | Selects the secp256k1 private signing key reference.      |
+| `key.p256_ref`                      | **User**  | Selects the P-256 private signing key reference.          |
 | `signing_key`                       | **User**  | Selects which key file is read for commit signing.        |
+| `attest.signer`                     | **User**  | Selects `repo-key` / `external` / `keystore`.             |
+| `attest.default_algorithm`          | **User**  | Selects the attestation signing algorithm.                |
 | `attest.external_signer_path`       | **User**  | Selects which binary is spawned as a signer.              |
 | `attest.external_signer_args`       | **User**  | Argv for the signer subprocess.                           |
 | `attest.secp256k1_key_path`         | **User**  | Selects which secp256k1 key file is read.                 |
@@ -182,13 +191,11 @@ ignored.
 | `ssh.strict_host_key_checking`      | **User**  | Could weaken host-key verification.                       |
 | `ssh.user_known_hosts_file`         | **User**  | Selects which file is the source of trust.                |
 | `ssh.identity_file`                 | **User**  | Selects which private key SSH presents.                   |
-| `user.identity`                     | Repo      | Display string for the author field. No security weight.  |
+| `user.identity`                     | **User**  | Author identity; cannot be repo-selected for signed data. |
 | `default_branch`                    | Repo      | UX default. No security weight.                           |
 | `remote_endpoint`                   | Repo      | Address; trust is on the user's transport config.         |
 | `remote_bucket`                     | Repo      | Address.                                                  |
 | `remote_type`                       | Repo      | Dispatch hint to the transport layer.                     |
-| `attest.default_algorithm`          | Repo      | Algorithm dispatch; trust roots are still user-scoped.    |
-| `attest.signer`                     | Repo      | Selects `repo-key` / `external` / `sigstore-keyless`.     |
 
 Repo-scoped keys MAY still be overridden by the user file. The split
 is a one-way fence: user scope wins.
@@ -226,6 +233,40 @@ library API; CHANGELOG flags it.
 
 The same protections apply to the secp256k1 and P-256 key files
 selected via `attest.secp256k1_key_path` and `attest.p256_key_path`.
+
+### 6.1 Foundation V1 software keystore
+
+Foundation V1 adds a user-scoped software compatibility backend selected by
+`mkit key ...`, `signer = keystore`, and `attest.signer = keystore`.
+
+Security assumptions:
+
+- The software keystore is user-scoped, not repo-scoped. On Unix-like systems
+  its default root is `$XDG_DATA_HOME/mkit/keys/`, falling back to
+  `~/.local/share/mkit/keys/` when `XDG_DATA_HOME` is unset.
+- Keystore selectors (`signer`, `key.backend`, and every `key.*_ref`) are
+  user-scoped. A hostile repo cannot select a backend, label, key reference, or
+  signing mode.
+- Foundation V1 compatibility mode stores raw 32-byte secrets using the same
+  hardened file protections as legacy `.mkit/keys/*`: `0600` files, `0700`
+  directories, owner checks, symlink rejection, atomic writes, and zeroized
+  in-process buffers.
+- Foundation V1 does not claim hardware binding, non-extractability, user
+  presence, or encrypted-at-rest software storage. Those capabilities must not
+  be advertised until implemented by a later backend or encrypted software-file
+  mode.
+- Signing commands never auto-generate keystore keys. Users must run
+  `mkit key generate` or `mkit key import` explicitly.
+
+Non-goals in Foundation V1:
+
+- Protection against malware or another process already running as the same
+  UID. Such an attacker can read user-scoped software-key files just as they can
+  read legacy raw key files.
+- Completion of GitHub issue #104's OS-native/hardware backend requirement.
+  macOS Keychain, Windows Credential Manager/CNG, Linux Secret Service,
+  systemd-creds, YubiKey, and encrypted-at-rest software mode remain future
+  work unless `keystore.md` is amended.
 
 ---
 

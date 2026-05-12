@@ -1573,6 +1573,7 @@ dependencies = [
  "libc",
  "mkit-attest",
  "mkit-core",
+ "mkit-keystore",
  "mkit-rpc",
  "mkit-transport-file",
  "mkit-transport-http",
@@ -1608,6 +1609,22 @@ dependencies = [
  "libfuzzer-sys",
  "mkit-core",
  "tempfile",
+]
+
+[[package]]
+name = "mkit-keystore"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.4.2",
+ "k256",
+ "mkit-attest",
+ "mkit-core",
+ "p256",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]

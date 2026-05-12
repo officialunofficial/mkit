@@ -47,6 +47,7 @@ path = "src/main.rs"
 # the registry. Track workspace.package.version.
 mkit-core = { version = "0.1", path = "../mkit-core" }
 mkit-attest = { version = "0.1", path = "../mkit-attest" }
+mkit-keystore = { version = "0.1", path = "../mkit-keystore" }
 mkit-transport-memory = { version = "0.1", path = "../mkit-transport-memory" }
 mkit-transport-file = { version = "0.1", path = "../mkit-transport-file" }
 mkit-transport-http = { version = "0.1", path = "../mkit-transport-http" }

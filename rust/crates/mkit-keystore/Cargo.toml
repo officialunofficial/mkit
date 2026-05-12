@@ -1,0 +1,33 @@
+[package]
+name = "mkit-keystore"
+description = "Signing-key keystore abstraction for mkit"
+keywords = ["mkit", "keystore", "signing", "cryptography"]
+categories = ["cryptography", "authentication"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+attest = ["dep:mkit-attest"]
+
+[dependencies]
+mkit-core = { version = "0.1", path = "../mkit-core" }
+mkit-attest = { version = "0.1", path = "../mkit-attest", optional = true }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+getrandom = "0.4"
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+sha2 = { version = "0.10", default-features = false }
+thiserror = "2"
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
