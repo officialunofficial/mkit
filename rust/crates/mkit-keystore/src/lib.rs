@@ -14,6 +14,8 @@ mod backend_macos_keychain;
 mod backend_systemd_creds;
 #[cfg(all(windows, feature = "windows-credential"))]
 mod backend_windows_credential;
+#[cfg(feature = "backend-yubikey")]
+mod backend_yubikey;
 mod encrypted_record;
 mod error;
 mod software;
@@ -28,6 +30,8 @@ pub use backend_macos_keychain::MacosKeychainKeystore;
 pub use backend_systemd_creds::SystemdCredsKeystore;
 #[cfg(all(windows, feature = "windows-credential"))]
 pub use backend_windows_credential::WindowsCredentialKeystore;
+#[cfg(feature = "backend-yubikey")]
+pub use backend_yubikey::YubiKeyKeystore;
 pub use error::{Error, Result};
 pub use software::{SoftwareKeystore, SoftwareRawKeystore, SoftwareSigner};
 pub use types::{

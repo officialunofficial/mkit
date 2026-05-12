@@ -14,6 +14,7 @@ pub fn open_backend(kind: BackendKind) -> Result<Box<dyn Keystore>> {
         BackendKind::WindowsCredentialManager => open_windows_credential_backend(),
         BackendKind::LinuxSecretService => open_linux_secret_service_backend(),
         BackendKind::SystemdCreds => open_systemd_creds_backend(),
+        BackendKind::YubiKey => open_yubikey_backend(),
         other => Err(Error::BackendUnavailable(format!(
             "backend `{other}` is not implemented in this build"
         ))),
@@ -73,12 +74,34 @@ fn open_systemd_creds_backend() -> Result<Box<dyn Keystore>> {
     ))
 }
 
+#[cfg(feature = "backend-yubikey")]
+fn open_yubikey_backend() -> Result<Box<dyn Keystore>> {
+    Ok(Box::new(crate::YubiKeyKeystore::new()?))
+}
+
+#[cfg(not(feature = "backend-yubikey"))]
+fn open_yubikey_backend() -> Result<Box<dyn Keystore>> {
+    Err(Error::BackendUnavailable(
+        "YubiKey backend requires the `backend-yubikey` feature".into(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn unsupported_backend_fails_closed() {
+        match open_backend(BackendKind::External) {
+            Err(Error::BackendUnavailable(_)) => {}
+            Err(error) => panic!("unexpected error: {error}"),
+            Ok(_) => panic!("unexpected backend"),
+        }
+    }
+
+    #[cfg(not(feature = "backend-yubikey"))]
+    #[test]
+    fn yubikey_backend_fails_closed_when_unavailable() {
         match open_backend(BackendKind::YubiKey) {
             Err(Error::BackendUnavailable(_)) => {}
             Err(error) => panic!("unexpected error: {error}"),
