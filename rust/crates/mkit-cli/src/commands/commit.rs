@@ -31,7 +31,7 @@ use mkit_core::serialize;
 use mkit_core::sign::{self, KeyPair};
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
-use mkit_keystore::{BackendKind, KeyRef, KeySelector, Keystore as _};
+use mkit_keystore::{KeyRef, KeySelector, open_backend};
 
 use crate::config::Config;
 use crate::editor::{COMMIT_EDITMSG_TEMPLATE, spawn_editor};
@@ -317,17 +317,8 @@ fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8
         .ed25519_ref_or_fallback()
         .parse::<KeyRef>()
         .map_err(|error| (format!("key.ed25519_ref: {error}"), exit::CONFIG_ERROR))?;
-    if key_ref.backend != BackendKind::Software {
-        return Err((
-            format!(
-                "key backend `{}` is not supported in Foundation V1",
-                key_ref.backend
-            ),
-            exit::UNAVAILABLE,
-        ));
-    }
-    let store = mkit_keystore::SoftwareKeystore::new()
-        .map_err(|error| (format!("software keystore: {error}"), exit::UNAVAILABLE))?;
+    let store = open_backend(key_ref.backend.clone())
+        .map_err(|error| (format!("keystore backend: {error}"), exit::UNAVAILABLE))?;
     let selector = KeySelector::new(
         key_ref.label.clone(),
         Some(mkit_keystore::Algorithm::Ed25519),
@@ -336,8 +327,8 @@ fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8
     let signer = store.open(&selector).map_err(|error| match error {
         mkit_keystore::Error::KeyNotFound(_) => (
             format!(
-                "missing keystore signing key `{}` — run `mkit key generate --algorithm ed25519 --label {}` first, or set `signer = legacy` and use `mkit keygen`: {error}",
-                cfg.key.ed25519_ref_or_fallback(), key_ref.label
+                "missing keystore signing key `{}` — run `mkit key generate --backend {} --algorithm ed25519 --label {}` first, or set `signer = legacy` and use `mkit keygen`: {error}",
+                cfg.key.ed25519_ref_or_fallback(), key_ref.backend, key_ref.label
             ),
             exit::NOINPUT,
         ),
