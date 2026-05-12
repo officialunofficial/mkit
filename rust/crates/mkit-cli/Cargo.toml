@@ -55,10 +55,13 @@ mkit-transport-ssh = { version = "0.1", path = "../mkit-transport-ssh" }
 mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
 buffa = "0.5"
 
-# `derive` and `wrap_help` are intentionally disabled so help-text output
-# is deterministic — we render help ourselves from a compile-time const
-# pinned by snapshot tests.
-clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage"] }
+# `wrap_help` is intentionally disabled so help-text output stays
+# deterministic across terminal widths. `derive` is enabled so the
+# per-command strangler migration (see clap_shim.rs) can use
+# `#[derive(Parser)]`; the top-level `HELP_TEXT` constant remains
+# the source of truth for `mkit --help` and is pinned by snapshot
+# tests in cli.rs + tests/help_snapshot.rs.
+clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage", "derive", "string"] }
 tempfile = "3"
 thiserror = "2"
 # Used by `mkit keygen` to generate raw 32-byte secrets for non-ed25519
