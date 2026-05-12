@@ -1,49 +1,81 @@
-//! Signal handling — SIGINT / SIGTERM set a graceful-shutdown flag;
-//! SIGPIPE is ignored so `mkit log | head -1` exits cleanly.
+//! Signal handling — SIGINT / SIGTERM set a graceful-shutdown flag
+//! that long-running operations (`push` / `pull` / `clone` / `log`)
+//! poll at natural checkpoints, so a `Ctrl-C` aborts cleanly with
+//! `exit::TEMPFAIL` (75) rather than leaving a half-finished transfer.
 //!
-//! ## Current behavior
+//! ## SIGPIPE is intentionally not registered here
 //!
-//! `install()` is currently a **no-op placeholder**. No OS signal
-//! handler is registered. The shared [`SHUTDOWN`] atomic can only be
-//! flipped by [`set_interrupted_for_tests`] or by an eventual future
-//! hookup once a dependency on `signal-hook` (or equivalent) is
-//! accepted. Pulling in `signal-hook` was deliberately deferred to
-//! keep `mkit-cli`'s transitive dep set small while the long-running
-//! transport verbs (push/pull/clone) are still learning where their
-//! natural interruption checkpoints should sit.
+//! Rust's runtime sets `SIGPIPE` to `SIG_IGN` at process start since
+//! 1.65, which means `write(2)` on a closed pipe returns `EPIPE`
+//! instead of terminating the process. The CLI uses
+//! `let _ = writeln!(stdout, …)` everywhere, so the `EPIPE` propagates
+//! as a silently-dropped `io::Error` and the program exits at its
+//! next natural completion point — exactly the pipeline-friendly
+//! behaviour `docs/CLI.md` advertises.
 //!
-//! Callers SHOULD nonetheless call [`is_shutdown`] / [`interrupted`]
-//! at poll-loop boundaries so wiring a real handler later is
-//! a no-behaviour-change drop-in.
+//! Registering a signal-hook handler over the runtime's `SIG_IGN`
+//! would replace a clean kernel-level ignore with a userspace handler
+//! that does an atomic store and returns — observationally
+//! equivalent but strictly worse (extra wakeups, a window where a
+//! different thread might briefly observe a flipped flag we never
+//! consume). The integration test in `tests/sigpipe.rs` is the
+//! regression guard: it pipes `mkit cat <large-blob>` through
+//! `head -1` and asserts the left-hand exit code is `0`. If anyone
+//! ever opts mkit out of Rust's default with `#[unix_sigpipe]`, that
+//! test goes red.
 //!
-//! TODO(signal-hook): once transport verbs grow interruptible poll
-//! loops, register `signal_hook::flag::register(SIGINT, SHUTDOWN)`
-//! (and SIGTERM) inside `install()`. Until then it is intentionally
-//! empty — see module-level docs.
+//! ## Implementation
+//!
+//! `signal-hook`'s `flag` module installs the handlers via
+//! `sigaction(2)` and exposes a fully safe API (atomic-bool stores
+//! are async-signal-safe; the `unsafe` lives inside the crate). The
+//! CLI stays under its crate-level `#![deny(unsafe_code)]`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
-static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+/// Shared shutdown flag. Lazily initialised so tests that exercise the
+/// flag without going through [`install`] still observe a coherent
+/// value. The `Arc` is required because `signal_hook::flag::register`
+/// takes an owned `Arc<AtomicBool>` — it does not accept a `&'static`.
+static SHUTDOWN: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
-/// Install SIGINT/SIGTERM/SIGPIPE handlers. Idempotent; cheap.
-///
-/// **Today this is a no-op.** It does NOT register an OS-level signal
-/// handler; the shared [`SHUTDOWN`] atomic stays `false` until a test
-/// flips it via [`set_interrupted_for_tests`]. See module docs for
-/// why. Callers (push/pull/clone) should still call [`is_shutdown`]
-/// at natural checkpoints so future wiring is transparent.
-pub fn install() {
-    // Intentionally empty — see module docs.
+fn shutdown_flag() -> &'static Arc<AtomicBool> {
+    SHUTDOWN.get_or_init(|| Arc::new(AtomicBool::new(false)))
 }
 
-/// Returns `true` when a shutdown was requested via signal. This is
-/// the canonical check callers should use at poll-loop boundaries.
+/// Install SIGINT/SIGTERM handlers that flip the shared shutdown flag.
+/// Idempotent on the `signal-hook` side: re-registering the same
+/// signal layers another handler on top, but the cost is a few bytes
+/// and the observable behaviour is unchanged, so callers can invoke
+/// this more than once without harm.
 ///
-/// While [`install`] is a no-op this always returns `false` outside
-/// tests; wiring a real handler later does not change the API.
+/// On non-Unix targets this is a no-op (Windows signal semantics
+/// differ; the CLI does not currently ship on Windows).
+pub fn install() {
+    #[cfg(unix)]
+    {
+        use signal_hook::consts::{SIGINT, SIGTERM};
+
+        let flag = Arc::clone(shutdown_flag());
+        // Errors here are effectively unreachable (they only fail if
+        // the OS refuses to install a handler, e.g. for SIGKILL).
+        // Silently fall back to the default disposition in that case
+        // — the user sees the same behaviour they would have seen
+        // before this change.
+        let _ = signal_hook::flag::register(SIGINT, Arc::clone(&flag));
+        let _ = signal_hook::flag::register(SIGTERM, flag);
+    }
+}
+
+/// Returns `true` once a shutdown was requested via signal. Long-
+/// running poll loops should call this at natural checkpoints and
+/// return `exit::TEMPFAIL` when it flips.
 #[must_use]
 pub fn is_shutdown() -> bool {
-    SHUTDOWN.load(Ordering::Relaxed)
+    SHUTDOWN
+        .get()
+        .is_some_and(|f| f.load(Ordering::Relaxed))
 }
 
 /// Alias kept for historical callers. Prefer [`is_shutdown`].
@@ -56,7 +88,7 @@ pub fn interrupted() -> bool {
 /// long-running callers do honour it once it flips.
 #[doc(hidden)]
 pub fn set_interrupted_for_tests(v: bool) {
-    SHUTDOWN.store(v, Ordering::Relaxed);
+    shutdown_flag().store(v, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -71,14 +103,23 @@ mod tests {
         assert!(!interrupted());
     }
 
-    /// `install()` is a documented no-op: it must not set the flag,
-    /// and `is_shutdown()` must report `false` immediately after.
+    /// `install()` must not pre-flip the flag — long-running callers
+    /// poll `is_shutdown()` and would otherwise abort immediately.
     #[test]
     fn install_then_is_shutdown_returns_false() {
-        // Reset in case an earlier test in the same binary left it hot.
         set_interrupted_for_tests(false);
         install();
         assert!(!is_shutdown());
         assert!(!interrupted(), "alias must agree with is_shutdown");
+    }
+
+    /// Double-install must not panic. Tests share a process, so any
+    /// other test that calls `install()` first must leave this one
+    /// in a working state.
+    #[test]
+    fn install_is_idempotent() {
+        install();
+        install();
+        set_interrupted_for_tests(false);
     }
 }

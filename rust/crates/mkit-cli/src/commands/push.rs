@@ -43,6 +43,9 @@ pub fn run(args: &[String]) -> u8 {
                 let _ = writeln!(stdout, "pushed {n} ref(s) to {endpoint}");
                 exit::OK
             }
+            Err(remote_dispatch::DispatchError::Interrupted) => {
+                emit_err("push: interrupted", exit::TEMPFAIL)
+            }
             Err(e) => emit_err(&format!("push: {e}"), exit::GENERAL_ERROR),
         },
         Err(e) => emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),

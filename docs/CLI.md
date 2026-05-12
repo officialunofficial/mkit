@@ -220,12 +220,15 @@ Repo-local values in `.mkit/config` always win over user-level config.
 ### Signals
 
 - **`SIGINT`** (Ctrl-C) and **`SIGTERM`** set a graceful-shutdown flag.
-  Long-running operations (push, pull, clone) poll it at natural
+  Long-running operations (push, pull, clone, log) poll it at natural
   checkpoints and exit with `tempfail` (75) so the operation can be
-  retried.
+  retried. Wired via `signal-hook`'s `flag` module so the CLI stays
+  under its crate-level `#![deny(unsafe_code)]`.
 - **`SIGPIPE`** is ignored. Pipelines like `mkit log | head -1` exit
   cleanly without a "Broken pipe" message — the next write just
-  propagates `EPIPE` as a normal I/O error.
+  propagates `EPIPE` as a normal I/O error. This is the Rust runtime
+  default (since 1.65); mkit does not register over it. The behaviour
+  is pinned by an integration test (`tests/sigpipe.rs`).
 
 ### Man page
 

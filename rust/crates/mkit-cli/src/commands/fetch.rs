@@ -35,6 +35,9 @@ pub fn run(_args: &[String]) -> u8 {
                 let _ = writeln!(stdout, "fetched {n} ref(s) from {endpoint}");
                 exit::OK
             }
+            Err(remote_dispatch::DispatchError::Interrupted) => {
+                emit_err("fetch: interrupted", exit::TEMPFAIL)
+            }
             Err(e) => emit_err(&format!("fetch: {e}"), exit::GENERAL_ERROR),
         },
         Err(e) => emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
