@@ -1,6 +1,7 @@
 /* All `@import` rules MUST precede every other statement (CSS spec).
    Google Fonts goes first; Tailwind expands inline below it. */
-@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap");
+@import url("https://rsms.me/inter/inter.css");
+@import url("https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&display=swap");
 
 @import "tailwindcss/theme" layer(theme);
 @import "tailwindcss/utilities" layer(utilities);
@@ -18,7 +19,10 @@
   --color-subtle: light-dark(oklch(0.68 0 0), oklch(0.55 0 0));
   --color-hairline: light-dark(oklch(0.922 0 0), oklch(0.27 0 0));
 
-  --font-sans: "Geist", "Geist Variable", ui-sans-serif, system-ui,
+  /* Inter variable from rsms.me/inter — the canonical distribution. The
+     `InterVariable` family name is the variable build; `Inter` is the
+     legacy static fallback. */
+  --font-sans: "InterVariable", "Inter", ui-sans-serif, system-ui,
     -apple-system, sans-serif;
   --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 

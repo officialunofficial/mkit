@@ -48,30 +48,50 @@ export default defineConfig({
       {
         text: "Specifications",
         items: [
-          { text: "Objects", link: "/docs/spec/objects" },
-          { text: "Staging index", link: "/docs/spec/staging-index" },
-          { text: "Refs", link: "/docs/spec/refs" },
-          { text: "Packfile", link: "/docs/spec/packfile" },
-          { text: "Delta", link: "/docs/spec/delta" },
-          { text: "FastCDC", link: "/docs/spec/fastcdc" },
-          { text: "Transport", link: "/docs/spec/transport" },
-          { text: "RPC", link: "/docs/spec/rpc" },
-          { text: "Signing", link: "/docs/spec/signing" },
-          { text: "Attestations", link: "/docs/spec/attestations" },
-          { text: "External signer", link: "/docs/spec/external-signer" },
+          {
+            text: "Repository format",
+            items: [
+              { text: "Objects", link: "/docs/spec/objects" },
+              { text: "Staging index", link: "/docs/spec/staging-index" },
+              { text: "Refs", link: "/docs/spec/refs" },
+            ],
+          },
+          {
+            text: "Pack format",
+            items: [
+              { text: "Packfile", link: "/docs/spec/packfile" },
+              { text: "Delta", link: "/docs/spec/delta" },
+              { text: "FastCDC", link: "/docs/spec/fastcdc" },
+            ],
+          },
+          {
+            text: "Wire protocols",
+            items: [
+              { text: "Transport", link: "/docs/spec/transport" },
+              { text: "RPC", link: "/docs/spec/rpc" },
+            ],
+          },
+          {
+            text: "Signing & attestations",
+            items: [
+              { text: "Signing", link: "/docs/spec/signing" },
+              { text: "Attestations", link: "/docs/spec/attestations" },
+              { text: "External signer", link: "/docs/spec/external-signer" },
+            ],
+          },
         ],
       },
       {
         text: "Operations",
         items: [
-          { text: "Release", link: "/docs/release" },
-          { text: "Fuzz", link: "/docs/fuzz" },
+          { text: "Release process", link: "/docs/release" },
+          { text: "Fuzzing", link: "/docs/fuzz" },
           { text: "SSH security", link: "/docs/ssh-security" },
           { text: "Threat model", link: "/docs/threat-model" },
         ],
       },
       {
-        text: "Advisories",
+        text: "Security advisories",
         collapsed: true,
         items: [
           { text: "Overview", link: "/docs/advisories" },
@@ -81,7 +101,7 @@ export default defineConfig({
         ],
       },
       {
-        text: "Contributors",
+        text: "Contributing",
         collapsed: true,
         items: [
           { text: "Writing style guide", link: "/docs/style-guide" },
