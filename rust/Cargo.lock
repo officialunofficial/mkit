@@ -2165,6 +2165,7 @@ dependencies = [
  "getrandom 0.4.2",
  "k256",
  "keyring-core",
+ "libc",
  "mkit-attest",
  "mkit-core",
  "openpgp-card",

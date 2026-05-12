@@ -33,6 +33,18 @@ use ed25519_dalek::{
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// Effective uid for Unix key-file owner checks.
+#[cfg(unix)]
+#[must_use]
+pub fn effective_uid() -> u32 {
+    // SAFETY: `geteuid(2)` is a parameterless syscall that always succeeds,
+    // never reads or writes user memory, and is reentrant.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::geteuid()
+    }
+}
+
 /// Domain separator used when signing commit objects. The trailing
 /// `\x00` is load-bearing — see `docs/SPEC-SIGNING.md` §2. Twelve bytes.
 pub const COMMIT_DOMAIN: &[u8] = b"mkit.commit\x00";
@@ -405,8 +417,7 @@ pub fn load_raw_32(path: &Path) -> Result<zeroize::Zeroizing<[u8; 32]>, MkitErro
         // and async-signal-safe per POSIX. The `unsafe` block is the
         // only one in `mkit-core`; the crate keeps `deny(unsafe_code)`
         // so this opt-out is reviewable.
-        #[allow(unsafe_code)]
-        let euid = unsafe { libc::geteuid() };
+        let euid = effective_uid();
         if meta.uid() != euid {
             return Err(MkitError::InsecureKeyOwner {
                 actual: meta.uid(),

@@ -1,6 +1,5 @@
 //! User-scoped software compatibility backend.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -349,6 +348,7 @@ impl Keystore for SoftwareKeystore {
                 protector.as_ref(),
             )?;
             write_key_file(
+                &self.root,
                 &path,
                 label,
                 secret.algorithm(),
@@ -670,40 +670,278 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
 }
 
 fn write_key_file(
+    root: &Path,
     path: &Path,
     label: &str,
     algorithm: Algorithm,
     bytes: &[u8],
     overwrite: bool,
 ) -> Result<()> {
+    #[cfg(unix)]
+    return write_key_file_unix(root, path, label, algorithm, bytes, overwrite);
+
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        return write_key_file_portable(path, label, algorithm, bytes, overwrite);
+    }
+}
+
+#[cfg(unix)]
+fn write_key_file_unix(
+    root: &Path,
+    path: &Path,
+    label: &str,
+    algorithm: Algorithm,
+    bytes: &[u8],
+    overwrite: bool,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    ensure_no_symlink_path(root, parent)?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
+    set_private_dir_permissions(root)?;
+    ensure_owned_by_euid(root)?;
+    if parent != root {
+        set_private_dir_permissions(parent)?;
+        ensure_owned_by_euid(parent)?;
+    }
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(Error::Io(format!(
+                "keystore path is a symlink: {}",
+                path.display()
+            )));
+        }
+        Ok(metadata) => {
+            if !overwrite {
+                return Err(Error::KeyAlreadyExists {
+                    label: label.into(),
+                    algorithm,
+                });
+            }
+            if metadata.uid() != euid() {
+                return Err(Error::AccessDenied(format!(
+                    "existing key file is owned by uid {}, expected {}: {}",
+                    metadata.uid(),
+                    euid(),
+                    path.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::Io(format!("lstat {}: {error}", path.display()))),
+    }
+
+    let filename = path
+        .file_name()
+        .ok_or_else(|| Error::Io(format!("path has no filename: {}", path.display())))?;
+    let tmp_path = create_synced_tmp_key_file(parent, filename, bytes)?;
+
+    if overwrite {
+        if let Err(error) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(Error::Io(format!("rename {}: {error}", path.display())));
+        }
+    } else if let Err(error) = std::fs::hard_link(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return if error.kind() == std::io::ErrorKind::AlreadyExists {
+            Err(Error::KeyAlreadyExists {
+                label: label.into(),
+                algorithm,
+            })
+        } else {
+            Err(Error::Io(format!("link {}: {error}", path.display())))
+        };
+    } else if let Err(error) = std::fs::remove_file(&tmp_path) {
+        return Err(Error::Io(format!(
+            "unlink tmp {}: {error}",
+            tmp_path.display()
+        )));
+    }
+
+    let dir = std::fs::File::open(parent)
+        .map_err(|error| Error::Io(format!("open dir for fsync: {error}")))?;
+    dir.sync_all()
+        .map_err(|error| Error::Io(format!("fsync dir: {error}")))
+}
+
+#[cfg(unix)]
+fn create_synced_tmp_key_file(
+    parent: &Path,
+    filename: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> Result<PathBuf> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut tmp_path = temp_key_file_path(parent, filename, 0);
+    for attempt in 0..16u8 {
+        if attempt > 0 {
+            tmp_path = temp_key_file_path(parent, filename, attempt);
+        }
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(0o600)
+            .open(&tmp_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(Error::Io(format!(
+                    "open tmp {}: {error}",
+                    tmp_path.display()
+                )));
+            }
+        };
+        if let Err(error) = file.write_all(bytes) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(Error::Io(format!(
+                "write tmp {}: {error}",
+                tmp_path.display()
+            )));
+        }
+        if let Err(error) = file.sync_all() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(Error::Io(format!(
+                "fsync tmp {}: {error}",
+                tmp_path.display()
+            )));
+        }
+        drop(file);
+        return Ok(tmp_path);
+    }
+    Err(Error::Io(format!(
+        "could not create unique temp file under {}",
+        parent.display()
+    )))
+}
+
+#[cfg(unix)]
+fn temp_key_file_path(parent: &Path, filename: &std::ffi::OsStr, attempt: u8) -> PathBuf {
+    if attempt == 0 {
+        parent.join(format!(
+            ".{}.tmp.{}",
+            filename.to_string_lossy(),
+            std::process::id()
+        ))
+    } else {
+        parent.join(format!(
+            ".{}.tmp.{}.{}",
+            filename.to_string_lossy(),
+            std::process::id(),
+            attempt
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn ensure_no_symlink_path(root: &Path, path: &Path) -> Result<()> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if !candidate.starts_with(root) {
+            break;
+        }
+        match std::fs::symlink_metadata(candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(Error::Io(format!(
+                    "keystore path is a symlink: {}",
+                    candidate.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::Io(format!("lstat {}: {error}", candidate.display()))),
+        }
+        if candidate == root {
+            break;
+        }
+        current = candidate.parent();
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_owned_by_euid(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| Error::Io(format!("metadata {}: {error}", path.display())))?;
+    let actual = metadata.uid();
+    let expected = euid();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(Error::AccessDenied(format!(
+            "keystore path is owned by uid {actual}, expected {expected}: {}",
+            path.display()
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| Error::Io(format!("chmod {}: {error}", path.display())))
+}
+
+#[cfg(unix)]
+fn euid() -> u32 {
+    mkit_core::sign::effective_uid()
+}
+
+#[cfg(not(unix))]
+fn write_key_file_portable(
+    path: &Path,
+    label: &str,
+    algorithm: Algorithm,
+    bytes: &[u8],
+    overwrite: bool,
+) -> Result<()> {
+    use std::io::Write as _;
+
+    if path.exists() && !overwrite {
+        return Err(Error::KeyAlreadyExists {
+            label: label.into(),
+            algorithm,
+        });
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
     }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true);
-    if overwrite {
-        options.create(true).truncate(true);
-    } else {
-        options.create_new(true);
-    }
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(Error::KeyAlreadyExists {
-                label: label.into(),
-                algorithm,
-            });
-        }
-        Err(error) => return Err(Error::Io(format!("create {}: {error}", path.display()))),
-    };
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let filename = path
+        .file_name()
+        .ok_or_else(|| Error::Io(format!("path has no filename: {}", path.display())))?;
+    let tmp_path = parent.join(format!(
+        ".{}.tmp.{}",
+        filename.to_string_lossy(),
+        std::process::id()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .map_err(|error| Error::Io(format!("open tmp {}: {error}", tmp_path.display())))?;
     file.write_all(bytes)
-        .map_err(|error| Error::Io(format!("write {}: {error}", path.display())))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| Error::Io(format!("chmod {}: {error}", path.display())))?;
+        .map_err(|error| Error::Io(format!("write tmp {}: {error}", tmp_path.display())))?;
+    file.sync_all()
+        .map_err(|error| Error::Io(format!("fsync tmp {}: {error}", tmp_path.display())))?;
+    drop(file);
+    if let Err(error) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(Error::Io(format!("rename {}: {error}", path.display())));
     }
     Ok(())
 }
@@ -1367,6 +1605,28 @@ mod tests {
         assert_eq!(store.list().unwrap()[0].label, "encrypted");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn software_backend_writes_private_storage_permissions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("keys");
+        let store = software_store(&root);
+        store
+            .import(
+                "encrypted",
+                SecretKey::new(Algorithm::Ed25519, [0x4a; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("import");
+
+        let algorithm_dir = root.join("ed25519");
+        let key_path = store.path_for("encrypted", Algorithm::Ed25519).unwrap();
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(mode(&algorithm_dir), 0o700);
+        assert_eq!(mode(&key_path), 0o600);
+    }
+
     #[test]
     fn software_raw_backend_reports_raw_backend_kind() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1465,6 +1725,17 @@ mod tests {
             assert!(!capabilities.supports_device_bound);
             assert!(!capabilities.supports_non_extractable);
         }
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
     }
 }
 
