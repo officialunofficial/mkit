@@ -52,7 +52,10 @@ History / commits:
   commit history. `--format=json` emits JSONL (one JSON object per
   commit, newest first) with keys `hash`, `parents`, `tree`, `author`,
   `timestamp`, `title`, `message`.
-- `mkit blame <file>` — show line-level commit attribution.
+- `mkit blame [--format=json] <file>` — show line-level commit
+  attribution. Default emits `<short12>\t<line_num>\t<text>` per line;
+  `--format=json` emits JSONL with keys `hash`, `line_num`, `author`,
+  `timestamp`, `text`.
 - `mkit verify <hash>` — verify the signature on a commit or remix.
 - `mkit cat <hash>` — display an object by its hash.
 - `mkit hash <file>` — hash a file and store it as a blob.
@@ -61,7 +64,8 @@ History / commits:
 Branches / refs:
 
 - `mkit branch` / `mkit branch <name>` / `mkit branch -d <name>` —
-  list, create, or delete branches.
+  list, create, or delete branches. `--format=json` on the list form
+  emits JSONL with keys `name`, `current`, `hash`.
 - `mkit checkout <branch>` — switch HEAD and restore files.
 - `mkit tag` — list, create, or delete tags.
 - `mkit merge <branch>` — three-way merge into HEAD.
@@ -72,7 +76,9 @@ Branches / refs:
 
 Remote / sync:
 
-- `mkit remote` — show the configured remote.
+- `mkit remote [--format=json]` — show the configured remote.
+  `--format=json` emits a single JSON object `{"url":"...","transport":"..."}`;
+  unset remote → empty stdout.
 - `mkit remote add <url>` — set the remote. URL MUST start with
   `mkit+<scheme>://` (see below).
 - `mkit remote set <url>` — alias for `mkit remote add`.
@@ -86,7 +92,9 @@ Remote / sync:
 Config / keys / version:
 
 - `mkit keygen` — generate a new Ed25519 signing keypair.
-- `mkit config` — show all configuration values.
+- `mkit config [--format=json]` — show all configuration values.
+  `--format=json` emits a flat JSON object with every known key.
+- `mkit config <key> [--format=json]` — show one value.
 - `mkit config <key> <value>` — set a configuration value.
 - `mkit version` — print the version. Emits exactly `mkit <X.Y.Z>\n`.
 
