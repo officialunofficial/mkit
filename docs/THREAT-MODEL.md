@@ -253,7 +253,9 @@ Security assumptions:
 - `software:<label>` stores encrypted-at-rest software records. It protects
   against offline disk/backup disclosure to the extent the local OS-protected
   envelope material remains unavailable to the attacker. It does not protect
-  against malware running as the user.
+  against malware running as the user. Production `mkit-cli` builds enable the
+  target OS protector features; the `mkit-keystore` library keeps default
+  features empty for lean builds and tests.
 - `software-raw:<label>` is the explicit raw-file compatibility backend. It
   keeps deterministic raw-key behavior for compatibility tests and migration
   workflows and is not the secure default.
@@ -335,8 +337,8 @@ matching update here.
   from re-entering the public build surface.
 - CI matrix: `cargo fmt --check`, `cargo clippy --all-targets --
   -D warnings`, `cargo test --workspace --locked`, keystore backend feature
-  jobs for macOS/Windows/Linux, `cargo deny`, reproducible-build smoke,
-  `mkit version` byte-exact assertion.
+  jobs for macOS/Windows/Linux with opt-in live native-backend roundtrips,
+  `cargo deny`, reproducible-build smoke, `mkit version` byte-exact assertion.
 
 ---
 

@@ -15,7 +15,10 @@ back to a small, auditable set of inputs. This document is the contract.
   Manager, D-Bus Secret Service, PC/SC, or the `systemd-creds` binary.
   These features are off by default, platform-gated, and fail closed when
   the required service or device is unavailable. The Linux Secret Service
-  feature selects the pure-Rust crypto runtime, not OpenSSL.
+  feature selects the pure-Rust crypto runtime, not OpenSSL. Production
+  `mkit-cli` builds enable the target-appropriate software protector feature so
+  `software:<label>` stores encrypted records by default, while the
+  `mkit-keystore` library keeps an empty default feature set.
 - **Build inputs:** the Rust toolchain (version pinned in
   `rust-toolchain.toml`), the source tree at a tagged Git commit, and
   the set of `--target=` / profile flags documented in
@@ -69,6 +72,11 @@ ecosystem splits and optional YubiKey/RustCrypto prerelease transitive stacks,
 plus stale license allowances. They are tracked as warnings rather than release
 blockers because they do not introduce unapproved sources, yanked crates, or
 denied licenses.
+
+Keystore backend CI builds exercise the macOS, Windows, and Linux feature sets
+separately. Live OS-native create/list/open/export/delete tests are opt-in via
+`MKIT_RUN_NATIVE_KEYSTORE_TESTS=1` so local default builds stay daemon-free while
+the platform backend matrix still validates native behavior in CI.
 
 ## GitHub Actions dependencies
 

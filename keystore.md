@@ -67,7 +67,9 @@ completion requirement in section 15.2 before merge.
     issue remains open until the OS-native and hardware backend matrix in
     section 15.2 is implemented.
 11. For issue-complete V1, `software:<label>` is the encrypted-at-rest software
-    backend. Raw-file compatibility is exposed only through the explicit
+    backend. Production `mkit-cli` builds must enable the target-appropriate OS
+    protector feature, while `mkit-keystore` default features remain empty.
+    Raw-file compatibility is exposed only through the explicit
     `software-raw:<label>` backend token and must not be the secure default.
 12. The encrypted software backend must use OS-protected envelope encryption,
     not a password-derived key or an unaudited local encryption scheme.
@@ -596,7 +598,10 @@ Requirements:
 - Support may be split across OpenPGP, PIV, and FIDO2/CTAP implementations.
 - Backend must advertise the exact applet and algorithm support it can use.
 - FIDO2/WebAuthn signing must preserve the existing WebAuthn wrapping
-  semantics already used by `mkit-attest` and contrib CTAP signer.
+  semantics already used by `mkit-attest` and contrib CTAP signer. V1 must
+  fail closed through the keystore API for FIDO2/CTAP labels and route users to
+  the external CTAP signer unless a future keystore signer API can return the
+  full WebAuthn assertion metadata.
 - User presence/PIN prompts must be represented through typed errors or an
   explicit prompt flow. Do not block indefinitely without timeout handling.
 
