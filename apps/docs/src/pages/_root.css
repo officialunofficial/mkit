@@ -1,102 +1,197 @@
-@import "tailwindcss";
+/* All `@import` rules MUST precede every other statement (CSS spec).
+   Google Fonts goes first; Tailwind expands inline below it. */
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap");
 
-/* mkit-specific brand tokens go here. The landing agent will extend this
-   file with the project's color palette, fonts, and any chrome-level CSS
-   that the Vocs site needs. Keep this file the single source of truth for
-   global styles; component-scoped styles belong in their .tsx files. */
+@import "tailwindcss/theme" layer(theme);
+@import "tailwindcss/utilities" layer(utilities);
 
 @source "../components";
 
-/* ----------------------------------------------------------------------
-   Fonts — Geist + Geist Mono
-   ----------------------------------------------------------------------
-   Loaded from Google Fonts to mirror the existing site at
-   `web/src/pages/_layout.tsx`. CSS `@import` is used rather than a
-   `<link>` tag because `_root.css` is the only stylesheet hook Vocs
-   gives us at the document level — there's no shared `<head>` in MDX
-   pages. The `@import` MUST be the first non-comment rule in the file
-   for the CSS spec, but Tailwind/Vite tolerate it after `@import
-   "tailwindcss"` because they re-order imports during the build.
+/* mkit design tokens — lifted from web/src/styles.css so the ported
+   demo components (which reference `--color-*` via Tailwind arbitrary
+   values like `text-[--color-muted]`) keep rendering. Dark-first;
+   `light-dark()` lets one declaration drive both schemes. */
+@theme {
+  --color-bg: light-dark(oklch(1 0 0), oklch(0.145 0 0));
+  --color-fg: light-dark(oklch(0.145 0 0), oklch(1 0 0));
+  --color-muted: light-dark(oklch(0.556 0 0), oklch(0.71 0 0));
+  --color-subtle: light-dark(oklch(0.68 0 0), oklch(0.55 0 0));
+  --color-hairline: light-dark(oklch(0.922 0 0), oklch(0.27 0 0));
 
-   The `display=swap` query keeps text visible during the brief swap
-   window while Geist downloads, avoiding a flash of invisible text. */
-@import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap");
+  --font-sans: "Geist", "Geist Variable", ui-sans-serif, system-ui,
+    -apple-system, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
-/* ----------------------------------------------------------------------
-   Brand tokens — ported verbatim from `web/src/styles.css`
-   ----------------------------------------------------------------------
-   The demo components (`hash-demo.client.tsx`, `merkle-tree.tsx`, etc.)
-   reference these custom properties directly via Tailwind arbitrary
-   values like `text-[--color-muted]` and `border-[--color-hairline]`.
-   Keeping the same names lets the demos move from `web/` to
-   `apps/docs/src/components/` without code changes. The `--gradient-*`
-   tokens drive the brand-colored hairline accents and the landing
-   hero's gradient text. */
-:root {
-  --color-bg: oklch(1 0 0);
-  --color-fg: oklch(0.145 0 0);
-  --color-muted: oklch(0.556 0 0);
-  /* `subtle` sits between `muted` and `hairline` — used for the Merkle
-     tree connector lines and other descriptive copy that should read
-     as secondary without fully fading out. */
-  --color-subtle: oklch(0.68 0 0);
-  --color-hairline: oklch(0.922 0 0);
-
-  /* Brand gradient lifted from the official-unofficial logo. Stops are
-     carried verbatim so the chroma matches across surfaces. Two
-     directional tokens: `-h` for horizontal rules, `-v` for text
-     clipping (which stays vertical like the logo itself). */
+  /* Official-unofficial brand gradient. `-h` runs horizontal for
+     hairlines; `-v` runs vertical for text clipping (matches the
+     logo's own orientation). */
   --gradient-h: linear-gradient(to right, #fa7cfa 0%, #f5ca23 30%, #00d2a8 66%, #7a3bf7 97%);
   --gradient-v: linear-gradient(to bottom, #fa7cfa 0%, #f5ca23 30%, #00d2a8 66%, #7a3bf7 97%);
 }
 
-/* Dark scheme — flip the neutral palette. The brand gradient stops
-   stay the same; only the surface and hairline tokens invert. The Vocs
-   color scheme is `dark` by default (see `vocs.config.ts`), so this is
-   the path most visitors will see. */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-bg: oklch(0.145 0 0);
-    --color-fg: oklch(0.985 0 0);
-    --color-muted: oklch(0.708 0 0);
-    --color-subtle: oklch(0.45 0 0);
-    --color-hairline: oklch(0.269 0 0);
+:root {
+  /* Override Vocs v2 gray scale for a pure-black dark theme that
+     matches the existing mkit marketing site. Structure mirrors
+     makechain/apps/docs/src/pages/_root.css. */
+  --vocs-color-gray1: #000000;
+  --vocs-color-gray2: #000000;
+  --vocs-color-gray3: #0a0a0a;
+  --vocs-color-gray4: #0a0a0a;
+  --vocs-color-gray5: #111111;
+  --vocs-color-gray6: #191919;
+
+  /* Legacy color variable overrides (light-dark pairs). */
+  --vocs-color_background: light-dark(#ffffff, #000000);
+  --vocs-color_backgroundDark: light-dark(#f5f5f5, #0a0a0a);
+  --vocs-color_background2: light-dark(#f5f5f5, #111111);
+  --vocs-color_background3: light-dark(#eeeeee, #191919);
+  --vocs-color_background4: light-dark(#e8e8e8, #1e1e1e);
+  --vocs-color_background5: light-dark(#e0e0e0, #252525);
+  --vocs-color_text: light-dark(#000000, #ffffff);
+  --vocs-color_text2: light-dark(#333333, #cccccc);
+  --vocs-color_text3: light-dark(#666666, #999999);
+  --vocs-color_text4: light-dark(#999999, #666666);
+  --vocs-color_border: light-dark(#e0e0e0, #252525);
+  --vocs-color_border2: light-dark(#cccccc, #404040);
+  --vocs-color_codeBlockBackground: light-dark(#f5f5f5, #111111);
+
+  /* Point Vocs's font tokens at the mkit stack so the framework chrome
+     (sidebar, topNav, code blocks) follows. */
+  --vocs-fontFamily_default: var(--font-sans);
+  --vocs-fontFamily_mono: var(--font-mono);
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-wrap: pretty;
+    font-variant-numeric: tabular-nums;
+    scrollbar-gutter: stable;
+  }
+
+  h1, h2, h3 {
+    text-wrap: balance;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-hairline) transparent;
+  }
+
+  textarea, select, input:not([type="range"]) {
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--color-hairline);
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-thumb:hover { background-color: var(--color-muted); }
+  *::-webkit-scrollbar-corner { background: transparent; }
+
+  textarea, pre, [class*="overflow-"] { scrollbar-gutter: auto; }
+
+  /* Top-down Merkle tree — lifted verbatim from web/src/styles.css
+     so tree-demo renders unchanged. */
+  .merkle, .merkle ul {
+    position: relative;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    justify-content: center;
+    list-style: none;
+  }
+  .merkle ul { padding-top: 18px; }
+  .merkle ul::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 50%;
+    height: 18px;
+    border-left: 1px solid var(--color-subtle);
+  }
+  .merkle li {
+    list-style: none;
+    position: relative;
+    padding: 18px 8px 0 8px;
+    text-align: center;
+  }
+  .merkle li::before, .merkle li::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    height: 18px;
+    width: 50%;
+    border-top: 1px solid var(--color-subtle);
+  }
+  .merkle li::before { right: 50%; }
+  .merkle li::after { left: 50%; }
+  .merkle li:only-child::before, .merkle li:only-child::after { display: none; }
+  .merkle li:only-child { padding-top: 18px; }
+  .merkle li:first-child::before, .merkle li:last-child::after { border: 0 none; }
+  .merkle li > .merkle__node::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 50%;
+    height: 18px;
+    border-left: 1px solid var(--color-subtle);
+  }
+  .merkle > li { padding-top: 0; }
+  .merkle > li::before, .merkle > li::after { display: none; }
+  .merkle > li > .merkle__node::before { display: none; }
+
+  /* Brand gradient text fill — hero accents only. */
+  .text-gradient {
+    background-image: var(--gradient-v);
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
   }
 }
 
-/* ----------------------------------------------------------------------
-   Typography defaults
-   ----------------------------------------------------------------------
-   The Vocs body font is set via the `--vocs-font-fontFamily` token. We
-   override it to Geist so prose pages and the homepage hero share the
-   exact same typeface. Tailwind classes in the ported demos use
-   `font-sans` / `font-mono`, which resolve through the same custom
-   properties. */
-:root {
-  --vocs-fontFamily_default:
-    "Geist", "Geist Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --vocs-fontFamily_mono:
-    "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+/* Animations used by the ported demos. */
+@keyframes demo-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes demo-row-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes demo-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
 }
 
-html {
-  /* Crisper type on macOS; no-op elsewhere. */
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  /* Dynamic numbers (hash digits, byte counts) stay layout-stable. */
-  font-variant-numeric: tabular-nums;
+/* Logo sizing — fills the default 56px topNav slot. */
+[data-v-logo-image] { max-height: 1.5rem; }
+[data-v-logo] {
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+  cursor: pointer;
 }
 
-/* ----------------------------------------------------------------------
-   Landing-page demo cards
-   ----------------------------------------------------------------------
-   Hover affordance for `<DemoCards />`. The arrow translates 4px and
-   the card lifts to 80% opacity — matches the feel of the divider-list
-   pattern on the existing site. Scoped via class names so it cannot
-   leak into Vocs's own card components on doc pages. */
-.mkit-demo-card:hover {
-  opacity: 0.8;
+/* Demo / example card hover (landing demo grid and accordion bodies
+   inside the demos). */
+.example-card { transition: border-color 0.15s; }
+.example-card:hover { border-color: var(--color-hairline); }
+
+.demo-accordion-body :not(pre) > code {
+  padding-left: 0.15rem;
+  padding-right: 0.15rem;
 }
-.mkit-demo-card:hover .mkit-demo-card__arrow {
-  transform: translateX(4px);
+
+.category-chip {
+  transition: border-color 0.15s, color 0.15s;
+}
+.category-chip:hover {
+  border-color: var(--color-hairline);
+  color: var(--color-muted);
 }
