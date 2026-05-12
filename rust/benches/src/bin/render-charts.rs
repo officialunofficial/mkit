@@ -240,14 +240,26 @@ fn render_chart(
             row_h * 0.7,
             color_for(label)
         ));
-        // Value (printed in the unit the user wants to read, even
-        // when the bar metric is something else — e.g. millis benches
-        // plot ops/s but print "13.72 ms" for human latency feel).
+        // Value. For Millis benches the bar metric is ops/s (so the
+        // bar grows with goodness) but humans grok latency faster
+        // than reciprocal-of-latency. Print BOTH: the ops/s value
+        // that matches the bar/axis, plus the latency in parens for
+        // intuition. For pure-throughput benches (MibPerSec /
+        // OpsPerSec) the raw value already matches the axis, so just
+        // print one number.
+        let value_text = match display_unit {
+            Unit::Millis => format!(
+                "{} ({})",
+                fmt_value(*metric, axis_unit),
+                fmt_value(*raw, display_unit)
+            ),
+            _ => fmt_value(*raw, display_unit),
+        };
         svg.push_str(&format!(
             "  <text x=\"{:.1}\" y=\"{:.1}\" class=\"value\">{}</text>\n",
             bar_x + bar_w + 8.0,
             y + row_h * 0.66,
-            fmt_value(*raw, display_unit)
+            value_text
         ));
     }
 
