@@ -4,8 +4,8 @@ use std::io::Write as _;
 use std::path::Path;
 
 use mkit_keystore::{
-    Algorithm, BackendKind, GenerateOptions, ImportOptions, KeyAttrs, KeyRef, KeySelector,
-    Keystore, SecretKey, SoftwareKeystore,
+    Algorithm, BackendKind, Capabilities, GenerateOptions, ImportOptions, KeyAttrs, KeyRef,
+    KeySelector, Keystore, SecretKey, SoftwareKeystore,
 };
 use zeroize::Zeroize;
 
@@ -89,6 +89,7 @@ fn generate(args: &[String]) -> u8 {
         Err(error) => return keystore_error(error),
     };
     print_metadata(&metadata);
+    print_capabilities(&store.capabilities());
     if print_pubkey {
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", metadata.keyid);
@@ -124,6 +125,7 @@ fn list(args: &[String]) -> u8 {
         Ok(keys) => keys,
         Err(error) => return keystore_error(error),
     };
+    let capabilities = store.capabilities();
     keys.sort_by(|left, right| {
         (&left.backend, &left.label, left.algorithm).cmp(&(
             &right.backend,
@@ -140,14 +142,15 @@ fn list(args: &[String]) -> u8 {
             }
             let _ = write!(
                 stdout,
-                "{{\"backend\":\"{}\",\"label\":\"{}\",\"algorithm\":\"{}\",\"keyid\":\"{}\",\"extractable\":{},\"require_user_presence\":{},\"device_bound\":{}}}",
+                "{{\"backend\":\"{}\",\"label\":\"{}\",\"algorithm\":\"{}\",\"keyid\":\"{}\",\"extractable\":{},\"require_user_presence\":{},\"device_bound\":{},\"capabilities\":{}}}",
                 key.backend,
                 json_escape(&key.label),
                 key.algorithm,
                 json_escape(&key.keyid),
                 key.extractable,
                 key.require_user_presence,
-                key.device_bound
+                key.device_bound,
+                json_capabilities(&capabilities)
             );
         }
         let _ = writeln!(stdout, "]");
@@ -155,14 +158,22 @@ fn list(args: &[String]) -> u8 {
         for key in keys {
             let _ = writeln!(
                 stdout,
-                "{} {} {} {} extractable={} user_presence={} device_bound={}",
+                "{} {} {} {} extractable={} user_presence={} device_bound={} can_generate={} can_import={} can_export={} can_delete={} supports_listing={} supports_user_presence={} supports_device_bound={} supports_non_extractable={}",
                 key.backend,
                 key.label,
                 key.algorithm,
                 key.keyid,
                 key.extractable,
                 key.require_user_presence,
-                key.device_bound
+                key.device_bound,
+                capabilities.can_generate,
+                capabilities.can_import,
+                capabilities.can_export,
+                capabilities.can_delete,
+                capabilities.supports_listing,
+                capabilities.supports_user_presence,
+                capabilities.supports_device_bound,
+                capabilities.supports_non_extractable
             );
         }
     }
@@ -478,6 +489,87 @@ fn print_metadata(metadata: &mkit_keystore::KeyMetadata) {
         metadata.require_user_presence
     );
     let _ = writeln!(stdout, "device_bound = {}", metadata.device_bound);
+}
+
+fn print_capabilities(capabilities: &Capabilities) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "capabilities.backend = {}", capabilities.backend);
+    let _ = writeln!(
+        stdout,
+        "capabilities.algorithms = {}",
+        algorithms_csv(capabilities)
+    );
+    let _ = writeln!(
+        stdout,
+        "capabilities.can_generate = {}",
+        capabilities.can_generate
+    );
+    let _ = writeln!(
+        stdout,
+        "capabilities.can_import = {}",
+        capabilities.can_import
+    );
+    let _ = writeln!(
+        stdout,
+        "capabilities.can_export = {}",
+        capabilities.can_export
+    );
+    let _ = writeln!(
+        stdout,
+        "capabilities.can_delete = {}",
+        capabilities.can_delete
+    );
+    let _ = writeln!(
+        stdout,
+        "capabilities.supports_listing = {}",
+        capabilities.supports_listing
+    );
+    let _ = writeln!(
+        stdout,
+        "capabilities.supports_user_presence = {}",
+        capabilities.supports_user_presence
+    );
+    let _ = writeln!(
+        stdout,
+        "capabilities.supports_device_bound = {}",
+        capabilities.supports_device_bound
+    );
+    let _ = writeln!(
+        stdout,
+        "capabilities.supports_non_extractable = {}",
+        capabilities.supports_non_extractable
+    );
+}
+
+fn algorithms_csv(capabilities: &Capabilities) -> String {
+    capabilities
+        .algorithms
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn json_capabilities(capabilities: &Capabilities) -> String {
+    let algorithms = capabilities
+        .algorithms
+        .iter()
+        .map(|algorithm| format!("\"{algorithm}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"backend\":\"{}\",\"algorithms\":[{}],\"can_generate\":{},\"can_import\":{},\"can_export\":{},\"can_delete\":{},\"supports_listing\":{},\"supports_user_presence\":{},\"supports_device_bound\":{},\"supports_non_extractable\":{}}}",
+        capabilities.backend,
+        algorithms,
+        capabilities.can_generate,
+        capabilities.can_import,
+        capabilities.can_export,
+        capabilities.can_delete,
+        capabilities.supports_listing,
+        capabilities.supports_user_presence,
+        capabilities.supports_device_bound,
+        capabilities.supports_non_extractable
+    )
 }
 
 fn parse_secret_hex(hex: &str) -> Result<[u8; 32], u8> {

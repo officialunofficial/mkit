@@ -333,14 +333,18 @@ fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8
         Some(mkit_keystore::Algorithm::Ed25519),
     )
     .map_err(|error| (format!("key.ed25519_ref: {error}"), exit::CONFIG_ERROR))?;
-    let signer = store.open(&selector).map_err(|error| {
-        (
+    let signer = store.open(&selector).map_err(|error| match error {
+        mkit_keystore::Error::KeyNotFound(_) => (
             format!(
                 "missing keystore signing key `{}` — run `mkit key generate --algorithm ed25519 --label {}` first, or set `signer = legacy` and use `mkit keygen`: {error}",
                 cfg.key.ed25519_ref_or_fallback(), key_ref.label
             ),
             exit::NOINPUT,
-        )
+        ),
+        other => (
+            format!("keystore signing key `{}`: {other}", cfg.key.ed25519_ref_or_fallback()),
+            exit::DATAERR,
+        ),
     })?;
     Ok(CommitSigner::Keystore(signer))
 }

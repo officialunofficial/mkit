@@ -68,6 +68,7 @@ impl SoftwareKeystore {
 
     fn load_secret(&self, label: &str, algorithm: Algorithm) -> Result<SecretKey> {
         let path = self.path_for(label, algorithm)?;
+        self.ensure_storage_path_not_symlink(&path)?;
         if !path.exists() {
             return Err(Error::KeyNotFound(KeySelector {
                 label: label.into(),
@@ -133,6 +134,7 @@ impl Keystore for SoftwareKeystore {
         validate_label(label)?;
         validate_secret(secret.algorithm(), secret.expose_secret())?;
         let path = self.path_for(label, secret.algorithm())?;
+        self.ensure_storage_path_not_symlink(&path)?;
         if options.overwrite {
             mkit_core::sign::save_raw_32(&path, secret.expose_secret()).map_err(core_error)?;
         } else {
@@ -167,6 +169,7 @@ impl Keystore for SoftwareKeystore {
         let mut out = Vec::new();
         for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
             let dir = self.root.join(algorithm.as_str());
+            self.ensure_storage_path_not_symlink(&dir)?;
             let entries = match std::fs::read_dir(&dir) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -213,6 +216,7 @@ impl Keystore for SoftwareKeystore {
         validate_label(&selector.label)?;
         let algorithm = self.resolve_selector_algorithm(selector)?;
         let path = self.path_for(&selector.label, algorithm)?;
+        self.ensure_storage_path_not_symlink(&path)?;
         if !path.exists() {
             return Err(Error::KeyNotFound(KeySelector {
                 label: selector.label.clone(),
@@ -225,6 +229,39 @@ impl Keystore for SoftwareKeystore {
 }
 
 impl SoftwareKeystore {
+    #[cfg(unix)]
+    fn ensure_storage_path_not_symlink(&self, path: &Path) -> Result<()> {
+        let mut current = Some(path);
+        while let Some(candidate) = current {
+            if !candidate.starts_with(&self.root) {
+                break;
+            }
+            match std::fs::symlink_metadata(candidate) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(Error::Io(format!(
+                        "keystore path is a symlink: {}",
+                        candidate.display()
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(Error::Io(format!("lstat {}: {error}", candidate.display())));
+                }
+            }
+            if candidate == self.root {
+                break;
+            }
+            current = candidate.parent();
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn ensure_storage_path_not_symlink(&self, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+
     fn resolve_selector_algorithm(&self, selector: &KeySelector) -> Result<Algorithm> {
         if let Some(algorithm) = selector.algorithm {
             return Ok(algorithm);
@@ -613,6 +650,72 @@ mod tests {
             ),
             Err(Error::UnsupportedAttributes(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn software_backend_rejects_symlinked_storage_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_root = dir.path().join("real-keys");
+        let symlink_root = dir.path().join("keys");
+        std::fs::create_dir_all(&real_root).expect("real root");
+        std::os::unix::fs::symlink(&real_root, &symlink_root).expect("symlink root");
+        let store = SoftwareKeystore::with_root(&symlink_root);
+
+        let result = store.import(
+            "default",
+            SecretKey::new(Algorithm::Ed25519, [3; 32]),
+            KeyAttrs::default(),
+            ImportOptions::default(),
+        );
+        assert!(matches!(result, Err(Error::Io(message)) if message.contains("symlink")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn software_backend_rejects_symlinked_algorithm_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("keys");
+        let real_algorithm_dir = dir.path().join("real-ed25519");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&real_algorithm_dir).expect("real algorithm dir");
+        std::os::unix::fs::symlink(&real_algorithm_dir, root.join("ed25519"))
+            .expect("symlink algorithm dir");
+        let store = SoftwareKeystore::with_root(root);
+
+        let result = store.import(
+            "default",
+            SecretKey::new(Algorithm::Ed25519, [3; 32]),
+            KeyAttrs::default(),
+            ImportOptions::default(),
+        );
+        assert!(matches!(result, Err(Error::Io(message)) if message.contains("symlink")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn software_backend_rejects_symlinked_final_key_path_for_open_and_delete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SoftwareKeystore::with_root(dir.path().join("keys"));
+        let path = store
+            .path_for("default", Algorithm::Ed25519)
+            .expect("key path");
+        std::fs::create_dir_all(path.parent().expect("key parent")).expect("key parent");
+        let target = dir.path().join("target.key");
+        std::fs::write(&target, [3; 32]).expect("target key");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink key path");
+        let selector = KeySelector::new("default", Some(Algorithm::Ed25519)).expect("selector");
+
+        assert!(
+            matches!(store.open(&selector), Err(Error::Io(message)) if message.contains("symlink"))
+        );
+        assert!(
+            matches!(store.delete(&selector), Err(Error::Io(message)) if message.contains("symlink"))
+        );
+        assert!(
+            path.is_symlink(),
+            "delete must not remove a symlinked key path"
+        );
     }
 
     #[test]

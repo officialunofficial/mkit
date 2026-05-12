@@ -16,6 +16,25 @@ fn run(root: &std::path::Path, args: &[&str]) -> Output {
         .expect("spawn mkit")
 }
 
+fn assert_key_list_json_includes_capabilities(root: &std::path::Path) {
+    let list_json = run(root, &["key", "list", "--json"]);
+    assert!(
+        list_json.status.success(),
+        "list json stderr: {}",
+        String::from_utf8_lossy(&list_json.stderr)
+    );
+    let stdout = String::from_utf8(list_json.stdout).expect("stdout utf8");
+    assert!(stdout.trim_start().starts_with('['));
+    assert!(stdout.trim_end().ends_with(']'));
+    assert!(stdout.contains("\"backend\":\"software\""));
+    assert!(stdout.contains("\"label\":\"ci\""));
+    assert!(stdout.contains("\"algorithm\":\"ed25519\""));
+    assert!(stdout.contains("\"keyid\":\"ed25519:"));
+    assert!(stdout.contains("\"capabilities\":{\"backend\":\"software\""));
+    assert!(stdout.contains("\"can_generate\":true"));
+    assert!(stdout.contains("\"supports_non_extractable\":false"));
+}
+
 #[test]
 fn key_import_list_export_delete_roundtrip() {
     let td = tempfile::tempdir().expect("tempdir");
@@ -51,6 +70,9 @@ fn key_import_list_export_delete_roundtrip() {
     );
     let list_stdout = String::from_utf8(list.stdout).expect("stdout utf8");
     assert!(list_stdout.contains("software ci ed25519 ed25519:"));
+    assert!(list_stdout.contains("can_generate=true"));
+    assert!(list_stdout.contains("supports_non_extractable=false"));
+    assert_key_list_json_includes_capabilities(td.path());
 
     let export_without_flag = run(
         td.path(),
@@ -130,6 +152,14 @@ fn key_generate_prints_stable_keyid_line() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(stdout.contains("capabilities.can_generate = true"));
+    assert!(stdout.contains("capabilities.can_import = true"));
+    assert!(stdout.contains("capabilities.can_export = true"));
+    assert!(stdout.contains("capabilities.can_delete = true"));
+    assert!(stdout.contains("capabilities.supports_listing = true"));
+    assert!(stdout.contains("capabilities.supports_user_presence = false"));
+    assert!(stdout.contains("capabilities.supports_device_bound = false"));
+    assert!(stdout.contains("capabilities.supports_non_extractable = false"));
     assert!(
         stdout
             .lines()
@@ -332,6 +362,63 @@ fn keystore_commit_missing_key_fails_without_generation() {
     assert!(
         !td.path().join("data/mkit/keys").exists(),
         "keystore commit must not silently create a keystore key"
+    );
+}
+
+#[test]
+fn keystore_commit_malformed_key_is_not_reported_as_missing() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+    assert!(run(td.path(), &["init"]).status.success());
+
+    let import = run(
+        td.path(),
+        &[
+            "key",
+            "import",
+            "--algorithm",
+            "ed25519",
+            "--label",
+            "broken",
+            "--hex",
+            &"09".repeat(32),
+        ],
+    );
+    assert!(
+        import.status.success(),
+        "import stderr: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    std::fs::write(
+        td.path().join("data/mkit/keys/ed25519/62726f6b656e.key"),
+        b"short",
+    )
+    .expect("corrupt keystore key");
+
+    let cfg_dir = td.path().join("config/mkit");
+    std::fs::create_dir_all(&cfg_dir).expect("config dir");
+    std::fs::write(
+        cfg_dir.join("config"),
+        "signer = keystore\nkey.ed25519_ref = software:broken\n",
+    )
+    .expect("user config");
+
+    std::fs::write(td.path().join("repo/README.md"), b"hello\n").expect("README");
+    assert!(run(td.path(), &["add", "README.md"]).status.success());
+    let commit = run(td.path(), &["commit", "-m", "malformed keystore key"]);
+    assert!(!commit.status.success());
+    let stderr = String::from_utf8_lossy(&commit.stderr);
+    assert!(
+        stderr.contains("keystore signing key `software:broken`"),
+        "stderr should report a keystore key error: {stderr}"
+    );
+    assert!(
+        !stderr.contains("missing keystore signing key"),
+        "malformed key must not be reported as missing: {stderr}"
+    );
+    assert!(
+        !stderr.contains("mkit key generate"),
+        "malformed key must not suggest generation: {stderr}"
     );
 }
 
