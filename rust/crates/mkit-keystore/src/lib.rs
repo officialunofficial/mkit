@@ -13,7 +13,7 @@ mod types;
 
 pub use backend::open_backend;
 pub use error::{Error, Result};
-pub use software::{SoftwareKeystore, SoftwareSigner};
+pub use software::{SoftwareKeystore, SoftwareRawKeystore, SoftwareSigner};
 pub use types::{
     Algorithm, BackendKind, Capabilities, GenerateOptions, ImportOptions, KeyAttrs, KeyMetadata,
     KeyRef, KeySelector, SecretKey, validate_label,

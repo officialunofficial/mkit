@@ -17,20 +17,42 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct SoftwareKeystore {
     root: PathBuf,
+    backend: BackendKind,
+}
+
+/// Explicit raw-file compatibility backend.
+#[derive(Clone, Debug)]
+pub struct SoftwareRawKeystore {
+    inner: SoftwareKeystore,
 }
 
 impl SoftwareKeystore {
     /// Create a software keystore using the default user-scoped root.
     pub fn new() -> Result<Self> {
+        Self::new_with_backend(BackendKind::Software)
+    }
+
+    fn new_with_backend(backend: BackendKind) -> Result<Self> {
         Ok(Self {
             root: default_storage_root()?,
+            backend,
         })
     }
 
     /// Create a software keystore at an explicit root, useful for tests.
     #[must_use]
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            backend: BackendKind::Software,
+        }
+    }
+
+    fn with_root_and_backend(root: impl Into<PathBuf>, backend: BackendKind) -> Self {
+        Self {
+            root: root.into(),
+            backend,
+        }
     }
 
     /// Storage root for this backend.
@@ -48,15 +70,20 @@ impl SoftwareKeystore {
     }
 
     fn metadata_for(
+        &self,
         label: String,
         algorithm: Algorithm,
         secret: &SecretKey,
     ) -> Result<KeyMetadata> {
-        let signer =
-            SoftwareSigner::new(label.clone(), secret.algorithm(), *secret.expose_secret())?;
+        let signer = SoftwareSigner::new(
+            label.clone(),
+            self.backend.clone(),
+            secret.algorithm(),
+            *secret.expose_secret(),
+        )?;
         Ok(KeyMetadata {
             label,
-            backend: BackendKind::Software,
+            backend: self.backend.clone(),
             algorithm,
             public_key: signer.public_key()?,
             keyid: signer.keyid()?,
@@ -86,10 +113,81 @@ impl Default for SoftwareKeystore {
     }
 }
 
+impl SoftwareRawKeystore {
+    /// Create a raw-file compatibility keystore using the default user-scoped root.
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            inner: SoftwareKeystore::new_with_backend(BackendKind::SoftwareRaw)?,
+        })
+    }
+
+    /// Create a raw-file compatibility keystore at an explicit root.
+    #[must_use]
+    pub fn with_root(root: impl Into<PathBuf>) -> Self {
+        Self {
+            inner: SoftwareKeystore::with_root_and_backend(root, BackendKind::SoftwareRaw),
+        }
+    }
+
+    /// Storage root for this backend.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+impl Default for SoftwareRawKeystore {
+    fn default() -> Self {
+        Self::new().expect("default software-raw keystore root should be discoverable")
+    }
+}
+
+impl Keystore for SoftwareRawKeystore {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn generate(
+        &self,
+        label: &str,
+        algorithm: Algorithm,
+        attrs: KeyAttrs,
+        options: GenerateOptions,
+    ) -> Result<Box<dyn KeySigner>> {
+        self.inner.generate(label, algorithm, attrs, options)
+    }
+
+    fn import(
+        &self,
+        label: &str,
+        secret: SecretKey,
+        attrs: KeyAttrs,
+        options: ImportOptions,
+    ) -> Result<Box<dyn KeySigner>> {
+        self.inner.import(label, secret, attrs, options)
+    }
+
+    fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
+        self.inner.open(selector)
+    }
+
+    fn list(&self) -> Result<Vec<KeyMetadata>> {
+        self.inner.list()
+    }
+
+    fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
+        self.inner.export(selector)
+    }
+
+    fn delete(&self, selector: &KeySelector) -> Result<()> {
+        self.inner.delete(selector)
+    }
+}
+
 impl Keystore for SoftwareKeystore {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            backend: BackendKind::Software,
+            backend: self.backend.clone(),
             algorithms: vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256],
             can_generate: true,
             can_import: true,
@@ -149,6 +247,7 @@ impl Keystore for SoftwareKeystore {
         }
         Ok(Box::new(SoftwareSigner::new(
             label.into(),
+            self.backend.clone(),
             secret.algorithm(),
             *secret.expose_secret(),
         )?))
@@ -160,6 +259,7 @@ impl Keystore for SoftwareKeystore {
         let secret = self.load_secret(&selector.label, algorithm)?;
         Ok(Box::new(SoftwareSigner::new(
             selector.label.clone(),
+            self.backend.clone(),
             algorithm,
             *secret.expose_secret(),
         )?))
@@ -194,7 +294,7 @@ impl Keystore for SoftwareKeystore {
                 })?;
                 validate_label(&label)?;
                 let secret = self.load_secret(&label, algorithm)?;
-                out.push(Self::metadata_for(label, algorithm, &secret)?);
+                out.push(self.metadata_for(label, algorithm, &secret)?);
             }
         }
         out.sort_by(|left, right| {
@@ -282,16 +382,23 @@ impl SoftwareKeystore {
 /// Software signer backed by in-memory secret material loaded from the software backend.
 pub struct SoftwareSigner {
     label: String,
+    backend: BackendKind,
     secret: SecretKey,
 }
 
 impl SoftwareSigner {
-    fn new(label: String, algorithm: Algorithm, mut secret: [u8; 32]) -> Result<Self> {
+    fn new(
+        label: String,
+        backend: BackendKind,
+        algorithm: Algorithm,
+        mut secret: [u8; 32],
+    ) -> Result<Self> {
         validate_secret(algorithm, &secret)?;
         let wrapped = SecretKey::new(algorithm, secret);
         secret.zeroize();
         Ok(Self {
             label,
+            backend,
             secret: wrapped,
         })
     }
@@ -301,6 +408,7 @@ impl std::fmt::Debug for SoftwareSigner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SoftwareSigner")
             .field("label", &self.label)
+            .field("backend", &self.backend)
             .field("algorithm", &self.secret.algorithm())
             .field("secret", &"<redacted>")
             .finish()
@@ -319,7 +427,7 @@ impl KeySigner for SoftwareSigner {
     fn metadata(&self) -> Result<KeyMetadata> {
         Ok(KeyMetadata {
             label: self.label.clone(),
-            backend: BackendKind::Software,
+            backend: self.backend.clone(),
             algorithm: self.algorithm(),
             public_key: self.public_key()?,
             keyid: self.keyid()?,
@@ -751,6 +859,35 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn software_raw_backend_reports_raw_backend_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SoftwareRawKeystore::with_root(dir.path().join("keys"));
+        let signer = store
+            .import(
+                "default",
+                SecretKey::new(Algorithm::Ed25519, [9; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("import");
+
+        assert_eq!(store.capabilities().backend, BackendKind::SoftwareRaw);
+        assert_eq!(
+            signer.metadata().expect("metadata").backend,
+            BackendKind::SoftwareRaw
+        );
+        let selector = KeySelector::new("default", Some(Algorithm::Ed25519)).expect("selector");
+        assert_eq!(
+            store.list().expect("list")[0].backend,
+            BackendKind::SoftwareRaw
+        );
+        assert_eq!(
+            store.export(&selector).expect("export").expose_secret(),
+            &[9; 32]
+        );
+    }
 }
 
 #[cfg(all(test, feature = "attest"))]
@@ -765,7 +902,13 @@ mod compatibility_tests {
         let seed = [0x42; 32];
         let mut expected =
             mkit_attest::RepoKeySigner::new(mkit_core::sign::KeyPair::from_seed(seed));
-        let mut actual = SoftwareSigner::new("default".into(), Algorithm::Ed25519, seed).unwrap();
+        let mut actual = SoftwareSigner::new(
+            "default".into(),
+            BackendKind::Software,
+            Algorithm::Ed25519,
+            seed,
+        )
+        .unwrap();
 
         assert_eq!(
             actual.public_key().unwrap(),
@@ -779,7 +922,13 @@ mod compatibility_tests {
         let mut seed = [0u8; 32];
         seed[31] = 1;
         let expected = mkit_attest::signer_k256::Secp256k1Signer::new(seed).unwrap();
-        let mut actual = SoftwareSigner::new("default".into(), Algorithm::Secp256k1, seed).unwrap();
+        let mut actual = SoftwareSigner::new(
+            "default".into(),
+            BackendKind::Software,
+            Algorithm::Secp256k1,
+            seed,
+        )
+        .unwrap();
 
         assert_eq!(actual.public_key().unwrap(), expected.public_key_sec1());
         assert_eq!(actual.keyid().unwrap(), expected.keyid_string());
@@ -794,7 +943,13 @@ mod compatibility_tests {
             0x1d, 0x1e, 0x1f, 0x20,
         ];
         let expected = mkit_attest::signer_p256::P256Signer::new(seed).unwrap();
-        let mut actual = SoftwareSigner::new("default".into(), Algorithm::P256, seed).unwrap();
+        let mut actual = SoftwareSigner::new(
+            "default".into(),
+            BackendKind::Software,
+            Algorithm::P256,
+            seed,
+        )
+        .unwrap();
 
         assert_eq!(actual.public_key().unwrap(), expected.public_key_sec1());
         assert_eq!(actual.keyid().unwrap(), expected.keyid());

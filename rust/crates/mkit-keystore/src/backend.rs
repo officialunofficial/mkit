@@ -1,6 +1,6 @@
 //! Backend construction helpers.
 
-use crate::{BackendKind, Error, Keystore, Result, SoftwareKeystore};
+use crate::{BackendKind, Error, Keystore, Result, SoftwareKeystore, SoftwareRawKeystore};
 
 /// Open a backend by family.
 ///
@@ -9,6 +9,7 @@ use crate::{BackendKind, Error, Keystore, Result, SoftwareKeystore};
 pub fn open_backend(kind: BackendKind) -> Result<Box<dyn Keystore>> {
     match kind {
         BackendKind::Software => Ok(Box::new(SoftwareKeystore::new()?)),
+        BackendKind::SoftwareRaw => Ok(Box::new(SoftwareRawKeystore::new()?)),
         other => Err(Error::BackendUnavailable(format!(
             "backend `{other}` is not implemented in this build"
         ))),
