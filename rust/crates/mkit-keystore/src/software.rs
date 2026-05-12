@@ -79,10 +79,23 @@ impl SoftwareKeystore {
 
     fn path_for(&self, label: &str, algorithm: Algorithm) -> Result<PathBuf> {
         validate_label(label)?;
-        Ok(self
-            .root
-            .join(algorithm.as_str())
-            .join(format!("{}.key", hex_lower(label.as_bytes()))))
+        Ok(self.dir_for(algorithm).join(format!(
+            "{}.{}",
+            hex_lower(label.as_bytes()),
+            self.extension()
+        )))
+    }
+
+    fn dir_for(&self, algorithm: Algorithm) -> PathBuf {
+        if self.is_raw() {
+            self.root.join("raw").join(algorithm.as_str())
+        } else {
+            self.root.join(algorithm.as_str())
+        }
+    }
+
+    fn extension(&self) -> &'static str {
+        if self.is_raw() { "raw" } else { "key" }
     }
 
     fn is_raw(&self) -> bool {
@@ -367,7 +380,7 @@ impl Keystore for SoftwareKeystore {
     fn list(&self) -> Result<Vec<KeyMetadata>> {
         let mut out = Vec::new();
         for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
-            let dir = self.root.join(algorithm.as_str());
+            let dir = self.dir_for(algorithm);
             self.ensure_storage_path_not_symlink(&dir)?;
             let entries = match std::fs::read_dir(&dir) {
                 Ok(entries) => entries,
@@ -379,7 +392,9 @@ impl Keystore for SoftwareKeystore {
             for entry in entries {
                 let entry = entry.map_err(|error| Error::Io(format!("read_dir entry: {error}")))?;
                 let path = entry.path();
-                if path.extension().and_then(|extension| extension.to_str()) != Some("key") {
+                if path.extension().and_then(|extension| extension.to_str())
+                    != Some(self.extension())
+                {
                     continue;
                 }
                 let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -1357,6 +1372,46 @@ mod tests {
             store.export(&selector).expect("export").expose_secret(),
             &[9; 32]
         );
+    }
+
+    #[test]
+    fn software_and_raw_backends_do_not_alias_storage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("keys");
+        let software = software_store(&root);
+        let raw = SoftwareRawKeystore::with_root(&root);
+
+        software
+            .import(
+                "shared",
+                SecretKey::new(Algorithm::Ed25519, [7; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("software import");
+        raw.import(
+            "shared",
+            SecretKey::new(Algorithm::Ed25519, [8; 32]),
+            KeyAttrs::default(),
+            ImportOptions::default(),
+        )
+        .expect("raw import");
+
+        let software_path = software.path_for("shared", Algorithm::Ed25519).unwrap();
+        let raw_path = raw.inner.path_for("shared", Algorithm::Ed25519).unwrap();
+        assert_ne!(software_path, raw_path);
+        assert_eq!(std::fs::read(&raw_path).expect("raw bytes"), [8; 32]);
+        assert_ne!(
+            std::fs::read(&software_path).expect("record bytes"),
+            [8; 32]
+        );
+
+        let selector = KeySelector::new("shared", Some(Algorithm::Ed25519)).unwrap();
+        assert_eq!(
+            software.export(&selector).unwrap().expose_secret(),
+            &[7; 32]
+        );
+        assert_eq!(raw.export(&selector).unwrap().expose_secret(), &[8; 32]);
     }
 
     #[test]
