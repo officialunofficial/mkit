@@ -1346,6 +1346,27 @@ mod tests {
     }
 
     #[test]
+    fn software_backend_writes_encrypted_record_not_raw_seed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = software_store(dir.path().join("keys"));
+        let seed = [0x4a; 32];
+        store
+            .import(
+                "encrypted",
+                SecretKey::new(Algorithm::Ed25519, seed),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("import");
+
+        let path = store.path_for("encrypted", Algorithm::Ed25519).unwrap();
+        let encoded = std::fs::read(path).expect("record bytes");
+        assert!(encoded.starts_with(b"MKITKSV1"));
+        assert_ne!(encoded, seed);
+        assert_eq!(store.list().unwrap()[0].label, "encrypted");
+    }
+
+    #[test]
     fn software_raw_backend_reports_raw_backend_kind() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = SoftwareRawKeystore::with_root(dir.path().join("keys"));

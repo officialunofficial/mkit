@@ -1,6 +1,5 @@
 use mkit_keystore::{
-    Algorithm, BackendKind, ImportOptions, KeyAttrs, Keystore, SecretKey, SoftwareKeystore,
-    SoftwareRawKeystore,
+    Algorithm, BackendKind, ImportOptions, KeyAttrs, Keystore, SecretKey, SoftwareRawKeystore,
 };
 
 const PAE: &[u8] = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
@@ -38,11 +37,8 @@ const VECTORS: &[Vector] = &[
 ];
 
 #[test]
-fn software_backends_match_golden_vectors() {
+fn software_raw_backend_matches_golden_vectors() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let software = SoftwareKeystore::with_root(dir.path().join("software"));
-    assert_store_vectors(&software, &BackendKind::Software);
-
     let raw = SoftwareRawKeystore::with_root(dir.path().join("raw"));
     assert_store_vectors(&raw, &BackendKind::SoftwareRaw);
 }
