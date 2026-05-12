@@ -8,20 +8,34 @@
 
 use std::io::Write;
 
+use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::object::Object;
 use mkit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::exit;
 use crate::format;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit checkout",
+    about = "Switch HEAD to a branch (or tag / commit hash) and restore files."
+)]
+struct CheckoutOpts {
+    /// Branch name, tag, or 64-char commit hash.
+    target: String,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let Some(name) = args.first() else {
-        return super::usage_error("usage: mkit checkout <branch>");
+    let opts = match clap_shim::parse::<CheckoutOpts>("mkit checkout", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
+    let name = &opts.target;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),

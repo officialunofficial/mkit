@@ -5,37 +5,62 @@
 use std::fs;
 use std::io::Write;
 
+use clap::{Parser, Subcommand};
 use mkit_core::object::Object;
 use mkit_core::ops::restore::{self, RestoreOptions, load_sparse_checkout, write_sparse_checkout};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::exit;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit sparse-checkout",
+    about = "Manage sparse-checkout patterns."
+)]
+struct SparseOpts {
+    #[command(subcommand)]
+    sub: Option<SparseCmd>,
+}
+
+#[derive(Debug, Subcommand)]
+enum SparseCmd {
+    /// List current patterns.
+    List,
+    /// Replace the pattern set and re-materialize.
+    Set {
+        /// One or more patterns.
+        #[arg(required = true)]
+        patterns: Vec<String>,
+    },
+    /// Drop patterns and re-materialize the full worktree.
+    Disable,
+    /// Re-apply the current patterns to the worktree.
+    Reapply,
+}
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
+    let opts = match clap_shim::parse::<SparseOpts>("mkit sparse-checkout", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let sub = args.first().map_or("list", String::as_str);
-    match sub {
-        "list" => list_patterns(&cwd),
-        "set" => {
-            let patterns: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
-            if patterns.is_empty() {
-                return super::usage_error(
-                    "usage: mkit sparse-checkout set <pattern> [<pattern> ...]",
-                );
-            }
-            if let Err(e) = write_sparse_checkout(&cwd, &patterns) {
+    match opts.sub.unwrap_or(SparseCmd::List) {
+        SparseCmd::List => list_patterns(&cwd),
+        SparseCmd::Set { patterns } => {
+            let pat_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+            if let Err(e) = write_sparse_checkout(&cwd, &pat_refs) {
                 return emit_err(&format!("write sparse-checkout: {e}"), exit::CANTCREAT);
             }
             reapply(&cwd)
         }
-        "disable" => disable(&cwd),
-        "reapply" => reapply(&cwd),
-        other => super::usage_error(&format!("unknown sparse-checkout subcommand: {other}")),
+        SparseCmd::Disable => disable(&cwd),
+        SparseCmd::Reapply => reapply(&cwd),
     }
 }
 
