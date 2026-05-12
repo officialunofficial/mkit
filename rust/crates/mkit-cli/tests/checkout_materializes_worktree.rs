@@ -122,12 +122,14 @@ fn checkout_resets_index_to_checked_out_tree() {
     assert!(run_in(td.path(), &["checkout", "main"]).status.success());
     assert!(!td.path().join("feature.txt").exists());
 
-    let status = run_in(td.path(), &["status"]);
+    // Default-mode prose lives on stderr; use --porcelain for the
+    // machine-readable contract. Empty stdout means clean.
+    let status = run_in(td.path(), &["status", "--porcelain"]);
     assert!(status.status.success());
     let stdout = String::from_utf8(status.stdout).unwrap();
     assert!(
-        stdout.contains("nothing to commit"),
-        "checkout should leave index aligned with main: {stdout}"
+        stdout.is_empty(),
+        "checkout should leave index aligned with main: {stdout:?}"
     );
 
     assert!(

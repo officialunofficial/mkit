@@ -28,7 +28,12 @@ Working-tree commands:
 - `mkit add <path>` / `mkit add .` — stage a file (or every non-ignored
   file) for the next commit.
 - `mkit rm <path>` — mark a file for removal in the next commit.
-- `mkit status` — show staged and unstaged changes.
+- `mkit status [--porcelain]` — show staged and unstaged changes.
+  Default-mode prose (banner + section headers + per-file lines) goes
+  to **stderr**; stdout is reserved for `--porcelain` machine output.
+  Porcelain emits one entry per line in `git status --porcelain=v1`
+  format (`XY <path>`, with mkit's `T` for `ModeChanged` as the only
+  non-git extension). Empty stdout means clean.
 - `mkit diff [<hash1> <hash2>]` — show changes. With no args, compares
   HEAD to the working directory.
 - `mkit stash [save|list|pop|drop|show]` — save/restore WIP changes.
