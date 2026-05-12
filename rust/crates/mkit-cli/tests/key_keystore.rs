@@ -202,14 +202,14 @@ fn key_default_ref_drives_unlabeled_commands() {
 }
 
 #[test]
-fn unlabeled_key_commands_use_key_backend_not_ref_backend() {
+fn unlabeled_key_commands_use_configured_ref_backend() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(td.path().join("repo")).expect("repo dir");
     let cfg_dir = td.path().join("config/mkit");
     std::fs::create_dir_all(&cfg_dir).expect("config dir");
     std::fs::write(
         cfg_dir.join("config"),
-        "key.backend = yubikey\nkey.default_ref = software:shared\n",
+        "key.backend = yubikey\nkey.default_ref = software-raw:shared\n",
     )
     .expect("user config");
 
@@ -218,12 +218,13 @@ fn unlabeled_key_commands_use_key_backend_not_ref_backend() {
         td.path(),
         &["key", "import", "--algorithm", "ed25519", "--hex", &secret],
     );
-    assert!(!import.status.success());
-    let stderr = String::from_utf8_lossy(&import.stderr);
     assert!(
-        stderr.contains("backend `yubikey` is not supported"),
-        "stderr should show key.backend was selected: {stderr}"
+        import.status.success(),
+        "configured ref backend should be selected: {}",
+        String::from_utf8_lossy(&import.stderr)
     );
+    let stdout = String::from_utf8(import.stdout).expect("stdout utf8");
+    assert!(stdout.contains("backend = software-raw"));
 
     let import = run(
         td.path(),
@@ -232,6 +233,8 @@ fn unlabeled_key_commands_use_key_backend_not_ref_backend() {
             "import",
             "--backend",
             "software",
+            "--label",
+            "explicit",
             "--algorithm",
             "ed25519",
             "--hex",
@@ -244,12 +247,34 @@ fn unlabeled_key_commands_use_key_backend_not_ref_backend() {
         String::from_utf8_lossy(&import.stderr)
     );
 
-    let list = run(td.path(), &["key", "list", "--backend", "software"]);
+    let unsupported = run(
+        td.path(),
+        &[
+            "key",
+            "import",
+            "--backend",
+            "yubikey",
+            "--label",
+            "hardware",
+            "--algorithm",
+            "ed25519",
+            "--hex",
+            &secret,
+        ],
+    );
+    assert!(!unsupported.status.success());
+    let stderr = String::from_utf8_lossy(&unsupported.stderr);
+    assert!(
+        stderr.contains("backend `yubikey` is not implemented"),
+        "stderr should show generic backend routing failed closed: {stderr}"
+    );
+
+    let list = run(td.path(), &["key", "list", "--backend", "software-raw"]);
     assert!(list.status.success());
     let stdout = String::from_utf8(list.stdout).expect("stdout utf8");
     assert!(
-        stdout.contains("software shared ed25519 ed25519:"),
-        "default ref label should still be used: {stdout}"
+        stdout.contains("software-raw shared ed25519 ed25519:"),
+        "configured ref backend and label should be used: {stdout}"
     );
 }
 

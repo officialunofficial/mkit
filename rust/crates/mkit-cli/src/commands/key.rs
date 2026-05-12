@@ -5,7 +5,7 @@ use std::path::Path;
 
 use mkit_keystore::{
     Algorithm, BackendKind, Capabilities, GenerateOptions, ImportOptions, KeyAttrs, KeyRef,
-    KeySelector, Keystore, SecretKey, SoftwareKeystore,
+    KeySelector, Keystore, SecretKey, open_backend,
 };
 use zeroize::Zeroize;
 
@@ -71,7 +71,7 @@ fn generate(args: &[String]) -> u8 {
         Ok(selection) => selection,
         Err(code) => return code,
     };
-    let store = match store_for_backend(&selection.backend) {
+    let store = match store_for_backend(selection.backend.clone()) {
         Ok(store) => store,
         Err(code) => return code,
     };
@@ -116,8 +116,12 @@ fn list(args: &[String]) -> u8 {
         }
         i += 1;
     }
-    let backend = backend.unwrap_or_else(|| cfg.key.backend_or_fallback().to_owned());
-    let store = match store_for_backend(&backend) {
+    let backend =
+        match parse_backend(&backend.unwrap_or_else(|| cfg.key.backend_or_fallback().to_owned())) {
+            Ok(backend) => backend,
+            Err(code) => return code,
+        };
+    let store = match store_for_backend(backend) {
         Ok(store) => store,
         Err(code) => return code,
     };
@@ -253,7 +257,7 @@ fn import(args: &[String]) -> u8 {
     };
     let wrapped = SecretKey::new(algorithm, secret);
     secret.zeroize();
-    let store = match store_for_backend(&selection.backend) {
+    let store = match store_for_backend(selection.backend.clone()) {
         Ok(store) => store,
         Err(code) => return code,
     };
@@ -317,7 +321,7 @@ fn export(args: &[String]) -> u8 {
         Ok(selection) => selection,
         Err(code) => return code,
     };
-    let store = match store_for_backend(&selection.backend) {
+    let store = match store_for_backend(selection.backend.clone()) {
         Ok(store) => store,
         Err(code) => return code,
     };
@@ -375,7 +379,7 @@ fn delete(args: &[String]) -> u8 {
         Ok(selection) => selection,
         Err(code) => return code,
     };
-    let store = match store_for_backend(&selection.backend) {
+    let store = match store_for_backend(selection.backend.clone()) {
         Ok(store) => store,
         Err(code) => return code,
     };
@@ -395,7 +399,7 @@ fn delete(args: &[String]) -> u8 {
 
 #[derive(Debug)]
 struct Selection {
-    backend: String,
+    backend: BackendKind,
     label: String,
 }
 
@@ -405,8 +409,15 @@ fn selection_for(
     label: Option<String>,
     algorithm: Option<Algorithm>,
 ) -> Result<Selection, u8> {
-    let backend = backend.unwrap_or_else(|| cfg.key.backend_or_fallback().to_owned());
+    let explicit_backend = match backend {
+        Some(backend) => Some(parse_backend(&backend)?),
+        None => None,
+    };
     if let Some(label) = label {
+        let backend = match explicit_backend {
+            Some(backend) => backend,
+            None => parse_backend(cfg.key.backend_or_fallback())?,
+        };
         return Ok(Selection { backend, label });
     }
     let key_ref =
@@ -419,6 +430,7 @@ fn selection_for(
                 ));
             }
         };
+    let backend = explicit_backend.unwrap_or(key_ref.backend);
     Ok(Selection {
         backend,
         label: key_ref.label,
@@ -433,24 +445,19 @@ fn configured_ref(cfg: &Config, algorithm: Algorithm) -> &str {
     }
 }
 
-fn store_for_backend(backend: &str) -> Result<SoftwareKeystore, u8> {
-    let parsed = match backend.parse::<BackendKind>() {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return Err(emit_err(
-                &format!("key backend: {error}"),
-                exit::CONFIG_ERROR,
-            ));
-        }
-    };
-    match parsed {
-        BackendKind::Software => SoftwareKeystore::new()
-            .map_err(|error| emit_err(&format!("software keystore: {error}"), exit::UNAVAILABLE)),
-        other => Err(emit_err(
-            &format!("key backend `{other}` is not supported in Foundation V1"),
-            exit::UNAVAILABLE,
+fn parse_backend(backend: &str) -> Result<BackendKind, u8> {
+    match backend.parse::<BackendKind>() {
+        Ok(parsed) => Ok(parsed),
+        Err(error) => Err(emit_err(
+            &format!("key backend: {error}"),
+            exit::CONFIG_ERROR,
         )),
     }
+}
+
+fn store_for_backend(backend: BackendKind) -> Result<Box<dyn Keystore>, u8> {
+    open_backend(backend)
+        .map_err(|error| emit_err(&format!("keystore backend: {error}"), exit::UNAVAILABLE))
 }
 
 fn read_config() -> Result<Config, u8> {
@@ -649,14 +656,14 @@ const USAGE: &str = "\
 usage: mkit key <subcommand> [args]
 
 subcommands:
-  generate [--backend software] [--label <label>] [--algorithm ed25519|secp256k1|p256]
+  generate [--backend <backend>] [--label <label>] [--algorithm ed25519|secp256k1|p256]
            [--extractable|--non-extractable] [--device-bound]
            [--require-user-presence] [--force] [--print-pubkey]
-  list [--backend software] [--json]
-  import --algorithm ed25519|secp256k1|p256 [--backend software] [--label <label>]
+  list [--backend <backend>] [--json]
+  import --algorithm ed25519|secp256k1|p256 [--backend <backend>] [--label <label>]
          (--hex <64-hex> | --file <path>) [--extractable|--non-extractable]
          [--device-bound] [--require-user-presence] [--force]
-  export [--backend software] [--label <label>] [--algorithm ed25519|secp256k1|p256]
+  export [--backend <backend>] [--label <label>] [--algorithm ed25519|secp256k1|p256]
          --unsafe-print-secret
-  delete [--backend software] [--label <label>] [--algorithm ed25519|secp256k1|p256] --yes
+  delete [--backend <backend>] [--label <label>] [--algorithm ed25519|secp256k1|p256] --yes
 ";
