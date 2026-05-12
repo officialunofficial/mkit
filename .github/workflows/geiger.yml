@@ -1,0 +1,60 @@
+name: cargo-geiger
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  unsafe-ceiling:
+    name: Assert unsafe ceiling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-geiger
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            rust/target
+          key: geiger-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            geiger-${{ runner.os }}-
+
+      - name: Install cargo-geiger
+        run: |
+          if ! command -v cargo-geiger >/dev/null 2>&1; then
+            cargo install --locked cargo-geiger --version 0.13.0
+          fi
+
+      - name: Check per-crate unsafe ceiling
+        run: bash scripts/check-geiger-baseline.sh
+
+      - name: Publish full geiger report (artifact)
+        if: always()
+        run: |
+          cd rust/crates/mkit-cli
+          cargo geiger --quiet > "$RUNNER_TEMP/geiger.txt" 2>&1 || true
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-geiger-report
+          path: ${{ runner.temp }}/geiger.txt
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,90 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  llvm-cov:
+    name: cargo-llvm-cov (nextest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: llvm-tools-preview
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> rust/target
+          prefix-key: coverage-${{ runner.os }}
+          cache-on-failure: false
+
+      # Same native deps as rust.yml — the workspace's --all-features
+      # path pulls in the TPM / CTAP signers on Linux, and coverage
+      # needs every test target to compile.
+      - name: Install native signer deps
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev swtpm
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cargo-llvm-cov + cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      # Run the same test set rust.yml does so coverage matches CI's
+      # actual quality bar — `--workspace --all-features` plus doctests
+      # plus a final HTML+lcov merge.
+      - name: Collect coverage
+        working-directory: rust
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --no-report nextest --locked --workspace --all-features
+          cargo llvm-cov --no-report --doc --locked --workspace
+          cargo llvm-cov report --html --output-dir "$RUNNER_TEMP/coverage-html"
+          cargo llvm-cov report --lcov --output-path "$RUNNER_TEMP/coverage.lcov"
+          # Emit a numeric summary for the workflow output.
+          cargo llvm-cov report --summary-only | tee "$RUNNER_TEMP/coverage-summary.txt"
+
+      - name: Append summary to job output
+        run: |
+          {
+            echo "## Coverage summary"
+            echo ""
+            echo '```'
+            cat "$RUNNER_TEMP/coverage-summary.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: ${{ runner.temp }}/coverage-html
+          retention-days: 14
+
+      - name: Upload lcov
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: ${{ runner.temp }}/coverage.lcov
+          retention-days: 14
