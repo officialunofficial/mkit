@@ -3,14 +3,26 @@
 
 use std::io::Write;
 
+use clap::Parser;
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 
+use crate::clap_shim;
 use crate::exit;
 use crate::format;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit tree",
+    about = "Snapshot the working directory as a tree object."
+)]
+struct TreeOpts {}
+
 #[must_use]
-pub fn run(_args: &[String]) -> u8 {
+pub fn run(args: &[String]) -> u8 {
+    if let Err(code) = clap_shim::parse::<TreeOpts>("mkit tree", args) {
+        return code;
+    }
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),

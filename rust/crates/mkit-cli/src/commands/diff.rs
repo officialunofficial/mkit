@@ -5,6 +5,7 @@
 
 use std::io::Write;
 
+use clap::Parser;
 use mkit_core::hash::from_hex;
 use mkit_core::object::Object;
 use mkit_core::ops::{DiffKind, diff_trees};
@@ -12,10 +13,26 @@ use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 
+use crate::clap_shim;
 use crate::exit;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit diff",
+    about = "Summarize path-level differences between two trees, or HEAD vs worktree."
+)]
+struct DiffOpts {
+    /// Optional two tree hashes to diff against each other.
+    /// With no args, diffs HEAD vs worktree.
+    hashes: Vec<String>,
+}
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
+    let opts = match clap_shim::parse::<DiffOpts>("mkit diff", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -25,12 +42,12 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let (old_tree, new_tree) = if args.len() >= 2 {
-        let a = match from_hex(&args[0]) {
+    let (old_tree, new_tree) = if opts.hashes.len() >= 2 {
+        let a = match from_hex(&opts.hashes[0]) {
             Ok(h) => h,
             Err(e) => return emit_err(&format!("bad hash arg 1: {e}"), exit::DATAERR),
         };
-        let b = match from_hex(&args[1]) {
+        let b = match from_hex(&opts.hashes[1]) {
             Ok(h) => h,
             Err(e) => return emit_err(&format!("bad hash arg 2: {e}"), exit::DATAERR),
         };

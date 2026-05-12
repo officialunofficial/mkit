@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
+use clap::Parser;
 use mkit_core::hash::ZERO;
 use mkit_core::ignore::{self, IgnoreList};
 use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
@@ -13,7 +14,18 @@ use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 
+use crate::clap_shim;
 use crate::exit;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit add",
+    about = "Stage a file (or `.` for the whole worktree)."
+)]
+struct AddOpts {
+    /// Path to stage. Pass `.` to stage every non-ignored file.
+    path: String,
+}
 
 /// Refresh already-tracked index entries from the worktree.
 ///
@@ -98,9 +110,11 @@ fn file_status_from_meta(_meta: &std::fs::Metadata, previous: EntryStatus) -> En
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let Some(target) = args.first() else {
-        return super::usage_error("usage: mkit add <path> | .");
+    let opts = match clap_shim::parse::<AddOpts>("mkit add", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
+    let target = &opts.path;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
