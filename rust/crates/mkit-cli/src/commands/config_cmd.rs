@@ -7,12 +7,35 @@
 
 use std::io::Write;
 
+use clap::{Parser, ValueEnum};
+
+use crate::clap_shim;
 use crate::config::{self, Config, REPO_FORBIDDEN_KEYS};
 use crate::exit;
 use crate::format;
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ConfigFormat {
+    Default,
+    Json,
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "mkit config", about = "Show or set configuration values.")]
+struct ConfigOpts {
+    /// Output format for the show forms.
+    #[arg(long, value_enum, default_value = "default")]
+    format: ConfigFormat,
+    /// Optional `<key>` to show, or `<key> <value>` pair to set.
+    args: Vec<String>,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
+    let opts = match clap_shim::parse::<ConfigOpts>("mkit config", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -21,39 +44,21 @@ pub fn run(args: &[String]) -> u8 {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
+    let json = matches!(opts.format, ConfigFormat::Json);
 
-    // Parse `--format=json` / `--format json` out of args first so
-    // we can use it for both show modes.
-    let mut json = false;
-    let mut positional: Vec<&str> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--format=json" => json = true,
-            "--format" if i + 1 < args.len() => {
-                match args[i + 1].as_str() {
-                    "json" => json = true,
-                    "default" => json = false,
-                    other => {
-                        return super::usage_error(&format!("unknown --format value: {other}"));
-                    }
-                }
-                i += 1;
-            }
-            other => positional.push(other),
+    match opts.args.len() {
+        0 => return show_all(&cfg, json),
+        1 => return show_one(&cfg, &opts.args[0], json),
+        2 => {}
+        _ => {
+            return super::usage_error(&format!(
+                "too many arguments: expected 0, 1, or 2 positional args, got {}",
+                opts.args.len()
+            ));
         }
-        i += 1;
     }
-
-    if positional.is_empty() {
-        return show_all(&cfg, json);
-    }
-    if positional.len() == 1 {
-        return show_one(&cfg, positional[0], json);
-    }
-    // `key value` pair.
-    let key = positional[0];
-    let value = positional[1];
+    let key = opts.args[0].as_str();
+    let value = opts.args[1].as_str();
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);
     }
