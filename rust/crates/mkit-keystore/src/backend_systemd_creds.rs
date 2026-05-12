@@ -313,7 +313,7 @@ fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
     Ok(())
 }
 
-fn encrypt_credential(secret: &[u8; 32], path: &Path, name: &str) -> Result<()> {
+pub(crate) fn encrypt_credential(secret: &[u8; 32], path: &Path, name: &str) -> Result<()> {
     let mut child = Command::new("systemd-creds")
         .args(["--user", "--uid=self", "--with-key=auto", "--name", name])
         .arg("encrypt")
@@ -341,7 +341,7 @@ fn encrypt_credential(secret: &[u8; 32], path: &Path, name: &str) -> Result<()> 
     }
 }
 
-fn decrypt_credential(path: &Path, name: &str) -> Result<Vec<u8>> {
+pub(crate) fn decrypt_credential(path: &Path, name: &str) -> Result<Vec<u8>> {
     let output = Command::new("systemd-creds")
         .args(["--user", "--uid=self", "--name", name])
         .arg("decrypt")

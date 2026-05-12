@@ -1,7 +1,5 @@
 //! Encrypted software-key record format.
 
-#![allow(dead_code)]
-
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use zeroize::{Zeroize, Zeroizing};
@@ -14,7 +12,7 @@ const DEK_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
 
 /// OS-native wrapper for software-keystore data-encryption keys.
-pub(crate) trait KeyProtector {
+pub(crate) trait KeyProtector: std::fmt::Debug + Send + Sync {
     /// Stable protector identifier included in record AAD.
     fn id(&self) -> &'static str;
 
@@ -23,6 +21,11 @@ pub(crate) trait KeyProtector {
 
     /// Recover a protected data-encryption key.
     fn unwrap_dek(&self, wrapped: &[u8], aad: &[u8]) -> Result<Zeroizing<[u8; DEK_LEN]>>;
+
+    /// Best-effort cleanup for protector-side DEK state.
+    fn delete_wrapped_dek(&self, _wrapped: &[u8]) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,6 +141,10 @@ impl EncryptedKeyRecord {
         write_bytes(&mut out, &self.wrapped_dek)?;
         write_bytes(&mut out, &self.ciphertext)?;
         Ok(out)
+    }
+
+    pub(crate) fn wrapped_dek(&self) -> &[u8] {
+        &self.wrapped_dek
     }
 
     pub(crate) fn decode(input: &[u8]) -> Result<Self> {
@@ -305,6 +312,7 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
     struct TestProtector;
 
     impl KeyProtector for TestProtector {
