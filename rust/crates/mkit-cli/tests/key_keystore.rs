@@ -17,7 +17,10 @@ fn run(root: &std::path::Path, args: &[&str]) -> Output {
 }
 
 fn assert_key_list_json_includes_capabilities(root: &std::path::Path) {
-    let list_json = run(root, &["key", "list", "--json"]);
+    let list_json = run(
+        root,
+        &["key", "list", "--backend", "software-raw", "--json"],
+    );
     assert!(
         list_json.status.success(),
         "list json stderr: {}",
@@ -26,16 +29,17 @@ fn assert_key_list_json_includes_capabilities(root: &std::path::Path) {
     let stdout = String::from_utf8(list_json.stdout).expect("stdout utf8");
     assert!(stdout.trim_start().starts_with('['));
     assert!(stdout.trim_end().ends_with(']'));
-    assert!(stdout.contains("\"backend\":\"software\""));
+    assert!(stdout.contains("\"backend\":\"software-raw\""));
     assert!(stdout.contains("\"label\":\"ci\""));
     assert!(stdout.contains("\"algorithm\":\"ed25519\""));
     assert!(stdout.contains("\"keyid\":\"ed25519:"));
-    assert!(stdout.contains("\"capabilities\":{\"backend\":\"software\""));
+    assert!(stdout.contains("\"capabilities\":{\"backend\":\"software-raw\""));
     assert!(stdout.contains("\"can_generate\":true"));
     assert!(stdout.contains("\"supports_non_extractable\":false"));
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn key_import_list_export_delete_roundtrip() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(td.path().join("repo")).expect("repo dir");
@@ -46,6 +50,8 @@ fn key_import_list_export_delete_roundtrip() {
         &[
             "key",
             "import",
+            "--backend",
+            "software-raw",
             "--algorithm",
             "ed25519",
             "--label",
@@ -62,21 +68,30 @@ fn key_import_list_export_delete_roundtrip() {
     let import_stdout = String::from_utf8(import.stdout).expect("stdout utf8");
     assert!(import_stdout.contains("keyid = ed25519:"));
 
-    let list = run(td.path(), &["key", "list"]);
+    let list = run(td.path(), &["key", "list", "--backend", "software-raw"]);
     assert!(
         list.status.success(),
         "list stderr: {}",
         String::from_utf8_lossy(&list.stderr)
     );
     let list_stdout = String::from_utf8(list.stdout).expect("stdout utf8");
-    assert!(list_stdout.contains("software ci ed25519 ed25519:"));
+    assert!(list_stdout.contains("software-raw ci ed25519 ed25519:"));
     assert!(list_stdout.contains("can_generate=true"));
     assert!(list_stdout.contains("supports_non_extractable=false"));
     assert_key_list_json_includes_capabilities(td.path());
 
     let export_without_flag = run(
         td.path(),
-        &["key", "export", "--label", "ci", "--algorithm", "ed25519"],
+        &[
+            "key",
+            "export",
+            "--backend",
+            "software-raw",
+            "--label",
+            "ci",
+            "--algorithm",
+            "ed25519",
+        ],
     );
     assert_eq!(export_without_flag.status.code(), Some(64));
 
@@ -85,6 +100,8 @@ fn key_import_list_export_delete_roundtrip() {
         &[
             "key",
             "export",
+            "--backend",
+            "software-raw",
             "--label",
             "ci",
             "--algorithm",
@@ -106,7 +123,16 @@ fn key_import_list_export_delete_roundtrip() {
 
     let delete_without_yes = run(
         td.path(),
-        &["key", "delete", "--label", "ci", "--algorithm", "ed25519"],
+        &[
+            "key",
+            "delete",
+            "--backend",
+            "software-raw",
+            "--label",
+            "ci",
+            "--algorithm",
+            "ed25519",
+        ],
     );
     assert_eq!(delete_without_yes.status.code(), Some(64));
 
@@ -115,6 +141,8 @@ fn key_import_list_export_delete_roundtrip() {
         &[
             "key",
             "delete",
+            "--backend",
+            "software-raw",
             "--label",
             "ci",
             "--algorithm",
@@ -128,7 +156,7 @@ fn key_import_list_export_delete_roundtrip() {
         String::from_utf8_lossy(&delete.stderr)
     );
 
-    let list_after_delete = run(td.path(), &["key", "list"]);
+    let list_after_delete = run(td.path(), &["key", "list", "--backend", "software-raw"]);
     assert!(list_after_delete.status.success());
     assert!(
         String::from_utf8(list_after_delete.stdout)
@@ -144,7 +172,15 @@ fn key_generate_prints_stable_keyid_line() {
     std::fs::create_dir(td.path().join("repo")).expect("repo dir");
     let output = run(
         td.path(),
-        &["key", "generate", "--label", "generated", "--print-pubkey"],
+        &[
+            "key",
+            "generate",
+            "--backend",
+            "software-raw",
+            "--label",
+            "generated",
+            "--print-pubkey",
+        ],
     );
     assert!(
         output.status.success(),
@@ -177,7 +213,7 @@ fn key_default_ref_drives_unlabeled_commands() {
     std::fs::create_dir_all(&cfg_dir).expect("config dir");
     std::fs::write(
         cfg_dir.join("config"),
-        "key.default_ref = software:shared\n",
+        "key.default_ref = software-raw:shared\n",
     )
     .expect("user config");
 
@@ -192,11 +228,11 @@ fn key_default_ref_drives_unlabeled_commands() {
         String::from_utf8_lossy(&import.stderr)
     );
 
-    let list = run(td.path(), &["key", "list"]);
+    let list = run(td.path(), &["key", "list", "--backend", "software-raw"]);
     assert!(list.status.success());
     let stdout = String::from_utf8(list.stdout).expect("stdout utf8");
     assert!(
-        stdout.contains("software shared ed25519 ed25519:"),
+        stdout.contains("software-raw shared ed25519 ed25519:"),
         "default ref label should be used: {stdout}"
     );
 }
@@ -232,7 +268,7 @@ fn unlabeled_key_commands_use_configured_ref_backend() {
             "key",
             "import",
             "--backend",
-            "software",
+            "software-raw",
             "--label",
             "explicit",
             "--algorithm",
@@ -315,6 +351,8 @@ fn commit_can_use_keystore_signer_without_legacy_keygen() {
         &[
             "key",
             "import",
+            "--backend",
+            "software-raw",
             "--algorithm",
             "ed25519",
             "--label",
@@ -333,7 +371,7 @@ fn commit_can_use_keystore_signer_without_legacy_keygen() {
     std::fs::create_dir_all(&cfg_dir).expect("config dir");
     std::fs::write(
         cfg_dir.join("config"),
-        "signer = keystore\nkey.ed25519_ref = software:committer\n",
+        "signer = keystore\nkey.ed25519_ref = software-raw:committer\n",
     )
     .expect("user config");
 
@@ -457,6 +495,8 @@ fn keystore_commit_malformed_key_is_not_reported_as_missing() {
         &[
             "key",
             "import",
+            "--backend",
+            "software-raw",
             "--algorithm",
             "ed25519",
             "--label",
@@ -471,7 +511,8 @@ fn keystore_commit_malformed_key_is_not_reported_as_missing() {
         String::from_utf8_lossy(&import.stderr)
     );
     std::fs::write(
-        td.path().join("data/mkit/keys/ed25519/62726f6b656e.key"),
+        td.path()
+            .join("data/mkit/keys/raw/ed25519/62726f6b656e.raw"),
         b"short",
     )
     .expect("corrupt keystore key");
@@ -480,7 +521,7 @@ fn keystore_commit_malformed_key_is_not_reported_as_missing() {
     std::fs::create_dir_all(&cfg_dir).expect("config dir");
     std::fs::write(
         cfg_dir.join("config"),
-        "signer = keystore\nkey.ed25519_ref = software:broken\n",
+        "signer = keystore\nkey.ed25519_ref = software-raw:broken\n",
     )
     .expect("user config");
 
@@ -490,7 +531,7 @@ fn keystore_commit_malformed_key_is_not_reported_as_missing() {
     assert!(!commit.status.success());
     let stderr = String::from_utf8_lossy(&commit.stderr);
     assert!(
-        stderr.contains("keystore signing key `software:broken`"),
+        stderr.contains("keystore signing key `software-raw:broken`"),
         "stderr should report a keystore key error: {stderr}"
     );
     assert!(
@@ -500,6 +541,123 @@ fn keystore_commit_malformed_key_is_not_reported_as_missing() {
     assert!(
         !stderr.contains("mkit key generate"),
         "malformed key must not suggest generation: {stderr}"
+    );
+}
+
+#[test]
+fn keystore_merge_missing_key_fails_without_generation() {
+    let td = tempfile::tempdir().expect("tempdir");
+    prepare_history_repo(td.path());
+    run(td.path(), &["branch", "feature"]);
+
+    assert!(run(td.path(), &["checkout", "feature"]).status.success());
+    commit_file(td.path(), "feature.txt", b"feature\n", "feature commit");
+    assert!(run(td.path(), &["checkout", "main"]).status.success());
+    commit_file(td.path(), "main.txt", b"main\n", "main commit");
+    configure_keystore_signer(td.path(), "software-raw:missing");
+
+    let merge = run(td.path(), &["merge", "feature"]);
+    assert_missing_history_key_failure(td.path(), &merge);
+}
+
+#[test]
+fn keystore_cherry_pick_missing_key_fails_without_generation() {
+    let td = tempfile::tempdir().expect("tempdir");
+    prepare_history_repo(td.path());
+    assert!(run(td.path(), &["branch", "feature"]).status.success());
+
+    assert!(run(td.path(), &["checkout", "feature"]).status.success());
+    commit_file(td.path(), "feature.txt", b"feature\n", "feature commit");
+    let feature_commit = resolve_head(&td.path().join("repo"));
+    assert!(run(td.path(), &["checkout", "main"]).status.success());
+    commit_file(td.path(), "main.txt", b"main\n", "main commit");
+    configure_keystore_signer(td.path(), "software-raw:missing");
+
+    let cherry_pick = run(td.path(), &["cherry-pick", &feature_commit]);
+    assert_missing_history_key_failure(td.path(), &cherry_pick);
+}
+
+#[test]
+fn keystore_rebase_missing_key_fails_without_generation() {
+    let td = tempfile::tempdir().expect("tempdir");
+    prepare_history_repo(td.path());
+    assert!(run(td.path(), &["branch", "feature"]).status.success());
+
+    assert!(run(td.path(), &["checkout", "feature"]).status.success());
+    commit_file(td.path(), "feature.txt", b"feature\n", "feature commit");
+    assert!(run(td.path(), &["checkout", "main"]).status.success());
+    commit_file(td.path(), "main.txt", b"main\n", "main commit");
+    assert!(run(td.path(), &["checkout", "feature"]).status.success());
+    configure_keystore_signer(td.path(), "software-raw:missing");
+
+    let rebase = run(td.path(), &["rebase", "main"]);
+    assert_missing_history_key_failure(td.path(), &rebase);
+}
+
+fn prepare_history_repo(root: &std::path::Path) {
+    std::fs::create_dir(root.join("repo")).expect("repo dir");
+    assert!(run(root, &["init"]).status.success());
+    let import = run(
+        root,
+        &[
+            "key",
+            "import",
+            "--backend",
+            "software-raw",
+            "--algorithm",
+            "ed25519",
+            "--label",
+            "history",
+            "--hex",
+            &"0a".repeat(32),
+        ],
+    );
+    assert!(
+        import.status.success(),
+        "import stderr: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    configure_keystore_signer(root, "software-raw:history");
+    commit_file(root, "base.txt", b"base\n", "base commit");
+}
+
+fn configure_keystore_signer(root: &std::path::Path, key_ref: &str) {
+    let cfg_dir = root.join("config/mkit");
+    std::fs::create_dir_all(&cfg_dir).expect("config dir");
+    std::fs::write(
+        cfg_dir.join("config"),
+        format!("signer = keystore\nkey.ed25519_ref = {key_ref}\n"),
+    )
+    .expect("user config");
+}
+
+fn commit_file(root: &std::path::Path, file: &str, body: &[u8], message: &str) {
+    std::fs::write(root.join("repo").join(file), body).expect("write file");
+    assert!(run(root, &["add", file]).status.success());
+    let commit = run(root, &["commit", "-m", message]);
+    assert!(
+        commit.status.success(),
+        "commit stderr: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+}
+
+fn assert_missing_history_key_failure(root: &std::path::Path, output: &Output) {
+    assert!(!output.status.success(), "command unexpectedly succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("mkit key generate"),
+        "stderr should point to key generation: {stderr}"
+    );
+    assert!(
+        !root.join("repo/.mkit/keys/default.key").exists(),
+        "history command must not silently create the legacy key"
+    );
+    assert!(
+        !root
+            .join("data/mkit/keys/raw/ed25519/6d697373696e67.raw")
+            .exists(),
+        "history command must not silently create a keystore key"
     );
 }
 
