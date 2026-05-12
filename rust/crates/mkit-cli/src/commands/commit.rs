@@ -478,6 +478,7 @@ fn emit_err(msg: &str, code: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkit_keystore::Keystore;
 
     #[test]
     fn parse_author_ed25519_roundtrips() {

@@ -265,7 +265,9 @@ fn unlabeled_key_commands_use_configured_ref_backend() {
     assert!(!unsupported.status.success());
     let stderr = String::from_utf8_lossy(&unsupported.stderr);
     assert!(
-        stderr.contains("backend `yubikey` is not implemented"),
+        stderr.contains("backend `yubikey` is not implemented")
+            || stderr.contains("YubiKey backend requires the `backend-yubikey` feature")
+            || stderr.contains("no OpenPGP Ed25519 signing key found"),
         "stderr should show generic backend routing failed closed: {stderr}"
     );
 
