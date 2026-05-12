@@ -225,48 +225,67 @@ config knob that sets it.
 | Open flag               | `O_NOFOLLOW` — symlink in the path is a hard failure              |
 | Parent directory        | `0700`, owner-checked                                             |
 | Write strategy          | tempfile in same directory, fsync, atomic rename, fsync of parent |
-| Zeroisation             | seed buffers wrapped in `Zeroizing<[u8;32]>` end-to-end           |
+| Zeroisation             | seed buffers scrubbed at generation and file-I/O boundaries       |
 
-`KeyPair::from_seed` takes `Zeroizing<[u8;32]>` so the buffer cannot
-escape into a non-zeroising owner. This is a breaking change to the
-library API; CHANGELOG flags it.
+`KeyPair::generate` scrubs its local seed buffer after constructing the
+keypair. `KeyPair::from_seed` takes `[u8;32]`; callers that own long-lived
+secret buffers must use a zeroising owner before and after the call.
 
 The same protections apply to the secp256k1 and P-256 key files
 selected via `attest.secp256k1_key_path` and `attest.p256_key_path`.
 
-### 6.1 Foundation V1 software keystore
+### 6.1 Keystore backends
 
-Foundation V1 adds a user-scoped software compatibility backend selected by
-`mkit key ...`, `signer = keystore`, and `attest.signer = keystore`.
+Issue-complete V1 adds user-scoped software, OS-native, Linux desktop/headless,
+and YubiKey-backed keystore backends selected by `mkit key ...`,
+`signer = keystore`, and `attest.signer = keystore`.
 
 Security assumptions:
 
-- The software keystore is user-scoped, not repo-scoped. On Unix-like systems
-  its default root is `$XDG_DATA_HOME/mkit/keys/`, falling back to
-  `~/.local/share/mkit/keys/` when `XDG_DATA_HOME` is unset.
+- Keystores are user-scoped, not repo-scoped. On Unix-like systems the software
+  default root is `$XDG_DATA_HOME/mkit/keys/`, falling back to
+  `~/.local/share/mkit/keys/`; `systemd-creds` uses a separate user data
+  subtree for encrypted credential files.
 - Keystore selectors (`signer`, `key.backend`, and every `key.*_ref`) are
   user-scoped. A hostile repo cannot select a backend, label, key reference, or
   signing mode.
-- Foundation V1 compatibility mode stores raw 32-byte secrets using the same
-  hardened file protections as legacy `.mkit/keys/*`: `0600` files, `0700`
-  directories, owner checks, symlink rejection, atomic writes, and zeroized
-  in-process buffers.
-- Foundation V1 does not claim hardware binding, non-extractability, user
-  presence, or encrypted-at-rest software storage. Those capabilities must not
-  be advertised until implemented by a later backend or encrypted software-file
-  mode.
+- `software:<label>` stores encrypted-at-rest software records. It protects
+  against offline disk/backup disclosure to the extent the local OS-protected
+  envelope material remains unavailable to the attacker. It does not protect
+  against malware running as the user.
+- `software-raw:<label>` is the explicit raw-file compatibility backend. It
+  keeps deterministic raw-key behavior for compatibility tests and migration
+  workflows and is not the secure default.
+- macOS Keychain, Windows Credential Manager, Linux Secret Service, and
+  `systemd-creds` store extractable 32-byte signing secrets behind their
+  platform protection boundary. They do not claim hardware binding,
+  non-extractability, or user presence unless a future implementation changes
+  the storage primitive and capability report together.
+- Linux Secret Service is a desktop/session backend and may fail when no D-Bus
+  service is available or the session is locked. `systemd-creds` is the
+  headless/server Linux backend and shells out with argv tokens, not shell
+  interpolation.
+- YubiKey OpenPGP exposes existing Ed25519 signing-slot keys. YubiKey PIV
+  exposes existing P-256 certificate-backed slots (`piv-9a`, `piv-9c`,
+  `piv-9e`). Both are non-extractable and device-bound from mkit's point of
+  view; signing requires explicit PIN environment variables and optional touch
+  opt-in (`MKIT_YUBIKEY_OPENPGP_PIN`, `MKIT_YUBIKEY_OPENPGP_ALLOW_TOUCH`,
+  `MKIT_YUBIKEY_PIV_PIN`, `MKIT_YUBIKEY_PIV_ALLOW_TOUCH`).
+- FIDO2/CTAP WebAuthn signatures remain wired through the external signer path
+  because the current keystore `KeySigner` API returns only a signature and
+  cannot carry WebAuthn authenticator data plus client data JSON. The YubiKey
+  keystore fails closed for `fido2-*`/`ctap-*` P-256 labels rather than emitting
+  incomplete assertions.
 - Signing commands never auto-generate keystore keys. Users must run
   `mkit key generate` or `mkit key import` explicitly.
 
-Non-goals in Foundation V1:
+Keystore non-goals in V1:
 
 - Protection against malware or another process already running as the same
-  UID. Such an attacker can read user-scoped software-key files just as they can
-  read legacy raw key files.
-- Completion of GitHub issue #104's OS-native/hardware backend requirement.
-  macOS Keychain, Windows Credential Manager/CNG, Linux Secret Service,
-  systemd-creds, YubiKey, and encrypted-at-rest software mode remain future
-  work unless `keystore.md` is amended.
+  UID. Such an attacker can request signatures from unlocked software/OS
+  backends, read extractable secrets from software/raw/platform stores, or set
+  the environment variables needed to prompt hardware-backed signing.
+- Side-channel resistance beyond the underlying crypto/hardware libraries.
 
 ---
 
@@ -296,6 +315,11 @@ matching update here.
 
 - Golden vectors at `rust/tests/golden/` pin signing-byte and
   signing-hash shapes (`SPEC-SIGNING.md` §3, `SPEC-ATTESTATIONS.md` §4).
+- `mkit-keystore` golden vectors pin deterministic imported-key behavior for
+  `software` and `software-raw` Ed25519, secp256k1, and P-256 signing.
+- Keystore capability tests assert that each backend advertises only supported
+  algorithms, export/import/listing, user-presence, device-bound, and
+  non-extractability properties.
 - `cargo fuzz` targets cover delta decode, pack reader, and the
   object deserializer (`docs/FUZZ.md`).
 - Integration tests assert that a hostile `<repo>/.mkit/config`
@@ -305,8 +329,9 @@ matching update here.
 - Rename-gate (`scripts/verify-rename.sh`) prevents legacy strings
   from re-entering the public build surface.
 - CI matrix: `cargo fmt --check`, `cargo clippy --all-targets --
-  -D warnings`, `cargo test --workspace --locked`, `cargo deny`,
-  reproducible-build smoke, `mkit version` byte-exact assertion.
+  -D warnings`, `cargo test --workspace --locked`, keystore backend feature
+  jobs for macOS/Windows/Linux, `cargo deny`, reproducible-build smoke,
+  `mkit version` byte-exact assertion.
 
 ---
 
