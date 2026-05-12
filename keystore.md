@@ -455,9 +455,9 @@ Storage:
   user-scoped storage root in issue-complete V1. It must not resolve relative
   to the current repo.
 - `software-raw:<label>` maps to exactly one raw compatibility key record under
-  user-scoped storage. It exists for deterministic tests, compatibility, and
-  explicit migration work only. It must never be selected by default in
-  issue-complete V1.
+  a raw-specific storage subtree. It exists for deterministic tests,
+  compatibility, and explicit migration work only. It must never be selected by
+  default in issue-complete V1.
 - Legacy `.mkit/keys/*` files remain supported only through legacy raw-file
   flows such as `mkit keygen`, `signing_key`, and `repo-key` compatibility.
 - The software backend may reuse the existing hardened raw-file functions for
@@ -491,6 +491,9 @@ Storage-security modes:
   - Protect or wrap the DEK with an OS-native protection mechanism for the
     current platform: macOS Keychain, Windows DPAPI/Credential Manager or CNG,
     Linux Secret Service, or `systemd-creds` for headless/server Linux.
+  - On Linux, the `software` backend may auto-select Secret Service for desktop
+    sessions, then `systemd-creds` for headless/server use, and must fail closed
+    if neither protector is available.
   - Fail closed if no configured OS protection mechanism is available.
   - Never derive the encryption key from an mkit-managed password, hidden
     passphrase, repo data, or environment variable.
@@ -1153,9 +1156,11 @@ Backends:
 - `systemd-creds` backend is implemented and tested for Linux headless/server
   use.
 - YubiKey backend is implemented behind a feature flag, with OpenPGP, PIV, and
-  FIDO2/CTAP wiring. OpenPGP Ed25519 is required for the hardware-backed
-  Ed25519 path unless this spec is amended with a different hardware-backed
-  Ed25519 path.
+  FIDO2/CTAP wiring. OpenPGP Ed25519 is required only for the hardware-backed
+  Ed25519 path; a PIV-only token with an existing P-256 certificate-backed slot
+  must still be usable for the P-256 YubiKey path. FIDO2/CTAP remains routed to
+  the external signer path unless the keystore signer API can carry complete
+  WebAuthn assertion metadata.
 
 Backend honesty:
 

@@ -48,10 +48,10 @@ Issue #104 adds optional backend and envelope-encryption dependencies to
 |------------|-----|------|---------|-------|
 | `chacha20poly1305 = 0.10.1` | XChaCha20-Poly1305 software-key envelope encryption | always-on keystore crypto | Apache-2.0 OR MIT | Pure Rust, default features disabled except `alloc`; no OpenSSL/libcurl/native C dependency. |
 | `zeroize = 1.8.2` | Secret-memory clearing for software keys and records | always-on keystore crypto | Apache-2.0 OR MIT | Already common in the RustCrypto ecosystem; used directly for local secret material. |
-| `security-framework = 3.7.0` | macOS Keychain bindings | `macos-keychain`, macOS target only | MIT OR Apache-2.0 | Wraps platform Security.framework APIs; no default-build impact. |
-| `keyring-core = 1.0.0` | Shared keyring abstraction for OS key stores | `windows-credential`, `linux-secret-service` | MIT OR Apache-2.0 | Small shared abstraction used only by optional OS backends. |
-| `windows-native-keyring-store = 1.0.0` | Windows Credential Manager store | `windows-credential`, Windows target only | MIT OR Apache-2.0 | Requires Rust 1.88, below workspace MSRV 1.95; platform-gated. |
-| `zbus-secret-service-keyring-store = 1.0.0` | Linux Secret Service store | `linux-secret-service`, Linux target only | MIT OR Apache-2.0 | Requires Rust 1.88, below workspace MSRV 1.95; feature uses `rt-async-io-crypto-rust` to avoid OpenSSL. |
+| `security-framework = 3.7.0` | macOS Keychain bindings | `backend-macos-keychain` (`macos-keychain` alias), macOS target only | MIT OR Apache-2.0 | Wraps platform Security.framework APIs; no default-build impact. |
+| `keyring-core = 1.0.0` | Shared keyring abstraction for OS key stores | `backend-windows-credential`, `backend-linux-secret-service` | MIT OR Apache-2.0 | Small shared abstraction used only by optional OS backends. |
+| `windows-native-keyring-store = 1.0.0` | Windows Credential Manager store | `backend-windows-credential` (`windows-credential` alias), Windows target only | MIT OR Apache-2.0 | Requires Rust 1.88, below workspace MSRV 1.95; platform-gated. |
+| `zbus-secret-service-keyring-store = 1.0.0` | Linux Secret Service store | `backend-linux-secret-service` (`linux-secret-service` alias), Linux target only | MIT OR Apache-2.0 | Requires Rust 1.88, below workspace MSRV 1.95; feature uses `rt-async-io-crypto-rust` to avoid OpenSSL. |
 | `card-backend-pcsc = 0.5.1` | PC/SC card discovery for OpenPGP cards | `backend-yubikey` | MIT OR Apache-2.0 | Requires PC/SC libraries at build/runtime only when the YubiKey backend is enabled. |
 | `openpgp-card = 0.6.1` | OpenPGP card protocol for YubiKey signing-slot keys | `backend-yubikey` | MIT OR Apache-2.0 | Supports existing card keys; V1 does not generate/import/delete card keys. |
 | `secrecy = 0.10.3` | PIN handling wrappers for card operations | `backend-yubikey` | Apache-2.0 OR MIT | Complements `zeroize` for secret inputs crossing card APIs. |

@@ -244,8 +244,9 @@ Security assumptions:
 
 - Keystores are user-scoped, not repo-scoped. On Unix-like systems the software
   default root is `$XDG_DATA_HOME/mkit/keys/`, falling back to
-  `~/.local/share/mkit/keys/`; `systemd-creds` uses a separate user data
-  subtree for encrypted credential files.
+  `~/.local/share/mkit/keys/`; `software-raw` persists under a raw-specific
+  subtree, and `systemd-creds` uses a separate user data subtree for encrypted
+  credential files.
 - Keystore selectors (`signer`, `key.backend`, and every `key.*_ref`) are
   user-scoped. A hostile repo cannot select a backend, label, key reference, or
   signing mode.
@@ -264,7 +265,9 @@ Security assumptions:
 - Linux Secret Service is a desktop/session backend and may fail when no D-Bus
   service is available or the session is locked. `systemd-creds` is the
   headless/server Linux backend and shells out with argv tokens, not shell
-  interpolation.
+  interpolation. The encrypted `software` backend auto-selects Secret Service
+  first for desktop sessions, then `systemd-creds`, and fails closed if neither
+  protector is available.
 - YubiKey OpenPGP exposes existing Ed25519 signing-slot keys. YubiKey PIV
   exposes existing P-256 certificate-backed slots (`piv-9a`, `piv-9c`,
   `piv-9e`). Both are non-extractable and device-bound from mkit's point of
@@ -316,7 +319,9 @@ matching update here.
 - Golden vectors at `rust/tests/golden/` pin signing-byte and
   signing-hash shapes (`SPEC-SIGNING.md` §3, `SPEC-ATTESTATIONS.md` §4).
 - `mkit-keystore` golden vectors pin deterministic imported-key behavior for
-  `software` and `software-raw` Ed25519, secp256k1, and P-256 signing.
+  explicit `software-raw` Ed25519, secp256k1, and P-256 signing, while unit
+  storage tests assert that `software` writes encrypted records rather than raw
+  seeds.
 - Keystore capability tests assert that each backend advertises only supported
   algorithms, export/import/listing, user-presence, device-bound, and
   non-extractability properties.
