@@ -18,6 +18,12 @@ mod backend_windows_credential;
 mod backend_yubikey;
 mod encrypted_record;
 mod error;
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-secret-service"),
+    all(target_os = "macos", feature = "macos-keychain"),
+    all(windows, feature = "windows-credential")
+))]
+mod native_list;
 mod software;
 mod types;
 

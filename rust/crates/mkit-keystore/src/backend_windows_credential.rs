@@ -1,5 +1,7 @@
 //! Windows Credential Manager-backed keystore.
 
+use std::collections::HashMap;
+
 use zeroize::Zeroize;
 
 use crate::{
@@ -35,8 +37,7 @@ impl WindowsCredentialKeystore {
     fn entry(label: &str, algorithm: Algorithm) -> Result<keyring_core::Entry> {
         let store = windows_native_keyring_store::Store::new()
             .map_err(|error| keyring_backend_error("create Windows Credential store", error))?;
-        keyring_core::set_default_store(store)
-            .map_err(|error| keyring_backend_error("select Windows Credential store", error))?;
+        keyring_core::set_default_store(store);
         keyring_core::Entry::new(SERVICE, &Self::account(label, algorithm)?)
             .map_err(|error| map_keyring_error(error, label, algorithm))
     }
@@ -65,7 +66,7 @@ impl Keystore for WindowsCredentialKeystore {
             can_import: true,
             can_export: true,
             can_delete: true,
-            supports_listing: false,
+            supports_listing: true,
             supports_user_presence: false,
             supports_device_bound: false,
             supports_non_extractable: false,
@@ -137,9 +138,38 @@ impl Keystore for WindowsCredentialKeystore {
     }
 
     fn list(&self) -> Result<Vec<KeyMetadata>> {
-        Err(Error::UnsupportedOperation(
-            "Windows Credential Manager backend does not support listing in V1",
-        ))
+        let store = windows_native_keyring_store::Store::new()
+            .map_err(|error| keyring_backend_error("create Windows Credential store", error))?;
+        keyring_core::set_default_store(store);
+        let pattern = windows_service_pattern();
+        let spec = HashMap::from([("pattern", pattern.as_str())]);
+        let entries = keyring_core::Entry::search(&spec).map_err(keyring_list_error)?;
+
+        let mut out = Vec::new();
+        for entry in entries {
+            let attributes = match entry.get_attributes() {
+                Ok(attributes) => attributes,
+                Err(keyring_core::Error::NoEntry) => continue,
+                Err(error) => return Err(map_keyring_error(error, "list", Algorithm::Ed25519)),
+            };
+            let Some(account) = attributes.get("username") else {
+                continue;
+            };
+            let secret = match entry.get_secret() {
+                Ok(secret) => secret,
+                Err(keyring_core::Error::NoEntry) => continue,
+                Err(error) => return Err(map_keyring_error(error, "list", Algorithm::Ed25519)),
+            };
+            if let Some(metadata) = crate::native_list::metadata_from_account_secret(
+                account,
+                BackendKind::WindowsCredentialManager,
+                secret,
+            )? {
+                out.push(metadata);
+            }
+        }
+        crate::native_list::sort_metadata(&mut out);
+        Ok(out)
     }
 
     fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
@@ -155,6 +185,10 @@ impl Keystore for WindowsCredentialKeystore {
             .delete_credential()
             .map_err(|error| map_keyring_error(error, &selector.label, algorithm))
     }
+}
+
+fn windows_service_pattern() -> String {
+    format!(r"^.+\.{}$", SERVICE.replace('.', r"\."))
 }
 
 fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
@@ -219,6 +253,20 @@ fn keyring_backend_error(operation: &str, error: keyring_core::Error) -> Error {
     }
 }
 
+fn keyring_list_error(error: keyring_core::Error) -> Error {
+    match error {
+        keyring_core::Error::NoEntry => Error::KeyNotFound(KeySelector {
+            label: "list".into(),
+            algorithm: None,
+        }),
+        keyring_core::Error::NoStorageAccess(error) => Error::AccessDenied(error.to_string()),
+        keyring_core::Error::NotSupportedByStore(error) => Error::BackendUnavailable(format!(
+            "Windows Credential Manager listing unsupported: {error}"
+        )),
+        other => Error::Io(format!("Windows Credential Manager listing: {other}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,9 +283,17 @@ mod tests {
         assert!(capabilities.can_import);
         assert!(capabilities.can_export);
         assert!(capabilities.can_delete);
-        assert!(!capabilities.supports_listing);
+        assert!(capabilities.supports_listing);
         assert!(!capabilities.supports_user_presence);
         assert!(!capabilities.supports_device_bound);
         assert!(!capabilities.supports_non_extractable);
+    }
+
+    #[test]
+    fn service_search_pattern_matches_backend_targets() {
+        assert_eq!(
+            windows_service_pattern(),
+            r"^.+\.dev\.mkit\.keystore\.signing-key\.v1$"
+        );
     }
 }

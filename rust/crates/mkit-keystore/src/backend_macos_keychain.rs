@@ -1,5 +1,8 @@
 //! macOS Keychain-backed keystore.
 
+use std::collections::HashMap;
+
+use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
 use zeroize::Zeroize;
 
 use crate::{
@@ -57,7 +60,7 @@ impl Keystore for MacosKeychainKeystore {
             can_import: true,
             can_export: true,
             can_delete: true,
-            supports_listing: false,
+            supports_listing: true,
             supports_user_presence: false,
             supports_device_bound: false,
             supports_non_extractable: false,
@@ -132,9 +135,40 @@ impl Keystore for MacosKeychainKeystore {
     }
 
     fn list(&self) -> Result<Vec<KeyMetadata>> {
-        Err(Error::UnsupportedOperation(
-            "macOS Keychain backend does not support listing in V1",
-        ))
+        let mut options = ItemSearchOptions::new();
+        options
+            .class(ItemClass::generic_password())
+            .service(SERVICE)
+            .load_attributes(true)
+            .limit(Limit::All);
+        let results = match options.search() {
+            Ok(results) => results,
+            Err(error) if is_not_found(error) => return Ok(Vec::new()),
+            Err(error) => return Err(keychain_io("list", error)),
+        };
+
+        let mut out = Vec::new();
+        for result in results {
+            let Some(attributes) = result.simplify_dict() else {
+                continue;
+            };
+            let Some(account) = account_from_attributes(&attributes) else {
+                continue;
+            };
+            let Some((algorithm, label)) = crate::native_list::parse_account(account) else {
+                continue;
+            };
+            let secret = Self::get_secret(&label, algorithm)?;
+            if let Some(metadata) = crate::native_list::metadata_from_account_secret(
+                account,
+                BackendKind::MacosKeychain,
+                secret.into_bytes().to_vec(),
+            )? {
+                out.push(metadata);
+            }
+        }
+        crate::native_list::sort_metadata(&mut out);
+        Ok(out)
     }
 
     fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
@@ -150,6 +184,13 @@ impl Keystore for MacosKeychainKeystore {
         security_framework::passwords::delete_generic_password(SERVICE, &account)
             .map_err(|error| map_keychain_error(error, &selector.label, algorithm))
     }
+}
+
+fn account_from_attributes(attributes: &HashMap<String, String>) -> Option<&str> {
+    attributes
+        .get("acct")
+        .or_else(|| attributes.get("account"))
+        .map(String::as_str)
 }
 
 fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
@@ -223,9 +264,21 @@ mod tests {
         assert!(capabilities.can_import);
         assert!(capabilities.can_export);
         assert!(capabilities.can_delete);
-        assert!(!capabilities.supports_listing);
+        assert!(capabilities.supports_listing);
         assert!(!capabilities.supports_user_presence);
         assert!(!capabilities.supports_device_bound);
         assert!(!capabilities.supports_non_extractable);
+    }
+
+    #[test]
+    fn keychain_attribute_account_uses_short_or_readable_key() {
+        let mut attributes = HashMap::from([("acct".into(), "ed25519:short".into())]);
+        assert_eq!(account_from_attributes(&attributes), Some("ed25519:short"));
+
+        attributes = HashMap::from([("account".into(), "ed25519:readable".into())]);
+        assert_eq!(
+            account_from_attributes(&attributes),
+            Some("ed25519:readable")
+        );
     }
 }
