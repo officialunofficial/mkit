@@ -21,6 +21,7 @@ attest = ["dep:mkit-attest"]
 [dependencies]
 mkit-core = { version = "0.1", path = "../mkit-core" }
 mkit-attest = { version = "0.1", path = "../mkit-attest", optional = true }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 getrandom = "0.4"
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }

@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod backend;
+mod encrypted_record;
 mod error;
 mod software;
 mod types;
