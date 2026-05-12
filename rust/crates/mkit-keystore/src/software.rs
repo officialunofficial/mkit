@@ -273,13 +273,14 @@ impl Keystore for SoftwareRawKeystore {
 
 impl Keystore for SoftwareKeystore {
     fn capabilities(&self) -> Capabilities {
+        let can_use_secret_material = self.can_use_secret_material();
         Capabilities {
             backend: self.backend.clone(),
             algorithms: vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256],
-            can_generate: true,
-            can_import: true,
-            can_export: true,
-            can_delete: true,
+            can_generate: can_use_secret_material,
+            can_import: can_use_secret_material,
+            can_export: can_use_secret_material,
+            can_delete: can_use_secret_material,
             supports_listing: true,
             supports_user_presence: false,
             supports_device_bound: false,
@@ -500,6 +501,10 @@ impl SoftwareKeystore {
             [metadata] => Ok(metadata.algorithm),
             _ => Err(Error::AmbiguousKeySelector(selector.clone())),
         }
+    }
+
+    fn can_use_secret_material(&self) -> bool {
+        self.is_raw() || self.protector_for_write().is_ok()
     }
 }
 
@@ -1725,6 +1730,29 @@ mod tests {
             assert!(!capabilities.supports_device_bound);
             assert!(!capabilities.supports_non_extractable);
         }
+    }
+
+    #[cfg(not(any(
+        feature = "linux-secret-service",
+        feature = "macos-keychain",
+        feature = "systemd-creds",
+        feature = "windows-credential"
+    )))]
+    #[test]
+    fn software_capabilities_are_honest_without_protector() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let capabilities = SoftwareKeystore::with_root(dir.path().join("software")).capabilities();
+
+        assert_eq!(capabilities.backend, BackendKind::Software);
+        assert_eq!(
+            capabilities.algorithms,
+            vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256]
+        );
+        assert!(!capabilities.can_generate);
+        assert!(!capabilities.can_import);
+        assert!(!capabilities.can_export);
+        assert!(!capabilities.can_delete);
+        assert!(capabilities.supports_listing);
     }
 
     #[cfg(unix)]

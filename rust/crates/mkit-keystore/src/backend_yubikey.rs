@@ -100,18 +100,9 @@ fn ensure_any_signing_key(
 
 impl Keystore for YubiKeyKeystore {
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            backend: BackendKind::YubiKey,
-            algorithms: vec![Algorithm::Ed25519, Algorithm::P256],
-            can_generate: false,
-            can_import: false,
-            can_export: false,
-            can_delete: false,
-            supports_listing: true,
-            supports_user_presence: true,
-            supports_device_bound: true,
-            supports_non_extractable: true,
-        }
+        let openpgp_count = discover_openpgp_signing_keys().map_or(0, |keys| keys.len());
+        let piv_count = discover_piv_signing_keys().map_or(0, |keys| keys.len());
+        capabilities_for_signing_key_counts(openpgp_count, piv_count)
     }
 
     fn generate(
@@ -184,6 +175,29 @@ impl Keystore for YubiKeyKeystore {
         Err(Error::UnsupportedOperation(
             "YubiKey OpenPGP backend does not delete card keys in V1",
         ))
+    }
+}
+
+fn capabilities_for_signing_key_counts(openpgp_count: usize, piv_count: usize) -> Capabilities {
+    let mut algorithms = Vec::new();
+    if openpgp_count > 0 {
+        algorithms.push(Algorithm::Ed25519);
+    }
+    if piv_count > 0 {
+        algorithms.push(Algorithm::P256);
+    }
+    let has_signing_key = !algorithms.is_empty();
+    Capabilities {
+        backend: BackendKind::YubiKey,
+        algorithms,
+        can_generate: false,
+        can_import: false,
+        can_export: false,
+        can_delete: false,
+        supports_listing: has_signing_key,
+        supports_user_presence: has_signing_key,
+        supports_device_bound: has_signing_key,
+        supports_non_extractable: has_signing_key,
     }
 }
 
@@ -579,7 +593,7 @@ mod tests {
 
     #[test]
     fn capabilities_are_hardware_accurate() {
-        let capabilities = YubiKeyKeystore.capabilities();
+        let capabilities = capabilities_for_signing_key_counts(1, 1);
         assert_eq!(capabilities.backend, BackendKind::YubiKey);
         assert_eq!(
             capabilities.algorithms,
@@ -593,6 +607,40 @@ mod tests {
         assert!(capabilities.supports_user_presence);
         assert!(capabilities.supports_device_bound);
         assert!(capabilities.supports_non_extractable);
+    }
+
+    #[test]
+    fn capabilities_report_openpgp_only_algorithms() {
+        let capabilities = capabilities_for_signing_key_counts(1, 0);
+        assert_eq!(capabilities.algorithms, vec![Algorithm::Ed25519]);
+        assert!(capabilities.supports_listing);
+        assert!(capabilities.supports_user_presence);
+        assert!(capabilities.supports_device_bound);
+        assert!(capabilities.supports_non_extractable);
+    }
+
+    #[test]
+    fn capabilities_report_piv_only_algorithms() {
+        let capabilities = capabilities_for_signing_key_counts(0, 1);
+        assert_eq!(capabilities.algorithms, vec![Algorithm::P256]);
+        assert!(capabilities.supports_listing);
+        assert!(capabilities.supports_user_presence);
+        assert!(capabilities.supports_device_bound);
+        assert!(capabilities.supports_non_extractable);
+    }
+
+    #[test]
+    fn capabilities_report_no_token_as_unavailable() {
+        let capabilities = capabilities_for_signing_key_counts(0, 0);
+        assert!(capabilities.algorithms.is_empty());
+        assert!(!capabilities.can_generate);
+        assert!(!capabilities.can_import);
+        assert!(!capabilities.can_export);
+        assert!(!capabilities.can_delete);
+        assert!(!capabilities.supports_listing);
+        assert!(!capabilities.supports_user_presence);
+        assert!(!capabilities.supports_device_bound);
+        assert!(!capabilities.supports_non_extractable);
     }
 
     #[test]
