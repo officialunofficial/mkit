@@ -27,7 +27,7 @@
 use std::path::Path;
 
 use mkit_attest::{Algorithm, ExternalSigner, Signer};
-use mkit_keystore::{BackendKind, KeyRef, KeySelector, Keystore as _};
+use mkit_keystore::{KeyRef, KeySelector, open_backend};
 use zeroize::Zeroizing;
 
 use crate::config::Config;
@@ -47,6 +47,7 @@ pub enum FactoryError {
     MissingKeystoreKey {
         algorithm: Algorithm,
         key_ref: String,
+        backend: String,
         label: String,
         reason: String,
     },
@@ -79,11 +80,12 @@ impl std::fmt::Display for FactoryError {
             Self::MissingKeystoreKey {
                 algorithm,
                 key_ref,
+                backend,
                 label,
                 reason,
             } => write!(
                 f,
-                "missing keystore signing key `{key_ref}` — run `mkit key generate --algorithm {algorithm} --label {label}` first: {reason}"
+                "missing keystore signing key `{key_ref}` — run `mkit key generate --backend {backend} --algorithm {algorithm} --label {label}` first: {reason}"
             ),
             Self::InvalidKeyFile { path, reason } => {
                 write!(f, "invalid key file '{path}': {reason}")
@@ -134,16 +136,11 @@ fn build_keystore_signer(
     let key_ref = configured_key_ref(cfg, algorithm)
         .parse::<KeyRef>()
         .map_err(|error| FactoryError::Keystore(format!("key ref: {error}")))?;
-    if key_ref.backend != BackendKind::Software {
-        return Err(FactoryError::Keystore(format!(
-            "backend `{}` is not supported in Foundation V1",
-            key_ref.backend
-        )));
-    }
-    let store = mkit_keystore::SoftwareKeystore::new()
+    let store = open_backend(key_ref.backend.clone())
         .map_err(|error| FactoryError::Keystore(error.to_string()))?;
     let keystore_algorithm = to_keystore_algorithm(algorithm);
     let key_ref_string = key_ref.to_string();
+    let backend = key_ref.backend.to_string();
     let label = key_ref.label;
     let selector = KeySelector::new(label.clone(), Some(keystore_algorithm))
         .map_err(|error| FactoryError::Keystore(error.to_string()))?;
@@ -151,6 +148,7 @@ fn build_keystore_signer(
         mkit_keystore::Error::KeyNotFound(_) => FactoryError::MissingKeystoreKey {
             algorithm,
             key_ref: key_ref_string,
+            backend,
             label,
             reason: error.to_string(),
         },
