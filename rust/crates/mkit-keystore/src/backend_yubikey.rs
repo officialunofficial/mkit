@@ -14,6 +14,7 @@ use secrecy::SecretString;
 use sha2::{Digest as _, Sha256};
 use yubikey::piv::{AlgorithmId as PivAlgorithmId, SlotAlgorithmId, SlotId};
 use yubikey::{PinPolicy, TouchPolicy};
+use zeroize::Zeroizing;
 
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
@@ -284,12 +285,12 @@ impl KeySigner for YubiKeyPivSigner {
     }
 
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>> {
-        let pin = std::env::var(PIV_PIN_ENV).map_err(|_| {
+        let pin = Zeroizing::new(std::env::var(PIV_PIN_ENV).map_err(|_| {
             Error::AuthenticationRequired(format!(
                 "set {PIV_PIN_ENV} to authorize PIV signing for yubikey:{}",
                 self.key.label
             ))
-        })?;
+        })?);
         if matches!(
             self.key.touch_policy,
             TouchPolicy::Always | TouchPolicy::Cached

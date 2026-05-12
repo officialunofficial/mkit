@@ -1035,13 +1035,15 @@ impl KeyProtector for MacosKeychainProtector {
     fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
         let account = std::str::from_utf8(wrapped)
             .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        let secret = security_framework::passwords::get_generic_password(Self::SERVICE, account)
-            .map_err(|error| {
-                Error::Io(format!("macOS Keychain software protector get: {error}"))
-            })?;
-        let secret: [u8; 32] = secret.try_into().map_err(|secret: Vec<u8>| {
-            Error::Encoding(format!("protected DEK length: {}", secret.len()))
-        })?;
+        let secret = zeroize::Zeroizing::new(
+            security_framework::passwords::get_generic_password(Self::SERVICE, account).map_err(
+                |error| Error::Io(format!("macOS Keychain software protector get: {error}")),
+            )?,
+        );
+        let secret: [u8; 32] = secret
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Encoding(format!("protected DEK length: {}", secret.len())))?;
         Ok(zeroize::Zeroizing::new(secret))
     }
 
@@ -1067,9 +1069,7 @@ impl WindowsCredentialProtector {
         let store = windows_native_keyring_store::Store::new().map_err(|error| {
             Error::BackendUnavailable(format!("Windows Credential software protector: {error}"))
         })?;
-        keyring_core::set_default_store(store).map_err(|error| {
-            Error::BackendUnavailable(format!("Windows Credential software protector: {error}"))
-        })?;
+        keyring_core::set_default_store(store);
         keyring_core::Entry::new(Self::SERVICE, account)
             .map_err(|error| Error::Io(format!("Windows Credential software protector: {error}")))
     }
@@ -1094,14 +1094,16 @@ impl KeyProtector for WindowsCredentialProtector {
     fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
         let account = std::str::from_utf8(wrapped)
             .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        let secret = Self::entry(account)?.get_secret().map_err(|error| {
-            Error::Io(format!(
-                "Windows Credential software protector get: {error}"
-            ))
-        })?;
-        let secret: [u8; 32] = secret.try_into().map_err(|secret: Vec<u8>| {
-            Error::Encoding(format!("protected DEK length: {}", secret.len()))
-        })?;
+        let secret =
+            zeroize::Zeroizing::new(Self::entry(account)?.get_secret().map_err(|error| {
+                Error::Io(format!(
+                    "Windows Credential software protector get: {error}"
+                ))
+            })?);
+        let secret: [u8; 32] = secret
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Encoding(format!("protected DEK length: {}", secret.len())))?;
         Ok(zeroize::Zeroizing::new(secret))
     }
 
@@ -1129,9 +1131,7 @@ impl LinuxSecretServiceProtector {
         let store = zbus_secret_service_keyring_store::Store::new().map_err(|error| {
             Error::BackendUnavailable(format!("Linux Secret Service software protector: {error}"))
         })?;
-        keyring_core::set_default_store(store).map_err(|error| {
-            Error::BackendUnavailable(format!("Linux Secret Service software protector: {error}"))
-        })?;
+        keyring_core::set_default_store(store);
         keyring_core::Entry::new(Self::SERVICE, account)
             .map_err(|error| Error::Io(format!("Linux Secret Service software protector: {error}")))
     }
@@ -1156,14 +1156,16 @@ impl KeyProtector for LinuxSecretServiceProtector {
     fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
         let account = std::str::from_utf8(wrapped)
             .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        let secret = Self::entry(account)?.get_secret().map_err(|error| {
-            Error::Io(format!(
-                "Linux Secret Service software protector get: {error}"
-            ))
-        })?;
-        let secret: [u8; 32] = secret.try_into().map_err(|secret: Vec<u8>| {
-            Error::Encoding(format!("protected DEK length: {}", secret.len()))
-        })?;
+        let secret =
+            zeroize::Zeroizing::new(Self::entry(account)?.get_secret().map_err(|error| {
+                Error::Io(format!(
+                    "Linux Secret Service software protector get: {error}"
+                ))
+            })?);
+        let secret: [u8; 32] = secret
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Encoding(format!("protected DEK length: {}", secret.len())))?;
         Ok(zeroize::Zeroizing::new(secret))
     }
 
@@ -1228,13 +1230,14 @@ impl KeyProtector for SystemdCredsProtector {
     fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
         let handle = std::str::from_utf8(wrapped)
             .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        let secret = crate::backend_systemd_creds::decrypt_credential(
+        let secret = zeroize::Zeroizing::new(crate::backend_systemd_creds::decrypt_credential(
             &self.path_for(handle),
             &Self::credential_name(handle),
-        )?;
-        let secret: [u8; 32] = secret.try_into().map_err(|secret: Vec<u8>| {
-            Error::Encoding(format!("protected DEK length: {}", secret.len()))
-        })?;
+        )?);
+        let secret: [u8; 32] = secret
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Encoding(format!("protected DEK length: {}", secret.len())))?;
         Ok(zeroize::Zeroizing::new(secret))
     }
 

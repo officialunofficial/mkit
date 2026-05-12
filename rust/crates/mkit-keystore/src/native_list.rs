@@ -10,13 +10,14 @@ pub(crate) fn metadata_from_account_secret(
     let Some((algorithm, label)) = parse_account(account) else {
         return Ok(None);
     };
-    let secret: [u8; 32] =
-        secret
-            .try_into()
-            .map_err(|secret: Vec<u8>| Error::InvalidKeyMaterial {
-                algorithm,
-                reason: format!("expected 32 bytes, got {}", secret.len()),
-            })?;
+    let secret = zeroize::Zeroizing::new(secret);
+    let secret: [u8; 32] = secret
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::InvalidKeyMaterial {
+            algorithm,
+            reason: format!("expected 32 bytes, got {}", secret.len()),
+        })?;
     let secret = SecretKey::new(algorithm, secret);
     let signer = SoftwareSigner::new(
         label.clone(),

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
@@ -43,13 +43,16 @@ impl LinuxSecretServiceKeystore {
     }
 
     fn get_secret(label: &str, algorithm: Algorithm) -> Result<SecretKey> {
-        let secret = Self::entry(label, algorithm)?
-            .get_secret()
-            .map_err(|error| map_keyring_error(error, label, algorithm))?;
+        let secret = Zeroizing::new(
+            Self::entry(label, algorithm)?
+                .get_secret()
+                .map_err(|error| map_keyring_error(error, label, algorithm))?,
+        );
         let secret: [u8; 32] =
             secret
+                .as_slice()
                 .try_into()
-                .map_err(|secret: Vec<u8>| Error::InvalidKeyMaterial {
+                .map_err(|_| Error::InvalidKeyMaterial {
                     algorithm,
                     reason: format!("expected 32 bytes, got {}", secret.len()),
                 })?;

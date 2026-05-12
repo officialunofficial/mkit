@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
@@ -38,12 +38,15 @@ impl MacosKeychainKeystore {
 
     fn get_secret(label: &str, algorithm: Algorithm) -> Result<SecretKey> {
         let account = Self::account(label, algorithm)?;
-        let password = security_framework::passwords::get_generic_password(SERVICE, &account)
-            .map_err(|error| map_keychain_error(error, label, algorithm))?;
+        let password = Zeroizing::new(
+            security_framework::passwords::get_generic_password(SERVICE, &account)
+                .map_err(|error| map_keychain_error(error, label, algorithm))?,
+        );
         let secret: [u8; 32] =
             password
+                .as_slice()
                 .try_into()
-                .map_err(|password: Vec<u8>| Error::InvalidKeyMaterial {
+                .map_err(|_| Error::InvalidKeyMaterial {
                     algorithm,
                     reason: format!("expected 32 bytes, got {}", password.len()),
                 })?;
@@ -162,7 +165,7 @@ impl Keystore for MacosKeychainKeystore {
             if let Some(metadata) = crate::native_list::metadata_from_account_secret(
                 account,
                 BackendKind::MacosKeychain,
-                secret.into_bytes().to_vec(),
+                secret.expose_secret().to_vec(),
             )? {
                 out.push(metadata);
             }
