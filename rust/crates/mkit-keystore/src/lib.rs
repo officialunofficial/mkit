@@ -5,10 +5,12 @@
 
 #![forbid(unsafe_code)]
 
+mod backend;
 mod error;
 mod software;
 mod types;
 
+pub use backend::open_backend;
 pub use error::{Error, Result};
 pub use software::{SoftwareKeystore, SoftwareSigner};
 pub use types::{
@@ -84,6 +86,14 @@ mod tests {
         assert_eq!(key_ref.backend, BackendKind::Software);
         assert_eq!(key_ref.label, "default");
         assert_eq!(key_ref.to_string(), "software:default");
+    }
+
+    #[test]
+    fn software_raw_key_ref_round_trips() {
+        let key_ref: KeyRef = "software-raw:default".parse().expect("key ref parses");
+        assert_eq!(key_ref.backend, BackendKind::SoftwareRaw);
+        assert_eq!(key_ref.label, "default");
+        assert_eq!(key_ref.to_string(), "software-raw:default");
     }
 
     #[test]

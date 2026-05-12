@@ -97,6 +97,8 @@ impl Default for KeyAttrs {
 pub enum BackendKind {
     /// User-scoped software compatibility backend.
     Software,
+    /// User-scoped raw-file compatibility backend.
+    SoftwareRaw,
     /// macOS Keychain backend.
     MacosKeychain,
     /// Windows Credential Manager or CNG backend.
@@ -121,6 +123,7 @@ impl BackendKind {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Software => "software",
+            Self::SoftwareRaw => "software-raw",
             Self::MacosKeychain => "macos-keychain",
             Self::WindowsCredentialManager => "windows-credential",
             Self::LinuxSecretService => "linux-secret-service",
@@ -145,6 +148,7 @@ impl FromStr for BackendKind {
     fn from_str(s: &str) -> Result<Self> {
         match s {
             "software" => Ok(Self::Software),
+            "software-raw" => Ok(Self::SoftwareRaw),
             "macos-keychain" => Ok(Self::MacosKeychain),
             "windows-credential" => Ok(Self::WindowsCredentialManager),
             "linux-secret-service" => Ok(Self::LinuxSecretService),
