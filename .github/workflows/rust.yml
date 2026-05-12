@@ -129,13 +129,13 @@ jobs:
         include:
           - name: macos-keychain-yubikey
             os: macos-latest
-            features: macos-keychain backend-yubikey
+            features: backend-macos-keychain backend-yubikey
           - name: windows-credential
             os: windows-latest
-            features: windows-credential
+            features: backend-windows-credential
           - name: linux-secret-systemd-yubikey
             os: ubuntu-latest
-            features: linux-secret-service systemd-creds backend-yubikey
+            features: backend-linux-secret-service backend-systemd-creds backend-yubikey
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6

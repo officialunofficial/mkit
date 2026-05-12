@@ -17,6 +17,10 @@ workspace = true
 [features]
 default = []
 attest = ["dep:mkit-attest"]
+backend-linux-secret-service = ["linux-secret-service"]
+backend-macos-keychain = ["macos-keychain"]
+backend-systemd-creds = ["systemd-creds"]
+backend-windows-credential = ["windows-credential"]
 backend-yubikey = ["dep:card-backend-pcsc", "dep:der", "dep:openpgp-card", "dep:secrecy", "dep:yubikey", "p256/pkcs8"]
 linux-secret-service = [
   "dep:keyring-core",

@@ -708,6 +708,7 @@ fn write_key_file(
     Ok(())
 }
 
+#[allow(unreachable_code)]
 fn default_protector_for_write(root: &Path) -> Result<Arc<dyn KeyProtector>> {
     #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
     {
