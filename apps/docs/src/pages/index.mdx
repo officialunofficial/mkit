@@ -1,31 +1,75 @@
 ---
-layout: minimal
+layout: docs
 title: mkit — A content-addressed VCS in Rust
 description: BLAKE3-addressed objects, Ed25519-signed commits, portable in-toto v1 attestations. A Git-shaped VCS, rebuilt from first principles.
-showAskAi: false
-showLogo: false
 ---
 
-import { HomePage } from "vocs";
-import { DemoCards } from "../components/demo-cards.client.tsx";
+# mkit
 
-<HomePage.Root>
-  {/* TODO(brand): <HomePage.Logo /> once mkit wordmark SVG ships in apps/docs/public/. */}
-  <HomePage.Tagline>A content-addressed VCS.</HomePage.Tagline>
-  <HomePage.Description>
-    Every file is named by a BLAKE3 hash of its bytes. Every commit
-    is signed. Every review is a portable, signed claim anyone can
-    verify. Written in Rust — here it runs in your browser.
-  </HomePage.Description>
-  <HomePage.Buttons>
-    <HomePage.Button href="/docs/install" variant="accent">Install</HomePage.Button>
-    <HomePage.Button href="/docs">Docs</HomePage.Button>
-    <HomePage.Button href="/demos/hash">Try it</HomePage.Button>
-  </HomePage.Buttons>
-</HomePage.Root>
+A content-addressed version control toolkit written in Rust.
+
+`mkit` is a generic content-addressed VCS — Git-like commits, refs, and
+transports — plus a native, predicate-agnostic attestation subsystem
+(in-toto v1 Statements wrapped in DSSE envelopes) that any downstream
+service can attach witness signatures to commits with.
+
+The v1 on-disk and wire formats are pinned by golden vectors under
+`rust/tests/golden/` in the source repository.
 
 ```bash
 cargo install --git https://github.com/officialunofficial/mkit mkit-cli
 ```
 
-<DemoCards />
+## What to read first
+
+The documentation is grouped into four sections.
+
+### Overview
+
+Start here if you are new to mkit or just want it installed and
+running.
+
+- [Install](/docs/install) — four install channels (from source,
+  GitHub Releases, npm/WASM, hardware signers) with verification
+  steps.
+- [CLI](/docs/cli) — subcommand reference, config keys, URL schemes,
+  exit codes, environment variables, and signals.
+- [Architecture](/docs/architecture) — code map of the Rust workspace,
+  data flow between objects, packs, refs, and transports, and the
+  attestation pipeline.
+
+### Specifications
+
+Normative wire and on-disk formats. Read these if you are implementing
+a compatible tool, a new transport, or a verifier.
+
+- [Objects](/docs/spec/objects) — Blob, Tree, Commit, Remix,
+  ChunkedBlob, Delta.
+- [Staging index](/docs/spec/staging-index) — the repo-local staging index.
+- [Refs](/docs/spec/refs) — named tips with atomic CAS.
+- [Packfile](/docs/spec/packfile) — packfile wire format.
+- [Delta](/docs/spec/delta) — pack-internal delta encoding.
+- [FastCDC](/docs/spec/fastcdc) — content-defined chunking.
+- [Transport](/docs/spec/transport) — the seven-verb protocol shared
+  by every transport.
+- [RPC](/docs/spec/rpc) — RPC framing on top of the transport.
+- [Signing](/docs/spec/signing) — commit and remix signing.
+- [Attestations](/docs/spec/attestations) — in-toto v1 + DSSE.
+- [External signer](/docs/spec/external-signer) — v1 stdio protocol
+  for out-of-process signers.
+
+### Operations
+
+Operator-facing guides.
+
+- [Release](/docs/release) — maintainer release checklist.
+- [Fuzz](/docs/fuzz) — fuzz-harness conventions.
+- [SSH security](/docs/ssh-security) — trust model for the
+  `mkit+ssh://` transport.
+- [Threat model](/docs/threat-model) — security boundaries.
+
+### Try it in your browser
+
+Five interactive demos backed by the `mkit-wasm` build:
+[hash](/demos/hash), [sign](/demos/sign), [attest](/demos/attest),
+[tree](/demos/tree), [streaming](/demos/streaming).

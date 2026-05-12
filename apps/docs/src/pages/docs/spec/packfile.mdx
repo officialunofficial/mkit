@@ -132,7 +132,7 @@ streaming reader complete without buffering.
 Normative:
 
 - `entry_count <= 10_000_000`.
-- Sum of all `payload_len` <= **4 GiB**.
+- Sum of all `payload_len` ≤ **4 GiB**.
 - Single entry `payload_len` must fit in a `u32` (≤ ~4 GiB).
 
 These are policy caps, not wire limits. Implementations MUST fail with

@@ -122,8 +122,8 @@ Every target body must satisfy all six:
 Use this checklist before landing a new target:
 
 - [ ] Pick a parser with a clear input → output contract.
-- [ ] Add the target body to `rust/fuzz/src/lib.rs` as a `pub fn
-      run_`<name>`(rng_seed: u64)` that enforces the six guardrails.
+- [ ] Add the target body to `rust/fuzz/src/lib.rs` as
+      `pub fn run_<name>(rng_seed: u64)` that enforces the six guardrails.
 - [ ] Add a libfuzzer shim under `fuzz_targets/<name>.rs` calling the
       same body.
 - [ ] Add a `#[test]` shim that invokes the body with fixed seeds.

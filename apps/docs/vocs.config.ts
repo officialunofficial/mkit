@@ -22,7 +22,7 @@ export default defineConfig({
     { icon: "github", link: "https://github.com/officialunofficial/mkit" },
   ],
   topNav: [
-    { text: "Docs", link: "/docs", match: "/docs" },
+    { text: "Docs", link: "/", match: "/" },
     { text: "Demos", link: "/demos/hash", match: "/demos" },
     { text: "Spec", link: "/docs/spec/objects", match: "/docs/spec" },
   ],
@@ -35,11 +35,11 @@ export default defineConfig({
     // }),
   },
   sidebar: {
-    "/docs": [
+    "/": [
       {
         text: "Overview",
         items: [
-          { text: "Introduction", link: "/docs" },
+          { text: "Introduction", link: "/" },
           { text: "Install", link: "/docs/install" },
           { text: "CLI", link: "/docs/cli" },
           { text: "Architecture", link: "/docs/architecture" },

@@ -340,9 +340,9 @@ multi-version readers.
    — 10 bytes total input. Record the resulting hex digest.
 2. **Empty tree hash**: `BLAKE3(prologue{0x02,MKT1,0x01} ‖ u32(0))`
    — 10 bytes total input.
-3. **Canonical single-file tree**: one entry `{name="README.md",
-   mode=0x01, object_hash=<hash of §13.1>}`. Record both the serialised
-   bytes and the resulting BLAKE3 digest.
+3. **Canonical single-file tree**: one entry
+   `{name="README.md", mode=0x01, object_hash=<hash of §13.1>}`.
+   Record both the serialised bytes and the resulting BLAKE3 digest.
 4. **Identity round-trip**: encode `Identity{kind=0x01, len=32,
    payload=[0xAA; 32]}` → must be exactly 35 bytes.
 5. **Root commit with zero message_hash/content_digest and Ed25519

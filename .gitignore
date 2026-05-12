@@ -5,6 +5,16 @@ zig-out/
 *.log
 .DS_Store
 
+# Node
+node_modules/
+
+# Vocs generated routes
+apps/docs/src/pages.gen.ts
+
+# Local screenshots
+.before-*.png
+.after-*.png
+
 # Rust (rewrite/rust branch)
 /rust/target/
 /rust/**/target/
