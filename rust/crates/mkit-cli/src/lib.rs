@@ -16,6 +16,7 @@
 // SAFETY comment on the block.
 #![deny(unsafe_code)]
 
+pub mod clap_shim;
 pub mod cli;
 pub mod commands;
 pub mod config;
