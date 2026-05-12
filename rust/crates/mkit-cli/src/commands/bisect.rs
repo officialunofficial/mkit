@@ -13,11 +13,42 @@ use mkit_core::ops::bisect::{
 use mkit_core::refs::{self, Head};
 use mkit_core::store::ObjectStore;
 
+use clap::{Parser, Subcommand};
+
+use crate::clap_shim;
 use crate::exit;
 use crate::format;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit bisect",
+    about = "Binary-search for a regression-introducing commit."
+)]
+struct BisectOpts {
+    #[command(subcommand)]
+    sub: BisectCmd,
+}
+
+#[derive(Debug, Subcommand)]
+enum BisectCmd {
+    /// Begin a bisect session at HEAD.
+    Start,
+    /// Mark a commit (or HEAD) as good.
+    Good { commit: Option<String> },
+    /// Mark a commit (or HEAD) as bad.
+    Bad { commit: Option<String> },
+    /// Skip the current candidate.
+    Skip,
+    /// End the session and restore the original HEAD.
+    Reset,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
+    let opts = match clap_shim::parse::<BisectOpts>("mkit bisect", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -28,16 +59,12 @@ pub fn run(args: &[String]) -> u8 {
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
-    let Some(sub) = args.first() else {
-        return super::usage_error("usage: mkit bisect (start|good|bad|reset|skip) [<commit>]");
-    };
-    match sub.as_str() {
-        "start" => start(&mkit_dir),
-        "good" => mark(&store, &mkit_dir, args.get(1).map(String::as_str), true),
-        "bad" => mark(&store, &mkit_dir, args.get(1).map(String::as_str), false),
-        "skip" => skip(&store, &mkit_dir),
-        "reset" => reset(&mkit_dir),
-        other => super::usage_error(&format!("unknown bisect subcommand: {other}")),
+    match opts.sub {
+        BisectCmd::Start => start(&mkit_dir),
+        BisectCmd::Good { commit } => mark(&store, &mkit_dir, commit.as_deref(), true),
+        BisectCmd::Bad { commit } => mark(&store, &mkit_dir, commit.as_deref(), false),
+        BisectCmd::Skip => skip(&store, &mkit_dir),
+        BisectCmd::Reset => reset(&mkit_dir),
     }
 }
 
