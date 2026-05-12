@@ -25,7 +25,8 @@ commands:
   cat <hash>        Display an object by its hash
   tree              Snapshot working directory as a tree object
   commit [-a] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
-  log [--oneline] [--graph] [-n N]  Show commit history
+  log [--oneline] [--format=json] [--graph] [-n N]
+                    Show commit history (--format=json emits JSONL)
   status [--porcelain]
                     Show staged and working tree changes
                     (--porcelain emits machine-readable XY lines on stdout)

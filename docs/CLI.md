@@ -48,7 +48,10 @@ History / commits:
   tracked-only shortcut: it stages modified tracked files and tracked
   deletions before committing, but does not add untracked files.
   `mkit commit -am <msg>` is accepted as shorthand for `-a -m <msg>`.
-- `mkit log [--oneline] [--graph] [-n N]` — show commit history.
+- `mkit log [--oneline] [--format=json] [--graph] [-n N]` — show
+  commit history. `--format=json` emits JSONL (one JSON object per
+  commit, newest first) with keys `hash`, `parents`, `tree`, `author`,
+  `timestamp`, `title`, `message`.
 - `mkit blame <file>` — show line-level commit attribution.
 - `mkit verify <hash>` — verify the signature on a commit or remix.
 - `mkit cat <hash>` — display an object by its hash.
