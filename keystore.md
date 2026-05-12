@@ -1,6 +1,6 @@
 # mkit Keystore Vault Specification
 
-Status: draft implementation specification for GitHub issue #104.
+Status: draft implementation specification for GitHub issue #104 and PR #109.
 
 Authority: this file is the source of truth for implementing and reviewing
 `mkit-keystore`. If code, docs, tests, or issue comments disagree with this
@@ -35,6 +35,10 @@ This spec distinguishes two milestones:
   model updates. Issue #104 must not be closed until this second milestone is
   complete.
 
+PR #109 is scoped to complete both milestones in one branch: it must preserve
+the Foundation V1 review boundary while also satisfying every Issue #104
+completion requirement in section 15.2 before merge.
+
 ## 2. Non-Negotiable Design Decisions
 
 1. `mkit-core` must remain lean. It must not depend on platform keychain,
@@ -62,6 +66,11 @@ This spec distinguishes two milestones:
 10. Foundation V1 must not be presented as full issue #104 completion. The
     issue remains open until the OS-native and hardware backend matrix in
     section 15.2 is implemented.
+11. For issue-complete V1, `software:<label>` is the encrypted-at-rest software
+    backend. Raw-file compatibility is exposed only through the explicit
+    `software-raw:<label>` backend token and must not be the secure default.
+12. The encrypted software backend must use OS-protected envelope encryption,
+    not a password-derived key or an unaudited local encryption scheme.
 
 ## 3. Scope
 
@@ -199,6 +208,7 @@ implementation details:
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BackendKind {
     Software,
+    SoftwareRaw,
     MacosKeychain,
     WindowsCredentialManager,
     LinuxSecretService,
@@ -441,8 +451,13 @@ Storage:
   falling back to `~/.local/share/mkit/keys/` when `XDG_DATA_HOME` is unset.
   Non-Unix platforms must use the platform's per-user application data
   directory or a documented equivalent.
-- `software:<label>` maps to exactly one key record under that user-scoped
-  storage root. It must not resolve relative to the current repo.
+- `software:<label>` maps to exactly one encrypted key record under that
+  user-scoped storage root in issue-complete V1. It must not resolve relative
+  to the current repo.
+- `software-raw:<label>` maps to exactly one raw compatibility key record under
+  user-scoped storage. It exists for deterministic tests, compatibility, and
+  explicit migration work only. It must never be selected by default in
+  issue-complete V1.
 - Legacy `.mkit/keys/*` files remain supported only through legacy raw-file
   flows such as `mkit keygen`, `signing_key`, and `repo-key` compatibility.
 - The software backend may reuse the existing hardened raw-file functions for
@@ -463,17 +478,29 @@ Storage-security modes:
   current hardened `0600` raw-key behavior and is acceptable only as the first
   implementation milestone.
 - Compatibility raw-file mode does not satisfy issue #104's encrypted-at-rest
-  software-backend acceptance criterion.
-- **Encrypted software-file mode** is required before issue #104 is complete.
-  It must encrypt key material at rest using a key obtained from an OS-native
-  protection mechanism or another design approved by updating this spec first.
-  mkit must not invent an unaudited password-based encryption scheme as a
-  hidden default.
+  software-backend acceptance criterion and must be named `software-raw` once
+  the issue-complete backend matrix lands.
+- **Encrypted software-file mode** is required before issue #104 is complete
+  and owns the `software` backend token. It must encrypt key material at rest
+  using OS-protected envelope encryption:
+  - Generate a fresh random data-encryption key (DEK) per stored key record.
+  - Encrypt the 32-byte secret with an AEAD approved by workspace supply-chain
+    review.
+  - Bind record version, backend token, label, algorithm, public key, key ID,
+    and key attributes as AEAD associated data.
+  - Protect or wrap the DEK with an OS-native protection mechanism for the
+    current platform: macOS Keychain, Windows DPAPI/Credential Manager or CNG,
+    Linux Secret Service, or `systemd-creds` for headless/server Linux.
+  - Fail closed if no configured OS protection mechanism is available.
+  - Never derive the encryption key from an mkit-managed password, hidden
+    passphrase, repo data, or environment variable.
 - The software backend must be clearly reported as `BackendKind::Software` and
   documented as software-only, not hardware-bound.
 - The software backend must not claim `supports_device_bound`,
   `supports_non_extractable`, or encrypted-at-rest properties unless implemented
   truthfully.
+- The raw compatibility backend must be clearly reported as
+  `BackendKind::SoftwareRaw` and must not claim encrypted-at-rest protection.
 
 ### 6.2 Memory Backend
 
@@ -582,6 +609,7 @@ Examples:
 
 ```text
 software:default
+software-raw:default
 macos-keychain:default
 windows-credential:default
 linux-secret-service:default
@@ -598,8 +626,14 @@ Rules:
 - A key ref must not be interpreted relative to the repo.
 - Repo config must not set key refs.
 
-Foundation V1 may support only `software:<label>` while preserving the syntax
-for later backends.
+Foundation V1 may initially support only the software family while preserving
+the syntax for later backends. Issue-complete V1 must support the required
+backend matrix in section 15.2.
+
+A full key ref includes the backend. For signing integrations,
+`key.<algorithm>_ref = <backend>:<label>` is authoritative and must route to
+that backend. `key.backend` is only the default backend for `mkit key` commands
+when no explicit backend or configured key ref supplies one.
 
 ## 8. Config Specification
 
@@ -624,7 +658,7 @@ Interpretation:
   which preserves existing raw-file `signing_key` behavior. Setting
   `signer = keystore` opts commit signing into `mkit-keystore`.
 - `key.backend` is the default backend for `mkit key` commands when no backend
-  is provided.
+  is provided and no full key ref is being used.
 - `key.default_ref` is the default key ref for generic commands.
 - Per-algorithm refs override generic refs.
 - `attest.signer = repo-key` remains the built-in default. Setting
@@ -648,6 +682,10 @@ Precedence:
   are out of scope unless this spec is amended.
 - CLI flags override config for the command being run because they are explicit
   user input.
+- A configured full key ref's backend must not be ignored. For example,
+  `key.default_ref = yubikey:main` selects the YubiKey backend for signing; it
+  must not be silently reinterpreted as `software:main` because
+  `key.backend = software` is also set.
 
 ### 8.2 Repo-Forbidden Keys
 
@@ -1114,9 +1152,10 @@ Backends:
 - Linux Secret Service backend is implemented and tested.
 - `systemd-creds` backend is implemented and tested for Linux headless/server
   use.
-- YubiKey backend is implemented behind a feature flag, with Ed25519 via
-  OpenPGP applet at minimum unless this spec is amended with a different
-  hardware-backed Ed25519 path.
+- YubiKey backend is implemented behind a feature flag, with OpenPGP, PIV, and
+  FIDO2/CTAP wiring. OpenPGP Ed25519 is required for the hardware-backed
+  Ed25519 path unless this spec is amended with a different hardware-backed
+  Ed25519 path.
 
 Backend honesty:
 
@@ -1184,39 +1223,47 @@ Docs/spec cleanup:
 - Teach `mkit commit` to use a configured Ed25519 keystore key ref.
 - Add golden equivalence tests.
 
-### Phase 5: First OS-Native Backend
+### Phase 5: Issue-Complete Backend Matrix
 
-- Implement macOS Keychain or another chosen OS-native backend behind a feature
-  flag.
-- Add platform-gated tests.
-- Update capabilities and threat model.
+- Make `software` the encrypted-at-rest software backend using OS-protected
+  envelope encryption.
+- Move raw compatibility persistence to `software-raw`.
+- Implement macOS Keychain, Windows DPAPI/Credential Manager or CNG, Linux
+  Secret Service, `systemd-creds`, and YubiKey OpenPGP/PIV/FIDO2 backends behind
+  feature flags.
+- Add backend factory/resolution so CLI, commit signing, and attestation signing
+  route by full key ref.
+- Add platform-gated tests and capability honesty tests.
 
-### Phase 6: Remaining Backends
+### Phase 6: Production Readiness
 
-- Add Windows, Linux Secret Service, systemd-creds, and YubiKey backends as
-  separate PRs.
-- Each backend must update this spec if behavior differs from sections above.
+- Add cross-platform CI for macOS, Windows, Linux desktop-compatible paths, and
+  Linux headless/server-compatible paths.
+- Add golden vectors and verification-equivalence tests.
+- Update threat model, user-facing docs, supply-chain review notes, and backend
+  manual-test documentation.
 
 ## 17. Deferred Decisions
 
-The following decisions are not blockers for Foundation V1. They must be
-resolved by amending this spec before the corresponding later feature is
-implemented.
+The following decisions were resolved for PR #109's issue-complete V1 target:
 
-1. Which OS-native backend lands first after Foundation V1: macOS Keychain,
-   Windows Credential Manager/CNG, Linux Secret Service, or `systemd-creds`.
-2. The exact encrypted software-file design required for issue #104 completion.
-   Acceptable designs must use an OS-native protection mechanism or receive a
-   dedicated cryptographic design review before implementation.
+1. OS-native and hardware backend landing order is no longer deferred for PR
+   #109. The branch must include macOS Keychain, Windows DPAPI/Credential
+   Manager or CNG, Linux Secret Service, `systemd-creds`, and YubiKey.
+2. The encrypted software-file design is OS-protected envelope encryption. The
+   `software` backend is encrypted-at-rest; raw compatibility is explicit via
+   `software-raw`.
 3. Whether a future `mkit key export --file <path>` mode is worth adding. It is
    out of scope for Foundation V1.
-4. Whether future releases need attestation-only key refs separate from the
+4. YubiKey support includes OpenPGP, PIV, and FIDO2/CTAP wiring for V1.
+5. Whether future releases need attestation-only key refs separate from the
    shared `key.<algorithm>_ref` defaults. Foundation V1 deliberately shares
    commit and attestation refs.
 
 Foundation V1 uses these fixed conservative defaults:
 
-- default backend: software compatibility backend
+- default backend: encrypted-at-rest software backend (`software`)
+- raw compatibility backend: explicit `software-raw`
 - commit signing source: legacy raw-file `signing_key`
 - attestation signing source: existing `repo-key`
 - new Ed25519 keystore key IDs: `ed25519:<pubkey>`
