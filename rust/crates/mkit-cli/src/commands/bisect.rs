@@ -117,9 +117,10 @@ fn skip(store: &ObjectStore, mkit_dir: &std::path::Path) -> u8 {
         Ok(BisectStep::Testing { hash, .. }) => hash,
         Ok(_) => {
             // Nothing to skip: either already found or not enough data.
-            let mut stdout = std::io::stdout().lock();
-            let _ = writeln!(stdout, "bisect skip: no current candidate to skip");
-            return exit::OK;
+            // This is a user error (skip invoked when bisect has no
+            // current candidate); USAGE rather than OK so scripts see
+            // the failure.
+            return emit_err("bisect skip: no current candidate to skip", exit::USAGE);
         }
         Err(e) => return emit_err(&format!("bisect skip: {e}"), exit::GENERAL_ERROR),
     };
