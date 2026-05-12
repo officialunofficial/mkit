@@ -73,9 +73,7 @@ pub fn install() {
 /// return `exit::TEMPFAIL` when it flips.
 #[must_use]
 pub fn is_shutdown() -> bool {
-    SHUTDOWN
-        .get()
-        .is_some_and(|f| f.load(Ordering::Relaxed))
+    SHUTDOWN.get().is_some_and(|f| f.load(Ordering::Relaxed))
 }
 
 /// Alias kept for historical callers. Prefer [`is_shutdown`].
