@@ -24,58 +24,37 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use clap::Parser;
 use mkit_attest::{Algorithm, Registry, TrustRoot, store, verify_envelope};
 use mkit_core::hash::Hash;
 use mkit_core::{hash as hash_mod, refs};
 
+use crate::clap_shim;
 use crate::exit;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit verify-attest",
+    about = "Verify every attestation attached to a commit."
+)]
 struct Args {
+    /// Commit hash to verify attestations for. Defaults to HEAD.
+    #[arg(long, value_name = "HASH")]
     commit: Option<String>,
+    /// Path to a trust-roots TOML file.
+    #[arg(long, value_name = "PATH")]
     trust_roots: Option<String>,
+    /// Filter signatures by algorithm.
+    #[arg(long, value_name = "ALG")]
     algorithm: Option<String>,
-}
-
-fn parse_args(args: &[String]) -> Result<Args, String> {
-    let mut out = Args {
-        commit: None,
-        trust_roots: None,
-        algorithm: None,
-    };
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--commit" if i + 1 < args.len() => {
-                out.commit = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--trust-roots" if i + 1 < args.len() => {
-                out.trust_roots = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--algorithm" if i + 1 < args.len() => {
-                out.algorithm = Some(args[i + 1].clone());
-                i += 2;
-            }
-            other => return Err(format!("unknown argument: {other}")),
-        }
-    }
-    Ok(out)
 }
 
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
-    let parsed = match parse_args(args) {
-        Ok(p) => p,
-        Err(e) => {
-            return emit_err(
-                &format!(
-                    "{e}\nusage: mkit verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>]"
-                ),
-                exit::USAGE,
-            );
-        }
+    let parsed = match clap_shim::parse::<Args>("mkit verify-attest", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
@@ -413,7 +392,16 @@ fn emit_err(msg: &str, code: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use std::fs;
+
+    /// Test-only adapter: drive the clap-derive parser with just the
+    /// trailing args.
+    fn parse_args(args: &[String]) -> Result<Args, clap::Error> {
+        let mut full: Vec<String> = vec!["mkit verify-attest".into()];
+        full.extend_from_slice(args);
+        Args::try_parse_from(full)
+    }
 
     #[test]
     fn parse_args_defaults() {
