@@ -3,13 +3,6 @@ title: Staging index
 description: "Repo-local staging index format used by mkit add, mkit rm, and mkit commit."
 ---
 
-:::info[Spec metadata]
-- **spec** — SPEC-INDEX
-- **version** — 1
-- **status** — draft
-- **audience** — implementers of the staging area; advisory and local-only (not exchanged between peers)
-:::
-
 # Staging index
 
 Status: **Advisory** for mkit v1. Local-only; not exchanged between
@@ -51,7 +44,7 @@ Each entry:
 ```
 
 Paths MUST be relative to the repo root, use `/` as separator, and
-pass SPEC-OBJECTS §4.1 name rules for each path segment except that
+pass [Objects](/docs/spec/objects) §4.1 name rules for each path segment except that
 `/` is allowed as a separator.
 
 ---
@@ -65,7 +58,7 @@ pass SPEC-OBJECTS §4.1 name rules for each path segment except that
 0x03    symlink       object_hash is a blob whose data is the link target
 ```
 
-Executable bit (mode 0x04 in SPEC-OBJECTS §4.2) is tracked in v1 via a
+Executable bit (mode 0x04 in [Objects](/docs/spec/objects) §4.2) is tracked in v1 via a
 planned `0x04 executable` status byte. Implementations MUST emit
 `0x04` for staged executables; readers MUST tolerate all 5 defined
 codes. Other values → `IndexCorrupt`.
@@ -97,8 +90,6 @@ Future versions evolving the index MUST:
 ---
 
 ## 6. Test vectors (implementer MUST produce)
-
-TO BE FIXED IN IMPLEMENTATION:
 
 1. **Empty index**: magic + version + `count=0` = 9 bytes. Record
    BLAKE3 of those bytes (informative — index is never hashed for

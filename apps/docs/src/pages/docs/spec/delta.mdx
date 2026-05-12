@@ -3,20 +3,11 @@ title: Delta
 description: "Delta encoding used inside mkit packfiles for cross-blob compression."
 ---
 
-:::info[Spec metadata]
-- **spec** — SPEC-DELTA
-- **version** — 1
-- **status** — draft
-- **audience** — implementers of compatible packfile readers and writers
-:::
-
 # Delta
 
 Status: **Normative** for mkit v1.
 Scope: the byte layout of the delta instruction stream referenced by
-packfile `0x02 delta` entries (see SPEC-PACKFILE §3.2).
-
-Resolves red-team R-19 (no delta format spec, no version byte).
+packfile `0x02 delta` entries (see [Packfile](/docs/spec/packfile) §3.2).
 
 ---
 
@@ -26,12 +17,12 @@ Delta streams appear exclusively inside packfile entries. The
 enclosing entry provides:
 
 - `base_hash` (32 bytes) — the BLAKE3 of the full serialised base
-  object (including its SPEC-OBJECTS prologue).
+  object (including its [Objects](/docs/spec/objects) prologue).
 - Byte range containing the delta stream.
 
 There is no standalone delta file. There is no per-entry `result_size`
 in v1 (the unpacker discovers it from the actual reconstruction). If a
-caller needs result-size verification, the outer SPEC-OBJECTS delta
+caller needs result-size verification, the outer [Objects](/docs/spec/objects) delta
 object (§8) supplies a `result_size` field; pack entries do not.
 
 ---
@@ -155,7 +146,7 @@ reconstructed bytes equal the target.
 
 - **Not signed.** The delta bytes are not covered by any commit
   signature. Integrity comes from:
-  1. The packfile trailer (SPEC-PACKFILE §8) — end-to-end pack hash.
+  1. The packfile trailer ([Packfile](/docs/spec/packfile) §8) — end-to-end pack hash.
   2. The reconstructed object's hash matching the path under which it
      is stored in the object store.
   3. The commit signature over the reconstructed tree hash etc.
@@ -176,16 +167,14 @@ reconstructed bytes equal the target.
 - Per-INSERT literal: 1..127 bytes.
 - Per-COPY: 7 bytes, `length <= 65_535`.
 - Overall stream length: implicit cap equal to the enclosing packfile
-  entry's `payload_len - 32` (see SPEC-PACKFILE §3.2). Practical cap
+  entry's `payload_len - 32` (see [Packfile](/docs/spec/packfile) §3.2). Practical cap
   is the packfile's 4 GiB total.
-- `result_len`: any `u32` value, but bounded by SPEC-OBJECTS object
+- `result_len`: any `u32` value, but bounded by [Objects](/docs/spec/objects) object
   limits (1 GiB per stored object).
 
 ---
 
 ## 8. Test vectors (implementer MUST produce)
-
-TO BE FIXED IN IMPLEMENTATION:
 
 1. **Identity delta**: base = 64 byte string of "0123456789abcdef" × 4;
    target = same bytes. Stream must reconstruct verbatim. Record stream
@@ -205,7 +194,7 @@ TO BE FIXED IN IMPLEMENTATION:
    header says `result_len = 99` → `DeltaCorrupt` at end-of-stream.
 9. **Fuzz harness**: `apply(base, arbitrary_bytes)` MUST NOT panic,
    MUST NOT read out of bounds, MUST either succeed or return a
-   well-defined error (see red-team R-18).
+   well-defined error (.).
 
 ---
 

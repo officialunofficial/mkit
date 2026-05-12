@@ -5,9 +5,10 @@ description: "Security boundaries of mkit: trust domains, attacker capabilities,
 
 # Threat model
 
-Status: **Informative**. Companion document to `SECURITY.md` and the
-SPEC-* normative specs. Audience: integrators, auditors, and
-contributors changing crypto- or key-handling code.
+Status: **Informative**. Companion document to
+[`SECURITY.md`](https://github.com/officialunofficial/mkit/blob/main/SECURITY.md)
+and the [specifications](/docs/spec/objects). Audience: integrators,
+auditors, and contributors changing crypto- or key-handling code.
 
 This document states what mkit defends, what it does not, and where
 the lines are drawn. It is the source of truth a reviewer consults
@@ -19,8 +20,8 @@ auth, or the release pipeline.
 ## 1. Scope
 
 mkit is a content-addressed VCS with cryptographic signing
-(`SPEC-SIGNING.md`) and an attestation subsystem
-(`SPEC-ATTESTATIONS.md`, `SPEC-EXTERNAL-SIGNER.md`). mkit defends:
+([Signing](/docs/spec/signing)) and an attestation subsystem
+([Attestations](/docs/spec/attestations), [External signer](/docs/spec/external-signer)). mkit defends:
 
 - The integrity of objects, packs, refs, and attestations stored in a
   repository — content addressing plus signed commits and DSSE
@@ -78,7 +79,7 @@ mkit defends:
 
 - Object/pack/ref integrity. Tampered bytes fail BLAKE3 verification
   on read; pack readers refuse oversize allocations
-  (`SPEC-PACKFILE.md`, `SPEC-DELTA.md`).
+  ([Packfile](/docs/spec/packfile), [Delta](/docs/spec/delta)).
 - Worktree containment. Symlinks pointing outside the repo root, and
   paths matching `.mkit` / `.git` (case-insensitive), are rejected
   during checkout.
@@ -259,7 +260,7 @@ document honest. A change that weakens any of these requires a
 matching update here.
 
 - Golden vectors at `rust/tests/golden/` pin signing-byte and
-  signing-hash shapes (`SPEC-SIGNING.md` §3, `SPEC-ATTESTATIONS.md` §4).
+  signing-hash shapes ([Signing](/docs/spec/signing) §3, [Attestations](/docs/spec/attestations) §4).
 - `cargo fuzz` targets cover delta decode, pack reader, and the
   object deserializer (`docs/FUZZ.md`).
 - Integration tests assert that a hostile `<repo>/.mkit/config`

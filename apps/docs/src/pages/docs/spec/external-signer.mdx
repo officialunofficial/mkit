@@ -3,19 +3,12 @@ title: External signer
 description: "v1 stdio protocol between mkit and an out-of-process signer binary (TPM, Secure Enclave, FIDO2, file-backed reference)."
 ---
 
-:::info[Spec metadata]
-- **spec** — SPEC-EXTERNAL-SIGNER
-- **version** — 1
-- **status** — draft
-- **audience** — integrators shipping a signer for a platform mkit does not ship natively (HSM, Secure Enclave, TPM, WebAuthn, KMS)
-:::
-
 # External signer
 
 The wire contract between the mkit host process and a user-supplied
 external signer binary. Implementations that follow this spec are
 drop-in compatible with the `external` signer selector referenced in
-[`SPEC-ATTESTATIONS.md`](/docs/spec/attestations) §6.2.
+[[Attestations](/docs/spec/attestations)](/docs/spec/attestations) §6.2.
 
 Audience: integrators shipping a signer for a platform mkit does not
 ship natively — Apple Secure Enclave, Ledger / Trezor, WebAuthn/CTAP,
@@ -48,8 +41,8 @@ Out of scope:
   or have access to the secret. Reference signers that *do* offer
   enrolment (`mkit-sign-ctap enroll`, `mkit-sign-tpm keygen`) expose
   it as a separate CLI subcommand outside the protocol.
-- The DSSE / in-toto envelope structure ([SPEC-ATTESTATIONS](/docs/spec/attestations)).
-- Trust-roots configuration ([SPEC-ATTESTATIONS](/docs/spec/attestations) §7).
+- The DSSE / in-toto envelope structure ([Attestations](/docs/spec/attestations)).
+- Trust-roots configuration ([Attestations](/docs/spec/attestations) §7).
 
 ---
 
@@ -80,7 +73,7 @@ free-form for human-readable diagnostics.
 ## 3. Wire framing
 
 Length-prefixed buffa `SignerFrame` messages on stdin (mkit → signer)
-and stdout (signer → mkit). Per [SPEC-RPC §1](/docs/spec/rpc#1-wire-framing).
+and stdout (signer → mkit). Per [RPC §1](/docs/spec/rpc#1-wire-framing).
 
 Schema: [`rust/crates/mkit-rpc/proto/signer.proto`](https://github.com/officialunofficial/mkit/blob/main/rust/crates/mkit-rpc/proto/signer.proto).
 
@@ -137,7 +130,7 @@ advertised capabilities before sending a `SignRequest`.
 | `algorithm` | The algorithm to sign under. MUST be one the signer advertised. |
 | `key_form` | The form the key is provided in. |
 | `key_ref` | Identifies which key. Empty for raw-bytes signers (key path is configured at signer startup). Non-empty for opaque-handle signers (CTAP credentialId, TPM 4-byte BE persistent handle). |
-| `payload` | Raw bytes to sign. For DSSE, this is the PAE per [SPEC-ATTESTATIONS](/docs/spec/attestations) §4. |
+| `payload` | Raw bytes to sign. For DSSE, this is the PAE per [Attestations](/docs/spec/attestations) §4. |
 | `context` | Optional context. CTAP signers receive the WebAuthn `clientDataJSON` here. |
 
 | `SignResponse` field | Meaning |
@@ -159,7 +152,7 @@ the key file, missing argv flag) exit non-zero with a stderr message,
 and the signer MUST NOT emit any frame on stdout in that case — a
 half-formed response would desync the caller's reader.
 
-Error code semantics: see [SPEC-RPC §3.3](/docs/spec/rpc#33-errorcode).
+Error code semantics: see [RPC §3.3](/docs/spec/rpc#33-errorcode).
 
 ---
 
@@ -269,4 +262,4 @@ Mitigations the host SHOULD take:
 
 This document and `signer.proto` are jointly v1. Wire-compatible
 additions land in v0.1.x patch releases. Breaking changes bump to v2
-with a sibling `signer2.proto`. See [SPEC-RPC §2](/docs/spec/rpc#2-versioning).
+with a sibling `signer2.proto`. See [RPC §2](/docs/spec/rpc#2-versioning).

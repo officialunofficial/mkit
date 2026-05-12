@@ -3,13 +3,6 @@ title: Attestations
 description: "Native in-toto v1 + DSSE attestation primitive for mkit: predicate types, multi-signer envelopes, and on-disk layout."
 ---
 
-:::info[Spec metadata]
-- **spec** — SPEC-ATTESTATIONS
-- **version** — 1
-- **status** — draft
-- **audience** — implementers and integrators producing or verifying native mkit attestations (in-toto v1 + DSSE)
-:::
-
 # Attestations
 
 Status: **Draft**. This document defines a native attestation primitive
@@ -64,8 +57,8 @@ DSSE envelope                 ← signed container (RFC-quality)
 - **in-toto Statement** is [in-toto v1](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md).
 - **JCS** is [RFC 8785 JSON Canonicalisation Scheme](https://www.rfc-editor.org/rfc/rfc8785).
 - **Base64** is standard base64 (RFC 4648 §4), padded.
-- **Hash** is BLAKE3, consistent with `SPEC-OBJECTS.md`.
-- **Signature** is Ed25519, consistent with `SPEC-SIGNING.md` §1 —
+- **Hash** is BLAKE3, consistent with [Objects](/docs/spec/objects).
+- **Signature** is Ed25519, consistent with [Signing](/docs/spec/signing) §1 —
   other algorithms are possible via the `Signer` trait (§6) but the
   built-in repo-key signer is Ed25519.
 
@@ -278,7 +271,7 @@ mkit ships three. Each is opt-in; the CLI picks the signer via
 attestor, or an internal tool wraps. The full wire contract —
 invocation, request/response JSON, error semantics, size caps,
 timeout, determinism, versioning — is specified normatively in
-[**`SPEC-EXTERNAL-SIGNER.md`**](/docs/spec/external-signer). Protocol
+[**[External signer](/docs/spec/external-signer)**](/docs/spec/external-signer). Protocol
 version is **v1**; that document is the source of truth for any new
 signer implementation, and the multi-algorithm `algorithm` field
 added in phase-1 of the Rust port lives there rather than being
@@ -377,7 +370,7 @@ No change to the commit object format. An attestation is a separate
 resource; a commit with zero attestations and a commit with five
 attestations are indistinguishable at the commit layer.
 
-### 7.2 Signing code (`SPEC-SIGNING.md`)
+### 7.2 Signing code ([Signing](/docs/spec/signing))
 
 The DSSE signer for `repo-key` reuses `std.crypto.sign.Ed25519` and
 the same `.mkit/keys/default.key`. It signs the DSSE PAE per §2.1 —
@@ -391,12 +384,12 @@ DSSE signing        = "DSSEv1 ..." (PAE, §2.1)
 
 The PAE prefix `"DSSEv1 "` cannot collide with either domain prefix
 (no `\x00` byte, different leading bytes). Cross-domain signature
-confusion (SPEC-SIGNING §2's R-17) is therefore extended to cover
-attestations with no additional work.
+confusion (see [Signing](/docs/spec/signing) §2) is therefore extended
+to cover attestations with no additional work.
 
 ### 7.3 Transport
 
-SPEC-TRANSPORT v1 gains **two** new verbs:
+[Transport](/docs/spec/transport) v1 gains **two** new verbs:
 
 ```
 OP_UPLOAD_ATTESTATION    = 0x08

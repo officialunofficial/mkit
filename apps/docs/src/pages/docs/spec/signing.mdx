@@ -3,23 +3,11 @@ title: Signing
 description: "Commit and remix signing format for mkit: canonicalization, signature bytes, and verifier dispatch."
 ---
 
-:::info[Spec metadata]
-- **spec** — SPEC-SIGNING
-- **version** — 1
-- **status** — draft
-- **audience** — implementers of compatible commit / remix signers and verifiers
-:::
-
 # Signing
 
 Status: **Normative** for mkit v1.
 Scope: the exact bytes covered by an Ed25519 signature on a commit or
 remix, and the domain separator used.
-
-This document resolves red-team risks R-04 (no version / magic in signing
-bytes) and R-17 (cross-domain signature confusion).
-
----
 
 ## 1. Signing primitives
 
@@ -78,7 +66,7 @@ reference implementation uses byte-prepend.
 
 ## 3. Commit signing bytes
 
-For a commit C (as defined in SPEC-OBJECTS §5), the canonical signing
+For a commit C (as defined in [Objects](/docs/spec/objects) §5), the canonical signing
 bytes are:
 
 ```
@@ -91,7 +79,7 @@ signing_bytes = PROLOGUE
               || signer_pubkey
 ```
 
-Where `PROLOGUE` is the 6 bytes defined in SPEC-OBJECTS §2:
+Where `PROLOGUE` is the 6 bytes defined in [Objects](/docs/spec/objects) §2:
 `[object_type=0x03] [magic="MKT1"] [schema_version=0x01]`.
 
 **Included fields, in order:**
@@ -101,7 +89,7 @@ Where `PROLOGUE` is the 6 bytes defined in SPEC-OBJECTS §2:
 2. `tree_hash` (32 bytes) — content the commit points at.
 3. `parent_count` (4 LE) and `parent_count` × `parent_hash` (32 each) —
    commit history.
-4. `Identity author` (variable; see SPEC-OBJECTS §9) — length-prefixed,
+4. `Identity author` (variable; see [Objects](/docs/spec/objects) §9) — length-prefixed,
    so field length ambiguity is impossible.
 5. `message_len` (4 LE) and message bytes — length-prefixed.
 6. `timestamp` (8 LE).
@@ -116,8 +104,8 @@ Where `PROLOGUE` is the 6 bytes defined in SPEC-OBJECTS §2:
 - `content_digest` (32 bytes) — same reasoning: downstream pack-digest
   annotation. Not a commit identity input.
 
-These two exclusions resolve red-team R-45. They are the only commit-
-struct fields excluded from signing bytes.
+These two fields are the only commit-struct fields excluded from
+signing bytes.
 
 The **signing hash** is then:
 
@@ -132,7 +120,7 @@ signing_hash)`.
 
 ## 4. Remix signing bytes
 
-For a remix R (SPEC-OBJECTS §6):
+For a remix R ([Objects](/docs/spec/objects) §6):
 
 ```
 signing_bytes = PROLOGUE                   // object_type=0x04
@@ -171,10 +159,10 @@ distinct digests.
 Therefore, a signature over a commit-domain digest cannot be replayed as
 a signature over a remix-domain digest, nor vice versa.
 
-This is the defence against R-17. The previous scheme used only the
-ObjectType tag byte (0x03/0x04) as separator — one byte of domain — and
-was fragile. v1 uses ≥ 11 bytes of high-entropy ASCII plus a null
-terminator.
+This is the defence against cross-domain confusion. The previous
+scheme used only the ObjectType tag byte (0x03/0x04) as separator —
+one byte of domain — and was fragile. v1 uses ≥ 11 bytes of
+high-entropy ASCII plus a null terminator.
 
 ---
 
@@ -182,7 +170,7 @@ terminator.
 
 Given a commit C retrieved from the store:
 
-1. Check object prologue (SPEC-OBJECTS §2).
+1. Check object prologue ([Objects](/docs/spec/objects) §2).
 2. Re-build signing bytes per §3. (It's the caller's responsibility to
    retrieve the exact `signer` field from C; the verifier does not
    accept a public key from elsewhere.)
@@ -228,7 +216,7 @@ one key across:
 
 - **Commit / remix signing** (this document, §§3-4).
 - **DSSE attestation signing** via the `repo-key` signer
-  (`SPEC-ATTESTATIONS.md` §6.2).
+  ([Attestations](/docs/spec/attestations) §6.2).
 - **SSH transport authentication** when pushing to `mkit+ssh://`
   servers. OpenSSH 8.0+ accepts the same raw Ed25519 seed as its
   `id_ed25519` private key.
@@ -248,8 +236,6 @@ ergonomics, not a security property.
 ---
 
 ## 9. Test vectors (implementer MUST produce)
-
-TO BE FIXED IN IMPLEMENTATION:
 
 1. **Deterministic commit signing bytes**: fixed-input commit with
    `Identity{kind=0x01, len=32, payload=[0xAA;32]}`, zero

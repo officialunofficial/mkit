@@ -5,7 +5,7 @@ description: "Trust model for the mkit+ssh:// transport: known_hosts handling, A
 
 # SSH transport security
 
-Status: **Informative**. Addresses red-team R-10 / R-11.
+Status: **Informative**.
 
 This document describes what mkit's SSH transport does and does NOT do,
 what guarantees users can rely on, and how to harden a deployment.
@@ -22,7 +22,7 @@ ssh [-p port] [-o StrictHostKeyChecking=…] [-o UserKnownHostsFile=…] \
 ```
 
 The stdin/stdout of that child process carry the mkit wire protocol
-(SPEC-TRANSPORT §7). Nothing else. In particular, mkit does NOT:
+([Transport](/docs/spec/transport) §7). Nothing else. In particular, mkit does NOT:
 
 - implement its own SSH client or server,
 - perform host-key verification,
@@ -132,7 +132,7 @@ idiomatic integration is the same one Git forges have used for a
 decade:
 
 1. User generates one Ed25519 key (`mkit keygen` — the seed doubles as
-   an `id_ed25519` for OpenSSH 8.0+; see `docs/SPEC-SIGNING.md` §8).
+   an `id_ed25519` for OpenSSH 8.0+; see [Signing](/docs/spec/signing) §8).
 2. Server runs `sshd` with:
 
    ```

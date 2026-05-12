@@ -6,9 +6,15 @@ description: "User-facing reference for the mkit command: subcommands, config ke
 # CLI reference
 
 Short user-facing reference for the `mkit` command. For wire-format
-details see the spec docs in this directory (SPEC-OBJECTS, SPEC-INDEX,
-SPEC-REFS, SPEC-PACKFILE, SPEC-TRANSPORT, SPEC-SIGNING, SPEC-FASTCDC,
-SSH-SECURITY).
+details see the specifications:
+[Objects](/docs/spec/objects),
+[Staging index](/docs/spec/staging-index),
+[Refs](/docs/spec/refs),
+[Packfile](/docs/spec/packfile),
+[Transport](/docs/spec/transport),
+[Signing](/docs/spec/signing),
+[FastCDC](/docs/spec/fastcdc),
+[SSH security](/docs/ssh-security).
 
 ## Quick start
 
@@ -122,8 +128,8 @@ Stored in `.mkit/config` as `key = value` lines.
 ### `user.identity`
 
 The commit author Identity, encoded as `[kind:u8][len:u16 LE][bytes]`
-in lowercase hex per `docs/SPEC-OBJECTS.md §9`. Accepted shorthands at
-parse time:
+in lowercase hex per [Objects](/docs/spec/objects) §9. Accepted
+shorthands at parse time:
 
 ```
 user.identity = ed25519:<64-char-hex>   # kind=0x01, 32-byte pubkey
@@ -165,7 +171,7 @@ Accepted schemes:
 | `mkit+ssh` | `mkit+ssh://user@host[:port]:path` | SSH with the mkit shell |
 | `mkit+memory` | `mkit+memory://` | in-memory (testing only) |
 
-See `docs/SPEC-TRANSPORT.md` for the wire protocol.
+See [Transport](/docs/spec/transport) for the wire protocol.
 
 ## Version output contract
 

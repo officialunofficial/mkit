@@ -3,20 +3,11 @@ title: Packfile
 description: "Wire format for mkit packfiles: header, object index, delta chains, and trailer."
 ---
 
-:::info[Spec metadata]
-- **spec** — SPEC-PACKFILE
-- **version** — 1
-- **status** — draft
-- **audience** — implementers of compatible packfile readers and writers; transport implementers
-:::
-
 # Packfile
 
 Status: **Normative** for mkit v1.
 Scope: the byte layout of a `.mkit`-produced packfile, used for
 transport upload/download and for bundle exchange.
-
-Resolves red-team R-05 (no spec at all) and R-06 (magic rename risk).
 
 ---
 
@@ -79,7 +70,7 @@ Notes:
 
 ### 3.1 `raw` (0x00)
 
-Payload is exactly the bytes you would get from SPEC-OBJECTS
+Payload is exactly the bytes you would get from [Objects](/docs/spec/objects)
 serialisation, starting with the object prologue. Unpackers insert
 these bytes into the object store verbatim (writing
 `.mkit/objects/<dd>/<rr...>`) after verifying BLAKE3 matches the
@@ -99,7 +90,7 @@ previous `raw` entry in the same pack or already present in the
 destination object store. If unresolvable → `DeltaBaseMissing`.
 
 Delta payloads reconstruct a full serialised object (with its
-SPEC-OBJECTS prologue). The reconstructed bytes are then hashed to
+[Objects](/docs/spec/objects) prologue). The reconstructed bytes are then hashed to
 produce the object's storage path — the same way a `raw` entry is
 stored.
 
@@ -141,7 +132,7 @@ silently truncating.
 
 **S3 single-PUT limit:** AWS S3 and Cloudflare R2 enforce a 5 GiB single-
 object cap; our 4 GiB cap stays under it. Larger packs require
-multipart upload, which is a v2 candidate (red-team R-14).
+multipart upload, which is a v2 candidate.
 
 **Known future relaxations** (not part of v1): streaming packs,
 multipart upload, removal of the 10M entry count. Each requires a
@@ -198,7 +189,7 @@ Readers MUST:
 
 Step 3 MUST happen before any entry is stored to the destination.
 
-(Note: the current mkit impl does not write/verify a trailer. W4 will
+(Note: the current mkit impl does not write/verify a trailer. A future version will
 add it; this SPEC pins the layout so the implementation doesn't drift.)
 
 ---
@@ -222,11 +213,9 @@ mkit v1 is the first version. The format rule going forward is:
 
 ## 10. Test vectors (implementer MUST produce)
 
-TO BE FIXED IN IMPLEMENTATION:
-
 1. **Empty pack**: header + `entry_count=0` + trailer. Expected length
    = 12 + 32 = 44 bytes. Record the trailer BLAKE3 digest hex.
-2. **Single-raw pack** containing the empty blob from SPEC-OBJECTS §13
+2. **Single-raw pack** containing the empty blob from [Objects](/docs/spec/objects) §13
    vector 1. Record full byte layout and trailer digest.
 3. **Two-entry pack with delta**: raw base blob + delta entry that
    reconstructs a second blob. Unpacker produces two object-store

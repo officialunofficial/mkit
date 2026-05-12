@@ -3,13 +3,6 @@ title: Transport
 description: "Seven-verb transport protocol shared by mkit's file, http, s3, and ssh backends, including the SSH OP_HELLO handshake."
 ---
 
-:::info[Spec metadata]
-- **spec** — SPEC-TRANSPORT
-- **version** — 1
-- **status** — draft
-- **audience** — implementers of compatible transport clients and servers
-:::
-
 # Transport
 
 mkit talks to remote stores through a small set of pluggable
@@ -97,7 +90,7 @@ mkit's SSH transport spawns a long-lived `ssh(1)` child process and
 exchanges length-prefixed buffa `SshFrame` messages on its
 stdin/stdout. The wire format is defined by
 [`SshFrame`](https://github.com/officialunofficial/mkit/blob/main/rust/crates/mkit-rpc/proto/ssh.proto) per
-[SPEC-RPC §1](/docs/spec/rpc#1-wire-framing).
+[RPC §1](/docs/spec/rpc#1-wire-framing).
 
 ### 4.1 Forced-command server pattern
 
@@ -171,7 +164,7 @@ Each cap trips returns an `Error{ ERROR_CODE_INVALID_REQUEST }`
 followed by connection close with `exit::PROTOCOL_ERROR`.
 
 The framing layer's per-frame `MAX_FRAME_BYTES = 1 MiB` cap (per
-[SPEC-RPC §1](/docs/spec/rpc#1-wire-framing)) bounds individual frame
+[RPC §1](/docs/spec/rpc#1-wire-framing)) bounds individual frame
 sizes; pack data flows through `PackChunk` streams to stay under the
 per-frame cap.
 
@@ -212,7 +205,7 @@ concerns.
 
 `upload_pack` and `download_pack` move opaque pack bytes. The pack
 format itself (object index + delta encoding + chunk store) is
-defined in [SPEC-PACKFILE](/docs/spec/packfile). Transport implementations
+defined in [Packfile](/docs/spec/packfile). Transport implementations
 MUST NOT inspect or rewrite pack bytes.
 
 The 32-byte pack digest is the BLAKE3 hash of the full pack-bytes
@@ -224,7 +217,7 @@ buffer.
 
 This document and `ssh.proto` are jointly v1. The cross-transport
 trait surface (`Transport`, `TransportError`, `PackKey`) is API-stable
-within the v0.1.x line. See [SPEC-RPC §2](/docs/spec/rpc#2-versioning)
+within the v0.1.x line. See [RPC §2](/docs/spec/rpc#2-versioning)
 for SSH wire-format versioning.
 
 A native SSH implementation (with in-process host-key pinning) is a

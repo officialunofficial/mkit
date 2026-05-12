@@ -8,7 +8,8 @@ description: "Code map of the mkit Rust workspace, data-flow between objects, pa
 Status: **Informative**. Audience: contributors and integrators who
 need to find where something lives and how the pieces connect.
 
-This document is the index. Normative shape lives in `SPEC-*.md`.
+This document is the index. Normative shape lives in the
+[specifications](/docs/spec/objects).
 
 ---
 
@@ -37,7 +38,7 @@ responsibility boundaries — there is no "common" or "utils" crate.
 The `contrib/signers/*` crates are workspace members so they share
 lint config and dependency pins, but they are not part of the
 `mkit` binary's link graph. They communicate over the protocol
-defined in `SPEC-EXTERNAL-SIGNER.md`.
+defined in [External signer](/docs/spec/external-signer).
 
 ---
 
@@ -114,8 +115,8 @@ to a verifier keyed on `keyid`, and consults trust roots from
 
 ## 4. External signer protocol
 
-The contract is `docs/SPEC-EXTERNAL-SIGNER.md` (Protocol v1, v1.1
-adds optional WebAuthn wrapping). Shape:
+The contract is [External signer](/docs/spec/external-signer)
+(Protocol v1, v1.1 adds optional WebAuthn wrapping). Shape:
 
 ```
 mkit attest ──► spawn binary at attest.external_signer_path
@@ -137,18 +138,18 @@ Pick the closest match.
 
 ### "I'm modifying the parser for an on-disk object."
 Start at `rust/crates/mkit-core/src/serialize.rs`, then read
-`docs/SPEC-OBJECTS.md`. Update the matching golden vector under
+[Objects](/docs/spec/objects). Update the matching golden vector under
 `rust/tests/golden/`. If you change the wire shape, version it.
 
 ### "I'm adding a new transport."
 Start at `rust/crates/mkit-core/src/protocol.rs` for the `Transport`
-trait, then read `docs/SPEC-TRANSPORT.md` for the seven verbs. Use
+trait, then read [Transport](/docs/spec/transport) for the seven verbs. Use
 `mkit-transport-memory` as the smallest implementation reference.
 
 ### "I'm adding a new signer algorithm or implementation."
 For an in-tree algorithm, edit `mkit-attest`'s `Algorithm` enum and
 the verifier dispatch. For an out-of-tree signer (HSM, KMS, hardware
-token), implement `docs/SPEC-EXTERNAL-SIGNER.md` and ship a binary —
+token), implement [External signer](/docs/spec/external-signer) and ship a binary —
 see `contrib/signers/mkit-sign-file/` for a minimal example.
 
 ### "I'm changing the wire format."
@@ -167,16 +168,16 @@ the change affects.
 
 ## 6. Cross-references
 
-- `SPEC-OBJECTS.md` — on-disk object format
-- `SPEC-PACKFILE.md` — packfile wire format
-- `SPEC-DELTA.md` — delta encoding
-- `SPEC-FASTCDC.md` — content-defined chunking
-- `SPEC-REFS.md` — ref names, CAS variants
-- `SPEC-INDEX.md` — repo-local index
-- `SPEC-TRANSPORT.md` — seven-verb wire protocol
-- `SPEC-SIGNING.md` — commit / remix signing
-- `SPEC-ATTESTATIONS.md` — DSSE + in-toto v1
-- `SPEC-EXTERNAL-SIGNER.md` — external signer subprocess protocol
-- `SSH-SECURITY.md` — SSH trust model (informative)
-- `THREAT-MODEL.md` — security boundaries (informative)
-- `FUZZ.md` — fuzz harness conventions
+- [Objects](/docs/spec/objects) — on-disk object format
+- [Packfile](/docs/spec/packfile) — packfile wire format
+- [Delta](/docs/spec/delta) — delta encoding
+- [FastCDC](/docs/spec/fastcdc) — content-defined chunking
+- [Refs](/docs/spec/refs) — ref names, CAS variants
+- [Staging index](/docs/spec/staging-index) — repo-local index
+- [Transport](/docs/spec/transport) — seven-verb wire protocol
+- [Signing](/docs/spec/signing) — commit / remix signing
+- [Attestations](/docs/spec/attestations) — DSSE + in-toto v1
+- [External signer](/docs/spec/external-signer) — external signer subprocess protocol
+- [SSH security](/docs/ssh-security) — SSH trust model (informative)
+- [Threat model](/docs/threat-model) — security boundaries (informative)
+- [Fuzzing](/docs/fuzz) — fuzz harness conventions

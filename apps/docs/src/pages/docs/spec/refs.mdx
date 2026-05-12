@@ -3,21 +3,12 @@ title: Refs
 description: "Reference namespace, atomic CAS semantics, and on-disk layout for branch and tag pointers."
 ---
 
-:::info[Spec metadata]
-- **spec** — SPEC-REFS
-- **version** — 1
-- **status** — draft
-- **audience** — implementers of compatible ref stores and transports
-:::
-
 # Refs
 
 Status: **Normative** for mkit v1.
 Scope: ref names, ref wire bytes, ref storage layout, and the exact
 semantics of `listRefs(prefix)` and `updateRef(condition)` across
 transports.
-
-Resolves red-team R-07, R-08, R-13, R-40.
 
 ---
 
@@ -199,12 +190,12 @@ not exist or contains a different hash → `RefConflict`.
 | Transport | `.any`      | `.missing`                            | `.match`                                                       | Notes |
 |-----------|-------------|---------------------------------------|----------------------------------------------------------------|-------|
 | memory    | atomic*     | atomic*                               | **NOT atomic** — read-then-write race                          | *Single-threaded by construction. Across fibres: no lock. |
-| file      | atomic      | atomic (via `O_EXCL` create)          | **NOT atomic** — read-then-write race across processes         | v1 known gap; W4 will replace with lockfile. |
+| file      | atomic      | atomic (via `O_EXCL` create)          | **NOT atomic** — read-then-write race across processes         | v1 known gap; A future version will replace with lockfile. |
 | s3        | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<md5-of-wire>"`                         | Requires server that supports conditional writes (R2 and post-2024 AWS S3 do; generic S3 may not). |
 | http      | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<hex-hash>"`                            | Worker-flavoured server. Generic S3 + nginx does NOT conform. |
 | ssh       | atomic      | atomic (`OP_WRITE_REF_IF_ABSENT` path via condition byte) | atomic (`CONDITION_MATCH` with 32-byte expected hash)          | Server enforces CAS; client trusts `STATUS_ERROR`. |
 
-*memory/file CAS:* v1 ships the non-atomic implementations; SPEC-TRANSPORT
+*memory/file CAS:* v1 ships the non-atomic implementations; [Transport](/docs/spec/transport)
 documents this explicitly. Concurrent callers on the file transport MAY
 lose updates. Production deployments should use s3/http/ssh for CAS
 critical paths.
@@ -254,8 +245,6 @@ reads.
 ---
 
 ## 7. Test vectors (implementer MUST produce)
-
-TO BE FIXED IN IMPLEMENTATION:
 
 1. **Wire encode/decode**: hash = BLAKE3("test-ref") → 64 hex + `\n`.
    Record the 65-byte wire.

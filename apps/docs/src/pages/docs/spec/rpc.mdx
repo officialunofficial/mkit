@@ -3,13 +3,6 @@ title: RPC
 description: "RPC framing on top of the transport protocol: message envelope, request/response shape, and error codes."
 ---
 
-:::info[Spec metadata]
-- **spec** — SPEC-RPC
-- **version** — 1
-- **status** — draft
-- **audience** — integrators implementing an mkit external signer or mkit-server
-:::
-
 # RPC
 
 mkit speaks to processes outside its address space — external signers
@@ -21,8 +14,8 @@ The schemas live in [`rust/crates/mkit-rpc/proto/`](https://github.com/officialu
 | File | Purpose |
 |---|---|
 | `common.proto` | Shared types: `Algorithm`, `KeyForm`, `ErrorCode`, `Error`, `ProtocolVersion` |
-| `signer.proto` | External-signer protocol (`SignerFrame` oneof). See [SPEC-EXTERNAL-SIGNER](/docs/spec/external-signer) for prose. |
-| `ssh.proto` | SSH transport protocol (`SshFrame` oneof). See [SPEC-TRANSPORT](/docs/spec/transport) for prose. |
+| `signer.proto` | External-signer protocol (`SignerFrame` oneof). See [External signer](/docs/spec/external-signer) for prose. |
+| `ssh.proto` | SSH transport protocol (`SshFrame` oneof). See [Transport](/docs/spec/transport) for prose. |
 
 Protocol-version integer is `1` (`PROTOCOL_VERSION_1`). All v0.1.x mkit
 releases speak this and only this. A future breaking revision will
@@ -169,7 +162,7 @@ choice is deliberate:
   hard cap is simpler to reason about than JSON-line streams that
   may need arbitrary lookahead for `}` matching.
 - **Schema-as-source-of-truth.** The .proto files are the contract;
-  prose specs (this file, SPEC-EXTERNAL-SIGNER, SPEC-TRANSPORT) are
+  prose specs (this file, [External signer](/docs/spec/external-signer), [Transport](/docs/spec/transport)) are
   derivative.
 
 The buffa runtime (`buffa = "0.5"`) is used by the Rust reference

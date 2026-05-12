@@ -3,21 +3,13 @@ title: Objects
 description: "On-disk object format for mkit: Blob, Tree, Commit, Remix, ChunkedBlob, and Delta, with the v1 canonical serialization."
 ---
 
-:::info[Spec metadata]
-- **spec** — SPEC-OBJECTS
-- **version** — 1
-- **status** — stable
-- **audience** — implementers of compatible tools producing or consuming mkit on-disk objects
-:::
-
 # Objects
 
 Status: **Normative** for mkit v1.
 Scope: `.mkit/objects/` content and the byte layout of every object type.
 Endianness: **little-endian** throughout. All hashes are 32-byte BLAKE3.
 
-This document defines what W2 (on-disk V1 bump) and W3 (identity / remix
-generalisation) must implement. External tools MUST be able to produce and
+This document defines whatv1 must implement. External tools MUST be able to produce and
 consume these bytes with only this document.
 
 ---
@@ -71,7 +63,7 @@ Readers MUST reject any of:
 - `magic` != `"MKT1"` → `InvalidMagic`
 - `schema_version` != `0x01` → `UnsupportedObjectVersion`
 
-There is no v0. mkit does not read mkit-era bytes.
+There is no v0. mkit does not read earlier-format bytes.
 
 ---
 
@@ -86,7 +78,7 @@ There is no v0. mkit does not read mkit-era bytes.
 No interpretation of `data`. `len = 0` is valid (empty blob). Upper bound
 is enforced at the storage layer: the object store rejects objects
 > 1 GiB. A pack entry independently caps at the packfile total limit
-(see SPEC-PACKFILE).
+(see [Packfile](/docs/spec/packfile)).
 
 ---
 
@@ -130,7 +122,7 @@ when ordering is canonical.
 0x04    executable   regular file, executable bit set (POSIX 0o755)
 ```
 
-Mode `0x04` is new in v1 (previously absent; see red-team R-41 — silent
+Mode `0x04` is new in v1 (previously absent; see below silent
 data-loss bug for any POSIX workflow). Writers MUST emit `0x04` for any
 file with the POSIX executable bit set at staging time. Non-POSIX hosts
 MAY round-trip `0x04` bytes opaquely.
@@ -141,7 +133,6 @@ Any other mode byte → `InvalidEntryMode`.
 
 mkit v1 does not detect renames or copies. Diff and merge treat renames
 as (delete, add) pairs. This is a documented departure from Git; see
-red-team R-21.
 
 ---
 
@@ -164,15 +155,14 @@ repeat parent_count:
 ```
 
 Differences from mkit:
-- `author_mid: u64` → `Identity` tagged union (§9). (W2.)
-- `timestamp: u32` → `u64`. Avoids 2106 overflow (red-team 7d / Team Lead
-  7d).
+- `author_mid: u64` → `Identity` tagged union (§9).
+- `timestamp: u32` → `u64`. Avoids 2106 overflow.
 - Relative field order of `signer` and `message` is preserved.
 
 ### 5.1 `message_hash` / `content_digest`
 
 These remain **core fields** on `Commit` but are
-**NOT part of the commit signing bytes** (see SPEC-SIGNING §3). They are
+**NOT part of the commit signing bytes** (see [Signing](/docs/spec/signing) §3). They are
 optional off-chain annotation slots for downstream consumers. Core
 stores them because:
 1. They are 32 bytes each and carry a stable meaning regardless of any
@@ -182,7 +172,6 @@ stores them because:
 
 Writers with no annotation to record MUST emit them as `0x00`*32 (zero
 hash). Readers MUST NOT reject a commit because they are zero.
-(This resolves red-team R-45.)
 
 ### 5.2 Root commits
 
@@ -201,7 +190,7 @@ repeat parent_count:
     [32 bytes parent_hash]
 [u32 LE source_count]                     0..=10_000
 repeat source_count:
-    [32 bytes upstream_id]                was project_id in mkit
+    [32 bytes upstream_id]                was project_id in earlier drafts
     [32 bytes commit_hash]
 [Identity author]                         see §9
 [u32 LE message_len]
@@ -240,7 +229,7 @@ repeat chunk_count:
 
 `chunk_size = 0` indicates the manifest was produced by FastCDC and
 chunk lengths are recovered by re-reading each chunk blob. See
-SPEC-FASTCDC.
+[FastCDC](/docs/spec/fastcdc).
 `chunk_size > 0` indicates fixed-size chunking with the stated size
 (final chunk may be shorter).
 
@@ -253,7 +242,7 @@ The concatenated length MUST equal `total_size`.
 
 ## 8. Delta (`0x06`)
 
-Pack-only. See SPEC-DELTA for the instruction format and SPEC-PACKFILE
+Pack-only. See [Delta](/docs/spec/delta) for the instruction format and [Packfile](/docs/spec/packfile)
 for framing. The on-disk layout (if ever serialised alone, which
 implementations SHOULD NOT do) is:
 
@@ -293,7 +282,7 @@ Rules:
   byte-equal. No case-folding, no canonicalisation.
 
 Identity serialisation is used in **both** the on-wire serialised commit
-and the signing bytes (see SPEC-SIGNING). The bytes are identical in both
+and the signing bytes (see [Signing](/docs/spec/signing)). The bytes are identical in both
 contexts. This means the identity length is variable at signing time,
 which is why the `len` field is always explicit.
 
@@ -309,7 +298,7 @@ On read, the store MUST recompute BLAKE3 and fail `HashMismatch` if the
 computed hash does not match the path. Objects > 1 GiB MUST be rejected.
 
 `.mkit/` directory: presence of `.mkit/objects` is the repository
-marker. See SPEC-INDEX for the `.mkit/index` sidecar.
+marker. See [Staging index](/docs/spec/staging-index) for the `.mkit/index` sidecar.
 
 ---
 
