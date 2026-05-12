@@ -51,15 +51,16 @@ jobs:
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
-      # Run the same test set rust.yml does so coverage matches CI's
-      # actual quality bar — `--workspace --all-features` plus doctests
-      # plus a final HTML+lcov merge.
+      # Coverage from the same nextest run rust.yml gates on. Doctests
+      # are NOT included: `cargo llvm-cov --doc` needs nightly
+      # (`-Z unstable-options --persist-doctests`), and the workspace
+      # pins to stable per rust-toolchain.toml. rust.yml already
+      # exercises doctests for correctness in a separate step.
       - name: Collect coverage
         working-directory: rust
         run: |
           cargo llvm-cov clean --workspace
           cargo llvm-cov --no-report nextest --locked --workspace --all-features
-          cargo llvm-cov --no-report --doc --locked --workspace
           cargo llvm-cov report --html --output-dir "$RUNNER_TEMP/coverage-html"
           cargo llvm-cov report --lcov --output-path "$RUNNER_TEMP/coverage.lcov"
           # Emit a numeric summary for the workflow output.
