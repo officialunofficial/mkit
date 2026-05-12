@@ -38,25 +38,40 @@
 
 use std::io::Write;
 
+use clap::{Parser, ValueEnum};
 use mkit_core::index;
 use mkit_core::object::Object;
 use mkit_core::ops::{DiffKind, StatusEntry, StatusStaging, status_diff};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::exit;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PorcelainVersion {
+    V1,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit status",
+    about = "Show working-tree changes relative to HEAD."
+)]
+struct StatusOpts {
+    /// Emit machine-readable XY-code-plus-path on stdout. Default
+    /// `v1` matches `git status --porcelain=v1`.
+    #[arg(long, value_name = "VERSION", num_args = 0..=1, default_missing_value = "v1")]
+    porcelain: Option<PorcelainVersion>,
+}
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let mut porcelain = false;
-    for a in args {
-        match a.as_str() {
-            "--porcelain" | "--porcelain=v1" => porcelain = true,
-            other => {
-                return super::usage_error(&format!("unknown flag for status: {other}"));
-            }
-        }
-    }
+    let opts = match clap_shim::parse::<StatusOpts>("mkit status", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    let porcelain = opts.porcelain.is_some();
 
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
