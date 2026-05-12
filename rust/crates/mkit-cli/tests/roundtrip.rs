@@ -105,11 +105,14 @@ fn status_reports_staged_entries() {
     assert!(run_in(td.path(), &["init"]).status.success());
     fs::write(td.path().join("a.txt"), b"a").unwrap();
     assert!(run_in(td.path(), &["add", "a.txt"]).status.success());
-    let out = run_in(td.path(), &["status"]);
+    // Default mode routes prose to stderr; use --porcelain for a
+    // stable stdout contract. See tests/status_integration.rs for the
+    // full porcelain matrix.
+    let out = run_in(td.path(), &["status", "--porcelain"]);
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.contains("a.txt"),
+        stdout.lines().any(|l| l.ends_with(" a.txt")),
         "status missing staged file: {stdout}"
     );
 }

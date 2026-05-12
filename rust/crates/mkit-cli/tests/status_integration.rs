@@ -1,5 +1,10 @@
 //! Integration tests for `mkit status` — verifies three-way grouping of
 //! committed / staged / unstaged changes by spawning the real binary.
+//!
+//! Tests assert against `--porcelain` output (XY codes on stdout) rather
+//! than the default human prose, which lives on stderr. The porcelain
+//! contract is the long-term machine interface; the human format is
+//! presentation-only and free to change.
 
 use std::fs;
 use std::process::Command;
@@ -18,6 +23,24 @@ fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
         .expect("spawn mkit");
     drop(xdg);
     out
+}
+
+/// Run `mkit status --porcelain` and return `(stdout, stderr)` as
+/// owned strings. Asserts the command succeeded.
+fn status_porcelain(cwd: &std::path::Path) -> (String, String) {
+    let out = run_in(cwd, &["status", "--porcelain"]);
+    assert!(out.status.success(), "status --porcelain failed: {out:?}");
+    (
+        String::from_utf8(out.stdout).expect("stdout utf-8"),
+        String::from_utf8(out.stderr).expect("stderr utf-8"),
+    )
+}
+
+/// True iff some line in `out` has both the given XY code (first two
+/// chars) and the given path (tail after the single space separator).
+fn has_entry(out: &str, code: &str, path: &str) -> bool {
+    let target = format!("{code} {path}");
+    out.lines().any(|l| l == target)
 }
 
 /// Initialise a fresh repo and make an initial commit containing `files`.
@@ -44,44 +67,36 @@ fn init_with_commit(files: &[(&str, &[u8])]) -> tempfile::TempDir {
 }
 
 // -----------------------------------------------------------------------
-// 1. Clean working tree — nothing to report.
+// 1. Clean working tree — empty stdout.
 // -----------------------------------------------------------------------
 
 #[test]
 fn status_clean_working_tree() {
     let td = init_with_commit(&[("a.txt", b"hello")]);
-    let out = run_in(td.path(), &["status"]);
-    assert!(out.status.success(), "status failed: {out:?}");
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    let (stdout, _stderr) = status_porcelain(td.path());
     assert!(
-        stdout.contains("nothing to commit"),
-        "expected clean output, got: {stdout}"
+        stdout.is_empty(),
+        "expected empty porcelain output for clean tree, got: {stdout:?}"
     );
 }
 
 // -----------------------------------------------------------------------
-// 2. Untracked (worktree only) file shows as unstaged.
+// 2. Untracked file appears as `??`.
 // -----------------------------------------------------------------------
 
 #[test]
 fn status_untracked_file_is_unstaged() {
     let td = init_with_commit(&[("a.txt", b"hello")]);
     fs::write(td.path().join("b.txt"), b"new").unwrap();
-    let out = run_in(td.path(), &["status"]);
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    let (stdout, _) = status_porcelain(td.path());
     assert!(
-        stdout.contains("b.txt"),
-        "b.txt missing from status: {stdout}"
-    );
-    assert!(
-        stdout.contains("not staged"),
-        "expected 'not staged' section: {stdout}"
+        has_entry(&stdout, "??", "b.txt"),
+        "b.txt should be ?? (untracked); got: {stdout:?}"
     );
 }
 
 // -----------------------------------------------------------------------
-// 3. Staged file (add but not commit) shows in "Changes to be committed".
+// 3. Staged new file appears as `A ` (X=A, Y=space).
 // -----------------------------------------------------------------------
 
 #[test]
@@ -89,45 +104,37 @@ fn status_staged_file_shows_committed_section() {
     let td = init_with_commit(&[("a.txt", b"hello")]);
     fs::write(td.path().join("c.txt"), b"staged content").unwrap();
     assert!(run_in(td.path(), &["add", "c.txt"]).status.success());
-    let out = run_in(td.path(), &["status"]);
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    let (stdout, _) = status_porcelain(td.path());
     assert!(
-        stdout.contains("c.txt"),
-        "c.txt missing from status: {stdout}"
-    );
-    assert!(
-        stdout.contains("to be committed"),
-        "expected staged section: {stdout}"
+        has_entry(&stdout, "A ", "c.txt"),
+        "c.txt should be `A ` (staged-added); got: {stdout:?}"
     );
 }
 
 // -----------------------------------------------------------------------
-// 4. Modified committed file shows in status (staged or partially-staged,
-// depending on whether the index still holds the committed snapshot).
+// 4. Modified committed file appears in status (somewhere — either
+//    staged or unstaged depending on index state).
 // -----------------------------------------------------------------------
 
 #[test]
 fn status_modified_committed_file_appears_in_status() {
     let td = init_with_commit(&[("a.txt", b"original")]);
     fs::write(td.path().join("a.txt"), b"changed").unwrap();
-    let out = run_in(td.path(), &["status"]);
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    // a.txt must appear somewhere in the status output.
-    assert!(
-        stdout.contains("a.txt"),
-        "a.txt missing from status: {stdout}"
-    );
+    let (stdout, _) = status_porcelain(td.path());
     // The repo is NOT clean.
     assert!(
-        !stdout.contains("nothing to commit"),
-        "unexpectedly clean: {stdout}"
+        !stdout.is_empty(),
+        "tree must report a.txt as changed; got empty output"
+    );
+    // a.txt must appear somewhere.
+    assert!(
+        stdout.lines().any(|l| l.ends_with(" a.txt")),
+        "a.txt missing from status: {stdout:?}"
     );
 }
 
 // -----------------------------------------------------------------------
-// 5. Three-state scenario: committed file modified + new file staged.
+// 5. Three-state scenario: modified, newly-staged, deleted.
 // -----------------------------------------------------------------------
 
 #[test]
@@ -145,22 +152,22 @@ fn status_three_states() {
     // Remove b.txt from disk (worktree deletion, unstaged).
     fs::remove_file(td.path().join("b.txt")).unwrap();
 
-    let out = run_in(td.path(), &["status"]);
-    assert!(out.status.success(), "status failed: {out:?}");
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    let (stdout, _) = status_porcelain(td.path());
 
-    // c.txt should be in the staged section (its index hash matches the worktree).
     assert!(
-        stdout.contains("to be committed"),
-        "expected staged section: {stdout}"
+        has_entry(&stdout, "A ", "c.txt"),
+        "c.txt should be `A ` (staged-added); got: {stdout:?}"
     );
-    assert!(stdout.contains("c.txt"), "c.txt missing: {stdout}");
-
-    // a.txt and b.txt must appear somewhere in the output.
-    // They will be in 'partially staged' since the committed index holds
-    // their old hashes but the worktree has different content.
-    assert!(stdout.contains("a.txt"), "a.txt missing: {stdout}");
-    assert!(stdout.contains("b.txt"), "b.txt missing: {stdout}");
+    // a.txt was modified, not staged → ` M`.
+    assert!(
+        stdout.lines().any(|l| l.ends_with(" a.txt")),
+        "a.txt missing from status: {stdout:?}"
+    );
+    // b.txt was deleted from worktree, not staged → ` D`.
+    assert!(
+        stdout.lines().any(|l| l.ends_with(" b.txt")),
+        "b.txt missing from status: {stdout:?}"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -172,13 +179,10 @@ fn status_no_head_shows_all_as_changes() {
     let td = tempfile::tempdir().unwrap();
     assert!(run_in(td.path(), &["init"]).status.success());
     fs::write(td.path().join("x.txt"), b"content").unwrap();
-    let out = run_in(td.path(), &["status"]);
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    // Should report x.txt somehow (not staged, since no index entry).
+    let (stdout, _) = status_porcelain(td.path());
     assert!(
-        stdout.contains("x.txt"),
-        "x.txt missing from status: {stdout}"
+        stdout.lines().any(|l| l.ends_with(" x.txt")),
+        "x.txt missing from status: {stdout:?}"
     );
 }
 
@@ -201,20 +205,14 @@ fn staged_change_remains_visible_after_worktree_revert() {
     fs::write(p.join("a.txt"), b"v1").unwrap();
 
     // Status MUST surface the staged delta — the index still has v2.
-    let out = run_in(p, &["status"]);
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
+    let (stdout, _) = status_porcelain(p);
     assert!(
-        !stdout.contains("nothing to commit"),
-        "status hid a staged change behind a worktree revert: {stdout}"
+        !stdout.is_empty(),
+        "status hid a staged change behind a worktree revert"
     );
     assert!(
-        stdout.contains("a.txt"),
-        "staged a.txt missing from status: {stdout}"
-    );
-    assert!(
-        stdout.contains("Changes to be committed"),
-        "expected staged-section header, got: {stdout}"
+        has_entry(&stdout, "M ", "a.txt"),
+        "expected staged `M ` for a.txt; got: {stdout:?}"
     );
 }
 
@@ -223,15 +221,32 @@ fn missing_index_with_clean_head_is_reported_clean() {
     let td = init_with_commit(&[("a.txt", b"v1")]);
     fs::remove_file(td.path().join(".mkit/index")).unwrap();
 
+    let (stdout, _) = status_porcelain(td.path());
+    assert!(
+        stdout.is_empty(),
+        "missing/empty index should not look like staged removals: {stdout:?}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Default-mode behaviour: human prose goes to stderr, stdout stays
+// empty when porcelain isn't requested. This pins the contract that
+// `mkit status > /tmp/out` produces an empty file in clean state.
+// -----------------------------------------------------------------------
+
+#[test]
+fn default_mode_writes_prose_to_stderr_not_stdout() {
+    let td = init_with_commit(&[("a.txt", b"hello")]);
     let out = run_in(td.path(), &["status"]);
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stdout.contains("nothing to commit"),
-        "missing/empty index should not look like staged removals: {stdout}"
+        stdout.is_empty(),
+        "default-mode `mkit status` must not write to stdout (got: {stdout:?})"
     );
     assert!(
-        !stdout.contains("Changes to be committed"),
-        "missing/empty index unexpectedly created staged changes: {stdout}"
+        stderr.contains("nothing to commit"),
+        "default-mode prose should be on stderr (got: {stderr:?})"
     );
 }

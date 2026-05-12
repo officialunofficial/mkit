@@ -26,7 +26,9 @@ commands:
   tree              Snapshot working directory as a tree object
   commit [-a] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
   log [--oneline] [--graph] [-n N]  Show commit history
-  status            Show staged and working tree changes
+  status [--porcelain]
+                    Show staged and working tree changes
+                    (--porcelain emits machine-readable XY lines on stdout)
   diff              Show changes (HEAD vs workdir, or two trees)
   branch            List branches (* marks current)
   branch <name>     Create a branch at HEAD
