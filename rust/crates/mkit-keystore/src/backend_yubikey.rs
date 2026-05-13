@@ -40,6 +40,7 @@ struct OpenPgpSigningKey {
 #[derive(Clone, Debug)]
 struct PivSigningKey {
     label: String,
+    serial: yubikey::Serial,
     slot: SlotId,
     public_key: Vec<u8>,
     pin_policy: PinPolicy,
@@ -301,7 +302,10 @@ impl KeySigner for YubiKeyPivSigner {
             )));
         }
 
-        let mut yubikey = yubikey::YubiKey::open().map_err(map_yubikey_error)?;
+        let mut yubikey =
+            yubikey::YubiKey::open_by_serial(self.key.serial).map_err(map_yubikey_error)?;
+        let public_key = piv_public_key_for_slot(&mut yubikey, self.key.slot)?;
+        verify_piv_public_key_matches(&self.key, &public_key)?;
         if self.key.pin_policy != PinPolicy::Never {
             yubikey
                 .verify_pin(pin.as_bytes())
@@ -415,6 +419,7 @@ fn discover_piv_signing_keys() -> Result<Vec<PivSigningKey>> {
             .unwrap_or((default_pin_policy(slot), TouchPolicy::Default));
         out.push(PivSigningKey {
             label: piv_label(slot),
+            serial: yubikey.serial(),
             slot,
             public_key,
             pin_policy,
@@ -506,6 +511,28 @@ fn p256_public_key_from_certificate(certificate: &yubikey::Certificate) -> Resul
     let public = p256::PublicKey::from_public_key_der(&der)
         .map_err(|error| Error::Encoding(format!("PIV P-256 public key: {error}")))?;
     Ok(public.to_encoded_point(true).as_bytes().to_vec())
+}
+
+fn piv_public_key_for_slot(yubikey: &mut yubikey::YubiKey, slot: SlotId) -> Result<Vec<u8>> {
+    for key in yubikey::Key::list(yubikey).map_err(map_yubikey_error)? {
+        if key.slot() == slot {
+            return p256_public_key_from_certificate(key.certificate());
+        }
+    }
+    Err(Error::KeyNotFound(KeySelector {
+        label: piv_label(slot),
+        algorithm: Some(Algorithm::P256),
+    }))
+}
+
+fn verify_piv_public_key_matches(key: &PivSigningKey, public_key: &[u8]) -> Result<()> {
+    if key.public_key == public_key {
+        return Ok(());
+    }
+    Err(Error::AccessDenied(format!(
+        "YubiKey PIV slot {} on serial {} no longer matches resolved public key",
+        key.label, key.serial
+    )))
 }
 
 fn piv_label(slot: SlotId) -> String {
@@ -689,6 +716,24 @@ mod tests {
     fn piv_labels_are_key_ref_safe() {
         assert_eq!(piv_label(SlotId::Signature), "piv-9c");
         validate_label(&piv_label(SlotId::Signature)).expect("label is valid");
+    }
+
+    #[test]
+    fn piv_public_key_mismatch_fails_closed() {
+        let key = PivSigningKey {
+            label: "piv-9c".into(),
+            serial: yubikey::Serial(1234),
+            slot: SlotId::Signature,
+            public_key: vec![1; 33],
+            pin_policy: PinPolicy::Always,
+            touch_policy: TouchPolicy::Never,
+        };
+
+        verify_piv_public_key_matches(&key, &[1; 33]).expect("matching public key");
+        assert!(matches!(
+            verify_piv_public_key_matches(&key, &[2; 33]),
+            Err(Error::AccessDenied(_))
+        ));
     }
 
     #[test]
