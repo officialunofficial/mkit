@@ -365,7 +365,7 @@ pub(crate) fn encrypt_credential(secret: &[u8; 32], path: &Path, name: &str) -> 
 
 fn encrypt_credential_to_path(secret: &[u8; 32], path: &Path, name: &str) -> Result<()> {
     let mut child = Command::new("systemd-creds")
-        .args(["--uid=self", "--with-key=auto", "--name", name])
+        .args(["--with-key=auto", "--name", name])
         .arg("encrypt")
         .arg("-")
         .arg(path)
@@ -409,7 +409,7 @@ fn temp_credential_path(path: &Path) -> Result<PathBuf> {
 
 pub(crate) fn decrypt_credential(path: &Path, name: &str) -> Result<Vec<u8>> {
     let output = Command::new("systemd-creds")
-        .args(["--uid=self", "--name", name])
+        .args(["--name", name])
         .arg("decrypt")
         .arg(path)
         .arg("-")
@@ -569,7 +569,11 @@ mod tests {
             .and_then(|name| name.to_str())
             .expect("temp filename");
         assert!(filename.starts_with(".release.cred."));
-        assert!(filename.ends_with(".tmp"));
+        assert!(
+            filename
+                .rsplit_once('.')
+                .is_some_and(|(_, extension)| extension == "tmp")
+        );
         assert_ne!(temp_path, final_path);
     }
 
