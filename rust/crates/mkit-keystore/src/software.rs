@@ -125,19 +125,6 @@ impl SoftwareKeystore {
         })
     }
 
-    fn metadata_for_record(&self, label: String, record: &EncryptedKeyRecord) -> KeyMetadata {
-        KeyMetadata {
-            label,
-            backend: self.backend.clone(),
-            algorithm: record.algorithm,
-            public_key: record.public_key.clone(),
-            keyid: record.keyid.clone(),
-            extractable: record.attrs.extractable,
-            require_user_presence: record.attrs.require_user_presence,
-            device_bound: record.attrs.device_bound,
-        }
-    }
-
     fn load_secret(&self, label: &str, algorithm: Algorithm) -> Result<SecretKey> {
         if !self.is_raw() {
             let record = self.load_record(label, algorithm)?;
@@ -413,7 +400,9 @@ impl Keystore for SoftwareKeystore {
                     out.push(self.metadata_for_secret(label, algorithm, &secret)?);
                 } else {
                     let record = self.load_record(&label, algorithm)?;
-                    out.push(self.metadata_for_record(label, &record));
+                    let protector = self.protector_for_record(&record)?;
+                    let secret = record.decrypt(&label, protector.as_ref())?;
+                    out.push(self.metadata_for_secret(label, algorithm, &secret)?);
                 }
             }
         }
@@ -446,6 +435,7 @@ impl Keystore for SoftwareKeystore {
         if !self.is_raw() {
             let record = self.load_record(&selector.label, algorithm)?;
             let protector = self.protector_for_record(&record)?;
+            let _ = record.decrypt(&selector.label, protector.as_ref())?;
             protector.delete_wrapped_dek(record.wrapped_dek())?;
         }
         std::fs::remove_file(&path)
@@ -1363,6 +1353,7 @@ fn hex_value(byte: u8) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use zeroize::Zeroizing;
 
     #[derive(Debug)]
@@ -1382,6 +1373,33 @@ mod tests {
                 .try_into()
                 .map_err(|_| Error::Encoding(format!("test DEK length: {}", wrapped.len())))?;
             Ok(Zeroizing::new(dek))
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingProtector {
+        deletes: Arc<AtomicUsize>,
+    }
+
+    impl KeyProtector for CountingProtector {
+        fn id(&self) -> &'static str {
+            "counting-protector"
+        }
+
+        fn wrap_dek(&self, dek: &[u8; 32], _aad: &[u8]) -> Result<Vec<u8>> {
+            Ok(dek.to_vec())
+        }
+
+        fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+            let dek: [u8; 32] = wrapped
+                .try_into()
+                .map_err(|_| Error::Encoding(format!("test DEK length: {}", wrapped.len())))?;
+            Ok(Zeroizing::new(dek))
+        }
+
+        fn delete_wrapped_dek(&self, _wrapped: &[u8]) -> Result<()> {
+            self.deletes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -1634,6 +1652,64 @@ mod tests {
         assert!(encoded.starts_with(b"MKITKSV1"));
         assert_ne!(encoded, seed);
         assert_eq!(store.list().unwrap()[0].label, "encrypted");
+    }
+
+    #[test]
+    fn software_list_authenticates_record_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = software_store(dir.path().join("keys"));
+        store
+            .import(
+                "encrypted",
+                SecretKey::new(Algorithm::Ed25519, [0x4a; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("import");
+        let path = store.path_for("encrypted", Algorithm::Ed25519).unwrap();
+        let mut record = EncryptedKeyRecord::decode(&std::fs::read(&path).expect("record bytes"))
+            .expect("record decode");
+        record.keyid = "ed25519:forged".into();
+        std::fs::write(&path, record.encode().expect("record encode")).expect("record write");
+
+        assert!(
+            matches!(store.list(), Err(Error::Encoding(message)) if message.contains("authentication"))
+        );
+    }
+
+    #[test]
+    fn software_delete_authenticates_before_dek_cleanup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let store = SoftwareKeystore::with_root_and_protector(
+            dir.path().join("keys"),
+            Arc::new(CountingProtector {
+                deletes: Arc::clone(&deletes),
+            }),
+        );
+        store
+            .import(
+                "encrypted",
+                SecretKey::new(Algorithm::Ed25519, [0x4a; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("import");
+        let path = store.path_for("encrypted", Algorithm::Ed25519).unwrap();
+        let mut record = EncryptedKeyRecord::decode(&std::fs::read(&path).expect("record bytes"))
+            .expect("record decode");
+        record.public_key = vec![0xff; 32];
+        std::fs::write(&path, record.encode().expect("record encode")).expect("record write");
+        let selector = KeySelector::new("encrypted", Some(Algorithm::Ed25519)).unwrap();
+
+        assert!(
+            matches!(store.delete(&selector), Err(Error::Encoding(message)) if message.contains("authentication"))
+        );
+        assert_eq!(deletes.load(Ordering::SeqCst), 0);
+        assert!(
+            path.exists(),
+            "unauthenticated record must remain for inspection"
+        );
     }
 
     #[cfg(unix)]
