@@ -238,6 +238,55 @@ fn key_default_ref_drives_unlabeled_commands() {
 }
 
 #[test]
+fn key_backend_drives_unlabeled_commands_when_refs_are_unset() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+    let cfg_dir = td.path().join("config/mkit");
+    std::fs::create_dir_all(&cfg_dir).expect("config dir");
+    std::fs::write(cfg_dir.join("config"), "key.backend = software-raw\n").expect("user config");
+
+    let secret = "06".repeat(32);
+    let import = run(
+        td.path(),
+        &["key", "import", "--algorithm", "ed25519", "--hex", &secret],
+    );
+    assert!(
+        import.status.success(),
+        "import stderr: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    let stdout = String::from_utf8(import.stdout).expect("stdout utf8");
+    assert!(stdout.contains("backend = software-raw"));
+    assert!(stdout.contains("label = default"));
+
+    let list = run(td.path(), &["key", "list"]);
+    assert!(list.status.success());
+    let stdout = String::from_utf8(list.stdout).expect("stdout utf8");
+    assert!(stdout.contains("software-raw default ed25519 ed25519:"));
+
+    let export = run(
+        td.path(),
+        &[
+            "key",
+            "export",
+            "--algorithm",
+            "ed25519",
+            "--unsafe-print-secret",
+        ],
+    );
+    assert!(export.status.success());
+    assert_eq!(String::from_utf8(export.stdout).unwrap().trim(), secret);
+
+    let delete = run(
+        td.path(),
+        &["key", "delete", "--algorithm", "ed25519", "--yes"],
+    );
+    assert!(delete.status.success());
+    let stdout = String::from_utf8(delete.stdout).expect("stdout utf8");
+    assert!(stdout.contains("deleted software-raw:default"));
+}
+
+#[test]
 fn unlabeled_key_commands_use_configured_ref_backend() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(td.path().join("repo")).expect("repo dir");

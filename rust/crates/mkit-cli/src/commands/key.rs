@@ -420,24 +420,44 @@ fn selection_for(
         };
         return Ok(Selection { backend, label });
     }
-    let key_ref =
-        match configured_ref(cfg, algorithm.unwrap_or(Algorithm::Ed25519)).parse::<KeyRef>() {
-            Ok(key_ref) => key_ref,
-            Err(error) => {
-                return Err(emit_err(
-                    &format!("config key ref: {error}"),
-                    exit::CONFIG_ERROR,
-                ));
-            }
-        };
-    let backend = explicit_backend.unwrap_or(key_ref.backend);
+    let algorithm = algorithm.unwrap_or(Algorithm::Ed25519);
+    let configured_ref = configured_ref_explicit(cfg, algorithm);
+    let key_ref = match configured_ref
+        .unwrap_or_else(|| configured_ref_or_fallback(cfg, algorithm))
+        .parse::<KeyRef>()
+    {
+        Ok(key_ref) => key_ref,
+        Err(error) => {
+            return Err(emit_err(
+                &format!("config key ref: {error}"),
+                exit::CONFIG_ERROR,
+            ));
+        }
+    };
+    let backend = match explicit_backend {
+        Some(backend) => backend,
+        None if configured_ref.is_some() => key_ref.backend,
+        None => parse_backend(cfg.key.backend_or_fallback())?,
+    };
     Ok(Selection {
         backend,
         label: key_ref.label,
     })
 }
 
-fn configured_ref(cfg: &Config, algorithm: Algorithm) -> &str {
+fn configured_ref_explicit(cfg: &Config, algorithm: Algorithm) -> Option<&str> {
+    match algorithm {
+        Algorithm::Ed25519 if !cfg.key.ed25519_ref.is_empty() => Some(cfg.key.ed25519_ref.as_str()),
+        Algorithm::Secp256k1 if !cfg.key.secp256k1_ref.is_empty() => {
+            Some(cfg.key.secp256k1_ref.as_str())
+        }
+        Algorithm::P256 if !cfg.key.p256_ref.is_empty() => Some(cfg.key.p256_ref.as_str()),
+        _ if !cfg.key.default_ref.is_empty() => Some(cfg.key.default_ref.as_str()),
+        _ => None,
+    }
+}
+
+fn configured_ref_or_fallback(cfg: &Config, algorithm: Algorithm) -> &str {
     match algorithm {
         Algorithm::Ed25519 => cfg.key.ed25519_ref_or_fallback(),
         Algorithm::Secp256k1 => cfg.key.secp256k1_ref_or_fallback(),
