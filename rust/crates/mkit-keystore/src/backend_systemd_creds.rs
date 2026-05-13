@@ -66,7 +66,6 @@ impl SystemdCredsKeystore {
     }
 
     fn metadata_for(
-        &self,
         label: String,
         algorithm: Algorithm,
         secret: &SecretKey,
@@ -203,7 +202,7 @@ impl Keystore for SystemdCredsKeystore {
                 })?;
                 validate_label(&label)?;
                 let secret = self.load_secret(&label, algorithm)?;
-                out.push(self.metadata_for(label, algorithm, &secret)?);
+                out.push(Self::metadata_for(label, algorithm, &secret)?);
             }
         }
         out.sort_by(|left, right| {
@@ -370,7 +369,7 @@ fn encrypt_credential_to_path(secret: &[u8; 32], path: &Path, name: &str) -> Res
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(systemd_creds_spawn_error)?;
+        .map_err(|error| systemd_creds_spawn_error(&error))?;
     child
         .stdin
         .as_mut()
@@ -384,7 +383,7 @@ fn encrypt_credential_to_path(secret: &[u8; 32], path: &Path, name: &str) -> Res
         Ok(())
     } else {
         let _ = std::fs::remove_file(path);
-        Err(systemd_creds_status_error("encrypt", output))
+        Err(systemd_creds_status_error("encrypt", &output))
     }
 }
 
@@ -413,15 +412,15 @@ pub(crate) fn decrypt_credential(path: &Path, name: &str) -> Result<Vec<u8>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(systemd_creds_spawn_error)?;
+        .map_err(|error| systemd_creds_spawn_error(&error))?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
-        Err(systemd_creds_status_error("decrypt", output))
+        Err(systemd_creds_status_error("decrypt", &output))
     }
 }
 
-fn systemd_creds_spawn_error(error: std::io::Error) -> Error {
+fn systemd_creds_spawn_error(error: &std::io::Error) -> Error {
     if error.kind() == std::io::ErrorKind::NotFound {
         Error::BackendUnavailable("systemd-creds executable was not found".into())
     } else {
@@ -429,7 +428,7 @@ fn systemd_creds_spawn_error(error: std::io::Error) -> Error {
     }
 }
 
-fn systemd_creds_status_error(operation: &str, output: std::process::Output) -> Error {
+fn systemd_creds_status_error(operation: &str, output: &std::process::Output) -> Error {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if stderr.is_empty() {
         Error::BackendUnavailable(format!(

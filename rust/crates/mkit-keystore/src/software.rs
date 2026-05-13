@@ -919,16 +919,7 @@ fn write_key_file_portable(
     let filename = path
         .file_name()
         .ok_or_else(|| Error::Io(format!("path has no filename: {}", path.display())))?;
-    let tmp_path = parent.join(format!(
-        ".{}.tmp.{}",
-        filename.to_string_lossy(),
-        std::process::id()
-    ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp_path)
-        .map_err(|error| Error::Io(format!("open tmp {}: {error}", tmp_path.display())))?;
+    let (tmp_path, mut file) = create_synced_tmp_key_file_portable(parent, filename)?;
     file.write_all(bytes)
         .map_err(|error| Error::Io(format!("write tmp {}: {error}", tmp_path.display())))?;
     file.sync_all()
@@ -936,9 +927,57 @@ fn write_key_file_portable(
     drop(file);
     if let Err(error) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(Error::Io(format!("rename {}: {error}", path.display())));
+        return if !overwrite && error.kind() == std::io::ErrorKind::AlreadyExists {
+            Err(Error::KeyAlreadyExists {
+                label: label.into(),
+                algorithm,
+            })
+        } else {
+            Err(Error::Io(format!("rename {}: {error}", path.display())))
+        };
     }
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_synced_tmp_key_file_portable(
+    parent: &Path,
+    filename: &std::ffi::OsStr,
+) -> Result<(PathBuf, std::fs::File)> {
+    for attempt in 0..16u8 {
+        let tmp_path = if attempt == 0 {
+            parent.join(format!(
+                ".{}.tmp.{}",
+                filename.to_string_lossy(),
+                std::process::id()
+            ))
+        } else {
+            parent.join(format!(
+                ".{}.tmp.{}.{}",
+                filename.to_string_lossy(),
+                std::process::id(),
+                attempt
+            ))
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(file) => return Ok((tmp_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(Error::Io(format!(
+                    "open tmp {}: {error}",
+                    tmp_path.display()
+                )));
+            }
+        }
+    }
+    Err(Error::Io(format!(
+        "could not create unique temp file under {}",
+        parent.display()
+    )))
 }
 
 #[allow(unreachable_code)]
@@ -971,7 +1010,10 @@ fn default_protector_for_write(root: &Path) -> Result<Arc<dyn KeyProtector>> {
     ))
 }
 
-fn default_protector_by_id(_root: &Path, id: &str) -> Result<Arc<dyn KeyProtector>> {
+fn default_protector_by_id(root: &Path, id: &str) -> Result<Arc<dyn KeyProtector>> {
+    #[cfg(not(all(target_os = "linux", feature = "systemd-creds")))]
+    let _ = root;
+
     match id {
         #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
         MacosKeychainProtector::ID => Ok(Arc::new(MacosKeychainProtector)),
@@ -980,7 +1022,7 @@ fn default_protector_by_id(_root: &Path, id: &str) -> Result<Arc<dyn KeyProtecto
         #[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
         LinuxSecretServiceProtector::ID => Ok(Arc::new(LinuxSecretServiceProtector)),
         #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-        SystemdCredsProtector::ID => systemd_creds_protector(_root),
+        SystemdCredsProtector::ID => systemd_creds_protector(root),
         _ => Err(Error::BackendUnavailable(format!(
             "software key record requires unavailable protector `{id}`"
         ))),
