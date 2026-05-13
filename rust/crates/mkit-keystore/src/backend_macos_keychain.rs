@@ -100,6 +100,12 @@ impl Keystore for MacosKeychainKeystore {
     ) -> Result<Box<dyn KeySigner>> {
         validate_attrs(&attrs)?;
         let account = Self::account(label, secret.algorithm())?;
+        let signer = SoftwareSigner::new(
+            label.into(),
+            BackendKind::MacosKeychain,
+            secret.algorithm(),
+            *secret.expose_secret(),
+        )?;
         let exists = match security_framework::passwords::get_generic_password(SERVICE, &account) {
             Ok(_) => true,
             Err(error) if is_not_found(error) => false,
@@ -117,12 +123,7 @@ impl Keystore for MacosKeychainKeystore {
             secret.expose_secret(),
         )
         .map_err(|error| keychain_io("set", error))?;
-        Ok(Box::new(SoftwareSigner::new(
-            label.into(),
-            BackendKind::MacosKeychain,
-            secret.algorithm(),
-            *secret.expose_secret(),
-        )?))
+        Ok(Box::new(signer))
     }
 
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
@@ -283,6 +284,19 @@ mod tests {
             account_from_attributes(&attributes),
             Some("ed25519:readable")
         );
+    }
+
+    #[test]
+    fn invalid_ecdsa_import_rejected_before_keychain_write() {
+        let store = MacosKeychainKeystore::new();
+        let result = store.import(
+            "invalid",
+            SecretKey::new(Algorithm::Secp256k1, [0; 32]),
+            KeyAttrs::default(),
+            ImportOptions::default(),
+        );
+
+        assert!(matches!(result, Err(Error::InvalidKeyMaterial { .. })));
     }
 
     #[test]

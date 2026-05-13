@@ -105,6 +105,12 @@ impl Keystore for WindowsCredentialKeystore {
         options: ImportOptions,
     ) -> Result<Box<dyn KeySigner>> {
         validate_attrs(&attrs)?;
+        let signer = SoftwareSigner::new(
+            label.into(),
+            BackendKind::WindowsCredentialManager,
+            secret.algorithm(),
+            *secret.expose_secret(),
+        )?;
         let entry = Self::entry(label, secret.algorithm())?;
         let exists = match entry.get_secret() {
             Ok(_) => true,
@@ -120,12 +126,7 @@ impl Keystore for WindowsCredentialKeystore {
         entry
             .set_secret(secret.expose_secret())
             .map_err(|error| map_keyring_error(error, label, secret.algorithm()))?;
-        Ok(Box::new(SoftwareSigner::new(
-            label.into(),
-            BackendKind::WindowsCredentialManager,
-            secret.algorithm(),
-            *secret.expose_secret(),
-        )?))
+        Ok(Box::new(signer))
     }
 
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
@@ -298,6 +299,19 @@ mod tests {
             windows_service_pattern(),
             r"^.+\.dev\.mkit\.keystore\.signing-key\.v1$"
         );
+    }
+
+    #[test]
+    fn invalid_ecdsa_import_rejected_before_credential_write() {
+        let store = WindowsCredentialKeystore::new();
+        let result = store.import(
+            "invalid",
+            SecretKey::new(Algorithm::Secp256k1, [0; 32]),
+            KeyAttrs::default(),
+            ImportOptions::default(),
+        );
+
+        assert!(matches!(result, Err(Error::InvalidKeyMaterial { .. })));
     }
 
     #[test]

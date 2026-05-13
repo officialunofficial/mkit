@@ -105,6 +105,12 @@ impl Keystore for LinuxSecretServiceKeystore {
         options: ImportOptions,
     ) -> Result<Box<dyn KeySigner>> {
         validate_attrs(&attrs)?;
+        let signer = SoftwareSigner::new(
+            label.into(),
+            BackendKind::LinuxSecretService,
+            secret.algorithm(),
+            *secret.expose_secret(),
+        )?;
         let entry = Self::entry(label, secret.algorithm())?;
         let exists = match entry.get_secret() {
             Ok(_) => true,
@@ -120,12 +126,7 @@ impl Keystore for LinuxSecretServiceKeystore {
         entry
             .set_secret(secret.expose_secret())
             .map_err(|error| map_keyring_error(error, label, secret.algorithm()))?;
-        Ok(Box::new(SoftwareSigner::new(
-            label.into(),
-            BackendKind::LinuxSecretService,
-            secret.algorithm(),
-            *secret.expose_secret(),
-        )?))
+        Ok(Box::new(signer))
     }
 
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
@@ -281,6 +282,19 @@ mod tests {
         assert!(!capabilities.supports_user_presence);
         assert!(!capabilities.supports_device_bound);
         assert!(!capabilities.supports_non_extractable);
+    }
+
+    #[test]
+    fn invalid_ecdsa_import_rejected_before_secret_service_write() {
+        let store = LinuxSecretServiceKeystore::new();
+        let result = store.import(
+            "invalid",
+            SecretKey::new(Algorithm::P256, [0; 32]),
+            KeyAttrs::default(),
+            ImportOptions::default(),
+        );
+
+        assert!(matches!(result, Err(Error::InvalidKeyMaterial { .. })));
     }
 
     #[test]

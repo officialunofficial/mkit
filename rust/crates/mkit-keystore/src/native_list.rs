@@ -98,7 +98,27 @@ pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> 
     {
         return Err(error);
     }
-    result
+    result?;
+
+    let invalid_label = unique_test_label();
+    let invalid_selector = crate::KeySelector::new(invalid_label.clone(), Some(Algorithm::P256))?;
+    let invalid_result = store.import(
+        &invalid_label,
+        SecretKey::new(Algorithm::P256, [0; 32]),
+        crate::KeyAttrs::default(),
+        crate::ImportOptions { overwrite: false },
+    );
+    assert!(
+        matches!(invalid_result, Err(Error::InvalidKeyMaterial { .. })),
+        "invalid P-256 import must fail before persistence"
+    );
+    assert!(
+        matches!(store.open(&invalid_selector), Err(Error::KeyNotFound(_))),
+        "invalid P-256 import must not leave an openable key"
+    );
+    let _ = store.delete(&invalid_selector);
+
+    Ok(())
 }
 
 #[cfg(test)]

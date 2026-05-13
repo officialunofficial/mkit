@@ -141,6 +141,12 @@ impl Keystore for SystemdCredsKeystore {
         options: ImportOptions,
     ) -> Result<Box<dyn KeySigner>> {
         validate_attrs(&attrs)?;
+        let signer = SoftwareSigner::new(
+            label.into(),
+            BackendKind::SystemdCreds,
+            secret.algorithm(),
+            *secret.expose_secret(),
+        )?;
         let path = self.path_for(label, secret.algorithm())?;
         self.ensure_storage_path_not_symlink(&path)?;
         if path.exists() && !options.overwrite {
@@ -164,12 +170,7 @@ impl Keystore for SystemdCredsKeystore {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
                 .map_err(|error| Error::Io(format!("chmod {}: {error}", path.display())))?;
         }
-        Ok(Box::new(SoftwareSigner::new(
-            label.into(),
-            BackendKind::SystemdCreds,
-            secret.algorithm(),
-            *secret.expose_secret(),
-        )?))
+        Ok(Box::new(signer))
     }
 
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
@@ -466,6 +467,24 @@ mod tests {
         assert_eq!(
             SystemdCredsKeystore::credential_name("release", Algorithm::Ed25519).unwrap(),
             "mkit.ed25519.release"
+        );
+    }
+
+    #[test]
+    fn invalid_ecdsa_import_rejected_before_credential_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SystemdCredsKeystore::with_root(dir.path().join("systemd-creds"));
+        let result = store.import(
+            "invalid",
+            SecretKey::new(Algorithm::P256, [0; 32]),
+            KeyAttrs::default(),
+            ImportOptions::default(),
+        );
+
+        assert!(matches!(result, Err(Error::InvalidKeyMaterial { .. })));
+        assert!(
+            !store.path_for("invalid", Algorithm::P256).unwrap().exists(),
+            "invalid import must not leave a credential file"
         );
     }
 }
