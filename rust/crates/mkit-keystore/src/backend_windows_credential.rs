@@ -128,7 +128,7 @@ impl Keystore for WindowsCredentialKeystore {
 
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
         validate_label(&selector.label)?;
-        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(selector, Self::get_secret)?;
         let secret = Self::get_secret(&selector.label, algorithm)?;
         Ok(Box::new(SoftwareSigner::new(
             selector.label.clone(),
@@ -161,7 +161,7 @@ impl Keystore for WindowsCredentialKeystore {
                 Err(keyring_core::Error::NoEntry) => continue,
                 Err(error) => return Err(map_keyring_error(error, "list", Algorithm::Ed25519)),
             };
-            if let Some(metadata) = crate::native_list::metadata_from_account_secret(
+            if let Some(metadata) = crate::native_list::list_metadata_from_account_secret(
                 account,
                 BackendKind::WindowsCredentialManager,
                 secret,
@@ -175,13 +175,13 @@ impl Keystore for WindowsCredentialKeystore {
 
     fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
         validate_label(&selector.label)?;
-        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(selector, Self::get_secret)?;
         Self::get_secret(&selector.label, algorithm)
     }
 
     fn delete(&self, selector: &KeySelector) -> Result<()> {
         validate_label(&selector.label)?;
-        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(selector, Self::get_secret)?;
         Self::entry(&selector.label, algorithm)?
             .delete_credential()
             .map_err(|error| map_keyring_error(error, &selector.label, algorithm))

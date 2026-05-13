@@ -125,7 +125,7 @@ impl Keystore for MacosKeychainKeystore {
 
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
         validate_label(&selector.label)?;
-        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(selector, Self::get_secret)?;
         let secret = Self::get_secret(&selector.label, algorithm)?;
         Ok(Box::new(SoftwareSigner::new(
             selector.label.clone(),
@@ -159,11 +159,16 @@ impl Keystore for MacosKeychainKeystore {
             let Some((algorithm, label)) = crate::native_list::parse_account(account) else {
                 continue;
             };
-            let secret = Self::get_secret(&label, algorithm)?;
-            if let Some(metadata) = crate::native_list::metadata_from_account_secret(
+            let secret = match security_framework::passwords::get_generic_password(SERVICE, account)
+            {
+                Ok(secret) => secret,
+                Err(error) if is_not_found(error) => continue,
+                Err(error) => return Err(map_keychain_error(error, &label, algorithm)),
+            };
+            if let Some(metadata) = crate::native_list::list_metadata_from_account_secret(
                 account,
                 BackendKind::MacosKeychain,
-                secret.expose_secret().to_vec(),
+                secret,
             )? {
                 out.push(metadata);
             }
@@ -174,13 +179,13 @@ impl Keystore for MacosKeychainKeystore {
 
     fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
         validate_label(&selector.label)?;
-        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(selector, Self::get_secret)?;
         Self::get_secret(&selector.label, algorithm)
     }
 
     fn delete(&self, selector: &KeySelector) -> Result<()> {
         validate_label(&selector.label)?;
-        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(selector, Self::get_secret)?;
         let account = Self::account(&selector.label, algorithm)?;
         security_framework::passwords::delete_generic_password(SERVICE, &account)
             .map_err(|error| map_keychain_error(error, &selector.label, algorithm))

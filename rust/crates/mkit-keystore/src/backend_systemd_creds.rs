@@ -54,10 +54,45 @@ impl SystemdCredsKeystore {
                 algorithm: Some(algorithm),
             }));
         }
-        let plaintext = Zeroizing::new(decrypt_credential(
+        Self::secret_from_plaintext(
+            algorithm,
+            decrypt_credential(&path, &Self::credential_name(label, algorithm)?)?,
+        )
+    }
+
+    fn load_secret_for_list(&self, label: &str, algorithm: Algorithm) -> Result<Option<SecretKey>> {
+        self.load_secret_for_list_with_command(label, algorithm, "systemd-creds")
+    }
+
+    fn load_secret_for_list_with_command(
+        &self,
+        label: &str,
+        algorithm: Algorithm,
+        command: &str,
+    ) -> Result<Option<SecretKey>> {
+        let path = self.path_for(label, algorithm)?;
+        self.ensure_storage_path_not_symlink(&path)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let plaintext = match decrypt_credential_with_command_result(
+            command,
             &path,
             &Self::credential_name(label, algorithm)?,
-        )?);
+        ) {
+            Ok(plaintext) => plaintext,
+            Err(CredentialDecryptError::Status(_)) => return Ok(None),
+            Err(error) => return Err(error.into_error()),
+        };
+        match Self::secret_from_plaintext(algorithm, plaintext) {
+            Ok(secret) => Ok(Some(secret)),
+            Err(error) if crate::native_list::is_malformed_list_entry_error(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn secret_from_plaintext(algorithm: Algorithm, plaintext: Vec<u8>) -> Result<SecretKey> {
+        let plaintext = Zeroizing::new(plaintext);
         if plaintext.len() != 32 {
             return Err(Error::InvalidKeyMaterial {
                 algorithm,
@@ -90,6 +125,18 @@ impl SystemdCredsKeystore {
             require_user_presence: false,
             device_bound: false,
         })
+    }
+
+    fn list_metadata_for(
+        label: String,
+        algorithm: Algorithm,
+        secret: &SecretKey,
+    ) -> Result<Option<KeyMetadata>> {
+        match Self::metadata_for(label, algorithm, secret) {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(error) if crate::native_list::is_malformed_list_entry_error(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -202,15 +249,21 @@ impl Keystore for SystemdCredsKeystore {
                 let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
                     continue;
                 };
-                let label = String::from_utf8(hex_decode(stem)?).map_err(|error| {
-                    Error::Encoding(format!(
-                        "stored label is not UTF-8 in {}: {error}",
-                        path.display()
-                    ))
-                })?;
-                validate_label(&label)?;
-                let secret = self.load_secret(&label, algorithm)?;
-                out.push(Self::metadata_for(label, algorithm, &secret)?);
+                let Ok(label_bytes) = hex_decode(stem) else {
+                    continue;
+                };
+                let Ok(label) = String::from_utf8(label_bytes) else {
+                    continue;
+                };
+                if validate_label(&label).is_err() {
+                    continue;
+                }
+                let Some(secret) = self.load_secret_for_list(&label, algorithm)? else {
+                    continue;
+                };
+                if let Some(metadata) = Self::list_metadata_for(label, algorithm, &secret)? {
+                    out.push(metadata);
+                }
             }
         }
         out.sort_by(|left, right| {
@@ -343,14 +396,17 @@ impl SystemdCredsKeystore {
         if let Some(algorithm) = selector.algorithm {
             return Ok(algorithm);
         }
-        let matches: Vec<_> = self
-            .list()?
-            .into_iter()
-            .filter(|metadata| metadata.label == selector.label)
-            .collect();
+        let mut matches = Vec::new();
+        for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
+            match self.load_secret(&selector.label, algorithm) {
+                Ok(_) => matches.push(algorithm),
+                Err(Error::KeyNotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
         match matches.as_slice() {
             [] => Err(Error::KeyNotFound(selector.clone())),
-            [metadata] => Ok(metadata.algorithm),
+            [algorithm] => Ok(*algorithm),
             _ => Err(Error::AmbiguousKeySelector(selector.clone())),
         }
     }
@@ -552,6 +608,28 @@ pub(crate) fn decrypt_credential(path: &Path, name: &str) -> Result<Vec<u8>> {
 }
 
 fn decrypt_credential_with_command(command: &str, path: &Path, name: &str) -> Result<Vec<u8>> {
+    decrypt_credential_with_command_result(command, path, name)
+        .map_err(CredentialDecryptError::into_error)
+}
+
+enum CredentialDecryptError {
+    Spawn(Error),
+    Status(Error),
+}
+
+impl CredentialDecryptError {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Spawn(error) | Self::Status(error) => error,
+        }
+    }
+}
+
+fn decrypt_credential_with_command_result(
+    command: &str,
+    path: &Path,
+    name: &str,
+) -> std::result::Result<Vec<u8>, CredentialDecryptError> {
     let output = Command::new(command)
         .args(["--name", name])
         .arg("decrypt")
@@ -560,11 +638,13 @@ fn decrypt_credential_with_command(command: &str, path: &Path, name: &str) -> Re
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|error| systemd_creds_spawn_error(&error))?;
+        .map_err(|error| CredentialDecryptError::Spawn(systemd_creds_spawn_error(&error)))?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
-        Err(systemd_creds_status_error("decrypt", &output))
+        Err(CredentialDecryptError::Status(systemd_creds_status_error(
+            "decrypt", &output,
+        )))
     }
 }
 
@@ -811,6 +891,69 @@ mod tests {
             !store.path_for("invalid", Algorithm::P256).unwrap().exists(),
             "invalid import must not leave a credential file"
         );
+    }
+
+    #[test]
+    fn list_metadata_skips_invalid_ecdsa_secret() {
+        let invalid = SecretKey::new(Algorithm::P256, [0; 32]);
+        assert!(
+            SystemdCredsKeystore::list_metadata_for("invalid".into(), Algorithm::P256, &invalid)
+                .unwrap()
+                .is_none()
+        );
+
+        let valid = SecretKey::new(Algorithm::Ed25519, [1; 32]);
+        let metadata =
+            SystemdCredsKeystore::list_metadata_for("valid".into(), Algorithm::Ed25519, &valid)
+                .unwrap()
+                .expect("valid metadata should list");
+        assert_eq!(metadata.label, "valid");
+        assert_eq!(metadata.algorithm, Algorithm::Ed25519);
+    }
+
+    #[test]
+    fn list_secret_skips_corrupt_decrypt_status_but_exact_decrypt_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SystemdCredsKeystore::with_root(dir.path().join("systemd-creds"));
+        let path = store.path_for("corrupt", Algorithm::Ed25519).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).expect("algorithm dir");
+        std::fs::write(&path, b"not a systemd credential").expect("corrupt credential");
+
+        assert!(
+            store
+                .load_secret_for_list_with_command("corrupt", Algorithm::Ed25519, "false")
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(matches!(
+            decrypt_credential_with_command(
+                "false",
+                &path,
+                &SystemdCredsKeystore::credential_name("corrupt", Algorithm::Ed25519).unwrap(),
+            ),
+            Err(Error::BackendUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn list_secret_does_not_hide_missing_systemd_creds_command() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SystemdCredsKeystore::with_root(dir.path().join("systemd-creds"));
+        let path = store.path_for("release", Algorithm::Ed25519).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).expect("algorithm dir");
+        std::fs::write(&path, b"credential").expect("credential");
+
+        let result = store.load_secret_for_list_with_command(
+            "release",
+            Algorithm::Ed25519,
+            "mkit-systemd-creds-missing-test-command",
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::BackendUnavailable(message)) if message.contains("executable was not found")
+        ));
     }
 
     #[test]

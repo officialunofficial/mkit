@@ -332,16 +332,30 @@ fn resolve_piv(selector: &KeySelector) -> Result<PivSigningKey> {
     }
 
     let keys = discover_piv_signing_keys()?;
-    if let Some(key) = keys.iter().find(|key| key.label == selector.label) {
-        return Ok(key.clone());
-    }
-    if selector.label == "piv" && keys.len() == 1 {
+    resolve_piv_from_keys(selector, &keys)
+}
+
+fn resolve_piv_from_keys(selector: &KeySelector, keys: &[PivSigningKey]) -> Result<PivSigningKey> {
+    let mut matches: Vec<_> = keys
+        .iter()
+        .filter(|key| key.label == selector.label || piv_label(key.slot) == selector.label)
+        .cloned()
+        .collect();
+
+    if matches.is_empty() && selector.label == "piv" && keys.len() == 1 {
         let mut key = keys[0].clone();
         key.label.clone_from(&selector.label);
         return Ok(key);
     }
 
-    Err(Error::KeyNotFound(selector.clone()))
+    match matches.as_mut_slice() {
+        [] => Err(Error::KeyNotFound(selector.clone())),
+        [key] => {
+            key.label.clone_from(&selector.label);
+            Ok(key.clone())
+        }
+        _ => Err(Error::AmbiguousKeySelector(selector.clone())),
+    }
 }
 
 fn discover_openpgp_signing_keys() -> Result<Vec<OpenPgpSigningKey>> {
@@ -374,15 +388,33 @@ fn discover_openpgp_signing_keys() -> Result<Vec<OpenPgpSigningKey>> {
 }
 
 fn discover_piv_signing_keys() -> Result<Vec<PivSigningKey>> {
-    let mut yubikey = match yubikey::YubiKey::open() {
-        Ok(yubikey) => yubikey,
-        Err(yubikey::Error::PcscError { .. } | yubikey::Error::AppletNotFound { .. }) => {
+    let mut context = match yubikey::reader::Context::open() {
+        Ok(context) => context,
+        Err(yubikey::Error::PcscError { .. } | yubikey::Error::NotFound) => {
             return Ok(Vec::new());
         }
         Err(error) => return Err(map_yubikey_error(error)),
     };
+
     let mut out = Vec::new();
-    for key in yubikey::Key::list(&mut yubikey).map_err(map_yubikey_error)? {
+    for reader in context.iter().map_err(map_yubikey_error)? {
+        let mut yubikey = match reader.open() {
+            Ok(yubikey) => yubikey,
+            Err(
+                yubikey::Error::PcscError { .. }
+                | yubikey::Error::AppletNotFound { .. }
+                | yubikey::Error::NotFound,
+            ) => continue,
+            Err(error) => return Err(map_yubikey_error(error)),
+        };
+        out.extend(discover_piv_signing_keys_on_card(&mut yubikey)?);
+    }
+    Ok(assign_piv_labels(out))
+}
+
+fn discover_piv_signing_keys_on_card(yubikey: &mut yubikey::YubiKey) -> Result<Vec<PivSigningKey>> {
+    let mut out = Vec::new();
+    for key in yubikey::Key::list(yubikey).map_err(map_yubikey_error)? {
         let slot = key.slot();
         if !matches!(
             slot,
@@ -390,7 +422,7 @@ fn discover_piv_signing_keys() -> Result<Vec<PivSigningKey>> {
         ) {
             continue;
         }
-        let metadata = yubikey::piv::metadata(&mut yubikey, slot).map_err(map_yubikey_error)?;
+        let metadata = yubikey::piv::metadata(yubikey, slot).map_err(map_yubikey_error)?;
         if metadata.algorithm != SlotAlgorithmId::Asymmetric(PivAlgorithmId::EccP256) {
             continue;
         }
@@ -408,6 +440,22 @@ fn discover_piv_signing_keys() -> Result<Vec<PivSigningKey>> {
         });
     }
     Ok(out)
+}
+
+fn assign_piv_labels(mut keys: Vec<PivSigningKey>) -> Vec<PivSigningKey> {
+    for index in 0..keys.len() {
+        let slot = keys[index].slot;
+        let duplicate_slot_count = keys.iter().filter(|key| key.slot == slot).count();
+        keys[index].label = if duplicate_slot_count > 1 {
+            serial_qualified_piv_label(keys[index].serial, slot)
+        } else {
+            piv_label(slot)
+        };
+    }
+    keys.sort_by(|left, right| {
+        (&left.label, left.serial, left.slot).cmp(&(&right.label, right.serial, right.slot))
+    });
+    keys
 }
 
 fn open_card_by_ident(ident: &str) -> Result<Card<Open>> {
@@ -546,6 +594,12 @@ fn piv_label(slot: SlotId) -> String {
         _ => "piv-unknown",
     }
     .into()
+}
+
+fn serial_qualified_piv_label(serial: yubikey::Serial, slot: SlotId) -> String {
+    let base = piv_label(slot);
+    let suffix = base.strip_prefix("piv-").unwrap_or(&base);
+    format!("piv-{}-{suffix}", serial.0)
 }
 
 fn default_pin_policy(slot: SlotId) -> PinPolicy {
@@ -796,6 +850,51 @@ mod tests {
             verify_piv_public_key_matches(&key, &[2; 33]),
             Err(Error::AccessDenied(_))
         ));
+    }
+
+    fn test_piv_key(serial: u32, slot: SlotId) -> PivSigningKey {
+        PivSigningKey {
+            label: piv_label(slot),
+            serial: yubikey::Serial(serial),
+            slot,
+            public_key: vec![1; 33],
+            pin_policy: PinPolicy::Never,
+            touch_policy: TouchPolicy::Never,
+        }
+    }
+
+    #[test]
+    fn piv_discovery_keeps_bare_labels_when_slots_are_unique() {
+        let keys = assign_piv_labels(vec![
+            test_piv_key(111, SlotId::Signature),
+            test_piv_key(222, SlotId::Authentication),
+        ]);
+
+        assert!(keys.iter().any(|key| key.label == "piv-9c"));
+        assert!(keys.iter().any(|key| key.label == "piv-9a"));
+        let selector = KeySelector::new("piv-9c", Some(Algorithm::P256)).unwrap();
+        let key = resolve_piv_from_keys(&selector, &keys).expect("bare unique slot resolves");
+        assert_eq!(key.serial, yubikey::Serial(111));
+    }
+
+    #[test]
+    fn piv_discovery_serial_qualifies_duplicate_slots() {
+        let keys = assign_piv_labels(vec![
+            test_piv_key(111, SlotId::Signature),
+            test_piv_key(222, SlotId::Signature),
+        ]);
+
+        assert!(keys.iter().any(|key| key.label == "piv-111-9c"));
+        assert!(keys.iter().any(|key| key.label == "piv-222-9c"));
+        let bare = KeySelector::new("piv-9c", Some(Algorithm::P256)).unwrap();
+        assert!(matches!(
+            resolve_piv_from_keys(&bare, &keys),
+            Err(Error::AmbiguousKeySelector(_))
+        ));
+
+        let qualified = KeySelector::new("piv-222-9c", Some(Algorithm::P256)).unwrap();
+        let key = resolve_piv_from_keys(&qualified, &keys).expect("qualified slot resolves");
+        assert_eq!(key.serial, yubikey::Serial(222));
     }
 
     #[test]

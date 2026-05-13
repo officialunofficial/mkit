@@ -38,6 +38,18 @@ pub(crate) fn metadata_from_account_secret(
     }))
 }
 
+pub(crate) fn list_metadata_from_account_secret(
+    account: &str,
+    backend: BackendKind,
+    secret: Vec<u8>,
+) -> Result<Option<KeyMetadata>> {
+    match metadata_from_account_secret(account, backend, secret) {
+        Ok(metadata) => Ok(metadata),
+        Err(error) if is_malformed_list_entry_error(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn sort_metadata(metadata: &mut [KeyMetadata]) {
     metadata.sort_by(|left, right| {
         (&left.backend, &left.label, left.algorithm).cmp(&(
@@ -55,23 +67,36 @@ pub(crate) fn parse_account(account: &str) -> Option<(Algorithm, String)> {
     Some((algorithm, label.to_owned()))
 }
 
-pub(crate) fn resolve_selector_algorithm(
-    store: &dyn crate::Keystore,
+pub(crate) fn resolve_selector_algorithm<F>(
     selector: &crate::KeySelector,
-) -> Result<Algorithm> {
+    mut load_secret: F,
+) -> Result<Algorithm>
+where
+    F: FnMut(&str, Algorithm) -> Result<SecretKey>,
+{
     if let Some(algorithm) = selector.algorithm {
         return Ok(algorithm);
     }
-    let matches: Vec<_> = store
-        .list()?
-        .into_iter()
-        .filter(|metadata| metadata.label == selector.label)
-        .collect();
+    let mut matches = Vec::new();
+    for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
+        match load_secret(&selector.label, algorithm) {
+            Ok(_) => matches.push(algorithm),
+            Err(Error::KeyNotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
     match matches.as_slice() {
         [] => Err(Error::KeyNotFound(selector.clone())),
-        [metadata] => Ok(metadata.algorithm),
+        [algorithm] => Ok(*algorithm),
         _ => Err(Error::AmbiguousKeySelector(selector.clone())),
     }
+}
+
+pub(crate) fn is_malformed_list_entry_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::InvalidKeyMaterial { .. } | Error::InvalidLabel { .. } | Error::Encoding(_)
+    )
 }
 
 #[cfg(test)]
@@ -275,111 +300,94 @@ fn unique_test_label() -> String {
 mod tests {
     use super::*;
 
-    #[derive(Clone)]
-    struct FakeKeystore {
-        metadata: Vec<KeyMetadata>,
-    }
-
-    impl crate::Keystore for FakeKeystore {
-        fn capabilities(&self) -> crate::Capabilities {
-            crate::Capabilities {
-                backend: BackendKind::Software,
-                algorithms: Vec::new(),
-                can_generate: false,
-                can_import: false,
-                can_export: false,
-                can_delete: false,
-                supports_listing: true,
-                supports_user_presence: false,
-                supports_device_bound: false,
-                supports_non_extractable: false,
-            }
-        }
-
-        fn generate(
-            &self,
-            _label: &str,
-            _algorithm: Algorithm,
-            _attrs: crate::KeyAttrs,
-            _options: crate::GenerateOptions,
-        ) -> Result<Box<dyn crate::KeySigner>> {
-            unimplemented!()
-        }
-
-        fn import(
-            &self,
-            _label: &str,
-            _secret: crate::SecretKey,
-            _attrs: crate::KeyAttrs,
-            _options: crate::ImportOptions,
-        ) -> Result<Box<dyn crate::KeySigner>> {
-            unimplemented!()
-        }
-
-        fn open(&self, _selector: &crate::KeySelector) -> Result<Box<dyn crate::KeySigner>> {
-            unimplemented!()
-        }
-
-        fn list(&self) -> Result<Vec<KeyMetadata>> {
-            Ok(self.metadata.clone())
-        }
-
-        fn export(&self, _selector: &crate::KeySelector) -> Result<crate::SecretKey> {
-            unimplemented!()
-        }
-
-        fn delete(&self, _selector: &crate::KeySelector) -> Result<()> {
-            unimplemented!()
-        }
-    }
-
-    fn metadata(label: &str, algorithm: Algorithm) -> KeyMetadata {
-        KeyMetadata {
-            label: label.into(),
-            backend: BackendKind::Software,
-            algorithm,
-            public_key: Vec::new(),
-            keyid: String::new(),
-            extractable: true,
-            require_user_presence: false,
-            device_bound: false,
-        }
-    }
-
     #[test]
     fn label_only_selector_resolution_matches_contract() {
-        let store = FakeKeystore {
-            metadata: vec![
-                metadata("unique", Algorithm::Ed25519),
-                metadata("ambiguous", Algorithm::Ed25519),
-                metadata("ambiguous", Algorithm::P256),
-            ],
+        let load_secret = |label: &str, algorithm: Algorithm| match (label, algorithm) {
+            ("unique", Algorithm::Ed25519)
+            | ("ambiguous", Algorithm::Ed25519 | Algorithm::P256) => {
+                Ok(SecretKey::new(algorithm, [1; 32]))
+            }
+            _ => Err(Error::KeyNotFound(crate::KeySelector {
+                label: label.into(),
+                algorithm: Some(algorithm),
+            })),
         };
 
         assert_eq!(
-            resolve_selector_algorithm(&store, &crate::KeySelector::new("unique", None).unwrap())
-                .unwrap(),
+            resolve_selector_algorithm(
+                &crate::KeySelector::new("unique", None).unwrap(),
+                load_secret
+            )
+            .unwrap(),
             Algorithm::Ed25519
         );
         assert!(matches!(
-            resolve_selector_algorithm(&store, &crate::KeySelector::new("missing", None).unwrap()),
+            resolve_selector_algorithm(
+                &crate::KeySelector::new("missing", None).unwrap(),
+                load_secret
+            ),
             Err(Error::KeyNotFound(_))
         ));
         assert!(matches!(
             resolve_selector_algorithm(
-                &store,
-                &crate::KeySelector::new("ambiguous", None).unwrap()
+                &crate::KeySelector::new("ambiguous", None).unwrap(),
+                load_secret
             ),
             Err(Error::AmbiguousKeySelector(_))
         ));
         assert_eq!(
             resolve_selector_algorithm(
-                &store,
-                &crate::KeySelector::new("ambiguous", Some(Algorithm::P256)).unwrap()
+                &crate::KeySelector::new("ambiguous", Some(Algorithm::P256)).unwrap(),
+                load_secret
             )
             .unwrap(),
             Algorithm::P256
         );
+    }
+
+    #[test]
+    fn label_only_selector_resolution_fails_closed_for_matching_malformed_key() {
+        let load_secret = |label: &str, algorithm: Algorithm| match (label, algorithm) {
+            ("corrupt", Algorithm::Ed25519) => Err(Error::InvalidKeyMaterial {
+                algorithm,
+                reason: "expected 32 bytes, got 3".into(),
+            }),
+            _ => Err(Error::KeyNotFound(crate::KeySelector {
+                label: label.into(),
+                algorithm: Some(algorithm),
+            })),
+        };
+
+        assert!(matches!(
+            resolve_selector_algorithm(
+                &crate::KeySelector::new("corrupt", None).unwrap(),
+                load_secret
+            ),
+            Err(Error::InvalidKeyMaterial { .. })
+        ));
+    }
+
+    #[test]
+    fn listing_metadata_skips_malformed_native_entries() {
+        assert!(
+            list_metadata_from_account_secret(
+                "ed25519:bad",
+                BackendKind::MacosKeychain,
+                vec![1, 2, 3]
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        let metadata = list_metadata_from_account_secret(
+            "ed25519:good",
+            BackendKind::MacosKeychain,
+            vec![1; 32],
+        )
+        .unwrap()
+        .expect("valid entry should list");
+        assert_eq!(metadata.label, "good");
+        assert_eq!(metadata.algorithm, Algorithm::Ed25519);
     }
 
     #[test]
