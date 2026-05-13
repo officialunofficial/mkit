@@ -30,12 +30,6 @@ impl MacosKeychainKeystore {
         Ok(format!("{}:{label}", algorithm.as_str()))
     }
 
-    fn selector_algorithm(selector: &KeySelector) -> Result<Algorithm> {
-        selector.algorithm.ok_or(Error::UnsupportedOperation(
-            "macOS Keychain backend requires an algorithm in key selectors",
-        ))
-    }
-
     fn get_secret(label: &str, algorithm: Algorithm) -> Result<SecretKey> {
         let account = Self::account(label, algorithm)?;
         let password = Zeroizing::new(
@@ -128,7 +122,7 @@ impl Keystore for MacosKeychainKeystore {
 
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
         validate_label(&selector.label)?;
-        let algorithm = Self::selector_algorithm(selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
         let secret = Self::get_secret(&selector.label, algorithm)?;
         Ok(Box::new(SoftwareSigner::new(
             selector.label.clone(),
@@ -177,13 +171,13 @@ impl Keystore for MacosKeychainKeystore {
 
     fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
         validate_label(&selector.label)?;
-        let algorithm = Self::selector_algorithm(selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
         Self::get_secret(&selector.label, algorithm)
     }
 
     fn delete(&self, selector: &KeySelector) -> Result<()> {
         validate_label(&selector.label)?;
-        let algorithm = Self::selector_algorithm(selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
         let account = Self::account(&selector.label, algorithm)?;
         security_framework::passwords::delete_generic_password(SERVICE, &account)
             .map_err(|error| map_keychain_error(error, &selector.label, algorithm))

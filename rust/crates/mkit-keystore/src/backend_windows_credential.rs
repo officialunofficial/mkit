@@ -28,12 +28,6 @@ impl WindowsCredentialKeystore {
         Ok(format!("{}:{label}", algorithm.as_str()))
     }
 
-    fn selector_algorithm(selector: &KeySelector) -> Result<Algorithm> {
-        selector.algorithm.ok_or(Error::UnsupportedOperation(
-            "Windows Credential Manager backend requires an algorithm in key selectors",
-        ))
-    }
-
     fn entry(label: &str, algorithm: Algorithm) -> Result<keyring_core::Entry> {
         let store = windows_native_keyring_store::Store::new()
             .map_err(|error| keyring_backend_error("create Windows Credential store", error))?;
@@ -131,7 +125,7 @@ impl Keystore for WindowsCredentialKeystore {
 
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
         validate_label(&selector.label)?;
-        let algorithm = Self::selector_algorithm(selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
         let secret = Self::get_secret(&selector.label, algorithm)?;
         Ok(Box::new(SoftwareSigner::new(
             selector.label.clone(),
@@ -178,13 +172,13 @@ impl Keystore for WindowsCredentialKeystore {
 
     fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
         validate_label(&selector.label)?;
-        let algorithm = Self::selector_algorithm(selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
         Self::get_secret(&selector.label, algorithm)
     }
 
     fn delete(&self, selector: &KeySelector) -> Result<()> {
         validate_label(&selector.label)?;
-        let algorithm = Self::selector_algorithm(selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
         Self::entry(&selector.label, algorithm)?
             .delete_credential()
             .map_err(|error| map_keyring_error(error, &selector.label, algorithm))

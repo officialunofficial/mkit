@@ -28,12 +28,6 @@ impl LinuxSecretServiceKeystore {
         Ok(format!("{}:{label}", algorithm.as_str()))
     }
 
-    fn selector_algorithm(selector: &KeySelector) -> Result<Algorithm> {
-        selector.algorithm.ok_or(Error::UnsupportedOperation(
-            "Linux Secret Service backend requires an algorithm in key selectors",
-        ))
-    }
-
     fn entry(label: &str, algorithm: Algorithm) -> Result<keyring_core::Entry> {
         let store = zbus_secret_service_keyring_store::Store::new()
             .map_err(|error| keyring_backend_error("create Secret Service store", error))?;
@@ -131,7 +125,7 @@ impl Keystore for LinuxSecretServiceKeystore {
 
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
         validate_label(&selector.label)?;
-        let algorithm = Self::selector_algorithm(selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
         let secret = Self::get_secret(&selector.label, algorithm)?;
         Ok(Box::new(SoftwareSigner::new(
             selector.label.clone(),
@@ -175,13 +169,13 @@ impl Keystore for LinuxSecretServiceKeystore {
 
     fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
         validate_label(&selector.label)?;
-        let algorithm = Self::selector_algorithm(selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
         Self::get_secret(&selector.label, algorithm)
     }
 
     fn delete(&self, selector: &KeySelector) -> Result<()> {
         validate_label(&selector.label)?;
-        let algorithm = Self::selector_algorithm(selector)?;
+        let algorithm = crate::native_list::resolve_selector_algorithm(self, selector)?;
         Self::entry(&selector.label, algorithm)?
             .delete_credential()
             .map_err(|error| map_keyring_error(error, &selector.label, algorithm))

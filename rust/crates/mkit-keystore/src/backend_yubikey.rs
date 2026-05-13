@@ -70,11 +70,37 @@ impl YubiKeyKeystore {
 
     fn resolve(selector: &KeySelector) -> Result<YubiKeySigningKey> {
         validate_label(&selector.label)?;
-        match selector.algorithm.unwrap_or(Algorithm::Ed25519) {
-            Algorithm::Ed25519 => resolve_openpgp(selector).map(YubiKeySigningKey::OpenPgp),
-            Algorithm::P256 => resolve_piv(selector).map(YubiKeySigningKey::Piv),
-            Algorithm::Secp256k1 => Err(Error::UnsupportedAlgorithm(Algorithm::Secp256k1)),
+        match selector.algorithm {
+            None => resolve_label_only(selector),
+            Some(algorithm) => resolve_by_algorithm(selector, algorithm),
         }
+    }
+}
+
+fn resolve_by_algorithm(selector: &KeySelector, algorithm: Algorithm) -> Result<YubiKeySigningKey> {
+    match algorithm {
+        Algorithm::Ed25519 => resolve_openpgp(selector).map(YubiKeySigningKey::OpenPgp),
+        Algorithm::P256 => resolve_piv(selector).map(YubiKeySigningKey::Piv),
+        Algorithm::Secp256k1 => Err(Error::UnsupportedAlgorithm(Algorithm::Secp256k1)),
+    }
+}
+
+fn resolve_label_only(selector: &KeySelector) -> Result<YubiKeySigningKey> {
+    let mut matches = Vec::new();
+    match resolve_openpgp(selector) {
+        Ok(key) => matches.push(YubiKeySigningKey::OpenPgp(key)),
+        Err(Error::KeyNotFound(_)) => {}
+        Err(error) => return Err(error),
+    }
+    match resolve_piv(selector) {
+        Ok(key) => matches.push(YubiKeySigningKey::Piv(key)),
+        Err(Error::KeyNotFound(_)) => {}
+        Err(error) => return Err(error),
+    }
+    match matches.as_slice() {
+        [] => Err(Error::KeyNotFound(selector.clone())),
+        [key] => Ok(key.clone()),
+        _ => Err(Error::AmbiguousKeySelector(selector.clone())),
     }
 }
 

@@ -54,6 +54,25 @@ pub(crate) fn parse_account(account: &str) -> Option<(Algorithm, String)> {
     Some((algorithm, label.to_owned()))
 }
 
+pub(crate) fn resolve_selector_algorithm(
+    store: &dyn crate::Keystore,
+    selector: &crate::KeySelector,
+) -> Result<Algorithm> {
+    if let Some(algorithm) = selector.algorithm {
+        return Ok(algorithm);
+    }
+    let matches: Vec<_> = store
+        .list()?
+        .into_iter()
+        .filter(|metadata| metadata.label == selector.label)
+        .collect();
+    match matches.as_slice() {
+        [] => Err(Error::KeyNotFound(selector.clone())),
+        [metadata] => Ok(metadata.algorithm),
+        _ => Err(Error::AmbiguousKeySelector(selector.clone())),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> Result<()> {
     let label = unique_test_label();
@@ -127,6 +146,7 @@ pub(crate) fn run_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn run_required_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
     run_native_backend_roundtrip_test_with_availability(store, true);
 }
@@ -252,6 +272,113 @@ fn unique_test_label() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone)]
+    struct FakeKeystore {
+        metadata: Vec<KeyMetadata>,
+    }
+
+    impl crate::Keystore for FakeKeystore {
+        fn capabilities(&self) -> crate::Capabilities {
+            crate::Capabilities {
+                backend: BackendKind::Software,
+                algorithms: Vec::new(),
+                can_generate: false,
+                can_import: false,
+                can_export: false,
+                can_delete: false,
+                supports_listing: true,
+                supports_user_presence: false,
+                supports_device_bound: false,
+                supports_non_extractable: false,
+            }
+        }
+
+        fn generate(
+            &self,
+            _label: &str,
+            _algorithm: Algorithm,
+            _attrs: crate::KeyAttrs,
+            _options: crate::GenerateOptions,
+        ) -> Result<Box<dyn crate::KeySigner>> {
+            unimplemented!()
+        }
+
+        fn import(
+            &self,
+            _label: &str,
+            _secret: crate::SecretKey,
+            _attrs: crate::KeyAttrs,
+            _options: crate::ImportOptions,
+        ) -> Result<Box<dyn crate::KeySigner>> {
+            unimplemented!()
+        }
+
+        fn open(&self, _selector: &crate::KeySelector) -> Result<Box<dyn crate::KeySigner>> {
+            unimplemented!()
+        }
+
+        fn list(&self) -> Result<Vec<KeyMetadata>> {
+            Ok(self.metadata.clone())
+        }
+
+        fn export(&self, _selector: &crate::KeySelector) -> Result<crate::SecretKey> {
+            unimplemented!()
+        }
+
+        fn delete(&self, _selector: &crate::KeySelector) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    fn metadata(label: &str, algorithm: Algorithm) -> KeyMetadata {
+        KeyMetadata {
+            label: label.into(),
+            backend: BackendKind::Software,
+            algorithm,
+            public_key: Vec::new(),
+            keyid: String::new(),
+            extractable: true,
+            require_user_presence: false,
+            device_bound: false,
+        }
+    }
+
+    #[test]
+    fn label_only_selector_resolution_matches_contract() {
+        let store = FakeKeystore {
+            metadata: vec![
+                metadata("unique", Algorithm::Ed25519),
+                metadata("ambiguous", Algorithm::Ed25519),
+                metadata("ambiguous", Algorithm::P256),
+            ],
+        };
+
+        assert_eq!(
+            resolve_selector_algorithm(&store, &crate::KeySelector::new("unique", None).unwrap())
+                .unwrap(),
+            Algorithm::Ed25519
+        );
+        assert!(matches!(
+            resolve_selector_algorithm(&store, &crate::KeySelector::new("missing", None).unwrap()),
+            Err(Error::KeyNotFound(_))
+        ));
+        assert!(matches!(
+            resolve_selector_algorithm(
+                &store,
+                &crate::KeySelector::new("ambiguous", None).unwrap()
+            ),
+            Err(Error::AmbiguousKeySelector(_))
+        ));
+        assert_eq!(
+            resolve_selector_algorithm(
+                &store,
+                &crate::KeySelector::new("ambiguous", Some(Algorithm::P256)).unwrap()
+            )
+            .unwrap(),
+            Algorithm::P256
+        );
+    }
 
     #[test]
     fn parses_backend_account_names() {
