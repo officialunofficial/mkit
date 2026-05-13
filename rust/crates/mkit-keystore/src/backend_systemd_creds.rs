@@ -338,6 +338,29 @@ fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
 }
 
 pub(crate) fn encrypt_credential(secret: &[u8; 32], path: &Path, name: &str) -> Result<()> {
+    let tmp_path = temp_credential_path(path)?;
+    if let Err(error) = encrypt_credential_to_path(secret, &tmp_path, name) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| Error::Io(format!("chmod {}: {error}", tmp_path.display())))?;
+    }
+    if let Err(error) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(Error::Io(format!(
+            "rename {} to {}: {error}",
+            tmp_path.display(),
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn encrypt_credential_to_path(secret: &[u8; 32], path: &Path, name: &str) -> Result<()> {
     let mut child = Command::new("systemd-creds")
         .args(["--user", "--uid=self", "--with-key=auto", "--name", name])
         .arg("encrypt")
@@ -363,6 +386,22 @@ pub(crate) fn encrypt_credential(secret: &[u8; 32], path: &Path, name: &str) -> 
         let _ = std::fs::remove_file(path);
         Err(systemd_creds_status_error("encrypt", output))
     }
+}
+
+fn temp_credential_path(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::Io(format!("path has no parent: {}", path.display())))?;
+    let filename = path
+        .file_name()
+        .ok_or_else(|| Error::Io(format!("path has no filename: {}", path.display())))?;
+    let mut suffix = [0u8; 8];
+    getrandom::fill(&mut suffix).map_err(|_| Error::Internal("rng failed".into()))?;
+    Ok(parent.join(format!(
+        ".{}.{}.tmp",
+        filename.to_string_lossy(),
+        hex_lower(&suffix)
+    )))
 }
 
 pub(crate) fn decrypt_credential(path: &Path, name: &str) -> Result<Vec<u8>> {
@@ -513,6 +552,22 @@ mod tests {
             SystemdCredsKeystore::credential_name("release", Algorithm::Ed25519).unwrap(),
             "mkit.ed25519.release"
         );
+    }
+
+    #[test]
+    fn temp_credential_path_is_hidden_sibling() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let final_path = dir.path().join("release.cred");
+        let temp_path = temp_credential_path(&final_path).expect("temp path");
+
+        assert_eq!(temp_path.parent(), final_path.parent());
+        let filename = temp_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("temp filename");
+        assert!(filename.starts_with(".release.cred."));
+        assert!(filename.ends_with(".tmp"));
+        assert_ne!(temp_path, final_path);
     }
 
     #[test]
