@@ -266,13 +266,17 @@ pub(crate) fn systemd_creds_runtime_available() -> bool {
 }
 
 fn systemd_creds_runtime_available_with_command(command: &str) -> bool {
-    Command::new(command)
+    if !Command::new(command)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+    {
+        return false;
+    }
+    systemd_creds_roundtrip_available_with_command(command)
 }
 
 impl SystemdCredsKeystore {
@@ -364,7 +368,16 @@ pub(crate) fn encrypt_credential(secret: &[u8; 32], path: &Path, name: &str) -> 
 }
 
 fn encrypt_credential_to_path(secret: &[u8; 32], path: &Path, name: &str) -> Result<()> {
-    let mut child = Command::new("systemd-creds")
+    encrypt_credential_to_path_with_command("systemd-creds", secret, path, name)
+}
+
+fn encrypt_credential_to_path_with_command(
+    command: &str,
+    secret: &[u8; 32],
+    path: &Path,
+    name: &str,
+) -> Result<()> {
+    let mut child = Command::new(command)
         .args(["--with-key=auto", "--name", name])
         .arg("encrypt")
         .arg("-")
@@ -408,7 +421,11 @@ fn temp_credential_path(path: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn decrypt_credential(path: &Path, name: &str) -> Result<Vec<u8>> {
-    let output = Command::new("systemd-creds")
+    decrypt_credential_with_command("systemd-creds", path, name)
+}
+
+fn decrypt_credential_with_command(command: &str, path: &Path, name: &str) -> Result<Vec<u8>> {
+    let output = Command::new(command)
         .args(["--name", name])
         .arg("decrypt")
         .arg(path)
@@ -422,6 +439,25 @@ pub(crate) fn decrypt_credential(path: &Path, name: &str) -> Result<Vec<u8>> {
     } else {
         Err(systemd_creds_status_error("decrypt", &output))
     }
+}
+
+fn systemd_creds_roundtrip_available_with_command(command: &str) -> bool {
+    let mut suffix = [0u8; 8];
+    if getrandom::fill(&mut suffix).is_err() {
+        return false;
+    }
+    let dir = std::env::temp_dir().join(format!("mkit-systemd-creds-{}", hex_lower(&suffix)));
+    let path = dir.join("probe.cred");
+    let name = "mkit.runtime-probe";
+    let secret = [0x5a; 32];
+    let result = std::fs::create_dir_all(&dir)
+        .map_err(|error| Error::Io(format!("mkdir {}: {error}", dir.display())))
+        .and_then(|()| encrypt_credential_to_path_with_command(command, &secret, &path, name))
+        .and_then(|()| decrypt_credential_with_command(command, &path, name))
+        .is_ok_and(|plaintext| plaintext == secret);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+    result
 }
 
 fn systemd_creds_spawn_error(error: &std::io::Error) -> Error {
@@ -597,6 +633,12 @@ mod tests {
 
     #[test]
     fn live_backend_create_open_list_export_delete_roundtrip() {
+        if std::env::var_os("MKIT_RUN_SYSTEMD_CREDS_TESTS").as_deref() != Some("1".as_ref()) {
+            eprintln!(
+                "skipping systemd-creds live backend roundtrip; set MKIT_RUN_SYSTEMD_CREDS_TESTS=1 to run"
+            );
+            return;
+        }
         let dir = tempfile::tempdir().expect("tempdir");
         let store = SystemdCredsKeystore::with_root(dir.path().join("systemd-creds"));
         crate::native_list::run_required_native_backend_roundtrip_test(&store);

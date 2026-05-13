@@ -475,6 +475,7 @@ impl SoftwareKeystore {
     }
 
     #[cfg(not(unix))]
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
     fn ensure_storage_path_not_symlink(&self, _path: &Path) -> Result<()> {
         Ok(())
     }
@@ -680,7 +681,7 @@ fn write_key_file(
     #[cfg(not(unix))]
     {
         let _ = root;
-        return write_key_file_portable(path, label, algorithm, bytes, overwrite);
+        write_key_file_portable(path, label, algorithm, bytes, overwrite)
     }
 }
 
@@ -912,31 +913,24 @@ fn write_key_file_portable(
             .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
     }
     if !overwrite {
-        return write_key_file_portable_create_new(path, label, algorithm, bytes);
+        write_key_file_portable_create_new(path, label, algorithm, bytes)
+    } else {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let filename = path
+            .file_name()
+            .ok_or_else(|| Error::Io(format!("path has no filename: {}", path.display())))?;
+        let (tmp_path, mut file) = create_synced_tmp_key_file_portable(parent, filename)?;
+        file.write_all(bytes)
+            .map_err(|error| Error::Io(format!("write tmp {}: {error}", tmp_path.display())))?;
+        file.sync_all()
+            .map_err(|error| Error::Io(format!("fsync tmp {}: {error}", tmp_path.display())))?;
+        drop(file);
+        if let Err(error) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(Error::Io(format!("rename {}: {error}", path.display())));
+        }
+        Ok(())
     }
-
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let filename = path
-        .file_name()
-        .ok_or_else(|| Error::Io(format!("path has no filename: {}", path.display())))?;
-    let (tmp_path, mut file) = create_synced_tmp_key_file_portable(parent, filename)?;
-    file.write_all(bytes)
-        .map_err(|error| Error::Io(format!("write tmp {}: {error}", tmp_path.display())))?;
-    file.sync_all()
-        .map_err(|error| Error::Io(format!("fsync tmp {}: {error}", tmp_path.display())))?;
-    drop(file);
-    if let Err(error) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return if !overwrite && error.kind() == std::io::ErrorKind::AlreadyExists {
-            Err(Error::KeyAlreadyExists {
-                label: label.into(),
-                algorithm,
-            })
-        } else {
-            Err(Error::Io(format!("rename {}: {error}", path.display())))
-        };
-    }
-    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -999,7 +993,7 @@ fn create_synced_tmp_key_file_portable(
             .open(&tmp_path)
         {
             Ok(file) => return Ok((tmp_path, file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(Error::Io(format!(
                     "open tmp {}: {error}",

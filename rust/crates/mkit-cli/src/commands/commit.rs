@@ -604,7 +604,7 @@ mod tests {
         let seed = [0x5a; 32];
         let kp = KeyPair::from_seed(seed);
         let store_root = tempfile::tempdir().unwrap();
-        let store = mkit_keystore::SoftwareKeystore::with_root(store_root.path().join("keys"));
+        let store = mkit_keystore::SoftwareRawKeystore::with_root(store_root.path().join("keys"));
         store
             .import(
                 "committer",

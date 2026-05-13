@@ -170,6 +170,15 @@ jobs:
               eval "$(printf "mkit-ci\n" | gnome-keyring-daemon --unlock --components=secrets)"
               cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
             '
+            sudo env \
+              "PATH=$PATH" \
+              "CARGO_HOME=$CARGO_HOME" \
+              "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+              "CARGO_TARGET_DIR=$RUNNER_TEMP/mkit-systemd-creds-target" \
+              "MKIT_RUN_NATIVE_KEYSTORE_TESTS=1" \
+              "MKIT_RUN_SYSTEMD_CREDS_TESTS=1" \
+              cargo test --locked -p mkit-keystore --features "backend-systemd-creds" \
+                backend_systemd_creds::tests::live_backend_create_open_list_export_delete_roundtrip -- --exact
           else
             cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
           fi
