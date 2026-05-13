@@ -122,10 +122,10 @@ impl EncryptedKeyRecord {
                 reason: "decrypted secret is not 32 bytes".into(),
             });
         }
-        let mut secret = [0u8; DEK_LEN];
+        let mut secret = Zeroizing::new([0u8; DEK_LEN]);
         secret.copy_from_slice(&plaintext);
         plaintext.zeroize();
-        Ok(SecretKey::new(self.algorithm, secret))
+        Ok(SecretKey::from_zeroizing(self.algorithm, secret))
     }
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {

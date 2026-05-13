@@ -11,14 +11,15 @@ pub(crate) fn metadata_from_account_secret(
         return Ok(None);
     };
     let secret = zeroize::Zeroizing::new(secret);
-    let secret: [u8; 32] = secret
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::InvalidKeyMaterial {
+    if secret.len() != 32 {
+        return Err(Error::InvalidKeyMaterial {
             algorithm,
             reason: format!("expected 32 bytes, got {}", secret.len()),
-        })?;
-    let secret = SecretKey::new(algorithm, secret);
+        });
+    }
+    let mut secret_bytes = zeroize::Zeroizing::new([0u8; 32]);
+    secret_bytes.copy_from_slice(secret.as_slice());
+    let secret = SecretKey::from_zeroizing(algorithm, secret_bytes);
     let signer = SoftwareSigner::new(
         label.clone(),
         backend.clone(),

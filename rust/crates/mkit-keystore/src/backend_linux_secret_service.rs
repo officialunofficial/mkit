@@ -42,15 +42,15 @@ impl LinuxSecretServiceKeystore {
                 .get_secret()
                 .map_err(|error| map_keyring_error(error, label, algorithm))?,
         );
-        let secret: [u8; 32] =
-            secret
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::InvalidKeyMaterial {
-                    algorithm,
-                    reason: format!("expected 32 bytes, got {}", secret.len()),
-                })?;
-        Ok(SecretKey::new(algorithm, secret))
+        if secret.len() != 32 {
+            return Err(Error::InvalidKeyMaterial {
+                algorithm,
+                reason: format!("expected 32 bytes, got {}", secret.len()),
+            });
+        }
+        let mut secret_bytes = Zeroizing::new([0u8; 32]);
+        secret_bytes.copy_from_slice(secret.as_slice());
+        Ok(SecretKey::from_zeroizing(algorithm, secret_bytes))
     }
 }
 

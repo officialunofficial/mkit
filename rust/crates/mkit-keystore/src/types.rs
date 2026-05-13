@@ -228,6 +228,10 @@ impl SecretKey {
         }
     }
 
+    pub(crate) fn from_zeroizing(algorithm: Algorithm, bytes: Zeroizing<[u8; 32]>) -> Self {
+        Self { algorithm, bytes }
+    }
+
     /// Secret key algorithm.
     #[must_use]
     pub const fn algorithm(&self) -> Algorithm {

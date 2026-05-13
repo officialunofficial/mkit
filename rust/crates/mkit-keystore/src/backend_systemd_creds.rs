@@ -58,15 +58,15 @@ impl SystemdCredsKeystore {
             &path,
             &Self::credential_name(label, algorithm)?,
         )?);
-        let secret: [u8; 32] =
-            plaintext
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::InvalidKeyMaterial {
-                    algorithm,
-                    reason: format!("expected 32 bytes, got {}", plaintext.len()),
-                })?;
-        Ok(SecretKey::new(algorithm, secret))
+        if plaintext.len() != 32 {
+            return Err(Error::InvalidKeyMaterial {
+                algorithm,
+                reason: format!("expected 32 bytes, got {}", plaintext.len()),
+            });
+        }
+        let mut secret = Zeroizing::new([0u8; 32]);
+        secret.copy_from_slice(plaintext.as_slice());
+        Ok(SecretKey::from_zeroizing(algorithm, secret))
     }
 
     fn metadata_for(
@@ -140,11 +140,7 @@ impl Keystore for SystemdCredsKeystore {
             *secret.expose_secret(),
         )?;
         let path = self.path_for(label, secret.algorithm())?;
-        self.ensure_storage_path_not_symlink(&path)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
-        }
+        self.prepare_write_path(&path)?;
         if options.overwrite {
             encrypt_credential(
                 secret.expose_secret(),
@@ -316,6 +312,33 @@ impl SystemdCredsKeystore {
         Ok(())
     }
 
+    #[cfg(unix)]
+    fn prepare_write_path(&self, path: &Path) -> Result<()> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        self.ensure_storage_path_not_symlink(parent)?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
+        set_private_dir_permissions(&self.root)?;
+        ensure_owned_by_euid(&self.root)?;
+        if parent != self.root {
+            set_private_dir_permissions(parent)?;
+            ensure_owned_by_euid(parent)?;
+        }
+        self.ensure_storage_path_not_symlink(path)
+    }
+
+    #[cfg(not(unix))]
+    fn prepare_write_path(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
+        }
+        Ok(())
+    }
+
     fn resolve_selector_algorithm(&self, selector: &KeySelector) -> Result<Algorithm> {
         if let Some(algorithm) = selector.algorithm {
             return Ok(algorithm);
@@ -350,6 +373,32 @@ fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_owned_by_euid(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| Error::Io(format!("metadata {}: {error}", path.display())))?;
+    let actual = metadata.uid();
+    let expected = mkit_core::sign::effective_uid();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(Error::AccessDenied(format!(
+            "keystore path is owned by uid {actual}, expected {expected}: {}",
+            path.display()
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| Error::Io(format!("chmod {}: {error}", path.display())))
 }
 
 pub(crate) fn encrypt_credential(secret: &[u8; 32], path: &Path, name: &str) -> Result<()> {
@@ -689,6 +738,44 @@ mod tests {
                 .is_some_and(|(_, extension)| extension == "tmp")
         );
         assert_ne!(temp_path, final_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_write_path_hardens_parent_directories() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SystemdCredsKeystore::with_root(dir.path().join("systemd-creds"));
+        let path = store.path_for("release", Algorithm::Ed25519).unwrap();
+
+        store.prepare_write_path(&path).expect("prepare write path");
+
+        let root_metadata = std::fs::metadata(&store.root).expect("root metadata");
+        let parent = path.parent().expect("key parent");
+        let parent_metadata = std::fs::metadata(parent).expect("parent metadata");
+        assert_eq!(root_metadata.permissions().mode() & 0o777, 0o700);
+        assert_eq!(parent_metadata.permissions().mode() & 0o777, 0o700);
+        assert_eq!(root_metadata.uid(), mkit_core::sign::effective_uid());
+        assert_eq!(parent_metadata.uid(), mkit_core::sign::effective_uid());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_write_path_rejects_symlinked_algorithm_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("systemd-creds");
+        let real_algorithm_dir = dir.path().join("real-ed25519");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&real_algorithm_dir).expect("real algorithm dir");
+        std::os::unix::fs::symlink(&real_algorithm_dir, root.join("ed25519"))
+            .expect("algorithm dir symlink");
+        let store = SystemdCredsKeystore::with_root(root);
+        let path = store.path_for("release", Algorithm::Ed25519).unwrap();
+
+        let result = store.prepare_write_path(&path);
+
+        assert!(matches!(result, Err(Error::Io(message)) if message.contains("symlink")));
     }
 
     #[cfg(unix)]

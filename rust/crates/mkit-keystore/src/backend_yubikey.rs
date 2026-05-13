@@ -255,12 +255,12 @@ impl KeySigner for YubiKeyOpenPgpSigner {
     }
 
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>> {
-        let pin = std::env::var(USER_PIN_ENV).map_err(|_| {
+        let pin = Zeroizing::new(std::env::var(USER_PIN_ENV).map_err(|_| {
             Error::AuthenticationRequired(format!(
                 "set {USER_PIN_ENV} to authorize OpenPGP signing for yubikey:{}",
                 self.card.label
             ))
-        })?;
+        })?);
 
         let mut card = open_card_by_ident(&self.card.ident)?;
         let mut transaction = card.transaction().map_err(map_openpgp_error)?;
@@ -276,7 +276,7 @@ impl KeySigner for YubiKeyOpenPgpSigner {
         }
 
         transaction
-            .verify_user_signing_pin(SecretString::from(pin))
+            .verify_user_signing_pin(SecretString::from(pin.to_string()))
             .map_err(map_openpgp_error)?;
         let signature = transaction
             .card()

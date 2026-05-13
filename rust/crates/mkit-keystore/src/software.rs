@@ -1119,11 +1119,15 @@ impl KeyProtector for MacosKeychainProtector {
                 |error| Error::Io(format!("macOS Keychain software protector get: {error}")),
             )?,
         );
-        let secret: [u8; 32] = secret
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::Encoding(format!("protected DEK length: {}", secret.len())))?;
-        Ok(zeroize::Zeroizing::new(secret))
+        if secret.len() != 32 {
+            return Err(Error::Encoding(format!(
+                "protected DEK length: {}",
+                secret.len()
+            )));
+        }
+        let mut dek = zeroize::Zeroizing::new([0u8; 32]);
+        dek.copy_from_slice(secret.as_slice());
+        Ok(dek)
     }
 
     fn delete_wrapped_dek(&self, wrapped: &[u8]) -> Result<()> {
@@ -1179,11 +1183,15 @@ impl KeyProtector for WindowsCredentialProtector {
                     "Windows Credential software protector get: {error}"
                 ))
             })?);
-        let secret: [u8; 32] = secret
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::Encoding(format!("protected DEK length: {}", secret.len())))?;
-        Ok(zeroize::Zeroizing::new(secret))
+        if secret.len() != 32 {
+            return Err(Error::Encoding(format!(
+                "protected DEK length: {}",
+                secret.len()
+            )));
+        }
+        let mut dek = zeroize::Zeroizing::new([0u8; 32]);
+        dek.copy_from_slice(secret.as_slice());
+        Ok(dek)
     }
 
     fn delete_wrapped_dek(&self, wrapped: &[u8]) -> Result<()> {
@@ -1245,11 +1253,15 @@ impl KeyProtector for LinuxSecretServiceProtector {
                     "Linux Secret Service software protector get: {error}"
                 ))
             })?);
-        let secret: [u8; 32] = secret
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::Encoding(format!("protected DEK length: {}", secret.len())))?;
-        Ok(zeroize::Zeroizing::new(secret))
+        if secret.len() != 32 {
+            return Err(Error::Encoding(format!(
+                "protected DEK length: {}",
+                secret.len()
+            )));
+        }
+        let mut dek = zeroize::Zeroizing::new([0u8; 32]);
+        dek.copy_from_slice(secret.as_slice());
+        Ok(dek)
     }
 
     fn delete_wrapped_dek(&self, wrapped: &[u8]) -> Result<()> {
@@ -1375,11 +1387,15 @@ impl KeyProtector for SystemdCredsProtector {
             &path,
             &Self::credential_name(handle),
         )?);
-        let secret: [u8; 32] = secret
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::Encoding(format!("protected DEK length: {}", secret.len())))?;
-        Ok(zeroize::Zeroizing::new(secret))
+        if secret.len() != 32 {
+            return Err(Error::Encoding(format!(
+                "protected DEK length: {}",
+                secret.len()
+            )));
+        }
+        let mut dek = zeroize::Zeroizing::new([0u8; 32]);
+        dek.copy_from_slice(secret.as_slice());
+        Ok(dek)
     }
 
     fn delete_wrapped_dek(&self, wrapped: &[u8]) -> Result<()> {

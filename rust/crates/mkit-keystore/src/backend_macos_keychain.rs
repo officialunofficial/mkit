@@ -36,15 +36,15 @@ impl MacosKeychainKeystore {
             security_framework::passwords::get_generic_password(SERVICE, &account)
                 .map_err(|error| map_keychain_error(error, label, algorithm))?,
         );
-        let secret: [u8; 32] =
-            password
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::InvalidKeyMaterial {
-                    algorithm,
-                    reason: format!("expected 32 bytes, got {}", password.len()),
-                })?;
-        Ok(SecretKey::new(algorithm, secret))
+        if password.len() != 32 {
+            return Err(Error::InvalidKeyMaterial {
+                algorithm,
+                reason: format!("expected 32 bytes, got {}", password.len()),
+            });
+        }
+        let mut secret = Zeroizing::new([0u8; 32]);
+        secret.copy_from_slice(password.as_slice());
+        Ok(SecretKey::from_zeroizing(algorithm, secret))
     }
 }
 
