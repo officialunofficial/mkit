@@ -92,6 +92,18 @@ Remote / sync:
 Config / keys / version:
 
 - `mkit keygen` — generate a new Ed25519 signing keypair.
+- `mkit key generate [--backend B] [--label L] [--algorithm ALG]` — generate
+  a signing key in a keystore backend. `ALG` is `ed25519`, `secp256k1`, or
+  `p256`; default is `ed25519`.
+- `mkit key list [--backend B] [--json]` — list keys visible to a backend.
+- `mkit key import --algorithm ALG (--hex HEX | --file PATH) [--backend B]
+  [--label L]` — import 32 bytes of signing key material where the backend
+  allows import.
+- `mkit key export [--backend B] [--label L] [--algorithm ALG]
+  --unsafe-print-secret` — export extractable key material. Non-extractable
+  backends fail closed.
+- `mkit key delete [--backend B] [--label L] [--algorithm ALG] --yes` — delete
+  exactly one backend key where deletion is supported.
 - `mkit config [--format=json]` — show all configuration values.
   `--format=json` emits a flat JSON object with every known key.
 - `mkit config <key> [--format=json]` — show one value.
@@ -113,6 +125,19 @@ Stored in `.mkit/config` as `key = value` lines.
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | |
 | `ssh.user_known_hosts_file` | path | inherit | |
 | `ssh.identity_file` | path | inherit | |
+| `signer` | `legacy` / `keystore` | `legacy` | User-scoped commit signing source |
+| `key.backend` | backend name | `software` | User-scoped default for `mkit key` |
+| `key.default_ref` | `<backend>:<label>` | `software:default` | User-scoped fallback key ref |
+| `key.ed25519_ref` | `<backend>:<label>` | `software:default` | User-scoped Ed25519 ref |
+| `key.secp256k1_ref` | `<backend>:<label>` | `software:default-secp256k1` | User-scoped secp256k1 ref |
+| `key.p256_ref` | `<backend>:<label>` | `software:default-p256` | User-scoped P-256 ref |
+| `attest.signer` | `repo-key` / `keystore` / `external` | `repo-key` | User-scoped attestation signer |
+
+Keystore backend names include `software`, `software-raw`, `macos-keychain`,
+`windows-credential`, `linux-secret-service`, `systemd-creds`, and `yubikey`
+when the target build enables the corresponding backend feature. Security-
+sensitive selector keys are ignored from repo-local config; set them in
+`$XDG_CONFIG_HOME/mkit/config` or with explicit command flags.
 
 ### `user.identity`
 
@@ -231,7 +256,9 @@ parsing stderr.
 | `$XDG_CACHE_HOME/mkit/`             | User-level cache                                 |
 | `$XDG_STATE_HOME/mkit/`             | User-level state                                 |
 
-Repo-local values in `.mkit/config` always win over user-level config.
+Repo-local values in `.mkit/config` win over user-level config except for
+security-sensitive signer, keystore, external-signer, and identity selector keys
+that mkit intentionally accepts only from user scope or explicit flags.
 
 ### Signals
 

@@ -30,14 +30,16 @@ This spec distinguishes two milestones:
   API, CLI, config, deterministic software backend, commit-signing adapter, and
   attestation adapter. It is sufficient to start using and testing the
   abstraction, but it does not close issue #104.
-- **Issue #104 complete**: the full acceptance target from the issue. It adds
-  the required OS-native and hardware backends, platform CI, and final threat
-  model updates. Issue #104 must not be closed until this second milestone is
-  complete.
+- **Keystore V1**: the production scope for PR #109. It adds encrypted-at-rest
+  software storage, explicit raw-file compatibility, OS-native extractable
+  storage backends where implemented, keystore-backed commit/attestation
+  signing, and honest capability reporting. It does not claim Secure Enclave,
+  Windows TPM/CNG provider keys, TPM/PCR-bound systemd credentials, cloud KMS,
+  PKCS#11/HSM support, or FIDO2/WebAuthn keystore signing.
 
-PR #109 is scoped to complete both milestones in one branch: it must preserve
-the Foundation V1 review boundary while also satisfying every Issue #104
-completion requirement in section 15.2 before merge.
+PR #109 is scoped to Keystore V1. Issue #104 may be resolved by this narrowed
+production contract only if issue/PR discussion accepts these deferred items;
+otherwise the deferred hardware/provider features remain follow-up work.
 
 ## 2. Non-Negotiable Design Decisions
 
@@ -63,10 +65,10 @@ completion requirement in section 15.2 before merge.
    ECDSA backends may produce valid but non-byte-equal signatures.
 9. WASM builds must not depend on native keystore code. Browser integrations
    use an in-memory backend or a JS-side signer bridge in a later phase.
-10. Foundation V1 must not be presented as full issue #104 completion. The
-    issue remains open until the OS-native and hardware backend matrix in
-    section 15.2 is implemented.
-11. For issue-complete V1, `software:<label>` is the encrypted-at-rest software
+10. Foundation V1 must not be presented as full issue #104 completion. Keystore
+    V1 is the production scope in section 15.2; deferred hardware/provider
+    claims remain follow-up work unless explicitly implemented and tested.
+11. For Keystore V1, `software:<label>` is the encrypted-at-rest software
     backend. Production `mkit-cli` builds must enable the target-appropriate OS
     protector feature, while `mkit-keystore` default features remain empty.
     Raw-file compatibility is exposed only through the explicit
@@ -83,7 +85,7 @@ completion requirement in section 15.2 before merge.
 - Generation, import, export where allowed, enumeration, opening, signing,
   metadata lookup, and deletion.
 - A uniform signer handle abstraction that hides whether the key is software,
-  OS-native, hardware-bound, external, or cloud-backed.
+  OS-native, hardware-bound, or external.
 - `mkit-cli` integration through `mkit key {generate,list,import,export,delete}`.
 - `mkit-attest` integration through a keystore-backed implementation of its
   existing `Signer` trait.
@@ -101,7 +103,10 @@ completion requirement in section 15.2 before merge.
 - Arbitrary blob encryption or decryption APIs.
 - PKCS#11/HSM abstraction beyond the narrow signing handle model.
 - Network-aware key semantics such as `this key signs for chain X`.
-- Mandatory cloud KMS support in Foundation V1.
+- Cloud KMS support in Keystore V1.
+- PKCS#11/HSM support in Keystore V1.
+- Secure Enclave, Windows TPM/CNG provider keys, or TPM/PCR-bound
+  `systemd-creds` behavior unless implemented and capability-tested.
 - Replacing all existing raw-key workflows in Foundation V1.
 
 ## 4. Crate Boundary
@@ -448,7 +453,7 @@ Purpose:
 - Allow CLI and integration work to land before all OS-native backends are
   available.
 - Preserve current raw-key workflows through an abstraction without claiming
-  they satisfy the full issue #104 vault requirement.
+  they satisfy the encrypted-at-rest Keystore V1 vault requirement.
 
 Storage:
 
@@ -458,12 +463,12 @@ Storage:
   Non-Unix platforms must use the platform's per-user application data
   directory or a documented equivalent.
 - `software:<label>` maps to exactly one encrypted key record under that
-  user-scoped storage root in issue-complete V1. It must not resolve relative
+  user-scoped storage root in Keystore V1. It must not resolve relative
   to the current repo.
 - `software-raw:<label>` maps to exactly one raw compatibility key record under
   a raw-specific storage subtree. It exists for deterministic tests,
   compatibility, and explicit migration work only. It must never be selected by
-  default in issue-complete V1.
+  default in Keystore V1.
 - Legacy `.mkit/keys/*` files remain supported only through legacy raw-file
   flows such as `mkit keygen`, `signing_key`, and `repo-key` compatibility.
 - The software backend may reuse the existing hardened raw-file functions for
@@ -483,10 +488,9 @@ Storage-security modes:
 - **Compatibility raw-file mode** may be used for Foundation V1. It preserves
   current hardened `0600` raw-key behavior and is acceptable only as the first
   implementation milestone.
-- Compatibility raw-file mode does not satisfy issue #104's encrypted-at-rest
-  software-backend acceptance criterion and must be named `software-raw` once
-  the issue-complete backend matrix lands.
-- **Encrypted software-file mode** is required before issue #104 is complete
+- Compatibility raw-file mode does not satisfy Keystore V1's encrypted-at-rest
+  software-backend acceptance criterion and must be named `software-raw`.
+- **Encrypted software-file mode** is required for Keystore V1
   and owns the `software` backend token. It must encrypt key material at rest
   using OS-protected envelope encryption:
   - Generate a fresh random data-encryption key (DEK) per stored key record.
@@ -495,7 +499,7 @@ Storage-security modes:
   - Bind record version, backend token, label, algorithm, public key, key ID,
     and key attributes as AEAD associated data.
   - Protect or wrap the DEK with an OS-native protection mechanism for the
-    current platform: macOS Keychain, Windows DPAPI/Credential Manager or CNG,
+    current platform: macOS Keychain, Windows DPAPI/Credential Manager,
     Linux Secret Service, or `systemd-creds` for headless/server Linux.
   - On Linux, the `software` backend may auto-select Secret Service for desktop
     sessions, then `systemd-creds` for headless/server use, and must fail closed
@@ -532,16 +536,18 @@ Requirements:
 - Store extractable software keys as Keychain generic password or keychain key
   items under a stable service/account scheme.
 - Implement deterministic listing of keys created by the mkit service/account
-  scheme so `mkit key list --backend macos-keychain` works for issue-complete
+  scheme so `mkit key list --backend macos-keychain` works for Keystore
   V1.
 - V1 create/import refuses existing `(label, algorithm)` values in the normal
   sequential case. Concurrent same-label create/import atomicity depends on the
   native Keychain primitive exposed by the selected dependency and is not a
   cross-process lock guarantee in V1.
-- Default accessibility for device-bound keys:
-  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
-- Synchronization must default to disabled:
-  `kSecAttrSynchronizable = false`.
+- Keystore V1 stores extractable signing seeds in the user Keychain and must not
+  claim Secure Enclave, non-extractable, or device-bound semantics.
+- Device-bound Keychain storage using
+  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` and
+  `kSecAttrSynchronizable = false` is follow-up work unless implemented and
+  covered by capability tests.
 - P-256 Secure Enclave support is optional after Foundation V1 but must report
   non-extractable and user-presence capabilities accurately if implemented.
 - Ed25519 must not be advertised as Secure Enclave-backed. Apple Secure
@@ -555,16 +561,18 @@ Default target: Windows only.
 
 Requirements:
 
-- Use Windows-native user-bound storage, either Credential Manager with DPAPI
-  protection or CNG key storage.
+- Use Windows-native user-bound storage. Keystore V1 uses Credential Manager
+  with DPAPI-protected extractable records unless a CNG provider-backed key
+  implementation is added.
 - Implement deterministic listing of keys created by the mkit target-name scheme
-  so `mkit key list --backend windows-credential` works for issue-complete V1.
+  so `mkit key list --backend windows-credential` works for Keystore V1.
 - V1 create/import refuses existing `(label, algorithm)` values in the normal
   sequential case. Concurrent same-target create/import atomicity depends on the
-  Credential Manager or CNG primitive exposed by the selected dependency and is
-  not a cross-process lock guarantee in V1.
+  Credential Manager primitive exposed by the selected dependency and is not a
+  cross-process lock guarantee in V1.
 - Report TPM/provider-backed behavior only when actually using a TPM-capable
-  provider such as `MS_PLATFORM_CRYPTO_PROVIDER`.
+  provider such as `MS_PLATFORM_CRYPTO_PROVIDER`. Keystore V1 does not claim
+  TPM/provider-backed behavior for Credential Manager records.
 - Ed25519 hardware support must be capability-detected, not assumed.
 
 ### 6.5 Linux Secret Service Backend
@@ -578,7 +586,7 @@ Requirements:
 - Use the Secret Service API through a reviewed dependency or a small adapter.
 - Implement deterministic listing of keys created by the mkit service/attribute
   scheme so `mkit key list --backend linux-secret-service` works for
-  issue-complete V1.
+  Keystore V1.
 - Must fail clearly when no service is available or the session is locked.
 - V1 create/import refuses existing `(label, algorithm)` values in the normal
   sequential case. Concurrent same-attribute create/import atomicity depends on
@@ -597,9 +605,10 @@ Requirements:
 - The `systemd-creds` backend may shell out to `systemd-creds` rather than link
   TPM2 libraries.
 - Shelling out must avoid shell interpolation. Use `Command` with argv tokens.
-- Backend must clearly report when systemd credentials or TPM sealing are not
-  available.
-- PCR/device-binding claims must match what was actually requested and stored.
+- Backend must clearly report when `systemd-creds` is not available.
+- Keystore V1 treats `systemd-creds` as encrypted credential storage. It does
+  not claim TPM/PCR sealing or device binding unless the backend explicitly
+  requests and verifies those properties.
 
 ### 6.7 YubiKey Backend
 
@@ -616,6 +625,10 @@ Requirements:
   full WebAuthn assertion metadata.
 - User presence/PIN prompts must be represented through typed errors or an
   explicit prompt flow. Do not block indefinitely without timeout handling.
+- Keystore V1 does not accept YubiKey PINs through environment variables. PIN-
+  or touch-required signing fails closed with typed authentication errors until
+  a bounded prompt provider is implemented. FIDO2/CTAP labels continue to route
+  users to the external signer path.
 
 ### 6.8 External And Cloud Backends
 
@@ -1169,32 +1182,29 @@ Review:
 - Any new direct dependency receives supply-chain review.
 - Any unsafe code must be justified locally and reviewed explicitly.
 
-### 15.2 Issue #104 Completion Requirements
+### 15.2 Keystore V1 Completion Requirements
 
-Issue #104 is complete only when all Foundation V1 requirements are complete
-and all items below are done.
+Keystore V1 is complete only when all Foundation V1 requirements are complete
+and all items below are done. Deferred provider claims from the original issue
+remain out of scope unless explicitly added to this list.
 
 Backends:
 
 - Software encrypted-at-rest file mode is implemented or this spec is amended
   with an equivalent reviewed design.
 - macOS Keychain backend is implemented and tested.
-- Windows DPAPI/Credential Manager or CNG-backed backend is implemented and
-  tested.
+- Windows DPAPI/Credential Manager backend is implemented and tested.
 - Linux Secret Service backend is implemented and tested.
 - `systemd-creds` backend is implemented and tested for Linux headless/server
   use.
-- YubiKey backend is implemented behind a feature flag, with OpenPGP, PIV, and
-  FIDO2/CTAP wiring. OpenPGP Ed25519 is required only for the hardware-backed
-  Ed25519 path; a PIV-only token with an existing P-256 certificate-backed slot
-  must still be usable for the P-256 YubiKey path. FIDO2/CTAP remains routed to
-  the external signer path unless the keystore signer API can carry complete
-  WebAuthn assertion metadata.
+- YubiKey backend is implemented behind a feature flag, with OpenPGP/PIV
+  discovery and FIDO2/CTAP fail-closed routing. PIN- or touch-required signing
+  must fail closed until a bounded prompt provider is implemented.
 
 Backend honesty:
 
 - macOS Secure Enclave support, if present, advertises P-256 only.
-- Windows TPM/provider-backed support is runtime capability-detected.
+- Windows TPM/provider-backed support is not claimed in Keystore V1.
 - Linux desktop and headless backend selection is explicit or documented; a
   headless system must not silently try to use a locked desktop keyring.
 - Hardware-backed Ed25519 limitations are documented and reflected in
@@ -1209,7 +1219,8 @@ CLI and integrations:
   their V1 mkit backend schemes.
 - `mkit-attest` accepts a keystore-backed signer for every supported algorithm
   and backend combination that can sign that algorithm.
-- Ed25519 commit signing can use every backend that advertises Ed25519 signing.
+- Ed25519 commit signing can use every backend that advertises usable Ed25519
+  signing.
 
 Tests and CI:
 
@@ -1263,14 +1274,14 @@ Docs/spec cleanup:
 - Teach `mkit commit` to use a configured Ed25519 keystore key ref.
 - Add golden equivalence tests.
 
-### Phase 5: Issue-Complete Backend Matrix
+### Phase 5: Keystore V1 Backend Matrix
 
 - Make `software` the encrypted-at-rest software backend using OS-protected
   envelope encryption.
 - Move raw compatibility persistence to `software-raw`.
-- Implement macOS Keychain, Windows DPAPI/Credential Manager or CNG, Linux
-  Secret Service, `systemd-creds`, and YubiKey OpenPGP/PIV/FIDO2 backends behind
-  feature flags.
+- Implement macOS Keychain, Windows DPAPI/Credential Manager, Linux Secret
+  Service, `systemd-creds`, and YubiKey OpenPGP/PIV/FIDO2 backends behind
+  feature flags with honest capabilities.
 - Add backend factory/resolution so CLI, commit signing, and attestation signing
   route by full key ref.
 - Add platform-gated tests and capability honesty tests.
@@ -1285,17 +1296,18 @@ Docs/spec cleanup:
 
 ## 17. Deferred Decisions
 
-The following decisions were resolved for PR #109's issue-complete V1 target:
+The following decisions were resolved for PR #109's Keystore V1 target:
 
-1. OS-native and hardware backend landing order is no longer deferred for PR
-   #109. The branch must include macOS Keychain, Windows DPAPI/Credential
-   Manager or CNG, Linux Secret Service, `systemd-creds`, and YubiKey.
+1. The branch includes macOS Keychain, Windows DPAPI/Credential Manager, Linux
+   Secret Service, `systemd-creds`, and YubiKey backends with capability reports
+   limited to what they actually implement.
 2. The encrypted software-file design is OS-protected envelope encryption. The
    `software` backend is encrypted-at-rest; raw compatibility is explicit via
    `software-raw`.
 3. Whether a future `mkit key export --file <path>` mode is worth adding. It is
    out of scope for Foundation V1.
-4. YubiKey support includes OpenPGP, PIV, and FIDO2/CTAP wiring for V1.
+4. YubiKey support includes OpenPGP/PIV discovery and FIDO2/CTAP fail-closed
+   routing for V1; bounded PIN/touch prompt signing is follow-up work.
 5. Whether future releases need attestation-only key refs separate from the
    shared `key.<algorithm>_ref` defaults. Foundation V1 deliberately shares
    commit and attestation refs.

@@ -275,9 +275,9 @@ Security assumptions:
 - YubiKey OpenPGP exposes existing Ed25519 signing-slot keys. YubiKey PIV
   exposes existing P-256 certificate-backed slots (`piv-9a`, `piv-9c`,
   `piv-9e`). Both are non-extractable and device-bound from mkit's point of
-  view; signing requires explicit PIN environment variables and optional touch
-  opt-in (`MKIT_YUBIKEY_OPENPGP_PIN`, `MKIT_YUBIKEY_OPENPGP_ALLOW_TOUCH`,
-  `MKIT_YUBIKEY_PIV_PIN`, `MKIT_YUBIKEY_PIV_ALLOW_TOUCH`).
+  view. Keystore V1 does not accept YubiKey PINs through environment variables;
+  PIN- or touch-required signing fails closed with typed authentication errors
+  until a bounded prompt provider is implemented.
 - FIDO2/CTAP WebAuthn signatures remain wired through the external signer path
   because the current keystore `KeySigner` API returns only a signature and
   cannot carry WebAuthn authenticator data plus client data JSON. The YubiKey
@@ -290,8 +290,7 @@ Keystore non-goals in V1:
 
 - Protection against malware or another process already running as the same
   UID. Such an attacker can request signatures from unlocked software/OS
-  backends, read extractable secrets from software/raw/platform stores, or set
-  the environment variables needed to prompt hardware-backed signing.
+  backends or read extractable secrets from software/raw/platform stores.
 - Side-channel resistance beyond the underlying crypto/hardware libraries.
 
 ---

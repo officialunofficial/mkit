@@ -266,8 +266,11 @@ mkit ships three. Each is opt-in; the CLI picks the signer via
 | Signer name | What it signs with | Where the trust root lives |
 |---|---|---|
 | `repo-key` (default) | Ed25519, the existing `.mkit/keys/default.key` | The `signer` field already stored on commits. |
-| `sigstore-keyless` | Ephemeral Fulcio cert, OIDC identity | Rekor + Fulcio (same as the release workflow). |
+| `keystore` | A user-scoped `mkit-keystore` key reference | The selected keystore key's canonical key ID. |
 | `external` | Subprocess — JSON-over-stdin/stdout to a caller-supplied binary | Whatever the external process's trust model is. |
+
+Sigstore keyless attestations remain future work until the CLI has a matching
+signer implementation.
 
 `external` is the extension point Makechain, a future blockchain
 attestor, or an internal tool wraps. The full wire contract —
@@ -287,8 +290,8 @@ stdout  (one-line JSON):  {"keyid": "...", "sig_base64": "..."}
 exit 0  on success, non-zero on error (stderr surfaces to the user).
 ```
 
-The binary path comes from `attest.external_signer_path` in
-`.mkit/config`. A reference implementation lives at
+The binary path comes from user-scoped `attest.external_signer_path`.
+A reference implementation lives at
 `contrib/signers/mkit-sign-file/`.
 
 **Signer argv.** The subprocess is spawned with an optional argv
@@ -296,7 +299,7 @@ vector in addition to the stdin JSON. By default that vector is
 empty (backward-compatible with pre-argv mkit). There are three
 ways to populate it, each overriding the previous:
 
-1. `attest.external_signer_args` in `.mkit/config` — a pipe-separated
+1. User-scoped `attest.external_signer_args` — a pipe-separated
    list (`sign|--tag|prod`). Pipe instead of comma because the
    multi-sig spec already uses `,` as its key=value separator.
 2. `--external-signer-arg <V>` on `mkit attest`, repeatable. When
@@ -324,6 +327,10 @@ the tag, blocking multi-key workflows.
 | `path`      | Overrides key path (repo-key) or binary path (external).   |
 | `args`      | Pipe-separated argv for external signers only (optional).  |
 
+Keystore-backed signing is available as the primary `attest.signer` in
+Keystore V1. `--additional-signer` remains limited to `repo-key` and `external`
+until the multi-sig grammar grows a key-ref field.
+
 Example:
 
 ```
@@ -340,6 +347,8 @@ for this signer only; absent means "fall through to config."
 No hard format — it's free-form UTF-8. But strongly recommended:
 
 - `repo-key` → `blake3:<32-hex-of-pubkey>`.
+- Keystore Ed25519 → `ed25519:<64-hex-of-pubkey>`; other algorithms use the
+  keystore backend's canonical scheme.
 - Sigstore keyless → `sigstore:<cert-san>` (e.g.
   `sigstore:https://github.com/user/repo/.github/workflows/release.yml@refs/tags/v1`).
 - External → whatever the external signer returns; by convention
@@ -446,11 +455,15 @@ unchanged (§`mkit version`).
 New keys in `.mkit/config` (validated by `config.validateConfigValue`):
 
 ```
-attest.signer               = "repo-key" | "sigstore-keyless" | "external"  (default: repo-key)
+attest.signer               = "repo-key" | "keystore" | "external"  (default: repo-key)
 attest.external_signer_path = /abs/path/to/binary   (required when signer = external)
 attest.external_signer_args = a|b|c                 (pipe-separated argv, optional; default empty)
 attest.auto_sign_commit     = false                 (default — mkit doesn't auto-attest on commit)
 ```
+
+`attest.signer = keystore` is user-scoped and signs with the configured
+`mkit-keystore` key reference for the selected algorithm. Repo-local config must
+not select `keystore` or any `key.*_ref` value.
 
 `attest.auto_sign_commit = true` attaches a minimal attestation with
 `predicateType = https://mkit.io/predicate/commit-signed/v1` (TBD) to

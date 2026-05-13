@@ -10,21 +10,14 @@ use openpgp_card::{Card, Error as OpenPgpError};
 use p256::ecdsa::Signature as P256Signature;
 use p256::elliptic_curve::sec1::ToEncodedPoint as _;
 use p256::pkcs8::DecodePublicKey as _;
-use secrecy::SecretString;
 use sha2::{Digest as _, Sha256};
 use yubikey::piv::{AlgorithmId as PivAlgorithmId, SlotAlgorithmId, SlotId};
 use yubikey::{PinPolicy, TouchPolicy};
-use zeroize::Zeroizing;
 
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
     KeyMetadata, KeySelector, KeySigner, Keystore, Result, SecretKey, validate_label,
 };
-
-const USER_PIN_ENV: &str = "MKIT_YUBIKEY_OPENPGP_PIN";
-const ALLOW_TOUCH_ENV: &str = "MKIT_YUBIKEY_OPENPGP_ALLOW_TOUCH";
-const PIV_PIN_ENV: &str = "MKIT_YUBIKEY_PIV_PIN";
-const PIV_ALLOW_TOUCH_ENV: &str = "MKIT_YUBIKEY_PIV_ALLOW_TOUCH";
 
 /// `YubiKey` `OpenPGP` backend over PC/SC.
 #[derive(Clone, Debug, Default)]
@@ -255,29 +248,10 @@ impl KeySigner for YubiKeyOpenPgpSigner {
     }
 
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>> {
-        let pin = Zeroizing::new(std::env::var(USER_PIN_ENV).map_err(|_| {
-            Error::AuthenticationRequired(format!(
-                "set {USER_PIN_ENV} to authorize OpenPGP signing for yubikey:{}",
-                self.card.label
-            ))
-        })?);
+        ensure_openpgp_interaction_available(&self.card.label)?;
 
         let mut card = open_card_by_ident(&self.card.ident)?;
         let mut transaction = card.transaction().map_err(map_openpgp_error)?;
-        if transaction
-            .user_interaction_flag(KeyType::Signing)
-            .map_err(map_openpgp_error)?
-            .is_some_and(|uif| uif.touch_policy().touch_required())
-            && std::env::var_os(ALLOW_TOUCH_ENV).is_none()
-        {
-            return Err(Error::AuthenticationRequired(format!(
-                "OpenPGP signing key requires touch; set {ALLOW_TOUCH_ENV}=1 to allow the hardware prompt"
-            )));
-        }
-
-        transaction
-            .verify_user_signing_pin(SecretString::from(pin.to_string()))
-            .map_err(map_openpgp_error)?;
         let signature = transaction
             .card()
             .signature_for_hash(openpgp_card::ocard::crypto::Hash::EdDSA(msg))
@@ -312,31 +286,12 @@ impl KeySigner for YubiKeyPivSigner {
     }
 
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>> {
-        let pin = Zeroizing::new(std::env::var(PIV_PIN_ENV).map_err(|_| {
-            Error::AuthenticationRequired(format!(
-                "set {PIV_PIN_ENV} to authorize PIV signing for yubikey:{}",
-                self.key.label
-            ))
-        })?);
-        if matches!(
-            self.key.touch_policy,
-            TouchPolicy::Always | TouchPolicy::Cached
-        ) && std::env::var_os(PIV_ALLOW_TOUCH_ENV).is_none()
-        {
-            return Err(Error::AuthenticationRequired(format!(
-                "PIV signing key requires touch; set {PIV_ALLOW_TOUCH_ENV}=1 to allow the hardware prompt"
-            )));
-        }
+        ensure_piv_interaction_available(&self.key)?;
 
         let mut yubikey =
             yubikey::YubiKey::open_by_serial(self.key.serial).map_err(map_yubikey_error)?;
         let public_key = piv_public_key_for_slot(&mut yubikey, self.key.slot)?;
         verify_piv_public_key_matches(&self.key, &public_key)?;
-        if self.key.pin_policy != PinPolicy::Never {
-            yubikey
-                .verify_pin(pin.as_bytes())
-                .map_err(map_yubikey_error)?;
-        }
         let digest = Sha256::digest(msg);
         let der = yubikey::piv::sign_data(
             &mut yubikey,
@@ -500,6 +455,28 @@ fn normalize_ed25519_signature(signature: Vec<u8>) -> Result<Vec<u8>> {
         "OpenPGP Ed25519 signature is too short: {} bytes",
         signature.len()
     )))
+}
+
+fn ensure_openpgp_interaction_available(label: &str) -> Result<()> {
+    Err(Error::AuthenticationRequired(format!(
+        "YubiKey OpenPGP signing for yubikey:{label} requires an explicit PIN prompt provider; PINs via environment variables are not supported"
+    )))
+}
+
+fn ensure_piv_interaction_available(key: &PivSigningKey) -> Result<()> {
+    if key.pin_policy != PinPolicy::Never {
+        return Err(Error::AuthenticationRequired(format!(
+            "YubiKey PIV signing for yubikey:{} requires an explicit PIN prompt provider; PINs via environment variables are not supported",
+            key.label
+        )));
+    }
+    if matches!(key.touch_policy, TouchPolicy::Always | TouchPolicy::Cached) {
+        return Err(Error::AuthenticationRequired(format!(
+            "YubiKey PIV signing key yubikey:{} requires touch, but no bounded touch prompt flow is available",
+            key.label
+        )));
+    }
+    Ok(())
 }
 
 fn openpgp_metadata_for(card: &OpenPgpSigningKey) -> KeyMetadata {
@@ -736,6 +713,65 @@ mod tests {
         let mut encoded = vec![0x01, 0x02];
         encoded.extend([9u8; 64]);
         assert_eq!(normalize_ed25519_signature(encoded).unwrap(), vec![9u8; 64]);
+    }
+
+    #[test]
+    fn openpgp_signing_requires_explicit_pin_prompt_provider() {
+        let mut signer = YubiKeyOpenPgpSigner {
+            card: OpenPgpSigningKey {
+                label: "default".into(),
+                ident: "0000:TEST".into(),
+                public_key: vec![1; 32],
+            },
+        };
+
+        match signer.sign(b"message") {
+            Err(Error::AuthenticationRequired(message)) => {
+                assert!(message.contains("explicit PIN prompt provider"));
+                assert!(message.contains("environment variables are not supported"));
+            }
+            other => panic!("unexpected signing result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn piv_pin_required_fails_before_device_io() {
+        let key = PivSigningKey {
+            label: "piv-9c".into(),
+            serial: yubikey::Serial(1234),
+            slot: SlotId::Signature,
+            public_key: vec![1; 33],
+            pin_policy: PinPolicy::Always,
+            touch_policy: TouchPolicy::Never,
+        };
+
+        match ensure_piv_interaction_available(&key) {
+            Err(Error::AuthenticationRequired(message)) => {
+                assert!(message.contains("explicit PIN prompt provider"));
+                assert!(message.contains("environment variables are not supported"));
+            }
+            other => panic!("unexpected interaction result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn piv_touch_required_fails_without_bounded_prompt_flow() {
+        let key = PivSigningKey {
+            label: "piv-9c".into(),
+            serial: yubikey::Serial(1234),
+            slot: SlotId::Signature,
+            public_key: vec![1; 33],
+            pin_policy: PinPolicy::Never,
+            touch_policy: TouchPolicy::Always,
+        };
+
+        match ensure_piv_interaction_available(&key) {
+            Err(Error::AuthenticationRequired(message)) => {
+                assert!(message.contains("requires touch"));
+                assert!(message.contains("bounded touch prompt flow"));
+            }
+            other => panic!("unexpected interaction result: {other:?}"),
+        }
     }
 
     #[test]

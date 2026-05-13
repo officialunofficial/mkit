@@ -113,8 +113,8 @@ fn start(
         todo,
         done: Vec::new(),
     };
-    let signer = match load_rebase_signer(cwd) {
-        Ok(signer) => signer,
+    let signing = match load_rebase_signing(cwd) {
+        Ok(signing) => signing,
         Err(code) => return code,
     };
     if let Err(e) = write_state(mkit_dir, &state) {
@@ -134,7 +134,7 @@ fn start(
     if let Err(e) = super::sync_index_to_tree(cwd, store, onto_tree) {
         return emit_err(&e, exit::CANTCREAT);
     }
-    replay(cwd, mkit_dir, store, Some(signer))
+    replay(cwd, mkit_dir, store, Some(signing))
 }
 
 fn resume(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
@@ -176,16 +176,16 @@ fn replay(
     cwd: &std::path::Path,
     mkit_dir: &std::path::Path,
     store: &ObjectStore,
-    signer: Option<super::commit::CommitSigner>,
+    signing: Option<RebaseSigning>,
 ) -> u8 {
     let mut state = match read_state(mkit_dir) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
-    let mut signer = match signer {
-        Some(signer) => signer,
-        None => match load_rebase_signer(cwd) {
-            Ok(signer) => signer,
+    let mut signing = match signing {
+        Some(signing) => signing,
+        None => match load_rebase_signing(cwd) {
+            Ok(signing) => signing,
             Err(code) => return code,
         },
     };
@@ -226,7 +226,14 @@ fn replay(
             );
             return exit::GENERAL_ERROR;
         }
-        let new_hash = match build_commit(store, &mut signer, head_hash, target, result.tree_hash) {
+        let new_hash = match build_commit(
+            store,
+            &mut signing.signer,
+            signing.author.clone(),
+            head_hash,
+            target,
+            result.tree_hash,
+        ) {
             Ok(h) => h,
             Err(c) => return c,
         };
@@ -270,15 +277,28 @@ fn replay(
     exit::OK
 }
 
-fn load_rebase_signer(cwd: &std::path::Path) -> Result<super::commit::CommitSigner, u8> {
+struct RebaseSigning {
+    signer: super::commit::CommitSigner,
+    author: Identity,
+}
+
+fn load_rebase_signing(cwd: &std::path::Path) -> Result<RebaseSigning, u8> {
     let cfg = config::read_or_default(cwd)
         .map_err(|e| emit_err(&format!("config: {e}"), exit::CONFIG_ERROR))?;
-    super::commit::load_commit_signer(cwd, &cfg).map_err(|(msg, code)| emit_err(&msg, code))
+    let signer =
+        super::commit::load_commit_signer(cwd, &cfg).map_err(|(msg, code)| emit_err(&msg, code))?;
+    let signer_public = signer
+        .public_key()
+        .map_err(|(msg, code)| emit_err(&msg, code))?;
+    let author = super::commit::resolve_author(None, &cfg.user_identity, &signer_public)
+        .map_err(|error| emit_err(&format!("author: {error}"), exit::CONFIG_ERROR))?;
+    Ok(RebaseSigning { signer, author })
 }
 
 fn build_commit(
     store: &ObjectStore,
     signer: &mut super::commit::CommitSigner,
+    author: Identity,
     parent: Hash,
     original: Hash,
     tree_hash: Hash,
@@ -291,7 +311,6 @@ fn build_commit(
     let signer_public = signer
         .public_key()
         .map_err(|(msg, code)| emit_err(&msg, code))?;
-    let author = Identity::ed25519(signer_public);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
