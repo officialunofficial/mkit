@@ -1273,7 +1273,8 @@ fn linux_desktop_session_available() -> bool {
 #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
 #[derive(Debug)]
 struct SystemdCredsProtector {
-    root: PathBuf,
+    storage_root: PathBuf,
+    dek_root: PathBuf,
 }
 
 #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
@@ -1281,11 +1282,45 @@ impl SystemdCredsProtector {
     const ID: &'static str = "systemd-creds";
 
     fn path_for(&self, handle: &str) -> PathBuf {
-        self.root.join(format!("{handle}.cred"))
+        self.dek_root.join(format!("{handle}.cred"))
     }
 
     fn credential_name(handle: &str) -> String {
         format!("mkit.software-dek.{handle}")
+    }
+
+    fn prepare_write_path(&self, path: &Path) -> Result<()> {
+        #[cfg(unix)]
+        {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            ensure_no_symlink_path(&self.storage_root, parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
+            set_private_dir_permissions(&self.storage_root)?;
+            ensure_owned_by_euid(&self.storage_root)?;
+            if parent != self.storage_root {
+                set_private_dir_permissions(parent)?;
+                ensure_owned_by_euid(parent)?;
+            }
+        }
+
+        #[cfg(not(unix))]
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_existing_path(&self, path: &Path) -> Result<()> {
+        #[cfg(unix)]
+        ensure_no_symlink_path(&self.storage_root, path)?;
+
+        Ok(())
     }
 }
 
@@ -1308,7 +1343,8 @@ fn systemd_creds_protector_for_availability(
         ));
     }
     Ok(Arc::new(SystemdCredsProtector {
-        root: root.join("deks"),
+        storage_root: root.into(),
+        dek_root: root.join("deks"),
     }))
 }
 
@@ -1321,11 +1357,8 @@ impl KeyProtector for SystemdCredsProtector {
     fn wrap_dek(&self, dek: &[u8; 32], _aad: &[u8]) -> Result<Vec<u8>> {
         let handle = random_handle()?;
         let path = self.path_for(&handle);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
-        }
-        crate::backend_systemd_creds::encrypt_credential(
+        self.prepare_write_path(&path)?;
+        crate::backend_systemd_creds::encrypt_credential_create_new(
             dek,
             &path,
             &Self::credential_name(&handle),
@@ -1336,8 +1369,10 @@ impl KeyProtector for SystemdCredsProtector {
     fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
         let handle = std::str::from_utf8(wrapped)
             .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
+        let path = self.path_for(handle);
+        self.validate_existing_path(&path)?;
         let secret = zeroize::Zeroizing::new(crate::backend_systemd_creds::decrypt_credential(
-            &self.path_for(handle),
+            &path,
             &Self::credential_name(handle),
         )?);
         let secret: [u8; 32] = secret
@@ -1350,7 +1385,9 @@ impl KeyProtector for SystemdCredsProtector {
     fn delete_wrapped_dek(&self, wrapped: &[u8]) -> Result<()> {
         let handle = std::str::from_utf8(wrapped)
             .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        match std::fs::remove_file(self.path_for(handle)) {
+        let path = self.path_for(handle);
+        self.validate_existing_path(&path)?;
+        match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(Error::Io(format!("delete systemd-creds DEK: {error}"))),
@@ -2252,6 +2289,86 @@ mod tests {
             systemd_creds_protector_for_availability(dir.path(), false),
             Err(Error::BackendUnavailable(_))
         ));
+    }
+
+    #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
+    #[test]
+    fn systemd_protector_rejects_symlinked_storage_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real_root = dir.path().join("real-keys");
+        let symlink_root = dir.path().join("keys");
+        std::fs::create_dir_all(&real_root).expect("real root");
+        std::os::unix::fs::symlink(&real_root, &symlink_root).expect("symlink root");
+        let protector = SystemdCredsProtector {
+            storage_root: symlink_root.clone(),
+            dek_root: symlink_root.join("deks"),
+        };
+        let path = protector.path_for("0123456789abcdef");
+
+        assert!(
+            matches!(protector.prepare_write_path(&path), Err(Error::Io(message)) if message.contains("symlink"))
+        );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
+    #[test]
+    fn systemd_protector_rejects_symlinked_dek_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("keys");
+        let real_deks = dir.path().join("real-deks");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&real_deks).expect("real deks");
+        std::os::unix::fs::symlink(&real_deks, root.join("deks")).expect("symlink deks");
+        let protector = SystemdCredsProtector {
+            storage_root: root.clone(),
+            dek_root: root.join("deks"),
+        };
+        let path = protector.path_for("0123456789abcdef");
+
+        assert!(
+            matches!(protector.prepare_write_path(&path), Err(Error::Io(message)) if message.contains("symlink"))
+        );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
+    #[test]
+    fn systemd_protector_delete_rejects_symlinked_dek_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("keys");
+        let protector = SystemdCredsProtector {
+            storage_root: root.clone(),
+            dek_root: root.join("deks"),
+        };
+        let path = protector.path_for("0123456789abcdef");
+        std::fs::create_dir_all(path.parent().expect("dek parent")).expect("dek parent");
+        let target = dir.path().join("target.cred");
+        std::fs::write(&target, b"credential").expect("target credential");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink dek");
+
+        assert!(
+            matches!(protector.delete_wrapped_dek(b"0123456789abcdef"), Err(Error::Io(message)) if message.contains("symlink"))
+        );
+        assert!(
+            path.is_symlink(),
+            "delete must not remove symlinked DEK path"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
+    #[test]
+    fn systemd_protector_write_path_creates_private_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("keys");
+        let protector = SystemdCredsProtector {
+            storage_root: root.clone(),
+            dek_root: root.join("deks"),
+        };
+        let path = protector.path_for("0123456789abcdef");
+
+        protector.prepare_write_path(&path).expect("prepare path");
+
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(mode(&root.join("deks")), 0o700);
     }
 
     #[cfg(unix)]

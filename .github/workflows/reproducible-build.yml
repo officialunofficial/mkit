@@ -56,6 +56,7 @@ jobs:
           prefix-key: "rust-reproducible"
           key: reproducible-build
           cache-on-failure: false
+          cache-bin: false
 
       - name: Install protoc
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0

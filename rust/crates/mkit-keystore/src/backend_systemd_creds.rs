@@ -137,21 +137,25 @@ impl Keystore for SystemdCredsKeystore {
         )?;
         let path = self.path_for(label, secret.algorithm())?;
         self.ensure_storage_path_not_symlink(&path)?;
-        if path.exists() && !options.overwrite {
-            return Err(Error::KeyAlreadyExists {
-                label: label.into(),
-                algorithm: secret.algorithm(),
-            });
-        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
         }
-        encrypt_credential(
-            secret.expose_secret(),
-            &path,
-            &Self::credential_name(label, secret.algorithm())?,
-        )?;
+        if options.overwrite {
+            encrypt_credential(
+                secret.expose_secret(),
+                &path,
+                &Self::credential_name(label, secret.algorithm())?,
+            )?;
+        } else {
+            encrypt_key_credential_create_new(
+                secret.expose_secret(),
+                &path,
+                &Self::credential_name(label, secret.algorithm())?,
+                label,
+                secret.algorithm(),
+            )?;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -345,6 +349,62 @@ fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
 }
 
 pub(crate) fn encrypt_credential(secret: &[u8; 32], path: &Path, name: &str) -> Result<()> {
+    let tmp_path = write_temp_credential(secret, path, name)?;
+    if let Err(error) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(Error::Io(format!(
+            "rename {} to {}: {error}",
+            tmp_path.display(),
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn encrypt_credential_create_new(
+    secret: &[u8; 32],
+    path: &Path,
+    name: &str,
+) -> Result<()> {
+    let tmp_path = write_temp_credential(secret, path, name)?;
+    if let Err(error) = publish_temp_credential_create_new(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(Error::Io(format!(
+            "create credential {} from {}: {error}",
+            path.display(),
+            tmp_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn encrypt_key_credential_create_new(
+    secret: &[u8; 32],
+    path: &Path,
+    name: &str,
+    label: &str,
+    algorithm: Algorithm,
+) -> Result<()> {
+    let tmp_path = write_temp_credential(secret, path, name)?;
+    if let Err(error) = publish_temp_credential_create_new(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return if error.kind() == std::io::ErrorKind::AlreadyExists {
+            Err(Error::KeyAlreadyExists {
+                label: label.into(),
+                algorithm,
+            })
+        } else {
+            Err(Error::Io(format!(
+                "create credential {} from {}: {error}",
+                path.display(),
+                tmp_path.display()
+            )))
+        };
+    }
+    Ok(())
+}
+
+fn write_temp_credential(secret: &[u8; 32], path: &Path, name: &str) -> Result<PathBuf> {
     let tmp_path = temp_credential_path(path)?;
     if let Err(error) = encrypt_credential_to_path(secret, &tmp_path, name) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -356,15 +416,29 @@ pub(crate) fn encrypt_credential(secret: &[u8; 32], path: &Path, name: &str) -> 
         std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
             .map_err(|error| Error::Io(format!("chmod {}: {error}", tmp_path.display())))?;
     }
-    if let Err(error) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(Error::Io(format!(
-            "rename {} to {}: {error}",
-            tmp_path.display(),
-            path.display()
-        )));
-    }
-    Ok(())
+    Ok(tmp_path)
+}
+
+#[cfg(unix)]
+fn publish_temp_credential_create_new(tmp_path: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(tmp_path, path)?;
+    std::fs::remove_file(tmp_path)
+}
+
+#[cfg(not(unix))]
+fn publish_temp_credential_create_new(tmp_path: &Path, path: &Path) -> std::io::Result<()> {
+    use std::io::{Read as _, Write as _};
+
+    let mut tmp_file = std::fs::File::open(tmp_path)?;
+    let mut bytes = Vec::new();
+    tmp_file.read_to_end(&mut bytes)?;
+    let mut final_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    final_file.write_all(&bytes)?;
+    final_file.sync_all()?;
+    std::fs::remove_file(tmp_path)
 }
 
 fn encrypt_credential_to_path(secret: &[u8; 32], path: &Path, name: &str) -> Result<()> {
@@ -611,6 +685,23 @@ mod tests {
                 .is_some_and(|(_, extension)| extension == "tmp")
         );
         assert_ne!(temp_path, final_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_new_publish_refuses_existing_final_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tmp_path = dir.path().join("tmp.cred");
+        let final_path = dir.path().join("release.cred");
+        std::fs::write(&tmp_path, b"new").expect("tmp credential");
+        std::fs::write(&final_path, b"old").expect("existing credential");
+
+        let error = publish_temp_credential_create_new(&tmp_path, &final_path)
+            .expect_err("create-new publish must not replace existing file");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&final_path).expect("final bytes"), b"old");
+        assert_eq!(std::fs::read(&tmp_path).expect("tmp bytes"), b"new");
     }
 
     #[test]

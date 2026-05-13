@@ -197,8 +197,10 @@ ignored.
 | `remote_bucket`                     | Repo      | Address.                                                  |
 | `remote_type`                       | Repo      | Dispatch hint to the transport layer.                     |
 
-Repo-scoped keys MAY still be overridden by the user file. The split
-is a one-way fence: user scope wins.
+Repo-safe keys are applied after the user file and may override user
+defaults. The security fence is narrower and stricter: private-key,
+signer, executable, trust-root, and host-key selectors are user-only
+and are ignored when they appear in repo config.
 
 ---
 

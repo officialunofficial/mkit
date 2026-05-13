@@ -33,6 +33,7 @@ jobs:
           workspaces: rust -> rust/target
           prefix-key: coverage-${{ runner.os }}
           cache-on-failure: false
+          cache-bin: false
 
       # Same native deps as rust.yml — the workspace's --all-features
       # path pulls in the TPM / CTAP signers on Linux, and coverage

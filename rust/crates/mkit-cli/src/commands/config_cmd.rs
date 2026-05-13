@@ -5,6 +5,7 @@
 //! user-scoped `$XDG_CONFIG_HOME/mkit/config` and are written there
 //! when set via this command. Unknown keys are rejected.
 
+use std::borrow::Cow;
 use std::io::Write;
 
 use clap::{Parser, ValueEnum};
@@ -152,6 +153,11 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
 /// paired with its value. Keys are emitted in alphabetical order so
 /// the output is deterministic and easy to snapshot-test.
 const CONFIG_KEYS: &[&str] = &[
+    "attest.default_algorithm",
+    "attest.external_signer_args",
+    "attest.external_signer_path",
+    "attest.p256_key_path",
+    "attest.secp256k1_key_path",
     "attest.signer",
     "default_branch",
     "key.backend",
@@ -171,25 +177,36 @@ const CONFIG_KEYS: &[&str] = &[
     "user.identity",
 ];
 
-fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<&'a str> {
+fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
     match key {
-        "user.identity" => Some(&cfg.user_identity),
-        "trusted_remote_endpoint" => Some(&cfg.trusted_remote_endpoint),
-        "signing_key" => Some(&cfg.signing_key),
-        "default_branch" => Some(&cfg.default_branch),
-        "remote_endpoint" => Some(&cfg.remote_endpoint),
-        "remote_bucket" => Some(&cfg.remote_bucket),
-        "remote_type" => Some(&cfg.remote_type),
-        "ssh.strict_host_key_checking" => Some(&cfg.ssh_strict_host_key_checking),
-        "ssh.user_known_hosts_file" => Some(&cfg.ssh_user_known_hosts_file),
-        "ssh.identity_file" => Some(&cfg.ssh_identity_file),
-        "signer" => Some(&cfg.signer),
-        "key.backend" => Some(cfg.key.backend_or_fallback()),
-        "key.default_ref" => Some(cfg.key.default_ref_or_fallback()),
-        "key.ed25519_ref" => Some(cfg.key.ed25519_ref_or_fallback()),
-        "key.secp256k1_ref" => Some(cfg.key.secp256k1_ref_or_fallback()),
-        "key.p256_ref" => Some(cfg.key.p256_ref_or_fallback()),
-        "attest.signer" => Some(cfg.attest.signer_or_fallback()),
+        "user.identity" => Some(Cow::Borrowed(&cfg.user_identity)),
+        "trusted_remote_endpoint" => Some(Cow::Borrowed(&cfg.trusted_remote_endpoint)),
+        "signing_key" => Some(Cow::Borrowed(&cfg.signing_key)),
+        "default_branch" => Some(Cow::Borrowed(&cfg.default_branch)),
+        "remote_endpoint" => Some(Cow::Borrowed(&cfg.remote_endpoint)),
+        "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
+        "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),
+        "ssh.strict_host_key_checking" => Some(Cow::Borrowed(&cfg.ssh_strict_host_key_checking)),
+        "ssh.user_known_hosts_file" => Some(Cow::Borrowed(&cfg.ssh_user_known_hosts_file)),
+        "ssh.identity_file" => Some(Cow::Borrowed(&cfg.ssh_identity_file)),
+        "signer" => Some(Cow::Borrowed(&cfg.signer)),
+        "key.backend" => Some(Cow::Borrowed(cfg.key.backend_or_fallback())),
+        "key.default_ref" => Some(Cow::Borrowed(cfg.key.default_ref_or_fallback())),
+        "key.ed25519_ref" => Some(Cow::Borrowed(cfg.key.ed25519_ref_or_fallback())),
+        "key.secp256k1_ref" => Some(Cow::Borrowed(cfg.key.secp256k1_ref_or_fallback())),
+        "key.p256_ref" => Some(Cow::Borrowed(cfg.key.p256_ref_or_fallback())),
+        "attest.default_algorithm" => {
+            Some(Cow::Borrowed(cfg.attest.default_algorithm_or_fallback()))
+        }
+        "attest.external_signer_args" => {
+            Some(Cow::Owned(cfg.attest.external_signer_args.join("|")))
+        }
+        "attest.external_signer_path" => Some(Cow::Borrowed(&cfg.attest.external_signer_path)),
+        "attest.secp256k1_key_path" => {
+            Some(Cow::Borrowed(cfg.attest.secp256k1_key_path_or_default()))
+        }
+        "attest.p256_key_path" => Some(Cow::Borrowed(cfg.attest.p256_key_path_or_default())),
+        "attest.signer" => Some(Cow::Borrowed(cfg.attest.signer_or_fallback())),
         _ => None,
     }
 }
@@ -204,19 +221,19 @@ fn show_all(cfg: &Config, json: bool) -> u8 {
             if i > 0 {
                 let _ = stdout.write_all(b",");
             }
-            let v = lookup(cfg, key).unwrap_or("");
+            let v = lookup(cfg, key).unwrap_or(Cow::Borrowed(""));
             let _ = write!(
                 stdout,
                 "\"{}\":\"{}\"",
                 format::json_escape(key),
-                format::json_escape(v)
+                format::json_escape(&v)
             );
         }
         let _ = stdout.write_all(b"}\n");
         return exit::OK;
     }
     for key in CONFIG_KEYS {
-        let v = lookup(cfg, key).unwrap_or("");
+        let v = lookup(cfg, key).unwrap_or(Cow::Borrowed(""));
         let _ = writeln!(stdout, "{key} = {v}");
     }
     exit::OK
@@ -232,7 +249,7 @@ fn show_one(cfg: &Config, key: &str, json: bool) -> u8 {
             stdout,
             "{{\"{}\":\"{}\"}}",
             format::json_escape(key),
-            format::json_escape(v)
+            format::json_escape(&v)
         );
     } else {
         let _ = writeln!(stdout, "{v}");

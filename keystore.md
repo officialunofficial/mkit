@@ -534,6 +534,10 @@ Requirements:
 - Implement deterministic listing of keys created by the mkit service/account
   scheme so `mkit key list --backend macos-keychain` works for issue-complete
   V1.
+- V1 create/import refuses existing `(label, algorithm)` values in the normal
+  sequential case. Concurrent same-label create/import atomicity depends on the
+  native Keychain primitive exposed by the selected dependency and is not a
+  cross-process lock guarantee in V1.
 - Default accessibility for device-bound keys:
   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
 - Synchronization must default to disabled:
@@ -555,6 +559,10 @@ Requirements:
   protection or CNG key storage.
 - Implement deterministic listing of keys created by the mkit target-name scheme
   so `mkit key list --backend windows-credential` works for issue-complete V1.
+- V1 create/import refuses existing `(label, algorithm)` values in the normal
+  sequential case. Concurrent same-target create/import atomicity depends on the
+  Credential Manager or CNG primitive exposed by the selected dependency and is
+  not a cross-process lock guarantee in V1.
 - Report TPM/provider-backed behavior only when actually using a TPM-capable
   provider such as `MS_PLATFORM_CRYPTO_PROVIDER`.
 - Ed25519 hardware support must be capability-detected, not assumed.
@@ -572,6 +580,10 @@ Requirements:
   scheme so `mkit key list --backend linux-secret-service` works for
   issue-complete V1.
 - Must fail clearly when no service is available or the session is locked.
+- V1 create/import refuses existing `(label, algorithm)` values in the normal
+  sequential case. Concurrent same-attribute create/import atomicity depends on
+  the Secret Service implementation and dependency surface and is not a
+  cross-process lock guarantee in V1.
 - Must not be selected by default for headless/server mode.
 
 ### 6.6 systemd-creds Backend

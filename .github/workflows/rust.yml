@@ -49,6 +49,7 @@ jobs:
           workspaces: rust -> rust/target
           prefix-key: "rust-ci-${{ matrix.os }}"
           cache-on-failure: false
+          cache-bin: false
 
       # cargo-nextest: faster + structured test runner. Replaces
       # `cargo test`. Pinned via taiki-e/install-action which fetches a
@@ -152,6 +153,7 @@ jobs:
           workspaces: rust -> rust/target
           prefix-key: "rust-keystore-${{ matrix.name }}"
           cache-on-failure: false
+          cache-bin: false
 
       - name: Install Linux keystore native deps
         if: runner.os == 'Linux'
@@ -233,6 +235,7 @@ jobs:
           workspaces: rust -> rust/target
           prefix-key: "rust-msrv-${{ steps.msrv.outputs.msrv }}"
           cache-on-failure: false
+          cache-bin: false
 
       - name: cargo check (workspace, locked)
         working-directory: rust

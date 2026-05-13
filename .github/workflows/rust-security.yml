@@ -46,6 +46,7 @@ jobs:
           workspaces: rust -> rust/target
           prefix-key: "rust-security-audit"
           cache-on-failure: false
+          cache-bin: false
 
       # rustsec/audit-check@v1 does not accept a working-directory input
       # (silently dropped; the action then `cargo generate-lockfile`s at the
