@@ -16,6 +16,7 @@
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::object::{Commit, Object};
 use mkit_core::ops::merge::{ConflictKind, find_merge_base, merge_trees};
@@ -24,16 +25,26 @@ use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::config;
 use crate::exit;
 use crate::format;
 
+#[derive(Debug, Parser)]
+#[command(name = "mkit merge", about = "Three-way merge a branch into HEAD.")]
+struct MergeOpts {
+    /// Branch to merge into HEAD.
+    branch: String,
+}
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
-    let Some(branch) = args.first() else {
-        return super::usage_error("usage: mkit merge <branch>");
+    let opts = match clap_shim::parse::<MergeOpts>("mkit merge", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
+    let branch = &opts.branch;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -56,8 +67,8 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if ours == theirs {
-        let mut stdout = std::io::stdout().lock();
-        let _ = writeln!(stdout, "already up to date");
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "already up to date");
         return exit::OK;
     }
 
@@ -84,8 +95,8 @@ pub fn run(args: &[String]) -> u8 {
         if let Err(e) = advance_head(&mkit_dir, &theirs) {
             return emit_err(&e, exit::CANTCREAT);
         }
-        let mut stdout = std::io::stdout().lock();
-        let _ = writeln!(stdout, "fast-forward {}", format::short_hash(&theirs, 8));
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "fast-forward {}", format::short_hash(&theirs, 8));
         return exit::OK;
     }
 
@@ -179,9 +190,9 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = super::sync_index_to_tree(&cwd, &store, result.tree_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
-        stdout,
+        stderr,
         "merge {} into HEAD ({})",
         format::short_hash(&theirs, 8),
         format::short_hash(&commit_hash, 8)

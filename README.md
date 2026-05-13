@@ -60,11 +60,13 @@ constant-time scalar arithmetic mode.
 
 ### Object commit (hash + write)
 
-Wallclock for the steady-state "hash a blob and write it to the object
-store" path — mkit's content-addressed primitive vs `git2` (libgit2
-binding) vs `git hash-object -w` over an inherited stdio pipe. Smaller
-bars are better; `git CLI` carries fork/exec overhead that dominates
-at small batches.
+Steady-state "hash a blob and write it to the object store" —
+mkit's content-addressed primitive vs `git2` (libgit2 binding) vs
+`git hash-object -w` over an inherited stdio pipe. Bars are ops/s
+(longer = better); each row label shows the same number with the
+wallclock latency in parentheses. `git CLI` carries fork/exec
+overhead that dominates at small batches, which is why its bar is
+near-invisible on the same axis.
 
 ![Object commit, 1 file](benchmarks/charts/object_commit-1_file.svg)
 ![Object commit, 10 files](benchmarks/charts/object_commit-10_files.svg)
@@ -75,7 +77,8 @@ at small batches.
 
 End-to-end "store N blobs, content-addressed" — mkit's BLAKE3 path vs
 `git2 odb.write` vs `git pack-objects --stdout` on the same blob set.
-Smaller is better.
+Same chart convention: bar = ops/s (longer = better), label shows
+ops/s and latency.
 
 ![Pack create, 10 × 64 KiB](benchmarks/charts/pack_create-10__64_kib.svg)
 ![Pack create, 100 × 64 KiB](benchmarks/charts/pack_create-100__64_kib.svg)
@@ -117,37 +120,133 @@ should never appear in the generic `mkit` utility (see the script's
 
 ## Architecture
 
-mkit is a thin, generic VCS with a predicate-agnostic attestation layer
-built on industry-standard primitives:
+mkit is a content-addressed VCS layered into a small `mkit-core`
+crate (object model, hashing, refs, packfile, signing, transport
+trait) plus one crate per transport and one binary crate
+(`mkit-cli`) that wires them together. The same core is exposed to
+the browser via `mkit-wasm` and to programmatic users via
+`cargo add mkit-core`.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  mkit core binary                                       │
-│  - objects, packs, refs, transports, CLI                │
-│  - attestations: in-toto v1 Statement + DSSE envelopes  │
-└────────────────────┬────────────────────────────────────┘
-                     │
-        ┌────────────┼────────────────┐
-        │            │                │
-┌───────┴────────┐   │   ┌────────────┴────────────────┐
-│ repo-key       │   │   │ external subprocess signer  │
-│ (Ed25519, the  │   │   │ (custom notary, blockchain  │
-│  commit key)   │   │   │  attestor, settlement svc)  │
-└────────────────┘   │   └─────────────────────────────┘
-                     │
-            ┌────────┴────────┐
-            │ sigstore-keyless │
-            │ (planned)        │
-            └──────────────────┘
+### Layers
+
+```text
+┌───────────────────────────────────────────────────────────────┐
+│  mkit-cli                       — argv parser + dispatcher    │
+│  (binary `mkit`, ships every subcommand documented in CLI.md) │
+└───────────────────────────────────────────────────────────────┘
+                              │
+┌───────────────────────────────────────────────────────────────┐
+│  mkit-core                     — content-addressed primitives │
+│  ┌──────────────┬──────────────┬──────────────┬──────────────┐│
+│  │ hash         │ object       │ pack         │ index        ││
+│  │ (BLAKE3)     │ (Blob/Tree/  │ (delta+CDC,  │ (staging,    ││
+│  │              │  Commit/     │  SPEC-PACK)  │  SPEC-INDEX) ││
+│  │              │  Remix,      │              │              ││
+│  │              │  SPEC-OBJ)   │              │              ││
+│  ├──────────────┼──────────────┼──────────────┼──────────────┤│
+│  │ refs         │ store        │ sign         │ ops          ││
+│  │ (named tips, │ (on-disk     │ (Ed25519     │ (status,     ││
+│  │  HEAD)       │  CAS)        │  + verify)   │  merge,      ││
+│  │              │              │              │  bisect, …)  ││
+│  ├──────────────┴──────────────┴──────────────┴──────────────┤│
+│  │           protocol::Transport (object-graph trait)         │
+│  └────────────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────────────┘
+                              │
+   ┌──────────┬──────────┬────┴─────┬──────────┬──────────┐
+   ▼          ▼          ▼          ▼          ▼          ▼
+┌──────┐  ┌──────┐  ┌─────────┐  ┌──────┐  ┌──────┐  ┌──────┐
+│memory│  │ file │  │  http   │  │  s3  │  │ ssh  │  │ wasm │
+│      │  │      │  │ (gateway│  │ (R2, │  │(forced│  │(browser
+│tests │  │local │  │  worker)│  │ etc.)│  │ cmd) │  │ +CFW)│
+└──────┘  └──────┘  └─────────┘  └──────┘  └──────┘  └──────┘
+   one crate per transport, plus mkit-wasm for the JS surface
 ```
 
-Attestations are plain DSSE envelopes carrying an in-toto v1 Statement
-with the commit hash as subject — no mkit-specific schema. Any service
-(CI provenance producer, human reviewer sign-off tool, external
-settlement attestor) can produce or verify them with off-the-shelf
-tooling. See
-[`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) for the full
-contract.
+Each transport implements the same trait — `list_refs`, `read_ref`,
+`write_ref`, `pack_exists`, `download_pack`, `upload_pack` —
+described in [`docs/SPEC-TRANSPORT.md`](docs/SPEC-TRANSPORT.md). The
+URL scheme picks the transport: `mkit+ssh://`, `mkit+s3://`,
+`mkit+https://`, `mkit+file://`. There is no built-in "smart"
+fallback — the scheme is part of the contract.
+
+### Content addressing
+
+Every object is identified by the BLAKE3 hash of its canonical
+serialization. There is no hashing-algorithm negotiation, no
+SHA-1/SHA-256 dichotomy. Hashes are stable across all transports
+and storage backends, including the WASM build. The hashing
+section above quantifies why this choice was free at the
+performance layer.
+
+Object kinds (full schema in
+[`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md)):
+
+| Kind          | Purpose                                                |
+|---------------|--------------------------------------------------------|
+| Blob          | File contents (or chunked via FastCDC for large files) |
+| Tree          | Directory snapshot                                     |
+| Commit        | Tree + parents + Ed25519 signature + author Identity   |
+| Remix         | Signed derivative of one or more commits (attestation-friendly) |
+| ChunkedBlob   | Index of FastCDC chunks for blob > chunk threshold     |
+| Delta         | Bsdiff-like delta between two blobs (pack-internal)    |
+
+### Attestation model
+
+mkit ships **native attestation as a first-class object type**, not
+as a side-channel. A signed in-toto v1 Statement wrapped in a DSSE
+envelope (RFC pending; spec at
+[`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md)) is stored
+under `.mkit/attestations/<commit-hash>/<att-id>.dsse` and can be
+produced by any signer that speaks the
+[v1 stdio protocol](docs/SPEC-EXTERNAL-SIGNER.md):
+
+```text
+                       ┌──────────────────────────────┐
+                       │       mkit attest            │
+                       │   (in-toto v1 + DSSE)        │
+                       └──────────┬───────────────────┘
+                                  │
+        ┌─────────────────────────┼─────────────────────────────┐
+        ▼                         ▼                             ▼
+┌─────────────────┐    ┌──────────────────────┐    ┌────────────────────┐
+│ repo-key signer │    │ external signer      │    │ keyless / sigstore │
+│  (Ed25519 from  │    │ (subprocess, stdio   │    │ (planned, OIDC →   │
+│   .mkit/keys)   │    │   protocol; runs     │    │   short-lived cert)│
+│                 │    │   TPM, FIDO2/CTAP,   │    │                    │
+│ commit & remix  │    │   secure enclave,    │    │                    │
+│ also use this   │    │   …)                 │    │                    │
+└─────────────────┘    └──────────────────────┘    └────────────────────┘
+```
+
+Attestations carry the commit hash as the in-toto `subject`, so
+they verify with off-the-shelf tooling (cosign, in-toto-go, custom
+verifiers). Anything that produces a valid DSSE envelope with an
+in-toto v1 Statement can attest to a mkit commit; conversely,
+mkit's attestations are consumable by any standards-compliant
+verifier. Multi-signer envelopes (one envelope, N signatures) work
+out of the box — see
+[`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) §6.
+
+### CLI ergonomics
+
+Every subcommand parses arguments through `clap-derive` (see
+`mkit-cli/src/clap_shim.rs`) and follows POSIX conventions
+documented in [`docs/CLI.md`](docs/CLI.md):
+
+- **stdout = data, stderr = diagnostics.** `mkit status > /tmp/out`
+  produces an empty file in a clean tree; banners and progress go
+  to stderr.
+- **`--porcelain` / `--format=json`** modes on every read-style
+  command (`status`, `log`, `branch`, `blame`, `remote`, `config`)
+  for scripting.
+- **Exit codes follow BSD `sysexits(3)`.** Shell scripts can
+  distinguish user typos (64) from transient transport failures
+  (75) without parsing stderr.
+- **Signals:** SIGINT/SIGTERM set a graceful-shutdown flag polled
+  by long-running operations (push/pull/clone/log). SIGPIPE is
+  ignored (Rust runtime default); pipelines like
+  `mkit log | head -1` exit cleanly.
 
 ## Identity & push auth — one key, many roles
 

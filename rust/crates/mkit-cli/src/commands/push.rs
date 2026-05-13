@@ -6,13 +6,31 @@
 
 use std::io::Write;
 
+use clap::Parser;
+
+use crate::clap_shim;
 use crate::config;
 use crate::exit;
 use crate::remote_dispatch;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit push",
+    about = "Push refs and packs to the configured remote."
+)]
+struct PushOpts {
+    /// Print what would be pushed without contacting the remote.
+    #[arg(long)]
+    dry_run: bool,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let dry_run = args.iter().any(|a| a == "--dry-run");
+    let opts = match clap_shim::parse::<PushOpts>("mkit push", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    let dry_run = opts.dry_run;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -29,8 +47,8 @@ pub fn run(args: &[String]) -> u8 {
         );
     }
     if dry_run {
-        let mut stdout = std::io::stdout().lock();
-        let _ = writeln!(stdout, "(dry-run) would push to {endpoint}");
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "(dry-run) would push to {endpoint}");
         return exit::OK;
     }
     if let Err(msg) = config::enforce_trusted_remote_endpoint(&cfg) {
@@ -39,9 +57,12 @@ pub fn run(args: &[String]) -> u8 {
     match remote_dispatch::open(endpoint) {
         Ok(tx) => match remote_dispatch::push_all(&cwd, tx.as_ref()) {
             Ok(n) => {
-                let mut stdout = std::io::stdout().lock();
-                let _ = writeln!(stdout, "pushed {n} ref(s) to {endpoint}");
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "pushed {n} ref(s) to {endpoint}");
                 exit::OK
+            }
+            Err(remote_dispatch::DispatchError::Interrupted) => {
+                emit_err("push: interrupted", exit::TEMPFAIL)
             }
             Err(e) => emit_err(&format!("push: {e}"), exit::GENERAL_ERROR),
         },

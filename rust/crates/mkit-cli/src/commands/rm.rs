@@ -4,17 +4,32 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
+use clap::Parser;
 use mkit_core::hash::ZERO;
 use mkit_core::index::{self, EntryStatus, IndexEntry};
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::exit;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit rm",
+    about = "Mark a path for removal in the next commit."
+)]
+struct RmOpts {
+    /// Path to mark for removal. Directory paths remove every entry
+    /// at or below them.
+    path: String,
+}
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let Some(path) = args.first() else {
-        return super::usage_error("usage: mkit rm <path>");
+    let opts = match clap_shim::parse::<RmOpts>("mkit rm", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
+    let path = &opts.path;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),

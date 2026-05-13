@@ -5,12 +5,22 @@
 
 use std::io::Write;
 
+use clap::Parser;
+
+use crate::clap_shim;
 use crate::config;
 use crate::exit;
 use crate::remote_dispatch;
 
+#[derive(Debug, Parser)]
+#[command(name = "mkit pull", about = "Pull changes from the configured remote.")]
+struct PullOpts {}
+
 #[must_use]
-pub fn run(_args: &[String]) -> u8 {
+pub fn run(args: &[String]) -> u8 {
+    if let Err(code) = clap_shim::parse::<PullOpts>("mkit pull", args) {
+        return code;
+    }
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -32,9 +42,12 @@ pub fn run(_args: &[String]) -> u8 {
     match remote_dispatch::open(endpoint) {
         Ok(tx) => match remote_dispatch::pull_all(&cwd, tx.as_ref()) {
             Ok(n) => {
-                let mut stdout = std::io::stdout().lock();
-                let _ = writeln!(stdout, "pulled {n} ref(s) from {endpoint}");
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "pulled {n} ref(s) from {endpoint}");
                 exit::OK
+            }
+            Err(remote_dispatch::DispatchError::Interrupted) => {
+                emit_err("pull: interrupted", exit::TEMPFAIL)
             }
             Err(e) => emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),
         },

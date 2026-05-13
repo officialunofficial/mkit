@@ -7,6 +7,7 @@
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use clap::Parser;
 use mkit_core::hash::{self, Hash};
 use mkit_core::object::{Commit, Object};
 use mkit_core::ops::cherry_pick::cherry_pick;
@@ -16,16 +17,26 @@ use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::config;
 use crate::exit;
 use crate::format;
 
+#[derive(Debug, Parser)]
+#[command(name = "mkit cherry-pick", about = "Apply a single commit onto HEAD.")]
+struct CherryPickOpts {
+    /// 64-char hex commit hash to replay.
+    commit: String,
+}
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
-    let Some(hex) = args.first() else {
-        return super::usage_error("usage: mkit cherry-pick <commit>");
+    let opts = match clap_shim::parse::<CherryPickOpts>("mkit cherry-pick", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
+    let hex = &opts.commit;
     let target: Hash = match hash::from_hex(hex) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("bad commit hash: {e}"), exit::DATAERR),
@@ -127,9 +138,9 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = super::sync_index_to_tree(&cwd, &store, result.tree_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
-        stdout,
+        stderr,
         "cherry-picked {} onto {} as {}",
         format::short_hash(&target, 8),
         format::short_hash(&ours, 8),

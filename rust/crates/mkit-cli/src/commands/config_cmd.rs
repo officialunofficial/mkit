@@ -7,11 +7,35 @@
 
 use std::io::Write;
 
+use clap::{Parser, ValueEnum};
+
+use crate::clap_shim;
 use crate::config::{self, Config, REPO_FORBIDDEN_KEYS};
 use crate::exit;
+use crate::format;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ConfigFormat {
+    Default,
+    Json,
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "mkit config", about = "Show or set configuration values.")]
+struct ConfigOpts {
+    /// Output format for the show forms.
+    #[arg(long, value_enum, default_value = "default")]
+    format: ConfigFormat,
+    /// Optional `<key>` to show, or `<key> <value>` pair to set.
+    args: Vec<String>,
+}
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
+    let opts = match clap_shim::parse::<ConfigOpts>("mkit config", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -20,16 +44,21 @@ pub fn run(args: &[String]) -> u8 {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
+    let json = matches!(opts.format, ConfigFormat::Json);
 
-    if args.is_empty() {
-        return show_all(&cfg);
+    match opts.args.len() {
+        0 => return show_all(&cfg, json),
+        1 => return show_one(&cfg, &opts.args[0], json),
+        2 => {}
+        _ => {
+            return super::usage_error(&format!(
+                "too many arguments: expected 0, 1, or 2 positional args, got {}",
+                opts.args.len()
+            ));
+        }
     }
-    if args.len() == 1 {
-        return show_one(&cfg, &args[0]);
-    }
-    // `key value` pair.
-    let key = &args[0];
-    let value = &args[1];
+    let key = opts.args[0].as_str();
+    let value = opts.args[1].as_str();
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);
     }
@@ -39,7 +68,7 @@ pub fn run(args: &[String]) -> u8 {
             Err(e) => return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR),
         }
     } else {
-        value.clone()
+        value.to_owned()
     };
     // Path-traversal validation for any key whose value is a filesystem
     // path. Catches `..` even on the user-scoped path.
@@ -48,7 +77,7 @@ pub fn run(args: &[String]) -> u8 {
     {
         return emit_err(&format!("{e}"), exit::CONFIG_ERROR);
     }
-    if REPO_FORBIDDEN_KEYS.contains(&key.as_str()) {
+    if REPO_FORBIDDEN_KEYS.contains(&key) {
         return write_user_scoped(key, &normalized_value);
     }
     if let Err(code) = apply(&mut cfg, key, &normalized_value) {
@@ -119,79 +148,95 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
     Ok(())
 }
 
-fn show_all(cfg: &Config) -> u8 {
+/// Stable schema for the JSON form: every key the CLI knows about,
+/// paired with its value. Keys are emitted in alphabetical order so
+/// the output is deterministic and easy to snapshot-test.
+const CONFIG_KEYS: &[&str] = &[
+    "attest.signer",
+    "default_branch",
+    "key.backend",
+    "key.default_ref",
+    "key.ed25519_ref",
+    "key.p256_ref",
+    "key.secp256k1_ref",
+    "remote_bucket",
+    "remote_endpoint",
+    "remote_type",
+    "signer",
+    "signing_key",
+    "ssh.identity_file",
+    "ssh.strict_host_key_checking",
+    "ssh.user_known_hosts_file",
+    "trusted_remote_endpoint",
+    "user.identity",
+];
+
+fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<&'a str> {
+    match key {
+        "user.identity" => Some(&cfg.user_identity),
+        "trusted_remote_endpoint" => Some(&cfg.trusted_remote_endpoint),
+        "signing_key" => Some(&cfg.signing_key),
+        "default_branch" => Some(&cfg.default_branch),
+        "remote_endpoint" => Some(&cfg.remote_endpoint),
+        "remote_bucket" => Some(&cfg.remote_bucket),
+        "remote_type" => Some(&cfg.remote_type),
+        "ssh.strict_host_key_checking" => Some(&cfg.ssh_strict_host_key_checking),
+        "ssh.user_known_hosts_file" => Some(&cfg.ssh_user_known_hosts_file),
+        "ssh.identity_file" => Some(&cfg.ssh_identity_file),
+        "signer" => Some(&cfg.signer),
+        "key.backend" => Some(cfg.key.backend_or_fallback()),
+        "key.default_ref" => Some(cfg.key.default_ref_or_fallback()),
+        "key.ed25519_ref" => Some(cfg.key.ed25519_ref_or_fallback()),
+        "key.secp256k1_ref" => Some(cfg.key.secp256k1_ref_or_fallback()),
+        "key.p256_ref" => Some(cfg.key.p256_ref_or_fallback()),
+        "attest.signer" => Some(cfg.attest.signer_or_fallback()),
+        _ => None,
+    }
+}
+
+fn show_all(cfg: &Config, json: bool) -> u8 {
     let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "user.identity = {}", cfg.user_identity);
-    let _ = writeln!(
-        stdout,
-        "trusted_remote_endpoint = {}",
-        cfg.trusted_remote_endpoint
-    );
-    let _ = writeln!(stdout, "signer = {}", cfg.signer);
-    let _ = writeln!(stdout, "key.backend = {}", cfg.key.backend_or_fallback());
-    let _ = writeln!(
-        stdout,
-        "key.default_ref = {}",
-        cfg.key.default_ref_or_fallback()
-    );
-    let _ = writeln!(
-        stdout,
-        "key.ed25519_ref = {}",
-        cfg.key.ed25519_ref_or_fallback()
-    );
-    let _ = writeln!(
-        stdout,
-        "key.secp256k1_ref = {}",
-        cfg.key.secp256k1_ref_or_fallback()
-    );
-    let _ = writeln!(stdout, "key.p256_ref = {}", cfg.key.p256_ref_or_fallback());
-    let _ = writeln!(
-        stdout,
-        "attest.signer = {}",
-        cfg.attest.signer_or_fallback()
-    );
-    let _ = writeln!(stdout, "signing_key = {}", cfg.signing_key);
-    let _ = writeln!(stdout, "default_branch = {}", cfg.default_branch);
-    let _ = writeln!(stdout, "remote_endpoint = {}", cfg.remote_endpoint);
-    let _ = writeln!(stdout, "remote_bucket = {}", cfg.remote_bucket);
-    let _ = writeln!(stdout, "remote_type = {}", cfg.remote_type);
-    let _ = writeln!(
-        stdout,
-        "ssh.strict_host_key_checking = {}",
-        cfg.ssh_strict_host_key_checking
-    );
-    let _ = writeln!(
-        stdout,
-        "ssh.user_known_hosts_file = {}",
-        cfg.ssh_user_known_hosts_file
-    );
-    let _ = writeln!(stdout, "ssh.identity_file = {}", cfg.ssh_identity_file);
+    if json {
+        // Flat object with every known key. Unset values render as
+        // empty strings, matching the default-mode behaviour.
+        let _ = stdout.write_all(b"{");
+        for (i, key) in CONFIG_KEYS.iter().enumerate() {
+            if i > 0 {
+                let _ = stdout.write_all(b",");
+            }
+            let v = lookup(cfg, key).unwrap_or("");
+            let _ = write!(
+                stdout,
+                "\"{}\":\"{}\"",
+                format::json_escape(key),
+                format::json_escape(v)
+            );
+        }
+        let _ = stdout.write_all(b"}\n");
+        return exit::OK;
+    }
+    for key in CONFIG_KEYS {
+        let v = lookup(cfg, key).unwrap_or("");
+        let _ = writeln!(stdout, "{key} = {v}");
+    }
     exit::OK
 }
 
-fn show_one(cfg: &Config, key: &str) -> u8 {
-    let v = match key {
-        "user.identity" => &cfg.user_identity,
-        "trusted_remote_endpoint" => &cfg.trusted_remote_endpoint,
-        "signer" => &cfg.signer,
-        "key.backend" => cfg.key.backend_or_fallback(),
-        "key.default_ref" => cfg.key.default_ref_or_fallback(),
-        "key.ed25519_ref" => cfg.key.ed25519_ref_or_fallback(),
-        "key.secp256k1_ref" => cfg.key.secp256k1_ref_or_fallback(),
-        "key.p256_ref" => cfg.key.p256_ref_or_fallback(),
-        "attest.signer" => cfg.attest.signer_or_fallback(),
-        "signing_key" => &cfg.signing_key,
-        "default_branch" => &cfg.default_branch,
-        "remote_endpoint" => &cfg.remote_endpoint,
-        "remote_bucket" => &cfg.remote_bucket,
-        "remote_type" => &cfg.remote_type,
-        "ssh.strict_host_key_checking" => &cfg.ssh_strict_host_key_checking,
-        "ssh.user_known_hosts_file" => &cfg.ssh_user_known_hosts_file,
-        "ssh.identity_file" => &cfg.ssh_identity_file,
-        _ => return emit_err(&format!("unknown config key: {key}"), exit::CONFIG_ERROR),
+fn show_one(cfg: &Config, key: &str, json: bool) -> u8 {
+    let Some(v) = lookup(cfg, key) else {
+        return emit_err(&format!("unknown config key: {key}"), exit::CONFIG_ERROR);
     };
     let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "{v}");
+    if json {
+        let _ = writeln!(
+            stdout,
+            "{{\"{}\":\"{}\"}}",
+            format::json_escape(key),
+            format::json_escape(v)
+        );
+    } else {
+        let _ = writeln!(stdout, "{v}");
+    }
     exit::OK
 }
 

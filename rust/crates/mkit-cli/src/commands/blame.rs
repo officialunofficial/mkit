@@ -1,22 +1,52 @@
 //! `mkit blame <file>` — line-level attribution against HEAD.
 //!
-//! Output is pinned against `rust/tests/golden/phase5b/blame_three_commit.txt`:
-//! `<short12>\t<line_num>\t<text>\n` — emitted verbatim by
-//! [`mkit_core::ops::blame::format_blame_text`].
+//! Output modes:
+//!
+//! - default — `<short12>\t<line_num>\t<text>\n` per line, pinned by
+//!   the integration test in `tests/cli_wire.rs:233-243`.
+//! - `--format=json` — JSONL, one self-contained record per line with
+//!   keys `hash`, `line_num`, `author`, `timestamp`, `text`. Schema
+//!   diverges from the tab format because mkit's author is an
+//!   Identity, not a `Name <email>` string — see commands/log.rs for
+//!   the same divergence.
 
 use std::io::Write;
 
-use mkit_core::ops::blame::{blame_file, format_blame_text};
+use clap::{Parser, ValueEnum};
+use mkit_core::ops::blame::{BlameResult, blame_file, format_blame_text};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::exit;
+use crate::format;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BlameFormat {
+    Default,
+    Json,
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "mkit blame", about = "Show line-level commit attribution.")]
+struct BlameOpts {
+    /// Output format. Default emits `<short12>\t<line_num>\t<text>`
+    /// per line; `json` emits JSONL with `hash`, `line_num`,
+    /// `author`, `timestamp`, `text` keys.
+    #[arg(long, value_enum, default_value = "default")]
+    format: BlameFormat,
+    /// File to blame against HEAD.
+    file: String,
+}
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let Some(file) = args.first() else {
-        return super::usage_error("usage: mkit blame <file>");
+    let opts = match clap_shim::parse::<BlameOpts>("mkit blame", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
+    let json = matches!(opts.format, BlameFormat::Json);
+    let file = &opts.file;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -35,9 +65,44 @@ pub fn run(args: &[String]) -> u8 {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("blame: {e}"), exit::NOINPUT),
     };
-    let text = format_blame_text(&result);
+    if json {
+        render_json(&result)
+    } else {
+        let text = format_blame_text(&result);
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(text.as_bytes());
+        exit::OK
+    }
+}
+
+/// JSONL output for `--format=json`. One record per source line:
+///
+/// ```json
+/// {"hash":"<64-hex>","line_num":<int>,"author":"<identity>","timestamp":<int>,"text":"<line>"}
+/// ```
+fn render_json(result: &BlameResult) -> u8 {
     let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
+    for line in &result.lines {
+        let _ = stdout.write_all(b"{");
+        let _ = write!(
+            stdout,
+            "\"hash\":\"{}\"",
+            format::hex_hash(&line.commit_hash)
+        );
+        let _ = write!(stdout, ",\"line_num\":{}", line.line_num);
+        let _ = write!(
+            stdout,
+            ",\"author\":\"{}\"",
+            format::json_escape(&format::full_identity(&line.author))
+        );
+        let _ = write!(stdout, ",\"timestamp\":{}", line.timestamp);
+        // Line text may contain arbitrary bytes from the source file.
+        // Render via lossy UTF-8 — the original bytes are recoverable
+        // via the default tab format for callers that care.
+        let text = String::from_utf8_lossy(&line.text);
+        let _ = write!(stdout, ",\"text\":\"{}\"", format::json_escape(&text));
+        let _ = stdout.write_all(b"}\n");
+    }
     exit::OK
 }
 

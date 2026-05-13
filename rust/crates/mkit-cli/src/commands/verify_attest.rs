@@ -24,58 +24,37 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use clap::Parser;
 use mkit_attest::{Algorithm, Registry, TrustRoot, store, verify_envelope};
 use mkit_core::hash::Hash;
 use mkit_core::{hash as hash_mod, refs};
 
+use crate::clap_shim;
 use crate::exit;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit verify-attest",
+    about = "Verify every attestation attached to a commit."
+)]
 struct Args {
+    /// Commit hash to verify attestations for. Defaults to HEAD.
+    #[arg(long, value_name = "HASH")]
     commit: Option<String>,
+    /// Path to a trust-roots TOML file.
+    #[arg(long, value_name = "PATH")]
     trust_roots: Option<String>,
+    /// Filter signatures by algorithm.
+    #[arg(long, value_name = "ALG")]
     algorithm: Option<String>,
-}
-
-fn parse_args(args: &[String]) -> Result<Args, String> {
-    let mut out = Args {
-        commit: None,
-        trust_roots: None,
-        algorithm: None,
-    };
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--commit" if i + 1 < args.len() => {
-                out.commit = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--trust-roots" if i + 1 < args.len() => {
-                out.trust_roots = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--algorithm" if i + 1 < args.len() => {
-                out.algorithm = Some(args[i + 1].clone());
-                i += 2;
-            }
-            other => return Err(format!("unknown argument: {other}")),
-        }
-    }
-    Ok(out)
 }
 
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
-    let parsed = match parse_args(args) {
-        Ok(p) => p,
-        Err(e) => {
-            return emit_err(
-                &format!(
-                    "{e}\nusage: mkit verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>]"
-                ),
-                exit::USAGE,
-            );
-        }
+    let parsed = match clap_shim::parse::<Args>("mkit verify-attest", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
@@ -131,10 +110,14 @@ pub fn run(args: &[String]) -> u8 {
         Ok(v) => v,
         Err(e) => return emit_err(&format!("list attestations: {e}"), exit::NOINPUT),
     };
-    let mut stdout = std::io::stdout().lock();
+    // All `verify-attest` report lines are human-readable prose; the
+    // verdict is conveyed via the exit code (OK / DATAERR /
+    // GENERAL_ERROR). Route the entire report to stderr so stdout
+    // stays clean for a future `--format=json` output mode.
+    let mut report = std::io::stderr().lock();
     if envelopes.is_empty() {
         let _ = writeln!(
-            stdout,
+            report,
             "no attestations for commit {}",
             hash_mod::to_hex(&commit_hash)
         );
@@ -142,7 +125,7 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     let _ = writeln!(
-        stdout,
+        report,
         "verifying {} attestation(s) for commit {}",
         envelopes.len(),
         hash_mod::to_hex(&commit_hash)
@@ -153,7 +136,7 @@ pub fn run(args: &[String]) -> u8 {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
-                let _ = writeln!(stdout, "  {}: read error: {e}", path.display());
+                let _ = writeln!(report, "  {}: read error: {e}", path.display());
                 all_ok = false;
                 continue;
             }
@@ -163,7 +146,7 @@ pub fn run(args: &[String]) -> u8 {
             Ok(r) => r,
             Err(e) => {
                 let _ = writeln!(
-                    stdout,
+                    report,
                     "  {}: malformed envelope: {e}",
                     hash_mod::to_hex(&att_id)
                 );
@@ -172,7 +155,7 @@ pub fn run(args: &[String]) -> u8 {
             }
         };
         let _ = writeln!(
-            stdout,
+            report,
             "  attestation {}: {} signature(s)",
             hash_mod::to_hex(&att_id),
             result.signatures.len()
@@ -193,13 +176,13 @@ pub fn run(args: &[String]) -> u8 {
                 format!("FAILED ({:?})", sig.reason)
             };
             let _ = writeln!(
-                stdout,
+                report,
                 "    [{alg_str}] {} — {verdict}",
                 short_keyid(&sig.keyid)
             );
         }
         if !any_shown && filter.is_some() {
-            let _ = writeln!(stdout, "    (no signatures matched --algorithm filter)");
+            let _ = writeln!(report, "    (no signatures matched --algorithm filter)");
         }
         if !result.any_verified {
             all_ok = false;
@@ -207,10 +190,10 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     if all_ok {
-        let _ = writeln!(stdout, "ok: all attestations verified");
+        let _ = writeln!(report, "ok: all attestations verified");
         exit::OK
     } else {
-        let _ = writeln!(stdout, "bad: at least one attestation failed verification");
+        let _ = writeln!(report, "bad: at least one attestation failed verification");
         exit::DATAERR
     }
 }
@@ -409,7 +392,16 @@ fn emit_err(msg: &str, code: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use std::fs;
+
+    /// Test-only adapter: drive the clap-derive parser with just the
+    /// trailing args.
+    fn parse_args(args: &[String]) -> Result<Args, clap::Error> {
+        let mut full: Vec<String> = vec!["mkit verify-attest".into()];
+        full.extend_from_slice(args);
+        Args::try_parse_from(full)
+    }
 
     #[test]
     fn parse_args_defaults() {

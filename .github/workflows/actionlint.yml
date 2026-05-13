@@ -1,0 +1,42 @@
+name: actionlint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actionlint.yaml'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actionlint.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # `rhysd/actionlint` is the upstream; the docker image is pinned
+      # by tag for reproducibility. shellcheck is bundled so the
+      # `run:` blocks get linted too.
+      - name: Download actionlint
+        id: get_actionlint
+        run: bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7
+        shell: bash
+
+      # shellcheck is bundled into actionlint. We restrict it to
+      # `error` severity so the gate fails only on real bugs, not on
+      # pre-existing style suggestions (SC2129, SC2155, etc.) across
+      # release.yml / reproducible-build.yml. Tighten the severity here
+      # once those are cleaned up in a follow-up.
+      - name: Run actionlint
+        run: |
+          ${{ steps.get_actionlint.outputs.executable }} \
+            -color \
+            -shellcheck="shellcheck -S error"
+        shell: bash

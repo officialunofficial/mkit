@@ -12,39 +12,47 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
+use clap::Parser;
 use mkit_core::refs;
 use mkit_core::store::{ObjectStore, StoreError};
 
+use crate::clap_shim;
 use crate::config::{self, Config};
 use crate::exit;
 use crate::remote_dispatch;
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit clone",
+    about = "Initialise a new repo and pull from a remote URL."
+)]
+struct CloneOpts {
+    /// Shallow clone depth (not yet wired).
+    #[arg(long, value_name = "N")]
+    depth: Option<u32>,
+    /// Sparse-checkout pattern (not yet wired).
+    #[arg(long, value_name = "PATTERN")]
+    sparse: Option<String>,
+    /// Remote URL (e.g. `mkit+file:///abs/path`).
+    url: String,
+    /// Destination directory. Defaults to the final URL segment.
+    dir: Option<String>,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let mut url: Option<&str> = None;
-    let mut dir: Option<&str> = None;
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        if a == "--depth" || a == "--sparse" {
-            return super::usage_error(&format!("mkit clone: {a} is not yet wired"));
-        }
-        if a.starts_with("--") {
-            return super::usage_error(&format!("mkit clone: unknown flag {a}"));
-        }
-        if url.is_none() {
-            url = Some(a);
-        } else if dir.is_none() {
-            dir = Some(a);
-        } else {
-            return super::usage_error("usage: mkit clone <url> [<dir>]");
-        }
-        i += 1;
-    }
-    let Some(url) = url else {
-        return super::usage_error("usage: mkit clone <url> [<dir>]");
+    let opts = match clap_shim::parse::<CloneOpts>("mkit clone", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
-    let target: PathBuf = match dir {
+    if opts.depth.is_some() {
+        return super::usage_error("mkit clone: --depth is not yet wired");
+    }
+    if opts.sparse.is_some() {
+        return super::usage_error("mkit clone: --sparse is not yet wired");
+    }
+    let url = opts.url.as_str();
+    let target: PathBuf = match opts.dir.as_deref() {
         Some(d) => PathBuf::from(d),
         None => PathBuf::from(derive_dir_from_url(url)),
     };
@@ -80,13 +88,16 @@ pub fn run(args: &[String]) -> u8 {
     match remote_dispatch::open(url) {
         Ok(tx) => match remote_dispatch::pull_all(&target, tx.as_ref()) {
             Ok(n) => {
-                let mut stdout = std::io::stdout().lock();
+                let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(
-                    stdout,
+                    stderr,
                     "cloned {n} ref(s) from {url} into {}",
                     target.display()
                 );
                 exit::OK
+            }
+            Err(remote_dispatch::DispatchError::Interrupted) => {
+                emit_err("clone: interrupted", exit::TEMPFAIL)
             }
             Err(e) => emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),
         },

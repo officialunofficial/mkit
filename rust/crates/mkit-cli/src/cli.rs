@@ -25,15 +25,21 @@ commands:
   cat <hash>        Display an object by its hash
   tree              Snapshot working directory as a tree object
   commit [-a] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
-  log [--oneline] [--graph] [-n N]  Show commit history
-  status            Show staged and working tree changes
+  log [--oneline] [--format=json] [--graph] [-n N]
+                    Show commit history (--format=json emits JSONL)
+  status [--porcelain]
+                    Show staged and working tree changes
+                    (--porcelain emits machine-readable XY lines on stdout)
   diff              Show changes (HEAD vs workdir, or two trees)
-  branch            List branches (* marks current)
+  branch [--format=json]
+                    List branches (* marks current; JSONL with --format=json)
   branch <name>     Create a branch at HEAD
   branch -d <name>  Delete a branch
   checkout <branch> Switch HEAD to a branch and restore files
   tag               List, create, or delete tags
-  config            Show or set configuration values
+  config [--format=json]  Show all configuration values (JSON with --format=json)
+  config <key> [--format=json]  Show one value
+  config <key> <value>  Set a configuration value
   config user.identity <value>  Set author Identity
                         (ed25519:<hex>, mid:<N>, or raw [kind][len][bytes] hex)
   config trusted_remote_endpoint <url>  Trust an HTTP/S3 remote for ambient env credentials
@@ -51,7 +57,7 @@ commands:
   stash drop [N]    Remove stash entry N without applying
   stash show [N]    Show diff of stash entry N
   clone [--depth N] [--sparse ...] <url>  Clone a repository
-  remote            Show remote configuration
+  remote [--format=json]  Show remote configuration (JSON with --format=json)
   remote add <url>  Add remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
   remote set <url>  Alias for 'remote add'
   key generate|list|import|export|delete  Manage user-scoped keystore keys
@@ -67,7 +73,8 @@ commands:
   bisect reset       End bisect and restore original state
   sparse-checkout    Manage sparse checkout patterns
   serve <path>       Start SSH transport server (internal)
-  blame <file>      Show line-level commit attribution
+  blame [--format=json] <file>
+                    Show line-level commit attribution (JSONL with --format=json)
   verify <hash>     Verify the signature on a commit or remix
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
          [--additional-signer \"algorithm=<alg>,signer=<kind>[,path=<p>]\"]...

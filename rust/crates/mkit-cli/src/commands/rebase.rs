@@ -26,12 +26,32 @@ use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
 
+use clap::Parser;
+
+use crate::clap_shim;
 use crate::config;
 use crate::exit;
 use crate::format;
 
+#[derive(Debug, Parser)]
+#[command(name = "mkit rebase", about = "Replay commits onto a different base.")]
+struct RebaseOpts {
+    /// Continue an in-progress rebase after resolving conflicts.
+    #[arg(long = "continue", conflicts_with_all = ["abort", "branch"])]
+    cont: bool,
+    /// Abort the in-progress rebase and restore the original HEAD.
+    #[arg(long, conflicts_with_all = ["cont", "branch"])]
+    abort: bool,
+    /// Branch to replay commits onto.
+    branch: Option<String>,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
+    let opts = match clap_shim::parse::<RebaseOpts>("mkit rebase", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -42,11 +62,14 @@ pub fn run(args: &[String]) -> u8 {
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
-    match args.first().map(String::as_str) {
-        Some("--abort") => abort(&cwd, &mkit_dir, &store),
-        Some("--continue") => resume(&cwd, &mkit_dir, &store),
-        Some(branch) => start(&cwd, &mkit_dir, &store, branch),
-        None => super::usage_error("usage: mkit rebase <branch> | --continue | --abort"),
+    if opts.abort {
+        abort(&cwd, &mkit_dir, &store)
+    } else if opts.cont {
+        resume(&cwd, &mkit_dir, &store)
+    } else if let Some(branch) = opts.branch.as_deref() {
+        start(&cwd, &mkit_dir, &store, branch)
+    } else {
+        super::usage_error("usage: mkit rebase <branch> | --continue | --abort")
     }
 }
 
@@ -140,9 +163,9 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
         let _ = super::sync_index_to_tree(cwd, store, tree);
     }
     let _ = cleanup_rebase(mkit_dir);
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
-        stdout,
+        stderr,
         "rebase aborted; HEAD restored to {}",
         &state.head_name
     );
@@ -237,9 +260,9 @@ fn replay(
         return emit_err(&format!("reattach HEAD: {e}"), exit::CANTCREAT);
     }
     let _ = cleanup_rebase(mkit_dir);
-    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
-        stdout,
+        stderr,
         "rebased {} commit(s) onto {}",
         state.done.len(),
         format::short_hash(&state.onto, 8)

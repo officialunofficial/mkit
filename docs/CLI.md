@@ -28,7 +28,12 @@ Working-tree commands:
 - `mkit add <path>` / `mkit add .` — stage a file (or every non-ignored
   file) for the next commit.
 - `mkit rm <path>` — mark a file for removal in the next commit.
-- `mkit status` — show staged and unstaged changes.
+- `mkit status [--porcelain]` — show staged and unstaged changes.
+  Default-mode prose (banner + section headers + per-file lines) goes
+  to **stderr**; stdout is reserved for `--porcelain` machine output.
+  Porcelain emits one entry per line in `git status --porcelain=v1`
+  format (`XY <path>`, with mkit's `T` for `ModeChanged` as the only
+  non-git extension). Empty stdout means clean.
 - `mkit diff [<hash1> <hash2>]` — show changes. With no args, compares
   HEAD to the working directory.
 - `mkit stash [save|list|pop|drop|show]` — save/restore WIP changes.
@@ -43,8 +48,14 @@ History / commits:
   tracked-only shortcut: it stages modified tracked files and tracked
   deletions before committing, but does not add untracked files.
   `mkit commit -am <msg>` is accepted as shorthand for `-a -m <msg>`.
-- `mkit log [--oneline] [--graph] [-n N]` — show commit history.
-- `mkit blame <file>` — show line-level commit attribution.
+- `mkit log [--oneline] [--format=json] [--graph] [-n N]` — show
+  commit history. `--format=json` emits JSONL (one JSON object per
+  commit, newest first) with keys `hash`, `parents`, `tree`, `author`,
+  `timestamp`, `title`, `message`.
+- `mkit blame [--format=json] <file>` — show line-level commit
+  attribution. Default emits `<short12>\t<line_num>\t<text>` per line;
+  `--format=json` emits JSONL with keys `hash`, `line_num`, `author`,
+  `timestamp`, `text`.
 - `mkit verify <hash>` — verify the signature on a commit or remix.
 - `mkit cat <hash>` — display an object by its hash.
 - `mkit hash <file>` — hash a file and store it as a blob.
@@ -53,7 +64,8 @@ History / commits:
 Branches / refs:
 
 - `mkit branch` / `mkit branch <name>` / `mkit branch -d <name>` —
-  list, create, or delete branches.
+  list, create, or delete branches. `--format=json` on the list form
+  emits JSONL with keys `name`, `current`, `hash`.
 - `mkit checkout <branch>` — switch HEAD and restore files.
 - `mkit tag` — list, create, or delete tags.
 - `mkit merge <branch>` — three-way merge into HEAD.
@@ -64,7 +76,9 @@ Branches / refs:
 
 Remote / sync:
 
-- `mkit remote` — show the configured remote.
+- `mkit remote [--format=json]` — show the configured remote.
+  `--format=json` emits a single JSON object `{"url":"...","transport":"..."}`;
+  unset remote → empty stdout.
 - `mkit remote add <url>` — set the remote. URL MUST start with
   `mkit+<scheme>://` (see below).
 - `mkit remote set <url>` — alias for `mkit remote add`.
@@ -78,7 +92,9 @@ Remote / sync:
 Config / keys / version:
 
 - `mkit keygen` — generate a new Ed25519 signing keypair.
-- `mkit config` — show all configuration values.
+- `mkit config [--format=json]` — show all configuration values.
+  `--format=json` emits a flat JSON object with every known key.
+- `mkit config <key> [--format=json]` — show one value.
 - `mkit config <key> <value>` — set a configuration value.
 - `mkit version` — print the version. Emits exactly `mkit <X.Y.Z>\n`.
 
@@ -220,12 +236,15 @@ Repo-local values in `.mkit/config` always win over user-level config.
 ### Signals
 
 - **`SIGINT`** (Ctrl-C) and **`SIGTERM`** set a graceful-shutdown flag.
-  Long-running operations (push, pull, clone) poll it at natural
+  Long-running operations (push, pull, clone, log) poll it at natural
   checkpoints and exit with `tempfail` (75) so the operation can be
-  retried.
+  retried. Wired via `signal-hook`'s `flag` module so the CLI stays
+  under its crate-level `#![deny(unsafe_code)]`.
 - **`SIGPIPE`** is ignored. Pipelines like `mkit log | head -1` exit
   cleanly without a "Broken pipe" message — the next write just
-  propagates `EPIPE` as a normal I/O error.
+  propagates `EPIPE` as a normal I/O error. This is the Rust runtime
+  default (since 1.65); mkit does not register over it. The behaviour
+  is pinned by an integration test (`tests/sigpipe.rs`).
 
 ### Man page
 

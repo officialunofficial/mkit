@@ -2,18 +2,32 @@
 
 use std::io::Write;
 
+use clap::Parser;
 use mkit_core::hash::from_hex;
 use mkit_core::object::Object;
 use mkit_core::sign::{verify_commit, verify_remix};
 use mkit_core::store::ObjectStore;
 
+use crate::clap_shim;
 use crate::exit;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "mkit verify",
+    about = "Verify the signature on a commit or remix."
+)]
+struct VerifyOpts {
+    /// 64-char hex object hash.
+    hash: String,
+}
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let Some(hex) = args.first() else {
-        return super::usage_error("usage: mkit verify <hash>");
+    let opts = match clap_shim::parse::<VerifyOpts>("mkit verify", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
+    let hex = &opts.hash;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),

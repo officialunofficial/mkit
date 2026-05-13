@@ -56,10 +56,13 @@ mkit-transport-ssh = { version = "0.1", path = "../mkit-transport-ssh" }
 mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
 buffa = "0.5"
 
-# `derive` and `wrap_help` are intentionally disabled so help-text output
-# is deterministic — we render help ourselves from a compile-time const
-# pinned by snapshot tests.
-clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage"] }
+# `wrap_help` is intentionally disabled so help-text output stays
+# deterministic across terminal widths. `derive` is enabled so the
+# per-command strangler migration (see clap_shim.rs) can use
+# `#[derive(Parser)]`; the top-level `HELP_TEXT` constant remains
+# the source of truth for `mkit --help` and is pinned by snapshot
+# tests in cli.rs + tests/help_snapshot.rs.
+clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage", "derive", "string"] }
 tempfile = "3"
 thiserror = "2"
 # Used by `mkit keygen` to generate raw 32-byte secrets for non-ed25519
@@ -73,8 +76,14 @@ zeroize = "1"
 # (secp256k1, p256). The Ed25519 path uses mkit_core::sign which has
 # its own libc dependency; the cli's non-Ed25519 paths reach through
 # the same primitives, so we add libc here too.
+#
+# signal-hook installs SIGINT/SIGTERM handlers via sigaction(2) for
+# cooperative shutdown. We use only the `flag` module (atomic-bool
+# stores; async-signal-safe) so this crate stays
+# `#![deny(unsafe_code)]` — see signal.rs.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+signal-hook = { version = "0.3", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mkit-keystore = { version = "0.1", path = "../mkit-keystore", features = ["backend-macos-keychain"] }

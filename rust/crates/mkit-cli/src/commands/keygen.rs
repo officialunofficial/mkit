@@ -28,59 +28,35 @@
 use std::io::Write;
 use std::path::Path;
 
+use clap::Parser;
 use mkit_attest::Algorithm;
 use mkit_core::sign::{KeyPair, load_raw_32, save_key, save_raw_32};
 use zeroize::Zeroizing;
 
+use crate::clap_shim;
 use crate::commands::attest_factory;
 use crate::exit;
 use crate::format;
 
-struct Args {
+#[derive(Debug, Parser)]
+#[command(name = "mkit keygen", about = "Generate a fresh signing key.")]
+struct KeygenOpts {
+    /// Algorithm: `ed25519` (default), `secp256k1`, or `p256`.
+    #[arg(long)]
     algorithm: Option<String>,
+    /// Overwrite an existing key file at the target path.
+    #[arg(long)]
     force: bool,
+    /// Emit the canonical keyid on stdout for trust-roots entries.
+    #[arg(long)]
     print_pubkey: bool,
-}
-
-fn parse_args(args: &[String]) -> Result<Args, String> {
-    let mut out = Args {
-        algorithm: None,
-        force: false,
-        print_pubkey: false,
-    };
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--algorithm" if i + 1 < args.len() => {
-                out.algorithm = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--force" => {
-                out.force = true;
-                i += 1;
-            }
-            "--print-pubkey" => {
-                out.print_pubkey = true;
-                i += 1;
-            }
-            other => return Err(format!("unknown argument: {other}")),
-        }
-    }
-    Ok(out)
 }
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let parsed = match parse_args(args) {
-        Ok(p) => p,
-        Err(e) => {
-            return emit_err(
-                &format!(
-                    "{e}\nusage: mkit keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]"
-                ),
-                exit::USAGE,
-            );
-        }
+    let parsed = match clap_shim::parse::<KeygenOpts>("mkit keygen", args) {
+        Ok(o) => o,
+        Err(code) => return code,
     };
 
     let cwd = match std::env::current_dir() {
@@ -160,16 +136,20 @@ fn run_ed25519(key_path: &Path, force: bool, print_pubkey: bool) -> u8 {
     if let Err(e) = save_key(key_path, &kp) {
         return emit_err(&format!("save key: {e}"), exit::CANTCREAT);
     }
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "generated signing key at {}", key_path.display());
     let pk_hex = hex32(&kp.public.0);
-    let _ = writeln!(stdout, "public:  ed25519:{pk_hex}");
-    let _ = writeln!(
-        stdout,
-        "identity: {}",
-        format::short_identity(&mkit_core::Identity::ed25519(kp.public.0))
-    );
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "generated signing key at {}", key_path.display());
+        let _ = writeln!(stderr, "public:  ed25519:{pk_hex}");
+        let _ = writeln!(
+            stderr,
+            "identity: {}",
+            format::short_identity(&mkit_core::Identity::ed25519(kp.public.0))
+        );
+    }
     if print_pubkey {
+        // The key string IS the data when --print-pubkey is set.
+        let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "ed25519:{pk_hex}");
     }
     exit::OK
@@ -218,10 +198,13 @@ fn run_secp256k1(key_path: &Path, force: bool, print_pubkey: bool) -> u8 {
     drop(secret);
 
     let pk = signer.public_key_sec1();
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "generated signing key at {}", key_path.display());
-    let _ = writeln!(stdout, "public:  secp256k1:{}", hex_lower(&pk));
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "generated signing key at {}", key_path.display());
+        let _ = writeln!(stderr, "public:  secp256k1:{}", hex_lower(&pk));
+    }
     if print_pubkey {
+        let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "secp256k1:{}", hex_lower(&pk));
     }
     exit::OK
@@ -262,10 +245,13 @@ fn run_p256(key_path: &Path, force: bool, print_pubkey: bool) -> u8 {
     drop(secret);
 
     let pk = signer.public_key_sec1();
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "generated signing key at {}", key_path.display());
-    let _ = writeln!(stdout, "public:  p256:{}", hex_lower(&pk));
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "generated signing key at {}", key_path.display());
+        let _ = writeln!(stderr, "public:  p256:{}", hex_lower(&pk));
+    }
     if print_pubkey {
+        let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "p256:{}", hex_lower(&pk));
     }
     exit::OK
@@ -341,32 +327,35 @@ fn emit_err(msg: &str, code: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use clap::Parser;
+
+    use super::KeygenOpts;
 
     #[test]
-    fn parse_args_defaults() {
-        let p = parse_args(&[]).unwrap();
+    fn parse_defaults() {
+        let p = KeygenOpts::try_parse_from(["mkit keygen"]).unwrap();
         assert!(p.algorithm.is_none());
         assert!(!p.force);
         assert!(!p.print_pubkey);
     }
 
     #[test]
-    fn parse_args_all_flags() {
-        let args = vec![
-            "--algorithm".into(),
-            "secp256k1".into(),
-            "--force".into(),
-            "--print-pubkey".into(),
-        ];
-        let p = parse_args(&args).unwrap();
+    fn parse_all_flags() {
+        let p = KeygenOpts::try_parse_from([
+            "mkit keygen",
+            "--algorithm",
+            "secp256k1",
+            "--force",
+            "--print-pubkey",
+        ])
+        .unwrap();
         assert_eq!(p.algorithm.as_deref(), Some("secp256k1"));
         assert!(p.force);
         assert!(p.print_pubkey);
     }
 
     #[test]
-    fn parse_args_unknown() {
-        assert!(parse_args(&["--bogus".into()]).is_err());
+    fn parse_unknown_flag_rejected() {
+        assert!(KeygenOpts::try_parse_from(["mkit keygen", "--bogus"]).is_err());
     }
 }
