@@ -107,7 +107,10 @@ impl Keystore for WindowsCredentialKeystore {
         )?;
         let entry = Self::entry(label, secret.algorithm())?;
         let exists = match entry.get_secret() {
-            Ok(_) => true,
+            Ok(secret) => {
+                let _secret = Zeroizing::new(secret);
+                true
+            }
             Err(keyring_core::Error::NoEntry) => false,
             Err(error) => return Err(map_keyring_error(error, label, secret.algorithm())),
         };

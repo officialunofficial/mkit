@@ -101,7 +101,10 @@ impl Keystore for MacosKeychainKeystore {
             *secret.expose_secret(),
         )?;
         let exists = match security_framework::passwords::get_generic_password(SERVICE, &account) {
-            Ok(_) => true,
+            Ok(secret) => {
+                let _secret = Zeroizing::new(secret);
+                true
+            }
             Err(error) if is_not_found(error) => false,
             Err(error) => return Err(map_keychain_error(error, label, secret.algorithm())),
         };

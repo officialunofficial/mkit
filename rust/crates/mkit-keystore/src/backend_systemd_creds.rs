@@ -4,7 +4,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
@@ -54,11 +54,15 @@ impl SystemdCredsKeystore {
                 algorithm: Some(algorithm),
             }));
         }
-        let plaintext = decrypt_credential(&path, &Self::credential_name(label, algorithm)?)?;
+        let plaintext = Zeroizing::new(decrypt_credential(
+            &path,
+            &Self::credential_name(label, algorithm)?,
+        )?);
         let secret: [u8; 32] =
             plaintext
+                .as_slice()
                 .try_into()
-                .map_err(|plaintext: Vec<u8>| Error::InvalidKeyMaterial {
+                .map_err(|_| Error::InvalidKeyMaterial {
                     algorithm,
                     reason: format!("expected 32 bytes, got {}", plaintext.len()),
                 })?;
