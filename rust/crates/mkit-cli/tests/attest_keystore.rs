@@ -102,6 +102,8 @@ fn attest_with_keystore_ed25519_roundtrip() {
         &[
             "key",
             "import",
+            "--backend",
+            "software-raw",
             "--algorithm",
             "ed25519",
             "--label",
@@ -120,7 +122,7 @@ fn attest_with_keystore_ed25519_roundtrip() {
     fs::create_dir_all(&cfg_dir).expect("config dir");
     fs::write(
         cfg_dir.join("config"),
-        "attest.signer = keystore\nkey.ed25519_ref = software:attester\n",
+        "attest.signer = keystore\nkey.ed25519_ref = software-raw:attester\n",
     )
     .expect("user config");
 
@@ -260,7 +262,7 @@ fn attest_with_keystore_missing_key_fails_without_generation() {
     fs::create_dir_all(&cfg_dir).expect("config dir");
     fs::write(
         cfg_dir.join("config"),
-        "attest.signer = keystore\nkey.ed25519_ref = software:missing\n",
+        "attest.signer = keystore\nkey.ed25519_ref = software-raw:missing\n",
     )
     .expect("user config");
 

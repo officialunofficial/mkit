@@ -912,9 +912,7 @@ fn write_key_file_portable(
         std::fs::create_dir_all(parent)
             .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
     }
-    if !overwrite {
-        write_key_file_portable_create_new(path, label, algorithm, bytes)
-    } else {
+    if overwrite {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let filename = path
             .file_name()
@@ -930,6 +928,8 @@ fn write_key_file_portable(
             return Err(Error::Io(format!("rename {}: {error}", path.display())));
         }
         Ok(())
+    } else {
+        write_key_file_portable_create_new(path, label, algorithm, bytes)
     }
 }
 
