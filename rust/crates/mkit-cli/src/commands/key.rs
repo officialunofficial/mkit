@@ -3,71 +3,149 @@
 use std::io::Write as _;
 use std::path::Path;
 
+use clap::{Parser, Subcommand};
 use mkit_keystore::{
     Algorithm, BackendKind, Capabilities, GenerateOptions, ImportOptions, KeyAttrs, KeyRef,
     KeySelector, Keystore, SecretKey, open_backend,
 };
 use zeroize::Zeroize;
 
+use crate::clap_shim;
 use crate::config::{self, Config};
 use crate::exit;
 
+#[derive(Debug, Parser)]
+#[command(name = "mkit key", about = "Manage keystore signing keys.")]
+struct KeyOpts {
+    #[command(subcommand)]
+    command: KeyCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum KeyCommand {
+    /// Generate a new signing key.
+    Generate(GenerateOpts),
+    /// List keys visible to a backend.
+    List(ListOpts),
+    /// Import 32-byte signing key material.
+    Import(ImportOpts),
+    /// Export extractable signing key material.
+    Export(ExportOpts),
+    /// Delete exactly one signing key.
+    Delete(DeleteOpts),
+}
+
+#[derive(Debug, Parser)]
+#[allow(clippy::struct_excessive_bools)]
+struct GenerateOpts {
+    #[arg(long, value_name = "BACKEND")]
+    backend: Option<String>,
+    #[arg(long, value_name = "LABEL")]
+    label: Option<String>,
+    #[arg(long, value_name = "ALG")]
+    algorithm: Option<String>,
+    #[arg(long, conflicts_with = "non_extractable")]
+    extractable: bool,
+    #[arg(long, conflicts_with = "extractable")]
+    non_extractable: bool,
+    #[arg(long)]
+    device_bound: bool,
+    #[arg(long)]
+    require_user_presence: bool,
+    #[arg(long)]
+    force: bool,
+    #[arg(long)]
+    print_pubkey: bool,
+}
+
+#[derive(Debug, Parser)]
+struct ListOpts {
+    #[arg(long, value_name = "BACKEND")]
+    backend: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Parser)]
+#[allow(clippy::struct_excessive_bools)]
+struct ImportOpts {
+    #[arg(long, value_name = "ALG")]
+    algorithm: Option<String>,
+    #[arg(long, value_name = "BACKEND")]
+    backend: Option<String>,
+    #[arg(long, value_name = "LABEL")]
+    label: Option<String>,
+    #[arg(long, value_name = "HEX")]
+    hex: Option<String>,
+    #[arg(long, value_name = "PATH")]
+    file: Option<String>,
+    #[arg(long, conflicts_with = "non_extractable")]
+    extractable: bool,
+    #[arg(long, conflicts_with = "extractable")]
+    non_extractable: bool,
+    #[arg(long)]
+    device_bound: bool,
+    #[arg(long)]
+    require_user_presence: bool,
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Parser)]
+struct ExportOpts {
+    #[arg(long, value_name = "BACKEND")]
+    backend: Option<String>,
+    #[arg(long, value_name = "LABEL")]
+    label: Option<String>,
+    #[arg(long, value_name = "ALG")]
+    algorithm: Option<String>,
+    #[arg(long)]
+    unsafe_print_secret: bool,
+}
+
+#[derive(Debug, Parser)]
+struct DeleteOpts {
+    #[arg(long, value_name = "BACKEND")]
+    backend: Option<String>,
+    #[arg(long, value_name = "LABEL")]
+    label: Option<String>,
+    #[arg(long, value_name = "ALG")]
+    algorithm: Option<String>,
+    #[arg(long)]
+    yes: bool,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let Some((subcommand, rest)) = args.split_first() else {
-        return usage();
+    let opts = match clap_shim::parse::<KeyOpts>("mkit key", args) {
+        Ok(opts) => opts,
+        Err(code) => return code,
     };
-    match subcommand.as_str() {
-        "generate" => generate(rest),
-        "list" => list(rest),
-        "import" => import(rest),
-        "export" => export(rest),
-        "delete" => delete(rest),
-        "-h" | "--help" | "help" => usage_ok(),
-        other => emit_err(&format!("unknown key subcommand `{other}`"), exit::USAGE),
+    match opts.command {
+        KeyCommand::Generate(opts) => generate(opts),
+        KeyCommand::List(opts) => list(opts),
+        KeyCommand::Import(opts) => import(opts),
+        KeyCommand::Export(opts) => export(opts),
+        KeyCommand::Delete(opts) => delete(opts),
     }
 }
 
-fn generate(args: &[String]) -> u8 {
+fn generate(opts: GenerateOpts) -> u8 {
     let cfg = match read_config() {
         Ok(cfg) => cfg,
         Err(code) => return code,
     };
-    let mut backend = None;
-    let mut label = None;
-    let mut algorithm = Algorithm::Ed25519;
-    let mut attrs = KeyAttrs::default();
-    let mut force = false;
-    let mut print_pubkey = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--backend" => match take_value(args, &mut i, "--backend") {
-                Ok(value) => backend = Some(value),
-                Err(code) => return code,
-            },
-            "--label" => match take_value(args, &mut i, "--label") {
-                Ok(value) => label = Some(value),
-                Err(code) => return code,
-            },
-            "--algorithm" => match take_value(args, &mut i, "--algorithm") {
-                Ok(value) => match parse_algorithm(&value) {
-                    Ok(value) => algorithm = value,
-                    Err(code) => return code,
-                },
-                Err(code) => return code,
-            },
-            "--extractable" => attrs.extractable = true,
-            "--non-extractable" => attrs.extractable = false,
-            "--device-bound" => attrs.device_bound = true,
-            "--require-user-presence" => attrs.require_user_presence = true,
-            "--force" => force = true,
-            "--print-pubkey" => print_pubkey = true,
-            other => return emit_err(&format!("unknown option `{other}`"), exit::USAGE),
-        }
-        i += 1;
-    }
-    let selection = match selection_for(&cfg, backend, label, Some(algorithm)) {
+    let algorithm = match optional_algorithm_or_default(opts.algorithm.as_deref()) {
+        Ok(algorithm) => algorithm,
+        Err(code) => return code,
+    };
+    let attrs = attrs_from_flags(
+        opts.extractable,
+        opts.non_extractable,
+        opts.device_bound,
+        opts.require_user_presence,
+    );
+    let selection = match selection_for(&cfg, opts.backend, opts.label, Some(algorithm)) {
         Ok(selection) => selection,
         Err(code) => return code,
     };
@@ -79,7 +157,9 @@ fn generate(args: &[String]) -> u8 {
         &selection.label,
         algorithm,
         attrs,
-        GenerateOptions { overwrite: force },
+        GenerateOptions {
+            overwrite: opts.force,
+        },
     ) {
         Ok(signer) => signer,
         Err(error) => return keystore_error(error),
@@ -90,37 +170,26 @@ fn generate(args: &[String]) -> u8 {
     };
     print_metadata(&metadata);
     print_capabilities(&store.capabilities());
-    if print_pubkey {
+    if opts.print_pubkey {
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", metadata.keyid);
     }
     exit::OK
 }
 
-fn list(args: &[String]) -> u8 {
+fn list(opts: ListOpts) -> u8 {
     let cfg = match read_config() {
         Ok(cfg) => cfg,
         Err(code) => return code,
     };
-    let mut backend = None;
-    let mut json = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--backend" => match take_value(args, &mut i, "--backend") {
-                Ok(value) => backend = Some(value),
-                Err(code) => return code,
-            },
-            "--json" => json = true,
-            other => return emit_err(&format!("unknown option `{other}`"), exit::USAGE),
-        }
-        i += 1;
-    }
-    let backend =
-        match parse_backend(&backend.unwrap_or_else(|| cfg.key.backend_or_fallback().to_owned())) {
-            Ok(backend) => backend,
-            Err(code) => return code,
-        };
+    let backend = match parse_backend(
+        &opts
+            .backend
+            .unwrap_or_else(|| cfg.key.backend_or_fallback().to_owned()),
+    ) {
+        Ok(backend) => backend,
+        Err(code) => return code,
+    };
     let store = match store_for_backend(backend) {
         Ok(store) => store,
         Err(code) => return code,
@@ -138,7 +207,7 @@ fn list(args: &[String]) -> u8 {
         ))
     });
     let mut stdout = std::io::stdout().lock();
-    if json {
+    if opts.json {
         let _ = write!(stdout, "[");
         for (index, key) in keys.iter().enumerate() {
             if index > 0 {
@@ -184,67 +253,35 @@ fn list(args: &[String]) -> u8 {
     exit::OK
 }
 
-fn import(args: &[String]) -> u8 {
+fn import(opts: ImportOpts) -> u8 {
     let cfg = match read_config() {
         Ok(cfg) => cfg,
         Err(code) => return code,
     };
-    let mut backend = None;
-    let mut label = None;
-    let mut algorithm = None;
-    let mut hex = None;
-    let mut file = None;
-    let mut attrs = KeyAttrs::default();
-    let mut force = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--backend" => match take_value(args, &mut i, "--backend") {
-                Ok(value) => backend = Some(value),
-                Err(code) => return code,
-            },
-            "--label" => match take_value(args, &mut i, "--label") {
-                Ok(value) => label = Some(value),
-                Err(code) => return code,
-            },
-            "--algorithm" => match take_value(args, &mut i, "--algorithm") {
-                Ok(value) => match parse_algorithm(&value) {
-                    Ok(value) => algorithm = Some(value),
-                    Err(code) => return code,
-                },
-                Err(code) => return code,
-            },
-            "--hex" => match take_value(args, &mut i, "--hex") {
-                Ok(value) => hex = Some(value),
-                Err(code) => return code,
-            },
-            "--file" => match take_value(args, &mut i, "--file") {
-                Ok(value) => file = Some(value),
-                Err(code) => return code,
-            },
-            "--extractable" => attrs.extractable = true,
-            "--non-extractable" => attrs.extractable = false,
-            "--device-bound" => attrs.device_bound = true,
-            "--require-user-presence" => attrs.require_user_presence = true,
-            "--force" => force = true,
-            other => return emit_err(&format!("unknown option `{other}`"), exit::USAGE),
-        }
-        i += 1;
-    }
-    let Some(algorithm) = algorithm else {
+    let Some(algorithm) = opts.algorithm.as_deref() else {
         return emit_err("mkit key import requires --algorithm", exit::USAGE);
     };
-    if hex.is_some() == file.is_some() {
+    let algorithm = match parse_algorithm(algorithm) {
+        Ok(algorithm) => algorithm,
+        Err(code) => return code,
+    };
+    if opts.hex.is_some() == opts.file.is_some() {
         return emit_err(
             "mkit key import requires exactly one of --hex or --file",
             exit::USAGE,
         );
     }
-    let selection = match selection_for(&cfg, backend, label, Some(algorithm)) {
+    let attrs = attrs_from_flags(
+        opts.extractable,
+        opts.non_extractable,
+        opts.device_bound,
+        opts.require_user_presence,
+    );
+    let selection = match selection_for(&cfg, opts.backend, opts.label, Some(algorithm)) {
         Ok(selection) => selection,
         Err(code) => return code,
     };
-    let mut secret = match (hex, file) {
+    let mut secret = match (opts.hex, opts.file) {
         (Some(hex), None) => match parse_secret_hex(&hex) {
             Ok(secret) => secret,
             Err(code) => return code,
@@ -265,7 +302,9 @@ fn import(args: &[String]) -> u8 {
         &selection.label,
         wrapped,
         attrs,
-        ImportOptions { overwrite: force },
+        ImportOptions {
+            overwrite: opts.force,
+        },
     ) {
         Ok(signer) => signer,
         Err(error) => return keystore_error(error),
@@ -279,45 +318,22 @@ fn import(args: &[String]) -> u8 {
     }
 }
 
-fn export(args: &[String]) -> u8 {
+fn export(opts: ExportOpts) -> u8 {
     let cfg = match read_config() {
         Ok(cfg) => cfg,
         Err(code) => return code,
     };
-    let mut backend = None;
-    let mut label = None;
-    let mut algorithm = None;
-    let mut unsafe_print_secret = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--backend" => match take_value(args, &mut i, "--backend") {
-                Ok(value) => backend = Some(value),
-                Err(code) => return code,
-            },
-            "--label" => match take_value(args, &mut i, "--label") {
-                Ok(value) => label = Some(value),
-                Err(code) => return code,
-            },
-            "--algorithm" => match take_value(args, &mut i, "--algorithm") {
-                Ok(value) => match parse_algorithm(&value) {
-                    Ok(value) => algorithm = Some(value),
-                    Err(code) => return code,
-                },
-                Err(code) => return code,
-            },
-            "--unsafe-print-secret" => unsafe_print_secret = true,
-            other => return emit_err(&format!("unknown option `{other}`"), exit::USAGE),
-        }
-        i += 1;
-    }
-    if !unsafe_print_secret {
+    let algorithm = match optional_algorithm(opts.algorithm.as_deref()) {
+        Ok(algorithm) => algorithm,
+        Err(code) => return code,
+    };
+    if !opts.unsafe_print_secret {
         return emit_err(
             "mkit key export requires --unsafe-print-secret",
             exit::USAGE,
         );
     }
-    let selection = match selection_for(&cfg, backend, label, algorithm) {
+    let selection = match selection_for(&cfg, opts.backend, opts.label, algorithm) {
         Ok(selection) => selection,
         Err(code) => return code,
     };
@@ -340,42 +356,19 @@ fn export(args: &[String]) -> u8 {
     exit::OK
 }
 
-fn delete(args: &[String]) -> u8 {
+fn delete(opts: DeleteOpts) -> u8 {
     let cfg = match read_config() {
         Ok(cfg) => cfg,
         Err(code) => return code,
     };
-    let mut backend = None;
-    let mut label = None;
-    let mut algorithm = None;
-    let mut yes = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--backend" => match take_value(args, &mut i, "--backend") {
-                Ok(value) => backend = Some(value),
-                Err(code) => return code,
-            },
-            "--label" => match take_value(args, &mut i, "--label") {
-                Ok(value) => label = Some(value),
-                Err(code) => return code,
-            },
-            "--algorithm" => match take_value(args, &mut i, "--algorithm") {
-                Ok(value) => match parse_algorithm(&value) {
-                    Ok(value) => algorithm = Some(value),
-                    Err(code) => return code,
-                },
-                Err(code) => return code,
-            },
-            "--yes" => yes = true,
-            other => return emit_err(&format!("unknown option `{other}`"), exit::USAGE),
-        }
-        i += 1;
-    }
-    if !yes {
+    let algorithm = match optional_algorithm(opts.algorithm.as_deref()) {
+        Ok(algorithm) => algorithm,
+        Err(code) => return code,
+    };
+    if !opts.yes {
         return emit_err("mkit key delete requires --yes", exit::USAGE);
     }
-    let selection = match selection_for(&cfg, backend, label, algorithm) {
+    let selection = match selection_for(&cfg, opts.backend, opts.label, algorithm) {
         Ok(selection) => selection,
         Err(code) => return code,
     };
@@ -495,11 +488,34 @@ fn parse_algorithm(value: &str) -> Result<Algorithm, u8> {
         .map_err(|error| emit_err(&format!("algorithm: {error}"), exit::USAGE))
 }
 
-fn take_value(args: &[String], index: &mut usize, option: &str) -> Result<String, u8> {
-    *index += 1;
-    args.get(*index)
-        .cloned()
-        .ok_or_else(|| emit_err(&format!("{option} requires a value"), exit::USAGE))
+fn optional_algorithm(value: Option<&str>) -> Result<Option<Algorithm>, u8> {
+    value.map(parse_algorithm).transpose()
+}
+
+fn optional_algorithm_or_default(value: Option<&str>) -> Result<Algorithm, u8> {
+    match optional_algorithm(value)? {
+        Some(algorithm) => Ok(algorithm),
+        None => Ok(Algorithm::Ed25519),
+    }
+}
+
+#[allow(clippy::fn_params_excessive_bools)]
+fn attrs_from_flags(
+    extractable: bool,
+    non_extractable: bool,
+    device_bound: bool,
+    require_user_presence: bool,
+) -> KeyAttrs {
+    let mut attrs = KeyAttrs::default();
+    if extractable {
+        attrs.extractable = true;
+    }
+    if non_extractable {
+        attrs.extractable = false;
+    }
+    attrs.device_bound = device_bound;
+    attrs.require_user_presence = require_user_presence;
+    attrs
 }
 
 fn print_metadata(metadata: &mkit_keystore::KeyMetadata) {
@@ -654,36 +670,46 @@ fn keystore_error(error: mkit_keystore::Error) -> u8 {
     emit_err(&format!("keystore: {error}"), exit::DATAERR)
 }
 
-fn usage() -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = stderr.write_all(USAGE.as_bytes());
-    exit::USAGE
-}
-
-fn usage_ok() -> u8 {
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(USAGE.as_bytes());
-    exit::OK
-}
-
 fn emit_err(msg: &str, code: u8) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "error: {msg}");
     code
 }
 
-const USAGE: &str = "\
-usage: mkit key <subcommand> [args]
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-subcommands:
-  generate [--backend <backend>] [--label <label>] [--algorithm ed25519|secp256k1|p256]
-           [--extractable|--non-extractable] [--device-bound]
-           [--require-user-presence] [--force] [--print-pubkey]
-  list [--backend <backend>] [--json]
-  import --algorithm ed25519|secp256k1|p256 [--backend <backend>] [--label <label>]
-         (--hex <64-hex> | --file <path>) [--extractable|--non-extractable]
-         [--device-bound] [--require-user-presence] [--force]
-  export [--backend <backend>] [--label <label>] [--algorithm ed25519|secp256k1|p256]
-         --unsafe-print-secret
-  delete [--backend <backend>] [--label <label>] [--algorithm ed25519|secp256k1|p256] --yes
-";
+    fn parse(args: &[&str]) -> Result<KeyOpts, clap::Error> {
+        KeyOpts::try_parse_from(
+            std::iter::once("mkit key".to_owned()).chain(args.iter().map(|arg| (*arg).to_owned())),
+        )
+    }
+
+    #[test]
+    fn generate_accepts_equals_options() {
+        let opts = parse(&["generate", "--backend=software-raw", "--algorithm=ed25519"]).unwrap();
+        let KeyCommand::Generate(generate) = opts.command else {
+            panic!("expected generate command");
+        };
+        assert_eq!(generate.backend.as_deref(), Some("software-raw"));
+        assert_eq!(generate.algorithm.as_deref(), Some("ed25519"));
+    }
+
+    #[test]
+    fn import_accepts_equals_options() {
+        let secret = "03".repeat(32);
+        let opts = parse(&["import", "--algorithm=ed25519", &format!("--hex={secret}")]).unwrap();
+        let KeyCommand::Import(import) = opts.command else {
+            panic!("expected import command");
+        };
+        assert_eq!(import.algorithm.as_deref(), Some("ed25519"));
+        assert_eq!(import.hex.as_deref(), Some(secret.as_str()));
+    }
+
+    #[test]
+    fn extractable_flags_conflict() {
+        assert!(parse(&["generate", "--extractable", "--non-extractable"]).is_err());
+        assert!(parse(&["import", "--extractable", "--non-extractable"]).is_err());
+    }
+}
