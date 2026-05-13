@@ -123,6 +123,19 @@ pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> 
 
 #[cfg(test)]
 pub(crate) fn run_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
+    run_native_backend_roundtrip_test_with_availability(store, false);
+}
+
+#[cfg(test)]
+pub(crate) fn run_required_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
+    run_native_backend_roundtrip_test_with_availability(store, true);
+}
+
+#[cfg(test)]
+fn run_native_backend_roundtrip_test_with_availability(
+    store: &dyn crate::Keystore,
+    require_backend: bool,
+) {
     if std::env::var_os("MKIT_RUN_NATIVE_KEYSTORE_TESTS").as_deref() != Some("1".as_ref()) {
         eprintln!("skipping native backend roundtrip; set MKIT_RUN_NATIVE_KEYSTORE_TESTS=1 to run");
         return;
@@ -132,7 +145,7 @@ pub(crate) fn run_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
         .and_then(|()| exercise_native_backend_ecdsa_verification(store))
     {
         Ok(()) => {}
-        Err(Error::BackendUnavailable(message)) => {
+        Err(Error::BackendUnavailable(message)) if !require_backend => {
             eprintln!("skipping native backend roundtrip: {message}");
         }
         Err(error) => panic!("native backend roundtrip failed: {error:?}"),

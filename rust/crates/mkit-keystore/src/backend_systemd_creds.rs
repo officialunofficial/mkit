@@ -487,4 +487,11 @@ mod tests {
             "invalid import must not leave a credential file"
         );
     }
+
+    #[test]
+    fn live_backend_create_open_list_export_delete_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SystemdCredsKeystore::with_root(dir.path().join("systemd-creds"));
+        crate::native_list::run_required_native_backend_roundtrip_test(&store);
+    }
 }
