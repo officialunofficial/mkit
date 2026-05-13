@@ -56,18 +56,7 @@ impl LinuxSecretServiceKeystore {
 
 impl Keystore for LinuxSecretServiceKeystore {
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            backend: BackendKind::LinuxSecretService,
-            algorithms: vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256],
-            can_generate: true,
-            can_import: true,
-            can_export: true,
-            can_delete: true,
-            supports_listing: true,
-            supports_user_presence: false,
-            supports_device_bound: false,
-            supports_non_extractable: false,
-        }
+        linux_secret_service_capabilities(linux_secret_service_runtime_available())
     }
 
     fn generate(
@@ -182,6 +171,31 @@ impl Keystore for LinuxSecretServiceKeystore {
     }
 }
 
+fn linux_secret_service_capabilities(runtime_available: bool) -> Capabilities {
+    let algorithms = if runtime_available {
+        vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256]
+    } else {
+        Vec::new()
+    };
+
+    Capabilities {
+        backend: BackendKind::LinuxSecretService,
+        algorithms,
+        can_generate: runtime_available,
+        can_import: runtime_available,
+        can_export: runtime_available,
+        can_delete: runtime_available,
+        supports_listing: runtime_available,
+        supports_user_presence: false,
+        supports_device_bound: false,
+        supports_non_extractable: false,
+    }
+}
+
+fn linux_secret_service_runtime_available() -> bool {
+    zbus_secret_service_keyring_store::Store::new().is_ok()
+}
+
 fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
     if !attrs.extractable {
         return Err(Error::UnsupportedAttributes(
@@ -262,7 +276,7 @@ mod tests {
 
     #[test]
     fn capabilities_are_backend_accurate() {
-        let capabilities = LinuxSecretServiceKeystore::new().capabilities();
+        let capabilities = linux_secret_service_capabilities(true);
         assert_eq!(capabilities.backend, BackendKind::LinuxSecretService);
         assert_eq!(
             capabilities.algorithms,
@@ -273,6 +287,21 @@ mod tests {
         assert!(capabilities.can_export);
         assert!(capabilities.can_delete);
         assert!(capabilities.supports_listing);
+        assert!(!capabilities.supports_user_presence);
+        assert!(!capabilities.supports_device_bound);
+        assert!(!capabilities.supports_non_extractable);
+    }
+
+    #[test]
+    fn capabilities_disable_operations_when_runtime_unavailable() {
+        let capabilities = linux_secret_service_capabilities(false);
+        assert_eq!(capabilities.backend, BackendKind::LinuxSecretService);
+        assert!(capabilities.algorithms.is_empty());
+        assert!(!capabilities.can_generate);
+        assert!(!capabilities.can_import);
+        assert!(!capabilities.can_export);
+        assert!(!capabilities.can_delete);
+        assert!(!capabilities.supports_listing);
         assert!(!capabilities.supports_user_presence);
         assert!(!capabilities.supports_device_bound);
         assert!(!capabilities.supports_non_extractable);

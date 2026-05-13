@@ -320,6 +320,14 @@ impl Keystore for SoftwareKeystore {
                 });
             }
         } else {
+            let old_wrapped_dek = if options.overwrite && path.exists() {
+                let old_record = self.load_record(label, secret.algorithm())?;
+                let old_protector = self.protector_for_record(&old_record)?;
+                let _ = old_record.decrypt(label, old_protector.as_ref())?;
+                Some((old_protector, old_record.wrapped_dek().to_vec()))
+            } else {
+                None
+            };
             let signer = SoftwareSigner::new(
                 label.into(),
                 self.backend.clone(),
@@ -335,14 +343,20 @@ impl Keystore for SoftwareKeystore {
                 signer.keyid()?,
                 protector.as_ref(),
             )?;
-            write_key_file(
+            if let Err(error) = write_key_file(
                 &self.root,
                 &path,
                 label,
                 secret.algorithm(),
                 &record.encode()?,
                 options.overwrite,
-            )?;
+            ) {
+                let _ = protector.delete_wrapped_dek(record.wrapped_dek());
+                return Err(error);
+            }
+            if let Some((old_protector, old_wrapped_dek)) = old_wrapped_dek {
+                let _ = old_protector.delete_wrapped_dek(&old_wrapped_dek);
+            }
             return Ok(Box::new(signer));
         }
         Ok(Box::new(SoftwareSigner::new(
@@ -438,7 +452,11 @@ impl Keystore for SoftwareKeystore {
             let record = self.load_record(&selector.label, algorithm)?;
             let protector = self.protector_for_record(&record)?;
             let _ = record.decrypt(&selector.label, protector.as_ref())?;
-            protector.delete_wrapped_dek(record.wrapped_dek())?;
+            let wrapped_dek = record.wrapped_dek().to_vec();
+            std::fs::remove_file(&path)
+                .map_err(|error| Error::Io(format!("delete {}: {error}", path.display())))?;
+            let _ = protector.delete_wrapped_dek(&wrapped_dek);
+            return Ok(());
         }
         std::fs::remove_file(&path)
             .map_err(|error| Error::Io(format!("delete {}: {error}", path.display())))
@@ -484,14 +502,19 @@ impl SoftwareKeystore {
         if let Some(algorithm) = selector.algorithm {
             return Ok(algorithm);
         }
-        let matches: Vec<_> = self
-            .list()?
-            .into_iter()
-            .filter(|metadata| metadata.label == selector.label)
-            .collect();
+        let mut matches = Vec::new();
+        for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
+            let path = self.path_for(&selector.label, algorithm)?;
+            self.ensure_storage_path_not_symlink(&path)?;
+            if !path.exists() {
+                continue;
+            }
+            let _ = self.load_secret(&selector.label, algorithm)?;
+            matches.push(algorithm);
+        }
         match matches.as_slice() {
             [] => Err(Error::KeyNotFound(selector.clone())),
-            [metadata] => Ok(metadata.algorithm),
+            [algorithm] => Ok(*algorithm),
             _ => Err(Error::AmbiguousKeySelector(selector.clone())),
         }
     }
@@ -1473,6 +1496,30 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FailingDeleteProtector;
+
+    impl KeyProtector for FailingDeleteProtector {
+        fn id(&self) -> &'static str {
+            "failing-delete-protector"
+        }
+
+        fn wrap_dek(&self, dek: &[u8; 32], _aad: &[u8]) -> Result<Vec<u8>> {
+            Ok(dek.to_vec())
+        }
+
+        fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+            let dek: [u8; 32] = wrapped
+                .try_into()
+                .map_err(|_| Error::Encoding(format!("test DEK length: {}", wrapped.len())))?;
+            Ok(Zeroizing::new(dek))
+        }
+
+        fn delete_wrapped_dek(&self, _wrapped: &[u8]) -> Result<()> {
+            Err(Error::Io("test DEK cleanup failure".into()))
+        }
+    }
+
     fn software_store(root: impl Into<PathBuf>) -> SoftwareKeystore {
         SoftwareKeystore::with_root_and_protector(root, Arc::new(TestProtector))
     }
@@ -1748,6 +1795,74 @@ mod tests {
     }
 
     #[test]
+    fn software_label_only_resolution_ignores_unrelated_corrupt_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = software_store(dir.path().join("keys"));
+        store
+            .import(
+                "valid",
+                SecretKey::new(Algorithm::Ed25519, [0x4a; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("valid import");
+        store
+            .import(
+                "corrupt",
+                SecretKey::new(Algorithm::P256, [1; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("corrupt import");
+        let corrupt_path = store.path_for("corrupt", Algorithm::P256).unwrap();
+        let mut record =
+            EncryptedKeyRecord::decode(&std::fs::read(&corrupt_path).expect("record bytes"))
+                .expect("record decode");
+        record.keyid = "p256:forged".into();
+        std::fs::write(&corrupt_path, record.encode().expect("record encode"))
+            .expect("record write");
+
+        assert!(
+            store.list().is_err(),
+            "strict list still authenticates all records"
+        );
+        let selector = KeySelector::new("valid", None).unwrap();
+        assert_eq!(
+            store.open(&selector).unwrap().algorithm(),
+            Algorithm::Ed25519
+        );
+        assert_eq!(
+            store.export(&selector).unwrap().expose_secret(),
+            &[0x4a; 32]
+        );
+        store.delete(&selector).unwrap();
+    }
+
+    #[test]
+    fn software_label_only_resolution_fails_closed_for_matching_corrupt_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = software_store(dir.path().join("keys"));
+        store
+            .import(
+                "corrupt",
+                SecretKey::new(Algorithm::Ed25519, [0x4a; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("import");
+        let path = store.path_for("corrupt", Algorithm::Ed25519).unwrap();
+        let mut record = EncryptedKeyRecord::decode(&std::fs::read(&path).expect("record bytes"))
+            .expect("record decode");
+        record.keyid = "ed25519:forged".into();
+        std::fs::write(&path, record.encode().expect("record encode")).expect("record write");
+        let selector = KeySelector::new("corrupt", None).unwrap();
+
+        assert!(
+            matches!(store.open(&selector), Err(Error::Encoding(message)) if message.contains("authentication"))
+        );
+    }
+
+    #[test]
     fn software_delete_authenticates_before_dek_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let deletes = Arc::new(AtomicUsize::new(0));
@@ -1780,6 +1895,208 @@ mod tests {
             path.exists(),
             "unauthenticated record must remain for inspection"
         );
+    }
+
+    #[test]
+    fn software_delete_removes_record_before_best_effort_dek_cleanup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SoftwareKeystore::with_root_and_protector(
+            dir.path().join("keys"),
+            Arc::new(FailingDeleteProtector),
+        );
+        store
+            .import(
+                "encrypted",
+                SecretKey::new(Algorithm::Ed25519, [0x4a; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("import");
+        let path = store.path_for("encrypted", Algorithm::Ed25519).unwrap();
+        let selector = KeySelector::new("encrypted", Some(Algorithm::Ed25519)).unwrap();
+
+        store.delete(&selector).expect("delete");
+        assert!(!path.exists(), "selected key record must be removed");
+    }
+
+    #[test]
+    fn software_overwrite_cleans_up_old_dek_after_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let store = SoftwareKeystore::with_root_and_protector(
+            dir.path().join("keys"),
+            Arc::new(CountingProtector {
+                deletes: Arc::clone(&deletes),
+            }),
+        );
+        store
+            .import(
+                "shared",
+                SecretKey::new(Algorithm::Ed25519, [0x4a; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("initial import");
+        store
+            .import(
+                "shared",
+                SecretKey::new(Algorithm::P256, [1; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("other algorithm import");
+        store
+            .import(
+                "shared",
+                SecretKey::new(Algorithm::Ed25519, [0x5b; 32]),
+                KeyAttrs::default(),
+                ImportOptions { overwrite: true },
+            )
+            .expect("overwrite import");
+
+        let ed25519 = KeySelector::new("shared", Some(Algorithm::Ed25519)).unwrap();
+        let p256 = KeySelector::new("shared", Some(Algorithm::P256)).unwrap();
+        assert_eq!(store.export(&ed25519).unwrap().expose_secret(), &[0x5b; 32]);
+        assert_eq!(store.export(&p256).unwrap().expose_secret(), &[1; 32]);
+        assert_eq!(deletes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn software_failed_overwrite_does_not_cleanup_old_dek() {
+        #[derive(Debug)]
+        struct FailSecondWrapProtector {
+            wraps: Arc<AtomicUsize>,
+            deletes: Arc<AtomicUsize>,
+        }
+
+        impl KeyProtector for FailSecondWrapProtector {
+            fn id(&self) -> &'static str {
+                "fail-second-wrap-protector"
+            }
+
+            fn wrap_dek(&self, dek: &[u8; 32], _aad: &[u8]) -> Result<Vec<u8>> {
+                if self.wraps.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(dek.to_vec())
+                } else {
+                    Err(Error::Io("test wrap failure".into()))
+                }
+            }
+
+            fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+                let dek: [u8; 32] = wrapped
+                    .try_into()
+                    .map_err(|_| Error::Encoding(format!("test DEK length: {}", wrapped.len())))?;
+                Ok(Zeroizing::new(dek))
+            }
+
+            fn delete_wrapped_dek(&self, _wrapped: &[u8]) -> Result<()> {
+                self.deletes.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wraps = Arc::new(AtomicUsize::new(0));
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let store = SoftwareKeystore::with_root_and_protector(
+            dir.path().join("keys"),
+            Arc::new(FailSecondWrapProtector {
+                wraps: Arc::clone(&wraps),
+                deletes: Arc::clone(&deletes),
+            }),
+        );
+        store
+            .import(
+                "encrypted",
+                SecretKey::new(Algorithm::Ed25519, [0x4a; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .expect("import");
+
+        assert!(matches!(
+            store.import(
+                "encrypted",
+                SecretKey::new(Algorithm::Ed25519, [0x5b; 32]),
+                KeyAttrs::default(),
+                ImportOptions { overwrite: true },
+            ),
+            Err(Error::Io(message)) if message.contains("wrap failure")
+        ));
+        assert_eq!(deletes.load(Ordering::SeqCst), 0);
+        let selector = KeySelector::new("encrypted", Some(Algorithm::Ed25519)).unwrap();
+        assert_eq!(
+            store.export(&selector).unwrap().expose_secret(),
+            &[0x4a; 32]
+        );
+    }
+
+    #[test]
+    fn encrypted_software_backend_matches_golden_vectors() {
+        const PAE: &[u8] = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
+        struct Vector {
+            label: &'static str,
+            algorithm: Algorithm,
+            seed_hex: &'static str,
+            public_hex: &'static str,
+            signature_hex: &'static str,
+        }
+        const VECTORS: &[Vector] = &[
+            Vector {
+                label: "ed25519-rfc8032-empty",
+                algorithm: Algorithm::Ed25519,
+                seed_hex: "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+                public_hex: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+                signature_hex: "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+            },
+            Vector {
+                label: "secp256k1-generator",
+                algorithm: Algorithm::Secp256k1,
+                seed_hex: "0000000000000000000000000000000000000000000000000000000000000001",
+                public_hex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                signature_hex: "834cd126c1bcadb2998d6881e3dd35f6c10b87905b3dd5ba4714f59fcb018d79085c75876fd776083affcf1fc5c982b1e2bea4f0cfc14876ca4305de964521c9",
+            },
+            Vector {
+                label: "p256-readable-seed",
+                algorithm: Algorithm::P256,
+                seed_hex: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+                public_hex: "02515c3d6eb9e396b904d3feca7f54fdcd0cc1e997bf375dca515ad0a6c3b4035f",
+                signature_hex: "a0075344345ada8f8dd1182e51d0aafcaab7e6c44bc378705cb4b78705faed5c42849f10ff7bf91ea3ac1eda3eb663c289d3dd68c27403acad830a6bde4306c5",
+            },
+        ];
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = software_store(dir.path().join("keys"));
+        for vector in VECTORS {
+            let seed: [u8; 32] = hex_decode(vector.seed_hex)
+                .expect("seed hex")
+                .try_into()
+                .expect("seed length");
+            let mut signer = store
+                .import(
+                    vector.label,
+                    SecretKey::new(vector.algorithm, seed),
+                    KeyAttrs::default(),
+                    ImportOptions::default(),
+                )
+                .expect("import vector");
+            assert_eq!(
+                hex_lower(&signer.public_key().expect("public key")),
+                vector.public_hex
+            );
+            assert_eq!(
+                signer.keyid().expect("keyid"),
+                format!("{}:{}", vector.algorithm, vector.public_hex)
+            );
+            let message = match vector.algorithm {
+                Algorithm::Ed25519 => b"".as_slice(),
+                Algorithm::Secp256k1 | Algorithm::P256 => PAE,
+            };
+            assert_eq!(
+                hex_lower(&signer.sign(message).expect("sign")),
+                vector.signature_hex
+            );
+        }
     }
 
     #[cfg(unix)]
