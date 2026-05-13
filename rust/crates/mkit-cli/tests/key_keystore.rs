@@ -591,8 +591,40 @@ fn keystore_rebase_missing_key_fails_without_generation() {
     assert!(run(td.path(), &["checkout", "feature"]).status.success());
     configure_keystore_signer(td.path(), "software-raw:missing");
 
+    let repo = td.path().join("repo");
+    let head_before = std::fs::read_to_string(repo.join(".mkit/HEAD")).expect("HEAD before");
+    let resolved_head_before = resolve_head(&repo);
+    let index_before = std::fs::read(repo.join(".mkit/index")).expect("index before");
+
     let rebase = run(td.path(), &["rebase", "main"]);
     assert_missing_history_key_failure(td.path(), &rebase);
+    assert!(
+        !repo.join(".mkit/rebase-apply").exists(),
+        "missing signer must fail before writing rebase state"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".mkit/HEAD")).expect("HEAD after"),
+        head_before,
+        "missing signer must not detach HEAD"
+    );
+    assert_eq!(
+        resolve_head(&repo),
+        resolved_head_before,
+        "missing signer must not move the current branch"
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".mkit/index")).expect("index after"),
+        index_before,
+        "missing signer must not rewrite the index"
+    );
+    assert!(
+        repo.join("feature.txt").exists(),
+        "missing signer must not restore away the feature worktree"
+    );
+    assert!(
+        !repo.join("main.txt").exists(),
+        "missing signer must fail before restoring the target worktree"
+    );
 }
 
 fn prepare_history_repo(root: &std::path::Path) {

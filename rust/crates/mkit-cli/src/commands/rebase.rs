@@ -90,6 +90,10 @@ fn start(
         todo,
         done: Vec::new(),
     };
+    let signer = match load_rebase_signer(cwd) {
+        Ok(signer) => signer,
+        Err(code) => return code,
+    };
     if let Err(e) = write_state(mkit_dir, &state) {
         return emit_err(&format!("write rebase state: {e}"), exit::CANTCREAT);
     }
@@ -107,14 +111,14 @@ fn start(
     if let Err(e) = super::sync_index_to_tree(cwd, store, onto_tree) {
         return emit_err(&e, exit::CANTCREAT);
     }
-    replay(cwd, mkit_dir, store)
+    replay(cwd, mkit_dir, store, Some(signer))
 }
 
 fn resume(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
     if !is_rebase_in_progress(mkit_dir) {
         return emit_err("no rebase in progress", exit::GENERAL_ERROR);
     }
-    replay(cwd, mkit_dir, store)
+    replay(cwd, mkit_dir, store, None)
 }
 
 fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
@@ -145,18 +149,22 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     exit::OK
 }
 
-fn replay(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
+fn replay(
+    cwd: &std::path::Path,
+    mkit_dir: &std::path::Path,
+    store: &ObjectStore,
+    signer: Option<super::commit::CommitSigner>,
+) -> u8 {
     let mut state = match read_state(mkit_dir) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
-    let cfg = match config::read_or_default(cwd) {
-        Ok(c) => c,
-        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
-    };
-    let mut signer = match super::commit::load_commit_signer(cwd, &cfg) {
-        Ok(signer) => signer,
-        Err((msg, code)) => return emit_err(&msg, code),
+    let mut signer = match signer {
+        Some(signer) => signer,
+        None => match load_rebase_signer(cwd) {
+            Ok(signer) => signer,
+            Err(code) => return code,
+        },
     };
 
     while !state.todo.is_empty() {
@@ -237,6 +245,12 @@ fn replay(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore
         format::short_hash(&state.onto, 8)
     );
     exit::OK
+}
+
+fn load_rebase_signer(cwd: &std::path::Path) -> Result<super::commit::CommitSigner, u8> {
+    let cfg = config::read_or_default(cwd)
+        .map_err(|e| emit_err(&format!("config: {e}"), exit::CONFIG_ERROR))?;
+    super::commit::load_commit_signer(cwd, &cfg).map_err(|(msg, code)| emit_err(&msg, code))
 }
 
 fn build_commit(
