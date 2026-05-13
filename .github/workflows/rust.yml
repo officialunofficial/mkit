@@ -155,14 +155,24 @@ jobs:
 
       - name: Install Linux keystore native deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring libpcsclite-dev pkg-config
 
       - name: Test keystore backend feature set
         working-directory: rust
         shell: bash
         env:
           MKIT_RUN_NATIVE_KEYSTORE_TESTS: "1"
-        run: cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            dbus-run-session -- bash -lc '
+              set -euo pipefail
+              eval "$(printf "mkit-ci\n" | gnome-keyring-daemon --unlock --components=secrets)"
+              cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
+            '
+          else
+            cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
+          fi
 
       - name: Clippy keystore backend feature set
         working-directory: rust
