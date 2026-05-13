@@ -380,8 +380,10 @@ impl Keystore for SoftwareKeystore {
             for entry in entries {
                 let entry = entry.map_err(|error| Error::Io(format!("read_dir entry: {error}")))?;
                 let path = entry.path();
-                if path.extension().and_then(|extension| extension.to_str())
-                    != Some(self.extension())
+                if !path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case(self.extension()))
                 {
                     continue;
                 }
@@ -905,16 +907,14 @@ fn write_key_file_portable(
 ) -> Result<()> {
     use std::io::Write as _;
 
-    if path.exists() && !overwrite {
-        return Err(Error::KeyAlreadyExists {
-            label: label.into(),
-            algorithm,
-        });
-    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
     }
+    if !overwrite {
+        return write_key_file_portable_create_new(path, label, algorithm, bytes);
+    }
+
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let filename = path
         .file_name()
@@ -935,6 +935,40 @@ fn write_key_file_portable(
         } else {
             Err(Error::Io(format!("rename {}: {error}", path.display())))
         };
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_key_file_portable_create_new(
+    path: &Path,
+    label: &str,
+    algorithm: Algorithm,
+    bytes: &[u8],
+) -> Result<()> {
+    use std::io::Write as _;
+
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(Error::KeyAlreadyExists {
+                label: label.into(),
+                algorithm,
+            });
+        }
+        Err(error) => return Err(Error::Io(format!("open {}: {error}", path.display()))),
+    };
+    if let Err(error) = file.write_all(bytes) {
+        let _ = std::fs::remove_file(path);
+        return Err(Error::Io(format!("write {}: {error}", path.display())));
+    }
+    if let Err(error) = file.sync_all() {
+        let _ = std::fs::remove_file(path);
+        return Err(Error::Io(format!("fsync {}: {error}", path.display())));
     }
     Ok(())
 }

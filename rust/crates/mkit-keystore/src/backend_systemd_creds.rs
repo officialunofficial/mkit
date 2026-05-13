@@ -188,7 +188,11 @@ impl Keystore for SystemdCredsKeystore {
             for entry in entries {
                 let entry = entry.map_err(|error| Error::Io(format!("read_dir entry: {error}")))?;
                 let path = entry.path();
-                if path.extension().and_then(|extension| extension.to_str()) != Some("cred") {
+                if !path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("cred"))
+                {
                     continue;
                 }
                 let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -361,7 +365,7 @@ pub(crate) fn encrypt_credential(secret: &[u8; 32], path: &Path, name: &str) -> 
 
 fn encrypt_credential_to_path(secret: &[u8; 32], path: &Path, name: &str) -> Result<()> {
     let mut child = Command::new("systemd-creds")
-        .args(["--user", "--uid=self", "--with-key=auto", "--name", name])
+        .args(["--uid=self", "--with-key=auto", "--name", name])
         .arg("encrypt")
         .arg("-")
         .arg(path)
@@ -405,7 +409,7 @@ fn temp_credential_path(path: &Path) -> Result<PathBuf> {
 
 pub(crate) fn decrypt_credential(path: &Path, name: &str) -> Result<Vec<u8>> {
     let output = Command::new("systemd-creds")
-        .args(["--user", "--uid=self", "--name", name])
+        .args(["--uid=self", "--name", name])
         .arg("decrypt")
         .arg(path)
         .arg("-")

@@ -141,6 +141,7 @@ pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> 
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn run_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
     run_native_backend_roundtrip_test_with_availability(store, false);
 }
