@@ -966,15 +966,13 @@ fn default_protector_for_write(root: &Path) -> Result<Arc<dyn KeyProtector>> {
     #[cfg(target_os = "linux")]
     {
         #[cfg(feature = "linux-secret-service")]
-        if linux_desktop_session_available() {
+        if linux_desktop_session_available() && LinuxSecretServiceProtector::available() {
             let _ = root;
             return Ok(Arc::new(LinuxSecretServiceProtector));
         }
         #[cfg(feature = "systemd-creds")]
         {
-            return Ok(Arc::new(SystemdCredsProtector {
-                root: root.join("deks"),
-            }));
+            return systemd_creds_protector(root);
         }
     }
     let _ = root;
@@ -992,9 +990,7 @@ fn default_protector_by_id(_root: &Path, id: &str) -> Result<Arc<dyn KeyProtecto
         #[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
         LinuxSecretServiceProtector::ID => Ok(Arc::new(LinuxSecretServiceProtector)),
         #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-        SystemdCredsProtector::ID => Ok(Arc::new(SystemdCredsProtector {
-            root: _root.join("deks"),
-        })),
+        SystemdCredsProtector::ID => systemd_creds_protector(_root),
         _ => Err(Error::BackendUnavailable(format!(
             "software key record requires unavailable protector `{id}`"
         ))),
@@ -1127,6 +1123,10 @@ impl LinuxSecretServiceProtector {
     const ID: &'static str = "linux-secret-service";
     const SERVICE: &'static str = "dev.mkit.keystore.software-dek.v1";
 
+    fn available() -> bool {
+        zbus_secret_service_keyring_store::Store::new().is_ok()
+    }
+
     fn entry(account: &str) -> Result<keyring_core::Entry> {
         let store = zbus_secret_service_keyring_store::Store::new().map_err(|error| {
             Error::BackendUnavailable(format!("Linux Secret Service software protector: {error}"))
@@ -1204,6 +1204,29 @@ impl SystemdCredsProtector {
     fn credential_name(handle: &str) -> String {
         format!("mkit.software-dek.{handle}")
     }
+}
+
+#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
+fn systemd_creds_protector(root: &Path) -> Result<Arc<dyn KeyProtector>> {
+    systemd_creds_protector_for_availability(
+        root,
+        crate::backend_systemd_creds::systemd_creds_runtime_available(),
+    )
+}
+
+#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
+fn systemd_creds_protector_for_availability(
+    root: &Path,
+    runtime_available: bool,
+) -> Result<Arc<dyn KeyProtector>> {
+    if !runtime_available {
+        return Err(Error::BackendUnavailable(
+            "systemd-creds executable was not found or is unusable".into(),
+        ));
+    }
+    Ok(Arc::new(SystemdCredsProtector {
+        root: root.join("deks"),
+    }))
 }
 
 #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
@@ -1756,6 +1779,16 @@ mod tests {
         assert!(!capabilities.can_export);
         assert!(!capabilities.can_delete);
         assert!(capabilities.supports_listing);
+    }
+
+    #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
+    #[test]
+    fn systemd_protector_requires_available_runtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(matches!(
+            systemd_creds_protector_for_availability(dir.path(), false),
+            Err(Error::BackendUnavailable(_))
+        ));
     }
 
     #[cfg(unix)]

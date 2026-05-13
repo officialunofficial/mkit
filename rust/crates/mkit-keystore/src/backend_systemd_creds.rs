@@ -98,18 +98,7 @@ impl Default for SystemdCredsKeystore {
 
 impl Keystore for SystemdCredsKeystore {
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            backend: BackendKind::SystemdCreds,
-            algorithms: vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256],
-            can_generate: true,
-            can_import: true,
-            can_export: true,
-            can_delete: true,
-            supports_listing: true,
-            supports_user_presence: false,
-            supports_device_bound: false,
-            supports_non_extractable: false,
-        }
+        systemd_creds_capabilities(systemd_creds_runtime_available())
     }
 
     fn generate(
@@ -247,6 +236,40 @@ impl Keystore for SystemdCredsKeystore {
         std::fs::remove_file(&path)
             .map_err(|error| Error::Io(format!("delete {}: {error}", path.display())))
     }
+}
+
+fn systemd_creds_capabilities(runtime_available: bool) -> Capabilities {
+    let algorithms = if runtime_available {
+        vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256]
+    } else {
+        Vec::new()
+    };
+    Capabilities {
+        backend: BackendKind::SystemdCreds,
+        algorithms,
+        can_generate: runtime_available,
+        can_import: runtime_available,
+        can_export: runtime_available,
+        can_delete: runtime_available,
+        supports_listing: runtime_available,
+        supports_user_presence: false,
+        supports_device_bound: false,
+        supports_non_extractable: false,
+    }
+}
+
+pub(crate) fn systemd_creds_runtime_available() -> bool {
+    systemd_creds_runtime_available_with_command("systemd-creds")
+}
+
+fn systemd_creds_runtime_available_with_command(command: &str) -> bool {
+    Command::new(command)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 impl SystemdCredsKeystore {
@@ -449,9 +472,12 @@ mod tests {
 
     #[test]
     fn capabilities_are_backend_accurate() {
-        let store = SystemdCredsKeystore::with_root("/tmp/mkit-systemd-creds-test");
-        let capabilities = store.capabilities();
+        let capabilities = systemd_creds_capabilities(true);
         assert_eq!(capabilities.backend, BackendKind::SystemdCreds);
+        assert_eq!(
+            capabilities.algorithms,
+            vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256]
+        );
         assert!(capabilities.can_generate);
         assert!(capabilities.can_import);
         assert!(capabilities.can_export);
@@ -460,6 +486,25 @@ mod tests {
         assert!(!capabilities.supports_user_presence);
         assert!(!capabilities.supports_device_bound);
         assert!(!capabilities.supports_non_extractable);
+    }
+
+    #[test]
+    fn capabilities_disable_operations_when_runtime_unavailable() {
+        let capabilities = systemd_creds_capabilities(false);
+        assert_eq!(capabilities.backend, BackendKind::SystemdCreds);
+        assert!(capabilities.algorithms.is_empty());
+        assert!(!capabilities.can_generate);
+        assert!(!capabilities.can_import);
+        assert!(!capabilities.can_export);
+        assert!(!capabilities.can_delete);
+        assert!(!capabilities.supports_listing);
+    }
+
+    #[test]
+    fn runtime_probe_reports_missing_systemd_creds_unavailable() {
+        assert!(!systemd_creds_runtime_available_with_command(
+            "mkit-systemd-creds-missing-test-command"
+        ));
     }
 
     #[test]
