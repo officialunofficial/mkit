@@ -9,9 +9,16 @@ back to a small, auditable set of inputs. This document is the contract.
   dep is hash-pinned on each release build. The workspace's direct
   deps are kept deliberately small — see `rust/Cargo.toml` and each
   crate's `[dependencies]` section for the full list.
-- **System libs:** the release builds link musl (Linux) or the platform
-  C runtime (macOS). We do not pull in openssl, libcurl, or any other
-  native C library outside the platform toolchain.
+- **System libs:** default release builds link musl (Linux) or the
+  platform C runtime (macOS). Optional keystore backend features may use
+  platform services such as Security.framework, Windows Credential
+  Manager, D-Bus Secret Service, PC/SC, or the `systemd-creds` binary.
+  These features are off by default, platform-gated, and fail closed when
+  the required service or device is unavailable. The Linux Secret Service
+  feature selects the pure-Rust crypto runtime, not OpenSSL. Production
+  `mkit-cli` builds enable the target-appropriate software protector feature so
+  `software:<label>` stores encrypted records by default, while the
+  `mkit-keystore` library keeps an empty default feature set.
 - **Build inputs:** the Rust toolchain (version pinned in
   `rust-toolchain.toml`), the source tree at a tagged Git commit, and
   the set of `--target=` / profile flags documented in
@@ -32,6 +39,44 @@ Every new direct dependency added to a workspace `Cargo.toml` must:
    Dependency Graph enabled and `ENABLE_DEPENDENCY_REVIEW=1`.
 5. Have a cross-platform build. If the dep breaks on one of our four
    release targets, it doesn't land.
+
+## Keystore V1 backend dependency review
+
+Issue #104 adds optional backend and envelope-encryption dependencies to
+`mkit-keystore`. T19 reviewed the direct additions below. All are pinned in
+`Cargo.toml`, reflected in `Cargo.lock`, sourced from crates.io, accepted by
+`cargo deny`, and isolated from default builds unless listed as always-on.
+
+| Dependency | Use | Gate | License | Notes |
+|------------|-----|------|---------|-------|
+| `chacha20poly1305 = 0.10.1` | XChaCha20-Poly1305 software-key envelope encryption | always-on keystore crypto | Apache-2.0 OR MIT | Pure Rust, default features disabled except `alloc`; no OpenSSL/libcurl/native C dependency. |
+| `zeroize = 1.8.2` | Secret-memory clearing for software keys and records | always-on keystore crypto | Apache-2.0 OR MIT | Already common in the RustCrypto ecosystem; used directly for local secret material. |
+| `security-framework = 3.7.0` | macOS Keychain bindings | `backend-macos-keychain` (`macos-keychain` alias), macOS target only | MIT OR Apache-2.0 | Wraps platform Security.framework APIs; no default-build impact. |
+| `keyring-core = 1.0.0` | Shared keyring abstraction for OS key stores | `backend-windows-credential`, `backend-linux-secret-service` | MIT OR Apache-2.0 | Small shared abstraction used only by optional OS backends. |
+| `windows-native-keyring-store = 1.0.0` | Windows Credential Manager store | `backend-windows-credential` (`windows-credential` alias), Windows target only | MIT OR Apache-2.0 | Requires Rust 1.88, below workspace MSRV 1.95; platform-gated. |
+| `zbus-secret-service-keyring-store = 1.0.0` | Linux Secret Service store | `backend-linux-secret-service` (`linux-secret-service` alias), Linux target only | MIT OR Apache-2.0 | Requires Rust 1.88, below workspace MSRV 1.95; feature uses `rt-async-io-crypto-rust` to avoid OpenSSL. |
+| `card-backend-pcsc = 0.5.1` | PC/SC card discovery for OpenPGP cards | `backend-yubikey` | MIT OR Apache-2.0 | Requires PC/SC libraries at build/runtime only when the YubiKey backend is enabled. |
+| `openpgp-card = 0.6.1` | OpenPGP card protocol for YubiKey signing-slot keys | `backend-yubikey` | MIT OR Apache-2.0 | Supports existing card keys; V1 does not generate/import/delete card keys. |
+| `secrecy = 0.10.3` | PIN handling wrappers for card operations | `backend-yubikey` | Apache-2.0 OR MIT | Complements `zeroize` for secret inputs crossing card APIs. |
+| `der = 0.8.0` | DER parsing for YubiKey PIV certificates | `backend-yubikey` | Apache-2.0 OR MIT | RustCrypto format crate; used to extract P-256 public keys from existing certificates. |
+| `yubikey = 0.9.0-pre.0` | YubiKey PIV certificate discovery and signing | `backend-yubikey` | BSD-2-Clause | Accepted because V1 PIV support needs mature PIV APDUs and no stable alternative matched the API. Risk is contained by optional feature gating, existing-key-only support, fail-closed behavior, CI feature builds, and manual hardware validation. |
+
+T27 also exact-pinned the remaining direct `mkit-keystore` support dependencies
+that were previously semver ranges: `ed25519-dalek = 2.2.0`, `getrandom =
+0.4.2`, `k256 = 0.13.4`, `p256 = 0.13.2`, `sha2 = 0.10.9`, `thiserror =
+2.0.18`, and dev-only `tempfile = 3.27.0`.
+
+`cargo deny check` currently finishes with `advisories ok, bans ok, licenses ok,
+sources ok`. Remaining warnings are duplicate crate versions from existing
+ecosystem splits and optional YubiKey/RustCrypto prerelease transitive stacks,
+plus stale license allowances. They are tracked as warnings rather than release
+blockers because they do not introduce unapproved sources, yanked crates, or
+denied licenses.
+
+Keystore backend CI builds exercise the macOS, Windows, and Linux feature sets
+separately. Live OS-native create/list/open/export/delete tests are opt-in via
+`MKIT_RUN_NATIVE_KEYSTORE_TESTS=1` so local default builds stay daemon-free while
+the platform backend matrix still validates native behavior in CI.
 
 ## GitHub Actions dependencies
 

@@ -46,28 +46,22 @@ obvious to static analysis).
 
 `COMMIT_DOMAIN` covers commits and `REMIX_DOMAIN` covers remixes.
 
-### 2.1 Preferred derivation
+### 2.1 Signing-hash derivation
 
-Implementations SHOULD use BLAKE3 `derive_key(context, signing_bytes)`
-where the standard library exposes it. The context string is the domain
-string **without the trailing `\x00`**:
-
-- context = `"mkit.commit"` → 32-byte digest over `signing_bytes`.
-- context = `"mkit.remix"`.
-
-### 2.2 Byte-prepend fallback
-
-Where `derive_key` is unavailable, implementations MUST use byte-prepend:
+Implementations MUST compute the signing digest with a 16-bit little-endian
+domain length prefix, followed by the full domain string and canonical signing
+bytes:
 
 ```
-digest = BLAKE3(domain || signing_bytes)
+digest = BLAKE3(u16_le(domain.len) || domain || signing_bytes)
 ```
 
 Where `domain` is the full domain string *including* the trailing
 `\x00`. This is the shape we commit to on the wire and in test vectors.
 
-Both paths MUST produce identical digests for the same input. The
-reference implementation uses byte-prepend.
+The length prefix makes the `(domain, signing_bytes)` boundary explicit. A
+verifier MUST NOT use BLAKE3 `derive_key`, bare `BLAKE3(domain ||
+signing_bytes)`, or any other domain construction for v1 signatures.
 
 ---
 
@@ -117,7 +111,7 @@ struct fields excluded from signing bytes.
 The **signing hash** is then:
 
 ```
-signing_hash = BLAKE3("mkit.commit\x00" || signing_bytes)
+signing_hash = BLAKE3(u16_le(12) || "mkit.commit\x00" || signing_bytes)
 ```
 
 And the commit's `signature` field is `Ed25519.sign(signer_seed,
@@ -143,24 +137,24 @@ signing_bytes = PROLOGUE                   // object_type=0x04
 Excluded: `signature`.
 
 ```
-signing_hash = BLAKE3("mkit.remix\x00" || signing_bytes)
+signing_hash = BLAKE3(u16_le(11) || "mkit.remix\x00" || signing_bytes)
 ```
 
 ---
 
 ## 5. Cross-domain collision proof sketch
 
-Commit signing input always begins with the 12-byte domain string
-`"mkit.commit\x00"`; remix signing input begins with the 11-byte string
-`"mkit.remix\x00"`.
+Commit signing input always begins with `u16_le(12)` followed by the 12-byte
+domain string `"mkit.commit\x00"`; remix signing input begins with
+`u16_le(11)` followed by the 11-byte string `"mkit.remix\x00"`.
 
 - `"mkit.commit\x00"` and `"mkit.remix\x00"` share 5 bytes and differ at
   byte 5 (`c` 0x63 vs `r` 0x72).
 
-Because the first differing byte occurs strictly before any possible
-user-controlled content (domains are compile-time constants), no user
-input can make one domain's hash input equal another's. BLAKE3 is
-collision-resistant, so distinct inputs have (cryptographically)
+Because the domain length and the first differing domain byte occur strictly
+before any possible user-controlled content (domains are compile-time
+constants), no user input can make one domain's hash input equal another's.
+BLAKE3 is collision-resistant, so distinct inputs have cryptographically
 distinct digests.
 
 Therefore, a signature over a commit-domain digest cannot be replayed as
@@ -181,7 +175,7 @@ Given a commit C retrieved from the store:
 2. Re-build signing bytes per §3. (It's the caller's responsibility to
    retrieve the exact `signer` field from C; the verifier does not
    accept a public key from elsewhere.)
-3. Compute `signing_hash = BLAKE3("mkit.commit\x00" || signing_bytes)`.
+3. Compute `signing_hash = BLAKE3(u16_le(12) || "mkit.commit\x00" || signing_bytes)`.
 4. Parse `signer` as an Ed25519 public key. Invalid point → verify fails.
 5. `Ed25519.verify(signer, signing_hash, C.signature)`. Any failure →
    verify fails.

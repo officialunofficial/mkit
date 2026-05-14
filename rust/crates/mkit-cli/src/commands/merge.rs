@@ -23,7 +23,6 @@ use mkit_core::ops::merge::{ConflictKind, find_merge_base, merge_trees};
 use mkit_core::ops::restore::{self, RestoreOptions};
 use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
-use mkit_core::sign::{self, KeyPair};
 use mkit_core::store::ObjectStore;
 
 use crate::clap_shim;
@@ -141,15 +140,15 @@ pub fn run(args: &[String]) -> u8 {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
-    let key_path = match config::resolve_key_path(&cwd, &cfg.signing_key) {
-        Ok(p) => p,
-        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+    let mut signer = match super::commit::load_commit_signer(&cwd, &cfg) {
+        Ok(signer) => signer,
+        Err((msg, code)) => return emit_err(&msg, code),
     };
-    let kp: KeyPair = match sign::load_key(&key_path) {
-        Ok(k) => k,
-        Err(e) => return emit_err(&format!("load key: {e}"), exit::NOPERM),
+    let signer_public = match signer.public_key() {
+        Ok(public) => public,
+        Err((msg, code)) => return emit_err(&msg, code),
     };
-    let author = match super::commit::resolve_author(None, &cfg.user_identity, &kp) {
+    let author = match super::commit::resolve_author(None, &cfg.user_identity, &signer_public) {
         Ok(id) => id,
         Err(e) => return emit_err(&format!("author: {e}"), exit::CONFIG_ERROR),
     };
@@ -161,16 +160,16 @@ pub fn run(args: &[String]) -> u8 {
         result.tree_hash,
         vec![ours, theirs],
         author,
-        kp.public.0,
+        signer_public,
         msg.as_bytes().to_vec(),
         timestamp,
         [0u8; 64],
     );
-    let sig = match sign::sign_commit(&unsigned, &kp) {
-        Ok(s) => s,
-        Err(e) => return emit_err(&format!("sign: {e}"), exit::GENERAL_ERROR),
+    let sig = match signer.sign_commit(&unsigned) {
+        Ok(signature) => signature,
+        Err((msg, code)) => return emit_err(&msg, code),
     };
-    unsigned.signature = sig.0;
+    unsigned.signature = sig;
     let bytes = match serialize::serialize(&Object::Commit(unsigned)) {
         Ok(b) => b,
         Err(e) => return emit_err(&format!("serialize: {e}"), exit::DATAERR),

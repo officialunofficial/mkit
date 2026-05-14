@@ -35,6 +35,11 @@ pub const CONFIG_FILE: &str = ".mkit/config";
 pub const USER_CONFIG_SUBPATH: &str = "mkit/config";
 pub const DEFAULT_SIGNING_KEY: &str = ".mkit/keys/default.key";
 pub const DEFAULT_BRANCH: &str = "main";
+pub const DEFAULT_SIGNER: &str = "legacy";
+pub const DEFAULT_KEY_BACKEND: &str = "software";
+pub const DEFAULT_KEY_REF: &str = "software:default";
+pub const DEFAULT_SECP256K1_KEY_REF: &str = "software:default-secp256k1";
+pub const DEFAULT_P256_KEY_REF: &str = "software:default-p256";
 
 /// Keys that MUST NOT be settable via the per-repo `<repo>/.mkit/config`
 /// because a hostile clone could otherwise:
@@ -59,6 +64,12 @@ pub const DEFAULT_BRANCH: &str = "main";
 pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "user.identity",
     "trusted_remote_endpoint",
+    "signer",
+    "key.backend",
+    "key.default_ref",
+    "key.ed25519_ref",
+    "key.secp256k1_ref",
+    "key.p256_ref",
     "signing_key",
     "ssh.strict_host_key_checking",
     "ssh.user_known_hosts_file",
@@ -100,9 +111,83 @@ pub struct Config {
     pub ssh_strict_host_key_checking: String,
     pub ssh_user_known_hosts_file: String,
     pub ssh_identity_file: String,
+    /// Commit-signing selector. User-scoped only.
+    pub signer: String,
+    /// `[key]` section. User-scoped keystore selectors.
+    pub key: KeyConfig,
     /// `[attest]` section. Separate struct so new attest knobs don't
     /// balloon the flat `Config`.
     pub attest: AttestConfig,
+}
+
+/// `[key]` section for keystore-backed signing. All fields are user-scoped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyConfig {
+    /// Default backend for `mkit key` commands.
+    pub backend: String,
+    /// Generic key reference.
+    pub default_ref: String,
+    /// Ed25519 key reference.
+    pub ed25519_ref: String,
+    /// secp256k1 key reference.
+    pub secp256k1_ref: String,
+    /// P-256 key reference.
+    pub p256_ref: String,
+}
+
+impl KeyConfig {
+    #[must_use]
+    pub fn backend_or_fallback(&self) -> &str {
+        if self.backend.is_empty() {
+            DEFAULT_KEY_BACKEND
+        } else {
+            self.backend.as_str()
+        }
+    }
+
+    #[must_use]
+    pub fn default_ref_or_fallback(&self) -> &str {
+        if self.default_ref.is_empty() {
+            DEFAULT_KEY_REF
+        } else {
+            self.default_ref.as_str()
+        }
+    }
+
+    #[must_use]
+    pub fn ed25519_ref_or_fallback(&self) -> &str {
+        if self.ed25519_ref.is_empty() {
+            self.default_ref_or_fallback()
+        } else {
+            self.ed25519_ref.as_str()
+        }
+    }
+
+    #[must_use]
+    pub fn secp256k1_ref_or_fallback(&self) -> &str {
+        if self.secp256k1_ref.is_empty() {
+            if self.default_ref.is_empty() {
+                DEFAULT_SECP256K1_KEY_REF
+            } else {
+                self.default_ref.as_str()
+            }
+        } else {
+            self.secp256k1_ref.as_str()
+        }
+    }
+
+    #[must_use]
+    pub fn p256_ref_or_fallback(&self) -> &str {
+        if self.p256_ref.is_empty() {
+            if self.default_ref.is_empty() {
+                DEFAULT_P256_KEY_REF
+            } else {
+                self.default_ref.as_str()
+            }
+        } else {
+            self.p256_ref.as_str()
+        }
+    }
 }
 
 /// Parsed config with per-layer provenance preserved so callers can
@@ -121,7 +206,7 @@ pub struct LayeredConfig {
 pub struct AttestConfig {
     /// One of `"ed25519"`, `"secp256k1"`, `"p256"`. Empty = `"ed25519"`.
     pub default_algorithm: String,
-    /// One of `"repo-key"`, `"external"`. Empty = `"repo-key"`.
+    /// One of `"repo-key"`, `"external"`, `"keystore"`. Empty = `"repo-key"`.
     pub signer: String,
     /// Absolute path to the external signer binary. Required when
     /// `signer = "external"`. User-scoped only.
@@ -183,6 +268,14 @@ impl Config {
         Self {
             signing_key: DEFAULT_SIGNING_KEY.to_owned(),
             default_branch: DEFAULT_BRANCH.to_owned(),
+            signer: DEFAULT_SIGNER.to_owned(),
+            key: KeyConfig {
+                backend: DEFAULT_KEY_BACKEND.to_owned(),
+                default_ref: String::new(),
+                ed25519_ref: String::new(),
+                secp256k1_ref: String::new(),
+                p256_ref: String::new(),
+            },
             ..Self::default()
         }
     }
@@ -439,6 +532,12 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
     match key {
         "user.identity" => val.clone_into(&mut cfg.user_identity),
         "trusted_remote_endpoint" => val.clone_into(&mut cfg.trusted_remote_endpoint),
+        "signer" => val.clone_into(&mut cfg.signer),
+        "key.backend" => val.clone_into(&mut cfg.key.backend),
+        "key.default_ref" => val.clone_into(&mut cfg.key.default_ref),
+        "key.ed25519_ref" => val.clone_into(&mut cfg.key.ed25519_ref),
+        "key.secp256k1_ref" => val.clone_into(&mut cfg.key.secp256k1_ref),
+        "key.p256_ref" => val.clone_into(&mut cfg.key.p256_ref),
         "signing_key" => val.clone_into(&mut cfg.signing_key),
         "default_branch" => val.clone_into(&mut cfg.default_branch),
         "remote_endpoint" => val.clone_into(&mut cfg.remote_endpoint),
@@ -773,12 +872,17 @@ mod tests {
         let mut cfg = Config::with_defaults();
         cfg.user_identity = "01200011".into();
         cfg.signing_key = "/should/not/be/written".into();
+        cfg.signer = "keystore".into();
+        cfg.key.backend = "software".into();
+        cfg.key.default_ref = "software:attacker".into();
         cfg.ssh_strict_host_key_checking = "no".into();
         cfg.attest.external_signer_path = "/usr/local/bin/evil".into();
         write(td.path(), &cfg).unwrap();
         let on_disk = fs::read_to_string(td.path().join(CONFIG_FILE)).unwrap();
         assert!(!on_disk.contains("user.identity"));
         assert!(!on_disk.contains("signing_key"));
+        assert!(!on_disk.contains("signer"));
+        assert!(!on_disk.contains("key.default_ref"));
         assert!(!on_disk.contains("ssh.strict_host_key_checking"));
         assert!(!on_disk.contains("external_signer_path"));
     }
@@ -868,6 +972,77 @@ mod tests {
         assert_eq!(cfg.attest.default_algorithm, "");
         // Default fallback is ed25519, regardless of repo wishes.
         assert_eq!(cfg.attest.default_algorithm_or_fallback(), "ed25519");
+    }
+
+    #[test]
+    fn repo_keystore_selectors_are_rejected() {
+        let cfg = layer(
+            Some(
+                "signer = keystore\n\
+                 key.backend = yubikey\n\
+                 key.default_ref = yubikey:main\n\
+                 key.ed25519_ref = software:repo-ed\n\
+                 key.secp256k1_ref = software:repo-k1\n\
+                 key.p256_ref = software:repo-p256\n",
+            ),
+            None,
+        );
+        assert_eq!(cfg.signer, DEFAULT_SIGNER);
+        assert_eq!(cfg.key.backend, DEFAULT_KEY_BACKEND);
+        assert_eq!(cfg.key.default_ref_or_fallback(), DEFAULT_KEY_REF);
+        assert_eq!(cfg.key.ed25519_ref_or_fallback(), DEFAULT_KEY_REF);
+        assert_eq!(
+            cfg.key.secp256k1_ref_or_fallback(),
+            DEFAULT_SECP256K1_KEY_REF
+        );
+        assert_eq!(cfg.key.p256_ref_or_fallback(), DEFAULT_P256_KEY_REF);
+    }
+
+    #[test]
+    fn user_keystore_selectors_are_honored() {
+        let cfg = layer(
+            None,
+            Some(
+                "signer = keystore\n\
+                 key.backend = software\n\
+                 key.default_ref = software:user-default\n\
+                 key.ed25519_ref = software:user-ed\n\
+                 key.secp256k1_ref = software:user-k1\n\
+                 key.p256_ref = software:user-p256\n",
+            ),
+        );
+        assert_eq!(cfg.signer, "keystore");
+        assert_eq!(cfg.key.backend, "software");
+        assert_eq!(cfg.key.default_ref, "software:user-default");
+        assert_eq!(cfg.key.ed25519_ref_or_fallback(), "software:user-ed");
+        assert_eq!(cfg.key.secp256k1_ref_or_fallback(), "software:user-k1");
+        assert_eq!(cfg.key.p256_ref_or_fallback(), "software:user-p256");
+    }
+
+    #[test]
+    fn user_default_key_ref_is_generic_fallback() {
+        let cfg = layer(None, Some("key.default_ref = software:release\n"));
+        assert_eq!(cfg.key.default_ref_or_fallback(), "software:release");
+        assert_eq!(cfg.key.ed25519_ref_or_fallback(), "software:release");
+        assert_eq!(cfg.key.secp256k1_ref_or_fallback(), "software:release");
+        assert_eq!(cfg.key.p256_ref_or_fallback(), "software:release");
+    }
+
+    #[test]
+    fn algorithm_key_refs_override_default_key_ref() {
+        let cfg = layer(
+            None,
+            Some(
+                "key.default_ref = software:release\n\
+                 key.ed25519_ref = software:ed\n\
+                 key.secp256k1_ref = software:k1\n\
+                 key.p256_ref = software:p256\n",
+            ),
+        );
+        assert_eq!(cfg.key.default_ref_or_fallback(), "software:release");
+        assert_eq!(cfg.key.ed25519_ref_or_fallback(), "software:ed");
+        assert_eq!(cfg.key.secp256k1_ref_or_fallback(), "software:k1");
+        assert_eq!(cfg.key.p256_ref_or_fallback(), "software:p256");
     }
 
     #[test]
@@ -1025,6 +1200,19 @@ mod tests {
     #[test]
     fn attest_config_defaults_are_empty() {
         let cfg = Config::with_defaults();
+        assert_eq!(cfg.signer, DEFAULT_SIGNER);
+        assert_eq!(cfg.key.backend_or_fallback(), DEFAULT_KEY_BACKEND);
+        assert_eq!(cfg.key.default_ref_or_fallback(), DEFAULT_KEY_REF);
+        assert!(cfg.key.default_ref.is_empty());
+        assert!(cfg.key.ed25519_ref.is_empty());
+        assert!(cfg.key.secp256k1_ref.is_empty());
+        assert!(cfg.key.p256_ref.is_empty());
+        assert_eq!(cfg.key.ed25519_ref_or_fallback(), DEFAULT_KEY_REF);
+        assert_eq!(
+            cfg.key.secp256k1_ref_or_fallback(),
+            DEFAULT_SECP256K1_KEY_REF
+        );
+        assert_eq!(cfg.key.p256_ref_or_fallback(), DEFAULT_P256_KEY_REF);
         assert_eq!(cfg.attest.default_algorithm, "");
         assert_eq!(cfg.attest.signer, "");
         assert_eq!(cfg.attest.default_algorithm_or_fallback(), "ed25519");

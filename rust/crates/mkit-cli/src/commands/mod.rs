@@ -20,6 +20,7 @@ pub mod diff;
 pub mod fetch;
 pub mod hash_cmd;
 pub mod init;
+pub mod key;
 pub mod keygen;
 pub mod log;
 pub mod merge;

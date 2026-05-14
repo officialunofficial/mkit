@@ -81,7 +81,8 @@ mkit defends:
   user-scoped trust-roots file (§5), not from the cloned repo.
 - Choice of key material and external processes. Per §4, a hostile
   `.mkit/config` cannot select which key file is read, which binary
-  is spawned as an external signer, or what argv it gets.
+  is spawned as an external signer, which keystore backend/key ref is
+  used, or what argv an external signer gets.
 
 mkit does NOT defend:
 
@@ -174,7 +175,15 @@ ignored.
 
 | Key                                 | Scope     | Rationale                                                 |
 |-------------------------------------|-----------|-----------------------------------------------------------|
+| `signer`                            | **User**  | Selects legacy raw-file vs keystore commit signing.       |
+| `key.backend`                       | **User**  | Selects the keystore backend family.                      |
+| `key.default_ref`                   | **User**  | Selects a private signing key reference.                  |
+| `key.ed25519_ref`                   | **User**  | Selects the Ed25519 private signing key reference.        |
+| `key.secp256k1_ref`                 | **User**  | Selects the secp256k1 private signing key reference.      |
+| `key.p256_ref`                      | **User**  | Selects the P-256 private signing key reference.          |
 | `signing_key`                       | **User**  | Selects which key file is read for commit signing.        |
+| `attest.signer`                     | **User**  | Selects `repo-key` / `external` / `keystore`.             |
+| `attest.default_algorithm`          | **User**  | Selects the attestation signing algorithm.                |
 | `attest.external_signer_path`       | **User**  | Selects which binary is spawned as a signer.              |
 | `attest.external_signer_args`       | **User**  | Argv for the signer subprocess.                           |
 | `attest.secp256k1_key_path`         | **User**  | Selects which secp256k1 key file is read.                 |
@@ -182,16 +191,16 @@ ignored.
 | `ssh.strict_host_key_checking`      | **User**  | Could weaken host-key verification.                       |
 | `ssh.user_known_hosts_file`         | **User**  | Selects which file is the source of trust.                |
 | `ssh.identity_file`                 | **User**  | Selects which private key SSH presents.                   |
-| `user.identity`                     | Repo      | Display string for the author field. No security weight.  |
+| `user.identity`                     | **User**  | Author identity; cannot be repo-selected for signed data. |
 | `default_branch`                    | Repo      | UX default. No security weight.                           |
 | `remote_endpoint`                   | Repo      | Address; trust is on the user's transport config.         |
 | `remote_bucket`                     | Repo      | Address.                                                  |
 | `remote_type`                       | Repo      | Dispatch hint to the transport layer.                     |
-| `attest.default_algorithm`          | Repo      | Algorithm dispatch; trust roots are still user-scoped.    |
-| `attest.signer`                     | Repo      | Selects `repo-key` / `external` / `sigstore-keyless`.     |
 
-Repo-scoped keys MAY still be overridden by the user file. The split
-is a one-way fence: user scope wins.
+Repo-safe keys are applied after the user file and may override user
+defaults. The security fence is narrower and stricter: private-key,
+signer, executable, trust-root, and host-key selectors are user-only
+and are ignored when they appear in repo config.
 
 ---
 
@@ -218,14 +227,71 @@ config knob that sets it.
 | Open flag               | `O_NOFOLLOW` — symlink in the path is a hard failure              |
 | Parent directory        | `0700`, owner-checked                                             |
 | Write strategy          | tempfile in same directory, fsync, atomic rename, fsync of parent |
-| Zeroisation             | seed buffers wrapped in `Zeroizing<[u8;32]>` end-to-end           |
+| Zeroisation             | seed buffers scrubbed at generation and file-I/O boundaries       |
 
-`KeyPair::from_seed` takes `Zeroizing<[u8;32]>` so the buffer cannot
-escape into a non-zeroising owner. This is a breaking change to the
-library API; CHANGELOG flags it.
+`KeyPair::generate` scrubs its local seed buffer after constructing the
+keypair. `KeyPair::from_seed` takes `[u8;32]`; callers that own long-lived
+secret buffers must use a zeroising owner before and after the call.
 
 The same protections apply to the secp256k1 and P-256 key files
 selected via `attest.secp256k1_key_path` and `attest.p256_key_path`.
+
+### 6.1 Keystore backends
+
+Issue-complete V1 adds user-scoped software, OS-native, Linux desktop/headless,
+and YubiKey-backed keystore backends selected by `mkit key ...`,
+`signer = keystore`, and `attest.signer = keystore`.
+
+Security assumptions:
+
+- Keystores are user-scoped, not repo-scoped. On Unix-like systems the software
+  default root is `$XDG_DATA_HOME/mkit/keys/`, falling back to
+  `~/.local/share/mkit/keys/`; `software-raw` persists under a raw-specific
+  subtree, and `systemd-creds` uses a separate user data subtree for encrypted
+  credential files.
+- Keystore selectors (`signer`, `key.backend`, and every `key.*_ref`) are
+  user-scoped. A hostile repo cannot select a backend, label, key reference, or
+  signing mode.
+- `software:<label>` stores encrypted-at-rest software records. It protects
+  against offline disk/backup disclosure to the extent the local OS-protected
+  envelope material remains unavailable to the attacker. It does not protect
+  against malware running as the user. Production `mkit-cli` builds enable the
+  target OS protector features; the `mkit-keystore` library keeps default
+  features empty for lean builds and tests.
+- `software-raw:<label>` is the explicit raw-file compatibility backend. It
+  keeps deterministic raw-key behavior for compatibility tests and migration
+  workflows and is not the secure default.
+- macOS Keychain, Windows Credential Manager, Linux Secret Service, and
+  `systemd-creds` store extractable 32-byte signing secrets behind their
+  platform protection boundary. They do not claim hardware binding,
+  non-extractability, or user presence unless a future implementation changes
+  the storage primitive and capability report together.
+- Linux Secret Service is a desktop/session backend and may fail when no D-Bus
+  service is available or the session is locked. `systemd-creds` is the
+  headless/server Linux backend and shells out with argv tokens, not shell
+  interpolation. The encrypted `software` backend auto-selects Secret Service
+  first for desktop sessions, then `systemd-creds`, and fails closed if neither
+  protector is available.
+- YubiKey OpenPGP exposes existing Ed25519 signing-slot keys. YubiKey PIV
+  exposes existing P-256 certificate-backed slots (`piv-9a`, `piv-9c`,
+  `piv-9e`). Both are non-extractable and device-bound from mkit's point of
+  view. Keystore V1 does not accept YubiKey PINs through environment variables;
+  PIN- or touch-required signing fails closed with typed authentication errors
+  until a bounded prompt provider is implemented.
+- FIDO2/CTAP WebAuthn signatures remain wired through the external signer path
+  because the current keystore `KeySigner` API returns only a signature and
+  cannot carry WebAuthn authenticator data plus client data JSON. The YubiKey
+  keystore fails closed for `fido2-*`/`ctap-*` P-256 labels rather than emitting
+  incomplete assertions.
+- Signing commands never auto-generate keystore keys. Users must run
+  `mkit key generate` or `mkit key import` explicitly.
+
+Keystore non-goals in V1:
+
+- Protection against malware or another process already running as the same
+  UID. Such an attacker can request signatures from unlocked software/OS
+  backends or read extractable secrets from software/raw/platform stores.
+- Side-channel resistance beyond the underlying crypto/hardware libraries.
 
 ---
 
@@ -255,6 +321,13 @@ matching update here.
 
 - Golden vectors at `rust/tests/golden/` pin signing-byte and
   signing-hash shapes (`SPEC-SIGNING.md` §3, `SPEC-ATTESTATIONS.md` §4).
+- `mkit-keystore` golden vectors pin deterministic imported-key behavior for
+  explicit `software-raw` Ed25519, secp256k1, and P-256 signing, while unit
+  storage tests assert that `software` writes encrypted records rather than raw
+  seeds.
+- Keystore capability tests assert that each backend advertises only supported
+  algorithms, export/import/listing, user-presence, device-bound, and
+  non-extractability properties.
 - `cargo fuzz` targets cover delta decode, pack reader, and the
   object deserializer (`docs/FUZZ.md`).
 - Integration tests assert that a hostile `<repo>/.mkit/config`
@@ -264,8 +337,9 @@ matching update here.
 - Rename-gate (`scripts/verify-rename.sh`) prevents legacy strings
   from re-entering the public build surface.
 - CI matrix: `cargo fmt --check`, `cargo clippy --all-targets --
-  -D warnings`, `cargo test --workspace --locked`, `cargo deny`,
-  reproducible-build smoke, `mkit version` byte-exact assertion.
+  -D warnings`, `cargo test --workspace --locked`, keystore backend feature
+  jobs for macOS/Windows/Linux with opt-in live native-backend roundtrips,
+  `cargo deny`, reproducible-build smoke, `mkit version` byte-exact assertion.
 
 ---
 

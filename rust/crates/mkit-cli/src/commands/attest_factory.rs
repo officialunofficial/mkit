@@ -27,6 +27,7 @@
 use std::path::Path;
 
 use mkit_attest::{Algorithm, ExternalSigner, Signer};
+use mkit_keystore::{KeyRef, KeySelector, open_backend};
 use zeroize::Zeroizing;
 
 use crate::config::Config;
@@ -36,11 +37,20 @@ use crate::config::Config;
 pub enum FactoryError {
     /// Algorithm name (e.g. `"rsa"`) is not one of `ed25519`, `secp256k1`, `p256`.
     UnknownAlgorithm(String),
-    /// `--signer` value is not one of `repo-key`, `external`.
+    /// `--signer` value is not one of `repo-key`, `external`, `keystore`.
     UnknownSignerKind(String),
     /// The per-algorithm keyfile is missing. Error message points the
     /// user at `mkit keygen --algorithm <algo>`.
     MissingKeyFile { algorithm: Algorithm, path: String },
+    /// The selected keystore key is missing. Error message points the user at
+    /// `mkit key generate --algorithm <algo> --label <label>`.
+    MissingKeystoreKey {
+        algorithm: Algorithm,
+        key_ref: String,
+        backend: String,
+        label: String,
+        reason: String,
+    },
     /// Keyfile exists but is not a 32-byte raw secret.
     InvalidKeyFile { path: String, reason: String },
     /// `attest.external_signer_path` is empty / relative / unusable.
@@ -48,6 +58,8 @@ pub enum FactoryError {
     /// Failure surfaced from the mkit-attest signer itself (wraps its
     /// `Error` as a string; the CLI doesn't need to pattern-match these).
     Signer(String),
+    /// Failure surfaced from mkit-keystore.
+    Keystore(String),
 }
 
 impl std::fmt::Display for FactoryError {
@@ -59,11 +71,21 @@ impl std::fmt::Display for FactoryError {
             ),
             Self::UnknownSignerKind(s) => write!(
                 f,
-                "unknown signer '{s}' — expected one of: repo-key, external"
+                "unknown signer '{s}' — expected one of: repo-key, external, keystore"
             ),
             Self::MissingKeyFile { algorithm, path } => write!(
                 f,
                 "{algorithm} key file not found at '{path}' — run `mkit keygen --algorithm {algorithm}` first"
+            ),
+            Self::MissingKeystoreKey {
+                algorithm,
+                key_ref,
+                backend,
+                label,
+                reason,
+            } => write!(
+                f,
+                "missing keystore signing key `{key_ref}` — run `mkit key generate --backend {backend} --algorithm {algorithm} --label {label}` first: {reason}"
             ),
             Self::InvalidKeyFile { path, reason } => {
                 write!(f, "invalid key file '{path}': {reason}")
@@ -72,6 +94,7 @@ impl std::fmt::Display for FactoryError {
                 write!(f, "attest.external_signer_path: {s}")
             }
             Self::Signer(s) => write!(f, "signer: {s}"),
+            Self::Keystore(s) => write!(f, "keystore: {s}"),
         }
     }
 }
@@ -88,7 +111,7 @@ pub fn parse_algorithm(s: &str) -> Result<Algorithm, FactoryError> {
 ///
 /// * `root` — the repo root (the `.mkit/` directory lives directly under it).
 /// * `algorithm` — resolved [`Algorithm`].
-/// * `signer_kind` — `"repo-key"` or `"external"`.
+/// * `signer_kind` — `"repo-key"`, `"external"`, or `"keystore"`.
 /// * `cfg` — the merged config (defaults + user-scoped + repo-scoped).
 ///
 /// The returned signer is ready to be called with PAE bytes.
@@ -101,7 +124,84 @@ pub fn build_signer(
     match signer_kind {
         "repo-key" => build_repo_key_signer(root, algorithm, cfg),
         "external" => build_external_signer(algorithm, &cfg.attest),
+        "keystore" => build_keystore_signer(algorithm, cfg),
         other => Err(FactoryError::UnknownSignerKind(other.to_owned())),
+    }
+}
+
+fn build_keystore_signer(
+    algorithm: Algorithm,
+    cfg: &Config,
+) -> Result<Box<dyn Signer>, FactoryError> {
+    let key_ref = configured_key_ref(cfg, algorithm)
+        .parse::<KeyRef>()
+        .map_err(|error| FactoryError::Keystore(format!("key ref: {error}")))?;
+    let store = open_backend(key_ref.backend())
+        .map_err(|error| FactoryError::Keystore(error.to_string()))?;
+    let keystore_algorithm = to_keystore_algorithm(algorithm);
+    let key_ref_string = key_ref.to_string();
+    let backend = key_ref.backend().to_string();
+    let label = key_ref.label().to_owned();
+    let selector = KeySelector::new(label.clone(), Some(keystore_algorithm))
+        .map_err(|error| FactoryError::Keystore(error.to_string()))?;
+    let signer = store.open(&selector).map_err(|error| match error {
+        mkit_keystore::Error::KeyNotFound(_) => FactoryError::MissingKeystoreKey {
+            algorithm,
+            key_ref: key_ref_string,
+            backend,
+            label,
+            reason: error.to_string(),
+        },
+        other => FactoryError::Keystore(other.to_string()),
+    })?;
+    Ok(Box::new(KeystoreAttestSigner { algorithm, signer }))
+}
+
+fn configured_key_ref(cfg: &Config, algorithm: Algorithm) -> &str {
+    match algorithm {
+        Algorithm::Ed25519 => cfg.key.ed25519_ref_or_fallback(),
+        Algorithm::Secp256k1 => cfg.key.secp256k1_ref_or_fallback(),
+        Algorithm::P256 => cfg.key.p256_ref_or_fallback(),
+    }
+}
+
+fn to_keystore_algorithm(algorithm: Algorithm) -> mkit_keystore::Algorithm {
+    match algorithm {
+        Algorithm::Ed25519 => mkit_keystore::Algorithm::Ed25519,
+        Algorithm::Secp256k1 => mkit_keystore::Algorithm::Secp256k1,
+        Algorithm::P256 => mkit_keystore::Algorithm::P256,
+    }
+}
+
+struct KeystoreAttestSigner {
+    algorithm: Algorithm,
+    signer: Box<dyn mkit_keystore::KeySigner>,
+}
+
+impl std::fmt::Debug for KeystoreAttestSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeystoreAttestSigner")
+            .field("algorithm", &self.algorithm)
+            .field("signer", &"<keystore>")
+            .finish()
+    }
+}
+
+impl Signer for KeystoreAttestSigner {
+    fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+
+    fn keyid(&self) -> Result<String, mkit_attest::Error> {
+        self.signer
+            .keyid()
+            .map_err(|error| mkit_attest::Error::ExternalSignerBadResponse(error.to_string()))
+    }
+
+    fn sign(&mut self, pae: &[u8]) -> Result<Vec<u8>, mkit_attest::Error> {
+        self.signer
+            .sign(pae)
+            .map_err(|error| mkit_attest::Error::ExternalSignerBadResponse(error.to_string()))
     }
 }
 

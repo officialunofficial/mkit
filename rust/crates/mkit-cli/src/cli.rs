@@ -60,6 +60,7 @@ commands:
   remote [--format=json]  Show remote configuration (JSON with --format=json)
   remote add <url>  Add remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
   remote set <url>  Alias for 'remote add'
+  key generate|list|import|export|delete  Manage user-scoped keystore keys
   keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
                     Generate a new signing key (defaults to Ed25519)
   cherry-pick <hash> Apply a commit to the current branch
@@ -140,6 +141,7 @@ mod tests {
             "stash",
             "clone",
             "remote",
+            "key",
             "keygen",
             "cherry-pick",
             "rebase",

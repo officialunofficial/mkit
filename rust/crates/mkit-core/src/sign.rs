@@ -33,6 +33,18 @@ use ed25519_dalek::{
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// Effective uid for Unix key-file owner checks.
+#[cfg(unix)]
+#[must_use]
+pub fn effective_uid() -> u32 {
+    // SAFETY: `geteuid(2)` is a parameterless syscall that always succeeds,
+    // never reads or writes user memory, and is reentrant.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::geteuid()
+    }
+}
+
 /// Domain separator used when signing commit objects. The trailing
 /// `\x00` is load-bearing — see `docs/SPEC-SIGNING.md` §2. Twelve bytes.
 pub const COMMIT_DOMAIN: &[u8] = b"mkit.commit\x00";
@@ -135,7 +147,8 @@ impl KeyPair {
     }
 
     /// Sign `signing_bytes` under the given domain. The actual Ed25519
-    /// input is `BLAKE3(domain || signing_bytes)` — see SPEC §2.2.
+    /// input is `BLAKE3(len_le16(domain) || domain || signing_bytes)` — see
+    /// SPEC §2.2.
     #[must_use]
     pub fn sign(&self, domain: &[u8], signing_bytes: &[u8]) -> Signature {
         let digest = domain_digest(domain, signing_bytes);
@@ -145,8 +158,8 @@ impl KeyPair {
     }
 }
 
-/// Verify a signature over `BLAKE3(domain || signing_bytes)` against the
-/// embedded public key. Returns `Ok(())` on success.
+/// Verify a signature over `BLAKE3(len_le16(domain) || domain || signing_bytes)`
+/// against the embedded public key. Returns `Ok(())` on success.
 ///
 /// Uses [`VerifyingKey::verify_strict`], which enforces ZIP-215 / RFC 8032
 /// strict-verification semantics:
@@ -208,13 +221,15 @@ fn domain_digest(domain: &[u8], signing_bytes: &[u8]) -> [u8; HASH_LEN] {
     *h.finalize().as_bytes()
 }
 
-/// Public helper: `BLAKE3(COMMIT_DOMAIN || commit_signing_bytes(c))`.
+/// Public helper:
+/// `BLAKE3(len_le16(COMMIT_DOMAIN) || COMMIT_DOMAIN || commit_signing_bytes(c))`.
 pub fn commit_signing_hash(c: &Commit) -> Result<Hash, MkitError> {
     let sb = commit_signing_bytes(c)?;
     Ok(domain_digest(COMMIT_DOMAIN, &sb))
 }
 
-/// Public helper: `BLAKE3(REMIX_DOMAIN || remix_signing_bytes(r))`.
+/// Public helper:
+/// `BLAKE3(len_le16(REMIX_DOMAIN) || REMIX_DOMAIN || remix_signing_bytes(r))`.
 pub fn remix_signing_hash(r: &Remix) -> Result<Hash, MkitError> {
     let sb = remix_signing_bytes(r)?;
     Ok(domain_digest(REMIX_DOMAIN, &sb))
@@ -402,8 +417,7 @@ pub fn load_raw_32(path: &Path) -> Result<zeroize::Zeroizing<[u8; 32]>, MkitErro
         // and async-signal-safe per POSIX. The `unsafe` block is the
         // only one in `mkit-core`; the crate keeps `deny(unsafe_code)`
         // so this opt-out is reviewable.
-        #[allow(unsafe_code)]
-        let euid = unsafe { libc::geteuid() };
+        let euid = effective_uid();
         if meta.uid() != euid {
             return Err(MkitError::InsecureKeyOwner {
                 actual: meta.uid(),
@@ -435,7 +449,10 @@ pub fn load_raw_32(path: &Path) -> Result<zeroize::Zeroizing<[u8; 32]>, MkitErro
         // is junk that almost certainly means the file isn't a valid
         // mkit seed.
         let mut probe = [0u8; 1];
-        if f.read(&mut probe).unwrap_or(0) != 0 {
+        let trailing = f
+            .read(&mut probe)
+            .map_err(|e| MkitError::KeyIo(format!("read trailing byte: {e}")))?;
+        if trailing != 0 {
             return Err(MkitError::InvalidKeyLength {
                 actual: usize::try_from(meta.len()).unwrap_or(usize::MAX),
             });
@@ -613,6 +630,27 @@ pub fn save_raw_32(path: &Path, secret: &[u8; 32]) -> Result<(), MkitError> {
         }
     }
     Ok(())
+}
+
+/// Persist a raw 32-byte secret only if `path` does not already exist.
+///
+/// Returns `Ok(true)` when the key was created and `Ok(false)` when the
+/// destination already existed. The successful write path is crash-atomic and
+/// preserves the same parent-directory hardening as [`save_raw_32`].
+pub fn save_raw_32_create_new(path: &Path, secret: &[u8; 32]) -> Result<bool, MkitError> {
+    let parent: &Path = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+
+    #[cfg(unix)]
+    create_secure_dir_all(parent)?;
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(parent)
+        .map_err(|e| MkitError::KeyIo(format!("mkdir {}: {e}", parent.display())))?;
+
+    crate::atomic::write_create_new(path, secret, false)
+        .map_err(|e| MkitError::KeyIo(format!("create key: {e}")))
 }
 
 // -------------------------------------------------------------------
@@ -1080,6 +1118,15 @@ mod tests {
         assert_eq!(meta_after.mode() & 0o777, 0o600);
         let kp_loaded = load_key(&p).unwrap();
         assert_eq!(kp_loaded.public.0, kp2.public.0);
+    }
+
+    #[test]
+    fn save_raw_32_create_new_refuses_existing_key() {
+        let dir = tempdir();
+        let p = dir.join("default.key");
+        assert!(save_raw_32_create_new(&p, &[0x11; 32]).unwrap());
+        assert!(!save_raw_32_create_new(&p, &[0x22; 32]).unwrap());
+        assert_eq!(&*load_raw_32(&p).unwrap(), &[0x11; 32]);
     }
 
     #[cfg(unix)]

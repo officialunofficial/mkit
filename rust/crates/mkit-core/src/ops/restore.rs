@@ -581,6 +581,7 @@ fn apply_executable_bit(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn apply_executable_bit(_path: &Path) -> io::Result<()> {
     Ok(())
 }

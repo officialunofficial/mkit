@@ -33,12 +33,13 @@ jobs:
           workspaces: rust -> rust/target
           prefix-key: coverage-${{ runner.os }}
           cache-on-failure: false
+          cache-bin: false
 
       # Same native deps as rust.yml — the workspace's --all-features
       # path pulls in the TPM / CTAP signers on Linux, and coverage
       # needs every test target to compile.
       - name: Install native signer deps
-        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev swtpm
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config swtpm
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3

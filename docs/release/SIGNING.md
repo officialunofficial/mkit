@@ -18,6 +18,11 @@ For each of the four target archives
 (`aarch64-apple-darwin`, `x86_64-apple-darwin`,
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`):
 
+Release archives build the production `mkit-cli` target for that platform. The
+CLI enables the matching keystore software-protector feature so `software` keys
+are encrypted at rest on supported targets without changing the lean default
+feature set of the `mkit-keystore` library crate.
+
 | File                            | Purpose                                 |
 | ------------------------------- | --------------------------------------- |
 | `mkit-X.Y.Z-<triple>.tar.gz`    | The release archive.                    |

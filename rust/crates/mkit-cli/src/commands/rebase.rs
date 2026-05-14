@@ -24,7 +24,6 @@ use mkit_core::ops::rebase::{
 use mkit_core::ops::restore::{self, RestoreOptions};
 use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
-use mkit_core::sign::{self, KeyPair};
 use mkit_core::store::ObjectStore;
 
 use clap::Parser;
@@ -114,6 +113,10 @@ fn start(
         todo,
         done: Vec::new(),
     };
+    let signing = match load_rebase_signing(cwd) {
+        Ok(signing) => signing,
+        Err(code) => return code,
+    };
     if let Err(e) = write_state(mkit_dir, &state) {
         return emit_err(&format!("write rebase state: {e}"), exit::CANTCREAT);
     }
@@ -131,14 +134,14 @@ fn start(
     if let Err(e) = super::sync_index_to_tree(cwd, store, onto_tree) {
         return emit_err(&e, exit::CANTCREAT);
     }
-    replay(cwd, mkit_dir, store)
+    replay(cwd, mkit_dir, store, Some(signing))
 }
 
 fn resume(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
     if !is_rebase_in_progress(mkit_dir) {
         return emit_err("no rebase in progress", exit::GENERAL_ERROR);
     }
-    replay(cwd, mkit_dir, store)
+    replay(cwd, mkit_dir, store, None)
 }
 
 fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
@@ -169,22 +172,22 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     exit::OK
 }
 
-fn replay(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
+fn replay(
+    cwd: &std::path::Path,
+    mkit_dir: &std::path::Path,
+    store: &ObjectStore,
+    signing: Option<RebaseSigning>,
+) -> u8 {
     let mut state = match read_state(mkit_dir) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
-    let cfg = match config::read_or_default(cwd) {
-        Ok(c) => c,
-        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
-    };
-    let key_path = match config::resolve_key_path(cwd, &cfg.signing_key) {
-        Ok(p) => p,
-        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
-    };
-    let kp: KeyPair = match sign::load_key(&key_path) {
-        Ok(k) => k,
-        Err(e) => return emit_err(&format!("load key: {e}"), exit::NOPERM),
+    let mut signing = match signing {
+        Some(signing) => signing,
+        None => match load_rebase_signing(cwd) {
+            Ok(signing) => signing,
+            Err(code) => return code,
+        },
     };
 
     while !state.todo.is_empty() {
@@ -223,7 +226,14 @@ fn replay(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore
             );
             return exit::GENERAL_ERROR;
         }
-        let new_hash = match build_commit(store, &kp, head_hash, target, result.tree_hash) {
+        let new_hash = match build_commit(
+            store,
+            &mut signing.signer,
+            signing.author.clone(),
+            head_hash,
+            target,
+            result.tree_hash,
+        ) {
             Ok(h) => h,
             Err(c) => return c,
         };
@@ -267,9 +277,28 @@ fn replay(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore
     exit::OK
 }
 
+struct RebaseSigning {
+    signer: super::commit::CommitSigner,
+    author: Identity,
+}
+
+fn load_rebase_signing(cwd: &std::path::Path) -> Result<RebaseSigning, u8> {
+    let cfg = config::read_or_default(cwd)
+        .map_err(|e| emit_err(&format!("config: {e}"), exit::CONFIG_ERROR))?;
+    let signer =
+        super::commit::load_commit_signer(cwd, &cfg).map_err(|(msg, code)| emit_err(&msg, code))?;
+    let signer_public = signer
+        .public_key()
+        .map_err(|(msg, code)| emit_err(&msg, code))?;
+    let author = super::commit::resolve_author(None, &cfg.user_identity, &signer_public)
+        .map_err(|error| emit_err(&format!("author: {error}"), exit::CONFIG_ERROR))?;
+    Ok(RebaseSigning { signer, author })
+}
+
 fn build_commit(
     store: &ObjectStore,
-    kp: &KeyPair,
+    signer: &mut super::commit::CommitSigner,
+    author: Identity,
     parent: Hash,
     original: Hash,
     tree_hash: Hash,
@@ -279,7 +308,9 @@ fn build_commit(
         Ok(_) => return Err(emit_err("original is not a commit", exit::DATAERR)),
         Err(e) => return Err(emit_err(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
     };
-    let author = Identity::ed25519(kp.public.0);
+    let signer_public = signer
+        .public_key()
+        .map_err(|(msg, code)| emit_err(&msg, code))?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -287,14 +318,15 @@ fn build_commit(
         tree_hash,
         vec![parent],
         author,
-        kp.public.0,
+        signer_public,
         original_msg,
         timestamp,
         [0u8; 64],
     );
-    let sig = sign::sign_commit(&unsigned, kp)
-        .map_err(|e| emit_err(&format!("sign: {e}"), exit::GENERAL_ERROR))?;
-    unsigned.signature = sig.0;
+    let sig = signer
+        .sign_commit(&unsigned)
+        .map_err(|(msg, code)| emit_err(&msg, code))?;
+    unsigned.signature = sig;
     let bytes = serialize::serialize(&Object::Commit(unsigned))
         .map_err(|e| emit_err(&format!("serialize: {e}"), exit::DATAERR))?;
     store
