@@ -121,9 +121,15 @@ fn ensure_any_signing_key(
 
 impl Keystore for YubiKeyKeystore {
     fn capabilities(&self) -> Capabilities {
-        let openpgp_count = discover_openpgp_signing_keys().map_or(0, |keys| keys.len());
-        let piv_count = discover_piv_signing_keys().map_or(0, |keys| keys.len());
-        capabilities_for_signing_key_counts(openpgp_count, piv_count)
+        let openpgp = discover_openpgp_signing_keys();
+        let piv = discover_piv_signing_keys();
+        match (openpgp, piv) {
+            (Ok(openpgp), Ok(piv)) => capabilities_for_signing_key_counts(openpgp.len(), piv.len()),
+            // `Capabilities` has no error channel. Do not turn hardware/PCSC
+            // failures into "no algorithms"; list/open will surface the real
+            // discovery error when the caller performs an operation.
+            _ => yubikey_backend_capabilities(),
+        }
     }
 
     fn generate(
@@ -135,10 +141,10 @@ impl Keystore for YubiKeyKeystore {
     ) -> Result<Box<dyn KeySigner>> {
         match algorithm {
             Algorithm::Ed25519 => Err(Error::UnsupportedOperation(
-                "YubiKey OpenPGP backend opens existing Ed25519 signing keys; generate with vendor tooling for V1",
+                "YubiKey OpenPGP backend opens existing Ed25519 signing keys; generate with vendor tooling",
             )),
             Algorithm::P256 => Err(Error::UnsupportedOperation(
-                "YubiKey PIV/FIDO2 backend opens existing hardware keys; generate with vendor tooling or the CTAP external signer for V1",
+                "YubiKey PIV/FIDO2 backend opens existing hardware keys; generate with vendor tooling or the CTAP external signer",
             )),
             Algorithm::Secp256k1 => Err(Error::UnsupportedAlgorithm(algorithm)),
         }
@@ -153,10 +159,10 @@ impl Keystore for YubiKeyKeystore {
     ) -> Result<Box<dyn KeySigner>> {
         match secret.algorithm() {
             Algorithm::Ed25519 => Err(Error::UnsupportedOperation(
-                "YubiKey OpenPGP backend does not import extractable secret material in V1",
+                "YubiKey OpenPGP backend does not import extractable secret material",
             )),
             Algorithm::P256 => Err(Error::UnsupportedOperation(
-                "YubiKey PIV/FIDO2 backend does not import extractable secret material in V1",
+                "YubiKey PIV/FIDO2 backend does not import extractable secret material",
             )),
             Algorithm::Secp256k1 => Err(Error::UnsupportedAlgorithm(secret.algorithm())),
         }
@@ -194,7 +200,7 @@ impl Keystore for YubiKeyKeystore {
     fn delete(&self, selector: &KeySelector) -> Result<()> {
         validate_label(&selector.label)?;
         Err(Error::UnsupportedOperation(
-            "YubiKey OpenPGP backend does not delete card keys in V1",
+            "YubiKey OpenPGP backend does not delete card keys",
         ))
     }
 }
@@ -219,6 +225,21 @@ fn capabilities_for_signing_key_counts(openpgp_count: usize, piv_count: usize) -
         supports_user_presence: has_signing_key,
         supports_device_bound: has_signing_key,
         supports_non_extractable: has_signing_key,
+    }
+}
+
+fn yubikey_backend_capabilities() -> Capabilities {
+    Capabilities {
+        backend: BackendKind::YubiKey,
+        algorithms: vec![Algorithm::Ed25519, Algorithm::P256],
+        can_generate: false,
+        can_import: false,
+        can_export: false,
+        can_delete: false,
+        supports_listing: true,
+        supports_user_presence: true,
+        supports_device_bound: true,
+        supports_non_extractable: true,
     }
 }
 
@@ -327,7 +348,7 @@ fn resolve_openpgp(selector: &KeySelector) -> Result<OpenPgpSigningKey> {
 fn resolve_piv(selector: &KeySelector) -> Result<PivSigningKey> {
     if selector.label.starts_with("fido2-") || selector.label.starts_with("ctap-") {
         return Err(Error::UnsupportedOperation(
-            "FIDO2/WebAuthn YubiKey signing must use the CTAP external signer in V1 because keystore signatures cannot carry WebAuthn assertion data",
+            "FIDO2/WebAuthn YubiKey signing must use the CTAP external signer because keystore signatures cannot carry WebAuthn assertion data; this guard is based on fido2-/ctap- label prefixes",
         ));
     }
 
@@ -362,20 +383,20 @@ fn discover_openpgp_signing_keys() -> Result<Vec<OpenPgpSigningKey>> {
     let mut out = Vec::new();
     let cards = PcscBackend::card_backends(None).map_err(map_smartcard_error)?;
     for backend in cards {
-        let Ok(backend) = backend else {
-            continue;
+        let backend = backend.map_err(map_smartcard_error)?;
+        let mut card = match Card::<Open>::new(backend) {
+            Ok(card) => card,
+            Err(error) if is_absent_openpgp_card(&error) => continue,
+            Err(error) => return Err(map_openpgp_error(error)),
         };
-        let Ok(mut card) = Card::<Open>::new(backend) else {
-            continue;
-        };
-        let Ok(mut tx) = card.transaction() else {
-            continue;
-        };
-        let Ok(aid) = tx.application_identifier() else {
-            continue;
-        };
-        let Ok(public_key) = ed25519_public_key(&mut tx) else {
-            continue;
+        let mut tx = card.transaction().map_err(map_openpgp_error)?;
+        let aid = tx.application_identifier().map_err(map_openpgp_error)?;
+        let public_key = match ed25519_public_key(&mut tx) {
+            Ok(public_key) => public_key,
+            Err(Error::KeyNotFound(_) | Error::UnsupportedAlgorithm(Algorithm::Ed25519)) => {
+                continue;
+            }
+            Err(error) => return Err(error),
         };
         let ident = aid.ident();
         out.push(OpenPgpSigningKey {
@@ -390,8 +411,11 @@ fn discover_openpgp_signing_keys() -> Result<Vec<OpenPgpSigningKey>> {
 fn discover_piv_signing_keys() -> Result<Vec<PivSigningKey>> {
     let mut context = match yubikey::reader::Context::open() {
         Ok(context) => context,
-        Err(yubikey::Error::PcscError { .. } | yubikey::Error::NotFound) => {
-            return Ok(Vec::new());
+        Err(yubikey::Error::NotFound) => return Ok(Vec::new()),
+        Err(yubikey::Error::PcscError { .. }) => {
+            return Err(Error::BackendUnavailable(
+                "PIV PC/SC smartcard access failed".into(),
+            ));
         }
         Err(error) => return Err(map_yubikey_error(error)),
     };
@@ -400,11 +424,12 @@ fn discover_piv_signing_keys() -> Result<Vec<PivSigningKey>> {
     for reader in context.iter().map_err(map_yubikey_error)? {
         let mut yubikey = match reader.open() {
             Ok(yubikey) => yubikey,
-            Err(
-                yubikey::Error::PcscError { .. }
-                | yubikey::Error::AppletNotFound { .. }
-                | yubikey::Error::NotFound,
-            ) => continue,
+            Err(yubikey::Error::AppletNotFound { .. } | yubikey::Error::NotFound) => continue,
+            Err(yubikey::Error::PcscError { .. }) => {
+                return Err(Error::BackendUnavailable(
+                    "PIV PC/SC smartcard access failed".into(),
+                ));
+            }
             Err(error) => return Err(map_yubikey_error(error)),
         };
         out.extend(discover_piv_signing_keys_on_card(&mut yubikey)?);
@@ -427,9 +452,7 @@ fn discover_piv_signing_keys_on_card(yubikey: &mut yubikey::YubiKey) -> Result<V
             continue;
         }
         let public_key = p256_public_key_from_certificate(key.certificate())?;
-        let (pin_policy, touch_policy) = metadata
-            .policy
-            .unwrap_or((default_pin_policy(slot), TouchPolicy::Default));
+        let (pin_policy, touch_policy) = piv_policy(metadata.policy, slot)?;
         out.push(PivSigningKey {
             label: piv_label(slot),
             serial: yubikey.serial(),
@@ -440,6 +463,22 @@ fn discover_piv_signing_keys_on_card(yubikey: &mut yubikey::YubiKey) -> Result<V
         });
     }
     Ok(out)
+}
+
+fn is_absent_openpgp_card(error: &OpenPgpError) -> bool {
+    matches!(error, OpenPgpError::NotFound(_))
+}
+
+fn piv_policy(
+    policy: Option<(PinPolicy, TouchPolicy)>,
+    slot: SlotId,
+) -> Result<(PinPolicy, TouchPolicy)> {
+    policy.ok_or_else(|| {
+        Error::BackendUnavailable(format!(
+            "cannot determine PIV PIN/touch policy for slot {}",
+            piv_label(slot)
+        ))
+    })
 }
 
 fn assign_piv_labels(mut keys: Vec<PivSigningKey>) -> Vec<PivSigningKey> {
@@ -600,14 +639,6 @@ fn serial_qualified_piv_label(serial: yubikey::Serial, slot: SlotId) -> String {
     let base = piv_label(slot);
     let suffix = base.strip_prefix("piv-").unwrap_or(&base);
     format!("piv-{}-{suffix}", serial.0)
-}
-
-fn default_pin_policy(slot: SlotId) -> PinPolicy {
-    match slot {
-        SlotId::CardAuthentication => PinPolicy::Never,
-        SlotId::Signature => PinPolicy::Always,
-        _ => PinPolicy::Once,
-    }
 }
 
 fn keyid_for(public_key: &[u8]) -> String {
@@ -829,6 +860,17 @@ mod tests {
     }
 
     #[test]
+    fn piv_missing_policy_metadata_fails_closed() {
+        match piv_policy(None, SlotId::Signature) {
+            Err(Error::BackendUnavailable(message)) => {
+                assert!(message.contains("cannot determine PIV PIN/touch policy"));
+                assert!(message.contains("piv-9c"));
+            }
+            other => panic!("unexpected policy result: {other:?}"),
+        }
+    }
+
+    #[test]
     fn piv_labels_are_key_ref_safe() {
         assert_eq!(piv_label(SlotId::Signature), "piv-9c");
         validate_label(&piv_label(SlotId::Signature)).expect("label is valid");
@@ -904,5 +946,15 @@ mod tests {
             Err(Error::UnsupportedOperation(message)) => assert!(message.contains("WebAuthn")),
             other => panic!("unexpected result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn export_fails_for_non_extractable_hardware_backend() {
+        let selector = KeySelector::new("piv-9c", Some(Algorithm::P256)).unwrap();
+        let store = YubiKeyKeystore;
+        assert!(matches!(
+            store.export(&selector),
+            Err(Error::NotExtractable(_))
+        ));
     }
 }

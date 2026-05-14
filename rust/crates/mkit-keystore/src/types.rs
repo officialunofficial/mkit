@@ -83,6 +83,9 @@ pub struct KeyAttrs {
 }
 
 impl Default for KeyAttrs {
+    /// Default software-backend attributes are extractable because V1 software
+    /// storage decrypts into process memory; stronger backends advertise
+    /// non-extractability through [`Capabilities::supports_non_extractable`].
     fn default() -> Self {
         Self {
             extractable: true,
@@ -93,7 +96,7 @@ impl Default for KeyAttrs {
 }
 
 /// Backend family identifier.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BackendKind {
     /// User-scoped software compatibility backend.
     Software,
@@ -194,7 +197,7 @@ pub struct Capabilities {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyMetadata {
     /// Backend-local label.
-    pub label: String,
+    pub(crate) label: String,
     /// Backend family.
     pub backend: BackendKind,
     /// Signing algorithm.
@@ -202,7 +205,7 @@ pub struct KeyMetadata {
     /// Encoded public key bytes.
     pub public_key: Vec<u8>,
     /// Canonical key ID.
-    pub keyid: String,
+    pub(crate) keyid: String,
     /// Whether this key can be exported.
     pub extractable: bool,
     /// Whether signing requires user presence.
@@ -211,10 +214,36 @@ pub struct KeyMetadata {
     pub device_bound: bool,
 }
 
+impl KeyMetadata {
+    /// Backend-local label.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Backend family.
+    #[must_use]
+    pub const fn backend(&self) -> BackendKind {
+        self.backend
+    }
+
+    /// Signing algorithm.
+    #[must_use]
+    pub const fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+
+    /// Canonical key ID.
+    #[must_use]
+    pub fn keyid(&self) -> &str {
+        &self.keyid
+    }
+}
+
 /// Secret 32-byte key material.
 pub struct SecretKey {
     /// Algorithm the bytes belong to.
-    pub algorithm: Algorithm,
+    pub(crate) algorithm: Algorithm,
     bytes: Zeroizing<[u8; 32]>,
 }
 
@@ -228,7 +257,9 @@ impl SecretKey {
         }
     }
 
-    pub(crate) fn from_zeroizing(algorithm: Algorithm, bytes: Zeroizing<[u8; 32]>) -> Self {
+    /// Wrap zeroizing secret bytes for an algorithm.
+    #[must_use]
+    pub fn from_zeroizing(algorithm: Algorithm, bytes: Zeroizing<[u8; 32]>) -> Self {
         Self { algorithm, bytes }
     }
 
@@ -264,7 +295,7 @@ impl fmt::Debug for SecretKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeySelector {
     /// Backend-local label.
-    pub label: String,
+    pub(crate) label: String,
     /// Optional algorithm disambiguator.
     pub algorithm: Option<Algorithm>,
 }
@@ -276,6 +307,18 @@ impl KeySelector {
         validate_label(&label)?;
         Ok(Self { label, algorithm })
     }
+
+    /// Backend-local label.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Optional algorithm disambiguator.
+    #[must_use]
+    pub const fn algorithm(&self) -> Option<Algorithm> {
+        self.algorithm
+    }
 }
 
 /// Parsed `<backend>:<label>` key reference.
@@ -284,7 +327,7 @@ pub struct KeyRef {
     /// Backend family.
     pub backend: BackendKind,
     /// Backend-local label.
-    pub label: String,
+    pub(crate) label: String,
 }
 
 impl KeyRef {
@@ -294,6 +337,18 @@ impl KeyRef {
         validate_label(&label)?;
         validate_key_ref_label(&label)?;
         Ok(Self { backend, label })
+    }
+
+    /// Backend family.
+    #[must_use]
+    pub const fn backend(&self) -> BackendKind {
+        self.backend
+    }
+
+    /// Backend-local label.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
     }
 }
 
@@ -346,6 +401,12 @@ pub fn validate_label(label: &str) -> Result<()> {
         return Err(Error::InvalidLabel {
             label: label.into(),
             reason: "must not have leading or trailing whitespace",
+        });
+    }
+    if label.len() > 255 {
+        return Err(Error::InvalidLabel {
+            label: label.into(),
+            reason: "must be at most 255 bytes",
         });
     }
     if label.contains(':') {

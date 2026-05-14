@@ -31,6 +31,7 @@ impl LinuxSecretServiceKeystore {
     fn entry(label: &str, algorithm: Algorithm) -> Result<keyring_core::Entry> {
         let store = zbus_secret_service_keyring_store::Store::new()
             .map_err(|error| keyring_backend_error("create Secret Service store", error))?;
+        let _guard = crate::keyring_default_store_lock();
         keyring_core::set_default_store(store);
         keyring_core::Entry::new(SERVICE, &Self::account(label, algorithm)?)
             .map_err(|error| map_keyring_error(error, label, algorithm))
@@ -130,6 +131,7 @@ impl Keystore for LinuxSecretServiceKeystore {
     fn list(&self) -> Result<Vec<KeyMetadata>> {
         let store = zbus_secret_service_keyring_store::Store::new()
             .map_err(|error| keyring_backend_error("create Secret Service store", error))?;
+        let _guard = crate::keyring_default_store_lock();
         keyring_core::set_default_store(store);
         let spec = HashMap::from([("service", SERVICE)]);
         let entries = keyring_core::Entry::search(&spec).map_err(keyring_list_error)?;
@@ -207,12 +209,12 @@ fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
     }
     if attrs.require_user_presence {
         return Err(Error::UnsupportedAttributes(
-            "Linux Secret Service backend does not support user presence in V1".into(),
+            "Linux Secret Service backend does not support user presence".into(),
         ));
     }
     if attrs.device_bound {
         return Err(Error::UnsupportedAttributes(
-            "Linux Secret Service backend does not support device-bound keys in V1".into(),
+            "Linux Secret Service backend does not support device-bound keys".into(),
         ));
     }
     Ok(())
@@ -220,7 +222,7 @@ fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
 
 fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     let mut secret = [0u8; 32];
-    loop {
+    for _ in 0..8 {
         getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
         if SoftwareSigner::new(
             "validation".into(),
@@ -233,6 +235,10 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
             return Ok(secret);
         }
     }
+    secret.zeroize();
+    Err(Error::Internal(
+        "rng failed to produce a valid scalar".into(),
+    ))
 }
 
 fn map_keyring_error(error: keyring_core::Error, label: &str, algorithm: Algorithm) -> Error {

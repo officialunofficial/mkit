@@ -31,6 +31,7 @@ impl WindowsCredentialKeystore {
     fn entry(label: &str, algorithm: Algorithm) -> Result<keyring_core::Entry> {
         let store = windows_native_keyring_store::Store::new()
             .map_err(|error| keyring_backend_error("create Windows Credential store", error))?;
+        let _guard = crate::keyring_default_store_lock();
         keyring_core::set_default_store(store);
         keyring_core::Entry::new(SERVICE, &Self::account(label, algorithm)?)
             .map_err(|error| map_keyring_error(error, label, algorithm))
@@ -141,6 +142,7 @@ impl Keystore for WindowsCredentialKeystore {
     fn list(&self) -> Result<Vec<KeyMetadata>> {
         let store = windows_native_keyring_store::Store::new()
             .map_err(|error| keyring_backend_error("create Windows Credential store", error))?;
+        let _guard = crate::keyring_default_store_lock();
         keyring_core::set_default_store(store);
         let pattern = windows_service_pattern();
         let spec = HashMap::from([("pattern", pattern.as_str())]);
@@ -200,12 +202,12 @@ fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
     }
     if attrs.require_user_presence {
         return Err(Error::UnsupportedAttributes(
-            "Windows Credential Manager backend does not support user presence in V1".into(),
+            "Windows Credential Manager backend does not support user presence".into(),
         ));
     }
     if attrs.device_bound {
         return Err(Error::UnsupportedAttributes(
-            "Windows Credential Manager backend does not support device-bound keys in V1".into(),
+            "Windows Credential Manager backend does not support device-bound keys".into(),
         ));
     }
     Ok(())
@@ -213,7 +215,7 @@ fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
 
 fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     let mut secret = [0u8; 32];
-    loop {
+    for _ in 0..8 {
         getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
         if SoftwareSigner::new(
             "validation".into(),
@@ -226,6 +228,10 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
             return Ok(secret);
         }
     }
+    secret.zeroize();
+    Err(Error::Internal(
+        "rng failed to produce a valid scalar".into(),
+    ))
 }
 
 fn map_keyring_error(error: keyring_core::Error, label: &str, algorithm: Algorithm) -> Error {

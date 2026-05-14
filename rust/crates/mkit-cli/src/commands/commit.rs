@@ -350,10 +350,10 @@ fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8
         .ed25519_ref_or_fallback()
         .parse::<KeyRef>()
         .map_err(|error| (format!("key.ed25519_ref: {error}"), exit::CONFIG_ERROR))?;
-    let store = open_backend(key_ref.backend.clone())
+    let store = open_backend(key_ref.backend())
         .map_err(|error| (format!("keystore backend: {error}"), exit::UNAVAILABLE))?;
     let selector = KeySelector::new(
-        key_ref.label.clone(),
+        key_ref.label().to_owned(),
         Some(mkit_keystore::Algorithm::Ed25519),
     )
     .map_err(|error| (format!("key.ed25519_ref: {error}"), exit::CONFIG_ERROR))?;
@@ -361,7 +361,7 @@ fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8
         mkit_keystore::Error::KeyNotFound(_) => (
             format!(
                 "missing keystore signing key `{}` — run `mkit key generate --backend {} --algorithm ed25519 --label {}` first, or set `signer = legacy` and use `mkit keygen`: {error}",
-                cfg.key.ed25519_ref_or_fallback(), key_ref.backend, key_ref.label
+                cfg.key.ed25519_ref_or_fallback(), key_ref.backend(), key_ref.label()
             ),
             exit::NOINPUT,
         ),
@@ -379,7 +379,7 @@ fn advance_head(
     mkit_dir: &std::path::Path,
     commit_hash: &mkit_core::hash::Hash,
 ) -> Result<(), (String, u8)> {
-    let head = refs::read_head(mkit_dir).unwrap_or(Head::Branch("main".to_string()));
+    let head = refs::read_head(mkit_dir).map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?;
     match head {
         Head::Branch(name) => refs::write_ref(mkit_dir, &name, commit_hash)
             .map_err(|e| (format!("write ref: {e}"), exit::CANTCREAT)),

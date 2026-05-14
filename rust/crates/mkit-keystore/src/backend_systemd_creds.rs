@@ -415,7 +415,7 @@ impl SystemdCredsKeystore {
 fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
     if !attrs.extractable {
         return Err(Error::UnsupportedAttributes(
-            "systemd-creds backend does not support non-extractable keys in V1".into(),
+            "systemd-creds backend does not support non-extractable keys".into(),
         ));
     }
     if attrs.require_user_presence {
@@ -425,7 +425,7 @@ fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
     }
     if attrs.device_bound {
         return Err(Error::UnsupportedAttributes(
-            "systemd-creds backend does not expose device-bound key requests in V1".into(),
+            "systemd-creds backend does not expose device-bound key requests".into(),
         ));
     }
     Ok(())
@@ -689,7 +689,7 @@ fn systemd_creds_status_error(operation: &str, output: &std::process::Output) ->
 
 fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     let mut secret = [0u8; 32];
-    loop {
+    for _ in 0..8 {
         getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
         if SoftwareSigner::new(
             "validation".into(),
@@ -702,6 +702,10 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
             return Ok(secret);
         }
     }
+    zeroize::Zeroize::zeroize(&mut secret);
+    Err(Error::Internal(
+        "rng failed to produce a valid scalar".into(),
+    ))
 }
 
 fn default_storage_root() -> Result<PathBuf> {

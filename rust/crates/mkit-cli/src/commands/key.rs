@@ -149,7 +149,7 @@ fn generate(opts: GenerateOpts) -> u8 {
         Ok(selection) => selection,
         Err(code) => return code,
     };
-    let store = match store_for_backend(selection.backend.clone()) {
+    let store = match store_for_backend(selection.backend) {
         Ok(store) => store,
         Err(code) => return code,
     };
@@ -172,7 +172,7 @@ fn generate(opts: GenerateOpts) -> u8 {
     print_capabilities(&store.capabilities());
     if opts.print_pubkey {
         let mut stdout = std::io::stdout().lock();
-        let _ = writeln!(stdout, "{}", metadata.keyid);
+        let _ = writeln!(stdout, "{}", metadata.keyid());
     }
     exit::OK
 }
@@ -200,10 +200,10 @@ fn list(opts: ListOpts) -> u8 {
     };
     let capabilities = store.capabilities();
     keys.sort_by(|left, right| {
-        (&left.backend, &left.label, left.algorithm).cmp(&(
-            &right.backend,
-            &right.label,
-            right.algorithm,
+        (left.backend(), left.label(), left.algorithm()).cmp(&(
+            right.backend(),
+            right.label(),
+            right.algorithm(),
         ))
     });
     let mut stdout = std::io::stdout().lock();
@@ -216,10 +216,10 @@ fn list(opts: ListOpts) -> u8 {
             let _ = write!(
                 stdout,
                 "{{\"backend\":\"{}\",\"label\":\"{}\",\"algorithm\":\"{}\",\"keyid\":\"{}\",\"extractable\":{},\"require_user_presence\":{},\"device_bound\":{},\"capabilities\":{}}}",
-                key.backend,
-                json_escape(&key.label),
-                key.algorithm,
-                json_escape(&key.keyid),
+                key.backend(),
+                json_escape(key.label()),
+                key.algorithm(),
+                json_escape(key.keyid()),
                 key.extractable,
                 key.require_user_presence,
                 key.device_bound,
@@ -232,10 +232,10 @@ fn list(opts: ListOpts) -> u8 {
             let _ = writeln!(
                 stdout,
                 "{} {} {} {} extractable={} user_presence={} device_bound={} can_generate={} can_import={} can_export={} can_delete={} supports_listing={} supports_user_presence={} supports_device_bound={} supports_non_extractable={}",
-                key.backend,
-                key.label,
-                key.algorithm,
-                key.keyid,
+                key.backend(),
+                key.label(),
+                key.algorithm(),
+                key.keyid(),
                 key.extractable,
                 key.require_user_presence,
                 key.device_bound,
@@ -294,7 +294,7 @@ fn import(opts: ImportOpts) -> u8 {
     };
     let wrapped = SecretKey::new(algorithm, secret);
     secret.zeroize();
-    let store = match store_for_backend(selection.backend.clone()) {
+    let store = match store_for_backend(selection.backend) {
         Ok(store) => store,
         Err(code) => return code,
     };
@@ -337,13 +337,13 @@ fn export(opts: ExportOpts) -> u8 {
         Ok(selection) => selection,
         Err(code) => return code,
     };
-    let store = match store_for_backend(selection.backend.clone()) {
+    let store = match store_for_backend(selection.backend) {
         Ok(store) => store,
         Err(code) => return code,
     };
-    let selector = KeySelector {
-        label: selection.label,
-        algorithm,
+    let selector = match KeySelector::new(selection.label, algorithm) {
+        Ok(selector) => selector,
+        Err(error) => return keystore_error(error),
     };
     let secret = match store.export(&selector) {
         Ok(secret) => secret,
@@ -352,7 +352,9 @@ fn export(opts: ExportOpts) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "warning: printing secret key material to stdout");
     let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "{}", hex_lower(secret.expose_secret()));
+    if let Err(error) = writeln!(stdout, "{}", hex_lower(secret.expose_secret())) {
+        return emit_err(&format!("write exported secret: {error}"), exit::CANTCREAT);
+    }
     exit::OK
 }
 
@@ -372,13 +374,13 @@ fn delete(opts: DeleteOpts) -> u8 {
         Ok(selection) => selection,
         Err(code) => return code,
     };
-    let store = match store_for_backend(selection.backend.clone()) {
+    let store = match store_for_backend(selection.backend) {
         Ok(store) => store,
         Err(code) => return code,
     };
-    let selector = KeySelector {
-        label: selection.label.clone(),
-        algorithm,
+    let selector = match KeySelector::new(selection.label.clone(), algorithm) {
+        Ok(selector) => selector,
+        Err(error) => return keystore_error(error),
     };
     match store.delete(&selector) {
         Ok(()) => {
@@ -429,12 +431,12 @@ fn selection_for(
     };
     let backend = match explicit_backend {
         Some(backend) => backend,
-        None if configured_ref.is_some() => key_ref.backend,
+        None if configured_ref.is_some() => key_ref.backend(),
         None => parse_backend(cfg.key.backend_or_fallback())?,
     };
     Ok(Selection {
         backend,
-        label: key_ref.label,
+        label: key_ref.label().to_owned(),
     })
 }
 
@@ -520,11 +522,11 @@ fn attrs_from_flags(
 
 fn print_metadata(metadata: &mkit_keystore::KeyMetadata) {
     let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "backend = {}", metadata.backend);
-    let _ = writeln!(stdout, "label = {}", metadata.label);
-    let _ = writeln!(stdout, "algorithm = {}", metadata.algorithm);
+    let _ = writeln!(stdout, "backend = {}", metadata.backend());
+    let _ = writeln!(stdout, "label = {}", metadata.label());
+    let _ = writeln!(stdout, "algorithm = {}", metadata.algorithm());
     let _ = writeln!(stdout, "public_key = {}", hex_lower(&metadata.public_key));
-    let _ = writeln!(stdout, "keyid = {}", metadata.keyid);
+    let _ = writeln!(stdout, "keyid = {}", metadata.keyid());
     let _ = writeln!(stdout, "extractable = {}", metadata.extractable);
     let _ = writeln!(
         stdout,

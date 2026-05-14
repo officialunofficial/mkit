@@ -1,15 +1,10 @@
 # mkit Keystore Vault Specification
 
-Status: draft implementation specification for GitHub issue #104 and PR #109.
+Status: normative keystore implementation specification.
 
-Authority: this file is the source of truth for implementing and reviewing
-`mkit-keystore`. If code, docs, tests, or issue comments disagree with this
-file, this file wins until it is amended in the same pull request.
-
-Location note: issue #104 originally names `docs/keystore.md`; the project has
-chosen this root-level `keystore.md` as the implementation specification. User
-documentation may later summarize this file, but implementation review is
-against this file.
+Authority: this file is the source of truth for `mkit-keystore` behavior.
+If code, docs, or tests disagree with this file, update the implementation or
+amend this specification in the same change.
 
 ## 1. Purpose
 
@@ -30,16 +25,16 @@ This spec distinguishes two milestones:
   API, CLI, config, deterministic software backend, commit-signing adapter, and
   attestation adapter. It is sufficient to start using and testing the
   abstraction, but it does not close issue #104.
-- **Keystore V1**: the production scope for PR #109. It adds encrypted-at-rest
+- **Keystore V1**: the production keystore scope. It adds encrypted-at-rest
   software storage, explicit raw-file compatibility, OS-native extractable
   storage backends where implemented, keystore-backed commit/attestation
   signing, and honest capability reporting. It does not claim Secure Enclave,
   Windows TPM/CNG provider keys, TPM/PCR-bound systemd credentials, cloud KMS,
   PKCS#11/HSM support, or FIDO2/WebAuthn keystore signing.
 
-PR #109 is scoped to Keystore V1. Issue #104 may be resolved by this narrowed
-production contract only if issue/PR discussion accepts these deferred items;
-otherwise the deferred hardware/provider features remain follow-up work.
+Issue #104 may be resolved by this narrowed production contract only if project
+discussion accepts these deferred items; otherwise the deferred
+hardware/provider features remain follow-up work.
 
 ## 2. Non-Negotiable Design Decisions
 
@@ -1173,8 +1168,8 @@ Docs/spec cleanup:
 - `docs/SPEC-SIGNING.md` is updated to match current implementation:
   `BLAKE3(len_le16(domain) || domain || signing_bytes)`.
 - Threat model is updated with keystore backend assumptions.
-- CLI docs may be updated after this spec is implemented, but this file remains
-  the source of truth during implementation.
+- CLI docs may summarize this behavior, but this specification remains the
+  source of truth unless amended in a later spec change.
 
 Review:
 
@@ -1239,8 +1234,8 @@ Docs/spec cleanup:
 
 - `docs/THREAT-MODEL.md` documents the accepted malware, disk extraction,
   backup exfiltration, and side-channel assumptions for each backend family.
-- User-facing docs may summarize the final behavior, but this root spec remains
-  the implementation-review authority unless replaced by a later spec PR.
+- User-facing docs may summarize the final behavior, but this specification
+  remains the implementation-review authority unless replaced by a later spec.
 
 ## 16. Implementation Phases
 
@@ -1296,7 +1291,7 @@ Docs/spec cleanup:
 
 ## 17. Deferred Decisions
 
-The following decisions were resolved for PR #109's Keystore V1 target:
+The following decisions are resolved for the Keystore V1 target:
 
 1. The branch includes macOS Keychain, Windows DPAPI/Credential Manager, Linux
    Secret Service, `systemd-creds`, and YubiKey backends with capability reports

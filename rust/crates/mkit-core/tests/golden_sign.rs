@@ -9,8 +9,8 @@
 //!    `remix_signing_bytes`.
 //! 4. Compare byte-for-byte against the pinned `_signing_bytes.bin`
 //!    fixture.
-//! 5. Re-derive `BLAKE3(domain || signing_bytes)` and assert it matches
-//!    the recorded MANIFEST digest of the same domain-prefixed input.
+//! 5. Re-derive `BLAKE3(len_le16(domain) || domain || signing_bytes)` and
+//!    assert it matches the recorded stable signing-hash vectors.
 
 use std::fs;
 use std::path::PathBuf;

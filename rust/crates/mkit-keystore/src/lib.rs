@@ -46,6 +46,16 @@ pub use types::{
     KeyRef, KeySelector, SecretKey, validate_label,
 };
 
+#[allow(dead_code)]
+static KEYRING_DEFAULT_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[allow(dead_code)]
+pub(crate) fn keyring_default_store_lock() -> std::sync::MutexGuard<'static, ()> {
+    KEYRING_DEFAULT_STORE_LOCK
+        .lock()
+        .expect("keyring default-store mutex poisoned")
+}
+
 /// Signing handle returned by a keystore backend.
 pub trait KeySigner: Send {
     /// Signing algorithm.
@@ -58,16 +68,40 @@ pub trait KeySigner: Send {
     fn public_key(&self) -> Result<Vec<u8>>;
     /// Canonical key ID.
     fn keyid(&self) -> Result<String>;
-    /// Sign bytes according to this key's algorithm semantics.
+    /// Sign a raw message according to this key's algorithm semantics.
+    ///
+    /// # Returns
+    ///
+    /// Ed25519 signers return the 64-byte RFC 8032 signature over `msg`.
+    /// ECDSA signers return a 64-byte IEEE-P1363 signature (`r || s`) with
+    /// low-S normalization; secp256k1 signs SHA-256(`msg`) and P-256 uses the
+    /// backend's P-256 signing semantics for `msg`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if backend authentication, user presence, hardware I/O,
+    /// or signature generation fails.
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>>;
 }
 
 /// Keystore backend interface.
 pub trait Keystore: Send + Sync {
     /// Runtime backend capabilities.
+    ///
+    /// # Returns
+    ///
+    /// Capabilities for this backend instance in the current environment. The
+    /// same backend kind may report different algorithms or feature support on
+    /// different machines, devices, sessions, or feature builds.
     fn capabilities(&self) -> Capabilities;
 
     /// Generate a new key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot generate keys, cannot honor the
+    /// requested attributes, the label is invalid, the key already exists and
+    /// overwrite is disabled, or persistence fails.
     fn generate(
         &self,
         label: &str,
@@ -77,6 +111,12 @@ pub trait Keystore: Send + Sync {
     ) -> Result<Box<dyn KeySigner>>;
 
     /// Import secret key material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot import extractable material, the
+    /// label or secret is invalid, requested attributes are unsupported, the key
+    /// already exists and overwrite is disabled, or persistence fails.
     fn import(
         &self,
         label: &str,
@@ -86,12 +126,33 @@ pub trait Keystore: Send + Sync {
     ) -> Result<Box<dyn KeySigner>>;
 
     /// Open a key for signing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selector is invalid, missing, ambiguous, or the
+    /// backend cannot make the key available for signing.
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>>;
     /// List keys visible to the backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if backend enumeration fails. Malformed entries owned by
+    /// other applications may be skipped by backend-specific implementations.
     fn list(&self) -> Result<Vec<KeyMetadata>>;
     /// Export secret key material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotExtractable`] or [`Error::UnsupportedOperation`] for
+    /// backends or keys that cannot export secret material. Also returns errors
+    /// for invalid, missing, ambiguous, or unreadable selectors.
     fn export(&self, selector: &KeySelector) -> Result<SecretKey>;
     /// Delete the selected key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if deletion is unsupported, the selector is invalid,
+    /// missing, ambiguous, or backend cleanup fails.
     fn delete(&self, selector: &KeySelector) -> Result<()>;
 }
 
@@ -111,16 +172,16 @@ mod tests {
     #[test]
     fn key_ref_round_trips() {
         let key_ref: KeyRef = "software:default".parse().expect("key ref parses");
-        assert_eq!(key_ref.backend, BackendKind::Software);
-        assert_eq!(key_ref.label, "default");
+        assert_eq!(key_ref.backend(), BackendKind::Software);
+        assert_eq!(key_ref.label(), "default");
         assert_eq!(key_ref.to_string(), "software:default");
     }
 
     #[test]
     fn software_raw_key_ref_round_trips() {
         let key_ref: KeyRef = "software-raw:default".parse().expect("key ref parses");
-        assert_eq!(key_ref.backend, BackendKind::SoftwareRaw);
-        assert_eq!(key_ref.label, "default");
+        assert_eq!(key_ref.backend(), BackendKind::SoftwareRaw);
+        assert_eq!(key_ref.label(), "default");
         assert_eq!(key_ref.to_string(), "software-raw:default");
     }
 
@@ -142,6 +203,12 @@ mod tests {
                 "label should fail: {label:?}"
             );
         }
+    }
+
+    #[test]
+    fn label_validation_rejects_overlong_labels() {
+        validate_label(&"a".repeat(255)).expect("255-byte label is valid");
+        assert!(validate_label(&"a".repeat(256)).is_err());
     }
 
     #[test]

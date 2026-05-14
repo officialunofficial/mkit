@@ -15,7 +15,7 @@ use crate::{
     KeyMetadata, KeySelector, KeySigner, Keystore, Result, SecretKey, validate_label,
 };
 
-/// Persistent Foundation V1 software keystore.
+/// Persistent software keystore with encrypted-at-rest records by default.
 #[derive(Clone, Debug)]
 pub struct SoftwareKeystore {
     root: PathBuf,
@@ -109,13 +109,13 @@ impl SoftwareKeystore {
     ) -> Result<KeyMetadata> {
         let signer = SoftwareSigner::new(
             label.clone(),
-            self.backend.clone(),
+            self.backend,
             secret.algorithm(),
             *secret.expose_secret(),
         )?;
         Ok(KeyMetadata {
             label,
-            backend: self.backend.clone(),
+            backend: self.backend,
             algorithm,
             public_key: signer.public_key()?,
             keyid: signer.keyid()?,
@@ -262,7 +262,7 @@ impl Keystore for SoftwareKeystore {
     fn capabilities(&self) -> Capabilities {
         let can_use_secret_material = self.can_use_secret_material();
         Capabilities {
-            backend: self.backend.clone(),
+            backend: self.backend,
             algorithms: vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256],
             can_generate: can_use_secret_material,
             can_import: can_use_secret_material,
@@ -330,7 +330,7 @@ impl Keystore for SoftwareKeystore {
             };
             let signer = SoftwareSigner::new(
                 label.into(),
-                self.backend.clone(),
+                self.backend,
                 secret.algorithm(),
                 *secret.expose_secret(),
             )?;
@@ -361,7 +361,7 @@ impl Keystore for SoftwareKeystore {
         }
         Ok(Box::new(SoftwareSigner::new(
             label.into(),
-            self.backend.clone(),
+            self.backend,
             secret.algorithm(),
             *secret.expose_secret(),
         )?))
@@ -373,7 +373,7 @@ impl Keystore for SoftwareKeystore {
         let secret = self.load_secret(&selector.label, algorithm)?;
         Ok(Box::new(SoftwareSigner::new(
             selector.label.clone(),
-            self.backend.clone(),
+            self.backend,
             algorithm,
             *secret.expose_secret(),
         )?))
@@ -524,7 +524,11 @@ impl SoftwareKeystore {
     }
 }
 
-/// Software signer backed by in-memory secret material loaded from the software backend.
+/// In-process signer backed by extractable secret material.
+///
+/// Used by software, software-raw, and OS-native backends that return 32-byte
+/// secret material to this process. Hardware-backed signers use dedicated
+/// signer types that keep private material on the device.
 pub struct SoftwareSigner {
     label: String,
     backend: BackendKind,
@@ -572,7 +576,7 @@ impl KeySigner for SoftwareSigner {
     fn metadata(&self) -> Result<KeyMetadata> {
         Ok(KeyMetadata {
             label: self.label.clone(),
-            backend: self.backend.clone(),
+            backend: self.backend,
             algorithm: self.algorithm(),
             public_key: self.public_key()?,
             keyid: self.keyid()?,
@@ -599,7 +603,7 @@ impl KeySigner for SoftwareSigner {
 fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
     if !attrs.extractable {
         return Err(Error::UnsupportedAttributes(
-            "software backend does not support non-extractable keys in Foundation V1".into(),
+            "software backend does not support non-extractable keys".into(),
         ));
     }
     if attrs.require_user_presence {
@@ -682,12 +686,16 @@ fn sign_message(algorithm: Algorithm, secret: &[u8; 32], msg: &[u8]) -> Result<V
 
 fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     let mut secret = [0u8; 32];
-    loop {
+    for _ in 0..8 {
         getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
         if validate_secret(algorithm, &secret).is_ok() {
             return Ok(secret);
         }
     }
+    secret.zeroize();
+    Err(Error::Internal(
+        "rng failed to produce a valid scalar".into(),
+    ))
 }
 
 fn write_key_file(
@@ -1046,9 +1054,15 @@ fn default_protector_for_write(root: &Path) -> Result<Arc<dyn KeyProtector>> {
     #[cfg(target_os = "linux")]
     {
         #[cfg(feature = "linux-secret-service")]
-        if linux_desktop_session_available() && LinuxSecretServiceProtector::available() {
-            let _ = root;
-            return Ok(Arc::new(LinuxSecretServiceProtector));
+        if linux_desktop_session_available() {
+            match LinuxSecretServiceProtector::available() {
+                Ok(true) => {
+                    let _ = root;
+                    return Ok(Arc::new(LinuxSecretServiceProtector));
+                }
+                Ok(false) => {}
+                Err(error) => return Err(error),
+            }
         }
         #[cfg(feature = "systemd-creds")]
         {
@@ -1152,6 +1166,7 @@ impl WindowsCredentialProtector {
         let store = windows_native_keyring_store::Store::new().map_err(|error| {
             Error::BackendUnavailable(format!("Windows Credential software protector: {error}"))
         })?;
+        let _guard = crate::keyring_default_store_lock();
         keyring_core::set_default_store(store);
         keyring_core::Entry::new(Self::SERVICE, account)
             .map_err(|error| Error::Io(format!("Windows Credential software protector: {error}")))
@@ -1214,14 +1229,20 @@ impl LinuxSecretServiceProtector {
     const ID: &'static str = "linux-secret-service";
     const SERVICE: &'static str = "dev.mkit.keystore.software-dek.v1";
 
-    fn available() -> bool {
-        zbus_secret_service_keyring_store::Store::new().is_ok()
+    fn available() -> Result<bool> {
+        match zbus_secret_service_keyring_store::Store::new() {
+            Ok(_) => Ok(true),
+            Err(error) => Err(Error::BackendUnavailable(format!(
+                "Linux Secret Service software protector: {error}"
+            ))),
+        }
     }
 
     fn entry(account: &str) -> Result<keyring_core::Entry> {
         let store = zbus_secret_service_keyring_store::Store::new().map_err(|error| {
             Error::BackendUnavailable(format!("Linux Secret Service software protector: {error}"))
         })?;
+        let _guard = crate::keyring_default_store_lock();
         keyring_core::set_default_store(store);
         keyring_core::Entry::new(Self::SERVICE, account)
             .map_err(|error| Error::Io(format!("Linux Secret Service software protector: {error}")))
@@ -1501,6 +1522,13 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use zeroize::Zeroizing;
+
+    mod golden_vectors {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/common/vectors.rs"
+        ));
+    }
 
     #[derive(Debug)]
     struct TestProtector;
@@ -2086,41 +2114,10 @@ mod tests {
 
     #[test]
     fn encrypted_software_backend_matches_golden_vectors() {
-        const PAE: &[u8] = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
-        struct Vector {
-            label: &'static str,
-            algorithm: Algorithm,
-            seed_hex: &'static str,
-            public_hex: &'static str,
-            signature_hex: &'static str,
-        }
-        const VECTORS: &[Vector] = &[
-            Vector {
-                label: "ed25519-rfc8032-empty",
-                algorithm: Algorithm::Ed25519,
-                seed_hex: "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
-                public_hex: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-                signature_hex: "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
-            },
-            Vector {
-                label: "secp256k1-generator",
-                algorithm: Algorithm::Secp256k1,
-                seed_hex: "0000000000000000000000000000000000000000000000000000000000000001",
-                public_hex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-                signature_hex: "834cd126c1bcadb2998d6881e3dd35f6c10b87905b3dd5ba4714f59fcb018d79085c75876fd776083affcf1fc5c982b1e2bea4f0cfc14876ca4305de964521c9",
-            },
-            Vector {
-                label: "p256-readable-seed",
-                algorithm: Algorithm::P256,
-                seed_hex: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
-                public_hex: "02515c3d6eb9e396b904d3feca7f54fdcd0cc1e997bf375dca515ad0a6c3b4035f",
-                signature_hex: "a0075344345ada8f8dd1182e51d0aafcaab7e6c44bc378705cb4b78705faed5c42849f10ff7bf91ea3ac1eda3eb663c289d3dd68c27403acad830a6bde4306c5",
-            },
-        ];
-
         let dir = tempfile::tempdir().expect("tempdir");
         let store = software_store(dir.path().join("keys"));
-        for vector in VECTORS {
+        for vector in golden_vectors::VECTORS {
+            let algorithm: Algorithm = vector.algorithm.parse().expect("algorithm parses");
             let seed: [u8; 32] = hex_decode(vector.seed_hex)
                 .expect("seed hex")
                 .try_into()
@@ -2128,7 +2125,7 @@ mod tests {
             let mut signer = store
                 .import(
                     vector.label,
-                    SecretKey::new(vector.algorithm, seed),
+                    SecretKey::new(algorithm, seed),
                     KeyAttrs::default(),
                     ImportOptions::default(),
                 )
@@ -2141,9 +2138,9 @@ mod tests {
                 signer.keyid().expect("keyid"),
                 format!("{}:{}", vector.algorithm, vector.public_hex)
             );
-            let message = match vector.algorithm {
+            let message = match algorithm {
                 Algorithm::Ed25519 => b"".as_slice(),
-                Algorithm::Secp256k1 | Algorithm::P256 => PAE,
+                Algorithm::Secp256k1 | Algorithm::P256 => golden_vectors::PAE,
             };
             assert_eq!(
                 hex_lower(&signer.sign(message).expect("sign")),

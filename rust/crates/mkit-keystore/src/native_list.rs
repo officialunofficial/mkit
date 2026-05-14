@@ -20,12 +20,7 @@ pub(crate) fn metadata_from_account_secret(
     let mut secret_bytes = zeroize::Zeroizing::new([0u8; 32]);
     secret_bytes.copy_from_slice(secret.as_slice());
     let secret = SecretKey::from_zeroizing(algorithm, secret_bytes);
-    let signer = SoftwareSigner::new(
-        label.clone(),
-        backend.clone(),
-        algorithm,
-        *secret.expose_secret(),
-    )?;
+    let signer = SoftwareSigner::new(label.clone(), backend, algorithm, *secret.expose_secret())?;
     Ok(Some(KeyMetadata {
         label,
         backend,
@@ -104,6 +99,10 @@ pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> 
     let label = unique_test_label();
     let selector = crate::KeySelector::new(label.clone(), Some(Algorithm::Ed25519))?;
     let _ = store.delete(&selector);
+    let _cleanup_guard = NativeTestCleanup {
+        store,
+        selector: &selector,
+    };
 
     let result = (|| -> Result<()> {
         let seed = [0x36; 32];
@@ -147,6 +146,10 @@ pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> 
 
     let invalid_label = unique_test_label();
     let invalid_selector = crate::KeySelector::new(invalid_label.clone(), Some(Algorithm::P256))?;
+    let _invalid_cleanup_guard = NativeTestCleanup {
+        store,
+        selector: &invalid_selector,
+    };
     let invalid_result = store.import(
         &invalid_label,
         SecretKey::new(Algorithm::P256, [0; 32]),
@@ -205,6 +208,10 @@ fn exercise_native_backend_ecdsa_verification(store: &dyn crate::Keystore) -> Re
         let label = unique_test_label();
         let selector = crate::KeySelector::new(label.clone(), Some(algorithm))?;
         let _ = store.delete(&selector);
+        let _cleanup_guard = NativeTestCleanup {
+            store,
+            selector: &selector,
+        };
 
         let result = (|| -> Result<()> {
             let mut seed = [0u8; 32];
@@ -249,6 +256,19 @@ fn exercise_native_backend_ecdsa_verification(store: &dyn crate::Keystore) -> Re
         result?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+struct NativeTestCleanup<'a> {
+    store: &'a dyn crate::Keystore,
+    selector: &'a crate::KeySelector,
+}
+
+#[cfg(test)]
+impl Drop for NativeTestCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = self.store.delete(self.selector);
+    }
 }
 
 #[cfg(test)]

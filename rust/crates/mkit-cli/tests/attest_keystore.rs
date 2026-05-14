@@ -162,6 +162,63 @@ fn attest_with_keystore_ed25519_roundtrip() {
 }
 
 #[test]
+fn attest_ignores_repo_controlled_attest_signer_and_key_ref() {
+    let td = tempfile::tempdir().expect("tempdir");
+    init_repo_with_commit(td.path());
+
+    let user_secret = [0x61; 32];
+    let attacker_secret = [0x62; 32];
+    import_raw_ed25519(td.path(), "user-attester", &user_secret);
+    import_raw_ed25519(td.path(), "repo-attacker", &attacker_secret);
+
+    let cfg_dir = td.path().join("config/mkit");
+    fs::create_dir_all(&cfg_dir).expect("config dir");
+    fs::write(
+        cfg_dir.join("config"),
+        "attest.signer = keystore\nkey.ed25519_ref = software-raw:user-attester\n",
+    )
+    .expect("user config");
+    fs::write(
+        td.path().join("repo/.mkit/config"),
+        "attest.signer = keystore\nattest.default_algorithm = ed25519\nkey.default_ref = software-raw:repo-attacker\nkey.ed25519_ref = software-raw:repo-attacker\n",
+    )
+    .expect("repo config");
+
+    let attest = run(td.path(), &["attest", "--algorithm", "ed25519"]);
+    assert!(
+        attest.status.success(),
+        "attest stderr: {}",
+        String::from_utf8_lossy(&attest.stderr)
+    );
+
+    let repo = td.path().join("repo");
+    let (public_key, trust_kind) = public_key_and_trust_kind("ed25519", &user_secret);
+    let public_hex = hex_lower(&public_key);
+    fs::write(
+        repo.join(".mkit/attest-trust-roots.toml"),
+        format!(
+            "[[trust_root]]\nkeyid = \"ed25519:{public_hex}\"\nkind = \"{trust_kind}\"\npubkey_hex = \"{public_hex}\"\n"
+        ),
+    )
+    .expect("trust roots");
+
+    let verify = run(
+        td.path(),
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
+    assert!(
+        verify.status.success(),
+        "verify stdout: {}\nverify stderr: {}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+#[test]
 fn attest_with_software_raw_keystore_all_algorithms_roundtrip() {
     let mut secp256k1_secret = [0u8; 32];
     secp256k1_secret[31] = 42;
@@ -276,5 +333,29 @@ fn attest_with_keystore_missing_key_fails_without_generation() {
     assert!(
         !td.path().join("data/mkit/keys").exists(),
         "keystore attest must not silently create a keystore key"
+    );
+}
+
+fn import_raw_ed25519(root: &Path, label: &str, secret: &[u8; 32]) {
+    let secret_hex = hex_lower(secret);
+    let import = run(
+        root,
+        &[
+            "key",
+            "import",
+            "--backend",
+            "software-raw",
+            "--algorithm",
+            "ed25519",
+            "--label",
+            label,
+            "--hex",
+            &secret_hex,
+        ],
+    );
+    assert!(
+        import.status.success(),
+        "import {label} stderr: {}",
+        String::from_utf8_lossy(&import.stderr)
     );
 }

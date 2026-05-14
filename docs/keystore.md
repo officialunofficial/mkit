@@ -1,7 +1,6 @@
 # Keystore
 
-The normative implementation and review specification for PR #109 is the
-root-level [`keystore.md`](../keystore.md).
+The normative implementation specification is [`SPEC-KEYSTORE.md`](SPEC-KEYSTORE.md).
 
-This page exists because issue #104 originally referenced `docs/keystore.md`.
-Do not duplicate requirements here; amend the root specification instead.
+This page is a stable entry point for readers looking for keystore behavior,
+threat assumptions, and backend requirements.

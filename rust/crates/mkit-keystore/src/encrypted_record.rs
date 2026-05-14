@@ -11,7 +11,12 @@ const VERSION: u8 = 1;
 const DEK_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
 
-/// OS-native wrapper for software-keystore data-encryption keys.
+/// Wrapper for software-keystore data-encryption keys.
+///
+/// The record's inner XChaCha20-Poly1305 layer is the required AAD
+/// authentication boundary. Current OS-native protectors use `aad` only as a
+/// reserved context parameter and may ignore it; callers must not rely on the
+/// protector layer alone to bind metadata to a wrapped DEK.
 pub(crate) trait KeyProtector: std::fmt::Debug + Send + Sync {
     /// Stable protector identifier included in record AAD.
     fn id(&self) -> &'static str;
@@ -126,6 +131,51 @@ impl EncryptedKeyRecord {
         secret.copy_from_slice(&plaintext);
         plaintext.zeroize();
         Ok(SecretKey::from_zeroizing(self.algorithm, secret))
+    }
+
+    #[cfg(test)]
+    fn encrypt_with_material(
+        label: &str,
+        secret: &SecretKey,
+        attrs: KeyAttrs,
+        public_key: Vec<u8>,
+        keyid: String,
+        protector: &dyn KeyProtector,
+        dek: [u8; DEK_LEN],
+        nonce: [u8; NONCE_LEN],
+    ) -> Result<Self> {
+        let dek = Zeroizing::new(dek);
+        let aad = record_aad(
+            label,
+            secret.algorithm(),
+            &public_key,
+            &keyid,
+            &attrs,
+            protector.id(),
+        );
+        let cipher = XChaCha20Poly1305::new_from_slice(&*dek)
+            .map_err(|_| Error::Internal("invalid encryption key length".into()))?;
+        let ciphertext = cipher
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: secret.expose_secret(),
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| Error::Internal("software key encryption failed".into()))?;
+        let wrapped_dek = protector.wrap_dek(&dek, &aad)?;
+
+        Ok(Self {
+            algorithm: secret.algorithm(),
+            public_key,
+            keyid,
+            attrs,
+            protector: protector.id().into(),
+            nonce,
+            wrapped_dek,
+            ciphertext,
+        })
     }
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
@@ -382,5 +432,105 @@ mod tests {
     #[test]
     fn encrypted_record_rejects_corrupt_encoding() {
         assert!(EncryptedKeyRecord::decode(b"short").is_err());
+    }
+
+    fn stable_record() -> EncryptedKeyRecord {
+        let protector = TestProtector;
+        EncryptedKeyRecord::encrypt_with_material(
+            "default",
+            &SecretKey::new(Algorithm::Ed25519, [0x42; 32]),
+            KeyAttrs::default(),
+            vec![0x24; 32],
+            "ed25519:stable".into(),
+            &protector,
+            [0x11; DEK_LEN],
+            [0x22; NONCE_LEN],
+        )
+        .expect("encrypt stable record")
+    }
+
+    fn assert_tamper_fails(
+        mut record: EncryptedKeyRecord,
+        mutate: impl FnOnce(&mut EncryptedKeyRecord),
+    ) {
+        let protector = TestProtector;
+        mutate(&mut record);
+        assert!(record.decrypt("default", &protector).is_err());
+    }
+
+    #[test]
+    fn encrypted_record_rejects_tampered_ciphertext() {
+        assert_tamper_fails(stable_record(), |record| record.ciphertext[0] ^= 0x01);
+    }
+
+    #[test]
+    fn encrypted_record_rejects_tampered_nonce() {
+        assert_tamper_fails(stable_record(), |record| record.nonce[0] ^= 0x01);
+    }
+
+    #[test]
+    fn encrypted_record_rejects_tampered_wrapped_dek() {
+        assert_tamper_fails(stable_record(), |record| record.wrapped_dek[0] ^= 0x01);
+    }
+
+    #[test]
+    fn encrypted_record_rejects_tampered_public_key_aad() {
+        assert_tamper_fails(stable_record(), |record| record.public_key[0] ^= 0x01);
+    }
+
+    #[test]
+    fn encrypted_record_rejects_tampered_keyid_aad() {
+        assert_tamper_fails(stable_record(), |record| record.keyid.push_str("-tampered"));
+    }
+
+    #[test]
+    fn encrypted_record_rejects_tampered_attrs_aad() {
+        assert_tamper_fails(stable_record(), |record| record.attrs.device_bound = true);
+    }
+
+    #[test]
+    fn encrypted_record_rejects_tampered_protector_id_aad() {
+        assert_tamper_fails(stable_record(), |record| record.protector = "other".into());
+    }
+
+    #[test]
+    fn encrypted_record_bytes_are_stable_for_v1() {
+        let encoded = stable_record().encode().expect("encode stable record");
+        let encoded_hex = hex_lower(&encoded);
+        assert_eq!(encoded_hex, stable_record_hex());
+    }
+
+    #[test]
+    fn encrypted_record_v1_decodes_frozen_blob() {
+        let protector = TestProtector;
+        let frozen = hex_to_bytes(stable_record_hex());
+        let decoded = EncryptedKeyRecord::decode(&frozen).expect("decode frozen record");
+        let secret = decoded
+            .decrypt("default", &protector)
+            .expect("decrypt frozen record");
+        assert_eq!(secret.algorithm(), Algorithm::Ed25519);
+        assert_eq!(secret.expose_secret(), &[0x42; 32]);
+    }
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).expect("hex byte"))
+            .collect()
+    }
+
+    fn stable_record_hex() -> &'static str {
+        "4d4b49544b53563101010104000000746573742000000024242424242424242424242424242424242424242424242424242424242424240e000000656432353531393a737461626c651800000022222222222222222222222222222222222222222222222220000000f9fffde0ffe7e285b5c7dbd2c0c3d5c6d1b4d0d1d2d5c1d8c0b4b5b5c0d1c7c030000000c125a54e1efba6d6a70f5689ff3be3a070d5819657dcb8a6220934a533a21b67c5c74b378a2de924f1976fa761f115df"
+    }
+
+    fn hex_lower(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        out
     }
 }

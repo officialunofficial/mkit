@@ -136,12 +136,12 @@ fn build_keystore_signer(
     let key_ref = configured_key_ref(cfg, algorithm)
         .parse::<KeyRef>()
         .map_err(|error| FactoryError::Keystore(format!("key ref: {error}")))?;
-    let store = open_backend(key_ref.backend.clone())
+    let store = open_backend(key_ref.backend())
         .map_err(|error| FactoryError::Keystore(error.to_string()))?;
     let keystore_algorithm = to_keystore_algorithm(algorithm);
     let key_ref_string = key_ref.to_string();
-    let backend = key_ref.backend.to_string();
-    let label = key_ref.label;
+    let backend = key_ref.backend().to_string();
+    let label = key_ref.label().to_owned();
     let selector = KeySelector::new(label.clone(), Some(keystore_algorithm))
         .map_err(|error| FactoryError::Keystore(error.to_string()))?;
     let signer = store.open(&selector).map_err(|error| match error {

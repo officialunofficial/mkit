@@ -207,12 +207,12 @@ fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
     }
     if attrs.require_user_presence {
         return Err(Error::UnsupportedAttributes(
-            "macOS Keychain backend does not support user presence in V1".into(),
+            "macOS Keychain backend does not support user presence".into(),
         ));
     }
     if attrs.device_bound {
         return Err(Error::UnsupportedAttributes(
-            "macOS Keychain backend does not support device-bound keys in V1".into(),
+            "macOS Keychain backend does not support device-bound keys".into(),
         ));
     }
     Ok(())
@@ -220,7 +220,7 @@ fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
 
 fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     let mut secret = [0u8; 32];
-    loop {
+    for _ in 0..8 {
         getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
         if SoftwareSigner::new(
             "validation".into(),
@@ -233,6 +233,10 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
             return Ok(secret);
         }
     }
+    secret.zeroize();
+    Err(Error::Internal(
+        "rng failed to produce a valid scalar".into(),
+    ))
 }
 
 fn is_not_found(error: security_framework::base::Error) -> bool {

@@ -2,6 +2,8 @@
 
 use std::process::{Command, Output};
 
+use mkit_core::object::Object;
+
 fn mkit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mkit")
 }
@@ -516,6 +518,71 @@ fn commit_can_use_keystore_signer_without_legacy_keygen() {
 }
 
 #[test]
+fn commit_ignores_repo_controlled_signing_key_ref() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+    assert!(run(td.path(), &["init"]).status.success());
+
+    let user_secret = [0x31; 32];
+    let attacker_secret = [0x32; 32];
+    import_raw_ed25519(td.path(), "user-committer", &user_secret);
+    import_raw_ed25519(td.path(), "repo-attacker", &attacker_secret);
+
+    let cfg_dir = td.path().join("config/mkit");
+    std::fs::create_dir_all(&cfg_dir).expect("config dir");
+    std::fs::write(
+        cfg_dir.join("config"),
+        "signer = keystore\nkey.ed25519_ref = software-raw:user-committer\n",
+    )
+    .expect("user config");
+    std::fs::write(
+        td.path().join("repo/.mkit/config"),
+        "signer = keystore\nkey.default_ref = software-raw:repo-attacker\nkey.ed25519_ref = software-raw:repo-attacker\n",
+    )
+    .expect("repo config");
+
+    std::fs::write(td.path().join("repo/README.md"), b"hello\n").expect("README");
+    assert!(run(td.path(), &["add", "README.md"]).status.success());
+    let commit = run(td.path(), &["commit", "-m", "repo selector ignored"]);
+    assert!(
+        commit.status.success(),
+        "commit stderr: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    let signer = head_commit_signer(&td.path().join("repo"));
+    assert_eq!(signer, ed25519_public_key(&user_secret));
+    assert_ne!(signer, ed25519_public_key(&attacker_secret));
+}
+
+#[test]
+fn commit_with_corrupt_head_does_not_fallback_to_main() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+    assert!(run(td.path(), &["init"]).status.success());
+    import_raw_ed25519(td.path(), "user-committer", &[0x33; 32]);
+
+    let cfg_dir = td.path().join("config/mkit");
+    std::fs::create_dir_all(&cfg_dir).expect("config dir");
+    std::fs::write(
+        cfg_dir.join("config"),
+        "signer = keystore\nkey.ed25519_ref = software-raw:user-committer\n",
+    )
+    .expect("user config");
+    std::fs::write(td.path().join("repo/README.md"), b"hello\n").expect("README");
+    assert!(run(td.path(), &["add", "README.md"]).status.success());
+    std::fs::write(td.path().join("repo/.mkit/HEAD"), b"ref: ").expect("corrupt HEAD");
+
+    let commit = run(td.path(), &["commit", "-m", "corrupt head"]);
+    assert!(!commit.status.success());
+    assert!(String::from_utf8_lossy(&commit.stderr).contains("read HEAD"));
+    assert!(
+        !td.path().join("repo/.mkit/refs/heads/main").exists(),
+        "corrupt HEAD must not advance refs/heads/main"
+    );
+}
+
+#[test]
 fn commit_can_use_software_raw_keystore_ref() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(td.path().join("repo")).expect("repo dir");
@@ -663,6 +730,70 @@ fn keystore_commit_malformed_key_is_not_reported_as_missing() {
 }
 
 #[test]
+fn key_export_and_delete_unknown_label_fail_cleanly() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+
+    let export = run(
+        td.path(),
+        &[
+            "key",
+            "export",
+            "--backend",
+            "software-raw",
+            "--label",
+            "missing",
+            "--algorithm",
+            "ed25519",
+            "--unsafe-print-secret",
+        ],
+    );
+    assert_eq!(export.status.code(), Some(65));
+    assert!(String::from_utf8_lossy(&export.stderr).contains("key not found"));
+
+    let delete = run(
+        td.path(),
+        &[
+            "key",
+            "delete",
+            "--backend",
+            "software-raw",
+            "--label",
+            "missing",
+            "--algorithm",
+            "ed25519",
+            "--yes",
+        ],
+    );
+    assert_eq!(delete.status.code(), Some(65));
+    assert!(String::from_utf8_lossy(&delete.stderr).contains("key not found"));
+}
+
+#[test]
+fn key_list_does_not_cross_software_variants() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+
+    import_raw_ed25519(td.path(), "raw-only", &[0x44; 32]);
+
+    let encrypted_list = run(td.path(), &["key", "list", "--backend", "software"]);
+    assert!(encrypted_list.status.success());
+    assert!(
+        !String::from_utf8(encrypted_list.stdout)
+            .expect("stdout utf8")
+            .contains("raw-only")
+    );
+
+    let raw_list = run(td.path(), &["key", "list", "--backend", "software-raw"]);
+    assert!(raw_list.status.success());
+    assert!(
+        String::from_utf8(raw_list.stdout)
+            .expect("stdout utf8")
+            .contains("raw-only")
+    );
+}
+
+#[test]
 fn keystore_merge_missing_key_fails_without_generation() {
     let td = tempfile::tempdir().expect("tempdir");
     prepare_history_repo(td.path());
@@ -792,6 +923,30 @@ fn commit_file(root: &std::path::Path, file: &str, body: &[u8], message: &str) {
     );
 }
 
+fn import_raw_ed25519(root: &std::path::Path, label: &str, secret: &[u8; 32]) {
+    let secret_hex = hex_lower(secret);
+    let import = run(
+        root,
+        &[
+            "key",
+            "import",
+            "--backend",
+            "software-raw",
+            "--algorithm",
+            "ed25519",
+            "--label",
+            label,
+            "--hex",
+            &secret_hex,
+        ],
+    );
+    assert!(
+        import.status.success(),
+        "import {label} stderr: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+}
+
 fn assert_missing_history_key_failure(root: &std::path::Path, output: &Output) {
     assert!(!output.status.success(), "command unexpectedly succeeded");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -822,4 +977,31 @@ fn resolve_head(root: &std::path::Path) -> String {
     } else {
         head.to_owned()
     }
+}
+
+fn head_commit_signer(root: &std::path::Path) -> Vec<u8> {
+    let head = resolve_head(root);
+    let hash = mkit_core::hash::from_hex(&head).expect("head hash");
+    let store = mkit_core::ObjectStore::open(root).expect("object store");
+    match store.read_object(&hash).expect("head object") {
+        Object::Commit(commit) => commit.signer.to_vec(),
+        other => panic!("expected commit, got {other:?}"),
+    }
+}
+
+fn ed25519_public_key(secret: &[u8; 32]) -> Vec<u8> {
+    ed25519_dalek::SigningKey::from_bytes(secret)
+        .verifying_key()
+        .to_bytes()
+        .to_vec()
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }

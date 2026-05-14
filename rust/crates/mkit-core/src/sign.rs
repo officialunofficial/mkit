@@ -449,7 +449,10 @@ pub fn load_raw_32(path: &Path) -> Result<zeroize::Zeroizing<[u8; 32]>, MkitErro
         // is junk that almost certainly means the file isn't a valid
         // mkit seed.
         let mut probe = [0u8; 1];
-        if f.read(&mut probe).unwrap_or(0) != 0 {
+        let trailing = f
+            .read(&mut probe)
+            .map_err(|e| MkitError::KeyIo(format!("read trailing byte: {e}")))?;
+        if trailing != 0 {
             return Err(MkitError::InvalidKeyLength {
                 actual: usize::try_from(meta.len()).unwrap_or(usize::MAX),
             });
