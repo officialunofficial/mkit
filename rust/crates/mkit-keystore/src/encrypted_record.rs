@@ -387,6 +387,26 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FixedDekProtector {
+        id: &'static str,
+        dek: [u8; DEK_LEN],
+    }
+
+    impl KeyProtector for FixedDekProtector {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn wrap_dek(&self, _dek: &[u8; DEK_LEN], _aad: &[u8]) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn unwrap_dek(&self, _wrapped: &[u8], _aad: &[u8]) -> Result<Zeroizing<[u8; DEK_LEN]>> {
+            Ok(Zeroizing::new(self.dek))
+        }
+    }
+
     #[test]
     fn encrypted_record_round_trips() {
         let protector = TestProtector;
@@ -512,6 +532,31 @@ mod tests {
     #[test]
     fn encrypted_record_rejects_tampered_protector_id_aad() {
         assert_tamper_fails(stable_record(), |record| record.protector = "other".into());
+    }
+
+    #[test]
+    fn encrypted_record_authenticates_protector_id_aad() {
+        let dek = [0x11; DEK_LEN];
+        let protector = FixedDekProtector { id: "test", dek };
+        let mut record = EncryptedKeyRecord::encrypt_with_material(
+            "default",
+            &SecretKey::new(Algorithm::Ed25519, [0x42; 32]),
+            KeyAttrs::default(),
+            vec![0x24; 32],
+            "ed25519:stable".into(),
+            &protector,
+            dek,
+            [0x22; NONCE_LEN],
+        )
+        .expect("encrypt stable record");
+
+        record.protector = "other".into();
+        let matching_wrong_protector = FixedDekProtector { id: "other", dek };
+        assert!(
+            record
+                .decrypt("default", &matching_wrong_protector)
+                .is_err()
+        );
     }
 
     #[test]

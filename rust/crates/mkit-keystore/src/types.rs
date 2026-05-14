@@ -83,7 +83,7 @@ pub struct KeyAttrs {
 }
 
 impl Default for KeyAttrs {
-    /// Default software-backend attributes are extractable because V1 software
+    /// Default software-backend attributes are extractable because software-style
     /// storage decrypts into process memory; stronger backends advertise
     /// non-extractability through [`Capabilities::supports_non_extractable`].
     fn default() -> Self {
