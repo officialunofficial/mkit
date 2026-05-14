@@ -66,7 +66,7 @@ impl EncryptedKeyRecord {
             &keyid,
             &attrs,
             protector.id(),
-        );
+        )?;
         let cipher = XChaCha20Poly1305::new_from_slice(&*dek)
             .map_err(|_| Error::Internal("invalid encryption key length".into()))?;
         let ciphertext = cipher
@@ -107,7 +107,7 @@ impl EncryptedKeyRecord {
             &self.keyid,
             &self.attrs,
             protector.id(),
-        );
+        )?;
         let dek = protector.unwrap_dek(&self.wrapped_dek, &aad)?;
         let cipher = XChaCha20Poly1305::new_from_slice(&*dek)
             .map_err(|_| Error::Internal("invalid encryption key length".into()))?;
@@ -152,7 +152,7 @@ impl EncryptedKeyRecord {
             &keyid,
             &attrs,
             protector.id(),
-        );
+        )?;
         let cipher = XChaCha20Poly1305::new_from_slice(&*dek)
             .map_err(|_| Error::Internal("invalid encryption key length".into()))?;
         let ciphertext = cipher
@@ -240,22 +240,18 @@ fn record_aad(
     keyid: &str,
     attrs: &KeyAttrs,
     protector: &str,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.push(VERSION);
-    out.extend_from_slice(b"software");
-    out.push(0);
-    out.extend_from_slice(label.as_bytes());
-    out.push(0);
+    write_bytes(&mut out, b"software")?;
+    write_bytes(&mut out, label.as_bytes())?;
     out.push(algorithm_id(algorithm));
     out.push(attrs_bits(attrs));
-    out.extend_from_slice(protector.as_bytes());
-    out.push(0);
-    out.extend_from_slice(public_key);
-    out.push(0);
-    out.extend_from_slice(keyid.as_bytes());
-    out
+    write_bytes(&mut out, protector.as_bytes())?;
+    write_bytes(&mut out, public_key)?;
+    write_bytes(&mut out, keyid.as_bytes())?;
+    Ok(out)
 }
 
 fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
@@ -430,6 +426,31 @@ mod tests {
     }
 
     #[test]
+    fn record_aad_length_prefixes_variable_fields() {
+        let attrs = KeyAttrs::default();
+        let left = record_aad(
+            "default",
+            Algorithm::Ed25519,
+            b"public\0key",
+            "id",
+            &attrs,
+            "test",
+        )
+        .expect("left aad");
+        let right = record_aad(
+            "default",
+            Algorithm::Ed25519,
+            b"public",
+            "key\0id",
+            &attrs,
+            "test",
+        )
+        .expect("right aad");
+
+        assert_ne!(left, right);
+    }
+
+    #[test]
     fn encrypted_record_rejects_corrupt_encoding() {
         assert!(EncryptedKeyRecord::decode(b"short").is_err());
     }
@@ -521,7 +542,7 @@ mod tests {
     }
 
     fn stable_record_hex() -> &'static str {
-        "4d4b49544b53563101010104000000746573742000000024242424242424242424242424242424242424242424242424242424242424240e000000656432353531393a737461626c651800000022222222222222222222222222222222222222222222222220000000f9fffde0ffe7e285b5c7dbd2c0c3d5c6d1b4d0d1d2d5c1d8c0b4b5b5c0d1c7c030000000c125a54e1efba6d6a70f5689ff3be3a070d5819657dcb8a6220934a533a21b67c5c74b378a2de924f1976fa761f115df"
+        "4d4b49544b53563101010104000000746573742000000024242424242424242424242424242424242424242424242424242424242424240e000000656432353531393a737461626c651800000022222222222222222222222222222222222222222222222220000000f9fffde0ffe7e285b5bcb4b4b4c7dbd2c0c3d5c6d1b3b4b4b4d0d1d2d5c1d8c030000000c125a54e1efba6d6a70f5689ff3be3a070d5819657dcb8a6220934a533a21b67791eb2cb0db7cbdd4815ce51b3ea5ae0"
     }
 
     fn hex_lower(bytes: &[u8]) -> String {
