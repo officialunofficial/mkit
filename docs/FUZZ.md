@@ -25,6 +25,10 @@ from recurring.
 | `fuzz_targets/tree.rs`         | `serialize::deserialize`    |
 | `fuzz_targets/software_key_record.rs` | `EncryptedKeyRecord::decode` |
 
+Targets that exercise crate-private parser surfaces should expose a minimal
+`#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in
+`rust/fuzz/Cargo.toml`, as `software_key_record` does for `mkit-keystore`.
+
 ## What is **not** fuzzed (deferred)
 
 - **`restore` (symlink resolution)** — the file-system side-effect

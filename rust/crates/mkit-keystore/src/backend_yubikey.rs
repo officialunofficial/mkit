@@ -16,7 +16,8 @@ use yubikey::{PinPolicy, TouchPolicy};
 
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, KeyId, KeyLabel, KeyLister, KeyMetadata,
-    KeyOpener, KeySelector, KeySigner, Keystore, PublicKeyBytes, Result, validate_label,
+    KeyOpener, KeySelector, KeySigner, Keystore, PublicKeyBytes, Result, types::static_label,
+    validate_label,
 };
 
 /// `YubiKey` `OpenPGP` backend over PC/SC.
@@ -184,6 +185,7 @@ fn capabilities_for_discovered_keys(
         can_import: false,
         can_export: false,
         can_delete: false,
+        // Capabilities are structural; token and PC/SC availability are checked by list().
         supports_listing: true,
         supports_user_presence,
         supports_device_bound: has_signing_key,
@@ -404,7 +406,7 @@ fn discover_piv_signing_keys_on_card(yubikey: &mut yubikey::YubiKey) -> Result<V
         let public_key = p256_public_key_from_certificate(key.certificate())?;
         let (pin_policy, touch_policy) = piv_policy(metadata.policy, slot)?;
         out.push(PivSigningKey {
-            label: KeyLabel::new(piv_label(slot)).expect("static PIV label is valid"),
+            label: piv_key_label(slot),
             serial: yubikey.serial(),
             slot,
             public_key,
@@ -439,7 +441,7 @@ fn assign_piv_labels(mut keys: Vec<PivSigningKey>) -> Vec<PivSigningKey> {
             KeyLabel::new(serial_qualified_piv_label(keys[index].serial, slot))
                 .expect("generated PIV label is valid")
         } else {
-            KeyLabel::new(piv_label(slot)).expect("static PIV label is valid")
+            piv_key_label(slot)
         };
     }
     keys.sort_by(|left, right| {
@@ -563,7 +565,7 @@ fn piv_public_key_for_slot(yubikey: &mut yubikey::YubiKey, slot: SlotId) -> Resu
         }
     }
     Err(Error::KeyNotFound(KeySelector {
-        label: KeyLabel::new(piv_label(slot)).expect("static PIV label is valid"),
+        label: piv_key_label(slot),
         algorithm: Some(Algorithm::P256),
     }))
 }
@@ -586,6 +588,10 @@ fn piv_label(slot: SlotId) -> String {
         _ => "piv-unknown",
     }
     .into()
+}
+
+fn piv_key_label(slot: SlotId) -> KeyLabel {
+    KeyLabel::new(piv_label(slot)).expect("static PIV label is valid")
 }
 
 fn serial_qualified_piv_label(serial: yubikey::Serial, slot: SlotId) -> String {
@@ -618,7 +624,7 @@ fn map_openpgp_error(error: OpenPgpError) -> Error {
         OpenPgpError::UnsupportedAlgo(_) => Error::UnsupportedAlgorithm(Algorithm::Ed25519),
         OpenPgpError::Smartcard(_) => Error::Io(error.to_string()),
         OpenPgpError::NotFound(_) => Error::KeyNotFound(KeySelector {
-            label: KeyLabel::new("openpgp-signing").expect("static label is valid"),
+            label: static_label("openpgp-signing"),
             algorithm: Some(Algorithm::Ed25519),
         }),
         other => Error::Io(other.to_string()),
@@ -636,7 +642,7 @@ fn map_yubikey_error(error: yubikey::Error) -> Error {
             Error::UnsupportedAlgorithm(Algorithm::P256)
         }
         yubikey::Error::NotFound => Error::KeyNotFound(KeySelector {
-            label: KeyLabel::new("piv").expect("static label is valid"),
+            label: static_label("piv"),
             algorithm: Some(Algorithm::P256),
         }),
         yubikey::Error::PcscError { .. } | yubikey::Error::AppletNotFound { .. } => {

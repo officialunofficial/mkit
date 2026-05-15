@@ -278,7 +278,9 @@ Canonical key IDs:
 - P-256: `p256:<66 lowercase hex compressed SEC1 pubkey>`.
 
 The keystore must expose canonical key IDs. Compatibility adapters may emit
-legacy key IDs only where existing verifier contracts require them.
+legacy key IDs only where existing verifier contracts require them. Public
+`KeyId` values must be non-empty, must not contain control characters, and must
+be at most 256 bytes.
 
 ### 5.5 Secret Key Material
 
@@ -450,6 +452,10 @@ Requirements:
   being created/imported. Backends should make replacement atomic where the
   underlying vault supports it; otherwise they must document the non-atomic
   behavior in their backend notes and tests.
+- Encrypted software backends must prove the existing record decrypts before an
+  overwrite replaces it. If the protector is permanently unavailable, recovery
+  requires manual record removal and wrapped-DEK cleanup rather than silent data
+  loss.
 - `open` must fail if the selector is missing or ambiguous.
 - `list` must return deterministic ordering by `(backend, label, algorithm)`
   where the backend can list keys.
@@ -951,6 +957,10 @@ Behavior:
 - Must report key-not-found distinctly from successful deletion.
 - Must not delete legacy raw key files unless the selected backend is the
   software backend and the selected label maps to that exact key.
+- For encrypted software storage, deletion intentionally fails if the selected
+  record cannot be decrypted with its recorded protector. Manual recovery from a
+  permanently lost protector requires removing the exact stored record plus its
+  corresponding OS-protected wrapped DEK.
 
 ## 10. Commit Signing Integration
 

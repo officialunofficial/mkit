@@ -190,25 +190,42 @@ pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> 
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) fn run_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
-    run_native_backend_roundtrip_test_with_availability(store, false);
+    run_native_backend_roundtrip_test_with_availability(store, false, |_| None);
 }
 
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) fn run_required_native_backend_roundtrip_test(store: &dyn crate::Keystore) {
-    run_native_backend_roundtrip_test_with_availability(store, true);
+    run_native_backend_roundtrip_test_with_availability(store, true, |_| None);
 }
 
 #[cfg(test)]
-fn run_native_backend_roundtrip_test_with_availability(
+#[allow(dead_code)]
+pub(crate) fn run_required_native_backend_roundtrip_test_with_gate(
+    store: &dyn crate::Keystore,
+    gate: impl FnOnce(crate::BackendKind) -> Option<String>,
+) {
+    run_native_backend_roundtrip_test_with_availability(store, true, gate);
+}
+
+#[cfg(test)]
+fn run_native_backend_roundtrip_test_with_availability<F>(
     store: &dyn crate::Keystore,
     require_backend: bool,
-) {
+    extra_gate: F,
+) where
+    F: FnOnce(crate::BackendKind) -> Option<String>,
+{
     let backend = store.capabilities().backend;
     if std::env::var_os("MKIT_RUN_NATIVE_KEYSTORE_TESTS").as_deref() != Some("1".as_ref()) {
         let message = format!(
             "native backend roundtrip for {backend} requires MKIT_RUN_NATIVE_KEYSTORE_TESTS=1"
         );
+        assert!(!require_backend, "{message}");
+        eprintln!("skipping {message}");
+        return;
+    }
+    if let Some(message) = extra_gate(backend) {
         assert!(!require_backend, "{message}");
         eprintln!("skipping {message}");
         return;

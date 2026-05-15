@@ -66,7 +66,9 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BackendUnavailable(_) => f.write_str("keystore backend unavailable"),
+            Self::BackendUnavailable(_) => {
+                f.write_str("keystore backend unavailable: no usable protector or session")
+            }
             Self::UnsupportedAlgorithm(algorithm) => {
                 write!(f, "unsupported algorithm: {algorithm}")
             }
@@ -98,10 +100,10 @@ impl fmt::Display for Error {
             Self::AuthenticationRequired(_) => f.write_str("authentication required"),
             Self::UserDeclined => f.write_str("user declined keystore operation"),
             Self::TimedOut => f.write_str("keystore operation timed out"),
-            Self::Io(_) => f.write_str("keystore I/O failure"),
-            Self::AccessDenied(_) => f.write_str("keystore access denied"),
-            Self::Encoding(_) => f.write_str("keystore encoding failure"),
-            Self::Internal(_) => f.write_str("internal keystore error"),
+            Self::Io(_) => f.write_str("keystore I/O failure during storage operation"),
+            Self::AccessDenied(_) => f.write_str("keystore access denied by backend policy"),
+            Self::Encoding(_) => f.write_str("keystore encoding failure while processing key data"),
+            Self::Internal(_) => f.write_str("internal keystore invariant failure"),
         }
     }
 }
@@ -118,7 +120,10 @@ mod tests {
         let unavailable = Error::BackendUnavailable(
             "systemd-creds decrypt /Users/alice/private/key.cred: denied".into(),
         );
-        assert_eq!(unavailable.to_string(), "keystore backend unavailable");
+        assert_eq!(
+            unavailable.to_string(),
+            "keystore backend unavailable: no usable protector or session"
+        );
         assert!(unavailable.detail().contains("/Users/alice/private"));
 
         let invalid = Error::InvalidLabel {
@@ -138,11 +143,15 @@ mod tests {
         assert!(!missing.to_string().contains("prod-signing"));
 
         let io = Error::Io("read /Users/alice/.local/share/mkit/keys/prod.key: denied".into());
+        assert_eq!(
+            io.to_string(),
+            "keystore I/O failure during storage operation"
+        );
         assert!(!io.to_string().contains("/Users/alice"));
         assert!(io.detail().contains("/Users/alice"));
 
         let internal = Error::Internal("label prod-signing under /tmp/private".into());
-        assert_eq!(internal.to_string(), "internal keystore error");
+        assert_eq!(internal.to_string(), "internal keystore invariant failure");
 
         let auth = Error::AuthenticationRequired(
             "backend prompt for label prod-signing at /Users/alice/keyring failed".into(),

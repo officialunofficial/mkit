@@ -7,7 +7,8 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
     KeyDeleter, KeyExporter, KeyGenerator, KeyImporter, KeyLabel, KeyLister, KeyMetadata,
-    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner, validate_label,
+    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner,
+    types::static_label, validate_label,
 };
 
 const SERVICE: &str = "dev.mkit.keystore.signing-key.v1";
@@ -56,7 +57,7 @@ impl LinuxSecretServiceKeystore {
 
 impl Keystore for LinuxSecretServiceKeystore {
     fn capabilities(&self) -> Capabilities {
-        linux_secret_service_capabilities(linux_secret_service_runtime_available())
+        linux_secret_service_capabilities()
     }
 
     fn generator(&self) -> Option<&dyn KeyGenerator> {
@@ -217,7 +218,7 @@ impl KeyDeleter for LinuxSecretServiceKeystore {
     }
 }
 
-fn linux_secret_service_capabilities(_runtime_available: bool) -> Capabilities {
+fn linux_secret_service_capabilities() -> Capabilities {
     Capabilities {
         backend: BackendKind::LinuxSecretService,
         algorithms: vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256],
@@ -230,10 +231,6 @@ fn linux_secret_service_capabilities(_runtime_available: bool) -> Capabilities {
         supports_device_bound: false,
         supports_non_extractable: false,
     }
-}
-
-fn linux_secret_service_runtime_available() -> bool {
-    zbus_secret_service_keyring_store::Store::new().is_ok()
 }
 
 fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
@@ -260,7 +257,7 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     for _ in 0..8 {
         getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
         if SoftwareSigner::new(
-            KeyLabel::new("validation").expect("static label is valid"),
+            static_label("validation"),
             BackendKind::LinuxSecretService,
             algorithm,
             secret,
@@ -303,7 +300,7 @@ fn keyring_backend_error(operation: &str, error: keyring_core::Error) -> Error {
 fn keyring_list_error(error: keyring_core::Error) -> Error {
     match error {
         keyring_core::Error::NoEntry => Error::KeyNotFound(KeySelector {
-            label: KeyLabel::new("list").expect("static label is valid"),
+            label: static_label("list"),
             algorithm: None,
         }),
         keyring_core::Error::NoStorageAccess(error) => Error::AccessDenied(error.to_string()),
@@ -320,7 +317,7 @@ mod tests {
 
     #[test]
     fn capabilities_are_backend_accurate() {
-        let capabilities = linux_secret_service_capabilities(true);
+        let capabilities = linux_secret_service_capabilities();
         assert_eq!(capabilities.backend, BackendKind::LinuxSecretService);
         assert_eq!(
             capabilities.algorithms,
@@ -338,7 +335,7 @@ mod tests {
 
     #[test]
     fn capabilities_report_structural_support_when_runtime_unavailable() {
-        let capabilities = linux_secret_service_capabilities(false);
+        let capabilities = linux_secret_service_capabilities();
         let store = LinuxSecretServiceKeystore::new();
         assert_eq!(capabilities.backend, BackendKind::LinuxSecretService);
         assert_eq!(

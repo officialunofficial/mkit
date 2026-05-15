@@ -7,7 +7,8 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
     KeyDeleter, KeyExporter, KeyGenerator, KeyImporter, KeyLabel, KeyLister, KeyMetadata,
-    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner, validate_label,
+    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner,
+    types::static_label, validate_label,
 };
 
 const SERVICE: &str = "dev.mkit.keystore.signing-key.v1";
@@ -265,7 +266,7 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     for _ in 0..8 {
         getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
         if SoftwareSigner::new(
-            KeyLabel::new("validation").expect("static label is valid"),
+            static_label("validation"),
             BackendKind::WindowsCredentialManager,
             algorithm,
             secret,
@@ -310,7 +311,7 @@ fn keyring_backend_error(operation: &str, error: keyring_core::Error) -> Error {
 fn keyring_list_error(error: keyring_core::Error) -> Error {
     match error {
         keyring_core::Error::NoEntry => Error::KeyNotFound(KeySelector {
-            label: KeyLabel::new("list").expect("static label is valid"),
+            label: static_label("list"),
             algorithm: None,
         }),
         keyring_core::Error::NoStorageAccess(error) => Error::AccessDenied(error.to_string()),

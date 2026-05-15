@@ -9,7 +9,8 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
     KeyDeleter, KeyExporter, KeyGenerator, KeyImporter, KeyLabel, KeyLister, KeyMetadata,
-    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner, validate_label,
+    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner,
+    types::static_label, validate_label,
 };
 
 /// User-scoped systemd encrypted credentials backend.
@@ -148,7 +149,7 @@ impl Default for SystemdCredsKeystore {
 
 impl Keystore for SystemdCredsKeystore {
     fn capabilities(&self) -> Capabilities {
-        systemd_creds_capabilities(systemd_creds_runtime_available())
+        systemd_creds_capabilities()
     }
 
     fn generator(&self) -> Option<&dyn KeyGenerator> {
@@ -334,7 +335,7 @@ impl KeyDeleter for SystemdCredsKeystore {
     }
 }
 
-fn systemd_creds_capabilities(_runtime_available: bool) -> Capabilities {
+fn systemd_creds_capabilities() -> Capabilities {
     Capabilities {
         backend: BackendKind::SystemdCreds,
         algorithms: vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256],
@@ -723,7 +724,7 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     for _ in 0..8 {
         getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
         if SoftwareSigner::new(
-            KeyLabel::new("validation").expect("static label is valid"),
+            static_label("validation"),
             BackendKind::SystemdCreds,
             algorithm,
             secret,
@@ -792,7 +793,7 @@ mod tests {
 
     #[test]
     fn capabilities_are_backend_accurate() {
-        let capabilities = systemd_creds_capabilities(true);
+        let capabilities = systemd_creds_capabilities();
         assert_eq!(capabilities.backend, BackendKind::SystemdCreds);
         assert_eq!(
             capabilities.algorithms,
@@ -810,7 +811,7 @@ mod tests {
 
     #[test]
     fn capabilities_report_structural_support_when_runtime_unavailable() {
-        let capabilities = systemd_creds_capabilities(false);
+        let capabilities = systemd_creds_capabilities();
         let store = SystemdCredsKeystore::with_root(std::path::PathBuf::from("test-systemd-creds"));
         assert_eq!(capabilities.backend, BackendKind::SystemdCreds);
         assert_eq!(
@@ -1005,16 +1006,19 @@ mod tests {
     #[test]
     #[ignore = "set MKIT_RUN_NATIVE_KEYSTORE_TESTS=1 and MKIT_RUN_SYSTEMD_CREDS_TESTS=1 to exercise systemd-creds"]
     fn live_backend_create_open_list_export_delete_roundtrip() {
-        assert!(
-            std::env::var_os("MKIT_RUN_NATIVE_KEYSTORE_TESTS").as_deref() == Some("1".as_ref()),
-            "native backend roundtrip for systemd-creds requires MKIT_RUN_NATIVE_KEYSTORE_TESTS=1"
-        );
-        assert!(
-            std::env::var_os("MKIT_RUN_SYSTEMD_CREDS_TESTS").as_deref() == Some("1".as_ref()),
-            "systemd-creds live backend roundtrip requires MKIT_RUN_SYSTEMD_CREDS_TESTS=1"
-        );
         let dir = tempfile::tempdir().expect("tempdir");
         let store = SystemdCredsKeystore::with_root(dir.path().join("systemd-creds"));
-        crate::native_list::run_required_native_backend_roundtrip_test(&store);
+        crate::native_list::run_required_native_backend_roundtrip_test_with_gate(
+            &store,
+            |backend| {
+                (std::env::var_os("MKIT_RUN_SYSTEMD_CREDS_TESTS").as_deref()
+                    != Some("1".as_ref()))
+                .then(|| {
+                    format!(
+                        "native backend roundtrip for {backend} requires MKIT_RUN_SYSTEMD_CREDS_TESTS=1"
+                    )
+                })
+            },
+        );
     }
 }

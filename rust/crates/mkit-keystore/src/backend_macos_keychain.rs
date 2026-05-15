@@ -8,7 +8,8 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
     KeyDeleter, KeyExporter, KeyGenerator, KeyImporter, KeyLabel, KeyLister, KeyMetadata,
-    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner, validate_label,
+    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner,
+    types::static_label, validate_label,
 };
 
 const SERVICE: &str = "dev.mkit.keystore.signing-key.v1";
@@ -260,7 +261,7 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     for _ in 0..8 {
         getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
         if SoftwareSigner::new(
-            KeyLabel::new("validation").expect("static label is valid"),
+            static_label("validation"),
             BackendKind::MacosKeychain,
             algorithm,
             secret,

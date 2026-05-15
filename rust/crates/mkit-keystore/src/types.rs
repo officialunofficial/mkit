@@ -7,6 +7,8 @@ use zeroize::Zeroizing;
 
 use crate::{Error, Result};
 
+const MAX_KEY_ID_LEN: usize = 256;
+
 /// Validated backend-local key label.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyLabel(String);
@@ -56,6 +58,12 @@ impl PartialEq<KeyLabel> for &str {
     fn eq(&self, other: &KeyLabel) -> bool {
         *self == other.as_str()
     }
+}
+
+/// Build a validated label from a source-controlled static string.
+#[allow(dead_code)]
+pub(crate) fn static_label(label: &'static str) -> KeyLabel {
+    KeyLabel::new(label).expect("static label is valid")
 }
 
 /// Validated label component for `<backend>:<label>` key references.
@@ -108,6 +116,9 @@ impl KeyId {
         let keyid = keyid.into();
         if keyid.is_empty() {
             return Err(Error::Encoding("keyid must not be empty".into()));
+        }
+        if keyid.len() > MAX_KEY_ID_LEN {
+            return Err(Error::Encoding("keyid must be at most 256 bytes".into()));
         }
         if keyid.chars().any(char::is_control) {
             return Err(Error::Encoding(
@@ -689,4 +700,25 @@ fn validate_key_ref_label(label: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_id_rejects_oversized_values() {
+        let keyid = "a".repeat(MAX_KEY_ID_LEN + 1);
+
+        assert!(
+            matches!(KeyId::new(keyid), Err(Error::Encoding(message)) if message.contains("256"))
+        );
+    }
+
+    #[test]
+    fn key_id_accepts_maximum_length_value() {
+        let keyid = "a".repeat(MAX_KEY_ID_LEN);
+
+        assert_eq!(KeyId::new(keyid.clone()).unwrap(), keyid);
+    }
 }
