@@ -7,7 +7,7 @@
 # * `cd rust/fuzz && cargo +nightly fuzz run delta` — libfuzzer-sys
 #   harness; the iteration counter inside each target body still
 #   enforces the FUZZ.md guardrails.
-# * `cargo test --manifest-path rust/fuzz/Cargo.toml` — plain unit-test
+# * `cd rust && cargo test --manifest-path fuzz/Cargo.toml` — plain unit-test
 #   harness over the same target bodies, so CI catches regressions
 #   even without nightly.
 #

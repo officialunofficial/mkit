@@ -940,15 +940,17 @@ mod tests {
     #[test]
     fn list_metadata_skips_invalid_ecdsa_secret() {
         let invalid = SecretKey::new(Algorithm::P256, [0; 32]);
+        let invalid_label = KeyLabel::new("invalid").unwrap();
         assert!(
-            SystemdCredsKeystore::list_metadata_for("invalid".into(), Algorithm::P256, &invalid)
+            SystemdCredsKeystore::list_metadata_for(invalid_label, Algorithm::P256, &invalid)
                 .unwrap()
                 .is_none()
         );
 
         let valid = SecretKey::new(Algorithm::Ed25519, [1; 32]);
+        let valid_label = KeyLabel::new("valid").unwrap();
         let metadata =
-            SystemdCredsKeystore::list_metadata_for("valid".into(), Algorithm::Ed25519, &valid)
+            SystemdCredsKeystore::list_metadata_for(valid_label, Algorithm::Ed25519, &valid)
                 .unwrap()
                 .expect("valid metadata should list");
         assert_eq!(metadata.label, "valid");

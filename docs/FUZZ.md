@@ -4,7 +4,7 @@ mkit ships a small number of **bounded property tests** that exercise the
 binary parsers from adversarial inputs. They live in the `mkit-fuzz`
 crate at `rust/fuzz/` and run in two modes:
 
-- `cargo test --manifest-path rust/fuzz/Cargo.toml` — plain unit-test
+- `cd rust && cargo test --manifest-path fuzz/Cargo.toml` — plain unit-test
   harness over the target bodies; stable Rust, no extra tooling. CI runs
   this.
 - `cd rust/fuzz && cargo +nightly fuzz run <target>` — libfuzzer-sys
@@ -60,7 +60,8 @@ Target-specific invariants:
 ## How to run
 
 ```sh
-cargo test --manifest-path rust/fuzz/Cargo.toml
+cd rust
+cargo test --manifest-path fuzz/Cargo.toml
 ```
 
 That runs the target bodies as ordinary unit tests with a seeded

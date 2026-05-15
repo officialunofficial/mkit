@@ -98,6 +98,10 @@ jobs:
         working-directory: rust
         run: cargo nextest run --locked --workspace --all-features
 
+      - name: Fuzz unit tests
+        working-directory: rust
+        run: cargo test --manifest-path fuzz/Cargo.toml
+
       # Doctests are not run by `cargo nextest`. Run them separately so
       # docstring examples still get exercised.
       - name: Doctests
