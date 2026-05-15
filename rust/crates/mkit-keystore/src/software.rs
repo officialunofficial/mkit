@@ -12,7 +12,8 @@ use zeroize::Zeroize;
 use crate::encrypted_record::{EncryptedKeyRecord, KeyProtector};
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
-    KeyMetadata, KeySelector, KeySigner, Keystore, Result, SecretKey, validate_label,
+    KeyDeleter, KeyExporter, KeyGenerator, KeyId, KeyImporter, KeyLabel, KeyLister, KeyMetadata,
+    KeyOpener, KeySelector, KeySigner, Keystore, PublicKeyBytes, Result, SecretKey, validate_label,
 };
 
 /// Persistent software keystore with encrypted-at-rest records by default.
@@ -103,7 +104,7 @@ impl SoftwareKeystore {
 
     fn metadata_for_secret(
         &self,
-        label: String,
+        label: KeyLabel,
         algorithm: Algorithm,
         secret: &SecretKey,
     ) -> Result<KeyMetadata> {
@@ -125,17 +126,17 @@ impl SoftwareKeystore {
         })
     }
 
-    fn load_secret(&self, label: &str, algorithm: Algorithm) -> Result<SecretKey> {
+    fn load_secret(&self, label: &KeyLabel, algorithm: Algorithm) -> Result<SecretKey> {
         if !self.is_raw() {
             let record = self.load_record(label, algorithm)?;
             let protector = self.protector_for_record(&record)?;
-            return record.decrypt(label, protector.as_ref());
+            return record.decrypt(label.as_str(), protector.as_ref());
         }
-        let path = self.path_for(label, algorithm)?;
+        let path = self.path_for(label.as_str(), algorithm)?;
         self.ensure_storage_path_not_symlink(&path)?;
         if !path.exists() {
             return Err(Error::KeyNotFound(KeySelector {
-                label: label.into(),
+                label: label.clone(),
                 algorithm: Some(algorithm),
             }));
         }
@@ -143,12 +144,12 @@ impl SoftwareKeystore {
         Ok(SecretKey::new(algorithm, *bytes))
     }
 
-    fn load_record(&self, label: &str, algorithm: Algorithm) -> Result<EncryptedKeyRecord> {
-        let path = self.path_for(label, algorithm)?;
+    fn load_record(&self, label: &KeyLabel, algorithm: Algorithm) -> Result<EncryptedKeyRecord> {
+        let path = self.path_for(label.as_str(), algorithm)?;
         self.ensure_storage_path_not_symlink(&path)?;
         if !path.exists() {
             return Err(Error::KeyNotFound(KeySelector {
-                label: label.into(),
+                label: label.clone(),
                 algorithm: Some(algorithm),
             }));
         }
@@ -187,6 +188,29 @@ impl Default for SoftwareKeystore {
     }
 }
 
+#[cfg(test)]
+impl SoftwareKeystore {
+    fn generate(
+        &self,
+        label: &str,
+        algorithm: Algorithm,
+        attrs: KeyAttrs,
+        options: GenerateOptions,
+    ) -> Result<Box<dyn KeySigner>> {
+        KeyGenerator::generate(self, &KeyLabel::new(label)?, algorithm, attrs, options)
+    }
+
+    fn import(
+        &self,
+        label: &str,
+        secret: SecretKey,
+        attrs: KeyAttrs,
+        options: ImportOptions,
+    ) -> Result<Box<dyn KeySigner>> {
+        KeyImporter::import(self, &KeyLabel::new(label)?, secret, attrs, options)
+    }
+}
+
 impl SoftwareRawKeystore {
     /// Create a raw-file compatibility keystore using the default user-scoped root.
     pub fn new() -> Result<Self> {
@@ -216,21 +240,8 @@ impl Default for SoftwareRawKeystore {
     }
 }
 
-impl Keystore for SoftwareRawKeystore {
-    fn capabilities(&self) -> Capabilities {
-        self.inner.capabilities()
-    }
-
-    fn generate(
-        &self,
-        label: &str,
-        algorithm: Algorithm,
-        attrs: KeyAttrs,
-        options: GenerateOptions,
-    ) -> Result<Box<dyn KeySigner>> {
-        self.inner.generate(label, algorithm, attrs, options)
-    }
-
+#[cfg(test)]
+impl SoftwareRawKeystore {
     fn import(
         &self,
         label: &str,
@@ -238,21 +249,83 @@ impl Keystore for SoftwareRawKeystore {
         attrs: KeyAttrs,
         options: ImportOptions,
     ) -> Result<Box<dyn KeySigner>> {
-        self.inner.import(label, secret, attrs, options)
+        KeyImporter::import(self, &KeyLabel::new(label)?, secret, attrs, options)
+    }
+}
+
+impl Keystore for SoftwareRawKeystore {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
     }
 
+    fn generator(&self) -> Option<&dyn KeyGenerator> {
+        Some(self)
+    }
+
+    fn importer(&self) -> Option<&dyn KeyImporter> {
+        Some(self)
+    }
+
+    fn opener(&self) -> Option<&dyn KeyOpener> {
+        Some(self)
+    }
+
+    fn lister(&self) -> Option<&dyn KeyLister> {
+        Some(self)
+    }
+
+    fn exporter(&self) -> Option<&dyn KeyExporter> {
+        Some(self)
+    }
+
+    fn deleter(&self) -> Option<&dyn KeyDeleter> {
+        Some(self)
+    }
+}
+
+impl KeyGenerator for SoftwareRawKeystore {
+    fn generate(
+        &self,
+        label: &KeyLabel,
+        algorithm: Algorithm,
+        attrs: KeyAttrs,
+        options: GenerateOptions,
+    ) -> Result<Box<dyn KeySigner>> {
+        KeyGenerator::generate(&self.inner, label, algorithm, attrs, options)
+    }
+}
+
+impl KeyImporter for SoftwareRawKeystore {
+    fn import(
+        &self,
+        label: &KeyLabel,
+        secret: SecretKey,
+        attrs: KeyAttrs,
+        options: ImportOptions,
+    ) -> Result<Box<dyn KeySigner>> {
+        KeyImporter::import(&self.inner, label, secret, attrs, options)
+    }
+}
+
+impl KeyOpener for SoftwareRawKeystore {
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
         self.inner.open(selector)
     }
+}
 
+impl KeyLister for SoftwareRawKeystore {
     fn list(&self) -> Result<Vec<KeyMetadata>> {
         self.inner.list()
     }
+}
 
+impl KeyExporter for SoftwareRawKeystore {
     fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
         self.inner.export(selector)
     }
+}
 
+impl KeyDeleter for SoftwareRawKeystore {
     fn delete(&self, selector: &KeySelector) -> Result<()> {
         self.inner.delete(selector)
     }
@@ -260,14 +333,13 @@ impl Keystore for SoftwareRawKeystore {
 
 impl Keystore for SoftwareKeystore {
     fn capabilities(&self) -> Capabilities {
-        let can_use_secret_material = self.can_use_secret_material();
         Capabilities {
             backend: self.backend,
             algorithms: vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256],
-            can_generate: can_use_secret_material,
-            can_import: can_use_secret_material,
-            can_export: can_use_secret_material,
-            can_delete: can_use_secret_material,
+            can_generate: true,
+            can_import: true,
+            can_export: true,
+            can_delete: true,
             supports_listing: true,
             supports_user_presence: false,
             supports_device_bound: false,
@@ -275,9 +347,35 @@ impl Keystore for SoftwareKeystore {
         }
     }
 
+    fn generator(&self) -> Option<&dyn KeyGenerator> {
+        Some(self)
+    }
+
+    fn importer(&self) -> Option<&dyn KeyImporter> {
+        Some(self)
+    }
+
+    fn opener(&self) -> Option<&dyn KeyOpener> {
+        Some(self)
+    }
+
+    fn lister(&self) -> Option<&dyn KeyLister> {
+        Some(self)
+    }
+
+    fn exporter(&self) -> Option<&dyn KeyExporter> {
+        Some(self)
+    }
+
+    fn deleter(&self) -> Option<&dyn KeyDeleter> {
+        Some(self)
+    }
+}
+
+impl KeyGenerator for SoftwareKeystore {
     fn generate(
         &self,
-        label: &str,
+        label: &KeyLabel,
         algorithm: Algorithm,
         attrs: KeyAttrs,
         options: GenerateOptions,
@@ -286,7 +384,8 @@ impl Keystore for SoftwareKeystore {
         let mut secret = random_valid_secret(algorithm)?;
         let wrapped = SecretKey::new(algorithm, secret);
         secret.zeroize();
-        self.import(
+        KeyImporter::import(
+            self,
             label,
             wrapped,
             attrs,
@@ -295,18 +394,20 @@ impl Keystore for SoftwareKeystore {
             },
         )
     }
+}
 
+impl KeyImporter for SoftwareKeystore {
     fn import(
         &self,
-        label: &str,
+        label: &KeyLabel,
         secret: SecretKey,
         attrs: KeyAttrs,
         options: ImportOptions,
     ) -> Result<Box<dyn KeySigner>> {
         validate_attrs(&attrs)?;
-        validate_label(label)?;
+        validate_label(label.as_str())?;
         validate_secret(secret.algorithm(), secret.expose_secret())?;
-        let path = self.path_for(label, secret.algorithm())?;
+        let path = self.path_for(label.as_str(), secret.algorithm())?;
         self.ensure_storage_path_not_symlink(&path)?;
         if self.is_raw() && options.overwrite {
             mkit_core::sign::save_raw_32(&path, secret.expose_secret()).map_err(core_error)?;
@@ -315,7 +416,7 @@ impl Keystore for SoftwareKeystore {
                 .map_err(core_error)?;
             if !created {
                 return Err(Error::KeyAlreadyExists {
-                    label: label.into(),
+                    label: label.clone(),
                     algorithm: secret.algorithm(),
                 });
             }
@@ -323,36 +424,50 @@ impl Keystore for SoftwareKeystore {
             let old_wrapped_dek = if options.overwrite && path.exists() {
                 let old_record = self.load_record(label, secret.algorithm())?;
                 let old_protector = self.protector_for_record(&old_record)?;
-                let _ = old_record.decrypt(label, old_protector.as_ref())?;
+                let _ = old_record.decrypt(label.as_str(), old_protector.as_ref())?;
                 Some((old_protector, old_record.wrapped_dek().to_vec()))
             } else {
                 None
             };
             let signer = SoftwareSigner::new(
-                label.into(),
+                label.clone(),
                 self.backend,
                 secret.algorithm(),
                 *secret.expose_secret(),
             )?;
             let protector = self.protector_for_write()?;
             let record = EncryptedKeyRecord::encrypt(
-                label,
+                label.as_str(),
                 &secret,
                 attrs,
-                signer.public_key()?,
-                signer.keyid()?,
+                signer.public_key()?.into_vec(),
+                signer.keyid()?.into_string(),
                 protector.as_ref(),
             )?;
+            if let Err(error) = record.decrypt(label.as_str(), protector.as_ref()) {
+                let _ = protector.delete_wrapped_dek(record.wrapped_dek());
+                return Err(error);
+            }
+            let encoded_record = match record.encode() {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    let _ = protector.delete_wrapped_dek(record.wrapped_dek());
+                    return Err(error);
+                }
+            };
             if let Err(error) = write_key_file(
                 &self.root,
                 &path,
-                label,
+                label.as_str(),
                 secret.algorithm(),
-                &record.encode()?,
+                &encoded_record,
                 options.overwrite,
             ) {
-                let _ = protector.delete_wrapped_dek(record.wrapped_dek());
-                return Err(error);
+                return Err(cleanup_new_dek_after_write_failure(
+                    protector.as_ref(),
+                    record.wrapped_dek(),
+                    error,
+                ));
             }
             if let Some((old_protector, old_wrapped_dek)) = old_wrapped_dek {
                 let _ = old_protector.delete_wrapped_dek(&old_wrapped_dek);
@@ -360,25 +475,29 @@ impl Keystore for SoftwareKeystore {
             return Ok(Box::new(signer));
         }
         Ok(Box::new(SoftwareSigner::new(
-            label.into(),
+            label.clone(),
             self.backend,
             secret.algorithm(),
             *secret.expose_secret(),
         )?))
     }
+}
 
+impl KeyOpener for SoftwareKeystore {
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
-        validate_label(&selector.label)?;
+        validate_label(selector.label())?;
         let algorithm = self.resolve_selector_algorithm(selector)?;
-        let secret = self.load_secret(&selector.label, algorithm)?;
+        let secret = self.load_secret(selector.label_id(), algorithm)?;
         Ok(Box::new(SoftwareSigner::new(
-            selector.label.clone(),
+            selector.label_id().clone(),
             self.backend,
             algorithm,
             *secret.expose_secret(),
         )?))
     }
+}
 
+impl KeyLister for SoftwareKeystore {
     fn list(&self) -> Result<Vec<KeyMetadata>> {
         let mut out = Vec::new();
         for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
@@ -410,14 +529,14 @@ impl Keystore for SoftwareKeystore {
                         path.display()
                     ))
                 })?;
-                validate_label(&label)?;
+                let label = KeyLabel::new(label)?;
                 if self.is_raw() {
                     let secret = self.load_secret(&label, algorithm)?;
                     out.push(self.metadata_for_secret(label, algorithm, &secret)?);
                 } else {
                     let record = self.load_record(&label, algorithm)?;
                     let protector = self.protector_for_record(&record)?;
-                    let secret = record.decrypt(&label, protector.as_ref())?;
+                    let secret = record.decrypt(label.as_str(), protector.as_ref())?;
                     out.push(self.metadata_for_secret(label, algorithm, &secret)?);
                 }
             }
@@ -431,27 +550,31 @@ impl Keystore for SoftwareKeystore {
         });
         Ok(out)
     }
+}
 
+impl KeyExporter for SoftwareKeystore {
     fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
         let signer = self.open(selector)?;
         self.load_secret(signer.label(), signer.algorithm())
     }
+}
 
+impl KeyDeleter for SoftwareKeystore {
     fn delete(&self, selector: &KeySelector) -> Result<()> {
-        validate_label(&selector.label)?;
+        validate_label(selector.label())?;
         let algorithm = self.resolve_selector_algorithm(selector)?;
-        let path = self.path_for(&selector.label, algorithm)?;
+        let path = self.path_for(selector.label(), algorithm)?;
         self.ensure_storage_path_not_symlink(&path)?;
         if !path.exists() {
             return Err(Error::KeyNotFound(KeySelector {
-                label: selector.label.clone(),
+                label: selector.label_id().clone(),
                 algorithm: Some(algorithm),
             }));
         }
         if !self.is_raw() {
-            let record = self.load_record(&selector.label, algorithm)?;
+            let record = self.load_record(selector.label_id(), algorithm)?;
             let protector = self.protector_for_record(&record)?;
-            let _ = record.decrypt(&selector.label, protector.as_ref())?;
+            let _ = record.decrypt(selector.label(), protector.as_ref())?;
             let wrapped_dek = record.wrapped_dek().to_vec();
             std::fs::remove_file(&path)
                 .map_err(|error| Error::Io(format!("delete {}: {error}", path.display())))?;
@@ -504,12 +627,12 @@ impl SoftwareKeystore {
         }
         let mut matches = Vec::new();
         for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
-            let path = self.path_for(&selector.label, algorithm)?;
+            let path = self.path_for(selector.label(), algorithm)?;
             self.ensure_storage_path_not_symlink(&path)?;
             if !path.exists() {
                 continue;
             }
-            let _ = self.load_secret(&selector.label, algorithm)?;
+            let _ = self.load_secret(selector.label_id(), algorithm)?;
             matches.push(algorithm);
         }
         match matches.as_slice() {
@@ -517,10 +640,6 @@ impl SoftwareKeystore {
             [algorithm] => Ok(*algorithm),
             _ => Err(Error::AmbiguousKeySelector(selector.clone())),
         }
-    }
-
-    fn can_use_secret_material(&self) -> bool {
-        self.is_raw() || self.protector_for_write().is_ok()
     }
 }
 
@@ -530,14 +649,14 @@ impl SoftwareKeystore {
 /// secret material to this process. Hardware-backed signers use dedicated
 /// signer types that keep private material on the device.
 pub struct SoftwareSigner {
-    label: String,
+    label: KeyLabel,
     backend: BackendKind,
     secret: SecretKey,
 }
 
 impl SoftwareSigner {
     pub(crate) fn new(
-        label: String,
+        label: KeyLabel,
         backend: BackendKind,
         algorithm: Algorithm,
         mut secret: [u8; 32],
@@ -569,7 +688,7 @@ impl KeySigner for SoftwareSigner {
         self.secret.algorithm()
     }
 
-    fn label(&self) -> &str {
+    fn label(&self) -> &KeyLabel {
         &self.label
     }
 
@@ -586,13 +705,17 @@ impl KeySigner for SoftwareSigner {
         })
     }
 
-    fn public_key(&self) -> Result<Vec<u8>> {
-        public_key(self.algorithm(), self.secret.expose_secret())
+    fn public_key(&self) -> Result<PublicKeyBytes> {
+        public_key(self.algorithm(), self.secret.expose_secret()).map(PublicKeyBytes::new)
     }
 
-    fn keyid(&self) -> Result<String> {
+    fn keyid(&self) -> Result<KeyId> {
         let public_key = self.public_key()?;
-        Ok(format!("{}:{}", self.algorithm(), hex_lower(&public_key)))
+        KeyId::new(format!(
+            "{}:{}",
+            self.algorithm(),
+            hex_lower(public_key.as_bytes())
+        ))
     }
 
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>> {
@@ -698,6 +821,39 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     ))
 }
 
+#[derive(Debug)]
+struct KeyFileWriteError {
+    error: Error,
+    record_may_exist: bool,
+}
+
+impl KeyFileWriteError {
+    fn before_record_install(error: Error) -> Self {
+        Self {
+            error,
+            record_may_exist: false,
+        }
+    }
+
+    fn after_record_install(error: Error) -> Self {
+        Self {
+            error,
+            record_may_exist: true,
+        }
+    }
+}
+
+fn cleanup_new_dek_after_write_failure(
+    protector: &dyn KeyProtector,
+    wrapped_dek: &[u8],
+    error: KeyFileWriteError,
+) -> Error {
+    if !error.record_may_exist {
+        let _ = protector.delete_wrapped_dek(wrapped_dek);
+    }
+    error.error
+}
+
 fn write_key_file(
     root: &Path,
     path: &Path,
@@ -705,7 +861,7 @@ fn write_key_file(
     algorithm: Algorithm,
     bytes: &[u8],
     overwrite: bool,
-) -> Result<()> {
+) -> std::result::Result<(), KeyFileWriteError> {
     #[cfg(unix)]
     return write_key_file_unix(root, path, label, algorithm, bytes, overwrite);
 
@@ -724,81 +880,101 @@ fn write_key_file_unix(
     algorithm: Algorithm,
     bytes: &[u8],
     overwrite: bool,
-) -> Result<()> {
+) -> std::result::Result<(), KeyFileWriteError> {
     use std::os::unix::fs::MetadataExt as _;
 
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    ensure_no_symlink_path(root, parent)?;
+    ensure_no_symlink_path(root, parent).map_err(KeyFileWriteError::before_record_install)?;
     std::fs::create_dir_all(parent)
-        .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
-    set_private_dir_permissions(root)?;
-    ensure_owned_by_euid(root)?;
+        .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))
+        .map_err(KeyFileWriteError::before_record_install)?;
+    set_private_dir_permissions(root).map_err(KeyFileWriteError::before_record_install)?;
+    ensure_owned_by_euid(root).map_err(KeyFileWriteError::before_record_install)?;
     if parent != root {
-        set_private_dir_permissions(parent)?;
-        ensure_owned_by_euid(parent)?;
+        set_private_dir_permissions(parent).map_err(KeyFileWriteError::before_record_install)?;
+        ensure_owned_by_euid(parent).map_err(KeyFileWriteError::before_record_install)?;
     }
 
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(Error::Io(format!(
-                "keystore path is a symlink: {}",
-                path.display()
+            return Err(KeyFileWriteError::before_record_install(Error::Io(
+                format!("keystore path is a symlink: {}", path.display()),
             )));
         }
         Ok(metadata) => {
             if !overwrite {
-                return Err(Error::KeyAlreadyExists {
-                    label: label.into(),
-                    algorithm,
-                });
+                return Err(KeyFileWriteError::before_record_install(
+                    Error::KeyAlreadyExists {
+                        label: KeyLabel::new(label)
+                            .map_err(KeyFileWriteError::before_record_install)?,
+                        algorithm,
+                    },
+                ));
             }
             if metadata.uid() != euid() {
-                return Err(Error::AccessDenied(format!(
-                    "existing key file is owned by uid {}, expected {}: {}",
-                    metadata.uid(),
-                    euid(),
-                    path.display()
-                )));
+                return Err(KeyFileWriteError::before_record_install(
+                    Error::AccessDenied(format!(
+                        "existing key file is owned by uid {}, expected {}: {}",
+                        metadata.uid(),
+                        euid(),
+                        path.display()
+                    )),
+                ));
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(Error::Io(format!("lstat {}: {error}", path.display()))),
+        Err(error) => {
+            return Err(KeyFileWriteError::before_record_install(Error::Io(
+                format!("lstat {}: {error}", path.display()),
+            )));
+        }
     }
 
     let filename = path
         .file_name()
-        .ok_or_else(|| Error::Io(format!("path has no filename: {}", path.display())))?;
-    let tmp_path = create_synced_tmp_key_file(parent, filename, bytes)?;
+        .ok_or_else(|| Error::Io(format!("path has no filename: {}", path.display())))
+        .map_err(KeyFileWriteError::before_record_install)?;
+    let tmp_path = create_synced_tmp_key_file(parent, filename, bytes)
+        .map_err(KeyFileWriteError::before_record_install)?;
 
     if overwrite {
         if let Err(error) = std::fs::rename(&tmp_path, path) {
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(Error::Io(format!("rename {}: {error}", path.display())));
+            return Err(KeyFileWriteError::before_record_install(Error::Io(
+                format!("rename {}: {error}", path.display()),
+            )));
         }
     } else if let Err(error) = std::fs::hard_link(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
         return if error.kind() == std::io::ErrorKind::AlreadyExists {
-            Err(Error::KeyAlreadyExists {
-                label: label.into(),
-                algorithm,
-            })
+            Err(KeyFileWriteError::before_record_install(
+                Error::KeyAlreadyExists {
+                    label: KeyLabel::new(label)
+                        .map_err(KeyFileWriteError::before_record_install)?,
+                    algorithm,
+                },
+            ))
         } else {
-            Err(Error::Io(format!("link {}: {error}", path.display())))
+            Err(KeyFileWriteError::before_record_install(Error::Io(
+                format!("link {}: {error}", path.display()),
+            )))
         };
     } else if let Err(error) = std::fs::remove_file(&tmp_path) {
-        return Err(Error::Io(format!(
+        return Err(KeyFileWriteError::after_record_install(Error::Io(format!(
             "unlink tmp {}: {error}",
             tmp_path.display()
-        )));
+        ))));
     }
 
     let dir = std::fs::File::open(parent)
-        .map_err(|error| Error::Io(format!("open dir for fsync: {error}")))?;
+        .map_err(|error| Error::Io(format!("open dir for fsync: {error}")))
+        .map_err(KeyFileWriteError::after_record_install)?;
     dir.sync_all()
         .map_err(|error| Error::Io(format!("fsync dir: {error}")))
+        .map_err(KeyFileWriteError::after_record_install)
 }
 
 #[cfg(unix)]
@@ -936,27 +1112,34 @@ fn write_key_file_portable(
     algorithm: Algorithm,
     bytes: &[u8],
     overwrite: bool,
-) -> Result<()> {
+) -> std::result::Result<(), KeyFileWriteError> {
     use std::io::Write as _;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
+            .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))
+            .map_err(KeyFileWriteError::before_record_install)?;
     }
     if overwrite {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let filename = path
             .file_name()
-            .ok_or_else(|| Error::Io(format!("path has no filename: {}", path.display())))?;
-        let (tmp_path, mut file) = create_synced_tmp_key_file_portable(parent, filename)?;
+            .ok_or_else(|| Error::Io(format!("path has no filename: {}", path.display())))
+            .map_err(KeyFileWriteError::before_record_install)?;
+        let (tmp_path, mut file) = create_synced_tmp_key_file_portable(parent, filename)
+            .map_err(KeyFileWriteError::before_record_install)?;
         file.write_all(bytes)
-            .map_err(|error| Error::Io(format!("write tmp {}: {error}", tmp_path.display())))?;
+            .map_err(|error| Error::Io(format!("write tmp {}: {error}", tmp_path.display())))
+            .map_err(KeyFileWriteError::before_record_install)?;
         file.sync_all()
-            .map_err(|error| Error::Io(format!("fsync tmp {}: {error}", tmp_path.display())))?;
+            .map_err(|error| Error::Io(format!("fsync tmp {}: {error}", tmp_path.display())))
+            .map_err(KeyFileWriteError::before_record_install)?;
         drop(file);
         if let Err(error) = std::fs::rename(&tmp_path, path) {
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(Error::Io(format!("rename {}: {error}", path.display())));
+            return Err(KeyFileWriteError::before_record_install(Error::Io(
+                format!("rename {}: {error}", path.display()),
+            )));
         }
         Ok(())
     } else {
@@ -970,7 +1153,7 @@ fn write_key_file_portable_create_new(
     label: &str,
     algorithm: Algorithm,
     bytes: &[u8],
-) -> Result<()> {
+) -> std::result::Result<(), KeyFileWriteError> {
     use std::io::Write as _;
 
     let mut file = match std::fs::OpenOptions::new()
@@ -980,20 +1163,37 @@ fn write_key_file_portable_create_new(
     {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(Error::KeyAlreadyExists {
-                label: label.into(),
-                algorithm,
-            });
+            return Err(KeyFileWriteError::before_record_install(
+                Error::KeyAlreadyExists {
+                    label: KeyLabel::new(label)
+                        .map_err(KeyFileWriteError::before_record_install)?,
+                    algorithm,
+                },
+            ));
         }
-        Err(error) => return Err(Error::Io(format!("open {}: {error}", path.display()))),
+        Err(error) => {
+            return Err(KeyFileWriteError::before_record_install(Error::Io(
+                format!("open {}: {error}", path.display()),
+            )));
+        }
     };
     if let Err(error) = file.write_all(bytes) {
-        let _ = std::fs::remove_file(path);
-        return Err(Error::Io(format!("write {}: {error}", path.display())));
+        let removed = std::fs::remove_file(path).is_ok();
+        let error = Error::Io(format!("write {}: {error}", path.display()));
+        return Err(if removed {
+            KeyFileWriteError::before_record_install(error)
+        } else {
+            KeyFileWriteError::after_record_install(error)
+        });
     }
     if let Err(error) = file.sync_all() {
-        let _ = std::fs::remove_file(path);
-        return Err(Error::Io(format!("fsync {}: {error}", path.display())));
+        let removed = std::fs::remove_file(path).is_ok();
+        let error = Error::Io(format!("fsync {}: {error}", path.display()));
+        return Err(if removed {
+            KeyFileWriteError::before_record_install(error)
+        } else {
+            KeyFileWriteError::after_record_install(error)
+        });
     }
     Ok(())
 }
@@ -1601,6 +1801,30 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FailingUnwrapProtector {
+        deletes: Arc<AtomicUsize>,
+    }
+
+    impl KeyProtector for FailingUnwrapProtector {
+        fn id(&self) -> &'static str {
+            "failing-unwrap-protector"
+        }
+
+        fn wrap_dek(&self, dek: &[u8; 32], _aad: &[u8]) -> Result<Vec<u8>> {
+            Ok(dek.to_vec())
+        }
+
+        fn unwrap_dek(&self, _wrapped: &[u8], _aad: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+            Err(Error::BackendUnavailable("test unwrap failure".into()))
+        }
+
+        fn delete_wrapped_dek(&self, _wrapped: &[u8]) -> Result<()> {
+            self.deletes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     fn software_store(root: impl Into<PathBuf>) -> SoftwareKeystore {
         SoftwareKeystore::with_root_and_protector(root, Arc::new(TestProtector))
     }
@@ -1850,6 +2074,71 @@ mod tests {
         assert!(encoded.starts_with(b"MKITKSV1"));
         assert_ne!(encoded, seed);
         assert_eq!(store.list().unwrap()[0].label, "encrypted");
+    }
+
+    #[test]
+    fn software_import_proves_protector_roundtrip_before_record_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let store = SoftwareKeystore::with_root_and_protector(
+            dir.path().join("keys"),
+            Arc::new(FailingUnwrapProtector {
+                deletes: Arc::clone(&deletes),
+            }),
+        );
+
+        let result = store.import(
+            "encrypted",
+            SecretKey::new(Algorithm::Ed25519, [0x4a; 32]),
+            KeyAttrs::default(),
+            ImportOptions::default(),
+        );
+
+        assert!(
+            matches!(result, Err(Error::BackendUnavailable(message)) if message.contains("unwrap failure"))
+        );
+        assert_eq!(deletes.load(Ordering::SeqCst), 1);
+        assert!(
+            !store
+                .path_for("encrypted", Algorithm::Ed25519)
+                .unwrap()
+                .exists(),
+            "record must not be committed when protector cannot unwrap"
+        );
+    }
+
+    #[test]
+    fn software_pre_install_write_failure_cleans_new_dek() {
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let protector = CountingProtector {
+            deletes: Arc::clone(&deletes),
+        };
+
+        let error = cleanup_new_dek_after_write_failure(
+            &protector,
+            b"wrapped-dek",
+            KeyFileWriteError::before_record_install(Error::Io("pre-install write failure".into())),
+        );
+
+        assert!(matches!(error, Error::Io(message) if message.contains("pre-install")));
+        assert_eq!(deletes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn software_post_install_write_failure_preserves_new_dek() {
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let protector = CountingProtector {
+            deletes: Arc::clone(&deletes),
+        };
+
+        let error = cleanup_new_dek_after_write_failure(
+            &protector,
+            b"wrapped-dek",
+            KeyFileWriteError::after_record_install(Error::Io("post-install fsync failure".into())),
+        );
+
+        assert!(matches!(error, Error::Io(message) if message.contains("post-install")));
+        assert_eq!(deletes.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -2131,7 +2420,7 @@ mod tests {
                 )
                 .expect("import vector");
             assert_eq!(
-                hex_lower(&signer.public_key().expect("public key")),
+                hex_lower(signer.public_key().expect("public key").as_bytes()),
                 vector.public_hex
             );
             assert_eq!(
@@ -2268,6 +2557,11 @@ mod tests {
             assert!(!capabilities.supports_user_presence);
             assert!(!capabilities.supports_device_bound);
             assert!(!capabilities.supports_non_extractable);
+            assert_eq!(capabilities.can_generate, store.generator().is_some());
+            assert_eq!(capabilities.can_import, store.importer().is_some());
+            assert_eq!(capabilities.can_export, store.exporter().is_some());
+            assert_eq!(capabilities.can_delete, store.deleter().is_some());
+            assert_eq!(capabilities.supports_listing, store.lister().is_some());
         }
     }
 
@@ -2278,7 +2572,7 @@ mod tests {
         feature = "windows-credential"
     )))]
     #[test]
-    fn software_capabilities_are_honest_without_protector() {
+    fn software_capabilities_report_structural_support_without_protector() {
         let dir = tempfile::tempdir().expect("tempdir");
         let capabilities = SoftwareKeystore::with_root(dir.path().join("software")).capabilities();
 
@@ -2287,10 +2581,10 @@ mod tests {
             capabilities.algorithms,
             vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256]
         );
-        assert!(!capabilities.can_generate);
-        assert!(!capabilities.can_import);
-        assert!(!capabilities.can_export);
-        assert!(!capabilities.can_delete);
+        assert!(capabilities.can_generate);
+        assert!(capabilities.can_import);
+        assert!(capabilities.can_export);
+        assert!(capabilities.can_delete);
         assert!(capabilities.supports_listing);
     }
 
@@ -2409,7 +2703,7 @@ mod compatibility_tests {
         let mut expected =
             mkit_attest::RepoKeySigner::new(mkit_core::sign::KeyPair::from_seed(seed));
         let mut actual = SoftwareSigner::new(
-            "default".into(),
+            KeyLabel::new("default").unwrap(),
             BackendKind::Software,
             Algorithm::Ed25519,
             seed,
@@ -2429,7 +2723,7 @@ mod compatibility_tests {
         seed[31] = 1;
         let expected = mkit_attest::signer_k256::Secp256k1Signer::new(seed).unwrap();
         let mut actual = SoftwareSigner::new(
-            "default".into(),
+            KeyLabel::new("default").unwrap(),
             BackendKind::Software,
             Algorithm::Secp256k1,
             seed,
@@ -2450,7 +2744,7 @@ mod compatibility_tests {
         ];
         let expected = mkit_attest::signer_p256::P256Signer::new(seed).unwrap();
         let mut actual = SoftwareSigner::new(
-            "default".into(),
+            KeyLabel::new("default").unwrap(),
             BackendKind::Software,
             Algorithm::P256,
             seed,

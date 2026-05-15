@@ -140,6 +140,12 @@ pub fn tree_one_iteration(input: &[u8]) {
     let _ = mkit_core::serialize::deserialize(input);
 }
 
+/// Apply the encrypted software-key record decoder against `input`.
+pub fn software_key_record_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let _ = mkit_keystore::fuzz_decode_software_key_record(input);
+}
+
 /// Single-shot: invoke `body(input)` exactly once, with the
 /// per-iteration wall-clock cap. libfuzzer harnesses call this from
 /// their `fuzz_target!` body; the iteration counter lives one level up,
@@ -187,6 +193,11 @@ mod tests {
         run_iterated_unit(tree_one_iteration).expect("guardrails held");
     }
 
+    #[test]
+    fn software_key_record_target_runs_within_caps() {
+        run_iterated_unit(software_key_record_one_iteration).expect("guardrails held");
+    }
+
     /// Pin a few hand-crafted inputs so the targets keep accepting them
     /// even under refactors of the parser surface.
     #[test]
@@ -221,5 +232,27 @@ mod tests {
         let mut bad = vec![0x02u8, b'M', b'K', b'T', b'1', 0x01];
         bad.extend_from_slice(&u32::MAX.to_le_bytes());
         tree_one_iteration(&bad);
+    }
+
+    #[test]
+    fn software_key_record_target_handles_fixed_cases() {
+        let valid = hex_to_bytes(
+            "4d4b49544b53563101010104000000746573742000000024242424242424242424242424242424242424242424242424242424242424240e000000656432353531393a737461626c651800000022222222222222222222222222222222222222222222222220000000f9fffde0ffe7e285b5bcb4b4b4c7dbd2c0c3d5c6d1b3b4b4b4d0d1d2d5c1d8c030000000c125a54e1efba6d6a70f5689ff3be3a070d5819657dcb8a6220934a533a21b67791eb2cb0db7cbdd4815ce51b3ea5ae0",
+        );
+        software_key_record_one_iteration(&valid);
+        software_key_record_one_iteration(&[]);
+        software_key_record_one_iteration(b"MKITKSV1\x01\x01\x01");
+        let mut bad = b"MKITKSV1".to_vec();
+        bad.extend_from_slice(&[1, 1, 1]);
+        bad.extend_from_slice(&u32::MAX.to_le_bytes());
+        software_key_record_one_iteration(&bad);
+    }
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).expect("hex byte"))
+            .collect()
     }
 }

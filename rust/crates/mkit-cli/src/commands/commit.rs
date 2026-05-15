@@ -292,7 +292,7 @@ impl CommitSigner {
                 let public = signer
                     .public_key()
                     .map_err(|error| (format!("keystore public key: {error}"), exit::DATAERR))?;
-                public.try_into().map_err(|public: Vec<u8>| {
+                public.as_bytes().try_into().map_err(|_| {
                     (
                         format!(
                             "keystore Ed25519 public key must be 32 bytes, got {}",
@@ -357,16 +357,25 @@ fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8
         Some(mkit_keystore::Algorithm::Ed25519),
     )
     .map_err(|error| (format!("key.ed25519_ref: {error}"), exit::CONFIG_ERROR))?;
-    let signer = store.open(&selector).map_err(|error| match error {
+    let opener = store.opener().ok_or_else(|| {
+        (
+            format!(
+                "keystore backend `{}` does not support opening keys",
+                key_ref.backend()
+            ),
+            exit::DATAERR,
+        )
+    })?;
+    let signer = opener.open(&selector).map_err(|error| match error {
         mkit_keystore::Error::KeyNotFound(_) => (
             format!(
-                "missing keystore signing key `{}` — run `mkit key generate --backend {} --algorithm ed25519 --label {}` first, or set `signer = legacy` and use `mkit keygen`: {error}",
-                cfg.key.ed25519_ref_or_fallback(), key_ref.backend(), key_ref.label()
+                "missing keystore signing key for algorithm ed25519 — run `mkit key generate --backend {} --algorithm ed25519 --label <label>` first, or set `signer = legacy` and use `mkit keygen`: {error}",
+                key_ref.backend()
             ),
             exit::NOINPUT,
         ),
         other => (
-            format!("keystore signing key `{}`: {other}", cfg.key.ed25519_ref_or_fallback()),
+            format!("keystore signing key for algorithm ed25519: {other}"),
             exit::DATAERR,
         ),
     })?;
@@ -606,8 +615,10 @@ mod tests {
         let store_root = tempfile::tempdir().unwrap();
         let store = mkit_keystore::SoftwareRawKeystore::with_root(store_root.path().join("keys"));
         store
+            .importer()
+            .unwrap()
             .import(
-                "committer",
+                &mkit_keystore::KeyLabel::new("committer").unwrap(),
                 mkit_keystore::SecretKey::new(mkit_keystore::Algorithm::Ed25519, seed),
                 mkit_keystore::KeyAttrs::default(),
                 mkit_keystore::ImportOptions::default(),
@@ -616,7 +627,7 @@ mod tests {
         let selector =
             mkit_keystore::KeySelector::new("committer", Some(mkit_keystore::Algorithm::Ed25519))
                 .unwrap();
-        let mut signer = CommitSigner::Keystore(store.open(&selector).unwrap());
+        let mut signer = CommitSigner::Keystore(store.opener().unwrap().open(&selector).unwrap());
         let signer_public = signer.public_key().unwrap();
         let commit = Commit::new_unannotated(
             [1; 32],

@@ -98,6 +98,10 @@ jobs:
         working-directory: rust
         run: cargo nextest run --locked --workspace --all-features
 
+      - name: Fuzz unit tests
+        working-directory: rust
+        run: cargo test --manifest-path fuzz/Cargo.toml
+
       # Doctests are not run by `cargo nextest`. Run them separately so
       # docstring examples still get exercised.
       - name: Doctests
@@ -171,6 +175,8 @@ jobs:
               set -euo pipefail
               eval "$(printf "mkit-ci\n" | gnome-keyring-daemon --unlock --components=secrets)"
               cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
+              cargo test --locked -p mkit-keystore --features "${{ matrix.features }}" \
+                backend_linux_secret_service::tests::live_backend_create_open_list_export_delete_roundtrip -- --exact --ignored
             '
             sudo env \
               "PATH=$PATH" \
@@ -179,10 +185,11 @@ jobs:
               "CARGO_TARGET_DIR=$RUNNER_TEMP/mkit-systemd-creds-target" \
               "MKIT_RUN_NATIVE_KEYSTORE_TESTS=1" \
               "MKIT_RUN_SYSTEMD_CREDS_TESTS=1" \
-              cargo test --locked -p mkit-keystore --features "backend-systemd-creds" \
-                backend_systemd_creds::tests::live_backend_create_open_list_export_delete_roundtrip -- --exact
+            cargo test --locked -p mkit-keystore --features "backend-systemd-creds" \
+                backend_systemd_creds::tests::live_backend_create_open_list_export_delete_roundtrip -- --exact --ignored
           else
             cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
+            cargo test --locked -p mkit-keystore --features "${{ matrix.features }}" -- --ignored
           fi
 
       - name: Clippy keystore backend feature set

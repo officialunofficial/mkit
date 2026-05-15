@@ -8,8 +8,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
-    KeyMetadata, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner,
-    validate_label,
+    KeyDeleter, KeyExporter, KeyGenerator, KeyImporter, KeyLabel, KeyLister, KeyMetadata,
+    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner,
+    types::static_label, validate_label,
 };
 
 /// User-scoped systemd encrypted credentials backend.
@@ -45,18 +46,18 @@ impl SystemdCredsKeystore {
         Ok(format!("mkit.{}.{}", algorithm.as_str(), label))
     }
 
-    fn load_secret(&self, label: &str, algorithm: Algorithm) -> Result<SecretKey> {
-        let path = self.path_for(label, algorithm)?;
+    fn load_secret(&self, label: &KeyLabel, algorithm: Algorithm) -> Result<SecretKey> {
+        let path = self.path_for(label.as_str(), algorithm)?;
         self.ensure_storage_path_not_symlink(&path)?;
         if !path.exists() {
             return Err(Error::KeyNotFound(KeySelector {
-                label: label.into(),
+                label: label.clone(),
                 algorithm: Some(algorithm),
             }));
         }
         Self::secret_from_plaintext(
             algorithm,
-            decrypt_credential(&path, &Self::credential_name(label, algorithm)?)?,
+            decrypt_credential(&path, &Self::credential_name(label.as_str(), algorithm)?)?,
         )
     }
 
@@ -105,7 +106,7 @@ impl SystemdCredsKeystore {
     }
 
     fn metadata_for(
-        label: String,
+        label: KeyLabel,
         algorithm: Algorithm,
         secret: &SecretKey,
     ) -> Result<KeyMetadata> {
@@ -128,7 +129,7 @@ impl SystemdCredsKeystore {
     }
 
     fn list_metadata_for(
-        label: String,
+        label: KeyLabel,
         algorithm: Algorithm,
         secret: &SecretKey,
     ) -> Result<Option<KeyMetadata>> {
@@ -148,12 +149,38 @@ impl Default for SystemdCredsKeystore {
 
 impl Keystore for SystemdCredsKeystore {
     fn capabilities(&self) -> Capabilities {
-        systemd_creds_capabilities(systemd_creds_runtime_available())
+        systemd_creds_capabilities()
     }
 
+    fn generator(&self) -> Option<&dyn KeyGenerator> {
+        Some(self)
+    }
+
+    fn importer(&self) -> Option<&dyn KeyImporter> {
+        Some(self)
+    }
+
+    fn opener(&self) -> Option<&dyn KeyOpener> {
+        Some(self)
+    }
+
+    fn lister(&self) -> Option<&dyn KeyLister> {
+        Some(self)
+    }
+
+    fn exporter(&self) -> Option<&dyn KeyExporter> {
+        Some(self)
+    }
+
+    fn deleter(&self) -> Option<&dyn KeyDeleter> {
+        Some(self)
+    }
+}
+
+impl KeyGenerator for SystemdCredsKeystore {
     fn generate(
         &self,
-        label: &str,
+        label: &KeyLabel,
         algorithm: Algorithm,
         attrs: KeyAttrs,
         options: GenerateOptions,
@@ -171,35 +198,37 @@ impl Keystore for SystemdCredsKeystore {
             },
         )
     }
+}
 
+impl KeyImporter for SystemdCredsKeystore {
     fn import(
         &self,
-        label: &str,
+        label: &KeyLabel,
         secret: SecretKey,
         attrs: KeyAttrs,
         options: ImportOptions,
     ) -> Result<Box<dyn KeySigner>> {
         validate_attrs(&attrs)?;
         let signer = SoftwareSigner::new(
-            label.into(),
+            label.clone(),
             BackendKind::SystemdCreds,
             secret.algorithm(),
             *secret.expose_secret(),
         )?;
-        let path = self.path_for(label, secret.algorithm())?;
+        let path = self.path_for(label.as_str(), secret.algorithm())?;
         self.prepare_write_path(&path)?;
         if options.overwrite {
             encrypt_credential(
                 secret.expose_secret(),
                 &path,
-                &Self::credential_name(label, secret.algorithm())?,
+                &Self::credential_name(label.as_str(), secret.algorithm())?,
             )?;
         } else {
             encrypt_key_credential_create_new(
                 secret.expose_secret(),
                 &path,
-                &Self::credential_name(label, secret.algorithm())?,
-                label,
+                &Self::credential_name(label.as_str(), secret.algorithm())?,
+                label.as_str(),
                 secret.algorithm(),
             )?;
         }
@@ -211,19 +240,23 @@ impl Keystore for SystemdCredsKeystore {
         }
         Ok(Box::new(signer))
     }
+}
 
+impl KeyOpener for SystemdCredsKeystore {
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
-        validate_label(&selector.label)?;
+        validate_label(selector.label())?;
         let algorithm = self.resolve_selector_algorithm(selector)?;
-        let secret = self.load_secret(&selector.label, algorithm)?;
+        let secret = self.load_secret(selector.label_id(), algorithm)?;
         Ok(Box::new(SoftwareSigner::new(
-            selector.label.clone(),
+            selector.label_id().clone(),
             BackendKind::SystemdCreds,
             algorithm,
             *secret.expose_secret(),
         )?))
     }
+}
 
+impl KeyLister for SystemdCredsKeystore {
     fn list(&self) -> Result<Vec<KeyMetadata>> {
         let mut out = Vec::new();
         for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
@@ -255,10 +288,10 @@ impl Keystore for SystemdCredsKeystore {
                 let Ok(label) = String::from_utf8(label_bytes) else {
                     continue;
                 };
-                if validate_label(&label).is_err() {
+                let Ok(label) = KeyLabel::new(label) else {
                     continue;
-                }
-                let Some(secret) = self.load_secret_for_list(&label, algorithm)? else {
+                };
+                let Some(secret) = self.load_secret_for_list(label.as_str(), algorithm)? else {
                     continue;
                 };
                 if let Some(metadata) = Self::list_metadata_for(label, algorithm, &secret)? {
@@ -275,21 +308,25 @@ impl Keystore for SystemdCredsKeystore {
         });
         Ok(out)
     }
+}
 
+impl KeyExporter for SystemdCredsKeystore {
     fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
-        validate_label(&selector.label)?;
+        validate_label(selector.label())?;
         let algorithm = self.resolve_selector_algorithm(selector)?;
-        self.load_secret(&selector.label, algorithm)
+        self.load_secret(selector.label_id(), algorithm)
     }
+}
 
+impl KeyDeleter for SystemdCredsKeystore {
     fn delete(&self, selector: &KeySelector) -> Result<()> {
-        validate_label(&selector.label)?;
+        validate_label(selector.label())?;
         let algorithm = self.resolve_selector_algorithm(selector)?;
-        let path = self.path_for(&selector.label, algorithm)?;
+        let path = self.path_for(selector.label(), algorithm)?;
         self.ensure_storage_path_not_symlink(&path)?;
         if !path.exists() {
             return Err(Error::KeyNotFound(KeySelector {
-                label: selector.label.clone(),
+                label: selector.label_id().clone(),
                 algorithm: Some(algorithm),
             }));
         }
@@ -298,20 +335,15 @@ impl Keystore for SystemdCredsKeystore {
     }
 }
 
-fn systemd_creds_capabilities(runtime_available: bool) -> Capabilities {
-    let algorithms = if runtime_available {
-        vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256]
-    } else {
-        Vec::new()
-    };
+fn systemd_creds_capabilities() -> Capabilities {
     Capabilities {
         backend: BackendKind::SystemdCreds,
-        algorithms,
-        can_generate: runtime_available,
-        can_import: runtime_available,
-        can_export: runtime_available,
-        can_delete: runtime_available,
-        supports_listing: runtime_available,
+        algorithms: vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256],
+        can_generate: true,
+        can_import: true,
+        can_export: true,
+        can_delete: true,
+        supports_listing: true,
         supports_user_presence: false,
         supports_device_bound: false,
         supports_non_extractable: false,
@@ -398,7 +430,7 @@ impl SystemdCredsKeystore {
         }
         let mut matches = Vec::new();
         for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
-            match self.load_secret(&selector.label, algorithm) {
+            match self.load_secret(selector.label_id(), algorithm) {
                 Ok(_) => matches.push(algorithm),
                 Err(Error::KeyNotFound(_)) => {}
                 Err(error) => return Err(error),
@@ -499,7 +531,7 @@ fn encrypt_key_credential_create_new(
         let _ = std::fs::remove_file(&tmp_path);
         return if error.kind() == std::io::ErrorKind::AlreadyExists {
             Err(Error::KeyAlreadyExists {
-                label: label.into(),
+                label: KeyLabel::new(label)?,
                 algorithm,
             })
         } else {
@@ -692,7 +724,7 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     for _ in 0..8 {
         getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
         if SoftwareSigner::new(
-            "validation".into(),
+            static_label("validation"),
             BackendKind::SystemdCreds,
             algorithm,
             secret,
@@ -761,7 +793,7 @@ mod tests {
 
     #[test]
     fn capabilities_are_backend_accurate() {
-        let capabilities = systemd_creds_capabilities(true);
+        let capabilities = systemd_creds_capabilities();
         assert_eq!(capabilities.backend, BackendKind::SystemdCreds);
         assert_eq!(
             capabilities.algorithms,
@@ -778,15 +810,24 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_disable_operations_when_runtime_unavailable() {
-        let capabilities = systemd_creds_capabilities(false);
+    fn capabilities_report_structural_support_when_runtime_unavailable() {
+        let capabilities = systemd_creds_capabilities();
+        let store = SystemdCredsKeystore::with_root(std::path::PathBuf::from("test-systemd-creds"));
         assert_eq!(capabilities.backend, BackendKind::SystemdCreds);
-        assert!(capabilities.algorithms.is_empty());
-        assert!(!capabilities.can_generate);
-        assert!(!capabilities.can_import);
-        assert!(!capabilities.can_export);
-        assert!(!capabilities.can_delete);
-        assert!(!capabilities.supports_listing);
+        assert_eq!(
+            capabilities.algorithms,
+            vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256]
+        );
+        assert!(capabilities.can_generate);
+        assert!(capabilities.can_import);
+        assert!(capabilities.can_export);
+        assert!(capabilities.can_delete);
+        assert!(capabilities.supports_listing);
+        assert_eq!(capabilities.can_generate, store.generator().is_some());
+        assert_eq!(capabilities.can_import, store.importer().is_some());
+        assert_eq!(capabilities.can_export, store.exporter().is_some());
+        assert_eq!(capabilities.can_delete, store.deleter().is_some());
+        assert_eq!(capabilities.supports_listing, store.lister().is_some());
     }
 
     #[test]
@@ -884,7 +925,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = SystemdCredsKeystore::with_root(dir.path().join("systemd-creds"));
         let result = store.import(
-            "invalid",
+            &KeyLabel::new("invalid").unwrap(),
             SecretKey::new(Algorithm::P256, [0; 32]),
             KeyAttrs::default(),
             ImportOptions::default(),
@@ -900,15 +941,17 @@ mod tests {
     #[test]
     fn list_metadata_skips_invalid_ecdsa_secret() {
         let invalid = SecretKey::new(Algorithm::P256, [0; 32]);
+        let invalid_label = KeyLabel::new("invalid").unwrap();
         assert!(
-            SystemdCredsKeystore::list_metadata_for("invalid".into(), Algorithm::P256, &invalid)
+            SystemdCredsKeystore::list_metadata_for(invalid_label, Algorithm::P256, &invalid)
                 .unwrap()
                 .is_none()
         );
 
         let valid = SecretKey::new(Algorithm::Ed25519, [1; 32]);
+        let valid_label = KeyLabel::new("valid").unwrap();
         let metadata =
-            SystemdCredsKeystore::list_metadata_for("valid".into(), Algorithm::Ed25519, &valid)
+            SystemdCredsKeystore::list_metadata_for(valid_label, Algorithm::Ed25519, &valid)
                 .unwrap()
                 .expect("valid metadata should list");
         assert_eq!(metadata.label, "valid");
@@ -961,15 +1004,21 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "set MKIT_RUN_NATIVE_KEYSTORE_TESTS=1 and MKIT_RUN_SYSTEMD_CREDS_TESTS=1 to exercise systemd-creds"]
     fn live_backend_create_open_list_export_delete_roundtrip() {
-        if std::env::var_os("MKIT_RUN_SYSTEMD_CREDS_TESTS").as_deref() != Some("1".as_ref()) {
-            eprintln!(
-                "skipping systemd-creds live backend roundtrip; set MKIT_RUN_SYSTEMD_CREDS_TESTS=1 to run"
-            );
-            return;
-        }
         let dir = tempfile::tempdir().expect("tempdir");
         let store = SystemdCredsKeystore::with_root(dir.path().join("systemd-creds"));
-        crate::native_list::run_required_native_backend_roundtrip_test(&store);
+        crate::native_list::run_required_native_backend_roundtrip_test_with_gate(
+            &store,
+            |backend| {
+                (std::env::var_os("MKIT_RUN_SYSTEMD_CREDS_TESTS").as_deref()
+                    != Some("1".as_ref()))
+                .then(|| {
+                    format!(
+                        "native backend roundtrip for {backend} requires MKIT_RUN_SYSTEMD_CREDS_TESTS=1"
+                    )
+                })
+            },
+        );
     }
 }

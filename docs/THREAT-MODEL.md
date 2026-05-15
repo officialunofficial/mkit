@@ -270,8 +270,11 @@ Security assumptions:
   service is available or the session is locked. `systemd-creds` is the
   headless/server Linux backend and shells out with argv tokens, not shell
   interpolation. The encrypted `software` backend auto-selects Secret Service
-  first for desktop sessions, then `systemd-creds`, and fails closed if neither
-  protector is available.
+  only when a desktop session is detected and the protector opens cleanly;
+  Secret Service errors fail closed rather than silently falling back to a
+  weaker protector. `systemd-creds` is selected for headless/server Linux when
+  no desktop Secret Service session is detected, and writes fail closed if no
+  usable protector is available.
 - YubiKey OpenPGP exposes existing Ed25519 signing-slot keys. YubiKey PIV
   exposes existing P-256 certificate-backed slots (`piv-9a`, `piv-9c`,
   `piv-9e`). Both are non-extractable and device-bound from mkit's point of
@@ -328,8 +331,8 @@ matching update here.
 - Keystore capability tests assert that each backend advertises only supported
   algorithms, export/import/listing, user-presence, device-bound, and
   non-extractability properties.
-- `cargo fuzz` targets cover delta decode, pack reader, and the
-  object deserializer (`docs/FUZZ.md`).
+- `cargo fuzz` targets cover delta decode, pack reader, the object
+  deserializer, and the encrypted software key record parser (`docs/FUZZ.md`).
 - Integration tests assert that a hostile `<repo>/.mkit/config`
   cannot set any user-scoped key (warning + ignored).
 - Integration tests assert key-file owner / mode / `O_NOFOLLOW`

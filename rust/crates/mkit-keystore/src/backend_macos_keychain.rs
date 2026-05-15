@@ -7,8 +7,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
-    KeyMetadata, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner,
-    validate_label,
+    KeyDeleter, KeyExporter, KeyGenerator, KeyImporter, KeyLabel, KeyLister, KeyMetadata,
+    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner,
+    types::static_label, validate_label,
 };
 
 const SERVICE: &str = "dev.mkit.keystore.signing-key.v1";
@@ -25,13 +26,12 @@ impl MacosKeychainKeystore {
         Self
     }
 
-    fn account(label: &str, algorithm: Algorithm) -> Result<String> {
-        validate_label(label)?;
-        Ok(format!("{}:{label}", algorithm.as_str()))
+    fn account(label: &KeyLabel, algorithm: Algorithm) -> String {
+        format!("{}:{}", algorithm.as_str(), label.as_str())
     }
 
-    fn get_secret(label: &str, algorithm: Algorithm) -> Result<SecretKey> {
-        let account = Self::account(label, algorithm)?;
+    fn get_secret(label: &KeyLabel, algorithm: Algorithm) -> Result<SecretKey> {
+        let account = Self::account(label, algorithm);
         let password = Zeroizing::new(
             security_framework::passwords::get_generic_password(SERVICE, &account)
                 .map_err(|error| map_keychain_error(error, label, algorithm))?,
@@ -64,9 +64,35 @@ impl Keystore for MacosKeychainKeystore {
         }
     }
 
+    fn generator(&self) -> Option<&dyn KeyGenerator> {
+        Some(self)
+    }
+
+    fn importer(&self) -> Option<&dyn KeyImporter> {
+        Some(self)
+    }
+
+    fn opener(&self) -> Option<&dyn KeyOpener> {
+        Some(self)
+    }
+
+    fn lister(&self) -> Option<&dyn KeyLister> {
+        Some(self)
+    }
+
+    fn exporter(&self) -> Option<&dyn KeyExporter> {
+        Some(self)
+    }
+
+    fn deleter(&self) -> Option<&dyn KeyDeleter> {
+        Some(self)
+    }
+}
+
+impl KeyGenerator for MacosKeychainKeystore {
     fn generate(
         &self,
-        label: &str,
+        label: &KeyLabel,
         algorithm: Algorithm,
         attrs: KeyAttrs,
         options: GenerateOptions,
@@ -84,18 +110,20 @@ impl Keystore for MacosKeychainKeystore {
             },
         )
     }
+}
 
+impl KeyImporter for MacosKeychainKeystore {
     fn import(
         &self,
-        label: &str,
+        label: &KeyLabel,
         secret: SecretKey,
         attrs: KeyAttrs,
         options: ImportOptions,
     ) -> Result<Box<dyn KeySigner>> {
         validate_attrs(&attrs)?;
-        let account = Self::account(label, secret.algorithm())?;
+        let account = Self::account(label, secret.algorithm());
         let signer = SoftwareSigner::new(
-            label.into(),
+            label.clone(),
             BackendKind::MacosKeychain,
             secret.algorithm(),
             *secret.expose_secret(),
@@ -110,7 +138,7 @@ impl Keystore for MacosKeychainKeystore {
         };
         if exists && !options.overwrite {
             return Err(Error::KeyAlreadyExists {
-                label: label.into(),
+                label: label.clone(),
                 algorithm: secret.algorithm(),
             });
         }
@@ -122,19 +150,23 @@ impl Keystore for MacosKeychainKeystore {
         .map_err(|error| keychain_io("set", error))?;
         Ok(Box::new(signer))
     }
+}
 
+impl KeyOpener for MacosKeychainKeystore {
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
-        validate_label(&selector.label)?;
+        validate_label(selector.label())?;
         let algorithm = crate::native_list::resolve_selector_algorithm(selector, Self::get_secret)?;
-        let secret = Self::get_secret(&selector.label, algorithm)?;
+        let secret = Self::get_secret(selector.label_id(), algorithm)?;
         Ok(Box::new(SoftwareSigner::new(
-            selector.label.clone(),
+            selector.label_id().clone(),
             BackendKind::MacosKeychain,
             algorithm,
             *secret.expose_secret(),
         )?))
     }
+}
 
+impl KeyLister for MacosKeychainKeystore {
     fn list(&self) -> Result<Vec<KeyMetadata>> {
         let mut options = ItemSearchOptions::new();
         options
@@ -163,7 +195,9 @@ impl Keystore for MacosKeychainKeystore {
             {
                 Ok(secret) => secret,
                 Err(error) if is_not_found(error) => continue,
-                Err(error) => return Err(map_keychain_error(error, &label, algorithm)),
+                Err(error) => {
+                    return Err(map_keychain_error(error, &KeyLabel::new(label)?, algorithm));
+                }
             };
             if let Some(metadata) = crate::native_list::list_metadata_from_account_secret(
                 account,
@@ -176,19 +210,23 @@ impl Keystore for MacosKeychainKeystore {
         crate::native_list::sort_metadata(&mut out);
         Ok(out)
     }
+}
 
+impl KeyExporter for MacosKeychainKeystore {
     fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
-        validate_label(&selector.label)?;
+        validate_label(selector.label())?;
         let algorithm = crate::native_list::resolve_selector_algorithm(selector, Self::get_secret)?;
-        Self::get_secret(&selector.label, algorithm)
+        Self::get_secret(selector.label_id(), algorithm)
     }
+}
 
+impl KeyDeleter for MacosKeychainKeystore {
     fn delete(&self, selector: &KeySelector) -> Result<()> {
-        validate_label(&selector.label)?;
+        validate_label(selector.label())?;
         let algorithm = crate::native_list::resolve_selector_algorithm(selector, Self::get_secret)?;
-        let account = Self::account(&selector.label, algorithm)?;
+        let account = Self::account(selector.label_id(), algorithm);
         security_framework::passwords::delete_generic_password(SERVICE, &account)
-            .map_err(|error| map_keychain_error(error, &selector.label, algorithm))
+            .map_err(|error| map_keychain_error(error, selector.label_id(), algorithm))
     }
 }
 
@@ -223,7 +261,7 @@ fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
     for _ in 0..8 {
         getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
         if SoftwareSigner::new(
-            "validation".into(),
+            static_label("validation"),
             BackendKind::MacosKeychain,
             algorithm,
             secret,
@@ -245,12 +283,12 @@ fn is_not_found(error: security_framework::base::Error) -> bool {
 
 fn map_keychain_error(
     error: security_framework::base::Error,
-    label: &str,
+    label: &KeyLabel,
     algorithm: Algorithm,
 ) -> Error {
     if is_not_found(error) {
         Error::KeyNotFound(KeySelector {
-            label: label.into(),
+            label: label.clone(),
             algorithm: Some(algorithm),
         })
     } else {
@@ -296,7 +334,7 @@ mod tests {
     fn invalid_ecdsa_import_rejected_before_keychain_write() {
         let store = MacosKeychainKeystore::new();
         let result = store.import(
-            "invalid",
+            &KeyLabel::new("invalid").unwrap(),
             SecretKey::new(Algorithm::Secp256k1, [0; 32]),
             KeyAttrs::default(),
             ImportOptions::default(),
@@ -306,6 +344,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "set MKIT_RUN_NATIVE_KEYSTORE_TESTS=1 to exercise macOS Keychain"]
     fn live_backend_create_open_list_export_delete_roundtrip() {
         crate::native_list::run_required_native_backend_roundtrip_test(
             &MacosKeychainKeystore::new(),

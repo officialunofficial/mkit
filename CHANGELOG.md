@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Keystore capabilities now report structural operation support.** Operation
+  booleans match the corresponding `Keystore` operation accessors and no longer
+  promise that the current session, daemon, hardware token, or protector is
+  available at probe time. Operations still fail closed when runtime support is
+  unavailable.
+
 - **`mkit commit` now reads the staging index** (`.mkit/index`)
   instead of recursively snapshotting the worktree.
   ([#102](https://github.com/officialunofficial/mkit/issues/102))

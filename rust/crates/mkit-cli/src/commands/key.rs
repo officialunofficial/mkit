@@ -5,8 +5,8 @@ use std::path::Path;
 
 use clap::{Parser, Subcommand};
 use mkit_keystore::{
-    Algorithm, BackendKind, Capabilities, GenerateOptions, ImportOptions, KeyAttrs, KeyRef,
-    KeySelector, Keystore, SecretKey, open_backend,
+    Algorithm, BackendKind, Capabilities, GenerateOptions, ImportOptions, KeyAttrs, KeyLabel,
+    KeyRef, KeySelector, Keystore, SecretKey, open_backend,
 };
 use zeroize::Zeroize;
 
@@ -153,8 +153,15 @@ fn generate(opts: GenerateOpts) -> u8 {
         Ok(store) => store,
         Err(code) => return code,
     };
-    let signer = match store.generate(
-        &selection.label,
+    let label = match KeyLabel::new(selection.label.clone()) {
+        Ok(label) => label,
+        Err(error) => return keystore_error(error),
+    };
+    let Some(generator) = store.generator() else {
+        return keystore_error(mkit_keystore::Error::UnsupportedOperation("generate"));
+    };
+    let signer = match generator.generate(
+        &label,
         algorithm,
         attrs,
         GenerateOptions {
@@ -194,7 +201,10 @@ fn list(opts: ListOpts) -> u8 {
         Ok(store) => store,
         Err(code) => return code,
     };
-    let mut keys = match store.list() {
+    let Some(lister) = store.lister() else {
+        return keystore_error(mkit_keystore::Error::UnsupportedOperation("list"));
+    };
+    let mut keys = match lister.list() {
         Ok(keys) => keys,
         Err(error) => return keystore_error(error),
     };
@@ -298,8 +308,15 @@ fn import(opts: ImportOpts) -> u8 {
         Ok(store) => store,
         Err(code) => return code,
     };
-    let signer = match store.import(
-        &selection.label,
+    let label = match KeyLabel::new(selection.label) {
+        Ok(label) => label,
+        Err(error) => return keystore_error(error),
+    };
+    let Some(importer) = store.importer() else {
+        return keystore_error(mkit_keystore::Error::UnsupportedOperation("import"));
+    };
+    let signer = match importer.import(
+        &label,
         wrapped,
         attrs,
         ImportOptions {
@@ -345,7 +362,10 @@ fn export(opts: ExportOpts) -> u8 {
         Ok(selector) => selector,
         Err(error) => return keystore_error(error),
     };
-    let secret = match store.export(&selector) {
+    let Some(exporter) = store.exporter() else {
+        return keystore_error(mkit_keystore::Error::UnsupportedOperation("export"));
+    };
+    let secret = match exporter.export(&selector) {
         Ok(secret) => secret,
         Err(error) => return keystore_error(error),
     };
@@ -382,7 +402,10 @@ fn delete(opts: DeleteOpts) -> u8 {
         Ok(selector) => selector,
         Err(error) => return keystore_error(error),
     };
-    match store.delete(&selector) {
+    let Some(deleter) = store.deleter() else {
+        return keystore_error(mkit_keystore::Error::UnsupportedOperation("delete"));
+    };
+    match deleter.delete(&selector) {
         Ok(()) => {
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "deleted {}:{}", selection.backend, selection.label);
@@ -525,7 +548,7 @@ fn print_metadata(metadata: &mkit_keystore::KeyMetadata) {
     let _ = writeln!(stdout, "backend = {}", metadata.backend());
     let _ = writeln!(stdout, "label = {}", metadata.label());
     let _ = writeln!(stdout, "algorithm = {}", metadata.algorithm());
-    let _ = writeln!(stdout, "public_key = {}", hex_lower(&metadata.public_key));
+    let _ = writeln!(stdout, "public_key = {}", hex_lower(metadata.public_key()));
     let _ = writeln!(stdout, "keyid = {}", metadata.keyid());
     let _ = writeln!(stdout, "extractable = {}", metadata.extractable);
     let _ = writeln!(
