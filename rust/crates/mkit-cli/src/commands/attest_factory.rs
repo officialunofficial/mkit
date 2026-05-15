@@ -46,9 +46,7 @@ pub enum FactoryError {
     /// `mkit key generate --algorithm <algo> --label <label>`.
     MissingKeystoreKey {
         algorithm: Algorithm,
-        key_ref: String,
         backend: String,
-        label: String,
         reason: String,
     },
     /// Keyfile exists but is not a 32-byte raw secret.
@@ -79,13 +77,11 @@ impl std::fmt::Display for FactoryError {
             ),
             Self::MissingKeystoreKey {
                 algorithm,
-                key_ref,
                 backend,
-                label,
                 reason,
             } => write!(
                 f,
-                "missing keystore signing key `{key_ref}` — run `mkit key generate --backend {backend} --algorithm {algorithm} --label {label}` first: {reason}"
+                "missing keystore signing key for algorithm {algorithm} — run `mkit key generate --backend {backend} --algorithm {algorithm} --label <label>` first: {reason}"
             ),
             Self::InvalidKeyFile { path, reason } => {
                 write!(f, "invalid key file '{path}': {reason}")
@@ -139,17 +135,17 @@ fn build_keystore_signer(
     let store = open_backend(key_ref.backend())
         .map_err(|error| FactoryError::Keystore(error.to_string()))?;
     let keystore_algorithm = to_keystore_algorithm(algorithm);
-    let key_ref_string = key_ref.to_string();
     let backend = key_ref.backend().to_string();
     let label = key_ref.label().to_owned();
     let selector = KeySelector::new(label.clone(), Some(keystore_algorithm))
         .map_err(|error| FactoryError::Keystore(error.to_string()))?;
-    let signer = store.open(&selector).map_err(|error| match error {
+    let opener = store
+        .opener()
+        .ok_or_else(|| FactoryError::Keystore(format!("backend {backend} cannot open keys")))?;
+    let signer = opener.open(&selector).map_err(|error| match error {
         mkit_keystore::Error::KeyNotFound(_) => FactoryError::MissingKeystoreKey {
             algorithm,
-            key_ref: key_ref_string,
             backend,
-            label,
             reason: error.to_string(),
         },
         other => FactoryError::Keystore(other.to_string()),
@@ -195,6 +191,7 @@ impl Signer for KeystoreAttestSigner {
     fn keyid(&self) -> Result<String, mkit_attest::Error> {
         self.signer
             .keyid()
+            .map(mkit_keystore::KeyId::into_string)
             .map_err(|error| mkit_attest::Error::ExternalSignerBadResponse(error.to_string()))
     }
 

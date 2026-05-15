@@ -7,6 +7,215 @@ use zeroize::Zeroizing;
 
 use crate::{Error, Result};
 
+/// Validated backend-local key label.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct KeyLabel(String);
+
+impl KeyLabel {
+    /// Build a label after applying keystore label validation.
+    pub fn new(label: impl Into<String>) -> Result<Self> {
+        let label = label.into();
+        validate_label(&label)?;
+        Ok(Self(label))
+    }
+
+    /// Borrow the label as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for KeyLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for KeyLabel {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for KeyLabel {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::new(s)
+    }
+}
+
+impl PartialEq<&str> for KeyLabel {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<KeyLabel> for &str {
+    fn eq(&self, other: &KeyLabel) -> bool {
+        *self == other.as_str()
+    }
+}
+
+/// Validated label component for `<backend>:<label>` key references.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct KeyRefLabel(String);
+
+impl KeyRefLabel {
+    /// Build a key-reference label after applying key-ref validation.
+    pub fn new(label: impl Into<String>) -> Result<Self> {
+        let label = label.into();
+        validate_label(&label)?;
+        validate_key_ref_label(&label)?;
+        Ok(Self(label))
+    }
+
+    /// Borrow the label as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for KeyRefLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for KeyRefLabel {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for KeyRefLabel {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::new(s)
+    }
+}
+
+/// Canonical key identifier produced from a public key.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct KeyId(String);
+
+impl KeyId {
+    /// Build a key ID.
+    pub fn new(keyid: impl Into<String>) -> Result<Self> {
+        let keyid = keyid.into();
+        if keyid.is_empty() {
+            return Err(Error::Encoding("keyid must not be empty".into()));
+        }
+        if keyid.chars().any(char::is_control) {
+            return Err(Error::Encoding(
+                "keyid must not contain control characters".into(),
+            ));
+        }
+        Ok(Self(keyid))
+    }
+
+    /// Borrow the key ID as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume the wrapper and return its string.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for KeyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for KeyId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl FromStr for KeyId {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::new(s)
+    }
+}
+
+impl PartialEq<&str> for KeyId {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for KeyId {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
+/// Encoded public key bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicKeyBytes(Vec<u8>);
+
+impl PublicKeyBytes {
+    /// Wrap encoded public key bytes.
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow encoded public key bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Encoded public key byte count.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the encoded public key is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Consume the wrapper and return encoded bytes.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+impl AsRef<[u8]> for PublicKeyBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl PartialEq<Vec<u8>> for PublicKeyBytes {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.as_bytes() == other.as_slice()
+    }
+}
+
+impl PartialEq<[u8; 32]> for PublicKeyBytes {
+    fn eq(&self, other: &[u8; 32]) -> bool {
+        self.as_bytes() == other
+    }
+}
+
 /// Signing algorithm supported by mkit keystores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Algorithm {
@@ -167,7 +376,11 @@ impl FromStr for BackendKind {
     }
 }
 
-/// Runtime capabilities for one backend instance.
+/// Capabilities for one backend instance.
+///
+/// Operation booleans describe structural support and match the corresponding
+/// [`crate::Keystore`] operation accessors. They do not guarantee the current
+/// session, daemon, hardware token, or protector is available for an operation.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capabilities {
@@ -197,15 +410,15 @@ pub struct Capabilities {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyMetadata {
     /// Backend-local label.
-    pub(crate) label: String,
+    pub(crate) label: KeyLabel,
     /// Backend family.
     pub backend: BackendKind,
     /// Signing algorithm.
     pub algorithm: Algorithm,
     /// Encoded public key bytes.
-    pub public_key: Vec<u8>,
+    pub(crate) public_key: PublicKeyBytes,
     /// Canonical key ID.
-    pub(crate) keyid: String,
+    pub(crate) keyid: KeyId,
     /// Whether this key can be exported.
     pub extractable: bool,
     /// Whether signing requires user presence.
@@ -218,6 +431,12 @@ impl KeyMetadata {
     /// Backend-local label.
     #[must_use]
     pub fn label(&self) -> &str {
+        self.label.as_str()
+    }
+
+    /// Backend-local label as a validated identifier.
+    #[must_use]
+    pub const fn label_id(&self) -> &KeyLabel {
         &self.label
     }
 
@@ -236,7 +455,25 @@ impl KeyMetadata {
     /// Canonical key ID.
     #[must_use]
     pub fn keyid(&self) -> &str {
+        self.keyid.as_str()
+    }
+
+    /// Canonical key ID as a typed identifier.
+    #[must_use]
+    pub const fn key_id(&self) -> &KeyId {
         &self.keyid
+    }
+
+    /// Encoded public key bytes.
+    #[must_use]
+    pub fn public_key(&self) -> &[u8] {
+        self.public_key.as_bytes()
+    }
+
+    /// Encoded public key bytes as a typed identifier.
+    #[must_use]
+    pub const fn public_key_bytes(&self) -> &PublicKeyBytes {
+        &self.public_key
     }
 }
 
@@ -295,7 +532,7 @@ impl fmt::Debug for SecretKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeySelector {
     /// Backend-local label.
-    pub(crate) label: String,
+    pub(crate) label: KeyLabel,
     /// Optional algorithm disambiguator.
     pub algorithm: Option<Algorithm>,
 }
@@ -303,14 +540,19 @@ pub struct KeySelector {
 impl KeySelector {
     /// Build a selector after validating its label.
     pub fn new(label: impl Into<String>, algorithm: Option<Algorithm>) -> Result<Self> {
-        let label = label.into();
-        validate_label(&label)?;
+        let label = KeyLabel::new(label)?;
         Ok(Self { label, algorithm })
     }
 
     /// Backend-local label.
     #[must_use]
     pub fn label(&self) -> &str {
+        self.label.as_str()
+    }
+
+    /// Backend-local label as a validated identifier.
+    #[must_use]
+    pub const fn label_id(&self) -> &KeyLabel {
         &self.label
     }
 
@@ -327,15 +569,13 @@ pub struct KeyRef {
     /// Backend family.
     pub backend: BackendKind,
     /// Backend-local label.
-    pub(crate) label: String,
+    pub(crate) label: KeyRefLabel,
 }
 
 impl KeyRef {
     /// Create a key reference after validating the label.
     pub fn new(backend: BackendKind, label: impl Into<String>) -> Result<Self> {
-        let label = label.into();
-        validate_label(&label)?;
-        validate_key_ref_label(&label)?;
+        let label = KeyRefLabel::new(label)?;
         Ok(Self { backend, label })
     }
 
@@ -348,6 +588,12 @@ impl KeyRef {
     /// Backend-local label.
     #[must_use]
     pub fn label(&self) -> &str {
+        self.label.as_str()
+    }
+
+    /// Backend-local label as a validated key-reference label.
+    #[must_use]
+    pub const fn label_id(&self) -> &KeyRefLabel {
         &self.label
     }
 }

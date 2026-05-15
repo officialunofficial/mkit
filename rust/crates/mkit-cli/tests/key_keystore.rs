@@ -420,10 +420,7 @@ fn unlabeled_key_commands_use_configured_ref_backend() {
     assert!(!unsupported.status.success());
     let stderr = String::from_utf8_lossy(&unsupported.stderr);
     assert!(
-        stderr.contains("backend `yubikey` is not implemented")
-            || stderr.contains("YubiKey backend requires the `backend-yubikey` feature")
-            || stderr.contains("no OpenPGP Ed25519 signing key found")
-            || stderr.contains("no OpenPGP Ed25519 or PIV P-256 signing key found"),
+        stderr.contains("keystore backend unavailable"),
         "stderr should show generic backend routing failed closed: {stderr}"
     );
 
@@ -646,7 +643,7 @@ fn keystore_commit_missing_key_fails_without_generation() {
     std::fs::create_dir_all(&cfg_dir).expect("config dir");
     std::fs::write(
         cfg_dir.join("config"),
-        "signer = keystore\nkey.ed25519_ref = software:missing\n",
+        "signer = keystore\nkey.ed25519_ref = software:secret-commit-label\n",
     )
     .expect("user config");
 
@@ -658,6 +655,10 @@ fn keystore_commit_missing_key_fails_without_generation() {
     assert!(
         stderr.contains("mkit key generate"),
         "stderr should point to key generation: {stderr}"
+    );
+    assert!(
+        !stderr.contains("secret-commit-label") && !stderr.contains("software:secret-commit-label"),
+        "stderr must not leak keystore label or key ref: {stderr}"
     );
     assert!(
         !td.path().join("repo/.mkit/keys/default.key").exists(),
@@ -716,8 +717,12 @@ fn keystore_commit_malformed_key_is_not_reported_as_missing() {
     assert!(!commit.status.success());
     let stderr = String::from_utf8_lossy(&commit.stderr);
     assert!(
-        stderr.contains("keystore signing key `software-raw:broken`"),
+        stderr.contains("keystore signing key for algorithm ed25519"),
         "stderr should report a keystore key error: {stderr}"
+    );
+    assert!(
+        !stderr.contains("software-raw:broken") && !stderr.contains("broken"),
+        "stderr must not leak keystore label or key ref: {stderr}"
     );
     assert!(
         !stderr.contains("missing keystore signing key"),

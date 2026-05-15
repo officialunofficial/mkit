@@ -1,5 +1,6 @@
 use mkit_keystore::{
-    Algorithm, BackendKind, ImportOptions, KeyAttrs, Keystore, SecretKey, SoftwareRawKeystore,
+    Algorithm, BackendKind, ImportOptions, KeyAttrs, KeyLabel, Keystore, SecretKey,
+    SoftwareRawKeystore,
 };
 
 mod common;
@@ -17,9 +18,10 @@ fn assert_store_vectors(store: &dyn Keystore, backend: BackendKind) {
     for vector in VECTORS {
         let algorithm: Algorithm = vector.algorithm.parse().expect("algorithm parses");
         let seed = fixed_32(vector.seed_hex);
-        let mut signer = store
+        let importer = store.importer().expect("backend imports vectors");
+        let mut signer = importer
             .import(
-                vector.label,
+                &KeyLabel::new(vector.label).expect("vector label is valid"),
                 SecretKey::new(algorithm, seed),
                 KeyAttrs::default(),
                 ImportOptions::default(),
@@ -28,7 +30,7 @@ fn assert_store_vectors(store: &dyn Keystore, backend: BackendKind) {
         let metadata = signer.metadata().expect("metadata");
         assert_eq!(metadata.backend(), backend);
         assert_eq!(metadata.algorithm(), algorithm);
-        assert_eq!(hex_lower(&metadata.public_key), vector.public_hex);
+        assert_eq!(hex_lower(metadata.public_key()), vector.public_hex);
         assert_eq!(
             metadata.keyid(),
             format!("{}:{}", vector.algorithm, vector.public_hex)

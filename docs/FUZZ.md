@@ -23,6 +23,7 @@ from recurring.
 | `fuzz_targets/delta.rs`        | `delta::decode`             |
 | `fuzz_targets/pack.rs`         | `pack::PackReader::unpack`  |
 | `fuzz_targets/tree.rs`         | `serialize::deserialize`    |
+| `fuzz_targets/software_key_record.rs` | `EncryptedKeyRecord::decode` |
 
 ## What is **not** fuzzed (deferred)
 
@@ -73,6 +74,7 @@ cd rust/fuzz
 cargo +nightly fuzz run delta
 cargo +nightly fuzz run pack
 cargo +nightly fuzz run tree
+cargo +nightly fuzz run software_key_record
 ```
 
 ## Guardrails (NON-NEGOTIABLE)
@@ -89,6 +91,11 @@ Every target body must satisfy all six:
    - `pack::PackReader` enforces `MAX_ENTRIES = 10_000_000` and
      `MAX_PAYLOAD = 4 GiB` with count × entry-frame-length lower-bound
      checks against the input slice before any `Vec::with_capacity`.
+   - `software_key_record` truncates each input to 64 KiB before calling
+     `EncryptedKeyRecord::decode`. The decoder's cursor checks every
+     length-prefixed field against the remaining input before copying, so
+     allocation is bounded by bytes already present in the capped input rather
+     than by untrusted declared lengths.
    - The harness adds defensive pre-checks
      (`claimed_result_len > MAX_INPUT * 4`,
      `claimed_entries > 100_000`) that short-circuit before calling

@@ -140,6 +140,12 @@ pub fn tree_one_iteration(input: &[u8]) {
     let _ = mkit_core::serialize::deserialize(input);
 }
 
+/// Apply the encrypted software-key record decoder against `input`.
+pub fn software_key_record_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let _ = mkit_keystore::fuzz_decode_software_key_record(input);
+}
+
 /// Single-shot: invoke `body(input)` exactly once, with the
 /// per-iteration wall-clock cap. libfuzzer harnesses call this from
 /// their `fuzz_target!` body; the iteration counter lives one level up,
@@ -187,6 +193,11 @@ mod tests {
         run_iterated_unit(tree_one_iteration).expect("guardrails held");
     }
 
+    #[test]
+    fn software_key_record_target_runs_within_caps() {
+        run_iterated_unit(software_key_record_one_iteration).expect("guardrails held");
+    }
+
     /// Pin a few hand-crafted inputs so the targets keep accepting them
     /// even under refactors of the parser surface.
     #[test]
@@ -221,5 +232,15 @@ mod tests {
         let mut bad = vec![0x02u8, b'M', b'K', b'T', b'1', 0x01];
         bad.extend_from_slice(&u32::MAX.to_le_bytes());
         tree_one_iteration(&bad);
+    }
+
+    #[test]
+    fn software_key_record_target_handles_known_corruption() {
+        software_key_record_one_iteration(&[]);
+        software_key_record_one_iteration(b"MKITKSV1\x01\x01\x01");
+        let mut bad = b"MKITKSV1".to_vec();
+        bad.extend_from_slice(&[1, 1, 1]);
+        bad.extend_from_slice(&u32::MAX.to_le_bytes());
+        software_key_record_one_iteration(&bad);
     }
 }

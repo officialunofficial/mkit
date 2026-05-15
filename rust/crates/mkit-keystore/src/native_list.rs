@@ -1,5 +1,6 @@
 use crate::{
-    Algorithm, BackendKind, Error, KeyMetadata, KeySigner as _, Result, SecretKey, SoftwareSigner,
+    Algorithm, BackendKind, Error, KeyLabel, KeyMetadata, KeySigner as _, Result, SecretKey,
+    SoftwareSigner,
 };
 
 pub(crate) fn metadata_from_account_secret(
@@ -20,6 +21,7 @@ pub(crate) fn metadata_from_account_secret(
     let mut secret_bytes = zeroize::Zeroizing::new([0u8; 32]);
     secret_bytes.copy_from_slice(secret.as_slice());
     let secret = SecretKey::from_zeroizing(algorithm, secret_bytes);
+    let label = KeyLabel::new(label)?;
     let signer = SoftwareSigner::new(label.clone(), backend, algorithm, *secret.expose_secret())?;
     Ok(Some(KeyMetadata {
         label,
@@ -67,14 +69,14 @@ pub(crate) fn resolve_selector_algorithm<F>(
     mut load_secret: F,
 ) -> Result<Algorithm>
 where
-    F: FnMut(&str, Algorithm) -> Result<SecretKey>,
+    F: FnMut(&KeyLabel, Algorithm) -> Result<SecretKey>,
 {
     if let Some(algorithm) = selector.algorithm {
         return Ok(algorithm);
     }
     let mut matches = Vec::new();
     for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
-        match load_secret(&selector.label, algorithm) {
+        match load_secret(selector.label_id(), algorithm) {
             Ok(_) => matches.push(algorithm),
             Err(Error::KeyNotFound(_)) => {}
             Err(error) => return Err(error),
@@ -98,44 +100,60 @@ pub(crate) fn is_malformed_list_entry_error(error: &Error) -> bool {
 pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> Result<()> {
     let label = unique_test_label();
     let selector = crate::KeySelector::new(label.clone(), Some(Algorithm::Ed25519))?;
-    let _ = store.delete(&selector);
+    let importer = store
+        .importer()
+        .ok_or(Error::UnsupportedOperation("backend import"))?;
+    let opener = store
+        .opener()
+        .ok_or(Error::UnsupportedOperation("backend open"))?;
+    let lister = store
+        .lister()
+        .ok_or(Error::UnsupportedOperation("backend list"))?;
+    let exporter = store
+        .exporter()
+        .ok_or(Error::UnsupportedOperation("backend export"))?;
+    let deleter = store
+        .deleter()
+        .ok_or(Error::UnsupportedOperation("backend delete"))?;
+    let _ = deleter.delete(&selector);
     let _cleanup_guard = NativeTestCleanup {
-        store,
+        deleter,
         selector: &selector,
     };
 
     let result = (|| -> Result<()> {
         let seed = [0x36; 32];
-        let mut signer = store.import(
-            &label,
+        let mut signer = importer.import(
+            selector.label_id(),
             SecretKey::new(Algorithm::Ed25519, seed),
             crate::KeyAttrs::default(),
             crate::ImportOptions { overwrite: false },
         )?;
         assert_eq!(signer.algorithm(), Algorithm::Ed25519);
-        assert_eq!(signer.label(), label);
+        assert_eq!(signer.label().as_str(), label);
         assert_eq!(signer.sign(b"native backend roundtrip")?.len(), 64);
 
-        let opened = store.open(&selector)?;
-        assert_eq!(opened.metadata()?.label, label);
+        let reopened_signer = opener.open(&selector)?;
+        assert_eq!(reopened_signer.metadata()?.label(), label);
 
-        let listed = store.list()?;
+        let listed_metadata = lister.list()?;
         assert!(
-            listed
+            listed_metadata
                 .iter()
-                .any(|metadata| metadata.label == label && metadata.algorithm == Algorithm::Ed25519),
+                .any(|metadata| metadata.label() == label
+                    && metadata.algorithm == Algorithm::Ed25519),
             "created key must appear in native backend listing"
         );
 
-        let exported = store.export(&selector)?;
-        assert_eq!(exported.expose_secret(), &seed);
+        let exported_seed = exporter.export(&selector)?;
+        assert_eq!(exported_seed.expose_secret(), &seed);
 
-        store.delete(&selector)?;
-        assert!(matches!(store.open(&selector), Err(Error::KeyNotFound(_))));
+        deleter.delete(&selector)?;
+        assert!(matches!(opener.open(&selector), Err(Error::KeyNotFound(_))));
         Ok(())
     })();
 
-    let cleanup = store.delete(&selector);
+    let cleanup = deleter.delete(&selector);
     if result.is_ok()
         && !matches!(cleanup, Ok(()) | Err(Error::KeyNotFound(_)))
         && let Err(error) = cleanup
@@ -147,11 +165,11 @@ pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> 
     let invalid_label = unique_test_label();
     let invalid_selector = crate::KeySelector::new(invalid_label.clone(), Some(Algorithm::P256))?;
     let _invalid_cleanup_guard = NativeTestCleanup {
-        store,
+        deleter,
         selector: &invalid_selector,
     };
-    let invalid_result = store.import(
-        &invalid_label,
+    let invalid_result = importer.import(
+        invalid_selector.label_id(),
         SecretKey::new(Algorithm::P256, [0; 32]),
         crate::KeyAttrs::default(),
         crate::ImportOptions { overwrite: false },
@@ -161,10 +179,10 @@ pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> 
         "invalid P-256 import must fail before persistence"
     );
     assert!(
-        matches!(store.open(&invalid_selector), Err(Error::KeyNotFound(_))),
+        matches!(opener.open(&invalid_selector), Err(Error::KeyNotFound(_))),
         "invalid P-256 import must not leave an openable key"
     );
-    let _ = store.delete(&invalid_selector);
+    let _ = deleter.delete(&invalid_selector);
 
     Ok(())
 }
@@ -186,8 +204,13 @@ fn run_native_backend_roundtrip_test_with_availability(
     store: &dyn crate::Keystore,
     require_backend: bool,
 ) {
+    let backend = store.capabilities().backend;
     if std::env::var_os("MKIT_RUN_NATIVE_KEYSTORE_TESTS").as_deref() != Some("1".as_ref()) {
-        eprintln!("skipping native backend roundtrip; set MKIT_RUN_NATIVE_KEYSTORE_TESTS=1 to run");
+        let message = format!(
+            "native backend roundtrip for {backend} requires MKIT_RUN_NATIVE_KEYSTORE_TESTS=1"
+        );
+        assert!(!require_backend, "{message}");
+        eprintln!("skipping {message}");
         return;
     }
 
@@ -196,57 +219,77 @@ fn run_native_backend_roundtrip_test_with_availability(
     {
         Ok(()) => {}
         Err(Error::BackendUnavailable(message)) if !require_backend => {
-            eprintln!("skipping native backend roundtrip: {message}");
+            eprintln!("skipping native backend roundtrip for {backend}: {message}");
         }
-        Err(error) => panic!("native backend roundtrip failed: {error:?}"),
+        Err(error) => panic!("native backend roundtrip for {backend} failed: {error:?}"),
     }
 }
 
 #[cfg(test)]
 fn exercise_native_backend_ecdsa_verification(store: &dyn crate::Keystore) -> Result<()> {
+    let importer = store
+        .importer()
+        .ok_or(Error::UnsupportedOperation("backend import"))?;
+    let opener = store
+        .opener()
+        .ok_or(Error::UnsupportedOperation("backend open"))?;
+    let lister = store
+        .lister()
+        .ok_or(Error::UnsupportedOperation("backend list"))?;
+    let exporter = store
+        .exporter()
+        .ok_or(Error::UnsupportedOperation("backend export"))?;
+    let deleter = store
+        .deleter()
+        .ok_or(Error::UnsupportedOperation("backend delete"))?;
     for algorithm in [Algorithm::Secp256k1, Algorithm::P256] {
         let label = unique_test_label();
         let selector = crate::KeySelector::new(label.clone(), Some(algorithm))?;
-        let _ = store.delete(&selector);
+        let _ = deleter.delete(&selector);
         let _cleanup_guard = NativeTestCleanup {
-            store,
+            deleter,
             selector: &selector,
         };
 
         let result = (|| -> Result<()> {
             let mut seed = [0u8; 32];
             seed[31] = 1;
-            let mut signer = store.import(
-                &label,
+            let mut signer = importer.import(
+                selector.label_id(),
                 SecretKey::new(algorithm, seed),
                 crate::KeyAttrs::default(),
                 crate::ImportOptions { overwrite: false },
             )?;
             let message = b"native backend ecdsa verification equivalence";
             let signature = signer.sign(message)?;
-            verify_ecdsa_signature(algorithm, &signer.public_key()?, message, &signature)?;
-
-            let mut opened = store.open(&selector)?;
-            let reopened_signature = opened.sign(message)?;
             verify_ecdsa_signature(
                 algorithm,
-                &opened.public_key()?,
+                signer.public_key()?.as_bytes(),
+                message,
+                &signature,
+            )?;
+
+            let mut reopened_signer = opener.open(&selector)?;
+            let reopened_signature = reopened_signer.sign(message)?;
+            verify_ecdsa_signature(
+                algorithm,
+                reopened_signer.public_key()?.as_bytes(),
                 message,
                 &reopened_signature,
             )?;
 
-            let listed = store.list()?;
+            let listed_metadata = lister.list()?;
             assert!(
-                listed
+                listed_metadata
                     .iter()
-                    .any(|metadata| metadata.label == label && metadata.algorithm == algorithm),
+                    .any(|metadata| metadata.label() == label && metadata.algorithm == algorithm),
                 "created ECDSA key must appear in native backend listing"
             );
-            assert_eq!(store.export(&selector)?.expose_secret(), &seed);
-            store.delete(&selector)
+            assert_eq!(exporter.export(&selector)?.expose_secret(), &seed);
+            deleter.delete(&selector)
         })();
 
-        let cleanup = store.delete(&selector);
+        let cleanup = deleter.delete(&selector);
         if result.is_ok()
             && !matches!(cleanup, Ok(()) | Err(Error::KeyNotFound(_)))
             && let Err(error) = cleanup
@@ -260,14 +303,14 @@ fn exercise_native_backend_ecdsa_verification(store: &dyn crate::Keystore) -> Re
 
 #[cfg(test)]
 struct NativeTestCleanup<'a> {
-    store: &'a dyn crate::Keystore,
+    deleter: &'a dyn crate::KeyDeleter,
     selector: &'a crate::KeySelector,
 }
 
 #[cfg(test)]
 impl Drop for NativeTestCleanup<'_> {
     fn drop(&mut self) {
-        let _ = self.store.delete(self.selector);
+        let _ = self.deleter.delete(self.selector);
     }
 }
 
@@ -319,16 +362,18 @@ fn unique_test_label() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{KeyId, PublicKeyBytes};
 
     #[test]
     fn label_only_selector_resolution_matches_contract() {
-        let load_secret = |label: &str, algorithm: Algorithm| match (label, algorithm) {
+        let load_secret = |label: &KeyLabel, algorithm: Algorithm| match (label.as_str(), algorithm)
+        {
             ("unique", Algorithm::Ed25519)
             | ("ambiguous", Algorithm::Ed25519 | Algorithm::P256) => {
                 Ok(SecretKey::new(algorithm, [1; 32]))
             }
             _ => Err(Error::KeyNotFound(crate::KeySelector {
-                label: label.into(),
+                label: label.clone(),
                 algorithm: Some(algorithm),
             })),
         };
@@ -367,13 +412,14 @@ mod tests {
 
     #[test]
     fn label_only_selector_resolution_fails_closed_for_matching_malformed_key() {
-        let load_secret = |label: &str, algorithm: Algorithm| match (label, algorithm) {
+        let load_secret = |label: &KeyLabel, algorithm: Algorithm| match (label.as_str(), algorithm)
+        {
             ("corrupt", Algorithm::Ed25519) => Err(Error::InvalidKeyMaterial {
                 algorithm,
                 reason: "expected 32 bytes, got 3".into(),
             }),
             _ => Err(Error::KeyNotFound(crate::KeySelector {
-                label: label.into(),
+                label: label.clone(),
                 algorithm: Some(algorithm),
             })),
         };
@@ -425,31 +471,31 @@ mod tests {
     fn metadata_sorting_is_deterministic() {
         let mut metadata = vec![
             KeyMetadata {
-                label: "z".into(),
+                label: KeyLabel::new("z").unwrap(),
                 backend: BackendKind::MacosKeychain,
                 algorithm: Algorithm::P256,
-                public_key: Vec::new(),
-                keyid: String::new(),
+                public_key: PublicKeyBytes::new(Vec::new()),
+                keyid: KeyId::new("z").unwrap(),
                 extractable: true,
                 require_user_presence: false,
                 device_bound: false,
             },
             KeyMetadata {
-                label: "a".into(),
+                label: KeyLabel::new("a").unwrap(),
                 backend: BackendKind::MacosKeychain,
                 algorithm: Algorithm::Ed25519,
-                public_key: Vec::new(),
-                keyid: String::new(),
+                public_key: PublicKeyBytes::new(Vec::new()),
+                keyid: KeyId::new("a-ed25519").unwrap(),
                 extractable: true,
                 require_user_presence: false,
                 device_bound: false,
             },
             KeyMetadata {
-                label: "a".into(),
+                label: KeyLabel::new("a").unwrap(),
                 backend: BackendKind::MacosKeychain,
                 algorithm: Algorithm::P256,
-                public_key: Vec::new(),
-                keyid: String::new(),
+                public_key: PublicKeyBytes::new(Vec::new()),
+                keyid: KeyId::new("a-p256").unwrap(),
                 extractable: true,
                 require_user_presence: false,
                 device_bound: false,
@@ -470,14 +516,18 @@ mod tests {
         for algorithm in [Algorithm::Secp256k1, Algorithm::P256] {
             let mut seed = [0u8; 32];
             seed[31] = 1;
-            let mut signer =
-                SoftwareSigner::new("ecdsa".into(), BackendKind::Software, algorithm, seed)
-                    .unwrap();
+            let mut signer = SoftwareSigner::new(
+                KeyLabel::new("ecdsa").unwrap(),
+                BackendKind::Software,
+                algorithm,
+                seed,
+            )
+            .unwrap();
             let message = b"verify ecdsa instead of comparing bytes";
             let signature = signer.sign(message).unwrap();
             verify_ecdsa_signature(
                 algorithm,
-                &signer.public_key().unwrap(),
+                signer.public_key().unwrap().as_bytes(),
                 message,
                 &signature,
             )

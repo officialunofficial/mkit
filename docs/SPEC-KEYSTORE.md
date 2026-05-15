@@ -228,9 +228,12 @@ pub enum BackendKind {
 
 Requirements:
 
-- Capabilities must describe actual runtime behavior, not compile-time wishes.
+- Operation booleans must match operation-specific trait availability on the
+  `Keystore` registry. They describe structural backend support, not a guarantee
+  that the current session, daemon, hardware token, or protector is available.
 - A backend compiled in but unavailable at runtime must return an unavailable
-  error from construction or operations.
+  error from construction or operations, and must not silently fall back to a
+  weaker backend.
 - Capability checks must be testable without performing a signing operation.
 
 ### 5.4 Key Metadata
@@ -238,14 +241,25 @@ Requirements:
 ```rust
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyMetadata {
-    pub label: String,
+    label: KeyLabel,
     pub backend: BackendKind,
     pub algorithm: Algorithm,
-    pub public_key: Vec<u8>,
-    pub keyid: String,
+    public_key: PublicKeyBytes,
+    keyid: KeyId,
     pub extractable: bool,
     pub require_user_presence: bool,
     pub device_bound: bool,
+}
+
+impl KeyMetadata {
+    pub fn label(&self) -> &str;
+    pub fn label_id(&self) -> &KeyLabel;
+    pub fn backend(&self) -> BackendKind;
+    pub fn algorithm(&self) -> Algorithm;
+    pub fn keyid(&self) -> &str;
+    pub fn key_id(&self) -> &KeyId;
+    pub fn public_key(&self) -> &[u8];
+    pub fn public_key_bytes(&self) -> &PublicKeyBytes;
 }
 ```
 
@@ -270,12 +284,16 @@ legacy key IDs only where existing verifier contracts require them.
 
 ```rust
 pub struct SecretKey {
-    pub algorithm: Algorithm,
+    algorithm: Algorithm,
     bytes: zeroize::Zeroizing<[u8; 32]>,
 }
 
 impl SecretKey {
     pub fn new(algorithm: Algorithm, bytes: [u8; 32]) -> Self;
+    pub fn from_zeroizing(
+        algorithm: Algorithm,
+        bytes: zeroize::Zeroizing<[u8; 32]>,
+    ) -> Self;
     pub fn algorithm(&self) -> Algorithm;
     pub fn expose_secret(&self) -> &[u8; 32];
     pub fn into_bytes(self) -> zeroize::Zeroizing<[u8; 32]>;
@@ -306,10 +324,10 @@ Requirements:
 ```rust
 pub trait KeySigner: Send {
     fn algorithm(&self) -> Algorithm;
-    fn label(&self) -> &str;
+    fn label(&self) -> &KeyLabel;
     fn metadata(&self) -> Result<KeyMetadata, Error>;
-    fn public_key(&self) -> Result<Vec<u8>, Error>;
-    fn keyid(&self) -> Result<String, Error>;
+    fn public_key(&self) -> Result<PublicKeyBytes, Error>;
+    fn keyid(&self) -> Result<KeyId, Error>;
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>, Error>;
 }
 ```
@@ -340,8 +358,15 @@ Selectors identify keys for read, export, and deletion operations:
 ```rust
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeySelector {
-    pub label: String,
+    label: KeyLabel,
     pub algorithm: Option<Algorithm>,
+}
+
+impl KeySelector {
+    pub fn new(label: impl Into<String>, algorithm: Option<Algorithm>) -> Result<Self, Error>;
+    pub fn label(&self) -> &str;
+    pub fn label_id(&self) -> &KeyLabel;
+    pub fn algorithm(&self) -> Option<Algorithm>;
 }
 ```
 
@@ -353,26 +378,47 @@ ambiguous-key error.
 ```rust
 pub trait Keystore: Send + Sync {
     fn capabilities(&self) -> Capabilities;
+    fn generator(&self) -> Option<&dyn KeyGenerator>;
+    fn importer(&self) -> Option<&dyn KeyImporter>;
+    fn opener(&self) -> Option<&dyn KeyOpener>;
+    fn lister(&self) -> Option<&dyn KeyLister>;
+    fn exporter(&self) -> Option<&dyn KeyExporter>;
+    fn deleter(&self) -> Option<&dyn KeyDeleter>;
+}
 
+pub trait KeyGenerator: Send + Sync {
     fn generate(
         &self,
-        label: &str,
+        label: &KeyLabel,
         algorithm: Algorithm,
         attrs: KeyAttrs,
         options: GenerateOptions,
     ) -> Result<Box<dyn KeySigner>, Error>;
+}
 
+pub trait KeyImporter: Send + Sync {
     fn import(
         &self,
-        label: &str,
+        label: &KeyLabel,
         secret: SecretKey,
         attrs: KeyAttrs,
         options: ImportOptions,
     ) -> Result<Box<dyn KeySigner>, Error>;
+}
 
+pub trait KeyOpener: Send + Sync {
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>, Error>;
+}
+
+pub trait KeyLister: Send + Sync {
     fn list(&self) -> Result<Vec<KeyMetadata>, Error>;
+}
+
+pub trait KeyExporter: Send + Sync {
     fn export(&self, selector: &KeySelector) -> Result<SecretKey, Error>;
+}
+
+pub trait KeyDeleter: Send + Sync {
     fn delete(&self, selector: &KeySelector) -> Result<(), Error>;
 }
 
@@ -409,6 +455,10 @@ Requirements:
   where the backend can list keys.
 - `delete` must delete only the selected key and must not delete by prefix.
 - `export` must fail for non-extractable keys.
+- Operation support must be represented by operation-specific traits available
+  through `Keystore`; non-exportable backends must not implement `KeyExporter`.
+- Public APIs that accept labels, key references, key IDs, or public key bytes
+  must use typed wrappers rather than unconstrained `String` values.
 
 ### 5.8 Error Taxonomy
 
@@ -434,6 +484,10 @@ Requirements:
 
 Errors must be structured enums, not stringly typed. CLI commands may render
 human-friendly messages from them.
+
+User-facing `Display` output must redact backend-local labels, selectors,
+filesystem paths, and arbitrary backend payloads. Full diagnostics remain
+available through structured fields and developer/debug output.
 
 ## 6. Backend Requirements
 
@@ -496,9 +550,12 @@ Storage-security modes:
   - Protect or wrap the DEK with an OS-native protection mechanism for the
     current platform: macOS Keychain, Windows DPAPI/Credential Manager,
     Linux Secret Service, or `systemd-creds` for headless/server Linux.
-  - On Linux, the `software` backend may auto-select Secret Service for desktop
-    sessions, then `systemd-creds` for headless/server use, and must fail closed
-    if neither protector is available.
+  - On Linux, the `software` backend may auto-select Secret Service only when a
+    desktop session is detected and the protector opens cleanly. Secret Service
+    errors must fail closed rather than silently falling back to a weaker
+    protector. The backend may select `systemd-creds` for headless/server use
+    when no desktop Secret Service session is detected, and must fail closed if
+    no usable protector is available.
   - Fail closed if no configured OS protection mechanism is available.
   - Never derive the encryption key from an mkit-managed password, hidden
     passphrase, repo data, or environment variable.
@@ -1095,6 +1152,11 @@ Each OS-native backend must include tests gated by target OS and feature flag.
 
 Tests must not require developer-specific keychain state. They must create and
 delete unique test labels.
+
+Live OS-native backend tests are ignored by default and must fail loudly when
+explicitly invoked without `MKIT_RUN_NATIVE_KEYSTORE_TESTS=1`. CI jobs that
+claim native backend coverage must run those ignored tests with the required
+environment gate set.
 
 Hardware tests may be ignored by default and documented as manual tests.
 

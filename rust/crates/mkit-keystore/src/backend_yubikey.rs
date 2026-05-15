@@ -15,8 +15,8 @@ use yubikey::piv::{AlgorithmId as PivAlgorithmId, SlotAlgorithmId, SlotId};
 use yubikey::{PinPolicy, TouchPolicy};
 
 use crate::{
-    Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
-    KeyMetadata, KeySelector, KeySigner, Keystore, Result, SecretKey, validate_label,
+    Algorithm, BackendKind, Capabilities, Error, KeyId, KeyLabel, KeyLister, KeyMetadata,
+    KeyOpener, KeySelector, KeySigner, Keystore, PublicKeyBytes, Result, validate_label,
 };
 
 /// `YubiKey` `OpenPGP` backend over PC/SC.
@@ -25,14 +25,14 @@ pub struct YubiKeyKeystore;
 
 #[derive(Clone, Debug)]
 struct OpenPgpSigningKey {
-    label: String,
+    label: KeyLabel,
     ident: String,
     public_key: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
 struct PivSigningKey {
-    label: String,
+    label: KeyLabel,
     serial: yubikey::Serial,
     slot: SlotId,
     public_key: Vec<u8>,
@@ -62,7 +62,7 @@ impl YubiKeyKeystore {
     }
 
     fn resolve(selector: &KeySelector) -> Result<YubiKeySigningKey> {
-        validate_label(&selector.label)?;
+        validate_label(selector.label())?;
         match selector.algorithm {
             None => resolve_label_only(selector),
             Some(algorithm) => resolve_by_algorithm(selector, algorithm),
@@ -121,60 +121,30 @@ fn ensure_any_signing_key(
 
 impl Keystore for YubiKeyKeystore {
     fn capabilities(&self) -> Capabilities {
-        let openpgp = discover_openpgp_signing_keys();
-        let piv = discover_piv_signing_keys();
-        match (openpgp, piv) {
-            (Ok(openpgp), Ok(piv)) => capabilities_for_signing_key_counts(openpgp.len(), piv.len()),
-            // `Capabilities` has no error channel. Do not turn hardware/PCSC
-            // failures into "no algorithms"; list/open will surface the real
-            // discovery error when the caller performs an operation.
-            _ => yubikey_backend_capabilities(),
-        }
+        let openpgp = discover_openpgp_signing_keys().unwrap_or_default();
+        let piv = discover_piv_signing_keys().unwrap_or_default();
+        capabilities_for_discovered_keys(&openpgp, &piv)
     }
 
-    fn generate(
-        &self,
-        _label: &str,
-        algorithm: Algorithm,
-        _attrs: KeyAttrs,
-        _options: GenerateOptions,
-    ) -> Result<Box<dyn KeySigner>> {
-        match algorithm {
-            Algorithm::Ed25519 => Err(Error::UnsupportedOperation(
-                "YubiKey OpenPGP backend opens existing Ed25519 signing keys; generate with vendor tooling",
-            )),
-            Algorithm::P256 => Err(Error::UnsupportedOperation(
-                "YubiKey PIV/FIDO2 backend opens existing hardware keys; generate with vendor tooling or the CTAP external signer",
-            )),
-            Algorithm::Secp256k1 => Err(Error::UnsupportedAlgorithm(algorithm)),
-        }
+    fn opener(&self) -> Option<&dyn KeyOpener> {
+        Some(self)
     }
 
-    fn import(
-        &self,
-        _label: &str,
-        secret: SecretKey,
-        _attrs: KeyAttrs,
-        _options: ImportOptions,
-    ) -> Result<Box<dyn KeySigner>> {
-        match secret.algorithm() {
-            Algorithm::Ed25519 => Err(Error::UnsupportedOperation(
-                "YubiKey OpenPGP backend does not import extractable secret material",
-            )),
-            Algorithm::P256 => Err(Error::UnsupportedOperation(
-                "YubiKey PIV/FIDO2 backend does not import extractable secret material",
-            )),
-            Algorithm::Secp256k1 => Err(Error::UnsupportedAlgorithm(secret.algorithm())),
-        }
+    fn lister(&self) -> Option<&dyn KeyLister> {
+        Some(self)
     }
+}
 
+impl KeyOpener for YubiKeyKeystore {
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>> {
         match Self::resolve(selector)? {
             YubiKeySigningKey::OpenPgp(card) => Ok(Box::new(YubiKeyOpenPgpSigner { card })),
             YubiKeySigningKey::Piv(key) => Ok(Box::new(YubiKeyPivSigner { key })),
         }
     }
+}
 
+impl KeyLister for YubiKeyKeystore {
     fn list(&self) -> Result<Vec<KeyMetadata>> {
         let mut out = Vec::new();
         for card in discover_openpgp_signing_keys()? {
@@ -188,32 +158,25 @@ impl Keystore for YubiKeyKeystore {
         });
         Ok(out)
     }
-
-    fn export(&self, selector: &KeySelector) -> Result<SecretKey> {
-        validate_label(&selector.label)?;
-        Err(Error::NotExtractable(KeySelector {
-            label: selector.label.clone(),
-            algorithm: selector.algorithm.or(Some(Algorithm::Ed25519)),
-        }))
-    }
-
-    fn delete(&self, selector: &KeySelector) -> Result<()> {
-        validate_label(&selector.label)?;
-        Err(Error::UnsupportedOperation(
-            "YubiKey OpenPGP backend does not delete card keys",
-        ))
-    }
 }
 
-fn capabilities_for_signing_key_counts(openpgp_count: usize, piv_count: usize) -> Capabilities {
+fn capabilities_for_discovered_keys(
+    openpgp: &[OpenPgpSigningKey],
+    piv: &[PivSigningKey],
+) -> Capabilities {
     let mut algorithms = Vec::new();
-    if openpgp_count > 0 {
+    if !openpgp.is_empty() {
         algorithms.push(Algorithm::Ed25519);
     }
-    if piv_count > 0 {
+    if !piv.is_empty() {
         algorithms.push(Algorithm::P256);
     }
     let has_signing_key = !algorithms.is_empty();
+    let supports_user_presence = !openpgp.is_empty()
+        || piv.iter().any(|key| {
+            key.pin_policy != PinPolicy::Never
+                || matches!(key.touch_policy, TouchPolicy::Always | TouchPolicy::Cached)
+        });
     Capabilities {
         backend: BackendKind::YubiKey,
         algorithms,
@@ -221,25 +184,10 @@ fn capabilities_for_signing_key_counts(openpgp_count: usize, piv_count: usize) -
         can_import: false,
         can_export: false,
         can_delete: false,
-        supports_listing: has_signing_key,
-        supports_user_presence: has_signing_key,
+        supports_listing: true,
+        supports_user_presence,
         supports_device_bound: has_signing_key,
         supports_non_extractable: has_signing_key,
-    }
-}
-
-fn yubikey_backend_capabilities() -> Capabilities {
-    Capabilities {
-        backend: BackendKind::YubiKey,
-        algorithms: vec![Algorithm::Ed25519, Algorithm::P256],
-        can_generate: false,
-        can_import: false,
-        can_export: false,
-        can_delete: false,
-        supports_listing: true,
-        supports_user_presence: true,
-        supports_device_bound: true,
-        supports_non_extractable: true,
     }
 }
 
@@ -252,7 +200,7 @@ impl KeySigner for YubiKeyOpenPgpSigner {
         Algorithm::Ed25519
     }
 
-    fn label(&self) -> &str {
+    fn label(&self) -> &KeyLabel {
         &self.card.label
     }
 
@@ -260,16 +208,16 @@ impl KeySigner for YubiKeyOpenPgpSigner {
         Ok(openpgp_metadata_for(&self.card))
     }
 
-    fn public_key(&self) -> Result<Vec<u8>> {
-        Ok(self.card.public_key.clone())
+    fn public_key(&self) -> Result<PublicKeyBytes> {
+        Ok(PublicKeyBytes::new(self.card.public_key.clone()))
     }
 
-    fn keyid(&self) -> Result<String> {
-        Ok(keyid_for(&self.card.public_key))
+    fn keyid(&self) -> Result<KeyId> {
+        KeyId::new(keyid_for(&self.card.public_key))
     }
 
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>> {
-        ensure_openpgp_interaction_available(&self.card.label)?;
+        ensure_openpgp_interaction_available(self.card.label.as_str())?;
 
         let mut card = open_card_by_ident(&self.card.ident)?;
         let mut transaction = card.transaction().map_err(map_openpgp_error)?;
@@ -290,7 +238,7 @@ impl KeySigner for YubiKeyPivSigner {
         Algorithm::P256
     }
 
-    fn label(&self) -> &str {
+    fn label(&self) -> &KeyLabel {
         &self.key.label
     }
 
@@ -298,12 +246,12 @@ impl KeySigner for YubiKeyPivSigner {
         Ok(piv_metadata_for(&self.key))
     }
 
-    fn public_key(&self) -> Result<Vec<u8>> {
-        Ok(self.key.public_key.clone())
+    fn public_key(&self) -> Result<PublicKeyBytes> {
+        Ok(PublicKeyBytes::new(self.key.public_key.clone()))
     }
 
-    fn keyid(&self) -> Result<String> {
-        Ok(format!("p256:{}", hex_lower(&self.key.public_key)))
+    fn keyid(&self) -> Result<KeyId> {
+        KeyId::new(format!("p256:{}", hex_lower(&self.key.public_key)))
     }
 
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>> {
@@ -331,14 +279,14 @@ impl KeySigner for YubiKeyPivSigner {
 fn resolve_openpgp(selector: &KeySelector) -> Result<OpenPgpSigningKey> {
     let cards = discover_openpgp_signing_keys()?;
     if let Some(card) = cards.iter().find(|card| {
-        card.label == selector.label || card.ident.eq_ignore_ascii_case(&selector.label)
+        card.label.as_str() == selector.label() || card.ident.eq_ignore_ascii_case(selector.label())
     }) {
         return Ok(card.clone());
     }
 
-    if matches!(selector.label.as_str(), "default" | "main") && cards.len() == 1 {
+    if matches!(selector.label(), "default" | "main") && cards.len() == 1 {
         let mut card = cards[0].clone();
-        card.label.clone_from(&selector.label);
+        card.label = selector.label_id().clone();
         return Ok(card);
     }
 
@@ -346,7 +294,7 @@ fn resolve_openpgp(selector: &KeySelector) -> Result<OpenPgpSigningKey> {
 }
 
 fn resolve_piv(selector: &KeySelector) -> Result<PivSigningKey> {
-    if selector.label.starts_with("fido2-") || selector.label.starts_with("ctap-") {
+    if selector.label().starts_with("fido2-") || selector.label().starts_with("ctap-") {
         return Err(Error::UnsupportedOperation(
             "FIDO2/WebAuthn YubiKey signing must use the CTAP external signer because keystore signatures cannot carry WebAuthn assertion data; this guard is based on fido2-/ctap- label prefixes",
         ));
@@ -359,20 +307,22 @@ fn resolve_piv(selector: &KeySelector) -> Result<PivSigningKey> {
 fn resolve_piv_from_keys(selector: &KeySelector, keys: &[PivSigningKey]) -> Result<PivSigningKey> {
     let mut matches: Vec<_> = keys
         .iter()
-        .filter(|key| key.label == selector.label || piv_label(key.slot) == selector.label)
+        .filter(|key| {
+            key.label.as_str() == selector.label() || piv_label(key.slot) == selector.label()
+        })
         .cloned()
         .collect();
 
-    if matches.is_empty() && selector.label == "piv" && keys.len() == 1 {
+    if matches.is_empty() && selector.label() == "piv" && keys.len() == 1 {
         let mut key = keys[0].clone();
-        key.label.clone_from(&selector.label);
+        key.label = selector.label_id().clone();
         return Ok(key);
     }
 
     match matches.as_mut_slice() {
         [] => Err(Error::KeyNotFound(selector.clone())),
         [key] => {
-            key.label.clone_from(&selector.label);
+            key.label = selector.label_id().clone();
             Ok(key.clone())
         }
         _ => Err(Error::AmbiguousKeySelector(selector.clone())),
@@ -400,7 +350,7 @@ fn discover_openpgp_signing_keys() -> Result<Vec<OpenPgpSigningKey>> {
         };
         let ident = aid.ident();
         out.push(OpenPgpSigningKey {
-            label: label_from_ident(&ident),
+            label: KeyLabel::new(label_from_ident(&ident))?,
             ident,
             public_key,
         });
@@ -454,7 +404,7 @@ fn discover_piv_signing_keys_on_card(yubikey: &mut yubikey::YubiKey) -> Result<V
         let public_key = p256_public_key_from_certificate(key.certificate())?;
         let (pin_policy, touch_policy) = piv_policy(metadata.policy, slot)?;
         out.push(PivSigningKey {
-            label: piv_label(slot),
+            label: KeyLabel::new(piv_label(slot)).expect("static PIV label is valid"),
             serial: yubikey.serial(),
             slot,
             public_key,
@@ -486,9 +436,10 @@ fn assign_piv_labels(mut keys: Vec<PivSigningKey>) -> Vec<PivSigningKey> {
         let slot = keys[index].slot;
         let duplicate_slot_count = keys.iter().filter(|key| key.slot == slot).count();
         keys[index].label = if duplicate_slot_count > 1 {
-            serial_qualified_piv_label(keys[index].serial, slot)
+            KeyLabel::new(serial_qualified_piv_label(keys[index].serial, slot))
+                .expect("generated PIV label is valid")
         } else {
-            piv_label(slot)
+            KeyLabel::new(piv_label(slot)).expect("static PIV label is valid")
         };
     }
     keys.sort_by(|left, right| {
@@ -544,24 +495,25 @@ fn normalize_ed25519_signature(signature: Vec<u8>) -> Result<Vec<u8>> {
     )))
 }
 
-fn ensure_openpgp_interaction_available(label: &str) -> Result<()> {
-    Err(Error::AuthenticationRequired(format!(
-        "YubiKey OpenPGP signing for yubikey:{label} requires an explicit PIN prompt provider; PINs via environment variables are not supported"
-    )))
+fn ensure_openpgp_interaction_available(_label: &str) -> Result<()> {
+    Err(Error::AuthenticationRequired(
+        "YubiKey OpenPGP signing requires an explicit PIN prompt provider; PINs via environment variables are not supported"
+            .into(),
+    ))
 }
 
 fn ensure_piv_interaction_available(key: &PivSigningKey) -> Result<()> {
     if key.pin_policy != PinPolicy::Never {
-        return Err(Error::AuthenticationRequired(format!(
-            "YubiKey PIV signing for yubikey:{} requires an explicit PIN prompt provider; PINs via environment variables are not supported",
-            key.label
-        )));
+        return Err(Error::AuthenticationRequired(
+            "YubiKey PIV signing requires an explicit PIN prompt provider; PINs via environment variables are not supported"
+                .into(),
+        ));
     }
     if matches!(key.touch_policy, TouchPolicy::Always | TouchPolicy::Cached) {
-        return Err(Error::AuthenticationRequired(format!(
-            "YubiKey PIV signing key yubikey:{} requires touch, but no bounded touch prompt flow is available",
-            key.label
-        )));
+        return Err(Error::AuthenticationRequired(
+            "YubiKey PIV signing key requires touch, but no bounded touch prompt flow is available"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -571,8 +523,8 @@ fn openpgp_metadata_for(card: &OpenPgpSigningKey) -> KeyMetadata {
         label: card.label.clone(),
         backend: BackendKind::YubiKey,
         algorithm: Algorithm::Ed25519,
-        public_key: card.public_key.clone(),
-        keyid: keyid_for(&card.public_key),
+        public_key: PublicKeyBytes::new(card.public_key.clone()),
+        keyid: KeyId::new(keyid_for(&card.public_key)).expect("generated key ID is valid"),
         extractable: false,
         require_user_presence: true,
         device_bound: true,
@@ -584,8 +536,9 @@ fn piv_metadata_for(key: &PivSigningKey) -> KeyMetadata {
         label: key.label.clone(),
         backend: BackendKind::YubiKey,
         algorithm: Algorithm::P256,
-        public_key: key.public_key.clone(),
-        keyid: format!("p256:{}", hex_lower(&key.public_key)),
+        public_key: PublicKeyBytes::new(key.public_key.clone()),
+        keyid: KeyId::new(format!("p256:{}", hex_lower(&key.public_key)))
+            .expect("generated key ID is valid"),
         extractable: false,
         require_user_presence: key.pin_policy != PinPolicy::Never
             || matches!(key.touch_policy, TouchPolicy::Always | TouchPolicy::Cached),
@@ -610,7 +563,7 @@ fn piv_public_key_for_slot(yubikey: &mut yubikey::YubiKey, slot: SlotId) -> Resu
         }
     }
     Err(Error::KeyNotFound(KeySelector {
-        label: piv_label(slot),
+        label: KeyLabel::new(piv_label(slot)).expect("static PIV label is valid"),
         algorithm: Some(Algorithm::P256),
     }))
 }
@@ -665,7 +618,7 @@ fn map_openpgp_error(error: OpenPgpError) -> Error {
         OpenPgpError::UnsupportedAlgo(_) => Error::UnsupportedAlgorithm(Algorithm::Ed25519),
         OpenPgpError::Smartcard(_) => Error::Io(error.to_string()),
         OpenPgpError::NotFound(_) => Error::KeyNotFound(KeySelector {
-            label: "openpgp-signing".into(),
+            label: KeyLabel::new("openpgp-signing").expect("static label is valid"),
             algorithm: Some(Algorithm::Ed25519),
         }),
         other => Error::Io(other.to_string()),
@@ -683,7 +636,7 @@ fn map_yubikey_error(error: yubikey::Error) -> Error {
             Error::UnsupportedAlgorithm(Algorithm::P256)
         }
         yubikey::Error::NotFound => Error::KeyNotFound(KeySelector {
-            label: "piv".into(),
+            label: KeyLabel::new("piv").expect("static label is valid"),
             algorithm: Some(Algorithm::P256),
         }),
         yubikey::Error::PcscError { .. } | yubikey::Error::AppletNotFound { .. } => {
@@ -707,9 +660,31 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn openpgp_test_key() -> OpenPgpSigningKey {
+        OpenPgpSigningKey {
+            label: KeyLabel::new("openpgp").unwrap(),
+            ident: "0000:TEST".into(),
+            public_key: vec![1; 32],
+        }
+    }
+
+    fn piv_test_key(pin_policy: PinPolicy, touch_policy: TouchPolicy) -> PivSigningKey {
+        PivSigningKey {
+            label: KeyLabel::new("piv-9c").unwrap(),
+            serial: yubikey::Serial(1234),
+            slot: SlotId::Signature,
+            public_key: vec![1; 33],
+            pin_policy,
+            touch_policy,
+        }
+    }
+
     #[test]
     fn capabilities_are_hardware_accurate() {
-        let capabilities = capabilities_for_signing_key_counts(1, 1);
+        let capabilities = capabilities_for_discovered_keys(
+            &[openpgp_test_key()],
+            &[piv_test_key(PinPolicy::Always, TouchPolicy::Never)],
+        );
         assert_eq!(capabilities.backend, BackendKind::YubiKey);
         assert_eq!(
             capabilities.algorithms,
@@ -727,7 +702,7 @@ mod tests {
 
     #[test]
     fn capabilities_report_openpgp_only_algorithms() {
-        let capabilities = capabilities_for_signing_key_counts(1, 0);
+        let capabilities = capabilities_for_discovered_keys(&[openpgp_test_key()], &[]);
         assert_eq!(capabilities.algorithms, vec![Algorithm::Ed25519]);
         assert!(capabilities.supports_listing);
         assert!(capabilities.supports_user_presence);
@@ -737,7 +712,10 @@ mod tests {
 
     #[test]
     fn capabilities_report_piv_only_algorithms() {
-        let capabilities = capabilities_for_signing_key_counts(0, 1);
+        let capabilities = capabilities_for_discovered_keys(
+            &[],
+            &[piv_test_key(PinPolicy::Always, TouchPolicy::Never)],
+        );
         assert_eq!(capabilities.algorithms, vec![Algorithm::P256]);
         assert!(capabilities.supports_listing);
         assert!(capabilities.supports_user_presence);
@@ -747,16 +725,34 @@ mod tests {
 
     #[test]
     fn capabilities_report_no_token_as_unavailable() {
-        let capabilities = capabilities_for_signing_key_counts(0, 0);
+        let capabilities = capabilities_for_discovered_keys(&[], &[]);
         assert!(capabilities.algorithms.is_empty());
         assert!(!capabilities.can_generate);
         assert!(!capabilities.can_import);
         assert!(!capabilities.can_export);
         assert!(!capabilities.can_delete);
-        assert!(!capabilities.supports_listing);
+        assert!(capabilities.supports_listing);
         assert!(!capabilities.supports_user_presence);
         assert!(!capabilities.supports_device_bound);
         assert!(!capabilities.supports_non_extractable);
+    }
+
+    #[test]
+    fn capabilities_report_piv_user_presence_from_policy() {
+        let without_presence = capabilities_for_discovered_keys(
+            &[],
+            &[piv_test_key(PinPolicy::Never, TouchPolicy::Never)],
+        );
+        assert_eq!(without_presence.algorithms, vec![Algorithm::P256]);
+        assert!(!without_presence.supports_user_presence);
+        assert!(without_presence.supports_device_bound);
+        assert!(without_presence.supports_non_extractable);
+
+        let with_touch = capabilities_for_discovered_keys(
+            &[],
+            &[piv_test_key(PinPolicy::Never, TouchPolicy::Always)],
+        );
+        assert!(with_touch.supports_user_presence);
     }
 
     #[test]
@@ -804,7 +800,7 @@ mod tests {
     fn openpgp_signing_requires_explicit_pin_prompt_provider() {
         let mut signer = YubiKeyOpenPgpSigner {
             card: OpenPgpSigningKey {
-                label: "default".into(),
+                label: KeyLabel::new("default").unwrap(),
                 ident: "0000:TEST".into(),
                 public_key: vec![1; 32],
             },
@@ -814,6 +810,8 @@ mod tests {
             Err(Error::AuthenticationRequired(message)) => {
                 assert!(message.contains("explicit PIN prompt provider"));
                 assert!(message.contains("environment variables are not supported"));
+                assert!(!message.contains("default"));
+                assert!(!message.contains("yubikey:"));
             }
             other => panic!("unexpected signing result: {other:?}"),
         }
@@ -822,7 +820,7 @@ mod tests {
     #[test]
     fn piv_pin_required_fails_before_device_io() {
         let key = PivSigningKey {
-            label: "piv-9c".into(),
+            label: KeyLabel::new("piv-9c").unwrap(),
             serial: yubikey::Serial(1234),
             slot: SlotId::Signature,
             public_key: vec![1; 33],
@@ -834,6 +832,8 @@ mod tests {
             Err(Error::AuthenticationRequired(message)) => {
                 assert!(message.contains("explicit PIN prompt provider"));
                 assert!(message.contains("environment variables are not supported"));
+                assert!(!message.contains("piv-9c"));
+                assert!(!message.contains("yubikey:"));
             }
             other => panic!("unexpected interaction result: {other:?}"),
         }
@@ -842,7 +842,7 @@ mod tests {
     #[test]
     fn piv_touch_required_fails_without_bounded_prompt_flow() {
         let key = PivSigningKey {
-            label: "piv-9c".into(),
+            label: KeyLabel::new("piv-9c").unwrap(),
             serial: yubikey::Serial(1234),
             slot: SlotId::Signature,
             public_key: vec![1; 33],
@@ -854,6 +854,8 @@ mod tests {
             Err(Error::AuthenticationRequired(message)) => {
                 assert!(message.contains("requires touch"));
                 assert!(message.contains("bounded touch prompt flow"));
+                assert!(!message.contains("piv-9c"));
+                assert!(!message.contains("yubikey:"));
             }
             other => panic!("unexpected interaction result: {other:?}"),
         }
@@ -879,7 +881,7 @@ mod tests {
     #[test]
     fn piv_public_key_mismatch_fails_closed() {
         let key = PivSigningKey {
-            label: "piv-9c".into(),
+            label: KeyLabel::new("piv-9c").unwrap(),
             serial: yubikey::Serial(1234),
             slot: SlotId::Signature,
             public_key: vec![1; 33],
@@ -896,7 +898,7 @@ mod tests {
 
     fn test_piv_key(serial: u32, slot: SlotId) -> PivSigningKey {
         PivSigningKey {
-            label: piv_label(slot),
+            label: KeyLabel::new(piv_label(slot)).unwrap(),
             serial: yubikey::Serial(serial),
             slot,
             public_key: vec![1; 33],
@@ -950,11 +952,7 @@ mod tests {
 
     #[test]
     fn export_fails_for_non_extractable_hardware_backend() {
-        let selector = KeySelector::new("piv-9c", Some(Algorithm::P256)).unwrap();
         let store = YubiKeyKeystore;
-        assert!(matches!(
-            store.export(&selector),
-            Err(Error::NotExtractable(_))
-        ));
+        assert!(store.exporter().is_none());
     }
 }

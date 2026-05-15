@@ -42,9 +42,19 @@ pub use backend_yubikey::YubiKeyKeystore;
 pub use error::{Error, Result};
 pub use software::{SoftwareKeystore, SoftwareRawKeystore, SoftwareSigner};
 pub use types::{
-    Algorithm, BackendKind, Capabilities, GenerateOptions, ImportOptions, KeyAttrs, KeyMetadata,
-    KeyRef, KeySelector, SecretKey, validate_label,
+    Algorithm, BackendKind, Capabilities, GenerateOptions, ImportOptions, KeyAttrs, KeyId,
+    KeyLabel, KeyMetadata, KeyRef, KeyRefLabel, KeySelector, PublicKeyBytes, SecretKey,
+    validate_label,
 };
+
+/// Decode a software key record for fuzzing harnesses.
+///
+/// This intentionally exposes only the parser success/failure boundary, not
+/// the decoded record internals.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_decode_software_key_record(input: &[u8]) -> Result<()> {
+    encrypted_record::EncryptedKeyRecord::decode(input).map(|_| ())
+}
 
 #[allow(dead_code)]
 static KEYRING_DEFAULT_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -61,13 +71,13 @@ pub trait KeySigner: Send {
     /// Signing algorithm.
     fn algorithm(&self) -> Algorithm;
     /// Backend-local label.
-    fn label(&self) -> &str;
+    fn label(&self) -> &KeyLabel;
     /// Public metadata for this key.
     fn metadata(&self) -> Result<KeyMetadata>;
     /// Encoded public key bytes.
-    fn public_key(&self) -> Result<Vec<u8>>;
+    fn public_key(&self) -> Result<PublicKeyBytes>;
     /// Canonical key ID.
-    fn keyid(&self) -> Result<String>;
+    fn keyid(&self) -> Result<KeyId>;
     /// Sign a raw message according to this key's algorithm semantics.
     ///
     /// # Returns
@@ -84,17 +94,8 @@ pub trait KeySigner: Send {
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>>;
 }
 
-/// Keystore backend interface.
-pub trait Keystore: Send + Sync {
-    /// Runtime backend capabilities.
-    ///
-    /// # Returns
-    ///
-    /// Capabilities for this backend instance in the current environment. The
-    /// same backend kind may report different algorithms or feature support on
-    /// different machines, devices, sessions, or feature builds.
-    fn capabilities(&self) -> Capabilities;
-
+/// Backend operation that can generate keys.
+pub trait KeyGenerator: Send + Sync {
     /// Generate a new key.
     ///
     /// # Errors
@@ -104,12 +105,15 @@ pub trait Keystore: Send + Sync {
     /// overwrite is disabled, or persistence fails.
     fn generate(
         &self,
-        label: &str,
+        label: &KeyLabel,
         algorithm: Algorithm,
         attrs: KeyAttrs,
         options: GenerateOptions,
     ) -> Result<Box<dyn KeySigner>>;
+}
 
+/// Backend operation that can import extractable key material.
+pub trait KeyImporter: Send + Sync {
     /// Import secret key material.
     ///
     /// # Errors
@@ -119,12 +123,15 @@ pub trait Keystore: Send + Sync {
     /// already exists and overwrite is disabled, or persistence fails.
     fn import(
         &self,
-        label: &str,
+        label: &KeyLabel,
         secret: SecretKey,
         attrs: KeyAttrs,
         options: ImportOptions,
     ) -> Result<Box<dyn KeySigner>>;
+}
 
+/// Backend operation that can open keys for signing.
+pub trait KeyOpener: Send + Sync {
     /// Open a key for signing.
     ///
     /// # Errors
@@ -132,6 +139,10 @@ pub trait Keystore: Send + Sync {
     /// Returns an error if the selector is invalid, missing, ambiguous, or the
     /// backend cannot make the key available for signing.
     fn open(&self, selector: &KeySelector) -> Result<Box<dyn KeySigner>>;
+}
+
+/// Backend operation that can list keys.
+pub trait KeyLister: Send + Sync {
     /// List keys visible to the backend.
     ///
     /// # Errors
@@ -139,6 +150,10 @@ pub trait Keystore: Send + Sync {
     /// Returns an error if backend enumeration fails. Malformed entries owned by
     /// other applications may be skipped by backend-specific implementations.
     fn list(&self) -> Result<Vec<KeyMetadata>>;
+}
+
+/// Backend operation that can export secret key material.
+pub trait KeyExporter: Send + Sync {
     /// Export secret key material.
     ///
     /// # Errors
@@ -147,6 +162,10 @@ pub trait Keystore: Send + Sync {
     /// backends or keys that cannot export secret material. Also returns errors
     /// for invalid, missing, ambiguous, or unreadable selectors.
     fn export(&self, selector: &KeySelector) -> Result<SecretKey>;
+}
+
+/// Backend operation that can delete keys.
+pub trait KeyDeleter: Send + Sync {
     /// Delete the selected key.
     ///
     /// # Errors
@@ -154,6 +173,49 @@ pub trait Keystore: Send + Sync {
     /// Returns an error if deletion is unsupported, the selector is invalid,
     /// missing, ambiguous, or backend cleanup fails.
     fn delete(&self, selector: &KeySelector) -> Result<()>;
+}
+
+/// Keystore backend operation registry.
+pub trait Keystore: Send + Sync {
+    /// Backend capabilities.
+    ///
+    /// # Returns
+    ///
+    /// Capabilities for this backend instance. Operation booleans describe
+    /// structural backend support and must match the corresponding operation
+    /// accessor availability; operation calls still fail closed if the current
+    /// session, daemon, hardware token, or protector is unavailable.
+    fn capabilities(&self) -> Capabilities;
+
+    /// Key-generation operation, if supported by this backend.
+    fn generator(&self) -> Option<&dyn KeyGenerator> {
+        None
+    }
+
+    /// Key-import operation, if supported by this backend.
+    fn importer(&self) -> Option<&dyn KeyImporter> {
+        None
+    }
+
+    /// Key-open operation, if supported by this backend.
+    fn opener(&self) -> Option<&dyn KeyOpener> {
+        None
+    }
+
+    /// Key-list operation, if supported by this backend.
+    fn lister(&self) -> Option<&dyn KeyLister> {
+        None
+    }
+
+    /// Key-export operation, if supported by this backend.
+    fn exporter(&self) -> Option<&dyn KeyExporter> {
+        None
+    }
+
+    /// Key-delete operation, if supported by this backend.
+    fn deleter(&self) -> Option<&dyn KeyDeleter> {
+        None
+    }
 }
 
 #[cfg(test)]

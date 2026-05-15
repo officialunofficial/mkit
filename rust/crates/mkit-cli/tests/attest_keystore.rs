@@ -319,7 +319,7 @@ fn attest_with_keystore_missing_key_fails_without_generation() {
     fs::create_dir_all(&cfg_dir).expect("config dir");
     fs::write(
         cfg_dir.join("config"),
-        "attest.signer = keystore\nkey.ed25519_ref = software-raw:missing\n",
+        "attest.signer = keystore\nkey.ed25519_ref = software-raw:secret-attest-label\n",
     )
     .expect("user config");
 
@@ -329,6 +329,11 @@ fn attest_with_keystore_missing_key_fails_without_generation() {
     assert!(
         stderr.contains("mkit key generate"),
         "stderr should point to key generation: {stderr}"
+    );
+    assert!(
+        !stderr.contains("secret-attest-label")
+            && !stderr.contains("software-raw:secret-attest-label"),
+        "stderr must not leak keystore label or key ref: {stderr}"
     );
     assert!(
         !td.path().join("data/mkit/keys").exists(),

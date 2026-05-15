@@ -22,6 +22,7 @@ backend-macos-keychain = ["macos-keychain"]
 backend-systemd-creds = ["systemd-creds"]
 backend-windows-credential = ["windows-credential"]
 backend-yubikey = ["dep:card-backend-pcsc", "dep:der", "dep:openpgp-card", "dep:yubikey", "p256/pkcs8"]
+fuzzing = []
 linux-secret-service = [
   "dep:keyring-core",
   "dep:zbus-secret-service-keyring-store",
