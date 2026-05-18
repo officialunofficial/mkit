@@ -78,14 +78,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload HTML report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-html
           path: ${{ runner.temp }}/coverage-html
           retention-days: 14
 
       - name: Upload lcov
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: ${{ runner.temp }}/coverage.lcov
