@@ -13,7 +13,7 @@ jobs:
     name: Spell check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Run typos
         uses: crate-ci/typos@v1.46.1
         with:
