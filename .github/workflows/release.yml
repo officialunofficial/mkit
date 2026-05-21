@@ -497,11 +497,8 @@ jobs:
         working-directory: rust/crates/mkit-wasm/pkg
         env:
           NODE_AUTH_TOKEN: ${{ secrets.MKIT_NPM_TOKEN }}
-        # `--provenance` requires the source GitHub repo to be public;
-        # this repo is currently `internal`, so npm rejects the
-        # provenance bundle with E422. Re-add `--provenance` once the
-        # repo is flipped to public (see docs/RELEASE.md TODO).
-        run: npm publish --access public
+        # provenance: requires public repo, GitHub OIDC, and the release workflow's id-token: write permission — all present
+        run: npm publish --access public --provenance
 
       - name: Stage WASM bundle for GitHub Release
         shell: bash
