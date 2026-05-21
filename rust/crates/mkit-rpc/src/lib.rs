@@ -50,7 +50,9 @@ pub const MAX_FRAME_BYTES: u32 = 1024 * 1024;
 pub const PROTOCOL_VERSION: i32 = crate::mkit::rpc::v1::ProtocolVersion::PROTOCOL_VERSION_1 as i32;
 
 mod framing;
+mod helpers;
 pub use framing::{FrameError, read_frame, write_frame};
+pub use helpers::{signer_error_frame, ssh_error_frame};
 
 #[cfg(test)]
 mod tests {

@@ -16,7 +16,7 @@ use mkit_rpc::mkit::rpc::v1::ssh::{
     ReadRefResponse, RefExpectation, SshFrame, UploadPackResponse, list_refs_response::RefEntry,
     ssh_frame,
 };
-use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode, ProtocolVersion};
+use mkit_rpc::mkit::rpc::v1::{ErrorCode, ProtocolVersion};
 use mkit_rpc::{FrameError, read_frame, write_frame};
 use mkit_transport_file::FileTransport;
 
@@ -100,7 +100,7 @@ pub(crate) fn serve_loop(tx: &FileTransport, r: &mut impl Read, w: &mut impl Wri
             Ok(f) => f,
             Err(FrameError::LengthTruncated) => return exit::OK,
             Err(_) => {
-                let _ = send_error(
+                let _ = emit_error(
                     w,
                     ErrorCode::ERROR_CODE_INVALID_REQUEST,
                     "frame parse error",
@@ -111,7 +111,7 @@ pub(crate) fn serve_loop(tx: &FileTransport, r: &mut impl Read, w: &mut impl Wri
 
         frame_count = frame_count.saturating_add(1);
         if frame_count > MAX_FRAMES_PER_CONN {
-            let _ = send_error(
+            let _ = emit_error(
                 w,
                 ErrorCode::ERROR_CODE_INVALID_REQUEST,
                 "per-connection frame budget exceeded",
@@ -125,7 +125,7 @@ pub(crate) fn serve_loop(tx: &FileTransport, r: &mut impl Read, w: &mut impl Wri
         // close enough proxy for budget tracking.
         byte_count = byte_count.saturating_add(frame_byte_estimate(&frame));
         if byte_count > MAX_BYTES_PER_CONN {
-            let _ = send_error(
+            let _ = emit_error(
                 w,
                 ErrorCode::ERROR_CODE_INVALID_REQUEST,
                 "per-connection byte budget exceeded",
@@ -150,7 +150,7 @@ fn handshake(r: &mut impl Read, w: &mut impl Write) -> bool {
         Err(_) => return false,
     };
     let Some(ssh_frame::Body::Hello(hello)) = frame.body else {
-        let _ = send_error(
+        let _ = emit_error(
             w,
             ErrorCode::ERROR_CODE_INVALID_REQUEST,
             "first frame must be Hello",
@@ -159,7 +159,7 @@ fn handshake(r: &mut impl Read, w: &mut impl Write) -> bool {
     };
     let proto = hello.proto.as_ref().map_or(0, buffa::EnumValue::to_i32);
     if proto != ProtocolVersion::PROTOCOL_VERSION_1 as i32 {
-        let _ = send_error(
+        let _ = emit_error(
             w,
             ErrorCode::ERROR_CODE_INVALID_REQUEST,
             &format!("unsupported proto_version {proto}"),
@@ -316,12 +316,9 @@ fn dispatch(
             }
             let mut new_h = [0u8; 32];
             new_h.copy_from_slice(&new_id);
-            // CAS intent derives entirely from the `expectation` enum.
-            // `expected_id` is only consulted for MATCH and MUST be a
-            // 32-byte digest in that case. mkit is alpha (pre-1.0) —
-            // clients and servers move together; there is no back-compat
-            // surface for the pre-`expectation` wire shape (see
-            // SPEC-TRANSPORT §4.2.1).
+            // CAS intent = `expectation`. `expected_id` is only
+            // consulted for MATCH and MUST be a 32-byte digest. See
+            // SPEC-TRANSPORT §4.2.1.
             let expectation = req
                 .expectation
                 .as_ref()
@@ -411,19 +408,8 @@ fn send(w: &mut impl Write, body: ssh_frame::Body) -> std::io::Result<()> {
 }
 
 fn emit_error(w: &mut impl Write, code: ErrorCode, message: &str) -> std::io::Result<()> {
-    send(
-        w,
-        ssh_frame::Body::Error(Box::new(RpcError {
-            code: Some(code.into()),
-            message: Some(message.into()),
-            details: Some(Vec::new()),
-            ..Default::default()
-        })),
-    )
-}
-
-fn send_error(w: &mut impl Write, code: ErrorCode, message: &str) -> std::io::Result<()> {
-    emit_error(w, code, message)
+    write_frame(w, &mkit_rpc::ssh_error_frame(code, message))
+        .map_err(|_| std::io::Error::other("frame write"))
 }
 
 fn pack_key_from_bytes(bytes: Option<&Vec<u8>>) -> std::io::Result<PackKey> {

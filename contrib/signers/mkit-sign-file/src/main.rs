@@ -43,10 +43,8 @@ use mkit_core::sign::KeyPair;
 use mkit_rpc::mkit::rpc::v1::signer::{
     Capabilities, HelloResponse, SignResponse, SignerFrame, signer_frame,
 };
-use mkit_rpc::mkit::rpc::v1::{
-    Algorithm as RpcAlgorithm, Error as RpcError, ErrorCode, KeyForm, ProtocolVersion,
-};
-use mkit_rpc::{FrameError, read_frame, write_frame};
+use mkit_rpc::mkit::rpc::v1::{Algorithm as RpcAlgorithm, ErrorCode, KeyForm, ProtocolVersion};
+use mkit_rpc::{FrameError, read_frame, signer_error_frame, write_frame};
 use zeroize::Zeroizing;
 
 /// Top-level entry. Two error layers:
@@ -217,14 +215,16 @@ fn handle_sign(
             None => map_rpc_algorithm(req.algorithm.as_ref().map_or(0, buffa::EnumValue::to_i32)),
         }) {
         Ok(a) => a,
-        Err(e) => return error_frame(ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM, e.to_string()),
+        Err(e) => {
+            return signer_error_frame(ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM, e.to_string());
+        }
     };
 
     // The reference signer only accepts KEY_FORM_RAW_BYTES — the key
     // is a 32-byte file on disk. Reject anything else loudly.
     let key_form = req.key_form.as_ref().map_or(0, buffa::EnumValue::to_i32);
     if key_form != KeyForm::KEY_FORM_RAW_BYTES as i32 && key_form != 0 {
-        return error_frame(
+        return signer_error_frame(
             ErrorCode::ERROR_CODE_UNSUPPORTED_KEY_FORM,
             "mkit-sign-file only supports KEY_FORM_RAW_BYTES".to_owned(),
         );
@@ -240,7 +240,7 @@ fn handle_sign(
             let sig = match <RepoKeySigner as mkit_attest::Signer>::sign(&mut s, &pae) {
                 Ok(b) => b,
                 Err(e) => {
-                    return error_frame(
+                    return signer_error_frame(
                         ErrorCode::ERROR_CODE_INTERNAL,
                         format!("ed25519 sign: {e}"),
                     );
@@ -257,7 +257,7 @@ fn handle_sign(
             let s = match Secp256k1Signer::new(**secret) {
                 Ok(s) => s,
                 Err(e) => {
-                    return error_frame(
+                    return signer_error_frame(
                         ErrorCode::ERROR_CODE_INTERNAL,
                         format!("secp256k1 init: {e}"),
                     );
@@ -267,7 +267,7 @@ fn handle_sign(
             let sig = match s.sign_dsse(&pae) {
                 Ok(b) => b,
                 Err(e) => {
-                    return error_frame(
+                    return signer_error_frame(
                         ErrorCode::ERROR_CODE_INTERNAL,
                         format!("secp256k1 sign: {e}"),
                     );
@@ -284,14 +284,20 @@ fn handle_sign(
             let s = match P256Signer::new(**secret) {
                 Ok(s) => s,
                 Err(e) => {
-                    return error_frame(ErrorCode::ERROR_CODE_INTERNAL, format!("p256 init: {e}"));
+                    return signer_error_frame(
+                        ErrorCode::ERROR_CODE_INTERNAL,
+                        format!("p256 init: {e}"),
+                    );
                 }
             };
             let pubkey = s.public_key_sec1();
             let sig = match s.sign_dsse(&pae) {
                 Ok(b) => b,
                 Err(e) => {
-                    return error_frame(ErrorCode::ERROR_CODE_INTERNAL, format!("p256 sign: {e}"));
+                    return signer_error_frame(
+                        ErrorCode::ERROR_CODE_INTERNAL,
+                        format!("p256 sign: {e}"),
+                    );
                 }
             };
             (s.keyid(), sig, pubkey, RpcAlgorithm::ALGORITHM_P256)
@@ -311,20 +317,8 @@ fn handle_sign(
 }
 
 fn write_error<W: Write>(w: &mut W, code: ErrorCode, message: String) -> Result<(), SignerError> {
-    let frame = error_frame(code, message);
+    let frame = signer_error_frame(code, message);
     write_frame(w, &frame).map_err(|e| SignerError::Io(format!("write error frame: {e}")))
-}
-
-fn error_frame(code: ErrorCode, message: String) -> SignerFrame {
-    SignerFrame {
-        body: Some(signer_frame::Body::Error(Box::new(
-            RpcError::default()
-                .with_code(code)
-                .with_message(message)
-                .with_details(Vec::new()),
-        ))),
-        ..Default::default()
-    }
 }
 
 fn oneof_name(b: &signer_frame::Body) -> &'static str {

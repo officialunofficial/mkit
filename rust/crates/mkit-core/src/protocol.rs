@@ -196,6 +196,12 @@ pub const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 /// Upper bound on any individual sleep.
 pub const BACKOFF_CAP: Duration = Duration::from_secs(300);
 
+/// Per-pack body size ceiling enforced by every transport that ingests
+/// pack bytes (HTTP `Content-Length`, S3 `GetObject`, SSH
+/// `DownloadPackHeader.total_bytes`). 4 GiB matches the pack-format
+/// addressable range; servers advertising more are treated as hostile.
+pub const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Exponential-backoff iterator used by all transports.
 ///
 /// Yields `[1s, 2s, 4s, 8s, 16s]` (5 attempts) for the default ladder,

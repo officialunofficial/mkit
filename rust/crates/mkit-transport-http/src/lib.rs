@@ -67,10 +67,9 @@ pub const TOKEN_ENV: &str = "MKIT_API_TOKEN";
 #[allow(clippy::duration_suboptimal_units)]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Upper bound on a single `download_pack` response body, matching the
-/// S3 transport's `PACK_BODY_LIMIT`. Prevents an unbounded allocation if
-/// a misbehaving server streams an oversize response.
-pub const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+// Pack-body limit is the canonical constant `mkit_core::protocol::PACK_BODY_LIMIT`;
+// re-exported here so existing call sites (`http::PACK_BODY_LIMIT`) keep working.
+pub use mkit_core::protocol::PACK_BODY_LIMIT;
 
 /// Validate that `url` uses either `https://` (always allowed) or plain
 /// `http://` pointing at a loopback host (`127.0.0.1`, `::1`, or

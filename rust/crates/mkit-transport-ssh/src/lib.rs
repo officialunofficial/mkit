@@ -59,14 +59,7 @@ pub use crate::url::{MKIT_SSH_PREFIX, SshTarget, parse_mkit_ssh_url, validate_ss
 /// Maximum combined ref / prefix name length accepted over the wire.
 const MAX_REF_NAME: usize = 4096;
 
-/// Upper bound on a single `download_pack` response body. Mirrors
-/// `mkit_transport_http::PACK_BODY_LIMIT` to give the SSH transport the
-/// same defence against a server (or man-in-the-middle that controls
-/// the spawned `ssh(1)`'s stdout) advertising an oversize pack and
-/// driving the client into an unbounded allocation.
-//
-// keep in sync with mkit-transport-http::PACK_BODY_LIMIT
-const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+use mkit_core::protocol::PACK_BODY_LIMIT;
 
 /// Client identification string sent in the `Hello` frame. Inherited
 /// from the workspace version, so a release bump propagates
@@ -331,17 +324,9 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
 
-        // CAS intent is carried by the `expectation` enum.
-        // `expected_id` is meaningful only for MATCH (the 32-byte
-        // digest); for ANY / MISSING it is empty. See SPEC-TRANSPORT
-        // §4.2.1. mkit is alpha (pre-1.0) and clients/servers move
-        // together; there is no back-compat for the pre-`expectation`
-        // wire shape.
-        let (expected_id, expectation) = match condition {
-            RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
-            RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
-            RefWriteCondition::Match(h) => (h.to_vec(), RefExpectation::REF_EXPECTATION_MATCH),
-        };
+        // CAS intent = `expectation`. `expected_id` is meaningful only
+        // for MATCH. See SPEC-TRANSPORT §4.2.1.
+        let (expected_id, expectation) = cond_to_wire(condition);
 
         let req = SshFrame {
             body: Some(ssh_frame::Body::UpdateRef(Box::new(
@@ -452,6 +437,19 @@ impl Transport for SshTransport {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Encode a [`RefWriteCondition`] into the two on-wire fields the
+/// `UpdateRef` message carries: the (often empty) `expected_id` bytes
+/// and the `RefExpectation` enum. Production and test paths share this
+/// so the test can't drift from the production encoding. See
+/// SPEC-TRANSPORT §4.2.1.
+fn cond_to_wire(c: RefWriteCondition) -> (Vec<u8>, RefExpectation) {
+    match c {
+        RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
+        RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
+        RefWriteCondition::Match(h) => (h.to_vec(), RefExpectation::REF_EXPECTATION_MATCH),
+    }
+}
 
 /// Read the response side of `download_pack` from a generic reader.
 ///
@@ -789,14 +787,7 @@ mod tests {
     /// — if that encoding changes, this helper must change too.
     fn encode_update_ref(condition: RefWriteCondition) -> UpdateRef {
         let new_hash = [0xABu8; 32];
-        let target_hash = [0xCDu8; 32];
-        let (expected_id, expectation) = match condition {
-            RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
-            RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
-            RefWriteCondition::Match(_) => {
-                (target_hash.to_vec(), RefExpectation::REF_EXPECTATION_MATCH)
-            }
-        };
+        let (expected_id, expectation) = cond_to_wire(condition);
         UpdateRef {
             name: Some("refs/heads/main".into()),
             expected_id: Some(expected_id),

@@ -11,10 +11,8 @@ use std::io::{Read, Write};
 use mkit_rpc::mkit::rpc::v1::signer::{
     Capabilities, HelloResponse, SignResponse, SignerFrame, signer_frame,
 };
-use mkit_rpc::mkit::rpc::v1::{
-    Algorithm as RpcAlgorithm, Error as RpcError, ErrorCode, KeyForm, ProtocolVersion,
-};
-use mkit_rpc::{FrameError, read_frame, write_frame};
+use mkit_rpc::mkit::rpc::v1::{Algorithm as RpcAlgorithm, ErrorCode, KeyForm, ProtocolVersion};
+use mkit_rpc::{FrameError, read_frame, signer_error_frame, write_frame};
 
 use crate::SignerError;
 
@@ -148,7 +146,7 @@ fn handle_sign<T: TpmSigner>(
 ) -> SignerFrame {
     let algorithm = req.algorithm.as_ref().map_or(0, buffa::EnumValue::to_i32);
     if algorithm != RpcAlgorithm::ALGORITHM_P256 as i32 {
-        return error_frame(
+        return signer_error_frame(
             ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM,
             "mkit-sign-tpm signs ALGORITHM_P256 only".to_owned(),
         );
@@ -156,7 +154,7 @@ fn handle_sign<T: TpmSigner>(
 
     let key_form = req.key_form.as_ref().map_or(0, buffa::EnumValue::to_i32);
     if key_form != KeyForm::KEY_FORM_OPAQUE_HANDLE as i32 && key_form != 0 {
-        return error_frame(
+        return signer_error_frame(
             ErrorCode::ERROR_CODE_UNSUPPORTED_KEY_FORM,
             "mkit-sign-tpm only supports KEY_FORM_OPAQUE_HANDLE (the persistent handle)".to_owned(),
         );
@@ -170,7 +168,7 @@ fn handle_sign<T: TpmSigner>(
         Some(b) if b.len() == 4 => Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
         Some(b) if b.is_empty() => None,
         Some(_) => {
-            return error_frame(
+            return signer_error_frame(
                 ErrorCode::ERROR_CODE_INVALID_REQUEST,
                 "key_ref must be a 4-byte big-endian u32 persistent handle".to_owned(),
             );
@@ -180,7 +178,7 @@ fn handle_sign<T: TpmSigner>(
     .or(handle_default);
 
     let Some(handle) = handle else {
-        return error_frame(
+        return signer_error_frame(
             ErrorCode::ERROR_CODE_INVALID_REQUEST,
             "no persistent handle — pass --handle on argv or set SignRequest.key_ref to the 4-byte BE handle".to_owned(),
         );
@@ -190,19 +188,19 @@ fn handle_sign<T: TpmSigner>(
     let (pubkey, sig) = match signer.sign(handle, &pae) {
         Ok(out) => out,
         Err(SignerError::Tpm(msg)) => {
-            return error_frame(ErrorCode::ERROR_CODE_HARDWARE_ERROR, msg);
+            return signer_error_frame(ErrorCode::ERROR_CODE_HARDWARE_ERROR, msg);
         }
-        Err(e) => return error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
+        Err(e) => return signer_error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
     };
 
     if pubkey.len() != 33 {
-        return error_frame(
+        return signer_error_frame(
             ErrorCode::ERROR_CODE_INTERNAL,
             format!("signer returned pubkey {} bytes, want 33", pubkey.len()),
         );
     }
     if sig.len() != 64 {
-        return error_frame(
+        return signer_error_frame(
             ErrorCode::ERROR_CODE_INTERNAL,
             format!("signer returned signature {} bytes, want 64", sig.len()),
         );
@@ -223,20 +221,8 @@ fn handle_sign<T: TpmSigner>(
 }
 
 fn write_error<W: Write>(w: &mut W, code: ErrorCode, message: String) -> Result<(), SignerError> {
-    let frame = error_frame(code, message);
+    let frame = signer_error_frame(code, message);
     write_frame(w, &frame).map_err(|e| SignerError::Io(format!("write error frame: {e}")))
-}
-
-fn error_frame(code: ErrorCode, message: String) -> SignerFrame {
-    SignerFrame {
-        body: Some(signer_frame::Body::Error(Box::new(
-            RpcError::default()
-                .with_code(code)
-                .with_message(message)
-                .with_details(Vec::new()),
-        ))),
-        ..Default::default()
-    }
 }
 
 #[cfg(test)]

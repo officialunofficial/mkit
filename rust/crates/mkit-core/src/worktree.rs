@@ -20,7 +20,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::chunker::FastCdc;
+use crate::chunker::{ChunkIterator, FastCdc};
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
 use crate::object::{ChunkedBlob, EntryMode, Object, Tree, TreeEntry};
@@ -342,24 +342,21 @@ pub fn hash_file(store: &ObjectStore, path: &Path) -> WorktreeResult<Hash> {
         return Ok(store.write(&bytes)?);
     }
 
-    // Large file: split with FastCDC v1, store each chunk as a Blob,
-    // build a ChunkedBlob manifest, store the manifest as a single
-    // object, and return the manifest's hash. Per-manifest chunk count
-    // is bounded by serialize::MAX_CHUNKS (1_000_000); MAX_FILE_BYTES
-    // (1 GiB) ÷ FastCDC MIN_SIZE (16 KiB) = ~65k, well under the cap.
+    // Large file: split with FastCDC v1 via the public ChunkIterator,
+    // store each chunk as a Blob, and assemble a ChunkedBlob manifest.
+    // Per-manifest chunk count is bounded by serialize::MAX_CHUNKS
+    // (1_000_000); MAX_FILE_BYTES (1 GiB) ÷ FastCDC MIN_SIZE (16 KiB)
+    // = ~65k, well under the cap.
     let total_size = data.len() as u64;
-    let cdc = FastCdc::v1();
-    let mut chunks: Vec<Hash> = Vec::new();
-    let mut offset: usize = 0;
-    while offset < data.len() {
-        let remaining = &data[offset..];
-        let len = cdc.cut(remaining);
-        let chunk = remaining[..len].to_vec();
-        let chunk_blob = Object::Blob(crate::object::Blob { data: chunk });
-        let chunk_bytes = serialize::serialize(&chunk_blob)?;
-        chunks.push(store.write(&chunk_bytes)?);
-        offset += len;
-    }
+    let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), &data)
+        .map(|b| {
+            let chunk_blob = Object::Blob(crate::object::Blob {
+                data: data[b.offset..b.offset + b.length].to_vec(),
+            });
+            let chunk_bytes = serialize::serialize(&chunk_blob)?;
+            Ok::<_, WorktreeError>(store.write(&chunk_bytes)?)
+        })
+        .collect::<Result<_, _>>()?;
 
     let manifest = Object::ChunkedBlob(ChunkedBlob {
         total_size,
