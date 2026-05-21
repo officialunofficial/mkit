@@ -20,6 +20,16 @@ workspace = true
 
 [dependencies]
 blake3 = "1"
+# `commonware-storage` provides the Merkle Mountain Range (MMR) used by
+# the `history` module behind the `history-mmr` feature. Pinned to the
+# 2026.x calendar-versioned line. ALPHA stability — the wire format is
+# part of mkit's v0.2 break window (see issue #157 + SPEC-HISTORY-PROOF).
+# `default-features = false` keeps the dep tree minimal: with std off
+# we get the `mem`-backed MMR (no tracing, no prometheus, no rayon, no
+# runtime executor). The journaled-on-disk MMR lands in Phase 2 and
+# will flip `std` on then.
+commonware-storage = { version = "=2026.4.0", default-features = false, optional = true }
+commonware-cryptography = { version = "=2026.4.0", default-features = false, optional = true }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 getrandom = "0.4"
 # `subtle` is a constant-time-equality primitive used by the Ed25519
@@ -38,3 +48,10 @@ libc = "0.2"
 
 [dev-dependencies]
 hex = "0.4"
+
+[features]
+# Phase 1 of issue #157 — append-only MMR over the commit chain for
+# light-client inclusion proofs. Default-off because the dep tree pulls
+# in `commonware-storage` + `commonware-cryptography`. Promote toward
+# default once the wire format stabilises (v0.3 per issue #157).
+history-mmr = ["dep:commonware-storage", "dep:commonware-cryptography"]
