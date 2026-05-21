@@ -240,14 +240,16 @@ fn handle_sign<D: CtapDevice>(
         body: Some(signer_frame::Body::SignResponse(Box::new(SignResponse {
             signature: Some(sig_compact),
             public_key: Some(public_key),
+            // Pass through the caller's `Option` unchanged (incl. None);
+            // `with_algorithm` would force an unwrap and lose that.
             algorithm: req.algorithm,
             key_id: Some(key_id),
             certificate_chain: Vec::new(),
-            webauthn: buffa::MessageField::some(WebAuthnData {
-                authenticator_data: Some(assertion.auth_data),
-                client_data_json: Some(client_data_json),
-                ..Default::default()
-            }),
+            webauthn: buffa::MessageField::some(
+                WebAuthnData::default()
+                    .with_authenticator_data(assertion.auth_data)
+                    .with_client_data_json(client_data_json),
+            ),
             ..Default::default()
         }))),
         ..Default::default()
@@ -261,12 +263,12 @@ fn write_error<W: Write>(w: &mut W, code: ErrorCode, message: String) -> Result<
 
 fn error_frame(code: ErrorCode, message: String) -> SignerFrame {
     SignerFrame {
-        body: Some(signer_frame::Body::Error(Box::new(RpcError {
-            code: Some(code.into()),
-            message: Some(message),
-            details: Some(Vec::new()),
-            ..Default::default()
-        }))),
+        body: Some(signer_frame::Body::Error(Box::new(
+            RpcError::default()
+                .with_code(code)
+                .with_message(message)
+                .with_details(Vec::new()),
+        ))),
         ..Default::default()
     }
 }
@@ -382,11 +384,11 @@ mod tests {
     #[test]
     fn hello_response_advertises_p256_and_opaque_handle() {
         let frames = vec![SignerFrame {
-            body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-                want_capabilities: Some(true),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::Hello(Box::new(
+                Hello::default()
+                    .with_protocol(ProtocolVersion::PROTOCOL_VERSION_1)
+                    .with_want_capabilities(true),
+            ))),
             ..Default::default()
         }];
         let mut input = Cursor::new(encode(&frames));
@@ -422,20 +424,19 @@ mod tests {
     fn sign_request_emits_webauthn_extension() {
         let frames = vec![
             SignerFrame {
-                body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                    protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-                    ..Default::default()
-                }))),
+                body: Some(signer_frame::Body::Hello(Box::new(
+                    Hello::default().with_protocol(ProtocolVersion::PROTOCOL_VERSION_1),
+                ))),
                 ..Default::default()
             },
             SignerFrame {
-                body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                    algorithm: Some(RpcAlgorithm::ALGORITHM_P256.into()),
-                    key_form: Some(KeyForm::KEY_FORM_OPAQUE_HANDLE.into()),
-                    key_ref: Some(b"mock-cred".to_vec()),
-                    payload: Some(b"DSSEv1 28 application/vnd.in-toto+json 2 {}".to_vec()),
-                    ..Default::default()
-                }))),
+                body: Some(signer_frame::Body::SignRequest(Box::new(
+                    SignRequest::default()
+                        .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+                        .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+                        .with_key_ref(b"mock-cred".to_vec())
+                        .with_payload(b"DSSEv1 28 application/vnd.in-toto+json 2 {}".to_vec()),
+                ))),
                 ..Default::default()
             },
         ];
@@ -466,21 +467,20 @@ mod tests {
     fn unsupported_algorithm_returns_error_frame() {
         let frames = vec![
             SignerFrame {
-                body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                    protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-                    ..Default::default()
-                }))),
+                body: Some(signer_frame::Body::Hello(Box::new(
+                    Hello::default().with_protocol(ProtocolVersion::PROTOCOL_VERSION_1),
+                ))),
                 ..Default::default()
             },
             SignerFrame {
-                body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
+                body: Some(signer_frame::Body::SignRequest(Box::new(
                     // CTAP signer doesn't support raw Ed25519.
-                    algorithm: Some(RpcAlgorithm::ALGORITHM_ED25519.into()),
-                    key_form: Some(KeyForm::KEY_FORM_OPAQUE_HANDLE.into()),
-                    key_ref: Some(b"any".to_vec()),
-                    payload: Some(b"x".to_vec()),
-                    ..Default::default()
-                }))),
+                    SignRequest::default()
+                        .with_algorithm(RpcAlgorithm::ALGORITHM_ED25519)
+                        .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+                        .with_key_ref(b"any".to_vec())
+                        .with_payload(b"x".to_vec()),
+                ))),
                 ..Default::default()
             },
         ];
@@ -503,13 +503,13 @@ mod tests {
     #[test]
     fn missing_credential_id_returns_invalid_request() {
         let frames = vec![SignerFrame {
-            body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                algorithm: Some(RpcAlgorithm::ALGORITHM_P256.into()),
-                key_form: Some(KeyForm::KEY_FORM_OPAQUE_HANDLE.into()),
-                key_ref: Some(Vec::new()), // explicitly empty
-                payload: Some(b"x".to_vec()),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::SignRequest(Box::new(
+                SignRequest::default()
+                    .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+                    .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+                    .with_key_ref(Vec::new()) // explicitly empty
+                    .with_payload(b"x".to_vec()),
+            ))),
             ..Default::default()
         }];
         let mut input = Cursor::new(encode(&frames));

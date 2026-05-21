@@ -103,12 +103,12 @@ mod tests {
 
     fn err_frame(code: ErrorCode, msg: &str) -> SignerFrame {
         SignerFrame {
-            body: Some(signer_frame::Body::Error(Box::new(Error {
-                code: Some(code.into()),
-                message: Some(msg.into()),
-                details: Some(Vec::new()),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::Error(Box::new(
+                Error::default()
+                    .with_code(code)
+                    .with_message(msg)
+                    .with_details(Vec::new()),
+            ))),
             ..Default::default()
         }
     }

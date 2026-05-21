@@ -49,8 +49,8 @@ use mkit_core::protocol::{PackKey, Transport, TransportError, TransportResult};
 use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
 use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
 use mkit_rpc::mkit::rpc::v1::ssh::{
-    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame, UpdateRef, UploadPack,
-    list_refs_response::RefEntry, ssh_frame,
+    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, RefExpectation, SshFrame,
+    UpdateRef, UploadPack, list_refs_response::RefEntry, ssh_frame,
 };
 use mkit_rpc::{FrameError, read_frame, write_frame};
 
@@ -212,11 +212,11 @@ impl Transport for SshTransport {
 
         // Header frame announces the pack id + advertised total length.
         let header = SshFrame {
-            body: Some(ssh_frame::Body::UploadPack(Box::new(UploadPack {
-                pack_id: Some(key.as_bytes().to_vec()),
-                total_bytes: Some(bytes.len() as u64),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::UploadPack(Box::new(
+                UploadPack::default()
+                    .with_pack_id(key.as_bytes().to_vec())
+                    .with_total_bytes(bytes.len() as u64),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &header).map_err(|_| TransportError::ConnectionFailed)?;
@@ -230,13 +230,13 @@ impl Transport for SshTransport {
         while iter_pos < total {
             let end = core::cmp::min(iter_pos + CHUNK_DATA_MAX, total);
             let chunk = SshFrame {
-                body: Some(ssh_frame::Body::PackChunk(Box::new(PackChunk {
-                    pack_id: Some(key.as_bytes().to_vec()),
-                    offset: Some(offset),
-                    data: Some(bytes[iter_pos..end].to_vec()),
-                    last: Some(end == total),
-                    ..Default::default()
-                }))),
+                body: Some(ssh_frame::Body::PackChunk(Box::new(
+                    PackChunk::default()
+                        .with_pack_id(key.as_bytes().to_vec())
+                        .with_offset(offset)
+                        .with_data(bytes[iter_pos..end].to_vec())
+                        .with_last(end == total),
+                ))),
                 ..Default::default()
             };
             write_frame(&mut io.stdin, &chunk).map_err(|_| TransportError::ConnectionFailed)?;
@@ -247,13 +247,13 @@ impl Transport for SshTransport {
             // Empty packs still need a final last=true chunk so the
             // server knows the upload is complete.
             let chunk = SshFrame {
-                body: Some(ssh_frame::Body::PackChunk(Box::new(PackChunk {
-                    pack_id: Some(key.as_bytes().to_vec()),
-                    offset: Some(0),
-                    data: Some(Vec::new()),
-                    last: Some(true),
-                    ..Default::default()
-                }))),
+                body: Some(ssh_frame::Body::PackChunk(Box::new(
+                    PackChunk::default()
+                        .with_pack_id(key.as_bytes().to_vec())
+                        .with_offset(0)
+                        .with_data(Vec::new())
+                        .with_last(true),
+                ))),
                 ..Default::default()
             };
             write_frame(&mut io.stdin, &chunk).map_err(|_| TransportError::ConnectionFailed)?;
@@ -277,10 +277,9 @@ impl Transport for SshTransport {
         }
 
         let req = SshFrame {
-            body: Some(ssh_frame::Body::DownloadPack(Box::new(DownloadPack {
-                pack_id: Some(key.as_bytes().to_vec()),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::DownloadPack(Box::new(
+                DownloadPack::default().with_pack_id(key.as_bytes().to_vec()),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
@@ -297,10 +296,9 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
         let req = SshFrame {
-            body: Some(ssh_frame::Body::PackExists(Box::new(PackExists {
-                pack_id: Some(key.as_bytes().to_vec()),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::PackExists(Box::new(
+                PackExists::default().with_pack_id(key.as_bytes().to_vec()),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
@@ -333,26 +331,33 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
 
-        // CAS encoding:
-        //   .Any            → expected_id empty (server clobbers)
-        //   .Missing        → expected_id empty + we rely on the
-        //                     server interpreting .Any-with-existing
-        //                     as a conflict; current ssh.proto folds
-        //                     these together. Tighten when the server
-        //                     spec catches up.
-        //   .Match(h)       → expected_id = h
-        let expected_id = match condition {
-            RefWriteCondition::Any | RefWriteCondition::Missing => Vec::new(),
-            RefWriteCondition::Match(h) => h.to_vec(),
+        // CAS encoding. The on-wire shape uses both the legacy
+        // `expected_id` field (for back-compat with v0.1.0 servers
+        // that key off its length) and the explicit `expectation`
+        // enum added in ssh.proto v0.1.1. A v0.1.0 server that
+        // ignores `expectation` still services Any and Match
+        // correctly via the `expected_id` length heuristic; only
+        // the new Missing variant needs the new field.
+        //
+        //   .Any            → expected_id empty, expectation = ANY
+        //   .Missing        → expected_id empty, expectation = MISSING
+        //                     (distinct from Any: an existing ref MUST
+        //                     fail the CAS).
+        //   .Match(h)       → expected_id = h,    expectation = MATCH
+        let (expected_id, expectation) = match condition {
+            RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
+            RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
+            RefWriteCondition::Match(h) => (h.to_vec(), RefExpectation::REF_EXPECTATION_MATCH),
         };
 
         let req = SshFrame {
-            body: Some(ssh_frame::Body::UpdateRef(Box::new(UpdateRef {
-                name: Some(name.into()),
-                expected_id: Some(expected_id),
-                new_id: Some(hash.to_vec()),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::UpdateRef(Box::new(
+                UpdateRef::default()
+                    .with_name(name)
+                    .with_expected_id(expected_id)
+                    .with_new_id(hash.to_vec())
+                    .with_expectation(expectation),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
@@ -392,10 +397,9 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
         let req = SshFrame {
-            body: Some(ssh_frame::Body::ReadRef(Box::new(ReadRef {
-                name: Some(name.into()),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::ReadRef(Box::new(
+                ReadRef::default().with_name(name),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
@@ -433,10 +437,9 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
         let req = SshFrame {
-            body: Some(ssh_frame::Body::ListRefs(Box::new(ListRefs {
-                prefix: Some(prefix.into()),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::ListRefs(Box::new(
+                ListRefs::default().with_prefix(prefix),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
@@ -595,11 +598,11 @@ fn ref_entry_to_ref(e: RefEntry) -> TransportResult<Ref> {
 
 fn perform_client_handshake(io: &mut ChildIo) -> Result<(), SshInitError> {
     let hello = SshFrame {
-        body: Some(ssh_frame::Body::Hello(Box::new(Hello {
-            proto: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-            client_id: Some(CLIENT_ID.into()),
-            ..Default::default()
-        }))),
+        body: Some(ssh_frame::Body::Hello(Box::new(
+            Hello::default()
+                .with_proto(ProtocolVersion::PROTOCOL_VERSION_1)
+                .with_client_id(CLIENT_ID),
+        ))),
         ..Default::default()
     };
     write_frame(&mut io.stdin, &hello)
@@ -700,11 +703,9 @@ mod tests {
 
     #[test]
     fn ref_entry_to_ref_validates_oid_length() {
-        let bad = RefEntry {
-            name: Some("refs/heads/main".into()),
-            object_id: Some(vec![0u8; 16]),
-            ..Default::default()
-        };
+        let bad = RefEntry::default()
+            .with_name("refs/heads/main")
+            .with_object_id(vec![0u8; 16]);
         assert!(matches!(
             ref_entry_to_ref(bad),
             Err(TransportError::InvalidResponse)
@@ -714,11 +715,9 @@ mod tests {
     #[test]
     fn ref_entry_to_ref_validates_name() {
         // Empty ref names are rejected by `validate_ref_name`.
-        let bad = RefEntry {
-            name: Some(String::new()),
-            object_id: Some(vec![0u8; 32]),
-            ..Default::default()
-        };
+        let bad = RefEntry::default()
+            .with_name(String::new())
+            .with_object_id(vec![0u8; 32]);
         assert!(matches!(
             ref_entry_to_ref(bad),
             Err(TransportError::InvalidRef(_))
@@ -734,10 +733,7 @@ mod tests {
         let mut buf = Vec::new();
         let header = SshFrame {
             body: Some(ssh_frame::Body::DownloadPackHeader(Box::new(
-                DownloadPackHeader {
-                    total_bytes: Some(u64::MAX),
-                    ..Default::default()
-                },
+                DownloadPackHeader::default().with_total_bytes(u64::MAX),
             ))),
             ..Default::default()
         };
@@ -772,22 +768,19 @@ mod tests {
         let mut buf = Vec::new();
         let header = SshFrame {
             body: Some(ssh_frame::Body::DownloadPackHeader(Box::new(
-                DownloadPackHeader {
-                    total_bytes: Some(4),
-                    ..Default::default()
-                },
+                DownloadPackHeader::default().with_total_bytes(4),
             ))),
             ..Default::default()
         };
         write_frame(&mut buf, &header).expect("write header frame");
         let chunk = SshFrame {
-            body: Some(ssh_frame::Body::PackChunk(Box::new(PackChunk {
-                pack_id: Some(vec![0u8; 32]),
-                offset: Some(0),
-                data: Some(vec![1, 2, 3, 4]),
-                last: Some(true),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::PackChunk(Box::new(
+                PackChunk::default()
+                    .with_pack_id(vec![0u8; 32])
+                    .with_offset(0)
+                    .with_data(vec![1, 2, 3, 4])
+                    .with_last(true),
+            ))),
             ..Default::default()
         };
         write_frame(&mut buf, &chunk).expect("write chunk frame");
@@ -795,6 +788,122 @@ mod tests {
         let mut cursor = std::io::Cursor::new(buf);
         let out = read_download_pack_body(&mut cursor).expect("honest small pack should succeed");
         assert_eq!(out, vec![1, 2, 3, 4]);
+    }
+
+    /// Build the `UpdateRef` body the client would send for a given
+    /// `RefWriteCondition`, by walking the same encoding path as the
+    /// transport impl. Kept in lockstep with `Transport::update_ref`
+    /// — if that encoding changes, this helper must change too.
+    fn encode_update_ref(condition: RefWriteCondition) -> UpdateRef {
+        let new_hash = [0xABu8; 32];
+        let target_hash = [0xCDu8; 32];
+        let (expected_id, expectation) = match condition {
+            RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
+            RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
+            RefWriteCondition::Match(_) => {
+                (target_hash.to_vec(), RefExpectation::REF_EXPECTATION_MATCH)
+            }
+        };
+        UpdateRef {
+            name: Some("refs/heads/main".into()),
+            expected_id: Some(expected_id),
+            new_id: Some(new_hash.to_vec()),
+            expectation: Some(expectation.into()),
+            ..Default::default()
+        }
+    }
+
+    /// The three CAS variants MUST produce three distinct on-wire
+    /// encodings. Before the `expectation` field landed, `Any` and
+    /// `Missing` collapsed to the same bytes — this regression test
+    /// pins that they no longer do.
+    #[test]
+    fn update_ref_cas_variants_produce_distinct_wire_bytes() {
+        use buffa::Message;
+
+        let any = encode_update_ref(RefWriteCondition::Any).encode_to_vec();
+        let missing = encode_update_ref(RefWriteCondition::Missing).encode_to_vec();
+        let m = encode_update_ref(RefWriteCondition::Match([0xCDu8; 32])).encode_to_vec();
+
+        assert_ne!(any, missing, "Any and Missing must differ on the wire");
+        assert_ne!(any, m, "Any and Match must differ on the wire");
+        assert_ne!(missing, m, "Missing and Match must differ on the wire");
+
+        // Hex-print the three encodings so a failing CI run leaves
+        // the wire bytes in the log for forensic review.
+        eprintln!("UpdateRef[Any]     = {}", hex_encode(&any));
+        eprintln!("UpdateRef[Missing] = {}", hex_encode(&missing));
+        eprintln!("UpdateRef[Match]   = {}", hex_encode(&m));
+    }
+
+    /// After encoding and decoding round-trips, each variant
+    /// surfaces its declared `expectation` value. Catches a future
+    /// codegen change that drops the field by mistake.
+    #[test]
+    fn update_ref_expectation_round_trips() {
+        use buffa::Message;
+
+        for (cond, want) in [
+            (RefWriteCondition::Any, RefExpectation::REF_EXPECTATION_ANY),
+            (
+                RefWriteCondition::Missing,
+                RefExpectation::REF_EXPECTATION_MISSING,
+            ),
+            (
+                RefWriteCondition::Match([0xCDu8; 32]),
+                RefExpectation::REF_EXPECTATION_MATCH,
+            ),
+        ] {
+            let bytes = encode_update_ref(cond).encode_to_vec();
+            let decoded = UpdateRef::decode(&mut &bytes[..]).expect("decode UpdateRef");
+            let got = decoded
+                .expectation
+                .as_ref()
+                .map(buffa::EnumValue::to_i32)
+                .unwrap_or_default();
+            assert_eq!(
+                got, want as i32,
+                "expectation field did not round-trip for {cond:?}"
+            );
+        }
+    }
+
+    /// A v0.1.0 client that never set the new field (`expectation =
+    /// UNSPECIFIED`) MUST be parseable by a v0.1.1 build. Belt-and-
+    /// braces test for the additive-field migration story.
+    #[test]
+    fn update_ref_legacy_unspecified_decodes_cleanly() {
+        use buffa::Message;
+
+        let legacy = UpdateRef {
+            name: Some("refs/heads/main".into()),
+            expected_id: Some(Vec::new()),
+            new_id: Some(vec![0xABu8; 32]),
+            // `expectation` left as None → encodes as zero-default
+            // (UNSPECIFIED) on the wire.
+            ..Default::default()
+        };
+        let bytes = legacy.encode_to_vec();
+        let decoded = UpdateRef::decode(&mut &bytes[..]).expect("decode legacy UpdateRef");
+        let got = decoded
+            .expectation
+            .as_ref()
+            .map(buffa::EnumValue::to_i32)
+            .unwrap_or_default();
+        assert_eq!(
+            got,
+            RefExpectation::REF_EXPECTATION_UNSPECIFIED as i32,
+            "legacy UpdateRef must decode as UNSPECIFIED"
+        );
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+        }
+        s
     }
 
     #[test]
