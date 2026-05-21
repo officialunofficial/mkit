@@ -74,8 +74,13 @@ free-form for human-readable diagnostics.
 
 ## 3. Wire framing
 
-Length-prefixed buffa `SignerFrame` messages on stdin (mkit → signer)
-and stdout (signer → mkit). Per [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing).
+Length-prefixed protobuf-encoded `SignerFrame` messages on stdin
+(mkit → signer) and stdout (signer → mkit). The Rust reference
+signers use the `buffa` runtime; any protobuf 3 / edition 2023
+toolchain emitting the same wire bytes is conformant. See
+[SPEC-RPC §1](SPEC-RPC.md#1-wire-framing) for the 4-byte LE length
+prefix, endianness, and the `MAX_FRAME_BYTES = 1 MiB` cap (frames
+exceeding the cap are a connection-fatal error).
 
 Schema: [`rust/crates/mkit-rpc/proto/signer.proto`](../rust/crates/mkit-rpc/proto/signer.proto).
 
@@ -131,18 +136,18 @@ advertised capabilities before sending a `SignRequest`.
 |---|---|
 | `algorithm` | The algorithm to sign under. MUST be one the signer advertised. |
 | `key_form` | The form the key is provided in. |
-| `key_ref` | Identifies which key. Empty for raw-bytes signers (key path is configured at signer startup). Non-empty for opaque-handle signers (CTAP credentialId, TPM 4-byte BE persistent handle). |
+| `key_ref` | Identifies which key. Empty for raw-bytes signers (key path is configured at signer startup). For opaque-handle signers (CTAP credentialId, TPM 4-byte BE persistent handle): the wire value is preferred, but signers MAY fall back to a per-process default supplied on argv (`mkit-sign-tpm --handle 0x81010001`, `mkit-sign-ctap --credential-id <b64url>`) when `key_ref` is empty. An ill-formed `key_ref` (wrong length, undecodable) MUST be rejected with `ERROR_CODE_INVALID_REQUEST` rather than silently falling through to the argv default. |
 | `payload` | Raw bytes to sign. For DSSE, this is the PAE per [SPEC-ATTESTATIONS](SPEC-ATTESTATIONS.md) §4. |
-| `context` | Optional context. CTAP signers receive the WebAuthn `clientDataJSON` here. |
+| `context` | Optional context. CTAP signers ignore the wire field today and build the WebAuthn `clientDataJSON` themselves from the payload and configured origin; this field is reserved for a future signer that needs caller-supplied context. |
 
 | `SignResponse` field | Meaning |
 |---|---|
 | `signature` | Compact signature. 64 bytes for Ed25519 / k256 / p256. |
-| `public_key` | Public key bytes. 32 for Ed25519, 33 SEC1-compressed (or 65 uncompressed) for k256/p256. REQUIRED. |
+| `public_key` | Public key bytes. 32 for Ed25519, 33 SEC1-compressed (or 65 uncompressed) for k256/p256. REQUIRED, except that the CTAP signer MAY return an empty `public_key` if it has no record of the credential in its local store (the verifier then has to recover the key from a separate trust root). |
 | `algorithm` | Echoes the algorithm used. |
-| `key_id` | DSSE `signatures[].keyid`. Convention: `blake3:<hex>` (Ed25519), `secp256k1:<hex>`, `p256:<hex>`, `webauthn:<base64url-cred-id>`. |
-| `certificate_chain[]` | DER-encoded X.509 chain when applicable. Empty for raw-key signers. |
-| `webauthn` | `{ authenticator_data, client_data_json }` for CTAP signers. |
+| `key_id` | DSSE `signatures[].keyid`. Conventions used by the reference signers: `blake3:<hex>` for Ed25519 (BLAKE3-256 over the raw 32-byte public key), `secp256k1:<hex(compressed-pubkey)>`, `p256:<hex(compressed-pubkey)>`, `webauthn:<base64url-cred-id>`. Other schemes are tolerated; mkit treats `key_id` as opaque. |
+| `certificate_chain[]` | DER-encoded X.509 chain when applicable. Empty for raw-key signers and for both reference hardware signers today (no signer ships an attestation chain in v1). |
+| `webauthn` | `{ authenticator_data, client_data_json }` for CTAP signers — required when `algorithm = ALGORITHM_ED25519_WEBAUTHN` or when the signer is FIDO2-flavoured P-256, so the verifier can reconstruct `authenticator_data ‖ SHA-256(client_data_json)` and check `signature` against that. Unset for non-WebAuthn signers. |
 
 ---
 
@@ -159,6 +164,15 @@ Error code semantics: see [SPEC-RPC §3.3](SPEC-RPC.md#33-errorcode).
 ---
 
 ## 8. Reference signers
+
+Three reference signers ship in `contrib/signers/` and exercise the
+full v1 wire surface. All three loop on stdin, processing successive
+`Hello` / `SignRequest` pairs until the caller closes the stream; a
+clean EOF on the length prefix is treated as a graceful shutdown.
+
+The Swift `mkit-sign-se` (Apple Secure Enclave) in the same
+directory still speaks the pre-v1 line-JSON protocol and is NOT a v1
+conformant signer today. It is being ported separately.
 
 ### 8.1 mkit-sign-file
 
