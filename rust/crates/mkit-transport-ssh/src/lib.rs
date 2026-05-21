@@ -212,11 +212,11 @@ impl Transport for SshTransport {
 
         // Header frame announces the pack id + advertised total length.
         let header = SshFrame {
-            body: Some(ssh_frame::Body::UploadPack(Box::new(UploadPack {
-                pack_id: Some(key.as_bytes().to_vec()),
-                total_bytes: Some(bytes.len() as u64),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::UploadPack(Box::new(
+                UploadPack::default()
+                    .with_pack_id(key.as_bytes().to_vec())
+                    .with_total_bytes(bytes.len() as u64),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &header).map_err(|_| TransportError::ConnectionFailed)?;
@@ -230,13 +230,13 @@ impl Transport for SshTransport {
         while iter_pos < total {
             let end = core::cmp::min(iter_pos + CHUNK_DATA_MAX, total);
             let chunk = SshFrame {
-                body: Some(ssh_frame::Body::PackChunk(Box::new(PackChunk {
-                    pack_id: Some(key.as_bytes().to_vec()),
-                    offset: Some(offset),
-                    data: Some(bytes[iter_pos..end].to_vec()),
-                    last: Some(end == total),
-                    ..Default::default()
-                }))),
+                body: Some(ssh_frame::Body::PackChunk(Box::new(
+                    PackChunk::default()
+                        .with_pack_id(key.as_bytes().to_vec())
+                        .with_offset(offset)
+                        .with_data(bytes[iter_pos..end].to_vec())
+                        .with_last(end == total),
+                ))),
                 ..Default::default()
             };
             write_frame(&mut io.stdin, &chunk).map_err(|_| TransportError::ConnectionFailed)?;
@@ -247,13 +247,13 @@ impl Transport for SshTransport {
             // Empty packs still need a final last=true chunk so the
             // server knows the upload is complete.
             let chunk = SshFrame {
-                body: Some(ssh_frame::Body::PackChunk(Box::new(PackChunk {
-                    pack_id: Some(key.as_bytes().to_vec()),
-                    offset: Some(0),
-                    data: Some(Vec::new()),
-                    last: Some(true),
-                    ..Default::default()
-                }))),
+                body: Some(ssh_frame::Body::PackChunk(Box::new(
+                    PackChunk::default()
+                        .with_pack_id(key.as_bytes().to_vec())
+                        .with_offset(0)
+                        .with_data(Vec::new())
+                        .with_last(true),
+                ))),
                 ..Default::default()
             };
             write_frame(&mut io.stdin, &chunk).map_err(|_| TransportError::ConnectionFailed)?;
@@ -277,10 +277,9 @@ impl Transport for SshTransport {
         }
 
         let req = SshFrame {
-            body: Some(ssh_frame::Body::DownloadPack(Box::new(DownloadPack {
-                pack_id: Some(key.as_bytes().to_vec()),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::DownloadPack(Box::new(
+                DownloadPack::default().with_pack_id(key.as_bytes().to_vec()),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
@@ -297,10 +296,9 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
         let req = SshFrame {
-            body: Some(ssh_frame::Body::PackExists(Box::new(PackExists {
-                pack_id: Some(key.as_bytes().to_vec()),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::PackExists(Box::new(
+                PackExists::default().with_pack_id(key.as_bytes().to_vec()),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
@@ -347,12 +345,12 @@ impl Transport for SshTransport {
         };
 
         let req = SshFrame {
-            body: Some(ssh_frame::Body::UpdateRef(Box::new(UpdateRef {
-                name: Some(name.into()),
-                expected_id: Some(expected_id),
-                new_id: Some(hash.to_vec()),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::UpdateRef(Box::new(
+                UpdateRef::default()
+                    .with_name(name)
+                    .with_expected_id(expected_id)
+                    .with_new_id(hash.to_vec()),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
@@ -392,10 +390,9 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
         let req = SshFrame {
-            body: Some(ssh_frame::Body::ReadRef(Box::new(ReadRef {
-                name: Some(name.into()),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::ReadRef(Box::new(
+                ReadRef::default().with_name(name),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
@@ -433,10 +430,9 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
         let req = SshFrame {
-            body: Some(ssh_frame::Body::ListRefs(Box::new(ListRefs {
-                prefix: Some(prefix.into()),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::ListRefs(Box::new(
+                ListRefs::default().with_prefix(prefix),
+            ))),
             ..Default::default()
         };
         write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
@@ -595,11 +591,11 @@ fn ref_entry_to_ref(e: RefEntry) -> TransportResult<Ref> {
 
 fn perform_client_handshake(io: &mut ChildIo) -> Result<(), SshInitError> {
     let hello = SshFrame {
-        body: Some(ssh_frame::Body::Hello(Box::new(Hello {
-            proto: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-            client_id: Some(CLIENT_ID.into()),
-            ..Default::default()
-        }))),
+        body: Some(ssh_frame::Body::Hello(Box::new(
+            Hello::default()
+                .with_proto(ProtocolVersion::PROTOCOL_VERSION_1)
+                .with_client_id(CLIENT_ID),
+        ))),
         ..Default::default()
     };
     write_frame(&mut io.stdin, &hello)
@@ -700,11 +696,9 @@ mod tests {
 
     #[test]
     fn ref_entry_to_ref_validates_oid_length() {
-        let bad = RefEntry {
-            name: Some("refs/heads/main".into()),
-            object_id: Some(vec![0u8; 16]),
-            ..Default::default()
-        };
+        let bad = RefEntry::default()
+            .with_name("refs/heads/main")
+            .with_object_id(vec![0u8; 16]);
         assert!(matches!(
             ref_entry_to_ref(bad),
             Err(TransportError::InvalidResponse)
@@ -714,11 +708,9 @@ mod tests {
     #[test]
     fn ref_entry_to_ref_validates_name() {
         // Empty ref names are rejected by `validate_ref_name`.
-        let bad = RefEntry {
-            name: Some(String::new()),
-            object_id: Some(vec![0u8; 32]),
-            ..Default::default()
-        };
+        let bad = RefEntry::default()
+            .with_name(String::new())
+            .with_object_id(vec![0u8; 32]);
         assert!(matches!(
             ref_entry_to_ref(bad),
             Err(TransportError::InvalidRef(_))
@@ -734,10 +726,7 @@ mod tests {
         let mut buf = Vec::new();
         let header = SshFrame {
             body: Some(ssh_frame::Body::DownloadPackHeader(Box::new(
-                DownloadPackHeader {
-                    total_bytes: Some(u64::MAX),
-                    ..Default::default()
-                },
+                DownloadPackHeader::default().with_total_bytes(u64::MAX),
             ))),
             ..Default::default()
         };
@@ -772,22 +761,19 @@ mod tests {
         let mut buf = Vec::new();
         let header = SshFrame {
             body: Some(ssh_frame::Body::DownloadPackHeader(Box::new(
-                DownloadPackHeader {
-                    total_bytes: Some(4),
-                    ..Default::default()
-                },
+                DownloadPackHeader::default().with_total_bytes(4),
             ))),
             ..Default::default()
         };
         write_frame(&mut buf, &header).expect("write header frame");
         let chunk = SshFrame {
-            body: Some(ssh_frame::Body::PackChunk(Box::new(PackChunk {
-                pack_id: Some(vec![0u8; 32]),
-                offset: Some(0),
-                data: Some(vec![1, 2, 3, 4]),
-                last: Some(true),
-                ..Default::default()
-            }))),
+            body: Some(ssh_frame::Body::PackChunk(Box::new(
+                PackChunk::default()
+                    .with_pack_id(vec![0u8; 32])
+                    .with_offset(0)
+                    .with_data(vec![1, 2, 3, 4])
+                    .with_last(true),
+            ))),
             ..Default::default()
         };
         write_frame(&mut buf, &chunk).expect("write chunk frame");
