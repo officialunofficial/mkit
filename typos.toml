@@ -46,6 +46,10 @@ INSER = "INSER"
 # Storage). Used in web/scripts/patch-worker-config.mjs.
 als = "als"
 
+# Vendor name; "HashiCorp" appears in SPEC-KEYSTORE.md disambiguation
+# ("not HashiCorp Vault"). Default dictionary wants Hashi → Hash.
+Hashi = "Hashi"
+
 # Hyphenated prefix: "mis-resolve" / "mis-designed" appear in docs
 # and scripts; typos parses them as standalone "mis".
 mis = "mis"
