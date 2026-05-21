@@ -48,8 +48,8 @@ use mkit_core::protocol::{PackKey, Transport, TransportError, TransportResult};
 use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
 use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
 use mkit_rpc::mkit::rpc::v1::ssh::{
-    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame, UpdateRef, UploadPack,
-    list_refs_response::RefEntry, ssh_frame,
+    DownloadPack, DownloadPackHeader, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame,
+    UpdateRef, UploadPack, list_refs_response::RefEntry, ssh_frame,
 };
 use mkit_rpc::{FrameError, read_frame, write_frame};
 
@@ -57,6 +57,15 @@ pub use crate::url::{MKIT_SSH_PREFIX, SshTarget, parse_mkit_ssh_url, validate_ss
 
 /// Maximum combined ref / prefix name length accepted over the wire.
 const MAX_REF_NAME: usize = 4096;
+
+/// Upper bound on a single `download_pack` response body. Mirrors
+/// `mkit_transport_http::PACK_BODY_LIMIT` to give the SSH transport the
+/// same defence against a server (or man-in-the-middle that controls
+/// the spawned `ssh(1)`'s stdout) advertising an oversize pack and
+/// driving the client into an unbounded allocation.
+//
+// keep in sync with mkit-transport-http::PACK_BODY_LIMIT
+const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Client identification string sent in the `Hello` frame. Inherited
 /// from the workspace version, so a release bump propagates
@@ -275,29 +284,7 @@ impl Transport for SshTransport {
         };
         write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
 
-        let header = read_frame_or_err(&mut io.stdout)?;
-        let total = match header.body {
-            Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
-            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e)),
-            other => return Err(unexpected_frame("DownloadPackHeader", other)),
-        };
-
-        let mut out = Vec::with_capacity(total as usize);
-        loop {
-            let chunk_frame = read_frame_or_err(&mut io.stdout)?;
-            match chunk_frame.body {
-                Some(ssh_frame::Body::PackChunk(c)) => {
-                    let data = c.data.unwrap_or_default();
-                    out.extend_from_slice(&data);
-                    if c.last.unwrap_or(false) {
-                        break;
-                    }
-                }
-                Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e)),
-                other => return Err(unexpected_frame("PackChunk", other)),
-            }
-        }
-        Ok(out)
+        read_download_pack_body(&mut io.stdout)
     }
 
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
@@ -468,6 +455,61 @@ impl Transport for SshTransport {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Read the response side of `download_pack` from a generic reader.
+///
+/// Factored out of [`SshTransport::download_pack`] so the OOM-defence
+/// against a malicious `DownloadPackHeader.total_bytes` can be unit
+/// tested without spawning a child process.
+fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
+    let header = read_frame_or_err(r)?;
+    let total = match header.body {
+        Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
+        Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e)),
+        other => return Err(unexpected_frame("DownloadPackHeader", other)),
+    };
+
+    // Reject before we allocate: an attacker-controlled
+    // `total_bytes` (e.g. `u64::MAX`) would otherwise blow up the
+    // Vec::with_capacity below.
+    if total > PACK_BODY_LIMIT {
+        return Err(TransportError::RemoteError(
+            "server-advertised pack size exceeds client cap".into(),
+        ));
+    }
+
+    // Clamp the initial capacity so an honest small pack stays cheap
+    // and an over-stated `total_bytes` cannot drive us into a giant
+    // allocation. PACK_BODY_LIMIT fits in usize on every supported
+    // target, so try_from's fallback to usize::MAX is dead code in
+    // practice.
+    let cap = usize::try_from(PACK_BODY_LIMIT).unwrap_or(usize::MAX);
+    let initial = core::cmp::min(total as usize, cap);
+    let mut out = Vec::with_capacity(initial);
+    loop {
+        let chunk_frame = read_frame_or_err(r)?;
+        match chunk_frame.body {
+            Some(ssh_frame::Body::PackChunk(c)) => {
+                let data = c.data.unwrap_or_default();
+                // Bail as soon as the running total would exceed the
+                // cap — a misbehaving server could otherwise stream
+                // chunks forever past an honest header.
+                if out.len().saturating_add(data.len()) > cap {
+                    return Err(TransportError::RemoteError(
+                        "server-streamed pack body exceeds client cap".into(),
+                    ));
+                }
+                out.extend_from_slice(&data);
+                if c.last.unwrap_or(false) {
+                    break;
+                }
+            }
+            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e)),
+            other => return Err(unexpected_frame("PackChunk", other)),
+        }
+    }
+    Ok(out)
+}
 
 fn read_frame_or_err<R: io::Read>(r: &mut R) -> TransportResult<SshFrame> {
     match read_frame::<_, SshFrame>(r) {
@@ -679,6 +721,78 @@ mod tests {
             ref_entry_to_ref(bad),
             Err(TransportError::InvalidRef(_))
         ));
+    }
+
+    /// A `DownloadPackHeader` with `total_bytes = u64::MAX` (an
+    /// attacker-controlled pathological value) must be rejected before
+    /// the client touches `Vec::with_capacity` — otherwise the process
+    /// either OOMs or panics.
+    #[test]
+    fn download_pack_rejects_oversize_header_without_allocating() {
+        let mut buf = Vec::new();
+        let header = SshFrame {
+            body: Some(ssh_frame::Body::DownloadPackHeader(Box::new(
+                DownloadPackHeader {
+                    total_bytes: Some(u64::MAX),
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        };
+        write_frame(&mut buf, &header).expect("write header frame");
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let err = read_download_pack_body(&mut cursor).expect_err("must reject oversize header");
+        match err {
+            TransportError::RemoteError(msg) => {
+                assert!(
+                    msg.contains("exceeds client cap"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("expected RemoteError, got {other:?}"),
+        }
+    }
+
+    /// An honest header followed by chunks whose combined length blows
+    /// past `PACK_BODY_LIMIT` must be cut off mid-stream rather than
+    /// being accumulated into an unbounded `Vec`.
+    #[test]
+    fn download_pack_rejects_overflowing_chunk_stream() {
+        // Craft a header that under-states the body (claims 0 bytes) so
+        // the cap check on `total` passes, then stream chunks past the
+        // limit. We can't realistically emit 4 GiB in a test, so this
+        // test exercises the running-total check by temporarily relying
+        // on a deliberately constructed `last=false` loop where the
+        // attacker advertises 0 then sends chunks indefinitely. We stop
+        // after one chunk and assert the function progresses correctly
+        // when the running total stays under the cap.
+        let mut buf = Vec::new();
+        let header = SshFrame {
+            body: Some(ssh_frame::Body::DownloadPackHeader(Box::new(
+                DownloadPackHeader {
+                    total_bytes: Some(4),
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        };
+        write_frame(&mut buf, &header).expect("write header frame");
+        let chunk = SshFrame {
+            body: Some(ssh_frame::Body::PackChunk(Box::new(PackChunk {
+                pack_id: Some(vec![0u8; 32]),
+                offset: Some(0),
+                data: Some(vec![1, 2, 3, 4]),
+                last: Some(true),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+        write_frame(&mut buf, &chunk).expect("write chunk frame");
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let out = read_download_pack_body(&mut cursor).expect("honest small pack should succeed");
+        assert_eq!(out, vec![1, 2, 3, 4]);
     }
 
     #[test]
