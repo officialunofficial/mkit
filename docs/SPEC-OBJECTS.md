@@ -106,8 +106,22 @@ Normative:
 - `name_len` ∈ `[1, 255]`. Zero-length name is illegal.
 - Forbidden bytes **anywhere** in name: `0x00`, `/` (`0x2F`), `\` (`0x5C`).
 - Forbidden exact names: `"."`, `".."`.
+- Forbidden trailing characters: `.` (`0x2E`) and SPACE (`0x20`). Windows
+  silently strips these, which would alias one entry onto another of the
+  same bare name. Applies to the last byte of `name` only — interior
+  dots and spaces are accepted.
+- Forbidden case-insensitively: the bare names `.mkit` and `.git`. ASCII
+  case-folding only; names containing non-ASCII bytes are not folded
+  (they remain constrained by every other rule above). This is a
+  Git CVE-2021-21300 family defence.
+- Forbidden Windows reserved device names, case-insensitively, with or
+  without an extension: `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
+  `LPT1`-`LPT9`. Comparison is against the stem (the bytes before the
+  first `.`). `COM0` and `LPT0` are NOT reserved.
 - No further Unicode validation performed. Implementations SHOULD reject
   input that is not well-formed UTF-8 but MAY pass it through byte-for-byte.
+
+Violations of any rule above → `InvalidEntryName`.
 
 Additionally, entries within a single tree MUST be sorted
 lexicographically (byte-wise ascending) by `name` with no duplicates.
