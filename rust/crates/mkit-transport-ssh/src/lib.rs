@@ -49,8 +49,8 @@ use mkit_core::protocol::{PackKey, Transport, TransportError, TransportResult};
 use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
 use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
 use mkit_rpc::mkit::rpc::v1::ssh::{
-    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame, UpdateRef, UploadPack,
-    list_refs_response::RefEntry, ssh_frame,
+    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, RefExpectation, SshFrame,
+    UpdateRef, UploadPack, list_refs_response::RefEntry, ssh_frame,
 };
 use mkit_rpc::{FrameError, read_frame, write_frame};
 
@@ -331,17 +331,23 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
 
-        // CAS encoding:
-        //   .Any            → expected_id empty (server clobbers)
-        //   .Missing        → expected_id empty + we rely on the
-        //                     server interpreting .Any-with-existing
-        //                     as a conflict; current ssh.proto folds
-        //                     these together. Tighten when the server
-        //                     spec catches up.
-        //   .Match(h)       → expected_id = h
-        let expected_id = match condition {
-            RefWriteCondition::Any | RefWriteCondition::Missing => Vec::new(),
-            RefWriteCondition::Match(h) => h.to_vec(),
+        // CAS encoding. The on-wire shape uses both the legacy
+        // `expected_id` field (for back-compat with v0.1.0 servers
+        // that key off its length) and the explicit `expectation`
+        // enum added in ssh.proto v0.1.1. A v0.1.0 server that
+        // ignores `expectation` still services Any and Match
+        // correctly via the `expected_id` length heuristic; only
+        // the new Missing variant needs the new field.
+        //
+        //   .Any            → expected_id empty, expectation = ANY
+        //   .Missing        → expected_id empty, expectation = MISSING
+        //                     (distinct from Any: an existing ref MUST
+        //                     fail the CAS).
+        //   .Match(h)       → expected_id = h,    expectation = MATCH
+        let (expected_id, expectation) = match condition {
+            RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
+            RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
+            RefWriteCondition::Match(h) => (h.to_vec(), RefExpectation::REF_EXPECTATION_MATCH),
         };
 
         let req = SshFrame {
@@ -349,7 +355,8 @@ impl Transport for SshTransport {
                 UpdateRef::default()
                     .with_name(name)
                     .with_expected_id(expected_id)
-                    .with_new_id(hash.to_vec()),
+                    .with_new_id(hash.to_vec())
+                    .with_expectation(expectation),
             ))),
             ..Default::default()
         };
@@ -781,6 +788,122 @@ mod tests {
         let mut cursor = std::io::Cursor::new(buf);
         let out = read_download_pack_body(&mut cursor).expect("honest small pack should succeed");
         assert_eq!(out, vec![1, 2, 3, 4]);
+    }
+
+    /// Build the `UpdateRef` body the client would send for a given
+    /// `RefWriteCondition`, by walking the same encoding path as the
+    /// transport impl. Kept in lockstep with `Transport::update_ref`
+    /// — if that encoding changes, this helper must change too.
+    fn encode_update_ref(condition: RefWriteCondition) -> UpdateRef {
+        let new_hash = [0xABu8; 32];
+        let target_hash = [0xCDu8; 32];
+        let (expected_id, expectation) = match condition {
+            RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
+            RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
+            RefWriteCondition::Match(_) => {
+                (target_hash.to_vec(), RefExpectation::REF_EXPECTATION_MATCH)
+            }
+        };
+        UpdateRef {
+            name: Some("refs/heads/main".into()),
+            expected_id: Some(expected_id),
+            new_id: Some(new_hash.to_vec()),
+            expectation: Some(expectation.into()),
+            ..Default::default()
+        }
+    }
+
+    /// The three CAS variants MUST produce three distinct on-wire
+    /// encodings. Before the `expectation` field landed, `Any` and
+    /// `Missing` collapsed to the same bytes — this regression test
+    /// pins that they no longer do.
+    #[test]
+    fn update_ref_cas_variants_produce_distinct_wire_bytes() {
+        use buffa::Message;
+
+        let any = encode_update_ref(RefWriteCondition::Any).encode_to_vec();
+        let missing = encode_update_ref(RefWriteCondition::Missing).encode_to_vec();
+        let m = encode_update_ref(RefWriteCondition::Match([0xCDu8; 32])).encode_to_vec();
+
+        assert_ne!(any, missing, "Any and Missing must differ on the wire");
+        assert_ne!(any, m, "Any and Match must differ on the wire");
+        assert_ne!(missing, m, "Missing and Match must differ on the wire");
+
+        // Hex-print the three encodings so a failing CI run leaves
+        // the wire bytes in the log for forensic review.
+        eprintln!("UpdateRef[Any]     = {}", hex_encode(&any));
+        eprintln!("UpdateRef[Missing] = {}", hex_encode(&missing));
+        eprintln!("UpdateRef[Match]   = {}", hex_encode(&m));
+    }
+
+    /// After encoding and decoding round-trips, each variant
+    /// surfaces its declared `expectation` value. Catches a future
+    /// codegen change that drops the field by mistake.
+    #[test]
+    fn update_ref_expectation_round_trips() {
+        use buffa::Message;
+
+        for (cond, want) in [
+            (RefWriteCondition::Any, RefExpectation::REF_EXPECTATION_ANY),
+            (
+                RefWriteCondition::Missing,
+                RefExpectation::REF_EXPECTATION_MISSING,
+            ),
+            (
+                RefWriteCondition::Match([0xCDu8; 32]),
+                RefExpectation::REF_EXPECTATION_MATCH,
+            ),
+        ] {
+            let bytes = encode_update_ref(cond).encode_to_vec();
+            let decoded = UpdateRef::decode(&mut &bytes[..]).expect("decode UpdateRef");
+            let got = decoded
+                .expectation
+                .as_ref()
+                .map(buffa::EnumValue::to_i32)
+                .unwrap_or_default();
+            assert_eq!(
+                got, want as i32,
+                "expectation field did not round-trip for {cond:?}"
+            );
+        }
+    }
+
+    /// A v0.1.0 client that never set the new field (`expectation =
+    /// UNSPECIFIED`) MUST be parseable by a v0.1.1 build. Belt-and-
+    /// braces test for the additive-field migration story.
+    #[test]
+    fn update_ref_legacy_unspecified_decodes_cleanly() {
+        use buffa::Message;
+
+        let legacy = UpdateRef {
+            name: Some("refs/heads/main".into()),
+            expected_id: Some(Vec::new()),
+            new_id: Some(vec![0xABu8; 32]),
+            // `expectation` left as None → encodes as zero-default
+            // (UNSPECIFIED) on the wire.
+            ..Default::default()
+        };
+        let bytes = legacy.encode_to_vec();
+        let decoded = UpdateRef::decode(&mut &bytes[..]).expect("decode legacy UpdateRef");
+        let got = decoded
+            .expectation
+            .as_ref()
+            .map(buffa::EnumValue::to_i32)
+            .unwrap_or_default();
+        assert_eq!(
+            got,
+            RefExpectation::REF_EXPECTATION_UNSPECIFIED as i32,
+            "legacy UpdateRef must decode as UNSPECIFIED"
+        );
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+        }
+        s
     }
 
     #[test]
