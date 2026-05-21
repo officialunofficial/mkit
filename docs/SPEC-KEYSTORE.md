@@ -1,10 +1,25 @@
-# mkit Keystore Vault Specification
+---
+spec: SPEC-KEYSTORE
+version: 1
+status: draft
+audience: implementers and reviewers of the `mkit-keystore` crate, its CLI surface (`mkit key`), and the keystore-backed commit and attestation signers
+---
 
-Status: normative keystore implementation specification.
+# SPEC-KEYSTORE — mkit signing-key keystore
+
+Status: **Normative** for `mkit-keystore` behavior. This file does not
+specify wire formats; it specifies the keystore vault abstraction inside
+mkit. ("Vault" throughout this document refers to the mkit keystore vault
+abstraction, **not** HashiCorp Vault or any external secret manager.)
 
 Authority: this file is the source of truth for `mkit-keystore` behavior.
 If code, docs, or tests disagree with this file, update the implementation or
 amend this specification in the same change.
+
+Scope reminder: this spec covers the crate `rust/crates/mkit-keystore`, the
+`mkit key` CLI command, the keystore-backed `mkit_attest::Signer` adapter,
+and the keystore-backed commit signer adapter. External signers are specified
+by SPEC-EXTERNAL-SIGNER, not here.
 
 ## 1. Purpose
 
@@ -35,6 +50,50 @@ This spec distinguishes two milestones:
 Issue #104 may be resolved by this narrowed production contract only if project
 discussion accepts these deferred items; otherwise the deferred
 hardware/provider features remain follow-up work.
+
+### 1.1 Implementation Status
+
+This section summarizes what is implemented in the crate today. It is a
+reading aid; the per-section requirements below remain the normative contract.
+
+Shipped against this spec:
+
+- `rust/crates/mkit-keystore` crate, public API (`Keystore`, `KeySigner`,
+  `KeyGenerator`, `KeyImporter`, `KeyOpener`, `KeyLister`, `KeyExporter`,
+  `KeyDeleter`), structured `Error` enum, typed wrappers (`KeyLabel`,
+  `KeyRefLabel`, `KeyId`, `PublicKeyBytes`, `KeyRef`, `KeySelector`).
+- `Capabilities` reporting structurally tied to operation-trait availability,
+  with capability-honesty tests in each backend module.
+- Software backend with encrypted-at-rest records (`software:<label>`,
+  XChaCha20-Poly1305 + length-prefixed AAD over backend / label / algorithm /
+  public key / key ID / attrs / protector ID, wrapped DEK in an OS protector).
+- Software-raw compatibility backend (`software-raw:<label>`), reusing
+  `mkit_core::sign::{load_raw_32, save_raw_32}` hardening.
+- OS-native backends behind feature flags: `macos-keychain`,
+  `windows-credential` (Credential Manager via DPAPI), `linux-secret-service`,
+  `systemd-creds`.
+- `YubiKey` backend behind `backend-yubikey` — OpenPGP signing slot (Ed25519)
+  and PIV signing slot (P-256). secp256k1 is reported `UnsupportedAlgorithm`;
+  FIDO2/CTAP keys are not handled in this backend and remain on the external
+  signer path.
+- `mkit key {generate,list,import,export,delete}` CLI with the flags and
+  defaults specified in §9.
+- Keystore-backed commit signing (`signer = keystore`) and attestation
+  signing (`attest.signer = keystore`).
+- Repo-forbidden config gating for every selector in §8 and the legacy
+  selectors in §8.3.
+
+Not yet shipped against this spec:
+
+- In-memory backend (`BackendKind::Memory` exists in the enum, but no
+  `MemoryKeystore` is implemented in this build).
+- External signer keystore bridge (`BackendKind::External`) — `open_backend`
+  returns `BackendUnavailable`; external signing continues to live in
+  `mkit-rpc` per §12.
+- Cloud KMS backend (`BackendKind::Cloud`) — same as above.
+- Secure Enclave, Windows TPM/CNG provider-backed keys, TPM/PCR-bound
+  `systemd-creds` semantics, bounded PIN/touch prompt providers for YubiKey,
+  hardware ECDSA verification-equivalence CI for every required platform.
 
 ## 2. Non-Negotiable Design Decisions
 
@@ -185,6 +244,12 @@ Semantics:
   such as Touch ID, PIN, biometric prompt, or hardware touch.
 - `device_bound = true` requests that a key cannot be restored onto another
   machine through backup or cloud sync.
+
+`KeyAttrs::default()` is `{ extractable: true, require_user_presence: false,
+device_bound: false }` because software-style storage decrypts into process
+memory. Stronger backends that hold non-extractable keys advertise that
+through `Capabilities::supports_non_extractable` and must reject
+`extractable = true` import paths they cannot honor.
 
 Backends may reject unsupported attribute combinations. They must not silently
 weaken requested attributes.
@@ -688,6 +753,23 @@ Requirements:
   a bounded prompt provider is implemented. FIDO2/CTAP labels continue to route
   users to the external signer path.
 
+Current implementation status:
+
+- The shipped YubiKey backend covers OpenPGP signing slots (Ed25519) and PIV
+  signing slots (P-256). secp256k1 is reported as `UnsupportedAlgorithm`.
+- The backend is read-only over the keystore API: `can_generate`,
+  `can_import`, `can_export`, and `can_delete` are all false; provisioning is
+  done out of band with `ykman` / `gpg --card-edit`.
+- `Capabilities::supports_user_presence` is derived from the discovered slot
+  policies (`PinPolicy != Never` or `TouchPolicy ∈ { Always, Cached }`).
+  `supports_device_bound` and `supports_non_extractable` are true iff at least
+  one signing key was discovered.
+- FIDO2/CTAP slots are not exposed by this backend at all. They remain on the
+  external signer path; the "fail closed through the keystore API for
+  FIDO2/CTAP labels" requirement is met implicitly because the backend will
+  return `KeyNotFound` for any label that does not resolve to an OpenPGP or
+  PIV signing slot.
+
 ### 6.8 External And Cloud Backends
 
 External signer and cloud KMS support are not Foundation V1 blockers unless
@@ -722,12 +804,22 @@ yubikey:main
 
 Rules:
 
-- Backend names are lowercase ASCII tokens.
+- Backend names are lowercase ASCII tokens — see `BackendKind::as_str` for the
+  authoritative list (`software`, `software-raw`, `macos-keychain`,
+  `windows-credential`, `linux-secret-service`, `systemd-creds`, `yubikey`,
+  `external`, `cloud`, `memory`).
 - Labels are backend-local but must pass the label validation in section 5.7.
 - A key ref must not contain paths, URLs, shell metacharacter semantics, or
   implicit environment expansion.
 - A key ref must not be interpreted relative to the repo.
 - Repo config must not set key refs.
+
+Implementation note: the label component of a parsed `KeyRef` is a
+`KeyRefLabel`, a typed wrapper that re-checks the general label rules in
+§5.7 plus an extra reject list (`$ ~ * ? [ ] { } ; & | ` `' "`). This is
+strictly stronger than the §5.7 validation: labels coming from a key-ref
+string cannot contain shell or environment-expansion characters even if a
+future backend would accept them in a non-ref context.
 
 Foundation V1 may initially support only the software family while preserving
 the syntax for later backends. Issue-complete V1 must support the required
@@ -792,8 +884,14 @@ Precedence:
 
 ### 8.2 Repo-Forbidden Keys
 
-Every config key in section 8.1 must be added to `REPO_FORBIDDEN_KEYS` in
-`rust/crates/mkit-cli/src/config.rs`.
+Every config key in section 8.1 must be present in `REPO_FORBIDDEN_KEYS` in
+`rust/crates/mkit-cli/src/config.rs`. The `REPO_FORBIDDEN_KEYS` list may
+include additional keys (for example `signing_key`,
+`attest.external_signer_path`, `attest.external_signer_args`,
+`attest.secp256k1_key_path`, `attest.p256_key_path`,
+`attest.default_algorithm`) covering legacy signer selectors and other
+private-key-influencing settings. Such extras must not be removed because
+they enforce the same confused-deputy posture for the pre-keystore code path.
 
 Reason:
 
@@ -995,10 +1093,10 @@ Implementation options:
 
 Required cleanup:
 
-- `docs/SPEC-SIGNING.md` currently describes `BLAKE3(domain || signing_bytes)`
-  while implementation uses `BLAKE3(len_le16(domain) || domain || signing_bytes)`.
-  Before keystore-backed commit signing is complete, update the spec or this
-  mismatch will block review.
+- `docs/SPEC-SIGNING.md` now describes `BLAKE3(len_le16(domain) || domain ||
+  signing_bytes)` and matches the implementation. **Done.** Cross-reference
+  SPEC-SIGNING §3 for the canonical formula and `mkit_core::sign::domain_digest`
+  for the implementation.
 
 ## 11. Attestation Integration
 
@@ -1238,8 +1336,11 @@ Tests:
 Docs/spec cleanup:
 
 - `docs/SPEC-SIGNING.md` is updated to match current implementation:
-  `BLAKE3(len_le16(domain) || domain || signing_bytes)`.
-- Threat model is updated with keystore backend assumptions.
+  `BLAKE3(len_le16(domain) || domain || signing_bytes)`. **Done** — see
+  `digest = BLAKE3(u16_le(domain.len) || domain || signing_bytes)` in
+  SPEC-SIGNING §3 and the matching `domain_digest` implementation in
+  `mkit_core::sign`.
+- Threat model is updated with keystore backend assumptions. **In flight.**
 - CLI docs may summarize this behavior, but this specification remains the
   source of truth unless amended in a later spec change.
 
@@ -1311,55 +1412,83 @@ Docs/spec cleanup:
 
 ## 16. Implementation Phases
 
-### Phase 1: Foundation
+Status tags below describe what is in the current build. They are advisory;
+the per-section requirements above remain normative.
 
-- Add `mkit-keystore` crate.
-- Add core API, errors, label/key-ref parsing, capabilities.
-- Add memory backend for tests.
+### Phase 1: Foundation — shipped
+
+- Add `mkit-keystore` crate. **Shipped.**
+- Add core API, errors, label/key-ref parsing, capabilities. **Shipped.**
+- Add memory backend for tests. **Not shipped** — `BackendKind::Memory` is
+  defined but no `MemoryKeystore` implementation exists. Software-raw with
+  a `tempfile`-backed root is used in the test suite instead.
 - Add software backend reusing existing hardened raw-key behavior where
-  practical.
-- Add unit tests.
+  practical. **Shipped** as `SoftwareRawKeystore`, which delegates to
+  `mkit_core::sign::{load_raw_32, save_raw_32, save_raw_32_create_new}`.
+- Add unit tests. **Shipped.**
 
-### Phase 2: CLI Surface
+### Phase 2: CLI Surface — shipped
 
-- Add `commands/key.rs`.
-- Wire `mkit key` in `mkit-cli/src/lib.rs`.
-- Preserve `mkit keygen`.
-- Add config keys and repo-forbidden tests.
-- Add CLI integration tests.
+- Add `commands/key.rs`. **Shipped** at
+  `rust/crates/mkit-cli/src/commands/key.rs`.
+- Wire `mkit key` in `mkit-cli/src/lib.rs`. **Shipped.**
+- Preserve `mkit keygen`. **Shipped.**
+- Add config keys and repo-forbidden tests. **Shipped** — see `KeyConfig` and
+  `REPO_FORBIDDEN_KEYS` in `mkit-cli/src/config.rs`.
+- Add CLI integration tests. **Shipped.**
 
-### Phase 3: Attestation Integration
+### Phase 3: Attestation Integration — shipped
 
-- Add keystore-backed `mkit_attest::Signer` adapter.
-- Extend `attest_factory` for `attest.signer = keystore`.
-- Add DSSE signing and verification tests.
+- Add keystore-backed `mkit_attest::Signer` adapter. **Shipped** as
+  `KeystoreAttestSigner` in `commands/attest_factory.rs`.
+- Extend `attest_factory` for `attest.signer = keystore`. **Shipped.**
+- Add DSSE signing and verification tests. **Shipped.**
 
-### Phase 4: Commit Integration
+### Phase 4: Commit Integration — shipped
 
 - Add or expose the minimal `mkit-core` helper needed for keystore commit
-  signing without creating a dependency cycle.
+  signing without creating a dependency cycle. **Shipped** —
+  `mkit_core::sign::commit_signing_hash` is exposed and used by
+  `CommitSigner::Keystore` in `commands/commit.rs`.
 - Teach `mkit commit` to use a configured Ed25519 keystore key ref.
-- Add golden equivalence tests.
+  **Shipped** behind `signer = keystore`.
+- Add golden equivalence tests. **Shipped** — see
+  `keystore_commit_signature_matches_legacy_keypair_signature` in
+  `commands/commit.rs` tests.
 
-### Phase 5: Keystore V1 Backend Matrix
+### Phase 5: Keystore V1 Backend Matrix — mostly shipped
 
 - Make `software` the encrypted-at-rest software backend using OS-protected
-  envelope encryption.
-- Move raw compatibility persistence to `software-raw`.
+  envelope encryption. **Shipped** — `SoftwareKeystore` + `EncryptedKeyRecord`
+  (XChaCha20-Poly1305, length-prefixed AAD, OS protector wrapping the DEK).
+- Move raw compatibility persistence to `software-raw`. **Shipped** as
+  `SoftwareRawKeystore`.
 - Implement macOS Keychain, Windows DPAPI/Credential Manager, Linux Secret
   Service, `systemd-creds`, and YubiKey OpenPGP/PIV/FIDO2 backends behind
-  feature flags with honest capabilities.
+  feature flags with honest capabilities. **Shipped** for macOS Keychain
+  (`macos-keychain`), Windows Credential Manager (`windows-credential`),
+  Linux Secret Service (`linux-secret-service`), `systemd-creds`
+  (`systemd-creds`), and YubiKey OpenPGP + PIV (`backend-yubikey`).
+  **Not shipped:** a dedicated YubiKey FIDO2/CTAP routing in this backend
+  — FIDO2 stays on the external signer path per §6.7.
 - Add backend factory/resolution so CLI, commit signing, and attestation signing
-  route by full key ref.
-- Add platform-gated tests and capability honesty tests.
+  route by full key ref. **Shipped** — `open_backend` plus `selection_for`
+  in `commands/key.rs`, mirrored in commit and attest paths.
+- Add platform-gated tests and capability honesty tests. **Shipped.**
 
-### Phase 6: Production Readiness
+### Phase 6: Production Readiness — in flight
 
 - Add cross-platform CI for macOS, Windows, Linux desktop-compatible paths, and
-  Linux headless/server-compatible paths.
-- Add golden vectors and verification-equivalence tests.
+  Linux headless/server-compatible paths. **Partially in flight** — live
+  OS-native backend tests are gated by `MKIT_RUN_NATIVE_KEYSTORE_TESTS=1` per
+  §14.4; CI matrix coverage is still being expanded.
+- Add golden vectors and verification-equivalence tests. **Shipped** for
+  deterministic software/software-raw signers; hardware/OS ECDSA
+  verification-equivalence coverage is still expanding.
 - Update threat model, user-facing docs, supply-chain review notes, and backend
-  manual-test documentation.
+  manual-test documentation. **Partially shipped** — see `docs/keystore.md`
+  for the end-user overview; `docs/THREAT-MODEL.md` updates per §15.2 are
+  still being landed.
 
 ## 17. Deferred Decisions
 
