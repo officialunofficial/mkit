@@ -36,14 +36,19 @@ Both protocols use the same length-prefixed framing:
 +------------------+------------------------------------+
 ```
 
-- **Length prefix**: 4 bytes, little-endian, encoded length of the
-  protobuf body in bytes — does NOT include the prefix itself.
-- **Body**: a single buffa-encoded `SignerFrame` (signer protocol) or
-  `SshFrame` (SSH protocol), per the `oneof body { ... }` definitions
-  in the .proto files.
-- **Cap**: `MAX_FRAME_BYTES = 1 MiB` (`1024 * 1024`). Receivers MUST
-  close the connection on a frame whose advertised length exceeds the
-  cap, before reading the body. Bulk data flows that need more than
+- **Length prefix**: 4 bytes, little-endian unsigned integer, encoded
+  length of the protobuf body in bytes — does NOT include the prefix
+  itself.
+- **Body**: a single protobuf-encoded `SignerFrame` (signer protocol)
+  or `SshFrame` (SSH protocol), per the `oneof body { ... }`
+  definitions in the .proto files. The Rust reference implementations
+  use the `buffa` runtime, but any protobuf 3 / edition 2023 toolchain
+  emitting the same wire bytes is conformant.
+- **Cap**: `MAX_FRAME_BYTES = 1 MiB` (`1024 * 1024`, exported from
+  `mkit-rpc` as a constant of the same name). Receivers MUST close
+  the connection on a frame whose advertised length exceeds the cap,
+  before reading the body. Senders MUST refuse to emit a frame whose
+  body would exceed the cap. Bulk data flows that need more than
   1 MiB use a streaming pattern (see `PackChunk` in `ssh.proto`).
 
 Receivers MUST validate the length prefix against the cap before
@@ -106,6 +111,7 @@ the next available number.
 
 | Name | Wire | Meaning |
 |---|---|---|
+| `ERROR_CODE_UNSPECIFIED` | 0 | Default/unset. Receivers MUST treat this as a protocol error (every `Error` frame MUST carry a known non-zero code). |
 | `ERROR_CODE_INVALID_REQUEST` | 1 | Structurally bad request. Connection MAY continue. |
 | `ERROR_CODE_UNSUPPORTED_ALGORITHM` | 2 | Signer doesn't speak the algorithm. |
 | `ERROR_CODE_UNSUPPORTED_KEY_FORM` | 3 | Signer doesn't accept the key form. |
@@ -116,10 +122,13 @@ the next available number.
 | `ERROR_CODE_TIMEOUT` | 8 | User presence check timed out. |
 | `ERROR_CODE_INTERNAL` | 99 | Unmapped — `message` MUST be set. |
 
-`Error.message` is human-readable English, ≤ 1 KiB, suitable for
-direct UI display. `Error.details` is opaque vendor-specific bytes
-(CTAP CBOR status, TPM `TPM_RC`, PKCS#11 `CKR_*`, etc.); programs MUST
-NOT pattern-match on its contents.
+`Error.message` is human-readable English, suitable for direct UI
+display. Producers SHOULD keep it under 1 KiB so receivers can render
+it inline; the framing layer does NOT enforce a per-field cap, only
+the `MAX_FRAME_BYTES = 1 MiB` whole-frame ceiling from §1.
+`Error.details` is opaque vendor-specific bytes (CTAP CBOR status,
+TPM `TPM_RC`, PKCS#11 `CKR_*`, etc.); programs MUST NOT pattern-match
+on its contents.
 
 ---
 
@@ -127,23 +136,32 @@ NOT pattern-match on its contents.
 
 A signer or server is mkit-rpc-compliant if and only if:
 
-1. It speaks length-prefixed buffa frames as in §1.
+1. It speaks length-prefixed protobuf frames as in §1.
 2. The first frame it sends or expects is `Hello` with
    `protocol = PROTOCOL_VERSION_1`.
 3. It returns a `HelloResponse` with the same `protocol` value before
    processing any other request.
-4. Every error response is an `Error` frame with a known `ErrorCode`
-   and a non-empty `message` (except `ERROR_CODE_INTERNAL`, where
-   `message` MUST be set explicitly).
-5. It enforces `MAX_FRAME_BYTES` on receive.
+4. Every error response is an `Error` frame with a known non-zero
+   `ErrorCode` and a non-empty `message`.
+5. It enforces `MAX_FRAME_BYTES` on receive AND on send.
 
-Reference implementations:
+Reference implementations (all in this repository):
 
-- `contrib/signers/mkit-sign-file/` — `KEY_FORM_RAW_BYTES`,
-  Ed25519/secp256k1/P-256.
-- `contrib/signers/mkit-sign-ctap/` — FIDO2/WebAuthn signer.
-- `contrib/signers/mkit-sign-tpm/` — TPM 2.0 P-256 signer.
-- `rust/crates/mkit-cli/src/commands/serve.rs` — `mkit serve` SSH server.
+- [`contrib/signers/mkit-sign-file/`](../contrib/signers/mkit-sign-file/) —
+  `KEY_FORM_RAW_BYTES`, Ed25519 / secp256k1 / P-256.
+- [`contrib/signers/mkit-sign-ctap/`](../contrib/signers/mkit-sign-ctap/) —
+  FIDO2/WebAuthn signer, P-256 / Ed25519-WebAuthn.
+- [`contrib/signers/mkit-sign-tpm/`](../contrib/signers/mkit-sign-tpm/) —
+  TPM 2.0 P-256 signer.
+- [`rust/crates/mkit-cli/src/commands/serve.rs`](../rust/crates/mkit-cli/src/commands/serve.rs) —
+  `mkit serve` SSH server (consumes `ssh.proto`).
+
+The Swift `contrib/signers/mkit-sign-se/` (Apple Secure Enclave)
+binary still ships with the pre-v1 line-JSON protocol and is NOT
+mkit-rpc-conformant today. Porting it to v1 is tracked separately;
+wiring it through the `external` signer selector defined in
+[`SPEC-EXTERNAL-SIGNER`](SPEC-EXTERNAL-SIGNER.md) will fail at the
+first frame until the port lands.
 
 ---
 
@@ -157,7 +175,7 @@ choice is deliberate:
   explicit-presence; adding optional fields or oneof variants is a
   wire-compatible patch-level change.
 - **Cross-language.** mkit ships in Rust, but external signers may
-  ship in any language with a buffa or vanilla protobuf
+  ship in any language with a protobuf 3 / edition 2023
   implementation. JSON parsing edge cases (number precision, escape
   handling, key ordering) are not in the contract.
 - **Bounded sizes by construction.** Length-prefixed framing with a
