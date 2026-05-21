@@ -841,7 +841,7 @@ mod tests {
         assert_eq!(serialize(&obj), Err(MkitError::InvalidIdentity));
     }
 
-    /// `read_commit` claims `parent_count = MAX_PARENTS` (1_000) but
+    /// `read_commit` claims `parent_count = MAX_PARENTS` (`1_000`) but
     /// the remaining buffer is too small to ever hold that many
     /// 32-byte parent hashes. The pre-allocation guard must reject the
     /// header before the parent vec is sized from attacker input.
@@ -858,7 +858,7 @@ mod tests {
         assert_eq!(deserialize(&buf), Err(MkitError::UnexpectedEof));
     }
 
-    /// `read_remix` claims `source_count = MAX_REMIX_SOURCES` (10_000)
+    /// `read_remix` claims `source_count = MAX_REMIX_SOURCES` (`10_000`)
     /// but the remaining buffer cannot accommodate even one source
     /// (which is 64 bytes — two hashes). Reject without allocating.
     #[test]
