@@ -275,6 +275,26 @@ pub fn verify_signature(
                 Err(Error::AlgorithmNotEnabled(Algorithm::P256))
             }
         }
+        // BLS12-381 threshold dispatch. Phase 1 routes through the
+        // `signer_bls_threshold::verify` helper, which uses the
+        // mkit-attest BLS namespace + the MinSig variant — i.e. only
+        // signatures produced by this crate's `ThresholdSigner`
+        // verify. A third-party BLS aggregator using a different
+        // namespace will NOT verify here, by design.
+        //
+        // The `verify_signature` contract (see function-level
+        // doc-comment) collapses crypto-mismatch into the same
+        // `AlgorithmNotEnabled` error variant as a compiled-out
+        // backend. Callers wanting reason-level detail use
+        // `verify_envelope` once the BLS keyid dispatch lands on the
+        // `TrustRoot` registry in Phase 2.
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => {
+            match crate::signer_bls_threshold::verify(pubkey, msg, sig) {
+                Ok(()) => Ok(()),
+                Err(_) => Err(Error::AlgorithmNotEnabled(Algorithm::Bls12381Threshold)),
+            }
+        }
     }
 }
 

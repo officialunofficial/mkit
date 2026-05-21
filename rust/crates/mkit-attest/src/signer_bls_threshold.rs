@@ -127,19 +127,7 @@ impl ThresholdSigner {
 
 impl Signer for ThresholdSigner {
     fn algorithm(&self) -> Algorithm {
-        // No `Algorithm::Bls12381Threshold` variant exists yet on the
-        // in-process Algorithm enum — that enum encodes the COSE-id
-        // ladder used by the per-signature verifier dispatch, which
-        // doesn't have a numeric ID for BLS threshold today. We tag
-        // partials with Ed25519 as a placeholder so the DSSE envelope
-        // still encodes; the wire-level identity lives on the
-        // mkit-rpc proto `Algorithm::ALGORITHM_BLS12381_THRESHOLD = 5`
-        // and is what consumers should match on.
-        //
-        // When the in-process enum gains a `Bls12381Threshold` variant
-        // (Phase 2 / Phase 3, as the verifier path lands), this
-        // returns it directly and the placeholder is gone.
-        Algorithm::Ed25519
+        Algorithm::Bls12381Threshold
     }
 
     fn keyid(&self) -> Result<String, Error> {
@@ -281,7 +269,7 @@ mod tests {
         let mut partials_bytes: Vec<Vec<u8>> = Vec::with_capacity(3);
         for s in shares.iter().take(3) {
             let mut signer = ThresholdSigner::new(s.clone(), sharing.clone());
-            assert_eq!(signer.algorithm(), Algorithm::Ed25519);
+            assert_eq!(signer.algorithm(), Algorithm::Bls12381Threshold);
             let kid = signer.keyid().expect("keyid");
             assert!(kid.starts_with(KEYID_PREFIX));
             assert_eq!(kid.len(), KEYID_PREFIX.len() + PUBLIC_KEY_SIZE * 2);

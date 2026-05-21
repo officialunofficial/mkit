@@ -211,6 +211,13 @@ fn rpc_algorithm_for(a: Algorithm) -> RpcAlgorithm {
         Algorithm::Ed25519 => RpcAlgorithm::ALGORITHM_ED25519,
         Algorithm::Secp256k1 => RpcAlgorithm::ALGORITHM_SECP256K1,
         Algorithm::P256 => RpcAlgorithm::ALGORITHM_P256,
+        // External-signer dispatch for BLS threshold isn't wired
+        // yet — the Phase-1 holder runs in-process. But the proto
+        // wire integer is reserved so a future external signer can
+        // claim ALGORITHM_BLS12381_THRESHOLD and the mapping
+        // already exists.
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => RpcAlgorithm::ALGORITHM_BLS12381_THRESHOLD,
     }
 }
 
