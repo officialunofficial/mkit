@@ -74,7 +74,7 @@ const CLIENT_ID: &str = concat!("mkit ", env!("CARGO_PKG_VERSION"));
 
 /// Optional SSH CLI knobs threaded from `.mkit/config`. All fields default
 /// to empty, which means "inherit the user's `ssh(1)` defaults". See
-/// SPEC-TRANSPORT §7.5 for the canonical field list.
+/// SPEC-TRANSPORT §4.3 for the canonical field list.
 #[derive(Debug, Default, Clone)]
 pub struct SshOptions {
     /// `-o StrictHostKeyChecking=<value>`. Empty → do not pass.

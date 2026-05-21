@@ -95,9 +95,9 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
     }
     if url.starts_with("mkit+ssh://") {
         // SshTransport::connect parses the URL, spawns `ssh(1)`, and
-        // performs the OP_HELLO handshake. Any failure here tears the
-        // child down before returning, so callers never see a
-        // half-initialised transport.
+        // performs the `Hello` / `HelloResponse` handshake. Any failure
+        // here tears the child down before returning, so callers never
+        // see a half-initialised transport.
         let tx = SshTransport::connect(url)?;
         return Ok(Arc::new(tx));
     }

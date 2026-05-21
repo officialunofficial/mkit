@@ -9,7 +9,7 @@
 //!    `UnsupportedScheme`).
 //! 2. A full push roundtrip — list refs, upload pack, write ref — lands
 //!    against the mock server in the shape the HTTP wire contract
-//!    (SPEC-TRANSPORT §6) expects.
+//!    (SPEC-TRANSPORT §5.1) expects.
 //! 3. A full pull roundtrip — list refs + download pack — materialises
 //!    the remote's single ref into a fresh local repo.
 //!
