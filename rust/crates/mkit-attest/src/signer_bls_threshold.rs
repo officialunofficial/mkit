@@ -107,7 +107,7 @@ impl ThresholdSigner {
     /// holder.
     #[must_use]
     pub fn new(share: Share, sharing: Sharing<V>) -> Self {
-        let pk_hex = encode_hex(&sharing.public().encode());
+        let pk_hex = mkit_core::to_hex_bytes(&sharing.public().encode());
         let keyid = format!("{KEYID_PREFIX}{pk_hex}");
         Self {
             share,
@@ -224,18 +224,8 @@ pub fn threshold_for(n: u32) -> u32 {
     N3f1::quorum(n)
 }
 
-/// Lowercase-hex encoder, factored out so the keyid producer doesn't
-/// pull `mkit-core::hash::to_hex` (which is BLAKE3-specific). 48 bytes
-/// of pubkey → 96 hex chars.
-fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0F) as usize] as char);
-    }
-    out
-}
+// Hex encoding goes through the workspace-canonical
+// `mkit_core::hash::to_hex_bytes`; nothing BLS-specific here.
 
 #[cfg(test)]
 mod tests {
@@ -277,7 +267,10 @@ mod tests {
             // point of threshold signing: one public identity.
             assert_eq!(
                 kid,
-                format!("{KEYID_PREFIX}{}", encode_hex(&sharing.public().encode()))
+                format!(
+                    "{KEYID_PREFIX}{}",
+                    mkit_core::to_hex_bytes(&sharing.public().encode())
+                )
             );
 
             let bytes = signer.sign(pae).expect("sign partial");

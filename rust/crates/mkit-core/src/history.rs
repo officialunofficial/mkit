@@ -91,25 +91,13 @@ impl CommitHistory {
     /// Open a fresh empty history.
     ///
     /// Phase 1 stub: the MMR is in-memory only, so there is no path /
-    /// branch to wire up yet. The `for_branch` constructor below
-    /// reserves the eventual Phase 2 signature without committing to
-    /// on-disk semantics today.
+    /// branch to wire up yet. Phase 2 will introduce a path-bound
+    /// `open(mkit_dir, branch)` against the on-disk journal.
     #[must_use]
     pub fn open() -> Self {
         let hasher: StandardHasher<Blake3> = StandardHasher::new();
         let mmr = MemMmr::new(&hasher);
         Self { mmr, hasher }
-    }
-
-    /// Open a history for the named branch.
-    ///
-    /// Phase 1: `branch` is recorded for future use but does not affect
-    /// state — every call returns an empty in-memory MMR. Phase 2 will
-    /// resolve `<mkit_dir>/history/<branch>.mmr` and replay the
-    /// journal.
-    #[must_use]
-    pub fn for_branch(_branch: &str) -> Self {
-        Self::open()
     }
 
     /// Append a commit hash. Returns its leaf [`Position`].
@@ -339,17 +327,15 @@ mod tests {
     }
 
     #[test]
-    fn for_branch_does_not_share_state_in_phase1() {
-        // Phase 1 stub: branch names are recorded but state is per-instance
-        // and in-memory. Two `for_branch("main")` calls return independent
-        // empty histories.
-        let mut a = CommitHistory::for_branch("main");
-        let b = CommitHistory::for_branch("main");
+    fn two_open_calls_return_independent_histories() {
+        // Phase 1: every `open()` is a fresh in-memory MMR. Phase 2
+        // will replace this with a path-bound constructor; the test
+        // is intentionally written so the *result* still holds (two
+        // distinct paths = two distinct histories) — the API name is
+        // what changes.
+        let mut a = CommitHistory::open();
+        let b = CommitHistory::open();
         a.append(&synth(0)).unwrap();
-        assert_ne!(
-            a.len(),
-            b.len(),
-            "Phase 1 for_branch is a stub — no persistence yet"
-        );
+        assert_ne!(a.len(), b.len());
     }
 }

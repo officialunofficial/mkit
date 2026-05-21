@@ -42,13 +42,11 @@
 //! ## Phase 1 scope
 //!
 //! - In-process round-trip via [`commonware_runtime::mocks::Channel`].
-//! - Constructor takes `(host, port, server_pubkey)` for forwards
-//!   compatibility, but **does not** open a TCP socket — `connect_tcp`
-//!   returns [`EncInitError::Unimplemented`] pending Phase 2.
-//! - URL parsing (`mkit+enc://…`), CLI dispatch wiring, and
-//!   `cargo feature = "enc-transport"` gates are out of scope; see
+//! - Constructor [`EncTransport::from_session`] takes an
+//!   already-established [`EncSession`]; the TCP dial helper, URL
+//!   parsing, and CLI wiring are Phase 2 — see
 //!   [docs/SPEC-TRANSPORT-ENC.md](../../../docs/SPEC-TRANSPORT-ENC.md)
-//!   §6 for the Phase 2 punch list.
+//!   §6.
 
 #![forbid(unsafe_code)]
 // Wire-frame fields are `Option<T>` (Edition 2023 explicit presence).
@@ -63,7 +61,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use buffa::Message;
-use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
+use commonware_cryptography::ed25519::PrivateKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Config as EncConfig, Receiver, Sender};
 
@@ -115,9 +113,6 @@ pub enum EncInitError {
     /// handshake completes) failed.
     #[error("application hello failed: {0}")]
     AppHelloFailed(String),
-    /// Phase 2: actual TCP connection establishment.
-    #[error("connect_tcp is not implemented in Phase 1 of mkit-transport-enc")]
-    Unimplemented,
 }
 
 impl From<commonware_stream::encrypted::Error> for EncInitError {
@@ -224,9 +219,8 @@ impl<I: Stream, O: Sink, E: Executor> EncTransport<I, O, E> {
     /// lands on a v1 mkit peer.
     ///
     /// Phase 1 uses this constructor from tests after driving the
-    /// commonware-stream handshake manually; Phase 2 production code
-    /// will call [`Self::connect_tcp`] which folds the two steps
-    /// together.
+    /// commonware-stream handshake manually; Phase 2 will add a real
+    /// TCP-connecting helper that folds dial+handshake+Hello.
     pub fn from_session(
         session: EncSession<I, O>,
         executor: E,
@@ -285,24 +279,6 @@ impl<I: Stream, O: Sink, E: Executor> EncTransport<I, O, E> {
             }
         })
     }
-}
-
-/// Phase-2 entry point. Once URL parsing lands, this will resolve the
-/// host, open a TCP socket, drive the commonware-stream handshake, and
-/// return a fully-wired [`EncTransport`]. Phase 1 returns
-/// [`EncInitError::Unimplemented`] — kept as a public symbol so the
-/// CLI work in Phase 2 has a concrete name to bind against.
-///
-/// `_signing_key` is the client's static `ed25519` private key; the
-/// remote learns it during the handshake. `_server_pubkey` is the
-/// trust anchor the client carries in advance.
-pub fn connect_tcp(
-    _host: &str,
-    _port: u16,
-    _server_pubkey: PublicKey,
-    _signing_key: PrivateKey,
-) -> Result<(), EncInitError> {
-    Err(EncInitError::Unimplemented)
 }
 
 /// Default [`EncConfig`] suitable for mkit's encrypted transport.
@@ -1075,17 +1051,6 @@ mod tests {
     fn peer_rejected_error_maps_to_init_error() {
         let mapped: EncInitError = EncryptedError::PeerRejected(b"fake-peer-key".to_vec()).into();
         assert!(matches!(mapped, EncInitError::PeerRejected));
-    }
-
-    /// [`connect_tcp`] is the Phase 2 entry point — Phase 1 returns
-    /// `Unimplemented` so CLI work can bind against the symbol now
-    /// without us shipping a half-wired TCP path.
-    #[test]
-    fn connect_tcp_is_unimplemented_in_phase_1() {
-        let server_pub = PrivateKey::from_seed(1).public_key();
-        let client_sk = PrivateKey::from_seed(2);
-        let err = connect_tcp("localhost", 4242, server_pub, client_sk).unwrap_err();
-        assert!(matches!(err, EncInitError::Unimplemented));
     }
 
     /// Naive subsequence search — `Vec<u8>::contains_slice` is not

@@ -65,17 +65,24 @@ pub enum FromHexError {
     InvalidChar,
 }
 
-/// Render a [`Hash`] as lowercase hex.
+/// Render a byte slice as lowercase hex. `format!`-with-`{:02x}`
+/// allocates per byte; the hand-roll here is the workspace's canonical
+/// hex encoder. Use this everywhere a byte slice needs hex rendering.
 #[must_use]
-pub fn to_hex(h: &Hash) -> String {
-    let mut out = String::with_capacity(HEX_LEN);
-    for b in h {
-        // `format!` with "{:02x}" allocates per-byte; hand-roll for speed.
+pub fn to_hex_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         out.push(HEX[(b >> 4) as usize] as char);
         out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+/// Render a [`Hash`] as lowercase hex.
+#[must_use]
+pub fn to_hex(h: &Hash) -> String {
+    to_hex_bytes(h)
 }
 
 /// Parse a lowercase-or-uppercase 64-char hex string into a [`Hash`].
@@ -149,6 +156,19 @@ mod tests {
             to_hex(&h),
             "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f"
         );
+    }
+
+    #[test]
+    fn to_hex_bytes_matches_to_hex_for_32_byte_slice() {
+        let h = hash(b"any");
+        assert_eq!(to_hex_bytes(h.as_slice()), to_hex(&h));
+    }
+
+    #[test]
+    fn to_hex_bytes_handles_arbitrary_length() {
+        assert_eq!(to_hex_bytes(b""), "");
+        assert_eq!(to_hex_bytes(&[0x00, 0xff]), "00ff");
+        assert_eq!(to_hex_bytes(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
     }
 
     #[test]

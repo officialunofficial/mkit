@@ -49,10 +49,7 @@ use std::path::PathBuf;
 
 use commonware_cryptography::{Sha256, sha256};
 use commonware_runtime::{Metrics as _, Runner as _, deterministic};
-use commonware_storage::{
-    MerkleizedBitMap,
-    merkle::{Proof, mmr},
-};
+use commonware_storage::{MerkleizedBitMap, merkle::mmr};
 
 /// Bitmap chunk size in bytes (32 bytes = 256 bits = one SHA-256 digest).
 ///
@@ -99,12 +96,11 @@ pub struct SparseManifest {
 
 /// Verifiable proof bundle accompanying a [`SparseManifest`].
 ///
-/// Phase 1 carries the full bitmap chunks plus the upstream MMR
-/// proof; this is sufficient because for any realistic tree size the
-/// bitmap fits comfortably in a few hundred bytes and the verifier
-/// has to walk every delivered entry anyway. Phase 2's transport
-/// wire-format may swap this for per-bit inclusion proofs if it ever
-/// becomes a bandwidth concern.
+/// Phase 1 carries the full bitmap chunks; for any realistic tree
+/// size the bitmap fits comfortably in a few hundred bytes and the
+/// verifier walks every delivered entry anyway. Phase 2's transport
+/// wire-format may add per-bit inclusion proofs if bandwidth ever
+/// becomes a concern — those will land as a new field, not as a swap.
 #[derive(Debug, Clone)]
 pub struct SparseProof {
     /// The raw bitmap bytes, exactly `ceil(leaf_count / 8)` bytes
@@ -112,14 +108,6 @@ pub struct SparseProof {
     /// Verifier MUST recompute the bitmap root from these bytes and
     /// compare to `manifest.bitmap_root`.
     pub bitmap_bytes: Vec<u8>,
-    /// MMR inclusion proof for the bitmap's first chunk, fetched
-    /// from the upstream `AuthenticatedBitMap`. For trees with
-    /// `leaf_count <= 256` this is essentially trivial (one peak
-    /// digest); larger trees produce a deeper proof.
-    ///
-    /// Re-exported from `commonware-storage` rather than re-defined
-    /// so we don't fork the upstream wire format.
-    pub mmr_proof: Proof<mmr::Family, sha256::Digest>,
 }
 
 /// Stable BLAKE3 hash of a path-prefix filter. Canonical form:
@@ -265,67 +253,57 @@ pub fn build_sparse(
     // I/O, no network — which is exactly what we want here: the
     // bitmap is purely a verifiable commitment object, not a
     // persistent store.
+    let (bitmap_root, bitmap_bytes) = merkleize_bits(&bits);
+
+    let manifest = SparseManifest {
+        tree_hash: tree_hash(tree),
+        bitmap_root,
+        filter_hash: hash_filter(filter),
+        leaf_count,
+    };
+    let proof = SparseProof { bitmap_bytes };
+    Ok((delivered, manifest, proof))
+}
+
+/// Build the upstream `MerkleizedBitMap` over `bits` and return
+/// `(root, bitmap_bytes)`. Shared between [`build_sparse`] and
+/// [`verify_sparse`] so the two cannot drift.
+///
+/// Phase 1 spins a fresh `deterministic::Runner` per call. Phase 2
+/// (sparse over a real transport) will reuse a long-lived executor via
+/// the future `mkit_core::protocol::Executor` shim; the dependency is
+/// captured at this seam to keep the migration mechanical.
+fn merkleize_bits(bits: &[bool]) -> ([u8; 32], Vec<u8>) {
     let runner = deterministic::Runner::default();
-    let (bitmap_root, bitmap_bytes, mmr_proof): (
-        sha256::Digest,
-        Vec<u8>,
-        Proof<mmr::Family, sha256::Digest>,
-    ) = runner.start(move |ctx| async move {
+    let bits_owned = bits.to_vec();
+    runner.start(move |ctx| async move {
         let hasher = mmr::StandardHasher::<Sha256>::new();
         let bitmap: MerkleizedBitMap<_, sha256::Digest, CHUNK_BYTES> =
             MerkleizedBitMap::init(ctx.with_label("sparse"), "sparse", None, &hasher)
                 .await
                 .expect("in-memory bitmap init cannot fail");
         let mut dirty = bitmap.into_dirty();
-        for b in &bits {
+        for b in &bits_owned {
             dirty.push(*b);
         }
-        let bitmap = dirty.merkleize(&hasher).expect("merkleize is infallible");
-        let root = bitmap.root();
+        let merkleized = dirty.merkleize(&hasher).expect("merkleize is infallible");
+        let root = merkleized.root();
 
-        // Collect the bitmap bytes. Includes the partial last chunk
-        // so the verifier can replay byte-for-byte.
-        let mut bytes = Vec::with_capacity(bits.len().div_ceil(8));
-        for (i, bit) in bits.iter().enumerate() {
+        let mut bytes = Vec::with_capacity(bits_owned.len().div_ceil(8));
+        for (i, bit) in bits_owned.iter().enumerate() {
             if i % 8 == 0 {
                 bytes.push(0u8);
             }
             if *bit {
-                let last = bytes.last_mut().unwrap();
+                let last = bytes.last_mut().expect("just pushed a byte");
                 *last |= 1 << (i % 8);
             }
         }
 
-        // MMR proof for the first bit (Phase 2 witness — verifier
-        // currently checks the bitmap root by byte-level
-        // reconstruction below).
-        let proof = if bits.is_empty() {
-            Proof::default()
-        } else {
-            let (p, _chunk) = bitmap
-                .proof(&hasher, 0)
-                .await
-                .expect("bit 0 is always in range when bits is non-empty");
-            p
-        };
-
-        (root, bytes, proof)
-    });
-
-    let mut bitmap_root_bytes = [0u8; 32];
-    bitmap_root_bytes.copy_from_slice(bitmap_root.as_ref());
-
-    let manifest = SparseManifest {
-        tree_hash: tree_hash(tree),
-        bitmap_root: bitmap_root_bytes,
-        filter_hash: hash_filter(filter),
-        leaf_count,
-    };
-    let proof = SparseProof {
-        bitmap_bytes,
-        mmr_proof,
-    };
-    Ok((delivered, manifest, proof))
+        let mut root_bytes = [0u8; 32];
+        root_bytes.copy_from_slice(root.as_ref());
+        (root_bytes, bytes)
+    })
 }
 
 /// Verify a sparse delivery against a manifest.
@@ -413,36 +391,11 @@ pub fn verify_sparse(
     // bitmap inside an in-memory commonware runtime, identical to
     // the one [`build_sparse`] used. Any tampering with
     // `bitmap_bytes` produces a different root.
-    let bitmap_bytes = proof.bitmap_bytes.clone();
-    let runner = deterministic::Runner::default();
-    let computed_root: [u8; 32] = runner.start(move |ctx| async move {
-        let hasher = mmr::StandardHasher::<Sha256>::new();
-        let bitmap: MerkleizedBitMap<_, sha256::Digest, CHUNK_BYTES> =
-            MerkleizedBitMap::init(ctx.with_label("sparse"), "sparse", None, &hasher)
-                .await
-                .expect("in-memory bitmap init cannot fail");
-        let mut dirty = bitmap.into_dirty();
-        for i in 0..leaf_count {
-            let byte = bitmap_bytes[i / 8];
-            let bit = (byte >> (i % 8)) & 1 == 1;
-            dirty.push(bit);
-        }
-        let bitmap = dirty.merkleize(&hasher).expect("merkleize is infallible");
-        let root = bitmap.root();
-        let mut out = [0u8; 32];
-        out.copy_from_slice(root.as_ref());
-        out
-    });
+    let bits: Vec<bool> = (0..leaf_count)
+        .map(|i| (proof.bitmap_bytes[i / 8] >> (i % 8)) & 1 == 1)
+        .collect();
+    let (computed_root, _bytes) = merkleize_bits(&bits);
     if computed_root != manifest.bitmap_root {
-        return false;
-    }
-
-    // mmr_proof is currently a witness for forward-compat — Phase 2
-    // transport will use it to do per-bit inclusion proofs on
-    // streamed deliveries. For full-bitmap delivery as in Phase 1,
-    // the byte-level root reconstruction above is sufficient. Reject
-    // a wildly malformed proof shape, though.
-    if !proof.mmr_proof.digests.is_empty() && manifest.leaf_count == 0 {
         return false;
     }
 

@@ -64,7 +64,7 @@ pub mod history;
 #[cfg(feature = "sparse-checkout")]
 pub mod sparse;
 
-pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher};
+pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher, to_hex, to_hex_bytes};
 pub use object::{
     Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind, MAGIC,
     MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, Tree, TreeEntry,
