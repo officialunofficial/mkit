@@ -9,14 +9,20 @@ audience: implementers and integrators producing or verifying native mkit attest
 
 Status: **Draft**. This document defines a native attestation primitive
 for mkit: the on-disk layout, the wire envelope, the signing contract,
-the CLI, and the transport additions. It supersedes `docs/NOTARY.md`
-(removed in the same commit series that implements this spec).
+the CLI, and the transport additions. It supersedes the historical
+`docs/NOTARY.md` design note.
 
 Scope: everything about how mkit produces, stores, transports, and
 verifies an attestation about a commit. **Not** in scope: what an
 attestation *means* — that's the business of the predicate-type URI,
 which is chosen by whoever makes the claim (mkit itself, Makechain,
 GitHub, a user's build server, etc.).
+
+This spec is normative for the wire bytes and on-disk layout that the
+`mkit-attest` crate produces and the `mkit attest` / `mkit verify-attest`
+CLI consume. Items marked **(planned)** are spec'd here for forward
+compatibility but are not implemented in the current `mkit-attest`
+crate or CLI; consumers MUST NOT rely on them.
 
 ---
 
@@ -37,9 +43,12 @@ GitHub, a user's build server, etc.).
 4. **Predicate-agnostic.** mkit never parses the `predicate` body. It
    only validates that the envelope is well-formed and at least one
    signature verifies.
-5. **No external runtime dep.** Canonical JSON + DSSE + base64 +
-   BLAKE3/Ed25519 are all in-tree, per the project's zero-deps policy
-   (`docs/release/SUPPLY-CHAIN.md`).
+5. **Minimal external dep surface.** JCS, DSSE PAE, BLAKE3 hashing, and
+   the on-disk store are hand-rolled in `mkit-attest`. `serde_json` is
+   used **only** to (a) parse-and-validate a caller-supplied predicate
+   body as a JSON object before pass-through, and (b) extract the
+   `subject[].digest.blake3` field on the verify path. The canonical
+   encoder never goes through `serde_json::to_string` — see §4.3.
 
 ---
 
@@ -60,9 +69,12 @@ DSSE envelope                 ← signed container (RFC-quality)
 - **JCS** is [RFC 8785 JSON Canonicalisation Scheme](https://www.rfc-editor.org/rfc/rfc8785).
 - **Base64** is standard base64 (RFC 4648 §4), padded.
 - **Hash** is BLAKE3, consistent with `SPEC-OBJECTS.md`.
-- **Signature** is Ed25519, consistent with `SPEC-SIGNING.md` §1 —
-  other algorithms are possible via the `Signer` trait (§6) but the
-  built-in repo-key signer is Ed25519.
+- **Signature algorithms** — Ed25519 (COSE −19), ECDSA-P-256 (COSE −7,
+  ES256), and ECDSA-secp256k1 (COSE −47, ES256K). All three are wired
+  through the `Signer` trait (§6) and registered as trust-root
+  variants on the verify side. Ed25519 is the built-in repo-key
+  default; the others are reached via per-algorithm key paths or the
+  keystore signer.
 
 ### 2.1 Pre-Authentication Encoding (PAE)
 
@@ -78,8 +90,17 @@ PAE(type, payload) =
 
 Where `len(x)` is the decimal-ASCII length of the UTF-8 bytes of `x`
 and `SP` is a single ASCII space (0x20). mkit signs `PAE(type, payload)`
-directly — no further hashing wrapper. (The Ed25519 code path already
-pre-hashes with BLAKE3 at a lower level; see §7.)
+directly — no further hashing wrapper. (Ed25519 internally pre-hashes
+with SHA-512 inside `ed25519-dalek`; ECDSA backends pre-hash with
+SHA-256. The signer trait always hands the signer the raw PAE; the
+signer's algorithm is responsible for any required digest.)
+
+Reference encoding (`mkit-attest::envelope::pae_of`):
+
+```
+PAE("hello", "body")  ==  b"DSSEv1 5 hello 4 body"
+PAE("t",     "")      ==  b"DSSEv1 1 t 0 "
+```
 
 ---
 
@@ -101,9 +122,13 @@ pre-hashes with BLAKE3 at a lower level; see §7.)
 - File contents — UTF-8 JSON bytes of the DSSE envelope (§4). **No
   trailing newline.** The attestation file ID is `BLAKE3(file_bytes)`
   hex, so any trailing whitespace would change the ID and break the
-  content-addressing invariant. Implementations that want to append `\n`
-  for human-readable viewing MUST compute the ID over the unpadded bytes
-  first.
+  content-addressing invariant.
+- Single-envelope size cap: **1 MiB** (`store::MAX_ENVELOPE_SIZE`).
+  Multi-signer envelopes in practice stay in the low kilobytes; the
+  cap exists to bound a malformed read.
+- Writes are atomic: a temp file in the same directory is `fsync`ed
+  and `rename(2)`d into place, and on Unix the parent directory is
+  `fsync`ed after the rename to make the dirent update durable.
 
 There is no index file, no central manifest. `ls .mkit/attestations/<commit-hash>/`
 lists every attestation attached to that commit. This is the same
@@ -112,7 +137,7 @@ discoverability model as `refs/`.
 ### 3.1 Relationship to objects/
 
 Attestations are NOT objects in the `objects/` tree. They are a
-separate resource class with their own transport verb (§8). Rationale:
+separate resource class. Rationale:
 
 - An attestation is *about* a commit; it doesn't participate in the
   DAG. Putting it under `objects/` would imply Merkle-inclusion which
@@ -128,45 +153,65 @@ separate resource class with their own transport verb (§8). Rationale:
 
 ### 4.1 DSSE envelope JSON
 
+JCS-canonical key order is **strictly ascending UCS-2 codepoint**, so
+the wire bytes have keys in this exact order:
+
 ```json
 {
+  "payload":     "<base64(statement_json)>",
   "payloadType": "application/vnd.in-toto+json",
-  "payload": "<base64(statement_json)>",
-  "signatures": [
+  "signatures":  [
     { "keyid": "<signer-identifier>", "sig": "<base64(sig_bytes)>" }
   ]
 }
 ```
 
-- Fields appear in the order above. JCS ensures bit-exactness.
+- `"payload"` < `"payloadType"` < `"signatures"`, and inside each
+  signature object `"keyid"` < `"sig"`. JCS sort is mandatory; the
+  encoder builds the object members in this order and the strict
+  decoder rejects any envelope whose bytes don't match this exact
+  shape.
 - `payload` is base64-encoded UTF-8 of the in-toto Statement JSON (§4.2).
-- `signatures` is a non-empty array. Order is append-only; new
-  signatures go at the end.
+- `signatures` is a non-empty array. Order is append-only by
+  convention (mkit emits primary signer first, then each
+  `--additional-signer` in the order they appeared on argv); the
+  envelope encoder preserves the caller-supplied vector order.
 - `keyid` is an arbitrary string. Conventions in §6.3.
 
 ### 4.2 in-toto v1 Statement body
 
+JCS-canonical key order. Note `predicate` precedes `predicateType`
+(by codepoint sort), `_type` is first (`_` = 0x5F sorts before `p` =
+0x70), and `subject` is last (`s` = 0x73 > `p`):
+
 ```json
 {
   "_type": "https://in-toto.io/Statement/v1",
+  "predicate": { ... arbitrary JSON, predicate-type's own schema ... },
+  "predicateType": "<uri-identifying-the-predicate>",
   "subject": [
     {
-      "name": "<optional-human-readable-string>",
-      "digest": { "blake3": "<commit-hash-hex>" }
+      "digest": { "blake3": "<commit-hash-hex>" },
+      "name": "<optional-human-readable-string>"
     }
-  ],
-  "predicateType": "<uri-identifying-the-predicate>",
-  "predicate": { ... arbitrary JSON, predicate-type's own schema ... }
+  ]
 }
 ```
 
+- Inside each subject entry, `"digest"` precedes the optional
+  `"name"`. The encoder emits `name` only when set.
 - `subject[0].digest.blake3` is the commit hash. Additional subjects
   MAY appear (e.g. a file within the commit's tree); implementations
   MUST NOT require them.
 - `predicateType` is the URI that tells a consumer how to interpret
-  `predicate`. §6.2 lists the known types.
-- `predicate` is opaque to mkit. Serialised per the predicate type's
-  own spec; mkit pipes bytes through.
+  `predicate`. §6.4 lists ecosystem conventions.
+- `predicate` is opaque to mkit. The caller hands the encoder
+  already-canonical predicate bytes (a JSON **object**, starting `{`
+  ending `}`); they are pass-through verbatim into the enclosing
+  Statement's bytes. The encoder rejects predicates that don't parse
+  as a JSON object.
+- The `mkit attest` CLI defaults to a `{}` predicate body when
+  `--predicate-file` is omitted.
 
 ### 4.3 Canonicalisation
 
@@ -175,19 +220,36 @@ via RFC 8785 JCS. This makes `<attestation-id>` (hash of envelope
 bytes) a stable function of the logical content. Implementation rules:
 
 - UTF-8 throughout.
-- Object members sorted by UCS-2 codepoint on the key.
-- Numbers serialised per JCS §3.2.2 (no trailing zeros, lowercase
-  exponent, no `+` on positive exponents).
-- Strings per JCS §3.2.3 (short-form escapes, `\uXXXX` only for
-  control chars).
-- No trailing whitespace; no trailing newline. The bytes written to disk
-  are the bytes hashed for the attestation ID (§3) — no padding is
-  appended.
+- Object members appear in strictly ascending byte-wise order on the
+  key. All keys mkit emits are ASCII, so byte order coincides with
+  UCS-2 codepoint order.
+- Numbers are restricted to non-negative integers (`u64`). JCS's
+  float-serialisation rules are deliberately not implemented — mkit
+  never emits a non-integer number in either the envelope or the
+  Statement frame. Predicate bodies pass through verbatim and inherit
+  whatever number serialisation the caller produced.
+- Strings per JCS §3.2.3 (short-form escapes for `\"`, `\\`, `\b`,
+  `\f`, `\n`, `\r`, `\t`; lowercase `\uXXXX` for the remaining
+  control chars `< 0x20`; everything else, including all non-ASCII
+  Unicode, emitted verbatim as UTF-8; `/` is NOT escaped).
+- No trailing whitespace; no trailing newline. The bytes written to
+  disk are the bytes hashed for the attestation ID (§3).
 
-The JCS writer lives in the `mkit-attest` crate. It is restricted to
-the JSON subset used by DSSE + in-toto (string, number as integer,
-bool, null, object, array) — no floating-point support, no
-JSON-number-that-is-really-a-u64-literal shenanigans.
+The JCS writer lives in `mkit-attest::jcs`. It is restricted to the
+JSON subset used by DSSE + in-toto (string, `u64`, bool, null,
+object, array). `serde_json::to_string` is never called on the emit
+path — it does NOT honour JCS sort and number-format rules.
+`serde_json` IS used for parsing on the verify side (extract
+`subject[].digest.blake3`) and for validating caller-supplied
+predicate bodies.
+
+The strict envelope decoder in `mkit-attest::envelope::decode` accepts
+**only** the exact byte shape `encode` emits — no whitespace
+tolerance, no key-order flexibility. Third-party DSSE envelopes
+written by other tools must be re-canonicalised before mkit's decoder
+will accept them. (This is intentional: an mkit producer always
+writes through `encode`, so the strict decoder gives the strongest
+possible "what you wrote is what came back" guarantee.)
 
 ---
 
@@ -195,50 +257,77 @@ JSON-number-that-is-really-a-u64-literal shenanigans.
 
 ### 5.1 Create
 
-1. User or service constructs a predicate (arbitrary JSON).
+1. User or service constructs a predicate (arbitrary JSON object).
 2. mkit builds the in-toto Statement (§4.2) with the commit hash as
    subject and the caller-supplied `predicateType` + `predicate`.
 3. Statement is JCS-canonicalised; bytes become the envelope payload.
-4. `Signer.signDsse(PAE(payloadType, payload))` is called once per
-   configured signer; signatures are collected.
+4. `Signer.sign(PAE(payloadType, payload))` is called once per
+   configured signer (primary `--signer` first, then each
+   `--additional-signer` in order); signatures are collected into the
+   envelope's `signatures[]` array in that same order.
 5. Envelope assembled (§4.1), JCS-canonicalised, BLAKE3-hashed for
    the attestation id.
 6. Envelope written to `.mkit/attestations/<commit>/<att-id>.dsse`.
 
-### 5.2 Add signature
+Multi-signature envelopes are produced in a single `mkit attest`
+invocation by repeating `--additional-signer` (§8). Any signer
+failure aborts the attest with no partial envelope on disk.
 
-1. Read existing envelope by `<att-id>`.
-2. Decode payload, re-encode via JCS (identity if the envelope was
-   well-formed), build PAE.
-3. New signer produces its signature over the PAE; append to
-   `signatures[]`.
-4. Re-serialise envelope, compute new `<att-id-new>`, write new file.
-   Old file is NOT removed (two envelopes now differ by signer set).
+### 5.2 Adding signatures after the fact **(planned)**
 
-Co-signing produces a new attestation id because the envelope bytes
-differ; this is deliberate — it means "revoke the old one by ignoring
-it" is always achievable.
+The current CLI does not support attaching a new signature to an
+already-on-disk envelope. The wire format does not preclude this —
+a future tool could decode, append to `signatures[]`, re-encode, and
+write under the new `<att-id>` derived from the new bytes — but no
+`mkit attest --add-signature <att-id>` flag exists today. Producers
+that need multi-party attestations must collect all signatures at
+create time via `--additional-signer`.
+
+If implemented, the new envelope MUST be written under the att-id
+derived from its new bytes; the previous-att-id file is NOT
+overwritten or deleted, so the two envelopes co-exist on disk.
 
 ### 5.3 Verify
 
 For each envelope attached to the commit:
 
-1. Parse envelope; reject if not JCS-canonical, if `payloadType` is
-   not `application/vnd.in-toto+json`, or if `signatures[]` is empty.
-2. Decode payload; parse Statement; reject if `_type` is not the in-toto
-   v1 URI, if `subject` is empty, or if no subject's digest matches
-   the asked-about commit.
-3. For each signature, consult the trust-root registry (§6.3) for the
-   `keyid`; if a trust root is known, run its verifier over
-   `PAE(payloadType, payload) + sig`. An envelope verifies if **at
-   least one** signature verifies against a recognised trust root.
-4. Return a per-signer result list to the caller. `mkit attest verify`
-   exits 0 iff at least one envelope per commit has at least one
-   verifying signature.
+1. Decode envelope bytes via the strict decoder; reject if it doesn't
+   match the canonical shape, if `payloadType` is not
+   `application/vnd.in-toto+json`, or if `signatures[]` is empty.
+2. For each signature, look up the `keyid` in the trust-root
+   `Registry` (§6.3). On hit, run the algorithm-specific verifier
+   over `PAE(payloadType, payload)` + signature bytes:
+   - `TrustRoot::Ed25519PubKey([u8; 32])` — `ed25519-dalek`
+     `verify_strict` (rejects malleability — non-canonical R, s ≥ ℓ,
+     non-canonical A).
+   - `TrustRoot::P256PubKeySec1(Vec<u8>)` — ECDSA-P-256/SHA-256 over
+     a SEC1-encoded pubkey (33-byte compressed or 65-byte
+     uncompressed).
+   - `TrustRoot::Secp256k1PubKeySec1(Vec<u8>)` — ECDSA-secp256k1/
+     SHA-256 over a SEC1-encoded pubkey.
+   - `TrustRoot::SigstoreCa` — placeholder; any signature dispatched
+     to it surfaces `Reason::UnsupportedTrustRoot`. Real Sigstore
+     verification (Fulcio cert chain + Rekor inclusion) is not
+     implemented.
+3. Each signature returns a typed `Reason`: `Ok`, `UnknownKeyid`,
+   `UnknownKeyidPrefix` (keyid prefix not recognised by
+   `Algorithm::from_keyid`), `SignatureMismatch`,
+   `UnsupportedTrustRoot`, or `AlgorithmNotEnabled` (the algorithm's
+   crypto backend was compiled out of this build).
+4. The envelope verifies if **at least one** signature returns
+   `Reason::Ok`. The caller is also responsible for binding the
+   envelope to the commit being asked about — `mkit-attest` exposes
+   `verify::extract_primary_commit_hash` to read the first subject's
+   blake3 digest out of the Statement payload for that purpose.
 
-There is no revocation list. Revocation is: stop trusting the `keyid`.
-Transparency-log-backed signatures (§6.2) solve this differently by
-binding signatures to timestamps.
+The `mkit verify-attest` CLI enumerates every envelope under
+`.mkit/attestations/<commit>/`, prints a per-signature verdict, and
+exits 0 iff every envelope has at least one verifying signature.
+
+There is no revocation list. Revocation is: stop trusting the
+`keyid`. Transparency-log-backed signatures would solve this
+differently by binding signatures to timestamps; that's future work
+gated on a real Sigstore backend.
 
 ---
 
@@ -246,58 +335,79 @@ binding signatures to timestamps.
 
 ### 6.1 `Signer` trait
 
-The `Signer` trait has two methods:
+The `Signer` trait (`mkit_attest::Signer`) has three methods:
 
-- `keyid() -> String` — identifies which trust root verifies this
-  signer's output.
-- `sign_dsse(pae: &[u8]) -> Vec<u8>` — signs the DSSE PAE. Implementation
-  may prompt, network-call, subprocess, etc. Returns raw signature bytes.
+- `algorithm() -> Algorithm` — the COSE-tagged signing algorithm
+  this signer produces (`Ed25519` / `Secp256k1` / `P256`). Callers
+  use this to pick the right verifier path on the receive side
+  without reparsing the keyid.
+- `keyid() -> Result<String, Error>` — identifies which trust root
+  verifies this signer's output. May fail before the first sign call
+  for signers that learn their keyid from the signer process (e.g.
+  `ExternalSigner` returns `KeyIdNotKnownUntilFirstSign`).
+- `sign(pae: &[u8]) -> Result<Vec<u8>, Error>` — signs the DSSE PAE.
+  Implementation may prompt, network-call, subprocess, etc. Returns
+  raw signature bytes (the envelope encoder base64s on the way out).
 
 Verification is symmetric but NOT attached to the same trait, because
 the verifier often has no knowledge of how the signature was produced
-(e.g. for a Sigstore-keyless signature the verifier is Fulcio's cert
-chain, which no signer owns). Verifiers dispatch on `keyid` (§6.3).
+(e.g. for a future Sigstore-keyless signature the verifier is
+Fulcio's cert chain, which no signer owns). Verifiers dispatch on
+`keyid` (§6.3) and the resolved `TrustRoot` variant.
 
 ### 6.2 Built-in signers
 
-mkit ships three. Each is opt-in; the CLI picks the signer via
-`--signer` flag or the `attest.signer` config key.
+mkit ships three production signer kinds, plus a scaffold for
+Sigstore. Each is opt-in; the CLI picks the signer via `--signer`
+flag or the `attest.signer` config key.
 
 | Signer name | What it signs with | Where the trust root lives |
 |---|---|---|
-| `repo-key` (default) | Ed25519, the existing `.mkit/keys/default.key` | The `signer` field already stored on commits. |
-| `keystore` | A user-scoped `mkit-keystore` key reference | The selected keystore key's canonical key ID. |
-| `external` | Subprocess — JSON-over-stdin/stdout to a caller-supplied binary | Whatever the external process's trust model is. |
+| `repo-key` (default) | Ed25519/secp256k1/P-256 over a raw 32-byte secret on disk under `.mkit/keys/` | The corresponding public key, registered by `keyid` in the trust-roots file. |
+| `keystore` | A user-scoped `mkit-keystore` key reference (the keystore performs the signing) | The keystore backend's canonical key id. |
+| `external` | Subprocess wire conversation per [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) | Whatever the external signer's trust model is. |
+| `sigstore` *(scaffold)* | — | — — `Error::SigstoreNotImplemented` is returned. Not selectable from the CLI factory. |
 
-Sigstore keyless attestations remain future work until the CLI has a matching
-signer implementation.
+`repo-key` covers all three algorithms:
+- Ed25519 reuses the existing commit-signing keypair at
+  `.mkit/keys/default.key` (path is configurable via
+  `signing_key`).
+- secp256k1 and P-256 each read a raw 32-byte secret from
+  `attest.secp256k1_key_path` / `attest.p256_key_path` (defaults
+  `.mkit/keys/secp256k1.key`, `.mkit/keys/p256.key`). Neither path
+  is auto-generated — `mkit keygen --algorithm <alg>` must run
+  first.
 
-`external` is the extension point Makechain, a future blockchain
-attestor, or an internal tool wraps. The full wire contract —
-invocation, request/response JSON, error semantics, size caps,
-timeout, determinism, versioning — is specified normatively in
-[**`SPEC-EXTERNAL-SIGNER.md`**](./SPEC-EXTERNAL-SIGNER.md). Protocol
-version is **v1**; that document is the source of truth for any new
-signer implementation, and the multi-algorithm `algorithm` field
-added in phase-1 of the Rust port lives there rather than being
-re-specified here.
+`external` is the extension point an HSM, Secure Enclave, browser-
+crypto wallet, Makechain, etc. wraps. The full wire contract —
+invocation, request/response shapes, capability discovery, PIN
+prompts, error semantics, size caps, timeout, determinism,
+versioning — is specified normatively in
+[**`SPEC-EXTERNAL-SIGNER.md`**](./SPEC-EXTERNAL-SIGNER.md), with the
+underlying length-prefixed buffa framing defined in
+[`SPEC-RPC.md`](./SPEC-RPC.md). Protocol version is **v1**; that
+document is the source of truth for any new signer implementation.
 
-TL;DR for readers who just want the shape:
+In summary, the wire is length-prefixed `SignerFrame` protobuf
+messages (NOT one-line JSON) carrying:
 
 ```
-stdin   (one-line JSON):  {"pae_base64": "...", "algorithm": "ed25519|secp256k1|p256"}
-stdout  (one-line JSON):  {"keyid": "...", "sig_base64": "..."}
-exit 0  on success, non-zero on error (stderr surfaces to the user).
+parent → child:   Hello { protocol = v1, ... }
+                  SignRequest { algorithm, key_form, key_ref, payload }
+child  → parent:  HelloResponse { capabilities, ... }   (optional)
+                  SignResponse { signature, public_key, key_id }
+                    OR Error { code, message }
 ```
 
-The binary path comes from user-scoped `attest.external_signer_path`.
-A reference implementation lives at
-`contrib/signers/mkit-sign-file/`.
+The binary path comes from user-scoped `attest.external_signer_path`
+and MUST be absolute (relative paths are rejected at construction to
+close a `$PATH` resolution race). The child receives the PAE inside
+`SignRequest.payload` on stdin — never on argv.
 
 **Signer argv.** The subprocess is spawned with an optional argv
-vector in addition to the stdin JSON. By default that vector is
-empty (backward-compatible with pre-argv mkit). There are three
-ways to populate it, each overriding the previous:
+vector in addition to the protobuf request on stdin. By default the
+vector is empty. There are three ways to populate it, each
+overriding the previous:
 
 1. User-scoped `attest.external_signer_args` — a pipe-separated
    list (`sign|--tag|prod`). Pipe instead of comma because the
@@ -310,12 +420,9 @@ ways to populate it, each overriding the previous:
    envelope — see §6.2.1 below.
 
 Every token is passed verbatim to `Command::args` — no shell
-interpolation, no splitting on whitespace. This closes the gap
-where a signer that wanted subcommand shape (`mkit-sign-se sign
---tag prod`) had to be wrapped in a shell script that hardcoded
-the tag, blocking multi-key workflows.
+interpolation, no splitting on whitespace.
 
-#### 6.2.1 Multi-sig spec: `args=` clause
+#### 6.2.1 Multi-sig spec: `--additional-signer` clause
 
 `mkit attest --additional-signer` takes a comma-separated
 `key=value` spec. The recognised keys are:
@@ -327,9 +434,10 @@ the tag, blocking multi-key workflows.
 | `path`      | Overrides key path (repo-key) or binary path (external).   |
 | `args`      | Pipe-separated argv for external signers only (optional).  |
 
-Keystore-backed signing is available as the primary `attest.signer` in
-Keystore V1. `--additional-signer` remains limited to `repo-key` and `external`
-until the multi-sig grammar grows a key-ref field.
+Keystore-backed signing is available as the primary `attest.signer`.
+`--additional-signer` is currently limited to `repo-key` and
+`external` until the multi-sig grammar grows a key-ref field for
+keystore selection.
 
 Example:
 
@@ -340,23 +448,35 @@ mkit attest --additional-signer \
 
 `|` is used inside `args=` because `,` is the outer separator.
 When `args=` is present it overrides `attest.external_signer_args`
-for this signer only; absent means "fall through to config."
+for this signer only; absent means "fall through to config." An
+explicit `args=` with no value is a valid "zero argv" override.
 
 ### 6.3 `keyid` conventions
 
-No hard format — it's free-form UTF-8. But strongly recommended:
+Free-form UTF-8. Strongly recommended canonical shapes:
 
-- `repo-key` → `blake3:<32-hex-of-pubkey>`.
-- Keystore Ed25519 → `ed25519:<64-hex-of-pubkey>`; other algorithms use the
-  keystore backend's canonical scheme.
-- Sigstore keyless → `sigstore:<cert-san>` (e.g.
+- Ed25519 `repo-key` — `blake3:<hex>` where `<hex>` is the 64-char
+  lowercase hex of `BLAKE3(pubkey_bytes)` (32 bytes → 64 hex chars).
+  The full keyid string is 71 bytes long (`blake3:` + 64 hex). The
+  legacy `blake3:` prefix is preserved for backward compatibility
+  with attestations produced before the multi-algorithm split; the
+  verifier maps it to Ed25519 via `Algorithm::from_keyid`.
+- secp256k1 / P-256 `repo-key` — `secp256k1:<hex>` / `p256:<hex>` of
+  the SEC1-encoded compressed pubkey (33 bytes → 66 hex chars).
+- Keystore-backed keys — whatever the keystore backend returns from
+  `KeySigner::keyid()`. Conventionally prefixed by its algorithm.
+- External — whatever the external signer returns in
+  `SignResponse.key_id`; by convention scheme-prefixed
+  (`x509:<spki-hash>`, `makechain:0x…`, etc.).
+- Sigstore keyless **(planned)** — `sigstore:<cert-san>` (e.g.
   `sigstore:https://github.com/user/repo/.github/workflows/release.yml@refs/tags/v1`).
-- External → whatever the external signer returns; by convention
-  scheme-prefixed (`makechain:0x…`, `x509:<spki-hash>`, etc.).
 
 The keyid is purely a dispatch key into the verifier registry. It is
 NOT authoritative — the signature itself is the only thing that
-proves identity.
+proves identity. `Algorithm::from_keyid` recognises the prefixes
+`ed25519:`, `secp256k1:`, `p256:`, and the legacy `blake3:`;
+anything else surfaces `Reason::UnknownKeyidPrefix` on the verify
+side.
 
 ### 6.4 Predicate types — conventions, not requirements
 
@@ -367,11 +487,47 @@ into):
 - `https://slsa.dev/provenance/v1` — SLSA build provenance.
 - `https://in-toto.io/attestation/vuln/v0.1` — vuln-scan results.
 - `https://github.com/officialunofficial/mkit/spec/predicate/review/v1`
-  — code review sign-off. *[to be defined in
-  `docs/PREDICATE-REVIEW.md` if we actually ship it.]*
-- Third-party (e.g. `tag:github.com,2024:officialunofficial/mkit/settlement/v1`
-  — placeholder for a Makechain-team settlement predicate, subject to
-  provisioning) — entirely opaque to mkit.
+  — code review sign-off **(planned; not yet defined)**.
+- Third-party predicates (e.g. a Makechain settlement predicate at
+  a yet-to-be-provisioned URI such as
+  `tag:github.com,2024:officialunofficial/mkit/settlement/v1`) are
+  entirely opaque to mkit.
+
+### 6.5 Trust-roots file
+
+The verify path resolves a `keyid` to a `TrustRoot` variant via a
+user-scoped trust-roots file. By default this lives at
+`$XDG_CONFIG_HOME/mkit/trust-roots.toml` (typically
+`~/.config/mkit/trust-roots.toml`). `mkit verify-attest --trust-roots
+<path>` overrides the location.
+
+**An in-repo trust-roots file is REJECTED unless `--trust-roots` is
+explicitly passed.** A hostile clone could otherwise ship
+`.mkit/attest-trust-roots.toml` listing attacker keys and the verify
+loop would print "ok" against attacker-controlled signatures.
+
+Schema (a strict subset of TOML — the parser is hand-rolled and
+recognises only this exact grammar; unknown keys inside a block are
+tolerated and ignored):
+
+```toml
+# Repeat one block per trusted key.
+[[trust_root]]
+keyid      = "ed25519:abc123..."   # exact match against the keyid carried in the DSSE signature
+kind       = "ed25519"             # see table below
+pubkey_hex = "deadbeef..."         # raw public-key bytes, lowercase hex
+```
+
+| `kind`                       | Maps to `TrustRoot` variant  | `pubkey_hex` expects                                |
+|------------------------------|------------------------------|-----------------------------------------------------|
+| `ed25519`                    | `Ed25519PubKey([u8; 32])`    | exactly 32 bytes (64 hex chars)                     |
+| `p256-sec1` or `p256`        | `P256PubKeySec1(Vec<u8>)`    | SEC1: 33 bytes compressed (66 hex) or 65 bytes uncompressed (130 hex) |
+| `secp256k1` or `secp256k1-sec1` | `Secp256k1PubKeySec1(Vec<u8>)` | SEC1: 33 bytes compressed (66 hex) or 65 bytes uncompressed (130 hex) |
+| anything else                | silently skipped             | —                                                   |
+
+Missing file ⇒ empty registry ⇒ every signature surfaces
+`UnknownKeyid` ⇒ no envelope verifies. The CLI prints a
+`note: trust-roots file not found at ...` hint in that case.
 
 ---
 
@@ -385,9 +541,10 @@ attestations are indistinguishable at the commit layer.
 
 ### 7.2 Signing code (`SPEC-SIGNING.md`)
 
-The DSSE signer for `repo-key` reuses `std.crypto.sign.Ed25519` and
-the same `.mkit/keys/default.key`. It signs the DSSE PAE per §2.1 —
-note this is a DIFFERENT signed-bytes domain from commit signing:
+The Ed25519 DSSE signer for `repo-key` reuses `ed25519-dalek` and the
+same `.mkit/keys/default.key` as commit signing. It signs the DSSE
+PAE per §2.1 — note this is a DIFFERENT signed-bytes domain from
+commit signing:
 
 ```
 COMMIT_DOMAIN       = "mkit.commit\x00"      (SPEC-SIGNING §2)
@@ -400,78 +557,113 @@ The PAE prefix `"DSSEv1 "` cannot collide with either domain prefix
 confusion (SPEC-SIGNING §2's R-17) is therefore extended to cover
 attestations with no additional work.
 
-### 7.3 Transport
+### 7.3 Transport **(planned)**
 
-SPEC-TRANSPORT v1 gains **two** new verbs:
+Push/pull of attestations across the wire is not yet implemented in
+any of the `mkit-transport-{file,http,s3,ssh,memory}` backends, and
+the SPEC-RPC opcode table does not yet carry attestation verbs.
+`mkit push` / `mkit pull` / `mkit fetch` move only the object DAG
+today; attestations remain repo-local until a future transport
+revision adds them.
 
-```
-OP_UPLOAD_ATTESTATION    = 0x08
-OP_DOWNLOAD_ATTESTATION  = 0x09
-OP_LIST_ATTESTATIONS     = 0x0A
-```
+When that revision lands it MUST:
 
-(Opcodes chosen to avoid collision with existing verbs up to 0x07,
-plus OP_CLOSE at 0xFF.) Semantics mirror the pack ops:
+- Allow uploading an envelope as `(commit-hash, envelope-bytes)`,
+  with the server computing `<att-id> = BLAKE3(envelope-bytes)` and
+  writing `.mkit/attestations/<commit>/<att-id>.dsse`.
+- Allow downloading by `<att-id>` (returning envelope bytes).
+- Allow listing every `<att-id>` attached to a given `<commit>`,
+  returning the same sorted-by-att-id order `store::list` produces.
+- Degrade cleanly: a pre-attestation-aware server returns whatever
+  the SPEC-RPC unsupported-verb status is, and the client emits a
+  `warning:` line to stderr and continues without attestations.
 
-- `UPLOAD_ATTESTATION`: `[32-byte commit hash] [envelope bytes]`.
-  Server stores at `.mkit/attestations/<commit>/<blake3(env)>.dsse`.
-- `DOWNLOAD_ATTESTATION`: `[32-byte att-id]` → returns envelope bytes.
-- `LIST_ATTESTATIONS`: `[32-byte commit hash]` → returns a count +
-  sorted list of `<att-id>` hashes.
+Opcode numbers and exact frame shapes will be specified in
+`SPEC-RPC` once the wire revision is cut.
 
-`mkit push` uploads every attestation under the pushed commits;
-`mkit pull` / `mkit fetch` download them. Transport protocols that
-predate attestations (e.g. a pre-0.3 server) return
-`STATUS_UNSUPPORTED` for the new opcodes; the client degrades to
-attestation-less pull with a `warning:` line on stderr.
+---
 
 ## 8. CLI surface
 
 ```
-mkit attest <commit> --predicate-type <uri> --predicate <file.json>
-                     [--signer <name>]
-                     [--add-signature <att-id>]
-    Create a new attestation or add a signature to an existing one.
+mkit attest [--commit <hash>]
+            [--algorithm ed25519|secp256k1|p256]
+            [--signer repo-key|external|keystore]
+            [--predicate-type <URI>]
+            [--predicate-file <path>]
+            [--external-signer-arg <V>]...
+            [--additional-signer "<spec>"]...
+    Produce a signed DSSE attestation for a commit. Prints the
+    att-id (64 hex chars) on success.
 
-mkit attest verify <commit> [--require-predicate <uri>] [--require-signer <keyid>]
-    Verify at least one attestation on <commit>. Exits 0 iff passed.
-
-mkit attest ls <commit>
-    List attestations attached to a commit.
-
-mkit attest show <att-id>
-    Pretty-print an envelope (decoded payload + per-signer keyid).
-
-mkit attest rm <att-id>
-    Remove an attestation locally. No remote effect.
+mkit verify-attest [--commit <hash>]
+                   [--trust-roots <path>]
+                   [--algorithm <filter>]
+    Verify every attestation attached to a commit. Exits 0 iff every
+    listed attestation has at least one verifying signature. The
+    --algorithm filter narrows the per-signature display to one of
+    ed25519 / secp256k1 / p256; the verdict is unchanged.
 ```
 
-All attestation subcommands are namespaced under `mkit attest` to keep
-the top-level help readable. Homebrew/Scoop version-wire format is
-unchanged (§`mkit version`).
+Defaults:
+- `--commit` — HEAD.
+- `--algorithm` — `attest.default_algorithm` from config, else
+  `ed25519`.
+- `--signer` — `attest.signer` from config, else `repo-key`.
+- `--predicate-type` —
+  `https://github.com/officialunofficial/mkit/spec/predicate/empty/v1`
+  (placeholder; real callers pass their own URI).
+- `--predicate-file` — omitted ⇒ predicate body is `{}`.
+- `--trust-roots` — `$XDG_CONFIG_HOME/mkit/trust-roots.toml`.
+
+The following subcommands appear in earlier drafts but are **not
+implemented**:
+
+- `mkit attest verify` — folded into the top-level `mkit verify-attest`.
+- `mkit attest ls` / `show` / `rm` — list / inspect / delete by
+  hand against `.mkit/attestations/<commit>/<att-id>.dsse`.
+- `mkit attest --add-signature <att-id>` — see §5.2; multi-signer
+  envelopes must currently be produced in a single invocation.
+- `--require-predicate` / `--require-signer` filters on
+  `mkit verify-attest` — the verify command currently exits 0 if
+  every envelope verifies under at least one trust-rooted signature,
+  without further policy filtering.
 
 ---
 
 ## 9. Config
 
-New keys in `.mkit/config` (validated by `config.validateConfigValue`):
+Keys in the merged config (`.mkit/config` repo-local + user-scoped
+`$XDG_CONFIG_HOME/mkit/config`). Security-sensitive keys are
+**user-scoped only**: setting them in repo-local config is rejected
+with a stderr warning. See `THREAT-MODEL.md` for the motivation.
 
 ```
-attest.signer               = "repo-key" | "keystore" | "external"  (default: repo-key)
-attest.external_signer_path = /abs/path/to/binary   (required when signer = external)
-attest.external_signer_args = a|b|c                 (pipe-separated argv, optional; default empty)
-attest.auto_sign_commit     = false                 (default — mkit doesn't auto-attest on commit)
+[attest]
+default_algorithm    = "ed25519" | "secp256k1" | "p256"   (user-scoped)
+signer               = "repo-key" | "external" | "keystore"  (user-scoped)
+external_signer_path = /abs/path/to/binary               (user-scoped; required when signer = external)
+external_signer_args = a|b|c                             (user-scoped; pipe-separated argv, optional)
+secp256k1_key_path   = .mkit/keys/secp256k1.key          (user-scoped; default shown)
+p256_key_path        = .mkit/keys/p256.key               (user-scoped; default shown)
+
+[key]                                                    # see SPEC-KEYSTORE
+ed25519_ref     = "<backend>:<label>"                    (user-scoped)
+secp256k1_ref   = "<backend>:<label>"                    (user-scoped)
+p256_ref        = "<backend>:<label>"                    (user-scoped)
 ```
 
-`attest.signer = keystore` is user-scoped and signs with the configured
-`mkit-keystore` key reference for the selected algorithm. Repo-local config must
-not select `keystore` or any `key.*_ref` value.
+`signer = "keystore"` signs with the keystore reference selected for
+the configured algorithm (`key.<alg>_ref`, falling back to
+`key.default_ref`). Repo-local config MUST NOT select `keystore` or
+populate any `key.*_ref` — a hostile clone would otherwise pin the
+victim's signing identity to an attacker-chosen key alias.
 
-`attest.auto_sign_commit = true` attaches a minimal attestation with
-`predicateType = https://github.com/officialunofficial/mkit/spec/predicate/commit-signed/v1`
-to every new commit, so downstream verifiers can require "every
-commit has at least a repo-key signature". Opt-in because it doubles
-the signing work on every commit.
+**`attest.auto_sign_commit` (planned).** Earlier drafts proposed an
+"auto-attest every commit with a minimal `commit-signed` predicate"
+toggle. This is not implemented; `mkit commit` does not invoke the
+attest pipeline today. Producers that want commit-level attestations
+must run `mkit attest` explicitly after the commit lands.
 
 ---
 
@@ -483,16 +675,24 @@ Protects against:
 - **Cross-domain signature reuse.** DSSE PAE prefix is distinct from
   commit-signing PAE (§7.2).
 - **Single-signer compromise.** Multi-sig lets you require N-of-M
-  policy at verify time.
+  policy at verify time (callers must implement the N-of-M check
+  themselves on top of the per-signature `Reason` results — the
+  envelope verifies as long as *any* signature returns `Ok`).
 - **Predicate-type sprawl.** mkit doesn't parse predicates, so a
   future unsafe predicate-type can't subvert mkit's invariants.
+- **In-repo trust-roots planting.** `mkit verify-attest` refuses to
+  read a trust-roots file under the repo's `.mkit/` directory unless
+  the user passes `--trust-roots` explicitly.
+- **Ed25519 malleability.** Verify uses `verify_strict` (rejects
+  non-canonical R/A and s ≥ ℓ), so honest verifiers reach the same
+  verdict on the same signature bytes.
 
 Does NOT protect against:
 - **A malicious predicate body.** Interpreting the predicate is the
   consumer's job; mkit just moves the bytes.
 - **Revocation timing.** Without a transparency log the
-  "when was this signature made" is the signer's claim. Use Rekor
-  (Sigstore keyless) for auditable timestamping.
+  "when was this signature made" is the signer's claim. Real
+  Sigstore-style auditable timestamping is future work.
 - **A malicious signer impl.** An `external` signer can return
   whatever it wants. The keyid / trust root has to be checked by
   whoever consumes the envelope.
@@ -503,12 +703,14 @@ Does NOT protect against:
 
 - **Revocation lists.** Out of scope; relies on transparency log or
   signer-level key rotation.
-- **Signed predicates as typed structs.** We never parse `predicate`.
+- **Signed predicates as typed structs.** We never parse `predicate`
+  beyond "is this a JSON object?" on the produce side.
 - **Automatic SLSA provenance generation.** Separate feature; if
   shipped, it'd be a predicate-type-specific emitter that drives
   `mkit attest` at build time.
 - **C2PA / JUMBF support.** Different ecosystem, different shape.
 - **Binary-only DSSE variant.** Defeats interop.
+- **Float number support in JCS.** mkit never emits one.
 
 ---
 
@@ -516,6 +718,14 @@ Does NOT protect against:
 
 This document is draft through the first implementation PR. Once
 shipped in a tagged release, any breaking change to the on-disk
-layout or wire envelope requires a version bump and a `SPEC-ATTESTATIONS-v2.md`
-(same pattern as `SPEC-OBJECTS`). The DSSE + in-toto bodies are
-governed by their upstream specs; mkit tracks those as they evolve.
+layout or wire envelope requires a version bump and a
+`SPEC-ATTESTATIONS-v2.md` (same pattern as `SPEC-OBJECTS`). The DSSE
++ in-toto bodies are governed by their upstream specs; mkit tracks
+those as they evolve.
+
+Items currently marked **(planned)** — §5.2 (`--add-signature`),
+§7.3 (transport verbs), §8 (`mkit attest ls/show/rm`,
+`--require-predicate`/`--require-signer`), §9
+(`attest.auto_sign_commit`), §6.4 review predicate URI — are
+forward-compatible additions and will not require a version bump
+when implemented.
