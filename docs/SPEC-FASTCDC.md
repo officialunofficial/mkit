@@ -108,13 +108,13 @@ mkit-core the worktree picks `CHUNK_THRESHOLD = 1 MiB`
 (`worktree::CHUNK_THRESHOLD`). v1 specifies only that **once a file
 is chunked**, the parameters above MUST be used.
 
-Implementation status: the chunker (`FastCdc::v1`) is fully wired
-inside mkit-core, but `worktree::hash_file` currently returns
-`WorktreeError::NeedsChunker` for files larger than `CHUNK_THRESHOLD`
-rather than producing a `chunked_blob`. The end-to-end wiring of
-worktree → chunker → `chunked_blob` is tracked separately from this
-spec; the byte-level chunk boundaries are already pinned by goldens
-(see §8).
+Implementation status: end-to-end wiring is in place.
+`worktree::hash_file` splits files larger than `CHUNK_THRESHOLD` with
+`FastCdc::v1`, stores each chunk as its own `Blob`, and writes a
+`ChunkedBlob` manifest (with `chunk_size = 0` to denote content-
+defined chunking) whose hash lands in the parent tree. The byte-level
+chunk boundaries are pinned by the goldens in §8; the worktree round-
+trip is covered by `worktree::tests::large_file_becomes_chunked_blob`.
 
 ---
 
