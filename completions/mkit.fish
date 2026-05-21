@@ -16,9 +16,9 @@ complete -c mkit -f
 
 set -l __mkit_subcommands \
     init add rm hash cat tree commit log status diff branch checkout \
-    tag config merge push pull fetch stash clone remote keygen \
+    tag config merge push pull fetch stash clone remote key keygen \
     cherry-pick rebase bisect sparse-checkout serve blame verify \
-    version help
+    attest verify-attest version help
 
 # Subcommand list (only when no subcommand has been entered yet).
 complete -c mkit -n "not __fish_seen_subcommand_from $__mkit_subcommands" \
@@ -64,6 +64,29 @@ complete -c mkit -n "__fish_seen_subcommand_from stash; \
 complete -c mkit -n "__fish_seen_subcommand_from remote; \
     and not __fish_seen_subcommand_from add set" \
     -a "add set"
+complete -c mkit -n "__fish_seen_subcommand_from key; \
+    and not __fish_seen_subcommand_from generate list import export delete" \
+    -a "generate list import export delete"
+
+# attest / verify-attest flags.
+complete -c mkit -n "__fish_seen_subcommand_from attest" \
+    -l commit -d "Commit hash" -r
+complete -c mkit -n "__fish_seen_subcommand_from attest" \
+    -l algorithm -d "Signing algorithm" -r
+complete -c mkit -n "__fish_seen_subcommand_from attest" \
+    -l signer -d "Signer kind" -r
+complete -c mkit -n "__fish_seen_subcommand_from attest" \
+    -l predicate-type -d "Predicate type URI" -r
+complete -c mkit -n "__fish_seen_subcommand_from attest" \
+    -l predicate-file -d "Predicate file path" -r
+complete -c mkit -n "__fish_seen_subcommand_from attest" \
+    -l additional-signer -d "Additional signer spec" -r
+complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
+    -l commit -d "Commit hash" -r
+complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
+    -l trust-roots -d "Trust roots path" -r
+complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
+    -l algorithm -d "Algorithm filter" -r
 
 # Generic --help on any subcommand.
 complete -c mkit -n "__fish_seen_subcommand_from $__mkit_subcommands" \

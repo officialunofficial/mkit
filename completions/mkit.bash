@@ -14,7 +14,7 @@ _mkit_complete() {
     local cur prev words cword
     _init_completion || return 0
 
-    local subcommands="init add rm hash cat tree commit log status diff branch checkout tag config merge push pull fetch stash clone remote keygen cherry-pick rebase bisect sparse-checkout serve blame verify version help"
+    local subcommands="init add rm hash cat tree commit log status diff branch checkout tag config merge push pull fetch stash clone remote key keygen cherry-pick rebase bisect sparse-checkout serve blame verify attest verify-attest version help"
     local top_flags="--help -h --version"
 
     # First non-flag word is the subcommand.
@@ -57,6 +57,15 @@ _mkit_complete() {
             ;;
         remote)
             COMPREPLY=( $(compgen -W "add set" -- "$cur") )
+            ;;
+        key)
+            COMPREPLY=( $(compgen -W "generate list import export delete --help" -- "$cur") )
+            ;;
+        attest)
+            COMPREPLY=( $(compgen -W "--commit --algorithm --signer --predicate-type --predicate-file --additional-signer --help" -- "$cur") )
+            ;;
+        verify-attest)
+            COMPREPLY=( $(compgen -W "--commit --trust-roots --algorithm --help" -- "$cur") )
             ;;
         *)
             COMPREPLY=( $(compgen -W "--help" -- "$cur") )

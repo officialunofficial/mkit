@@ -47,6 +47,23 @@ Stage files for the next commit. Respects
 .Pa .mkitignore .
 .It Cm rm Ar path ...
 Mark a file for deletion in the next commit.
+.It Cm hash Ar file
+Hash
+.Ar file
+as a blob, store it under
+.Pa .mkit/objects/ ,
+and print the resulting BLAKE3 hash on stdout.
+.It Cm cat Ar hash
+Decode and print the object identified by
+.Ar hash
+on stdout.
+.It Cm tree
+Snapshot the working directory as a tree object and print the tree hash.
+Honors
+.Pa .mkitignore
+the same way
+.Cm add
+does.
 .It Cm commit Op Fl a | Fl Fl all Op Fl m Ar message
 Create a signed commit. With
 .Fl a
@@ -78,6 +95,24 @@ Show the staged and working-tree changes.
 List, create, or delete branches.
 .It Cm checkout Ar branch
 Switch HEAD to a branch and restore files from its tree.
+.It Cm tag Oo Ar name Oc Op Fl d Ar name
+List, create, or delete tags. With no arguments, prints the list of
+tags. With a
+.Ar name
+argument, creates a tag at HEAD. With
+.Fl d ,
+deletes the named tag.
+.It Cm sparse-checkout Cm set | Cm list | Cm disable | Cm reapply Op Ar pattern ...
+Manage the sparse-checkout pattern set at
+.Pa .mkit/sparse-checkout .
+.Cm set
+overwrites the pattern list,
+.Cm list
+prints the current patterns,
+.Cm disable
+clears them, and
+.Cm reapply
+re-materialises the working tree from the current patterns.
 .It Cm merge Ar branch
 Merge
 .Ar branch
@@ -113,6 +148,22 @@ Line-level attribution of the committed state of
 .Ar file .
 .It Cm verify Ar hash
 Verify the signature on a commit object.
+.It Cm attest Oo Fl Fl commit Ar hash Oc Op Fl Fl algorithm Ar alg Op Fl Fl signer Ar kind Op Fl Fl predicate-type Ar uri Op Fl Fl predicate-file Ar path
+Produce a signed DSSE attestation for the given commit (defaults to
+HEAD). Multiple
+.Fl Fl additional-signer
+specs may be supplied to co-sign the attestation. The resulting
+envelope is attached to the commit's attestation set.
+.It Cm verify-attest Oo Fl Fl commit Ar hash Oc Op Fl Fl trust-roots Ar path Op Fl Fl algorithm Ar filter
+Verify every attestation attached to the given commit. Returns success
+only if every envelope verifies; an algorithm filter restricts the
+check to a single algorithm.
+.It Cm key Cm generate | Cm list | Cm import | Cm export | Cm delete
+Manage user-scoped keystore keys backed by the platform keystore
+(Keychain on macOS, libsecret/systemd-creds/YubiKey on Linux, Credential
+Manager on Windows). Unlike
+.Cm keygen
+(which writes to a repo-local file), these keys persist across repos.
 .It Cm keygen
 Generate a fresh Ed25519 keypair in
 .Pa .mkit/keys/default.key .
