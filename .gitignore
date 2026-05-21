@@ -25,3 +25,13 @@ mkit/test-key
 .env.*
 secrets.*
 credentials.*
+
+# Build/runtime artifacts
+# JS/TS build artifacts
+node_modules/
+apps/*/node_modules/
+apps/*/dist/
+apps/*/.vocs/
+
+# Rust dist artifacts (wasm-pack, dist tarballs)
+/rust/dist/
