@@ -7,9 +7,9 @@ backed by Apple's Secure Enclave.
 Headline properties:
 
 - **P-256 only.** The Secure Enclave supports no other algorithm. Any
-  request with `"algorithm"` other than `"p256"` is rejected with
-  exit code 2 and a message on stderr — this signer **will not** fall
-  back to a software key.
+  `SignRequest` with a non-P-256 `algorithm` is answered with an
+  `Error` frame carrying `ERROR_CODE_UNSUPPORTED_ALGORITHM` — this
+  signer **will not** fall back to a software key.
 - **Non-extractable private key.** `SecureEnclave.P256.Signing.PrivateKey`
   generates and holds the scalar inside the Secure Enclave processor;
   the blob we persist to the keychain is an encrypted handle that only
@@ -17,7 +17,57 @@ Headline properties:
 - **Optional biometric gating.** `--require-biometric` on `keygen`
   binds the key to `.biometryCurrentSet`, so every sign prompts for
   Touch ID / Face ID (and the key becomes unusable if the user enrolls
-  a new fingerprint / face).
+  a new fingerprint / face). When the user cancels the prompt the
+  signer returns `ERROR_CODE_USER_DECLINED`.
+
+---
+
+## Wire protocol
+
+`mkit-sign-se sign` speaks the v1 wire — length-prefixed protobuf
+`SignerFrame` messages on stdin/stdout. This is the same protocol
+all other mkit reference signers (`mkit-sign-file`, `mkit-sign-tpm`,
+`mkit-sign-ctap`) speak; the schema is shared
+([`signer.proto`](../../../rust/crates/mkit-rpc/proto/signer.proto)
+plus [`common.proto`](../../../rust/crates/mkit-rpc/proto/common.proto)).
+
+The Swift implementation links the canonical Apple-platform protobuf
+runtime — [SwiftProtobuf](https://github.com/apple/swift-protobuf),
+pinned to `1.30.0+` in `Package.swift`. Pre-generated `.pb.swift`
+sources are checked into `Sources/mkit-sign-se/Generated/` to avoid
+build-time codegen (SwiftPM has no clean equivalent of `build.rs`).
+To regenerate after a `.proto` change:
+
+```console
+$ brew install swift-protobuf   # provides `protoc-gen-swift`
+$ protoc --swift_out=contrib/signers/mkit-sign-se/Sources/mkit-sign-se/Generated \
+         --proto_path=rust/crates/mkit-rpc/proto \
+         rust/crates/mkit-rpc/proto/common.proto \
+         rust/crates/mkit-rpc/proto/signer.proto
+```
+
+### Capabilities
+
+```
+algorithms = [P256]
+key_forms  = [OPAQUE_HANDLE]   # UTF-8 bytes of the keychain tag
+supports_pin = false
+supports_certificate_chain = false
+requires_user_presence = true   # advisory — biometric or keychain prompt
+```
+
+### Resolving the key
+
+The Secure Enclave key to sign with is selected by **tag** — the same
+label `keygen` stored under `kSecAttrAccount`. The tag can be supplied
+two ways:
+
+- `--tag <label>` on argv (per-process default).
+- `SignRequest.key_ref` over the wire, interpreted as the UTF-8 bytes
+  of the tag (`KEY_FORM_OPAQUE_HANDLE` per `signer.proto`).
+
+When both are set, the wire value wins. If neither is set the signer
+answers with `ERROR_CODE_INVALID_REQUEST`.
 
 ---
 
@@ -29,6 +79,8 @@ Headline properties:
 - Swift 5.9+ toolchain — shipping Xcode 14+ or the standalone
   Command Line Tools is enough.
 - For the e2e test: `openssl` and `python3` (both ship with macOS).
+- SwiftProtobuf 1.30+ is fetched automatically by SwiftPM on first
+  build; no manual setup needed.
 
 ## Build
 
@@ -46,12 +98,14 @@ $ make build
 
 ## Install
 
-Either copy the binary or use the Makefile target:
-
 ```console
 $ make install                      # copies to /usr/local/bin
 $ make install PREFIX=$HOME/.local  # installs under ~/.local/bin
 ```
+
+The expected production install path is `/usr/local/bin/mkit-sign-se`;
+that is the path mkit's `attest.external_signer_path` config key
+should point at.
 
 ---
 
@@ -61,7 +115,7 @@ Subcommands:
 
 ```
 mkit-sign-se keygen --tag <label> [--require-biometric]
-mkit-sign-se sign   --tag <label>
+mkit-sign-se sign   [--tag <label>]
 mkit-sign-se list
 mkit-sign-se delete --tag <label>
 ```
@@ -81,22 +135,28 @@ Add `--require-biometric` to gate signing on Touch ID / Face ID.
 
 ### `sign`
 
-Implements the external-signer v1 protocol. Reads one line of JSON
-from stdin and writes one line of JSON to stdout:
+Implements the v1 external-signer wire protocol. Reads framed
+`SignerFrame` messages from stdin and writes framed responses to
+stdout:
 
-```console
-$ PAE='DSSEv1 28 application/vnd.in-toto+json 2 {}'
-$ PAE_B64=$(printf '%s' "$PAE" | base64 | tr -d '\n')
-$ printf '{"pae_base64":"%s","algorithm":"p256"}\n' "$PAE_B64" \
-    | mkit-sign-se sign --tag my-attest-key
-{"keyid":"p256:…","sig_base64":"…"}
+```
+mkit -> signer:    SignerFrame{ Hello { protocol_version = V1, ... } }
+signer -> mkit:    SignerFrame{ HelloResponse { capabilities... } }
+mkit -> signer:    SignerFrame{ SignRequest { algorithm = P256, ... } }
+signer -> mkit:    SignerFrame{ SignResponse { signature, public_key, key_id, ... } }
 ```
 
-- Exit 0 on success with one line of JSON on stdout (nothing on stderr).
-- Exit 2 specifically for `algorithm != "p256"` — nothing on stdout, a
-  human-readable reject message on stderr.
-- Exit 1 for everything else (unknown tag, SEP unavailable, biometric
-  declined, malformed stdin JSON, keychain failure).
+Each frame is a 4-byte little-endian u32 length prefix followed by the
+protobuf body, capped at 1 MiB matching `MAX_FRAME_BYTES` in
+`rust/crates/mkit-rpc/src/framing.rs`. The signer loops on stdin and
+processes successive `Hello` + `SignRequest` pairs until the caller
+closes the stream — a clean EOF on the length prefix is treated as a
+graceful shutdown.
+
+Per-request errors (no key with that tag, biometric declined,
+unsupported algorithm) come back as `Error` frames; the binary keeps
+running. Setup-phase failures (no Secure Enclave on the host, bad
+argv) exit non-zero with a message on stderr and no frame on stdout.
 
 ### `list`
 
@@ -118,49 +178,24 @@ unknown tag exits non-zero with a `tagNotFound` message.
 ```toml
 [attest]
 signer = "external"
-external_signer = "/usr/local/bin/mkit-sign-se"
+external_signer_path = "/usr/local/bin/mkit-sign-se"
+external_signer_args = "sign|--tag|my-attest-key"
 ```
 
-### ⚠️ Known limitation: `--tag` is not passed through today
-
-mkit's external-signer invocation today sends the signer an **empty
-argv**. That means `mkit-sign-se sign --tag <label>` — which is how you
-tell this binary *which* SEP key to use — can't be selected by mkit
-directly; the binary would be invoked with no `--tag` argument and
-exit on the "missing --tag" path.
-
-**Workaround until mkit grows a `--tag` pass-through (tracked as a
-follow-up):** wrap the binary in a trivial shell script that hard-codes
-your chosen tag and point mkit at the wrapper instead.
-
-`~/.local/bin/mkit-sign-se-myproject`:
-
-```sh
-#!/bin/sh
-exec /usr/local/bin/mkit-sign-se sign --tag my-attest-key
-```
-
-Then:
-
-```console
-$ chmod 755 ~/.local/bin/mkit-sign-se-myproject
-$ mkit config set attest.external_signer "$HOME/.local/bin/mkit-sign-se-myproject"
-```
-
-(That same wrapper trick is how `mkit-sign-file` handles its own
-per-invocation `--key` plumbing — see `contrib/signers/README.md`.)
+The pipe (`|`) is used in the args string because commas are reserved
+for `--additional-signer` multi-sig specs. mkit splits on `|` and
+passes each piece as a separate argv element, so the signer is
+launched as `mkit-sign-se sign --tag my-attest-key`.
 
 ### `mkit keygen` does NOT produce an SEP-backed key
 
 `mkit keygen --algorithm p256` writes a raw-key file to
-`.mkit/signing.key` — that is a *different* flow. For the SEP
-workflow:
+`.mkit/signing.key` — a *different* flow. For the SEP workflow:
 
 1. Run `mkit-sign-se keygen --tag my-attest-key` to mint the SEP key.
 2. Note the printed `p256:<hex>` keyid.
 3. Add that keyid to your verifier's trust-root registry.
-4. Configure mkit with the `external_signer` block above (plus the
-   wrapper-script workaround for `--tag`).
+4. Configure mkit with the `external_signer_*` block above.
 
 ---
 
@@ -172,9 +207,8 @@ workflow:
   only ask the SEP to sign, subject to whatever access control was
   set at creation.
 - **Biometric-gated signing.** With `--require-biometric`, signing
-  prompts for Touch ID / Face ID. Declining or cancelling the prompt
-  surfaces as a non-zero exit with a `biometric prompt was declined`
-  message. mkit treats that as a normal signer failure.
+  prompts for Touch ID / Face ID. Cancelling the prompt surfaces as
+  an `ERROR_CODE_USER_DECLINED` frame.
 - **Device loss = key loss.** SEP keys are bound to the physical SEP
   silicon. They are **not** synced via iCloud Keychain. A lost /
   wiped / reset device loses the key irrecoverably — you cannot back
@@ -186,7 +220,7 @@ workflow:
   those. Deleting a key is reversible only if you kept the old
   `dataRepresentation` blob (we don't; we delete the keychain item
   wholesale).
-- **Installation path.** Treat `attest.external_signer` as a
+- **Installation path.** Treat `attest.external_signer_path` as a
   code-execution sink (same class as `git config core.editor`). For
   any deployment where the local user account is less trusted than
   the user who configured mkit, install the binary on a root-owned,
@@ -218,7 +252,7 @@ The tag you passed to `sign` / `delete` doesn't exist. Run
 `mkit-sign-se list` to see what's there, or `mkit-sign-se keygen
 --tag <label>` to create it.
 
-### "biometric prompt was declined or cancelled"
+### Got an `ERROR_CODE_USER_DECLINED` from `sign`
 
 You pressed Cancel on the Touch ID / Face ID dialog, let it time
 out, or enrolled a new biometric after creating a
@@ -243,15 +277,16 @@ $ xcrun notarytool submit .build/release/mkit-sign-se --wait …
 ## Testing
 
 ```console
-$ swift test           # unit tests; SEP-roundtrip test is XCTSkip'd
+$ swift test           # unit tests; SEP-roundtrip tests are XCTSkip'd
                        # if the SEP is unavailable
-$ ./Tests/e2e.sh       # end-to-end: keygen -> sign -> openssl verify
-                       # -> reject-wrong-algorithm -> delete
+$ ./Tests/e2e.sh       # end-to-end: keygen -> sign (over the protobuf
+                       # wire) -> openssl verify -> reject path -> delete
 ```
 
-The `e2e.sh` script is self-contained: it uses `openssl` (ships with
-macOS) to verify the compact signature out-of-band, so it exercises
-the on-the-wire format directly without needing a built `mkit` binary.
+The `e2e.sh` script is self-contained: it assembles the request frames
+with a small python3 helper (no protobuf dependency — we encode the
+varints by hand), pipes them through the signer, parses the response
+frames, and verifies the compact signature out-of-band with `openssl`.
 On a host without a SEP, the script prints a skip message and exits 0.
 
 The script lives under `Tests/e2e.sh` rather than a separate `tests/`
@@ -263,7 +298,7 @@ filesystems where `Tests/` and `tests/` are the same directory anyway.
 
 ## Status
 
-Reference implementation for SEP signers. The plan is to use this as
-the blueprint for other platform-specific signers (Ledger, WebAuthn,
-HSM, ...): each follows the same argv / subcommand / JSON shape, but
-targets a different secret store.
+Reference Swift implementation of the v1 external-signer wire
+protocol. Companion to the Rust signers (`mkit-sign-file`,
+`mkit-sign-tpm`, `mkit-sign-ctap`) — same protocol, different
+language, different secret store.
