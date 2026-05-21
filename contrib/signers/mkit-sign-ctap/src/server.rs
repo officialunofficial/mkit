@@ -20,10 +20,8 @@ use mkit_attest::build_client_data_json;
 use mkit_rpc::mkit::rpc::v1::signer::{
     Capabilities, HelloResponse, SignResponse, SignerFrame, WebAuthnData, signer_frame,
 };
-use mkit_rpc::mkit::rpc::v1::{
-    Algorithm as RpcAlgorithm, Error as RpcError, ErrorCode, KeyForm, ProtocolVersion,
-};
-use mkit_rpc::{FrameError, read_frame, write_frame};
+use mkit_rpc::mkit::rpc::v1::{Algorithm as RpcAlgorithm, ErrorCode, KeyForm, ProtocolVersion};
+use mkit_rpc::{FrameError, read_frame, signer_error_frame, write_frame};
 
 use crate::ctap::CtapDevice;
 use crate::{SignerError, cred_store, proto};
@@ -154,7 +152,7 @@ fn handle_sign<D: CtapDevice>(
     if algorithm != RpcAlgorithm::ALGORITHM_P256 as i32
         && algorithm != RpcAlgorithm::ALGORITHM_ED25519_WEBAUTHN as i32
     {
-        return error_frame(
+        return signer_error_frame(
             ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM,
             "mkit-sign-ctap only signs ALGORITHM_P256 and ALGORITHM_ED25519_WEBAUTHN".to_owned(),
         );
@@ -163,7 +161,7 @@ fn handle_sign<D: CtapDevice>(
     // CTAP signers require an opaque credential_id handle.
     let key_form = req.key_form.as_ref().map_or(0, buffa::EnumValue::to_i32);
     if key_form != KeyForm::KEY_FORM_OPAQUE_HANDLE as i32 && key_form != 0 {
-        return error_frame(
+        return signer_error_frame(
             ErrorCode::ERROR_CODE_UNSUPPORTED_KEY_FORM,
             "mkit-sign-ctap only supports KEY_FORM_OPAQUE_HANDLE (the credential_id)".to_owned(),
         );
@@ -180,7 +178,7 @@ fn handle_sign<D: CtapDevice>(
     let credential_id = match credential_id {
         Some(c) => c,
         None => {
-            return error_frame(
+            return signer_error_frame(
                 ErrorCode::ERROR_CODE_INVALID_REQUEST,
                 "no credential — pass --credential-id on argv or set SignRequest.key_ref"
                     .to_owned(),
@@ -192,7 +190,7 @@ fn handle_sign<D: CtapDevice>(
     let credential_id_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential_id);
     let store_path = match cred_store::default_path() {
         Ok(p) => p,
-        Err(e) => return error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
+        Err(e) => return signer_error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
     };
     let store = cred_store::Store::load(&store_path).unwrap_or_default();
     let record = store.find_by_credential_id(&credential_id_b64);
@@ -218,14 +216,14 @@ fn handle_sign<D: CtapDevice>(
     ) {
         Ok(a) => a,
         Err(SignerError::Ctap(msg)) => {
-            return error_frame(ErrorCode::ERROR_CODE_HARDWARE_ERROR, msg);
+            return signer_error_frame(ErrorCode::ERROR_CODE_HARDWARE_ERROR, msg);
         }
-        Err(e) => return error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
+        Err(e) => return signer_error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
     };
 
     let sig_compact = match proto::der_to_compact_p256(&assertion.signature) {
         Ok(c) => c.to_vec(),
-        Err(e) => return error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
+        Err(e) => return signer_error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
     };
 
     let key_id = record.map_or_else(
@@ -257,20 +255,8 @@ fn handle_sign<D: CtapDevice>(
 }
 
 fn write_error<W: Write>(w: &mut W, code: ErrorCode, message: String) -> Result<(), SignerError> {
-    let frame = error_frame(code, message);
+    let frame = signer_error_frame(code, message);
     write_frame(w, &frame).map_err(|e| SignerError::Io(format!("write error frame: {e}")))
-}
-
-fn error_frame(code: ErrorCode, message: String) -> SignerFrame {
-    SignerFrame {
-        body: Some(signer_frame::Body::Error(Box::new(
-            RpcError::default()
-                .with_code(code)
-                .with_message(message)
-                .with_details(Vec::new()),
-        ))),
-        ..Default::default()
-    }
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, &'static str> {

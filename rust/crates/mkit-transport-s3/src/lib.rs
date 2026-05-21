@@ -42,8 +42,8 @@ use crate::sigv4::{Credentials, SignedRequest, sign_request};
 /// larger requires multipart upload (deferred).
 pub const S3_SINGLE_PUT_MAX: u64 = 5 * 1024 * 1024 * 1024;
 
-/// Body-size cap for a pack download (4 GiB).
-const PACK_BODY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
+// Body-size cap for a pack download. Canonical value lives in mkit-core.
+use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
 /// Body-size cap for a ref body (64 hex + newline + slack).
 const REF_BODY_LIMIT: usize = 256;
 /// Cap for list XML / small responses (16 MiB).
@@ -423,7 +423,7 @@ fn quoted_md5(wire: &[u8]) -> String {
 
 impl Transport for S3Transport {
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        if bytes.len() as u64 > S3_SINGLE_PUT_MAX || bytes.len() > PACK_BODY_LIMIT {
+        if bytes.len() as u64 > S3_SINGLE_PUT_MAX || bytes.len() as u64 > PACK_BODY_LIMIT {
             return Err(TransportError::ServerError { status: 413 });
         }
         let object_key = Self::pack_object_key(key.as_bytes());
@@ -450,7 +450,7 @@ impl Transport for S3Transport {
             "",
             None,
             &[],
-            Some(PACK_BODY_LIMIT),
+            Some(PACK_BODY_LIMIT_USIZE),
         )?;
         match resp.status {
             200 => Ok(resp.body),

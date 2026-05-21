@@ -59,14 +59,7 @@ pub use crate::url::{MKIT_SSH_PREFIX, SshTarget, parse_mkit_ssh_url, validate_ss
 /// Maximum combined ref / prefix name length accepted over the wire.
 const MAX_REF_NAME: usize = 4096;
 
-/// Upper bound on a single `download_pack` response body. Mirrors
-/// `mkit_transport_http::PACK_BODY_LIMIT` to give the SSH transport the
-/// same defence against a server (or man-in-the-middle that controls
-/// the spawned `ssh(1)`'s stdout) advertising an oversize pack and
-/// driving the client into an unbounded allocation.
-//
-// keep in sync with mkit-transport-http::PACK_BODY_LIMIT
-const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
 
 /// Client identification string sent in the `Hello` frame. Inherited
 /// from the workspace version, so a release bump propagates
@@ -331,17 +324,9 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
 
-        // CAS intent is carried by the `expectation` enum.
-        // `expected_id` is meaningful only for MATCH (the 32-byte
-        // digest); for ANY / MISSING it is empty. See SPEC-TRANSPORT
-        // §4.2.1. mkit is alpha (pre-1.0) and clients/servers move
-        // together; there is no back-compat for the pre-`expectation`
-        // wire shape.
-        let (expected_id, expectation) = match condition {
-            RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
-            RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
-            RefWriteCondition::Match(h) => (h.to_vec(), RefExpectation::REF_EXPECTATION_MATCH),
-        };
+        // CAS intent = `expectation`. `expected_id` is meaningful only
+        // for MATCH. See SPEC-TRANSPORT §4.2.1.
+        let (expected_id, expectation) = cond_to_wire(condition);
 
         let req = SshFrame {
             body: Some(ssh_frame::Body::UpdateRef(Box::new(
@@ -453,6 +438,19 @@ impl Transport for SshTransport {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Encode a [`RefWriteCondition`] into the two on-wire fields the
+/// `UpdateRef` message carries: the (often empty) `expected_id` bytes
+/// and the `RefExpectation` enum. Production and test paths share this
+/// so the test can't drift from the production encoding. See
+/// SPEC-TRANSPORT §4.2.1.
+fn cond_to_wire(c: RefWriteCondition) -> (Vec<u8>, RefExpectation) {
+    match c {
+        RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
+        RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
+        RefWriteCondition::Match(h) => (h.to_vec(), RefExpectation::REF_EXPECTATION_MATCH),
+    }
+}
+
 /// Read the response side of `download_pack` from a generic reader.
 ///
 /// Factored out of [`SshTransport::download_pack`] so the OOM-defence
@@ -477,11 +475,8 @@ fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
 
     // Clamp the initial capacity so an honest small pack stays cheap
     // and an over-stated `total_bytes` cannot drive us into a giant
-    // allocation. PACK_BODY_LIMIT fits in usize on every supported
-    // target, so try_from's fallback to usize::MAX is dead code in
-    // practice.
-    let cap = usize::try_from(PACK_BODY_LIMIT).unwrap_or(usize::MAX);
-    let initial = core::cmp::min(total as usize, cap);
+    // allocation.
+    let initial = core::cmp::min(total as usize, PACK_BODY_LIMIT_USIZE);
     let mut out = Vec::with_capacity(initial);
     loop {
         let chunk_frame = read_frame_or_err(r)?;
@@ -491,7 +486,7 @@ fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
                 // Bail as soon as the running total would exceed the
                 // cap — a misbehaving server could otherwise stream
                 // chunks forever past an honest header.
-                if out.len().saturating_add(data.len()) > cap {
+                if out.len().saturating_add(data.len()) > PACK_BODY_LIMIT_USIZE {
                     return Err(TransportError::RemoteError(
                         "server-streamed pack body exceeds client cap".into(),
                     ));
@@ -783,20 +778,11 @@ mod tests {
         assert_eq!(out, vec![1, 2, 3, 4]);
     }
 
-    /// Build the `UpdateRef` body the client would send for a given
-    /// `RefWriteCondition`, by walking the same encoding path as the
-    /// transport impl. Kept in lockstep with `Transport::update_ref`
-    /// — if that encoding changes, this helper must change too.
+    /// Build an `UpdateRef` body via `cond_to_wire` so this test
+    /// exercises the same encoding path as `Transport::update_ref`.
     fn encode_update_ref(condition: RefWriteCondition) -> UpdateRef {
         let new_hash = [0xABu8; 32];
-        let target_hash = [0xCDu8; 32];
-        let (expected_id, expectation) = match condition {
-            RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
-            RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
-            RefWriteCondition::Match(_) => {
-                (target_hash.to_vec(), RefExpectation::REF_EXPECTATION_MATCH)
-            }
-        };
+        let (expected_id, expectation) = cond_to_wire(condition);
         UpdateRef {
             name: Some("refs/heads/main".into()),
             expected_id: Some(expected_id),
@@ -806,12 +792,12 @@ mod tests {
         }
     }
 
-    /// The three CAS variants MUST produce three distinct on-wire
-    /// encodings. Before the `expectation` field landed, `Any` and
-    /// `Missing` collapsed to the same bytes — this regression test
+    /// The three CAS variants MUST produce three distinct
+    /// `cond_to_wire` encodings. Before the `expectation` field
+    /// landed, `Any` and `Missing` collapsed to the same bytes — this
     /// pins that they no longer do.
     #[test]
-    fn update_ref_cas_variants_produce_distinct_wire_bytes() {
+    fn cond_to_wire_variants_produce_distinct_encodings() {
         use buffa::Message;
 
         let any = encode_update_ref(RefWriteCondition::Any).encode_to_vec();

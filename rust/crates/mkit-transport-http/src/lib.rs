@@ -67,10 +67,10 @@ pub const TOKEN_ENV: &str = "MKIT_API_TOKEN";
 #[allow(clippy::duration_suboptimal_units)]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Upper bound on a single `download_pack` response body, matching the
-/// S3 transport's `PACK_BODY_LIMIT`. Prevents an unbounded allocation if
-/// a misbehaving server streams an oversize response.
-pub const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+// Pack-body limit lives canonically in mkit-core; re-exported so
+// existing `http::PACK_BODY_LIMIT` / `http::PACK_BODY_LIMIT_USIZE`
+// call sites keep working.
+pub use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
 
 /// Validate that `url` uses either `https://` (always allowed) or plain
 /// `http://` pointing at a loopback host (`127.0.0.1`, `::1`, or
@@ -425,7 +425,7 @@ impl Transport for HttpTransport {
         // Stream the body with a running counter. `Read` is the portable
         // path here; reqwest's blocking `Response` implements it directly.
         let mut reader = resp;
-        let cap = usize::try_from(PACK_BODY_LIMIT).unwrap_or(usize::MAX);
+        let cap = PACK_BODY_LIMIT_USIZE;
         let mut buf = Vec::new();
         let mut chunk = vec![0u8; 64 * 1024];
         loop {
