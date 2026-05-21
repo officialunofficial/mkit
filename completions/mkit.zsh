@@ -33,6 +33,7 @@ _mkit() {
         'stash:Stash working-dir changes'
         'clone:Clone a repository'
         'remote:Show or configure the origin remote'
+        'key:Manage user-scoped keystore keys (generate/list/import/export/delete)'
         'keygen:Generate a new Ed25519 signing keypair'
         'cherry-pick:Apply a commit to the current branch'
         'rebase:Replay commits onto a different base'
@@ -41,6 +42,8 @@ _mkit() {
         'serve:Start SSH transport server (internal)'
         'blame:Show line-level commit attribution'
         'verify:Verify the signature on a commit'
+        'attest:Produce a signed DSSE attestation for a commit'
+        'verify-attest:Verify every attestation attached to a commit'
         'version:Print version'
         'help:Show help text'
     )
@@ -112,6 +115,31 @@ _mkit() {
                     _values 'remote subcommand' \
                         'add[add a remote]' \
                         'set[alias for add]'
+                    ;;
+                key)
+                    _values 'key subcommand' \
+                        'generate[generate a new key in the keystore]' \
+                        'list[list keystore entries]' \
+                        'import[import a key into the keystore]' \
+                        'export[export a key from the keystore]' \
+                        'delete[delete a key from the keystore]'
+                    ;;
+                attest)
+                    _arguments \
+                        '--commit[commit hash]:hash:' \
+                        '--algorithm[signing algorithm]:alg:' \
+                        '--signer[signer kind]:kind:' \
+                        '--predicate-type[predicate type URI]:uri:' \
+                        '--predicate-file[predicate file path]:_files' \
+                        '*--additional-signer[additional signer spec]:spec:' \
+                        '--help[show help]'
+                    ;;
+                verify-attest)
+                    _arguments \
+                        '--commit[commit hash]:hash:' \
+                        '--trust-roots[trust roots path]:_files' \
+                        '--algorithm[algorithm filter]:alg:' \
+                        '--help[show help]'
                     ;;
             esac
             ;;
