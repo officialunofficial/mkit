@@ -14,15 +14,15 @@ current normative version.
 
 ## Reporting
 
-To report behaviour you believe violates the Covenant, open a private
-report through GitHub Security Advisories:
+To report behaviour you believe violates the Covenant, email the
+maintainers privately at:
 
-- <https://github.com/officialunofficial/mkit/security/advisories/new>
+- <conduct@officialunofficial.com>
 
-This is the same channel used for security disclosures (see
-[`SECURITY.md`](SECURITY.md)). It routes the report to the maintainers
-privately and gives us a place to collaborate on a response. Do not
-file a public issue with the report contents.
+This inbox is separate from the security-disclosure channel (see
+[`SECURITY.md`](SECURITY.md)) so that interpersonal reports are not
+routed through a vulnerability-tracking workflow. Do not file a public
+issue with the report contents.
 
 ## Enforcement
 

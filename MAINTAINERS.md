@@ -5,8 +5,21 @@ Active maintainers of mkit are the public members of the
 
 - <https://github.com/orgs/officialunofficial/people>
 
-That page is the source of truth. We do not duplicate it here so it
-cannot drift.
+That page is the source of truth. We do not duplicate the full list
+here so it cannot drift.
+
+## Current maintainers
+
+<!-- TODO: fill in real names + handles before flipping repo public -->
+
+| Handle                            | Areas                                            |
+| --------------------------------- | ------------------------------------------------ |
+| TBD (project lead)                | overall direction, release sign-off              |
+| TBD                               | core, transport                                  |
+| TBD                               | attest, keystore, crypto                         |
+
+Fallback contact for non-security issues: TBD (e.g., `mkit@officialunofficial.com`).
+For security disclosures see [SECURITY.md](SECURITY.md).
 
 ## How to reach us
 
