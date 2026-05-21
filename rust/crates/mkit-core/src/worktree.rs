@@ -7,11 +7,12 @@
 //!
 //! Notes:
 //!
-//! - **No `FastCDC` chunking in this module**. The `chunked_blob` path
-//!   lives in [`crate::chunker`] + [`crate::pack`]; this module rejects
-//!   files larger than [`CHUNK_THRESHOLD`] with
-//!   [`WorktreeError::FileTooLarge`]. v1 small-repo flows are
-//!   unaffected.
+//! - Files at or below [`CHUNK_THRESHOLD`] are stored as a single
+//!   [`Blob`](crate::object::Blob). Files above the threshold are
+//!   chunked with [`crate::chunker::FastCdc::v1`]; each chunk is
+//!   stored as a `Blob` and the file is represented by a
+//!   [`ChunkedBlob`](crate::object::ChunkedBlob) manifest whose hash
+//!   is what lands in the parent tree.
 //! - We never follow symlinks while walking. Linux/macOS `read_link`
 //!   reports the target verbatim and we hash it as a blob.
 
@@ -19,9 +20,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::chunker::FastCdc;
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
-use crate::object::{EntryMode, Object, Tree, TreeEntry};
+use crate::object::{ChunkedBlob, EntryMode, Object, Tree, TreeEntry};
 use crate::serialize;
 use crate::store::ObjectStore;
 
@@ -40,11 +42,6 @@ pub enum WorktreeError {
     /// File exceeded [`MAX_FILE_BYTES`].
     #[error("file '{0}' exceeds the {MAX_FILE_BYTES} byte limit")]
     FileTooLarge(PathBuf),
-    /// File exceeded [`CHUNK_THRESHOLD`] but the chunker port is not
-    /// yet in place. Tracked separately from [`Self::FileTooLarge`] so
-    /// downstream call sites can detect and re-route once PACK lands.
-    #[error("file '{0}' exceeds {CHUNK_THRESHOLD} bytes; chunker not yet ported")]
-    NeedsChunker(PathBuf),
     /// Path component had non-UTF-8 bytes; tree entry names must be UTF-8.
     #[error("path component is not valid UTF-8")]
     InvalidUtf8,
@@ -315,10 +312,15 @@ pub fn build_tree_from_index(
     write_node(store, &root)
 }
 
-/// Read a file from disk, hash it as a [`Blob`](crate::object::Blob),
-/// store it, and return the hash. Rejects files larger than
-/// [`CHUNK_THRESHOLD`] with [`WorktreeError::NeedsChunker`] until the
-/// PACK agent's chunker lands.
+/// Read a file from disk, hash it, store it, and return the
+/// content-address of the resulting object.
+///
+/// Files at or below [`CHUNK_THRESHOLD`] become a single
+/// [`Blob`](crate::object::Blob). Files above the threshold are split
+/// with [`FastCdc::v1`]; each chunk is stored as a `Blob`, and the
+/// file is represented by a [`ChunkedBlob`](crate::object::ChunkedBlob)
+/// manifest whose hash is returned and lands in the parent tree. See
+/// `SPEC-FASTCDC.md` and `SPEC-OBJECTS.md` §7.
 ///
 /// # Errors
 /// See [`WorktreeError`].
@@ -333,13 +335,39 @@ pub fn hash_file(store: &ObjectStore, path: &Path) -> WorktreeResult<Hash> {
     if pre_meta.len() > MAX_FILE_BYTES {
         return Err(WorktreeError::FileTooLarge(path.to_path_buf()));
     }
-    if pre_meta.len() > CHUNK_THRESHOLD {
-        return Err(WorktreeError::NeedsChunker(path.to_path_buf()));
-    }
     let data = fs::read(path)?;
-    let blob = Object::Blob(crate::object::Blob { data });
-    let bytes = serialize::serialize(&blob)?;
-    Ok(store.write(&bytes)?)
+    if (data.len() as u64) <= CHUNK_THRESHOLD {
+        let blob = Object::Blob(crate::object::Blob { data });
+        let bytes = serialize::serialize(&blob)?;
+        return Ok(store.write(&bytes)?);
+    }
+
+    // Large file: split with FastCDC v1, store each chunk as a Blob,
+    // build a ChunkedBlob manifest, store the manifest as a single
+    // object, and return the manifest's hash. Per-manifest chunk count
+    // is bounded by serialize::MAX_CHUNKS (1_000_000); MAX_FILE_BYTES
+    // (1 GiB) ÷ FastCDC MIN_SIZE (16 KiB) = ~65k, well under the cap.
+    let total_size = data.len() as u64;
+    let cdc = FastCdc::v1();
+    let mut chunks: Vec<Hash> = Vec::new();
+    let mut offset: usize = 0;
+    while offset < data.len() {
+        let remaining = &data[offset..];
+        let len = cdc.cut(remaining);
+        let chunk = remaining[..len].to_vec();
+        let chunk_blob = Object::Blob(crate::object::Blob { data: chunk });
+        let chunk_bytes = serialize::serialize(&chunk_blob)?;
+        chunks.push(store.write(&chunk_bytes)?);
+        offset += len;
+    }
+
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size,
+        chunk_size: 0, // 0 = content-defined (FastCDC) per SPEC-OBJECTS §7
+        chunks,
+    });
+    let manifest_bytes = serialize::serialize(&manifest)?;
+    Ok(store.write(&manifest_bytes)?)
 }
 
 #[cfg(test)]
@@ -503,13 +531,52 @@ mod tests {
     }
 
     #[test]
-    fn large_file_returns_needs_chunker() {
+    fn large_file_becomes_chunked_blob() {
+        // File > CHUNK_THRESHOLD should land as a ChunkedBlob manifest
+        // pointing at one Blob per FastCDC chunk. We pseudo-randomize
+        // the buffer so FastCDC sees real boundary candidates instead
+        // of running the entire file as one max-sized chunk.
         let (_sd, store) = fresh_store();
         let work = TempDir::new().unwrap();
-        let big = vec![0u8; usize::try_from(CHUNK_THRESHOLD + 1024).unwrap()];
+        let n = usize::try_from(CHUNK_THRESHOLD).unwrap() + 256 * 1024;
+        let mut big = Vec::with_capacity(n);
+        let mut state: u64 = 0x00C0_FFEE;
+        for _ in 0..n {
+            // splitmix64-ish; same construction as the gear table seed.
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            big.push((z & 0xFF) as u8);
+        }
         fs::write(work.path().join("big.bin"), &big).unwrap();
-        let err = build_tree(&store, work.path()).unwrap_err();
-        assert!(matches!(err, WorktreeError::NeedsChunker(_)));
+
+        let tree_hash = build_tree(&store, work.path()).unwrap();
+        let Object::Tree(t) = store.read_object(&tree_hash).unwrap() else {
+            panic!("expected tree");
+        };
+        assert_eq!(t.entries.len(), 1);
+
+        let entry_hash = t.entries[0].object_hash;
+        let entry = store.read_object(&entry_hash).unwrap();
+        let Object::ChunkedBlob(manifest) = entry else {
+            panic!("expected chunked_blob, got {entry:?}");
+        };
+
+        assert_eq!(manifest.total_size, n as u64);
+        assert_eq!(manifest.chunk_size, 0, "0 = content-defined (FastCDC)");
+        assert!(!manifest.chunks.is_empty());
+        // Every chunk hash must resolve to a Blob in the store, and
+        // the concatenation must reproduce the original file bytes.
+        let mut reassembled: Vec<u8> = Vec::with_capacity(n);
+        for h in &manifest.chunks {
+            let Object::Blob(b) = store.read_object(h).unwrap() else {
+                panic!("chunk did not resolve to a Blob");
+            };
+            reassembled.extend_from_slice(&b.data);
+        }
+        assert_eq!(reassembled, big, "chunks must round-trip the source");
     }
 
     // ---- build_tree_from_index — the staging-area path -------------
