@@ -26,11 +26,11 @@ authors.workspace = true
 all = { level = "warn", priority = -1 }
 
 [dependencies]
-buffa = "0.5"
+buffa = "0.6"
 thiserror = "2"
 
 [build-dependencies]
-buffa-build = "0.5"
+buffa-build = "0.6"
 
 [dev-dependencies]
 hex = "0.4"

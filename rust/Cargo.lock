@@ -397,9 +397,9 @@ dependencies = [
 
 [[package]]
 name = "buffa"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01ca40a275c18a1056fb8077e5016a95089fa9873e3b11db0e734aff714cfb96"
+checksum = "941c714734a660caa93a210c531dec553cc0ef417890409914d24032c94ab840"
 dependencies = [
  "bytes",
  "hashbrown 0.15.5",
@@ -411,9 +411,9 @@ dependencies = [
 
 [[package]]
 name = "buffa-build"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6f4181c6759b7354179913baed8772c76c2889620f70597df497ec71429f1a6"
+checksum = "d96988700c7be5e4dd1dd22ee5daecd13090b24ec62003ee7fd4a9d7fef50a7c"
 dependencies = [
  "buffa",
  "buffa-codegen",
@@ -422,9 +422,9 @@ dependencies = [
 
 [[package]]
 name = "buffa-codegen"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08feef8ec49ed91e84315f50338afcef34b9ec074609a8da03e5b60dd3acea08"
+checksum = "693ea91be01336fb0084b2e7bb071be7393224c72f737c846471e4013e58c327"
 dependencies = [
  "buffa",
  "buffa-descriptor",
@@ -437,11 +437,13 @@ dependencies = [
 
 [[package]]
 name = "buffa-descriptor"
-version = "0.5.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b068a626acb77c120c11fa642181a2d968082d158b9958a10d6653ddeba1711"
+checksum = "ad8df83adfcb525621f5a96c88e610f90aff1112ec57522d9b48a943df327394"
 dependencies = [
  "buffa",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
