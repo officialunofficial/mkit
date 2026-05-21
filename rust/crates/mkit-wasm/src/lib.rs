@@ -25,6 +25,16 @@ use mkit_core::sign::{COMMIT_DOMAIN, KeyPair, PublicKey, Signature, commit_signi
 
 use std::io::{Read, Write};
 
+/// Upper bound on the JSON input accepted by [`parse_json_triples`].
+///
+/// The hand-rolled parser is O(n) in input length but performs a string
+/// allocation per escaped token, so a hostile caller pasting a giant
+/// blob would cause the WASM blob to allocate well beyond what the
+/// demo site can recover from. 16 MiB is comfortably larger than any
+/// realistic triple list and small enough to keep the tab responsive
+/// when an attacker tries to wedge it.
+const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
+
 // ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
@@ -1086,6 +1096,11 @@ fn parse_parent_list(s: &str) -> Result<Vec<[u8; 32]>, JsValue> {
 /// serde into this crate: the input shape is fixed and we control both
 /// sides, so a hand-rolled parser keeps the wasm blob small.
 fn parse_json_triples(s: &str) -> Result<Vec<(String, String, String)>, &'static str> {
+    // Cheap up-front guard against pathological inputs — see
+    // `MAX_JSON_BYTES` for rationale.
+    if s.len() > MAX_JSON_BYTES {
+        return Err("input exceeds 16 MiB cap");
+    }
     let s = s.trim();
     let inner = s
         .strip_prefix('[')
@@ -1163,5 +1178,28 @@ fn read_string(it: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<Stri
             Some(c) => out.push(c),
             None => return Err("unterminated string"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_json_triples_rejects_oversize_input() {
+        // One byte over the cap is enough — the guard must fire before
+        // the parser even looks for a leading `[`.
+        let oversize = "x".repeat(MAX_JSON_BYTES + 1);
+        let err = parse_json_triples(&oversize).expect_err("must reject oversize input");
+        assert!(
+            err.contains("16 MiB cap"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_json_triples_accepts_small_valid_input() {
+        let out = parse_json_triples(r#"[["a","b","c"]]"#).expect("small input is valid");
+        assert_eq!(out, vec![("a".into(), "b".into(), "c".into())]);
     }
 }

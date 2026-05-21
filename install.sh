@@ -182,11 +182,47 @@ esac
 # to install. POSIX sh has no built-in semver compare, so we use sort
 # -V (GNU/BSD coreutils both ship it). If sort -V is missing we just
 # warn and continue.
+#
+# Two records are consulted:
+#   1. $state_dir/installed-tag — global per-user record, survives
+#      install_dir rotation.
+#   2. $install_dir/.mkit-installed-tag — local-to-binary record,
+#      survives state-dir clearance and catches the case where a user
+#      runs the installer with a different MKIT_STATE_DIR.
+# Both are written on every install; on a downgrade attempt, EITHER
+# file disagreeing causes the guard to fire.
 state_file="${state_dir}/installed-tag"
-if [ -f "$state_file" ]; then
-  prev_tag="$(cat "$state_file" 2>/dev/null || true)"
+bin_state_file="${install_dir}/.mkit-installed-tag"
+
+read_state_file() {
+  if [ -f "$1" ]; then
+    cat "$1" 2>/dev/null || true
+  fi
+}
+
+prev_tag_global="$(read_state_file "$state_file")"
+prev_tag_local="$(read_state_file "$bin_state_file")"
+
+# Pick the higher of the two so a missing/empty file never lets a
+# downgrade slip through. sort -V handles the comparison; if either is
+# empty we just use the non-empty one.
+if [ -n "$prev_tag_global" ] && [ -n "$prev_tag_local" ]; then
+  prev_g_bare="${prev_tag_global#v}"
+  prev_l_bare="${prev_tag_local#v}"
+  if command -v sort >/dev/null 2>&1; then
+    prev_higher="$(printf '%s\n%s\n' "$prev_g_bare" "$prev_l_bare" | sort -V | tail -n1)"
+    if [ "$prev_higher" = "$prev_l_bare" ]; then
+      prev_tag="$prev_tag_local"
+    else
+      prev_tag="$prev_tag_global"
+    fi
+  else
+    prev_tag="$prev_tag_global"
+  fi
+elif [ -n "$prev_tag_global" ]; then
+  prev_tag="$prev_tag_global"
 else
-  prev_tag=""
+  prev_tag="$prev_tag_local"
 fi
 
 if [ -n "$prev_tag" ] && [ "$prev_tag" != "$tag" ]; then
@@ -198,12 +234,20 @@ if [ -n "$prev_tag" ] && [ "$prev_tag" != "$tag" ]; then
     if [ "$higher" = "$prev_bare" ] && [ "$prev_bare" != "$new_bare" ]; then
       warn "you are installing $tag but $prev_tag is already recorded — this is a DOWNGRADE."
       if [ "$resolved_from_latest" = "1" ]; then
-        die "refusing to silently downgrade from $prev_tag to $tag via 'latest'. Pin --version $prev_tag or newer, or delete $state_file."
+        die "refusing to silently downgrade from $prev_tag to $tag via 'latest'. Pin --version $prev_tag or newer, or delete $state_file and $bin_state_file."
       else
         warn "proceeding because --version was passed explicitly."
       fi
     fi
   fi
+fi
+
+# Independent check: the two state files MUST agree when both exist.
+# A mismatch means one was tampered with (or a parallel installer
+# misbehaved). Refuse rather than picking a winner silently.
+if [ -n "$prev_tag_global" ] && [ -n "$prev_tag_local" ] \
+   && [ "$prev_tag_global" != "$prev_tag_local" ]; then
+  die "installed-tag mismatch: $state_file says '$prev_tag_global' but $bin_state_file says '$prev_tag_local'. Refusing to install. Resolve manually."
 fi
 
 archive="mkit-${bare}-${target}.tar.gz"
@@ -293,6 +337,37 @@ bin_src="$tmp/$stage_dir/mkit"
 mkdir -p "$install_dir"
 install_path="$install_dir/mkit"
 
+# ---- install_dir permission check ----
+#
+# A group- or world-writable install directory lets anyone on the host
+# race a malicious binary into $install_path between our final mv(1)
+# and the user's first invocation. Refuse rather than win the race
+# unintentionally. Mode is read with BSD stat on Darwin and GNU stat
+# on Linux — the rest of the script already keys on $uname_os.
+case "$uname_os" in
+  Darwin) dir_mode="$(stat -f '%Lp' "$install_dir" 2>/dev/null || echo '')" ;;
+  Linux)  dir_mode="$(stat -c '%a' "$install_dir" 2>/dev/null || echo '')" ;;
+  *)      dir_mode="" ;;
+esac
+
+if [ -n "$dir_mode" ]; then
+  # Normalise to three digits so the substring tests below align.
+  case "$dir_mode" in
+    [0-9])    dir_mode="00${dir_mode}" ;;
+    [0-9][0-9]) dir_mode="0${dir_mode}" ;;
+  esac
+  # Group bit = middle digit, other bit = last digit. Either even-2
+  # (write bit set) is the failure case.
+  group_digit="$(printf '%s' "$dir_mode" | cut -c2)"
+  other_digit="$(printf '%s' "$dir_mode" | cut -c3)"
+  case "$group_digit" in
+    [2367]) die "install dir $install_dir is group-writable (mode $dir_mode); refusing to install — a malicious local user could race a replacement binary into place between mv and first execution. Tighten permissions: chmod g-w $install_dir" ;;
+  esac
+  case "$other_digit" in
+    [2367]) die "install dir $install_dir is world-writable (mode $dir_mode); refusing to install — anyone on this host could race a replacement binary into place. Tighten permissions: chmod o-w $install_dir" ;;
+  esac
+fi
+
 # Atomic install: stage the new binary in the SAME directory as the
 # final install path (so rename(2) stays within one filesystem),
 # chmod +x BEFORE the rename so the final inode is never executable-
@@ -306,10 +381,17 @@ chmod 0755 "$staged"
 mv "$staged" "$install_path"
 
 # ---- record installed tag for downgrade guard ----
+#
+# Write BOTH copies. Future installer runs treat either as
+# authoritative (the higher of the two wins); a mismatch trips the
+# tamper check above. mv-from-staging makes the writes atomic.
 
 mkdir -p "$state_dir"
 printf '%s\n' "$tag" > "${state_file}.new"
 mv "${state_file}.new" "$state_file"
+
+printf '%s\n' "$tag" > "${bin_state_file}.new"
+mv "${bin_state_file}.new" "$bin_state_file"
 
 log "installed $install_path ($tag)"
 

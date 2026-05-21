@@ -75,6 +75,19 @@ channel, which we believe is sufficient for the current scope. If you have
 a strong need for end-to-end encryption beyond TLS, mention this in the
 initial advisory and we'll arrange an out-of-band channel.
 
+## Bug bounty
+
+We do not currently offer a paid bug bounty. Researchers will be
+credited in the published advisory and in `CHANGELOG.md`.
+
+## Export control
+
+This project contains cryptographic software (BLAKE3, Ed25519, secp256k1,
+P-256, AES, rustls/TLS). Source code distribution is covered under the
+publicly-available open-source exemption (US EAR §740.13(e); ECCN 5D002.c.1;
+License Exception TSU). A §740.13(e) notification has been provided to BIS
+(crypt@bis.doc.gov) and ENC (enc@bis.doc.gov) at the time of public launch.
+
 ## Scope
 
 In scope:
