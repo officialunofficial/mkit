@@ -48,8 +48,8 @@ use mkit_core::protocol::{PackKey, Transport, TransportError, TransportResult};
 use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
 use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
 use mkit_rpc::mkit::rpc::v1::ssh::{
-    DownloadPack, DownloadPackHeader, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame,
-    UpdateRef, UploadPack, list_refs_response::RefEntry, ssh_frame,
+    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame, UpdateRef, UploadPack,
+    list_refs_response::RefEntry, ssh_frame,
 };
 use mkit_rpc::{FrameError, read_frame, write_frame};
 
@@ -695,6 +695,7 @@ mod tests {
     // SshTransport against it. For now, basic smoke tests of the
     // helper functions live here.
     use super::*;
+    use mkit_rpc::mkit::rpc::v1::ssh::DownloadPackHeader;
 
     #[test]
     fn ref_entry_to_ref_validates_oid_length() {
