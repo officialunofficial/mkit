@@ -36,7 +36,7 @@ algo-p256 = ["dep:p256", "dep:sha2"]
 mkit-core = { version = "0.1", path = "../mkit-core" }
 # mkit-rpc owns signer.proto + framing helpers used by ExternalSigner.
 mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
-buffa = "0.5"
+buffa = "0.6"
 blake3 = "1"
 base64 = "0.22"
 thiserror = "2"
