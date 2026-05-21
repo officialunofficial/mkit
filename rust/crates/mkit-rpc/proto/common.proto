@@ -34,6 +34,19 @@ enum Algorithm {
   // ClientDataJSON + authenticatorData per CTAP2. Used by the
   // FIDO2/WebAuthn signer.
   ALGORITHM_ED25519_WEBAUTHN = 4;
+
+  // BLS12-381 threshold signature. The wire signature is the
+  // aggregated form recovered from M-of-N partial signatures
+  // (variant `MinSig` — public key in G1, signature in G2, 96 bytes
+  // compressed). The DSSE `keyid` carries the aggregated group
+  // public key, NOT a per-share public key — every signer in the
+  // M-of-N cohort emits a partial signature that combines into a
+  // single signature verifiable against one keyid.
+  //
+  // Defined in docs/SPEC-RELEASE-THRESHOLD.md. Used by the
+  // "release party" flow where N maintainers co-sign a release
+  // without each maintainer's signature appearing on the wire.
+  ALGORITHM_BLS12381_THRESHOLD = 5;
 }
 
 // How the secret is presented to the signer. Some signers operate on
