@@ -25,6 +25,7 @@
 - [ ] Spec (`docs/SPEC-*.md`) and golden vectors updated if an
       on-disk or wire format changed
 - [ ] Crypto / key-handling change reviewed by a second maintainer
+- [ ] I have not copied third-party code into this PR, OR if I have, it is licensed under MIT / Apache-2.0 / BSD-2/3-Clause / ISC (or compatible), and the original copyright notice and license are preserved.
 
 For security-sensitive changes, also link the
 [`docs/THREAT-MODEL.md`](../docs/THREAT-MODEL.md) sections affected
