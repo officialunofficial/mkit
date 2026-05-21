@@ -18,8 +18,18 @@ Install (see [Installing](#installing) for all four channels):
 cargo install --git https://github.com/officialunofficial/mkit mkit-cli
 ```
 
-To push to a remote, declare a strict URL scheme (`mkit+file://`,
-`mkit+https://`, `mkit+s3://`, `mkit+ssh://`):
+Make your first signed commit:
+
+```sh
+mkit init                              # create .mkit/ in the current dir
+mkit keygen                            # generate an Ed25519 signing key
+echo hello > README.md
+mkit add README.md
+mkit commit -m "first commit"
+```
+
+Then, to push to a remote, declare a strict URL scheme
+(`mkit+file://`, `mkit+https://`, `mkit+s3://`, `mkit+ssh://`):
 
 ```sh
 mkit remote add origin mkit+file:///srv/mkit/my-repo
