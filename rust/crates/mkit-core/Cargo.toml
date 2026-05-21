@@ -31,10 +31,26 @@ tempfile = "3"
 thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
 
+# Sparse-checkout (Phase 1) — authenticated bitmap from commonware-storage.
+# Feature-gated; default off. The bitmap is ALPHA upstream (their
+# stability_scope! macro), so we opt in deliberately and pin the
+# `2026.4.0` train. Pulls in commonware-runtime / -cryptography only
+# when the feature is enabled. See `docs/SPEC-SPARSE-CHECKOUT.md`.
+commonware-storage = { version = "2026.4.0", optional = true, default-features = false, features = ["std"] }
+commonware-runtime = { version = "2026.4.0", optional = true }
+commonware-cryptography = { version = "2026.4.0", optional = true }
+
 # POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
 # Windows path uses default ACLs as documented in `docs/SPEC-SIGNING.md`.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[features]
+# Off by default. Toggles `mkit_core::sparse` and pulls in the
+# commonware-storage AuthenticatedBitMap dependency. Kept opt-in
+# because the upstream surface is marked ALPHA and we don't want
+# downstream consumers paying the dep cost unless they ask for it.
+sparse-checkout = ["dep:commonware-storage", "dep:commonware-runtime", "dep:commonware-cryptography"]
 
 [dev-dependencies]
 hex = "0.4"

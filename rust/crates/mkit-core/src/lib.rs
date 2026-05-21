@@ -40,6 +40,13 @@ pub mod worktree;
 // Phase 7a — transport trait surface (vtable + SSH framing + retry policy).
 pub mod protocol;
 
+// Verifiable sparse-checkout (issue #158, Phase 1). Feature-gated
+// because the upstream `commonware-storage::AuthenticatedBitMap` is
+// ALPHA-tier and pulls in `commonware-runtime` /
+// `commonware-cryptography`. Off by default.
+#[cfg(feature = "sparse-checkout")]
+pub mod sparse;
+
 pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher};
 pub use object::{
     Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind, MAGIC,
