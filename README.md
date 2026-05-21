@@ -392,21 +392,27 @@ TypeScript + Workers examples in
 ### Hardware signers (optional)
 
 External signers are separate binaries that mkit drives over the
-[v1 stdio protocol](docs/SPEC-EXTERNAL-SIGNER.md):
+[v1 stdio protocol](docs/SPEC-EXTERNAL-SIGNER.md). The signer crates
+live under [`contrib/signers/`](contrib/signers/) outside the
+top-level Cargo workspace at `rust/`, so the install path is
+`git clone` + `cargo install --path .` from the signer directory:
 
 ```sh
+git clone https://github.com/officialunofficial/mkit
+cd mkit/contrib/signers
+
 # File-backed reference signer (any platform)
-cargo install --git https://github.com/officialunofficial/mkit --bin mkit-sign-file
+cargo install --path mkit-sign-file
 
 # TPM 2.0 (Linux/Windows; install libtss2-dev first on Debian/Ubuntu)
-cargo install --git https://github.com/officialunofficial/mkit --bin mkit-sign-tpm --features tpm2
+cargo install --path mkit-sign-tpm --features tpm2
 
-# Apple Secure Enclave (macOS, Swift)
-cd contrib/signers/mkit-sign-se && swift build -c release \
-  && cp .build/release/mkit-sign-se /usr/local/bin/
+# Apple Secure Enclave (macOS, Swift; built with swift, not cargo)
+cd mkit-sign-se && swift build -c release \
+  && cp .build/release/mkit-sign-se /usr/local/bin/ && cd ..
 
 # FIDO2 / WebAuthn (CTAP-HID)
-cargo install --git https://github.com/officialunofficial/mkit --bin mkit-sign-ctap
+cargo install --path mkit-sign-ctap
 ```
 
 Each signer ships its own README under
