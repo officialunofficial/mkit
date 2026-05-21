@@ -15,6 +15,7 @@ members = [
     "crates/mkit-transport-http",
     "crates/mkit-transport-s3",
     "crates/mkit-transport-ssh",
+    "crates/mkit-transport-enc",
     "crates/mkit-cli",
     "crates/mkit-rpc",
     "crates/mkit-wasm",
