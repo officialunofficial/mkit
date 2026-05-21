@@ -169,36 +169,26 @@ before any header is emitted.
 
 #### 4.2.1 `UpdateRef` CAS encoding
 
-`UpdateRef` carries CAS intent across two fields: the legacy
-`expected_id` bytes (v0.1.0) and the explicit `RefExpectation` enum
-in `expectation` (v0.1.1+).
+CAS intent is carried entirely by the `RefExpectation` enum in
+`UpdateRef.expectation`. `expected_id` carries the digest only when
+`expectation = REF_EXPECTATION_MATCH`; it is ignored for `ANY` /
+`MISSING`.
 
-| `RefWriteCondition` | `expected_id` | `expectation`             | Semantics |
+| `RefWriteCondition` | `expectation`             | `expected_id`       | Semantics |
 |---|---|---|---|
-| `Any`        | empty               | `REF_EXPECTATION_ANY`      | Last-writer-wins; current ref value is ignored. |
-| `Missing`    | empty               | `REF_EXPECTATION_MISSING`  | Create-only; the ref MUST NOT exist on the server. |
-| `Match(h)`   | 32-byte digest `h`  | `REF_EXPECTATION_MATCH`    | Current ref value MUST equal `h`. |
+| `Any`        | `REF_EXPECTATION_ANY`      | empty               | Last-writer-wins; current ref value is ignored. |
+| `Missing`    | `REF_EXPECTATION_MISSING`  | empty               | Create-only; the ref MUST NOT exist on the server. |
+| `Match(h)`   | `REF_EXPECTATION_MATCH`    | 32-byte digest `h`  | Current ref value MUST equal `h`. |
 
-A conforming server MUST honour `expectation` when present. When
-`expectation` is `REF_EXPECTATION_UNSPECIFIED` (a v0.1.0 client that
-omitted the field), the server MUST fall back to the v0.1.0
-behaviour: empty `expected_id` is treated as `ANY`; 32-byte
-`expected_id` is treated as `MATCH`. There is no v0.1.0 way to
-request `MISSING` semantics, which is the whole reason the field
-was added.
-
-Back-compat matrix:
-
-| Client → Server   | Result |
-|---|---|
-| v0.1.0 → v0.1.0   | Original behaviour. `ANY` and `MATCH` work; `MISSING` is silently downgraded to `ANY`. |
-| v0.1.1 → v0.1.0   | New client still sends `expected_id` correctly. Old server ignores `expectation`; `ANY` and `MATCH` work; `MISSING` is silently downgraded to `ANY` (a missing-CAS write will succeed when it should have failed, just as in v0.1.0). |
-| v0.1.0 → v0.1.1   | Old client never sets `expectation`; new server sees `UNSPECIFIED` and falls back to the length heuristic. `ANY` and `MATCH` work. |
-| v0.1.1 → v0.1.1   | All three CAS variants distinguished correctly. |
+A conforming server MUST treat `REF_EXPECTATION_UNSPECIFIED` (the
+zero value, sent when the client omits the field) as a protocol
+error and reply with `ERROR_CODE_INVALID_REQUEST`. mkit is alpha
+(pre-1.0) — clients and servers move together; there is no v0.x
+back-compatibility surface to preserve.
 
 On a CAS mismatch the server returns `Error { code =
 ERROR_CODE_INVALID_REQUEST }` with the current ref value in
-`Error.details` (the same convention as the v0.1.0 server).
+`Error.details`.
 
 ### 4.3 Trust model
 
@@ -394,7 +384,7 @@ concerns.
 | File   | `link(2)` after `write_atomic` (atomic per POSIX) | OS exclusive file lock on `<root>/.mkit/refs/.lock` (via `std::fs::File::lock`) wraps a read-then-`write_atomic`; an in-process `Mutex` keeps multi-threaded callers within one process from contending on the OS lock | Yes |
 | HTTP   | `If-None-Match: *` enforced by the Worker | `If-Match: "<hex>"` enforced by the Worker | Yes |
 | S3     | `If-None-Match: *` enforced by R2 | `If-Match: "<md5-of-wire>"` enforced by R2 | Yes (on R2; S3 multipart breaks `Match` — see §6.3) |
-| SSH    | Server-enforced via `expectation = REF_EXPECTATION_MISSING` (ssh.proto v0.1.1+). A v0.1.0 server that ignores the new field falls back to ANY semantics, so `Missing` is only safe when both client and server are v0.1.1+ — see §4.2.1 for the back-compat matrix. | Server-enforced via `expected_id` (32-byte hash) + `expectation = REF_EXPECTATION_MATCH` | Depends on server-side ref-store atomicity |
+| SSH    | Server-enforced via `expectation = REF_EXPECTATION_MISSING` | Server-enforced via `expectation = REF_EXPECTATION_MATCH` + 32-byte `expected_id` | Depends on server-side ref-store atomicity |
 
 ---
 
