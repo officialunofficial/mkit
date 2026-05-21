@@ -38,6 +38,37 @@ mkit push
 
 See [`docs/CLI.md`](docs/CLI.md) for the full CLI reference.
 
+## Keystore
+
+Signing keys live in a pluggable keystore vault. Out of the box mkit
+recognises:
+
+- **software** / **software-raw** — encrypted-at-rest software vault
+  on disk, the cross-platform foundation backend;
+- **macos-keychain**, **windows-credential**, **linux-secret-service**
+  — native OS keychains where available;
+- **systemd-creds** — systemd's encrypted credential store on Linux
+  hosts that have it;
+- **yubikey** — hardware-backed via PIV / OpenPGP applets;
+- **external signers** — separate subprocess binaries that speak the
+  [v1 stdio protocol](docs/SPEC-EXTERNAL-SIGNER.md); reference
+  signers for FIDO2 / CTAP-HID, TPM 2.0, and Apple Secure Enclave
+  live under [`contrib/signers/`](contrib/signers/).
+
+The keystore vault subsystem (merged via PR
+[#109](https://github.com/officialunofficial/mkit/pull/109), follow-
+up hardening in
+[#135](https://github.com/officialunofficial/mkit/pull/135))
+abstracts these behind a single interface so commit signing,
+attestation signing, and SSH push-auth can all be served by the same
+key reference.
+
+The normative interface and backend requirements are in
+[`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md); the end-user
+overview is in [`docs/keystore.md`](docs/keystore.md). The set of
+backends a given binary supports depends on the build features
+enabled for that target — see CLI.md §"Config keys".
+
 ## Performance
 
 Numbers from `cargo bench --workspace` on an Apple Silicon laptop
