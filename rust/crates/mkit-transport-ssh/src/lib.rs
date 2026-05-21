@@ -331,19 +331,12 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
 
-        // CAS encoding. The on-wire shape uses both the legacy
-        // `expected_id` field (for back-compat with v0.1.0 servers
-        // that key off its length) and the explicit `expectation`
-        // enum added in ssh.proto v0.1.1. A v0.1.0 server that
-        // ignores `expectation` still services Any and Match
-        // correctly via the `expected_id` length heuristic; only
-        // the new Missing variant needs the new field.
-        //
-        //   .Any            → expected_id empty, expectation = ANY
-        //   .Missing        → expected_id empty, expectation = MISSING
-        //                     (distinct from Any: an existing ref MUST
-        //                     fail the CAS).
-        //   .Match(h)       → expected_id = h,    expectation = MATCH
+        // CAS intent is carried by the `expectation` enum.
+        // `expected_id` is meaningful only for MATCH (the 32-byte
+        // digest); for ANY / MISSING it is empty. See SPEC-TRANSPORT
+        // §4.2.1. mkit is alpha (pre-1.0) and clients/servers move
+        // together; there is no back-compat for the pre-`expectation`
+        // wire shape.
         let (expected_id, expectation) = match condition {
             RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
             RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
@@ -868,23 +861,23 @@ mod tests {
         }
     }
 
-    /// A v0.1.0 client that never set the new field (`expectation =
-    /// UNSPECIFIED`) MUST be parseable by a v0.1.1 build. Belt-and-
-    /// braces test for the additive-field migration story.
+    /// A frame missing `expectation` decodes as UNSPECIFIED — a real
+    /// wire state that a conforming server MUST reject (see
+    /// SPEC-TRANSPORT §4.2.1). This test pins the decode side; the
+    /// server-side rejection lives in `mkit-cli/src/commands/serve.rs`.
     #[test]
-    fn update_ref_legacy_unspecified_decodes_cleanly() {
+    fn update_ref_without_expectation_decodes_as_unspecified() {
         use buffa::Message;
 
-        let legacy = UpdateRef {
+        let req = UpdateRef {
             name: Some("refs/heads/main".into()),
             expected_id: Some(Vec::new()),
             new_id: Some(vec![0xABu8; 32]),
-            // `expectation` left as None → encodes as zero-default
-            // (UNSPECIFIED) on the wire.
+            // `expectation` left as None → zero-default on the wire.
             ..Default::default()
         };
-        let bytes = legacy.encode_to_vec();
-        let decoded = UpdateRef::decode(&mut &bytes[..]).expect("decode legacy UpdateRef");
+        let bytes = req.encode_to_vec();
+        let decoded = UpdateRef::decode(&mut &bytes[..]).expect("decode UpdateRef");
         let got = decoded
             .expectation
             .as_ref()
@@ -893,7 +886,7 @@ mod tests {
         assert_eq!(
             got,
             RefExpectation::REF_EXPECTATION_UNSPECIFIED as i32,
-            "legacy UpdateRef must decode as UNSPECIFIED"
+            "missing expectation field MUST decode as UNSPECIFIED"
         );
     }
 

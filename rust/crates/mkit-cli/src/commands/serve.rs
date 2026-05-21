@@ -2,8 +2,9 @@
 //! stdin/stdout against a local repository.
 //!
 //! The backing repo is accessed via `FileTransport`. Frames are
-//! length-prefixed buffa [`SshFrame`] messages defined in
-//! `rust/crates/mkit-rpc/proto/ssh.proto`.
+//! length-prefixed protobuf [`SshFrame`] messages defined in
+//! `rust/crates/mkit-rpc/proto/ssh.proto` (buffa is the Rust
+//! runtime; the wire is protobuf 3 / edition 2023).
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -12,7 +13,8 @@ use clap::Parser;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport};
 use mkit_rpc::mkit::rpc::v1::ssh::{
     DownloadPackHeader, HelloResponse, ListRefsResponse, PackChunk, PackExistsResponse,
-    ReadRefResponse, SshFrame, UploadPackResponse, list_refs_response::RefEntry, ssh_frame,
+    ReadRefResponse, RefExpectation, SshFrame, UploadPackResponse, list_refs_response::RefEntry,
+    ssh_frame,
 };
 use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode, ProtocolVersion};
 use mkit_rpc::{FrameError, read_frame, write_frame};
@@ -314,20 +316,38 @@ fn dispatch(
             }
             let mut new_h = [0u8; 32];
             new_h.copy_from_slice(&new_id);
-            // CAS condition derivation from expected_id length:
-            // empty → Any (caller MUST send Match expected for CAS).
-            let condition = match req.expected_id.as_deref() {
-                None | Some(&[]) => RefWriteCondition::Any,
-                Some(b) if b.len() == 32 => {
+            // CAS intent derives entirely from the `expectation` enum.
+            // `expected_id` is only consulted for MATCH and MUST be a
+            // 32-byte digest in that case. mkit is alpha (pre-1.0) —
+            // clients and servers move together; there is no back-compat
+            // surface for the pre-`expectation` wire shape (see
+            // SPEC-TRANSPORT §4.2.1).
+            let expectation = req
+                .expectation
+                .as_ref()
+                .and_then(buffa::EnumValue::as_known)
+                .unwrap_or(RefExpectation::REF_EXPECTATION_UNSPECIFIED);
+            let condition = match expectation {
+                RefExpectation::REF_EXPECTATION_ANY => RefWriteCondition::Any,
+                RefExpectation::REF_EXPECTATION_MISSING => RefWriteCondition::Missing,
+                RefExpectation::REF_EXPECTATION_MATCH => {
+                    let bytes = req.expected_id.as_deref().unwrap_or(&[]);
+                    if bytes.len() != 32 {
+                        return emit_error(
+                            w,
+                            ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                            "MATCH expectation requires a 32-byte expected_id",
+                        );
+                    }
                     let mut e = [0u8; 32];
-                    e.copy_from_slice(b);
+                    e.copy_from_slice(bytes);
                     RefWriteCondition::Match(e)
                 }
-                Some(_) => {
+                RefExpectation::REF_EXPECTATION_UNSPECIFIED => {
                     return emit_error(
                         w,
                         ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                        "expected_id must be empty or 32 bytes",
+                        "UpdateRef.expectation is required",
                     );
                 }
             };

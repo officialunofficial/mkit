@@ -152,15 +152,11 @@ message ReadRefResponse {
 // the three CAS variants via standard If-Match / If-None-Match
 // headers, so this enum is only needed where the wire is protobuf.
 //
-// Back-compat: a v0.1.0 client that does not set this field encodes
-// `REF_EXPECTATION_UNSPECIFIED` (the protobuf default). A server MUST
-// treat UNSPECIFIED identically to the original
-// "empty expected_id = clobber, 32 bytes = match" behaviour — i.e.
-// equivalent to `REF_EXPECTATION_ANY` when expected_id is empty and
-// `REF_EXPECTATION_MATCH` when expected_id is 32 bytes. This keeps
-// v0.1.0 servers and v0.1.1 clients interoperable: an old server that
-// ignores the field still services Any and Match correctly, and only
-// loses the new Missing semantics (which it never honoured anyway).
+// REQUIRED on every `UpdateRef`. A server MUST reject
+// `REF_EXPECTATION_UNSPECIFIED` (the protobuf default, sent when a
+// client omits the field) with `ERROR_CODE_INVALID_REQUEST`. mkit is
+// alpha (pre-1.0) and clients/servers move together; there is no
+// back-compat for the pre-`expectation` wire shape.
 //
 // Wire numbers are load-bearing. Do NOT renumber; new variants append.
 enum RefExpectation {
@@ -177,29 +173,18 @@ enum RefExpectation {
 
   // "Compare-and-swap against this exact hash". `expected_id` MUST
   // be 32 bytes (raw BLAKE3 digest) and equal to the current ref
-  // value on the server. Empty expected_id with this value is a
-  // protocol error.
+  // value on the server.
   REF_EXPECTATION_MATCH = 3;
 }
 
 // Compare-and-swap ref update. `expectation` selects which CAS variant
 // applies; `expected_id` carries the value to match (for `MATCH`) and
-// MUST be empty for `ANY` / `MISSING` / `UNSPECIFIED`. Atomic on the
-// server.
-//
-// v0.1.0 wire compatibility: a client that omits `expectation` (the
-// default-zero value `UNSPECIFIED`) and an `expected_id` of either
-// empty or 32 bytes is indistinguishable on the wire from the v0.1.0
-// `UpdateRef`, so old and new peers interoperate at the ANY/MATCH
-// granularity. Only the new MISSING variant requires both peers at
-// v0.1.1+.
+// MUST be empty for `ANY` / `MISSING`. Atomic on the server.
 message UpdateRef {
   string name = 1;
   bytes expected_id = 2;
-  bytes new_id = 3;       // empty new_id deletes the ref
-  // Added in v0.1.1. See RefExpectation comment for back-compat
-  // rules. Field number chosen so we don't disturb the first three.
-  RefExpectation expectation = 4;
+  bytes new_id = 3;            // empty new_id deletes the ref
+  RefExpectation expectation = 4;  // REQUIRED; UNSPECIFIED is a protocol error
 }
 
 message UpdateRefResponse {
