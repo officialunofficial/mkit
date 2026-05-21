@@ -493,6 +493,15 @@ jobs:
           npm version --no-git-tag-version --allow-same-version "$VERSION"
           jq '{name, version, license, repository}' package.json
 
+      - name: Ensure NPM_TOKEN present
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.MKIT_NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::MKIT_NPM_TOKEN secret is not configured. Set it in repo or org secrets before tagging a release." >&2
+            exit 1
+          fi
+
       - name: Publish to npm
         working-directory: rust/crates/mkit-wasm/pkg
         env:
