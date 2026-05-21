@@ -1,0 +1,24 @@
+# CODEOWNERS — see https://docs.github.com/articles/about-codeowners
+# Maintainers listed in MAINTAINERS.md and the officialunofficial GitHub org.
+#
+# NOTE: The teams referenced below (@officialunofficial/mkit-maintainers,
+# @officialunofficial/mkit-crypto) must be provisioned under the
+# officialunofficial GitHub organisation before this file will route
+# reviews effectively. Until those teams exist with members, CODEOWNERS
+# rules silently no-op for required-review purposes.
+
+*                                @officialunofficial/mkit-maintainers
+
+# Security-sensitive surfaces require crypto-team review
+/rust/crates/mkit-attest/        @officialunofficial/mkit-crypto
+/rust/crates/mkit-keystore/      @officialunofficial/mkit-crypto
+/rust/crates/mkit-rpc/           @officialunofficial/mkit-crypto
+
+# CI + release tooling
+/.github/                        @officialunofficial/mkit-maintainers
+/install.sh                      @officialunofficial/mkit-maintainers
+/scripts/                        @officialunofficial/mkit-maintainers
+
+# On-disk + wire formats — changes need spec sign-off
+/docs/SPEC-*.md                  @officialunofficial/mkit-maintainers
+/rust/tests/golden/              @officialunofficial/mkit-maintainers
