@@ -299,14 +299,13 @@ fn handle_sign(
     };
 
     SignerFrame {
-        body: Some(signer_frame::Body::SignResponse(Box::new(SignResponse {
-            signature: Some(sig),
-            public_key: Some(public_key),
-            algorithm: Some(rpc_alg.into()),
-            key_id: Some(keyid),
-            certificate_chain: Vec::new(),
-            ..Default::default()
-        }))),
+        body: Some(signer_frame::Body::SignResponse(Box::new(
+            SignResponse::default()
+                .with_signature(sig)
+                .with_public_key(public_key)
+                .with_algorithm(rpc_alg)
+                .with_key_id(keyid),
+        ))),
         ..Default::default()
     }
 }
@@ -318,12 +317,12 @@ fn write_error<W: Write>(w: &mut W, code: ErrorCode, message: String) -> Result<
 
 fn error_frame(code: ErrorCode, message: String) -> SignerFrame {
     SignerFrame {
-        body: Some(signer_frame::Body::Error(Box::new(RpcError {
-            code: Some(code.into()),
-            message: Some(message),
-            details: Some(Vec::new()),
-            ..Default::default()
-        }))),
+        body: Some(signer_frame::Body::Error(Box::new(
+            RpcError::default()
+                .with_code(code)
+                .with_message(message)
+                .with_details(Vec::new()),
+        ))),
         ..Default::default()
     }
 }

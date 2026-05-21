@@ -122,23 +122,23 @@ impl Signer for ExternalSigner {
         // Build the request: Hello + SignRequest. We fire both before
         // reading any response so the signer can pipeline.
         let hello = SignerFrame {
-            body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-                caller_id: Some(format!("mkit-attest/{}", env!("CARGO_PKG_VERSION"))),
-                want_capabilities: Some(false),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::Hello(Box::new(
+                Hello::default()
+                    .with_protocol(ProtocolVersion::PROTOCOL_VERSION_1)
+                    .with_caller_id(format!("mkit-attest/{}", env!("CARGO_PKG_VERSION")))
+                    .with_want_capabilities(false),
+            ))),
             ..Default::default()
         };
         let sign_req = SignerFrame {
-            body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                algorithm: Some(rpc_algorithm_for(self.algorithm).into()),
-                key_form: Some(rpc_key_form_for(self.algorithm).into()),
-                key_ref: Some(Vec::new()),
-                payload: Some(pae.to_vec()),
-                context: Some(Vec::new()),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::SignRequest(Box::new(
+                SignRequest::default()
+                    .with_algorithm(rpc_algorithm_for(self.algorithm))
+                    .with_key_form(rpc_key_form_for(self.algorithm))
+                    .with_key_ref(Vec::new())
+                    .with_payload(pae.to_vec())
+                    .with_context(Vec::new()),
+            ))),
             ..Default::default()
         };
 
