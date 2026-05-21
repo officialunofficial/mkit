@@ -94,6 +94,7 @@ Programs MUST NOT pattern-match on the advisory message strings.
 | `mkit+http://localhost…` | Plain HTTP for local dev | Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`, `localhost`) per `validate_http_scheme`; any other host returns `InsecureScheme`. |
 | `mkit+s3://endpoint/bucket[/prefix]` | S3-compatible (`S3Transport`) | The endpoint becomes `https://<endpoint>`; R2 is the primary target, AWS S3 also works but its CAS semantics are weaker (see §6.3). |
 | `mkit+ssh://user@host[:port]/path` | SSH child + `mkit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty / `.` / `..` segments. SCP-style `mkit+ssh://user@host:path` / `mkit+ssh://user@host:port:path` are also accepted (see [`mkit-transport-ssh/src/url.rs`](../rust/crates/mkit-transport-ssh/src/url.rs)). |
+| `mkit+enc://[user@]host[:port]/path?pubkey=<…>` | Encrypted-stream (`EncTransport`) | Self-contained ChaCha20-Poly1305 + ed25519 transport — does not shell out to `ssh(1)`. The server's static public key MUST be carried out-of-band in the URL. URL parsing + CLI plumbing land in Phase 2; see [SPEC-TRANSPORT-ENC](SPEC-TRANSPORT-ENC.md). |
 
 Bare `ssh://`, `https://`, `http://`, `s3://`, `file://` URLs (without
 the `mkit+` prefix) are deliberately rejected. The prefix marks a URL
