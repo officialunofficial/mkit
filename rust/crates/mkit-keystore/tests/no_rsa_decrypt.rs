@@ -34,9 +34,8 @@ const FORBIDDEN_TOKENS: &[&str] = &["yubikey::piv::decrypt_data", "piv::decrypt_
 /// on `target/` so a cargo build with debug artifacts doesn't slow
 /// the test or trip on generated code.
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -82,9 +81,8 @@ fn workspace_does_not_call_yubikey_rsa_decrypt() {
 
     let mut offenders: Vec<(PathBuf, &'static str)> = Vec::new();
     for path in &rs_files {
-        let contents = match fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(contents) = fs::read_to_string(path) else {
+            continue;
         };
         for token in FORBIDDEN_TOKENS {
             if contents.contains(token) {
