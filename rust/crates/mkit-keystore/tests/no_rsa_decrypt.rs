@@ -28,10 +28,7 @@ use std::path::{Path, PathBuf};
 /// Tokens that indicate a call into the vulnerable RSA decrypt path.
 /// Keep this list narrow so the test does not false-positive on
 /// strings that legitimately appear in comments or doc.
-const FORBIDDEN_TOKENS: &[&str] = &[
-    "yubikey::piv::decrypt_data",
-    "piv::decrypt_data",
-];
+const FORBIDDEN_TOKENS: &[&str] = &["yubikey::piv::decrypt_data", "piv::decrypt_data"];
 
 /// Walk `dir` recursively and collect every `.rs` file path. We bail
 /// on `target/` so a cargo build with debug artifacts doesn't slow
