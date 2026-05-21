@@ -211,14 +211,13 @@ fn handle_sign<T: TpmSigner>(
     let key_id = format!("p256:{}", crate::to_hex(&pubkey));
 
     SignerFrame {
-        body: Some(signer_frame::Body::SignResponse(Box::new(SignResponse {
-            signature: Some(sig),
-            public_key: Some(pubkey),
-            algorithm: Some(RpcAlgorithm::ALGORITHM_P256.into()),
-            key_id: Some(key_id),
-            certificate_chain: Vec::new(),
-            ..Default::default()
-        }))),
+        body: Some(signer_frame::Body::SignResponse(Box::new(
+            SignResponse::default()
+                .with_signature(sig)
+                .with_public_key(pubkey)
+                .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+                .with_key_id(key_id),
+        ))),
         ..Default::default()
     }
 }
@@ -230,12 +229,12 @@ fn write_error<W: Write>(w: &mut W, code: ErrorCode, message: String) -> Result<
 
 fn error_frame(code: ErrorCode, message: String) -> SignerFrame {
     SignerFrame {
-        body: Some(signer_frame::Body::Error(Box::new(RpcError {
-            code: Some(code.into()),
-            message: Some(message),
-            details: Some(Vec::new()),
-            ..Default::default()
-        }))),
+        body: Some(signer_frame::Body::Error(Box::new(
+            RpcError::default()
+                .with_code(code)
+                .with_message(message)
+                .with_details(Vec::new()),
+        ))),
         ..Default::default()
     }
 }
@@ -291,11 +290,11 @@ mod tests {
     #[test]
     fn hello_response_advertises_p256_only() {
         let frames = vec![SignerFrame {
-            body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-                want_capabilities: Some(true),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::Hello(Box::new(
+                Hello::default()
+                    .with_protocol(ProtocolVersion::PROTOCOL_VERSION_1)
+                    .with_want_capabilities(true),
+            ))),
             ..Default::default()
         }];
         let mut input = Cursor::new(encode(&frames));
@@ -325,20 +324,19 @@ mod tests {
 
         let frames = vec![
             SignerFrame {
-                body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                    protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-                    ..Default::default()
-                }))),
+                body: Some(signer_frame::Body::Hello(Box::new(
+                    Hello::default().with_protocol(ProtocolVersion::PROTOCOL_VERSION_1),
+                ))),
                 ..Default::default()
             },
             SignerFrame {
-                body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                    algorithm: Some(RpcAlgorithm::ALGORITHM_P256.into()),
-                    key_form: Some(KeyForm::KEY_FORM_OPAQUE_HANDLE.into()),
-                    key_ref: Some(handle.to_be_bytes().to_vec()),
-                    payload: Some(pae.to_vec()),
-                    ..Default::default()
-                }))),
+                body: Some(signer_frame::Body::SignRequest(Box::new(
+                    SignRequest::default()
+                        .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+                        .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+                        .with_key_ref(handle.to_be_bytes().to_vec())
+                        .with_payload(pae.to_vec()),
+                ))),
                 ..Default::default()
             },
         ];
@@ -362,13 +360,13 @@ mod tests {
     fn sign_request_uses_handle_default_when_key_ref_empty() {
         let pae = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
         let frames = vec![SignerFrame {
-            body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                algorithm: Some(RpcAlgorithm::ALGORITHM_P256.into()),
-                key_form: Some(KeyForm::KEY_FORM_OPAQUE_HANDLE.into()),
-                key_ref: Some(Vec::new()),
-                payload: Some(pae.to_vec()),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::SignRequest(Box::new(
+                SignRequest::default()
+                    .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+                    .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+                    .with_key_ref(Vec::new())
+                    .with_payload(pae.to_vec()),
+            ))),
             ..Default::default()
         }];
         let mut input = Cursor::new(encode(&frames));
@@ -386,13 +384,13 @@ mod tests {
     #[test]
     fn unsupported_algorithm_returns_error() {
         let frames = vec![SignerFrame {
-            body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                algorithm: Some(RpcAlgorithm::ALGORITHM_ED25519.into()),
-                key_form: Some(KeyForm::KEY_FORM_OPAQUE_HANDLE.into()),
-                key_ref: Some(b"\x81\x01\x00\x01".to_vec()),
-                payload: Some(b"x".to_vec()),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::SignRequest(Box::new(
+                SignRequest::default()
+                    .with_algorithm(RpcAlgorithm::ALGORITHM_ED25519)
+                    .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+                    .with_key_ref(b"\x81\x01\x00\x01".to_vec())
+                    .with_payload(b"x".to_vec()),
+            ))),
             ..Default::default()
         }];
         let mut input = Cursor::new(encode(&frames));
