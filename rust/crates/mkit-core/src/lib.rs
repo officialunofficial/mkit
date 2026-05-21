@@ -25,6 +25,15 @@ pub mod hash;
 pub mod object;
 pub mod ops;
 pub mod pack;
+// Erasure-coded pack delivery (Reed-Solomon). Feature-gated because
+// the dep stack (`commonware-coding` + `commonware-cryptography` +
+// `commonware-parallel` + `commonware-storage`) is large and only
+// needed by the shard-aware transports — see
+// `docs/SPEC-PACK-SHARDS.md`. Sibling of `pack`, not nested: the
+// on-disk pack format stays untouched; shards are a wire-level
+// encoding *of* a pack.
+#[cfg(feature = "pack-shards")]
+pub mod pack_shard;
 pub mod serialize;
 pub mod sign;
 pub mod store;

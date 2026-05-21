@@ -22,6 +22,16 @@ workspace = true
 blake3 = "1"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 getrandom = "0.4"
+
+# Optional: erasure-coded pack delivery via Reed-Solomon (see
+# `docs/SPEC-PACK-SHARDS.md`). Pulled in only when the `pack-shards`
+# feature is enabled — the dep graph is large (cryptography, parallel,
+# storage) and not needed by the default object/pack path.
+commonware-coding = { version = "=2026.4.0", optional = true }
+commonware-codec = { version = "=2026.4.0", optional = true, features = ["std"] }
+commonware-cryptography = { version = "=2026.4.0", optional = true, features = ["std"] }
+commonware-parallel = { version = "=2026.4.0", optional = true, features = ["std"] }
+commonware-utils = { version = "=2026.4.0", optional = true, features = ["std"] }
 # `subtle` is a constant-time-equality primitive used by the Ed25519
 # `SecretSeed` PartialEq. dalek pulls it transitively but we depend on
 # it directly so the constant-time guarantee is explicit at this crate
@@ -38,3 +48,15 @@ libc = "0.2"
 
 [dev-dependencies]
 hex = "0.4"
+
+[features]
+default = []
+# Erasure-coded pack delivery (Reed-Solomon shards). Adds the
+# `pack_shard` module and the `commonware-*` dep stack.
+pack-shards = [
+    "dep:commonware-coding",
+    "dep:commonware-codec",
+    "dep:commonware-cryptography",
+    "dep:commonware-parallel",
+    "dep:commonware-utils",
+]
