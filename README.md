@@ -109,8 +109,11 @@ Workspace crates:
 |---|---|
 | `mkit-core` | hash, object, serialize, store, sign, chunker, delta, pack, refs, index, worktree, ignore, repo_lock, ops, protocol |
 | `mkit-attest` | JCS, in-toto v1 Statement, DSSE envelope, signers, verify |
+| `mkit-keystore` | platform-aware signing-key vault (software, OS keychains, HashiCorp Vault, external signers) — see [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md) |
+| `mkit-rpc` | shared wire schemas + length-prefixed framing for stdio subprocess protocols (external signers, future agents) |
 | `mkit-transport-{memory,file,http,s3,ssh}` | Transport trait implementations |
 | `mkit-cli` | the `mkit` binary |
+| `mkit-wasm` | wasm-bindgen surface for browsers / Cloudflare Workers, published to npm as `@makechain/mkit-wasm` |
 | `mkit-fuzz` | bounded property tests (cargo-fuzz compatible) |
 
 `scripts/verify-rename.sh` is the rename-gate enforced in CI; it greps
@@ -273,10 +276,21 @@ See `docs/SPEC-SIGNING.md` §8 for the convention and
 
 ## Documentation
 
+The SPEC documents below are stamped `status: draft` pending review
+polish, but the v1 wire and on-disk formats they describe are pinned
+by the test vectors under [`rust/tests/golden/`](rust/tests/golden/)
+and will remain stable through the 0.x series — see
+[Status](#status).
+
 | Doc | Audience |
 |---|---|
 | [`docs/INSTALL.md`](docs/INSTALL.md) | End users — install channels, verification, hardware signers |
 | [`docs/CLI.md`](docs/CLI.md) | End users — subcommands, env vars, exit codes |
+| [`docs/keystore.md`](docs/keystore.md) | End users — keystore overview, picking a backend |
+| [`docs/SPEC-INDEX.md`](docs/SPEC-INDEX.md) | Implementers — staging-index format |
+| [`docs/SPEC-RPC.md`](docs/SPEC-RPC.md) | Implementers — shared stdio framing for subprocess protocols |
+| [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md) | Implementers — keystore vault interface, backend requirements |
+| [`docs/SPEC-EXTERNAL-SIGNER.md`](docs/SPEC-EXTERNAL-SIGNER.md) | Integrators — external signer stdio protocol |
 | [`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) | Implementers + integrators — native attestation primitive (in-toto v1 + DSSE) |
 | [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) | Implementers of compatible tools — on-disk format |
 | [`docs/SPEC-SIGNING.md`](docs/SPEC-SIGNING.md) | Implementers — commit signing format |
@@ -285,9 +299,13 @@ See `docs/SPEC-SIGNING.md` §8 for the convention and
 | [`docs/SPEC-REFS.md`](docs/SPEC-REFS.md) | Implementers — ref names and CAS |
 | [`docs/SPEC-TRANSPORT.md`](docs/SPEC-TRANSPORT.md) | Implementers — 7-verb transport protocol incl. SSH OP_HELLO |
 | [`docs/SPEC-FASTCDC.md`](docs/SPEC-FASTCDC.md) | Implementers — content chunking |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Contributors — module layering and design notes |
+| [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators + reviewers — trust boundaries and security assumptions |
+| [`docs/STYLE-GUIDE.md`](docs/STYLE-GUIDE.md) | Contributors — writing style for docs and commit messages |
 | [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators — SSH transport trust model |
-| [`docs/FUZZ.md`](docs/FUZZ.md) | Contributors — fuzz harness conventions |
+| [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release procedure overview |
 | [`docs/release/`](docs/release/) | Maintainers — release checklist, signing, reproducibility, supply chain |
+| [`docs/FUZZ.md`](docs/FUZZ.md) | Contributors — fuzz harness conventions |
 
 ## Installing
 
