@@ -1,0 +1,15 @@
+mkit
+Copyright 2024-present Official Unofficial, Inc.
+
+This product includes software developed by
+Official Unofficial, Inc. and the mkit contributors.
+
+Portions of this product include third-party software distributed under
+the Apache License 2.0, MIT, BSD-3-Clause, ISC, MPL-2.0, and similar
+permissive licenses. A consolidated THIRD-PARTY-NOTICES file is generated
+from the dependency graph and shipped with binary release artifacts.
+
+This product contains cryptographic software (BLAKE3, Ed25519, secp256k1,
+P-256, AES, rustls/TLS). Distribution is covered by the publicly-available
+open-source exemption under US EAR §740.13(e); ECCN 5D002.c.1; License
+Exception TSU.
