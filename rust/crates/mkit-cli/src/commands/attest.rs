@@ -18,7 +18,8 @@
 //! * `--commit` — HEAD.
 //! * `--algorithm` — `attest.default_algorithm` in config, else `ed25519`.
 //! * `--signer` — `attest.signer` in config, else `repo-key`.
-//! * `--predicate-type` — `https://mkit.io/predicate/empty/v1`.
+//! * `--predicate-type` —
+//!   `https://github.com/officialunofficial/mkit/spec/predicate/empty/v1`.
 //! * `--predicate-file` — omitted ⇒ `{}`.
 //!
 //! Multi-signature envelopes are produced by passing one or more
@@ -57,7 +58,14 @@ use crate::config::Config;
 use crate::exit;
 
 /// Default predicate type URI — placeholder; real callers pass their own.
-const DEFAULT_PREDICATE_TYPE: &str = "https://mkit.io/predicate/empty/v1";
+///
+/// Uses the GitHub-anchored URI scheme defined in
+/// `docs/SPEC-ATTESTATIONS.md` §6.4
+/// (`https://github.com/officialunofficial/mkit/spec/predicate/<name>/v<n>`)
+/// so the only predicate URI mkit ships out-of-the-box points at a
+/// location the project actually controls.
+const DEFAULT_PREDICATE_TYPE: &str =
+    "https://github.com/officialunofficial/mkit/spec/predicate/empty/v1";
 
 #[derive(Debug, Parser)]
 #[command(
