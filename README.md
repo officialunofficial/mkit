@@ -1,5 +1,7 @@
 # mkit
 
+![status: alpha](https://img.shields.io/badge/status-alpha-orange)
+
 A content-addressed version control toolkit written in Rust.
 
 `mkit` is a generic content-addressed VCS — Git-like commits, refs,
@@ -437,8 +439,18 @@ attestation contract.
 
 ## Status
 
-0.1.0 is the initial public release. See [`CHANGELOG.md`](CHANGELOG.md)
-for the full change list.
+mkit is **alpha (pre-1.0)**. The v1 on-disk and wire formats are
+pinned by golden vectors under
+[`rust/tests/golden/`](rust/tests/golden/) and will remain stable
+through the 0.x line; APIs, CLI flags, and unpinned internals may
+change in any 0.x release. See
+[`GOVERNANCE.md`](GOVERNANCE.md) for the stability contract and
+[`CHANGELOG.md`](CHANGELOG.md) for breaking-change history.
+
+**MSRV (Minimum Supported Rust Version):** Rust 1.95.0, matching
+[`rust/rust-toolchain.toml`](rust/rust-toolchain.toml). MSRV bumps
+are documented in the CHANGELOG and follow a "current stable minus
+one" policy unless a feature requires otherwise.
 
 ## Contributing
 
@@ -456,3 +468,6 @@ Dual-licensed under either of:
 at your option. Unless you explicitly state otherwise, any contribution
 intentionally submitted for inclusion in this project shall be dual-licensed
 as above, without any additional terms or conditions.
+
+The mkit name and marks are owned by Official Unofficial, Inc.; see
+[`TRADEMARKS.md`](TRADEMARKS.md).
