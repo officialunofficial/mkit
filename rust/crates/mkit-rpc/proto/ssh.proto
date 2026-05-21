@@ -23,7 +23,7 @@
 //
 // The SSH child process (`ssh user@host -- mkit-server`) receives
 // SshFrame messages on its stdin and emits SshFrame messages on its
-// stdout. The forced-command server pattern from SPEC-TRANSPORT §7.5
+// stdout. The forced-command server pattern from SPEC-TRANSPORT §4.1
 // remains: trust is delegated to the user's `ssh(1)` configuration
 // (host-key verification, identity selection).
 //

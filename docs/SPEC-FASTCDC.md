@@ -1,7 +1,7 @@
 ---
 spec: SPEC-FASTCDC
 version: 1
-status: draft
+status: stable
 audience: implementers of compatible chunkers; anyone reproducing chunked_blob hashes across producers
 ---
 
@@ -51,19 +51,26 @@ and can only be changed through a format-version bump.
 
 ## 3. Gear table seed
 
-The gear table is 256 `u64` entries, computed at compile time from a
-splitmix-like initial state seeded with an 8-byte ASCII literal.
+The gear table is 256 `u64` entries, derived from a splitmix64 initial
+state seeded with an 8-byte ASCII literal. mkit does **not** use the
+gear table from the FastCDC paper (Xia et al., USENIX ATC '16); the
+table is mkit-specific and produced by the procedure below.
 
 ```
 state = 0x4D4B495446434443        # ASCII "MKITFCDC" interpreted as big-endian u64
 for each of 256 entries:
-    state = state +% 0x9e3779b97f4a7c15              # wrapping add
+    state = state +% 0x9e3779b97f4a7c15              # wrapping add (splitmix64 gamma)
     z = state
     z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9        # wrapping mul
     z = (z ^ (z >> 27)) *% 0x94d049bb133111eb
     z = z ^ (z >> 31)
     table[i] = z
 ```
+
+The reference Rust implementation lives in
+`mkit-core::chunker::build_gear_table` and uses a `std::sync::OnceLock`
+to memoise the 2 KiB table on first use. The exported constant `SEED`
+is the same `0x4D4B_4954_4643_4443` value.
 
 ### 3.1 Seed decision (v1)
 
@@ -89,15 +96,25 @@ avg_size =  64 * 1024   =   64 KiB
 max_size = 256 * 1024   =  256 KiB
 ```
 
-Normative constraint: all three MUST be a power of two, with
-`min_size < avg_size < max_size`. `avg_size` in particular MUST be a
-power of two because the mask derivation (§5) uses `log2(avg_size)`.
+Normative constraint: `avg_size` MUST be a power of two (the mask
+derivation in §5 uses `log2(avg_size)`); `min_size < avg_size <
+max_size` MUST hold strictly. mkit's v1 constants satisfy "all three
+are powers of two", but the format only requires this of `avg_size`.
 
-Files of size ≤ `min_size` are NOT chunked — they are stored as a
-single `blob`. The threshold for taking the chunked path is an
-implementer choice (typically `>= 1 MiB` in practice); v1 specifies
-only that **once a file is chunked**, the above parameters MUST be
-used.
+Files of size ≤ `min_size` are NOT chunked — `cut` returns the full
+input length, so the caller stores the file as a single `blob`. The
+threshold for taking the chunked path is an implementer choice; in
+mkit-core the worktree picks `CHUNK_THRESHOLD = 1 MiB`
+(`worktree::CHUNK_THRESHOLD`). v1 specifies only that **once a file
+is chunked**, the parameters above MUST be used.
+
+Implementation status: the chunker (`FastCdc::v1`) is fully wired
+inside mkit-core, but `worktree::hash_file` currently returns
+`WorktreeError::NeedsChunker` for files larger than `CHUNK_THRESHOLD`
+rather than producing a `chunked_blob`. The end-to-end wiring of
+worktree → chunker → `chunked_blob` is tracked separately from this
+spec; the byte-level chunk boundaries are already pinned by goldens
+(see §8).
 
 ---
 
@@ -177,31 +194,48 @@ chunk lists across platforms.
 
 ---
 
-## 8. Test vectors (implementer MUST produce)
+## 8. Test vectors
 
-TO BE FIXED IN IMPLEMENTATION:
+The vectors below are exercised by
+`rust/crates/mkit-core/tests/golden_pack.rs` (boundaries on disk under
+`rust/tests/golden/phase3/`) plus the unit tests in
+`rust/crates/mkit-core/src/chunker.rs::tests`.
 
-1. **Gear table hash**: BLAKE3(all 256 `u64` entries as little-endian
-   bytes = 2048 bytes total). Record the digest hex. Any
-   implementation that derives the same table for seed `"MKITFCDC"`
-   will produce the same digest.
-2. **Small file fits in single chunk**: a 15 KiB file (`< min_size`)
-   → `cut` returns full length immediately. No `chunked_blob`
-   produced.
-3. **Exactly `min_size` file**: 16 KiB file → `cut` returns 16384
-   (single chunk).
-4. **Pseudo-random 1 MiB file** (seed = fixed byte pattern, e.g.
-   `i -> (i * 31 + 7) mod 256`): record the chunk boundary offsets
-   and the chunked_blob hash.
-5. **Repetitive 1 MiB file** (all 0x41 bytes): record boundary
-   offsets. Expect many forced cuts at `max_size`.
-6. **Shifted-by-1-byte file**: prepend one byte to vector 4's file.
-   Expect that *most* boundaries after the first reoccur at offsets
-   shifted by 1; a majority of chunks should have identical hashes to
-   vector 4. Record the proportion.
-7. **Seed misuse detector**: if an implementation is accidentally
-   built with any seed other than `"MKITFCDC"`, the gear table hash
-   in vector 1 will not match — fails loudly at test time.
+1. **Gear table hash**: `gear_table_digest()` returns
+   `BLAKE3` of the 256 `u64` entries little-endian-encoded
+   (2 048 bytes total). Any implementation that derives the same table
+   for seed `"MKITFCDC"` will produce the same digest. Stability is
+   asserted by `gear_table_digest_is_stable`; the table is also checked
+   to be all-unique and non-zero by `gear_table_is_unique_and_nonzero`.
+2. **Small file fits in single chunk**: short input → `cut` returns
+   `data.len()` immediately. No `chunked_blob` produced
+   (`small_input_is_single_chunk`).
+3. **`min_size`-or-smaller is single chunk**: `data.len() <= min_size`
+   → `cut` returns `data.len()` (`cut_at_exactly_min_size_returns_full`).
+4. **Pseudo-random 1 MiB file**, splitmix64 stream from seed
+   `0xA5A5_F00D_DEAD_BEEF`: chunk boundary offsets are pinned in
+   `rust/tests/golden/phase3/fastcdc_boundaries_1mib.bin`
+   (`fastcdc_boundaries_1mib_match_golden`).
+5. **Pseudo-random 256 KiB file**, splitmix64 stream from seed
+   `0xCAFE_BABE_1234_5678`: pinned in
+   `rust/tests/golden/phase3/fastcdc_boundaries_256k.bin`
+   (`fastcdc_boundaries_256k_match_golden`).
+6. **Repetitive buffer**: all-zero data with a tiny chunker exercises
+   the forced-cut-at-`max_size` path
+   (`cut_forces_boundary_at_max_size`).
+7. **Boundary stability under a 1-byte insert**: insert one byte at
+   32 KiB into a 64 KiB pseudo-random file; ≤ 3 chunks differ
+   (`boundary_stability_single_byte_insert`). The shifted-chunks
+   identity test from earlier drafts is subsumed by this regression.
+8. **Iterator total covers the input**: chunk lengths sum to the
+   input length (`iterator_total_bytes_matches_input`,
+   `fastcdc_iterator_total_equals_input_length`).
+9. **Different `avg_size` yields different boundaries**: a chunker
+   with `(8K, 32K, 128K)` does not produce the v1 boundaries
+   (`different_avg_size_yields_different_boundaries`).
+10. **Seed misuse detector**: if an implementation is accidentally
+    built with any seed other than `"MKITFCDC"`, the gear-table-hash
+    pin and the boundary goldens both fail loudly at test time.
 
 ---
 

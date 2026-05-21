@@ -20,10 +20,18 @@ bytes) and R-17 (cross-domain signature confusion).
 
 - **Hash:** BLAKE3 default mode (no keyed hashing, no derive-key at the
   signing layer). Output: 32 bytes.
-- **Signature:** Ed25519 per RFC 8032. Public key 32 bytes, seed 32
-  bytes, signature 64 bytes.
+- **Signature:** Ed25519 per RFC 8032 only. mkit-core does NOT support
+  any other signature algorithm; multi-algorithm signing (if any) lives
+  in `mkit-attest` / SPEC-ATTESTATIONS and is out of scope here.
+  Public key 32 bytes, seed 32 bytes, signature 64 bytes.
 - Signers sign the BLAKE3 digest (32 bytes) rather than the raw signing
-  bytes. This is Ed25519 "PureEdDSA over a pre-hashed message".
+  bytes. This is Ed25519 "PureEdDSA over a pre-hashed message". We do
+  NOT use Ed25519ph.
+- Verification uses `VerifyingKey::verify_strict` (ZIP-215 / RFC 8032
+  strict). Non-canonical `R`, high-`s`, or non-canonical public-key
+  encodings are rejected. This is stricter than the default
+  `verify`; mkit has no legacy-compat constraint so we hold the
+  tighter line.
 - No batched verification. Each verify is independent.
 
 ---
@@ -192,20 +200,60 @@ invariant.
 ## 7. Key file format
 
 ```
-Path:         .mkit/keys/default.key
-Contents:     raw 32 bytes (Ed25519 SEED — NOT expanded secret key)
-Permissions:  0600 (mandatory on POSIX)
+Path:           caller-provided; the convention is .mkit/keys/default.key
+Contents:       raw 32 bytes (Ed25519 SEED — NOT expanded secret key)
+File mode:      0600 (mandatory on POSIX)
+Parent-dir mode: 0700 (mandatory on POSIX)
 ```
 
 The seed is passed to the Ed25519 deterministic key-pair constructor
 to recover `(public_key, secret_key)` on load. No PEM, no DER, no
 password wrapping in v1.
 
-Writers MUST `chmod 0600` the file immediately after creation and MUST
-fail keygen if they cannot set that mode on POSIX.
+### 7.1 Write contract
 
-On non-POSIX hosts this rule is advisory; implementations SHOULD use
-the host's equivalent access restriction.
+Writers MUST use the following crash-atomic sequence on POSIX:
+
+1. Ensure the parent directory exists at mode 0700. Refuse if any
+   ancestor (up to three levels) is a symlink → `KeyPathIsSymlink`.
+2. Open a sibling temp file (`.<file>.tmp.<pid>`) with
+   `O_CREAT | O_EXCL | O_NOFOLLOW` and mode 0600. `O_EXCL` defeats a
+   pre-created symlink at the tmp name.
+3. Write the 32-byte seed, `fsync` the file.
+4. `rename(2)` the tmp file to the final path. Atomic on the same
+   filesystem; replaces any existing key.
+5. `fsync` the parent directory so the rename itself is durable.
+
+A `save_raw_32_create_new` variant exists for keygen flows that MUST
+NOT clobber an existing key; it returns `Ok(false)` if the destination
+already exists.
+
+### 7.2 Load contract
+
+Loaders MUST enforce on POSIX:
+
+- Open with `O_NOFOLLOW`. ELOOP → `KeyPathIsSymlink(path)`.
+- Reject if any of the three ancestor directories is a symlink →
+  `KeyPathIsSymlink(dir)`.
+- `fstat` the open file descriptor (not the path — closes a TOCTOU
+  rename(2) window).
+- File mode `& 0o077 != 0` → `InsecureKeyPermissions{actual}`.
+- File owner uid ≠ process euid → `InsecureKeyOwner{actual, euid}`.
+- Immediate parent directory mode `& 0o077 != 0` →
+  `InsecureKeyDir{actual}`.
+- File length ≠ 32 bytes (short or long) → `InvalidKeyLength{actual}`.
+
+Any I/O failure surfaces as `KeyIo(String)`. Public-key bytes that do
+not decode to a valid Edwards point → `InvalidPublicKey`. RNG failure
+during `KeyPair::generate()` → `RngFailure`. Signature verification
+failure → `SignatureInvalid` (the underlying Ed25519 layer does not
+distinguish among bad-signature, wrong-key, tampered-input, or wrong-
+domain).
+
+On non-POSIX hosts the symlink, owner, and mode checks degrade to
+no-ops; implementations SHOULD use the host's equivalent access
+restriction (e.g. keep keys under `%USERPROFILE%` so default Windows
+ACLs apply).
 
 ---
 
@@ -236,9 +284,7 @@ ergonomics, not a security property.
 
 ---
 
-## 9. Test vectors (implementer MUST produce)
-
-TO BE FIXED IN IMPLEMENTATION:
+## 9. Test vectors
 
 1. **Deterministic commit signing bytes**: fixed-input commit with
    `Identity{kind=0x01, len=32, payload=[0xAA;32]}`, zero

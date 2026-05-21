@@ -111,6 +111,15 @@ or canonicalise.
 
 ## 4. Prefix semantics for `listRefs`
 
+This section is normative for **transport** implementations of
+`listRefs(prefix)`. The local `mkit-core` API (see `refs.rs`) exposes
+the simpler `list_refs(mkit_dir)` / `list_tags(mkit_dir)` which return
+every ref under `refs/heads/` or `refs/tags/` respectively — the
+prefix has been pre-applied implicitly by the function choice. The
+algorithm below is what a transport server / a future
+`list_refs_with_prefix` core API MUST implement to remain cross-
+transport compatible.
+
 `listRefs(prefix) -> [{name, hash}]` walks the ref namespace and
 returns all refs whose full name begins with `prefix`. The `name` in
 each returned tuple has `prefix` stripped, plus any trailing `/` on the
@@ -164,8 +173,11 @@ empty slice, not null.
 ### 4.2 Prefix validation
 
 The prefix itself must be empty or pass the same grammar as a ref name
-(§3), possibly with a single trailing `/`. Reject invalid prefixes with
-`InvalidRef`.
+(§3), possibly with a single trailing `/`. Transports MUST reject
+invalid prefixes (the core helper `validate_ref_prefix` returns a
+boolean; transports wrap the false case as their domain-specific
+`InvalidRef` error, e.g. `RefError::InvalidRefName` on the file
+backend).
 
 ---
 
@@ -237,20 +249,34 @@ Clients requiring CAS MUST use `.match` explicitly.
 ## 6. Ref storage (local disk)
 
 ```
-.mkit/refs/heads/<name>     65 bytes wire
-.mkit/refs/tags/<name>      65 bytes wire
+.mkit/refs/heads/<name>     65 bytes wire (HEADS_DIR = "refs/heads")
+.mkit/refs/tags/<name>      65 bytes wire (TAGS_DIR  = "refs/tags")
 .mkit/HEAD                  symbolic ("ref: refs/heads/<name>\n") or detached (64-hex + '\n')
-.mkit/shallow               one 65-byte wire per line (no hash in this case — just hex+newline)
+.mkit/shallow               concatenation of N × 65-byte ref-wire blobs (one hash per line)
 ```
 
+`HEAD` content size is capped at 4 KiB; a single ref file at 128 bytes;
+the shallow file at 1 MiB. Reads exceeding these bounds yield
+`RefError::InvalidHead` / `RefError::InvalidRef` respectively.
+
 Writers MUST use atomic write-then-rename on local disk to avoid torn
-reads.
+reads. The temp-name pattern is `.<file>.tmp.<pid>.<seq>`, identical
+to SPEC-INDEX §4.
+
+`HEAD` reads tolerate trailing `\r`, space, and tab so a Windows-
+edited file does not brick a repo; ref-file reads tolerate the same
+trailing whitespace plus the optional `\r` before the terminating
+`\n`. Fresh writes always emit the strict 65-byte form.
+
+Listing `.mkit/refs/heads/` is recursive (nested directories like
+`feature/x/y` are supported), with a hard depth cap of 32 levels to
+defeat adversarial nesting. Files that fail `validate_ref_name` or
+whose bytes do not decode to a valid ref wire are silently skipped
+from listings.
 
 ---
 
-## 7. Test vectors (implementer MUST produce)
-
-TO BE FIXED IN IMPLEMENTATION:
+## 7. Test vectors
 
 1. **Wire encode/decode**: hash = BLAKE3("test-ref") → 64 hex + `\n`.
    Record the 65-byte wire.

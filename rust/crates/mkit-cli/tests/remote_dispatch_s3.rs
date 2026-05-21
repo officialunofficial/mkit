@@ -77,7 +77,7 @@ fn signed_put_request_carries_sigv4_headers() {
     // Build a transport manually (bypassing the `https://` rewrite in
     // `S3Transport::connect`) and issue an `upload_pack` against a
     // mockito endpoint. Assert the captured request carries the
-    // SPEC-TRANSPORT §7.4 `SigV4` header set:
+    // SPEC-TRANSPORT §6 `SigV4` header set:
     //   - Authorization: AWS4-HMAC-SHA256 ...
     //   - x-amz-date
     //   - x-amz-content-sha256

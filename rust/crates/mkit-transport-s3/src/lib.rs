@@ -11,7 +11,7 @@
 //! construction; the first signed call surfaces
 //! [`TransportError::AccessDenied`].
 //!
-//! Retry policy mirrors SPEC-TRANSPORT §8 via
+//! Retry policy mirrors SPEC-TRANSPORT §7 via
 //! [`mkit_core::protocol::BackoffIterator`]: 5xx and HTTP 429 retry up to
 //! 5 attempts; `412 Precondition Failed` NEVER retries so CAS writes
 //! can't silently turn into duplicate PUTs.
@@ -38,7 +38,7 @@ use reqwest::blocking::{Client, Response};
 
 use crate::sigv4::{Credentials, SignedRequest, sign_request};
 
-/// Per SPEC-TRANSPORT §5, a single PUT is capped at 5 GiB; anything
+/// Per SPEC-TRANSPORT §6.4, a single PUT is capped at 5 GiB; anything
 /// larger requires multipart upload (deferred).
 pub const S3_SINGLE_PUT_MAX: u64 = 5 * 1024 * 1024 * 1024;
 

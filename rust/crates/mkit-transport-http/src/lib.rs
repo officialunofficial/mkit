@@ -5,7 +5,7 @@
 //! `mkit+https://<host>/<project>`. The `mkit+` prefix is stripped
 //! before the inner reqwest call.
 //!
-//! Wire contract (SPEC-TRANSPORT §6):
+//! Wire contract (SPEC-TRANSPORT §5.1):
 //!
 //! - `POST   /<project>/packs` — body is pack bytes, response is
 //!   `{"key": "<64-hex>"}`. `ETag` on success = `MD5(body)` (advisory
@@ -63,7 +63,7 @@ pub const TOKEN_ENV: &str = "MKIT_API_TOKEN";
 /// wedge a client indefinitely.
 ///
 /// `from_secs(300)` is deliberate — `from_mins(5)` loses the direct
-/// mapping to the seconds-based SPEC-TRANSPORT §8 ladder.
+/// mapping to the seconds-based SPEC-TRANSPORT §7 ladder.
 #[allow(clippy::duration_suboptimal_units)]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -249,7 +249,7 @@ impl HttpTransport {
     /// Real sleeps are capped at [`TEST_MAX_SLEEP`] so unit tests don't
     /// burn a full 31-second backoff ladder; the spec's exponential
     /// ladder still governs how many retries happen, which is what
-    /// SPEC-TRANSPORT §8 actually mandates.
+    /// SPEC-TRANSPORT §7 actually mandates.
     fn retrying<F>(mut build_req: F) -> TransportResult<Response>
     where
         F: FnMut() -> RequestBuilder,
