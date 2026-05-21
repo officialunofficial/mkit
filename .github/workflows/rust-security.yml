@@ -1,5 +1,13 @@
 name: Rust Security
 
+# REMINDER: rust/deny.toml ignores RUSTSEC-2023-0071 (yubikey transitive
+# RSA decrypt timing leak). cargo-deny v0.19 does not yet support a
+# structured `expires` field on advisory ignores; the TODO comment in
+# deny.toml carries the 2026-08-21 re-justification deadline. When
+# that date passes, this workflow run should fail loudly until the
+# ignore is renewed or dropped. See also
+# rust/crates/mkit-keystore/tests/no_rsa_decrypt.rs.
+
 on:
   schedule:
     - cron: "0 6 * * 1"   # Every Monday at 06:00 UTC
