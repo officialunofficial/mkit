@@ -407,6 +407,8 @@ fn send(w: &mut impl Write, body: ssh_frame::Body) -> std::io::Result<()> {
     write_frame(w, &frame).map_err(|_| std::io::Error::other("frame write"))
 }
 
+// Bypasses `send` because `ssh_error_frame` already returns a full
+// `SshFrame`; passing it through `send` would just wrap-and-unwrap.
 fn emit_error(w: &mut impl Write, code: ErrorCode, message: &str) -> std::io::Result<()> {
     write_frame(w, &mkit_rpc::ssh_error_frame(code, message))
         .map_err(|_| std::io::Error::other("frame write"))

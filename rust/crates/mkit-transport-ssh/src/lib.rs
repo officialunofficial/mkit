@@ -59,7 +59,7 @@ pub use crate::url::{MKIT_SSH_PREFIX, SshTarget, parse_mkit_ssh_url, validate_ss
 /// Maximum combined ref / prefix name length accepted over the wire.
 const MAX_REF_NAME: usize = 4096;
 
-use mkit_core::protocol::PACK_BODY_LIMIT;
+use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
 
 /// Client identification string sent in the `Hello` frame. Inherited
 /// from the workspace version, so a release bump propagates
@@ -475,11 +475,8 @@ fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
 
     // Clamp the initial capacity so an honest small pack stays cheap
     // and an over-stated `total_bytes` cannot drive us into a giant
-    // allocation. PACK_BODY_LIMIT fits in usize on every supported
-    // target, so try_from's fallback to usize::MAX is dead code in
-    // practice.
-    let cap = usize::try_from(PACK_BODY_LIMIT).unwrap_or(usize::MAX);
-    let initial = core::cmp::min(total as usize, cap);
+    // allocation.
+    let initial = core::cmp::min(total as usize, PACK_BODY_LIMIT_USIZE);
     let mut out = Vec::with_capacity(initial);
     loop {
         let chunk_frame = read_frame_or_err(r)?;
@@ -489,7 +486,7 @@ fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
                 // Bail as soon as the running total would exceed the
                 // cap — a misbehaving server could otherwise stream
                 // chunks forever past an honest header.
-                if out.len().saturating_add(data.len()) > cap {
+                if out.len().saturating_add(data.len()) > PACK_BODY_LIMIT_USIZE {
                     return Err(TransportError::RemoteError(
                         "server-streamed pack body exceeds client cap".into(),
                     ));
@@ -781,10 +778,8 @@ mod tests {
         assert_eq!(out, vec![1, 2, 3, 4]);
     }
 
-    /// Build the `UpdateRef` body the client would send for a given
-    /// `RefWriteCondition`, by walking the same encoding path as the
-    /// transport impl. Kept in lockstep with `Transport::update_ref`
-    /// — if that encoding changes, this helper must change too.
+    /// Build an `UpdateRef` body via `cond_to_wire` so this test
+    /// exercises the same encoding path as `Transport::update_ref`.
     fn encode_update_ref(condition: RefWriteCondition) -> UpdateRef {
         let new_hash = [0xABu8; 32];
         let (expected_id, expectation) = cond_to_wire(condition);
@@ -797,12 +792,12 @@ mod tests {
         }
     }
 
-    /// The three CAS variants MUST produce three distinct on-wire
-    /// encodings. Before the `expectation` field landed, `Any` and
-    /// `Missing` collapsed to the same bytes — this regression test
+    /// The three CAS variants MUST produce three distinct
+    /// `cond_to_wire` encodings. Before the `expectation` field
+    /// landed, `Any` and `Missing` collapsed to the same bytes — this
     /// pins that they no longer do.
     #[test]
-    fn update_ref_cas_variants_produce_distinct_wire_bytes() {
+    fn cond_to_wire_variants_produce_distinct_encodings() {
         use buffa::Message;
 
         let any = encode_update_ref(RefWriteCondition::Any).encode_to_vec();

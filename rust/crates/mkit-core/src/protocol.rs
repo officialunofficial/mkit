@@ -202,6 +202,17 @@ pub const BACKOFF_CAP: Duration = Duration::from_secs(300);
 /// addressable range; servers advertising more are treated as hostile.
 pub const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 
+/// `usize`-typed mirror of [`PACK_BODY_LIMIT`] for `Vec`-shaped buffer
+/// caps. mkit only supports 64-bit targets where this fits trivially;
+/// the assertion below makes a 32-bit build fail to compile rather
+/// than silently truncate.
+#[allow(clippy::cast_possible_truncation)]
+pub const PACK_BODY_LIMIT_USIZE: usize = PACK_BODY_LIMIT as usize;
+const _: () = assert!(
+    (PACK_BODY_LIMIT_USIZE as u64) == PACK_BODY_LIMIT,
+    "PACK_BODY_LIMIT does not fit in usize on this target",
+);
+
 /// Exponential-backoff iterator used by all transports.
 ///
 /// Yields `[1s, 2s, 4s, 8s, 16s]` (5 attempts) for the default ladder,
