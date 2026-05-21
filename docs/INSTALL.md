@@ -170,7 +170,7 @@ console.log(id);
 
 ```ts
 import init, { hash } from "@makechain/mkit-wasm";
-import wasmModule from "mkit-wasm/mkit_wasm_bg.wasm";
+import wasmModule from "@makechain/mkit-wasm/mkit_wasm_bg.wasm";
 
 export default {
   async fetch(req: Request): Promise<Response> {
@@ -185,7 +185,7 @@ export default {
 
 ```html
 <script type="module">
-  import init, { hash } from "https://esm.sh/mkit-wasm";
+  import init, { hash } from "https://esm.sh/@makechain/mkit-wasm";
   await init();
   console.log(hash(new TextEncoder().encode("hi")));
 </script>
