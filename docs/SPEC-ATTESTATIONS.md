@@ -366,10 +366,12 @@ into):
 
 - `https://slsa.dev/provenance/v1` — SLSA build provenance.
 - `https://in-toto.io/attestation/vuln/v0.1` — vuln-scan results.
-- `https://mkit.io/predicate/review/v1` — code review sign-off. *[to
-  be defined in `docs/PREDICATE-REVIEW.md` if we actually ship it.]*
-- Third-party (e.g. `https://makechain.net/settlement/v1`) — entirely
-  opaque to mkit.
+- `https://github.com/officialunofficial/mkit/spec/predicate/review/v1`
+  — code review sign-off. *[to be defined in
+  `docs/PREDICATE-REVIEW.md` if we actually ship it.]*
+- Third-party (e.g. `tag:github.com,2024:officialunofficial/mkit/settlement/v1`
+  — placeholder for a Makechain-team settlement predicate, subject to
+  provisioning) — entirely opaque to mkit.
 
 ---
 
@@ -466,10 +468,10 @@ attest.auto_sign_commit     = false                 (default — mkit doesn't au
 not select `keystore` or any `key.*_ref` value.
 
 `attest.auto_sign_commit = true` attaches a minimal attestation with
-`predicateType = https://mkit.io/predicate/commit-signed/v1` (TBD) to
-every new commit, so downstream verifiers can require "every commit
-has at least a repo-key signature". Opt-in because it doubles the
-signing work on every commit.
+`predicateType = https://github.com/officialunofficial/mkit/spec/predicate/commit-signed/v1`
+to every new commit, so downstream verifiers can require "every
+commit has at least a repo-key signature". Opt-in because it doubles
+the signing work on every commit.
 
 ---
 

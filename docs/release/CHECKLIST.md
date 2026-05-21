@@ -1,5 +1,11 @@
 # Release checklist
 
+> **Homebrew tap status: not yet provisioned.** The
+> `officialunofficial/homebrew-tap` repository will be created at or
+> before the first public release. Until then, the Distribution step that
+> targets that tap will be skipped and `brew tap officialunofficial/tap`
+> will fail.
+
 One page. Run top to bottom. Do not skip steps.
 
 ## Pre-tag

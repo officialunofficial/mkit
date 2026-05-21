@@ -381,6 +381,12 @@ fn read_commit(r: &mut Reader<'_>) -> Result<Commit, MkitError> {
     if parent_count > MAX_PARENTS {
         return Err(MkitError::TooManyParents);
     }
+    // Cheap upper bound: each parent is HASH_LEN bytes on the wire. If
+    // the remaining buffer can't even hold the parent hashes, the
+    // header is lying and we must not pre-allocate for it.
+    if (parent_count as usize).saturating_mul(HASH_LEN) > r.remaining() {
+        return Err(MkitError::UnexpectedEof);
+    }
     let mut parents = Vec::with_capacity(parent_count as usize);
     for _ in 0..parent_count {
         parents.push(r.read_hash()?);
@@ -411,6 +417,10 @@ fn read_remix(r: &mut Reader<'_>) -> Result<Remix, MkitError> {
     if parent_count > MAX_PARENTS {
         return Err(MkitError::TooManyParents);
     }
+    // Cheap upper bound: each parent is HASH_LEN bytes on the wire.
+    if (parent_count as usize).saturating_mul(HASH_LEN) > r.remaining() {
+        return Err(MkitError::UnexpectedEof);
+    }
     let mut parents = Vec::with_capacity(parent_count as usize);
     for _ in 0..parent_count {
         parents.push(r.read_hash()?);
@@ -418,6 +428,11 @@ fn read_remix(r: &mut Reader<'_>) -> Result<Remix, MkitError> {
     let source_count = r.read_u32()?;
     if source_count > MAX_REMIX_SOURCES {
         return Err(MkitError::TooManySources);
+    }
+    // Each source is two hashes (upstream_id + commit_hash) = 2 *
+    // HASH_LEN bytes. Reject impossible counts before allocating.
+    if (source_count as usize).saturating_mul(2 * HASH_LEN) > r.remaining() {
+        return Err(MkitError::UnexpectedEof);
     }
     let mut sources = Vec::with_capacity(source_count as usize);
     for _ in 0..source_count {
@@ -824,6 +839,37 @@ mod tests {
             signature: [0; 64],
         });
         assert_eq!(serialize(&obj), Err(MkitError::InvalidIdentity));
+    }
+
+    /// `read_commit` claims `parent_count = MAX_PARENTS` (`1_000`) but
+    /// the remaining buffer is too small to ever hold that many
+    /// 32-byte parent hashes. The pre-allocation guard must reject the
+    /// header before the parent vec is sized from attacker input.
+    #[test]
+    fn rejects_truncated_commit_parents() {
+        let mut buf = vec![0x03, b'M', b'K', b'T', b'1', 0x01];
+        buf.extend_from_slice(&[0u8; 32]); // tree_hash
+        // Within MAX_PARENTS (1_000) so the existing TooManyParents
+        // guard doesn't fire — we want to confirm the capacity-vs-
+        // remaining check rejects too. 1_000 parents = 32_000 bytes,
+        // but only a single 32-byte hash follows.
+        buf.extend_from_slice(&1_000u32.to_le_bytes()); // parent_count
+        buf.extend_from_slice(&[0xAA; 32]); // only one parent worth
+        assert_eq!(deserialize(&buf), Err(MkitError::UnexpectedEof));
+    }
+
+    /// `read_remix` claims `source_count = MAX_REMIX_SOURCES` (`10_000`)
+    /// but the remaining buffer cannot accommodate even one source
+    /// (which is 64 bytes — two hashes). Reject without allocating.
+    #[test]
+    fn rejects_truncated_remix_sources() {
+        let mut buf = vec![0x04, b'M', b'K', b'T', b'1', 0x01];
+        buf.extend_from_slice(&[0u8; 32]); // tree_hash
+        buf.extend_from_slice(&0u32.to_le_bytes()); // parent_count
+        // 10_000 sources × 64 bytes = 640_000 bytes required, but the
+        // buffer is empty after this point.
+        buf.extend_from_slice(&10_000u32.to_le_bytes()); // source_count
+        assert_eq!(deserialize(&buf), Err(MkitError::UnexpectedEof));
     }
 
     #[cfg(target_pointer_width = "64")]

@@ -76,11 +76,16 @@ participate in `cargo {test,clippy,build} --workspace`.
 rust/
   Cargo.toml                  # [workspace] root
   crates/
-    mkit-core/
     mkit-attest/
     mkit-cli/
-    mkit-rpc/                 # buffa-defined wire protocols
-    mkit-transport-{memory,file,http,s3,ssh}/
+    mkit-core/
+    mkit-keystore/
+    mkit-rpc/                 # Protobuf-defined wire protocols
+    mkit-transport-file/
+    mkit-transport-http/
+    mkit-transport-memory/
+    mkit-transport-s3/
+    mkit-transport-ssh/
     mkit-wasm/
 contrib/signers/
   mkit-sign-file/             # workspace = "../../../rust"
@@ -100,7 +105,7 @@ the scopes you'll see in `git log`. Common scopes: `core`, `attest`,
 Examples from the repo:
 
 ```
-fix(metadata): bump inter-crate version pins 0.1 → 0.2 to match workspace
+fix(core): correct off-by-one in pack index reader
 ci(release): publish mkit-wasm to npm on every v*.*.* tag
 docs(install): refresh README install section + add docs/INSTALL.md
 ```
@@ -165,9 +170,17 @@ Before requesting review:
 - [ ] Spec + golden vector updated if format changed
 - [ ] No new dependencies added without justification in the PR body
 
-## License
+## License of contributions
 
-By contributing, you agree that your contributions will be dual-licensed
-under MIT OR Apache-2.0, matching the rest of the repository. There is
-no CLA; submitting a PR is taken as your assertion that you have the
-right to license the contribution under those terms.
+mkit follows the Rust-ecosystem convention of **inbound = outbound**:
+unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this repository, as defined in the Apache
+License 2.0, shall be dual-licensed as `MIT OR Apache-2.0` (without any
+additional terms or conditions), matching the project's outbound license.
+
+Do not include third-party code unless it is already licensed under
+MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, or another permissive
+license compatible with our dual-license — and preserve attribution.
+
+We do not require a Developer Certificate of Origin (DCO) sign-off or a
+Contributor License Agreement (CLA).

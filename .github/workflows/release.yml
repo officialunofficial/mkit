@@ -20,8 +20,8 @@ name: Release
 # specific `prefix-key`, partitioned away from the keys that PR-event
 # workflows write to. This prevents a malicious PR from poisoning a cache
 # that this workflow (which carries `secrets.MKIT_NPM_TOKEN` and
-# `id-token: write`) would later deserialize. See the Phase-10
-# cache-poisoning audit note.
+# `id-token: write`) would later deserialize. See the cache-poisoning
+# supply-chain audit pass.
 #
 # No secrets are needed for cosign keyless — OIDC token comes from GitHub.
 
@@ -493,15 +493,21 @@ jobs:
           npm version --no-git-tag-version --allow-same-version "$VERSION"
           jq '{name, version, license, repository}' package.json
 
+      - name: Ensure NPM_TOKEN present
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.MKIT_NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::MKIT_NPM_TOKEN secret is not configured. Set it in repo or org secrets before tagging a release." >&2
+            exit 1
+          fi
+
       - name: Publish to npm
         working-directory: rust/crates/mkit-wasm/pkg
         env:
           NODE_AUTH_TOKEN: ${{ secrets.MKIT_NPM_TOKEN }}
-        # `--provenance` requires the source GitHub repo to be public;
-        # this repo is currently `internal`, so npm rejects the
-        # provenance bundle with E422. Re-add `--provenance` once the
-        # repo is flipped to public (see docs/RELEASE.md TODO).
-        run: npm publish --access public
+        # provenance: requires public repo, GitHub OIDC, and the release workflow's id-token: write permission — all present
+        run: npm publish --access public --provenance
 
       - name: Stage WASM bundle for GitHub Release
         shell: bash

@@ -9,7 +9,7 @@ name: Supply chain
 #
 # Policy lives in docs/release/SUPPLY-CHAIN.md.
 #
-# Post-Rust-cutover audit (Phase 10):
+# Supply-chain audit pass:
 #   - dependency-review: opt-in via `ENABLE_DEPENDENCY_REVIEW=1` so
 #     forks / mirrors without Dependency Graph do not fail closed.
 #     Once enabled, it gates PRs on new vulns + blocked licenses.

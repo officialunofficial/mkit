@@ -43,7 +43,7 @@ edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/officialunofficial/mkit"
-authors = ["mkit contributors"]
+authors = ["Official Unofficial, Inc."]
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

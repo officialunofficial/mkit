@@ -8,7 +8,18 @@ yanked = "deny"
 ignore = [
     # Transitive through yubikey 0.9.0-pre.0 for certificate parsing; mkit does
     # not expose RSA private-key decryption, and no fixed yubikey release exists.
-    "RUSTSEC-2023-0071",
+    #
+    # TODO(2026-08-21): re-justify this ignore or drop it. cargo-deny v0.19's
+    # advisories schema does not yet support a native `expires` field on
+    # ignore entries (unexpected-keys error on `expires`), so we encode the
+    # 90-day expiry in this TODO comment plus a reminder block in
+    # .github/workflows/rust-security.yml. When cargo-deny adds `expires`
+    # natively, replace this with the structured form.
+    #
+    # The regression test in rust/crates/mkit-keystore/tests/no_rsa_decrypt.rs
+    # asserts the yubikey RSA decrypt entrypoint stays unreferenced workspace-
+    # wide; if that test is removed, this ignore MUST go too.
+    { id = "RUSTSEC-2023-0071", reason = "transitive via yubikey 0.9.0-pre.0 cert parsing; mkit never calls the affected RSA decrypt path (see mkit-keystore/tests/no_rsa_decrypt.rs). Re-justify by 2026-08-21." },
 ]
 
 [licenses]

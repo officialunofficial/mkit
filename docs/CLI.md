@@ -61,6 +61,78 @@ History / commits:
 - `mkit hash <file>` — hash a file and store it as a blob.
 - `mkit tree` — snapshot the working directory as a tree object.
 
+Attestations:
+
+- `mkit attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>]
+  [--predicate-type <uri>] [--predicate-file <path>]
+  [--external-signer-arg <V>]... [--additional-signer "<spec>"]...` —
+  produce a signed DSSE attestation for a commit. The signed payload is
+  an [in-toto v1 Statement](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md)
+  carrying the commit hash as `subject` and the user-supplied
+  predicate, wrapped in a DSSE envelope. On success prints the
+  att-id (BLAKE3 over the canonical envelope, 64 hex) and stores the
+  envelope under `.mkit/attestations/<commit>/<att-id>.dsse`.
+
+  Flags:
+
+  - `--commit <hash>` — commit to attest. Defaults to HEAD.
+  - `--algorithm <alg>` — `ed25519`, `secp256k1`, or `p256`.
+    Defaults to `attest.default_algorithm` in config, else `ed25519`.
+  - `--signer <kind>` — `repo-key` (default), `keystore`, or
+    `external`. Picks the primary signer.
+  - `--predicate-type <uri>` — predicate-type URI written into the
+    Statement. Defaults to the empty-predicate placeholder URI.
+  - `--predicate-file <path>` — JCS-canonical JSON object used as the
+    predicate body. Omitted ⇒ `{}`.
+  - `--external-signer-arg <V>` — repeatable argv token passed to the
+    external-signer subprocess. If any instance is supplied the full
+    list REPLACES `attest.external_signer_args` from config.
+  - `--additional-signer "<spec>"` — repeatable; adds a second (or
+    third, …) signature to the envelope. `<spec>` is a
+    comma-separated `key=value` list: `algorithm=<alg>,signer=<kind>
+    [,path=<file-or-binary>][,args=<a>|<b>|<c>]`. Signers run in the
+    order given; the resulting `{keyid, sig}` tuples appear in that
+    same order in the envelope. Any signer failure aborts the
+    attestation — no partial envelopes are written.
+
+  Example — sign with two algorithms at once:
+
+  ```sh
+  mkit attest --algorithm ed25519 \
+              --additional-signer "algorithm=p256,signer=repo-key" \
+              --predicate-type https://example.com/review/v1 \
+              --predicate-file review.json
+  ```
+
+- `mkit verify-attest [--commit <hash>] [--trust-roots <path>]
+  [--algorithm <alg>]` — verify every attestation attached to a
+  commit. For each envelope, looks each signature's `keyid` up in the
+  trust-roots registry and verifies the DSSE PAE. Reports per-
+  signature verdicts to stderr; stdout is reserved for a future
+  `--format=json` mode. Exits `0` iff every listed attestation has
+  at least one verified signature, `65` (`dataerr`) if any failed,
+  `1` (`general_error`) if the commit has no attestations.
+
+  Flags:
+
+  - `--commit <hash>` — commit to verify. Defaults to HEAD.
+  - `--trust-roots <path>` — path to a trust-roots TOML file
+    (`[[trust_root]]` entries with `keyid`, `kind`, `pubkey_hex`).
+    Defaults to `$XDG_CONFIG_HOME/mkit/trust-roots.toml`. mkit refuses
+    to verify against an in-repo path unless `--trust-roots` is
+    passed explicitly — without that gate, a hostile clone could
+    ship its own trust-roots and have verification print "ok"
+    against attacker keys.
+  - `--algorithm <alg>` — filter reported signatures by algorithm
+    (`ed25519`, `secp256k1`, `p256`). Unmatched signatures are
+    omitted from the report.
+
+  Example:
+
+  ```sh
+  mkit verify-attest --trust-roots ~/.config/mkit/trust-roots.toml
+  ```
+
 Branches / refs:
 
 - `mkit branch` / `mkit branch <name>` / `mkit branch -d <name>` —

@@ -1,5 +1,9 @@
 # Homebrew tap publication flow
 
+> **Status: not yet provisioned.** The `officialunofficial/homebrew-tap`
+> repository will be created at or before the first public release. Until
+> then, `brew tap officialunofficial/tap` will fail.
+
 This directory holds the formula template for a future
 `officialunofficial/homebrew-tap` repository. It is **not** consumed by
 Homebrew directly from this repo — Homebrew taps must live at
