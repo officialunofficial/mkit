@@ -121,7 +121,7 @@ jobs:
       #     diffoscope --html diffoscope-report.html \
       #       rust/target-r1/release/${{ env.BINARY_NAME }} \
       #       rust/target-r2/release/${{ env.BINARY_NAME }} || true
-      # - uses: actions/upload-artifact@v4
+      # - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
       #   if: failure()
       #   with:
       #     name: diffoscope-report
