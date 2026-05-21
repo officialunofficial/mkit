@@ -7,7 +7,7 @@
 //! the schema directly. The hand-rolled `OP_HELLO` byte format that
 //! used to live in this module has been retired.
 
-// SPEC-TRANSPORT §8 calls out the exponential ladder in seconds
+// SPEC-TRANSPORT §7 calls out the exponential ladder in seconds
 // (1, 2, 4, …, 300). Expressing those values with `Duration::from_secs`
 // is deliberate — switching to `from_mins` loses the one-to-one match
 // with the spec text.
@@ -43,7 +43,7 @@ pub enum TransportError {
     #[error("remote error: {0}")]
     RemoteError(String),
     /// `update_ref` CAS precondition was not satisfied. Per
-    /// SPEC-TRANSPORT §8, callers MUST treat this as
+    /// SPEC-TRANSPORT §7, callers MUST treat this as
     /// "possibly-success on retry" for `.missing` / `.match` and
     /// confirm with `read_ref`.
     #[error("ref CAS precondition failed")]
@@ -162,7 +162,7 @@ pub fn pack_key_from_hex(s: &str) -> Result<PackKey, FromHexError> {
 
 /// Return `true` if a transport should retry after seeing `err`.
 ///
-/// Retryable per SPEC-TRANSPORT §8:
+/// Retryable per SPEC-TRANSPORT §7:
 /// - [`TransportError::ConnectionFailed`]
 /// - [`TransportError::ServerError`] with a 5xx status OR HTTP 429.
 ///
@@ -187,7 +187,7 @@ pub fn is_retryable(err: &TransportError) -> bool {
 
 /// Max attempts for the default backoff ladder.
 ///
-/// SPEC-TRANSPORT §8: `attempt = 1; while attempt ≤ 5`.
+/// SPEC-TRANSPORT §7: `attempt = 1; while attempt ≤ 5`.
 pub const BACKOFF_MAX_ATTEMPTS: u32 = 5;
 
 /// Initial sleep between attempts.
@@ -200,7 +200,7 @@ pub const BACKOFF_CAP: Duration = Duration::from_secs(300);
 ///
 /// Yields `[1s, 2s, 4s, 8s, 16s]` (5 attempts) for the default ladder,
 /// doubling each step and capping at 300s. This is the ladder mandated
-/// by SPEC-TRANSPORT §8 for `ConnectionFailed`, 5xx, and HTTP 429.
+/// by SPEC-TRANSPORT §7 for `ConnectionFailed`, 5xx, and HTTP 429.
 ///
 /// The iterator is self-contained — it holds no reference to a clock,
 /// so it can be constructed in tests and exhaustively enumerated.
@@ -270,7 +270,7 @@ impl Iterator for BackoffIterator {
 /// `RwLock` internally. This keeps the trait object-safe.
 ///
 /// All implementations MUST honour the retry policy in
-/// SPEC-TRANSPORT §8 internally OR document that the caller is
+/// SPEC-TRANSPORT §7 internally OR document that the caller is
 /// responsible — the abstract trait takes no position. The
 /// [`is_retryable`] and [`BackoffIterator`] helpers are provided for
 /// implementations that embed the policy.
@@ -304,7 +304,7 @@ pub trait Transport: Send + Sync {
     /// On `.missing` / `.match` CAS failure, returns
     /// [`TransportError::RefConflict`]. Callers retrying after a
     /// timeout MUST follow up with [`Self::read_ref`] to confirm
-    /// whether the first attempt actually landed (SPEC-TRANSPORT §8).
+    /// whether the first attempt actually landed (SPEC-TRANSPORT §7).
     fn update_ref(
         &self,
         name: &str,

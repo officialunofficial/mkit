@@ -1,6 +1,6 @@
 //! Strict `mkit+ssh://` URL parser.
 //!
-//! SPEC-TRANSPORT §7 and SSH-SECURITY.md §2 are the authority for what
+//! SPEC-TRANSPORT §3 and SSH-SECURITY.md §2 are the authority for what
 //! is (and isn't) a legal `mkit+ssh://` URL.
 //!
 //! Accepted forms (all with the mandatory `mkit+` prefix):
@@ -136,7 +136,7 @@ pub fn parse_mkit_ssh_url(url: &str) -> Result<SshTarget, TransportError> {
         return Err(TransportError::InvalidRef("ssh url has no body".into()));
     }
 
-    // `user@` is REQUIRED (SPEC-TRANSPORT §7 `parseStrictSsh`).
+    // `user@` is REQUIRED (SPEC-TRANSPORT §3).
     let at = rest
         .find('@')
         .ok_or_else(|| TransportError::InvalidRef("ssh url missing user".into()))?;
