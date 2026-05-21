@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`mkit-keystore` crate** — pluggable signing-key vault subsystem
+  (PR [#109](https://github.com/officialunofficial/mkit/pull/109),
+  hardened in
+  [#135](https://github.com/officialunofficial/mkit/pull/135) and a
+  long tail of review-feedback follow-ups). Ships with backends for
+  software (encrypted-at-rest, the foundation backend), software-raw,
+  macOS Keychain, Windows Credential Store, Linux Secret Service,
+  systemd-creds, and YubiKey (PIV and OpenPGP applets). Public
+  interface and threat model are documented in
+  [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md).
+- **`mkit key …` subcommand family** — `generate`, `list`, `import`,
+  `export`, and `delete` against any built-in keystore backend, with
+  `--backend`/`--label`/`--algorithm` selectors and a `--json`
+  output mode on `list`.
+- **`<backend>:<label>` key-reference routing** — commit signing,
+  attestation signing, and the `mkit key …` commands resolve their
+  signing key through user-scoped `key.default_ref`,
+  `key.ed25519_ref`, `key.secp256k1_ref`, and `key.p256_ref`
+  selectors. Repo-local config cannot override these for security
+  reasons; the selector keys are accepted from
+  `$XDG_CONFIG_HOME/mkit/config` and explicit flags only.
+- **`mkit-rpc` crate** — shared length-prefixed framing and wire
+  schemas (`signer.proto`, `common.proto`) used by the external
+  signer subprocess protocol and reserved for future agent
+  protocols. See [`docs/SPEC-RPC.md`](docs/SPEC-RPC.md).
+- **`mkit status --porcelain=v1`** — machine-readable status output
+  matching the `git status --porcelain=v1` shape, plus the mkit-
+  specific `T` (mode change) status letter as the only extension.
+- **`mkit log --format=json`** — JSONL output (one commit per line)
+  with `hash`, `parents`, `tree`, `author`, `timestamp`, `title`,
+  and `message`.
+- **`--format=json` on `blame`, `branch`, `remote`, `config`** —
+  machine-readable output across the remaining read-style commands.
+- **`mkit commit -a` / `-am <msg>`** — Git-style "stage tracked
+  modifications and tracked deletions before committing" shortcut.
+- **Criterion-based benchmark suite** under `rust/benches/` with a
+  `render-charts` binary emitting buffa-style SVG charts; powers the
+  Performance section of the README.
+- **CLI port to `clap-derive`** — every subcommand is now parsed by
+  a derive-based parser routed through a sysexits-aware shim in
+  `mkit-cli/src/clap_shim.rs`, replacing the prior hand-rolled
+  parsers.
+- **Cooperative SIGINT/SIGTERM shutdown**
+  ([#111](https://github.com/officialunofficial/mkit/pull/111)) —
+  long-running operations poll a graceful-shutdown flag set by
+  `signal-hook` and exit with `tempfail` (75) at natural checkpoints.
+- **Writing style guide** at
+  [`docs/STYLE-GUIDE.md`](docs/STYLE-GUIDE.md)
+  ([#127](https://github.com/officialunofficial/mkit/pull/127)).
+
 ### Changed
 
 - **Keystore capabilities now report structural operation support.** Operation
@@ -14,7 +66,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   promise that the current session, daemon, hardware token, or protector is
   available at probe time. Operations still fail closed when runtime support is
   unavailable.
-
 - **`mkit commit` now reads the staging index** (`.mkit/index`)
   instead of recursively snapshotting the worktree.
   ([#102](https://github.com/officialunofficial/mkit/issues/102))
@@ -30,6 +81,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry, `build_tree` and `build_tree_from_index` produce the same
   root tree hash, so attestations signed under either path
   cross-verify against trees built under the other.
+- **Confirmation prose and progress lines move to stderr** across 17
+  commands; stdout is reserved for machine output so `mkit status
+  > /tmp/out` in a clean tree produces an empty file.
+
+### Fixed
+
+- **Keystore vault follow-up hardening**
+  ([#135](https://github.com/officialunofficial/mkit/pull/135)) —
+  protector AAD binding, length-prefixed encrypted-record AAD,
+  authenticated software metadata, zeroizing transient secret
+  buffers, software metadata authentication, no-clobber imports,
+  PIV-only YubiKey support, runtime-availability honesty in
+  capability reports, and other review-feedback items collected
+  across `946975e`, `524d3fc`, and `a5b382c`.
+- **Silent failure exits** in several subcommands now return proper
+  sysexits-aware codes instead of exiting 1 with no diagnostic.
+- **`mkit commit` index follow-ups** — preserve executable modes on
+  `-a`/`-am`, stage tracked deletions on `add .`, clear stale index
+  path conflicts, and keep the index aligned with committed trees
+  after PR
+  [#103](https://github.com/officialunofficial/mkit/pull/103)
+  review.
+- **`mkit rebase` preflights its signing key** so the operation fails
+  early instead of midway through a replay when no key is configured.
+- **Benchmark chart axes** are now apples-to-apples wallclock + ops/s
+  across the criterion and `git2`/git-CLI comparison rows.
 
 ## [0.1.0] - 2026-05-07
 

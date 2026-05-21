@@ -1,5 +1,7 @@
 # mkit
 
+![status: alpha](https://img.shields.io/badge/status-alpha-orange)
+
 A content-addressed version control toolkit written in Rust.
 
 `mkit` is a generic content-addressed VCS — Git-like commits, refs,
@@ -18,8 +20,18 @@ Install (see [Installing](#installing) for all four channels):
 cargo install --git https://github.com/officialunofficial/mkit mkit-cli
 ```
 
-To push to a remote, declare a strict URL scheme (`mkit+file://`,
-`mkit+https://`, `mkit+s3://`, `mkit+ssh://`):
+Make your first signed commit:
+
+```sh
+mkit init                              # create .mkit/ in the current dir
+mkit keygen                            # generate an Ed25519 signing key
+echo hello > README.md
+mkit add README.md
+mkit commit -m "first commit"
+```
+
+Then, to push to a remote, declare a strict URL scheme
+(`mkit+file://`, `mkit+https://`, `mkit+s3://`, `mkit+ssh://`):
 
 ```sh
 mkit remote add origin mkit+file:///srv/mkit/my-repo
@@ -27,6 +39,37 @@ mkit push
 ```
 
 See [`docs/CLI.md`](docs/CLI.md) for the full CLI reference.
+
+## Keystore
+
+Signing keys live in a pluggable keystore vault. Out of the box mkit
+recognises:
+
+- **software** / **software-raw** — encrypted-at-rest software vault
+  on disk, the cross-platform foundation backend;
+- **macos-keychain**, **windows-credential**, **linux-secret-service**
+  — native OS keychains where available;
+- **systemd-creds** — systemd's encrypted credential store on Linux
+  hosts that have it;
+- **yubikey** — hardware-backed via PIV / OpenPGP applets;
+- **external signers** — separate subprocess binaries that speak the
+  [v1 stdio protocol](docs/SPEC-EXTERNAL-SIGNER.md); reference
+  signers for FIDO2 / CTAP-HID, TPM 2.0, and Apple Secure Enclave
+  live under [`contrib/signers/`](contrib/signers/).
+
+The keystore vault subsystem (merged via PR
+[#109](https://github.com/officialunofficial/mkit/pull/109), follow-
+up hardening in
+[#135](https://github.com/officialunofficial/mkit/pull/135))
+abstracts these behind a single interface so commit signing,
+attestation signing, and SSH push-auth can all be served by the same
+key reference.
+
+The normative interface and backend requirements are in
+[`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md); the end-user
+overview is in [`docs/keystore.md`](docs/keystore.md). The set of
+backends a given binary supports depends on the build features
+enabled for that target — see CLI.md §"Config keys".
 
 ## Performance
 
@@ -109,8 +152,11 @@ Workspace crates:
 |---|---|
 | `mkit-core` | hash, object, serialize, store, sign, chunker, delta, pack, refs, index, worktree, ignore, repo_lock, ops, protocol |
 | `mkit-attest` | JCS, in-toto v1 Statement, DSSE envelope, signers, verify |
+| `mkit-keystore` | platform-aware signing-key vault (software, OS keychains, systemd-creds, YubiKey, external signers) — see [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md) |
+| `mkit-rpc` | shared wire schemas + length-prefixed framing for stdio subprocess protocols (external signers, future agents) |
 | `mkit-transport-{memory,file,http,s3,ssh}` | Transport trait implementations |
 | `mkit-cli` | the `mkit` binary |
+| `mkit-wasm` | wasm-bindgen surface for browsers / Cloudflare Workers, published to npm as `@makechain/mkit-wasm` |
 | `mkit-fuzz` | bounded property tests (cargo-fuzz compatible) |
 
 `scripts/verify-rename.sh` is the rename-gate enforced in CI; it greps
@@ -273,10 +319,21 @@ See `docs/SPEC-SIGNING.md` §8 for the convention and
 
 ## Documentation
 
+The SPEC documents below are stamped `status: draft` pending review
+polish, but the v1 wire and on-disk formats they describe are pinned
+by the test vectors under [`rust/tests/golden/`](rust/tests/golden/)
+and will remain stable through the 0.x series — see
+[Status](#status).
+
 | Doc | Audience |
 |---|---|
 | [`docs/INSTALL.md`](docs/INSTALL.md) | End users — install channels, verification, hardware signers |
 | [`docs/CLI.md`](docs/CLI.md) | End users — subcommands, env vars, exit codes |
+| [`docs/keystore.md`](docs/keystore.md) | End users — keystore overview, picking a backend |
+| [`docs/SPEC-INDEX.md`](docs/SPEC-INDEX.md) | Implementers — staging-index format |
+| [`docs/SPEC-RPC.md`](docs/SPEC-RPC.md) | Implementers — shared stdio framing for subprocess protocols |
+| [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md) | Implementers — keystore vault interface, backend requirements |
+| [`docs/SPEC-EXTERNAL-SIGNER.md`](docs/SPEC-EXTERNAL-SIGNER.md) | Integrators — external signer stdio protocol |
 | [`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) | Implementers + integrators — native attestation primitive (in-toto v1 + DSSE) |
 | [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) | Implementers of compatible tools — on-disk format |
 | [`docs/SPEC-SIGNING.md`](docs/SPEC-SIGNING.md) | Implementers — commit signing format |
@@ -285,9 +342,13 @@ See `docs/SPEC-SIGNING.md` §8 for the convention and
 | [`docs/SPEC-REFS.md`](docs/SPEC-REFS.md) | Implementers — ref names and CAS |
 | [`docs/SPEC-TRANSPORT.md`](docs/SPEC-TRANSPORT.md) | Implementers — 7-verb transport protocol incl. SSH OP_HELLO |
 | [`docs/SPEC-FASTCDC.md`](docs/SPEC-FASTCDC.md) | Implementers — content chunking |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Contributors — module layering and design notes |
+| [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators + reviewers — trust boundaries and security assumptions |
+| [`docs/STYLE-GUIDE.md`](docs/STYLE-GUIDE.md) | Contributors — writing style for docs and commit messages |
 | [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators — SSH transport trust model |
-| [`docs/FUZZ.md`](docs/FUZZ.md) | Contributors — fuzz harness conventions |
+| [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release procedure overview |
 | [`docs/release/`](docs/release/) | Maintainers — release checklist, signing, reproducibility, supply chain |
+| [`docs/FUZZ.md`](docs/FUZZ.md) | Contributors — fuzz harness conventions |
 
 ## Installing
 
@@ -331,21 +392,27 @@ TypeScript + Workers examples in
 ### Hardware signers (optional)
 
 External signers are separate binaries that mkit drives over the
-[v1 stdio protocol](docs/SPEC-EXTERNAL-SIGNER.md):
+[v1 stdio protocol](docs/SPEC-EXTERNAL-SIGNER.md). The signer crates
+live under [`contrib/signers/`](contrib/signers/) outside the
+top-level Cargo workspace at `rust/`, so the install path is
+`git clone` + `cargo install --path .` from the signer directory:
 
 ```sh
+git clone https://github.com/officialunofficial/mkit
+cd mkit/contrib/signers
+
 # File-backed reference signer (any platform)
-cargo install --git https://github.com/officialunofficial/mkit --bin mkit-sign-file
+cargo install --path mkit-sign-file
 
 # TPM 2.0 (Linux/Windows; install libtss2-dev first on Debian/Ubuntu)
-cargo install --git https://github.com/officialunofficial/mkit --bin mkit-sign-tpm --features tpm2
+cargo install --path mkit-sign-tpm --features tpm2
 
-# Apple Secure Enclave (macOS, Swift)
-cd contrib/signers/mkit-sign-se && swift build -c release \
-  && cp .build/release/mkit-sign-se /usr/local/bin/
+# Apple Secure Enclave (macOS, Swift; built with swift, not cargo)
+cd mkit-sign-se && swift build -c release \
+  && cp .build/release/mkit-sign-se /usr/local/bin/ && cd ..
 
 # FIDO2 / WebAuthn (CTAP-HID)
-cargo install --git https://github.com/officialunofficial/mkit --bin mkit-sign-ctap
+cargo install --path mkit-sign-ctap
 ```
 
 Each signer ships its own README under
@@ -378,8 +445,18 @@ attestation contract.
 
 ## Status
 
-0.1.0 is the initial public release. See [`CHANGELOG.md`](CHANGELOG.md)
-for the full change list.
+mkit is **alpha (pre-1.0)**. The v1 on-disk and wire formats are
+pinned by golden vectors under
+[`rust/tests/golden/`](rust/tests/golden/) and will remain stable
+through the 0.x line; APIs, CLI flags, and unpinned internals may
+change in any 0.x release. See
+[`GOVERNANCE.md`](GOVERNANCE.md) for the stability contract and
+[`CHANGELOG.md`](CHANGELOG.md) for breaking-change history.
+
+**MSRV (Minimum Supported Rust Version):** Rust 1.95.0, matching
+[`rust/rust-toolchain.toml`](rust/rust-toolchain.toml). MSRV bumps
+are documented in the CHANGELOG and follow a "current stable minus
+one" policy unless a feature requires otherwise.
 
 ## Contributing
 
@@ -397,3 +474,6 @@ Dual-licensed under either of:
 at your option. Unless you explicitly state otherwise, any contribution
 intentionally submitted for inclusion in this project shall be dual-licensed
 as above, without any additional terms or conditions.
+
+The mkit name and marks are owned by Official Unofficial, Inc.; see
+[`TRADEMARKS.md`](TRADEMARKS.md).
