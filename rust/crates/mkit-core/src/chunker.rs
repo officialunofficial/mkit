@@ -3,7 +3,7 @@
 //! Spec reference: `docs/SPEC-FASTCDC.md`. Frozen v1 parameters:
 //!
 //! * Gear seed: ASCII `"MKITFCDC"` interpreted as a big-endian `u64`
-//!   (`0x4D4B49_5446_4344_43`). Splitmix64-derived 256-entry table.
+//!   (`0x4D4B_4954_4643_4443`). Splitmix64-derived 256-entry table.
 //! * `MIN_SIZE = 16 KiB`, `AVG_SIZE = 64 KiB`, `MAX_SIZE = 256 KiB`.
 //! * `MASK_S = 0x0001_FFFF` (strict, used while `i < AVG_SIZE`).
 //! * `MASK   = 0x0000_FFFF` (informative; not used directly — we only
