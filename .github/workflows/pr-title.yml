@@ -1,3 +1,8 @@
+# SECURITY: This workflow runs with pull_request_target privileges.
+# Do NOT add `actions/checkout` with `ref: ${{ github.event.pull_request.head.sha }}`
+# or any step that executes code from the PR — that would create a privilege
+# escalation path. Keep this workflow strictly to metadata checks on PR fields.
+
 name: PR Title
 
 on:
