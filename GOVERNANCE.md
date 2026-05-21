@@ -11,10 +11,11 @@ any 0.x release. Production use is at your own risk.
 
 ## Maintainers
 
-See [MAINTAINERS.md](MAINTAINERS.md) for the current list and contact information.
-
-The active maintainer roster is also represented by GitHub teams under the
-`officialunofficial` org and reflected in `.github/CODEOWNERS`.
+A formal maintainer roster is TBD — see
+[`MAINTAINERS.md`](MAINTAINERS.md) for the current status. Until then,
+[`.github/CODEOWNERS`](.github/CODEOWNERS) is the authoritative pointer
+for who reviews what; security contact lives in
+[`SECURITY.md`](SECURITY.md).
 
 ## Decision model
 
