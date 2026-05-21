@@ -358,7 +358,7 @@ concerns.
 | Transport | `Missing` | `Match(h)` | Cross-process safe |
 |---|---|---|---|
 | Memory | `Mutex`-protected read-then-write | `Mutex`-protected | N/A (test only) |
-| File   | `link(2)` after `write_atomic` (atomic per POSIX) | `Mutex`-protected within a process; cross-process TOCTOU is a documented v1 gap | Partial — `Missing` is safe; `Match` is not |
+| File   | `link(2)` after `write_atomic` (atomic per POSIX) | OS exclusive file lock on `<root>/.mkit/refs/.lock` (via `std::fs::File::lock`) wraps a read-then-`write_atomic`; an in-process `Mutex` keeps multi-threaded callers within one process from contending on the OS lock | Yes |
 | HTTP   | `If-None-Match: *` enforced by the Worker | `If-Match: "<hex>"` enforced by the Worker | Yes |
 | S3     | `If-None-Match: *` enforced by R2 | `If-Match: "<md5-of-wire>"` enforced by R2 | Yes (on R2; S3 multipart breaks `Match` — see §6.3) |
 | SSH    | Server-enforced; current `ssh.proto` does not distinguish `Missing` from `Any`-on-existing (folded together) — tighten when the server spec catches up | Server-enforced via `expected_id` field | Depends on server-side ref-store atomicity |
