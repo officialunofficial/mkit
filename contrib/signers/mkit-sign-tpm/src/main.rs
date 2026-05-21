@@ -421,9 +421,10 @@ USAGE:
     mkit-sign-tpm list
     mkit-sign-tpm delete --handle <persistent-handle>
 
-`sign` reads {pae_base64, algorithm} JSON from stdin, writes
-{keyid, sig_base64} JSON to stdout. See docs/SPEC-EXTERNAL-SIGNER.md
-for the wire protocol.
+`sign` speaks the mkit-rpc v1 external-signer protocol over stdin/stdout:
+length-prefixed protobuf SignerFrame messages (Hello + SignRequest →
+HelloResponse + SignResponse/Error). See docs/SPEC-EXTERNAL-SIGNER.md
+for the wire protocol; signer.proto is the schema source of truth.
 
 Persistent handles are TPM-owner-hierarchy 32-bit values, conventionally
 written as 0x81010001 and upward. Pick one that no other application
