@@ -20,8 +20,8 @@ name: Release
 # specific `prefix-key`, partitioned away from the keys that PR-event
 # workflows write to. This prevents a malicious PR from poisoning a cache
 # that this workflow (which carries `secrets.MKIT_NPM_TOKEN` and
-# `id-token: write`) would later deserialize. See the Phase-10
-# cache-poisoning audit note.
+# `id-token: write`) would later deserialize. See the cache-poisoning
+# supply-chain audit pass.
 #
 # No secrets are needed for cosign keyless — OIDC token comes from GitHub.
 

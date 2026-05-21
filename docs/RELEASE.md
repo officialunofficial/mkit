@@ -91,7 +91,7 @@ human cutting the first release:
      Subsequent publishes go through Actions.
 5. Verify with `npm view @makechain/mkit-wasm` after the first publish.
 
-## TODO: migrate to Trusted Publishers (drop `MKIT_NPM_TOKEN`)
+### Future work: migrate to Trusted Publishers (drop `MKIT_NPM_TOKEN`)
 
 npm now supports
 [Trusted Publishers (OIDC)](https://docs.npmjs.com/trusted-publishers).
