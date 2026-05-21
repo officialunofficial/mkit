@@ -434,16 +434,22 @@ mod tests {
 
     #[test]
     fn gear_table_digest_is_stable() {
-        // SPEC-FASTCDC §8 vector 1 spirit: any change to the seed or
-        // splitmix derivation moves this digest. Pin the current value;
-        // CI flags drift loud and early.
+        // SPEC-FASTCDC §8 vector 1: any change to the seed or splitmix
+        // derivation moves this digest. The hex value is pinned below;
+        // CI flags drift loud and early. Recompute only on an explicit
+        // v2 derivation change.
         let d = gear_table_digest();
         let hex = crate::hash::to_hex(&d);
-        // This is the digest produced by the v1 splitmix derivation
-        // from seed "MKITFCDC" — recompute on first run if it ever
-        // legitimately changes (it should not until v2).
-        assert_eq!(hex.len(), 64);
-        // The actual hex value is asserted against the harvested
-        // golden vector in `tests/golden_pack.rs::gear_table_digest_matches`.
+        let expected = harvest_gear_table_digest_hex();
+        assert_eq!(
+            hex, expected,
+            "gear table digest changed; refuse to drift silently"
+        );
+    }
+
+    /// Pinned v1 gear-table digest, harvested once from the splitmix64
+    /// derivation seeded with "MKITFCDC". Drift = treated as a v2 break.
+    fn harvest_gear_table_digest_hex() -> &'static str {
+        "7b238963a8bb10c4dea1bf678aa07d8c3ce94284209c440ca971ff3a97ee5ad4"
     }
 }
