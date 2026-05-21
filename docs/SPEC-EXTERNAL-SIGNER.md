@@ -165,14 +165,12 @@ Error code semantics: see [SPEC-RPC §3.3](SPEC-RPC.md#33-errorcode).
 
 ## 8. Reference signers
 
-Three reference signers ship in `contrib/signers/` and exercise the
-full v1 wire surface. All three loop on stdin, processing successive
+Four reference signers ship in `contrib/signers/` and exercise the
+full v1 wire surface: three in Rust (`mkit-sign-file`, `mkit-sign-tpm`,
+`mkit-sign-ctap`) and one in Swift (`mkit-sign-se`, using
+`swift-protobuf`). All loop on stdin, processing successive
 `Hello` / `SignRequest` pairs until the caller closes the stream; a
 clean EOF on the length prefix is treated as a graceful shutdown.
-
-The Swift `mkit-sign-se` (Apple Secure Enclave) in the same
-directory still speaks the pre-v1 line-JSON protocol and is NOT a v1
-conformant signer today. It is being ported separately.
 
 ### 8.1 mkit-sign-file
 
