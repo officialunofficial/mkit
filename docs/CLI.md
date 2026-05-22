@@ -159,7 +159,17 @@ Remote / sync:
 - `mkit pull` — fetch and merge.
 - `mkit push [--dry-run]` — push refs and packs to the configured
   remote.
-- `mkit serve <path>` — internal SSH transport server.
+- `mkit serve <path>` — internal SSH transport server. Speaks the
+  mkit-rpc SSH framing on stdin/stdout by default.
+- `mkit serve <path> --listen-enc <addr>` — bind a TCP socket on
+  `<addr>` (e.g. `0.0.0.0:9418`) and serve the same protocol over
+  an encrypted-stream transport. Requires building the binary with
+  `--features enc-transport`. The server prints its ephemeral
+  ed25519 public key to stderr at startup; clients dial
+  `mkit+enc://<host>:<port>?pubkey=<key>` after copying that key
+  out-of-band. The default port advertised by `mkit+enc://` URLs
+  when none is supplied is **9418**. Keystore integration for a
+  stable per-host key is deferred (see SPEC-TRANSPORT-ENC §6.2).
 
 Config / keys / version:
 

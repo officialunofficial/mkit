@@ -1,6 +1,6 @@
 ---
 spec: SPEC-TRANSPORT-ENC
-version: 0 (draft, Phase 1)
+version: 1 (Phase 2)
 status: draft
 audience: implementers of mkit encrypted-stream clients and servers
 ---
@@ -20,9 +20,12 @@ transport for environments where shelling out to OpenSSH is awkward
 (WASM, embedded targets, browser-hosted Workers) while keeping a single
 source of truth for verb-level framing across SSH and encrypted paths.
 
-This is the Phase 1 scaffold spec. The CLI plumbing (`mkit+enc://` URL
-parsing, `remote_dispatch::open` switch, cargo feature gating) lands in
-Phase 2 — see §6 for the punch list.
+Phase 1 landed the in-process scaffold (`EncSession` /
+`from_session`) and the deterministic-runtime round-trip test. Phase 2
+(this revision) adds real TCP: URL parsing, `connect_tcp` /
+`serve_tcp`, the `mkit-cli/enc-transport` feature gate, and the
+`mkit serve --listen-enc <addr>` listener. §6 records what now ships
+and what remains for Phase 3.
 
 ---
 
@@ -30,15 +33,34 @@ Phase 2 — see §6 for the punch list.
 
 | Scheme prefix | Transport | Notes |
 |---|---|---|
-| `mkit+enc://[user@]host[:port]/path?pubkey=<base64>` | `mkit-transport-enc` | Phase 2. Phase 1 constructs the transport in-process from a `(host, port, server_pubkey)` triple — see §6. |
+| `mkit+enc://[user@]host[:port][/path]?pubkey=<hex-or-b64url>` | `mkit-transport-enc` | Implemented in Phase 2 (`mkit_transport_enc::url::parse_enc_url`). The `user@` and `/path` components are accepted for round-tripping but not consulted by the handshake; trust is via the `?pubkey=` payload only. |
 
-The Phase 2 URL form carries the **server's static `ed25519` public
-key** as a query-parameter `pubkey=<base64>` (or `pubkey=<hex>`; final
-encoding lands in §6 alongside the parser). Trust is established by
-out-of-band knowledge of this key — there is no fall-back to a
-TOFU-style first-use cache, and no CA chain. If the server's actual
-key during handshake differs from the URL-advertised key, the dialer
-aborts with `EncInitError::PeerRejected`.
+The URL carries the **server's static `ed25519` public key** as a
+query-parameter `pubkey=<…>` in one of two equivalent encodings:
+
+- **Hex**: 64 lowercase or uppercase hex digits (32 bytes raw).
+- **URL-safe base64, no padding**: 43 chars, alphabet
+  `[A-Za-z0-9-_]`. The trailing 2 bits of the final base64 character
+  MUST be zero; otherwise the parser rejects the URL to prevent
+  two distinct strings from decoding to the same payload.
+
+Trust is established by out-of-band knowledge of this key — there is
+no fall-back to a TOFU-style first-use cache, and no CA chain. If the
+server's actual key during handshake differs from the URL-advertised
+key, the dialer aborts with `EncInitError::PeerRejected` (mapped from
+`commonware_stream::encrypted::Error::PeerRejected`).
+
+The default TCP port when the URL omits one is **9418** (same as git's
+daemon, reused for operator familiarity).
+
+### 1.1 Examples
+
+```text
+mkit+enc://h.example?pubkey=0000…0000             # bare host + hex
+mkit+enc://h.example:7777?pubkey=0000…0000        # explicit port
+mkit+enc://alice@h.example/projects/x?pubkey=…    # user + path (round-trip only)
+mkit+enc://h.example?pubkey=AAAAAA…AAA            # b64-url, 43 chars
+```
 
 ---
 
@@ -167,7 +189,7 @@ keeps the protocol-version dance in one place.
 
 ---
 
-## 5. Test plan (Phase 1)
+## 5. Test plan
 
 The in-tree test suite lives in
 [`mkit-transport-enc/src/lib.rs`](../rust/crates/mkit-transport-enc/src/lib.rs)
@@ -181,41 +203,68 @@ wall-clock time or a multi-threaded executor.
 | `hello_and_list_refs_roundtrip_over_ciphertext` | End-to-end: encrypted handshake → app Hello → ListRefs round-trip → assert two refs decoded. Also captures bytes leaving the dialer's `Sink` and asserts the literal `"refs/heads/"` plaintext does NOT appear in the capture — the bytes on wire are ChaCha20-Poly1305 ciphertext. |
 | `handshake_rejection_surfaces_peer_rejected` | Server's bouncer unconditionally returns `false`; client's `dial` MUST resolve to an error and the server-side outcome MUST be `EncryptedError::PeerRejected`. |
 | `peer_rejected_error_maps_to_init_error` | Pure unit test: `EncryptedError::PeerRejected(_) → EncInitError::PeerRejected`. Catches regressions in the `From` impl even if a future commonware release moves which side surfaces the rejection. |
-| `connect_tcp_is_unimplemented_in_phase_1` | The Phase 2 TCP entry point returns `EncInitError::Unimplemented`. Locks the symbol shape so Phase 2 CLI code can bind against it. |
+| `url::parse_enc_url::*` (~25 cases) | URL parser: pins accepted forms (`mkit+enc://[user@]host[:port][/path]?pubkey=<hex\|b64url>`), both pubkey encodings, and rejection of bad inputs (missing prefix / pubkey, port overflow, CRLF / NUL injection, `..` path segments, b64 trailing-bit ambiguity, duplicate / unknown query params). |
+| `tcp::executor_handles_repeated_block_on` | `TokioExecutor::block_on` is safe to call repeatedly. Pins the `Arc<Runtime>` shape so a future refactor doesn't silently drop the runtime between calls. |
+| `tcp::buffer_pool_is_cached` | The `OnceLock`-cached buffer pool returns the same underlying allocation across calls. |
+| `tcp_e2e::list_refs_round_trip_over_real_tcp` (Phase 2, gated on `--features tcp`) | End-to-end TCP: real `TcpListener` on a free port, real `connect_tcp` dialer via an in-test byte-sniffing proxy. Asserts (a) `Transport::list_refs` round-trip succeeds and (b) the proxy never observes the literal `"refs/heads/"` prefix the client sent — bytes on wire are ChaCha20-Poly1305 ciphertext. |
 
 ---
 
-## 6. Phase 2 punch list
+## 6. Phase status
 
-Items intentionally out of scope for Phase 1, listed here so the next
-PR can grab them as a single batch:
+### 6.1 Phase 2 — landed
 
-1. **URL parsing** — accept `mkit+enc://[user@]host[:port]/path?pubkey=<…>`
-   in a `mkit-transport-enc::url` module mirroring
-   `mkit-transport-ssh::url`. Decide pubkey encoding (base64 vs hex)
-   and document under §1.
-2. **TCP transport** — wire `commonware-runtime::tokio` Sink/Stream to
-   a real TCP socket; flesh out `connect_tcp`.
-3. **CLI dispatch** — extend
-   [`remote_dispatch::open`](../rust/crates/mkit-cli/src/remote_dispatch.rs)
-   to recognise the `mkit+enc://` scheme. Gate the dependency behind
-   a `mkit-cli/enc-transport` cargo feature so users who only need
-   `mkit+ssh://` don't pay the commonware compile-time cost.
-4. **Server binary** — analog of `mkit serve` for the encrypted path.
-   Likely a flag on `mkit serve` (`--listen-enc <addr>`) rather than
-   a separate binary.
-5. **Keystore integration** — clients today carry their static signing
-   key as a raw `PrivateKey`. Phase 2 wires it through `mkit-keystore`
-   so the key is stored at rest the same way SSH keys and signing
-   keys are.
-6. **Tighten handshake bounds** — drop `synchrony_bound` / `max_handshake_age`
-   to ≤ 5 s, `handshake_timeout` to ≤ 10 s. Defer until Phase 2 because
-   the tighter bounds depend on real-network testing rather than the
-   deterministic-runtime tests Phase 1 runs.
-7. **`publish = true`** — flip the `mkit-transport-enc` `Cargo.toml`
+1. ~~**URL parsing**~~ — done. `mkit_transport_enc::url::parse_enc_url`
+   accepts `mkit+enc://[user@]host[:port][/path]?pubkey=<hex|b64url>`.
+   Pubkey encoding is hex (64 chars) or unpadded url-safe base64
+   (43 chars) — both decode to the same 32-byte payload. See §1.
+2. ~~**TCP transport**~~ — done. `EncTransport::connect_tcp` opens a
+   tokio `TcpStream`, drives `commonware_stream::encrypted::dial`
+   against the URL-advertised peer pubkey, and returns a fully-wired
+   synchronous `Transport`. The dial is single-roundtrip; verb calls
+   block_on a per-call future through the `TokioExecutor`. Custom
+   `Sink`/`Stream` wrappers (`tokio_io::{TokioSink, TokioStream}`)
+   adapt tokio's `OwnedReadHalf` / `OwnedWriteHalf` to
+   `commonware_runtime::{Sink, Stream}` because the upstream
+   `pub(crate)` types aren't reachable from outside the runtime crate.
+3. ~~**CLI dispatch**~~ — done. `remote_dispatch::open` recognises the
+   `mkit+enc://` scheme behind the `mkit-cli/enc-transport` cargo
+   feature; default builds remain SSH-only.
+4. ~~**Server binary**~~ — done. `mkit serve --listen-enc <addr>`
+   spawns an async accept loop via
+   `mkit_transport_enc::serve_tcp`. Bouncer is permissive in v0.x;
+   server prints its ephemeral pubkey to stderr at startup for
+   operators to copy into client URLs.
+
+### 6.2 Phase 3 — deferred
+
+5. **Keystore integration** — clients and server still derive an
+   ephemeral `ed25519` private key per process via `getrandom`. Once
+   `mkit-keystore` grows an "encrypted-transport identity" slot, this
+   becomes a stable, on-disk key surfaced through the same backends
+   as the SSH host keys and signing keys.
+6. **Tighten handshake bounds** — `default_handshake_config` still
+   uses the generous 30 s / 30 s / 60 s envelope inherited from
+   Phase 1 (deterministic-runtime tests). Real-network deployments
+   should tighten `synchrony_bound` / `max_handshake_age` to ≤ 5 s
+   and `handshake_timeout` to ≤ 10 s. Pending CI infra for a
+   real-network e2e job.
+7. **Server-side keyring / bouncer policy** — `serve_tcp` currently
+   accepts any peer that completes the handshake. Phase 3 wires the
+   bouncer to consult an operator-supplied allowlist (a TOML file or
+   a keystore partition).
+8. **`publish = true`** — flip the `mkit-transport-enc` `Cargo.toml`
    flag so the crate ships to crates.io alongside the other
-   transports. Requires keystore integration (#5) to land first so the
-   public API isn't a moving target.
+   transports. Requires keystore integration (#5) so the public
+   `connect_tcp` signature does not have to churn when raw
+   `PrivateKey` is replaced.
+9. **Buffer-pool footprint** — `connect_tcp` lazily bootstraps a
+   `commonware_runtime::BufferPool` by spinning up a one-shot
+   commonware tokio Runner on a fresh OS thread, then dropping the
+   bootstrap runtime while holding an `Arc` clone of the pool. The
+   pool is cached process-wide. Phase 3 should land an upstream
+   contribution to `commonware-runtime` that exposes a public
+   `BufferPool::new_for_network()` so this trick can retire.
 
 ---
 

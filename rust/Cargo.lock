@@ -2824,6 +2824,7 @@ dependencies = [
  "buffa",
  "clap",
  "commonware-codec",
+ "commonware-cryptography",
  "ed25519-dalek 2.2.0",
  "getrandom 0.4.2",
  "insta",
@@ -2833,6 +2834,7 @@ dependencies = [
  "mkit-core",
  "mkit-keystore",
  "mkit-rpc",
+ "mkit-transport-enc",
  "mkit-transport-file",
  "mkit-transport-http",
  "mkit-transport-memory",
@@ -2974,10 +2976,14 @@ dependencies = [
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
+ "governor",
  "hex",
  "mkit-core",
  "mkit-rpc",
+ "rand 0.8.6",
+ "rand_core 0.6.4",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

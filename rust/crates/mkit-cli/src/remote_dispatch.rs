@@ -101,7 +101,53 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
         let tx = SshTransport::connect(url)?;
         return Ok(Arc::new(tx));
     }
+    #[cfg(feature = "enc-transport")]
+    if url.starts_with("mkit+enc://") {
+        return open_enc(url);
+    }
     Err(DispatchError::MalformedUrl(url.to_string()))
+}
+
+/// `mkit+enc://` dispatch (Phase 2 of issue #156).
+///
+/// Parses the URL, derives an ephemeral dialer keypair (keystore
+/// integration is SPEC-TRANSPORT-ENC §6 item 5, still deferred), and
+/// runs the encrypted-stream handshake against the URL-advertised
+/// server public key.
+///
+/// Ephemeral dialer keys are acceptable for v0.x because the
+/// encrypted transport does not (yet) consult a per-peer authorization
+/// list on the server side — `serve_tcp`'s bouncer is permissive. When
+/// the server-side keyring lands, this function will switch to loading
+/// a stable identity from `mkit-keystore` so the operator's per-peer
+/// allowlist works.
+#[cfg(feature = "enc-transport")]
+fn open_enc(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
+    use commonware_cryptography::Signer;
+    use commonware_cryptography::ed25519::PrivateKey;
+    use mkit_transport_enc::url::parse_enc_url;
+
+    let target = parse_enc_url(url).map_err(DispatchError::Transport)?;
+    // Ephemeral dialer key — fresh per process. The server's bouncer
+    // is permissive in v0.x, so the key is effectively pseudonymous;
+    // bumping to a stable keystore-backed key is SPEC-TRANSPORT-ENC §6
+    // item 5.
+    //
+    // `PrivateKey::from_seed` keys are derived from a 64-bit seed
+    // which we draw from `OsRng`. The resulting `PrivateKey` is
+    // 32 bytes and will be zeroized on drop by commonware-cryptography
+    // (per its `Drop` impl).
+    // Use `getrandom` for the ephemeral seed. Already a dep of this
+    // crate (used by `mkit keygen`), so this path adds no transitive
+    // surface area.
+    let mut seed_bytes = [0u8; 8];
+    getrandom::fill(&mut seed_bytes)
+        .map_err(|e| DispatchError::Transport(TransportError::RemoteError(e.to_string())))?;
+    let seed = u64::from_le_bytes(seed_bytes);
+    let sk = PrivateKey::from_seed(seed);
+    let tx = mkit_transport_enc::connect_tcp(&target.host, target.port, &target.server_pubkey, sk)
+        .map_err(|e| DispatchError::Transport(TransportError::RemoteError(e.to_string())))?;
+    Ok(Arc::new(tx))
 }
 
 /// Push every ref under `refs/heads/` to the remote, assembling a pack
