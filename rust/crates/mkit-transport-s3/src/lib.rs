@@ -803,13 +803,19 @@ impl S3Transport {
         )?;
         match manifest_resp.status {
             200 => {}
+            // 404 is the only legitimate "no shards published" signal —
+            // the producer never wrote a manifest, so the client must
+            // fall through to the monolithic GET. Every other status,
+            // including a malformed-body 200, propagates so the caller
+            // sees the bug rather than silently downgrading. This
+            // mirrors HTTP's `download_pack_via_shards` posture — see
+            // `mkit-transport-http`'s comment on `X-Pack-Shards`.
             404 => return Ok(None),
             403 | 401 => return Err(TransportError::AccessDenied),
             s => return Err(TransportError::ServerError { status: s }),
         }
-        let Ok(manifest) = decode_manifest(&manifest_resp.body) else {
-            return Ok(None);
-        };
+        let manifest =
+            decode_manifest(&manifest_resp.body).map_err(|_| TransportError::InvalidResponse)?;
 
         let total = manifest.config.total_shards();
         let minimum = manifest.config.minimum_shards.get();
