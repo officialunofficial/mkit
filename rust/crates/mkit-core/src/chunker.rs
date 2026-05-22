@@ -447,4 +447,40 @@ mod tests {
             "gear table digest changed; refuse to drift silently"
         );
     }
+
+    // -- Property tests -------------------------------------------------
+    //
+    // Determinism + cap invariants exercised against arbitrary inputs
+    // via `proptest`. The example tests above cover specific PRNG seeds;
+    // the properties below catch the boundary cases the examples miss
+    // (very-short data, repeating patterns, etc.).
+    proptest::proptest! {
+        /// FastCDC is deterministic: two passes over the same bytes
+        /// produce the same chunk boundaries. This is the core SPEC-
+        /// FASTCDC §2 contract that makes `chunked_blob` content-
+        /// addressable.
+        #[test]
+        fn proptest_determinism(data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024)) {
+            let cdc = FastCdc::v1();
+            let pass1: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            let pass2: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            proptest::prop_assert_eq!(pass1, pass2);
+        }
+
+        /// Boundaries cover the input exactly: sum of lengths equals
+        /// input length; offsets are non-overlapping and monotonic.
+        #[test]
+        fn proptest_boundaries_partition_input(
+            data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024),
+        ) {
+            let cdc = FastCdc::v1();
+            let boundaries: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            let mut expected_offset = 0usize;
+            for b in &boundaries {
+                proptest::prop_assert_eq!(b.offset, expected_offset);
+                expected_offset += b.length;
+            }
+            proptest::prop_assert_eq!(expected_offset, data.len());
+        }
+    }
 }

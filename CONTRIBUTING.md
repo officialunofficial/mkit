@@ -37,20 +37,59 @@ Requires **Rust 1.95** (auto-installed by rustup from
 ```sh
 cd rust
 cargo build --workspace
-cargo test --workspace
+cargo t                                      # alias for `cargo nextest run`
 cargo fmt --check                            # CI-enforced
 cargo clippy --all-targets -- -D warnings    # CI-enforced
 ```
+
+`cargo t` shells out to `cargo nextest run` via the workspace
+`.cargo/config.toml` alias — nextest is up to 3× faster than the
+in-process `cargo test` on the mkit workspace because each test runs
+in its own process. Install with `cargo install cargo-nextest --locked`
+if `cargo t` errors with "no such subcommand".
 
 Useful extras:
 
 ```sh
 cargo install cargo-deny cargo-audit cargo-nextest    # supply-chain + faster tests
+cargo install cargo-mutants                           # mutation testing (see Test-first below)
 cargo deny check                                      # licenses, sources, advisories
 cargo audit                                           # RUSTSEC advisories
-cargo nextest run --workspace                         # what CI runs (faster + structured)
 ../scripts/verify-rename.sh                           # rename-gate (CI-enforced)
 ```
+
+## Test-first discipline
+
+Every bug fix PR MUST include a regression test that fails on the
+fix's parent commit. The pattern that's worked across the recent
+history:
+
+1. Reproduce the bug as a failing test (`cargo t` shows it red).
+2. Apply the fix.
+3. Re-run; test goes green.
+4. Commit test + fix together so the test's failing state is preserved
+   in the diff context of the fix.
+
+Reviewers check this by running `git checkout <PR-parent> && cargo t
+<new-test-name>` — if the new test passes at the parent, the test
+doesn't actually demonstrate the bug.
+
+For new features (not bug fixes), tests aren't required to fail at any
+specific commit, but they MUST cover the documented behaviour. Three
+test classes earn their keep:
+
+- **Example tests** (`#[test]`) — pin specific inputs/outputs; cite
+  golden vectors where they exist.
+- **Property tests** (`proptest!`) — encode round-trip invariants. The
+  `serialize.rs` blob/commit round-trip and `chunker.rs` determinism
+  property tests are the canonical examples.
+- **Snapshot tests** (`insta::assert_snapshot!`) — pin human-readable
+  output (CLI, JSON envelopes, formatted text). Update with
+  `cargo insta review` after deliberate output changes.
+
+CI runs `cargo-mutants` nightly against `mkit-core` and `mkit-attest`;
+the mutation score is posted to issue #161. Aim to add tests that
+move the score up over time rather than down.
 
 Optional but recommended for repeated local rebuilds:
 
@@ -164,11 +203,13 @@ Before requesting review:
 
 - [ ] `cargo fmt --check` clean
 - [ ] `cargo clippy --all-targets -- -D warnings` clean
-- [ ] `cargo test --workspace` passes
+- [ ] `cargo t` (or `cargo nextest run --workspace`) passes
 - [ ] `scripts/verify-rename.sh` passes
 - [ ] CHANGELOG entry under "Unreleased" if user-visible
 - [ ] Spec + golden vector updated if format changed
 - [ ] No new dependencies added without justification in the PR body
+- [ ] If this PR fixes a bug, a regression test demonstrating it lives
+      in this diff (see "Test-first discipline" above)
 
 ## License of contributions
 

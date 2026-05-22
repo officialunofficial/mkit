@@ -64,3 +64,9 @@ pack-shards = [
 
 [dev-dependencies]
 hex = "0.4"
+# Property-based testing: auto-shrinks counterexamples on round-trip
+# / invariant assertions. See issue #164.
+proptest = "1"
+# Snapshot testing for human-readable test fixtures. Snapshots live in
+# `src/snapshots/`; review with `cargo insta review`.
+insta = "1"

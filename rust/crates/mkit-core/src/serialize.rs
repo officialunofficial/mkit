@@ -890,4 +890,54 @@ mod tests {
             }
         );
     }
+
+    // -- Property tests -------------------------------------------------
+    //
+    // Round-trip invariants exercised against arbitrary inputs via
+    // `proptest`. The example tests above cover specific vectors and
+    // the goldens pin wire bytes; the properties below catch the
+    // boundary cases the examples miss (empty payloads, max-length
+    // strings, non-ASCII bytes, etc.).
+    proptest::proptest! {
+        /// Any blob round-trips byte-for-byte through serialize/deserialize.
+        #[test]
+        fn proptest_blob_roundtrip(data in proptest::collection::vec(proptest::num::u8::ANY, 0..4096)) {
+            let obj = Object::Blob(Blob { data });
+            let bytes = serialize(&obj).expect("blob serialises");
+            let parsed = deserialize(&bytes).expect("blob deserialises");
+            proptest::prop_assert_eq!(obj, parsed);
+        }
+
+        /// Any commit (single parent, fixed identity) round-trips
+        /// byte-for-byte. Covers arbitrary tree hashes, arbitrary parent
+        /// hashes, arbitrary message bytes including non-UTF-8 sequences
+        /// (commit messages are bytes per SPEC-OBJECTS §5). Signer + sig
+        /// arrays are constructed from a u8 seed (proptest only ships
+        /// `uniform32` natively; 64-byte signatures get a tiled seed).
+        #[test]
+        fn proptest_commit_roundtrip(
+            tree in proptest::array::uniform32(proptest::num::u8::ANY),
+            parent in proptest::array::uniform32(proptest::num::u8::ANY),
+            signer in proptest::array::uniform32(proptest::num::u8::ANY),
+            msg in proptest::collection::vec(proptest::num::u8::ANY, 0..2048),
+            sig_seed in proptest::num::u8::ANY,
+            ts in 0u64..u64::from(u32::MAX),
+        ) {
+            let mut sig = [0u8; 64];
+            sig.fill(sig_seed);
+            let commit = Commit::new_unannotated(
+                tree,
+                vec![parent],
+                ed25519_id(),
+                signer,
+                msg,
+                ts,
+                sig,
+            );
+            let obj = Object::Commit(commit);
+            let bytes = serialize(&obj).expect("commit serialises");
+            let parsed = deserialize(&bytes).expect("commit deserialises");
+            proptest::prop_assert_eq!(obj, parsed);
+        }
+    }
 }

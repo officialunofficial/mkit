@@ -82,3 +82,36 @@ fn unknown_subcommand_exits_usage() {
         "unknown command must exit 64 (sysexits EX_USAGE)"
     );
 }
+
+/// Snapshot of `mkit --help` output. Reviewable diffs via
+/// `cargo insta review`; raw assertions on a 30+ subcommand list
+/// produce noisy diffs that nobody reads.
+#[test]
+fn help_output_snapshot() {
+    let output = Command::new(mkit_bin())
+        .arg("--help")
+        .output()
+        .expect("spawn `mkit --help`");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    insta::assert_snapshot!("mkit_dash_help", stdout);
+}
+
+/// Snapshot of `mkit version`. Pins the format (key=value pairs,
+/// trailing newline) so any drift in the version-emitter shows up as
+/// a reviewable diff instead of a `contains("0.")` regex.
+#[test]
+fn version_output_snapshot() {
+    let output = Command::new(mkit_bin())
+        .arg("version")
+        .output()
+        .expect("spawn `mkit version`");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    // Mask the version string so a `Cargo.toml` version bump doesn't
+    // re-break the snapshot — we want shape-stability, not number-
+    // stability.
+    insta::with_settings!({filters => vec![
+        (r"\d+\.\d+\.\d+(-[A-Za-z0-9._-]+)?", "[VERSION]"),
+    ]}, {
+        insta::assert_snapshot!("mkit_version", stdout);
+    });
+}

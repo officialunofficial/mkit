@@ -163,6 +163,9 @@ fn configured_key_ref(cfg: &Config, algorithm: Algorithm) -> &str {
     }
 }
 
+// `Result` is necessary on the `bls-threshold` arm; without that
+// feature, clippy sees only infallible arms and flags the wrap.
+#[allow(clippy::unnecessary_wraps)]
 fn to_keystore_algorithm(algorithm: Algorithm) -> Result<mkit_keystore::Algorithm, FactoryError> {
     match algorithm {
         Algorithm::Ed25519 => Ok(mkit_keystore::Algorithm::Ed25519),
