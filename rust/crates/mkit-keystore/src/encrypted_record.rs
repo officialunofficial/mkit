@@ -267,6 +267,16 @@ fn algorithm_id(algorithm: Algorithm) -> u8 {
         Algorithm::Ed25519 => 1,
         Algorithm::Secp256k1 => 2,
         Algorithm::P256 => 3,
+        // 4 is reserved for BLS12-381 threshold. The on-disk wire
+        // format is shared with Ed25519/secp/p256, but the plaintext
+        // payload is a variable-length commonware-codec `Share`, not a
+        // 32-byte scalar. Decoders for the canonical
+        // `EncryptedKeyRecord` path reject id `4` because the
+        // plaintext length check would fail; BLS shares are decoded
+        // through `BlsShareRecord` instead, which uses a distinct
+        // magic header.
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => 4,
     }
 }
 
@@ -275,6 +285,8 @@ fn algorithm_from_id(id: u8) -> Result<Algorithm> {
         1 => Ok(Algorithm::Ed25519),
         2 => Ok(Algorithm::Secp256k1),
         3 => Ok(Algorithm::P256),
+        #[cfg(feature = "bls-threshold")]
+        4 => Ok(Algorithm::Bls12381Threshold),
         other => Err(Error::Encoding(format!("unknown algorithm id: {other}"))),
     }
 }
@@ -351,6 +363,232 @@ impl<'a> Cursor<'a> {
         };
         self.offset = end;
         Ok(bytes)
+    }
+}
+
+// -- BLS12-381 threshold share record -------------------------------
+//
+// BLS shares are variable-length wire-encoded `Share` values (≈52
+// bytes for the MinSig variant). The canonical `EncryptedKeyRecord`
+// format is closed at 32 bytes of plaintext, so BLS shares ride a
+// parallel record format with its own magic header (`MKITKSB1`) and
+// AEAD-bound AAD that includes:
+//
+//   * the share's cohort public key (the aggregated G2 pubkey — every
+//     holder reports the same one, so it's the natural anchor),
+//   * the share's holder index (the `u32` from `Share::index`),
+//   * the cohort threshold (M-of-N — defends against a substitution
+//     attack that swaps a 3-of-5 share for a 1-of-5 share),
+//   * the cohort total (N).
+//
+// We reuse the `KeyProtector` trait so the BLS path picks up the same
+// OS-native DEK wrapping the canonical path uses.
+
+#[cfg(feature = "bls-threshold")]
+const BLS_MAGIC: &[u8; 8] = b"MKITKSB1";
+
+/// On-disk encrypted record for a single BLS12-381 threshold share.
+#[cfg(feature = "bls-threshold")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BlsShareRecord {
+    /// Cohort group public key (G2 compressed, 96 bytes for MinSig).
+    pub(crate) cohort_public_key: Vec<u8>,
+    /// Holder index within the cohort (0..total).
+    pub(crate) share_index: u32,
+    /// Quorum threshold (M).
+    pub(crate) threshold: u32,
+    /// Total holders in the cohort (N).
+    pub(crate) total: u32,
+    /// Keyid, `bls12381-thr:<hex(cohort_public_key)>`.
+    pub(crate) keyid: String,
+    /// Protector id that wrapped the DEK.
+    pub(crate) protector: String,
+    nonce: [u8; NONCE_LEN],
+    wrapped_dek: Vec<u8>,
+    /// AEAD ciphertext over the wire-encoded `Share` plaintext.
+    ciphertext: Vec<u8>,
+}
+
+#[cfg(feature = "bls-threshold")]
+impl BlsShareRecord {
+    /// Encrypt a BLS share for on-disk persistence.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn encrypt(
+        label: &str,
+        share_bytes: &[u8],
+        cohort_public_key: Vec<u8>,
+        share_index: u32,
+        threshold: u32,
+        total: u32,
+        keyid: String,
+        protector: &dyn KeyProtector,
+    ) -> Result<Self> {
+        let mut dek = Zeroizing::new([0u8; DEK_LEN]);
+        getrandom::fill(dek.as_mut_slice()).map_err(|_| Error::Internal("rng failed".into()))?;
+        let mut nonce = [0u8; NONCE_LEN];
+        getrandom::fill(&mut nonce).map_err(|_| Error::Internal("rng failed".into()))?;
+
+        let aad = bls_record_aad(
+            label,
+            &cohort_public_key,
+            share_index,
+            threshold,
+            total,
+            &keyid,
+            protector.id(),
+        )?;
+        let cipher = XChaCha20Poly1305::new_from_slice(&*dek)
+            .map_err(|_| Error::Internal("invalid encryption key length".into()))?;
+        let ciphertext = cipher
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: share_bytes,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| Error::Internal("BLS share encryption failed".into()))?;
+        let wrapped_dek = protector.wrap_dek(&dek, &aad)?;
+
+        Ok(Self {
+            cohort_public_key,
+            share_index,
+            threshold,
+            total,
+            keyid,
+            protector: protector.id().into(),
+            nonce,
+            wrapped_dek,
+            ciphertext,
+        })
+    }
+
+    /// Decrypt the inner share plaintext (a wire-encoded `Share`).
+    pub(crate) fn decrypt(
+        &self,
+        label: &str,
+        protector: &dyn KeyProtector,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        if self.protector != protector.id() {
+            return Err(Error::AccessDenied(format!(
+                "record requires protector `{}`, got `{}`",
+                self.protector,
+                protector.id()
+            )));
+        }
+        let aad = bls_record_aad(
+            label,
+            &self.cohort_public_key,
+            self.share_index,
+            self.threshold,
+            self.total,
+            &self.keyid,
+            protector.id(),
+        )?;
+        let dek = protector.unwrap_dek(&self.wrapped_dek, &aad)?;
+        let cipher = XChaCha20Poly1305::new_from_slice(&*dek)
+            .map_err(|_| Error::Internal("invalid encryption key length".into()))?;
+        let plaintext = cipher
+            .decrypt(
+                XNonce::from_slice(&self.nonce),
+                Payload {
+                    msg: &self.ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| Error::Encoding("BLS share record authentication failed".into()))?;
+        Ok(Zeroizing::new(plaintext))
+    }
+
+    pub(crate) fn wrapped_dek(&self) -> &[u8] {
+        &self.wrapped_dek
+    }
+
+    pub(crate) fn encode(&self) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        out.extend_from_slice(BLS_MAGIC);
+        out.push(VERSION);
+        write_bytes(&mut out, self.protector.as_bytes())?;
+        write_bytes(&mut out, &self.cohort_public_key)?;
+        out.extend_from_slice(&self.share_index.to_le_bytes());
+        out.extend_from_slice(&self.threshold.to_le_bytes());
+        out.extend_from_slice(&self.total.to_le_bytes());
+        write_bytes(&mut out, self.keyid.as_bytes())?;
+        write_bytes(&mut out, &self.nonce)?;
+        write_bytes(&mut out, &self.wrapped_dek)?;
+        write_bytes(&mut out, &self.ciphertext)?;
+        Ok(out)
+    }
+
+    pub(crate) fn decode(input: &[u8]) -> Result<Self> {
+        let mut cursor = Cursor::new(input);
+        cursor.expect(BLS_MAGIC)?;
+        let version = cursor.read_u8()?;
+        if version != VERSION {
+            return Err(Error::Encoding(format!(
+                "unsupported BLS share record version: {version}"
+            )));
+        }
+        let protector = String::from_utf8(cursor.read_vec()?)
+            .map_err(|error| Error::Encoding(format!("protector id is not UTF-8: {error}")))?;
+        let cohort_public_key = cursor.read_vec()?;
+        let share_index = u32::from_le_bytes(cursor.read_u32_bytes()?);
+        let threshold = u32::from_le_bytes(cursor.read_u32_bytes()?);
+        let total = u32::from_le_bytes(cursor.read_u32_bytes()?);
+        let keyid = String::from_utf8(cursor.read_vec()?)
+            .map_err(|error| Error::Encoding(format!("keyid is not UTF-8: {error}")))?;
+        let nonce_vec = cursor.read_vec()?;
+        let nonce = nonce_vec
+            .try_into()
+            .map_err(|nonce: Vec<u8>| Error::Encoding(format!("nonce length: {}", nonce.len())))?;
+        let wrapped_dek = cursor.read_vec()?;
+        let ciphertext = cursor.read_vec()?;
+        cursor.finish()?;
+        Ok(Self {
+            cohort_public_key,
+            share_index,
+            threshold,
+            total,
+            keyid,
+            protector,
+            nonce,
+            wrapped_dek,
+            ciphertext,
+        })
+    }
+}
+
+#[cfg(feature = "bls-threshold")]
+fn bls_record_aad(
+    label: &str,
+    cohort_public_key: &[u8],
+    share_index: u32,
+    threshold: u32,
+    total: u32,
+    keyid: &str,
+    protector: &str,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.extend_from_slice(BLS_MAGIC);
+    out.push(VERSION);
+    write_bytes(&mut out, b"bls12381-thr")?;
+    write_bytes(&mut out, label.as_bytes())?;
+    write_bytes(&mut out, protector.as_bytes())?;
+    write_bytes(&mut out, cohort_public_key)?;
+    out.extend_from_slice(&share_index.to_le_bytes());
+    out.extend_from_slice(&threshold.to_le_bytes());
+    out.extend_from_slice(&total.to_le_bytes());
+    write_bytes(&mut out, keyid.as_bytes())?;
+    Ok(out)
+}
+
+#[cfg(feature = "bls-threshold")]
+impl<'a> Cursor<'a> {
+    fn read_u32_bytes(&mut self) -> Result<[u8; 4]> {
+        let bytes = self.take(4)?;
+        bytes
+            .try_into()
+            .map_err(|_| Error::Internal("u32 slice invariant failed".into()))
     }
 }
 
