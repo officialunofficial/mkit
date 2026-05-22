@@ -302,6 +302,13 @@ fn handle_sign(
             };
             (s.keyid(), sig, pubkey, RpcAlgorithm::ALGORITHM_P256)
         }
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => {
+            return signer_error_frame(
+                ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM,
+                "mkit-sign-file does not support BLS threshold (issue #160 Phase 3)".to_owned(),
+            );
+        }
     };
 
     SignerFrame {

@@ -46,3 +46,12 @@ mkit-core = { path = "../../../rust/crates/mkit-core" }
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
 buffa = "0.6"
 tempfile = "3"
+
+[features]
+default = []
+# Compile-time exhaustiveness: when mkit-attest enables its
+# `bls-threshold` Algorithm variant, this signer's match arms must
+# cover it (with an UNSUPPORTED_ALGORITHM error frame). This crate
+# never produces BLS signatures; the feature exists only to make the
+# match exhaustive under `cargo --all-features`.
+bls-threshold = ["mkit-attest/bls-threshold"]

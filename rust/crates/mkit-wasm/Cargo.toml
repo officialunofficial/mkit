@@ -62,3 +62,10 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # dalek is a regular dependency above (see `[dependencies]`); tests
 # (`tests/ed25519.rs`) reach the same crate without a separate
 # `[dev-dependencies]` entry, which would risk a duplicate dep version.
+
+[features]
+default = []
+# Exhaustiveness: mirrors mkit-attest's bls-threshold so the wasm
+# bindings compile under `--all-features`. WASM never produces BLS
+# signatures.
+bls-threshold = ["mkit-attest/bls-threshold"]

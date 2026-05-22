@@ -276,6 +276,15 @@ impl From<mkit_attest::Algorithm> for Algorithm {
             mkit_attest::Algorithm::Ed25519 => Self::Ed25519,
             mkit_attest::Algorithm::Secp256k1 => Self::Secp256k1,
             mkit_attest::Algorithm::P256 => Self::P256,
+            // BLS threshold shares are stored in a Phase 2 keystore
+            // backend (issue #160). A keystore Algorithm has no
+            // corresponding variant today; reaching this arm means a
+            // caller routed a BLS share into pre-Phase 2 code, which
+            // is a programmer bug.
+            #[cfg(feature = "bls-threshold")]
+            mkit_attest::Algorithm::Bls12381Threshold => {
+                unreachable!("BLS threshold keys have no Phase 1 keystore backend (issue #160)")
+            }
         }
     }
 }

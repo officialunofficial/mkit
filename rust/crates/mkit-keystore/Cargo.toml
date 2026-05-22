@@ -17,6 +17,11 @@ workspace = true
 [features]
 default = []
 attest = ["dep:mkit-attest"]
+# When `mkit-attest/bls-threshold` is also on (e.g. `--all-features`),
+# keystore needs to handle the BLS Algorithm variant in its conversion
+# impls. Phase 1 only handles its presence as a typed pass-through —
+# the actual BLS keystore backend is Phase 2 of issue #160.
+bls-threshold = ["attest", "mkit-attest/bls-threshold"]
 backend-linux-secret-service = ["linux-secret-service"]
 backend-macos-keychain = ["macos-keychain"]
 backend-systemd-creds = ["systemd-creds"]

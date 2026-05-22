@@ -111,3 +111,11 @@ mockito = "1"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+
+[features]
+default = []
+# Compile-time exhaustiveness mirror of mkit-attest's bls-threshold —
+# pulls the BLS Algorithm variant into scope so the CLI's match arms
+# cover it (returning UNAVAILABLE per-site). Phase 3 of issue #160
+# will replace the inert arms with a real release-party signer.
+bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold"]
