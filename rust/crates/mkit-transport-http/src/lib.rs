@@ -555,6 +555,148 @@ impl Transport for HttpTransport {
 }
 
 // ---------------------------------------------------------------------------
+// Sparse-checkout fetch (issue #158, Phase 2). Feature-gated behind
+// `sparse-checkout` so the binary cost of the upstream
+// `commonware-storage` chain is only paid when the consumer opts in.
+//
+// Wire contract additions (SPEC-TRANSPORT §5.6):
+//
+// - `POST /<project>/trees/<tree-hash-hex>/sparse?sparse=<filter-hash-hex>`
+//   * Request body: JSON `{ "filter": ["<utf8 path>", ...] }`.
+//     The `?sparse=<filter-hash>` query MUST equal
+//     `BLAKE3` of the canonicalised filter (see SPEC-SPARSE-CHECKOUT §2.3).
+//     The server uses the query to short-circuit a precomputed manifest
+//     cache; the body filter is canonical input for cache misses.
+//   * Response body: opaque `application/x-mkit-sparse` bytes —
+//     [`mkit_core::sparse::decode_sparse_response`] decodes it into a
+//     `SparseResponse`. The verifier holds the trust boundary; this
+//     transport layer only enforces transport-level size caps.
+//   * 404 → tree not found on server; surfaces as `PackNotFound`
+//     (no dedicated `TreeNotFound` variant — the existing taxonomy
+//     covers "the addressed object is missing").
+//   * 409 → server-side disagreement about the filter hash. Maps to
+//     `RefConflict` so retry policy treats it as terminal.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "sparse-checkout")]
+mod sparse_fetch {
+    use super::{
+        Hash, HttpTransport, RequestBuilder, TransportError, TransportResult, map_status, to_hex,
+    };
+    use mkit_core::sparse::{
+        SPARSE_WIRE_MAX_BYTES, SparseResponse, decode_sparse_response, hash_filter,
+    };
+    use serde::Serialize;
+    use std::path::PathBuf;
+    use url::Url;
+
+    /// JSON request DTO sent in the POST body. The server canonicalises
+    /// the filter independently and cross-checks against the URL's
+    /// `?sparse=<hex>` query, so a malicious server cannot silently
+    /// substitute a different filter.
+    #[derive(Debug, Serialize)]
+    struct SparseRequestBody<'a> {
+        /// Paths are sent UTF-8 only — non-UTF-8 paths in the caller's
+        /// filter are dropped at canonicalisation time (the canonical
+        /// form drops them anyway, so the hash agrees).
+        filter: Vec<&'a str>,
+    }
+
+    impl HttpTransport {
+        /// Build `/<project>/trees/<tree-hex>/sparse?sparse=<filter-hex>`.
+        fn sparse_tree_url(&self, tree_hash: &Hash, filter_hash: &Hash) -> TransportResult<Url> {
+            let mut u = self.base().clone();
+            u.path_segments_mut()
+                .map_err(|()| TransportError::InvalidResponse)?
+                .pop_if_empty()
+                .push("trees")
+                .push(&to_hex(tree_hash))
+                .push("sparse");
+            u.query_pairs_mut()
+                .clear()
+                .append_pair("sparse", &to_hex(filter_hash));
+            Ok(u)
+        }
+
+        /// Fetch a verifiable sparse manifest for `tree_hash` against
+        /// the given path-prefix filter.
+        ///
+        /// The transport layer is intentionally trust-thin: it returns
+        /// the decoded [`SparseResponse`] without verifying anything
+        /// beyond the wire envelope. The caller MUST run
+        /// [`mkit_core::sparse::verify_sparse`] on the result before
+        /// trusting the delivered entries.
+        ///
+        /// # Errors
+        ///
+        /// - [`TransportError::PackNotFound`] — server returned 404
+        ///   for the addressed tree.
+        /// - [`TransportError::RefConflict`] — server returned 409 or
+        ///   412 (filter-hash disagreement).
+        /// - [`TransportError::PayloadTooLarge`] — response body
+        ///   exceeded `SPARSE_WIRE_MAX_BYTES`.
+        /// - [`TransportError::InvalidResponse`] — wire envelope
+        ///   decode failed.
+        pub fn fetch_sparse_tree(
+            &self,
+            tree_hash: &Hash,
+            filter: &[PathBuf],
+        ) -> TransportResult<SparseResponse> {
+            let filter_hash = hash_filter(filter);
+            let url = self.sparse_tree_url(tree_hash, &filter_hash)?;
+            let filter_strs: Vec<&str> = filter.iter().filter_map(|p| p.to_str()).collect();
+            let body = SparseRequestBody {
+                filter: filter_strs,
+            };
+            let body_json =
+                serde_json::to_vec(&body).map_err(|_| TransportError::InvalidResponse)?;
+
+            let resp = HttpTransport::retrying(|| -> RequestBuilder {
+                let mut r = self
+                    .client()
+                    .post(url.clone())
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/x-mkit-sparse")
+                    .body(body_json.clone());
+                r = self.apply_auth_pub(r);
+                r
+            })?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(map_status(status, TransportError::PackNotFound));
+            }
+            // Bound the body before consuming — refuse oversized
+            // responses before allocating.
+            if let Some(len) = resp.content_length()
+                && len > SPARSE_WIRE_MAX_BYTES as u64
+            {
+                return Err(TransportError::PayloadTooLarge(
+                    usize::try_from(len).unwrap_or(usize::MAX),
+                ));
+            }
+            let body_bytes = resp.bytes().map_err(|_| TransportError::ConnectionFailed)?;
+            if body_bytes.len() > SPARSE_WIRE_MAX_BYTES {
+                return Err(TransportError::PayloadTooLarge(body_bytes.len()));
+            }
+            decode_sparse_response(&body_bytes).map_err(|_| TransportError::InvalidResponse)
+        }
+    }
+}
+
+// Helper accessors used by the sparse-fetch module. Crate-private —
+// other consumers should keep going through the trait surface.
+#[cfg(feature = "sparse-checkout")]
+impl HttpTransport {
+    fn client(&self) -> &Client {
+        &self.client
+    }
+    fn apply_auth_pub(&self, req: RequestBuilder) -> RequestBuilder {
+        self.apply_auth(req)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
