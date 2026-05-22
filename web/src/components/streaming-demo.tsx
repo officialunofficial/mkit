@@ -12,10 +12,12 @@ type FileAsset = { name: string; bytes: Uint8Array; source: 'default' | 'upload'
 
 const DEFAULT_NAME = 'grid.ppm'
 const DEFAULT_SEED = 0xc0de_cafe
-// Demo-only hard cap. At 64 KB avg FastCDC chunks, 16 MB → ~256 chunks — still readable on the strip and fast through
-// the wasm. Above this we'd freeze the tab building thousands of DOM nodes (and risk OOM in wasm32 well before a
-// gigabyte). Real mkit has no such limit; see issue tracker for the un-cap plan.
-const MAX_FILE_BYTES = 16 * 1024 * 1024
+// Demo-only hard cap. At 64 KB avg FastCDC chunks, 128 MiB → ~2,048 chunks — the strip stays readable (each chip is
+// still visible at typical viewport widths) and the wasm passes finish in a few seconds on a modest laptop. Above this
+// we'd risk OOM in wasm32 (the linear memory ceiling is 4 GiB and our passes hold multiple copies — input, chunker
+// state, Bao outboard) and start freezing the tab while building tens of thousands of DOM nodes. Real mkit has no
+// such limit; the cap only applies to this interactive page.
+const MAX_FILE_BYTES = 128 * 1024 * 1024
 // Auto-edit cadence. 500 ms is the visible target — the user perceives a continuously changing chunker. The
 // `tickRunning` guard naturally throttles to whatever rate the wasm pass actually completes at on the host machine,
 // so a slow device falls back to "as fast as possible" instead of stacking ticks.
