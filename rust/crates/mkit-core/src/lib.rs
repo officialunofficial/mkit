@@ -57,12 +57,21 @@ pub mod protocol;
 #[cfg(feature = "history-mmr")]
 pub mod history;
 
-// Verifiable sparse-checkout (issue #158, Phase 1). Feature-gated
+// Verifiable sparse-checkout (issue #158, Phase 2). Feature-gated
 // because the upstream `commonware-storage::AuthenticatedBitMap` is
 // ALPHA-tier and pulls in `commonware-runtime` /
 // `commonware-cryptography`. Off by default.
 #[cfg(feature = "sparse-checkout")]
 pub mod sparse;
+
+#[cfg(feature = "sparse-checkout")]
+pub use sparse::{
+    MAX_FILTER_PATHS as SPARSE_MAX_FILTER_PATHS, MAX_LEAVES as SPARSE_MAX_LEAVES, SPARSE_CACHE_DIR,
+    SPARSE_CACHE_MAGIC, SPARSE_CACHE_VERSION, SPARSE_WIRE_MAGIC, SPARSE_WIRE_MAX_BYTES,
+    SPARSE_WIRE_VERSION, SparseError, SparseManifest, SparseProof, SparseResponse, SparseWireError,
+    build_sparse, canonical_tree_hash, decode_sparse_cache, decode_sparse_response,
+    encode_sparse_cache, encode_sparse_response, hash_filter, verify_sparse,
+};
 
 pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher, to_hex, to_hex_bytes};
 pub use object::{
