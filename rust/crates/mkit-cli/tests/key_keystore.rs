@@ -1017,7 +1017,16 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// prints the cohort keyid on stdout. Pinned to Phase 2 of issue
 /// #160.
 #[cfg(feature = "bls-threshold")]
+// Linux CI runs this job without a DBus session or gnome-keyring, so the
+// `software` backend can't resolve a key protector — see the `Keystore
+// backends (linux-secret-systemd-yubikey)` matrix job which DOES set those
+// up via `dbus-run-session` and exercises the live backends. macOS and
+// Windows CI runners ship a native protector and run this test for real.
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "requires DBus/secret-service session; exercised by Keystore backends matrix"
+)]
 fn bls_threshold_key_generate_stores_shares_and_prints_keyid() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(td.path().join("repo")).expect("repo dir");
