@@ -56,7 +56,17 @@ pub fn run(args: &[String]) -> u8 {
             let Ok(Some(h)) = refs::resolve_head(&mkit_dir) else {
                 return emit_err("no HEAD commit to branch from", exit::GENERAL_ERROR);
             };
-            match refs::write_ref(&mkit_dir, name, &h) {
+            // `mkit branch <name>` creates a new branch at HEAD.
+            // Route through `write_ref_recording_history` so the new
+            // branch picks up a fresh history-MMR journal (the empty
+            // pre-leaf root + this first append) on builds with
+            // `--features history-mmr`.
+            match super::write_ref_recording_history(
+                &mkit_dir,
+                name,
+                refs::RefWriteCondition::Any,
+                &h,
+            ) {
                 Ok(()) => exit::OK,
                 Err(e) => emit_err(&format!("write {name}: {e}"), exit::CANTCREAT),
             }

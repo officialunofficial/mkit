@@ -155,7 +155,17 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     if let Err(e) = refs::write_head_branch(mkit_dir, &state.head_name) {
         return emit_err(&format!("restore HEAD: {e}"), exit::CANTCREAT);
     }
-    if let Err(e) = refs::write_ref(mkit_dir, &state.head_name, &state.orig_head) {
+    // Rebase abort rolls the branch tip back to `orig_head`. Route
+    // through the history-MMR-coupled helper so the rollback append
+    // is recorded under the repo lock; the MMR is append-only, so
+    // "rollback" surfaces as another leaf, not a rewind. That keeps
+    // the audit trail consistent with what actually happened.
+    if let Err(e) = super::write_ref_recording_history(
+        mkit_dir,
+        &state.head_name,
+        refs::RefWriteCondition::Any,
+        &state.orig_head,
+    ) {
         return emit_err(&format!("restore ref: {e}"), exit::CANTCREAT);
     }
     if let Ok(tree) = load_tree_hash(store, state.orig_head) {
@@ -255,12 +265,19 @@ fn replay(
         }
     }
 
-    // Finish: move the branch to current HEAD and reattach.
+    // Finish: move the branch to current HEAD and reattach. Route
+    // the final advance through the history-MMR-coupled helper so the
+    // replayed tip lands as the next leaf in the branch's journal.
     let final_head = match refs::resolve_head(mkit_dir) {
         Ok(Some(h)) => h,
         _ => state.onto,
     };
-    if let Err(e) = refs::write_ref(mkit_dir, &state.head_name, &final_head) {
+    if let Err(e) = super::write_ref_recording_history(
+        mkit_dir,
+        &state.head_name,
+        refs::RefWriteCondition::Any,
+        &final_head,
+    ) {
         return emit_err(&format!("write ref: {e}"), exit::CANTCREAT);
     }
     if let Err(e) = refs::write_head_branch(mkit_dir, &state.head_name) {

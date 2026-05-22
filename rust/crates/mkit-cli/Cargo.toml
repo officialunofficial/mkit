@@ -144,7 +144,7 @@ bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "de
 # and the `mkit serve --listen-enc <addr>` listener flag. Pulls in
 # `mkit-transport-enc` with its `tcp` feature (tokio + governor +
 # rand). See SPEC-TRANSPORT-ENC §6 item 3.
-enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography"]
+enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography", "dep:commonware-codec"]
 # Verifiable sparse-checkout (issue #158 Phase 2). Pulls the
 # `mkit-core` sparse module and the matching transport-side fetchers
 # into scope. Off by default — the upstream `commonware-storage` is
@@ -162,3 +162,11 @@ pack-shards = [
     "mkit-transport-http/pack-shards",
     "mkit-transport-s3/pack-shards",
 ]
+# Issue #157 Phase 2 — record every ref-write in an append-only,
+# branch-scoped Merkle Mountain Range journal under
+# `<mkit_dir>/history/<sanitized_branch>/`. Off by default because
+# the commonware journaled-MMR stack pulls in tokio + commonware-
+# runtime; opt in via `--features history-mmr` on builds that need
+# `mkit-core::history::CommitHistory::open_at` wired into commit /
+# branch / merge / rebase / cherry-pick ref advances.
+history-mmr = ["mkit-core/history-mmr"]

@@ -123,8 +123,16 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("store commit: {e}"), exit::CANTCREAT),
     };
     let head = refs::read_head(&mkit_dir).unwrap_or(Head::Branch("main".to_string()));
+    // Route the branch-tip advance through the history-MMR-coupled
+    // helper so cherry-picked commits land as the next leaf in the
+    // current branch's journal (no-op on default builds).
     let write_result = match head {
-        Head::Branch(name) => refs::write_ref(&mkit_dir, &name, &commit_hash),
+        Head::Branch(name) => super::write_ref_recording_history(
+            &mkit_dir,
+            &name,
+            refs::RefWriteCondition::Any,
+            &commit_hash,
+        ),
         Head::Detached(_) => refs::write_head_detached(&mkit_dir, &commit_hash),
     };
     if let Err(e) = write_result {
