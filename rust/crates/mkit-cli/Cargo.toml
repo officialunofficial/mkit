@@ -123,3 +123,12 @@ default = []
 # cover it (returning UNAVAILABLE per-site). Phase 3 of issue #160
 # will replace the inert arms with a real release-party signer.
 bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold"]
+# Verifiable sparse-checkout (issue #158 Phase 2). Pulls the
+# `mkit-core` sparse module and the matching transport-side fetchers
+# into scope. Off by default — the upstream `commonware-storage` is
+# ALPHA-tier.
+sparse-checkout = [
+    "mkit-core/sparse-checkout",
+    "mkit-transport-http/sparse-checkout",
+    "mkit-transport-s3/sparse-checkout",
+]
