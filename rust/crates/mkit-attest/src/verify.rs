@@ -42,6 +42,13 @@ pub enum TrustRoot {
     /// typically ship compressed.
     #[cfg(feature = "algo-secp256k1")]
     Secp256k1PubKeySec1(Vec<u8>),
+    /// Wire-encoded BLS12-381 G2 compressed public key (96 bytes for
+    /// the MinSig variant — see `signer_bls_threshold`). Aggregated
+    /// threshold signatures verify against this key using the in-tree
+    /// `signer_bls_threshold::verify` function and the mkit-attest
+    /// BLS namespace.
+    #[cfg(feature = "bls-threshold")]
+    Bls12381ThresholdPubKey(Vec<u8>),
     /// Scaffold — sigstore verification needs a Rekor + Fulcio walk
     /// that this crate does not yet ship. See SPEC-ATTESTATIONS §6.2.
     /// Any signature dispatched to this trust root reports
@@ -188,6 +195,17 @@ pub fn verify(env: &Envelope, registry: &Registry) -> Result<VerifyResult, Error
             #[cfg(feature = "algo-secp256k1")]
             Some(TrustRoot::Secp256k1PubKeySec1(pk)) => {
                 row.reason = match crate::signer_k256::verify_secp256k1(pk, &pae, &s.sig) {
+                    Ok(()) => Reason::Ok,
+                    Err(_) => Reason::SignatureMismatch,
+                };
+                if row.reason == Reason::Ok {
+                    row.verified = true;
+                    any_verified = true;
+                }
+            }
+            #[cfg(feature = "bls-threshold")]
+            Some(TrustRoot::Bls12381ThresholdPubKey(pk)) => {
+                row.reason = match crate::signer_bls_threshold::verify(pk, &pae, &s.sig) {
                     Ok(()) => Reason::Ok,
                     Err(_) => Reason::SignatureMismatch,
                 };
@@ -743,5 +761,120 @@ mod tests {
         let msg = b"hello";
         let sig = [0u8; 64];
         assert!(verify_signature(Algorithm::Ed25519, &pk, msg, &sig).is_err());
+    }
+
+    /// End-to-end: a DSSE envelope signed by a 3-of-4 BLS threshold
+    /// cohort verifies against a `Bls12381ThresholdPubKey` trust root
+    /// in the registry. Pins Phase 2's registry-dispatch wiring.
+    #[cfg(feature = "bls-threshold")]
+    #[test]
+    fn registry_dispatches_bls_threshold_keyid_to_verify() {
+        use crate::signer_bls_threshold::{
+            KEYID_PREFIX, ThresholdSigner, aggregate, trusted_dealer,
+        };
+        use commonware_codec::Encode as _;
+        use commonware_utils::{NZU32, test_rng_seeded};
+
+        // 3-of-4 cohort.
+        let mut rng = test_rng_seeded(0xBEEF);
+        let (sharing, shares) = trusted_dealer(&mut rng, NZU32!(4));
+        let agg_pubkey = sharing.public().encode().to_vec();
+        let keyid = format!("{KEYID_PREFIX}{}", mkit_core::to_hex_bytes(&agg_pubkey));
+
+        // Build an envelope around an in-toto Statement, then sign its
+        // PAE with 3 of the 4 holders and aggregate.
+        let stmt = crate::statement::encode(&crate::statement::Statement {
+            subjects: vec![crate::statement::Subject {
+                name: Some("commit".into()),
+                digest_blake3_hex: "a".repeat(64),
+            }],
+            predicate_type: "https://example.com/p/v1".into(),
+            predicate_jcs: b"{}",
+        })
+        .unwrap();
+        let pae = envelope::pae_of(envelope::PAYLOAD_TYPE_IN_TOTO, stmt.as_bytes());
+
+        let mut partials: Vec<Vec<u8>> = Vec::with_capacity(3);
+        for s in shares.iter().take(3) {
+            let mut signer = ThresholdSigner::new(s.clone(), sharing.clone());
+            use crate::signer::Signer as _;
+            partials.push(signer.sign(&pae).expect("partial sign"));
+        }
+        let agg_sig = aggregate(&sharing, &partials).expect("aggregate");
+
+        let env = Envelope {
+            payload_type: envelope::PAYLOAD_TYPE_IN_TOTO.into(),
+            payload: stmt.into_bytes(),
+            signatures: vec![envelope::Sig {
+                keyid: keyid.clone(),
+                sig: agg_sig,
+            }],
+        };
+        let bytes = env.encode().unwrap().into_bytes();
+
+        let mut reg = Registry::new();
+        reg.add(keyid.clone(), TrustRoot::Bls12381ThresholdPubKey(agg_pubkey));
+
+        let r = verify_envelope(&bytes, &reg).unwrap();
+        assert!(r.any_verified);
+        assert_eq!(r.signatures.len(), 1);
+        assert_eq!(r.signatures[0].reason, Reason::Ok);
+        assert!(r.signatures[0].verified);
+        assert_eq!(r.signatures[0].keyid, keyid);
+    }
+
+    /// Tampered aggregate signature reports `SignatureMismatch` (not
+    /// `UnknownKeyid` or `UnsupportedTrustRoot`).
+    #[cfg(feature = "bls-threshold")]
+    #[test]
+    fn registry_rejects_tampered_bls_aggregate() {
+        use crate::signer_bls_threshold::{
+            KEYID_PREFIX, ThresholdSigner, aggregate, trusted_dealer,
+        };
+        use commonware_codec::Encode as _;
+        use commonware_utils::{NZU32, test_rng_seeded};
+
+        let mut rng = test_rng_seeded(0xCAFE);
+        let (sharing, shares) = trusted_dealer(&mut rng, NZU32!(4));
+        let agg_pubkey = sharing.public().encode().to_vec();
+        let keyid = format!("{KEYID_PREFIX}{}", mkit_core::to_hex_bytes(&agg_pubkey));
+
+        let stmt = crate::statement::encode(&crate::statement::Statement {
+            subjects: vec![crate::statement::Subject {
+                name: Some("commit".into()),
+                digest_blake3_hex: "b".repeat(64),
+            }],
+            predicate_type: "https://example.com/p/v1".into(),
+            predicate_jcs: b"{}",
+        })
+        .unwrap();
+        let pae = envelope::pae_of(envelope::PAYLOAD_TYPE_IN_TOTO, stmt.as_bytes());
+
+        let mut partials: Vec<Vec<u8>> = Vec::with_capacity(3);
+        for s in shares.iter().take(3) {
+            let mut signer = ThresholdSigner::new(s.clone(), sharing.clone());
+            use crate::signer::Signer as _;
+            partials.push(signer.sign(&pae).expect("partial sign"));
+        }
+        let mut agg_sig = aggregate(&sharing, &partials).expect("aggregate");
+        let last = agg_sig.len() - 1;
+        agg_sig[last] ^= 0x01;
+
+        let env = Envelope {
+            payload_type: envelope::PAYLOAD_TYPE_IN_TOTO.into(),
+            payload: stmt.into_bytes(),
+            signatures: vec![envelope::Sig {
+                keyid: keyid.clone(),
+                sig: agg_sig,
+            }],
+        };
+        let bytes = env.encode().unwrap().into_bytes();
+
+        let mut reg = Registry::new();
+        reg.add(keyid, TrustRoot::Bls12381ThresholdPubKey(agg_pubkey));
+
+        let r = verify_envelope(&bytes, &reg).unwrap();
+        assert!(!r.any_verified);
+        assert_eq!(r.signatures[0].reason, Reason::SignatureMismatch);
     }
 }
