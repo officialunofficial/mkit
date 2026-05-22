@@ -56,6 +56,15 @@ struct GenerateOpts {
     force: bool,
     #[arg(long)]
     print_pubkey: bool,
+    /// BLS12-381 threshold (M-of-N): quorum required to recover an
+    /// aggregated signature. Required with
+    /// `--algorithm bls12381-thr`.
+    #[arg(long, value_name = "M")]
+    threshold: Option<u32>,
+    /// BLS12-381 threshold total (N): number of shares the dealer
+    /// produces. Required with `--algorithm bls12381-thr`.
+    #[arg(long, value_name = "N")]
+    total: Option<u32>,
 }
 
 #[derive(Debug, Parser)]
@@ -139,6 +148,20 @@ fn generate(opts: GenerateOpts) -> u8 {
         Ok(algorithm) => algorithm,
         Err(code) => return code,
     };
+
+    // BLS12-381 threshold needs a trusted-dealer ceremony: one
+    // command produces N encrypted shares stored under
+    // `<label>-<index>`, plus prints the cohort public key + keyid for
+    // registration in trust-roots. The `--threshold` / `--total`
+    // flags are required and `--extractable` / `--non-extractable` /
+    // `--device-bound` / `--require-user-presence` do not apply (the
+    // share record carries its own metadata, not the generic
+    // `KeyAttrs`).
+    #[cfg(feature = "bls-threshold")]
+    if algorithm == Algorithm::Bls12381Threshold {
+        return generate_bls_threshold(&cfg, &opts);
+    }
+
     let attrs = attrs_from_flags(
         opts.extractable,
         opts.non_extractable,
@@ -180,6 +203,148 @@ fn generate(opts: GenerateOpts) -> u8 {
     if opts.print_pubkey {
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", metadata.keyid());
+    }
+    exit::OK
+}
+
+/// Trusted-dealer keygen for the BLS12-381 threshold cohort. Stores
+/// `total` encrypted shares under `<label>-<index>` in the chosen
+/// keystore root and prints the aggregated cohort public key + keyid
+/// so the caller can register it in their `trust-roots.toml`.
+///
+/// Phase 3 (release-party CLI) replaces the single-host trusted dealer
+/// with a multi-host distribution ceremony; the keystore-side API is
+/// unchanged.
+#[cfg(feature = "bls-threshold")]
+#[allow(clippy::too_many_lines)]
+fn generate_bls_threshold(cfg: &Config, opts: &GenerateOpts) -> u8 {
+    use commonware_codec::Encode as _;
+    use mkit_attest::BLS_THRESHOLD_KEYID_PREFIX;
+    use mkit_keystore::SoftwareKeystore;
+
+    let Some(total) = opts.total else {
+        return emit_err(
+            "mkit key generate --algorithm bls12381-thr requires --total N",
+            exit::USAGE,
+        );
+    };
+    let Some(threshold) = opts.threshold else {
+        return emit_err(
+            "mkit key generate --algorithm bls12381-thr requires --threshold M",
+            exit::USAGE,
+        );
+    };
+    let Some(total_nz) = core::num::NonZeroU32::new(total) else {
+        return emit_err("--total must be at least 1", exit::USAGE);
+    };
+    if threshold == 0 || threshold > total {
+        return emit_err(
+            "--threshold M must satisfy 1 <= M <= N (--total)",
+            exit::USAGE,
+        );
+    }
+    // The Phase 1 trusted dealer pins the N3f1 fault model, which
+    // fixes `threshold = ceil(2n/3)`. We accept the caller's
+    // `--threshold` so the CLI surface matches the spec wording, but
+    // we validate it against what the dealer will actually produce —
+    // otherwise the caller would silently get a different threshold
+    // than they asked for.
+    let dealer_threshold = mkit_attest::bls_threshold_for(total);
+    if threshold != dealer_threshold {
+        return emit_err(
+            &format!(
+                "--threshold {threshold} does not match the N3f1 quorum for --total {total} \
+                 (expected {dealer_threshold}); the Phase 1 trusted dealer pins this ratio. \
+                 Phase 3 will accept arbitrary M-of-N once a DKG protocol is wired in."
+            ),
+            exit::USAGE,
+        );
+    }
+
+    let backend = match opts.backend.as_deref() {
+        Some(b) => match parse_backend(b) {
+            Ok(parsed) => parsed,
+            Err(code) => return code,
+        },
+        None => match parse_backend(cfg.key.backend_or_fallback()) {
+            Ok(parsed) => parsed,
+            Err(code) => return code,
+        },
+    };
+    if !matches!(backend, BackendKind::Software) {
+        return emit_err(
+            &format!(
+                "BLS threshold shares are stored by the `software` backend in Phase 2; \
+                 `--backend {backend}` is not supported"
+            ),
+            exit::USAGE,
+        );
+    }
+    let base_label = match opts.label.as_deref() {
+        Some(label) => label.to_owned(),
+        None => {
+            return emit_err(
+                "mkit key generate --algorithm bls12381-thr requires --label <BASE>",
+                exit::USAGE,
+            );
+        }
+    };
+
+    // Run the trusted dealer with the OS RNG. The cohort `Sharing`
+    // gives us the aggregated public key + every holder's `Share`.
+    let mut rng = rand_core::OsRng;
+    let (sharing, shares) = mkit_attest::bls_threshold_trusted_dealer(&mut rng, total_nz);
+    let agg_pubkey = sharing.public().encode().to_vec();
+    let keyid = format!("{BLS_THRESHOLD_KEYID_PREFIX}{}", hex_lower(&agg_pubkey));
+
+    let Ok(store) = SoftwareKeystore::new() else {
+        return emit_err("software keystore root not discoverable", exit::UNAVAILABLE);
+    };
+
+    let mut stored: Vec<(String, u32)> = Vec::with_capacity(shares.len());
+    for (offset, share) in shares.iter().enumerate() {
+        // commonware-cryptography's `Share` has a `u32` index; we use
+        // `offset` (0..total) as the CLI-visible holder index so the
+        // emitted labels are `<base>-0` through `<base>-{N-1}`.
+        let share_index = u32::try_from(offset).unwrap_or(u32::MAX);
+        let label_str = format!("{base_label}-{share_index}");
+        let label = match KeyLabel::new(label_str.clone()) {
+            Ok(l) => l,
+            Err(error) => return keystore_error(error),
+        };
+        let share_bytes = share.encode().to_vec();
+        if let Err(error) = store.store_bls_share(
+            &label,
+            &share_bytes,
+            agg_pubkey.clone(),
+            share_index,
+            threshold,
+            total,
+            keyid.clone(),
+            opts.force,
+        ) {
+            return keystore_error(error);
+        }
+        stored.push((label_str, share_index));
+    }
+
+    // Report. The cohort public key + keyid go to stdout so it's
+    // pipeable into `mkit config` / `trust-roots.toml`; the
+    // human-readable share roster goes to stderr.
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "generated {total} BLS12-381 threshold shares ({threshold}-of-{total} quorum)"
+    );
+    for (label, index) in &stored {
+        let _ = writeln!(stderr, "  share {index}: software:{label}");
+    }
+    let _ = writeln!(stderr, "register the cohort public key under this keyid:");
+
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{keyid}");
+    if opts.print_pubkey {
+        let _ = writeln!(stdout, "pubkey_hex = {}", hex_lower(&agg_pubkey));
     }
     exit::OK
 }
@@ -480,6 +645,13 @@ fn configured_ref_or_fallback(cfg: &Config, algorithm: Algorithm) -> &str {
         Algorithm::Ed25519 => cfg.key.ed25519_ref_or_fallback(),
         Algorithm::Secp256k1 => cfg.key.secp256k1_ref_or_fallback(),
         Algorithm::P256 => cfg.key.p256_ref_or_fallback(),
+        // BLS threshold keystore ref defaults to the generic
+        // `key.default_ref` (or the documented `software:default`
+        // fallback). The Phase 3 release-party CLI will introduce a
+        // dedicated `key.bls12381_thr_ref` knob; until then the
+        // generic ref is enough.
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => cfg.key.default_ref_or_fallback(),
     }
 }
 

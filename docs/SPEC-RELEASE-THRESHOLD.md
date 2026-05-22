@@ -296,13 +296,17 @@ Maintainer set churn is invisible at the verifier layer — by design.
 | 1 | `bls_threshold_verify` (free function) | Landed |
 | 1 | `bls_threshold_trusted_dealer` (Phase-1 dealer helper) | Landed |
 | 1 | `SPEC-RELEASE-THRESHOLD.md` (this document) | Draft |
-| 2 | `mkit-keystore::BackendKind::BlsShare` | Not started |
-| 2 | DSSE-envelope-level `verify_envelope` dispatch for BLS keyids | Not started |
-| 2 | Trust-roots TOML schema for `bls12381-thr:` keyids | Not started |
-| 2 | DKG ceremony in place of trusted dealer | Not started |
+| 2 | `mkit-keystore::Algorithm::Bls12381Threshold` variant | Landed |
+| 2 | `SoftwareKeystore::store_bls_share` / `load_bls_share` / `delete_bls_share` / `list_bls_shares` | Landed |
+| 2 | `BlsShareRecord` AEAD wire format (magic `MKITKSB1`) | Landed |
+| 2 | `TrustRoot::Bls12381ThresholdPubKey` + `verify_envelope` registry dispatch | Landed |
+| 2 | Trust-roots TOML schema for `bls12381-thr:` keyids (`kind = "bls12381-thr"` or `algorithm = "bls12381-thr"`) | Landed |
+| 2 | `mkit key generate --algorithm bls12381-thr --threshold M --total N --label <base>` CLI | Landed |
+| 2 | DKG ceremony in place of trusted dealer | Deferred to Phase 3 |
 | 3 | `contrib/release-party/` CLI (`sign`, `aggregate`, `deal`) | Not started |
 | 3 | `.github/workflows/release.yml` integration | Not started |
 | 3 | Maintainer rotation / resharing tooling | Not started |
+| 3 | Multi-host distribution (replacement for single-host trusted dealer) | Not started |
 
 Acceptance for the issue overall (#160):
 
@@ -324,10 +328,16 @@ Acceptance for the issue overall (#160):
 
 ## 7. Open questions
 
-- **Share serialisation at rest.** Phase-2 keystore concern. Likely a
-  PKCS#8-style PEM wrapping the `commonware_codec::Encode` form of
-  `Share`, but we want to round-trip through age / OpenBao without
-  format surprises.
+- **Share serialisation at rest.** *(Resolved in Phase 2.)* The
+  software backend stores each share as a
+  `commonware_codec::Encode`-encoded `Share` wrapped in a
+  `BlsShareRecord` (magic `MKITKSB1`, `XChaCha20-Poly1305`,
+  protector-managed DEK). The record's AAD binds the share to the
+  cohort public key, holder index, M-of-N threshold, and total — so
+  a swapped 1-of-N share cannot be passed off as 3-of-N. Round-trip
+  through age / OpenBao is unblocked: those tools wrap arbitrary
+  bytes and our wire format is opaque to them. See `SPEC-KEYSTORE.md`
+  §"BLS12-381 threshold share storage".
 - **Coordination channel.** Signal vs. GitHub issue comment vs.
   OpenBao audit log — each has different trust-root assumptions.
   Phase 3 picks one; the spec stays neutral.

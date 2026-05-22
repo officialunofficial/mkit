@@ -76,6 +76,11 @@ fn resolve_by_algorithm(selector: &KeySelector, algorithm: Algorithm) -> Result<
         Algorithm::Ed25519 => resolve_openpgp(selector).map(YubiKeySigningKey::OpenPgp),
         Algorithm::P256 => resolve_piv(selector).map(YubiKeySigningKey::Piv),
         Algorithm::Secp256k1 => Err(Error::UnsupportedAlgorithm(Algorithm::Secp256k1)),
+        // YubiKey backends (OpenPGP + PIV) do not implement
+        // BLS12-381; BLS threshold shares live in the software
+        // backend.
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => Err(Error::UnsupportedAlgorithm(algorithm)),
     }
 }
 
