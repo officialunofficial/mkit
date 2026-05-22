@@ -38,6 +38,24 @@ harness = false
 name = "pack_create"
 harness = false
 
+# Issue #159 Phase 2 — sharded vs monolithic 100 MiB pack transfer
+# with simulated network jitter. Default-off (the `pack-shards`
+# feature on mkit-core pulls in the commonware dep stack, which is
+# heavy). Run with:
+#
+#     cargo bench -p mkit-benches --features pack-shards \
+#                 --bench pack_shard_transfer
+#
+# Not gated on in CI — exists for future regression tracking.
+[[bench]]
+name = "pack_shard_transfer"
+harness = false
+required-features = ["pack-shards"]
+
+[features]
+default = []
+pack-shards = ["mkit-core/pack-shards"]
+
 [dependencies]
 mkit-core = { path = "../crates/mkit-core" }
 mkit-attest = { path = "../crates/mkit-attest" }

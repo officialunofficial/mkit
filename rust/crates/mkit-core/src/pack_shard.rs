@@ -64,6 +64,32 @@ const STRATEGY: Sequential = Sequential;
 /// originated from a valid mkit pack.
 const MAX_SHARD_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
+/// Size below which a producer SHOULD NOT shard a pack.
+///
+/// Per SPEC-PACK-SHARDS §6 the per-shard Merkle-proof overhead
+/// dominates for small packs, so producers serve them monolithically.
+/// 1 MiB is the v0 cutoff; the constant is exported so transports and
+/// CLI tooling agree on a single number.
+pub const SHARD_SIZE_THRESHOLD: u64 = 1024 * 1024;
+
+/// Wire-format magic for a serialised [`ShardSet`]. Spells "MKSH" —
+/// "mkit-shards" — and lets a parser refuse to treat random bytes as a
+/// manifest.
+pub const MANIFEST_MAGIC: [u8; 4] = *b"MKSH";
+
+/// Wire-format version for a serialised [`ShardSet`]. Bumped whenever
+/// the on-the-wire layout changes in a non-backwards-compatible way.
+pub const MANIFEST_VERSION: u8 = 0x01;
+
+/// Total prologue size: magic (4) + version (1).
+const MANIFEST_PROLOGUE_LEN: usize = 5;
+
+/// Per SPEC-PACK-SHARDS §6, a manifest with the v0 default config is
+/// `~ 32 * (T + 2)` bytes plus the prologue and config. We cap at
+/// 1 MiB so a hostile peer can not stream gigabytes through the
+/// deserialiser.
+pub const MANIFEST_MAX_BYTES: usize = 1024 * 1024;
+
 /// Default config: `(minimum_shards = 16, extra_shards = 4)`.
 ///
 /// 20 total shards, any 16 of which reconstruct. See SPEC-PACK-SHARDS §6
@@ -166,6 +192,26 @@ pub enum ShardError {
     /// Caller passed fewer than `config.minimum_shards` shards.
     #[error("insufficient shards: {provided} < {minimum}")]
     InsufficientShards { provided: usize, minimum: u16 },
+    /// The manifest wire bytes are shorter than the v0 prologue, do not
+    /// begin with [`MANIFEST_MAGIC`], or carry an unrecognised
+    /// [`MANIFEST_VERSION`].
+    #[error("invalid manifest prologue: {0}")]
+    InvalidManifestPrologue(&'static str),
+    /// The manifest wire bytes are truncated — a length-prefixed field
+    /// claims more bytes than remain in the buffer.
+    #[error("unexpected eof while decoding manifest")]
+    ManifestUnexpectedEof,
+    /// The manifest carries trailing bytes after the last expected
+    /// field. Most likely a producer / consumer version mismatch.
+    #[error("trailing bytes after manifest body")]
+    ManifestTrailingBytes,
+    /// The manifest declares a `(minimum_shards, extra_shards)` pair
+    /// whose components are zero — illegal at the SPEC level.
+    #[error("manifest declares zero shard count (min={minimum}, extra={extra})")]
+    ManifestZeroShardCount { minimum: u16, extra: u16 },
+    /// The manifest exceeds [`MANIFEST_MAX_BYTES`].
+    #[error("manifest is too large: {actual} > {max}")]
+    ManifestTooLarge { actual: usize, max: usize },
 }
 
 /// Encode a pack into shards.
@@ -330,6 +376,192 @@ fn bytes_to_digest(b: &[u8; HASH_LEN]) -> Commitment {
     Commitment::from(*b)
 }
 
+// ---------------------------------------------------------------------
+// Manifest wire format (v0)
+// ---------------------------------------------------------------------
+//
+// Layout (all multi-byte integers are little-endian):
+//
+//     offset  size  field
+//     ------  ----  -----------------------------------------
+//     0       4     magic = b"MKSH"
+//     4       1     version = 0x01
+//     5       32    pack_hash
+//     37      2     config.minimum_shards
+//     39      2     config.extra_shards
+//     41      32    commitment
+//     73      4     shard_hashes_len (== minimum + extra)
+//     77      32*T  shard_hashes
+//
+// Total size for the v0 default `(16, 4)` config:
+//     5 + 32 + 2 + 2 + 32 + 4 + 32*20 = 717 bytes.
+//
+// Rationale for adding a new format here rather than reusing
+// `mkit_core::serialize`:
+//   * `serialize.rs` is hard-coded to the [`Object`] enum and its
+//     `MAGIC = "MKT1"` / `SCHEMA_VERSION` prologue. Shoehorning a
+//     non-`Object` payload into that path would require widening its
+//     public API and re-encoding every golden vector.
+//   * The shard manifest is a transport artifact, not an object on
+//     disk. Keeping its wire format colocated with the rest of the
+//     pack-shard module keeps Phase 2 changes scoped to one file.
+
+/// Serialise a [`ShardSet`] into its v0 wire bytes.
+///
+/// The format is documented above and in SPEC-PACK-SHARDS §2. The
+/// caller takes ownership of the returned `Vec`.
+///
+/// # Errors
+///
+/// Returns [`ShardError::ManifestShardCountMismatch`] if
+/// `manifest.shard_hashes.len()` does not equal
+/// `manifest.config.total_shards()` — we refuse to encode a manifest
+/// whose vectors disagree with its config.
+///
+/// # Panics
+///
+/// Infallible: `config.total_shards()` is `u32` by commonware's own
+/// bound and the `expect` documents intent. It cannot fire.
+pub fn encode_manifest(manifest: &ShardSet) -> Result<Vec<u8>, ShardError> {
+    let total = manifest.config.total_shards() as usize;
+    if manifest.shard_hashes.len() != total {
+        return Err(ShardError::ManifestShardCountMismatch {
+            actual: manifest.shard_hashes.len(),
+            expected: total,
+        });
+    }
+
+    let body_len = MANIFEST_PROLOGUE_LEN + HASH_LEN + 2 + 2 + HASH_LEN + 4 + total * HASH_LEN;
+    let mut out = Vec::with_capacity(body_len);
+    out.extend_from_slice(&MANIFEST_MAGIC);
+    out.push(MANIFEST_VERSION);
+    out.extend_from_slice(&manifest.pack_hash);
+    out.extend_from_slice(&manifest.config.minimum_shards.get().to_le_bytes());
+    out.extend_from_slice(&manifest.config.extra_shards.get().to_le_bytes());
+    out.extend_from_slice(&manifest.commitment);
+    // Length-prefix the shard_hashes vector as u32 so the parser can
+    // bail before allocating attacker-controlled capacity.
+    out.extend_from_slice(
+        &u32::try_from(total)
+            .expect("total_shards fits in u32")
+            .to_le_bytes(),
+    );
+    for h in &manifest.shard_hashes {
+        out.extend_from_slice(h);
+    }
+    debug_assert_eq!(out.len(), body_len);
+    Ok(out)
+}
+
+/// Deserialise a [`ShardSet`] from its v0 wire bytes.
+///
+/// Validates the prologue, the length-prefixed shard-hashes vector,
+/// the per-config bounds, and rejects trailing bytes.
+///
+/// # Errors
+///
+/// * [`ShardError::ManifestTooLarge`] — input exceeds
+///   [`MANIFEST_MAX_BYTES`].
+/// * [`ShardError::InvalidManifestPrologue`] — magic / version
+///   mismatch or input shorter than the prologue.
+/// * [`ShardError::ManifestUnexpectedEof`] — any field claims more
+///   bytes than remain in the buffer.
+/// * [`ShardError::ManifestZeroShardCount`] — manifest declares
+///   `(0, _)` or `(_, 0)`.
+/// * [`ShardError::ManifestShardCountMismatch`] — declared
+///   `shard_hashes_len` does not equal `minimum + extra`.
+/// * [`ShardError::ManifestTrailingBytes`] — input has bytes after
+///   the last hash.
+pub fn decode_manifest(bytes: &[u8]) -> Result<ShardSet, ShardError> {
+    if bytes.len() > MANIFEST_MAX_BYTES {
+        return Err(ShardError::ManifestTooLarge {
+            actual: bytes.len(),
+            max: MANIFEST_MAX_BYTES,
+        });
+    }
+    if bytes.len() < MANIFEST_PROLOGUE_LEN {
+        return Err(ShardError::InvalidManifestPrologue(
+            "input shorter than prologue",
+        ));
+    }
+    if bytes[..4] != MANIFEST_MAGIC {
+        return Err(ShardError::InvalidManifestPrologue("bad magic"));
+    }
+    if bytes[4] != MANIFEST_VERSION {
+        return Err(ShardError::InvalidManifestPrologue("unsupported version"));
+    }
+    let mut pos = MANIFEST_PROLOGUE_LEN;
+
+    // pack_hash
+    if bytes.len() - pos < HASH_LEN {
+        return Err(ShardError::ManifestUnexpectedEof);
+    }
+    let mut pack_hash = [0u8; HASH_LEN];
+    pack_hash.copy_from_slice(&bytes[pos..pos + HASH_LEN]);
+    pos += HASH_LEN;
+
+    // config
+    if bytes.len() - pos < 4 {
+        return Err(ShardError::ManifestUnexpectedEof);
+    }
+    let minimum = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]);
+    let extra = u16::from_le_bytes([bytes[pos + 2], bytes[pos + 3]]);
+    pos += 4;
+    let minimum_nz =
+        NonZeroU16::new(minimum).ok_or(ShardError::ManifestZeroShardCount { minimum, extra })?;
+    let extra_nz =
+        NonZeroU16::new(extra).ok_or(ShardError::ManifestZeroShardCount { minimum, extra })?;
+    let config = Config {
+        minimum_shards: minimum_nz,
+        extra_shards: extra_nz,
+    };
+    let total = config.total_shards();
+
+    // commitment
+    if bytes.len() - pos < HASH_LEN {
+        return Err(ShardError::ManifestUnexpectedEof);
+    }
+    let mut commitment = [0u8; HASH_LEN];
+    commitment.copy_from_slice(&bytes[pos..pos + HASH_LEN]);
+    pos += HASH_LEN;
+
+    // shard_hashes_len
+    if bytes.len() - pos < 4 {
+        return Err(ShardError::ManifestUnexpectedEof);
+    }
+    let declared_len =
+        u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]);
+    pos += 4;
+    if declared_len != total {
+        return Err(ShardError::ManifestShardCountMismatch {
+            actual: declared_len as usize,
+            expected: total as usize,
+        });
+    }
+    // Cheap upper bound — reject impossible counts before allocating.
+    if (declared_len as usize).saturating_mul(HASH_LEN) > bytes.len() - pos {
+        return Err(ShardError::ManifestUnexpectedEof);
+    }
+    let mut shard_hashes = Vec::with_capacity(declared_len as usize);
+    for _ in 0..declared_len {
+        let mut h = [0u8; HASH_LEN];
+        h.copy_from_slice(&bytes[pos..pos + HASH_LEN]);
+        pos += HASH_LEN;
+        shard_hashes.push(h);
+    }
+
+    if pos != bytes.len() {
+        return Err(ShardError::ManifestTrailingBytes);
+    }
+
+    Ok(ShardSet {
+        pack_hash,
+        config,
+        shard_hashes,
+        commitment,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +636,111 @@ mod tests {
         assert!(
             matches!(err, ShardError::ShardHashMismatch { index: 0 }),
             "expected ShardHashMismatch{{index: 0}}, got {err:?}"
+        );
+    }
+
+    // ---- Manifest wire-format tests --------------------------------
+
+    #[test]
+    fn manifest_wire_format_round_trip_default_config() {
+        let pack = synthetic_pack(64 * 1024);
+        let (_, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+
+        let bytes = encode_manifest(&manifest).unwrap();
+        // Pin the v0 size for the default (16, 4) config.
+        // 5 (prologue) + 32 (pack_hash) + 4 (config) + 32 (commitment)
+        // + 4 (len) + 32 * 20 (hashes) = 717.
+        assert_eq!(bytes.len(), 717);
+        assert_eq!(&bytes[..4], &MANIFEST_MAGIC);
+        assert_eq!(bytes[4], MANIFEST_VERSION);
+
+        let decoded = decode_manifest(&bytes).unwrap();
+        assert_eq!(decoded, manifest);
+    }
+
+    #[test]
+    fn manifest_decode_rejects_bad_magic() {
+        let pack = synthetic_pack(32 * 1024);
+        let (_, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+        let mut bytes = encode_manifest(&manifest).unwrap();
+        bytes[0] = b'X';
+        let err = decode_manifest(&bytes).unwrap_err();
+        assert!(
+            matches!(err, ShardError::InvalidManifestPrologue("bad magic")),
+            "expected InvalidManifestPrologue(bad magic), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_decode_rejects_unsupported_version() {
+        let pack = synthetic_pack(32 * 1024);
+        let (_, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+        let mut bytes = encode_manifest(&manifest).unwrap();
+        bytes[4] = 0xFF;
+        let err = decode_manifest(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ShardError::InvalidManifestPrologue("unsupported version")
+            ),
+            "expected InvalidManifestPrologue(unsupported version), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_decode_rejects_trailing_bytes() {
+        let pack = synthetic_pack(32 * 1024);
+        let (_, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+        let mut bytes = encode_manifest(&manifest).unwrap();
+        bytes.push(0xAB);
+        let err = decode_manifest(&bytes).unwrap_err();
+        assert!(
+            matches!(err, ShardError::ManifestTrailingBytes),
+            "expected ManifestTrailingBytes, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_decode_rejects_truncated_body() {
+        let pack = synthetic_pack(32 * 1024);
+        let (_, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+        let mut bytes = encode_manifest(&manifest).unwrap();
+        bytes.truncate(bytes.len() - 1);
+        let err = decode_manifest(&bytes).unwrap_err();
+        assert!(
+            matches!(err, ShardError::ManifestUnexpectedEof),
+            "expected ManifestUnexpectedEof, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_decode_rejects_oversize_input() {
+        // Construct a buffer that *claims* to be a valid manifest by
+        // shape but exceeds the cap. We don't need a real manifest;
+        // the size check fires before prologue parsing.
+        let bytes = vec![0u8; MANIFEST_MAX_BYTES + 1];
+        let err = decode_manifest(&bytes).unwrap_err();
+        assert!(
+            matches!(err, ShardError::ManifestTooLarge { .. }),
+            "expected ManifestTooLarge, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_decode_rejects_zero_config() {
+        // Hand-craft a manifest with minimum_shards = 0.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MANIFEST_MAGIC);
+        bytes.push(MANIFEST_VERSION);
+        bytes.extend_from_slice(&[0u8; HASH_LEN]); // pack_hash
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // minimum_shards = 0
+        bytes.extend_from_slice(&4u16.to_le_bytes()); // extra_shards
+        bytes.extend_from_slice(&[0u8; HASH_LEN]); // commitment
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // shard_hashes_len
+        let err = decode_manifest(&bytes).unwrap_err();
+        assert!(
+            matches!(err, ShardError::ManifestZeroShardCount { .. }),
+            "expected ManifestZeroShardCount, got {err:?}"
         );
     }
 

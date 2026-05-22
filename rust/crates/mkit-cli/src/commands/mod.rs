@@ -24,6 +24,8 @@ pub mod key;
 pub mod keygen;
 pub mod log;
 pub mod merge;
+#[cfg(feature = "pack-shards")]
+pub mod pack_shard;
 pub mod pull;
 pub mod push;
 pub mod rebase;

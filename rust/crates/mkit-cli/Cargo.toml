@@ -154,3 +154,11 @@ sparse-checkout = [
     "mkit-transport-http/sparse-checkout",
     "mkit-transport-s3/sparse-checkout",
 ]
+# Issue #159 Phase 2 — `mkit pack-shard <hash>` producer subcommand
+# and shard-aware HTTP / S3 downloads. Default-off because the
+# commonware dep stack is large.
+pack-shards = [
+    "mkit-core/pack-shards",
+    "mkit-transport-http/pack-shards",
+    "mkit-transport-s3/pack-shards",
+]
