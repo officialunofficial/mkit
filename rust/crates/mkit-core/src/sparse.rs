@@ -433,16 +433,6 @@ pub fn tree_hash(tree: &Tree) -> Hash {
     blake3_hash(&bytes)
 }
 
-// Re-export the canonical helper so external code that just needs to
-// compute "the tree hash" (e.g. an HTTP server building the cache key)
-// can do so without re-cloning the canonical serialisation themselves.
-//
-// Equivalent to `tree_hash(t)`; named for the public-API call site.
-#[must_use]
-pub fn canonical_tree_hash(tree: &Tree) -> Hash {
-    tree_hash(tree)
-}
-
 /// Wire envelope magic — `b"MSP1"` (mkit-sparse-v1). Helps the
 /// transport sanity-check the body before any deserialisation. Sits in
 /// the same family as the v1 object prologue, but the codes are
@@ -812,12 +802,6 @@ pub fn decode_sparse_cache(buf: &[u8]) -> Result<(Hash, Hash, u64, Vec<u8>), Spa
     let bitmap_bytes = buf[81..end].to_vec();
     Ok((bitmap_root, filter_hash, leaf_count, bitmap_bytes))
 }
-
-// `ZERO` is still re-used by the empty-tree short-circuit fallback in
-// `tree_hash`; silence the unused-import warning for builds that don't
-// trigger that path (none today, but future test paths may).
-#[allow(dead_code)]
-const _UNUSED_ZERO: Hash = ZERO;
 
 // ---------------------------------------------------------------------------
 // Tests
