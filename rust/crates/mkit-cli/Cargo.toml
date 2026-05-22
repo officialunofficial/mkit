@@ -53,7 +53,17 @@ mkit-transport-file = { version = "0.1", path = "../mkit-transport-file" }
 mkit-transport-http = { version = "0.1", path = "../mkit-transport-http" }
 mkit-transport-s3 = { version = "0.1", path = "../mkit-transport-s3" }
 mkit-transport-ssh = { version = "0.1", path = "../mkit-transport-ssh" }
+# Optional: encrypted-stream transport. Off by default so the
+# baseline `mkit-cli` build doesn't pay tokio's compile cost. Turn on
+# via `--features enc-transport`. See SPEC-TRANSPORT-ENC §6.
+mkit-transport-enc = { version = "0.1", path = "../mkit-transport-enc", optional = true }
 mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
+# commonware-cryptography's ed25519 PrivateKey is the static-key type
+# the encrypted transport handshake takes. Pulled in here behind the
+# `enc-transport` feature so the keystore-driven key-loading path in
+# remote_dispatch can build a key from raw bytes without touching
+# `mkit-transport-enc`'s internals.
+commonware-cryptography = { workspace = true, features = ["std"], optional = true }
 buffa = "0.6"
 
 # `wrap_help` is intentionally disabled so help-text output stays
@@ -123,3 +133,8 @@ default = []
 # cover it (returning UNAVAILABLE per-site). Phase 3 of issue #160
 # will replace the inert arms with a real release-party signer.
 bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold"]
+# Enables the `mkit+enc://` dispatch path in `remote_dispatch::open`
+# and the `mkit serve --listen-enc <addr>` listener flag. Pulls in
+# `mkit-transport-enc` with its `tcp` feature (tokio + governor +
+# rand). See SPEC-TRANSPORT-ENC §6 item 3.
+enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography"]
