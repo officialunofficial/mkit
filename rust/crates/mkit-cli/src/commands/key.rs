@@ -480,6 +480,13 @@ fn configured_ref_or_fallback(cfg: &Config, algorithm: Algorithm) -> &str {
         Algorithm::Ed25519 => cfg.key.ed25519_ref_or_fallback(),
         Algorithm::Secp256k1 => cfg.key.secp256k1_ref_or_fallback(),
         Algorithm::P256 => cfg.key.p256_ref_or_fallback(),
+        // BLS threshold keystore ref defaults to the generic
+        // `key.default_ref` (or the documented `software:default`
+        // fallback). The Phase 3 release-party CLI will introduce a
+        // dedicated `key.bls12381_thr_ref` knob; until then the
+        // generic ref is enough.
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => cfg.key.default_ref_or_fallback(),
     }
 }
 
