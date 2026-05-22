@@ -840,6 +840,78 @@ mod tests {
         );
     }
 
+    // ---- Negative-path verification (journaled flow) -------------
+
+    /// Phase-1-equivalent: appending must change the root. Same
+    /// property as the deleted `root_changes_on_append` test, lifted
+    /// onto the journaled flavour.
+    #[test]
+    fn journaled_root_changes_on_append() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        let root_before = h.root();
+        h.append(&synth(0)).unwrap();
+        let root_after = h.root();
+        assert_ne!(
+            root_before, root_after,
+            "appending a leaf must change the journaled MMR root"
+        );
+    }
+
+    /// Phase-1-equivalent: an honest inclusion proof must not verify
+    /// against a different commit hash than the one that was appended.
+    #[test]
+    fn journaled_wrong_commit_fails_verification() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        let h_a = synth(0);
+        let h_other = synth(99);
+        h.append(&h_a).unwrap();
+        let proof = h.prove(Position(0)).unwrap();
+        let root = h.root();
+
+        assert!(
+            verify_inclusion(&h_a, Position(0), &proof, &root),
+            "honest proof must verify with the appended commit"
+        );
+        assert!(
+            !verify_inclusion(&h_other, Position(0), &proof, &root),
+            "swapping in a different commit hash must fail verification"
+        );
+    }
+
+    /// Phase-1-equivalent: an inclusion proof from one branch's MMR
+    /// must not verify against another branch's root.
+    #[test]
+    fn journaled_wrong_root_fails_verification() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+
+        let h_a = synth(0);
+        let mut a = CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+        a.append(&h_a).unwrap();
+        let proof = a.prove(Position(0)).unwrap();
+        let root_a = a.root();
+        assert!(
+            verify_inclusion(&h_a, Position(0), &proof, &root_a),
+            "sanity: honest proof verifies against its own root"
+        );
+
+        // Independent branch with different leaves — distinct root.
+        let mut b = CommitHistory::open_at(exec, &mkit_dir, "dev").unwrap();
+        b.append(&synth(1)).unwrap();
+        b.append(&synth(2)).unwrap();
+        let root_b = b.root();
+        assert_ne!(root_a, root_b, "distinct branches must have distinct roots");
+
+        assert!(
+            !verify_inclusion(&h_a, Position(0), &proof, &root_b),
+            "proof from one branch must not verify against another branch's root"
+        );
+    }
+
     // ---- Crash recovery (commonware-native semantics) ----------
 
     /// Simulate a torn write: truncate one journal blob mid-frame and
