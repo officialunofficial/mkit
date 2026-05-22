@@ -514,9 +514,14 @@ impl Transport for HttpTransport {
 
         // Shard path: server advertises `X-Pack-Shards`. We discard
         // the monolithic body (if any) and fetch the manifest +
-        // shards in parallel. Fall through to the body path on any
-        // shard-flow error so a flaky shard server doesn't break
-        // downloads outright — the monolithic body is the fallback.
+        // shards in parallel. On any shard-flow error we propagate
+        // it — we deliberately do NOT silently fall back to the
+        // monolithic body. The server advertised `X-Pack-Shards`,
+        // we trust that signal, and a failure in the shard path is
+        // a server-side bug (or attacker-controlled tampering) we
+        // surface rather than silently downgrade. The only fall-
+        // through is when `X-Pack-Shards` is itself malformed, which
+        // we treat as "no advertisement" and re-issue cleanly.
         #[cfg(feature = "pack-shards")]
         if let Some(advert) = resp.headers().get(X_PACK_SHARDS_HEADER).cloned() {
             // Drain the body before issuing more requests so connection
