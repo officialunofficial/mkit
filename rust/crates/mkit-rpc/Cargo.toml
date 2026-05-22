@@ -28,6 +28,14 @@ all = { level = "warn", priority = -1 }
 [dependencies]
 buffa = "0.6"
 thiserror = "2"
+# mkit-rpc now also re-exports a small set of shared transport-side
+# frame helpers (cond_to_wire, rpc_error_to_transport, ref_entry_to_ref,
+# unexpected_frame, body_name, MAX_REF_NAME, CHUNK_DATA_MAX) — used by
+# both mkit-transport-ssh and mkit-transport-enc. Those helpers need
+# `TransportError`, `Ref`, `RefWriteCondition`, and `validate_ref_name`
+# from mkit-core. mkit-core does NOT depend on mkit-rpc, so this is
+# acyclic.
+mkit-core = { version = "0.1", path = "../mkit-core" }
 
 [build-dependencies]
 buffa-build = "0.6"
