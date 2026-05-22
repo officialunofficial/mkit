@@ -471,8 +471,8 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
     // Single repo-level lock around the ref-write + MMR-append
     // critical section. Cross-process interleaving is impossible
     // while any holder owns this lock.
-    let _lock = crate::repo_lock::acquire_default(mkit_dir, "refs-history.lock")
-        .map_err(|e| match e {
+    let _lock =
+        crate::repo_lock::acquire_default(mkit_dir, "refs-history.lock").map_err(|e| match e {
             crate::repo_lock::LockError::Io(io) => RefError::Io(io),
             other => RefError::InvalidRef(format!("{branch}: lock acquisition: {other}")),
         })?;
@@ -1200,22 +1200,14 @@ mod tests {
         fn update_ref_with_history_appends_to_journal_under_lock() {
             let (_dir, mkit) = fresh_repo();
             let exec = Arc::new(TokioExecutor::new().unwrap());
-            let mut hist =
-                CommitHistory::open_at(exec.clone(), &mkit, "main").unwrap();
+            let mut hist = CommitHistory::open_at(exec.clone(), &mkit, "main").unwrap();
 
             let c1 = h("c1");
             let c2 = h("c2");
 
-            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &c1, &mut hist)
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &c1, &mut hist).unwrap();
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Match(c1), &c2, &mut hist)
                 .unwrap();
-            update_ref_with_history(
-                &mkit,
-                "main",
-                RefWriteCondition::Match(c1),
-                &c2,
-                &mut hist,
-            )
-            .unwrap();
 
             assert_eq!(read_ref(&mkit, "main").unwrap(), Some(c2));
             assert_eq!(hist.len(), 2, "two appends → two leaves in the MMR");
@@ -1241,8 +1233,7 @@ mod tests {
             let (_dir, mkit) = fresh_repo();
             let exec = Arc::new(TokioExecutor::new().unwrap());
             // Open history for "main", but try to update ref "feature".
-            let mut hist =
-                CommitHistory::open_at(exec, &mkit, "main").unwrap();
+            let mut hist = CommitHistory::open_at(exec, &mkit, "main").unwrap();
             let err = update_ref_with_history(
                 &mkit,
                 "feature",
@@ -1258,8 +1249,7 @@ mod tests {
         fn update_ref_with_history_cas_failure_does_not_append() {
             let (_dir, mkit) = fresh_repo();
             let exec = Arc::new(TokioExecutor::new().unwrap());
-            let mut hist =
-                CommitHistory::open_at(exec, &mkit, "main").unwrap();
+            let mut hist = CommitHistory::open_at(exec, &mkit, "main").unwrap();
 
             // Pre-seed the ref so a `Missing` CAS will fail.
             write_ref(&mkit, "main", &h("existing")).unwrap();

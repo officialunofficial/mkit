@@ -71,11 +71,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use commonware_cryptography::{Blake3, Hasher as CHasher};
-use commonware_runtime::{buffer::paged::CacheRef, Metrics, Runner as _};
+use commonware_runtime::{Metrics, Runner as _, buffer::paged::CacheRef};
 use commonware_storage::merkle::mmr::{
+    Location as MmrLocation, Proof as MmrProof, StandardHasher,
     journaled::{Config as JConfig, Mmr as JournaledMmr},
     mem::Mmr as MemMmr,
-    Location as MmrLocation, Proof as MmrProof, StandardHasher,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
 
@@ -146,18 +146,24 @@ pub enum HistoryError {
 
 /// Subdirectory of `<mkit_dir>` that holds per-branch MMR journals.
 ///
-/// Inside this directory the journaled MMR lays out two commonware
-/// partitions per branch:
+/// commonware lays its journaled-MMR partitions out as a pair of
+/// suffix-discriminated directories below this root:
 ///
 /// ```text
-/// <mkit_dir>/history/<sanitized_branch>__journal/  # node-digest journal
-/// <mkit_dir>/history/<sanitized_branch>__metadata/ # pruned-pinned-node sidecar
+/// <mkit_dir>/history/<sanitized_branch>__journal-blobs/     # node-digest journal blobs
+/// <mkit_dir>/history/<sanitized_branch>__journal-metadata/  # journal segment table
+/// <mkit_dir>/history/<sanitized_branch>__metadata/          # pruned-pinned-node sidecar
 /// ```
 ///
+/// The `-blobs` / `-metadata` segment suffixes are appended by
+/// commonware-storage; mkit names the leading partition tokens
+/// (`<sanitized_branch>__journal` and `<sanitized_branch>__metadata`)
+/// and hands them to `journaled::Mmr::init` via [`JConfig`].
+///
 /// commonware partition names are restricted to `[A-Za-z0-9_-]+`, so
-/// branch names are percent-escaped: `/` becomes `%2F`, every other
-/// non-allowed byte becomes `_`. Empty branches and invalid ref names
-/// are rejected by [`CommitHistory::open_at`].
+/// branch names go through [`sanitize_branch`] — a `_xx`-hex encoding
+/// of every byte outside `[A-Za-z0-9-]`. Empty branches and invalid
+/// ref names are rejected up front by [`CommitHistory::open_at`].
 pub const HISTORY_DIR: &str = "history";
 
 /// Suffix appended to the branch's partition name for the node-digest
@@ -279,11 +285,7 @@ impl<X: Executor + 'static> CommitHistory<X> {
     /// - [`HistoryError::Corrupted`] — commonware refused to recover
     ///   the journal (a deeper-than-trailing-leaf corruption).
     /// - [`HistoryError::Io`] — failed to create the history dir.
-    pub fn open_at(
-        executor: Arc<X>,
-        mkit_dir: &Path,
-        branch: &str,
-    ) -> Result<Self, HistoryError> {
+    pub fn open_at(executor: Arc<X>, mkit_dir: &Path, branch: &str) -> Result<Self, HistoryError> {
         if !validate_ref_name(branch) {
             return Err(HistoryError::InvalidBranch(branch.to_string()));
         }
@@ -609,8 +611,7 @@ fn bootstrap_commonware_context(
 ) -> Result<commonware_runtime::tokio::Context, HistoryError> {
     let dir = storage_directory.to_path_buf();
     std::thread::spawn(move || {
-        let cfg = commonware_runtime::tokio::Config::new()
-            .with_storage_directory(dir);
+        let cfg = commonware_runtime::tokio::Config::new().with_storage_directory(dir);
         let runner = commonware_runtime::tokio::Runner::new(cfg);
         // Return a Context clone. The Context's `executor: Arc<Executor>`
         // keeps the inner tokio runtime alive after the bootstrap
@@ -618,9 +619,7 @@ fn bootstrap_commonware_context(
         runner.start(|ctx| async move { ctx.clone() })
     })
     .join()
-    .map_err(|_| {
-        HistoryError::RuntimeBootstrap("bootstrap thread panicked".to_string())
-    })
+    .map_err(|_| HistoryError::RuntimeBootstrap("bootstrap thread panicked".to_string()))
     .map(|ctx| {
         // Best-effort label so any commonware metrics that surface
         // through this Context are easy to spot in a debugger.
@@ -737,8 +736,7 @@ mod tests {
     fn open_at_rejects_invalid_branch() {
         let (_tmp, mkit_dir) = fresh_mkit_dir();
         let exec = fresh_executor();
-        let err =
-            CommitHistory::open_at(exec, &mkit_dir, "../escape").expect_err("invalid branch");
+        let err = CommitHistory::open_at(exec, &mkit_dir, "../escape").expect_err("invalid branch");
         assert!(matches!(err, HistoryError::InvalidBranch(_)));
     }
 
@@ -763,8 +761,7 @@ mod tests {
 
         let commits: Vec<Hash> = (0..100u64).map(synth).collect();
         let (root_before, len_before) = {
-            let mut h =
-                CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+            let mut h = CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
             for c in &commits {
                 h.append(c).unwrap();
             }
@@ -782,8 +779,7 @@ mod tests {
         let exec = fresh_executor();
         let commits: Vec<Hash> = (0..64u64).map(synth).collect();
         let root = {
-            let mut h =
-                CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+            let mut h = CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
             for c in &commits {
                 h.append(c).unwrap();
             }
@@ -799,10 +795,8 @@ mod tests {
     fn open_at_distinct_branches_have_distinct_roots() {
         let (_tmp, mkit_dir) = fresh_mkit_dir();
         let exec = fresh_executor();
-        let mut main =
-            CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
-        let mut dev =
-            CommitHistory::open_at(exec.clone(), &mkit_dir, "dev").unwrap();
+        let mut main = CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+        let mut dev = CommitHistory::open_at(exec.clone(), &mkit_dir, "dev").unwrap();
         main.append(&synth(0)).unwrap();
         dev.append(&synth(1)).unwrap();
         assert_ne!(main.root(), dev.root());
@@ -833,8 +827,7 @@ mod tests {
         let exec = fresh_executor();
         let commits: Vec<Hash> = (0..50u64).map(synth).collect();
 
-        let mut journaled =
-            CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        let mut journaled = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
         let mut mem = CommitHistory::open();
         for c in &commits {
             journaled.append(c).unwrap();
@@ -864,8 +857,7 @@ mod tests {
         let commits: Vec<Hash> = (0..32u64).map(synth).collect();
 
         let len_before = {
-            let mut h =
-                CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+            let mut h = CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
             for c in &commits {
                 h.append(c).unwrap();
             }
@@ -897,8 +889,7 @@ mod tests {
                 }
             }
         }
-        let (blob_path, blob_len) =
-            largest.expect("at least one blob present after 32 appends");
+        let (blob_path, blob_len) = largest.expect("at least one blob present after 32 appends");
         assert!(
             blob_len > 5,
             "blob must be large enough to truncate (got {blob_len} bytes)"
@@ -961,8 +952,7 @@ mod tests {
         // Build the "reference" history by live appends.
         let commits: Vec<Hash> = (0..10u64).map(synth).collect();
         let reference_root = {
-            let mut h =
-                CommitHistory::open_at(exec.clone(), &mkit_dir_a, "main").unwrap();
+            let mut h = CommitHistory::open_at(exec.clone(), &mkit_dir_a, "main").unwrap();
             for c in &commits {
                 h.append(c).unwrap();
             }
@@ -972,26 +962,21 @@ mod tests {
         // Simulate the v0.1.x situation: refs/heads/main has a tip
         // commit, but `<mkit_dir>/history/` is empty. The walker
         // returns each commit's parent until root.
-        let mut h =
-            CommitHistory::open_at(exec.clone(), &mkit_dir_b, "main").unwrap();
+        let mut h = CommitHistory::open_at(exec.clone(), &mkit_dir_b, "main").unwrap();
         let tip = commits[commits.len() - 1];
-        let count = rebuild_from_chain::<TokioExecutor, _, std::io::Error>(
-            &mut h,
-            tip,
-            |hash| {
-                // Find this hash in `commits`, return the prior one or
-                // None if at index 0.
-                let idx = commits
-                    .iter()
-                    .position(|c| c == hash)
-                    .expect("walker called with unknown hash");
-                if idx == 0 {
-                    Ok(None)
-                } else {
-                    Ok(Some(commits[idx - 1]))
-                }
-            },
-        )
+        let count = rebuild_from_chain::<TokioExecutor, _, std::io::Error>(&mut h, tip, |hash| {
+            // Find this hash in `commits`, return the prior one or
+            // None if at index 0.
+            let idx = commits
+                .iter()
+                .position(|c| c == hash)
+                .expect("walker called with unknown hash");
+            if idx == 0 {
+                Ok(None)
+            } else {
+                Ok(Some(commits[idx - 1]))
+            }
+        })
         .unwrap();
         assert_eq!(count, commits.len() as u64);
         assert_eq!(
