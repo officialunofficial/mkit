@@ -234,7 +234,12 @@ fn handle_sign(
 
     let (keyid, sig, public_key, rpc_alg) = match algorithm {
         Algorithm::Ed25519 => {
-            let kp = KeyPair::from_seed(**secret);
+            // Borrow through `from_seed_zeroizing` so the inner
+            // `[u8; 32]` is never materialised as a `Copy` on this
+            // frame — the only memory copies are the `Zeroizing`
+            // already-owned one and the `KeyPair::secret` field that
+            // zeros on drop.
+            let kp = KeyPair::from_seed_zeroizing(secret);
             let pubkey = kp.public.0.to_vec();
             let mut s = RepoKeySigner::new(kp);
             let sig = match <RepoKeySigner as mkit_attest::Signer>::sign(&mut s, &pae) {
@@ -254,7 +259,9 @@ fn handle_sign(
             )
         }
         Algorithm::Secp256k1 => {
-            let s = match Secp256k1Signer::new(**secret) {
+            // Same rationale as the Ed25519 arm above — pass through
+            // the `Zeroizing` borrow rather than `**secret`.
+            let s = match Secp256k1Signer::from_seed_zeroizing(secret) {
                 Ok(s) => s,
                 Err(e) => {
                     return signer_error_frame(
@@ -281,7 +288,8 @@ fn handle_sign(
             )
         }
         Algorithm::P256 => {
-            let s = match P256Signer::new(**secret) {
+            // Same rationale as Ed25519/Secp256k1.
+            let s = match P256Signer::from_seed_zeroizing(secret) {
                 Ok(s) => s,
                 Err(e) => {
                     return signer_error_frame(

@@ -174,10 +174,10 @@ fn run_secp256k1(key_path: &Path, force: bool, print_pubkey: bool) -> u8 {
             Ok(s) => s,
             Err(e) => return emit_err(&format!("load key: {e}"), exit::GENERAL_ERROR),
         };
-        // `*secret` copies the inner [u8;32] into the constructor; the
-        // `Zeroizing` wrapper around `secret` is dropped at end of
-        // scope, scrubbing our local copy.
-        let signer = match mkit_attest::signer_k256::Secp256k1Signer::new(*secret) {
+        // Borrow through `from_seed_zeroizing` so no plain `[u8; 32]`
+        // is materialised on this frame — the constructor copies
+        // through a scratch buffer that it scrubs itself.
+        let signer = match mkit_attest::signer_k256::Secp256k1Signer::from_seed_zeroizing(&secret) {
             Ok(s) => s,
             Err(e) => return emit_err(&format!("invalid secp256k1 key: {e}"), exit::GENERAL_ERROR),
         };
@@ -228,7 +228,8 @@ fn run_p256(key_path: &Path, force: bool, print_pubkey: bool) -> u8 {
             Ok(s) => s,
             Err(e) => return emit_err(&format!("load key: {e}"), exit::GENERAL_ERROR),
         };
-        let signer = match mkit_attest::signer_p256::P256Signer::new(*secret) {
+        // Borrow-through pattern matches the secp256k1 arm above.
+        let signer = match mkit_attest::signer_p256::P256Signer::from_seed_zeroizing(&secret) {
             Ok(s) => s,
             Err(e) => return emit_err(&format!("invalid p256 key: {e}"), exit::GENERAL_ERROR),
         };
@@ -289,7 +290,7 @@ fn generate_secp256k1_signer() -> Result<
     for _ in 0..256 {
         let mut buf: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
         getrandom::fill(buf.as_mut_slice()).map_err(|e| format!("rng failed: {e}"))?;
-        if let Ok(signer) = mkit_attest::signer_k256::Secp256k1Signer::new(*buf) {
+        if let Ok(signer) = mkit_attest::signer_k256::Secp256k1Signer::from_seed_zeroizing(&buf) {
             return Ok((signer, buf));
         }
         // `buf` drops here, scrubbing the rejected scalar.
@@ -302,7 +303,7 @@ fn generate_p256_signer()
     for _ in 0..256 {
         let mut buf: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
         getrandom::fill(buf.as_mut_slice()).map_err(|e| format!("rng failed: {e}"))?;
-        if let Ok(signer) = mkit_attest::signer_p256::P256Signer::new(*buf) {
+        if let Ok(signer) = mkit_attest::signer_p256::P256Signer::from_seed_zeroizing(&buf) {
             return Ok((signer, buf));
         }
     }

@@ -66,6 +66,28 @@ impl P256Signer {
         Ok(Self { sk })
     }
 
+    /// Build from a [`zeroize::Zeroizing`]-wrapped raw 32-byte scalar.
+    /// Avoids the intermediate `[u8; 32]` `Copy` on the caller's stack
+    /// that [`P256Signer::new`] requires.
+    ///
+    /// # Zeroization
+    ///
+    /// The caller's `Zeroizing` wrapper still owns the seed and scrubs
+    /// it on drop. Internally we materialise one `[u8; 32]` to feed
+    /// into `SigningKey::from_bytes`, then scrub it before returning.
+    ///
+    /// # Errors
+    /// [`Error::P256KeyInvalid`] if the scalar is invalid.
+    pub fn from_seed_zeroizing(secret: &zeroize::Zeroizing<[u8; 32]>) -> Result<Self, Error> {
+        use zeroize::Zeroize;
+        let mut tmp = [0u8; 32];
+        tmp.copy_from_slice(secret.as_slice());
+        let result = SigningKey::from_bytes(&tmp.into()).map_err(|_| Error::P256KeyInvalid);
+        tmp.zeroize();
+        let sk = result?;
+        Ok(Self { sk })
+    }
+
     /// Build a signer from a DER-encoded PKCS#8 private key. This is
     /// the format `openssl pkcs8 -topk8` emits and the format
     /// `WebCrypto` `exportKey("pkcs8", …)` produces.
