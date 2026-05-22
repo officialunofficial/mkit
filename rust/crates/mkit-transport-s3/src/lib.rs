@@ -608,6 +608,113 @@ pub fn parse_list_xml(xml: &[u8]) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Sparse-checkout fetch (issue #158, Phase 2). Feature-gated behind
+// `sparse-checkout`.
+//
+// Wire contract additions (SPEC-TRANSPORT §6.6):
+//
+// - Object key: `sparse/<tree-hash-hex>/<filter-hash-hex>`. A server
+//   that wants to offer sparse delivery pre-builds the manifest under
+//   that key. Clients GET it; the response body IS the
+//   `application/x-mkit-sparse` envelope.
+// - The `?sparse=<filter-hash-hex>` query is a no-op on S3 (the
+//   content-addressed key already encodes it) — we accept it for URL
+//   parity with the HTTP transport but ignore it.
+// - 404 → no precomputed sparse for that (tree, filter) pair. Maps to
+//   `PackNotFound` so retries are terminated.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "sparse-checkout")]
+mod sparse_fetch {
+    use super::{
+        Hash, Method, PACK_BODY_LIMIT_USIZE, S3Transport, TransportError, TransportResult, to_hex,
+    };
+    use mkit_core::sparse::{
+        SPARSE_WIRE_MAX_BYTES, SparseResponse, decode_sparse_response, hash_filter,
+    };
+    use std::path::PathBuf;
+
+    impl S3Transport {
+        /// Build the S3 object key for a sparse delivery:
+        /// `sparse/<tree-hex>/<filter-hex>`.
+        #[must_use]
+        pub fn sparse_object_key(tree_hash: &Hash, filter_hash: &Hash) -> String {
+            format!("sparse/{}/{}", to_hex(tree_hash), to_hex(filter_hash))
+        }
+
+        /// Fetch the precomputed sparse delivery for `(tree_hash,
+        /// filter)`. The S3 transport does NOT compute manifests; it
+        /// assumes a server has pre-built them under the canonical
+        /// key.
+        ///
+        /// As with the HTTP transport, this function does NOT verify
+        /// the manifest — the caller MUST run
+        /// [`mkit_core::sparse::verify_sparse`] on the result before
+        /// trusting any delivered entries.
+        ///
+        /// # Errors
+        ///
+        /// - [`TransportError::PackNotFound`] — no precomputed sparse
+        ///   for the addressed `(tree, filter)` pair.
+        /// - [`TransportError::AccessDenied`] — credentials rejected.
+        /// - [`TransportError::InvalidResponse`] — wire envelope
+        ///   decode failed.
+        /// - [`TransportError::PayloadTooLarge`] — response body
+        ///   exceeded `SPARSE_WIRE_MAX_BYTES`.
+        pub fn fetch_sparse_tree(
+            &self,
+            tree_hash: &Hash,
+            filter: &[PathBuf],
+        ) -> TransportResult<SparseResponse> {
+            let filter_hash = hash_filter(filter);
+            let key = Self::sparse_object_key(tree_hash, &filter_hash);
+            // Cap body size at the wire-format max — far smaller than
+            // the pack-body limit. PACK_BODY_LIMIT_USIZE is the
+            // existing transport-side ceiling, used here for parity
+            // when SPARSE_WIRE_MAX_BYTES would otherwise allow a
+            // non-pack body larger than any pack we'd accept.
+            let cap = SPARSE_WIRE_MAX_BYTES.min(PACK_BODY_LIMIT_USIZE);
+            let resp = self.http_request_pub(&Method::GET, &key, "", None, &[], Some(cap))?;
+            match resp.status_pub() {
+                200 => decode_sparse_response(resp.body_pub())
+                    .map_err(|_| TransportError::InvalidResponse),
+                404 => Err(TransportError::PackNotFound),
+                403 | 401 => Err(TransportError::AccessDenied),
+                s => Err(TransportError::ServerError { status: s }),
+            }
+        }
+    }
+}
+
+// Crate-private bridge so the sparse-fetch module can poke through
+// `http_request` without the transport file losing its tightly-scoped
+// `pub(crate)` surface.
+#[cfg(feature = "sparse-checkout")]
+impl S3Transport {
+    pub(crate) fn http_request_pub(
+        &self,
+        method: &Method,
+        key: &str,
+        query: &str,
+        payload: Option<&[u8]>,
+        extra_headers: &[(&'static str, String)],
+        body_limit: Option<usize>,
+    ) -> TransportResult<HttpResponse> {
+        self.http_request(method, key, query, payload, extra_headers, body_limit)
+    }
+}
+
+#[cfg(feature = "sparse-checkout")]
+impl HttpResponse {
+    pub(crate) fn status_pub(&self) -> u16 {
+        self.status
+    }
+    pub(crate) fn body_pub(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
