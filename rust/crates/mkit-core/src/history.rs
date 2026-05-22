@@ -847,6 +847,109 @@ mod tests {
         );
     }
 
+    // ---- Crash recovery (commonware-native semantics) ----------
+
+    /// Simulate a torn write: truncate one journal blob mid-frame and
+    /// verify that commonware's `Journaled::init` either rolls forward
+    /// to the last valid size OR surfaces a recoverable error.
+    ///
+    /// SPEC-HISTORY-PROOF §4.4: mkit relies on commonware's native
+    /// recovery; mkit's own contract is only that reopening a
+    /// half-written journal does NOT panic and does NOT silently
+    /// expose stale data.
+    #[test]
+    fn truncated_journal_rolls_forward_or_surfaces_corruption() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let commits: Vec<Hash> = (0..32u64).map(synth).collect();
+
+        let len_before = {
+            let mut h =
+                CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+            for c in &commits {
+                h.append(c).unwrap();
+            }
+            h.len()
+        };
+        assert_eq!(len_before, 32);
+
+        // Find the journal blob directory and chop a few bytes off
+        // the tail of the largest file. The sanitized partition name
+        // for branch "main" is "main" → "main__journal".
+        // commonware lays out the journal partition's blobs in a
+        // subdirectory named `<partition>-blobs`; the journal metadata
+        // sidecar sits at `<partition>-metadata`. The truncation
+        // target is whichever blob holds actual digest data.
+        let journal_root = mkit_dir.join(HISTORY_DIR).join("main__journal-blobs");
+        assert!(
+            journal_root.exists(),
+            "journal blob dir must exist after appends"
+        );
+        let mut largest: Option<(std::path::PathBuf, u64)> = None;
+        for entry in std::fs::read_dir(&journal_root).unwrap() {
+            let entry = entry.unwrap();
+            let meta = entry.metadata().unwrap();
+            if meta.is_file() {
+                let path = entry.path();
+                let len = meta.len();
+                if largest.as_ref().is_none_or(|(_, l)| len > *l) {
+                    largest = Some((path, len));
+                }
+            }
+        }
+        let (blob_path, blob_len) =
+            largest.expect("at least one blob present after 32 appends");
+        assert!(
+            blob_len > 5,
+            "blob must be large enough to truncate (got {blob_len} bytes)"
+        );
+
+        // Truncate 5 bytes off the end — fewer than a digest (32 B), so
+        // commonware sees a torn frame at the tail.
+        let truncated_len = blob_len - 5;
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&blob_path)
+            .unwrap();
+        f.set_len(truncated_len).unwrap();
+        drop(f);
+
+        // Reopen. mkit's contract: either succeeds (rolled forward to
+        // last valid size, possibly fewer leaves than before) OR
+        // surfaces a `Corrupted` error. Crucially: no panic, no
+        // silent-stale-root.
+        let reopened = CommitHistory::open_at(exec, &mkit_dir, "main");
+        match reopened {
+            Ok(h) => {
+                assert!(
+                    h.len() <= len_before,
+                    "rolled-forward leaf count must not exceed the pre-truncation count"
+                );
+                // The root of the rolled-forward state, if non-empty,
+                // must equal the root of a freshly-built mem MMR over
+                // the surviving leaves — proving roll-forward is
+                // semantically consistent.
+                if !h.is_empty() {
+                    let n = usize::try_from(h.len()).expect("leaf count fits in usize");
+                    let mut reference = CommitHistory::open();
+                    for c in &commits[..n] {
+                        reference.append(c).unwrap();
+                    }
+                    assert_eq!(
+                        h.root(),
+                        reference.root(),
+                        "rolled-forward root must equal a clean replay of the surviving leaves"
+                    );
+                }
+            }
+            Err(HistoryError::Corrupted(_)) => {
+                // Acceptable: commonware refused to recover. Surfaced
+                // to the caller via the documented error variant.
+            }
+            Err(other) => panic!("unexpected error on truncated journal: {other:?}"),
+        }
+    }
+
     // ---- Rebuild shim --------------------------------------------
 
     #[test]
