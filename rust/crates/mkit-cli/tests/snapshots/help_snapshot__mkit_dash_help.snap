@@ -1,0 +1,72 @@
+---
+source: crates/mkit-cli/tests/help_snapshot.rs
+expression: stdout
+---
+usage: mkit <command> [args]
+
+commands:
+  init              Create a new mkit repository
+  add <path>        Stage a file for the next commit
+  add .             Stage all files (respects .mkitignore)
+  rm <path>         Mark a file for removal in the next commit
+  hash <file>       Hash a file and store it as a blob
+  cat <hash>        Display an object by its hash
+  tree              Snapshot working directory as a tree object
+  commit [-a] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
+  log [--oneline] [--format=json] [--graph] [-n N]
+                    Show commit history (--format=json emits JSONL)
+  status [--porcelain]
+                    Show staged and working tree changes
+                    (--porcelain emits machine-readable XY lines on stdout)
+  diff              Show changes (HEAD vs workdir, or two trees)
+  branch [--format=json]
+                    List branches (* marks current; JSONL with --format=json)
+  branch <name>     Create a branch at HEAD
+  branch -d <name>  Delete a branch
+  checkout <branch> Switch HEAD to a branch and restore files
+  tag               List, create, or delete tags
+  config [--format=json]  Show all configuration values (JSON with --format=json)
+  config <key> [--format=json]  Show one value
+  config <key> <value>  Set a configuration value
+  config user.identity <value>  Set author Identity
+                        (ed25519:<hex>, mid:<N>, or raw [kind][len][bytes] hex)
+  config trusted_remote_endpoint <url>  Trust an HTTP/S3 remote for ambient env credentials
+  config ssh.strict_host_key_checking <yes|no|accept-new>  Override SSH host policy
+  config ssh.user_known_hosts_file <path>  Custom SSH known_hosts file
+  config ssh.identity_file <path>  SSH private key file
+  merge <branch>    Merge a branch into HEAD
+  push [--dry-run]  Push refs and packs to the configured remote
+  pull              Pull changes from remote
+  fetch             Download from remote without merging
+  stash             Stash working dir changes (save WIP)
+  stash save -m <msg>  Stash with a message
+  stash list        List stash entries
+  stash pop [N]     Apply and remove stash entry N (default 0)
+  stash drop [N]    Remove stash entry N without applying
+  stash show [N]    Show diff of stash entry N
+  clone [--depth N] [--sparse ...] <url>  Clone a repository
+  remote [--format=json]  Show remote configuration (JSON with --format=json)
+  remote add <url>  Add remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
+  remote set <url>  Alias for 'remote add'
+  key generate|list|import|export|delete  Manage user-scoped keystore keys
+  keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
+                    Generate a new signing key (defaults to Ed25519)
+  cherry-pick <hash> Apply a commit to the current branch
+  rebase <branch>    Replay commits onto a different base
+  rebase --continue  Continue rebase after conflict resolution
+  rebase --abort     Abort rebase and restore original state
+  bisect start       Begin binary search for a bug
+  bisect good [hash] Mark a commit as good
+  bisect bad [hash]  Mark a commit as bad
+  bisect reset       End bisect and restore original state
+  sparse-checkout    Manage sparse checkout patterns
+  serve <path>       Start SSH transport server (internal)
+  blame [--format=json] <file>
+                    Show line-level commit attribution (JSONL with --format=json)
+  verify <hash>     Verify the signature on a commit or remix
+  attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
+         [--additional-signer "algorithm=<alg>,signer=<kind>[,path=<p>]"]...
+                    Produce a signed DSSE attestation for a commit
+  verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>]
+                    Verify every attestation attached to a commit
+  version           Print version

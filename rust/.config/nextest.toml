@@ -1,0 +1,28 @@
+# nextest configuration — `cargo nextest run` reads this file.
+# See https://nexte.st/docs/configuration/
+
+[profile.default]
+# Most mkit tests are sub-second; anything above 60 s is almost
+# certainly a hang. Slow-test warnings fire at 10 s.
+slow-timeout = { period = "10s", terminate-after = 6 }
+# Don't retry on local runs — bugs should be reproducible, not papered
+# over. CI overrides this in the `ci` profile below.
+retries = 0
+# Stop at the first failure when developing locally; CI overrides to
+# surface the full failure surface.
+fail-fast = true
+
+[profile.ci]
+# Surface every failure in one run on CI so we don't iterate through
+# them one push at a time.
+fail-fast = false
+# Transient flakes in CI (network, fs latency) get one retry. A real
+# bug fails twice; flakes succeed on the retry and are reported.
+retries = 2
+# Same slow-test envelope as default; CI machines vary so cap higher.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci.junit]
+# Emit JUnit XML alongside the human-readable output so GitHub Actions
+# can render failure annotations inline on PR diffs.
+path = "junit.xml"

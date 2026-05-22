@@ -1,0 +1,5 @@
+# Cargo aliases. `cargo t` is the default local-dev test entry point —
+# routes through nextest for the speed + isolation advantage.
+
+[alias]
+t = "nextest run"

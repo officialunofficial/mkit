@@ -111,6 +111,10 @@ mockito = "1"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+# Snapshot testing for CLI golden-output fixtures. See issue #164.
+# `filters` feature enables regex-based redaction so version-string
+# bumps don't churn snapshots.
+insta = { version = "1", features = ["filters"] }
 
 [features]
 default = []
