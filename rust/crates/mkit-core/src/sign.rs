@@ -31,7 +31,7 @@ use ed25519_dalek::{
     SigningKey, VerifyingKey,
 };
 use subtle::ConstantTimeEq;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Effective uid for Unix key-file owner checks.
 #[cfg(unix)]
@@ -109,41 +109,77 @@ pub struct KeyPair {
 
 impl KeyPair {
     /// Generate a fresh keypair using the system CSPRNG (`getrandom`).
-    /// The local seed buffer is zeroed before the function returns;
-    /// the only remaining copy lives inside the returned `KeyPair` and
-    /// is zeroized on drop via `SecretSeed`'s `ZeroizeOnDrop`.
+    ///
+    /// # Zeroization
+    ///
+    /// The local seed lives inside a [`Zeroizing`] wrapper that scrubs
+    /// the buffer at end of scope, so the only remaining copy is the
+    /// one inside the returned `KeyPair` (zeroized on drop via
+    /// `SecretSeed`'s [`ZeroizeOnDrop`]).
     pub fn generate() -> Result<Self, MkitError> {
-        let mut seed = [0u8; SECRET_KEY_LENGTH];
-        getrandom::fill(&mut seed).map_err(|_| MkitError::RngFailure)?;
-        let kp = Self::from_seed(seed);
-        // `[u8; 32]` is `Copy`; the call above copied the bytes into
-        // `from_seed`'s frame. Our local buffer is still live — scrub.
-        seed.zeroize();
-        Ok(kp)
+        let mut seed: Zeroizing<[u8; SECRET_KEY_LENGTH]> = Zeroizing::new([0u8; SECRET_KEY_LENGTH]);
+        getrandom::fill(seed.as_mut_slice()).map_err(|_| MkitError::RngFailure)?;
+        Ok(Self::from_seed_zeroizing(&seed))
     }
 
     /// Reconstruct a keypair deterministically from a 32-byte seed.
     /// Pure function: same seed always yields the same public key.
     ///
-    /// The parameter is `Copy`; this function cannot scrub the
-    /// caller's buffer for them. Callers that hold sensitive seed
-    /// material on their own stack are expected to `zeroize()` it
-    /// after the call. `KeyPair::generate()` and `load_key()` already
-    /// do.
+    /// # Zeroization
+    ///
+    /// The parameter is `Copy`; this function CANNOT scrub the caller's
+    /// own stack copy. Callers that hold sensitive seed material on
+    /// their own stack MUST either:
+    ///
+    /// * Prefer [`KeyPair::from_seed_zeroizing`], which takes a
+    ///   [`Zeroizing`]-wrapped reference and never creates a Copy on
+    ///   the caller's frame, or
+    /// * Wrap their seed in [`Zeroizing`] themselves, or
+    /// * `seed.zeroize()` the buffer after this call returns.
+    ///
+    /// [`KeyPair::generate`] and [`load_key`] already use the
+    /// `Zeroizing` path internally.
     #[must_use]
     pub fn from_seed(mut seed: [u8; SECRET_KEY_LENGTH]) -> Self {
         let signing = SigningKey::from_bytes(&seed);
         let public = PublicKey(signing.verifying_key().to_bytes());
-        // Move the seed into a fresh allocation and scrub our
-        // parameter. The fresh allocation lives inside `SecretSeed`
-        // and is zeroized on drop.
-        let mut secret_bytes = [0u8; SECRET_KEY_LENGTH];
-        secret_bytes.copy_from_slice(&seed);
+        // `[u8; 32]: Copy`, so moving `seed` into `SecretSeed` would
+        // leave the original stack slot live. Build the wrapper first,
+        // then scrub the parameter — `SecretSeed`'s `ZeroizeOnDrop`
+        // owns the only remaining copy.
+        let secret = SecretSeed(seed);
         seed.zeroize();
-        Self {
-            public,
-            secret: SecretSeed(secret_bytes),
-        }
+        Self { public, secret }
+    }
+
+    /// Reconstruct a keypair from a [`Zeroizing`]-wrapped 32-byte seed
+    /// without forcing the caller to keep a `Copy` of the raw bytes on
+    /// their own stack. This is the preferred constructor for
+    /// signing-path code that loads keys from disk (see [`load_key`])
+    /// or generates them on the fly (see [`KeyPair::generate`]).
+    ///
+    /// # Zeroization
+    ///
+    /// Borrowing the seed means this function never creates a fresh
+    /// `[u8; 32]` `Copy` on the caller's frame. The only memory copy
+    /// is the one owned by the returned `KeyPair::secret` field, which
+    /// zeroes on drop.
+    #[must_use]
+    pub fn from_seed_zeroizing(seed: &Zeroizing<[u8; SECRET_KEY_LENGTH]>) -> Self {
+        let signing = SigningKey::from_bytes(seed);
+        let public = PublicKey(signing.verifying_key().to_bytes());
+        // `**seed` would be a `Copy` of the inner array — to avoid
+        // that we initialise the destination zeroed and `copy_from_slice`
+        // through the borrow, so the inner array never materialises a
+        // second `Copy` on this frame.
+        let mut secret_bytes = [0u8; SECRET_KEY_LENGTH];
+        secret_bytes.copy_from_slice(seed.as_slice());
+        let secret = SecretSeed(secret_bytes);
+        // Scrub our local stack scratch even though we just moved the
+        // bytes into `SecretSeed` — the stack slot would otherwise
+        // retain the seed until the frame is reused.
+        secret_bytes.zeroize();
+        Self { public, secret }
     }
 
     /// Sign `signing_bytes` under the given domain. The actual Ed25519
@@ -374,7 +410,9 @@ pub fn verify_remix(r: &Remix) -> Result<(), MkitError> {
 /// ACLs (documented in `docs/SPEC-SIGNING.md` §7).
 pub fn load_key(path: &Path) -> Result<KeyPair, MkitError> {
     let seed = load_raw_32(path)?;
-    Ok(KeyPair::from_seed(*seed))
+    // Borrowing through `from_seed_zeroizing` avoids the `*seed` Copy
+    // the older path would synthesise on this frame.
+    Ok(KeyPair::from_seed_zeroizing(&seed))
 }
 
 /// Load a raw 32-byte secret from `path` with the same Unix hardening
