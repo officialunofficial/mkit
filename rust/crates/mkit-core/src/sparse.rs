@@ -402,32 +402,46 @@ pub fn verify_sparse(
     true
 }
 
+/// Domain string for [`tree_hash`]. Bound into the BLAKE3 input via
+/// [`crate::hash::domain_digest`] so the sparse-internal tree
+/// commitment can't collide with any other domain-prefixed BLAKE3
+/// hash in the codebase (commits, remixes, etc.).
+pub const SPARSE_TREE_DOMAIN: &[u8] = b"mkit-sparse-tree-v1";
+
 /// Compute the BLAKE3 hash of a tree's canonical serialisation. We
 /// avoid pulling in `serialize::serialize` here to keep the sparse
 /// module's surface tight; instead we hash the per-entry triple of
-/// (`name`, `mode`, `object_hash`) in entry order.
+/// (`name`, `mode`, `object_hash`) in entry order, then route the
+/// concatenation through [`crate::hash::domain_digest`] for the
+/// `u16 LE` length-prefixed domain separator (same recipe used by
+/// `sign.rs`).
 ///
 /// This is *not* the SPEC-OBJECTS tree hash (which includes the v1
 /// prologue and length prefixes); it is a sparse-module-internal
 /// commitment binding the manifest to a specific tree. Phase 2 will
 /// switch this to the full SPEC-OBJECTS hash once the transport-side
 /// `tree_hash` is plumbed.
+///
+/// NOTE: output bytes differ from the pre-B2 hand-rolled scheme
+/// (which used a `u32 LE` length prefix and an inline domain string).
+/// Phase 1 sparse is feature-gated and has no shipped consumers, so
+/// the break is in-budget.
 fn tree_hash(tree: &Tree) -> Hash {
     if tree.entries.is_empty() {
         return ZERO;
     }
-    let mut h = Hasher::new();
-    h.update(b"mkit-sparse-tree-v1");
+    let mut body = Hasher::new();
     let count = u32::try_from(tree.entries.len()).unwrap_or(u32::MAX);
-    h.update(&count.to_le_bytes());
+    body.update(&count.to_le_bytes());
     for entry in &tree.entries {
         let name_len = u32::try_from(entry.name.len()).unwrap_or(u32::MAX);
-        h.update(&name_len.to_le_bytes());
-        h.update(&entry.name);
-        h.update(&[entry.mode as u8]);
-        h.update(&entry.object_hash);
+        body.update(&name_len.to_le_bytes());
+        body.update(&entry.name);
+        body.update(&[entry.mode as u8]);
+        body.update(&entry.object_hash);
     }
-    h.finalize()
+    let body_digest = body.finalize();
+    crate::hash::domain_digest(SPARSE_TREE_DOMAIN, &body_digest)
 }
 
 // ---------------------------------------------------------------------------

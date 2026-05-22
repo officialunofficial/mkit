@@ -196,6 +196,14 @@ pub fn verify(
 /// Compute `BLAKE3(len_le16(domain) || domain || signing_bytes)`.
 /// Always 32 bytes.
 ///
+/// Thin wrapper around the public [`crate::hash::domain_digest`].
+/// Kept as a module-private alias because the original v0.1.0
+/// signature scheme is golden-vector-pinned through this symbol; the
+/// public hoist (Reuse B2) added the same routine to `mkit_core::hash`
+/// for re-use by `sparse` etc., but the sign-path call sites
+/// deliberately retain this local indirection so a future refactor of
+/// the public function can't silently change signature output.
+///
 /// The 2-byte little-endian length prefix closes a latent ambiguity
 /// that `BLAKE3(domain || signing_bytes)` alone would carry: without
 /// a length prefix, the concatenation `domain || signing_bytes` is
@@ -213,12 +221,7 @@ pub fn verify(
 /// break; there are no shipped artefacts to migrate.
 #[must_use]
 fn domain_digest(domain: &[u8], signing_bytes: &[u8]) -> [u8; HASH_LEN] {
-    let mut h = blake3::Hasher::new();
-    let domain_len = u16::try_from(domain.len()).expect("domain <= u16::MAX");
-    h.update(&domain_len.to_le_bytes());
-    h.update(domain);
-    h.update(signing_bytes);
-    *h.finalize().as_bytes()
+    crate::hash::domain_digest(domain, signing_bytes)
 }
 
 /// Public helper:

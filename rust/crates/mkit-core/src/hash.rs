@@ -85,6 +85,37 @@ pub fn to_hex(h: &Hash) -> String {
     to_hex_bytes(h)
 }
 
+/// Domain-separated BLAKE3 digest.
+///
+/// Computes `BLAKE3(len_le16(domain) || domain || body)` — the
+/// canonical mkit recipe for binding a hash output to a domain string.
+/// The 2-byte little-endian length prefix is what stops the
+/// `(domain, body)` pair from being ambiguous; without it,
+/// `("ab", "cX")` and `("abc", "X")` would hash to the same input.
+///
+/// Domain strings are short ASCII constants in this codebase (e.g.
+/// `b"mkit-commit-v1"`); the `u16` cap is comfortable.
+///
+/// Used by `sign` (commit / remix signatures), `sparse` (tree hash
+/// binding the manifest to its source tree), and any future module
+/// that needs a domain-separated hash.
+///
+/// # Panics
+///
+/// Panics if `domain.len()` exceeds `u16::MAX`. Domain strings are
+/// fixed constants in this crate; callers MUST verify the length at
+/// construction time. The check is `debug_assert!` plus a `try_from`
+/// because exceeding 65 535 bytes would be a programmer error.
+#[must_use]
+pub fn domain_digest(domain: &[u8], body: &[u8]) -> Hash {
+    let mut h = blake3::Hasher::new();
+    let domain_len = u16::try_from(domain.len()).expect("domain <= u16::MAX");
+    h.update(&domain_len.to_le_bytes());
+    h.update(domain);
+    h.update(body);
+    *h.finalize().as_bytes()
+}
+
 /// Parse a lowercase-or-uppercase 64-char hex string into a [`Hash`].
 /// Rejects any non-hex byte.
 pub fn from_hex(s: &str) -> Result<Hash, FromHexError> {
