@@ -385,6 +385,105 @@ pub fn update_ref(
     cas_write(&path, &wire, branch, condition)
 }
 
+// -----------------------------------------------------------------------------
+// History-coupled ref writes (feature: history-mmr)
+// -----------------------------------------------------------------------------
+
+/// Combined ref-write + history-MMR-append, protected by a single
+/// repo-level lock. Issue #157, Phase 2.
+///
+/// Performs, in order:
+///
+/// 1. Acquire [`crate::repo_lock::RepoLock`] on
+///    `<mkit_dir>/refs-history.lock` so concurrent writers in other
+///    mkit processes block until this caller is done.
+/// 2. CAS-write the ref under `<mkit_dir>/refs/heads/<branch>`.
+/// 3. Append `hash` to the branch's
+///    [`crate::history::CommitHistory`], which syncs the journal to
+///    disk before returning.
+/// 4. Release the lock.
+///
+/// On any failure between steps 2 and 3 the ref will be ahead of the
+/// history journal by one commit; the v0.1.x rebuild shim
+/// ([`crate::history::rebuild_from_chain`]) recovers from this state.
+///
+/// # Design note (Option B vs Option A)
+///
+/// The original Phase-2 plan considered adding an optional
+/// `executor: Option<&dyn Executor>` parameter to [`update_ref`]
+/// itself ("Option A"). Two reasons not to:
+///
+/// - [`update_ref`] is called by [`write_ref`] and [`update_head`]
+///   internally and indirectly by the file transport's
+///   [`crate::protocol::Transport::update_ref`] impl; threading an
+///   executor through all of those would either ripple
+///   `history-mmr` into transport-file's API surface or force a
+///   `None` at every callsite that doesn't care.
+/// - The [`crate::protocol::async_shim::Executor`] trait uses
+///   generic methods so `&dyn Executor` is not object-safe, forcing
+///   us to generic-parameterise the trait anyway.
+///
+/// Adding a dedicated [`update_ref_with_history`] keeps the
+/// existing [`update_ref`] signature intact and confines the
+/// `history-mmr` integration to the one call-site (`mkit-cli`'s
+/// commit path) that actually needs it.
+///
+/// # Errors
+///
+/// - [`RefError::InvalidRefName`] — `branch` failed
+///   [`validate_ref_name`].
+/// - [`RefError::Conflict`] — the CAS precondition was not satisfied.
+/// - [`RefError::Io`] — filesystem failure during ref or lock I/O.
+/// - The wrapped [`crate::history::HistoryError`] is exposed via a
+///   `String` payload on [`RefError::InvalidRef`] (so this function's
+///   signature stays compatible with consumers that pin only
+///   `RefError`). Callers that need structured access to the history
+///   error can drive the two steps themselves via [`update_ref`] +
+///   [`crate::history::CommitHistory::append`].
+#[cfg(feature = "history-mmr")]
+pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'static>(
+    mkit_dir: &Path,
+    branch: &str,
+    condition: RefWriteCondition,
+    hash: &Hash,
+    history: &mut crate::history::CommitHistory<X>,
+) -> RefResult<()> {
+    // Defence-in-depth: history must be a Phase-2 journaled flavour;
+    // a mem-only flavour would silently drop the appended leaf on
+    // process exit, defeating the whole point of this coupling.
+    let Some(history_dir) = history.mkit_dir() else {
+        return Err(RefError::InvalidRef(format!(
+            "{branch}: update_ref_with_history requires a journaled CommitHistory (open_at)"
+        )));
+    };
+    if history_dir != mkit_dir {
+        return Err(RefError::InvalidRef(format!(
+            "{branch}: CommitHistory's mkit_dir does not match the ref's mkit_dir"
+        )));
+    }
+    if history.branch() != Some(branch) {
+        return Err(RefError::InvalidRef(format!(
+            "{branch}: CommitHistory was opened for a different branch ({:?})",
+            history.branch()
+        )));
+    }
+
+    // Single repo-level lock around the ref-write + MMR-append
+    // critical section. Cross-process interleaving is impossible
+    // while any holder owns this lock.
+    let _lock =
+        crate::repo_lock::acquire_default(mkit_dir, "refs-history.lock").map_err(|e| match e {
+            crate::repo_lock::LockError::Io(io) => RefError::Io(io),
+            other => RefError::InvalidRef(format!("{branch}: lock acquisition: {other}")),
+        })?;
+
+    update_ref(mkit_dir, branch, condition, hash)?;
+    history
+        .append(hash)
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: history append: {e}")))?;
+    Ok(())
+}
+
 /// Delete a branch ref. Errors with [`RefError::NotFound`] if absent.
 pub fn delete_ref(mkit_dir: &Path, branch: &str) -> RefResult<()> {
     if !validate_ref_name(branch) {
@@ -1087,5 +1186,88 @@ mod tests {
         let loaded = load_shallow_boundaries(&mkit).unwrap().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], valid);
+    }
+
+    // --- history-coupled ref writes (history-mmr feature) -------------
+
+    #[cfg(feature = "history-mmr")]
+    mod history_coupling {
+        use super::*;
+        use crate::history::{CommitHistory, TokioExecutor};
+        use std::sync::Arc;
+
+        #[test]
+        fn update_ref_with_history_appends_to_journal_under_lock() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec.clone(), &mkit, "main").unwrap();
+
+            let c1 = h("c1");
+            let c2 = h("c2");
+
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &c1, &mut hist).unwrap();
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Match(c1), &c2, &mut hist)
+                .unwrap();
+
+            assert_eq!(read_ref(&mkit, "main").unwrap(), Some(c2));
+            assert_eq!(hist.len(), 2, "two appends → two leaves in the MMR");
+        }
+
+        #[test]
+        fn update_ref_with_history_rejects_mem_history() {
+            let (_dir, mkit) = fresh_repo();
+            let mut mem_hist = CommitHistory::open();
+            let err = update_ref_with_history(
+                &mkit,
+                "main",
+                RefWriteCondition::Any,
+                &h("x"),
+                &mut mem_hist,
+            )
+            .unwrap_err();
+            assert!(matches!(err, RefError::InvalidRef(_)));
+        }
+
+        #[test]
+        fn update_ref_with_history_rejects_branch_mismatch() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            // Open history for "main", but try to update ref "feature".
+            let mut hist = CommitHistory::open_at(exec, &mkit, "main").unwrap();
+            let err = update_ref_with_history(
+                &mkit,
+                "feature",
+                RefWriteCondition::Any,
+                &h("x"),
+                &mut hist,
+            )
+            .unwrap_err();
+            assert!(matches!(err, RefError::InvalidRef(_)));
+        }
+
+        #[test]
+        fn update_ref_with_history_cas_failure_does_not_append() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec, &mkit, "main").unwrap();
+
+            // Pre-seed the ref so a `Missing` CAS will fail.
+            write_ref(&mkit, "main", &h("existing")).unwrap();
+
+            let err = update_ref_with_history(
+                &mkit,
+                "main",
+                RefWriteCondition::Missing,
+                &h("new"),
+                &mut hist,
+            )
+            .unwrap_err();
+            assert!(matches!(err, RefError::Conflict(_)));
+            assert_eq!(
+                hist.len(),
+                0,
+                "CAS failure must NOT have appended to history"
+            );
+        }
     }
 }
