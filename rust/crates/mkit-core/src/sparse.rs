@@ -84,7 +84,7 @@ pub struct SparseManifest {
     /// bitmap. SHA-256 (32 bytes) under the upstream `mmr::Family`
     /// hasher. Verifier MUST recompute this from the delivered
     /// bitmap chunks and reject on mismatch.
-    pub bitmap_root: [u8; 32],
+    pub bitmap_root: Hash,
     /// BLAKE3 hash of the canonicalised filter — see
     /// [`hash_filter`]. Binds the manifest to a specific filter so
     /// the server can't substitute a different one mid-transfer.
@@ -273,7 +273,7 @@ pub fn build_sparse(
 /// (sparse over a real transport) will reuse a long-lived executor via
 /// the future `mkit_core::protocol::Executor` shim; the dependency is
 /// captured at this seam to keep the migration mechanical.
-fn merkleize_bits(bits: &[bool]) -> ([u8; 32], Vec<u8>) {
+fn merkleize_bits(bits: &[bool]) -> (Hash, Vec<u8>) {
     let runner = deterministic::Runner::default();
     let bits_owned = bits.to_vec();
     runner.start(move |ctx| async move {
@@ -300,7 +300,7 @@ fn merkleize_bits(bits: &[bool]) -> ([u8; 32], Vec<u8>) {
             }
         }
 
-        let mut root_bytes = [0u8; 32];
+        let mut root_bytes: Hash = [0u8; 32];
         root_bytes.copy_from_slice(root.as_ref());
         (root_bytes, bytes)
     })
