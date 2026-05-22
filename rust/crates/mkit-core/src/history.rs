@@ -525,7 +525,7 @@ where
     let mut cursor = Some(tip);
     while let Some(h) = cursor {
         chain.push(h);
-        cursor = parent_of(&h).map_err(|e| RebuildError::Walker(e.to_string()))?;
+        cursor = parent_of(&h).map_err(RebuildError::Walker)?;
     }
     // Walker yielded tip..root; we need root..tip for the append order.
     chain.reverse();
@@ -539,17 +539,14 @@ where
 /// Errors returned by [`rebuild_from_chain`].
 #[derive(Debug, thiserror::Error)]
 pub enum RebuildError<E: core::fmt::Display> {
-    /// The caller-supplied parent-walker failed.
+    /// The caller-supplied parent-walker failed. The wrapped `E`
+    /// carries the walker's error verbatim, so callers that pass a
+    /// structured error type get it back unchanged.
     #[error("parent-chain walker failed: {0}")]
-    Walker(String),
+    Walker(E),
     /// The underlying [`CommitHistory::append`] failed.
     #[error(transparent)]
     History(HistoryError),
-    /// PhantomData carrier so callers don't have to specify a
-    /// concrete `E` when the walker is infallible.
-    #[doc(hidden)]
-    #[error("unused")]
-    _Phantom(std::marker::PhantomData<E>),
 }
 
 // ---------------------------------------------------------------------
