@@ -118,26 +118,31 @@ pub fn run(args: &[String]) -> u8 {
         );
     }
 
-    // Manifest first — clients that race the producer would prefer
-    // "manifest missing" (clean fallback to monolithic) over "manifest
-    // present, shards incomplete".
+    // Shards first, manifest last — the manifest is the *publish
+    // commit point*. Clients that race the producer either see no
+    // manifest (clean fall-through to monolithic) or see manifest +
+    // all shards (clean shard path). Writing the manifest before the
+    // shards would let a racing reader observe "manifest present,
+    // shards missing", which forces a shard-fetch failure and either
+    // a noisy retry loop or (worse) a silent downgrade.
     let manifest_bytes = match encode_manifest(&manifest) {
         Ok(b) => b,
         Err(e) => return emit_err(&format!("encode manifest: {e}"), exit::DATAERR),
     };
-    let manifest_path = pack_dir.join("shards.manifest");
-    if let Err(e) = write_atomic(&manifest_path, &manifest_bytes) {
-        return emit_err(
-            &format!("write {}: {e}", manifest_path.display()),
-            exit::CANTCREAT,
-        );
-    }
 
     for shard in &shards {
         let path = shards_dir.join(shard.index.to_string());
         if let Err(e) = write_atomic(&path, &shard.bytes) {
             return emit_err(&format!("write {}: {e}", path.display()), exit::CANTCREAT);
         }
+    }
+
+    let manifest_path = pack_dir.join("shards.manifest");
+    if let Err(e) = write_atomic(&manifest_path, &manifest_bytes) {
+        return emit_err(
+            &format!("write {}: {e}", manifest_path.display()),
+            exit::CANTCREAT,
+        );
     }
 
     let mut stdout = std::io::stdout().lock();
