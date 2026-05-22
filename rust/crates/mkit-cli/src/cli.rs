@@ -73,6 +73,7 @@ commands:
   bisect reset       End bisect and restore original state
   sparse-checkout    Manage sparse checkout patterns
   serve <path>       Start SSH transport server (internal)
+  pack-shard <hash>  Encode a stored pack into Reed-Solomon shards (feature: pack-shards)
   blame [--format=json] <file>
                     Show line-level commit attribution (JSONL with --format=json)
   verify <hash>     Verify the signature on a commit or remix
@@ -148,6 +149,7 @@ mod tests {
             "bisect",
             "sparse-checkout",
             "serve",
+            "pack-shard",
             "blame",
             "verify",
             "version",

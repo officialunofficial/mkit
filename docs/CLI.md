@@ -170,6 +170,15 @@ Remote / sync:
   out-of-band. The default port advertised by `mkit+enc://` URLs
   when none is supplied is **9418**. Keystore integration for a
   stable per-host key is deferred (see SPEC-TRANSPORT-ENC §6.2).
+- `mkit pack-shard <hash> [--out <dir>] [--force]` — encode a stored
+  pack into Reed-Solomon shards plus a manifest, ready to publish to
+  an HTTP / S3 origin. Producer side of SPEC-PACK-SHARDS Phase 2. The
+  pack must already be in the local object store. Output layout:
+  `<out>/packs/<hex>/shards/<index>` and
+  `<out>/packs/<hex>/shards.manifest`. The manifest is written last
+  so racing readers either see "no manifest" (clean fall-through to
+  the monolithic pack) or "manifest + all shards". Requires building
+  the binary with `--features pack-shards`.
 
 Config / keys / version:
 

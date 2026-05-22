@@ -17,6 +17,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "diff",
     "stash",
     "sparse-checkout",
+    "pack-shard",
     "commit",
     "log",
     "blame",
