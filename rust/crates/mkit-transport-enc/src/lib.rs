@@ -68,19 +68,17 @@ use commonware_stream::encrypted::{Config as EncConfig, Receiver, Sender};
 use mkit_core::hash::Hash;
 use mkit_core::protocol::{PackKey, Transport, TransportError, TransportResult};
 use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
-use mkit_rpc::MAX_FRAME_BYTES;
 use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
 use mkit_rpc::mkit::rpc::v1::ssh::{
-    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, RefExpectation, SshFrame,
-    UpdateRef, UploadPack, list_refs_response::RefEntry, ssh_frame,
+    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame, UpdateRef, UploadPack,
+    ssh_frame,
+};
+use mkit_rpc::{
+    CHUNK_DATA_MAX, MAX_FRAME_BYTES, MAX_REF_NAME, body_name, cond_to_wire, ref_entry_to_ref,
+    rpc_error_to_transport, unexpected_frame,
 };
 
 use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
-
-/// Maximum combined ref / prefix name length accepted over the wire.
-/// Matches `mkit-transport-ssh`'s cap so both transports reject the
-/// same inputs at the boundary.
-const MAX_REF_NAME: usize = 4096;
 
 /// Client identification string sent in the `Hello` frame. Inherits
 /// the workspace version so a release bump propagates automatically.
@@ -319,10 +317,9 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
         self.executor
             .block_on(send_frame(&mut session.sender, &header))?;
 
-        // Body chunks. Cap matches the ssh transport's `CHUNK_DATA_MAX`
-        // so the inner SshFrame stays under MAX_FRAME_BYTES after
-        // protobuf overhead.
-        const CHUNK_DATA_MAX: usize = 800 * 1024;
+        // Body chunks. `CHUNK_DATA_MAX` lives in `mkit_rpc` so the
+        // ssh and enc transports cannot drift on the bound, keeping the
+        // inner SshFrame under `MAX_FRAME_BYTES` after protobuf overhead.
         let mut offset = 0u64;
         let total = bytes.len();
         let mut iter_pos = 0usize;
@@ -361,8 +358,8 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
         let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
         match resp.body {
             Some(ssh_frame::Body::UploadPackResponse(_)) => Ok(()),
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
-            other => Err(unexpected_frame("UploadPackResponse", other)),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
+            other => Err(unexpected_frame("enc", "UploadPackResponse", other)),
         }
     }
 
@@ -384,8 +381,8 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
         let header = self.executor.block_on(recv_frame(&mut session.receiver))?;
         let total = match header.body {
             Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
-            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e)),
-            other => return Err(unexpected_frame("DownloadPackHeader", other)),
+            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "enc")),
+            other => return Err(unexpected_frame("enc", "DownloadPackHeader", other)),
         };
 
         if total > PACK_BODY_LIMIT {
@@ -411,8 +408,8 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
                         break;
                     }
                 }
-                Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e)),
-                other => return Err(unexpected_frame("PackChunk", other)),
+                Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "enc")),
+                other => return Err(unexpected_frame("enc", "PackChunk", other)),
             }
         }
         Ok(out)
@@ -434,8 +431,8 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
         let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
         match resp.body {
             Some(ssh_frame::Body::PackExistsResponse(r)) => Ok(r.exists.unwrap_or(false)),
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
-            other => Err(unexpected_frame("PackExistsResponse", other)),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
+            other => Err(unexpected_frame("enc", "PackExistsResponse", other)),
         }
     }
 
@@ -481,10 +478,10 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
                 {
                     Err(TransportError::RefConflict)
                 } else {
-                    Err(rpc_error_to_transport(*e))
+                    Err(rpc_error_to_transport(*e, "enc"))
                 }
             }
-            other => Err(unexpected_frame("UpdateRefResponse", other)),
+            other => Err(unexpected_frame("enc", "UpdateRefResponse", other)),
         }
     }
 
@@ -521,8 +518,8 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
                     Err(TransportError::InvalidResponse)
                 }
             }
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
-            other => Err(unexpected_frame("ReadRefResponse", other)),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
+            other => Err(unexpected_frame("enc", "ReadRefResponse", other)),
         }
     }
 
@@ -552,8 +549,8 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
                 .into_iter()
                 .map(ref_entry_to_ref)
                 .collect::<TransportResult<Vec<_>>>(),
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
-            other => Err(unexpected_frame("ListRefsResponse", other)),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
+            other => Err(unexpected_frame("enc", "ListRefsResponse", other)),
         }
     }
 }
@@ -625,81 +622,9 @@ fn stream_err(_: commonware_stream::encrypted::Error) -> TransportError {
 }
 
 // ---------------------------------------------------------------------------
-// Shared helpers (mirrors mkit-transport-ssh)
+// (Shared frame helpers now live in `mkit_rpc::helpers` — re-used by
+// both this crate and `mkit-transport-ssh`. See B1 in #163's review.)
 // ---------------------------------------------------------------------------
-
-fn cond_to_wire(c: RefWriteCondition) -> (Vec<u8>, RefExpectation) {
-    match c {
-        RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
-        RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
-        RefWriteCondition::Match(h) => (h.to_vec(), RefExpectation::REF_EXPECTATION_MATCH),
-    }
-}
-
-fn rpc_error_to_transport(e: mkit_rpc::mkit::rpc::v1::Error) -> TransportError {
-    use mkit_rpc::mkit::rpc::v1::ErrorCode;
-    let code = e.code.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    let msg = e.message.unwrap_or_default();
-    if code == ErrorCode::ERROR_CODE_KEY_NOT_FOUND as i32 {
-        TransportError::PackNotFound
-    } else if code == ErrorCode::ERROR_CODE_USER_DECLINED as i32 {
-        TransportError::AccessDenied
-    } else if msg.is_empty() {
-        TransportError::RemoteError("enc server returned an unspecified error".into())
-    } else {
-        TransportError::RemoteError(msg)
-    }
-}
-
-fn unexpected_frame(want: &str, got: Option<ssh_frame::Body>) -> TransportError {
-    let body = got;
-    TransportError::RemoteError(format!(
-        "enc server returned {} when {} was expected",
-        body_name(&body),
-        want,
-    ))
-}
-
-fn body_name(b: &Option<ssh_frame::Body>) -> &'static str {
-    use ssh_frame::Body;
-    match b {
-        Some(Body::Hello(_)) => "hello",
-        Some(Body::HelloResponse(_)) => "hello_response",
-        Some(Body::Error(_)) => "error",
-        Some(Body::Close(_)) => "close",
-        Some(Body::ListRefs(_)) => "list_refs",
-        Some(Body::ListRefsResponse(_)) => "list_refs_response",
-        Some(Body::ReadRef(_)) => "read_ref",
-        Some(Body::ReadRefResponse(_)) => "read_ref_response",
-        Some(Body::UpdateRef(_)) => "update_ref",
-        Some(Body::UpdateRefResponse(_)) => "update_ref_response",
-        Some(Body::PackExists(_)) => "pack_exists",
-        Some(Body::PackExistsResponse(_)) => "pack_exists_response",
-        Some(Body::UploadPack(_)) => "upload_pack",
-        Some(Body::UploadPackResponse(_)) => "upload_pack_response",
-        Some(Body::DownloadPack(_)) => "download_pack",
-        Some(Body::DownloadPackHeader(_)) => "download_pack_header",
-        Some(Body::PackChunk(_)) => "pack_chunk",
-        None => "(empty body)",
-    }
-}
-
-fn ref_entry_to_ref(e: RefEntry) -> TransportResult<Ref> {
-    let name = e.name.unwrap_or_default();
-    if !validate_ref_name(&name) {
-        return Err(TransportError::InvalidRef(name));
-    }
-    let oid = e.object_id.unwrap_or_default();
-    if oid.len() != 32 {
-        return Err(TransportError::InvalidResponse);
-    }
-    let mut h = [0u8; 32];
-    h.copy_from_slice(&oid);
-    Ok(Ref {
-        name,
-        hash: Some(h),
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Tests

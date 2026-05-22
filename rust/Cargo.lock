@@ -2912,6 +2912,7 @@ dependencies = [
  "buffa",
  "buffa-build",
  "hex",
+ "mkit-core",
  "thiserror 2.0.18",
 ]
 
