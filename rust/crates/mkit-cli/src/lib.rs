@@ -25,6 +25,8 @@ pub mod exit;
 pub mod format;
 pub mod remote_dispatch;
 pub mod signal;
+#[cfg(feature = "sparse-checkout")]
+pub mod sparse_cache;
 pub mod term;
 
 use std::io::Write;
