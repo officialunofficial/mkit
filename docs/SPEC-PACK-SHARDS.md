@@ -60,9 +60,37 @@ commitment        [u8; 32]     Commonware BMT root committing to all
                                per-shard Merkle-proof checks.
 ```
 
-The exact byte layout for v0 transports is defined alongside the
-transport integration in Phase 2; see §5. For now, the Rust struct
-`mkit_core::pack_shard::ShardSet` is the canonical representation.
+### 2.1 v0 wire bytes
+
+All multi-byte integers are little-endian. The encoder /
+decoder live in `mkit_core::pack_shard::{encode_manifest,
+decode_manifest}`.
+
+```text
+offset  size   field
+------  -----  -----------------------------------------
+0       4      magic        = b"MKSH"
+4       1      version      = 0x01
+5       32     pack_hash
+37      2      minimum_shards (u16, non-zero)
+39      2      extra_shards   (u16, non-zero)
+41      32     commitment
+73      4      shard_hashes_len (u32, == minimum + extra)
+77      32*T   shard_hashes
+```
+
+For the v0 default `(16, 4)` config the manifest is `717` bytes:
+`5 + 32 + 2 + 2 + 32 + 4 + 20 * 32`.
+
+Decoders MUST:
+
+* Reject inputs shorter than the 5-byte prologue, or with a magic
+  that is not `b"MKSH"`, or with an unrecognised version.
+* Reject `minimum_shards == 0` or `extra_shards == 0`.
+* Reject a `shard_hashes_len` that does not equal
+  `minimum_shards + extra_shards`.
+* Reject any input that exceeds `MANIFEST_MAX_BYTES` (1 MiB).
+* Reject trailing bytes after the last hash.
 
 The manifest is itself content-addressed by `pack_hash` — i.e. the
 publish path is `/packs/<lower-hex(pack_hash)>/shards.manifest`.
