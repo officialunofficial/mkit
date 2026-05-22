@@ -61,6 +61,10 @@ fo = "fo"
 # are accepted by major dictionaries.
 unparseable = "unparseable"
 
+# `thr` is the keyid prefix for BLS12-381 threshold signatures
+# (`bls12381-thr:<hex>`). Default dictionary thinks it's a typo for "the".
+thr = "thr"
+
 [type.rust.extend-words]
 # `crate` is the obvious one but typos already knows it. Add any
 # Rust-specific terms here as they come up.
