@@ -83,13 +83,14 @@ sha2 = { version = "0.10", optional = true, default-features = false }
 # commonware-cryptography's default `std` feature. The whole dep tree is
 # default-off; opt-in carries the cost. `commonware-codec` is the
 # `Encode`/`Decode` companion crate used to ship partial signatures on
-# the wire between holders and aggregator.
-commonware-cryptography = { version = "2026.4", optional = true, default-features = false, features = ["std"] }
-commonware-codec = { version = "2026.4", optional = true, default-features = false, features = ["std"] }
+# the wire between holders and aggregator. Version pin lives at
+# `[workspace.dependencies]` in `rust/Cargo.toml`.
+commonware-cryptography = { workspace = true, optional = true, features = ["std"] }
+commonware-codec = { workspace = true, optional = true, features = ["std"] }
 # `Sequential` (parallel strategy) for recovery + `Faults`/`N3f1` for
-# threshold computation. Same workspace version as commonware-cryptography.
-commonware-parallel = { version = "2026.4", optional = true, default-features = false, features = ["std"] }
-commonware-utils = { version = "2026.4", optional = true, default-features = false, features = ["std"] }
+# threshold computation. Same workspace train as commonware-cryptography.
+commonware-parallel = { workspace = true, optional = true, features = ["std"] }
+commonware-utils = { workspace = true, optional = true, features = ["std"] }
 # `CryptoRngCore` for the trusted-dealer helper. Pulled by
 # commonware-cryptography anyway; explicit here so the call site can
 # accept any RNG without re-exporting commonware's prelude.
