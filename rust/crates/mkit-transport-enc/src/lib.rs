@@ -159,25 +159,16 @@ impl<I: Stream, O: Sink> EncSession<I, O> {
 }
 
 // ---------------------------------------------------------------------------
-// Executor trait — the async/sync shim boundary
+// Executor trait — re-exported from mkit-core::protocol::async_shim
 // ---------------------------------------------------------------------------
 
-/// Drives an async future to completion synchronously. Pluggable so
-/// callers can choose between `tokio`, `commonware-runtime`'s
-/// deterministic runner (tests), or the planned production tokio
-/// runner without `mkit-transport-enc` having to compile-time depend
-/// on a specific runtime crate.
-///
-/// Phase 1 tests construct an executor that calls into a
-/// [`commonware_runtime::deterministic::Runner`] already inside a
-/// running runtime — see the in-tree test harness.
-pub trait Executor: Send + Sync {
-    /// Block the current thread until `fut` resolves.
-    fn block_on<F, T>(&self, fut: F) -> T
-    where
-        F: std::future::Future<Output = T> + Send,
-        T: Send;
-}
+/// Pluggable async/sync shim. Re-exported here so the crate-public
+/// API stays backwards-compatible with Phase 1 callers that imported
+/// `mkit_transport_enc::Executor`. New code SHOULD prefer
+/// [`mkit_core::protocol::async_shim::Executor`] directly — the trait
+/// is generic infrastructure shared with `mkit-core::sparse` (Phase 2)
+/// and doesn't really belong in a transport crate.
+pub use mkit_core::protocol::async_shim::Executor;
 
 // ---------------------------------------------------------------------------
 // Transport implementation
