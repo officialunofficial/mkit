@@ -46,7 +46,9 @@ fn synthetic_blob(size: usize) -> Vec<u8> {
 fn with_cwd(path: &std::path::Path, body: impl FnOnce()) {
     // PoisonError::into_inner() — a previous panicked test has
     // already restored cwd, the lock is just dirty.
-    let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = CWD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let saved = env::current_dir().ok();
     env::set_current_dir(path).unwrap();
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
