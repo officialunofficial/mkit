@@ -11,6 +11,7 @@
 //! 71 bytes total.
 
 use ed25519_dalek::{Signer as _, SigningKey};
+use zeroize::Zeroizing;
 
 use crate::Error;
 use crate::algorithm::Algorithm;
@@ -33,6 +34,23 @@ impl RepoKeySigner {
     #[must_use]
     pub fn new(kp: KeyPair) -> Self {
         Self { kp }
+    }
+
+    /// Build a `RepoKeySigner` directly from a [`Zeroizing`]-wrapped
+    /// 32-byte seed. Avoids the intermediate `[u8; 32]` `Copy` on the
+    /// caller's stack — every internal step works through references.
+    ///
+    /// # Zeroization
+    ///
+    /// The caller's `Zeroizing` wrapper still owns the seed bytes and
+    /// scrubs them at end of scope. The returned signer owns its own
+    /// copy inside [`KeyPair::secret`], which is itself zeroized on
+    /// drop. No intermediate plain `[u8; 32]` is materialised.
+    #[must_use]
+    pub fn from_seed_zeroizing(seed: &Zeroizing<[u8; 32]>) -> Self {
+        Self {
+            kp: KeyPair::from_seed_zeroizing(seed),
+        }
     }
 
     /// Return the `blake3:<hex>` keyid this signer reports.

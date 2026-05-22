@@ -3040,6 +3040,7 @@ dependencies = [
  "mkit-attest",
  "mkit-core",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]
