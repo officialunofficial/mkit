@@ -108,26 +108,43 @@ fn run_listen_enc(_addr: &str, _repo_root: PathBuf) -> u8 {
     clippy::too_many_lines
 )]
 fn run_listen_enc(addr: &str, repo_root: PathBuf) -> u8 {
+    use commonware_codec::DecodeExt as _;
     use commonware_cryptography::Signer as _;
     use commonware_cryptography::ed25519::PrivateKey;
     use mkit_transport_enc::{EncSession, recv_frame, send_frame};
     use std::sync::Arc;
+    use zeroize::Zeroizing;
 
     // Ephemeral signing key. Same caveat as remote_dispatch's
     // dialer key — keystore integration is deferred. The
     // server's public key is what clients pin via the
     // `?pubkey=<…>` query parameter; operators currently must read
-    // the printed key off the serve process's stderr. We draw the
-    // seed from getrandom (already a dep of this crate via keygen)
-    // so the per-process key isn't predictable from process start
-    // time alone.
-    let mut seed_bytes = [0u8; 8];
-    if getrandom::fill(&mut seed_bytes).is_err() {
+    // the printed key off the serve process's stderr.
+    //
+    // The previous shape passed only 64 bits of entropy (a `u64`
+    // seed via `PrivateKey::from_seed`) — commonware's own
+    // documentation calls `from_seed` "insecure" and reserves it
+    // for examples / testing. Draw 32 bytes (≥256 bits) from
+    // `getrandom` and hand them to the Ed25519 SigningKey via
+    // commonware-codec's `DecodeExt::decode`, mirroring
+    // `PrivateKey`'s own `Read` impl. The intermediate bytes are
+    // wrapped in `Zeroizing` so the stack copy is scrubbed on drop;
+    // the resulting `PrivateKey` carries its own `Secret`-based
+    // zeroization for the lifetime of the value.
+    let mut secret = Zeroizing::new([0u8; 32]);
+    if getrandom::fill(secret.as_mut()).is_err() {
         eprintln!("mkit serve --listen-enc: failed to read system RNG for ephemeral key");
         return exit::TEMPFAIL;
     }
-    let seed = u64::from_le_bytes(seed_bytes);
-    let sk = PrivateKey::from_seed(seed);
+    let sk = match PrivateKey::decode(secret.as_ref()) {
+        Ok(sk) => sk,
+        Err(e) => {
+            eprintln!("mkit serve --listen-enc: ephemeral key construction failed: {e}");
+            return exit::TEMPFAIL;
+        }
+    };
+    // `secret` drops here and is zeroized; `sk` holds an internal
+    // `Secret` that scrubs on its own drop.
     let pk = sk.public_key().to_string();
     eprintln!(
         "mkit serve --listen-enc on {addr} (server pubkey = {pk}); \

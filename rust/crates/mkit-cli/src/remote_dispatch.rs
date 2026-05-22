@@ -123,9 +123,10 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
 /// allowlist works.
 #[cfg(feature = "enc-transport")]
 fn open_enc(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
-    use commonware_cryptography::Signer;
+    use commonware_codec::DecodeExt as _;
     use commonware_cryptography::ed25519::PrivateKey;
     use mkit_transport_enc::url::parse_enc_url;
+    use zeroize::Zeroizing;
 
     let target = parse_enc_url(url).map_err(DispatchError::Transport)?;
     // Ephemeral dialer key — fresh per process. The server's bouncer
@@ -133,18 +134,21 @@ fn open_enc(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
     // bumping to a stable keystore-backed key is SPEC-TRANSPORT-ENC §6
     // item 5.
     //
-    // `PrivateKey::from_seed` keys are derived from a 64-bit seed
-    // which we draw from `OsRng`. The resulting `PrivateKey` is
-    // 32 bytes and will be zeroized on drop by commonware-cryptography
-    // (per its `Drop` impl).
-    // Use `getrandom` for the ephemeral seed. Already a dep of this
-    // crate (used by `mkit keygen`), so this path adds no transitive
-    // surface area.
-    let mut seed_bytes = [0u8; 8];
-    getrandom::fill(&mut seed_bytes)
+    // The previous shape passed only 64 bits of entropy (a `u64`
+    // seed via `PrivateKey::from_seed`) — commonware's own
+    // documentation calls `from_seed` "insecure" and reserves it
+    // for examples / testing. Draw 32 bytes (≥256 bits) from
+    // `getrandom` and hand them to the Ed25519 SigningKey via
+    // commonware-codec's `DecodeExt::decode`, mirroring
+    // `PrivateKey`'s own `Read` impl. The intermediate bytes are
+    // wrapped in `Zeroizing` so the stack copy is scrubbed on drop;
+    // the resulting `PrivateKey` carries its own `Secret`-based
+    // zeroization for the lifetime of the value.
+    let mut secret = Zeroizing::new([0u8; 32]);
+    getrandom::fill(secret.as_mut())
         .map_err(|e| DispatchError::Transport(TransportError::RemoteError(e.to_string())))?;
-    let seed = u64::from_le_bytes(seed_bytes);
-    let sk = PrivateKey::from_seed(seed);
+    let sk = PrivateKey::decode(secret.as_ref())
+        .map_err(|e| DispatchError::Transport(TransportError::RemoteError(e.to_string())))?;
     let tx = mkit_transport_enc::connect_tcp(&target.host, target.port, &target.server_pubkey, sk)
         .map_err(|e| DispatchError::Transport(TransportError::RemoteError(e.to_string())))?;
     Ok(Arc::new(tx))
