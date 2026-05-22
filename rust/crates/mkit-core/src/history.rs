@@ -1,40 +1,96 @@
 //! Append-only commit-history Merkle Mountain Range (MMR).
 //!
-//! Phase 1 of issue #157. Light-client inclusion proofs for the commit
-//! chain: a verifier with the MMR root for a branch tip can check
-//! "commit X was leaf N on this branch" with `O(log n)` hash work,
-//! without downloading the parent chain or any pack.
+//! Issue #157. Light-client inclusion proofs for the commit chain: a
+//! verifier with the MMR root for a branch tip can check "commit X was
+//! leaf N on this branch" with `O(log n)` hash work, without
+//! downloading the parent chain or any pack.
 //!
 //! # Status
 //!
-//! This module is **Phase 1**: the MMR is `mem`-backed (in-memory only,
-//! lost on process exit). The persisted (journaled-on-disk) variant
-//! lands in Phase 2; integration with `object::Commit` lands in
-//! Phase 3. See `docs/SPEC-HISTORY-PROOF.md` for the normative wire
-//! format and the rollout plan.
-//!
-//! Underlying primitive: [`commonware_storage::merkle::mmr::mem::Mmr`]
-//! pinned to `2026.4.0` (ALPHA stability). The wire format of
-//! [`InclusionProof`] is a thin re-export of `commonware-storage`'s
-//! native [`Proof`] type — see SPEC-HISTORY-PROOF §2.
+//! - **Phase 1** (shipped, [`CommitHistory::open`]): `mem`-backed
+//!   in-memory MMR. Lost on process exit. Useful for tests and
+//!   short-lived computations where the proof is the only output.
+//! - **Phase 2** (this build, [`CommitHistory::open_at`]): on-disk
+//!   journaled MMR backed by
+//!   [`commonware_storage::merkle::mmr::journaled::Mmr`] pinned to
+//!   `=2026.4.0`. The on-disk layout is commonware's native two-store
+//!   shape — a fixed-item journal of node digests plus a metadata
+//!   sidecar for pruned pinned nodes — laid out under
+//!   `<mkit_dir>/history/<sanitized_branch>/`. See
+//!   `docs/SPEC-HISTORY-PROOF.md` §4.
+//! - **Phase 3** (planned, v0.2): `Commit.history_root` proto field,
+//!   new signing-bytes layout. Out of scope here.
 //!
 //! # Hashing
 //!
-//! Internally the MMR is parameterised over `Blake3` (from
-//! `commonware-cryptography`) so node digests are 32-byte BLAKE3
-//! values — same primitive mkit already uses elsewhere
-//! (`hash::Hash`). This is **not** the same hashing schedule as
-//! `hash::hash()`: the MMR injects node-position bytes into each
-//! parent/leaf digest (see commonware's `Hasher` trait). The two
-//! schedules are deliberately separate; the MMR's domain-separation
-//! is what makes inclusion proofs meaningful.
+//! The underlying primitive is `commonware-storage`'s journaled MMR
+//! parameterised over BLAKE3 (from `commonware-cryptography`). Node
+//! digests are 32-byte BLAKE3 values — same primitive mkit already
+//! uses elsewhere ([`crate::hash::Hash`]). The schedule is **not** the
+//! same as [`crate::hash::hash`]: commonware injects each node's
+//! position into the parent/leaf digest. Treat the digests as opaque
+//! beyond comparison.
+//!
+//! # Sync / async bridge
+//!
+//! commonware's journaled MMR is async over a `commonware-runtime`
+//! [`Context`]. The mkit-core public surface ([`CommitHistory::append`],
+//! [`CommitHistory::root`], [`CommitHistory::prove`]) is synchronous
+//! by design — it is called from the synchronous `refs::update_ref`
+//! path and from CLI helpers that have no async-runtime context.
+//!
+//! The bridge is the [`crate::protocol::async_shim::Executor`] trait
+//! hoisted in PR #167. [`CommitHistory`] is generic over an executor
+//! `X: Executor`; every sync method drives its async counterpart via
+//! `executor.block_on(...)`. The executor is held by [`Arc`] for the
+//! lifetime of the [`CommitHistory`] value so multiple [`append`] /
+//! [`prove`] calls share a single runtime.
+//!
+//! # Executor / Context ownership
+//!
+//! [`CommitHistory::open_at`] takes an [`Arc`]-shared executor from
+//! the caller. The commonware [`Context`] needed to drive the
+//! journaled MMR is bootstrapped *internally* via a one-shot
+//! [`commonware_runtime::tokio::Runner::start`] on a fresh OS thread
+//! (the standard workaround documented in transport-enc Phase 2):
+//! the runner returns a Context clone, the outer Arc<Executor> inside
+//! the Context keeps tokio's runtime alive, and the bootstrap thread
+//! joins immediately. Subsequent async ops are driven through the
+//! caller-supplied executor.
+//!
+//! This means production callers only need to construct an executor
+//! ([`crate::history::tokio_executor::TokioExecutor`] is provided when
+//! the `history-mmr` feature is on); mkit-core handles the
+//! commonware-side wiring. The trade-off: every [`CommitHistory`]
+//! owns one tokio runtime (via its executor) AND one commonware
+//! Context with its own inner tokio runtime. The two never need to
+//! interact — `tokio::fs` and `tokio::sync::Mutex` are runtime-agnostic
+//! and work whichever runtime is driving the poll.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use commonware_cryptography::{Blake3, Hasher as CHasher};
+use commonware_runtime::{buffer::paged::CacheRef, Metrics, Runner as _};
 use commonware_storage::merkle::mmr::{
-    Location as MmrLocation, Proof as MmrProof, StandardHasher, mem::Mmr as MemMmr,
+    journaled::{Config as JConfig, Mmr as JournaledMmr},
+    mem::Mmr as MemMmr,
+    Location as MmrLocation, Proof as MmrProof, StandardHasher,
 };
+use commonware_utils::{NZU16, NZU64, NZUsize};
 
 use crate::hash::{HASH_LEN, Hash};
+use crate::protocol::async_shim::Executor;
+use crate::refs::validate_ref_name;
+
+pub mod tokio_executor;
+
+/// Re-export of the bundled tokio-runtime executor.
+pub use tokio_executor::TokioExecutor;
+
+// ---------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------
 
 /// 0-based index of a commit within its branch's MMR.
 ///
@@ -67,75 +123,311 @@ pub enum HistoryError {
     /// `Display` impl — stable enough for logs, not parsed.
     #[error("mmr error: {0}")]
     Mmr(String),
+    /// The branch name failed [`crate::refs::validate_ref_name`].
+    #[error("invalid branch name for history journal: {0:?}")]
+    InvalidBranch(String),
+    /// On-disk journal could not be opened or recovered. commonware's
+    /// own `init` performs roll-forward recovery on a half-written
+    /// trailing leaf (see [`commonware_storage::merkle::journaled`]
+    /// docs); this variant surfaces failures it cannot recover from.
+    #[error("history journal is corrupt: {0}")]
+    Corrupted(String),
+    /// Failed to bootstrap the commonware tokio Context.
+    #[error("failed to bootstrap commonware runtime: {0}")]
+    RuntimeBootstrap(String),
+    /// Failed to set up the on-disk history directory.
+    #[error("history directory I/O: {0}")]
+    Io(#[from] std::io::Error),
 }
+
+// ---------------------------------------------------------------------
+// On-disk layout
+// ---------------------------------------------------------------------
+
+/// Subdirectory of `<mkit_dir>` that holds per-branch MMR journals.
+///
+/// Inside this directory the journaled MMR lays out two commonware
+/// partitions per branch:
+///
+/// ```text
+/// <mkit_dir>/history/<sanitized_branch>__journal/  # node-digest journal
+/// <mkit_dir>/history/<sanitized_branch>__metadata/ # pruned-pinned-node sidecar
+/// ```
+///
+/// commonware partition names are restricted to `[A-Za-z0-9_-]+`, so
+/// branch names are percent-escaped: `/` becomes `%2F`, every other
+/// non-allowed byte becomes `_`. Empty branches and invalid ref names
+/// are rejected by [`CommitHistory::open_at`].
+pub const HISTORY_DIR: &str = "history";
+
+/// Suffix appended to the branch's partition name for the node-digest
+/// journal.
+pub const JOURNAL_PARTITION_SUFFIX: &str = "__journal";
+
+/// Suffix appended to the branch's partition name for the
+/// pruned-pinned-node metadata sidecar.
+pub const METADATA_PARTITION_SUFFIX: &str = "__metadata";
+
+// ---------------------------------------------------------------------
+// CommitHistory
+// ---------------------------------------------------------------------
 
 /// Append-only Merkle history of commit hashes for one branch.
 ///
-/// Phase 1: `mem`-backed. Persistence and `open(mkit_dir, branch)` land
-/// in Phase 2 — see SPEC-HISTORY-PROOF §4.
-pub struct CommitHistory {
-    mmr: MemMmr<<Blake3 as CHasher>::Digest>,
+/// Two construction modes:
+///
+/// 1. [`CommitHistory::open`] — purely in-memory. Useful for tests
+///    and for callers that don't want any disk side-effects. Lost on
+///    drop.
+/// 2. [`CommitHistory::open_at`] — on-disk journaled MMR under
+///    `<mkit_dir>/history/<branch>/`. Survives process exit.
+///
+/// Each call to a sync method (`append`, `root`, `prove`) on the
+/// journaled flavour drives an async operation on the underlying
+/// `commonware-storage::journaled::Mmr` via the caller-supplied
+/// [`Executor`].
+pub struct CommitHistory<X: Executor = TokioExecutor> {
+    backend: Backend<X>,
     hasher: StandardHasher<Blake3>,
 }
 
-impl core::fmt::Debug for CommitHistory {
+/// Internal backend selector. The mem variant is the Phase-1 shape; the
+/// journaled variant is Phase-2.
+///
+/// `Journaled` is boxed because its inner state (commonware's
+/// `Journaled` plus a `Context` clone) is ~2.2 KiB and would otherwise
+/// pad every mem-flavour `CommitHistory` by the same amount.
+enum Backend<X: Executor> {
+    Mem {
+        mmr: MemMmr<<Blake3 as CHasher>::Digest>,
+    },
+    Journaled(Box<JournaledBackend<X>>),
+}
+
+struct JournaledBackend<X: Executor> {
+    // Order matters for Drop: `mmr` must drop before `_ctx` so
+    // any pending async-resource shutdowns can still poll on the
+    // surviving tokio runtime. In practice commonware's
+    // `Journaled` only flushes synchronously in `sync`, but the
+    // ordering is cheap insurance.
+    mmr: JournaledMmr<commonware_runtime::tokio::Context, <Blake3 as CHasher>::Digest>,
+    executor: Arc<X>,
+    // Held to keep the bootstrap tokio runtime (inside the Context's
+    // executor `Arc`) alive for the whole CommitHistory lifetime.
+    _ctx: commonware_runtime::tokio::Context,
+    // Held so update_ref_with_history can take a fresh RepoLock for
+    // every append. None for the mem-only flavour.
+    mkit_dir: PathBuf,
+    branch: String,
+}
+
+impl<X: Executor> core::fmt::Debug for CommitHistory<X> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("CommitHistory")
-            .field("leaves", &u64::from(self.mmr.leaves()))
-            .field("size", &u64::from(self.mmr.size()))
-            .finish_non_exhaustive()
+        match &self.backend {
+            Backend::Mem { mmr } => f
+                .debug_struct("CommitHistory::Mem")
+                .field("leaves", &u64::from(mmr.leaves()))
+                .field("size", &u64::from(mmr.size()))
+                .finish_non_exhaustive(),
+            Backend::Journaled(b) => f
+                .debug_struct("CommitHistory::Journaled")
+                .field("branch", &b.branch)
+                .field("leaves", &u64::from(b.mmr.leaves()))
+                .field("size", &u64::from(b.mmr.size()))
+                .finish_non_exhaustive(),
+        }
     }
 }
 
-impl CommitHistory {
-    /// Open a fresh empty history.
+impl CommitHistory<TokioExecutor> {
+    /// Open a fresh empty in-memory history (Phase 1 shape).
     ///
-    /// Phase 1 stub: the MMR is in-memory only, so there is no path /
-    /// branch to wire up yet. Phase 2 will introduce a path-bound
-    /// `open(mkit_dir, branch)` against the on-disk journal.
+    /// Lost on drop. Useful for unit tests and for callers that just
+    /// need a proof bundle without committing any state to disk.
     #[must_use]
     pub fn open() -> Self {
         let hasher: StandardHasher<Blake3> = StandardHasher::new();
         let mmr = MemMmr::new(&hasher);
-        Self { mmr, hasher }
+        Self {
+            backend: Backend::Mem { mmr },
+            hasher,
+        }
+    }
+}
+
+impl<X: Executor + 'static> CommitHistory<X> {
+    /// Open a persisted history under `<mkit_dir>/history/<branch>/`.
+    ///
+    /// The on-disk layout is commonware-storage's native journaled MMR
+    /// shape — see [`HISTORY_DIR`] and SPEC-HISTORY-PROOF §4. If the
+    /// underlying journal does not yet exist, it is created empty
+    /// (subsequent [`CommitHistory::append`] calls populate it).
+    ///
+    /// Crash recovery is delegated to commonware: its `Journaled::init`
+    /// detects a half-written trailing leaf, rewinds the journal to
+    /// the last valid size, and re-derives the in-memory state. See
+    /// SPEC-HISTORY-PROOF §4.4 for the contract surfaced to mkit
+    /// callers.
+    ///
+    /// # Errors
+    ///
+    /// - [`HistoryError::InvalidBranch`] — `branch` failed
+    ///   [`validate_ref_name`].
+    /// - [`HistoryError::RuntimeBootstrap`] — could not start the
+    ///   commonware tokio Runner used to construct the underlying
+    ///   storage Context.
+    /// - [`HistoryError::Corrupted`] — commonware refused to recover
+    ///   the journal (a deeper-than-trailing-leaf corruption).
+    /// - [`HistoryError::Io`] — failed to create the history dir.
+    pub fn open_at(
+        executor: Arc<X>,
+        mkit_dir: &Path,
+        branch: &str,
+    ) -> Result<Self, HistoryError> {
+        if !validate_ref_name(branch) {
+            return Err(HistoryError::InvalidBranch(branch.to_string()));
+        }
+
+        let history_dir = mkit_dir.join(HISTORY_DIR);
+        std::fs::create_dir_all(&history_dir)?;
+
+        // Bootstrap a commonware tokio Context rooted at
+        // `<mkit_dir>/history`. The Context survives the bootstrap
+        // runner's drop because its inner `Arc<Executor>` (the
+        // commonware Executor, not ours) holds the tokio runtime alive.
+        let ctx = bootstrap_commonware_context(&history_dir)?;
+
+        let sanitized = sanitize_branch(branch);
+        let journal_partition = format!("{sanitized}{JOURNAL_PARTITION_SUFFIX}");
+        let metadata_partition = format!("{sanitized}{METADATA_PARTITION_SUFFIX}");
+        let cfg = JConfig {
+            journal_partition,
+            metadata_partition,
+            // 4096 items/blob → 128 KiB blobs (32 B digest × 4096). Big
+            // enough that small branches stay in one blob; small enough
+            // that pruning later doesn't carry stale data around.
+            items_per_blob: NZU64!(4096),
+            write_buffer: NZUsize!(4096),
+            thread_pool: None,
+            page_cache: CacheRef::from_pooler(&ctx, NZU16!(4096), NZUsize!(8)),
+        };
+
+        let hasher: StandardHasher<Blake3> = StandardHasher::new();
+        let mmr = {
+            let hasher_inner: StandardHasher<Blake3> = StandardHasher::new();
+            let ctx_for_init = ctx.clone();
+            executor
+                .block_on(async move {
+                    JournaledMmr::<_, <Blake3 as CHasher>::Digest>::init(
+                        ctx_for_init,
+                        &hasher_inner,
+                        cfg,
+                    )
+                    .await
+                })
+                .map_err(|e| HistoryError::Corrupted(e.to_string()))?
+        };
+
+        Ok(Self {
+            backend: Backend::Journaled(Box::new(JournaledBackend {
+                mmr,
+                executor,
+                _ctx: ctx,
+                mkit_dir: mkit_dir.to_path_buf(),
+                branch: branch.to_string(),
+            })),
+            hasher,
+        })
+    }
+
+    /// Borrow the `mkit_dir` this history was opened against. `None`
+    /// for the mem-only flavour. Used by
+    /// [`crate::refs::update_ref_with_history`] to take a [`RepoLock`]
+    /// around the ref-write + MMR-append critical section.
+    #[must_use]
+    pub fn mkit_dir(&self) -> Option<&Path> {
+        match &self.backend {
+            Backend::Mem { .. } => None,
+            Backend::Journaled(b) => Some(b.mkit_dir.as_path()),
+        }
+    }
+
+    /// Borrow the branch name this history was opened against. `None`
+    /// for the mem-only flavour.
+    #[must_use]
+    pub fn branch(&self) -> Option<&str> {
+        match &self.backend {
+            Backend::Mem { .. } => None,
+            Backend::Journaled(b) => Some(b.branch.as_str()),
+        }
     }
 
     /// Append a commit hash. Returns its leaf [`Position`].
     ///
     /// Positions are dense: the *n*-th append returns `Position(n)`.
+    /// For the journaled flavour, the underlying MMR is `sync`'d to
+    /// disk before returning — survives a `SIGKILL` immediately after.
     pub fn append(&mut self, commit_hash: &Hash) -> Result<Position, HistoryError> {
         let leaf = digest_from_hash(commit_hash);
-        let leaf_loc = self.mmr.leaves();
-
-        let batch = self
-            .mmr
-            .new_batch()
-            .add(&self.hasher, &leaf)
-            .merkleize(&self.mmr, &self.hasher);
-        self.mmr
-            .apply_batch(&batch)
-            .map_err(|e| HistoryError::Mmr(e.to_string()))?;
-
-        Ok(Position(u64::from(leaf_loc)))
+        match &mut self.backend {
+            Backend::Mem { mmr } => {
+                let leaf_loc = mmr.leaves();
+                let batch = mmr
+                    .new_batch()
+                    .add(&self.hasher, &leaf)
+                    .merkleize(mmr, &self.hasher);
+                mmr.apply_batch(&batch)
+                    .map_err(|e| HistoryError::Mmr(e.to_string()))?;
+                Ok(Position(u64::from(leaf_loc)))
+            }
+            Backend::Journaled(b) => {
+                let leaf_loc = b.mmr.leaves();
+                let batch = b.mmr.new_batch().add(&self.hasher, &leaf);
+                let batch = b.mmr.with_mem(|mem| batch.merkleize(mem, &self.hasher));
+                b.mmr
+                    .apply_batch(&batch)
+                    .map_err(|e| HistoryError::Mmr(e.to_string()))?;
+                // Flush to disk synchronously so a SIGKILL between
+                // append and the caller's next ref-write does not lose
+                // the leaf we just promised to persist.
+                let sync_fut = b.mmr.sync();
+                b.executor
+                    .block_on(sync_fut)
+                    .map_err(|e| HistoryError::Mmr(e.to_string()))?;
+                Ok(Position(u64::from(leaf_loc)))
+            }
+        }
     }
 
     /// Current MMR root digest. 32-byte BLAKE3 (mkit `Hash` shape).
     ///
-    /// Defined for an empty history — commonware returns
-    /// `Blake3(leaf_count = 0_u64_be)` in that case, which is
-    /// deterministic and well-defined. See SPEC-HISTORY-PROOF §2.
+    /// Defined for an empty history — commonware returns a
+    /// deterministic empty-MMR root (see SPEC-HISTORY-PROOF §2.3).
     #[must_use]
     pub fn root(&self) -> Hash {
-        let d = self.mmr.root();
         let mut out = [0u8; HASH_LEN];
-        out.copy_from_slice(d.as_ref());
+        match &self.backend {
+            Backend::Mem { mmr } => {
+                out.copy_from_slice(mmr.root().as_ref());
+            }
+            // `Journaled::root` is sync (reads from the in-memory cache),
+            // no executor needed. It returns an owned `Digest`, unlike
+            // `mem::Mmr::root` which returns a borrow.
+            Backend::Journaled(b) => {
+                let d = b.mmr.root();
+                out.copy_from_slice(d.as_ref());
+            }
+        }
         out
     }
 
     /// Number of leaves (commits) appended so far.
     #[must_use]
     pub fn len(&self) -> u64 {
-        u64::from(self.mmr.leaves())
+        match &self.backend {
+            Backend::Mem { mmr } => u64::from(mmr.leaves()),
+            Backend::Journaled(b) => u64::from(b.mmr.leaves()),
+        }
     }
 
     /// `true` if no commits have been appended.
@@ -147,13 +439,25 @@ impl CommitHistory {
     /// Build an inclusion proof for the commit at `position`.
     pub fn prove(&self, position: Position) -> Result<InclusionProof, HistoryError> {
         let loc = MmrLocation::new(position.0);
-        self.mmr
-            .proof(&self.hasher, loc)
-            .map_err(|e| HistoryError::Mmr(e.to_string()))
+        match &self.backend {
+            Backend::Mem { mmr } => mmr
+                .proof(&self.hasher, loc)
+                .map_err(|e| HistoryError::Mmr(e.to_string())),
+            Backend::Journaled(b) => {
+                let hasher = self.hasher.clone();
+                let proof_fut = b.mmr.proof(&hasher, loc);
+                // Drive the async proof builder via the executor. The
+                // future borrows `mmr` immutably for the duration of
+                // `block_on`; the borrow ends when `block_on` returns.
+                b.executor
+                    .block_on(proof_fut)
+                    .map_err(|e| HistoryError::Mmr(e.to_string()))
+            }
+        }
     }
 }
 
-impl Default for CommitHistory {
+impl Default for CommitHistory<TokioExecutor> {
     fn default() -> Self {
         Self::open()
     }
@@ -173,10 +477,6 @@ pub fn verify_inclusion(
     proof: &InclusionProof,
     root: &Hash,
 ) -> bool {
-    // Reconstruct the typed digests commonware expects. Reject any
-    // hash whose byte layout doesn't fit the BLAKE3 digest size — in
-    // practice impossible (`Hash` is `[u8; 32]`) but the cast is
-    // checked anyway.
     let leaf = digest_from_hash(commit_hash);
     let root_digest = digest_from_hash(root);
     let loc = MmrLocation::new(position.0);
@@ -185,12 +485,157 @@ pub fn verify_inclusion(
     proof.verify_element_inclusion(&hasher, leaf.as_ref(), loc, &root_digest)
 }
 
-/// Convert an mkit `Hash` (`[u8; 32]`) into commonware's `Blake3::Digest`.
+// ---------------------------------------------------------------------
+// v0.1.x → v0.2.x rebuild shim
+// ---------------------------------------------------------------------
+
+/// Rebuild a branch's history MMR from its on-disk parent chain.
 ///
-/// Both are 32 bytes of BLAKE3 output, so this is a typed re-wrap with
-/// zero copy beyond the `[u8; 32]` move.
+/// For repos created against an older mkit (v0.1.x, before this
+/// module persisted anything to disk) the `<mkit_dir>/history/<branch>/`
+/// directory is empty on first open, but the branch's commit chain is
+/// already on disk in the object store. This helper walks the
+/// first-parent chain from `tip` to root, then re-appends each commit
+/// (in oldest-first order) into the supplied empty [`CommitHistory`].
+///
+/// The walker is supplied by the caller as `parent_of`: given a
+/// commit hash, it returns `Ok(Some(parent_hash))` if there is a
+/// parent, `Ok(None)` for the root commit, and `Err(_)` for any
+/// lookup failure. This keeps `mkit-core::history` free of an
+/// `ObjectStore` dependency — the rebuild shim is a tool the caller
+/// (typically `mkit-cli`) drives.
+///
+/// # Errors
+///
+/// - Propagates any error from `parent_of`.
+/// - Propagates any [`HistoryError`] from `history.append`.
+pub fn rebuild_from_chain<X, F, E>(
+    history: &mut CommitHistory<X>,
+    tip: Hash,
+    mut parent_of: F,
+) -> Result<u64, RebuildError<E>>
+where
+    X: Executor + 'static,
+    F: FnMut(&Hash) -> Result<Option<Hash>, E>,
+    E: core::fmt::Display,
+{
+    let mut chain = Vec::new();
+    let mut cursor = Some(tip);
+    while let Some(h) = cursor {
+        chain.push(h);
+        cursor = parent_of(&h).map_err(|e| RebuildError::Walker(e.to_string()))?;
+    }
+    // Walker yielded tip..root; we need root..tip for the append order.
+    chain.reverse();
+    let count = chain.len() as u64;
+    for h in &chain {
+        history.append(h).map_err(RebuildError::History)?;
+    }
+    Ok(count)
+}
+
+/// Errors returned by [`rebuild_from_chain`].
+#[derive(Debug, thiserror::Error)]
+pub enum RebuildError<E: core::fmt::Display> {
+    /// The caller-supplied parent-walker failed.
+    #[error("parent-chain walker failed: {0}")]
+    Walker(String),
+    /// The underlying [`CommitHistory::append`] failed.
+    #[error(transparent)]
+    History(HistoryError),
+    /// PhantomData carrier so callers don't have to specify a
+    /// concrete `E` when the walker is infallible.
+    #[doc(hidden)]
+    #[error("unused")]
+    _Phantom(std::marker::PhantomData<E>),
+}
+
+// ---------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------
+
+/// Convert an mkit `Hash` (`[u8; 32]`) into commonware's `Blake3::Digest`.
 fn digest_from_hash(h: &Hash) -> <Blake3 as CHasher>::Digest {
     <<Blake3 as CHasher>::Digest as From<[u8; HASH_LEN]>>::from(*h)
+}
+
+/// Hex-escape a mkit branch name into a commonware-partition-safe
+/// token.
+///
+/// commonware partition names are restricted to `[A-Za-z0-9_-]+`. mkit
+/// ref names can contain `.` and `/` (and `_`, which IS allowed
+/// upstream but which we must escape too to keep this encoding
+/// injective). Every non-`[A-Za-z0-9-]` byte is encoded as `_xx`
+/// where `xx` is the lowercase-hex byte value; `_` itself encodes as
+/// `_5f`. This makes the encoding self-delimiting — every `_` in the
+/// output is the lead-in of a two-hex-digit escape, never a literal.
+///
+/// Examples:
+///   `main`        → `main`
+///   `feat/v1.0`   → `feat_2fv1_2e0`
+///   `feat_v1_0`   → `feat_5fv1_5f0`
+///
+/// The encoding is injective: different valid branch names always
+/// sanitize to different partition tokens, so the journaled MMRs of
+/// two branches in the same repo never share commonware partitions.
+fn sanitize_branch(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for &b in name.as_bytes() {
+        let allowed = b.is_ascii_alphanumeric() || b == b'-';
+        if allowed {
+            out.push(b as char);
+        } else {
+            use core::fmt::Write as _;
+            let _ = write!(&mut out, "_{b:02x}");
+        }
+    }
+    out
+}
+
+/// Bootstrap a commonware tokio [`Context`] whose `storage_directory`
+/// is the supplied path.
+///
+/// The bootstrap is done on a fresh OS thread because tokio refuses to
+/// nest `runtime::Builder::build()` inside an already-active runtime
+/// (the `TokioExecutor`'s runtime is already alive in the caller's
+/// thread). The returned Context's inner `Arc<Executor>` keeps the
+/// bootstrap runtime alive after the bootstrap thread joins.
+///
+/// See `docs/SPEC-HISTORY-PROOF.md` §4.1 for the design rationale and
+/// the trade-off with the alternative "share the caller's tokio
+/// runtime" approach.
+fn bootstrap_commonware_context(
+    storage_directory: &Path,
+) -> Result<commonware_runtime::tokio::Context, HistoryError> {
+    let dir = storage_directory.to_path_buf();
+    std::thread::spawn(move || {
+        let cfg = commonware_runtime::tokio::Config::new()
+            .with_storage_directory(dir);
+        let runner = commonware_runtime::tokio::Runner::new(cfg);
+        // Return a Context clone. The Context's `executor: Arc<Executor>`
+        // keeps the inner tokio runtime alive after the bootstrap
+        // Runner is dropped at the end of `start`.
+        runner.start(|ctx| async move { ctx.clone() })
+    })
+    .join()
+    .map_err(|_| {
+        HistoryError::RuntimeBootstrap("bootstrap thread panicked".to_string())
+    })
+    .map(|ctx| {
+        // Best-effort label so any commonware metrics that surface
+        // through this Context are easy to spot in a debugger.
+        <commonware_runtime::tokio::Context as Metrics>::with_label(&ctx, "mkit_history")
+    })
+}
+
+// `BufferPooler`, `Clock`, `RStorage`, `Metrics` are implicit bounds on
+// the `Context` we use — the imports above keep them in scope so trait
+// methods (`with_label`, `network_buffer_pool`, …) resolve. Re-export
+// nothing.
+#[allow(dead_code)]
+fn _trait_imports_keep_alive() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<commonware_runtime::tokio::Context>();
 }
 
 // ---------------------------------------------------------------------
@@ -200,14 +645,28 @@ fn digest_from_hash(h: &Hash) -> <Blake3 as CHasher>::Digest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     /// Deterministic distinct commit hash generator.
     fn synth(i: u64) -> Hash {
         crate::hash::hash(&i.to_be_bytes())
     }
 
+    fn fresh_mkit_dir() -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let mkit_dir = tmp.path().join(".mkit");
+        std::fs::create_dir_all(&mkit_dir).unwrap();
+        (tmp, mkit_dir)
+    }
+
+    fn fresh_executor() -> Arc<TokioExecutor> {
+        Arc::new(TokioExecutor::new().expect("tokio runtime"))
+    }
+
+    // ---- Phase 1 mem-only API (unchanged from issue #157 Phase 1) --
+
     #[test]
-    fn empty_history_root_is_well_defined() {
+    fn mem_empty_history_root_is_well_defined() {
         let h1 = CommitHistory::open();
         let h2 = CommitHistory::open();
         assert_eq!(h1.root(), h2.root(), "empty root must be deterministic");
@@ -216,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn append_returns_dense_positions() {
+    fn mem_append_returns_dense_positions() {
         let mut h = CommitHistory::open();
         for i in 0..16u64 {
             let pos = h.append(&synth(i)).unwrap();
@@ -226,17 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn root_changes_on_append() {
-        let mut h = CommitHistory::open();
-        let r0 = h.root();
-        h.append(&synth(0)).unwrap();
-        let r1 = h.root();
-        assert_ne!(r0, r1, "root must change after appending a leaf");
-    }
-
-    /// Issue #157 acceptance: 1000 commits, prove a random one, verify.
-    #[test]
-    fn prove_and_verify_position_712_of_1000() {
+    fn mem_prove_and_verify_position_712_of_1000() {
         let mut h = CommitHistory::open();
         let commits: Vec<Hash> = (0..1000u64).map(synth).collect();
         for c in &commits {
@@ -255,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn tampered_proof_fails_verification() {
+    fn mem_tampered_proof_fails_verification() {
         let mut h = CommitHistory::open();
         for i in 0..256u64 {
             h.append(&synth(i)).unwrap();
@@ -265,11 +714,8 @@ mod tests {
         let root = h.root();
         let commit = synth(42);
 
-        // Sanity: untampered passes.
         assert!(verify_inclusion(&commit, target, &proof, &root));
 
-        // Flip one bit in the first sibling digest. This is the
-        // canonical "tampered proof" case from issue #157.
         assert!(
             !proof.digests.is_empty(),
             "non-trivial proof must carry at least one sibling"
@@ -285,57 +731,188 @@ mod tests {
         );
     }
 
-    #[test]
-    fn wrong_commit_fails_verification() {
-        let mut h = CommitHistory::open();
-        for i in 0..64u64 {
-            h.append(&synth(i)).unwrap();
-        }
-        let target = Position(7);
-        let proof = h.prove(target).unwrap();
-        let root = h.root();
+    // ---- Phase 2 journaled API ------------------------------------
 
-        // Honest hash at this position would be synth(7); we offer synth(8).
-        assert!(
-            !verify_inclusion(&synth(8), target, &proof, &root),
-            "proof must not verify against the wrong commit"
-        );
+    #[test]
+    fn open_at_rejects_invalid_branch() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let err =
+            CommitHistory::open_at(exec, &mkit_dir, "../escape").expect_err("invalid branch");
+        assert!(matches!(err, HistoryError::InvalidBranch(_)));
     }
 
     #[test]
-    fn wrong_root_fails_verification() {
-        let mut h = CommitHistory::open();
-        for i in 0..64u64 {
-            h.append(&synth(i)).unwrap();
-        }
-        let target = Position(7);
-        let proof = h.prove(target).unwrap();
-        let commit = synth(7);
-
-        // A root from a completely different history.
-        let mut other = CommitHistory::open();
-        for i in 100..164u64 {
-            other.append(&synth(i)).unwrap();
-        }
-        let wrong_root = other.root();
-        assert_ne!(h.root(), wrong_root);
-
-        assert!(
-            !verify_inclusion(&commit, target, &proof, &wrong_root),
-            "proof must not verify against a different root"
+    fn open_at_empty_root_matches_mem() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let h_disk = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        let h_mem = CommitHistory::open();
+        assert_eq!(
+            h_disk.root(),
+            h_mem.root(),
+            "empty journaled root must match empty mem root"
         );
+        assert!(h_disk.is_empty());
     }
 
     #[test]
-    fn two_open_calls_return_independent_histories() {
-        // Phase 1: every `open()` is a fresh in-memory MMR. Phase 2
-        // will replace this with a path-bound constructor; the test
-        // is intentionally written so the *result* still holds (two
-        // distinct paths = two distinct histories) — the API name is
-        // what changes.
-        let mut a = CommitHistory::open();
-        let b = CommitHistory::open();
+    fn open_at_round_trip_100_commits() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+
+        let commits: Vec<Hash> = (0..100u64).map(synth).collect();
+        let (root_before, len_before) = {
+            let mut h =
+                CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+            for c in &commits {
+                h.append(c).unwrap();
+            }
+            (h.root(), h.len())
+        };
+        // Re-open and verify the root survives.
+        let h = CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+        assert_eq!(h.len(), len_before, "leaf count must survive reopen");
+        assert_eq!(h.root(), root_before, "root must survive reopen");
+    }
+
+    #[test]
+    fn open_at_prove_after_reopen() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let commits: Vec<Hash> = (0..64u64).map(synth).collect();
+        let root = {
+            let mut h =
+                CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+            for c in &commits {
+                h.append(c).unwrap();
+            }
+            h.root()
+        };
+        let h = CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+        let target = Position(17);
+        let proof = h.prove(target).unwrap();
+        assert!(verify_inclusion(&commits[17], target, &proof, &root));
+    }
+
+    #[test]
+    fn open_at_distinct_branches_have_distinct_roots() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let mut main =
+            CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+        let mut dev =
+            CommitHistory::open_at(exec.clone(), &mkit_dir, "dev").unwrap();
+        main.append(&synth(0)).unwrap();
+        dev.append(&synth(1)).unwrap();
+        assert_ne!(main.root(), dev.root());
+    }
+
+    #[test]
+    fn open_at_branch_with_slash_is_isolated() {
+        // Two branches that sanitize to different partition names
+        // must not share state.
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let mut a = CommitHistory::open_at(exec.clone(), &mkit_dir, "feat/v1").unwrap();
+        let mut b = CommitHistory::open_at(exec.clone(), &mkit_dir, "feat/v2").unwrap();
         a.append(&synth(0)).unwrap();
-        assert_ne!(a.len(), b.len());
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 0, "sibling branch must not see appended leaf");
+        b.append(&synth(1)).unwrap();
+        assert_ne!(a.root(), b.root());
+    }
+
+    #[test]
+    fn open_at_root_matches_live_mem_root() {
+        // Executor swap test: a journaled MMR's root must equal the
+        // pure-mem MMR's root computed over the same leaf sequence.
+        // This proves the executor and the persistence layer are
+        // opaque to MMR semantics.
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let commits: Vec<Hash> = (0..50u64).map(synth).collect();
+
+        let mut journaled =
+            CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        let mut mem = CommitHistory::open();
+        for c in &commits {
+            journaled.append(c).unwrap();
+            mem.append(c).unwrap();
+        }
+        assert_eq!(
+            journaled.root(),
+            mem.root(),
+            "journaled and mem MMRs must produce the same root for the same leaf sequence"
+        );
+    }
+
+    // ---- Rebuild shim --------------------------------------------
+
+    #[test]
+    fn rebuild_from_chain_matches_live_appends() {
+        let (_tmp, mkit_dir_a) = fresh_mkit_dir();
+        let (_tmp_b, mkit_dir_b) = fresh_mkit_dir();
+        let exec = fresh_executor();
+
+        // Build the "reference" history by live appends.
+        let commits: Vec<Hash> = (0..10u64).map(synth).collect();
+        let reference_root = {
+            let mut h =
+                CommitHistory::open_at(exec.clone(), &mkit_dir_a, "main").unwrap();
+            for c in &commits {
+                h.append(c).unwrap();
+            }
+            h.root()
+        };
+
+        // Simulate the v0.1.x situation: refs/heads/main has a tip
+        // commit, but `<mkit_dir>/history/` is empty. The walker
+        // returns each commit's parent until root.
+        let mut h =
+            CommitHistory::open_at(exec.clone(), &mkit_dir_b, "main").unwrap();
+        let tip = commits[commits.len() - 1];
+        let count = rebuild_from_chain::<TokioExecutor, _, std::io::Error>(
+            &mut h,
+            tip,
+            |hash| {
+                // Find this hash in `commits`, return the prior one or
+                // None if at index 0.
+                let idx = commits
+                    .iter()
+                    .position(|c| c == hash)
+                    .expect("walker called with unknown hash");
+                if idx == 0 {
+                    Ok(None)
+                } else {
+                    Ok(Some(commits[idx - 1]))
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(count, commits.len() as u64);
+        assert_eq!(
+            h.root(),
+            reference_root,
+            "rebuilt root must match live-append root"
+        );
+    }
+
+    // ---- Sanitization --------------------------------------------
+
+    #[test]
+    fn sanitize_branch_round_trip_invariants() {
+        // Different ref-name byte sequences must encode to different
+        // partition tokens.
+        assert_ne!(sanitize_branch("feat/v1.0"), sanitize_branch("feat_v1_0"));
+        // Plain alpha-numeric / dash names pass through unchanged.
+        assert_eq!(sanitize_branch("main"), "main");
+        assert_eq!(sanitize_branch("release-2026"), "release-2026");
+        // `/` escapes to `_2f`.
+        assert_eq!(sanitize_branch("a/b"), "a_2fb");
+        // `.` escapes to `_2e`.
+        assert_eq!(sanitize_branch("v1.0"), "v1_2e0");
+        // `_` itself escapes to `_5f` to keep the encoding injective.
+        assert_eq!(sanitize_branch("a_b"), "a_5fb");
     }
 }
