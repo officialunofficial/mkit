@@ -248,14 +248,17 @@ fn build_repo_key_signer(
         Algorithm::Secp256k1 => {
             let rel = cfg.attest.secp256k1_key_path_or_default();
             let secret = load_raw_secret(root, rel, algorithm)?;
-            let signer = mkit_attest::signer_k256::Secp256k1Signer::new(*secret)
+            // Borrow through `from_seed_zeroizing` so no plain
+            // `[u8; 32]` is materialised on this frame.
+            let signer = mkit_attest::signer_k256::Secp256k1Signer::from_seed_zeroizing(&secret)
                 .map_err(|e| FactoryError::Signer(e.to_string()))?;
             Ok(Box::new(signer))
         }
         Algorithm::P256 => {
             let rel = cfg.attest.p256_key_path_or_default();
             let secret = load_raw_secret(root, rel, algorithm)?;
-            let signer = mkit_attest::signer_p256::P256Signer::new(*secret)
+            // Borrow through `from_seed_zeroizing`; see secp256k1 arm.
+            let signer = mkit_attest::signer_p256::P256Signer::from_seed_zeroizing(&secret)
                 .map_err(|e| FactoryError::Signer(e.to_string()))?;
             Ok(Box::new(signer))
         }

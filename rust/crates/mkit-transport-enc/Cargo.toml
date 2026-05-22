@@ -26,17 +26,17 @@ mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
 buffa = "0.6"
 thiserror = "2"
 
-# commonware: pinned to 2026.4.0 — the current stable release on
-# crates.io as of 2026-05-21. All four crates share the same
-# release cadence so they're version-locked here.
-commonware-stream = "=2026.4.0"
-commonware-runtime = "=2026.4.0"
-commonware-cryptography = { version = "=2026.4.0", features = ["std"] }
-commonware-codec = "=2026.4.0"
+# commonware: pinned at workspace root to the 2026.4.x train. All
+# crates share the same release cadence so they're version-locked at
+# `[workspace.dependencies]` and selected here with `workspace = true`.
+commonware-stream = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-cryptography = { workspace = true, features = ["std"] }
+commonware-codec = { workspace = true }
 
 [dev-dependencies]
 # Deterministic runner for the in-process round-trip test. The test
 # uses `commonware_runtime::deterministic::Runner` so we don't depend
 # on real wall-clock time or a multi-threaded executor.
-commonware-utils = "=2026.4.0"
+commonware-utils = { workspace = true }
 hex = "0.4"

@@ -52,7 +52,10 @@ pub const PROTOCOL_VERSION: i32 = crate::mkit::rpc::v1::ProtocolVersion::PROTOCO
 mod framing;
 mod helpers;
 pub use framing::{FrameError, read_frame, write_frame};
-pub use helpers::{signer_error_frame, ssh_error_frame};
+pub use helpers::{
+    CHUNK_DATA_MAX, MAX_REF_NAME, body_name, cond_to_wire, ref_entry_to_ref,
+    rpc_error_to_transport, signer_error_frame, ssh_error_frame, unexpected_frame,
+};
 
 #[cfg(test)]
 mod tests {

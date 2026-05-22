@@ -49,15 +49,15 @@ use mkit_core::protocol::{PackKey, Transport, TransportError, TransportResult};
 use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
 use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
 use mkit_rpc::mkit::rpc::v1::ssh::{
-    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, RefExpectation, SshFrame,
-    UpdateRef, UploadPack, list_refs_response::RefEntry, ssh_frame,
+    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, SshFrame, UpdateRef, UploadPack,
+    ssh_frame,
 };
-use mkit_rpc::{FrameError, read_frame, write_frame};
+use mkit_rpc::{
+    CHUNK_DATA_MAX, FrameError, MAX_REF_NAME, body_name, cond_to_wire, read_frame,
+    ref_entry_to_ref, rpc_error_to_transport, unexpected_frame, write_frame,
+};
 
 pub use crate::url::{MKIT_SSH_PREFIX, SshTarget, parse_mkit_ssh_url, validate_ssh_path};
-
-/// Maximum combined ref / prefix name length accepted over the wire.
-const MAX_REF_NAME: usize = 4096;
 
 use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
 
@@ -214,9 +214,8 @@ impl Transport for SshTransport {
         };
         write_frame(&mut io.stdin, &header).map_err(|_| TransportError::ConnectionFailed)?;
 
-        // Body chunks. Cap the per-frame data segment so the framing
-        // layer's 1 MiB cap accommodates protobuf overhead too.
-        const CHUNK_DATA_MAX: usize = 800 * 1024;
+        // Body chunks. The per-frame data cap lives in `mkit_rpc::CHUNK_DATA_MAX`
+        // so transport-ssh and transport-enc cannot drift on the bound.
         let mut offset = 0u64;
         let total = bytes.len();
         let mut iter_pos = 0usize;
@@ -255,8 +254,8 @@ impl Transport for SshTransport {
         let resp = read_frame_or_err(&mut io.stdout)?;
         match resp.body {
             Some(ssh_frame::Body::UploadPackResponse(_)) => Ok(()),
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
-            other => Err(unexpected_frame("UploadPackResponse", other)),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
+            other => Err(unexpected_frame("ssh", "UploadPackResponse", other)),
         }
     }
 
@@ -298,8 +297,8 @@ impl Transport for SshTransport {
         let resp = read_frame_or_err(&mut io.stdout)?;
         match resp.body {
             Some(ssh_frame::Body::PackExistsResponse(r)) => Ok(r.exists.unwrap_or(false)),
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
-            other => Err(unexpected_frame("PackExistsResponse", other)),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
+            other => Err(unexpected_frame("ssh", "PackExistsResponse", other)),
         }
     }
 
@@ -353,10 +352,10 @@ impl Transport for SshTransport {
                 {
                     Err(TransportError::RefConflict)
                 } else {
-                    Err(rpc_error_to_transport(*e))
+                    Err(rpc_error_to_transport(*e, "ssh"))
                 }
             }
-            other => Err(unexpected_frame("UpdateRefResponse", other)),
+            other => Err(unexpected_frame("ssh", "UpdateRefResponse", other)),
         }
     }
 
@@ -395,8 +394,8 @@ impl Transport for SshTransport {
                     Err(TransportError::InvalidResponse)
                 }
             }
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
-            other => Err(unexpected_frame("ReadRefResponse", other)),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
+            other => Err(unexpected_frame("ssh", "ReadRefResponse", other)),
         }
     }
 
@@ -428,28 +427,16 @@ impl Transport for SshTransport {
                 .into_iter()
                 .map(ref_entry_to_ref)
                 .collect::<TransportResult<Vec<_>>>(),
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e)),
-            other => Err(unexpected_frame("ListRefsResponse", other)),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
+            other => Err(unexpected_frame("ssh", "ListRefsResponse", other)),
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Helpers (transport-ssh-specific I/O wrappers; shared frame helpers
+// live in `mkit_rpc::helpers`)
 // ---------------------------------------------------------------------------
-
-/// Encode a [`RefWriteCondition`] into the two on-wire fields the
-/// `UpdateRef` message carries: the (often empty) `expected_id` bytes
-/// and the `RefExpectation` enum. Production and test paths share this
-/// so the test can't drift from the production encoding. See
-/// SPEC-TRANSPORT §4.2.1.
-fn cond_to_wire(c: RefWriteCondition) -> (Vec<u8>, RefExpectation) {
-    match c {
-        RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
-        RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
-        RefWriteCondition::Match(h) => (h.to_vec(), RefExpectation::REF_EXPECTATION_MATCH),
-    }
-}
 
 /// Read the response side of `download_pack` from a generic reader.
 ///
@@ -460,8 +447,8 @@ fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
     let header = read_frame_or_err(r)?;
     let total = match header.body {
         Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
-        Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e)),
-        other => return Err(unexpected_frame("DownloadPackHeader", other)),
+        Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "ssh")),
+        other => return Err(unexpected_frame("ssh", "DownloadPackHeader", other)),
     };
 
     // Reject before we allocate: an attacker-controlled
@@ -496,8 +483,8 @@ fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
                     break;
                 }
             }
-            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e)),
-            other => return Err(unexpected_frame("PackChunk", other)),
+            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "ssh")),
+            other => return Err(unexpected_frame("ssh", "PackChunk", other)),
         }
     }
     Ok(out)
@@ -513,71 +500,6 @@ fn read_frame_or_err<R: io::Read>(r: &mut R) -> TransportResult<SshFrame> {
         Err(FrameError::DecodeFailed) => Err(TransportError::ProtocolError),
         Err(FrameError::Io(_)) => Err(TransportError::ConnectionFailed),
     }
-}
-
-fn rpc_error_to_transport(e: mkit_rpc::mkit::rpc::v1::Error) -> TransportError {
-    use mkit_rpc::mkit::rpc::v1::ErrorCode;
-    let code = e.code.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    let msg = e.message.unwrap_or_default();
-    if code == ErrorCode::ERROR_CODE_KEY_NOT_FOUND as i32 {
-        TransportError::PackNotFound
-    } else if code == ErrorCode::ERROR_CODE_USER_DECLINED as i32 {
-        TransportError::AccessDenied
-    } else if msg.is_empty() {
-        TransportError::RemoteError("ssh server returned an unspecified error".into())
-    } else {
-        TransportError::RemoteError(msg)
-    }
-}
-
-fn unexpected_frame(want: &str, got: Option<ssh_frame::Body>) -> TransportError {
-    let body = got;
-    TransportError::RemoteError(format!(
-        "ssh server returned {} when {} was expected",
-        body_name(&body),
-        want,
-    ))
-}
-
-fn body_name(b: &Option<ssh_frame::Body>) -> &'static str {
-    use ssh_frame::Body;
-    match b {
-        Some(Body::Hello(_)) => "hello",
-        Some(Body::HelloResponse(_)) => "hello_response",
-        Some(Body::Error(_)) => "error",
-        Some(Body::Close(_)) => "close",
-        Some(Body::ListRefs(_)) => "list_refs",
-        Some(Body::ListRefsResponse(_)) => "list_refs_response",
-        Some(Body::ReadRef(_)) => "read_ref",
-        Some(Body::ReadRefResponse(_)) => "read_ref_response",
-        Some(Body::UpdateRef(_)) => "update_ref",
-        Some(Body::UpdateRefResponse(_)) => "update_ref_response",
-        Some(Body::PackExists(_)) => "pack_exists",
-        Some(Body::PackExistsResponse(_)) => "pack_exists_response",
-        Some(Body::UploadPack(_)) => "upload_pack",
-        Some(Body::UploadPackResponse(_)) => "upload_pack_response",
-        Some(Body::DownloadPack(_)) => "download_pack",
-        Some(Body::DownloadPackHeader(_)) => "download_pack_header",
-        Some(Body::PackChunk(_)) => "pack_chunk",
-        None => "(empty body)",
-    }
-}
-
-fn ref_entry_to_ref(e: RefEntry) -> TransportResult<Ref> {
-    let name = e.name.unwrap_or_default();
-    if !validate_ref_name(&name) {
-        return Err(TransportError::InvalidRef(name));
-    }
-    let oid = e.object_id.unwrap_or_default();
-    if oid.len() != 32 {
-        return Err(TransportError::InvalidResponse);
-    }
-    let mut h = [0u8; 32];
-    h.copy_from_slice(&oid);
-    Ok(Ref {
-        name,
-        hash: Some(h),
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +609,9 @@ mod tests {
     // SshTransport against it. For now, basic smoke tests of the
     // helper functions live here.
     use super::*;
-    use mkit_rpc::mkit::rpc::v1::ssh::DownloadPackHeader;
+    use mkit_rpc::mkit::rpc::v1::ssh::{
+        DownloadPackHeader, RefExpectation, list_refs_response::RefEntry,
+    };
 
     #[test]
     fn ref_entry_to_ref_validates_oid_length() {

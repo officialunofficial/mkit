@@ -61,6 +61,28 @@ impl Secp256k1Signer {
         Ok(Self { sk })
     }
 
+    /// Build from a [`zeroize::Zeroizing`]-wrapped raw 32-byte scalar.
+    /// Avoids the intermediate `[u8; 32]` `Copy` on the caller's stack
+    /// that [`Secp256k1Signer::new`] requires.
+    ///
+    /// # Zeroization
+    ///
+    /// The caller's `Zeroizing` wrapper still owns the seed and scrubs
+    /// it on drop. Internally we materialise one `[u8; 32]` to feed
+    /// into `SigningKey::from_bytes`, then scrub it before returning.
+    ///
+    /// # Errors
+    /// [`Error::Secp256k1KeyInvalid`] if the scalar is zero or >= n.
+    pub fn from_seed_zeroizing(secret: &zeroize::Zeroizing<[u8; 32]>) -> Result<Self, Error> {
+        use zeroize::Zeroize;
+        let mut tmp = [0u8; 32];
+        tmp.copy_from_slice(secret.as_slice());
+        let result = SigningKey::from_bytes((&tmp).into()).map_err(|_| Error::Secp256k1KeyInvalid);
+        tmp.zeroize();
+        let sk = result?;
+        Ok(Self { sk })
+    }
+
     /// Build from a PKCS#8-DER-encoded secp256k1 private key.
     ///
     /// # Errors

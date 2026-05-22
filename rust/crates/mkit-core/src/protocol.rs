@@ -339,6 +339,50 @@ pub trait Transport: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// async_shim — sync/async bridge for transports that wrap an async cipher
+// ---------------------------------------------------------------------------
+
+/// Sync-over-async shim for transports whose underlying cipher / I/O is
+/// async (e.g. `commonware-stream::encrypted`) but whose
+/// [`Transport`] trait surface is intentionally sync.
+///
+/// Lives in `mkit-core` (the trait crate) because it is generic
+/// infrastructure — multiple transports and Phase 2 sparse-checkout
+/// will reuse the same plug-in point. It does **not** depend on
+/// `tokio`, `commonware-runtime`, or any concrete executor; callers
+/// pick the runner.
+///
+/// # Why a trait
+///
+/// `mkit-transport-enc` and (in Phase 2) `mkit-core::sparse` need to
+/// drive `async fn` bodies from a sync method. Hard-coding
+/// `tokio::runtime::Handle::block_on` would bleed tokio across the
+/// workspace; hard-coding `commonware_runtime::deterministic` would
+/// mean production = tests. A pluggable [`Executor`] keeps the
+/// runtime-choice at the consumer crate.
+pub mod async_shim {
+    /// Drives an async future to completion synchronously. Pluggable so
+    /// callers can choose between `tokio`, `commonware-runtime`'s
+    /// deterministic runner (tests), or the planned production tokio
+    /// runner without `mkit-core` having to compile-time depend on a
+    /// specific runtime crate.
+    ///
+    /// Implementations MUST be re-entrancy-safe in the sense expected
+    /// by the chosen runtime — calling `block_on` from inside an
+    /// already-running task on the same runtime will typically panic
+    /// or deadlock. The shim's contract is "synchronous external API
+    /// wraps async internals", not "arbitrary async-from-sync
+    /// recursion".
+    pub trait Executor: Send + Sync {
+        /// Block the current thread until `fut` resolves.
+        fn block_on<F, T>(&self, fut: F) -> T
+        where
+            F: core::future::Future<Output = T> + Send,
+            T: Send;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

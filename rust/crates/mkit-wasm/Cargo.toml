@@ -47,6 +47,11 @@ bao = "0.13"
 # mkit-core::sign + mkit-attest already pull in (default-features off,
 # `std` on) — keeps the dep graph at a single dalek version.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+# `Zeroizing<[u8; 32]>` wrappers carry the scrub-on-drop contract for
+# every Rust-side temporary holding a JS-passed seed. The seed can't be
+# scrubbed on the JS side (we can't reach into the ArrayBuffer), but
+# every Rust-side copy must zero on drop — see `attest_keypair`.
+zeroize = { version = "1", default-features = false }
 
 # Activate the browser randomness backends for every getrandom in the
 # dep graph when compiling for `wasm32-unknown-unknown`. Two major

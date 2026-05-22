@@ -119,7 +119,7 @@ pub struct ShardSet {
     /// commonware decoder for per-shard Merkle-proof checks. Stored
     /// here so the manifest is self-contained — a receiver does not
     /// need a second round-trip to fetch the commitment.
-    pub commitment: [u8; HASH_LEN],
+    pub commitment: Hash,
 }
 
 /// Errors produced by [`encode_pack_to_shards`] / [`decode_pack_from_shards`].

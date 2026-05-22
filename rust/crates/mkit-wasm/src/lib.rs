@@ -24,6 +24,7 @@ use mkit_core::serialize::serialize;
 use mkit_core::sign::{COMMIT_DOMAIN, KeyPair, PublicKey, Signature, commit_signing_bytes, verify};
 
 use std::io::{Read, Write};
+use zeroize::Zeroizing;
 
 /// Upper bound on the JSON input accepted by [`parse_json_triples`].
 ///
@@ -133,9 +134,16 @@ pub fn commit_encode_and_sign(
 ) -> Result<EncodedCommit, JsValue> {
     let tree_hash = parse_hash_hex(tree_hash_hex)?;
     let parents = parse_parent_list(parent_hex)?;
-    let seed = parse_hash_hex(seed_hex)?;
+    // # Zeroization
+    //
+    // We cannot scrub the JS-side ArrayBuffer that backed `seed_hex`,
+    // but every Rust-side temporary holding the raw seed must zero on
+    // drop. `Zeroizing` carries that scrub into the destructor; the
+    // `from_seed_zeroizing` constructor avoids the `[u8; 32]: Copy`
+    // synthesis that a `*seed` deref would create.
+    let seed: Zeroizing<[u8; 32]> = Zeroizing::new(parse_hash_hex(seed_hex)?);
 
-    let kp = KeyPair::from_seed(seed);
+    let kp = KeyPair::from_seed_zeroizing(&seed);
     let signer_pub = kp.public.0;
     let author = Identity::ed25519(signer_pub);
 
@@ -184,8 +192,11 @@ pub fn commit_verify(commit_bytes: &[u8]) -> bool {
 /// the same seed always yields the same public key.
 #[wasm_bindgen]
 pub fn keypair_from_seed(seed_hex: &str) -> Result<KeyPairJs, JsValue> {
-    let seed = parse_hash_hex(seed_hex)?;
-    let kp = KeyPair::from_seed(seed);
+    // See zeroization note on `commit_encode_and_sign`. JS-passed seed
+    // material is mirrored to Rust through a `Zeroizing` wrapper so
+    // every Rust-side copy scrubs on drop.
+    let seed: Zeroizing<[u8; 32]> = Zeroizing::new(parse_hash_hex(seed_hex)?);
+    let kp = KeyPair::from_seed_zeroizing(&seed);
     Ok(KeyPairJs {
         seed_hex: seed_hex.to_string(),
         pubkey_hex: hex::encode(kp.public.0),
@@ -206,8 +217,9 @@ pub fn keypair_generate() -> Result<KeyPairJs, JsValue> {
 /// the signing demo — real mkit commits go through `commit_encode_and_sign`.
 #[wasm_bindgen]
 pub fn sign_bytes_commit_domain(seed_hex: &str, bytes: &[u8]) -> Result<String, JsValue> {
-    let seed = parse_hash_hex(seed_hex)?;
-    let kp = KeyPair::from_seed(seed);
+    // See zeroization note on `commit_encode_and_sign`.
+    let seed: Zeroizing<[u8; 32]> = Zeroizing::new(parse_hash_hex(seed_hex)?);
+    let kp = KeyPair::from_seed_zeroizing(&seed);
     let sig = kp.sign(COMMIT_DOMAIN, bytes);
     Ok(hex::encode(sig.0))
 }
@@ -288,8 +300,16 @@ pub fn ed25519_sign(msg: &[u8], seed: &[u8]) -> Result<Vec<u8>, JsValue> {
     // callable on native test targets — `JsError::new` walks through a
     // wasm-bindgen imported function and panics outside wasm. JS-side
     // shape is identical: a thrown `Error` either way.
-    let seed_arr: [u8; 32] =
-        parse_fixed::<32>(seed).map_err(|_| js_err("seed must be exactly 32 bytes"))?;
+    //
+    // # Zeroization
+    //
+    // The JS-passed `seed` slice we can't reach into and scrub, but
+    // the Rust-side `[u8; 32]` copy lives inside a `Zeroizing` wrapper
+    // so it zeros at end of scope. `SigningKey` owns its own copy and
+    // zeros on drop in `ed25519-dalek` 2.x.
+    let seed_arr: Zeroizing<[u8; 32]> = Zeroizing::new(
+        parse_fixed::<32>(seed).map_err(|_| js_err("seed must be exactly 32 bytes"))?,
+    );
     let sk = SigningKey::from_bytes(&seed_arr);
     let sig = sk.sign(msg);
     Ok(sig.to_bytes().to_vec())
@@ -306,9 +326,12 @@ pub fn ed25519_sign(msg: &[u8], seed: &[u8]) -> Result<Vec<u8>, JsValue> {
 pub fn ed25519_pubkey_from_seed(seed: &[u8]) -> Result<Vec<u8>, JsValue> {
     // `JsValue` flavour (rather than `JsError`) for the same native-test
     // reason as `ed25519_sign`. JS-side shape is identical.
-    let seed_arr: [u8; 32] =
-        parse_fixed::<32>(seed).map_err(|_| js_err("seed must be exactly 32 bytes"))?;
-    let kp = KeyPair::from_seed(seed_arr);
+    //
+    // # Zeroization — see `ed25519_sign`.
+    let seed_arr: Zeroizing<[u8; 32]> = Zeroizing::new(
+        parse_fixed::<32>(seed).map_err(|_| js_err("seed must be exactly 32 bytes"))?,
+    );
+    let kp = KeyPair::from_seed_zeroizing(&seed_arr);
     Ok(kp.public.0.to_vec())
 }
 
@@ -328,11 +351,17 @@ pub fn ed25519_pubkey_from_seed(seed: &[u8]) -> Result<Vec<u8>, JsValue> {
 /// and the legacy `blake3:<hex-of-blake3(pubkey)>` form for Ed25519 (what `RepoKeySigner` emits; verifier accepts).
 #[wasm_bindgen]
 pub fn attest_keypair(seed_hex: &str, algo: &str) -> Result<AttestKeyPairJs, JsValue> {
-    let seed = parse_hash_hex(seed_hex)?;
+    // # Zeroization
+    //
+    // JS callers pass the seed across the wasm boundary as a hex string.
+    // We cannot scrub the JS-side ArrayBuffer, but every Rust-side
+    // temporary holding the raw bytes must zero on drop. `Zeroizing`
+    // carries that scrub into the destructor.
+    let seed: Zeroizing<[u8; 32]> = Zeroizing::new(parse_hash_hex(seed_hex)?);
     let alg = parse_algo(algo)?;
     match alg {
         Algorithm::Ed25519 => {
-            let kp = KeyPair::from_seed(seed);
+            let kp = KeyPair::from_seed_zeroizing(&seed);
             let pk = kp.public.0;
             let signer = RepoKeySigner::new(kp);
             let keyid = signer.keyid().map_err(|e| js_err(format!("keyid: {e}")))?;
@@ -344,7 +373,8 @@ pub fn attest_keypair(seed_hex: &str, algo: &str) -> Result<AttestKeyPairJs, JsV
             })
         }
         Algorithm::Secp256k1 => {
-            let s = Secp256k1Signer::new(seed).map_err(|e| js_err(format!("secp256k1: {e}")))?;
+            let s = Secp256k1Signer::from_seed_zeroizing(&seed)
+                .map_err(|e| js_err(format!("secp256k1: {e}")))?;
             Ok(AttestKeyPairJs {
                 seed_hex: seed_hex.to_string(),
                 pubkey_hex: hex::encode(s.public_key_sec1()),
@@ -353,7 +383,8 @@ pub fn attest_keypair(seed_hex: &str, algo: &str) -> Result<AttestKeyPairJs, JsV
             })
         }
         Algorithm::P256 => {
-            let s = P256Signer::new(seed).map_err(|e| js_err(format!("p256: {e}")))?;
+            let s =
+                P256Signer::from_seed_zeroizing(&seed).map_err(|e| js_err(format!("p256: {e}")))?;
             Ok(AttestKeyPairJs {
                 seed_hex: seed_hex.to_string(),
                 pubkey_hex: hex::encode(s.public_key_sec1()),
@@ -387,7 +418,8 @@ pub fn attest_build(
     algo: &str,
 ) -> Result<AttestationJs, JsValue> {
     let _ = parse_hash_hex(commit_hash_hex)?;
-    let seed = parse_hash_hex(seed_hex)?;
+    // # Zeroization — see `attest_keypair`.
+    let seed: Zeroizing<[u8; 32]> = Zeroizing::new(parse_hash_hex(seed_hex)?);
     let alg = parse_algo(algo)?;
 
     let stmt = Statement {
@@ -410,7 +442,7 @@ pub fn attest_build(
 
     let (keyid, sig_bytes) = match alg {
         Algorithm::Ed25519 => {
-            let mut signer = RepoKeySigner::new(KeyPair::from_seed(seed));
+            let mut signer = RepoKeySigner::from_seed_zeroizing(&seed);
             let keyid = signer.keyid().map_err(|e| js_err(format!("keyid: {e}")))?;
             let sig = signer
                 .sign(&pae)
@@ -418,14 +450,16 @@ pub fn attest_build(
             (keyid, sig)
         }
         Algorithm::Secp256k1 => {
-            let s = Secp256k1Signer::new(seed).map_err(|e| js_err(format!("secp256k1: {e}")))?;
+            let s = Secp256k1Signer::from_seed_zeroizing(&seed)
+                .map_err(|e| js_err(format!("secp256k1: {e}")))?;
             let sig = s
                 .sign_dsse(&pae)
                 .map_err(|e| js_err(format!("sign: {e}")))?;
             (s.keyid_string(), sig)
         }
         Algorithm::P256 => {
-            let s = P256Signer::new(seed).map_err(|e| js_err(format!("p256: {e}")))?;
+            let s =
+                P256Signer::from_seed_zeroizing(&seed).map_err(|e| js_err(format!("p256: {e}")))?;
             let sig = s
                 .sign_dsse(&pae)
                 .map_err(|e| js_err(format!("sign: {e}")))?;
