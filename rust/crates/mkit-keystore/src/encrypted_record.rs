@@ -391,7 +391,7 @@ const BLS_MAGIC: &[u8; 8] = b"MKITKSB1";
 #[cfg(feature = "bls-threshold")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BlsShareRecord {
-    /// Cohort group public key (G2 compressed, 96 bytes for MinSig).
+    /// Cohort group public key (G2 compressed, 96 bytes for `MinSig`).
     pub(crate) cohort_public_key: Vec<u8>,
     /// Holder index within the cohort (0..total).
     pub(crate) share_index: u32,
@@ -583,7 +583,7 @@ fn bls_record_aad(
 }
 
 #[cfg(feature = "bls-threshold")]
-impl<'a> Cursor<'a> {
+impl Cursor<'_> {
     fn read_u32_bytes(&mut self) -> Result<[u8; 4]> {
         let bytes = self.take(4)?;
         bytes

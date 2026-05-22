@@ -71,6 +71,13 @@ getrandom = "0.4"
 # Wraps the raw 32-byte secrets keygen pulls out of the RNG until they
 # land inside the algorithm signer (which has its own scrubbing).
 zeroize = "1"
+# Used by `mkit key generate --algorithm bls12381-thr` to feed the
+# trusted-dealer ceremony with `OsRng`. Gated on `bls-threshold` so
+# the default build doesn't pull rand_core.
+rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
+# Wire-encodes `Share` values for storage in the keystore — same
+# version mkit-attest pulls.
+commonware-codec = { version = "2026.4.0", optional = true }
 
 # POSIX uid + O_NOFOLLOW for keygen.rs's raw-32 load/save paths
 # (secp256k1, p256). The Ed25519 path uses mkit_core::sign which has
@@ -122,4 +129,4 @@ default = []
 # pulls the BLS Algorithm variant into scope so the CLI's match arms
 # cover it (returning UNAVAILABLE per-site). Phase 3 of issue #160
 # will replace the inert arms with a real release-party signer.
-bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold"]
+bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "dep:rand_core", "dep:commonware-codec"]

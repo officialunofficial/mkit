@@ -365,6 +365,11 @@ fn verify_ecdsa_signature(
                 .map_err(|error| Error::Internal(format!("P-256 signature verify: {error}")))
         }
         Algorithm::Ed25519 => Err(Error::UnsupportedAlgorithm(Algorithm::Ed25519)),
+        // ECDSA-only helper; BLS verification flows through
+        // `mkit_attest::signer_bls_threshold::verify`, not this
+        // module's test-only helper.
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => Err(Error::UnsupportedAlgorithm(algorithm)),
     }
 }
 

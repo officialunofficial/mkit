@@ -513,7 +513,7 @@ mod tests {
     /// `[[trust_root]]` blocks with `kind = "bls12381-thr"` (or the
     /// `algorithm = "bls12381-thr"` alias) load into the registry as
     /// `TrustRoot::Bls12381ThresholdPubKey` and verify-dispatch picks
-    /// them up. Pinned to the 96-byte MinSig G2 compressed length —
+    /// them up. Pinned to the 96-byte `MinSig` G2 compressed length —
     /// anything shorter is silently dropped (per the parser's
     /// tolerate-and-skip policy).
     #[cfg(feature = "bls-threshold")]

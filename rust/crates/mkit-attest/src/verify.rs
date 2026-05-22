@@ -43,7 +43,7 @@ pub enum TrustRoot {
     #[cfg(feature = "algo-secp256k1")]
     Secp256k1PubKeySec1(Vec<u8>),
     /// Wire-encoded BLS12-381 G2 compressed public key (96 bytes for
-    /// the MinSig variant — see `signer_bls_threshold`). Aggregated
+    /// the `MinSig` variant — see `signer_bls_threshold`). Aggregated
     /// threshold signatures verify against this key using the in-tree
     /// `signer_bls_threshold::verify` function and the mkit-attest
     /// BLS namespace.
@@ -769,6 +769,7 @@ mod tests {
     #[cfg(feature = "bls-threshold")]
     #[test]
     fn registry_dispatches_bls_threshold_keyid_to_verify() {
+        use crate::signer::Signer as _;
         use crate::signer_bls_threshold::{
             KEYID_PREFIX, ThresholdSigner, aggregate, trusted_dealer,
         };
@@ -797,7 +798,6 @@ mod tests {
         let mut partials: Vec<Vec<u8>> = Vec::with_capacity(3);
         for s in shares.iter().take(3) {
             let mut signer = ThresholdSigner::new(s.clone(), sharing.clone());
-            use crate::signer::Signer as _;
             partials.push(signer.sign(&pae).expect("partial sign"));
         }
         let agg_sig = aggregate(&sharing, &partials).expect("aggregate");
@@ -813,7 +813,10 @@ mod tests {
         let bytes = env.encode().unwrap().into_bytes();
 
         let mut reg = Registry::new();
-        reg.add(keyid.clone(), TrustRoot::Bls12381ThresholdPubKey(agg_pubkey));
+        reg.add(
+            keyid.clone(),
+            TrustRoot::Bls12381ThresholdPubKey(agg_pubkey),
+        );
 
         let r = verify_envelope(&bytes, &reg).unwrap();
         assert!(r.any_verified);
@@ -828,6 +831,7 @@ mod tests {
     #[cfg(feature = "bls-threshold")]
     #[test]
     fn registry_rejects_tampered_bls_aggregate() {
+        use crate::signer::Signer as _;
         use crate::signer_bls_threshold::{
             KEYID_PREFIX, ThresholdSigner, aggregate, trusted_dealer,
         };
@@ -853,7 +857,6 @@ mod tests {
         let mut partials: Vec<Vec<u8>> = Vec::with_capacity(3);
         for s in shares.iter().take(3) {
             let mut signer = ThresholdSigner::new(s.clone(), sharing.clone());
-            use crate::signer::Signer as _;
             partials.push(signer.sign(&pae).expect("partial sign"));
         }
         let mut agg_sig = aggregate(&sharing, &partials).expect("aggregate");
