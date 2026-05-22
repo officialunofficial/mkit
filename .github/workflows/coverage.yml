@@ -90,3 +90,17 @@ jobs:
           name: coverage-lcov
           path: ${{ runner.temp }}/coverage.lcov
           retention-days: 14
+
+      # Codecov receives the lcov for badge / trend / PR-diff overlay.
+      # Token is REQUIRED for internal/private repos; tokenless mode
+      # is public-repo-only. The action uploads under
+      # codecov.io/gh/officialunofficial/mkit. Failures are non-fatal:
+      # CI green doesn't depend on Codecov's availability.
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@cddd853df119a48c5be31a973f8cd97e12e35e16  # v6.0.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ runner.temp }}/coverage.lcov
+          flags: rust
+          name: cargo-llvm-cov
+          fail_ci_if_error: false

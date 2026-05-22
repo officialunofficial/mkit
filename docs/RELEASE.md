@@ -55,10 +55,29 @@ produces:
 | Secret | Purpose | Required for |
 | --- | --- | --- |
 | `MKIT_NPM_TOKEN` | npm publish auth (Automation token, 2FA-bypass) | `publish-wasm` |
+| `CODECOV_TOKEN` | Codecov upload auth (required while repo is internal/private; once flipped to public, Codecov supports tokenless OIDC upload and this secret can be removed) | `coverage.yml` |
 | `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` | macOS notarization | macOS archives (gated; no-op until set) |
 
 cosign keyless and npm provenance both run on the GitHub OIDC token;
-no extra secrets needed.
+no extra secrets needed for those.
+
+## One-time setup: `CODECOV_TOKEN`
+
+Codecov receives the lcov report from `coverage.yml` so the README
+badge, trend chart, and PR-diff overlay work. Steps:
+
+1. Sign in at <https://app.codecov.io/> with the GitHub account that
+   admins the `officialunofficial` org.
+2. Add the `officialunofficial/mkit` repo. Codecov shows an "Upload
+   token" — copy it.
+3. In GitHub: `Settings → Secrets and variables → Actions → New
+   repository secret`.
+   - Name: `CODECOV_TOKEN`
+   - Value: the token from step 2.
+4. Trigger `coverage.yml` (push to main, or `gh workflow run coverage.yml`).
+   The first run seeds the baseline; subsequent runs populate the badge.
+5. Once the repo flips public, remove the secret — Codecov accepts
+   tokenless uploads from public repos via GitHub OIDC.
 
 ## One-time setup: `MKIT_NPM_TOKEN`
 

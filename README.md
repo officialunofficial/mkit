@@ -2,6 +2,7 @@
 
 ![status: alpha](https://img.shields.io/badge/status-alpha-orange)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![codecov](https://codecov.io/gh/officialunofficial/mkit/branch/main/graph/badge.svg)](https://codecov.io/gh/officialunofficial/mkit)
 
 A content-addressed version control toolkit written in Rust.
 
