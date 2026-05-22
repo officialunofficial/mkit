@@ -31,5 +31,12 @@ serde_json = "1"
 thiserror = "2"
 url = "2"
 
+[features]
+default = []
+# Issue #159 Phase 2 — Pack-Shards request/response header,
+# parallel-fetch client. Pulls the pack-shards feature in mkit-core
+# (which in turn pulls the commonware dep stack).
+pack-shards = ["mkit-core/pack-shards"]
+
 [dev-dependencies]
 mockito = "1"
