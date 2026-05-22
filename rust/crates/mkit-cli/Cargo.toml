@@ -145,3 +145,12 @@ bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "de
 # `mkit-transport-enc` with its `tcp` feature (tokio + governor +
 # rand). See SPEC-TRANSPORT-ENC §6 item 3.
 enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography"]
+# Verifiable sparse-checkout (issue #158 Phase 2). Pulls the
+# `mkit-core` sparse module and the matching transport-side fetchers
+# into scope. Off by default — the upstream `commonware-storage` is
+# ALPHA-tier.
+sparse-checkout = [
+    "mkit-core/sparse-checkout",
+    "mkit-transport-http/sparse-checkout",
+    "mkit-transport-s3/sparse-checkout",
+]

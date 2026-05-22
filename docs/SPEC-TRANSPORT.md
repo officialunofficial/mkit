@@ -295,6 +295,40 @@ so a CAS write never silently turns into a duplicate PUT.
 inside an async context MUST wrap calls with
 `tokio::task::spawn_blocking`.
 
+### 5.6 Verifiable sparse-checkout fetch (issue #158 Phase 2)
+
+Feature-gated extension. Off by default — built only when the
+`sparse-checkout` cargo feature is enabled on the consuming crate
+chain.
+
+```
+POST /<project>/trees/<tree-hex>/sparse?sparse=<filter-hex>
+Content-Type:   application/json
+Accept:         application/x-mkit-sparse
+Body:           {"filter": ["<utf8 path>", "<utf8 path>", ...]}
+```
+
+The server returns a single `application/x-mkit-sparse` byte stream
+defined by SPEC-SPARSE-CHECKOUT §5 (envelope = manifest + entries +
+proof). The client runs `mkit_core::sparse::verify_sparse` on the
+decoded result; the transport layer does NOT verify anything beyond
+the envelope shape and the
+`SPARSE_WIRE_MAX_BYTES = 16 MiB` body cap.
+
+| Status | Maps to |
+|---|---|
+| `200 OK` (`application/x-mkit-sparse` body) | `Ok(SparseResponse)` |
+| `404 Not Found` | `TransportError::PackNotFound` |
+| `409` / `412` (server-side filter-hash disagreement) | `TransportError::RefConflict` |
+| `4xx` other | not retried |
+| `5xx` / `429` | retried per §7 |
+
+The query param `?sparse=<filter-hex>` MUST equal `BLAKE3` of the
+canonicalised filter — the same value `hash_filter` computes (see
+SPEC-SPARSE-CHECKOUT §2.3). A conforming server canonicalises the
+body filter independently and rejects with `409` on mismatch, so a
+proxy cannot silently substitute a different filter.
+
 ---
 
 ## 6. S3 / R2 transport
@@ -351,6 +385,35 @@ surfaces `TransportError::AccessDenied`.
 ### 6.5 Retry
 
 Same ladder as §7. 5xx and 429 retry; 4xx including 412 does not.
+
+### 6.6 Verifiable sparse-checkout fetch (issue #158 Phase 2)
+
+Feature-gated extension. Off by default — built only when the
+`sparse-checkout` cargo feature is enabled on the consuming crate
+chain.
+
+S3 has no "POST a request, get a computed response" verb, so the
+sparse delivery is content-addressed at a canonical object key the
+server pre-populates:
+
+```
+GET /<bucket>/sparse/<tree-hex>/<filter-hex>
+```
+
+The response body IS the SPEC-SPARSE-CHECKOUT §5 envelope. SigV4
+signing is unchanged — this is just another signed GET on the same
+bucket. The client runs `verify_sparse` on the decoded result.
+
+| Status | Maps to |
+|---|---|
+| `200 OK` | `Ok(SparseResponse)` |
+| `404 Not Found` | `TransportError::PackNotFound` (no precomputed sparse for that `(tree, filter)`) |
+| `403` / `401` | `TransportError::AccessDenied` |
+| Other | mapped per `ServerError { status }` |
+
+The `?sparse=<filter-hex>` URL query that HTTP uses (§5.6) is a no-op
+on S3 because the object key already encodes the filter hash. The
+client omits it so the SigV4 canonical request stays tight.
 
 ---
 
