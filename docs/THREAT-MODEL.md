@@ -202,6 +202,23 @@ defaults. The security fence is narrower and stricter: private-key,
 signer, executable, trust-root, and host-key selectors are user-only
 and are ignored when they appear in repo config.
 
+The per-key classification, the read-site fence, the runtime credential
+gate on `remote_endpoint`, and the rules for adding a new config key
+are codified in `docs/SPEC-CONFIG-SECURITY.md`. That spec is the
+authoritative reference when reviewing a change that touches
+`mkit-cli/src/config.rs` or a transport that consumes a
+config-derived endpoint, key path, or credential.
+
+`remote_endpoint`, `remote_bucket`, and `remote_type` are repo-safe
+to *read* (a clone needs to be able to nominate a default mirror),
+but `mkit push`, `mkit pull`, and `mkit fetch` will refuse to attach
+ambient `MKIT_API_TOKEN` or `MKIT_R2_*` credentials to a
+repo-configured endpoint unless the user has explicitly listed that
+endpoint in user-scoped `trusted_remote_endpoint`. This closes the
+hostile-clone credential-exfiltration channel tracked in issue #97
+without breaking safe portable defaults for unauthenticated mirrors
+and SSH-bearing remotes.
+
 ---
 
 ## 5. Trust-roots scope
@@ -334,7 +351,12 @@ matching update here.
 - `cargo fuzz` targets cover delta decode, pack reader, the object
   deserializer, and the encrypted software key record parser (`docs/FUZZ.md`).
 - Integration tests assert that a hostile `<repo>/.mkit/config`
-  cannot set any user-scoped key (warning + ignored).
+  cannot set any user-scoped key (warning + ignored). Per-key
+  coverage lives in `crates/mkit-cli/tests/repo_config_forbidden_keys.rs`,
+  and the in-process meta-test
+  `every_forbidden_key_is_actually_dropped_from_repo_scope` iterates
+  the entire `REPO_FORBIDDEN_KEYS` list against a sentinel value.
+  The exact stderr warning shape is pinned by an `insta` snapshot.
 - Integration tests assert key-file owner / mode / `O_NOFOLLOW`
   behaviour and the atomic-write contract.
 - Rename-gate (`scripts/verify-rename.sh`) prevents legacy strings

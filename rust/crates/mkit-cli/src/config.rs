@@ -1058,6 +1058,122 @@ mod tests {
         assert!(cfg.ssh_user_known_hosts_file.is_empty());
     }
 
+    /// Hostile clone pins `ssh.identity_file` to a path the attacker
+    /// either chose to read (any file `mkit` can open under the user's
+    /// uid) or chose to have signed-against (a private key the user
+    /// happens to have on disk). Either way, `mkit push` must NOT take
+    /// the suggestion.
+    #[test]
+    fn repo_ssh_identity_file_is_rejected() {
+        let cfg = layer(
+            Some("ssh.identity_file = /home/victim/.ssh/id_ed25519\n"),
+            None,
+        );
+        assert!(cfg.ssh_identity_file.is_empty());
+    }
+
+    /// Hostile clone aims `attest.secp256k1_key_path` at a key file the
+    /// victim happens to own (e.g. a wallet seed). Must be ignored.
+    #[test]
+    fn repo_attest_secp256k1_key_path_is_rejected() {
+        let cfg = layer(
+            Some("attest.secp256k1_key_path = /home/victim/.wallet/seed\n"),
+            None,
+        );
+        assert!(cfg.attest.secp256k1_key_path.is_empty());
+        // Fallback default still wins.
+        assert_eq!(
+            cfg.attest.secp256k1_key_path_or_default(),
+            ".mkit/keys/secp256k1.key"
+        );
+    }
+
+    /// Companion to the secp256k1 case: same shape, different curve.
+    #[test]
+    fn repo_attest_p256_key_path_is_rejected() {
+        let cfg = layer(
+            Some("attest.p256_key_path = /home/victim/.ssh/id_ecdsa\n"),
+            None,
+        );
+        assert!(cfg.attest.p256_key_path.is_empty());
+        assert_eq!(cfg.attest.p256_key_path_or_default(), ".mkit/keys/p256.key");
+    }
+
+    /// Meta-test: every key listed in [`REPO_FORBIDDEN_KEYS`] MUST be
+    /// covered by a per-key rejection test in this module. If you add
+    /// a key to the list without a regression test, this test fails.
+    ///
+    /// Implemented by checking each key in isolation against `layer()`
+    /// and asserting that the corresponding field on the merged
+    /// `Config` is empty (i.e. the value did not propagate). Done at
+    /// the `apply_kv` layer so it catches the exact code path the
+    /// hostile-clone exploit uses, not just the constant itself.
+    #[test]
+    fn every_forbidden_key_is_actually_dropped_from_repo_scope() {
+        // A sentinel value that is syntactically valid for every key
+        // (no control bytes, parseable as path / argv / ref / hex). If
+        // the key were accepted, it would land verbatim in the matching
+        // string field — so seeing the field empty after a per-repo
+        // load proves the key is being dropped.
+        const SENTINEL: &str = "EXFIL_SENTINEL";
+
+        for key in REPO_FORBIDDEN_KEYS {
+            let line = format!("{key} = {SENTINEL}\n");
+            let cfg = layer(Some(&line), None);
+            // Look up the field through the same accessor `mkit config`
+            // uses, to assert the value did NOT propagate.
+            let observed = match *key {
+                "user.identity" => cfg.user_identity.as_str(),
+                "trusted_remote_endpoint" => cfg.trusted_remote_endpoint.as_str(),
+                "signer" => cfg.signer.as_str(),
+                "key.backend" => cfg.key.backend.as_str(),
+                "key.default_ref" => cfg.key.default_ref.as_str(),
+                "key.ed25519_ref" => cfg.key.ed25519_ref.as_str(),
+                "key.secp256k1_ref" => cfg.key.secp256k1_ref.as_str(),
+                "key.p256_ref" => cfg.key.p256_ref.as_str(),
+                "signing_key" => cfg.signing_key.as_str(),
+                "ssh.strict_host_key_checking" => cfg.ssh_strict_host_key_checking.as_str(),
+                "ssh.user_known_hosts_file" => cfg.ssh_user_known_hosts_file.as_str(),
+                "ssh.identity_file" => cfg.ssh_identity_file.as_str(),
+                "attest.signer" => cfg.attest.signer.as_str(),
+                "attest.default_algorithm" => cfg.attest.default_algorithm.as_str(),
+                "attest.external_signer_path" => cfg.attest.external_signer_path.as_str(),
+                "attest.external_signer_args" => {
+                    // pipe-list field; empty Vec stringifies to "".
+                    if cfg.attest.external_signer_args.is_empty() {
+                        ""
+                    } else {
+                        "<non-empty>"
+                    }
+                }
+                "attest.secp256k1_key_path" => cfg.attest.secp256k1_key_path.as_str(),
+                "attest.p256_key_path" => cfg.attest.p256_key_path.as_str(),
+                // If a new key appears in `REPO_FORBIDDEN_KEYS` without
+                // an arm here, fail loudly — the developer must extend
+                // both the constant AND the meta-test together. Without
+                // this branch, an added key would be silently treated
+                // as "not in this struct" and the test would pass.
+                other => panic!(
+                    "REPO_FORBIDDEN_KEYS contains `{other}` but the meta-test \
+                     in config.rs has no matching field accessor. Add an arm \
+                     to `every_forbidden_key_is_actually_dropped_from_repo_scope` \
+                     so the per-key drop is verified.",
+                ),
+            };
+            // `Config::with_defaults()` pre-seeds a few fields (e.g.
+            // `signing_key = ".mkit/keys/default.key"`, `signer =
+            // "legacy"`). Merge order is "defaults → user → repo
+            // (filtered)", so a dropped repo line cannot OVERWRITE the
+            // default. The crisp invariant is: the attacker's
+            // SENTINEL must NEVER appear in the observed value.
+            assert!(
+                observed != SENTINEL,
+                "forbidden key `{key}` was NOT dropped from repo scope — \
+                 observed `{observed}` (matches attacker SENTINEL)",
+            );
+        }
+    }
+
     #[test]
     fn user_signing_key_is_honored() {
         let cfg = layer(None, Some("signing_key = /home/user/.mkit/global.key\n"));
