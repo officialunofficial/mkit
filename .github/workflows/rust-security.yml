@@ -66,10 +66,12 @@ jobs:
       - name: cargo audit
         if: steps.lock.outputs.has_lock == 'true'
         working-directory: rust
-        # RUSTSEC-2023-0071 is transitive through yubikey 0.9.0-pre.0 for
-        # certificate parsing; mkit does not expose RSA private-key decryption,
-        # and no fixed yubikey release exists.
-        run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071
+        # Keep this list in lockstep with rust/deny.toml [advisories.ignore].
+        # RUSTSEC-2023-0071: transitive via yubikey 0.9.0-pre.0 cert parsing;
+        # mkit never calls the affected RSA decrypt path.
+        # RUSTSEC-2024-0436: `paste` unmaintained; macro-only, no runtime
+        # exposure, pulled by commonware-* feature-gated deps.
+        run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436
 
   deny:
     name: cargo deny

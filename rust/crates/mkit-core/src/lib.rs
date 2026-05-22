@@ -25,6 +25,15 @@ pub mod hash;
 pub mod object;
 pub mod ops;
 pub mod pack;
+// Erasure-coded pack delivery (Reed-Solomon). Feature-gated because
+// the dep stack (`commonware-coding` + `commonware-cryptography` +
+// `commonware-parallel` + `commonware-storage`) is large and only
+// needed by the shard-aware transports — see
+// `docs/SPEC-PACK-SHARDS.md`. Sibling of `pack`, not nested: the
+// on-disk pack format stays untouched; shards are a wire-level
+// encoding *of* a pack.
+#[cfg(feature = "pack-shards")]
+pub mod pack_shard;
 pub mod serialize;
 pub mod sign;
 pub mod store;
@@ -40,7 +49,22 @@ pub mod worktree;
 // Phase 7a — transport trait surface (vtable + SSH framing + retry policy).
 pub mod protocol;
 
-pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher};
+// Phase 1 of issue #157 — append-only MMR over the commit chain for
+// O(log n) inclusion proofs. Feature-gated so the `commonware-storage`
+// dep tree only materialises for downstream callers that opt in.
+// Persisted (journaled) MMR + commit-field integration are Phase 2/3
+// — see docs/SPEC-HISTORY-PROOF.md.
+#[cfg(feature = "history-mmr")]
+pub mod history;
+
+// Verifiable sparse-checkout (issue #158, Phase 1). Feature-gated
+// because the upstream `commonware-storage::AuthenticatedBitMap` is
+// ALPHA-tier and pulls in `commonware-runtime` /
+// `commonware-cryptography`. Off by default.
+#[cfg(feature = "sparse-checkout")]
+pub mod sparse;
+
+pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher, to_hex, to_hex_bytes};
 pub use object::{
     Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind, MAGIC,
     MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, Tree, TreeEntry,

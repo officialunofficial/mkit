@@ -32,6 +32,19 @@ pub enum Algorithm {
     Secp256k1,
     /// P-256 + SHA-256 (COSE `-7`, `ES256`).
     P256,
+    /// BLS12-381 M-of-N threshold (`MinSig` variant — signature in
+    /// G1, public key in G2). Used by the release-party flow; see
+    /// `docs/SPEC-RELEASE-THRESHOLD.md`. No COSE id is registered for
+    /// BLS threshold; [`Algorithm::cose_id`] returns a project-local
+    /// negative integer (`-256`) chosen outside the IANA reserved
+    /// ranges. The wire-level identifier is `Algorithm::
+    /// ALGORITHM_BLS12381_THRESHOLD = 5` in the mkit-rpc proto.
+    ///
+    /// Feature-gated behind `bls-threshold` because the `Signer`
+    /// implementation pulls a sizeable dep tree (blst); the enum
+    /// variant lives or dies with the implementation it identifies.
+    #[cfg(feature = "bls-threshold")]
+    Bls12381Threshold,
 }
 
 impl Algorithm {
@@ -46,6 +59,13 @@ impl Algorithm {
             Self::Ed25519 => -19,
             Self::Secp256k1 => -47,
             Self::P256 => -7,
+            // No IANA COSE id is registered for BLS12-381 threshold.
+            // -256 is outside the assigned range (lowest assigned is
+            // -65535 in 2026) and gives us room — if IANA ever
+            // registers one, we swap to the assigned value in a
+            // patch release.
+            #[cfg(feature = "bls-threshold")]
+            Self::Bls12381Threshold => -256,
         }
     }
 
@@ -59,6 +79,10 @@ impl Algorithm {
             Self::Ed25519 => "ed25519",
             Self::Secp256k1 => "secp256k1",
             Self::P256 => "p256",
+            // Matches the `KEYID_PREFIX` constant in
+            // `signer_bls_threshold` (minus the trailing colon).
+            #[cfg(feature = "bls-threshold")]
+            Self::Bls12381Threshold => "bls12381-thr",
         }
     }
 
@@ -78,6 +102,8 @@ impl Algorithm {
             "ed25519" | "blake3" => Some(Self::Ed25519),
             "secp256k1" => Some(Self::Secp256k1),
             "p256" => Some(Self::P256),
+            #[cfg(feature = "bls-threshold")]
+            "bls12381-thr" => Some(Self::Bls12381Threshold),
             _ => None,
         }
     }
@@ -100,6 +126,8 @@ impl FromStr for Algorithm {
             "ed25519" => Ok(Self::Ed25519),
             "secp256k1" => Ok(Self::Secp256k1),
             "p256" => Ok(Self::P256),
+            #[cfg(feature = "bls-threshold")]
+            "bls12381-thr" => Ok(Self::Bls12381Threshold),
             other => Err(UnknownAlgorithm(other.to_owned())),
         }
     }

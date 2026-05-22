@@ -20,6 +20,15 @@ ignore = [
     # asserts the yubikey RSA decrypt entrypoint stays unreferenced workspace-
     # wide; if that test is removed, this ignore MUST go too.
     { id = "RUSTSEC-2023-0071", reason = "transitive via yubikey 0.9.0-pre.0 cert parsing; mkit never calls the affected RSA decrypt path (see mkit-keystore/tests/no_rsa_decrypt.rs). Re-justify by 2026-08-21." },
+    # `paste` (macro crate) marked unmaintained 2024-10-07. Pulled
+    # transitively by commonware-* (via blst/aws-lc-sys macro
+    # expansion) when the optional `history-mmr` / `sparse-checkout`
+    # / `pack-shards` / `bls-threshold` features are enabled. No
+    # runtime exposure: paste expands at compile time, produces no
+    # binary code we own. Tracked upstream in
+    # https://github.com/anthropics/buffa/issues — once commonware
+    # migrates off paste this ignore goes. Re-justify by 2026-08-21.
+    { id = "RUSTSEC-2024-0436", reason = "transitive via commonware-* feature-gated deps; macro-only, no runtime exposure. Re-justify by 2026-08-21." },
 ]
 
 [licenses]

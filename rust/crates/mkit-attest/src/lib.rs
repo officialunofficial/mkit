@@ -37,6 +37,8 @@ pub mod algorithm;
 pub mod envelope;
 pub mod jcs;
 pub mod signer;
+#[cfg(feature = "bls-threshold")]
+pub mod signer_bls_threshold;
 pub mod signer_external;
 #[cfg(feature = "algo-secp256k1")]
 pub mod signer_k256;
@@ -57,6 +59,13 @@ pub mod webauthn;
 pub use algorithm::Algorithm;
 pub use envelope::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, attestation_id, pae_of};
 pub use signer::Signer;
+#[cfg(feature = "bls-threshold")]
+pub use signer_bls_threshold::{
+    KEYID_PREFIX as BLS_THRESHOLD_KEYID_PREFIX, NAMESPACE as BLS_THRESHOLD_NAMESPACE,
+    PUBLIC_KEY_SIZE as BLS_THRESHOLD_PUBLIC_KEY_SIZE, ThresholdSigner,
+    aggregate as bls_threshold_aggregate, threshold_for as bls_threshold_for,
+    trusted_dealer as bls_threshold_trusted_dealer, verify as bls_threshold_verify,
+};
 pub use signer_external::ExternalSigner;
 #[cfg(feature = "algo-ed25519")]
 pub use signer_repo_key::{KEYID_PREFIX, RepoKeySigner};
@@ -182,4 +191,24 @@ pub enum Error {
         "WebAuthn signature did not verify against the reconstructed authenticatorData || SHA256(clientDataJSON)"
     )]
     WebAuthnSignatureFailed,
+
+    // -- BLS12-381 threshold (feature `bls-threshold`) --
+    //
+    // Flat variants matching the established style. The aggregator
+    // path can fail in three independent ways (decode a partial,
+    // recover the threshold signature, verify the aggregate); we
+    // surface each with its own variant so a future release-party
+    // CLI can render the right diagnostic.
+    #[error("BLS12-381 threshold partial signature is not a valid wire encoding")]
+    BlsThresholdPartialDecode,
+    #[error(
+        "BLS12-381 threshold recovery failed: fewer than `threshold` distinct partials supplied"
+    )]
+    BlsThresholdInsufficientPartials,
+    #[error("BLS12-381 threshold aggregate public key is malformed (bad G1 compressed encoding)")]
+    BlsThresholdPublicKeyDecode,
+    #[error("BLS12-381 threshold signature is malformed (wrong length or bad G2 encoding)")]
+    BlsThresholdSignatureDecode,
+    #[error("BLS12-381 threshold signature did not verify against the aggregated public key")]
+    BlsThresholdVerifyFailed,
 }

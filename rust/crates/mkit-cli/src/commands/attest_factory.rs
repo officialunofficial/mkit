@@ -134,7 +134,7 @@ fn build_keystore_signer(
         .map_err(|error| FactoryError::Keystore(format!("key ref: {error}")))?;
     let store = open_backend(key_ref.backend())
         .map_err(|error| FactoryError::Keystore(error.to_string()))?;
-    let keystore_algorithm = to_keystore_algorithm(algorithm);
+    let keystore_algorithm = to_keystore_algorithm(algorithm)?;
     let backend = key_ref.backend().to_string();
     let label = key_ref.label().to_owned();
     let selector = KeySelector::new(label.clone(), Some(keystore_algorithm))
@@ -158,14 +158,20 @@ fn configured_key_ref(cfg: &Config, algorithm: Algorithm) -> &str {
         Algorithm::Ed25519 => cfg.key.ed25519_ref_or_fallback(),
         Algorithm::Secp256k1 => cfg.key.secp256k1_ref_or_fallback(),
         Algorithm::P256 => cfg.key.p256_ref_or_fallback(),
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => "",
     }
 }
 
-fn to_keystore_algorithm(algorithm: Algorithm) -> mkit_keystore::Algorithm {
+fn to_keystore_algorithm(algorithm: Algorithm) -> Result<mkit_keystore::Algorithm, FactoryError> {
     match algorithm {
-        Algorithm::Ed25519 => mkit_keystore::Algorithm::Ed25519,
-        Algorithm::Secp256k1 => mkit_keystore::Algorithm::Secp256k1,
-        Algorithm::P256 => mkit_keystore::Algorithm::P256,
+        Algorithm::Ed25519 => Ok(mkit_keystore::Algorithm::Ed25519),
+        Algorithm::Secp256k1 => Ok(mkit_keystore::Algorithm::Secp256k1),
+        Algorithm::P256 => Ok(mkit_keystore::Algorithm::P256),
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => Err(FactoryError::UnknownAlgorithm(
+            "bls12381-thr keystore backend is Phase 2 of issue #160".to_owned(),
+        )),
     }
 }
 
@@ -250,6 +256,10 @@ fn build_repo_key_signer(
                 .map_err(|e| FactoryError::Signer(e.to_string()))?;
             Ok(Box::new(signer))
         }
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => Err(FactoryError::UnknownAlgorithm(
+            "bls12381-thr repo-key signer is Phase 3 of issue #160 (release-party CLI)".to_owned(),
+        )),
     }
 }
 

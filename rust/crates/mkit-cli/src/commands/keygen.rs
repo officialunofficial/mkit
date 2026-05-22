@@ -94,6 +94,13 @@ pub fn run(args: &[String]) -> u8 {
         }
         Algorithm::Secp256k1 => cfg.attest.secp256k1_key_path_or_default(),
         Algorithm::P256 => cfg.attest.p256_key_path_or_default(),
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => {
+            return emit_err(
+                "BLS threshold keygen is not supported in Phase 1 (issue #160 Phase 2)",
+                exit::UNAVAILABLE,
+            );
+        }
     };
     let key_path = match crate::config::resolve_key_path(&cwd, rel_path) {
         Ok(p) => p,
@@ -104,6 +111,11 @@ pub fn run(args: &[String]) -> u8 {
         Algorithm::Ed25519 => run_ed25519(&key_path, parsed.force, parsed.print_pubkey),
         Algorithm::Secp256k1 => run_secp256k1(&key_path, parsed.force, parsed.print_pubkey),
         Algorithm::P256 => run_p256(&key_path, parsed.force, parsed.print_pubkey),
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => emit_err(
+            "BLS threshold keygen is not supported in Phase 1 (issue #160 Phase 2)",
+            exit::UNAVAILABLE,
+        ),
     }
 }
 

@@ -361,6 +361,10 @@ pub fn attest_keypair(seed_hex: &str, algo: &str) -> Result<AttestKeyPairJs, JsV
                 algo: "p256".to_string(),
             })
         }
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => Err(js_err(
+            "BLS threshold keypair generation is not supported in WASM (Phase 1)",
+        )),
     }
 }
 
@@ -427,6 +431,12 @@ pub fn attest_build(
                 .map_err(|e| js_err(format!("sign: {e}")))?;
             (s.keyid(), sig)
         }
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => {
+            return Err(js_err(
+                "BLS threshold signing is not supported in WASM (Phase 1)",
+            ));
+        }
     };
 
     env.signatures.push(Sig {
@@ -484,6 +494,8 @@ pub fn attest_verify(envelope_json: &str, pubkey_hex: &str, algo: &str) -> bool 
             let keyid = format!("p256:{}", hex::encode(&pubkey_bytes));
             registry.add(keyid, TrustRoot::P256PubKeySec1(pubkey_bytes));
         }
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => return false,
     }
 
     match verify_envelope(envelope_json.as_bytes(), &registry) {
