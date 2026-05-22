@@ -123,3 +123,11 @@ default = []
 # cover it (returning UNAVAILABLE per-site). Phase 3 of issue #160
 # will replace the inert arms with a real release-party signer.
 bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold"]
+# Issue #159 Phase 2 — `mkit pack-shard <hash>` producer subcommand
+# and shard-aware HTTP / S3 downloads. Default-off because the
+# commonware dep stack is large.
+pack-shards = [
+    "mkit-core/pack-shards",
+    "mkit-transport-http/pack-shards",
+    "mkit-transport-s3/pack-shards",
+]
