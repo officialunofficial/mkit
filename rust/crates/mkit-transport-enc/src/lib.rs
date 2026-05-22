@@ -57,6 +57,26 @@
 // Allow `*as usize` casts on bounded pack sizes.
 #![allow(clippy::cast_possible_truncation)]
 
+pub mod url;
+
+// Real-TCP entry points (Phase 2). Feature-gated so the in-process
+// scaffold builds without dragging tokio in.
+#[cfg(feature = "tcp")]
+pub mod tcp;
+#[cfg(feature = "tcp")]
+pub mod tokio_io;
+
+#[cfg(feature = "tcp")]
+pub use tcp::{TokioExecutor, connect_tcp, connect_tcp_with_executor, serve_tcp};
+
+/// Re-export of the encrypted-stream `Sender` / `Receiver` types
+/// downstream callers need to plug a custom server-side verb loop on
+/// top of an [`EncSession`]. Phase 2's `mkit serve --listen-enc`
+/// dispatch lives in `mkit-cli` and consumes this re-export rather
+/// than depending on `commonware-stream` directly; that keeps the CLI
+/// crate's transitive surface area centred on `mkit-transport-enc`.
+pub use commonware_stream::encrypted::{Receiver as EncReceiver, Sender as EncSender};
+
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -153,6 +173,17 @@ impl<I: Stream, O: Sink> EncSession<I, O> {
     #[must_use]
     pub fn new(sender: Sender<O>, receiver: Receiver<I>) -> Self {
         Self { sender, receiver }
+    }
+
+    /// Decompose into the raw encrypted-stream halves. Useful for
+    /// server-side callers (the `serve_tcp` accept loop's `serve_fn`)
+    /// that want to run a custom request-response loop instead of
+    /// going through the [`EncTransport`] client surface. The
+    /// returned [`Sender`] / [`Receiver`] still share the same cipher
+    /// state — drop either to tear the session down.
+    #[must_use]
+    pub fn into_parts(self) -> (Sender<O>, Receiver<I>) {
+        (self.sender, self.receiver)
     }
 }
 
@@ -572,14 +603,14 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
 /// [`TransportError::ConnectionFailed`]; preserving the detailed
 /// reason would require an orphan-rules workaround and isn't worth it
 /// — callers retry on `ConnectionFailed` regardless.
-async fn send_frame<O: Sink>(sender: &mut Sender<O>, msg: &SshFrame) -> TransportResult<()> {
+pub async fn send_frame<O: Sink>(sender: &mut Sender<O>, msg: &SshFrame) -> TransportResult<()> {
     let body = msg.encode_to_vec();
     sender.send(body).await.map_err(stream_err)
 }
 
 /// Receive one [`SshFrame`]. See [`send_frame`] for the wire choice
 /// and error-collapse rationale.
-async fn recv_frame<I: Stream>(receiver: &mut Receiver<I>) -> TransportResult<SshFrame> {
+pub async fn recv_frame<I: Stream>(receiver: &mut Receiver<I>) -> TransportResult<SshFrame> {
     let bufs = receiver.recv().await.map_err(stream_err)?;
     let buf = bufs.coalesce();
     SshFrame::decode_from_slice(buf.as_ref()).map_err(|_| TransportError::ProtocolError)
