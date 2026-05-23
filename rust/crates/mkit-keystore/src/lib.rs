@@ -40,6 +40,8 @@ pub use backend_windows_credential::WindowsCredentialKeystore;
 #[cfg(feature = "backend-yubikey")]
 pub use backend_yubikey::YubiKeyKeystore;
 pub use error::{Error, Result};
+#[cfg(feature = "bls-threshold")]
+pub use software::{BlsShareMetadata, LoadedBlsShare};
 pub use software::{SoftwareKeystore, SoftwareRawKeystore, SoftwareSigner};
 pub use types::{
     Algorithm, BackendKind, Capabilities, GenerateOptions, ImportOptions, KeyAttrs, KeyId,

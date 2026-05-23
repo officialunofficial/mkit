@@ -196,6 +196,22 @@ impl S3Transport {
         format!("packs/{}", to_hex(digest))
     }
 
+    /// Build the S3 object key for the shard manifest of a pack:
+    /// `packs/<64-char hex digest>/shards.manifest`. Mirrors the HTTP
+    /// transport's URL shape.
+    #[must_use]
+    pub fn shard_manifest_object_key(digest: &Hash) -> String {
+        format!("packs/{}/shards.manifest", to_hex(digest))
+    }
+
+    /// Build the S3 object key for one shard of a pack:
+    /// `packs/<64-char hex digest>/shards/<index>`. Mirrors the HTTP
+    /// transport's URL shape.
+    #[must_use]
+    pub fn shard_object_key(digest: &Hash, index: u16) -> String {
+        format!("packs/{}/shards/{}", to_hex(digest), index)
+    }
+
     /// Build the S3 path `/<bucket>/<key>` that the signer will sign
     /// and the client will request.
     fn build_path(&self, key: &str) -> String {
@@ -443,6 +459,16 @@ impl Transport for S3Transport {
     }
 
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        // Shard-aware path: when the pack-shards feature is on, try
+        // the manifest first. `Ok(None)` means the manifest is
+        // missing (producer never sharded this pack), so we fall
+        // through to the monolithic GET below. Any other error
+        // propagates as-is.
+        #[cfg(feature = "pack-shards")]
+        if let Some(bytes) = self.download_pack_via_shards(key)? {
+            return Ok(bytes);
+        }
+
         let object_key = Self::pack_object_key(key.as_bytes());
         let resp = self.http_request(
             &Method::GET,
@@ -605,6 +631,246 @@ pub fn parse_list_xml(xml: &[u8]) -> Vec<String> {
         cursor = abs_end + "</Key>".len();
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Sparse-checkout fetch (issue #158, Phase 2). Feature-gated behind
+// `sparse-checkout`.
+//
+// Wire contract additions (SPEC-TRANSPORT §6.6):
+//
+// - Object key: `sparse/<tree-hash-hex>/<filter-hash-hex>`. A server
+//   that wants to offer sparse delivery pre-builds the manifest under
+//   that key. Clients GET it; the response body IS the
+//   `application/x-mkit-sparse` envelope.
+// - The `?sparse=<filter-hash-hex>` query is a no-op on S3 (the
+//   content-addressed key already encodes it) — we accept it for URL
+//   parity with the HTTP transport but ignore it.
+// - 404 → no precomputed sparse for that (tree, filter) pair. Maps to
+//   `PackNotFound` so retries are terminated.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "sparse-checkout")]
+mod sparse_fetch {
+    use super::{
+        Hash, Method, PACK_BODY_LIMIT_USIZE, S3Transport, TransportError, TransportResult, to_hex,
+    };
+    use mkit_core::sparse::{
+        SPARSE_WIRE_MAX_BYTES, SparseResponse, decode_sparse_response, hash_filter,
+    };
+    use std::path::PathBuf;
+
+    impl S3Transport {
+        /// Build the S3 object key for a sparse delivery:
+        /// `sparse/<tree-hex>/<filter-hex>`.
+        #[must_use]
+        pub fn sparse_object_key(tree_hash: &Hash, filter_hash: &Hash) -> String {
+            format!("sparse/{}/{}", to_hex(tree_hash), to_hex(filter_hash))
+        }
+
+        /// Fetch the precomputed sparse delivery for `(tree_hash,
+        /// filter)`. The S3 transport does NOT compute manifests; it
+        /// assumes a server has pre-built them under the canonical
+        /// key.
+        ///
+        /// As with the HTTP transport, this function does NOT verify
+        /// the manifest — the caller MUST run
+        /// [`mkit_core::sparse::verify_sparse`] on the result before
+        /// trusting any delivered entries.
+        ///
+        /// # Errors
+        ///
+        /// - [`TransportError::PackNotFound`] — no precomputed sparse
+        ///   for the addressed `(tree, filter)` pair.
+        /// - [`TransportError::AccessDenied`] — credentials rejected.
+        /// - [`TransportError::InvalidResponse`] — wire envelope
+        ///   decode failed.
+        /// - [`TransportError::PayloadTooLarge`] — response body
+        ///   exceeded `SPARSE_WIRE_MAX_BYTES`.
+        pub fn fetch_sparse_tree(
+            &self,
+            tree_hash: &Hash,
+            filter: &[PathBuf],
+        ) -> TransportResult<SparseResponse> {
+            let filter_hash = hash_filter(filter);
+            let key = Self::sparse_object_key(tree_hash, &filter_hash);
+            // Cap body size at the wire-format max — far smaller than
+            // the pack-body limit. PACK_BODY_LIMIT_USIZE is the
+            // existing transport-side ceiling, used here for parity
+            // when SPARSE_WIRE_MAX_BYTES would otherwise allow a
+            // non-pack body larger than any pack we'd accept.
+            let cap = SPARSE_WIRE_MAX_BYTES.min(PACK_BODY_LIMIT_USIZE);
+            let resp = self.http_request_pub(&Method::GET, &key, "", None, &[], Some(cap))?;
+            match resp.status_pub() {
+                200 => decode_sparse_response(resp.body_pub())
+                    .map_err(|_| TransportError::InvalidResponse),
+                404 => Err(TransportError::PackNotFound),
+                403 | 401 => Err(TransportError::AccessDenied),
+                s => Err(TransportError::ServerError { status: s }),
+            }
+        }
+    }
+}
+
+// Crate-private bridge so the sparse-fetch module can poke through
+// `http_request` without the transport file losing its tightly-scoped
+// `pub(crate)` surface.
+#[cfg(feature = "sparse-checkout")]
+impl S3Transport {
+    pub(crate) fn http_request_pub(
+        &self,
+        method: &Method,
+        key: &str,
+        query: &str,
+        payload: Option<&[u8]>,
+        extra_headers: &[(&'static str, String)],
+        body_limit: Option<usize>,
+    ) -> TransportResult<HttpResponse> {
+        self.http_request(method, key, query, payload, extra_headers, body_limit)
+    }
+}
+
+#[cfg(feature = "sparse-checkout")]
+impl HttpResponse {
+    pub(crate) fn status_pub(&self) -> u16 {
+        self.status
+    }
+    pub(crate) fn body_pub(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pack-Shards client (feature-gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "pack-shards")]
+fn fetch_one_shard(
+    client: &Client,
+    endpoint: &str,
+    bucket: &str,
+    creds: &Credentials,
+    digest: &Hash,
+    index: u16,
+    ts: i64,
+) -> TransportResult<Vec<u8>> {
+    let object_key = S3Transport::shard_object_key(digest, index);
+    let path = if bucket.is_empty() {
+        format!("/{object_key}")
+    } else {
+        format!("/{bucket}/{object_key}")
+    };
+    let signed = sign_request(creds, "GET", &path, "", &[], endpoint, ts);
+    let url = format!("{endpoint}{path}");
+    let resp = client
+        .request(Method::GET, &url)
+        .header("Authorization", signed.authorization)
+        .header("x-amz-date", signed.x_amz_date)
+        .header("x-amz-content-sha256", signed.x_amz_content_sha256)
+        .send()
+        .map_err(|_| TransportError::ConnectionFailed)?;
+    let status = resp.status().as_u16();
+    match status {
+        200 => {
+            let bytes = resp.bytes().map_err(|_| TransportError::ConnectionFailed)?;
+            if bytes.len() > PACK_BODY_LIMIT_USIZE {
+                return Err(TransportError::PayloadTooLarge(bytes.len()));
+            }
+            Ok(bytes.to_vec())
+        }
+        404 => Err(TransportError::PackNotFound),
+        401 | 403 => Err(TransportError::AccessDenied),
+        s => Err(TransportError::ServerError { status: s }),
+    }
+}
+
+#[cfg(feature = "pack-shards")]
+impl S3Transport {
+    fn download_pack_via_shards(&self, key: &PackKey) -> TransportResult<Option<Vec<u8>>> {
+        use mkit_core::pack_shard::{
+            MANIFEST_MAX_BYTES, Shard, decode_manifest, decode_pack_from_shards,
+        };
+        use std::sync::mpsc;
+
+        let manifest_key = Self::shard_manifest_object_key(key.as_bytes());
+        let manifest_resp = self.http_request(
+            &Method::GET,
+            &manifest_key,
+            "",
+            None,
+            &[],
+            Some(MANIFEST_MAX_BYTES),
+        )?;
+        match manifest_resp.status {
+            200 => {}
+            // 404 is the only legitimate "no shards published" signal —
+            // the producer never wrote a manifest, so the client must
+            // fall through to the monolithic GET. Every other status,
+            // including a malformed-body 200, propagates so the caller
+            // sees the bug rather than silently downgrading. This
+            // mirrors HTTP's `download_pack_via_shards` posture — see
+            // `mkit-transport-http`'s comment on `X-Pack-Shards`.
+            404 => return Ok(None),
+            403 | 401 => return Err(TransportError::AccessDenied),
+            s => return Err(TransportError::ServerError { status: s }),
+        }
+        let manifest =
+            decode_manifest(&manifest_resp.body).map_err(|_| TransportError::InvalidResponse)?;
+
+        let total = manifest.config.total_shards();
+        let minimum = manifest.config.minimum_shards.get();
+        let max_failures = manifest.config.extra_shards.get();
+
+        if total > 256 {
+            return Err(TransportError::InvalidResponse);
+        }
+        let total_u16: u16 = u16::try_from(total).unwrap_or(u16::MAX);
+
+        let (tx, rx) = mpsc::channel::<(u16, TransportResult<Vec<u8>>)>();
+        let mut handles = Vec::with_capacity(total as usize);
+        let digest: Hash = *key.as_bytes();
+        for i in 0..total_u16 {
+            let tx = tx.clone();
+            let endpoint = self.endpoint.clone();
+            let bucket = self.bucket.clone();
+            let creds = self.creds.clone();
+            let client = self.client.clone();
+            let clock = self.clock;
+            handles.push(std::thread::spawn(move || {
+                let ts = clock();
+                let result = fetch_one_shard(&client, &endpoint, &bucket, &creds, &digest, i, ts);
+                let _ = tx.send((i, result));
+            }));
+        }
+        drop(tx);
+
+        let mut shards: Vec<Shard> = Vec::with_capacity(minimum as usize);
+        let mut failures: u16 = 0;
+        for (index, res) in &rx {
+            if let Ok(bytes) = res {
+                shards.push(Shard { index, bytes });
+                if shards.len() >= minimum as usize {
+                    break;
+                }
+            } else {
+                failures += 1;
+                if failures > max_failures {
+                    break;
+                }
+            }
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+
+        if shards.len() < minimum as usize {
+            return Err(TransportError::PackNotFound);
+        }
+
+        let pack = decode_pack_from_shards(&shards, &manifest)
+            .map_err(|_| TransportError::InvalidResponse)?;
+        Ok(Some(pack))
+    }
 }
 
 // ---------------------------------------------------------------------------

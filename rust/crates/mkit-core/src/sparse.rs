@@ -42,9 +42,9 @@
 //!
 //! [bitmap]: https://docs.rs/commonware-storage
 
-use crate::hash::{Hash, Hasher, ZERO};
-use crate::object::Tree;
-use crate::object::TreeEntry;
+use crate::hash::{Hash, Hasher, ZERO, hash as blake3_hash};
+use crate::object::{EntryMode, Object, Tree, TreeEntry};
+use crate::serialize::serialize;
 use std::path::PathBuf;
 
 use commonware_cryptography::{Sha256, sha256};
@@ -402,46 +402,405 @@ pub fn verify_sparse(
     true
 }
 
-/// Domain string for [`tree_hash`]. Bound into the BLAKE3 input via
-/// [`crate::hash::domain_digest`] so the sparse-internal tree
-/// commitment can't collide with any other domain-prefixed BLAKE3
-/// hash in the codebase (commits, remixes, etc.).
-pub const SPARSE_TREE_DOMAIN: &[u8] = b"mkit-sparse-tree-v1";
-
-/// Compute the BLAKE3 hash of a tree's canonical serialisation. We
-/// avoid pulling in `serialize::serialize` here to keep the sparse
-/// module's surface tight; instead we hash the per-entry triple of
-/// (`name`, `mode`, `object_hash`) in entry order, then route the
-/// concatenation through [`crate::hash::domain_digest`] for the
-/// `u16 LE` length-prefixed domain separator (same recipe used by
-/// `sign.rs`).
+/// Compute the canonical SPEC-OBJECTS tree hash.
 ///
-/// This is *not* the SPEC-OBJECTS tree hash (which includes the v1
-/// prologue and length prefixes); it is a sparse-module-internal
-/// commitment binding the manifest to a specific tree. Phase 2 will
-/// switch this to the full SPEC-OBJECTS hash once the transport-side
-/// `tree_hash` is plumbed.
+/// Phase 2 swaps the Phase-1 placeholder for the canonical hash:
+/// `BLAKE3(serialize(Object::Tree(t)))`. This is the *same* digest the
+/// rest of the codebase uses to address a tree object — commits, remix
+/// roots, and the object store all key trees by this value.
 ///
-/// NOTE: output bytes differ from the pre-B2 hand-rolled scheme
-/// (which used a `u32 LE` length prefix and an inline domain string).
-/// Phase 1 sparse is feature-gated and has no shipped consumers, so
-/// the break is in-budget.
-fn tree_hash(tree: &Tree) -> Hash {
-    if tree.entries.is_empty() {
+/// Binding the manifest to the canonical tree hash means the verifier
+/// can cross-check the manifest against any independently-known
+/// commitment to the source tree (a parent commit's `tree_hash`, a
+/// merge base's tree, the local object store) without re-deriving a
+/// sparse-private digest.
+///
+/// The empty tree still serializes to a valid 10-byte object
+/// (`6-byte prologue || u32 LE 0` entries) and hashes to a non-zero
+/// digest — there is no longer a `ZERO` short-circuit.
+#[must_use]
+pub fn tree_hash(tree: &Tree) -> Hash {
+    // `serialize` only fails when an individual length-prefixed field
+    // overflows `u32` — `Tree::entries` is bounded above by
+    // `MAX_LEAVES` (1 M) here so the serialise call cannot fail on any
+    // tree that already passed our caller guards. We still return
+    // `ZERO` as a defensive fallback to keep the function infallible
+    // for downstream users — they have no recourse if the upstream
+    // tree is malformed.
+    let Ok(bytes) = serialize(&Object::Tree(tree.clone())) else {
         return ZERO;
+    };
+    blake3_hash(&bytes)
+}
+
+/// Wire envelope magic — `b"MSP1"` (mkit-sparse-v1). Helps the
+/// transport sanity-check the body before any deserialisation. Sits in
+/// the same family as the v1 object prologue, but the codes are
+/// distinct so a misrouted blob can't be parsed as a sparse response.
+pub const SPARSE_WIRE_MAGIC: [u8; 4] = *b"MSP1";
+
+/// Wire-format version of [`SparseResponse`]. Bumped on any
+/// non-backward-compatible change.
+pub const SPARSE_WIRE_VERSION: u8 = 0x01;
+
+/// Maximum encoded sparse-response wire size. Caller-side cap; ~16 MiB
+/// is comfortably more than a maximum-sized bitmap (~125 KB) plus the
+/// largest possible entry stream.
+pub const SPARSE_WIRE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Complete server-to-client sparse delivery: manifest + entries +
+/// proof, in the order they appear on the wire. The encoder and
+/// decoder are content-stable across calls so the byte layout can be
+/// pinned in golden vectors if and when needed.
+#[derive(Debug, Clone)]
+pub struct SparseResponse {
+    /// Manifest committing to the delivery (104 bytes on the wire).
+    pub manifest: SparseManifest,
+    /// The subset of tree entries the filter selects, in canonical
+    /// lex-sorted order. The verifier walks these alongside the bitmap.
+    pub entries: Vec<TreeEntry>,
+    /// Proof bundle. Phase 2 carries only the raw bitmap bytes; the
+    /// future MMR proof slot is reserved for streaming-only transports.
+    pub proof: SparseProof,
+}
+
+/// Errors raised when encoding or decoding a [`SparseResponse`] on the
+/// wire. Kept tight — the transport layer wraps these in its own
+/// transport-error type at the call site.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SparseWireError {
+    /// Buffer was shorter than the fixed-size manifest header (or
+    /// truncated partway through a length-prefixed section). The
+    /// decoder refuses to allocate from a truncated header.
+    #[error("sparse wire: truncated buffer")]
+    Truncated,
+    /// First 4 bytes are not `b"MSP1"`. Either the body is for a
+    /// different endpoint or the server is on a fork.
+    #[error("sparse wire: bad magic")]
+    BadMagic,
+    /// Version byte is something other than [`SPARSE_WIRE_VERSION`].
+    /// A future server speaking v2 must not be silently downgraded.
+    #[error("sparse wire: unsupported version {0}")]
+    UnsupportedVersion(u8),
+    /// One of the length-prefixed sections claims more bytes than
+    /// remain in the input. Likely a malicious server trying to make
+    /// us allocate.
+    #[error("sparse wire: length out of bounds")]
+    LengthOutOfBounds,
+    /// `leaf_count` exceeds [`MAX_LEAVES`]. The verifier MUST refuse
+    /// before allocating anything proportional to the claimed count.
+    #[error("sparse wire: leaf_count exceeds MAX_LEAVES")]
+    TooManyLeaves,
+    /// Encoded buffer would exceed [`SPARSE_WIRE_MAX_BYTES`].
+    #[error("sparse wire: response exceeds maximum size")]
+    TooLarge,
+    /// A tree entry's mode byte is not a valid [`EntryMode`].
+    #[error("sparse wire: invalid entry mode {0}")]
+    InvalidEntryMode(u8),
+    /// Entry name length declared as zero or > 255 bytes — outside the
+    /// SPEC-OBJECTS §4 range. Matches the per-tree-entry name cap.
+    #[error("sparse wire: invalid entry name length")]
+    InvalidEntryName,
+}
+
+/// Encode a [`SparseResponse`] to the canonical wire bytes.
+///
+/// Layout:
+/// ```text
+/// offset  size  field
+/// 0       4     magic        = SPARSE_WIRE_MAGIC ("MSP1")
+/// 4       1     version      = SPARSE_WIRE_VERSION
+/// 5       32    tree_hash
+/// 37      32    bitmap_root
+/// 69      32    filter_hash
+/// 101     8     leaf_count   (u64 LE)
+/// 109     4     entries_len  (u32 LE) — count of TreeEntry items
+/// 113     ...   TreeEntry stream, each entry:
+///                 u16 LE name_len   (1..=255)
+///                 name_len bytes    (name; arbitrary bytes)
+///                 u8          mode  (EntryMode)
+///                 [u8; 32]    object_hash
+/// ...     4     bitmap_len   (u32 LE)
+/// ...     N     bitmap_bytes
+/// ```
+///
+/// Names are u16-LE length-prefixed rather than the u32 used by
+/// SPEC-OBJECTS — names are bounded at 255 bytes, so a u16 prefix is
+/// already overkill, and the four-byte saving per entry adds up over a
+/// large tree. The decoder rejects `name_len == 0` and `name_len > 255`
+/// to keep the bound enforced.
+///
+/// # Errors
+///
+/// * [`SparseWireError::TooManyLeaves`] — `manifest.leaf_count > MAX_LEAVES`.
+/// * [`SparseWireError::InvalidEntryName`] — an entry name is empty or
+///   > 255 bytes. Defensive: callers should reject before encoding.
+/// * [`SparseWireError::TooLarge`] — the encoded buffer would exceed
+///   [`SPARSE_WIRE_MAX_BYTES`].
+pub fn encode_sparse_response(resp: &SparseResponse) -> Result<Vec<u8>, SparseWireError> {
+    if resp.manifest.leaf_count > MAX_LEAVES {
+        return Err(SparseWireError::TooManyLeaves);
     }
-    let mut body = Hasher::new();
-    let count = u32::try_from(tree.entries.len()).unwrap_or(u32::MAX);
-    body.update(&count.to_le_bytes());
-    for entry in &tree.entries {
-        let name_len = u32::try_from(entry.name.len()).unwrap_or(u32::MAX);
-        body.update(&name_len.to_le_bytes());
-        body.update(&entry.name);
-        body.update(&[entry.mode as u8]);
-        body.update(&entry.object_hash);
+    // Pre-size: 113 byte header + per-entry (2 + name_len + 1 + 32) +
+    // 4-byte bitmap length prefix + bitmap bytes. Overshoot is fine.
+    let mut entries_size: usize = 0;
+    for e in &resp.entries {
+        if e.name.is_empty() || e.name.len() > 255 {
+            return Err(SparseWireError::InvalidEntryName);
+        }
+        entries_size = entries_size
+            .checked_add(2 + e.name.len() + 1 + 32)
+            .ok_or(SparseWireError::TooLarge)?;
     }
-    let body_digest = body.finalize();
-    crate::hash::domain_digest(SPARSE_TREE_DOMAIN, &body_digest)
+    let total = 113usize
+        .checked_add(entries_size)
+        .and_then(|n| n.checked_add(4))
+        .and_then(|n| n.checked_add(resp.proof.bitmap_bytes.len()))
+        .ok_or(SparseWireError::TooLarge)?;
+    if total > SPARSE_WIRE_MAX_BYTES {
+        return Err(SparseWireError::TooLarge);
+    }
+
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&SPARSE_WIRE_MAGIC);
+    out.push(SPARSE_WIRE_VERSION);
+    out.extend_from_slice(&resp.manifest.tree_hash);
+    out.extend_from_slice(&resp.manifest.bitmap_root);
+    out.extend_from_slice(&resp.manifest.filter_hash);
+    out.extend_from_slice(&resp.manifest.leaf_count.to_le_bytes());
+
+    let entries_len = u32::try_from(resp.entries.len()).map_err(|_| SparseWireError::TooLarge)?;
+    out.extend_from_slice(&entries_len.to_le_bytes());
+    for e in &resp.entries {
+        // Name length already bounded above.
+        #[allow(clippy::cast_possible_truncation)]
+        let name_len = e.name.len() as u16;
+        out.extend_from_slice(&name_len.to_le_bytes());
+        out.extend_from_slice(&e.name);
+        out.push(e.mode as u8);
+        out.extend_from_slice(&e.object_hash);
+    }
+
+    let bitmap_len =
+        u32::try_from(resp.proof.bitmap_bytes.len()).map_err(|_| SparseWireError::TooLarge)?;
+    out.extend_from_slice(&bitmap_len.to_le_bytes());
+    out.extend_from_slice(&resp.proof.bitmap_bytes);
+
+    Ok(out)
+}
+
+/// Decode a wire-format sparse response. Refuses any input larger than
+/// [`SPARSE_WIRE_MAX_BYTES`] before parsing.
+///
+/// # Errors
+///
+/// * [`SparseWireError::Truncated`] — buffer ended mid-field.
+/// * [`SparseWireError::BadMagic`] — magic prefix mismatch.
+/// * [`SparseWireError::UnsupportedVersion`] — version byte mismatch.
+/// * [`SparseWireError::TooManyLeaves`] — claimed `leaf_count >
+///   MAX_LEAVES`. Refused before any allocation.
+/// * [`SparseWireError::LengthOutOfBounds`] — a length prefix exceeds
+///   the remaining buffer.
+/// * [`SparseWireError::InvalidEntryMode`] — an entry mode byte is
+///   not a recognised [`EntryMode`].
+/// * [`SparseWireError::InvalidEntryName`] — an entry name length is
+///   outside the 1..=255 SPEC-OBJECTS bound.
+pub fn decode_sparse_response(buf: &[u8]) -> Result<SparseResponse, SparseWireError> {
+    if buf.len() > SPARSE_WIRE_MAX_BYTES {
+        return Err(SparseWireError::TooLarge);
+    }
+    if buf.len() < 113 {
+        return Err(SparseWireError::Truncated);
+    }
+    if buf[0..4] != SPARSE_WIRE_MAGIC {
+        return Err(SparseWireError::BadMagic);
+    }
+    if buf[4] != SPARSE_WIRE_VERSION {
+        return Err(SparseWireError::UnsupportedVersion(buf[4]));
+    }
+    let mut tree_hash = [0u8; 32];
+    tree_hash.copy_from_slice(&buf[5..37]);
+    let mut bitmap_root = [0u8; 32];
+    bitmap_root.copy_from_slice(&buf[37..69]);
+    let mut filter_hash = [0u8; 32];
+    filter_hash.copy_from_slice(&buf[69..101]);
+    let mut leaf_count_bytes = [0u8; 8];
+    leaf_count_bytes.copy_from_slice(&buf[101..109]);
+    let leaf_count = u64::from_le_bytes(leaf_count_bytes);
+    if leaf_count > MAX_LEAVES {
+        return Err(SparseWireError::TooManyLeaves);
+    }
+
+    let mut entries_len_bytes = [0u8; 4];
+    entries_len_bytes.copy_from_slice(&buf[109..113]);
+    let entries_len = u32::from_le_bytes(entries_len_bytes) as usize;
+    // Independently bound by the per-tree cap.
+    if entries_len as u64 > MAX_LEAVES {
+        return Err(SparseWireError::TooManyLeaves);
+    }
+
+    let mut cursor: usize = 113;
+    let mut entries: Vec<TreeEntry> = Vec::with_capacity(entries_len.min(64));
+    for _ in 0..entries_len {
+        if cursor.checked_add(2).ok_or(SparseWireError::Truncated)? > buf.len() {
+            return Err(SparseWireError::Truncated);
+        }
+        let mut nlb = [0u8; 2];
+        nlb.copy_from_slice(&buf[cursor..cursor + 2]);
+        let name_len = u16::from_le_bytes(nlb) as usize;
+        cursor += 2;
+        if name_len == 0 || name_len > 255 {
+            return Err(SparseWireError::InvalidEntryName);
+        }
+        let needed = name_len
+            .checked_add(1)
+            .and_then(|n| n.checked_add(32))
+            .ok_or(SparseWireError::LengthOutOfBounds)?;
+        if cursor
+            .checked_add(needed)
+            .ok_or(SparseWireError::Truncated)?
+            > buf.len()
+        {
+            return Err(SparseWireError::Truncated);
+        }
+        let name = buf[cursor..cursor + name_len].to_vec();
+        cursor += name_len;
+        let mode_byte = buf[cursor];
+        cursor += 1;
+        let mode = EntryMode::from_u8(mode_byte)
+            .map_err(|_| SparseWireError::InvalidEntryMode(mode_byte))?;
+        let mut object_hash = [0u8; 32];
+        object_hash.copy_from_slice(&buf[cursor..cursor + 32]);
+        cursor += 32;
+        entries.push(TreeEntry {
+            name,
+            mode,
+            object_hash,
+        });
+    }
+
+    // Bitmap length prefix.
+    if cursor.checked_add(4).ok_or(SparseWireError::Truncated)? > buf.len() {
+        return Err(SparseWireError::Truncated);
+    }
+    let mut blb = [0u8; 4];
+    blb.copy_from_slice(&buf[cursor..cursor + 4]);
+    let bitmap_len = u32::from_le_bytes(blb) as usize;
+    cursor += 4;
+    if cursor
+        .checked_add(bitmap_len)
+        .ok_or(SparseWireError::LengthOutOfBounds)?
+        > buf.len()
+    {
+        return Err(SparseWireError::LengthOutOfBounds);
+    }
+    let bitmap_bytes = buf[cursor..cursor + bitmap_len].to_vec();
+    cursor += bitmap_len;
+    if cursor != buf.len() {
+        // Trailing bytes — refuse so a hostile server can't pad with
+        // extra data hoping a future client parses it.
+        return Err(SparseWireError::LengthOutOfBounds);
+    }
+
+    Ok(SparseResponse {
+        manifest: SparseManifest {
+            tree_hash,
+            bitmap_root,
+            filter_hash,
+            leaf_count,
+        },
+        entries,
+        proof: SparseProof { bitmap_bytes },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// On-disk bitmap cache
+// ---------------------------------------------------------------------------
+
+/// Cache file header magic — `b"MSPC"` (mkit-sparse-cache). Distinct
+/// from the wire magic so a misnamed file can't be parsed as either.
+pub const SPARSE_CACHE_MAGIC: [u8; 4] = *b"MSPC";
+
+/// Cache file format version. Bumped on any breaking change.
+pub const SPARSE_CACHE_VERSION: u8 = 0x01;
+
+/// Subdirectory under `.mkit/` for the sparse bitmap cache.
+pub const SPARSE_CACHE_DIR: &str = "sparse";
+
+/// Encode the on-disk cache payload for a verified sparse delivery.
+///
+/// Layout:
+/// ```text
+/// 0   4   magic        = SPARSE_CACHE_MAGIC ("MSPC")
+/// 4   1   version      = SPARSE_CACHE_VERSION
+/// 5   32  bitmap_root
+/// 37  32  filter_hash
+/// 69  8   leaf_count   (u64 LE)
+/// 77  4   bitmap_len   (u32 LE)
+/// 81  N   bitmap_bytes
+/// ```
+///
+/// The `tree_hash` is *not* stored in the file body — it is the
+/// filename. Re-verifying a cached bitmap means recomputing the
+/// bitmap root from the bytes and comparing to `bitmap_root` here.
+#[must_use]
+pub fn encode_sparse_cache(manifest: &SparseManifest, proof: &SparseProof) -> Vec<u8> {
+    let mut out = Vec::with_capacity(81 + proof.bitmap_bytes.len());
+    out.extend_from_slice(&SPARSE_CACHE_MAGIC);
+    out.push(SPARSE_CACHE_VERSION);
+    out.extend_from_slice(&manifest.bitmap_root);
+    out.extend_from_slice(&manifest.filter_hash);
+    out.extend_from_slice(&manifest.leaf_count.to_le_bytes());
+    let len = u32::try_from(proof.bitmap_bytes.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&proof.bitmap_bytes);
+    out
+}
+
+/// Decode the on-disk cache payload. Returns the bitmap root, filter
+/// hash, leaf count, and bitmap bytes — the caller reconstructs the
+/// `SparseManifest` if needed (the `tree_hash` field comes from the
+/// filename, not from the file body).
+///
+/// # Errors
+///
+/// Same shape as [`decode_sparse_response`].
+#[allow(clippy::type_complexity)]
+pub fn decode_sparse_cache(buf: &[u8]) -> Result<(Hash, Hash, u64, Vec<u8>), SparseWireError> {
+    if buf.len() < 81 {
+        return Err(SparseWireError::Truncated);
+    }
+    if buf[0..4] != SPARSE_CACHE_MAGIC {
+        return Err(SparseWireError::BadMagic);
+    }
+    if buf[4] != SPARSE_CACHE_VERSION {
+        return Err(SparseWireError::UnsupportedVersion(buf[4]));
+    }
+    let mut bitmap_root = [0u8; 32];
+    bitmap_root.copy_from_slice(&buf[5..37]);
+    let mut filter_hash = [0u8; 32];
+    filter_hash.copy_from_slice(&buf[37..69]);
+    let mut lcb = [0u8; 8];
+    lcb.copy_from_slice(&buf[69..77]);
+    let leaf_count = u64::from_le_bytes(lcb);
+    if leaf_count > MAX_LEAVES {
+        return Err(SparseWireError::TooManyLeaves);
+    }
+    let mut blb = [0u8; 4];
+    blb.copy_from_slice(&buf[77..81]);
+    let bitmap_len = u32::from_le_bytes(blb) as usize;
+    let end = 81usize
+        .checked_add(bitmap_len)
+        .ok_or(SparseWireError::LengthOutOfBounds)?;
+    if end > buf.len() {
+        return Err(SparseWireError::LengthOutOfBounds);
+    }
+    if end != buf.len() {
+        return Err(SparseWireError::LengthOutOfBounds);
+    }
+    let bitmap_bytes = buf[81..end].to_vec();
+    Ok((bitmap_root, filter_hash, leaf_count, bitmap_bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -657,5 +1016,176 @@ mod tests {
         // ...but a different content set must produce a different hash.
         let c = hash_filter(&[PathBuf::from("x"), PathBuf::from("z")]);
         assert_ne!(a, c);
+    }
+
+    // ----- Phase 2: canonical tree-hash + wire format ----------------------
+
+    #[test]
+    fn tree_hash_matches_canonical_serialize_then_hash() {
+        // The Phase-2 tree_hash is BLAKE3(serialize(Object::Tree(t))).
+        // Cross-check against the codebase's canonical "address a tree
+        // object" recipe — anything else would defeat the point of the
+        // Phase-1 → Phase-2 swap.
+        let tree = make_tree(5);
+        let canonical = crate::hash::hash(
+            &crate::serialize::serialize(&crate::object::Object::Tree(tree.clone())).unwrap(),
+        );
+        assert_eq!(tree_hash(&tree), canonical);
+    }
+
+    #[test]
+    fn tree_hash_differs_from_phase1_placeholder() {
+        // Sanity: the Phase-1 sparse-internal hash and the new
+        // canonical hash MUST differ for any non-empty tree, so a
+        // mistakenly-pinned Phase-1 hash anywhere upstream surfaces
+        // immediately as a verifier mismatch.
+        let tree = make_tree(3);
+        // Phase-1 placeholder recipe — kept verbatim for the diff.
+        let mut body = Hasher::new();
+        let count = u32::try_from(tree.entries.len()).unwrap();
+        body.update(&count.to_le_bytes());
+        for entry in &tree.entries {
+            let name_len = u32::try_from(entry.name.len()).unwrap();
+            body.update(&name_len.to_le_bytes());
+            body.update(&entry.name);
+            body.update(&[entry.mode as u8]);
+            body.update(&entry.object_hash);
+        }
+        let body_digest = body.finalize();
+        let phase1 = crate::hash::domain_digest(b"mkit-sparse-tree-v1", &body_digest);
+        assert_ne!(tree_hash(&tree), phase1);
+    }
+
+    #[test]
+    fn wire_round_trip_simple() {
+        let tree = make_tree(8);
+        let filter = vec![PathBuf::from("aa"), PathBuf::from("ab")];
+        let (entries, manifest, proof) = build_sparse(&tree, &filter).unwrap();
+        let resp = SparseResponse {
+            manifest,
+            entries,
+            proof,
+        };
+        let bytes = encode_sparse_response(&resp).unwrap();
+        let parsed = decode_sparse_response(&bytes).unwrap();
+        assert_eq!(parsed.manifest, resp.manifest);
+        assert_eq!(parsed.entries.len(), resp.entries.len());
+        for (a, b) in parsed.entries.iter().zip(resp.entries.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.mode as u8, b.mode as u8);
+            assert_eq!(a.object_hash, b.object_hash);
+        }
+        assert_eq!(parsed.proof.bitmap_bytes, resp.proof.bitmap_bytes);
+        // Decoded response still verifies.
+        assert!(verify_sparse(
+            &parsed.manifest,
+            &parsed.entries,
+            &filter,
+            &parsed.proof
+        ));
+    }
+
+    #[test]
+    fn wire_rejects_bad_magic() {
+        let tree = make_tree(2);
+        let (entries, manifest, proof) = build_sparse(&tree, &[PathBuf::from("aa")]).unwrap();
+        let mut bytes = encode_sparse_response(&SparseResponse {
+            manifest,
+            entries,
+            proof,
+        })
+        .unwrap();
+        bytes[0] = 0xFF;
+        assert_eq!(
+            decode_sparse_response(&bytes).unwrap_err(),
+            SparseWireError::BadMagic
+        );
+    }
+
+    #[test]
+    fn wire_rejects_unsupported_version() {
+        let tree = make_tree(2);
+        let (entries, manifest, proof) = build_sparse(&tree, &[PathBuf::from("aa")]).unwrap();
+        let mut bytes = encode_sparse_response(&SparseResponse {
+            manifest,
+            entries,
+            proof,
+        })
+        .unwrap();
+        bytes[4] = 0x99;
+        assert!(matches!(
+            decode_sparse_response(&bytes).unwrap_err(),
+            SparseWireError::UnsupportedVersion(0x99)
+        ));
+    }
+
+    #[test]
+    fn wire_rejects_trailing_garbage() {
+        let tree = make_tree(2);
+        let (entries, manifest, proof) = build_sparse(&tree, &[PathBuf::from("aa")]).unwrap();
+        let mut bytes = encode_sparse_response(&SparseResponse {
+            manifest,
+            entries,
+            proof,
+        })
+        .unwrap();
+        bytes.push(0xAA);
+        assert_eq!(
+            decode_sparse_response(&bytes).unwrap_err(),
+            SparseWireError::LengthOutOfBounds
+        );
+    }
+
+    #[test]
+    fn wire_rejects_truncated_header() {
+        let tiny = vec![0u8; 50];
+        assert_eq!(
+            decode_sparse_response(&tiny).unwrap_err(),
+            SparseWireError::Truncated
+        );
+    }
+
+    #[test]
+    fn wire_rejects_overlong_leaf_count() {
+        let mut buf = Vec::with_capacity(113);
+        buf.extend_from_slice(&SPARSE_WIRE_MAGIC);
+        buf.push(SPARSE_WIRE_VERSION);
+        buf.extend_from_slice(&[0u8; 32]); // tree_hash
+        buf.extend_from_slice(&[0u8; 32]); // bitmap_root
+        buf.extend_from_slice(&[0u8; 32]); // filter_hash
+        buf.extend_from_slice(&(MAX_LEAVES + 1).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // entries_len = 0
+        // need bitmap length prefix for completeness
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            decode_sparse_response(&buf).unwrap_err(),
+            SparseWireError::TooManyLeaves
+        );
+    }
+
+    #[test]
+    fn cache_round_trip_recovers_bitmap_root() {
+        let tree = make_tree(10);
+        let filter = vec![PathBuf::from("ab")];
+        let (_entries, manifest, proof) = build_sparse(&tree, &filter).unwrap();
+        let bytes = encode_sparse_cache(&manifest, &proof);
+        let (bitmap_root, filter_hash, leaf_count, bitmap_bytes) =
+            decode_sparse_cache(&bytes).unwrap();
+        assert_eq!(bitmap_root, manifest.bitmap_root);
+        assert_eq!(filter_hash, manifest.filter_hash);
+        assert_eq!(leaf_count, manifest.leaf_count);
+        assert_eq!(bitmap_bytes, proof.bitmap_bytes);
+    }
+
+    #[test]
+    fn cache_rejects_bad_magic() {
+        let tree = make_tree(1);
+        let (_entries, manifest, proof) = build_sparse(&tree, &[PathBuf::from("aa")]).unwrap();
+        let mut bytes = encode_sparse_cache(&manifest, &proof);
+        bytes[0] = 0x00;
+        assert_eq!(
+            decode_sparse_cache(&bytes).unwrap_err(),
+            SparseWireError::BadMagic
+        );
     }
 }

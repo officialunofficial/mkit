@@ -29,6 +29,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
+      # Phase-2 commonware adoption pulled in tokio + axum + criterion +
+      # reed-solomon, doubling the post-nextest `target/` footprint past
+      # what the ubuntu-latest runner ships with (~14 GiB free of 75 GiB).
+      # Free the Android SDK / .NET / Haskell tree before the build so the
+      # doctest step has room. ~14 GiB recovered; the action is a no-op on
+      # macOS (only runs when `if` matches).
+      - name: Free disk space (Linux only)
+        if: runner.os == 'Linux'
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
       - name: Install Rust ${{ env.RUST_VERSION }}
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
@@ -121,6 +139,18 @@ jobs:
             echo "::error::mkit version contract violated — stdout is not exactly 'mkit <X.Y.Z>\\n'"
             exit 1
           fi
+
+      # Phase 2 of issue #156: build the CLI with the dedicated
+      # `enc-transport` cargo feature and run the encrypted-transport
+      # e2e test. The above `--all-features` test pass already covers
+      # this in aggregate; the dedicated invocation pins the feature
+      # gate so a future refactor can't silently break the
+      # opt-in-only build path.
+      - name: Encrypted-transport feature build (Phase 2)
+        working-directory: rust
+        run: |
+          cargo build --locked -p mkit-cli --features enc-transport
+          cargo test --locked -p mkit-transport-enc --features tcp --no-fail-fast
 
   keystore-backends:
     name: Keystore backends (${{ matrix.name }})

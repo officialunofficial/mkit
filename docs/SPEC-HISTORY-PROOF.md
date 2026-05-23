@@ -1,23 +1,22 @@
 ---
 spec: SPEC-HISTORY-PROOF
 version: 0
-status: draft (Phase 1)
+status: draft (Phase 2 shipped)
 audience: implementers of light-client verifiers and mirror-attestation services
 ---
 
 # SPEC-HISTORY-PROOF — mkit commit-history MMR and inclusion proofs
 
-Status: **Draft, Phase 1 of issue #157.**
-Scope: the in-memory append-only Merkle Mountain Range (MMR) that mkit
-keeps over each branch's commit chain, and the wire format of the
-inclusion proof that lets a light client verify "commit `X` was the
-`N`-th commit on branch `Y` at root `R`".
+Status: **Draft, Phase 2 of issue #157 (journaled persistence shipped).**
+Scope: the append-only Merkle Mountain Range (MMR) that mkit keeps
+over each branch's commit chain, the on-disk layout that persists it,
+and the wire format of the inclusion proof that lets a light client
+verify "commit `X` was the `N`-th commit on branch `Y` at root `R`".
 
 This document is normative for the `mkit-core::history` module and for
-any future on-disk or on-wire consumer. It deliberately does **not**
-yet mandate a persisted journal, a wire `Commit` field, or an
-attestation predicate — those are Phase 2 / Phase 3 / `mkit-attest`
-respectively (see §4).
+any future on-disk or on-wire consumer. It does **not** yet mandate a
+wire `Commit` field or an attestation predicate — those are Phase 3 /
+`mkit-attest` respectively (see §4).
 
 ---
 
@@ -44,12 +43,17 @@ we need an authenticated data structure whose root commits to the
 canonical fit: append-only, dense leaf indices, stable positions, root
 hash compresses arbitrary history into one digest.
 
-mkit reuses [`commonware-storage`'s MMR][cw-mmr], specifically the
-`merkle::mmr::mem::Mmr` type pinned to `=2026.4.0`. The wire shape of
-the inclusion proof in this spec is byte-for-byte the wire shape of
-that crate's `merkle::mmr::Proof` at the same version (see §2 below).
-We accept that crate's ALPHA stability marker and explicitly tie our
-own pre-`v0.2` window to it: see §4.
+mkit reuses [`commonware-storage`'s MMR][cw-mmr] pinned to `=2026.4.0`:
+- `merkle::mmr::mem::Mmr` for the Phase-1 mem-only flavour
+  ([`CommitHistory::open`]).
+- `merkle::mmr::journaled::Mmr` for the Phase-2 persisted flavour
+  ([`CommitHistory::open_at`]). The on-disk layout is normatively
+  defined in §4 below.
+
+The wire shape of the inclusion proof is byte-for-byte the wire shape
+of that crate's `merkle::mmr::Proof` at the same version (see §2
+below). We accept that crate's ALPHA stability marker and explicitly
+tie our own pre-`v0.2` window to it: see §4.
 
 [cw-mmr]: https://docs.rs/commonware-storage/2026.4.0/commonware_storage/merkle/mmr/
 
@@ -191,18 +195,123 @@ round-trip and the bit-flip tamper case.
 
 ---
 
-## 4. Implementation status and roadmap
+## 4. On-disk layout (normative, Phase 2)
+
+The persisted MMR for each branch lives under `<mkit_dir>/history/`.
+mkit does **not** invent a custom format: the durable representation
+is commonware-storage's native journaled-MMR shape pinned to the
+`=2026.4.0` release train. mkit owns the directory layout that selects
+*which* journal to open; the byte layout *inside* each partition is
+commonware's, documented at
+<https://docs.rs/commonware-storage/2026.4.0/commonware_storage/merkle/journaled/>.
+
+### 4.1 Directory layout
+
+```text
+<mkit_dir>/
+└─ history/
+   ├─ <sanitized_branch>__journal-blobs/       # commonware's fixed-item journal
+   ├─ <sanitized_branch>__journal-metadata/    # commonware's journal segment table
+   └─ <sanitized_branch>__metadata/            # commonware's pruned-pinned-node sidecar
+```
+
+Each `<sanitized_branch>__journal-blobs/` directory contains commonware's
+fixed-item-length blob files for the node-digest journal; each
+`__metadata/` directory contains commonware's metadata-store
+key/value blobs (used for pinned-node bookkeeping). mkit MUST NOT
+write into these directories itself; all mutation goes through
+`commonware-storage`'s `Journaled` API.
+
+### 4.2 Branch-name sanitisation
+
+commonware partition names are restricted to `[A-Za-z0-9_-]+`. mkit
+ref names may contain `.`, `/`, and `_`, so the sanitiser
+in [`mkit_core::history`] uses a hex-escape encoding:
+
+- `[A-Za-z0-9-]` → unchanged.
+- Every other byte (including `_`, `/`, `.`) → `_xx` where `xx` is
+  the lowercase-hex byte value.
+
+This encoding is injective on the [`validate_ref_name`] domain, so
+two distinct valid ref names always map to distinct partition tokens.
+Implementations MUST use the same sanitiser; cross-implementation
+consumers can rely on it to derive partition names from ref names
+without further normalisation.
+
+### 4.3 Update protocol
+
+A ref advance on a `history-mmr`-enabled mkit goes through
+[`refs::update_ref_with_history`], which is the atomic boundary of
+the durable couple:
+
+1. Acquire `<mkit_dir>/refs-history.lock` via `repo_lock::RepoLock`.
+2. CAS-write `<mkit_dir>/refs/heads/<branch>`.
+3. Call [`CommitHistory::append`], which itself calls commonware's
+   `Journaled::sync` after applying the leaf-batch, so the new node
+   is fsync'd before the function returns.
+4. Drop the lock.
+
+If step 2 fails the lock is released without touching the MMR. If
+step 3 fails after step 2 succeeded, the ref is one commit ahead of
+the MMR; this is the rebuild-shim recovery case (§4.5).
+
+### 4.4 Crash recovery
+
+mkit relies on commonware's native journaled-MMR recovery semantics,
+documented at the link above and verified by the integration test
+`history::tests::truncated_journal_rolls_forward_or_surfaces_corruption`.
+On reopen via `CommitHistory::open_at`:
+
+- A trailing **torn leaf** (the journal's final blob ends mid-frame)
+  is rewound to the last valid leaf-aligned size by
+  `Journaled::init`. The MMR's in-memory state is rebuilt from
+  the surviving leaves; the root matches a clean replay of those
+  leaves.
+- A **deeper corruption** (the metadata sidecar disagrees with the
+  journal beyond what roll-forward can resolve, or a blob's
+  earliest leaf is missing) is surfaced as
+  [`HistoryError::Corrupted`] with the underlying commonware error
+  message attached. The repo administrator MUST intervene; mkit
+  does not attempt to fabricate digests.
+- A missing `history/<branch>/` directory is treated as "first
+  open" and an empty MMR is initialised. For repos created against
+  v0.1.x mkit (no history persistence) this is the entry point to
+  the rebuild shim — see §4.5.
+
+mkit's own contract is narrower than commonware's: **reopening a
+half-written journal MUST NOT panic, MUST NOT silently expose stale
+data, and MUST surface any unrecoverable state through `HistoryError`.**
+
+### 4.5 v0.1.x → v0.2.x rebuild shim
+
+A repo created against an older mkit has `refs/heads/<branch>` on
+disk but no `history/<branch>/` directory. The first
+[`CommitHistory::open_at`] against such a repo returns an empty
+journaled MMR. To populate it, the caller invokes
+[`mkit_core::history::rebuild_from_chain(history, tip, parent_of)`],
+which:
+
+1. Walks the first-parent chain from `tip` via the caller-supplied
+   `parent_of` function (typically backed by `ObjectStore`).
+2. Reverses the chain so the root commit is appended first.
+3. Calls [`CommitHistory::append`] for each entry in order.
+
+The shim is one-shot (subsequent `open_at` calls find a non-empty
+journal and skip it). Cost is `O(n)` BLAKE3 hashes for an `n`-commit
+branch; on commodity hardware this completes in single-digit
+milliseconds for branches up to a few hundred thousand commits.
+
+## 5. Implementation status and roadmap
 
 | Phase   | Scope                                                                  | Lands in     |
 | ------- | ---------------------------------------------------------------------- | ------------ |
-| Phase 1 | `mem`-backed MMR, `CommitHistory::{open, append, root, prove}`, `verify_inclusion()`, this spec | `feat/history-mmr-phase1` (issue #157) |
-| Phase 2 | Persisted journaled MMR; on-disk layout under `.mkit/history/<branch>.mmr`; atomic update alongside `refs::update_ref` | follow-up    |
+| Phase 1 | `mem`-backed MMR, `CommitHistory::{open, append, root, prove}`, `verify_inclusion()`, §1–§3 of this spec | `feat/history-mmr-phase1` (issue #157, merged in PR #162) |
+| Phase 2 | **Shipped (this PR).** Journaled persistence via `commonware-storage::merkle::mmr::journaled::Mmr` pinned to `=2026.4.0`. `CommitHistory::open_at`, `refs::update_ref_with_history`, `rebuild_from_chain`. §4 of this spec. | `feat/history-mmr-phase2-commonware` |
 | Phase 3 | New `Commit.history_root` proto field at the v0.2 break; new signing-bytes layout + golden vectors; SPEC-OBJECTS update | v0.2         |
 | Phase 4 | `mkit-attest` `commit_in_branch` predicate bundling `(commit, position, proof)` | v0.2         |
-| Phase 5 | Compatibility shim: v0.1.x repos rebuild the MMR on first v0.2.x open by walking the parent chain | v0.2         |
-| Phase 6 | Promote `history-mmr` from opt-in feature to default                   | v0.3         |
+| Phase 5 | Promote `history-mmr` from opt-in feature to default                   | v0.3         |
 
-Phase 1 (this PR) deliberately does *not*:
+Phase 2 (this PR) deliberately does *not*:
 
 - touch `rust/crates/mkit-rpc/proto/` — no Commit field yet,
   no wire-breaking change yet;
@@ -213,18 +322,9 @@ Phase 1 (this PR) deliberately does *not*:
 
 Stability call: commonware-storage is ALPHA. We pin to an exact
 `=2026.4.0` and accept that future minor versions may change the
-proof's `digests` layout. Because Phase 3 includes a new signing-bytes
-golden vector anyway, the wire format documented in §2 is "frozen
-relative to the v0.2 break" — any change to commonware's proof codec
-between now and v0.2 lands as part of the same migration, not as a
-separate break.
-
-### 4.1 On-disk layout (Phase 2 sketch — not yet normative)
-
-Reserved for the Phase 2 PR. The intended shape is one
-commonware-journal append-log per branch at
-`.mkit/history/<branch>.mmr`, updated under the existing
-`repo_lock::RepoLock` whenever `refs::update_ref` advances a branch.
-The exact journal frame format, fsync schedule, and reconstruction-on-
-open behaviour will be specified there; consumers MUST NOT rely on any
-particular layout under `.mkit/history/` until Phase 2 lands.
+proof's `digests` layout *and* the on-disk partition shape described
+in §4. Because Phase 3 includes a new signing-bytes golden vector
+anyway, the wire format documented in §2 and the on-disk format
+documented in §4 are both "frozen relative to the v0.2 break" — any
+change to commonware between now and v0.2 lands as part of the same
+migration, not as a separate break.

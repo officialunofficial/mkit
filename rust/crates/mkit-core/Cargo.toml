@@ -32,6 +32,12 @@ commonware-coding = { workspace = true, optional = true }
 commonware-codec = { workspace = true, optional = true, features = ["std"] }
 commonware-parallel = { workspace = true, optional = true, features = ["std"] }
 commonware-utils = { workspace = true, optional = true, features = ["std"] }
+# tokio is opt-in via `history-mmr`: the journaled MMR persistence path
+# bridges sync mkit APIs to commonware-storage's async surface, and
+# bootstrapping a `commonware-runtime::tokio::Context` requires a tokio
+# runtime owned by mkit-core. Default builds (and the `sparse-checkout`
+# / `pack-shards` paths, which stay async-internal) don't pull tokio.
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "fs", "sync", "io-util", "time"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 getrandom = "0.4"
 # `subtle` is a constant-time-equality primitive used by the Ed25519
@@ -50,8 +56,25 @@ libc = "0.2"
 
 [features]
 default = []
-# Issue #157 Phase 1 — append-only MMR over the commit chain.
-history-mmr = ["dep:commonware-storage", "dep:commonware-cryptography"]
+# Issue #157 — append-only MMR over the commit chain.
+#
+# Phase 1 (mem-only `CommitHistory::open`) needs only the in-process
+# MMR primitive from `commonware-storage` and the BLAKE3 hasher from
+# `commonware-cryptography`. Phase 2 (this build, on-disk journaled
+# MMR via `CommitHistory::open_at`) additionally needs:
+#   - `commonware-runtime` for the `Storage + Clock + Metrics` Context
+#     that backs the journaled MMR's blob/metadata stores; and
+#   - `tokio` for the long-lived multi-thread runtime that drives the
+#     async journaled-MMR ops behind the sync mkit-core API.
+# Both are dragged in together because dropping either re-introduces
+# the rejected mem-only Phase 1 shape.
+history-mmr = [
+    "dep:commonware-storage",
+    "dep:commonware-cryptography",
+    "dep:commonware-runtime",
+    "dep:commonware-utils",
+    "dep:tokio",
+]
 # Issue #158 Phase 1 — verifiable sparse-checkout via AuthenticatedBitMap.
 sparse-checkout = ["dep:commonware-storage", "dep:commonware-runtime", "dep:commonware-cryptography"]
 # Issue #159 Phase 1 — erasure-coded pack delivery via Reed-Solomon.

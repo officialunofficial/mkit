@@ -1010,3 +1010,105 @@ fn hex_lower(bytes: &[u8]) -> String {
     }
     out
 }
+
+/// `mkit key generate --algorithm bls12381-thr --threshold 3 --total 4
+/// --label release` produces an N-share trusted-dealer set, stores
+/// each share under `<label>-<index>` in the software keystore, and
+/// prints the cohort keyid on stdout. Pinned to Phase 2 of issue
+/// #160.
+#[cfg(feature = "bls-threshold")]
+// Linux CI runs this job without a DBus session or gnome-keyring, so the
+// `software` backend can't resolve a key protector — see the `Keystore
+// backends (linux-secret-systemd-yubikey)` matrix job which DOES set those
+// up via `dbus-run-session` and exercises the live backends. macOS and
+// Windows CI runners ship a native protector and run this test for real.
+#[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "requires DBus/secret-service session; exercised by Keystore backends matrix"
+)]
+fn bls_threshold_key_generate_stores_shares_and_prints_keyid() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+
+    let out = run(
+        td.path(),
+        &[
+            "key",
+            "generate",
+            "--backend",
+            "software",
+            "--algorithm",
+            "bls12381-thr",
+            "--threshold",
+            "3",
+            "--total",
+            "4",
+            "--label",
+            "release",
+        ],
+    );
+    let stdout = String::from_utf8(out.stdout).expect("stdout utf8");
+    let stderr = String::from_utf8(out.stderr).expect("stderr utf8");
+    assert!(
+        out.status.success(),
+        "generate stderr: {stderr}\nstdout: {stdout}"
+    );
+
+    // stdout begins with the keyid `bls12381-thr:<192 hex chars>`.
+    let first_line = stdout.lines().next().expect("at least one stdout line");
+    assert!(
+        first_line.starts_with("bls12381-thr:"),
+        "expected bls12381-thr keyid, got: {first_line:?}"
+    );
+    let hex_body = first_line.strip_prefix("bls12381-thr:").unwrap();
+    assert_eq!(
+        hex_body.len(),
+        192,
+        "cohort pubkey hex must be 96 bytes = 192 hex chars",
+    );
+
+    // stderr reports the four share labels.
+    assert!(
+        stderr.contains("share 0: software:release-0"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("share 3: software:release-3"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `--threshold` must equal the N3f1 quorum the Phase 1 dealer
+/// produces; mismatched values are rejected so the caller doesn't
+/// silently get a different M than they asked for.
+#[cfg(feature = "bls-threshold")]
+#[test]
+fn bls_threshold_rejects_wrong_threshold_for_total() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+
+    let out = run(
+        td.path(),
+        &[
+            "key",
+            "generate",
+            "--backend",
+            "software",
+            "--algorithm",
+            "bls12381-thr",
+            "--threshold",
+            "2",
+            "--total",
+            "4",
+            "--label",
+            "release",
+        ],
+    );
+    assert!(!out.status.success(), "expected nonzero exit");
+    let stderr = String::from_utf8(out.stderr).expect("stderr utf8");
+    assert!(
+        stderr.contains("N3f1 quorum"),
+        "expected diagnostic about N3f1 quorum, got: {stderr}"
+    );
+}

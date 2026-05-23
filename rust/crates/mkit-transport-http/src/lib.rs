@@ -72,6 +72,19 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 // call sites keep working.
 pub use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
 
+/// HTTP request header advertising client willingness to receive a
+/// pack as `N+K` Reed-Solomon shards. Value is `"<N>+<K>"`. Per
+/// SPEC-PACK-SHARDS §5, sent by the client on `download_pack` when the
+/// `pack-shards` feature is enabled.
+pub const ACCEPT_PACK_SHARDS_HEADER: &str = "accept-pack-shards";
+
+/// HTTP response header set by the server to acknowledge that the
+/// pack is being served as shards. Value is `"<N>+<K>"` matching the
+/// manifest's `config`. When this header is present the response body
+/// is informational only — the client fetches the manifest and shards
+/// from the predictable sub-paths instead.
+pub const X_PACK_SHARDS_HEADER: &str = "x-pack-shards";
+
 /// Validate that `url` uses either `https://` (always allowed) or plain
 /// `http://` pointing at a loopback host (`127.0.0.1`, `::1`, or
 /// `localhost`). Any other combination is refused with
@@ -189,6 +202,35 @@ impl HttpTransport {
         Ok(u)
     }
 
+    /// URL for the shard manifest of a pack:
+    /// `<base>/packs/<lower-hex(pack_hash)>/shards.manifest`.
+    #[cfg(feature = "pack-shards")]
+    fn manifest_url(&self, key: &PackKey) -> TransportResult<Url> {
+        let mut u = self.base.clone();
+        u.path_segments_mut()
+            .map_err(|()| TransportError::InvalidResponse)?
+            .pop_if_empty()
+            .push("packs")
+            .push(&key.to_hex())
+            .push("shards.manifest");
+        Ok(u)
+    }
+
+    /// URL for one shard of a pack:
+    /// `<base>/packs/<lower-hex(pack_hash)>/shards/<index>`.
+    #[cfg(feature = "pack-shards")]
+    fn shard_url(&self, key: &PackKey, index: u16) -> TransportResult<Url> {
+        let mut u = self.base.clone();
+        u.path_segments_mut()
+            .map_err(|()| TransportError::InvalidResponse)?
+            .pop_if_empty()
+            .push("packs")
+            .push(&key.to_hex())
+            .push("shards")
+            .push(&index.to_string());
+        Ok(u)
+    }
+
     fn packs_collection_url(&self) -> TransportResult<Url> {
         let mut u = self.base.clone();
         u.path_segments_mut()
@@ -240,6 +282,51 @@ impl HttpTransport {
             }
         }
         req
+    }
+
+    /// Stream a reqwest blocking response body into a `Vec<u8>` with a
+    /// running cap at [`PACK_BODY_LIMIT_USIZE`]. Shared by the
+    /// monolithic-pack and shard-body paths.
+    fn read_body_capped(resp: Response) -> TransportResult<Vec<u8>> {
+        let mut reader = resp;
+        let cap = PACK_BODY_LIMIT_USIZE;
+        let mut buf = Vec::new();
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let n = reader
+                .read(&mut chunk)
+                .map_err(|_| TransportError::ConnectionFailed)?;
+            if n == 0 {
+                break;
+            }
+            if buf.len().saturating_add(n) > cap {
+                return Err(TransportError::PayloadTooLarge(buf.len() + n));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        Ok(buf)
+    }
+
+    /// Issue a pack GET that explicitly does *not* advertise
+    /// `Accept-Pack-Shards`, so the server is forced to reply
+    /// monolithically. Used as a fallback when the shard flow fails
+    /// mid-handshake.
+    #[cfg(feature = "pack-shards")]
+    fn download_pack_monolithic(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        let url = self.pack_url(key)?;
+        let resp = Self::retrying(|| self.apply_auth(self.client.get(url.clone())))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(map_status(status, TransportError::PackNotFound));
+        }
+        if let Some(len) = resp.content_length()
+            && len > PACK_BODY_LIMIT
+        {
+            return Err(TransportError::PayloadTooLarge(
+                usize::try_from(len).unwrap_or(usize::MAX),
+            ));
+        }
+        Self::read_body_capped(resp)
     }
 
     /// Drive `build_req` through the standard 5-attempt backoff ladder.
@@ -405,11 +492,52 @@ impl Transport for HttpTransport {
 
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
         let url = self.pack_url(key)?;
-        let resp = Self::retrying(|| self.apply_auth(self.client.get(url.clone())))?;
+        let resp = Self::retrying(|| {
+            #[allow(unused_mut)]
+            let mut r = self.apply_auth(self.client.get(url.clone()));
+            // Opportunistically advertise willingness to accept the
+            // pack as N+K shards. Servers that don't speak the shard
+            // dialect ignore the header and return the pack as-is;
+            // shard-aware servers may respond with `X-Pack-Shards`
+            // and we'll switch to the parallel-fetch path below.
+            #[cfg(feature = "pack-shards")]
+            {
+                let advert = pack_shards::accept_pack_shards_advertise();
+                r = r.header(ACCEPT_PACK_SHARDS_HEADER, advert);
+            }
+            r
+        })?;
         let status = resp.status();
         if !status.is_success() {
             return Err(map_status(status, TransportError::PackNotFound));
         }
+
+        // Shard path: server advertises `X-Pack-Shards`. We discard
+        // the monolithic body (if any) and fetch the manifest +
+        // shards in parallel. On any shard-flow error we propagate
+        // it — we deliberately do NOT silently fall back to the
+        // monolithic body. The server advertised `X-Pack-Shards`,
+        // we trust that signal, and a failure in the shard path is
+        // a server-side bug (or attacker-controlled tampering) we
+        // surface rather than silently downgrade. The only fall-
+        // through is when `X-Pack-Shards` is itself malformed, which
+        // we treat as "no advertisement" and re-issue cleanly.
+        #[cfg(feature = "pack-shards")]
+        if let Some(advert) = resp.headers().get(X_PACK_SHARDS_HEADER).cloned() {
+            // Drain the body before issuing more requests so connection
+            // reuse stays sane.
+            drop(resp);
+            if let Ok(spec) = advert.to_str()
+                && let Ok((_n, _k)) = pack_shards::parse_n_plus_k(spec)
+            {
+                return self.download_pack_via_shards(key);
+            }
+            // Malformed `X-Pack-Shards` header — server bug. Re-issue
+            // the request without the Accept-Pack-Shards header so we
+            // get a clean monolithic response.
+            return self.download_pack_monolithic(key);
+        }
+
         // Pre-check: if the server advertises a Content-Length greater
         // than our cap, refuse immediately without buffering any body.
         // A missing Content-Length falls through to the streaming
@@ -422,25 +550,7 @@ impl Transport for HttpTransport {
             ));
         }
 
-        // Stream the body with a running counter. `Read` is the portable
-        // path here; reqwest's blocking `Response` implements it directly.
-        let mut reader = resp;
-        let cap = PACK_BODY_LIMIT_USIZE;
-        let mut buf = Vec::new();
-        let mut chunk = vec![0u8; 64 * 1024];
-        loop {
-            let n = reader
-                .read(&mut chunk)
-                .map_err(|_| TransportError::ConnectionFailed)?;
-            if n == 0 {
-                break;
-            }
-            if buf.len().saturating_add(n) > cap {
-                return Err(TransportError::PayloadTooLarge(buf.len() + n));
-            }
-            buf.extend_from_slice(&chunk[..n]);
-        }
-        Ok(buf)
+        Self::read_body_capped(resp)
     }
 
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
@@ -551,6 +661,267 @@ impl Transport for HttpTransport {
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sparse-checkout fetch (issue #158, Phase 2). Feature-gated behind
+// `sparse-checkout` so the binary cost of the upstream
+// `commonware-storage` chain is only paid when the consumer opts in.
+//
+// Wire contract additions (SPEC-TRANSPORT §5.6):
+//
+// - `POST /<project>/trees/<tree-hash-hex>/sparse?sparse=<filter-hash-hex>`
+//   * Request body: JSON `{ "filter": ["<utf8 path>", ...] }`.
+//     The `?sparse=<filter-hash>` query MUST equal
+//     `BLAKE3` of the canonicalised filter (see SPEC-SPARSE-CHECKOUT §2.3).
+//     The server uses the query to short-circuit a precomputed manifest
+//     cache; the body filter is canonical input for cache misses.
+//   * Response body: opaque `application/x-mkit-sparse` bytes —
+//     [`mkit_core::sparse::decode_sparse_response`] decodes it into a
+//     `SparseResponse`. The verifier holds the trust boundary; this
+//     transport layer only enforces transport-level size caps.
+//   * 404 → tree not found on server; surfaces as `PackNotFound`
+//     (no dedicated `TreeNotFound` variant — the existing taxonomy
+//     covers "the addressed object is missing").
+//   * 409 → server-side disagreement about the filter hash. Maps to
+//     `RefConflict` so retry policy treats it as terminal.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "sparse-checkout")]
+mod sparse_fetch {
+    use super::{
+        Hash, HttpTransport, RequestBuilder, TransportError, TransportResult, map_status, to_hex,
+    };
+    use mkit_core::sparse::{
+        SPARSE_WIRE_MAX_BYTES, SparseResponse, decode_sparse_response, hash_filter,
+    };
+    use serde::Serialize;
+    use std::path::PathBuf;
+    use url::Url;
+
+    #[derive(Debug, Serialize)]
+    struct SparseRequestBody<'a> {
+        filter: Vec<&'a str>,
+    }
+
+    impl HttpTransport {
+        fn sparse_tree_url(&self, tree_hash: &Hash, filter_hash: &Hash) -> TransportResult<Url> {
+            let mut u = self.base().clone();
+            u.path_segments_mut()
+                .map_err(|()| TransportError::InvalidResponse)?
+                .pop_if_empty()
+                .push("trees")
+                .push(&to_hex(tree_hash))
+                .push("sparse");
+            u.query_pairs_mut()
+                .clear()
+                .append_pair("sparse", &to_hex(filter_hash));
+            Ok(u)
+        }
+
+        pub fn fetch_sparse_tree(
+            &self,
+            tree_hash: &Hash,
+            filter: &[PathBuf],
+        ) -> TransportResult<SparseResponse> {
+            let filter_hash = hash_filter(filter);
+            let url = self.sparse_tree_url(tree_hash, &filter_hash)?;
+            let filter_strs: Vec<&str> = filter.iter().filter_map(|p| p.to_str()).collect();
+            let body = SparseRequestBody {
+                filter: filter_strs,
+            };
+            let body_json =
+                serde_json::to_vec(&body).map_err(|_| TransportError::InvalidResponse)?;
+
+            let resp = HttpTransport::retrying(|| -> RequestBuilder {
+                let mut r = self
+                    .client()
+                    .post(url.clone())
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/x-mkit-sparse")
+                    .body(body_json.clone());
+                r = self.apply_auth_pub(r);
+                r
+            })?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(map_status(status, TransportError::PackNotFound));
+            }
+            if let Some(len) = resp.content_length()
+                && len > SPARSE_WIRE_MAX_BYTES as u64
+            {
+                return Err(TransportError::PayloadTooLarge(
+                    usize::try_from(len).unwrap_or(usize::MAX),
+                ));
+            }
+            let body_bytes = resp.bytes().map_err(|_| TransportError::ConnectionFailed)?;
+            if body_bytes.len() > SPARSE_WIRE_MAX_BYTES {
+                return Err(TransportError::PayloadTooLarge(body_bytes.len()));
+            }
+            decode_sparse_response(&body_bytes).map_err(|_| TransportError::InvalidResponse)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pack-Shards client (feature-gated)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "pack-shards")]
+mod pack_shards {
+    //! Client-side support for SPEC-PACK-SHARDS §5.
+
+    use mkit_core::pack_shard::default_config;
+
+    pub(crate) fn accept_pack_shards_advertise() -> String {
+        let c = default_config();
+        format!("{}+{}", c.minimum_shards.get(), c.extra_shards.get())
+    }
+
+    pub(crate) fn parse_n_plus_k(s: &str) -> Result<(u16, u16), ()> {
+        let (n, k) = s.split_once('+').ok_or(())?;
+        let n: u16 = n.trim().parse().map_err(|_| ())?;
+        let k: u16 = k.trim().parse().map_err(|_| ())?;
+        if n == 0 || k == 0 {
+            return Err(());
+        }
+        Ok((n, k))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn parse_advert_round_trip() {
+            assert_eq!(parse_n_plus_k("16+4"), Ok((16, 4)));
+            assert_eq!(parse_n_plus_k(" 16 + 4 "), Ok((16, 4)));
+        }
+
+        #[test]
+        fn parse_advert_rejects_bad() {
+            assert!(parse_n_plus_k("0+4").is_err());
+            assert!(parse_n_plus_k("16+0").is_err());
+            assert!(parse_n_plus_k("16-4").is_err());
+            assert!(parse_n_plus_k("abc").is_err());
+        }
+
+        #[test]
+        fn advertise_matches_default_config() {
+            let v = accept_pack_shards_advertise();
+            assert_eq!(v, "16+4");
+        }
+    }
+}
+
+// Helper accessors used by the sparse-fetch module. Crate-private —
+// other consumers should keep going through the trait surface.
+#[cfg(feature = "sparse-checkout")]
+impl HttpTransport {
+    fn client(&self) -> &Client {
+        &self.client
+    }
+    fn apply_auth_pub(&self, req: RequestBuilder) -> RequestBuilder {
+        self.apply_auth(req)
+    }
+}
+
+#[cfg(feature = "pack-shards")]
+impl HttpTransport {
+    /// Shard-mode download: fetch the manifest, then fetch shards in
+    /// parallel via std threads. Returns the reconstructed pack.
+    fn download_pack_via_shards(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        use mkit_core::pack_shard::{
+            MANIFEST_MAX_BYTES, Shard, decode_manifest, decode_pack_from_shards,
+        };
+        use std::sync::mpsc;
+
+        let manifest_url = self.manifest_url(key)?;
+        let resp = Self::retrying(|| self.apply_auth(self.client.get(manifest_url.clone())))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(map_status(status, TransportError::PackNotFound));
+        }
+        if let Some(len) = resp.content_length()
+            && len > MANIFEST_MAX_BYTES as u64
+        {
+            return Err(TransportError::PayloadTooLarge(
+                usize::try_from(len).unwrap_or(usize::MAX),
+            ));
+        }
+        let body = Self::read_body_capped(resp)?;
+        if body.len() > MANIFEST_MAX_BYTES {
+            return Err(TransportError::PayloadTooLarge(body.len()));
+        }
+        let manifest = decode_manifest(&body).map_err(|_| TransportError::InvalidResponse)?;
+
+        let total = manifest.config.total_shards();
+        let minimum = manifest.config.minimum_shards.get();
+
+        // Anti-DoS: cap the parallel fan-out at the v0 ceiling.
+        if total > 256 {
+            return Err(TransportError::InvalidResponse);
+        }
+
+        let (tx, rx) = mpsc::channel::<(u16, TransportResult<Vec<u8>>)>();
+        let mut handles = Vec::with_capacity(total as usize);
+        let total_u16: u16 = u16::try_from(total).unwrap_or(u16::MAX);
+        for i in 0..total_u16 {
+            let tx = tx.clone();
+            let url = self.shard_url(key, i)?;
+            let client = self.client.clone();
+            let token = self.token.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut req = client.get(url);
+                if let Some(t) = &token
+                    && let Ok(v) = HeaderValue::from_str(&format!("Bearer {t}"))
+                {
+                    req = req.header(AUTHORIZATION, v);
+                }
+                let result: TransportResult<Vec<u8>> = match req.send() {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        if status.is_success() {
+                            HttpTransport::read_body_capped(resp)
+                        } else {
+                            Err(map_status(status, TransportError::PackNotFound))
+                        }
+                    }
+                    Err(_) => Err(TransportError::ConnectionFailed),
+                };
+                let _ = tx.send((i, result));
+            }));
+        }
+        drop(tx);
+
+        let mut shards: Vec<Shard> = Vec::with_capacity(minimum as usize);
+        let mut failures: u16 = 0;
+        let max_failures = manifest.config.extra_shards.get();
+        for (index, res) in &rx {
+            if let Ok(bytes) = res {
+                shards.push(Shard { index, bytes });
+                if shards.len() >= minimum as usize {
+                    break;
+                }
+            } else {
+                failures += 1;
+                if failures > max_failures {
+                    break;
+                }
+            }
+        }
+
+        for h in handles {
+            let _ = h.join();
+        }
+
+        if shards.len() < minimum as usize {
+            return Err(TransportError::PackNotFound);
+        }
+
+        decode_pack_from_shards(&shards, &manifest).map_err(|_| TransportError::InvalidResponse)
     }
 }
 
@@ -1140,6 +1511,153 @@ mod tests {
         // two transports agree on the same upper bound for a single
         // pack download.
         assert_eq!(PACK_BODY_LIMIT, 4 * 1024 * 1024 * 1024);
+    }
+
+    // ----------------------------------------------------------------------
+    // Pack-Shards client (feature-gated) — wire tests via mockito.
+    //
+    // The server publishes:
+    //   - GET /packs/<hex>            → 200 with `X-Pack-Shards: 16+4`
+    //                                   header and empty body
+    //   - GET /packs/<hex>/shards.manifest → 200 with encoded ShardSet
+    //   - GET /packs/<hex>/shards/<i> → 200 with shard bytes
+    //
+    // and the client reconstructs the original pack.
+    // ----------------------------------------------------------------------
+
+    #[cfg(feature = "pack-shards")]
+    mod shard_tests {
+        use super::*;
+        use mkit_core::pack_shard::{default_config, encode_manifest, encode_pack_to_shards};
+
+        /// Deterministic synthetic pack large enough for the shard
+        /// encoder to accept (the commonware backend wants > a few
+        /// hundred bytes for the default `(16, 4)` config to be
+        /// useful).
+        fn synthetic_pack(bytes: usize) -> Vec<u8> {
+            let mut x: u64 = 0xC0DE_BEEF_F00D_BABE;
+            let mut out = Vec::with_capacity(bytes);
+            while out.len() < bytes {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                out.extend_from_slice(&x.to_le_bytes());
+            }
+            out.truncate(bytes);
+            out
+        }
+
+        fn key_for(pack: &[u8]) -> PackKey {
+            PackKey::new(mkit_core::hash::hash(pack))
+        }
+
+        /// Publish a sharded pack at the given mockito server. Returns
+        /// the pack bytes, key, and a `Vec` of all mock handles (so
+        /// the caller drops them at the end of the test).
+        fn publish_sharded(
+            server: &mut mockito::Server,
+            pack_size: usize,
+            drop_indices: &[u16],
+        ) -> (Vec<u8>, PackKey, Vec<mockito::Mock>) {
+            let pack = synthetic_pack(pack_size);
+            let key = key_for(&pack);
+            let (shards, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+            let manifest_bytes = encode_manifest(&manifest).unwrap();
+
+            let mut mocks = Vec::new();
+            // Pack URL — 200 with X-Pack-Shards header to signal shard mode.
+            let pack_path = format!("/myproj/packs/{}", key.to_hex());
+            mocks.push(
+                server
+                    .mock("GET", pack_path.as_str())
+                    .with_status(200)
+                    .with_header(X_PACK_SHARDS_HEADER, "16+4")
+                    .with_body("")
+                    .expect_at_least(1)
+                    .create(),
+            );
+            // Manifest.
+            let manifest_path = format!("/myproj/packs/{}/shards.manifest", key.to_hex());
+            mocks.push(
+                server
+                    .mock("GET", manifest_path.as_str())
+                    .with_status(200)
+                    .with_body(manifest_bytes)
+                    .create(),
+            );
+            // Shards — drop the requested indices (404).
+            for shard in &shards {
+                let path = format!("/myproj/packs/{}/shards/{}", key.to_hex(), shard.index);
+                if drop_indices.contains(&shard.index) {
+                    mocks.push(server.mock("GET", path.as_str()).with_status(404).create());
+                } else {
+                    mocks.push(
+                        server
+                            .mock("GET", path.as_str())
+                            .with_status(200)
+                            .with_body(shard.bytes.clone())
+                            .create(),
+                    );
+                }
+            }
+            (pack, key, mocks)
+        }
+
+        #[test]
+        fn shard_download_reconstructs_pack_with_all_shards_available() {
+            let mut server = mockito::Server::new();
+            let (pack, key, _mocks) = publish_sharded(&mut server, 64 * 1024, &[]);
+            let t = make_transport(&server, None);
+            let got = t.download_pack(&key).unwrap();
+            assert_eq!(got, pack);
+        }
+
+        #[test]
+        fn shard_download_reconstructs_pack_when_k_shards_404() {
+            // Drop the 4 extra shards — exactly `minimum_shards` remain.
+            let mut server = mockito::Server::new();
+            let dropped = [16u16, 17, 18, 19];
+            let (pack, key, _mocks) = publish_sharded(&mut server, 64 * 1024, &dropped);
+            let t = make_transport(&server, None);
+            let got = t.download_pack(&key).unwrap();
+            assert_eq!(got, pack);
+        }
+
+        #[test]
+        fn shard_download_fails_when_more_than_k_shards_404() {
+            // Drop 5 shards (one more than K). Reconstruction MUST fail.
+            let mut server = mockito::Server::new();
+            let dropped = [0u16, 1, 2, 3, 4];
+            let (_pack, key, _mocks) = publish_sharded(&mut server, 64 * 1024, &dropped);
+            let t = make_transport(&server, None);
+            let err = t.download_pack(&key).unwrap_err();
+            assert!(
+                matches!(err, TransportError::PackNotFound),
+                "expected PackNotFound, got {err:?}"
+            );
+        }
+
+        #[test]
+        fn monolithic_fallback_when_server_omits_x_pack_shards() {
+            // Server doesn't speak Pack-Shards — the response body IS
+            // the pack and the client must accept it.
+            let mut server = mockito::Server::new();
+            let body = b"mono-pack-bytes".to_vec();
+            let key = PackKey::new([0xAA; HASH_LEN]);
+            let path = format!("/myproj/packs/{}", key.to_hex());
+            let _m = server
+                .mock("GET", path.as_str())
+                .with_status(200)
+                .with_body(body.clone())
+                .create();
+            let t = make_transport(&server, None);
+            assert_eq!(t.download_pack(&key).unwrap(), body);
+        }
+
+        #[test]
+        fn shard_advertise_value_is_default_config() {
+            assert_eq!(pack_shards::accept_pack_shards_advertise(), "16+4");
+        }
     }
 
     /// Regression: a normal-sized body that arrives with an accurate

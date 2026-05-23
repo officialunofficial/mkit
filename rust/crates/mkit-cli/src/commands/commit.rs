@@ -384,14 +384,25 @@ fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8
 
 /// Advance the branch pointed to by HEAD (or HEAD itself, if detached)
 /// to `commit_hash`.
+///
+/// Routes through [`super::write_ref_recording_history`] so a build
+/// with `--features history-mmr` records every advance in the branch's
+/// journaled MMR under the repo's `refs-history.lock`. Detached HEAD
+/// advances bypass the journal: per-branch history is keyed on a
+/// branch name and a detached HEAD has none.
 fn advance_head(
     mkit_dir: &std::path::Path,
     commit_hash: &mkit_core::hash::Hash,
 ) -> Result<(), (String, u8)> {
     let head = refs::read_head(mkit_dir).map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?;
     match head {
-        Head::Branch(name) => refs::write_ref(mkit_dir, &name, commit_hash)
-            .map_err(|e| (format!("write ref: {e}"), exit::CANTCREAT)),
+        Head::Branch(name) => super::write_ref_recording_history(
+            mkit_dir,
+            &name,
+            refs::RefWriteCondition::Any,
+            commit_hash,
+        )
+        .map_err(|e| (format!("write ref: {e}"), exit::CANTCREAT)),
         Head::Detached(_) => refs::write_head_detached(mkit_dir, commit_hash)
             .map_err(|e| (format!("update HEAD: {e}"), exit::CANTCREAT)),
     }

@@ -211,9 +211,16 @@ fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, u8> {
 fn advance_head(mkit_dir: &std::path::Path, new_head: &Hash) -> Result<(), String> {
     let head = refs::read_head(mkit_dir).unwrap_or(Head::Branch("main".to_string()));
     match head {
-        Head::Branch(name) => {
-            refs::write_ref(mkit_dir, &name, new_head).map_err(|e| format!("write ref: {e}"))
-        }
+        // Route through the history-MMR-coupled helper so fast-forwards
+        // and merge commits both land in the branch's journal under the
+        // single repo-level lock. See `super::write_ref_recording_history`.
+        Head::Branch(name) => super::write_ref_recording_history(
+            mkit_dir,
+            &name,
+            refs::RefWriteCondition::Any,
+            new_head,
+        )
+        .map_err(|e| format!("write ref: {e}")),
         Head::Detached(_) => {
             refs::write_head_detached(mkit_dir, new_head).map_err(|e| format!("update HEAD: {e}"))
         }

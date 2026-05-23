@@ -53,7 +53,17 @@ mkit-transport-file = { version = "0.1", path = "../mkit-transport-file" }
 mkit-transport-http = { version = "0.1", path = "../mkit-transport-http" }
 mkit-transport-s3 = { version = "0.1", path = "../mkit-transport-s3" }
 mkit-transport-ssh = { version = "0.1", path = "../mkit-transport-ssh" }
+# Optional: encrypted-stream transport. Off by default so the
+# baseline `mkit-cli` build doesn't pay tokio's compile cost. Turn on
+# via `--features enc-transport`. See SPEC-TRANSPORT-ENC §6.
+mkit-transport-enc = { version = "0.1", path = "../mkit-transport-enc", optional = true }
 mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
+# commonware-cryptography's ed25519 PrivateKey is the static-key type
+# the encrypted transport handshake takes. Pulled in here behind the
+# `enc-transport` feature so the keystore-driven key-loading path in
+# remote_dispatch can build a key from raw bytes without touching
+# `mkit-transport-enc`'s internals.
+commonware-cryptography = { workspace = true, features = ["std"], optional = true }
 buffa = "0.6"
 
 # `wrap_help` is intentionally disabled so help-text output stays
@@ -71,6 +81,13 @@ getrandom = "0.4"
 # Wraps the raw 32-byte secrets keygen pulls out of the RNG until they
 # land inside the algorithm signer (which has its own scrubbing).
 zeroize = "1"
+# Used by `mkit key generate --algorithm bls12381-thr` to feed the
+# trusted-dealer ceremony with `OsRng`. Gated on `bls-threshold` so
+# the default build doesn't pull rand_core.
+rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
+# Wire-encodes `Share` values for storage in the keystore — same
+# version mkit-attest pulls.
+commonware-codec = { version = "2026.4.0", optional = true }
 
 # POSIX uid + O_NOFOLLOW for keygen.rs's raw-32 load/save paths
 # (secp256k1, p256). The Ed25519 path uses mkit_core::sign which has
@@ -122,4 +139,34 @@ default = []
 # pulls the BLS Algorithm variant into scope so the CLI's match arms
 # cover it (returning UNAVAILABLE per-site). Phase 3 of issue #160
 # will replace the inert arms with a real release-party signer.
-bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold"]
+bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "dep:rand_core", "dep:commonware-codec"]
+# Enables the `mkit+enc://` dispatch path in `remote_dispatch::open`
+# and the `mkit serve --listen-enc <addr>` listener flag. Pulls in
+# `mkit-transport-enc` with its `tcp` feature (tokio + governor +
+# rand). See SPEC-TRANSPORT-ENC §6 item 3.
+enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography", "dep:commonware-codec"]
+# Verifiable sparse-checkout (issue #158 Phase 2). Pulls the
+# `mkit-core` sparse module and the matching transport-side fetchers
+# into scope. Off by default — the upstream `commonware-storage` is
+# ALPHA-tier.
+sparse-checkout = [
+    "mkit-core/sparse-checkout",
+    "mkit-transport-http/sparse-checkout",
+    "mkit-transport-s3/sparse-checkout",
+]
+# Issue #159 Phase 2 — `mkit pack-shard <hash>` producer subcommand
+# and shard-aware HTTP / S3 downloads. Default-off because the
+# commonware dep stack is large.
+pack-shards = [
+    "mkit-core/pack-shards",
+    "mkit-transport-http/pack-shards",
+    "mkit-transport-s3/pack-shards",
+]
+# Issue #157 Phase 2 — record every ref-write in an append-only,
+# branch-scoped Merkle Mountain Range journal under
+# `<mkit_dir>/history/<sanitized_branch>/`. Off by default because
+# the commonware journaled-MMR stack pulls in tokio + commonware-
+# runtime; opt in via `--features history-mmr` on builds that need
+# `mkit-core::history::CommitHistory::open_at` wired into commit /
+# branch / merge / rebase / cherry-pick ref advances.
+history-mmr = ["mkit-core/history-mmr"]

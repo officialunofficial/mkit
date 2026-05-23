@@ -50,6 +50,12 @@ fn golden_message(algorithm: Algorithm) -> &'static [u8] {
     match algorithm {
         Algorithm::Ed25519 => b"",
         Algorithm::Secp256k1 | Algorithm::P256 => PAE,
+        // BLS golden vectors live in mkit-attest; this software-backend
+        // golden-vectors test only enumerates ed25519/secp/p256.
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => {
+            unreachable!("software golden vectors do not cover BLS12-381 threshold shares")
+        }
     }
 }
 

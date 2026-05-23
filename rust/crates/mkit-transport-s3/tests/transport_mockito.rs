@@ -158,6 +158,18 @@ fn upload_pack_rejects_over_5gib() {
 #[test]
 fn download_pack_200_returns_body() {
     let mut server = mockito::Server::new();
+    // pack-shards: scoped mocks. The manifest GET probes first; a 404
+    // signals "no shards published" so the transport falls through to
+    // the monolithic-body GET below. A bare `Matcher::Any` would feed
+    // the manifest path a body that fails `decode_manifest`, which —
+    // post-fix-#9 — surfaces as `InvalidResponse` rather than silently
+    // downgrading. Splitting the mocks by URL keeps the legacy
+    // happy-path behaviour explicit.
+    #[cfg(feature = "pack-shards")]
+    let _manifest_404 = server
+        .mock("GET", "/bucket/packs/4242424242424242424242424242424242424242424242424242424242424242/shards.manifest")
+        .with_status(404)
+        .create();
     let _m = server
         .mock("GET", mockito::Matcher::Any)
         .with_status(200)
@@ -453,6 +465,15 @@ fn list_refs_403_access_denied() {
 #[test]
 fn retry_429_then_200() {
     let mut server = mockito::Server::new();
+    // Scoped manifest 404 so the shard probe (under `--features
+    // pack-shards`) doesn't intercept the monolithic-body Matcher::Any
+    // mocks below. See `download_pack_200_returns_body` for the
+    // rationale.
+    #[cfg(feature = "pack-shards")]
+    let _manifest_404 = server
+        .mock("GET", "/bucket/packs/4242424242424242424242424242424242424242424242424242424242424242/shards.manifest")
+        .with_status(404)
+        .create();
     let _m429 = server
         .mock("GET", mockito::Matcher::Any)
         .with_status(429)

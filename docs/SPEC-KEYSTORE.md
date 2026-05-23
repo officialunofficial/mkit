@@ -214,6 +214,9 @@ pub enum Algorithm {
     Ed25519,
     Secp256k1,
     P256,
+    /// Feature-gated behind `bls-threshold`. See §6.1.1 below.
+    #[cfg(feature = "bls-threshold")]
+    Bls12381Threshold,
 }
 ```
 
@@ -221,8 +224,15 @@ Requirements:
 
 - `Algorithm` must convert to and from `mkit_attest::Algorithm` when the
   `attest` integration feature is enabled.
-- Canonical string forms are exactly `ed25519`, `secp256k1`, and `p256`.
+- Canonical string forms are exactly `ed25519`, `secp256k1`, `p256`, and
+  `bls12381-thr` (the BLS variant matches the same prefix as
+  `mkit_attest::Algorithm::Bls12381Threshold`).
 - The enum must not include backend-specific variants.
+- `Bls12381Threshold` is feature-gated behind `bls-threshold`. The
+  generic `KeyImporter` / `KeyExporter` traits MUST reject this variant
+  with `UnsupportedAlgorithm` — BLS shares are variable-length (≈52
+  bytes for `MinSig`) and the 32-byte `SecretKey` type cannot
+  represent them. See §6.1.1 for the dedicated BLS share storage API.
 
 ### 5.2 Key Attributes
 
@@ -637,6 +647,61 @@ Storage-security modes:
   truthfully.
 - The raw compatibility backend must be clearly reported as
   `BackendKind::SoftwareRaw` and must not claim encrypted-at-rest protection.
+
+#### 6.1.1 BLS12-381 Threshold Share Storage
+
+Phase 2 of issue #160 (and §6 of `SPEC-RELEASE-THRESHOLD.md`) adds
+support for storing BLS12-381 threshold shares in the encrypted
+software backend. The contract:
+
+- BLS shares are **variable-length** (≈52 bytes for the `MinSig`
+  variant — the wire-encoded
+  `commonware_cryptography::bls12381::primitives::group::Share`) so
+  they cannot ride the generic `KeyImporter` / `KeyExporter` paths
+  (which are pinned at 32 bytes). The keystore exposes a dedicated
+  BLS-share API on `SoftwareKeystore`:
+  - `store_bls_share(label, share_bytes, cohort_public_key,
+    share_index, threshold, total, keyid, overwrite)`
+  - `load_bls_share(label) -> LoadedBlsShare`
+  - `delete_bls_share(label)`
+  - `list_bls_shares() -> Vec<(KeyLabel, BlsShareMetadata)>`
+  - `bls_share_metadata(label) -> BlsShareMetadata` (public metadata
+    only, no decryption)
+- The on-disk record is `BlsShareRecord`, a parallel format to
+  `EncryptedKeyRecord` with magic `MKITKSB1` (canonical
+  `EncryptedKeyRecord` uses `MKITKSV1`). It is XChaCha20-Poly1305
+  AEAD-encrypted with a DEK wrapped by the same OS-native protector
+  the canonical record uses.
+- The record's **AAD binds** all of:
+  - magic + version
+  - backend tag (`bls12381-thr`)
+  - label
+  - protector id
+  - cohort public key (the 96-byte G2 compressed aggregated pubkey)
+  - share index (`u32`)
+  - quorum threshold M (`u32`)
+  - cohort total N (`u32`)
+  - canonical keyid
+- The AAD binding defeats a substitution attack where an adversary
+  swaps a 1-of-N share for a 3-of-N share, or routes a share for one
+  cohort into the storage slot of another cohort.
+- Directory layout: `<root>/bls12381-thr/<hex(label)>.share`.
+- BLS shares are advertised in
+  `Capabilities { algorithms, .. }` of the `software` backend when
+  the `bls-threshold` feature is on. The `software-raw` backend MUST
+  NOT advertise BLS — raw storage cannot bind AAD.
+- Generic `KeyImporter` / `KeyExporter` / `KeyGenerator` calls with
+  `algorithm == Bls12381Threshold` MUST fail closed with
+  `UnsupportedAlgorithm` or `UnsupportedOperation`. Generation of
+  BLS shares flows through a separate trusted-dealer ceremony — see
+  `SPEC-RELEASE-THRESHOLD.md` §2.1 and `mkit-cli`'s `mkit key
+  generate --algorithm bls12381-thr --threshold M --total N --label
+  <base>` surface.
+- Hostile backends (`yubikey`, `macos-keychain`, `windows-credential`,
+  `linux-secret-service`, `systemd-creds`) MUST reject
+  `Bls12381Threshold` with `UnsupportedAlgorithm`. BLS share storage
+  is software-backend-only in Phase 2; Phase 3 may extend to native
+  backends with their own threshold-aware wire formats.
 
 ### 6.2 Memory Backend
 

@@ -25,6 +25,8 @@ pub mod exit;
 pub mod format;
 pub mod remote_dispatch;
 pub mod signal;
+#[cfg(feature = "sparse-checkout")]
+pub mod sparse_cache;
 pub mod term;
 
 use std::io::Write;
@@ -93,6 +95,8 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "blame" => commands::blame::run(&rest),
         "serve" => commands::serve::run(&rest),
         "sparse-checkout" => commands::sparse_checkout::run(&rest),
+        #[cfg(feature = "pack-shards")]
+        "pack-shard" => commands::pack_shard::run(&rest),
         other => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(

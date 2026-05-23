@@ -26,6 +26,16 @@ md-5 = "0.11"
 hex = "0.4"
 thiserror = "2"
 
+[features]
+default = []
+# Wire-level sparse-checkout fetch (issue #158 Phase 2). Mirrors the
+# mkit-core feature; both must be enabled together. Off by default.
+sparse-checkout = ["mkit-core/sparse-checkout"]
+# Issue #159 Phase 2 — Pack-Shards mirror on the S3 keyspace. Pulls
+# the same feature in mkit-core (which in turn pulls the commonware
+# dep stack).
+pack-shards = ["mkit-core/pack-shards"]
+
 [dev-dependencies]
 mockito = "1"
 serde_json = "1"
