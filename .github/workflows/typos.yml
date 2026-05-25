@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: Run typos
-        uses: crate-ci/typos@ca8395668a014bffeb39e0463c660f958402e0ff  # v1.46.1
+        uses: crate-ci/typos@5374cbf686e897b15713110e233094e2874de7ef  # v1.46.1
         with:
           # Config lives at the repo root so contributors can run
           # `typos` locally with no extra flags.
