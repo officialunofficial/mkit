@@ -149,6 +149,17 @@ advertised capabilities before sending a `SignRequest`.
 | `certificate_chain[]` | DER-encoded X.509 chain when applicable. Empty for raw-key signers and for both reference hardware signers today (no signer ships an attestation chain in v1). |
 | `webauthn` | `{ authenticator_data, client_data_json }` for CTAP signers — required when `algorithm = ALGORITHM_ED25519_WEBAUTHN` or when the signer is FIDO2-flavoured P-256, so the verifier can reconstruct `authenticator_data ‖ SHA-256(client_data_json)` and check `signature` against that. Unset for non-WebAuthn signers. |
 
+Callers MUST treat `SignResponse` as untrusted. For non-WebAuthn
+responses, mkit rejects the response unless `algorithm` echoes the
+requested algorithm, `public_key` is present, and `signature` verifies
+against `public_key` and the requested `payload`. If `key_id` uses one
+of the reference canonical prefixes (`blake3:`, `ed25519:`,
+`secp256k1:`, `p256:`), mkit recomputes the expected identifier from
+`public_key` and rejects mismatches. Unknown `key_id` prefixes remain
+opaque and are accepted so third-party signer namespaces keep working.
+WebAuthn responses are validated by the WebAuthn verifier using the
+`webauthn` extension rather than this raw-payload check.
+
 ---
 
 ## 7. Errors
