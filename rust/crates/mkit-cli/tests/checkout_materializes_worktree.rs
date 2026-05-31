@@ -203,6 +203,35 @@ fn checkout_refuses_untracked_file_that_clean_restore_would_remove() {
 }
 
 #[test]
+fn checkout_refuses_untracked_file_on_same_tree_clean_restore() {
+    let td = tempfile::tempdir().unwrap();
+
+    assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
+    fs::write(td.path().join("tracked.txt"), b"tracked\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "main"])
+            .status
+            .success()
+    );
+
+    fs::write(td.path().join("notes.txt"), b"local notes\n").unwrap();
+    let out = run_in(td.path(), &["checkout", "main"]);
+
+    assert!(
+        !out.status.success(),
+        "same-tree clean restore should fail: {out:?}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("restore would remove untracked path"));
+    assert_eq!(
+        fs::read(td.path().join("notes.txt")).unwrap(),
+        b"local notes\n"
+    );
+}
+
+#[test]
 fn checkout_respects_mkitignore() {
     let td = tempfile::tempdir().unwrap();
 

@@ -226,7 +226,7 @@ pub fn ensure_restore_safe_with_options(
         .filter(|entry| restore_affects_path(options, &entry.path))
         .map(|entry| entry.path)
         .collect::<Vec<_>>();
-    if target_writes.is_empty() {
+    if target_writes.is_empty() && !options.clean {
         return Ok(());
     }
 
@@ -249,6 +249,7 @@ pub fn ensure_restore_safe_with_options(
         && let Some(path) = worktree_paths.iter().find(|path| {
             !index_tracks_path_or_descendant(&idx, path)
                 && restore_affects_path(options, path)
+                && *path != ".mkitignore"
                 && !is_ignored_worktree_path(root, &ignore, path)
         })
     {
