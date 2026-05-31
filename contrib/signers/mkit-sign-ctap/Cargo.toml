@@ -39,7 +39,7 @@ mkit-attest = { path = "../../../rust/crates/mkit-attest" }
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
 buffa = "0.6"
 # CTAP-HID driver, optional behind the `ctap-hw` feature.
-ctap-hid-fido2 = { version = "3.5", optional = true }
+ctap-hid-fido2 = { version = "=3.5.11", optional = true }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

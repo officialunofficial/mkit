@@ -25,9 +25,9 @@ dependencies = [
 
 [[package]]
 name = "aes"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66bd29a732b644c0431c6140f370d097879203d79b80c94a6747ba0872adaef8"
+checksum = "f1fc76eaeac4c9164506c466d4ffdd8ec9d0c5bf57ee97177c4d8eceb3a0e138"
 dependencies = [
  "cipher 0.5.2",
  "cpubits",
@@ -1313,11 +1313,11 @@ dependencies = [
 
 [[package]]
 name = "ctap-hid-fido2"
-version = "3.5.10"
+version = "3.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5e176c18579e8bbb6139e4e62ec3904f07c350de628bcecf25924875bc401c8"
+checksum = "e75cc091f4eab3642ecf7f413f71342ac2b6bc1264fba4ce166de1c2d286e3ab"
 dependencies = [
- "aes 0.9.0",
+ "aes 0.9.1",
  "anyhow",
  "base64",
  "byteorder",
@@ -4808,7 +4808,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6151,7 +6151,7 @@ version = "0.9.0-pre.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72822c92e2a481c345ef654a7e636a85e5fad5bffd09f48f096790038b85b559"
 dependencies = [
- "aes 0.9.0",
+ "aes 0.9.1",
  "base16ct 0.2.0",
  "bitflags",
  "cipher 0.5.2",
