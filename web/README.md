@@ -11,7 +11,7 @@ config close to the spec and the WASM crate it consumes.
 ## Local build
 
 Prerequisites: Node.js 22, pnpm 10, Rust 1.95.0, the `wasm32-unknown-unknown`
-target, and `wasm-pack` 0.13.1.
+target, `wasm-pack` 0.13.1, and `protoc` 31.0 or newer.
 
 ```sh
 pnpm install --frozen-lockfile
