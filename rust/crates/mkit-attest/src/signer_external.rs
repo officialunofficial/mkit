@@ -296,7 +296,7 @@ fn validate_sign_response(
     }
 
     if sr.webauthn.is_set() {
-        return Ok(());
+        return validate_webauthn_response(sr, expected_algorithm);
     }
 
     let public_key = sr.public_key.as_deref().ok_or_else(|| {
@@ -309,6 +309,34 @@ fn validate_sign_response(
         Algorithm::P256 => validate_p256_response(public_key, pae, signature, key_id),
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => Ok(()),
+    }
+}
+
+fn validate_webauthn_response(
+    sr: &SignResponse,
+    expected_algorithm: Algorithm,
+) -> Result<(), Error> {
+    if expected_algorithm != Algorithm::P256 {
+        return Err(Error::ExternalSignerBadResponse(
+            "WebAuthn SignResponse must use P-256".into(),
+        ));
+    }
+    let public_key = sr.public_key.as_deref().ok_or_else(|| {
+        Error::ExternalSignerBadResponse("WebAuthn SignResponse missing public_key".into())
+    })?;
+    #[cfg(feature = "algo-p256")]
+    {
+        let _ = p256::EncodedPoint::from_bytes(public_key).map_err(|_| {
+            Error::ExternalSignerBadResponse(
+                "WebAuthn SignResponse public_key is not a valid P-256 SEC1 key".into(),
+            )
+        })?;
+        Ok(())
+    }
+    #[cfg(not(feature = "algo-p256"))]
+    {
+        let _ = public_key;
+        Err(Error::AlgorithmNotEnabled(Algorithm::P256))
     }
 }
 
@@ -538,7 +566,7 @@ mod tests {
 
     #[cfg(feature = "algo-p256")]
     #[test]
-    fn response_validation_allows_webauthn_response_without_raw_public_key() {
+    fn response_validation_rejects_webauthn_response_without_raw_public_key() {
         let key_id = "opaque:ctap".to_owned();
         let signature = vec![0u8; 64];
         let mut sr = SignResponse::default()
@@ -551,8 +579,32 @@ mod tests {
                 .with_client_data_json(b"{}".to_vec()),
         );
 
+        let err = validate_sign_response(&sr, Algorithm::P256, PAE, &signature, &key_id)
+            .expect_err("WebAuthn marker must not bypass public key validation");
+        assert!(err.to_string().contains("missing public_key"));
+    }
+
+    #[cfg(feature = "algo-p256")]
+    #[test]
+    fn response_validation_allows_webauthn_response_with_valid_public_key() {
+        use crate::signer_p256::P256Signer;
+
+        let signer = P256Signer::new([0x33; 32]).unwrap();
+        let key_id = "webauthn:test".to_owned();
+        let signature = vec![0u8; 64];
+        let mut sr = SignResponse::default()
+            .with_signature(signature.clone())
+            .with_public_key(signer.public_key_sec1())
+            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_key_id(key_id.clone());
+        sr.webauthn = buffa::MessageField::some(
+            WebAuthnData::default()
+                .with_authenticator_data(vec![0u8; 37])
+                .with_client_data_json(b"{}".to_vec()),
+        );
+
         validate_sign_response(&sr, Algorithm::P256, PAE, &signature, &key_id)
-            .expect("WebAuthn response preserves hardware compatibility");
+            .expect("WebAuthn response preserves hardware compatibility with a valid public key");
     }
 
     #[cfg(feature = "algo-ed25519")]
