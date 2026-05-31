@@ -60,8 +60,9 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
         };
 
         let (status, bytes) = if meta.file_type().is_file() {
-            let bytes = std::fs::read(&abs).map_err(|e| format!("read {}: {e}", abs.display()))?;
-            (file_status_from_meta(&meta, entry.status), bytes)
+            let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
+                .map_err(|e| format!("read {}: {e}", abs.display()))?;
+            (file_status_from_meta(&opened_meta, entry.status), bytes)
         } else if meta.file_type().is_symlink() {
             let target = std::fs::read_link(&abs)
                 .map_err(|e| format!("read link {}: {e}", abs.display()))?;
@@ -158,10 +159,21 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
     let meta = abs
         .symlink_metadata()
         .map_err(|e| emit_err(&format!("metadata {}: {e}", abs.display()), exit::NOINPUT))?;
+    let rel_str = abs
+        .strip_prefix(root)
+        .unwrap_or(rel)
+        .to_string_lossy()
+        .replace('\\', "/");
+    if !index::validate_index_path(&rel_str) {
+        return Err(emit_err(&format!("invalid path: {rel_str}"), exit::DATAERR));
+    }
+    let previous_status = idx
+        .find_entry(&rel_str)
+        .map_or(EntryStatus::Blob, |existing| idx.entries[existing].status);
     let (status, bytes) = if meta.file_type().is_file() {
-        let bytes = std::fs::read(&abs)
+        let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
             .map_err(|e| emit_err(&format!("read {}: {e}", abs.display()), exit::NOINPUT))?;
-        (EntryStatus::Blob, bytes)
+        (file_status_from_meta(&opened_meta, previous_status), bytes)
     } else if meta.file_type().is_symlink() {
         let target = std::fs::read_link(&abs)
             .map_err(|e| emit_err(&format!("read link {}: {e}", abs.display()), exit::NOINPUT))?;
@@ -182,14 +194,6 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
             exit::NOINPUT,
         ));
     };
-    let rel_str = abs
-        .strip_prefix(root)
-        .unwrap_or(rel)
-        .to_string_lossy()
-        .replace('\\', "/");
-    if !index::validate_index_path(&rel_str) {
-        return Err(emit_err(&format!("invalid path: {rel_str}"), exit::DATAERR));
-    }
     let blob = Object::Blob(Blob { data: bytes });
     let ser = serialize::serialize(&blob)
         .map_err(|e| emit_err(&format!("serialize: {e}"), exit::DATAERR))?;

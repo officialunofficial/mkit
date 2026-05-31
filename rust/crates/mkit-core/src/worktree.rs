@@ -17,7 +17,7 @@
 //!   reports the target verbatim and we hash it as a blob.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::chunker::{ChunkIterator, FastCdc};
@@ -109,11 +109,19 @@ fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> Wo
             continue;
         }
 
+        let name_bytes = name_str.as_bytes();
+        if !TreeEntry::validate_name(name_bytes) {
+            return Err(WorktreeError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid tree entry name: {name_str:?}"),
+            )));
+        }
+
         if meta.file_type().is_file() {
-            let h = hash_file(store, &entry.path())?;
+            let (h, opened_meta) = hash_file_with_metadata(store, &entry.path())?;
             entries.push(TreeEntry {
                 name: name_str.into_bytes(),
-                mode: EntryMode::Blob,
+                mode: entry_mode_from_file_metadata(&opened_meta),
                 object_hash: h,
             });
         } else if meta.file_type().is_dir() {
@@ -264,8 +272,20 @@ pub fn build_tree_from_index(
                 "index path conflict: '{conflicting}' is staged as both a file and a directory"
             ))));
         }
-        node.leaves
-            .insert((*leaf).to_string(), (mode, entry.object_hash));
+        if node
+            .leaves
+            .insert((*leaf).to_string(), (mode, entry.object_hash))
+            .is_some()
+        {
+            let duplicate = if walked.is_empty() {
+                (*leaf).to_string()
+            } else {
+                format!("{walked}/{leaf}")
+            };
+            return Err(WorktreeError::Io(io::Error::other(format!(
+                "duplicate index path: '{duplicate}'"
+            ))));
+        }
     }
 
     fn write_node(store: &ObjectStore, node: &Node) -> WorktreeResult<Hash> {
@@ -325,21 +345,43 @@ pub fn build_tree_from_index(
 /// # Errors
 /// See [`WorktreeError`].
 pub fn hash_file(store: &ObjectStore, path: &Path) -> WorktreeResult<Hash> {
-    let pre_meta = path.symlink_metadata()?;
-    if !pre_meta.file_type().is_file() {
+    hash_file_with_metadata(store, path).map(|(hash, _)| hash)
+}
+
+/// Read a regular file without following the final path component on
+/// Unix, enforcing [`MAX_FILE_BYTES`] against both the opened handle's
+/// metadata and the actual bytes read.
+pub fn read_regular_file_bounded(path: &Path) -> WorktreeResult<(fs::Metadata, Vec<u8>)> {
+    let mut file = open_regular_file(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
         return Err(WorktreeError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "hash_file: path is not a regular file",
+            "path is not a regular file",
         )));
     }
-    if pre_meta.len() > MAX_FILE_BYTES {
+    if meta.len() > MAX_FILE_BYTES {
         return Err(WorktreeError::FileTooLarge(path.to_path_buf()));
     }
-    let data = fs::read(path)?;
-    if (data.len() as u64) <= CHUNK_THRESHOLD {
+    let mut data = Vec::with_capacity(usize::try_from(meta.len().min(CHUNK_THRESHOLD)).unwrap());
+    file.by_ref()
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut data)?;
+    if u64::try_from(data.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
+        return Err(WorktreeError::FileTooLarge(path.to_path_buf()));
+    }
+    Ok((meta, data))
+}
+
+fn hash_file_with_metadata(
+    store: &ObjectStore,
+    path: &Path,
+) -> WorktreeResult<(Hash, fs::Metadata)> {
+    let (meta, data) = read_regular_file_bounded(path)?;
+    if u64::try_from(data.len()).unwrap_or(u64::MAX) <= CHUNK_THRESHOLD {
         let blob = Object::Blob(crate::object::Blob { data });
         let bytes = serialize::serialize(&blob)?;
-        return Ok(store.write(&bytes)?);
+        return Ok((store.write(&bytes)?, meta));
     }
 
     // Large file: split with FastCDC v1 via the public ChunkIterator,
@@ -364,7 +406,38 @@ pub fn hash_file(store: &ObjectStore, path: &Path) -> WorktreeResult<Hash> {
         chunks,
     });
     let manifest_bytes = serialize::serialize(&manifest)?;
-    Ok(store.write(&manifest_bytes)?)
+    Ok((store.write(&manifest_bytes)?, meta))
+}
+
+#[cfg(unix)]
+fn open_regular_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_regular_file(path: &Path) -> io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+#[cfg(unix)]
+fn entry_mode_from_file_metadata(meta: &fs::Metadata) -> EntryMode {
+    use std::os::unix::fs::PermissionsExt;
+
+    if meta.permissions().mode() & 0o111 != 0 {
+        EntryMode::Executable
+    } else {
+        EntryMode::Blob
+    }
+}
+
+#[cfg(not(unix))]
+fn entry_mode_from_file_metadata(_meta: &fs::Metadata) -> EntryMode {
+    EntryMode::Blob
 }
 
 #[cfg(test)]
@@ -419,6 +492,52 @@ mod tests {
             panic!("expected blob");
         };
         assert_eq!(b.data, b"hello world");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_tree_marks_executable_regular_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_sd, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        let script = work.path().join("run.sh");
+        fs::write(&script, b"#!/bin/sh\n").unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(perms.mode() | 0o111);
+        fs::set_permissions(&script, perms).unwrap();
+
+        let h = build_tree(&store, work.path()).unwrap();
+        let Object::Tree(t) = store.read_object(&h).unwrap() else {
+            panic!("expected tree");
+        };
+        assert_eq!(t.entries[0].name.as_slice(), b"run.sh");
+        assert_eq!(t.entries[0].mode, EntryMode::Executable);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_tree_rejects_invalid_entry_name_before_writing_tree() {
+        let (_sd, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        fs::write(work.path().join("bad."), b"bad name").unwrap();
+
+        let err = build_tree(&store, work.path()).unwrap_err();
+        assert!(matches!(err, WorktreeError::Io(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_file_rejects_final_component_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let (_sd, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        fs::write(work.path().join("target.txt"), b"target").unwrap();
+        symlink("target.txt", work.path().join("link.txt")).unwrap();
+
+        let err = hash_file(&store, &work.path().join("link.txt")).unwrap_err();
+        assert!(matches!(err, WorktreeError::Io(_)));
     }
 
     #[test]
@@ -905,6 +1024,28 @@ mod tests {
             object_hash: h,
         });
         assert!(build_tree_from_index(&store, &idx).is_err());
+    }
+
+    #[test]
+    fn from_index_rejects_duplicate_exact_path() {
+        let (_sd, store) = fresh_store();
+        let a = write_blob(&store, b"a");
+        let b = write_blob(&store, b"b");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "same.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: a,
+        });
+        idx.entries.push(IndexEntry {
+            path: "same.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: b,
+        });
+
+        let err = build_tree_from_index(&store, &idx).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("duplicate index path"), "got: {msg}");
     }
 
     /// All-Removed index → empty root tree, NOT an error.

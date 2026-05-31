@@ -80,6 +80,36 @@ fn status_clean_working_tree() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn status_clean_for_committed_executable_that_remains_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let td = tempfile::tempdir().unwrap();
+    let p = td.path();
+    assert!(run_in(p, &["init"]).status.success());
+    assert!(run_in(p, &["keygen"]).status.success());
+
+    let script = p.join("run.sh");
+    fs::write(&script, b"#!/bin/sh\n").unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    fs::set_permissions(&script, perms).unwrap();
+
+    assert!(run_in(p, &["add", "run.sh"]).status.success());
+    assert!(
+        run_in(p, &["commit", "-m", "add executable"])
+            .status
+            .success()
+    );
+
+    let (stdout, _stderr) = status_porcelain(p);
+    assert!(
+        stdout.is_empty(),
+        "executable mode should remain clean after commit, got: {stdout:?}"
+    );
+}
+
 // -----------------------------------------------------------------------
 // 2. Untracked file appears as `??`.
 // -----------------------------------------------------------------------
