@@ -296,7 +296,7 @@ fn validate_sign_response(
     }
 
     if sr.webauthn.is_set() {
-        return validate_webauthn_response(sr, expected_algorithm);
+        return validate_webauthn_response(sr, expected_algorithm, pae, signature, key_id);
     }
 
     let public_key = sr.public_key.as_deref().ok_or_else(|| {
@@ -315,6 +315,9 @@ fn validate_sign_response(
 fn validate_webauthn_response(
     sr: &SignResponse,
     expected_algorithm: Algorithm,
+    pae: &[u8],
+    signature: &[u8],
+    key_id: &str,
 ) -> Result<(), Error> {
     if expected_algorithm != Algorithm::P256 {
         return Err(Error::ExternalSignerBadResponse(
@@ -326,12 +329,33 @@ fn validate_webauthn_response(
     })?;
     #[cfg(feature = "algo-p256")]
     {
-        let _ = p256::EncodedPoint::from_bytes(public_key).map_err(|_| {
+        use crate::webauthn::{WebAuthnWrapping, verify_webauthn_wrapping};
+        use p256::ecdsa::VerifyingKey;
+
+        let vk = VerifyingKey::from_sec1_bytes(public_key).map_err(|_| {
             Error::ExternalSignerBadResponse(
                 "WebAuthn SignResponse public_key is not a valid P-256 SEC1 key".into(),
             )
         })?;
-        Ok(())
+        let authenticator_data = sr.webauthn.authenticator_data.as_deref().ok_or_else(|| {
+            Error::ExternalSignerBadResponse(
+                "WebAuthn SignResponse missing authenticator_data".into(),
+            )
+        })?;
+        let client_data_json = sr.webauthn.client_data_json.as_deref().ok_or_else(|| {
+            Error::ExternalSignerBadResponse(
+                "WebAuthn SignResponse missing client_data_json".into(),
+            )
+        })?;
+        let wrapping = WebAuthnWrapping {
+            authenticator_data: authenticator_data.to_vec(),
+            client_data_json: client_data_json.to_vec(),
+        };
+        verify_webauthn_wrapping(pae, &wrapping, public_key, signature)?;
+
+        let compressed = vk.to_encoded_point(true);
+        let canonical = format!("p256:{}", hex_lower(compressed.as_bytes()));
+        require_matching_canonical_keyid(key_id, &[("p256", &canonical)])
     }
     #[cfg(not(feature = "algo-p256"))]
     {
@@ -586,25 +610,59 @@ mod tests {
 
     #[cfg(feature = "algo-p256")]
     #[test]
-    fn response_validation_allows_webauthn_response_with_valid_public_key() {
+    fn response_validation_rejects_webauthn_response_with_bad_signature() {
         use crate::signer_p256::P256Signer;
 
         let signer = P256Signer::new([0x33; 32]).unwrap();
-        let key_id = "webauthn:test".to_owned();
+        let key_id = signer.keyid();
         let signature = vec![0u8; 64];
         let mut sr = SignResponse::default()
             .with_signature(signature.clone())
-            .with_public_key(signer.public_key_sec1())
+            .with_public_key(signer.public_key_sec1_uncompressed())
             .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
             .with_key_id(key_id.clone());
         sr.webauthn = buffa::MessageField::some(
             WebAuthnData::default()
                 .with_authenticator_data(vec![0u8; 37])
-                .with_client_data_json(b"{}".to_vec()),
+                .with_client_data_json(crate::webauthn::build_client_data_json(
+                    PAE,
+                    "https://example.test",
+                    false,
+                )),
+        );
+
+        let err = validate_sign_response(&sr, Algorithm::P256, PAE, &signature, &key_id)
+            .expect_err("WebAuthn marker must not bypass assertion verification");
+        assert!(matches!(err, Error::WebAuthnSignatureFailed), "got {err:?}");
+    }
+
+    #[cfg(feature = "algo-p256")]
+    #[test]
+    fn response_validation_allows_webauthn_response_with_valid_assertion() {
+        use crate::signer_p256::P256Signer;
+        use sha2::{Digest, Sha256};
+
+        let signer = P256Signer::new([0x33; 32]).unwrap();
+        let key_id = signer.keyid();
+        let authenticator_data = vec![0u8; 37];
+        let client_data_json =
+            crate::webauthn::build_client_data_json(PAE, "https://example.test", false);
+        let mut signed_payload = authenticator_data.clone();
+        signed_payload.extend_from_slice(&Sha256::digest(&client_data_json));
+        let signature = signer.sign_dsse(&signed_payload).unwrap();
+        let mut sr = SignResponse::default()
+            .with_signature(signature.clone())
+            .with_public_key(signer.public_key_sec1_uncompressed())
+            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_key_id(key_id.clone());
+        sr.webauthn = buffa::MessageField::some(
+            WebAuthnData::default()
+                .with_authenticator_data(authenticator_data)
+                .with_client_data_json(client_data_json),
         );
 
         validate_sign_response(&sr, Algorithm::P256, PAE, &signature, &key_id)
-            .expect("WebAuthn response preserves hardware compatibility with a valid public key");
+            .expect("WebAuthn response verifies assertion binding and signature");
     }
 
     #[cfg(feature = "algo-ed25519")]
