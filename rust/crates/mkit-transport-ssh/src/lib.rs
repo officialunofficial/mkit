@@ -41,8 +41,10 @@
 pub mod url;
 
 use std::io;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{Mutex, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use mkit_core::hash::Hash;
 use mkit_core::protocol::{PackKey, Transport, TransportError, TransportResult};
@@ -65,6 +67,9 @@ use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
 /// from the workspace version, so a release bump propagates
 /// automatically.
 const CLIENT_ID: &str = concat!("mkit ", env!("CARGO_PKG_VERSION"));
+
+/// Default timeout for SSH handshake replies, verb responses, and child shutdown.
+pub const DEFAULT_SSH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Optional SSH CLI knobs threaded from `.mkit/config`. All fields default
 /// to empty, which means "inherit the user's `ssh(1)` defaults". See
@@ -116,8 +121,8 @@ pub struct SshTransport {
 #[derive(Debug)]
 struct ChildIo {
     child: Child,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
+    stdin: Option<ChildStdin>,
+    stdout_rx: mpsc::Receiver<Result<SshFrame, FrameError>>,
     /// `true` once we've sent `Close` and shut the pipe. Guards
     /// double-close from `Drop` + explicit `close`.
     closed: bool,
@@ -153,10 +158,11 @@ impl SshTransport {
             .stdout
             .take()
             .ok_or_else(|| SshInitError::HandshakeFailed("no child stdout".into()))?;
+        let stdout_rx = spawn_stdout_reader(stdout);
         let mut io = ChildIo {
             child,
-            stdin,
-            stdout,
+            stdin: Some(stdin),
+            stdout_rx,
             closed: false,
         };
         if let Err(e) = perform_client_handshake(&mut io) {
@@ -212,7 +218,8 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(&mut io.stdin, &header).map_err(|_| TransportError::ConnectionFailed)?;
+        write_frame(child_stdin(&mut io)?, &header)
+            .map_err(|_| TransportError::ConnectionFailed)?;
 
         // Body chunks. The per-frame data cap lives in `mkit_rpc::CHUNK_DATA_MAX`
         // so transport-ssh and transport-enc cannot drift on the bound.
@@ -231,7 +238,8 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_frame(&mut io.stdin, &chunk).map_err(|_| TransportError::ConnectionFailed)?;
+            write_frame(child_stdin(&mut io)?, &chunk)
+                .map_err(|_| TransportError::ConnectionFailed)?;
             offset += (end - iter_pos) as u64;
             iter_pos = end;
         }
@@ -248,10 +256,11 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_frame(&mut io.stdin, &chunk).map_err(|_| TransportError::ConnectionFailed)?;
+            write_frame(child_stdin(&mut io)?, &chunk)
+                .map_err(|_| TransportError::ConnectionFailed)?;
         }
 
-        let resp = read_frame_or_err(&mut io.stdout)?;
+        let resp = read_child_frame_or_err(&mut io)?;
         match resp.body {
             Some(ssh_frame::Body::UploadPackResponse(_)) => Ok(()),
             Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
@@ -274,9 +283,9 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        write_frame(child_stdin(&mut io)?, &req).map_err(|_| TransportError::ConnectionFailed)?;
 
-        read_download_pack_body(&mut io.stdout)
+        read_download_pack_body_from_child(&mut io)
     }
 
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
@@ -293,8 +302,8 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
-        let resp = read_frame_or_err(&mut io.stdout)?;
+        write_frame(child_stdin(&mut io)?, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        let resp = read_child_frame_or_err(&mut io)?;
         match resp.body {
             Some(ssh_frame::Body::PackExistsResponse(r)) => Ok(r.exists.unwrap_or(false)),
             Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
@@ -337,9 +346,9 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        write_frame(child_stdin(&mut io)?, &req).map_err(|_| TransportError::ConnectionFailed)?;
 
-        let resp = read_frame_or_err(&mut io.stdout)?;
+        let resp = read_child_frame_or_err(&mut io)?;
         match resp.body {
             Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(()),
             Some(ssh_frame::Body::Error(e)) => {
@@ -379,8 +388,8 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
-        let resp = read_frame_or_err(&mut io.stdout)?;
+        write_frame(child_stdin(&mut io)?, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        let resp = read_child_frame_or_err(&mut io)?;
         match resp.body {
             Some(ssh_frame::Body::ReadRefResponse(r)) => {
                 let oid = r.object_id.unwrap_or_default();
@@ -419,8 +428,8 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(&mut io.stdin, &req).map_err(|_| TransportError::ConnectionFailed)?;
-        let resp = read_frame_or_err(&mut io.stdout)?;
+        write_frame(child_stdin(&mut io)?, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        let resp = read_child_frame_or_err(&mut io)?;
         match resp.body {
             Some(ssh_frame::Body::ListRefsResponse(r)) => r
                 .refs
@@ -443,6 +452,7 @@ impl Transport for SshTransport {
 /// Factored out of [`SshTransport::download_pack`] so the OOM-defence
 /// against a malicious `DownloadPackHeader.total_bytes` can be unit
 /// tested without spawning a child process.
+#[cfg(test)]
 fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
     let header = read_frame_or_err(r)?;
     let total = match header.body {
@@ -490,15 +500,113 @@ fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
     Ok(out)
 }
 
+fn read_download_pack_body_from_child(io: &mut ChildIo) -> TransportResult<Vec<u8>> {
+    let header = read_child_frame_or_err(io)?;
+    let total = match header.body {
+        Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
+        Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "ssh")),
+        other => return Err(unexpected_frame("ssh", "DownloadPackHeader", other)),
+    };
+
+    if total > PACK_BODY_LIMIT {
+        return Err(TransportError::RemoteError(
+            "server-advertised pack size exceeds client cap".into(),
+        ));
+    }
+
+    let initial = core::cmp::min(total as usize, PACK_BODY_LIMIT_USIZE);
+    let mut out = Vec::with_capacity(initial);
+    loop {
+        let chunk_frame = read_child_frame_or_err(io)?;
+        match chunk_frame.body {
+            Some(ssh_frame::Body::PackChunk(c)) => {
+                let data = c.data.unwrap_or_default();
+                if out.len().saturating_add(data.len()) > PACK_BODY_LIMIT_USIZE {
+                    return Err(TransportError::RemoteError(
+                        "server-streamed pack body exceeds client cap".into(),
+                    ));
+                }
+                out.extend_from_slice(&data);
+                if c.last.unwrap_or(false) {
+                    break;
+                }
+            }
+            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "ssh")),
+            other => return Err(unexpected_frame("ssh", "PackChunk", other)),
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
 fn read_frame_or_err<R: io::Read>(r: &mut R) -> TransportResult<SshFrame> {
     match read_frame::<_, SshFrame>(r) {
         Ok(f) => Ok(f),
-        Err(FrameError::LengthTruncated | FrameError::BodyTruncated { .. }) => {
+        Err(e) => Err(frame_error_to_transport(e)),
+    }
+}
+
+fn child_stdin(io: &mut ChildIo) -> TransportResult<&mut ChildStdin> {
+    io.stdin.as_mut().ok_or(TransportError::ConnectionFailed)
+}
+
+fn spawn_stdout_reader(
+    mut stdout: std::process::ChildStdout,
+) -> mpsc::Receiver<Result<SshFrame, FrameError>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            let frame = read_frame::<_, SshFrame>(&mut stdout);
+            let should_stop = frame.is_err();
+            if tx.send(frame).is_err() || should_stop {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+#[derive(Debug)]
+enum TimedFrameError {
+    Timeout,
+    Disconnected,
+    Frame(FrameError),
+}
+
+fn recv_frame_with_timeout(
+    rx: &mpsc::Receiver<Result<SshFrame, FrameError>>,
+    timeout: Duration,
+) -> Result<SshFrame, TimedFrameError> {
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(frame)) => Ok(frame),
+        Ok(Err(e)) => Err(TimedFrameError::Frame(e)),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(TimedFrameError::Timeout),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(TimedFrameError::Disconnected),
+    }
+}
+
+fn read_child_frame_or_err(io: &mut ChildIo) -> TransportResult<SshFrame> {
+    match recv_frame_with_timeout(&io.stdout_rx, DEFAULT_SSH_TIMEOUT) {
+        Ok(frame) => Ok(frame),
+        Err(TimedFrameError::Timeout) => {
+            io.closed = true;
+            let _ = io.stdin.take();
+            terminate_child_now(&mut io.child);
             Err(TransportError::ConnectionFailed)
         }
-        Err(FrameError::LengthTooLarge(n)) => Err(TransportError::PayloadTooLarge(n as usize)),
-        Err(FrameError::DecodeFailed) => Err(TransportError::ProtocolError),
-        Err(FrameError::Io(_)) => Err(TransportError::ConnectionFailed),
+        Err(TimedFrameError::Disconnected) => Err(TransportError::ConnectionFailed),
+        Err(TimedFrameError::Frame(e)) => Err(frame_error_to_transport(e)),
+    }
+}
+
+fn frame_error_to_transport(e: FrameError) -> TransportError {
+    match e {
+        FrameError::LengthTruncated | FrameError::BodyTruncated { .. } => {
+            TransportError::ConnectionFailed
+        }
+        FrameError::LengthTooLarge(n) => TransportError::PayloadTooLarge(n as usize),
+        FrameError::DecodeFailed => TransportError::ProtocolError,
+        FrameError::Io(_) => TransportError::ConnectionFailed,
     }
 }
 
@@ -515,11 +623,34 @@ fn perform_client_handshake(io: &mut ChildIo) -> Result<(), SshInitError> {
         ))),
         ..Default::default()
     };
-    write_frame(&mut io.stdin, &hello)
+    let stdin = io
+        .stdin
+        .as_mut()
+        .ok_or_else(|| SshInitError::HandshakeFailed("no child stdin".into()))?;
+    write_frame(stdin, &hello)
         .map_err(|e| SshInitError::HandshakeFailed(format!("send hello: {e}")))?;
 
-    let resp = read_frame::<_, SshFrame>(&mut io.stdout)
-        .map_err(|e| SshInitError::HandshakeFailed(format!("read hello reply: {e}")))?;
+    let resp = match recv_frame_with_timeout(&io.stdout_rx, DEFAULT_SSH_TIMEOUT) {
+        Ok(frame) => frame,
+        Err(TimedFrameError::Timeout) => {
+            io.closed = true;
+            let _ = io.stdin.take();
+            terminate_child_now(&mut io.child);
+            return Err(SshInitError::HandshakeFailed(
+                "read hello reply timed out".into(),
+            ));
+        }
+        Err(TimedFrameError::Disconnected) => {
+            return Err(SshInitError::HandshakeFailed(
+                "read hello reply: child stdout closed".into(),
+            ));
+        }
+        Err(TimedFrameError::Frame(e)) => {
+            return Err(SshInitError::HandshakeFailed(format!(
+                "read hello reply: {e}"
+            )));
+        }
+    };
     match resp.body {
         Some(ssh_frame::Body::HelloResponse(h)) => {
             let proto = h.proto.as_ref().map_or(0, buffa::EnumValue::to_i32);
@@ -552,10 +683,36 @@ fn shut_child(io: &mut ChildIo) -> io::Result<()> {
         body: Some(ssh_frame::Body::Close(Box::default())),
         ..Default::default()
     };
-    let _ = write_frame(&mut io.stdin, &close);
-    // Dropping ChildIo's stdin closes the pipe; the server sees EOF.
-    let _ = io.child.wait();
+    if let Some(mut stdin) = io.stdin.take() {
+        let _ = write_frame(&mut stdin, &close);
+        // Dropping stdin closes the pipe; the server sees EOF even if it
+        // ignores the Close frame.
+    }
+    wait_child_timeout(&mut io.child, DEFAULT_SSH_TIMEOUT)?;
     Ok(())
+}
+
+fn wait_child_timeout(child: &mut Child, timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            terminate_child_now(child);
+            return Ok(());
+        }
+        thread::sleep(core::cmp::min(
+            Duration::from_millis(10),
+            deadline.saturating_duration_since(now),
+        ));
+    }
+}
+
+fn terminate_child_now(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 // ---------------------------------------------------------------------------
@@ -590,6 +747,8 @@ fn build_ssh_command(target: &SshTarget, options: &SshOptions) -> Command {
         cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
     }
     cmd.arg("-o").arg("BatchMode=yes");
+    cmd.arg("-o")
+        .arg(format!("ConnectTimeout={}", DEFAULT_SSH_TIMEOUT.as_secs()));
 
     cmd.arg(format!("{}@{}", target.user, target.host));
     // The path is already restricted to `[A-Za-z0-9._-/]` by
@@ -700,6 +859,47 @@ mod tests {
         let mut cursor = std::io::Cursor::new(buf);
         let out = read_download_pack_body(&mut cursor).expect("honest small pack should succeed");
         assert_eq!(out, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn recv_frame_with_timeout_reports_stalled_reader() {
+        let (_tx, rx) = mpsc::channel();
+        let started = Instant::now();
+        let result = recv_frame_with_timeout(&rx, Duration::from_millis(10));
+
+        assert!(matches!(result, Err(TimedFrameError::Timeout)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn wait_child_timeout_kills_stalled_child() {
+        let mut child = Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn sleep child");
+        let started = Instant::now();
+
+        wait_child_timeout(&mut child, Duration::from_millis(20)).expect("bounded wait");
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(child.try_wait().expect("poll child").is_some());
+    }
+
+    #[test]
+    fn ssh_command_sets_connect_timeout() {
+        let target = SshTarget {
+            user: "git".into(),
+            host: "example.com".into(),
+            port: None,
+            path: "repo".into(),
+        };
+        let cmd = build_ssh_command(&target, &SshOptions::default());
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(args.contains(&format!("ConnectTimeout={}", DEFAULT_SSH_TIMEOUT.as_secs())));
     }
 
     /// Build an `UpdateRef` body via `cond_to_wire` so this test
