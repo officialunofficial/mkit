@@ -22,7 +22,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use mkit_core::hash::Hash;
+use mkit_core::object::Object;
+use mkit_core::ops::merge::is_ancestor;
 use mkit_core::ops::reachable_objects;
+use mkit_core::ops::restore::{self, RestoreOptions};
 use mkit_core::pack::{PackError, PackReader};
 use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_core::refs::{self, Head};
@@ -31,6 +34,8 @@ use mkit_transport_file::FileTransport;
 use mkit_transport_http::HttpTransport;
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshTransport};
+
+const DEFAULT_REMOTE: &str = "default";
 
 /// Errors returned by the push / pull helpers. Mapped to exit codes by
 /// the commands themselves.
@@ -61,6 +66,18 @@ pub enum DispatchError {
     Pack(#[from] PackError),
     #[error("ssh init: {0}")]
     SshInit(#[from] SshInitError),
+    #[error("pull requires HEAD to point at a branch")]
+    DetachedHead,
+    #[error("remote branch '{0}' not found")]
+    RemoteBranchMissing(String),
+    #[error("pull would not fast-forward branch '{branch}'; merge or rebase first")]
+    NonFastForwardPull { branch: String },
+    #[error("restore safety: {0}")]
+    RestoreSafety(String),
+    #[error("object is not a commit")]
+    NotCommit,
+    #[error("restore: {0}")]
+    Restore(#[from] restore::RestoreError),
 }
 
 /// Open a transport for the given URL. Returns a type-erased `Arc`
@@ -209,31 +226,70 @@ pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> 
     Ok(n)
 }
 
-/// Mirror the remote's ref set + all reachable objects into the local
-/// repo. Count returned = number of refs updated locally. Unlike
-/// [`fetch_all`], this also moves HEAD to the first branch if HEAD was
-/// unset — matching the "clone-ish" behaviour the pre-pack port already
-/// had.
+/// Fetch remote refs, then fast-forward the current local branch from
+/// `refs/remotes/default/<branch>`. Fresh repos with no local branch tip
+/// initialise from the current branch's remote-tracking ref, or the first
+/// advertised remote branch when the current default branch is absent.
 pub fn pull_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {
     let n = fetch_all(cwd, tx)?;
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    // If HEAD is unset (freshly initialised), point it at the first
-    // branch we saw. Intuitive UX for the `pull` ≈ `clone` path.
-    if (refs::read_head(&mkit_dir).is_err()
-        || matches!(refs::read_head(&mkit_dir), Ok(Head::Branch(ref b)) if refs::read_ref(&mkit_dir, b).is_ok_and(|x| x.is_none())))
-        && let Ok(mut all) = refs::list_refs(&mkit_dir)
-    {
-        all.sort_by(|a, b| a.name.cmp(&b.name));
-        if let Some(first) = all.first() {
-            let _ = refs::write_head_branch(&mkit_dir, &first.name);
+    let store = ObjectStore::open(cwd)?;
+    let remote_refs = refs::list_remote_refs(&mkit_dir, DEFAULT_REMOTE)?
+        .into_iter()
+        .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
+        .collect::<Vec<_>>();
+    if remote_refs.is_empty() {
+        return Ok(n);
+    }
+
+    let (branch, local_tip, remote_tip) = match refs::read_head(&mkit_dir) {
+        Ok(Head::Branch(branch)) => {
+            let local_tip = refs::read_ref(&mkit_dir, &branch)?;
+            let selected = if local_tip.is_some() {
+                remote_refs
+                    .iter()
+                    .find(|(name, _)| name == &branch)
+                    .ok_or_else(|| DispatchError::RemoteBranchMissing(branch.clone()))?
+            } else {
+                remote_refs
+                    .iter()
+                    .find(|(name, _)| name == &branch)
+                    .unwrap_or(&remote_refs[0])
+            };
+            (selected.0.clone(), local_tip, selected.1)
+        }
+        Ok(Head::Detached(_)) => return Err(DispatchError::DetachedHead),
+        Err(_) => (remote_refs[0].0.clone(), None, remote_refs[0].1),
+    };
+
+    if let Some(local_tip) = local_tip {
+        if local_tip == remote_tip {
+            return Ok(n);
+        }
+        if !is_ancestor(&store, local_tip, remote_tip)? {
+            return Err(DispatchError::NonFastForwardPull { branch });
         }
     }
+
+    let tree = load_tree_hash(&store, remote_tip)?;
+    crate::commands::ensure_restore_safe(cwd, &store, tree)
+        .map_err(DispatchError::RestoreSafety)?;
+    restore::restore_tree(&store, tree, cwd, &RestoreOptions::default())?;
+    crate::commands::sync_index_to_tree(cwd, &store, tree).map_err(DispatchError::RestoreSafety)?;
+    crate::commands::write_ref_recording_history(
+        &mkit_dir,
+        &branch,
+        refs::RefWriteCondition::Any,
+        &remote_tip,
+    )?;
+    refs::write_head_branch(&mkit_dir, &branch)?;
     Ok(n)
 }
 
 /// `fetch` — `pull_all` without the HEAD update. Downloads every object
 /// reachable from each remote ref (via [`Transport::download_pack`] on
-/// the object's own digest) and writes the ref into `refs/heads/`.
+/// the object's own digest) and writes the ref into
+/// `refs/remotes/default/<branch>`.
 pub fn fetch_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
     let store = ObjectStore::open(cwd)?;
@@ -256,10 +312,18 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError>
         // each object's hash as a fallback. That matches the
         // per-object transport semantics in file.rs / memory.rs.
         fetch_object_closure(&store, tx, &h)?;
-        refs::write_ref(&mkit_dir, &r.name, &h)?;
+        refs::write_remote_ref(&mkit_dir, DEFAULT_REMOTE, &r.name, &h)?;
         n += 1;
     }
     Ok(n)
+}
+
+fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, DispatchError> {
+    match store.read_object(&commit_hash)? {
+        Object::Commit(c) => Ok(c.tree_hash),
+        Object::Remix(r) => Ok(r.tree_hash),
+        _ => Err(DispatchError::NotCommit),
+    }
 }
 
 /// Recursively download every object reachable from `root` into

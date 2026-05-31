@@ -81,6 +81,10 @@ pub fn run(args: &[String]) -> u8 {
         return exit::GENERAL_ERROR;
     }
 
+    if let Err(e) = super::ensure_restore_safe(&cwd, &store, result.tree_hash) {
+        return emit_err(&e, exit::GENERAL_ERROR);
+    }
+
     let cfg = match config::read_or_default(&cwd) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),

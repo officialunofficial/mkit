@@ -42,9 +42,13 @@ pub mod verify_attest;
 
 use crate::exit;
 use mkit_core::hash::Hash;
+use mkit_core::index::{EntryStatus, Index};
 use mkit_core::object::Object;
+use mkit_core::ops::diff::{DiffKind, diff_trees};
 use mkit_core::refs::{self, RefError, RefWriteCondition};
 use mkit_core::store::ObjectStore;
+use mkit_core::worktree;
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 
@@ -162,6 +166,133 @@ pub fn write_ref_recording_history(
 pub fn sync_index_to_tree(root: &Path, store: &ObjectStore, tree_hash: Hash) -> Result<(), String> {
     let idx = mkit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
     mkit_core::index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
+}
+
+/// Refuse a destructive restore when the index/worktree contains user work.
+pub fn ensure_restore_safe(
+    root: &Path,
+    store: &ObjectStore,
+    target_tree: Hash,
+) -> Result<(), String> {
+    let current_tree = current_head_tree(root, store)?;
+    let idx = read_or_seed_index_from_head(root, store)?;
+    let index_tree = worktree::build_tree_from_index(store, &idx)
+        .map_err(|e| format!("check index state: {e}"))?;
+
+    let staged = diff_trees(store, current_tree, Some(index_tree))
+        .map_err(|e| format!("check staged changes: {e}"))?;
+    if let Some(entry) = staged.entries.first() {
+        return Err(format!(
+            "restore would overwrite staged changes; commit, stash, or reset '{}' first",
+            entry.path
+        ));
+    }
+
+    let worktree_tree = worktree::build_tree(store, root)
+        .map_err(|e| format!("check working tree changes: {e}"))?;
+    let unstaged = diff_trees(store, Some(index_tree), Some(worktree_tree))
+        .map_err(|e| format!("check working tree changes: {e}"))?;
+    if let Some(entry) = unstaged
+        .entries
+        .iter()
+        .find(|entry| entry.kind != DiffKind::Added)
+    {
+        return Err(format!(
+            "restore would overwrite local changes; commit, stash, or reset '{}' first",
+            entry.path
+        ));
+    }
+
+    let target_writes = diff_trees(store, Some(index_tree), Some(target_tree))
+        .map_err(|e| format!("check restore target: {e}"))?
+        .entries
+        .into_iter()
+        .filter(|entry| entry.kind != DiffKind::Removed)
+        .map(|entry| entry.path)
+        .collect::<Vec<_>>();
+    if target_writes.is_empty() {
+        return Ok(());
+    }
+
+    let mut worktree_paths = Vec::new();
+    collect_worktree_paths(root, root, "", &mut worktree_paths)
+        .map_err(|e| format!("check untracked paths: {e}"))?;
+    if let Some(path) = worktree_paths.iter().find(|path| {
+        !index_tracks_path_or_descendant(&idx, path)
+            && target_writes
+                .iter()
+                .any(|target| paths_overlap(path, target))
+    }) {
+        return Err(format!(
+            "restore would overwrite untracked path '{}'; move or remove it first",
+            path
+        ));
+    }
+
+    Ok(())
+}
+
+fn current_head_tree(root: &Path, store: &ObjectStore) -> Result<Option<Hash>, String> {
+    let mkit_dir = root.join(mkit_core::MKIT_DIR);
+    let Some(head_hash) =
+        refs::resolve_head(&mkit_dir).map_err(|e| format!("resolve HEAD: {e}"))?
+    else {
+        return Ok(None);
+    };
+    match store
+        .read_object(&head_hash)
+        .map_err(|e| format!("read HEAD: {e}"))?
+    {
+        Object::Commit(c) => Ok(Some(c.tree_hash)),
+        Object::Remix(r) => Ok(Some(r.tree_hash)),
+        _ => Err("HEAD does not resolve to a commit or remix".to_string()),
+    }
+}
+
+fn collect_worktree_paths(
+    root: &Path,
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<String>,
+) -> std::io::Result<()> {
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in read {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case(".mkit") || name.eq_ignore_ascii_case(".git") {
+            continue;
+        }
+        let path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        out.push(path.clone());
+        let full_path = root.join(&path);
+        let meta = fs::symlink_metadata(&full_path)?;
+        if meta.is_dir() {
+            collect_worktree_paths(root, &full_path, &path, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn index_tracks_path_or_descendant(index: &Index, path: &str) -> bool {
+    index.entries.iter().any(|entry| {
+        entry.status != EntryStatus::Removed
+            && (entry.path == path || index_path_descends_from(&entry.path, path))
+    })
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    index_path_matches_or_descends(left, right) || index_path_descends_from(right, left)
 }
 
 /// Read the index, seeding an absent/empty one from HEAD when possible.

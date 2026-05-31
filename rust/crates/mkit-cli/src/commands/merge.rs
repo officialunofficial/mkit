@@ -85,6 +85,9 @@ pub fn run(args: &[String]) -> u8 {
             Ok(t) => t,
             Err(code) => return code,
         };
+        if let Err(e) = super::ensure_restore_safe(&cwd, &store, theirs_tree) {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
         if let Err(e) = restore::restore_tree(&store, theirs_tree, &cwd, &RestoreOptions::default())
         {
             return emit_err(&format!("restore worktree: {e}"), exit::GENERAL_ERROR);
@@ -133,6 +136,10 @@ pub fn run(args: &[String]) -> u8 {
             let _ = writeln!(stderr, "  {} ({kind})", c.path);
         }
         return exit::GENERAL_ERROR;
+    }
+
+    if let Err(e) = super::ensure_restore_safe(&cwd, &store, result.tree_hash) {
+        return emit_err(&e, exit::GENERAL_ERROR);
     }
 
     // Clean merge — build a merge commit with two parents.
