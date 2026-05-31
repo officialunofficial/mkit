@@ -41,18 +41,122 @@ on:
         type: string
 
 permissions:
-  contents: write       # create the GitHub Release + upload assets
-  id-token: write       # cosign keyless OIDC
-  attestations: write   # supply-chain attestations
+  contents: read
 
 env:
   RUST_VERSION: "1.95.0"
   BINARY_NAME: mkit
 
 jobs:
+  validate-release-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      ref: ${{ steps.validate.outputs.ref }}
+      version: ${{ steps.validate.outputs.version }}
+    steps:
+      - name: Checkout release refs
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag trust and ancestry
+        id: validate
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          TRUSTED_FINGERPRINTS: ${{ vars.MKIT_RELEASE_GPG_FINGERPRINTS }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${DISPATCH_TAG}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if [ -z "${TAG}" ]; then
+            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
+            exit 1
+          fi
+
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "ERROR: release tag must match vMAJOR.MINOR.PATCH with optional prerelease suffix: ${TAG}" >&2
+            exit 1
+          fi
+
+          if [ -z "${TRUSTED_FINGERPRINTS}" ]; then
+            echo "ERROR: MKIT_RELEASE_GPG_FINGERPRINTS repo/org variable is required" >&2
+            exit 1
+          fi
+          TRUSTED_FINGERPRINTS="$(printf '%s' "${TRUSTED_FINGERPRINTS}" | tr '[:lower:]' '[:upper:]')"
+
+          git fetch --force --tags origin
+          git fetch --force origin main:refs/remotes/origin/main
+
+          for TRUSTED_FINGERPRINT in ${TRUSTED_FINGERPRINTS}; do
+            if [[ ! "${TRUSTED_FINGERPRINT}" =~ ^[A-Fa-f0-9]{40}$ ]]; then
+              echo "ERROR: invalid GPG fingerprint in MKIT_RELEASE_GPG_FINGERPRINTS: ${TRUSTED_FINGERPRINT}" >&2
+              exit 1
+            fi
+            gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "${TRUSTED_FINGERPRINT}" || \
+              gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "${TRUSTED_FINGERPRINT}"
+          done
+
+          REF="refs/tags/${TAG}"
+          if ! git show-ref --verify --quiet "${REF}"; then
+            echo "ERROR: tag ${TAG} does not exist" >&2
+            exit 1
+          fi
+
+          if [ "$(git cat-file -t "${REF}")" != "tag" ]; then
+            echo "ERROR: ${TAG} must be an annotated signed tag, not a lightweight tag" >&2
+            exit 1
+          fi
+
+          VERIFY_LOG="$(mktemp)"
+          if ! git verify-tag --raw -v "${REF}" >"${VERIFY_LOG}" 2>&1; then
+            cat "${VERIFY_LOG}" >&2
+            echo "ERROR: ${TAG} does not have a valid GPG signature" >&2
+            exit 1
+          fi
+
+          FINGERPRINT="$(awk '/^\[GNUPG:\] VALIDSIG / { print $3; exit }' "${VERIFY_LOG}" | tr '[:lower:]' '[:upper:]')"
+          if [ -z "${FINGERPRINT}" ]; then
+            cat "${VERIFY_LOG}" >&2
+            echo "ERROR: could not extract tag signing fingerprint for ${TAG}" >&2
+            exit 1
+          fi
+
+          case " ${TRUSTED_FINGERPRINTS} " in
+            *" ${FINGERPRINT} "*) ;;
+            *)
+              echo "ERROR: tag signer ${FINGERPRINT} is not allowlisted in MKIT_RELEASE_GPG_FINGERPRINTS" >&2
+              exit 1
+              ;;
+          esac
+
+          TAG_COMMIT="$(git rev-parse "${REF}^{commit}")"
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
+            echo "ERROR: ${TAG} target commit ${TAG_COMMIT} is not reachable from origin/main" >&2
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    needs: validate-release-tag
+    permissions:
+      contents: read
+      id-token: write       # cosign keyless OIDC
     strategy:
       fail-fast: false
       matrix:
@@ -77,17 +181,9 @@ jobs:
         id: meta
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          if [ -z "${TAG}" ]; then
-            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
-            exit 1
-          fi
-          REF="refs/tags/${TAG}"
-          VERSION="${TAG#v}"
+          TAG="${{ needs.validate-release-tag.outputs.tag }}"
+          REF="${{ needs.validate-release-tag.outputs.ref }}"
+          VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -155,7 +251,11 @@ jobs:
           cp LICENSE-MIT LICENSE-APACHE README.md "${STAGE}/"
           # Optional artifacts — included when present.
           [ -f CHANGELOG.md ] && cp CHANGELOG.md "${STAGE}/" || true
-          [ -d share/man/man1 ] && cp -R share/man "${STAGE}/" || true
+          mkdir -p "${STAGE}/share/man/man1" "${STAGE}/share/completions"
+          cp man/mkit.1 "${STAGE}/share/man/man1/mkit.1"
+          cp completions/mkit.bash "${STAGE}/share/completions/mkit.bash"
+          cp completions/mkit.zsh "${STAGE}/share/completions/_mkit"
+          cp completions/mkit.fish "${STAGE}/share/completions/mkit.fish"
 
       - name: Compute per-archive SHA256SUMS
         shell: bash
@@ -225,23 +325,17 @@ jobs:
   sbom:
     name: Generate SBOM
     runs-on: ubuntu-latest
-    needs: build
+    needs: [validate-release-tag, build]
+    permissions:
+      contents: read
     steps:
       - name: Resolve release metadata
         id: meta
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          if [ -z "${TAG}" ]; then
-            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
-            exit 1
-          fi
-          REF="refs/tags/${TAG}"
-          VERSION="${TAG#v}"
+          TAG="${{ needs.validate-release-tag.outputs.tag }}"
+          REF="${{ needs.validate-release-tag.outputs.ref }}"
+          VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -272,23 +366,18 @@ jobs:
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [build, sbom]
+    needs: [validate-release-tag, build, sbom]
+    permissions:
+      contents: write       # create the GitHub Release + upload assets
+      id-token: write       # cosign keyless OIDC
     steps:
       - name: Resolve version
         id: meta
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          if [ -z "${TAG}" ]; then
-            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
-            exit 1
-          fi
-          REF="refs/tags/${TAG}"
-          VERSION="${TAG#v}"
+          TAG="${{ needs.validate-release-tag.outputs.tag }}"
+          REF="${{ needs.validate-release-tag.outputs.ref }}"
+          VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
@@ -395,14 +484,14 @@ jobs:
             ### npm package
 
             The WASM bindings are also published to npm as
-            [`mkit-wasm`](https://www.npmjs.com/package/mkit-wasm) at the
+            [`@makechain/mkit-wasm`](https://www.npmjs.com/package/@makechain/mkit-wasm) at the
             same version, with Sigstore-backed provenance attached to this
             workflow run.
 
   publish-wasm:
     name: Publish mkit-wasm to npm
     runs-on: ubuntu-latest
-    needs: [build, release]
+    needs: [validate-release-tag, build, release]
     permissions:
       contents: write       # attach assets to the GitHub Release
       id-token: write       # npm provenance via OIDC
@@ -411,17 +500,9 @@ jobs:
         id: meta
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          if [ -z "${TAG}" ]; then
-            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
-            exit 1
-          fi
-          REF="refs/tags/${TAG}"
-          VERSION="${TAG#v}"
+          TAG="${{ needs.validate-release-tag.outputs.tag }}"
+          REF="${{ needs.validate-release-tag.outputs.ref }}"
+          VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"

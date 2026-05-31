@@ -7,30 +7,30 @@ and [`docs/release/SIGNING.md`](release/SIGNING.md).
 ## What gets published
 
 A single `vX.Y.Z` tag triggers
-[`.github/workflows/release.yml`](../.github/workflows/release.yml), which
-produces:
+[`.github/workflows/release.yml`](../.github/workflows/release.yml). Before
+publishing anything, the workflow verifies that the tag is strict semver,
+annotated, GPG-signed by an allowlisted release fingerprint, and points at a
+commit reachable from `origin/main`. It then produces:
 
 1. **GitHub Release** with native binaries for four targets:
    - `aarch64-apple-darwin`
    - `x86_64-apple-darwin`
    - `aarch64-unknown-linux-gnu`
    - `x86_64-unknown-linux-gnu`
-   Each archive is cosign-signed (keyless OIDC, Rekor logged) and ships
-   alongside per-archive `.sig`/`.crt`/`.cosign.bundle`, an aggregate
-   `SHA256SUMS` (also cosign-signed), and a CycloneDX `sbom.cdx.json`.
+   Each archive contains the `mkit` binary, licenses, README, optional
+   changelog, `share/man/man1/mkit.1`, and shell completions under
+   `share/completions/`. Each archive is cosign-signed (keyless OIDC, Rekor
+   logged) and ships alongside per-archive `.sig`/`.crt`/`.cosign.bundle`, an
+   aggregate `SHA256SUMS` (also cosign-signed), and a CycloneDX
+   `sbom.cdx.json`.
 
 2. **npm package** `@makechain/mkit-wasm@X.Y.Z`. Built with
    `wasm-pack --target bundler` and published with `npm publish
    --access public`. The pkg tarball is also attached to the GitHub
    Release as `mkit-wasm-X.Y.Z-npm.tar.gz` for offline mirroring.
 
-   *Provenance is currently disabled* — `--provenance` requires the
-   source GitHub repo to be `public`, but this one is `internal`.
-   The workflow code path is intact (the `id-token: write` permission
-   is still set); just re-add `--provenance` to the `npm publish`
-   line once the repo is flipped to public. Sigstore attestation
-   will then bind each release to the GitHub Actions run that
-   produced it.
+   npm provenance is enabled with `npm publish --provenance`; it binds the
+   package to this GitHub Actions workflow run through GitHub OIDC.
 
 ## Cutting a release
 
@@ -43,14 +43,18 @@ produces:
    git tag -s vX.Y.Z -m "mkit X.Y.Z"
    git push origin vX.Y.Z
    ```
-   Signed tags only — see `docs/release/CHECKLIST.md`.
+   Signed, annotated tags only. The signing key fingerprint must be listed in
+   the `MKIT_RELEASE_GPG_FINGERPRINTS` repository or organization variable and
+   its public key must be available from `keys.openpgp.org` or
+   `keyserver.ubuntu.com`; see `docs/release/CHECKLIST.md`.
 5. Watch `release.yml`. The job order is:
-   `build` (× 4 archs) → `sbom` → `release` → `publish-wasm`.
+   `validate-release-tag` → `build` (× 4 archs) → `sbom` → `release` →
+   `publish-wasm`.
 6. Run the post-release smoke checks in
    [`docs/release/CHECKLIST.md`](release/CHECKLIST.md) (cosign verify,
-   `npm view mkit-wasm@X.Y.Z`, `npm audit signatures`).
+   `npm view @makechain/mkit-wasm@X.Y.Z`, `npm audit signatures`).
 
-## Required GitHub Actions secrets
+## Required GitHub Actions secrets and variables
 
 | Secret | Purpose | Required for |
 | --- | --- | --- |
@@ -60,6 +64,10 @@ produces:
 
 cosign keyless and npm provenance both run on the GitHub OIDC token;
 no extra secrets needed for those.
+
+| Variable | Purpose | Required for |
+| --- | --- | --- |
+| `MKIT_RELEASE_GPG_FINGERPRINTS` | Space-separated trusted 40-hex GPG fingerprints allowed to sign release tags; public keys must be published to `keys.openpgp.org` or `keyserver.ubuntu.com` | `release.yml` preflight |
 
 ## One-time setup: `CODECOV_TOKEN`
 
@@ -81,22 +89,22 @@ badge, trend chart, and PR-diff overlay work. Steps:
 
 ## One-time setup: `MKIT_NPM_TOKEN`
 
-`mkit-wasm` is currently unclaimed on the npm registry. Steps for the
-human cutting the first release:
+`@makechain/mkit-wasm` is the npm package published by the release workflow.
+Steps for the human cutting the first release:
 
 1. **Create an npm org / user.** The package will publish under the
    account that owns `MKIT_NPM_TOKEN`. Recommended: a machine account or
    a maintainer account with the package added to a 2FA-protected org.
 2. **Generate an Automation token** (`npmjs.com → Access Tokens → New
    Granular Token` or a classic Automation token). Required scopes:
-   `read+write` on `mkit-wasm`. Automation tokens bypass the 2FA OTP
+   `read+write` on `@makechain/mkit-wasm`. Automation tokens bypass the 2FA OTP
    prompt that would otherwise block CI.
 3. **Add to GitHub repo secrets:**
    `Settings → Secrets and variables → Actions → New repository secret`
    - Name: `MKIT_NPM_TOKEN`
    - Value: the token from step 2.
 4. **Claim the package name (one-time).** Until the first successful
-   `npm publish`, the name `mkit-wasm` remains unclaimed. Two options:
+   `npm publish`, the name `@makechain/mkit-wasm` remains unclaimed. Two options:
    - Recommended: cut a real `v0.1.0` tag — the workflow will publish.
    - Or, manually publish a placeholder once from a maintainer
      workstation:
@@ -120,7 +128,7 @@ rotate, leak, or revoke.
 
 Migration plan:
 
-1. On `npmjs.com`, open the `mkit-wasm` package settings → Publishing
+1. On `npmjs.com`, open the `@makechain/mkit-wasm` package settings → Publishing
    access → Trusted Publishers → add this repo + the `release.yml`
    workflow.
 2. Drop the `NODE_AUTH_TOKEN` env on the publish step in
@@ -133,15 +141,12 @@ successful token-based release so the runbook is exercised.
 
 ## Package name decision
 
-`mkit-wasm` (unscoped). Verified available via
-`npm view @makechain/mkit-wasm` (404). Unscoped is what consumers will type
-without a registry-scope prefix and reads cleanly as `bun add @makechain/mkit-wasm`.
+The Rust crate remains `mkit-wasm`, but the release workflow publishes the npm
+package as `@makechain/mkit-wasm` so ownership and token scope live under the
+Makechain npm organization.
 
-If the unscoped name is ever lost or squatted, fall back to
-`@officialunofficial/mkit-wasm` and update:
+If the package scope ever changes, update:
 
-- `rust/crates/mkit-wasm/Cargo.toml` `[package].name`
 - `rust/crates/mkit-wasm/README.md` install snippet
-- The `publish-wasm` workflow (no `--access` change needed; already
-  `public`)
+- The `publish-wasm` workflow `npm pkg set name=...` line
 - `npm view` smoke-test references in this doc
