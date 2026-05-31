@@ -56,6 +56,8 @@ jobs:
     outputs:
       tag: ${{ steps.validate.outputs.tag }}
       ref: ${{ steps.validate.outputs.ref }}
+      tag_object: ${{ steps.validate.outputs.tag_object }}
+      commit: ${{ steps.validate.outputs.commit }}
       version: ${{ steps.validate.outputs.version }}
     steps:
       - name: Checkout release refs
@@ -139,6 +141,7 @@ jobs:
               ;;
           esac
 
+          TAG_OBJECT="$(git rev-parse "${REF}^{tag}")"
           TAG_COMMIT="$(git rev-parse "${REF}^{commit}")"
           if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
             echo "ERROR: ${TAG} target commit ${TAG_COMMIT} is not reachable from origin/main" >&2
@@ -148,6 +151,8 @@ jobs:
           VERSION="${TAG#v}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "tag_object=${TAG_OBJECT}" >> "$GITHUB_OUTPUT"
+          echo "commit=${TAG_COMMIT}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
   build:
@@ -183,9 +188,11 @@ jobs:
         run: |
           TAG="${{ needs.validate-release-tag.outputs.tag }}"
           REF="${{ needs.validate-release-tag.outputs.ref }}"
+          COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
           VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "archive=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}.${{ matrix.archive_ext }}" >> "$GITHUB_OUTPUT"
           echo "stage=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
@@ -193,7 +200,7 @@ jobs:
       - name: Checkout (at resolved tag)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
-          ref: ${{ steps.meta.outputs.ref }}
+          ref: ${{ steps.meta.outputs.commit }}
           fetch-depth: 0
 
       - name: Install Rust ${{ env.RUST_VERSION }} + target
@@ -335,15 +342,17 @@ jobs:
         run: |
           TAG="${{ needs.validate-release-tag.outputs.tag }}"
           REF="${{ needs.validate-release-tag.outputs.ref }}"
+          COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
           VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
-          ref: ${{ steps.meta.outputs.ref }}
+          ref: ${{ steps.meta.outputs.commit }}
           fetch-depth: 0
 
       - name: Generate CycloneDX SBOM
@@ -377,16 +386,36 @@ jobs:
         run: |
           TAG="${{ needs.validate-release-tag.outputs.tag }}"
           REF="${{ needs.validate-release-tag.outputs.ref }}"
+          TAG_OBJECT="${{ needs.validate-release-tag.outputs.tag_object }}"
+          COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
           VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "tag_object=${TAG_OBJECT}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
-          ref: ${{ steps.meta.outputs.ref }}
+          ref: ${{ steps.meta.outputs.commit }}
           fetch-depth: 0
+
+      - name: Verify tag still points at validated object
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          REF="${{ steps.meta.outputs.ref }}"
+          EXPECTED_TAG_OBJECT="${{ steps.meta.outputs.tag_object }}"
+          EXPECTED_COMMIT="${{ steps.meta.outputs.commit }}"
+          git fetch --force origin "${REF}:${REF}"
+          ACTUAL_TAG_OBJECT="$(git rev-parse "${REF}^{tag}")"
+          ACTUAL_COMMIT="$(git rev-parse "${REF}^{commit}")"
+          if [ "${ACTUAL_TAG_OBJECT}" != "${EXPECTED_TAG_OBJECT}" ] || [ "${ACTUAL_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
+            echo "ERROR: tag ${TAG} moved after validation" >&2
+            exit 1
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
@@ -502,15 +531,17 @@ jobs:
         run: |
           TAG="${{ needs.validate-release-tag.outputs.tag }}"
           REF="${{ needs.validate-release-tag.outputs.ref }}"
+          COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
           VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
-          ref: ${{ steps.meta.outputs.ref }}
+          ref: ${{ steps.meta.outputs.commit }}
           fetch-depth: 0
 
       - name: Install Rust ${{ env.RUST_VERSION }} + wasm32 target
