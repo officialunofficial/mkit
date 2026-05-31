@@ -363,7 +363,9 @@ pub fn read_regular_file_bounded(path: &Path) -> WorktreeResult<(fs::Metadata, V
     if meta.len() > MAX_FILE_BYTES {
         return Err(WorktreeError::FileTooLarge(path.to_path_buf()));
     }
-    let mut data = Vec::with_capacity(usize::try_from(meta.len().min(CHUNK_THRESHOLD)).unwrap());
+    let initial_capacity = usize::try_from(meta.len().min(CHUNK_THRESHOLD))
+        .map_err(|_| WorktreeError::FileTooLarge(path.to_path_buf()))?;
+    let mut data = Vec::with_capacity(initial_capacity);
     file.by_ref()
         .take(MAX_FILE_BYTES + 1)
         .read_to_end(&mut data)?;
