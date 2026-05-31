@@ -542,7 +542,7 @@ fn read_download_pack_body_from_child(io: &mut ChildIo) -> TransportResult<Vec<u
 fn read_frame_or_err<R: io::Read>(r: &mut R) -> TransportResult<SshFrame> {
     match read_frame::<_, SshFrame>(r) {
         Ok(f) => Ok(f),
-        Err(e) => Err(frame_error_to_transport(e)),
+        Err(e) => Err(frame_error_to_transport(&e)),
     }
 }
 
@@ -595,12 +595,12 @@ fn read_child_frame_or_err(io: &mut ChildIo) -> TransportResult<SshFrame> {
             Err(TransportError::ConnectionFailed)
         }
         Err(TimedFrameError::Disconnected) => Err(TransportError::ConnectionFailed),
-        Err(TimedFrameError::Frame(e)) => Err(frame_error_to_transport(e)),
+        Err(TimedFrameError::Frame(e)) => Err(frame_error_to_transport(&e)),
     }
 }
 
-fn frame_error_to_transport(e: FrameError) -> TransportError {
-    match e {
+fn frame_error_to_transport(e: &FrameError) -> TransportError {
+    match *e {
         FrameError::LengthTruncated | FrameError::BodyTruncated { .. } => {
             TransportError::ConnectionFailed
         }

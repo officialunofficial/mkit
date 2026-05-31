@@ -667,15 +667,26 @@ impl Transport for HttpTransport {
         let parsed: RefListResponse = resp.json().map_err(|_| TransportError::InvalidResponse)?;
 
         let mut out: Vec<Ref> = Vec::with_capacity(parsed.refs.len());
+        let full_prefix = prefix.trim_end_matches('/');
+        let full_prefix_with_slash = if full_prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{full_prefix}/")
+        };
         for entry in parsed.refs {
             // Strip the query prefix if the server included it — keeps
             // the list_refs contract identical to the memory / file
             // transports.
-            let stripped = entry
-                .name
-                .strip_prefix(prefix)
-                .unwrap_or(entry.name.as_str())
-                .to_string();
+            let stripped = if full_prefix_with_slash.is_empty() {
+                entry.name.as_str()
+            } else if let Some(relative) = entry.name.strip_prefix(&full_prefix_with_slash) {
+                relative
+            } else if entry.name.starts_with("refs/") {
+                return Err(TransportError::InvalidRef(entry.name));
+            } else {
+                entry.name.as_str()
+            }
+            .to_string();
             if !validate_ref_name(&stripped) {
                 return Err(TransportError::InvalidRef(entry.name));
             }
@@ -985,7 +996,10 @@ mod tests {
 
     fn record_sleep(delay: Duration) {
         RECORDED_SLEEP_COUNT.fetch_add(1, Ordering::SeqCst);
-        RECORDED_SLEEP_MILLIS.store(delay.as_millis() as u64, Ordering::SeqCst);
+        RECORDED_SLEEP_MILLIS.store(
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
     }
 
     // -- connect() + URL parsing -------------------------------------------
@@ -1392,6 +1406,45 @@ mod tests {
         let t = make_transport(&server, None);
         let err = t.list_refs("refs/heads/").unwrap_err();
         assert!(matches!(err, TransportError::InvalidResponse));
+    }
+
+    #[test]
+    fn list_refs_accepts_full_names_with_prefix_without_trailing_slash() {
+        let mut server = Server::new();
+        let h = sample_hash(0xB0);
+        let body = format!(
+            r#"{{"refs":[{{"name":"refs/heads/main","hash":"{}"}}]}}"#,
+            to_hex(&h),
+        );
+        let _m = server
+            .mock("GET", Matcher::Regex(r"^/myproj/refs\?prefix=".to_string()))
+            .with_status(200)
+            .with_body(body)
+            .create();
+        let t = make_transport(&server, None);
+        let refs = t.list_refs("refs/heads").unwrap();
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "main");
+        assert_eq!(refs[0].hash, Some(h));
+    }
+
+    #[test]
+    fn list_refs_rejects_full_names_outside_requested_prefix() {
+        let mut server = Server::new();
+        let body = format!(
+            r#"{{"refs":[{{"name":"refs/tags/v1","hash":"{}"}}]}}"#,
+            to_hex(&sample_hash(0xB1)),
+        );
+        let _m = server
+            .mock("GET", Matcher::Regex(r"^/myproj/refs\?prefix=".to_string()))
+            .with_status(200)
+            .with_body(body)
+            .create();
+        let t = make_transport(&server, None);
+        let err = t.list_refs("refs/heads/").unwrap_err();
+
+        assert!(matches!(err, TransportError::InvalidRef(_)));
     }
 
     // -- retry behaviour ----------------------------------------------------
