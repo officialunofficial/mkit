@@ -15,12 +15,12 @@ try {
 }
 
 const config = JSON.parse(raw)
-const today = new Date().toISOString().slice(0, 10)
+const COMPATIBILITY_DATE = '2026-05-31'
 const changes = []
 
-if (config.compatibility_date !== today) {
-  config.compatibility_date = today
-  changes.push(`compatibility_date=${today}`)
+if (config.compatibility_date !== COMPATIBILITY_DATE) {
+  config.compatibility_date = COMPATIBILITY_DATE
+  changes.push(`compatibility_date=${COMPATIBILITY_DATE}`)
 }
 
 const flags = new Set(Array.isArray(config.compatibility_flags) ? config.compatibility_flags : [])

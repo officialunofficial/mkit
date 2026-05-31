@@ -23,11 +23,16 @@ const DEFAULT_IMAGE: ImageAsset = {
   bytes: TEXT_ENCODER.encode(DEFAULT_SVG),
 }
 
+// Demo/browser cap. `/hash` builds an ArrayBuffer, WASM blob, and base64 data URL for preview, so keep this much lower
+// than the streaming demo and reject before allocating the file bytes.
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
 export function HashDemo() {
   const api = useMkit()
   const [text, setText] = useState('hello, mkit')
   const [message, setMessage] = useState('first commit')
   const [image, setImage] = useState<ImageAsset>(DEFAULT_IMAGE)
+  const [tooLarge, setTooLarge] = useState<{ name: string; size: number } | null>(null)
   const customised = image !== DEFAULT_IMAGE
 
   // Data URL for the <img> preview. Object URLs would be cheaper but React strict-mode double-mount revokes them
@@ -85,15 +90,24 @@ export function HashDemo() {
   if (!commit) return null
 
   const handleFile = async (file: File) => {
+    const name = file.name || 'image'
+    if (file.size > MAX_IMAGE_BYTES) {
+      setTooLarge({ name, size: file.size })
+      return
+    }
     const buf = await file.arrayBuffer()
+    setTooLarge(null)
     setImage({
-      name: file.name || 'image',
+      name,
       mime: file.type || 'application/octet-stream',
       bytes: new Uint8Array(buf),
     })
   }
 
-  const resetImage = () => setImage(DEFAULT_IMAGE)
+  const resetImage = () => {
+    setTooLarge(null)
+    setImage(DEFAULT_IMAGE)
+  }
 
   return (
     // Mobile-first ordering: outputs above controls. `flex-col-reverse` reverses sidebar/main below `lg`, then
@@ -113,7 +127,8 @@ export function HashDemo() {
         <div>
           <span className='block text-sm text-[--color-muted]'>Image</span>
           <p className='mb-3 text-xs text-[--color-muted]'>
-            {image.name} · {image.mime || 'application/octet-stream'} · {formatBytes(image.bytes.byteLength)}
+            {image.name} · {image.mime || 'application/octet-stream'} · {formatBytes(image.bytes.byteLength)} · demo cap{' '}
+            {formatBytes(MAX_IMAGE_BYTES)}
           </p>
           <div className='space-y-3'>
             {/* 1px pure-black inset outline per the image-outline design rule — reads as a consistent edge on any
@@ -141,6 +156,13 @@ export function HashDemo() {
                 Reset
               </button>
             </div>
+            {tooLarge ? (
+              <p className='rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700'>
+                <span className='font-medium'>{tooLarge.name}</span> is {formatBytes(tooLarge.size)}. The `/hash` demo
+                previews files as data URLs, so it rejects files over {formatBytes(MAX_IMAGE_BYTES)} before reading
+                them. Use `/streaming` for larger files.
+              </p>
+            ) : null}
             <input
               ref={fileRef}
               type='file'

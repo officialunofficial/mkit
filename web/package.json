@@ -4,22 +4,22 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "wasm:build": "cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir pkg --release",
+    "wasm:build": "rm -rf vendor/mkit-wasm/pkg && cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir ../../../web/vendor/mkit-wasm/pkg --release",
     "dev": "waku dev",
-    "build": "CLOUDFLARE=1 waku build && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",
+    "build": "pnpm wasm:build && CLOUDFLARE=1 waku build && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",
     "start": "waku start",
     "deploy": "pnpm build && wrangler deploy -c dist/server/wrangler.json",
     "preview": "pnpm build && wrangler dev -c dist/server/wrangler.json",
-    "test": "vitest run",
+    "test": "pnpm wasm:build && vitest run",
     "test:watch": "vitest",
     "lint": "oxlint src",
     "fmt": "oxfmt src",
     "fmt:check": "oxfmt --check src",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "pnpm wasm:build && tsc --noEmit"
   },
   "dependencies": {
     "hono": "^4.12.14",
-    "mkit-wasm": "file:../rust/crates/mkit-wasm/pkg",
+    "mkit-wasm": "link:vendor/mkit-wasm",
     "react": "~19.2.5",
     "react-dom": "~19.2.5",
     "react-server-dom-webpack": "~19.2.5",

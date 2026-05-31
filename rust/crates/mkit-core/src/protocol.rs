@@ -198,14 +198,16 @@ pub const BACKOFF_CAP: Duration = Duration::from_secs(300);
 
 /// Per-pack body size ceiling enforced by every transport that ingests
 /// pack bytes (HTTP `Content-Length`, S3 `GetObject`, SSH
-/// `DownloadPackHeader.total_bytes`). 4 GiB matches the pack-format
-/// addressable range; servers advertising more are treated as hostile.
+/// `DownloadPackHeader.total_bytes`). On 64-bit targets, 4 GiB matches
+/// the pack-format addressable range; pointer-width-limited targets cap
+/// at their maximum addressable buffer size instead of failing to compile.
+#[cfg(target_pointer_width = "64")]
 pub const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+#[cfg(not(target_pointer_width = "64"))]
+pub const PACK_BODY_LIMIT: u64 = usize::MAX as u64;
 
 /// `usize`-typed mirror of [`PACK_BODY_LIMIT`] for `Vec`-shaped buffer
-/// caps. mkit only supports 64-bit targets where this fits trivially;
-/// the assertion below makes a 32-bit build fail to compile rather
-/// than silently truncate.
+/// caps. The assertion below prevents silent truncation on any target.
 #[allow(clippy::cast_possible_truncation)]
 pub const PACK_BODY_LIMIT_USIZE: usize = PACK_BODY_LIMIT as usize;
 const _: () = assert!(
