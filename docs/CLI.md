@@ -272,7 +272,7 @@ Accepted schemes:
 |--------|------|-----|
 | `mkit+file` | `mkit+file:///abs/path` | local filesystem mirror |
 | `mkit+https` | `mkit+https://host[:port]/path` | HTTP gateway (e.g. VCS Worker) |
-| `mkit+s3` | `mkit+s3://bucket/prefix` | S3-compatible object store |
+| `mkit+s3` | `mkit+s3://endpoint/bucket[/prefix]` | S3-compatible object store |
 | `mkit+ssh` | `mkit+ssh://user@host[:port]:path` | SSH with the mkit shell |
 | `mkit+memory` | `mkit+memory://` | in-memory (testing only) |
 

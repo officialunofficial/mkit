@@ -160,7 +160,7 @@ impl S3Transport {
         Ok(Self {
             endpoint: endpoint.into(),
             bucket: bucket.into(),
-            prefix,
+            prefix: normalize_s3_prefix(prefix)?,
             creds,
             client,
             clock: default_clock,
@@ -212,13 +212,41 @@ impl S3Transport {
         format!("packs/{}/shards/{}", to_hex(digest), index)
     }
 
-    /// Build the S3 path `/<bucket>/<key>` that the signer will sign
-    /// and the client will request.
+    /// Build the repository namespace key. Without a URL prefix this is
+    /// the canonical repository-relative key; with a prefix it is
+    /// `<prefix>/<canonical-key>`.
+    fn effective_key(&self, key: &str) -> String {
+        match self.prefix.as_deref() {
+            Some(prefix) if key.is_empty() => format!("{prefix}/"),
+            Some(prefix) => format!("{prefix}/{key}"),
+            None => key.to_owned(),
+        }
+    }
+
+    /// Build the S3 path `/<bucket>/<effective-key>` that the signer will
+    /// sign and the client will request.
     fn build_path(&self, key: &str) -> String {
         if key.is_empty() {
             return format!("/{}", self.bucket);
         }
-        format!("/{}/{}", self.bucket, key)
+        format!("/{}/{}", self.bucket, self.effective_key(key))
+    }
+
+    /// Build a ListObjectsV2 prefix under the URL namespace. Listing is
+    /// sent to bucket root (`key = ""`) and scoped only through this query.
+    fn effective_list_prefix(&self, prefix: &str) -> String {
+        match self.prefix.as_deref() {
+            Some(namespace) if prefix.is_empty() => format!("{namespace}/"),
+            Some(namespace) => format!("{namespace}/{prefix}"),
+            None => prefix.to_owned(),
+        }
+    }
+
+    fn strip_effective_prefix<'a>(&self, key: &'a str) -> Option<&'a str> {
+        let Some(namespace) = self.prefix.as_deref() else {
+            return Some(key);
+        };
+        key.strip_prefix(namespace)?.strip_prefix('/')
     }
 
     /// Build the canonical query string for `ListObjectsV2` scoped to a
@@ -396,7 +424,7 @@ fn parse_s3_url(url: &str) -> Result<ParsedS3Url, TransportError> {
     if host.is_empty() {
         return Err(TransportError::InvalidRef("mkit+s3 URL empty host".into()));
     }
-    let (bucket, prefix) = match tail.split_once('/') {
+    let (bucket, raw_prefix) = match tail.split_once('/') {
         Some((b, p)) if !p.is_empty() => (b, Some(p.to_owned())),
         Some((b, _)) => (b, None),
         None => (tail, None),
@@ -409,8 +437,32 @@ fn parse_s3_url(url: &str) -> Result<ParsedS3Url, TransportError> {
     Ok(ParsedS3Url {
         host: host.to_owned(),
         bucket: bucket.to_owned(),
-        prefix,
+        prefix: normalize_s3_prefix(raw_prefix)?,
     })
+}
+
+fn normalize_s3_prefix(prefix: Option<String>) -> Result<Option<String>, TransportError> {
+    let Some(prefix) = prefix else {
+        return Ok(None);
+    };
+    if prefix.is_empty()
+        || prefix.starts_with('/')
+        || prefix.ends_with('/')
+        || prefix.contains("//")
+        || prefix.contains('\\')
+    {
+        return Err(TransportError::InvalidRef(format!(
+            "invalid S3 prefix: {prefix}"
+        )));
+    }
+    for segment in prefix.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(TransportError::InvalidRef(format!(
+                "invalid S3 prefix: {prefix}"
+            )));
+        }
+    }
+    Ok(Some(prefix))
 }
 
 // ---------------------------------------------------------------------------
@@ -551,7 +603,8 @@ impl Transport for S3Transport {
         if !validate_ref_prefix(prefix) {
             return Err(TransportError::InvalidRef(prefix.to_owned()));
         }
-        let query = Self::build_list_query(prefix);
+        let query_prefix = self.effective_list_prefix(prefix);
+        let query = Self::build_list_query(&query_prefix);
         let resp = self.http_request(
             &Method::GET,
             "",
@@ -568,22 +621,25 @@ impl Transport for S3Transport {
         let keys = parse_list_xml(&resp.body);
         let mut out: Vec<Ref> = Vec::new();
         for key in keys {
-            if !validate_ref_name(&key) {
+            let Some(repo_key) = self.strip_effective_prefix(&key) else {
+                continue;
+            };
+            if !validate_ref_name(repo_key) {
                 continue;
             }
             // Resolve each key to its hash via a second GET.
             let ref_resp =
-                self.http_request(&Method::GET, &key, "", None, &[], Some(REF_BODY_LIMIT))?;
+                self.http_request(&Method::GET, repo_key, "", None, &[], Some(REF_BODY_LIMIT))?;
             if ref_resp.status != 200 {
                 continue;
             }
             let Ok(h) = parse_ref_body(&ref_resp.body) else {
                 continue;
             };
-            let suffix = if key.len() > prefix.len() && key.starts_with(prefix) {
-                &key[prefix.len()..]
+            let suffix = if repo_key.len() > prefix.len() && repo_key.starts_with(prefix) {
+                &repo_key[prefix.len()..]
             } else {
-                key.as_str()
+                repo_key
             };
             if !validate_ref_name(suffix) {
                 continue;
@@ -749,12 +805,17 @@ fn fetch_one_shard(
     client: &Client,
     endpoint: &str,
     bucket: &str,
+    prefix: Option<&str>,
     creds: &Credentials,
     digest: &Hash,
     index: u16,
     ts: i64,
 ) -> TransportResult<Vec<u8>> {
-    let object_key = S3Transport::shard_object_key(digest, index);
+    let canonical_key = S3Transport::shard_object_key(digest, index);
+    let object_key = prefix.map_or_else(
+        || canonical_key.clone(),
+        |namespace| format!("{namespace}/{canonical_key}"),
+    );
     let path = if bucket.is_empty() {
         format!("/{object_key}")
     } else {
@@ -833,12 +894,22 @@ impl S3Transport {
             let tx = tx.clone();
             let endpoint = self.endpoint.clone();
             let bucket = self.bucket.clone();
+            let prefix = self.prefix.clone();
             let creds = self.creds.clone();
             let client = self.client.clone();
             let clock = self.clock;
             handles.push(std::thread::spawn(move || {
                 let ts = clock();
-                let result = fetch_one_shard(&client, &endpoint, &bucket, &creds, &digest, i, ts);
+                let result = fetch_one_shard(
+                    &client,
+                    &endpoint,
+                    &bucket,
+                    prefix.as_deref(),
+                    &creds,
+                    &digest,
+                    i,
+                    ts,
+                );
                 let _ = tx.send((i, result));
             }));
         }
