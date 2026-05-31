@@ -190,6 +190,7 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     exit::OK
 }
 
+#[allow(clippy::too_many_lines)]
 fn replay(
     cwd: &std::path::Path,
     mkit_dir: &std::path::Path,

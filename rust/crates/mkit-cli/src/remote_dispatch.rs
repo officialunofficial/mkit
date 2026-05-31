@@ -262,27 +262,25 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> 
         Err(_) => (remote_refs[0].0.clone(), None, remote_refs[0].1),
     };
 
-    if let Some(local_tip) = local_tip {
+    let ref_condition = if let Some(local_tip) = local_tip {
         if local_tip == remote_tip {
             return Ok(n);
         }
         if !is_ancestor(&store, local_tip, remote_tip)? {
             return Err(DispatchError::NonFastForwardPull { branch });
         }
-    }
+        refs::RefWriteCondition::Match(local_tip)
+    } else {
+        refs::RefWriteCondition::Missing
+    };
 
     let tree = load_tree_hash(&store, remote_tip)?;
     crate::commands::ensure_restore_safe(cwd, &store, tree)
         .map_err(DispatchError::RestoreSafety)?;
+    crate::commands::write_ref_recording_history(&mkit_dir, &branch, ref_condition, &remote_tip)?;
+    refs::write_head_branch(&mkit_dir, &branch)?;
     restore::restore_tree(&store, tree, cwd, &RestoreOptions::default())?;
     crate::commands::sync_index_to_tree(cwd, &store, tree).map_err(DispatchError::RestoreSafety)?;
-    crate::commands::write_ref_recording_history(
-        &mkit_dir,
-        &branch,
-        refs::RefWriteCondition::Any,
-        &remote_tip,
-    )?;
-    refs::write_head_branch(&mkit_dir, &branch)?;
     Ok(n)
 }
 

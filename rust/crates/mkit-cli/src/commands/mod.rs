@@ -45,6 +45,7 @@ use mkit_core::hash::Hash;
 use mkit_core::index::{EntryStatus, Index};
 use mkit_core::object::Object;
 use mkit_core::ops::diff::{DiffKind, diff_trees};
+use mkit_core::ops::restore::{RestoreOptions, matches_sparse};
 use mkit_core::refs::{self, RefError, RefWriteCondition};
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
@@ -174,6 +175,16 @@ pub fn ensure_restore_safe(
     store: &ObjectStore,
     target_tree: Hash,
 ) -> Result<(), String> {
+    ensure_restore_safe_with_options(root, store, target_tree, &RestoreOptions::default())
+}
+
+/// Refuse a destructive restore when affected index/worktree paths contain user work.
+pub fn ensure_restore_safe_with_options(
+    root: &Path,
+    store: &ObjectStore,
+    target_tree: Hash,
+    options: &RestoreOptions,
+) -> Result<(), String> {
     let current_tree = current_head_tree(root, store)?;
     let idx = read_or_seed_index_from_head(root, store)?;
     let index_tree = worktree::build_tree_from_index(store, &idx)
@@ -181,7 +192,11 @@ pub fn ensure_restore_safe(
 
     let staged = diff_trees(store, current_tree, Some(index_tree))
         .map_err(|e| format!("check staged changes: {e}"))?;
-    if let Some(entry) = staged.entries.first() {
+    if let Some(entry) = staged
+        .entries
+        .iter()
+        .find(|entry| restore_affects_path(options, &entry.path))
+    {
         return Err(format!(
             "restore would overwrite staged changes; commit, stash, or reset '{}' first",
             entry.path
@@ -195,7 +210,7 @@ pub fn ensure_restore_safe(
     if let Some(entry) = unstaged
         .entries
         .iter()
-        .find(|entry| entry.kind != DiffKind::Added)
+        .find(|entry| entry.kind != DiffKind::Added && restore_affects_path(options, &entry.path))
     {
         return Err(format!(
             "restore would overwrite local changes; commit, stash, or reset '{}' first",
@@ -208,12 +223,14 @@ pub fn ensure_restore_safe(
         .entries
         .into_iter()
         .filter(|entry| entry.kind != DiffKind::Removed)
+        .filter(|entry| restore_affects_path(options, &entry.path))
         .map(|entry| entry.path)
         .collect::<Vec<_>>();
     if target_writes.is_empty() {
         return Ok(());
     }
 
+    let ignore = mkit_core::ignore::load(root).map_err(|e| format!("read .mkitignore: {e}"))?;
     let mut worktree_paths = Vec::new();
     collect_worktree_paths(root, root, "", &mut worktree_paths)
         .map_err(|e| format!("check untracked paths: {e}"))?;
@@ -224,12 +241,45 @@ pub fn ensure_restore_safe(
                 .any(|target| paths_overlap(path, target))
     }) {
         return Err(format!(
-            "restore would overwrite untracked path '{}'; move or remove it first",
-            path
+            "restore would overwrite untracked path '{path}'; move or remove it first"
+        ));
+    }
+
+    if options.clean
+        && let Some(path) = worktree_paths.iter().find(|path| {
+            !index_tracks_path_or_descendant(&idx, path)
+                && restore_affects_path(options, path)
+                && !is_ignored_worktree_path(root, &ignore, path)
+        })
+    {
+        return Err(format!(
+            "restore would remove untracked path '{path}'; move or remove it first"
         ));
     }
 
     Ok(())
+}
+
+fn restore_affects_path(options: &RestoreOptions, path: &str) -> bool {
+    options
+        .sparse_patterns
+        .as_deref()
+        .is_none_or(|patterns| matches_sparse(patterns, path, false))
+}
+
+fn is_ignored_worktree_path(
+    root: &Path,
+    ignore: &mkit_core::ignore::IgnoreList,
+    path: &str,
+) -> bool {
+    let full_path = root.join(path);
+    let Ok(meta) = fs::symlink_metadata(&full_path) else {
+        return false;
+    };
+    let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    ignore.is_ignored(name, meta.is_dir())
 }
 
 fn current_head_tree(root: &Path, store: &ObjectStore) -> Result<Option<Hash>, String> {

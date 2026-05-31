@@ -120,7 +120,7 @@ pub fn run(args: &[String]) -> u8 {
     // reshapes the worktree to the branch tip. `.mkitignore` is
     // honoured inside the helper so locally-ignored files (editor
     // swapfiles, build artefacts) survive the transition.
-    if let Err(e) = super::ensure_restore_safe(&cwd, &store, tree_hash) {
+    if let Err(e) = super::ensure_restore_safe_with_options(&cwd, &store, tree_hash, &sparse_opts) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
     let report = match restore_tree_to_worktree(&store, &tree_hash, &cwd, &sparse_opts) {
