@@ -158,8 +158,8 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     if let Err(e) = super::ensure_restore_safe(cwd, store, orig_tree) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
-    if let Err(e) = refs::write_head_branch(mkit_dir, &state.head_name) {
-        return emit_err(&format!("restore HEAD: {e}"), exit::CANTCREAT);
+    if let Err(e) = super::restore_worktree_and_index(cwd, store, orig_tree) {
+        return emit_err(&e, exit::GENERAL_ERROR);
     }
     // Rebase abort rolls the branch tip back to `orig_head`. Route
     // through the history-MMR-coupled helper so the rollback append
@@ -174,7 +174,9 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     ) {
         return emit_err(&format!("restore ref: {e}"), exit::CANTCREAT);
     }
-    let _ = super::restore_worktree_and_index(cwd, store, orig_tree);
+    if let Err(e) = refs::write_head_branch(mkit_dir, &state.head_name) {
+        return emit_err(&format!("restore HEAD: {e}"), exit::CANTCREAT);
+    }
     let _ = cleanup_rebase(mkit_dir);
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(

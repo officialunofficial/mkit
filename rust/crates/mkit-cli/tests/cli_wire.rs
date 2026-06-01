@@ -40,7 +40,11 @@ fn make_commit(td: &Path, file: &str, body: &[u8], msg: &str) {
 }
 
 fn head_hash(td: &Path) -> String {
-    fs::read_to_string(td.join(".mkit/refs/heads/main"))
+    ref_hash(td, "main")
+}
+
+fn ref_hash(td: &Path, branch: &str) -> String {
+    fs::read_to_string(td.join(".mkit/refs/heads").join(branch))
         .unwrap()
         .trim()
         .to_string()
@@ -170,6 +174,24 @@ fn cherry_pick_errors_on_bad_hash() {
     assert!(!out.status.success());
 }
 
+#[test]
+fn cherry_pick_restores_worktree_and_advances_ref() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "base.txt", b"base\n", "base");
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    make_commit(td.path(), "picked.txt", b"picked\n", "picked");
+    let picked = ref_hash(td.path(), "feature");
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+    let main_before = head_hash(td.path());
+
+    let out = run_in(td.path(), &["cherry-pick", &picked]);
+    assert!(out.status.success(), "cherry-pick failed: {out:?}");
+    assert_eq!(fs::read(td.path().join("picked.txt")).unwrap(), b"picked\n");
+    assert_ne!(head_hash(td.path()), main_before);
+}
+
 // ---------- rebase --------------------------------------------------------
 
 #[test]
@@ -197,6 +219,32 @@ fn rebase_onto_same_head_is_noop() {
         stderr.contains("rebased 0") || stderr.contains("rebased"),
         "unexpected rebase output: {stderr}"
     );
+}
+
+#[test]
+fn rebase_abort_restores_original_branch_ref_and_worktree() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"base\n", "base");
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    make_commit(td.path(), "a.txt", b"feature\n", "feature change");
+    let feature_before = ref_hash(td.path(), "feature");
+
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+    make_commit(td.path(), "a.txt", b"main\n", "main change");
+
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    let rebase = run_in(td.path(), &["rebase", "main"]);
+    assert!(!rebase.status.success(), "rebase should pause on conflict");
+    assert!(td.path().join(".mkit/rebase-apply").exists());
+
+    let abort = run_in(td.path(), &["rebase", "--abort"]);
+    assert!(abort.status.success(), "abort failed: {abort:?}");
+    assert_eq!(ref_hash(td.path(), "feature"), feature_before);
+    assert_eq!(fs::read(td.path().join("a.txt")).unwrap(), b"feature\n");
+    assert!(!td.path().join(".mkit/rebase-apply").exists());
 }
 
 // ---------- bisect --------------------------------------------------------
