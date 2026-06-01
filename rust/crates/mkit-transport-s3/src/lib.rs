@@ -461,8 +461,17 @@ fn normalize_s3_prefix(prefix: Option<String>) -> Result<Option<String>, Transpo
                 "invalid S3 prefix: {prefix}"
             )));
         }
+        if !segment.bytes().all(is_safe_s3_prefix_byte) {
+            return Err(TransportError::InvalidRef(format!(
+                "invalid S3 prefix: {prefix}"
+            )));
+        }
     }
     Ok(Some(prefix))
+}
+
+fn is_safe_s3_prefix_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')
 }
 
 // ---------------------------------------------------------------------------
@@ -981,6 +990,30 @@ mod tests {
     fn url_parse_ok_with_prefix() {
         let p = parse_s3_url("mkit+s3://host.example/bucket/project-a").unwrap();
         assert_eq!(p.prefix.as_deref(), Some("project-a"));
+    }
+
+    #[test]
+    fn url_parse_ok_with_nested_safe_prefix() {
+        let p = parse_s3_url("mkit+s3://host.example/bucket/team_1/project.a-2").unwrap();
+        assert_eq!(p.prefix.as_deref(), Some("team_1/project.a-2"));
+    }
+
+    #[test]
+    fn url_parse_rejects_prefix_url_metacharacters() {
+        for prefix in [
+            "project?x=1",
+            "project#frag",
+            "project&x=1",
+            "project x",
+            "project%2Fother",
+            "project+other",
+        ] {
+            let url = format!("mkit+s3://host.example/bucket/{prefix}");
+            assert!(
+                matches!(parse_s3_url(&url), Err(TransportError::InvalidRef(_))),
+                "prefix should be rejected: {prefix}"
+            );
+        }
     }
 
     #[test]
