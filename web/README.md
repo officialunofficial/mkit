@@ -8,5 +8,27 @@ content-addressed pipeline end-to-end without installing the CLI.
 Not part of the published `mkit` toolkit; lives here to keep the deploy
 config close to the spec and the WASM crate it consumes.
 
-Deploy: `pnpm deploy` (see `wrangler.toml` / `waku.config.ts`). Source:
-`src/`.
+## Local build
+
+Prerequisites: Node.js 22, pnpm 10, Rust 1.95.0, the `wasm32-unknown-unknown`
+target, `wasm-pack` 0.13.1, and `protoc` 31.0 or newer.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm wasm:build
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+`mkit-wasm` is linked through `vendor/mkit-wasm`, which is a checked-in package
+shell. `pnpm wasm:build` generates the ignored `vendor/mkit-wasm/pkg/` contents
+from `../rust/crates/mkit-wasm` with `wasm-pack --target web`.
+
+## Deploy
+
+Deploy with `pnpm deploy`. Waku generates `dist/server/wrangler.json`; the
+post-build patcher pins the Cloudflare compatibility date, enables the required
+compatibility flags, observability, routes, preview URLs, and `workers.dev`.
+
+Preview locally with `pnpm preview`. Source lives under `src/`.

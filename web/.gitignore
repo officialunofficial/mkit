@@ -9,3 +9,4 @@ src/pages.gen.ts
 .cache
 .DS_Store
 *.pem
+vendor/mkit-wasm/pkg/

@@ -1,0 +1,89 @@
+name: Web CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/web.yml'
+      - 'web/**'
+      - 'rust/Cargo.lock'
+      - 'rust/Cargo.toml'
+      - 'rust/rust-toolchain.toml'
+      - 'rust/crates/mkit-attest/**'
+      - 'rust/crates/mkit-core/**'
+      - 'rust/crates/mkit-rpc/**'
+      - 'rust/crates/mkit-wasm/**'
+  pull_request:
+    paths:
+      - '.github/workflows/web.yml'
+      - 'web/**'
+      - 'rust/Cargo.lock'
+      - 'rust/Cargo.toml'
+      - 'rust/rust-toolchain.toml'
+      - 'rust/crates/mkit-attest/**'
+      - 'rust/crates/mkit-core/**'
+      - 'rust/crates/mkit-rpc/**'
+      - 'rust/crates/mkit-wasm/**'
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: Install, test, and build web demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install Rust 1.95.0 + wasm32 target
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: '1.95.0'
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked --version 0.13.1
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install web dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Build local mkit-wasm package
+        working-directory: web
+        run: pnpm wasm:build
+
+      - name: Typecheck
+        working-directory: web
+        run: pnpm typecheck
+
+      - name: Test
+        working-directory: web
+        run: pnpm test
+
+      - name: Lint
+        working-directory: web
+        run: pnpm lint
+
+      - name: Format check
+        working-directory: web
+        run: pnpm fmt:check
+
+      - name: Production build
+        working-directory: web
+        run: pnpm build
