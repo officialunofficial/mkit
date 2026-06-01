@@ -58,6 +58,8 @@ pub enum DispatchError {
     Transport(#[from] TransportError),
     #[error("refs: {0}")]
     Refs(#[from] refs::RefError),
+    #[error("repo lock: {0}")]
+    RepoLock(#[from] mkit_core::repo_lock::LockError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("store: {0}")]
@@ -233,6 +235,7 @@ pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> 
 pub fn pull_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {
     let n = fetch_all(cwd, tx)?;
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let _lock = mkit_core::repo_lock::acquire_default(&mkit_dir, "worktree.lock")?;
     let store = ObjectStore::open(cwd)?;
     let remote_refs = refs::list_remote_refs(&mkit_dir, DEFAULT_REMOTE)?
         .into_iter()
@@ -242,24 +245,25 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> 
         return Ok(n);
     }
 
-    let (branch, local_tip, remote_tip) = match refs::read_head(&mkit_dir) {
-        Ok(Head::Branch(branch)) => {
+    let original_head = refs::read_head(&mkit_dir).ok();
+    let (branch, local_tip, remote_tip) = match &original_head {
+        Some(Head::Branch(branch)) => {
             let local_tip = refs::read_ref(&mkit_dir, &branch)?;
             let selected = if local_tip.is_some() {
                 remote_refs
                     .iter()
-                    .find(|(name, _)| name == &branch)
+                    .find(|(name, _)| name == branch)
                     .ok_or_else(|| DispatchError::RemoteBranchMissing(branch.clone()))?
             } else {
                 remote_refs
                     .iter()
-                    .find(|(name, _)| name == &branch)
+                    .find(|(name, _)| name == branch)
                     .unwrap_or(&remote_refs[0])
             };
             (selected.0.clone(), local_tip, selected.1)
         }
-        Ok(Head::Detached(_)) => return Err(DispatchError::DetachedHead),
-        Err(_) => (remote_refs[0].0.clone(), None, remote_refs[0].1),
+        Some(Head::Detached(_)) => return Err(DispatchError::DetachedHead),
+        None => (remote_refs[0].0.clone(), None, remote_refs[0].1),
     };
 
     let ref_condition = if let Some(local_tip) = local_tip {
@@ -277,11 +281,58 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> 
     let tree = load_tree_hash(&store, remote_tip)?;
     crate::commands::ensure_restore_safe(cwd, &store, tree)
         .map_err(DispatchError::RestoreSafety)?;
-    crate::commands::restore_worktree_and_index(cwd, &store, tree)
-        .map_err(DispatchError::RestoreSafety)?;
     crate::commands::write_ref_recording_history(&mkit_dir, &branch, ref_condition, &remote_tip)?;
-    refs::write_head_branch(&mkit_dir, &branch)?;
+    if let Err(e) = refs::write_head_branch(&mkit_dir, &branch) {
+        rollback_pull_ref(&mkit_dir, &branch, local_tip, remote_tip)?;
+        return Err(e.into());
+    }
+    if let Err(e) = crate::commands::restore_worktree_and_index(cwd, &store, tree) {
+        if let Err(rollback) =
+            rollback_pull_ref_and_head(&mkit_dir, &branch, local_tip, remote_tip, original_head)
+        {
+            return Err(DispatchError::RestoreSafety(format!(
+                "{e}; additionally failed to roll back ref: {rollback}"
+            )));
+        }
+        return Err(DispatchError::RestoreSafety(e));
+    }
     Ok(n)
+}
+
+fn rollback_pull_ref_and_head(
+    mkit_dir: &Path,
+    branch: &str,
+    local_tip: Option<Hash>,
+    remote_tip: Hash,
+    original_head: Option<Head>,
+) -> Result<(), String> {
+    rollback_pull_ref(mkit_dir, branch, local_tip, remote_tip).map_err(|e| e.to_string())?;
+    match original_head {
+        Some(Head::Branch(name)) => refs::write_head_branch(mkit_dir, &name),
+        Some(Head::Detached(hash)) => refs::write_head_detached(mkit_dir, &hash),
+        None => Ok(()),
+    }
+    .map_err(|e| e.to_string())
+}
+
+fn rollback_pull_ref(
+    mkit_dir: &Path,
+    branch: &str,
+    local_tip: Option<Hash>,
+    remote_tip: Hash,
+) -> Result<(), refs::RefError> {
+    if let Some(local_tip) = local_tip {
+        crate::commands::write_ref_recording_history(
+            mkit_dir,
+            branch,
+            refs::RefWriteCondition::Match(remote_tip),
+            &local_tip,
+        )
+    } else if refs::read_ref(mkit_dir, branch)? == Some(remote_tip) {
+        refs::delete_ref(mkit_dir, branch)
+    } else {
+        Ok(())
+    }
 }
 
 /// `fetch` — `pull_all` without the HEAD update. Downloads every object

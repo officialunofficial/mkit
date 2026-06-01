@@ -402,3 +402,66 @@ fn sparse_checkout_roundtrips_patterns() {
             .success()
     );
 }
+
+#[test]
+fn sparse_checkout_set_refuses_dirty_tracked_file_inside_sparse_set() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"v1\n", "c1");
+
+    fs::write(td.path().join("a.txt"), b"local edit\n").unwrap();
+    let out = run_in(td.path(), &["sparse-checkout", "set", "a.txt"]);
+
+    assert!(!out.status.success(), "sparse set should fail: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("restore would overwrite local changes"));
+    assert_eq!(fs::read(td.path().join("a.txt")).unwrap(), b"local edit\n");
+    assert!(!td.path().join(".mkit/sparse-checkout").exists());
+}
+
+#[test]
+fn sparse_checkout_set_allows_dirty_tracked_file_outside_sparse_set() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    fs::write(td.path().join("a.txt"), b"a\n").unwrap();
+    fs::write(td.path().join("b.txt"), b"b\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(run_in(td.path(), &["commit", "-m", "c1"]).status.success());
+
+    fs::write(td.path().join("b.txt"), b"local b\n").unwrap();
+    let out = run_in(td.path(), &["sparse-checkout", "set", "a.txt"]);
+
+    assert!(out.status.success(), "sparse set failed: {out:?}");
+    assert_eq!(fs::read(td.path().join("b.txt")).unwrap(), b"local b\n");
+    assert_eq!(
+        fs::read_to_string(td.path().join(".mkit/sparse-checkout")).unwrap(),
+        "a.txt\n"
+    );
+}
+
+#[test]
+fn sparse_checkout_disable_refuses_untracked_file_that_full_restore_would_remove() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"a\n", "c1");
+    assert!(
+        run_in(td.path(), &["sparse-checkout", "set", "a.txt"])
+            .status
+            .success()
+    );
+
+    fs::write(td.path().join("notes.txt"), b"local notes\n").unwrap();
+    let out = run_in(td.path(), &["sparse-checkout", "disable"]);
+
+    assert!(!out.status.success(), "sparse disable should fail: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("restore would remove untracked path"));
+    assert_eq!(
+        fs::read(td.path().join("notes.txt")).unwrap(),
+        b"local notes\n"
+    );
+    assert_eq!(
+        fs::read_to_string(td.path().join(".mkit/sparse-checkout")).unwrap(),
+        "a.txt\n"
+    );
+}

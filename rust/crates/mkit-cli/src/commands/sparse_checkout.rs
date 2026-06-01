@@ -7,7 +7,9 @@ use std::io::Write;
 
 use clap::{Parser, Subcommand};
 use mkit_core::object::Object;
-use mkit_core::ops::restore::{self, RestoreOptions, load_sparse_checkout, write_sparse_checkout};
+use mkit_core::ops::restore::{
+    self, RestoreOptions, load_sparse_checkout, parse_sparse_patterns, write_sparse_checkout,
+};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
@@ -53,11 +55,16 @@ pub fn run(args: &[String]) -> u8 {
     match opts.sub.unwrap_or(SparseCmd::List) {
         SparseCmd::List => list_patterns(&cwd),
         SparseCmd::Set { patterns } => {
-            let pat_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
-            if let Err(e) = write_sparse_checkout(&cwd, &pat_refs) {
-                return emit_err(&format!("write sparse-checkout: {e}"), exit::CANTCREAT);
-            }
-            reapply(&cwd)
+            let joined = patterns.join("\n");
+            let opts = RestoreOptions {
+                clean: true,
+                sparse_patterns: Some(parse_sparse_patterns(&joined)),
+            };
+            apply_sparse_change(&cwd, &opts, || {
+                let pat_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+                write_sparse_checkout(&cwd, &pat_refs)
+                    .map_err(|e| (format!("write sparse-checkout: {e}"), exit::CANTCREAT))
+            })
         }
         SparseCmd::Disable => disable(&cwd),
         SparseCmd::Reapply => reapply(&cwd),
@@ -86,26 +93,53 @@ fn list_patterns(cwd: &std::path::Path) -> u8 {
 }
 
 fn disable(cwd: &std::path::Path) -> u8 {
-    let path = cwd.join(".mkit/sparse-checkout");
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return emit_err(&format!("remove: {e}"), exit::GENERAL_ERROR),
-    }
-    // Re-materialise HEAD with full (non-sparse) patterns.
-    reapply(cwd)
+    let opts = RestoreOptions {
+        clean: true,
+        sparse_patterns: None,
+    };
+    apply_sparse_change(cwd, &opts, || {
+        let path = cwd.join(".mkit/sparse-checkout");
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err((format!("remove: {e}"), exit::GENERAL_ERROR)),
+        }
+    })
 }
 
 fn reapply(cwd: &std::path::Path) -> u8 {
+    let sparse = match load_sparse_checkout(cwd) {
+        Ok(s) => s,
+        Err(e) => return emit_err(&format!("load sparse-checkout: {e}"), exit::GENERAL_ERROR),
+    };
+    let opts = RestoreOptions {
+        clean: true,
+        sparse_patterns: sparse,
+    };
+    apply_sparse_change(cwd, &opts, || Ok(()))
+}
+
+fn apply_sparse_change<F>(cwd: &std::path::Path, opts: &RestoreOptions, mutate_config: F) -> u8
+where
+    F: FnOnce() -> Result<(), (String, u8)>,
+{
     let store = match ObjectStore::open(cwd) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let _lock = match mkit_core::repo_lock::acquire_default(&mkit_dir, "worktree.lock") {
+        Ok(lock) => lock,
+        Err(e) => return emit_err(&format!("repo lock: {e}"), exit::TEMPFAIL),
+    };
     let head = match refs::resolve_head(&mkit_dir) {
         Ok(Some(h)) => h,
         Ok(None) => {
-            // Nothing to materialise yet.
+            if let Err((msg, code)) = mutate_config() {
+                return emit_err(&msg, code);
+            }
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "sparse-checkout applied");
             return exit::OK;
         }
         Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
@@ -115,16 +149,14 @@ fn reapply(cwd: &std::path::Path) -> u8 {
         Ok(_) => return emit_err("HEAD is not a commit", exit::DATAERR),
         Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::GENERAL_ERROR),
     };
-    let sparse = match load_sparse_checkout(cwd) {
-        Ok(s) => s,
-        Err(e) => return emit_err(&format!("load sparse-checkout: {e}"), exit::GENERAL_ERROR),
-    };
-    let opts = RestoreOptions {
-        clean: true,
-        sparse_patterns: sparse,
-    };
-    match restore::restore_tree(&store, tree_hash, cwd, &opts) {
-        Ok(()) => {
+    if let Err(e) = super::ensure_restore_safe_with_options(cwd, &store, tree_hash, opts) {
+        return emit_err(&e, exit::GENERAL_ERROR);
+    }
+    if let Err((msg, code)) = mutate_config() {
+        return emit_err(&msg, code);
+    }
+    match restore::restore_tree_to_worktree(&store, &tree_hash, cwd, opts) {
+        Ok(_) => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "sparse-checkout applied");
             exit::OK

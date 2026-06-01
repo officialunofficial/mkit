@@ -305,6 +305,60 @@ fn pull_all_refuses_dirty_worktree_before_fast_forward() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn pull_all_ref_update_failure_does_not_restore_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let alice = tempfile::tempdir().unwrap();
+    let bob = tempfile::tempdir().unwrap();
+
+    assert!(run_in(alice.path(), &["init"]).status.success());
+    assert!(run_in(alice.path(), &["keygen"]).status.success());
+    assert!(run_in(bob.path(), &["init"]).status.success());
+    assert!(run_in(bob.path(), &["keygen"]).status.success());
+
+    fs::write(alice.path().join("a.txt"), b"v1").unwrap();
+    assert!(run_in(alice.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(alice.path(), &["commit", "-m", "v1"])
+            .status
+            .success()
+    );
+
+    let tx: Arc<MemoryTransport> = Arc::new(MemoryTransport::new());
+    let _ = push_all(alice.path(), tx.as_ref()).unwrap();
+    pull_all(bob.path(), tx.as_ref()).expect("initial pull");
+
+    fs::write(alice.path().join("a.txt"), b"v2").unwrap();
+    assert!(run_in(alice.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(alice.path(), &["commit", "-m", "v2"])
+            .status
+            .success()
+    );
+    let _ = push_all(alice.path(), tx.as_ref()).unwrap();
+
+    let bob_mkit = bob.path().join(".mkit");
+    let bob_tip = refs::read_ref(&bob_mkit, "main").unwrap().unwrap();
+    let heads_dir = bob_mkit.join("refs/heads");
+    let original_perms = fs::metadata(&heads_dir).unwrap().permissions();
+    let mut readonly = original_perms.clone();
+    readonly.set_mode(0o555);
+    fs::set_permissions(&heads_dir, readonly).unwrap();
+
+    let err = pull_all(bob.path(), tx.as_ref()).unwrap_err();
+
+    fs::set_permissions(&heads_dir, original_perms).unwrap();
+
+    assert!(
+        matches!(err, DispatchError::Refs(_)),
+        "unexpected error: {err}"
+    );
+    assert_eq!(fs::read(bob.path().join("a.txt")).unwrap(), b"v1");
+    assert_eq!(refs::read_ref(&bob_mkit, "main").unwrap().unwrap(), bob_tip);
+}
+
 #[test]
 fn pull_all_preserves_ignored_untracked_files() {
     let alice = tempfile::tempdir().unwrap();
