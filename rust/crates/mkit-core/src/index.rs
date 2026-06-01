@@ -159,6 +159,9 @@ pub enum IndexError {
     /// Path failed [`validate_index_path`].
     #[error("invalid index path '{0}'")]
     InvalidPath(String),
+    /// Path appeared more than once in the same index.
+    #[error("duplicate index path '{0}'")]
+    DuplicatePath(String),
     /// Path UTF-8 decoding failed.
     #[error("index path is not valid UTF-8")]
     InvalidPathEncoding,
@@ -202,6 +205,7 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
         return Err(IndexError::Corrupt);
     }
     let mut entries = Vec::with_capacity(count.min(1024)); // bound initial alloc
+    let mut seen_paths = std::collections::HashSet::with_capacity(count.min(1024));
     let mut offset = 9usize;
     for _ in 0..count {
         // status(1) + hash(32) + path_len(2) = 35 fixed bytes.
@@ -227,11 +231,20 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
             .map_err(|_| IndexError::InvalidPathEncoding)?
             .to_string();
         offset += path_len;
+        if !validate_index_path(&path) {
+            return Err(IndexError::InvalidPath(path));
+        }
+        if !seen_paths.insert(path.clone()) {
+            return Err(IndexError::DuplicatePath(path));
+        }
         entries.push(IndexEntry {
             path,
             status,
             object_hash,
         });
+    }
+    if offset != data.len() {
+        return Err(IndexError::Corrupt);
     }
     Ok(Index { entries })
 }
@@ -484,6 +497,53 @@ mod tests {
         bytes.truncate(bytes.len() - 1); // drop the trailing path byte
         let err = deserialize(&bytes).unwrap_err();
         assert!(matches!(err, IndexError::Corrupt));
+    }
+
+    #[test]
+    fn rejects_trailing_bytes_after_declared_entries() {
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "a".into(),
+            status: EntryStatus::Blob,
+            object_hash: seed_hash("a"),
+        });
+        let mut bytes = idx.serialize();
+        bytes.extend_from_slice(b"junk");
+        let err = deserialize(&bytes).unwrap_err();
+        assert!(matches!(err, IndexError::Corrupt));
+    }
+
+    #[test]
+    fn rejects_invalid_path_on_deserialize() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.push(FORMAT_VERSION);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(EntryStatus::Blob as u8);
+        bytes.extend_from_slice(&[0u8; HASH_LEN]);
+        let path = b"../escape";
+        let path_len = u16::try_from(path.len()).unwrap();
+        bytes.extend_from_slice(&path_len.to_le_bytes());
+        bytes.extend_from_slice(path);
+        let err = deserialize(&bytes).unwrap_err();
+        assert!(matches!(err, IndexError::InvalidPath(path) if path == "../escape"));
+    }
+
+    #[test]
+    fn rejects_duplicate_paths_on_deserialize() {
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "same.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: seed_hash("a"),
+        });
+        idx.entries.push(IndexEntry {
+            path: "same.txt".into(),
+            status: EntryStatus::Executable,
+            object_hash: seed_hash("b"),
+        });
+        let err = deserialize(&idx.serialize()).unwrap_err();
+        assert!(matches!(err, IndexError::DuplicatePath(path) if path == "same.txt"));
     }
 
     #[test]
