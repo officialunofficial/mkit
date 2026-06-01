@@ -55,6 +55,15 @@ fn build_transport(endpoint: &str) -> S3Transport {
     t
 }
 
+fn build_transport_with_prefix(endpoint: &str, prefix: &str) -> S3Transport {
+    let mut t = S3Transport::with_parts(endpoint, "bucket", Some(prefix.to_owned()), demo_creds())
+        .expect("construct transport");
+    t.set_clock(fixed_clock);
+    t.set_sleeper(noop_sleep);
+    t.set_backoff(fast_backoff);
+    t
+}
+
 // -- uploadPack --------------------------------------------------------------
 
 #[test]
@@ -65,6 +74,19 @@ fn upload_pack_200_ok() {
         .with_status(200)
         .create();
     let t = build_transport(&server.url());
+    t.upload_pack(b"pack-bytes", &sample_key()).unwrap();
+    m.assert();
+}
+
+#[test]
+fn upload_pack_uses_url_prefix_namespace() {
+    let mut server = mockito::Server::new();
+    let hex = to_hex(sample_key().as_bytes());
+    let m = server
+        .mock("PUT", format!("/bucket/repo-a/packs/{hex}").as_str())
+        .with_status(200)
+        .create();
+    let t = build_transport_with_prefix(&server.url(), "repo-a");
     t.upload_pack(b"pack-bytes", &sample_key()).unwrap();
     m.assert();
 }
@@ -261,6 +283,18 @@ fn write_ref_any_200_ok() {
 }
 
 #[test]
+fn write_ref_uses_url_prefix_namespace() {
+    let mut server = mockito::Server::new();
+    let m = server
+        .mock("PUT", "/bucket/repo-a/refs/heads/main")
+        .with_status(200)
+        .create();
+    let t = build_transport_with_prefix(&server.url(), "repo-a");
+    t.write_ref("refs/heads/main", &sample_hash()).unwrap();
+    m.assert();
+}
+
+#[test]
 fn update_ref_missing_sends_if_none_match_star() {
     let mut server = mockito::Server::new();
     let m = server
@@ -370,6 +404,23 @@ fn read_ref_200_parses_wire_format() {
 }
 
 #[test]
+fn read_ref_uses_url_prefix_namespace() {
+    let mut server = mockito::Server::new();
+    let h = [0xEEu8; 32];
+    let mut body = to_hex(&h).into_bytes();
+    body.push(b'\n');
+    let m = server
+        .mock("GET", "/bucket/repo-a/refs/heads/main")
+        .with_status(200)
+        .with_body(body)
+        .create();
+    let t = build_transport_with_prefix(&server.url(), "repo-a");
+    let got = t.read_ref("refs/heads/main").unwrap().unwrap();
+    assert_eq!(got, h);
+    m.assert();
+}
+
+#[test]
 fn read_ref_404_returns_none() {
     let mut server = mockito::Server::new();
     let _m = server
@@ -444,6 +495,53 @@ fn list_refs_200_parses_xml_and_sorts() {
 }
 
 #[test]
+fn list_refs_uses_url_prefix_namespace_and_strips_it() {
+    let mut server = mockito::Server::new();
+
+    let xml = br#"<ListBucketResult>
+        <Contents><Key>repo-a/refs/heads/alpha</Key></Contents>
+        <Contents><Key>repo-a/refs/heads/zebra</Key></Contents>
+        <Contents><Key>repo-b/refs/heads/ignored</Key></Contents>
+    </ListBucketResult>"#;
+    let m_list = server
+        .mock("GET", "/bucket")
+        .match_query(mockito::Matcher::Exact(
+            "list-type=2&prefix=repo-a/refs/heads/".to_owned(),
+        ))
+        .with_status(200)
+        .with_body(xml)
+        .create();
+
+    let h_alpha = [0x01u8; 32];
+    let h_zebra = [0x02u8; 32];
+    let mut body_alpha = to_hex(&h_alpha).into_bytes();
+    body_alpha.push(b'\n');
+    let mut body_zebra = to_hex(&h_zebra).into_bytes();
+    body_zebra.push(b'\n');
+    let m_alpha = server
+        .mock("GET", "/bucket/repo-a/refs/heads/alpha")
+        .with_status(200)
+        .with_body(body_alpha)
+        .create();
+    let m_zebra = server
+        .mock("GET", "/bucket/repo-a/refs/heads/zebra")
+        .with_status(200)
+        .with_body(body_zebra)
+        .create();
+
+    let t = build_transport_with_prefix(&server.url(), "repo-a");
+    let refs = t.list_refs("refs/heads/").unwrap();
+    assert_eq!(refs.len(), 2);
+    assert_eq!(refs[0].name, "alpha");
+    assert_eq!(refs[1].name, "zebra");
+    assert_eq!(refs[0].hash.unwrap(), h_alpha);
+    assert_eq!(refs[1].hash.unwrap(), h_zebra);
+    m_list.assert();
+    m_alpha.assert();
+    m_zebra.assert();
+}
+
+#[test]
 fn list_refs_403_access_denied() {
     let mut server = mockito::Server::new();
     let _m = server
@@ -502,6 +600,29 @@ fn connect_reads_env_credentials() {
     // server.
     let ok = S3Transport::connect("mkit+s3://host.example/my-bucket");
     assert!(ok.is_ok());
+}
+
+#[test]
+fn with_parts_rejects_invalid_url_prefixes() {
+    let server = mockito::Server::new();
+    for prefix in [
+        "/repo",
+        "repo/",
+        "repo//a",
+        "repo/../a",
+        "repo/./a",
+        "repo\\a",
+    ] {
+        assert!(matches!(
+            S3Transport::with_parts(
+                server.url(),
+                "bucket",
+                Some(prefix.to_owned()),
+                demo_creds()
+            ),
+            Err(TransportError::InvalidRef(_))
+        ));
+    }
 }
 
 #[test]

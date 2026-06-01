@@ -40,7 +40,11 @@ fn make_commit(td: &Path, file: &str, body: &[u8], msg: &str) {
 }
 
 fn head_hash(td: &Path) -> String {
-    fs::read_to_string(td.join(".mkit/refs/heads/main"))
+    ref_hash(td, "main")
+}
+
+fn ref_hash(td: &Path, branch: &str) -> String {
+    fs::read_to_string(td.join(".mkit/refs/heads").join(branch))
         .unwrap()
         .trim()
         .to_string()
@@ -135,6 +139,31 @@ fn merge_fast_forwards_when_current_is_ancestor() {
     assert_ne!(head_hash(td.path()), c1);
 }
 
+#[test]
+fn merge_preserves_ignored_untracked_files() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"1\n", "c1");
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    make_commit(td.path(), "a.txt", b"2\n", "c2");
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+
+    fs::write(td.path().join(".mkitignore"), "local.txt\n").unwrap();
+    fs::write(td.path().join("local.txt"), b"local only\n").unwrap();
+
+    let out = run_in(td.path(), &["merge", "feature"]);
+    assert!(out.status.success(), "merge failed: {out:?}");
+    assert_eq!(
+        fs::read(td.path().join("local.txt")).unwrap(),
+        b"local only\n"
+    );
+    assert_eq!(
+        fs::read_to_string(td.path().join(".mkitignore")).unwrap(),
+        "local.txt\n"
+    );
+}
+
 // ---------- cherry-pick ---------------------------------------------------
 
 #[test]
@@ -143,6 +172,24 @@ fn cherry_pick_errors_on_bad_hash() {
     init_repo(td.path());
     let out = run_in(td.path(), &["cherry-pick", "not-a-hash"]);
     assert!(!out.status.success());
+}
+
+#[test]
+fn cherry_pick_restores_worktree_and_advances_ref() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "base.txt", b"base\n", "base");
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    make_commit(td.path(), "picked.txt", b"picked\n", "picked");
+    let picked = ref_hash(td.path(), "feature");
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+    let main_before = head_hash(td.path());
+
+    let out = run_in(td.path(), &["cherry-pick", &picked]);
+    assert!(out.status.success(), "cherry-pick failed: {out:?}");
+    assert_eq!(fs::read(td.path().join("picked.txt")).unwrap(), b"picked\n");
+    assert_ne!(head_hash(td.path()), main_before);
 }
 
 // ---------- rebase --------------------------------------------------------
@@ -172,6 +219,32 @@ fn rebase_onto_same_head_is_noop() {
         stderr.contains("rebased 0") || stderr.contains("rebased"),
         "unexpected rebase output: {stderr}"
     );
+}
+
+#[test]
+fn rebase_abort_restores_original_branch_ref_and_worktree() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"base\n", "base");
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    make_commit(td.path(), "a.txt", b"feature\n", "feature change");
+    let feature_before = ref_hash(td.path(), "feature");
+
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+    make_commit(td.path(), "a.txt", b"main\n", "main change");
+
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    let rebase = run_in(td.path(), &["rebase", "main"]);
+    assert!(!rebase.status.success(), "rebase should pause on conflict");
+    assert!(td.path().join(".mkit/rebase-apply").exists());
+
+    let abort = run_in(td.path(), &["rebase", "--abort"]);
+    assert!(abort.status.success(), "abort failed: {abort:?}");
+    assert_eq!(ref_hash(td.path(), "feature"), feature_before);
+    assert_eq!(fs::read(td.path().join("a.txt")).unwrap(), b"feature\n");
+    assert!(!td.path().join(".mkit/rebase-apply").exists());
 }
 
 // ---------- bisect --------------------------------------------------------
@@ -327,5 +400,68 @@ fn sparse_checkout_roundtrips_patterns() {
         run_in(td.path(), &["sparse-checkout", "disable"])
             .status
             .success()
+    );
+}
+
+#[test]
+fn sparse_checkout_set_refuses_dirty_tracked_file_inside_sparse_set() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"v1\n", "c1");
+
+    fs::write(td.path().join("a.txt"), b"local edit\n").unwrap();
+    let out = run_in(td.path(), &["sparse-checkout", "set", "a.txt"]);
+
+    assert!(!out.status.success(), "sparse set should fail: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("restore would overwrite local changes"));
+    assert_eq!(fs::read(td.path().join("a.txt")).unwrap(), b"local edit\n");
+    assert!(!td.path().join(".mkit/sparse-checkout").exists());
+}
+
+#[test]
+fn sparse_checkout_set_allows_dirty_tracked_file_outside_sparse_set() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    fs::write(td.path().join("a.txt"), b"a\n").unwrap();
+    fs::write(td.path().join("b.txt"), b"b\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(run_in(td.path(), &["commit", "-m", "c1"]).status.success());
+
+    fs::write(td.path().join("b.txt"), b"local b\n").unwrap();
+    let out = run_in(td.path(), &["sparse-checkout", "set", "a.txt"]);
+
+    assert!(out.status.success(), "sparse set failed: {out:?}");
+    assert_eq!(fs::read(td.path().join("b.txt")).unwrap(), b"local b\n");
+    assert_eq!(
+        fs::read_to_string(td.path().join(".mkit/sparse-checkout")).unwrap(),
+        "a.txt\n"
+    );
+}
+
+#[test]
+fn sparse_checkout_disable_refuses_untracked_file_that_full_restore_would_remove() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"a\n", "c1");
+    assert!(
+        run_in(td.path(), &["sparse-checkout", "set", "a.txt"])
+            .status
+            .success()
+    );
+
+    fs::write(td.path().join("notes.txt"), b"local notes\n").unwrap();
+    let out = run_in(td.path(), &["sparse-checkout", "disable"]);
+
+    assert!(!out.status.success(), "sparse disable should fail: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("restore would remove untracked path"));
+    assert_eq!(
+        fs::read(td.path().join("notes.txt")).unwrap(),
+        b"local notes\n"
+    );
+    assert_eq!(
+        fs::read_to_string(td.path().join(".mkit/sparse-checkout")).unwrap(),
+        "a.txt\n"
     );
 }

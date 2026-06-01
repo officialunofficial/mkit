@@ -80,6 +80,67 @@ fn status_clean_working_tree() {
     );
 }
 
+#[test]
+fn status_reports_invalid_index_instead_of_falling_back_to_worktree() {
+    use mkit_core::hash::ZERO;
+    use mkit_core::index::{EntryStatus, Index, IndexEntry};
+
+    let td = tempfile::tempdir().unwrap();
+    let p = td.path();
+    assert!(run_in(p, &["init"]).status.success());
+
+    let mut idx = Index::new();
+    idx.entries.push(IndexEntry {
+        path: "same.txt".into(),
+        status: EntryStatus::Blob,
+        object_hash: ZERO,
+    });
+    idx.entries.push(IndexEntry {
+        path: "same.txt".into(),
+        status: EntryStatus::Blob,
+        object_hash: ZERO,
+    });
+    fs::write(p.join(".mkit/index"), idx.serialize()).unwrap();
+
+    let out = run_in(p, &["status", "--porcelain"]);
+    assert!(!out.status.success(), "status must reject invalid index");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("read index") && stderr.contains("duplicate index path"),
+        "status should surface the index integrity error, got: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn status_clean_for_committed_executable_that_remains_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let td = tempfile::tempdir().unwrap();
+    let p = td.path();
+    assert!(run_in(p, &["init"]).status.success());
+    assert!(run_in(p, &["keygen"]).status.success());
+
+    let script = p.join("run.sh");
+    fs::write(&script, b"#!/bin/sh\n").unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    fs::set_permissions(&script, perms).unwrap();
+
+    assert!(run_in(p, &["add", "run.sh"]).status.success());
+    assert!(
+        run_in(p, &["commit", "-m", "add executable"])
+            .status
+            .success()
+    );
+
+    let (stdout, _stderr) = status_porcelain(p);
+    assert!(
+        stdout.is_empty(),
+        "executable mode should remain clean after commit, got: {stdout:?}"
+    );
+}
+
 // -----------------------------------------------------------------------
 // 2. Untracked file appears as `??`.
 // -----------------------------------------------------------------------

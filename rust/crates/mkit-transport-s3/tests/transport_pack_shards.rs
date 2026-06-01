@@ -48,6 +48,15 @@ fn build_transport(endpoint: &str) -> S3Transport {
     t
 }
 
+fn build_transport_with_prefix(endpoint: &str, prefix: &str) -> S3Transport {
+    let mut t = S3Transport::with_parts(endpoint, "bucket", Some(prefix.to_owned()), demo_creds())
+        .expect("construct transport");
+    t.set_clock(fixed_clock);
+    t.set_sleeper(noop_sleep);
+    t.set_backoff(fast_backoff);
+    t
+}
+
 /// Deterministic synthetic pack.
 fn synthetic_pack(bytes: usize) -> Vec<u8> {
     let mut x: u64 = 0x5EED_C0DE_FEED_FACE;
@@ -106,11 +115,52 @@ fn publish_sharded(
     (pack, key, mocks)
 }
 
+fn publish_sharded_under_prefix(
+    server: &mut mockito::Server,
+    pack_size: usize,
+    prefix: &str,
+) -> (Vec<u8>, PackKey, Vec<mockito::Mock>) {
+    let pack = synthetic_pack(pack_size);
+    let key = key_for(&pack);
+    let (shards, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+    let manifest_bytes = encode_manifest(&manifest).unwrap();
+
+    let hex = mkit_core::hash::to_hex(key.as_bytes());
+    let mut mocks = Vec::new();
+    let manifest_path = format!("/bucket/{prefix}/packs/{hex}/shards.manifest");
+    mocks.push(
+        server
+            .mock("GET", manifest_path.as_str())
+            .with_status(200)
+            .with_body(manifest_bytes)
+            .create(),
+    );
+    for shard in &shards {
+        let path = format!("/bucket/{prefix}/packs/{hex}/shards/{}", shard.index);
+        mocks.push(
+            server
+                .mock("GET", path.as_str())
+                .with_status(200)
+                .with_body(shard.bytes.clone())
+                .create(),
+        );
+    }
+    (pack, key, mocks)
+}
+
 #[test]
 fn s3_shard_round_trip_all_shards_present() {
     let mut server = mockito::Server::new();
     let (pack, key, _mocks) = publish_sharded(&mut server, 64 * 1024, &[]);
     let t = build_transport(&server.url());
+    assert_eq!(t.download_pack(&key).unwrap(), pack);
+}
+
+#[test]
+fn s3_shard_round_trip_uses_url_prefix_namespace() {
+    let mut server = mockito::Server::new();
+    let (pack, key, _mocks) = publish_sharded_under_prefix(&mut server, 64 * 1024, "repo-a");
+    let t = build_transport_with_prefix(&server.url(), "repo-a");
     assert_eq!(t.download_pack(&key).unwrap(), pack);
 }
 

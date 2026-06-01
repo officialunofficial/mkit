@@ -133,6 +133,12 @@ pub struct HttpTransport {
     client: Client,
     /// Bearer token, if `MKIT_API_TOKEN` was set at connect time.
     token: Option<String>,
+    /// Retry-delay ladder factory. Production uses the spec ladder;
+    /// tests inject a shorter ladder so retry assertions stay fast.
+    backoff: fn() -> BackoffIterator,
+    /// Sleep hook between retry attempts. Production sleeps for the
+    /// full delay; tests inject a no-op or recorder.
+    sleep: fn(Duration),
 }
 
 impl HttpTransport {
@@ -164,6 +170,8 @@ impl HttpTransport {
             base,
             client,
             token,
+            backoff: BackoffIterator::new,
+            sleep: thread::sleep,
         })
     }
 
@@ -181,7 +189,24 @@ impl HttpTransport {
             base,
             client,
             token,
+            backoff: test_backoff,
+            sleep: no_sleep,
         }
+    }
+
+    /// Test-only constructor with explicit retry hooks.
+    #[cfg(test)]
+    #[must_use]
+    fn new_for_test_with_retry(
+        base: Url,
+        token: Option<String>,
+        backoff: fn() -> BackoffIterator,
+        sleep: fn(Duration),
+    ) -> Self {
+        let mut transport = Self::new_for_test(base, token);
+        transport.backoff = backoff;
+        transport.sleep = sleep;
+        transport
     }
 
     /// Accessor for the base URL — for tests and debug logging only.
@@ -314,7 +339,7 @@ impl HttpTransport {
     #[cfg(feature = "pack-shards")]
     fn download_pack_monolithic(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
         let url = self.pack_url(key)?;
-        let resp = Self::retrying(|| self.apply_auth(self.client.get(url.clone())))?;
+        let resp = self.retrying(|| self.apply_auth(self.client.get(url.clone())))?;
         let status = resp.status();
         if !status.is_success() {
             return Err(map_status(status, TransportError::PackNotFound));
@@ -333,15 +358,14 @@ impl HttpTransport {
     /// The closure is re-invoked on every attempt so each try constructs
     /// a fresh request (reqwest consumes the builder on `.send()`).
     ///
-    /// Real sleeps are capped at [`TEST_MAX_SLEEP`] so unit tests don't
-    /// burn a full 31-second backoff ladder; the spec's exponential
-    /// ladder still governs how many retries happen, which is what
-    /// SPEC-TRANSPORT §7 actually mandates.
-    fn retrying<F>(mut build_req: F) -> TransportResult<Response>
+    /// Production sleeps for the full spec delay. Tests use
+    /// [`HttpTransport::new_for_test`] or `new_for_test_with_retry` to
+    /// inject short/no-op sleeps without changing shipped behavior.
+    fn retrying<F>(&self, mut build_req: F) -> TransportResult<Response>
     where
         F: FnMut() -> RequestBuilder,
     {
-        let mut backoff = BackoffIterator::new();
+        let mut backoff = (self.backoff)();
         loop {
             let err = match build_req().send() {
                 Ok(r) => {
@@ -362,7 +386,7 @@ impl HttpTransport {
             if is_retryable(&err)
                 && let Some(delay) = backoff.next()
             {
-                thread::sleep(delay.min(TEST_MAX_SLEEP));
+                (self.sleep)(delay);
                 continue;
             }
             return Err(err);
@@ -370,12 +394,11 @@ impl HttpTransport {
     }
 }
 
-/// Cap on any single thread-sleep inside the retry loop. Keeps the full
-/// test suite fast while still taking the same number of retry attempts
-/// as production. Production behaviour is still correct because the
-/// backoff iterator governs how many retries happen — only the
-/// inter-attempt pause is shortened.
-const TEST_MAX_SLEEP: Duration = Duration::from_millis(50);
+fn test_backoff() -> BackoffIterator {
+    BackoffIterator::with(Duration::from_millis(1), Duration::from_millis(1), 5)
+}
+
+fn no_sleep(_delay: Duration) {}
 
 // ---------------------------------------------------------------------------
 // JSON request / response DTOs
@@ -463,7 +486,7 @@ impl Transport for HttpTransport {
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
         let url = self.packs_collection_url()?;
         let body = bytes.to_vec();
-        let resp = Self::retrying(|| {
+        let resp = self.retrying(|| {
             let mut r = self
                 .client
                 .post(url.clone())
@@ -492,7 +515,7 @@ impl Transport for HttpTransport {
 
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
         let url = self.pack_url(key)?;
-        let resp = Self::retrying(|| {
+        let resp = self.retrying(|| {
             #[allow(unused_mut)]
             let mut r = self.apply_auth(self.client.get(url.clone()));
             // Opportunistically advertise willingness to accept the
@@ -555,7 +578,7 @@ impl Transport for HttpTransport {
 
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
         let url = self.pack_url(key)?;
-        let resp = Self::retrying(|| self.apply_auth(self.client.head(url.clone())))?;
+        let resp = self.retrying(|| self.apply_auth(self.client.head(url.clone())))?;
         let status = resp.status();
         match status.as_u16() {
             200..=299 => Ok(true),
@@ -580,7 +603,7 @@ impl Transport for HttpTransport {
         let body_json = serde_json::to_vec(&body).map_err(|_| TransportError::InvalidResponse)?;
         let headers = cas_headers(condition);
 
-        let resp = Self::retrying(|| {
+        let resp = self.retrying(|| {
             let mut r = self
                 .client
                 .put(url.clone())
@@ -609,7 +632,7 @@ impl Transport for HttpTransport {
             return Err(TransportError::InvalidRef(name.to_string()));
         }
         let url = self.ref_url(name)?;
-        let resp = Self::retrying(|| self.apply_auth(self.client.get(url.clone())))?;
+        let resp = self.retrying(|| self.apply_auth(self.client.get(url.clone())))?;
         let status = resp.status();
 
         if status.as_u16() == 404 {
@@ -632,7 +655,7 @@ impl Transport for HttpTransport {
             return Err(TransportError::InvalidRef(prefix.to_string()));
         }
         let url = self.refs_list_url(prefix)?;
-        let resp = Self::retrying(|| self.apply_auth(self.client.get(url.clone())))?;
+        let resp = self.retrying(|| self.apply_auth(self.client.get(url.clone())))?;
         let status = resp.status();
         if !status.is_success() {
             return Err(map_status(
@@ -644,19 +667,33 @@ impl Transport for HttpTransport {
         let parsed: RefListResponse = resp.json().map_err(|_| TransportError::InvalidResponse)?;
 
         let mut out: Vec<Ref> = Vec::with_capacity(parsed.refs.len());
+        let full_prefix = prefix.trim_end_matches('/');
+        let full_prefix_with_slash = if full_prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{full_prefix}/")
+        };
         for entry in parsed.refs {
             // Strip the query prefix if the server included it — keeps
             // the list_refs contract identical to the memory / file
             // transports.
-            let stripped = entry
-                .name
-                .strip_prefix(prefix)
-                .unwrap_or(entry.name.as_str())
-                .to_string();
-            let hash_opt = from_hex(&entry.hash).ok();
+            let stripped = if full_prefix_with_slash.is_empty() {
+                entry.name.as_str()
+            } else if let Some(relative) = entry.name.strip_prefix(&full_prefix_with_slash) {
+                relative
+            } else if entry.name.starts_with("refs/") {
+                return Err(TransportError::InvalidRef(entry.name));
+            } else {
+                entry.name.as_str()
+            }
+            .to_string();
+            if !validate_ref_name(&stripped) {
+                return Err(TransportError::InvalidRef(entry.name));
+            }
+            let hash = from_hex(&entry.hash).map_err(|_| TransportError::InvalidResponse)?;
             out.push(Ref {
                 name: stripped,
-                hash: hash_opt,
+                hash: Some(hash),
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -734,7 +771,7 @@ mod sparse_fetch {
             let body_json =
                 serde_json::to_vec(&body).map_err(|_| TransportError::InvalidResponse)?;
 
-            let resp = HttpTransport::retrying(|| -> RequestBuilder {
+            let resp = self.retrying(|| -> RequestBuilder {
                 let mut r = self
                     .client()
                     .post(url.clone())
@@ -839,7 +876,7 @@ impl HttpTransport {
         use std::sync::mpsc;
 
         let manifest_url = self.manifest_url(key)?;
-        let resp = Self::retrying(|| self.apply_auth(self.client.get(manifest_url.clone())))?;
+        let resp = self.retrying(|| self.apply_auth(self.client.get(manifest_url.clone())))?;
         let status = resp.status();
         if !status.is_success() {
             return Err(map_status(status, TransportError::PackNotFound));
@@ -935,6 +972,10 @@ mod tests {
     use super::*;
     use mkit_core::hash::{HASH_LEN, to_hex};
     use mockito::{Matcher, Server};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    static RECORDED_SLEEP_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static RECORDED_SLEEP_MILLIS: AtomicU64 = AtomicU64::new(0);
 
     fn sample_hash(byte: u8) -> Hash {
         [byte; HASH_LEN]
@@ -947,6 +988,18 @@ mod tests {
     fn make_transport(server: &Server, token: Option<&str>) -> HttpTransport {
         let base = Url::parse(&format!("{}/myproj", server.url())).unwrap();
         HttpTransport::new_for_test(base, token.map(String::from))
+    }
+
+    fn one_retry_backoff() -> BackoffIterator {
+        BackoffIterator::with(Duration::from_millis(7), Duration::from_millis(7), 1)
+    }
+
+    fn record_sleep(delay: Duration) {
+        RECORDED_SLEEP_COUNT.fetch_add(1, Ordering::SeqCst);
+        RECORDED_SLEEP_MILLIS.store(
+            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
     }
 
     // -- connect() + URL parsing -------------------------------------------
@@ -1325,6 +1378,75 @@ mod tests {
         assert!(matches!(err, TransportError::InvalidRef(_)));
     }
 
+    #[test]
+    fn list_refs_rejects_invalid_response_ref_name() {
+        let mut server = Server::new();
+        let body = format!(
+            r#"{{"refs":[{{"name":"bad//name","hash":"{}"}}]}}"#,
+            to_hex(&sample_hash(0xAB)),
+        );
+        let _m = server
+            .mock("GET", Matcher::Regex(r"^/myproj/refs\?prefix=".to_string()))
+            .with_status(200)
+            .with_body(body)
+            .create();
+        let t = make_transport(&server, None);
+        let err = t.list_refs("refs/heads/").unwrap_err();
+        assert!(matches!(err, TransportError::InvalidRef(_)));
+    }
+
+    #[test]
+    fn list_refs_rejects_invalid_response_hash() {
+        let mut server = Server::new();
+        let _m = server
+            .mock("GET", Matcher::Regex(r"^/myproj/refs\?prefix=".to_string()))
+            .with_status(200)
+            .with_body(r#"{"refs":[{"name":"main","hash":"not-hex"}]}"#)
+            .create();
+        let t = make_transport(&server, None);
+        let err = t.list_refs("refs/heads/").unwrap_err();
+        assert!(matches!(err, TransportError::InvalidResponse));
+    }
+
+    #[test]
+    fn list_refs_accepts_full_names_with_prefix_without_trailing_slash() {
+        let mut server = Server::new();
+        let h = sample_hash(0xB0);
+        let body = format!(
+            r#"{{"refs":[{{"name":"refs/heads/main","hash":"{}"}}]}}"#,
+            to_hex(&h),
+        );
+        let _m = server
+            .mock("GET", Matcher::Regex(r"^/myproj/refs\?prefix=".to_string()))
+            .with_status(200)
+            .with_body(body)
+            .create();
+        let t = make_transport(&server, None);
+        let refs = t.list_refs("refs/heads").unwrap();
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "main");
+        assert_eq!(refs[0].hash, Some(h));
+    }
+
+    #[test]
+    fn list_refs_rejects_full_names_outside_requested_prefix() {
+        let mut server = Server::new();
+        let body = format!(
+            r#"{{"refs":[{{"name":"refs/tags/v1","hash":"{}"}}]}}"#,
+            to_hex(&sample_hash(0xB1)),
+        );
+        let _m = server
+            .mock("GET", Matcher::Regex(r"^/myproj/refs\?prefix=".to_string()))
+            .with_status(200)
+            .with_body(body)
+            .create();
+        let t = make_transport(&server, None);
+        let err = t.list_refs("refs/heads/").unwrap_err();
+
+        assert!(matches!(err, TransportError::InvalidRef(_)));
+    }
+
     // -- retry behaviour ----------------------------------------------------
 
     #[test]
@@ -1346,6 +1468,33 @@ mod tests {
             .create();
         let t = make_transport(&server, None);
         assert_eq!(t.download_pack(&key).unwrap(), b"ok");
+    }
+
+    #[test]
+    fn retry_uses_injected_backoff_and_sleeper() {
+        RECORDED_SLEEP_COUNT.store(0, Ordering::SeqCst);
+        RECORDED_SLEEP_MILLIS.store(0, Ordering::SeqCst);
+
+        let mut server = Server::new();
+        let key = sample_key(0x79);
+        let path = format!("/myproj/packs/{}", key.to_hex());
+        let _m_fail = server
+            .mock("GET", path.as_str())
+            .with_status(503)
+            .expect(1)
+            .create();
+        let _m_ok = server
+            .mock("GET", path.as_str())
+            .with_status(200)
+            .with_body(b"ok")
+            .expect(1)
+            .create();
+        let base = Url::parse(&format!("{}/myproj", server.url())).unwrap();
+        let t = HttpTransport::new_for_test_with_retry(base, None, one_retry_backoff, record_sleep);
+
+        assert_eq!(t.download_pack(&key).unwrap(), b"ok");
+        assert_eq!(RECORDED_SLEEP_COUNT.load(Ordering::SeqCst), 1);
+        assert_eq!(RECORDED_SLEEP_MILLIS.load(Ordering::SeqCst), 7);
     }
 
     #[test]
