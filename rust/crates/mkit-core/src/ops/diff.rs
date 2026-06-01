@@ -73,6 +73,15 @@ pub fn diff_trees(
     old_hash: Option<Hash>,
     new_hash: Option<Hash>,
 ) -> Result<DiffResult, StoreError> {
+    diff_trees_inner(store, old_hash, new_hash, false)
+}
+
+fn diff_trees_inner(
+    store: &ObjectStore,
+    old_hash: Option<Hash>,
+    new_hash: Option<Hash>,
+    ignore_regular_executable_mode: bool,
+) -> Result<DiffResult, StoreError> {
     // Trivial cases: both empty, or identical hashes -> empty diff.
     match (old_hash, new_hash) {
         (None, None) => return Ok(DiffResult::default()),
@@ -84,7 +93,14 @@ pub fn diff_trees(
     let new_entries = load_entries(store, new_hash)?;
 
     let mut out: Vec<DiffEntry> = Vec::new();
-    diff_entries_recursive(store, &old_entries, &new_entries, "", &mut out)?;
+    diff_entries_recursive(
+        store,
+        &old_entries,
+        &new_entries,
+        "",
+        &mut out,
+        ignore_regular_executable_mode,
+    )?;
     Ok(DiffResult { entries: out })
 }
 
@@ -95,6 +111,7 @@ fn diff_entries_recursive(
     new_entries: &[TreeEntry],
     prefix: &str,
     out: &mut Vec<DiffEntry>,
+    ignore_regular_executable_mode: bool,
 ) -> Result<(), StoreError> {
     let mut i = 0usize;
     let mut j = 0usize;
@@ -117,16 +134,25 @@ fn diff_entries_recursive(
                         let sub_prefix = join_path(prefix, &o.name);
                         let old_sub = load_tree(store, o.object_hash)?;
                         let new_sub = load_tree(store, n.object_hash)?;
-                        diff_entries_recursive(store, &old_sub, &new_sub, &sub_prefix, out)?;
+                        diff_entries_recursive(
+                            store,
+                            &old_sub,
+                            &new_sub,
+                            &sub_prefix,
+                            out,
+                            ignore_regular_executable_mode,
+                        )?;
                     }
                     // identical subtree hashes -> nothing changed below
                 } else if o.mode != n.mode && o.object_hash == n.object_hash {
-                    out.push(DiffEntry {
-                        path: join_path(prefix, &o.name),
-                        kind: DiffKind::ModeChanged,
-                        old_hash: Some(o.object_hash),
-                        new_hash: Some(n.object_hash),
-                    });
+                    if !ignore_regular_executable_mode || !regular_executable_pair(o.mode, n.mode) {
+                        out.push(DiffEntry {
+                            path: join_path(prefix, &o.name),
+                            kind: DiffKind::ModeChanged,
+                            old_hash: Some(o.object_hash),
+                            new_hash: Some(n.object_hash),
+                        });
+                    }
                 } else if o.object_hash != n.object_hash || o.mode != n.mode {
                     out.push(DiffEntry {
                         path: join_path(prefix, &o.name),
@@ -150,6 +176,13 @@ fn diff_entries_recursive(
         j += 1;
     }
     Ok(())
+}
+
+fn regular_executable_pair(a: EntryMode, b: EntryMode) -> bool {
+    matches!(
+        (a, b),
+        (EntryMode::Blob, EntryMode::Executable) | (EntryMode::Executable, EntryMode::Blob)
+    )
 }
 
 fn add_removed_entries(
@@ -332,7 +365,7 @@ pub fn status_diff(
     let index_tree = worktree::build_tree_from_index(store, idx)?;
 
     let staged = diff_trees(store, head_tree.copied(), Some(index_tree))?;
-    let unstaged = diff_trees(store, Some(index_tree), Some(work_tree_hash))?;
+    let unstaged = diff_worktree_trees(store, Some(index_tree), Some(work_tree_hash))?;
 
     // Emit one entry per (path, leg). A path appearing in both legs
     // produces two entries — one `Staged` and one `Unstaged` — so the
@@ -367,6 +400,24 @@ pub fn status_diff(
         })
     });
     Ok(out)
+}
+
+#[cfg(unix)]
+fn diff_worktree_trees(
+    store: &ObjectStore,
+    old_hash: Option<Hash>,
+    new_hash: Option<Hash>,
+) -> Result<DiffResult, StoreError> {
+    diff_trees(store, old_hash, new_hash)
+}
+
+#[cfg(not(unix))]
+fn diff_worktree_trees(
+    store: &ObjectStore,
+    old_hash: Option<Hash>,
+    new_hash: Option<Hash>,
+) -> Result<DiffResult, StoreError> {
+    diff_trees_inner(store, old_hash, new_hash, true)
 }
 
 // =====================================================================
@@ -725,6 +776,27 @@ mod tests {
         let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].diff.path, "b.txt");
+        assert_eq!(result[0].staging, StatusStaging::Staged);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn status_ignores_unrepresentable_executable_mode_on_non_unix_worktree() {
+        use crate::index::{EntryStatus, Index, IndexEntry};
+
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("run.sh"), b"#!/bin/sh\n").unwrap();
+        let h = worktree::hash_file(&store, &work.path().join("run.sh")).unwrap();
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "run.sh".to_string(),
+            status: EntryStatus::Executable,
+            object_hash: h,
+        });
+
+        let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
+        assert_eq!(result.len(), 1, "expected only the staged addition");
         assert_eq!(result[0].staging, StatusStaging::Staged);
     }
 

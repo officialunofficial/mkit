@@ -191,8 +191,15 @@ pub fn build_tree_from_index(
     }
 
     let mut root = Node::default();
+    let mut seen_paths = std::collections::HashSet::with_capacity(index.entries.len());
 
     for entry in &index.entries {
+        if !seen_paths.insert(entry.path.as_str()) {
+            return Err(WorktreeError::Io(io::Error::other(format!(
+                "duplicate index path: '{}'",
+                entry.path
+            ))));
+        }
         if entry.status == EntryStatus::Removed {
             continue;
         }
@@ -1043,6 +1050,27 @@ mod tests {
             path: "same.txt".into(),
             status: EntryStatus::Blob,
             object_hash: b,
+        });
+
+        let err = build_tree_from_index(&store, &idx).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("duplicate index path"), "got: {msg}");
+    }
+
+    #[test]
+    fn from_index_rejects_duplicate_removed_and_live_path() {
+        let (_sd, store) = fresh_store();
+        let h = write_blob(&store, b"live");
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "same.txt".into(),
+            status: EntryStatus::Removed,
+            object_hash: [0; 32],
+        });
+        idx.entries.push(IndexEntry {
+            path: "same.txt".into(),
+            status: EntryStatus::Blob,
+            object_hash: h,
         });
 
         let err = build_tree_from_index(&store, &idx).unwrap_err();
