@@ -273,14 +273,15 @@ not leak through to the protocol layer.
 
 ## 10. Security model
 
-The signer process is in mkit's TCB. mkit does NOT verify what the
-signer signed beyond requiring that the returned `signature`
-verifies against the returned `public_key` over the requested
-`payload`. A compromised signer can:
+The signer process is in mkit's TCB. mkit verifies that the returned
+`signature` matches the returned `public_key` over the requested
+`payload`, and rejects `key_id` mismatches for known canonical
+prefixes. A compromised signer can still:
 
 - Sign arbitrary blobs of mkit's choosing.
-- Lie about which `key_id` produced the signature, leading the
-  verifier to attribute the signature to a different key.
+- Lie about which opaque or non-canonical `key_id` namespace produced
+  the signature, leading the verifier to attribute the signature to a
+  different key if that namespace is trusted out-of-band.
 - Fail closed (error frames) but not fail open.
 
 Mitigations the host SHOULD take:
