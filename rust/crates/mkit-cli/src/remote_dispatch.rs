@@ -248,7 +248,7 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> 
     let original_head = refs::read_head(&mkit_dir).ok();
     let (branch, local_tip, remote_tip) = match &original_head {
         Some(Head::Branch(branch)) => {
-            let local_tip = refs::read_ref(&mkit_dir, &branch)?;
+            let local_tip = refs::read_ref(&mkit_dir, branch)?;
             let selected = if local_tip.is_some() {
                 remote_refs
                     .iter()
