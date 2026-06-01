@@ -121,11 +121,17 @@ pub struct SshTransport {
 #[derive(Debug)]
 struct ChildIo {
     child: Child,
-    stdin: Option<ChildStdin>,
+    stdin_tx: Option<mpsc::SyncSender<WriteJob>>,
     stdout_rx: mpsc::Receiver<Result<SshFrame, FrameError>>,
-    /// `true` once we've sent `Close` and shut the pipe. Guards
-    /// double-close from `Drop` + explicit `close`.
+    /// `true` once we've shut down the child pipe. Guards double-close
+    /// from `Drop` + explicit `close`.
     closed: bool,
+}
+
+#[derive(Debug)]
+struct WriteJob {
+    frame: SshFrame,
+    result_tx: mpsc::Sender<Result<(), FrameError>>,
 }
 
 impl SshTransport {
@@ -158,10 +164,11 @@ impl SshTransport {
             .stdout
             .take()
             .ok_or_else(|| SshInitError::HandshakeFailed("no child stdout".into()))?;
+        let stdin_tx = spawn_stdin_writer(stdin);
         let stdout_rx = spawn_stdout_reader(stdout);
         let mut io = ChildIo {
             child,
-            stdin: Some(stdin),
+            stdin_tx: Some(stdin_tx),
             stdout_rx,
             closed: false,
         };
@@ -174,7 +181,7 @@ impl SshTransport {
         Ok(Self { io: Mutex::new(io) })
     }
 
-    /// Explicit shutdown — sends `Close` and waits for the child.
+    /// Explicit shutdown — closes stdin and waits for the child.
     /// Equivalent to dropping the transport, but lets the caller
     /// observe any shutdown error. Safe to call multiple times.
     pub fn close(&mut self) -> io::Result<()> {
@@ -218,8 +225,7 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(child_stdin(&mut io)?, &header)
-            .map_err(|_| TransportError::ConnectionFailed)?;
+        write_child_frame_or_err(&mut io, header)?;
 
         // Body chunks. The per-frame data cap lives in `mkit_rpc::CHUNK_DATA_MAX`
         // so transport-ssh and transport-enc cannot drift on the bound.
@@ -238,8 +244,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_frame(child_stdin(&mut io)?, &chunk)
-                .map_err(|_| TransportError::ConnectionFailed)?;
+            write_child_frame_or_err(&mut io, chunk)?;
             offset += (end - iter_pos) as u64;
             iter_pos = end;
         }
@@ -256,8 +261,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_frame(child_stdin(&mut io)?, &chunk)
-                .map_err(|_| TransportError::ConnectionFailed)?;
+            write_child_frame_or_err(&mut io, chunk)?;
         }
 
         let resp = read_child_frame_or_err(&mut io)?;
@@ -283,7 +287,7 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(child_stdin(&mut io)?, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        write_child_frame_or_err(&mut io, req)?;
 
         read_download_pack_body_from_child(&mut io)
     }
@@ -302,7 +306,7 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(child_stdin(&mut io)?, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        write_child_frame_or_err(&mut io, req)?;
         let resp = read_child_frame_or_err(&mut io)?;
         match resp.body {
             Some(ssh_frame::Body::PackExistsResponse(r)) => Ok(r.exists.unwrap_or(false)),
@@ -346,7 +350,7 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(child_stdin(&mut io)?, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        write_child_frame_or_err(&mut io, req)?;
 
         let resp = read_child_frame_or_err(&mut io)?;
         match resp.body {
@@ -388,7 +392,7 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(child_stdin(&mut io)?, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        write_child_frame_or_err(&mut io, req)?;
         let resp = read_child_frame_or_err(&mut io)?;
         match resp.body {
             Some(ssh_frame::Body::ReadRefResponse(r)) => {
@@ -428,7 +432,7 @@ impl Transport for SshTransport {
             ))),
             ..Default::default()
         };
-        write_frame(child_stdin(&mut io)?, &req).map_err(|_| TransportError::ConnectionFailed)?;
+        write_child_frame_or_err(&mut io, req)?;
         let resp = read_child_frame_or_err(&mut io)?;
         match resp.body {
             Some(ssh_frame::Body::ListRefsResponse(r)) => r
@@ -546,14 +550,45 @@ fn read_frame_or_err<R: io::Read>(r: &mut R) -> TransportResult<SshFrame> {
     }
 }
 
-fn child_stdin(io: &mut ChildIo) -> TransportResult<&mut ChildStdin> {
-    io.stdin.as_mut().ok_or(TransportError::ConnectionFailed)
+fn spawn_stdin_writer(mut stdin: ChildStdin) -> mpsc::SyncSender<WriteJob> {
+    let (tx, rx) = mpsc::sync_channel::<WriteJob>(1);
+    thread::spawn(move || {
+        for job in rx {
+            let result = write_frame(&mut stdin, &job.frame);
+            let should_stop = result.is_err();
+            let _ = job.result_tx.send(result);
+            if should_stop {
+                break;
+            }
+        }
+    });
+    tx
+}
+
+fn write_child_frame_or_err(io: &mut ChildIo, frame: SshFrame) -> TransportResult<()> {
+    let stdin_tx = io
+        .stdin_tx
+        .as_ref()
+        .ok_or(TransportError::ConnectionFailed)?;
+    let (result_tx, result_rx) = mpsc::channel();
+    stdin_tx
+        .send(WriteJob { frame, result_tx })
+        .map_err(|_| TransportError::ConnectionFailed)?;
+
+    if let Ok(Ok(())) = result_rx.recv_timeout(DEFAULT_SSH_TIMEOUT) {
+        Ok(())
+    } else {
+        io.closed = true;
+        let _ = io.stdin_tx.take();
+        terminate_child_now(&mut io.child);
+        Err(TransportError::ConnectionFailed)
+    }
 }
 
 fn spawn_stdout_reader(
     mut stdout: std::process::ChildStdout,
 ) -> mpsc::Receiver<Result<SshFrame, FrameError>> {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(1);
     thread::spawn(move || {
         loop {
             let frame = read_frame::<_, SshFrame>(&mut stdout);
@@ -590,7 +625,7 @@ fn read_child_frame_or_err(io: &mut ChildIo) -> TransportResult<SshFrame> {
         Ok(frame) => Ok(frame),
         Err(TimedFrameError::Timeout) => {
             io.closed = true;
-            let _ = io.stdin.take();
+            let _ = io.stdin_tx.take();
             terminate_child_now(&mut io.child);
             Err(TransportError::ConnectionFailed)
         }
@@ -623,18 +658,14 @@ fn perform_client_handshake(io: &mut ChildIo) -> Result<(), SshInitError> {
         ))),
         ..Default::default()
     };
-    let stdin = io
-        .stdin
-        .as_mut()
-        .ok_or_else(|| SshInitError::HandshakeFailed("no child stdin".into()))?;
-    write_frame(stdin, &hello)
-        .map_err(|e| SshInitError::HandshakeFailed(format!("send hello: {e}")))?;
+    write_child_frame_or_err(io, hello)
+        .map_err(|e| SshInitError::HandshakeFailed(format!("send hello: {e:?}")))?;
 
     let resp = match recv_frame_with_timeout(&io.stdout_rx, DEFAULT_SSH_TIMEOUT) {
         Ok(frame) => frame,
         Err(TimedFrameError::Timeout) => {
             io.closed = true;
-            let _ = io.stdin.take();
+            let _ = io.stdin_tx.take();
             terminate_child_now(&mut io.child);
             return Err(SshInitError::HandshakeFailed(
                 "read hello reply timed out".into(),
@@ -678,16 +709,9 @@ fn shut_child(io: &mut ChildIo) -> io::Result<()> {
         return Ok(());
     }
     io.closed = true;
-    // Best-effort Close frame; server might already be gone.
-    let close = SshFrame {
-        body: Some(ssh_frame::Body::Close(Box::default())),
-        ..Default::default()
-    };
-    if let Some(mut stdin) = io.stdin.take() {
-        let _ = write_frame(&mut stdin, &close);
-        // Dropping stdin closes the pipe; the server sees EOF even if it
-        // ignores the Close frame.
-    }
+    // Dropping stdin closes the pipe; `mkit serve` treats EOF as a clean
+    // shutdown, and this avoids blocking forever on a best-effort Close write.
+    let _ = io.stdin_tx.take();
     wait_child_timeout(&mut io.child, DEFAULT_SSH_TIMEOUT)?;
     Ok(())
 }
