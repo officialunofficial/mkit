@@ -138,12 +138,19 @@ Branches / refs:
 - `mkit branch` / `mkit branch <name>` / `mkit branch -d <name>` —
   list, create, or delete branches. `--format=json` on the list form
   emits JSONL with keys `name`, `current`, `hash`.
-- `mkit checkout <branch>` — switch HEAD and restore files.
+- `mkit checkout <branch>` — switch HEAD and restore files. Refuses to
+  run when staged changes, dirty tracked files, or untracked path
+  collisions would be overwritten.
 - `mkit tag` — list, create, or delete tags.
-- `mkit merge <branch>` — three-way merge into HEAD.
+- `mkit merge <branch>` — three-way merge into HEAD. Fast-forwards and
+  clean merges refuse to overwrite staged changes, dirty tracked files,
+  or untracked path collisions.
 - `mkit cherry-pick <hash>` — apply a commit to the current branch.
+  Refuses to overwrite staged changes, dirty tracked files, or untracked
+  path collisions.
 - `mkit rebase <branch> | --continue | --abort` — replay commits onto
-  a different base.
+  a different base. Restore steps refuse to overwrite staged changes,
+  dirty tracked files, or untracked path collisions.
 - `mkit bisect start | good | bad | reset` — binary search for a bug.
 
 Remote / sync:
@@ -155,8 +162,14 @@ Remote / sync:
   `mkit+<scheme>://` (see below).
 - `mkit remote set <url>` — alias for `mkit remote add`.
 - `mkit clone [--depth N] [--sparse ...] <url>` — clone a repository.
-- `mkit fetch` — download from remote without merging.
-- `mkit pull` — fetch and merge.
+- `mkit fetch` — download from remote without merging. Fetched branch
+  tips are stored under `refs/remotes/default/<branch>` and do not move
+  local branches.
+- `mkit pull` — fetch, then fast-forward the current branch from
+  `refs/remotes/default/<branch>`. Divergent histories are refused; use
+  explicit merge/rebase flows after resolving the divergence. Fresh repos
+  with no local branch tip initialize the current branch/worktree from
+  the remote default branch.
 - `mkit push [--dry-run]` — push refs and packs to the configured
   remote.
 - `mkit serve <path>` — internal SSH transport server. Speaks the
