@@ -32,7 +32,8 @@ on:
   # Manual escape hatch. GitHub occasionally de-dupes tag-push events when
   # a prior workflow for a nearby tag is still active or recently cancelled.
   # workflow_dispatch lets us force a release build against an existing tag
-  # from the Actions UI.
+  # from the Actions UI. The workflow must be run from that tag ref, not from
+  # a branch, so cosign's OIDC certificate identity remains tag-scoped.
   workflow_dispatch:
     inputs:
       tag:
@@ -111,6 +112,12 @@ jobs:
           REF="refs/tags/${TAG}"
           if ! git show-ref --verify --quiet "${REF}"; then
             echo "ERROR: tag ${TAG} does not exist" >&2
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" != "${REF}" ]; then
+            echo "ERROR: manual releases must run from ${REF}, not ${GITHUB_REF}" >&2
+            echo "Select the release tag in the Actions UI's 'Use workflow from' picker and keep the tag input identical." >&2
             exit 1
           fi
 
@@ -614,11 +621,20 @@ jobs:
             exit 1
           fi
 
+      - name: Require public repository for npm provenance
+        env:
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          if [ "${REPOSITORY_VISIBILITY}" != "public" ]; then
+            echo "::error::npm provenance requires a public GitHub repository; refusing to publish without provenance." >&2
+            exit 1
+          fi
+
       - name: Publish to npm
         working-directory: rust/crates/mkit-wasm/pkg
         env:
           NODE_AUTH_TOKEN: ${{ secrets.MKIT_NPM_TOKEN }}
-        # provenance: requires public repo, GitHub OIDC, and the release workflow's id-token: write permission — all present
+        # provenance: requires public repo, GitHub OIDC, and this job's id-token: write permission.
         run: npm publish --access public --provenance
 
       - name: Stage WASM bundle for GitHub Release
