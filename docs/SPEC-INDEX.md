@@ -103,6 +103,11 @@ fit in the remaining buffer (each entry is at minimum 35 bytes:
 `count = u32::MAX` is rejected as `IndexError::Corrupt` before the
 entry-allocation loop runs.
 
+Readers MUST reject any trailing bytes after the declared entry list.
+Readers MUST also reject duplicate exact paths as `IndexError::DuplicatePath`;
+an index cannot contain two live interpretations for the same repo-relative
+path.
+
 ---
 
 ## 5. Future versions

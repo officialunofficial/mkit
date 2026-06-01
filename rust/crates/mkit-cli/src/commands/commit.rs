@@ -129,11 +129,9 @@ pub fn run(args: &[String]) -> u8 {
     // changeset (the user is committing deletions) and produces an
     // empty-tree commit, so we DON'T gate on `staged_count()` (which
     // excludes Removed entries by design).
-    let Ok(idx) = index::read_index(&cwd) else {
-        return emit_err(
-            "nothing staged: run `mkit add <path>` (or `mkit add .`) before commit",
-            exit::USAGE,
-        );
+    let idx = match index::read_index(&cwd) {
+        Ok(idx) => idx,
+        Err(e) => return emit_err(&format!("read index: {e}"), exit::GENERAL_ERROR),
     };
     if idx.entries.is_empty() {
         return emit_err(
