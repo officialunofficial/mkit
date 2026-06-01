@@ -159,6 +159,11 @@ $ mkit-sign-ctap sign --credential-id <base64url>
 # (input/output are binary SignerFrame protobuf; not shell-paste-able)
 ```
 
+The signer advertises `KEY_FORM_OPAQUE_HANDLE` for CTAP credential IDs.
+For compatibility with mkit's current external-signer host path, it also
+accepts `KEY_FORM_RAW_BYTES` when `key_ref` is empty and `--credential-id`
+supplies the credential handle on argv.
+
 Exit codes: 0 success, 1 generic error, 2 algorithm mismatch (same as
 `mkit-sign-se`). Requires a physical authenticator for `enroll` /
 `sign`; `list-credentials` runs fine without one. The

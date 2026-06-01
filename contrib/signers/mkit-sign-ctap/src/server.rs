@@ -151,9 +151,20 @@ fn handle_sign<D: CtapDevice>(
         );
     }
 
-    // CTAP signers require an opaque credential_id handle.
+    // CTAP signers require an opaque credential_id handle. Current mkit
+    // releases send RAW_BYTES with an empty key_ref for argv-configured
+    // external signers, so tolerate that legacy host form only when the
+    // credential handle comes from --credential-id.
     let key_form = req.key_form.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    if key_form != KeyForm::KEY_FORM_OPAQUE_HANDLE as i32 && key_form != 0 {
+    let has_key_ref = req
+        .key_ref
+        .as_ref()
+        .is_some_and(|key_ref| !key_ref.is_empty());
+    let has_default_credential = defaults
+        .credential_id_b64url
+        .as_deref()
+        .is_some_and(|credential_id| !credential_id.is_empty());
+    if !ctap_key_form_allowed(key_form, has_key_ref, has_default_credential) {
         return signer_error_frame(
             ErrorCode::ERROR_CODE_UNSUPPORTED_KEY_FORM,
             "mkit-sign-ctap only supports KEY_FORM_OPAQUE_HANDLE (the credential_id)".to_owned(),
@@ -195,6 +206,14 @@ fn handle_sign<D: CtapDevice>(
         &credential_id,
         &credential_id_b64,
     )
+}
+
+fn ctap_key_form_allowed(key_form: i32, has_key_ref: bool, has_default_credential: bool) -> bool {
+    key_form == 0
+        || key_form == KeyForm::KEY_FORM_OPAQUE_HANDLE as i32
+        || (key_form == KeyForm::KEY_FORM_RAW_BYTES as i32
+            && !has_key_ref
+            && has_default_credential)
 }
 
 fn handle_sign_with_store<D: CtapDevice>(
@@ -540,6 +559,25 @@ mod tests {
             err.code.as_ref().unwrap().to_i32(),
             ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM as i32
         );
+    }
+
+    #[test]
+    fn raw_key_form_is_allowed_only_for_mkit_argv_default_compatibility() {
+        assert!(ctap_key_form_allowed(
+            KeyForm::KEY_FORM_RAW_BYTES as i32,
+            false,
+            true
+        ));
+        assert!(!ctap_key_form_allowed(
+            KeyForm::KEY_FORM_RAW_BYTES as i32,
+            true,
+            true
+        ));
+        assert!(!ctap_key_form_allowed(
+            KeyForm::KEY_FORM_RAW_BYTES as i32,
+            false,
+            false
+        ));
     }
 
     #[test]

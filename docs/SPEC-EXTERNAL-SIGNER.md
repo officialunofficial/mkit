@@ -228,6 +228,11 @@ reconstructs the signed input. A CTAP signer that has a credential ID but
 no local public-key metadata MUST return an error rather than an empty
 `public_key`.
 
+For compatibility with mkit's current external-signer host path, the
+reference CTAP signer accepts `KEY_FORM_RAW_BYTES` only when `key_ref` is
+empty and the credential handle is supplied by argv `--credential-id`.
+Explicit credential handles should use `KEY_FORM_OPAQUE_HANDLE`.
+
 ### 8.3 mkit-sign-tpm
 
 TPM 2.0 P-256 signer. Linux-native via `tss-esapi` (gated behind the
