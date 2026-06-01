@@ -205,8 +205,9 @@ message PackExistsResponse {
 }
 
 // Upload begins the streaming upload of a pack. `total_bytes` is
-// advisory and lets the server reject before allocating buffers if
-// the pack is too large.
+// required: servers use it to reject oversized uploads before storage
+// and to verify the following PackChunk stream ends exactly at the
+// declared byte count.
 message UploadPack {
   bytes pack_id = 1;
   uint64 total_bytes = 2;

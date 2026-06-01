@@ -112,7 +112,6 @@ fn run_listen_enc(addr: &str, repo_root: PathBuf) -> u8 {
     use commonware_codec::DecodeExt as _;
     use commonware_cryptography::Signer as _;
     use commonware_cryptography::ed25519::PrivateKey;
-    use mkit_transport_enc::{EncSession, recv_frame, send_frame};
     use std::sync::Arc;
     use zeroize::Zeroizing;
 
@@ -154,7 +153,7 @@ fn run_listen_enc(addr: &str, repo_root: PathBuf) -> u8 {
 
     let tx = Arc::new(FileTransport::new(&repo_root));
 
-    let serve_fn = move |sess: EncSession<
+    let serve_fn = move |sess: mkit_transport_enc::EncSession<
         mkit_transport_enc::tokio_io::TokioStream,
         mkit_transport_enc::tokio_io::TokioSink,
     >,
@@ -163,53 +162,7 @@ fn run_listen_enc(addr: &str, repo_root: PathBuf) -> u8 {
         // Each accepted connection gets its own future. `serve_tcp`
         // awaits this inside a per-connection `tokio::spawn`, so we
         // can `.await` freely without deadlocking the listener.
-        async move {
-            let (mut sender, mut receiver) = sess.into_parts();
-            // App-level Hello.
-            let frame = match recv_frame(&mut receiver).await {
-                Ok(f) => f,
-                Err(_) => return,
-            };
-            let proto = match frame.body {
-                Some(ssh_frame::Body::Hello(h)) => {
-                    h.proto.as_ref().map_or(0, buffa::EnumValue::to_i32)
-                }
-                _ => return,
-            };
-            if proto != ProtocolVersion::PROTOCOL_VERSION_1 as i32 {
-                return;
-            }
-            let resp = SshFrame {
-                body: Some(ssh_frame::Body::HelloResponse(Box::new(HelloResponse {
-                    proto: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-                    server_id: Some(format!("mkit serve-enc/{}", crate::cli::CLI_VERSION)),
-                    ..Default::default()
-                }))),
-                ..Default::default()
-            };
-            if send_frame(&mut sender, &resp).await.is_err() {
-                return;
-            }
-
-            // Verb loop. Mirrors the stdin/stdout `serve_loop`'s
-            // dispatch decisions but uses the async encrypted-frame
-            // helpers so we never block the listener's tokio worker.
-            loop {
-                let frame = match recv_frame(&mut receiver).await {
-                    Ok(f) => f,
-                    Err(_) => return,
-                };
-                if let Some(ssh_frame::Body::Close(_)) = frame.body {
-                    return;
-                }
-                if dispatch_enc_one(&tx, frame, &mut sender, &mut receiver)
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        }
+        async move { serve_enc_session(tx, sess).await }
     };
 
     match mkit_transport_enc::serve_tcp(addr, sk, serve_fn) {
@@ -217,6 +170,59 @@ fn run_listen_enc(addr: &str, repo_root: PathBuf) -> u8 {
         Err(e) => {
             eprintln!("mkit serve --listen-enc: {e}");
             exit::TEMPFAIL
+        }
+    }
+}
+
+#[cfg(feature = "enc-transport")]
+async fn serve_enc_session(
+    tx: std::sync::Arc<FileTransport>,
+    sess: mkit_transport_enc::EncSession<
+        mkit_transport_enc::tokio_io::TokioStream,
+        mkit_transport_enc::tokio_io::TokioSink,
+    >,
+) {
+    use mkit_transport_enc::{recv_frame, send_frame};
+
+    let (mut sender, mut receiver) = sess.into_parts();
+    // App-level Hello.
+    let Ok(frame) = recv_frame(&mut receiver).await else {
+        return;
+    };
+    let proto = match frame.body {
+        Some(ssh_frame::Body::Hello(h)) => h.proto.as_ref().map_or(0, buffa::EnumValue::to_i32),
+        _ => return,
+    };
+    if proto != ProtocolVersion::PROTOCOL_VERSION_1 as i32 {
+        return;
+    }
+    let resp = SshFrame {
+        body: Some(ssh_frame::Body::HelloResponse(Box::new(HelloResponse {
+            proto: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+            server_id: Some(format!("mkit serve-enc/{}", crate::cli::CLI_VERSION)),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    if send_frame(&mut sender, &resp).await.is_err() {
+        return;
+    }
+
+    // Verb loop. Mirrors the stdin/stdout `serve_loop`'s dispatch
+    // decisions but uses async encrypted-frame helpers so we never
+    // block the listener's tokio worker.
+    loop {
+        let Ok(frame) = recv_frame(&mut receiver).await else {
+            return;
+        };
+        if let Some(ssh_frame::Body::Close(_)) = frame.body {
+            return;
+        }
+        if dispatch_enc_one(&tx, frame, &mut sender, &mut receiver)
+            .await
+            .is_err()
+        {
+            return;
         }
     }
 }
@@ -1346,6 +1352,76 @@ mod tests {
         let mut reader = Cursor::new(input);
         let mut output = Vec::new();
         assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
+        assert_eq!(tx.download_pack(&key).unwrap(), bytes);
+    }
+
+    #[cfg(feature = "enc-transport")]
+    #[test]
+    fn listen_enc_rejected_upload_does_not_overwrite_existing_pack() {
+        use commonware_codec::Encode as _;
+        use commonware_cryptography::Signer as _;
+        use commonware_cryptography::ed25519::PrivateKey;
+        use mkit_transport_enc::tcp::{
+            TokioExecutor, connect_tcp_with_executor, serve_tcp_with_addr,
+        };
+        use std::sync::{Arc, mpsc};
+        use std::thread;
+        use std::time::Duration;
+
+        let td = tempfile::tempdir().unwrap();
+        let tx = FileTransport::new(td.path());
+        let (bytes, key) = valid_pack();
+        tx.upload_pack(&bytes, &key).unwrap();
+
+        let exec = TokioExecutor::new().expect("tokio runtime");
+        let server_key = PrivateKey::from_seed(1001);
+        let server_pubkey = {
+            let encoded = server_key.public_key().encode();
+            let bytes = encoded.as_ref();
+            assert_eq!(bytes.len(), 32);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(bytes);
+            out
+        };
+
+        let server_tx = Arc::new(FileTransport::new(td.path()));
+        let (addr_tx, addr_rx) = mpsc::channel();
+        let exec_for_server = exec.clone();
+        let _server_handle = thread::spawn(move || {
+            let serve_fn =
+                move |sess: mkit_transport_enc::EncSession<
+                    mkit_transport_enc::tokio_io::TokioStream,
+                    mkit_transport_enc::tokio_io::TokioSink,
+                >,
+                      _peer: commonware_cryptography::ed25519::PublicKey| {
+                    let tx = server_tx.clone();
+                    async move { serve_enc_session(tx, sess).await }
+                };
+            let _ = serve_tcp_with_addr(
+                "127.0.0.1:0",
+                server_key,
+                exec_for_server,
+                move |addr| {
+                    let _ = addr_tx.send(addr);
+                },
+                serve_fn,
+            );
+        });
+
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("encrypted listener address");
+        let client_key = PrivateKey::from_seed(2002);
+        let client = connect_tcp_with_executor(
+            &addr.ip().to_string(),
+            addr.port(),
+            &server_pubkey,
+            client_key,
+            exec,
+        )
+        .expect("connect encrypted client");
+
+        assert!(client.upload_pack(b"wrong", &key).is_err());
         assert_eq!(tx.download_pack(&key).unwrap(), bytes);
     }
 
