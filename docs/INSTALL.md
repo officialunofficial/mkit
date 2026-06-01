@@ -68,11 +68,13 @@ cargo test --workspace       # all crates, all tests
 ## From GitHub Releases
 
 The [`release.yml`](../.github/workflows/release.yml) workflow fires on
-every `v*.*.*` tag and produces a per-target archive plus signing
-material:
+strict-semver `v*.*.*` tags after verifying the tag is an annotated GPG-signed
+tag from an allowlisted release signer and points at a commit reachable from
+`main`. It then produces a per-target archive plus signing material:
 
-- `mkit-<version>-<target>.tar.gz` — the archive (binary + man pages +
-  completions + per-archive `SHA256SUMS`).
+- `mkit-<version>-<target>.tar.gz` — the archive (binary, licenses,
+  README, optional changelog, `share/man/man1/mkit.1`, shell completions,
+  and per-archive `SHA256SUMS`).
 - `mkit-<version>-<target>.tar.gz.sha256` — archive-level checksum.
 - `mkit-<version>-<target>.tar.gz.cosign.bundle` — keyless OIDC
   signature (Sigstore Fulcio + Rekor).

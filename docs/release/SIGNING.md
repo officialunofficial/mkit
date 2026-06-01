@@ -6,11 +6,19 @@ itself (`.github/workflows/release.yml`), authenticated by GitHub's OIDC
 provider, and every signature is recorded in the [Rekor transparency
 log](https://docs.sigstore.dev/logging/overview/).
 
-No private keys are held by any human. No private keys are stored in
-GitHub Secrets. If someone steals a release signature, they cannot reuse
-it on any other artifact — the signature is bound to the artifact hash.
-The installer (`install.sh`) enforces this same trust boundary by
-default.
+No artifact-signing private keys are held by any human or stored in GitHub
+Secrets. Artifact signatures are keyless and bound to the artifact hash, so a
+stolen release signature cannot be reused on any other artifact. The installer
+(`install.sh`) enforces this same trust boundary by default.
+
+The release workflow also validates the Git tag before any artifacts are
+published: the tag must be strict semver, annotated, GPG-signed by a
+fingerprint listed in the `MKIT_RELEASE_GPG_FINGERPRINTS` repository or
+organization variable, and point at a commit reachable from `origin/main`. The
+workflow imports those public keys from `keys.openpgp.org` or
+`keyserver.ubuntu.com` before running `git verify-tag`. Protected tag rulesets
+should be enabled as defense in depth, but the workflow performs these checks
+itself.
 
 ## Artifacts attached to every release
 
@@ -23,13 +31,13 @@ CLI enables the matching keystore software-protector feature so `software` keys
 are encrypted at rest on supported targets without changing the lean default
 feature set of the `mkit-keystore` library crate.
 
-| File                            | Purpose                                 |
-| ------------------------------- | --------------------------------------- |
-| `mkit-X.Y.Z-<triple>.tar.gz`    | The release archive.                    |
-| `...tar.gz.sha256`              | SHA256 of the archive (convenience).    |
-| `...tar.gz.sig`                 | Raw cosign signature (base64).          |
-| `...tar.gz.crt`                 | Fulcio-issued code-signing certificate. |
-| `...tar.gz.cosign.bundle`       | Bundle: sig + cert + Rekor entry.       |
+| File                         | Purpose                                      |
+| ---------------------------- | -------------------------------------------- |
+| `mkit-X.Y.Z-<triple>.tar.gz` | Binary, licenses, README, manpage, completions. |
+| `...tar.gz.sha256`           | SHA256 of the archive (convenience).         |
+| `...tar.gz.sig`              | Raw cosign signature (base64).               |
+| `...tar.gz.crt`              | Fulcio-issued code-signing certificate.      |
+| `...tar.gz.cosign.bundle`    | Bundle: sig + cert + Rekor entry.            |
 
 Plus one top-level set for the aggregate:
 

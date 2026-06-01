@@ -24,6 +24,11 @@ One page. Run top to bottom. Do not skip steps.
       `contrib/homebrew/mkit.rb`, `contrib/scoop/mkit.json`).
 - [ ] `docs/release/SIGNING.md` and `docs/release/REPRODUCIBILITY.md`
       still accurate for this release.
+- [ ] `MKIT_RELEASE_GPG_FINGERPRINTS` repo/org Actions variable contains
+      the release tag signing key fingerprint.
+- [ ] The release tag signing public key is published to `keys.openpgp.org`
+      or `keyserver.ubuntu.com` so the workflow can import it before
+      `git verify-tag`.
 - [ ] `SECURITY.md` disclosure contact confirmed reachable.
 
 ## Tag and push
@@ -37,11 +42,27 @@ Signed tags only. If you don't have a signing key configured, stop and fix
 that first; a release pipeline that blesses unsigned tags is lying about
 provenance.
 
+Verify the exact fingerprint before pushing:
+
+```sh
+git tag -v vX.Y.Z
+```
+
+The release workflow will reject lightweight tags, invalid signatures,
+fingerprints not listed in `MKIT_RELEASE_GPG_FINGERPRINTS`, tags outside the
+strict `vX.Y.Z[-prerelease]` form, and tag target commits that are not
+reachable from `origin/main`.
+
 ## Wait for the release workflow
 
-- [ ] `release.yml` succeeded on all four platforms.
+- [ ] `release.yml` succeeded through `validate-release-tag` and all four
+      platform builds.
 - [ ] GitHub Release created as a non-draft.
-- [ ] Archives present: `mkit-X.Y.Z-{aarch64,x86_64}-{macos,linux}.tar.gz`.
+- [ ] Archives present:
+      `mkit-X.Y.Z-aarch64-apple-darwin.tar.gz`,
+      `mkit-X.Y.Z-x86_64-apple-darwin.tar.gz`,
+      `mkit-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz`, and
+      `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`.
 - [ ] `sbom.cdx.json` present.
 - [ ] `SHA256SUMS`, `SHA256SUMS.sig`, `SHA256SUMS.crt`,
       `SHA256SUMS.cosign.bundle` present.
@@ -54,14 +75,19 @@ On at least one macOS and one Linux box:
 - [ ] Download the archive for your platform.
 - [ ] Verify cosign signature per `docs/release/SIGNING.md`.
 - [ ] Verify `SHA256SUMS` matches the archive.
-- [ ] Extract and run `./mkit version` — version string matches the tag.
+- [ ] Extract and run `./mkit-X.Y.Z-<target>/mkit version` — version string
+      matches the tag.
+- [ ] Extracted archive contains `share/man/man1/mkit.1`,
+      `share/completions/mkit.bash`, `share/completions/_mkit`, and
+      `share/completions/mkit.fish`.
 - [ ] Basic flow: `mkit init` → add a file → `mkit commit`.
 
 ## Distribution
 
-- [ ] Open a PR on `officialunofficial/homebrew-tap` updating
-      `Formula/mkit.rb` version + sha256s (per
-      `contrib/homebrew/README.md`).
+- [ ] If `officialunofficial/homebrew-tap` exists, copy
+      `contrib/homebrew/mkit.rb` into `Formula/mkit.rb`, update the version,
+      and replace every `PLACEHOLDER_SHA_*` with the matching archive hash
+      from release `SHA256SUMS`.
 - [ ] (If applicable) update Scoop manifest — deferred until Windows
       builds land.
 

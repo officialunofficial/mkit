@@ -6,8 +6,9 @@
 
 This directory holds the formula template for a future
 `officialunofficial/homebrew-tap` repository. It is **not** consumed by
-Homebrew directly from this repo — Homebrew taps must live at
-`<user>/homebrew-<name>`.
+Homebrew directly from this repo, and it intentionally contains
+`PLACEHOLDER_SHA_*` values until a release is published. Homebrew taps must
+live at `<user>/homebrew-<name>`.
 
 ## One-time tap setup
 
@@ -29,7 +30,11 @@ After each `v*.*.*` release is published on `officialunofficial/mkit`:
    `homebrew-tap/Formula/mkit.rb`.
 3. Update `version` to the new version.
 4. Replace every `PLACEHOLDER_SHA_*` with the matching sha256 from
-   `SHA256SUMS` (one per target triple).
+   `SHA256SUMS` (one per target-triple archive):
+   - `mkit-X.Y.Z-aarch64-apple-darwin.tar.gz`
+   - `mkit-X.Y.Z-x86_64-apple-darwin.tar.gz`
+   - `mkit-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz`
+   - `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
 5. Commit + push to the tap repo.
 
 ## User install flow
