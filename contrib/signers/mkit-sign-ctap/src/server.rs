@@ -186,20 +186,54 @@ fn handle_sign<D: CtapDevice>(
         }
     };
 
-    // Look up rp_id / keyid in the local store; fall back to argv defaults.
+    // Resolve credential metadata from the local store so SignResponse can
+    // include the public key that mkit validates before accepting a signature.
     let credential_id_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential_id);
     let store_path = match cred_store::default_path() {
         Ok(p) => p,
         Err(e) => return signer_error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
     };
     let store = cred_store::Store::load(&store_path).unwrap_or_default();
-    let record = store.find_by_credential_id(&credential_id_b64);
+    handle_sign_with_store(
+        req,
+        device,
+        defaults,
+        &store,
+        &credential_id,
+        &credential_id_b64,
+    )
+}
+
+fn handle_sign_with_store<D: CtapDevice>(
+    req: &mkit_rpc::mkit::rpc::v1::signer::SignRequest,
+    device: &D,
+    defaults: &SignDefaults,
+    store: &cred_store::Store,
+    credential_id: &[u8],
+    credential_id_b64: &str,
+) -> SignerFrame {
+    let Some(record) = store.find_by_credential_id(credential_id_b64) else {
+        return signer_error_frame(
+            ErrorCode::ERROR_CODE_INVALID_REQUEST,
+            format!(
+                "credential metadata for {credential_id_b64} is missing; run `mkit-sign-ctap enroll` so the signer can return a public_key"
+            ),
+        );
+    };
+    let public_key = match hex_decode(&record.public_key_sec1_uncompressed_hex) {
+        Ok(key) if key.len() == 65 => key,
+        _ => {
+            return signer_error_frame(
+                ErrorCode::ERROR_CODE_INTERNAL,
+                format!("stored public key for credential {credential_id_b64} is invalid"),
+            );
+        }
+    };
 
     let rp_id = defaults
         .rp_id
         .clone()
-        .or_else(|| record.map(|r| r.rp_id.clone()))
-        .unwrap_or_else(|| "mkit.local".to_owned());
+        .unwrap_or_else(|| record.rp_id.clone());
     let origin = defaults
         .origin
         .clone()
@@ -210,7 +244,7 @@ fn handle_sign<D: CtapDevice>(
 
     let assertion = match device.get_assertion(
         &rp_id,
-        &credential_id,
+        credential_id,
         &client_data_json,
         defaults.pin.as_deref(),
     ) {
@@ -226,13 +260,11 @@ fn handle_sign<D: CtapDevice>(
         Err(e) => return signer_error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
     };
 
-    let key_id = record.map_or_else(
-        || format!("webauthn:{credential_id_b64}"),
-        |r| r.keyid.clone(),
-    );
-    let public_key = record
-        .map(|r| hex_decode(&r.public_key_sec1_uncompressed_hex).unwrap_or_default())
-        .unwrap_or_default();
+    let key_id = if record.keyid.is_empty() {
+        format!("webauthn:{credential_id_b64}")
+    } else {
+        record.keyid.clone()
+    };
 
     SignerFrame {
         body: Some(signer_frame::Body::SignResponse(Box::new(SignResponse {
@@ -290,6 +322,7 @@ fn b64_encode(b: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cred_store::{Record, Store};
     use crate::ctap::{EnrolledCredential, MockCtapDevice, SignedAssertion};
     use buffa::Message;
     use mkit_rpc::mkit::rpc::v1::signer::{Hello, SignRequest};
@@ -367,6 +400,20 @@ mod tests {
         }
     }
 
+    fn store_with_mock_credential() -> Store {
+        let credential_id_b64url =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"mock-cred");
+        let mut store = Store::default();
+        store.upsert(Record {
+            credential_id_b64url,
+            public_key_sec1_uncompressed_hex: "04".to_owned() + &"aa".repeat(64),
+            rp_id: "mkit.local".to_owned(),
+            user_name: "alice".to_owned(),
+            keyid: "p256:mock".to_owned(),
+        });
+        store
+    }
+
     #[test]
     fn hello_response_advertises_p256_and_opaque_handle() {
         let frames = vec![SignerFrame {
@@ -408,32 +455,24 @@ mod tests {
 
     #[test]
     fn sign_request_emits_webauthn_extension() {
-        let frames = vec![
-            SignerFrame {
-                body: Some(signer_frame::Body::Hello(Box::new(
-                    Hello::default().with_protocol(ProtocolVersion::PROTOCOL_VERSION_1),
-                ))),
-                ..Default::default()
-            },
-            SignerFrame {
-                body: Some(signer_frame::Body::SignRequest(Box::new(
-                    SignRequest::default()
-                        .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
-                        .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
-                        .with_key_ref(b"mock-cred".to_vec())
-                        .with_payload(b"DSSEv1 28 application/vnd.in-toto+json 2 {}".to_vec()),
-                ))),
-                ..Default::default()
-            },
-        ];
-        let mut input = Cursor::new(encode(&frames));
-        let mut output = Vec::new();
         let device = mock_device();
-        serve(&mut input, &mut output, &device, &SignDefaults::default()).unwrap();
-
-        let frames = decode(&output);
-        assert_eq!(frames.len(), 2, "want HelloResponse + SignResponse");
-        let sign_resp = match frames[1].body.clone() {
+        let store = store_with_mock_credential();
+        let credential_id_b64url =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"mock-cred");
+        let req = SignRequest::default()
+            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+            .with_key_ref(b"mock-cred".to_vec())
+            .with_payload(b"DSSEv1 28 application/vnd.in-toto+json 2 {}".to_vec());
+        let resp = handle_sign_with_store(
+            &req,
+            &device,
+            &SignDefaults::default(),
+            &store,
+            b"mock-cred",
+            &credential_id_b64url,
+        );
+        let sign_resp = match resp.body.clone() {
             Some(signer_frame::Body::SignResponse(s)) => *s,
             Some(signer_frame::Body::Error(e)) => panic!("server returned Error: {e:?}"),
             other => panic!("expected SignResponse, got {other:?}"),
@@ -441,12 +480,45 @@ mod tests {
 
         // 64-byte compact P-256 signature.
         assert_eq!(sign_resp.signature.as_ref().map(Vec::len), Some(64));
+        assert_eq!(sign_resp.public_key.as_ref().map(Vec::len), Some(65));
 
         // WebAuthnData populated.
         let webauthn = sign_resp.webauthn.into_option().expect("webauthn set");
         assert_eq!(webauthn.authenticator_data.as_ref().map(Vec::len), Some(37));
         let cdj_bytes = webauthn.client_data_json.expect("client_data_json set");
         assert!(cdj_bytes.starts_with(b"{"));
+    }
+
+    #[test]
+    fn sign_request_without_stored_public_key_returns_invalid_request() {
+        let device = mock_device();
+        let req = SignRequest::default()
+            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+            .with_key_ref(b"mock-cred".to_vec())
+            .with_payload(b"x".to_vec());
+        let resp = handle_sign_with_store(
+            &req,
+            &device,
+            &SignDefaults::default(),
+            &Store::default(),
+            b"mock-cred",
+            "bW9jay1jcmVk",
+        );
+
+        let err = match resp.body.clone() {
+            Some(signer_frame::Body::Error(e)) => e,
+            other => panic!("expected Error, got {other:?}"),
+        };
+        assert_eq!(
+            err.code.as_ref().unwrap().to_i32(),
+            ErrorCode::ERROR_CODE_INVALID_REQUEST as i32
+        );
+        assert!(
+            err.message
+                .as_deref()
+                .is_some_and(|message| message.contains("credential metadata"))
+        );
     }
 
     #[test]

@@ -115,7 +115,11 @@ mod real {
 
             let credential_id = attestation.credential_descriptor.id;
             let pubkey_der = attestation.credential_publickey.der;
-            let pubkey_sec1 = spki_der_to_sec1_uncompressed(&pubkey_der).unwrap_or_default();
+            let pubkey_sec1 = spki_der_to_sec1_uncompressed(&pubkey_der).ok_or_else(|| {
+                SignerError::Ctap(
+                    "make_credential did not return a parseable P-256 public key".into(),
+                )
+            })?;
             let keyid = build_keyid(&credential_id, &pubkey_sec1);
 
             Ok(EnrolledCredential {
@@ -183,8 +187,7 @@ mod real {
     }
 
     /// Derive the `p256:<hex>` (compressed) keyid from an SEC1 65-byte
-    /// uncompressed pubkey, or fall back to `webauthn:<credential-id>`
-    /// for authenticators that don't emit a parseable pubkey.
+    /// uncompressed pubkey.
     fn build_keyid(credential_id: &[u8], pubkey_sec1: &[u8]) -> String {
         if pubkey_sec1.len() == 65 {
             let parity = if pubkey_sec1[64] & 1 == 0 {
@@ -198,6 +201,8 @@ mod real {
             format!("p256:{}", super::to_hex(&compressed))
         } else {
             use base64::Engine as _;
+            // Defensive fallback for malformed test inputs only. Real
+            // enrollment rejects credentials without a parseable public key.
             format!(
                 "webauthn:{}",
                 base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential_id)
@@ -207,8 +212,7 @@ mod real {
 
     /// Strip the 26-byte SPKI prefix that wraps a NIST P-256 pubkey
     /// and return the raw SEC1-uncompressed 65-byte body. Returns
-    /// `None` if the input does not start with the expected prefix —
-    /// callers fall back to a `webauthn:<credential-id>` keyid.
+    /// `None` if the input does not start with the expected prefix.
     fn spki_der_to_sec1_uncompressed(der: &[u8]) -> Option<Vec<u8>> {
         const SPKI_PREFIX: &[u8] = &[
             0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,

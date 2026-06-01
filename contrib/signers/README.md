@@ -44,7 +44,8 @@ and need to wrap the PAE inside a per-ceremony transport (here:
 `mkit-sign-ctap` populates `SignResponse.webauthn` (a `WebAuthnData`
 message defined in [`signer.proto`](../../rust/crates/mkit-rpc/proto/signer.proto))
 with the `authenticator_data` and `client_data_json` the authenticator
-signed over. Verifiers reconstruct
+signed over, and it returns the enrolled credential public key in
+`SignResponse.public_key`. Verifiers reconstruct
 `authenticator_data || SHA256(client_data_json)` and check the
 signature against it, after asserting that
 `clientDataJSON.challenge == base64url_nopad(PAE)`. The full spec is

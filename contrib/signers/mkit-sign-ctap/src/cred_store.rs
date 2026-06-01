@@ -4,9 +4,9 @@
 //! This is NOT a key store — the private key lives on the
 //! authenticator, never here. All we persist is the handful of
 //! attributes a caller needs to go from "I have a credential_id" to
-//! "I know what rp_id + pubkey the verifier will want". The file is
-//! advisory; missing or corrupt entries cause a fall-through to
-//! CLI-provided flags rather than a hard failure.
+//! "I know what rp_id + pubkey the verifier will want". Signing requires
+//! this metadata so the signer can return the public key mkit verifies
+//! against the WebAuthn assertion.
 
 use std::fs;
 use std::io::Write;

@@ -143,7 +143,7 @@ advertised capabilities before sending a `SignRequest`.
 | `SignResponse` field | Meaning |
 |---|---|
 | `signature` | Compact signature. 64 bytes for Ed25519 / k256 / p256. |
-| `public_key` | Public key bytes. 32 for Ed25519, 33 SEC1-compressed (or 65 uncompressed) for k256/p256. REQUIRED, except that the CTAP signer MAY return an empty `public_key` if it has no record of the credential in its local store (the verifier then has to recover the key from a separate trust root). |
+| `public_key` | Public key bytes. 32 for Ed25519, 33 SEC1-compressed (or 65 uncompressed) for k256/p256. REQUIRED. CTAP/WebAuthn signers MUST fail closed if local credential metadata is missing; callers should enroll the credential first so the signer can return the public key that mkit verifies against the WebAuthn assertion. |
 | `algorithm` | Echoes the algorithm used. |
 | `key_id` | DSSE `signatures[].keyid`. Conventions used by the reference signers: `blake3:<hex>` for Ed25519 (BLAKE3-256 over the raw 32-byte public key), `secp256k1:<hex(compressed-pubkey)>`, `p256:<hex(compressed-pubkey)>`, `webauthn:<base64url-cred-id>`. Other schemes are tolerated; mkit treats `key_id` as opaque. |
 | `certificate_chain[]` | DER-encoded X.509 chain when applicable. Empty for raw-key signers and for both reference hardware signers today (no signer ships an attestation chain in v1). |
@@ -221,8 +221,11 @@ supports_certificate_chain = false
 requires_user_presence = true
 ```
 
-`SignResponse.webauthn` is populated with `authenticator_data` +
-`client_data_json` so the verifier reconstructs the signed input.
+`SignResponse.public_key` is required, and `SignResponse.webauthn` is
+populated with `authenticator_data` + `client_data_json` so the verifier
+reconstructs the signed input. A CTAP signer that has a credential ID but
+no local public-key metadata MUST return an error rather than an empty
+`public_key`.
 
 ### 8.3 mkit-sign-tpm
 
