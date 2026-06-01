@@ -26,7 +26,9 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use mkit_rpc::mkit::rpc::v1::signer::{Hello, SignRequest, SignerFrame, signer_frame};
+use mkit_rpc::mkit::rpc::v1::signer::{
+    Hello, SignRequest, SignResponse, SignerFrame, signer_frame,
+};
 use mkit_rpc::mkit::rpc::v1::{Algorithm as RpcAlgorithm, KeyForm, ProtocolVersion};
 use mkit_rpc::{FrameError, read_frame, write_frame};
 
@@ -168,10 +170,10 @@ impl Signer for ExternalSigner {
             Some(signer_frame::Body::HelloResponse(_)) => {
                 // Read next frame: SignResponse | Error.
                 let next = read_frame_or_err(&mut stdout)?;
-                extract_signature(next)?
+                extract_signature(next, self.algorithm, pae)?
             }
             Some(signer_frame::Body::SignResponse(_) | signer_frame::Body::Error(_)) => {
-                extract_signature(resp)?
+                extract_signature(resp, self.algorithm, pae)?
             }
             other => {
                 return Err(Error::ExternalSignerBadResponse(format!(
@@ -247,15 +249,20 @@ fn read_frame_or_err<R: Read>(r: &mut R) -> Result<SignerFrame, Error> {
     }
 }
 
-fn extract_signature(frame: SignerFrame) -> Result<(Vec<u8>, String), Error> {
+fn extract_signature(
+    frame: SignerFrame,
+    expected_algorithm: Algorithm,
+    pae: &[u8],
+) -> Result<(Vec<u8>, String), Error> {
     match frame.body {
         Some(signer_frame::Body::SignResponse(sr)) => {
-            let signature = sr.signature.ok_or_else(|| {
+            let signature = sr.signature.clone().ok_or_else(|| {
                 Error::ExternalSignerBadResponse("SignResponse missing signature".into())
             })?;
-            let key_id = sr.key_id.ok_or_else(|| {
+            let key_id = sr.key_id.clone().ok_or_else(|| {
                 Error::ExternalSignerBadResponse("SignResponse missing key_id".into())
             })?;
+            validate_sign_response(&sr, expected_algorithm, pae, &signature, &key_id)?;
             Ok((signature, key_id))
         }
         Some(signer_frame::Body::Error(e)) => {
@@ -267,6 +274,225 @@ fn extract_signature(frame: SignerFrame) -> Result<(Vec<u8>, String), Error> {
             frame_name(&other),
         ))),
     }
+}
+
+fn validate_sign_response(
+    sr: &SignResponse,
+    expected_algorithm: Algorithm,
+    pae: &[u8],
+    signature: &[u8],
+    key_id: &str,
+) -> Result<(), Error> {
+    let actual_algorithm = sr
+        .algorithm
+        .as_ref()
+        .ok_or_else(|| Error::ExternalSignerBadResponse("SignResponse missing algorithm".into()))?
+        .to_i32();
+    let expected_rpc = rpc_algorithm_for(expected_algorithm) as i32;
+    if actual_algorithm != expected_rpc {
+        return Err(Error::ExternalSignerBadResponse(format!(
+            "SignResponse algorithm mismatch: got {actual_algorithm}, expected {expected_rpc}"
+        )));
+    }
+
+    if sr.webauthn.is_set() {
+        return validate_webauthn_response(sr, expected_algorithm, pae, signature, key_id);
+    }
+
+    let public_key = sr.public_key.as_deref().ok_or_else(|| {
+        Error::ExternalSignerBadResponse("SignResponse missing public_key".into())
+    })?;
+
+    match expected_algorithm {
+        Algorithm::Ed25519 => validate_ed25519_response(public_key, pae, signature, key_id),
+        Algorithm::Secp256k1 => validate_secp256k1_response(public_key, pae, signature, key_id),
+        Algorithm::P256 => validate_p256_response(public_key, pae, signature, key_id),
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => Ok(()),
+    }
+}
+
+fn validate_webauthn_response(
+    sr: &SignResponse,
+    expected_algorithm: Algorithm,
+    pae: &[u8],
+    signature: &[u8],
+    key_id: &str,
+) -> Result<(), Error> {
+    if expected_algorithm != Algorithm::P256 {
+        return Err(Error::ExternalSignerBadResponse(
+            "WebAuthn SignResponse must use P-256".into(),
+        ));
+    }
+    let public_key = sr.public_key.as_deref().ok_or_else(|| {
+        Error::ExternalSignerBadResponse("WebAuthn SignResponse missing public_key".into())
+    })?;
+    #[cfg(feature = "algo-p256")]
+    {
+        use crate::webauthn::{WebAuthnWrapping, verify_webauthn_wrapping};
+        use p256::ecdsa::VerifyingKey;
+
+        let vk = VerifyingKey::from_sec1_bytes(public_key).map_err(|_| {
+            Error::ExternalSignerBadResponse(
+                "WebAuthn SignResponse public_key is not a valid P-256 SEC1 key".into(),
+            )
+        })?;
+        let authenticator_data = sr.webauthn.authenticator_data.as_deref().ok_or_else(|| {
+            Error::ExternalSignerBadResponse(
+                "WebAuthn SignResponse missing authenticator_data".into(),
+            )
+        })?;
+        let client_data_json = sr.webauthn.client_data_json.as_deref().ok_or_else(|| {
+            Error::ExternalSignerBadResponse(
+                "WebAuthn SignResponse missing client_data_json".into(),
+            )
+        })?;
+        let wrapping = WebAuthnWrapping {
+            authenticator_data: authenticator_data.to_vec(),
+            client_data_json: client_data_json.to_vec(),
+        };
+        verify_webauthn_wrapping(pae, &wrapping, public_key, signature)?;
+
+        let compressed = vk.to_encoded_point(true);
+        let canonical = format!("p256:{}", hex_lower(compressed.as_bytes()));
+        require_matching_canonical_keyid(key_id, &[("p256", &canonical)])
+    }
+    #[cfg(not(feature = "algo-p256"))]
+    {
+        let _ = public_key;
+        Err(Error::AlgorithmNotEnabled(Algorithm::P256))
+    }
+}
+
+fn validate_ed25519_response(
+    public_key: &[u8],
+    pae: &[u8],
+    signature: &[u8],
+    key_id: &str,
+) -> Result<(), Error> {
+    #[cfg(feature = "algo-ed25519")]
+    {
+        use crate::verify::{Reason, verify_ed25519};
+
+        let pk: [u8; 32] = public_key.try_into().map_err(|_| {
+            Error::ExternalSignerBadResponse(
+                "SignResponse public_key is not a 32-byte Ed25519 key".into(),
+            )
+        })?;
+        if verify_ed25519(pk, signature, pae) != Reason::Ok {
+            return Err(Error::ExternalSignerBadResponse(
+                "SignResponse signature does not verify against public_key".into(),
+            ));
+        }
+
+        let digest = mkit_core::hash::hash(public_key);
+        let blake3_keyid = format!("blake3:{}", mkit_core::hash::to_hex(&digest));
+        let raw_keyid = format!("ed25519:{}", hex_lower(public_key));
+        require_matching_canonical_keyid(
+            key_id,
+            &[("blake3", &blake3_keyid), ("ed25519", &raw_keyid)],
+        )
+    }
+    #[cfg(not(feature = "algo-ed25519"))]
+    {
+        let _ = (public_key, pae, signature, key_id);
+        Err(Error::AlgorithmNotEnabled(Algorithm::Ed25519))
+    }
+}
+
+fn validate_secp256k1_response(
+    public_key: &[u8],
+    pae: &[u8],
+    signature: &[u8],
+    key_id: &str,
+) -> Result<(), Error> {
+    #[cfg(feature = "algo-secp256k1")]
+    {
+        use crate::signer_k256::verify_secp256k1;
+        use k256::ecdsa::VerifyingKey;
+
+        let vk = VerifyingKey::from_sec1_bytes(public_key).map_err(|_| {
+            Error::ExternalSignerBadResponse(
+                "SignResponse public_key is not a valid secp256k1 SEC1 key".into(),
+            )
+        })?;
+        verify_secp256k1(public_key, pae, signature).map_err(|_| {
+            Error::ExternalSignerBadResponse(
+                "SignResponse signature does not verify against public_key".into(),
+            )
+        })?;
+
+        let compressed = vk.to_encoded_point(true);
+        let canonical = format!("secp256k1:{}", hex_lower(compressed.as_bytes()));
+        require_matching_canonical_keyid(key_id, &[("secp256k1", &canonical)])
+    }
+    #[cfg(not(feature = "algo-secp256k1"))]
+    {
+        let _ = (public_key, pae, signature, key_id);
+        Err(Error::AlgorithmNotEnabled(Algorithm::Secp256k1))
+    }
+}
+
+fn validate_p256_response(
+    public_key: &[u8],
+    pae: &[u8],
+    signature: &[u8],
+    key_id: &str,
+) -> Result<(), Error> {
+    #[cfg(feature = "algo-p256")]
+    {
+        use crate::signer_p256::verify_p256;
+        use p256::ecdsa::VerifyingKey;
+
+        let vk = VerifyingKey::from_sec1_bytes(public_key).map_err(|_| {
+            Error::ExternalSignerBadResponse(
+                "SignResponse public_key is not a valid P-256 SEC1 key".into(),
+            )
+        })?;
+        verify_p256(public_key, pae, signature).map_err(|_| {
+            Error::ExternalSignerBadResponse(
+                "SignResponse signature does not verify against public_key".into(),
+            )
+        })?;
+
+        let compressed = vk.to_encoded_point(true);
+        let canonical = format!("p256:{}", hex_lower(compressed.as_bytes()));
+        require_matching_canonical_keyid(key_id, &[("p256", &canonical)])
+    }
+    #[cfg(not(feature = "algo-p256"))]
+    {
+        let _ = (public_key, pae, signature, key_id);
+        Err(Error::AlgorithmNotEnabled(Algorithm::P256))
+    }
+}
+
+fn require_matching_canonical_keyid(
+    key_id: &str,
+    canonical_by_prefix: &[(&str, &str)],
+) -> Result<(), Error> {
+    let Some((prefix, _)) = key_id.split_once(':') else {
+        return Ok(());
+    };
+    if let Some((_, canonical)) = canonical_by_prefix
+        .iter()
+        .find(|(canonical_prefix, _)| *canonical_prefix == prefix)
+        && key_id != *canonical
+    {
+        return Err(Error::ExternalSignerBadResponse(format!(
+            "SignResponse key_id mismatch: got {key_id}, expected {canonical}"
+        )));
+    }
+    Ok(())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0F) as usize] as char);
+    }
+    s
 }
 
 fn frame_name(b: &Option<signer_frame::Body>) -> &'static str {
@@ -304,6 +530,10 @@ fn drain_capped<R: Read>(mut r: R) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkit_rpc::mkit::rpc::v1::Algorithm as RpcAlgorithm;
+    use mkit_rpc::mkit::rpc::v1::signer::WebAuthnData;
+
+    const PAE: &[u8] = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
 
     #[test]
     fn new_rejects_relative_path() {
@@ -315,5 +545,209 @@ mod tests {
     #[test]
     fn new_accepts_absolute_path() {
         ExternalSigner::new("/usr/bin/foo").expect("absolute path accepted");
+    }
+
+    #[cfg(feature = "algo-ed25519")]
+    fn ed25519_response(key_id: String) -> (SignResponse, Vec<u8>, String) {
+        use ed25519_dalek::{Signer as _, SigningKey};
+
+        let sk = SigningKey::from_bytes(&[0x42; 32]);
+        let pk = sk.verifying_key().to_bytes().to_vec();
+        let sig = sk.sign(PAE).to_bytes().to_vec();
+        let sr = SignResponse::default()
+            .with_signature(sig.clone())
+            .with_public_key(pk)
+            .with_algorithm(RpcAlgorithm::ALGORITHM_ED25519)
+            .with_key_id(key_id.clone());
+        (sr, sig, key_id)
+    }
+
+    #[cfg(feature = "algo-ed25519")]
+    fn ed25519_keyid(public_key: &[u8]) -> String {
+        let digest = mkit_core::hash::hash(public_key);
+        format!("blake3:{}", mkit_core::hash::to_hex(&digest))
+    }
+
+    #[cfg(feature = "algo-ed25519")]
+    #[test]
+    fn response_validation_rejects_algorithm_mismatch() {
+        let (mut sr, sig, key_id) = ed25519_response("opaque:test".to_owned());
+        sr.algorithm = Some(RpcAlgorithm::ALGORITHM_P256.into());
+
+        let err = validate_sign_response(&sr, Algorithm::Ed25519, PAE, &sig, &key_id).unwrap_err();
+        assert!(err.to_string().contains("algorithm mismatch"));
+    }
+
+    #[cfg(feature = "algo-ed25519")]
+    #[test]
+    fn response_validation_rejects_missing_public_key_for_raw_response() {
+        let (mut sr, sig, key_id) = ed25519_response("opaque:test".to_owned());
+        sr.public_key = None;
+
+        let err = validate_sign_response(&sr, Algorithm::Ed25519, PAE, &sig, &key_id).unwrap_err();
+        assert!(err.to_string().contains("missing public_key"));
+    }
+
+    #[cfg(feature = "algo-p256")]
+    #[test]
+    fn response_validation_rejects_webauthn_response_without_raw_public_key() {
+        let key_id = "opaque:ctap".to_owned();
+        let signature = vec![0u8; 64];
+        let mut sr = SignResponse::default()
+            .with_signature(signature.clone())
+            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_key_id(key_id.clone());
+        sr.webauthn = buffa::MessageField::some(
+            WebAuthnData::default()
+                .with_authenticator_data(vec![0u8; 37])
+                .with_client_data_json(b"{}".to_vec()),
+        );
+
+        let err = validate_sign_response(&sr, Algorithm::P256, PAE, &signature, &key_id)
+            .expect_err("WebAuthn marker must not bypass public key validation");
+        assert!(err.to_string().contains("missing public_key"));
+    }
+
+    #[cfg(feature = "algo-p256")]
+    #[test]
+    fn response_validation_rejects_webauthn_response_with_bad_signature() {
+        use crate::signer_p256::P256Signer;
+
+        let signer = P256Signer::new([0x33; 32]).unwrap();
+        let key_id = signer.keyid();
+        let signature = vec![0u8; 64];
+        let mut sr = SignResponse::default()
+            .with_signature(signature.clone())
+            .with_public_key(signer.public_key_sec1_uncompressed())
+            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_key_id(key_id.clone());
+        sr.webauthn = buffa::MessageField::some(
+            WebAuthnData::default()
+                .with_authenticator_data(vec![0u8; 37])
+                .with_client_data_json(crate::webauthn::build_client_data_json(
+                    PAE,
+                    "https://example.test",
+                    false,
+                )),
+        );
+
+        let err = validate_sign_response(&sr, Algorithm::P256, PAE, &signature, &key_id)
+            .expect_err("WebAuthn marker must not bypass assertion verification");
+        assert!(matches!(err, Error::WebAuthnSignatureFailed), "got {err:?}");
+    }
+
+    #[cfg(feature = "algo-p256")]
+    #[test]
+    fn response_validation_allows_webauthn_response_with_valid_assertion() {
+        use crate::signer_p256::P256Signer;
+        use sha2::{Digest, Sha256};
+
+        let signer = P256Signer::new([0x33; 32]).unwrap();
+        let key_id = signer.keyid();
+        let authenticator_data = vec![0u8; 37];
+        let client_data_json =
+            crate::webauthn::build_client_data_json(PAE, "https://example.test", false);
+        let mut signed_payload = authenticator_data.clone();
+        signed_payload.extend_from_slice(&Sha256::digest(&client_data_json));
+        let signature = signer.sign_dsse(&signed_payload).unwrap();
+        let mut sr = SignResponse::default()
+            .with_signature(signature.clone())
+            .with_public_key(signer.public_key_sec1_uncompressed())
+            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_key_id(key_id.clone());
+        sr.webauthn = buffa::MessageField::some(
+            WebAuthnData::default()
+                .with_authenticator_data(authenticator_data)
+                .with_client_data_json(client_data_json),
+        );
+
+        validate_sign_response(&sr, Algorithm::P256, PAE, &signature, &key_id)
+            .expect("WebAuthn response verifies assertion binding and signature");
+    }
+
+    #[cfg(feature = "algo-ed25519")]
+    #[test]
+    fn response_validation_rejects_signature_mismatch() {
+        let (mut sr, mut sig, key_id) = ed25519_response("opaque:test".to_owned());
+        sig[0] ^= 0x01;
+        sr.signature = Some(sig.clone());
+
+        let err = validate_sign_response(&sr, Algorithm::Ed25519, PAE, &sig, &key_id).unwrap_err();
+        assert!(err.to_string().contains("signature does not verify"));
+    }
+
+    #[cfg(feature = "algo-ed25519")]
+    #[test]
+    fn response_validation_checks_ed25519_canonical_keyids_but_allows_opaque() {
+        let (sr, sig, key_id) = ed25519_response("opaque:test".to_owned());
+        validate_sign_response(&sr, Algorithm::Ed25519, PAE, &sig, &key_id)
+            .expect("opaque key_id remains allowed");
+
+        let public_key = sr.public_key.as_deref().unwrap();
+        let canonical_keyid = ed25519_keyid(public_key);
+        let (sr, sig, key_id) = ed25519_response(canonical_keyid);
+        validate_sign_response(&sr, Algorithm::Ed25519, PAE, &sig, &key_id)
+            .expect("canonical key_id matches returned public key");
+
+        let (sr, sig, key_id) = ed25519_response("blake3:00".to_owned());
+        let err = validate_sign_response(&sr, Algorithm::Ed25519, PAE, &sig, &key_id).unwrap_err();
+        assert!(err.to_string().contains("key_id mismatch"));
+    }
+
+    #[cfg(feature = "algo-secp256k1")]
+    #[test]
+    fn response_validation_checks_secp256k1_canonical_keyid() {
+        use crate::signer_k256::Secp256k1Signer;
+
+        let mut secret = [0u8; 32];
+        secret[31] = 7;
+        let signer = Secp256k1Signer::new(secret).unwrap();
+        let sig = signer.sign_dsse(PAE).unwrap();
+        let key_id = signer.keyid_string();
+        let sr = SignResponse::default()
+            .with_signature(sig.clone())
+            .with_public_key(signer.public_key_sec1())
+            .with_algorithm(RpcAlgorithm::ALGORITHM_SECP256K1)
+            .with_key_id(key_id.clone());
+        validate_sign_response(&sr, Algorithm::Secp256k1, PAE, &sig, &key_id)
+            .expect("canonical secp256k1 key_id matches returned public key");
+
+        let bad_key_id = "secp256k1:00".to_owned();
+        let bad = SignResponse::default()
+            .with_signature(sig.clone())
+            .with_public_key(signer.public_key_sec1())
+            .with_algorithm(RpcAlgorithm::ALGORITHM_SECP256K1)
+            .with_key_id(bad_key_id.clone());
+        let err =
+            validate_sign_response(&bad, Algorithm::Secp256k1, PAE, &sig, &bad_key_id).unwrap_err();
+        assert!(err.to_string().contains("key_id mismatch"));
+    }
+
+    #[cfg(feature = "algo-p256")]
+    #[test]
+    fn response_validation_checks_p256_canonical_keyid() {
+        use crate::signer_p256::P256Signer;
+
+        let secret = [0x33; 32];
+        let signer = P256Signer::new(secret).unwrap();
+        let sig = signer.sign_dsse(PAE).unwrap();
+        let key_id = signer.keyid();
+        let sr = SignResponse::default()
+            .with_signature(sig.clone())
+            .with_public_key(signer.public_key_sec1())
+            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_key_id(key_id.clone());
+        validate_sign_response(&sr, Algorithm::P256, PAE, &sig, &key_id)
+            .expect("canonical P-256 key_id matches returned public key");
+
+        let bad_key_id = "p256:00".to_owned();
+        let bad = SignResponse::default()
+            .with_signature(sig.clone())
+            .with_public_key(signer.public_key_sec1())
+            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_key_id(bad_key_id.clone());
+        let err =
+            validate_sign_response(&bad, Algorithm::P256, PAE, &sig, &bad_key_id).unwrap_err();
+        assert!(err.to_string().contains("key_id mismatch"));
     }
 }

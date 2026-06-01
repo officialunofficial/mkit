@@ -15,7 +15,6 @@
 use std::io::{Read, Write};
 
 use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64_STD;
 use mkit_attest::build_client_data_json;
 use mkit_rpc::mkit::rpc::v1::signer::{
     Capabilities, HelloResponse, SignResponse, SignerFrame, WebAuthnData, signer_frame,
@@ -86,14 +85,9 @@ where
                         protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
                         signer_id: Some(format!("mkit-sign-ctap/{}", env!("CARGO_PKG_VERSION"))),
                         capabilities: buffa::MessageField::some(Capabilities {
-                            // CTAP authenticators sign over WebAuthn-
-                            // wrapped P-256 (most), or Ed25519
-                            // (a handful). We advertise the wrapping
-                            // algorithms the protocol enum names.
-                            algorithms: vec![
-                                RpcAlgorithm::ALGORITHM_P256.into(),
-                                RpcAlgorithm::ALGORITHM_ED25519_WEBAUTHN.into(),
-                            ],
+                            // The reference CTAP signer currently enrolls and
+                            // verifies P-256 credentials only.
+                            algorithms: vec![RpcAlgorithm::ALGORITHM_P256.into()],
                             key_forms: vec![KeyForm::KEY_FORM_OPAQUE_HANDLE.into()],
                             supports_pin: Some(true),
                             supports_certificate_chain: Some(false),
@@ -146,21 +140,31 @@ fn handle_sign<D: CtapDevice>(
     device: &D,
     defaults: &SignDefaults,
 ) -> SignerFrame {
-    // CTAP authenticators only speak P-256 ECDSA (and a handful Ed25519
-    // via webauthn wrapping). Reject anything else loudly.
+    // The reference CTAP signer only supports P-256 credentials. Reject
+    // other WebAuthn algorithms until their public-key/signature formats
+    // are implemented end-to-end.
     let algorithm = req.algorithm.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    if algorithm != RpcAlgorithm::ALGORITHM_P256 as i32
-        && algorithm != RpcAlgorithm::ALGORITHM_ED25519_WEBAUTHN as i32
-    {
+    if algorithm != RpcAlgorithm::ALGORITHM_P256 as i32 {
         return signer_error_frame(
             ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM,
-            "mkit-sign-ctap only signs ALGORITHM_P256 and ALGORITHM_ED25519_WEBAUTHN".to_owned(),
+            "mkit-sign-ctap only signs ALGORITHM_P256".to_owned(),
         );
     }
 
-    // CTAP signers require an opaque credential_id handle.
+    // CTAP signers require an opaque credential_id handle. Current mkit
+    // releases send RAW_BYTES with an empty key_ref for argv-configured
+    // external signers, so tolerate that legacy host form only when the
+    // credential handle comes from --credential-id.
     let key_form = req.key_form.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    if key_form != KeyForm::KEY_FORM_OPAQUE_HANDLE as i32 && key_form != 0 {
+    let has_key_ref = req
+        .key_ref
+        .as_ref()
+        .is_some_and(|key_ref| !key_ref.is_empty());
+    let has_default_credential = defaults
+        .credential_id_b64url
+        .as_deref()
+        .is_some_and(|credential_id| !credential_id.is_empty());
+    if !ctap_key_form_allowed(key_form, has_key_ref, has_default_credential) {
         return signer_error_frame(
             ErrorCode::ERROR_CODE_UNSUPPORTED_KEY_FORM,
             "mkit-sign-ctap only supports KEY_FORM_OPAQUE_HANDLE (the credential_id)".to_owned(),
@@ -186,20 +190,70 @@ fn handle_sign<D: CtapDevice>(
         }
     };
 
-    // Look up rp_id / keyid in the local store; fall back to argv defaults.
+    // Resolve credential metadata from the local store so SignResponse can
+    // include the public key that mkit validates before accepting a signature.
     let credential_id_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential_id);
     let store_path = match cred_store::default_path() {
         Ok(p) => p,
         Err(e) => return signer_error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
     };
     let store = cred_store::Store::load(&store_path).unwrap_or_default();
-    let record = store.find_by_credential_id(&credential_id_b64);
+    handle_sign_with_store(
+        req,
+        device,
+        defaults,
+        &store,
+        &credential_id,
+        &credential_id_b64,
+    )
+}
+
+fn ctap_key_form_allowed(key_form: i32, has_key_ref: bool, has_default_credential: bool) -> bool {
+    key_form == 0
+        || key_form == KeyForm::KEY_FORM_OPAQUE_HANDLE as i32
+        || (key_form == KeyForm::KEY_FORM_RAW_BYTES as i32
+            && !has_key_ref
+            && has_default_credential)
+}
+
+fn handle_sign_with_store<D: CtapDevice>(
+    req: &mkit_rpc::mkit::rpc::v1::signer::SignRequest,
+    device: &D,
+    defaults: &SignDefaults,
+    store: &cred_store::Store,
+    credential_id: &[u8],
+    credential_id_b64: &str,
+) -> SignerFrame {
+    let algorithm = req.algorithm.as_ref().map_or(0, buffa::EnumValue::to_i32);
+    if algorithm != RpcAlgorithm::ALGORITHM_P256 as i32 {
+        return signer_error_frame(
+            ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM,
+            "mkit-sign-ctap only signs ALGORITHM_P256".to_owned(),
+        );
+    }
+
+    let Some(record) = store.find_by_credential_id(credential_id_b64) else {
+        return signer_error_frame(
+            ErrorCode::ERROR_CODE_INVALID_REQUEST,
+            format!(
+                "credential metadata for {credential_id_b64} is missing; run `mkit-sign-ctap enroll` so the signer can return a public_key"
+            ),
+        );
+    };
+    let public_key = match hex_decode(&record.public_key_sec1_uncompressed_hex) {
+        Ok(key) if key.len() == 65 => key,
+        _ => {
+            return signer_error_frame(
+                ErrorCode::ERROR_CODE_INTERNAL,
+                format!("stored public key for credential {credential_id_b64} is invalid"),
+            );
+        }
+    };
 
     let rp_id = defaults
         .rp_id
         .clone()
-        .or_else(|| record.map(|r| r.rp_id.clone()))
-        .unwrap_or_else(|| "mkit.local".to_owned());
+        .unwrap_or_else(|| record.rp_id.clone());
     let origin = defaults
         .origin
         .clone()
@@ -210,7 +264,7 @@ fn handle_sign<D: CtapDevice>(
 
     let assertion = match device.get_assertion(
         &rp_id,
-        &credential_id,
+        credential_id,
         &client_data_json,
         defaults.pin.as_deref(),
     ) {
@@ -226,13 +280,11 @@ fn handle_sign<D: CtapDevice>(
         Err(e) => return signer_error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
     };
 
-    let key_id = record.map_or_else(
-        || format!("webauthn:{credential_id_b64}"),
-        |r| r.keyid.clone(),
-    );
-    let public_key = record
-        .map(|r| hex_decode(&r.public_key_sec1_uncompressed_hex).unwrap_or_default())
-        .unwrap_or_default();
+    let key_id = if record.keyid.is_empty() {
+        format!("webauthn:{credential_id_b64}")
+    } else {
+        record.keyid.clone()
+    };
 
     SignerFrame {
         body: Some(signer_frame::Body::SignResponse(Box::new(SignResponse {
@@ -280,16 +332,10 @@ fn from_hex_nibble(c: u8) -> Result<u8, &'static str> {
     }
 }
 
-// Helper used by both ALGORITHM_ED25519_WEBAUTHN and ALGORITHM_P256
-// signers — kept here so callers don't repeat themselves.
-#[allow(dead_code)]
-fn b64_encode(b: &[u8]) -> String {
-    B64_STD.encode(b)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cred_store::{Record, Store};
     use crate::ctap::{EnrolledCredential, MockCtapDevice, SignedAssertion};
     use buffa::Message;
     use mkit_rpc::mkit::rpc::v1::signer::{Hello, SignRequest};
@@ -367,6 +413,20 @@ mod tests {
         }
     }
 
+    fn store_with_mock_credential() -> Store {
+        let credential_id_b64url =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"mock-cred");
+        let mut store = Store::default();
+        store.upsert(Record {
+            credential_id_b64url,
+            public_key_sec1_uncompressed_hex: "04".to_owned() + &"aa".repeat(64),
+            rp_id: "mkit.local".to_owned(),
+            user_name: "alice".to_owned(),
+            keyid: "p256:mock".to_owned(),
+        });
+        store
+    }
+
     #[test]
     fn hello_response_advertises_p256_and_opaque_handle() {
         let frames = vec![SignerFrame {
@@ -394,8 +454,7 @@ mod tests {
             .iter()
             .map(buffa::EnumValue::to_i32)
             .collect();
-        assert!(alg_set.contains(&(RpcAlgorithm::ALGORITHM_P256 as i32)));
-        assert!(alg_set.contains(&(RpcAlgorithm::ALGORITHM_ED25519_WEBAUTHN as i32)));
+        assert_eq!(alg_set, vec![RpcAlgorithm::ALGORITHM_P256 as i32]);
         let key_forms: Vec<i32> = caps
             .key_forms
             .iter()
@@ -408,32 +467,24 @@ mod tests {
 
     #[test]
     fn sign_request_emits_webauthn_extension() {
-        let frames = vec![
-            SignerFrame {
-                body: Some(signer_frame::Body::Hello(Box::new(
-                    Hello::default().with_protocol(ProtocolVersion::PROTOCOL_VERSION_1),
-                ))),
-                ..Default::default()
-            },
-            SignerFrame {
-                body: Some(signer_frame::Body::SignRequest(Box::new(
-                    SignRequest::default()
-                        .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
-                        .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
-                        .with_key_ref(b"mock-cred".to_vec())
-                        .with_payload(b"DSSEv1 28 application/vnd.in-toto+json 2 {}".to_vec()),
-                ))),
-                ..Default::default()
-            },
-        ];
-        let mut input = Cursor::new(encode(&frames));
-        let mut output = Vec::new();
         let device = mock_device();
-        serve(&mut input, &mut output, &device, &SignDefaults::default()).unwrap();
-
-        let frames = decode(&output);
-        assert_eq!(frames.len(), 2, "want HelloResponse + SignResponse");
-        let sign_resp = match frames[1].body.clone() {
+        let store = store_with_mock_credential();
+        let credential_id_b64url =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"mock-cred");
+        let req = SignRequest::default()
+            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+            .with_key_ref(b"mock-cred".to_vec())
+            .with_payload(b"DSSEv1 28 application/vnd.in-toto+json 2 {}".to_vec());
+        let resp = handle_sign_with_store(
+            &req,
+            &device,
+            &SignDefaults::default(),
+            &store,
+            b"mock-cred",
+            &credential_id_b64url,
+        );
+        let sign_resp = match resp.body.clone() {
             Some(signer_frame::Body::SignResponse(s)) => *s,
             Some(signer_frame::Body::Error(e)) => panic!("server returned Error: {e:?}"),
             other => panic!("expected SignResponse, got {other:?}"),
@@ -441,12 +492,92 @@ mod tests {
 
         // 64-byte compact P-256 signature.
         assert_eq!(sign_resp.signature.as_ref().map(Vec::len), Some(64));
+        assert_eq!(sign_resp.public_key.as_ref().map(Vec::len), Some(65));
 
         // WebAuthnData populated.
         let webauthn = sign_resp.webauthn.into_option().expect("webauthn set");
         assert_eq!(webauthn.authenticator_data.as_ref().map(Vec::len), Some(37));
         let cdj_bytes = webauthn.client_data_json.expect("client_data_json set");
         assert!(cdj_bytes.starts_with(b"{"));
+    }
+
+    #[test]
+    fn sign_request_without_stored_public_key_returns_invalid_request() {
+        let device = mock_device();
+        let req = SignRequest::default()
+            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+            .with_key_ref(b"mock-cred".to_vec())
+            .with_payload(b"x".to_vec());
+        let resp = handle_sign_with_store(
+            &req,
+            &device,
+            &SignDefaults::default(),
+            &Store::default(),
+            b"mock-cred",
+            "bW9jay1jcmVk",
+        );
+
+        let err = match resp.body.clone() {
+            Some(signer_frame::Body::Error(e)) => e,
+            other => panic!("expected Error, got {other:?}"),
+        };
+        assert_eq!(
+            err.code.as_ref().unwrap().to_i32(),
+            ErrorCode::ERROR_CODE_INVALID_REQUEST as i32
+        );
+        assert!(
+            err.message
+                .as_deref()
+                .is_some_and(|message| message.contains("credential metadata"))
+        );
+    }
+
+    #[test]
+    fn ed25519_webauthn_returns_unsupported_algorithm() {
+        let device = mock_device();
+        let store = store_with_mock_credential();
+        let req = SignRequest::default()
+            .with_algorithm(RpcAlgorithm::ALGORITHM_ED25519_WEBAUTHN)
+            .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+            .with_key_ref(b"mock-cred".to_vec())
+            .with_payload(b"x".to_vec());
+        let resp = handle_sign_with_store(
+            &req,
+            &device,
+            &SignDefaults::default(),
+            &store,
+            b"mock-cred",
+            "bW9jay1jcmVk",
+        );
+
+        let err = match resp.body.clone() {
+            Some(signer_frame::Body::Error(e)) => e,
+            other => panic!("expected Error, got {other:?}"),
+        };
+        assert_eq!(
+            err.code.as_ref().unwrap().to_i32(),
+            ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM as i32
+        );
+    }
+
+    #[test]
+    fn raw_key_form_is_allowed_only_for_mkit_argv_default_compatibility() {
+        assert!(ctap_key_form_allowed(
+            KeyForm::KEY_FORM_RAW_BYTES as i32,
+            false,
+            true
+        ));
+        assert!(!ctap_key_form_allowed(
+            KeyForm::KEY_FORM_RAW_BYTES as i32,
+            true,
+            true
+        ));
+        assert!(!ctap_key_form_allowed(
+            KeyForm::KEY_FORM_RAW_BYTES as i32,
+            false,
+            false
+        ));
     }
 
     #[test]

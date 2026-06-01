@@ -23,14 +23,16 @@
 //!   `bls12381-thr`, the bytes are the 96-byte G2 compressed
 //!   aggregated cohort public key (the `MinSig` variant).
 //!
-//! Exit code is 0 iff every listed attestation has `any_verified = true`,
-//! nonzero otherwise.
+//! Exit code is 0 iff every listed attestation is bound to the requested
+//! commit and has `any_verified = true`, nonzero otherwise.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use mkit_attest::{Algorithm, Registry, TrustRoot, store, verify_envelope};
+use mkit_attest::envelope;
+use mkit_attest::verify::{extract_primary_commit_hash, verify};
+use mkit_attest::{Algorithm, Registry, TrustRoot, store};
 use mkit_core::hash::Hash;
 use mkit_core::{hash as hash_mod, refs};
 
@@ -147,7 +149,42 @@ pub fn run(args: &[String]) -> u8 {
             }
         };
         let att_id = mkit_attest::attestation_id(&bytes);
-        let result = match verify_envelope(&bytes, &registry) {
+        let env = match envelope::decode(&bytes) {
+            Ok(env) => env,
+            Err(e) => {
+                let _ = writeln!(
+                    report,
+                    "  {}: malformed envelope: {e}",
+                    hash_mod::to_hex(&att_id)
+                );
+                all_ok = false;
+                continue;
+            }
+        };
+        let subject_hash = match extract_primary_commit_hash(&env.payload) {
+            Ok(subject_hash) => subject_hash,
+            Err(e) => {
+                let _ = writeln!(
+                    report,
+                    "  {}: subject error: {e}",
+                    hash_mod::to_hex(&att_id)
+                );
+                all_ok = false;
+                continue;
+            }
+        };
+        if subject_hash != commit_hash {
+            let _ = writeln!(
+                report,
+                "  {}: subject mismatch: statement names {}, requested {}",
+                hash_mod::to_hex(&att_id),
+                hash_mod::to_hex(&subject_hash),
+                hash_mod::to_hex(&commit_hash)
+            );
+            all_ok = false;
+            continue;
+        }
+        let result = match verify(&env, &registry) {
             Ok(r) => r,
             Err(e) => {
                 let _ = writeln!(

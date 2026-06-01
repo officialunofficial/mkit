@@ -20,7 +20,7 @@ Write your signer to that spec and mkit will drive it via
 |-----------------------------------------------|-------------------------|-------------------------------------------------------------------------------------|
 | [`mkit-sign-file/`](mkit-sign-file/)          | **reference** (Rust)    | Raw 32-byte key on disk. Ed25519 / secp256k1 / P-256. Not production.               |
 | [`mkit-sign-se/`](mkit-sign-se/README.md)     | **reference** (Swift)   | Apple Secure Enclave, P-256 only. SwiftProtobuf on the v1 wire. Non-extractable key; optional Touch ID / Face ID gating. |
-| [`mkit-sign-ctap/`](mkit-sign-ctap/)          | **reference** (Rust)    | FIDO2/WebAuthn roaming authenticator over CTAP-HID (YubiKey, Nitrokey, SoloKey). P-256 + ED25519_WEBAUTHN. WebAuthn-wrapping mode — see SPEC-EXTERNAL-SIGNER §14. |
+| [`mkit-sign-ctap/`](mkit-sign-ctap/)          | **reference** (Rust)    | FIDO2/WebAuthn roaming authenticator over CTAP-HID (YubiKey, Nitrokey, SoloKey). P-256. WebAuthn-wrapping mode — see SPEC-EXTERNAL-SIGNER §14. |
 | [`mkit-sign-tpm/`](mkit-sign-tpm/README.md)   | **reference** (Rust)    | TPM 2.0 persistent-handle P-256 key. Linux/Windows-native. `tss-esapi` under the hood. |
 | `ledger/` *(planned)*                         | not yet                 | Ledger Nano X/S via HID. secp256k1 + Ed25519. User button confirmation.             |
 | `wallet-bridge/` *(planned)*                  | not yet                 | JSON-RPC bridge to a running browser wallet. secp256k1, `personal_sign`.            |
@@ -44,7 +44,8 @@ and need to wrap the PAE inside a per-ceremony transport (here:
 `mkit-sign-ctap` populates `SignResponse.webauthn` (a `WebAuthnData`
 message defined in [`signer.proto`](../../rust/crates/mkit-rpc/proto/signer.proto))
 with the `authenticator_data` and `client_data_json` the authenticator
-signed over. Verifiers reconstruct
+signed over, and it returns the enrolled credential public key in
+`SignResponse.public_key`. Verifiers reconstruct
 `authenticator_data || SHA256(client_data_json)` and check the
 signature against it, after asserting that
 `clientDataJSON.challenge == base64url_nopad(PAE)`. The full spec is
@@ -157,6 +158,11 @@ $ # mkit-sign-file/tests/end_to_end.rs for the framing shape.
 $ mkit-sign-ctap sign --credential-id <base64url>
 # (input/output are binary SignerFrame protobuf; not shell-paste-able)
 ```
+
+The signer advertises `KEY_FORM_OPAQUE_HANDLE` for CTAP credential IDs.
+For compatibility with mkit's current external-signer host path, it also
+accepts `KEY_FORM_RAW_BYTES` when `key_ref` is empty and `--credential-id`
+supplies the credential handle on argv.
 
 Exit codes: 0 success, 1 generic error, 2 algorithm mismatch (same as
 `mkit-sign-se`). Requires a physical authenticator for `enroll` /

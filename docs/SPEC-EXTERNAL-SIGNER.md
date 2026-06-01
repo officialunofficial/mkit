@@ -143,11 +143,22 @@ advertised capabilities before sending a `SignRequest`.
 | `SignResponse` field | Meaning |
 |---|---|
 | `signature` | Compact signature. 64 bytes for Ed25519 / k256 / p256. |
-| `public_key` | Public key bytes. 32 for Ed25519, 33 SEC1-compressed (or 65 uncompressed) for k256/p256. REQUIRED, except that the CTAP signer MAY return an empty `public_key` if it has no record of the credential in its local store (the verifier then has to recover the key from a separate trust root). |
+| `public_key` | Public key bytes. 32 for Ed25519, 33 SEC1-compressed (or 65 uncompressed) for k256/p256. REQUIRED. CTAP/WebAuthn signers MUST fail closed if local credential metadata is missing; callers should enroll the credential first so the signer can return the public key that mkit verifies against the WebAuthn assertion. |
 | `algorithm` | Echoes the algorithm used. |
 | `key_id` | DSSE `signatures[].keyid`. Conventions used by the reference signers: `blake3:<hex>` for Ed25519 (BLAKE3-256 over the raw 32-byte public key), `secp256k1:<hex(compressed-pubkey)>`, `p256:<hex(compressed-pubkey)>`, `webauthn:<base64url-cred-id>`. Other schemes are tolerated; mkit treats `key_id` as opaque. |
 | `certificate_chain[]` | DER-encoded X.509 chain when applicable. Empty for raw-key signers and for both reference hardware signers today (no signer ships an attestation chain in v1). |
 | `webauthn` | `{ authenticator_data, client_data_json }` for CTAP signers — required when `algorithm = ALGORITHM_ED25519_WEBAUTHN` or when the signer is FIDO2-flavoured P-256, so the verifier can reconstruct `authenticator_data ‖ SHA-256(client_data_json)` and check `signature` against that. Unset for non-WebAuthn signers. |
+
+Callers MUST treat `SignResponse` as untrusted. For non-WebAuthn
+responses, mkit rejects the response unless `algorithm` echoes the
+requested algorithm, `public_key` is present, and `signature` verifies
+against `public_key` and the requested `payload`. If `key_id` uses one
+of the reference canonical prefixes (`blake3:`, `ed25519:`,
+`secp256k1:`, `p256:`), mkit recomputes the expected identifier from
+`public_key` and rejects mismatches. Unknown `key_id` prefixes remain
+opaque and are accepted so third-party signer namespaces keep working.
+WebAuthn responses are validated by the WebAuthn verifier using the
+`webauthn` extension rather than this raw-payload check.
 
 ---
 
@@ -203,15 +214,24 @@ $ mkit-sign-ctap sign  --credential-id <base64url> [--pin <pin>]
 ```
 
 ```
-algorithms = [P256, ED25519_WEBAUTHN]
+algorithms = [P256]
 key_forms  = [OPAQUE_HANDLE]            # the credential_id
 supports_pin = true
 supports_certificate_chain = false
 requires_user_presence = true
 ```
 
-`SignResponse.webauthn` is populated with `authenticator_data` +
-`client_data_json` so the verifier reconstructs the signed input.
+The reference CTAP signer currently supports P-256 credentials only.
+`SignResponse.public_key` is required, and `SignResponse.webauthn` is
+populated with `authenticator_data` + `client_data_json` so the verifier
+reconstructs the signed input. A CTAP signer that has a credential ID but
+no local public-key metadata MUST return an error rather than an empty
+`public_key`.
+
+For compatibility with mkit's current external-signer host path, the
+reference CTAP signer accepts `KEY_FORM_RAW_BYTES` only when `key_ref` is
+empty and the credential handle is supplied by argv `--credential-id`.
+Explicit credential handles should use `KEY_FORM_OPAQUE_HANDLE`.
 
 ### 8.3 mkit-sign-tpm
 
@@ -253,14 +273,15 @@ not leak through to the protocol layer.
 
 ## 10. Security model
 
-The signer process is in mkit's TCB. mkit does NOT verify what the
-signer signed beyond requiring that the returned `signature`
-verifies against the returned `public_key` over the requested
-`payload`. A compromised signer can:
+The signer process is in mkit's TCB. mkit verifies that the returned
+`signature` matches the returned `public_key` over the requested
+`payload`, and rejects `key_id` mismatches for known canonical
+prefixes. A compromised signer can still:
 
 - Sign arbitrary blobs of mkit's choosing.
-- Lie about which `key_id` produced the signature, leading the
-  verifier to attribute the signature to a different key.
+- Lie about which opaque or non-canonical `key_id` namespace produced
+  the signature, leading the verifier to attribute the signature to a
+  different key if that namespace is trusted out-of-band.
 - Fail closed (error frames) but not fail open.
 
 Mitigations the host SHOULD take:
