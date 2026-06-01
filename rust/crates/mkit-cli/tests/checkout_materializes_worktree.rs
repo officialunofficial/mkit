@@ -1,6 +1,5 @@
-//! `mkit checkout` must rematerialise the branch tip's tree on disk,
-//! not just flip HEAD. Integration test: commit files, delete them
-//! from the worktree, run checkout, assert they reappear.
+//! `mkit checkout` must protect dirty work before rematerialising a
+//! branch tip's tree on disk.
 
 use std::fs;
 use std::process::Command;
@@ -25,7 +24,7 @@ fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn checkout_restores_files_that_were_removed_from_worktree() {
+fn checkout_refuses_removed_tracked_files() {
     let td = tempfile::tempdir().unwrap();
 
     assert!(run_in(td.path(), &["init"]).status.success());
@@ -47,12 +46,189 @@ fn checkout_restores_files_that_were_removed_from_worktree() {
     assert!(!td.path().join("a.txt").exists());
     assert!(!td.path().join("sub/c.txt").exists());
 
-    // Run checkout on the main branch and assert all three files are back.
+    // Checkout must not silently recreate tracked paths the user removed.
     let out = run_in(td.path(), &["checkout", "main"]);
-    assert!(out.status.success(), "checkout failed: {out:?}");
-    assert_eq!(fs::read(td.path().join("a.txt")).unwrap(), b"alpha\n");
-    assert_eq!(fs::read(td.path().join("b.txt")).unwrap(), b"bravo\n");
-    assert_eq!(fs::read(td.path().join("sub/c.txt")).unwrap(), b"charlie\n");
+    assert!(!out.status.success(), "dirty checkout should fail: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("restore would overwrite local changes"),
+        "stderr should explain dirty worktree refusal: {stderr}"
+    );
+    assert!(!td.path().join("a.txt").exists());
+    assert!(!td.path().join("sub/c.txt").exists());
+}
+
+#[test]
+fn checkout_refuses_dirty_tracked_file() {
+    let td = tempfile::tempdir().unwrap();
+
+    assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
+    fs::write(td.path().join("a.txt"), b"v1\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "main"])
+            .status
+            .success()
+    );
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    fs::write(td.path().join("a.txt"), b"feature\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "feature"])
+            .status
+            .success()
+    );
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+
+    fs::write(td.path().join("a.txt"), b"local edit\n").unwrap();
+    let out = run_in(td.path(), &["checkout", "feature"]);
+    assert!(!out.status.success(), "dirty checkout should fail: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("restore would overwrite local changes"));
+    assert_eq!(fs::read(td.path().join("a.txt")).unwrap(), b"local edit\n");
+}
+
+#[test]
+fn checkout_refuses_staged_change() {
+    let td = tempfile::tempdir().unwrap();
+
+    assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
+    fs::write(td.path().join("a.txt"), b"v1\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "main"])
+            .status
+            .success()
+    );
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    fs::write(td.path().join("feature.txt"), b"feature\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "feature"])
+            .status
+            .success()
+    );
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+
+    fs::write(td.path().join("a.txt"), b"staged\n").unwrap();
+    assert!(run_in(td.path(), &["add", "a.txt"]).status.success());
+    let out = run_in(td.path(), &["checkout", "feature"]);
+    assert!(
+        !out.status.success(),
+        "staged checkout should fail: {out:?}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("restore would overwrite staged changes"));
+}
+
+#[test]
+fn checkout_refuses_untracked_collision() {
+    let td = tempfile::tempdir().unwrap();
+
+    assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
+    fs::write(td.path().join("base.txt"), b"base\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "main"])
+            .status
+            .success()
+    );
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    fs::write(td.path().join("collision.txt"), b"tracked on feature\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "feature"])
+            .status
+            .success()
+    );
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+
+    fs::write(td.path().join("collision.txt"), b"local only\n").unwrap();
+    let out = run_in(td.path(), &["checkout", "feature"]);
+    assert!(
+        !out.status.success(),
+        "untracked collision should fail: {out:?}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("restore would overwrite untracked path"));
+    assert_eq!(
+        fs::read(td.path().join("collision.txt")).unwrap(),
+        b"local only\n"
+    );
+}
+
+#[test]
+fn checkout_refuses_untracked_file_that_clean_restore_would_remove() {
+    let td = tempfile::tempdir().unwrap();
+
+    assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
+    fs::write(td.path().join("base.txt"), b"base\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "main"])
+            .status
+            .success()
+    );
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    fs::write(td.path().join("feature.txt"), b"feature\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "feature"])
+            .status
+            .success()
+    );
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+
+    fs::write(td.path().join("notes.txt"), b"local notes\n").unwrap();
+    let out = run_in(td.path(), &["checkout", "feature"]);
+
+    assert!(
+        !out.status.success(),
+        "untracked removal should fail: {out:?}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("restore would remove untracked path"));
+    assert_eq!(
+        fs::read(td.path().join("notes.txt")).unwrap(),
+        b"local notes\n"
+    );
+}
+
+#[test]
+fn checkout_refuses_untracked_file_on_same_tree_clean_restore() {
+    let td = tempfile::tempdir().unwrap();
+
+    assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
+    fs::write(td.path().join("tracked.txt"), b"tracked\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "main"])
+            .status
+            .success()
+    );
+
+    fs::write(td.path().join("notes.txt"), b"local notes\n").unwrap();
+    let out = run_in(td.path(), &["checkout", "main"]);
+
+    assert!(
+        !out.status.success(),
+        "same-tree clean restore should fail: {out:?}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("restore would remove untracked path"));
+    assert_eq!(
+        fs::read(td.path().join("notes.txt")).unwrap(),
+        b"local notes\n"
+    );
 }
 
 #[test]
@@ -73,6 +249,10 @@ fn checkout_respects_mkitignore() {
 
     let out = run_in(td.path(), &["checkout", "main"]);
     assert!(out.status.success(), "checkout failed: {out:?}");
+    assert_eq!(
+        fs::read_to_string(td.path().join(".mkitignore")).unwrap(),
+        "local.txt\n"
+    );
     assert_eq!(fs::read(td.path().join("local.txt")).unwrap(), b"untracked");
     assert_eq!(fs::read(td.path().join("tracked.txt")).unwrap(), b"v1");
 }

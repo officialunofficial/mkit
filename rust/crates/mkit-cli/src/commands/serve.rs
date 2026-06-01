@@ -10,11 +10,12 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
+use mkit_core::hash::hash;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport};
 use mkit_rpc::mkit::rpc::v1::ssh::{
     DownloadPackHeader, HelloResponse, ListRefsResponse, PackChunk, PackExistsResponse,
-    ReadRefResponse, RefExpectation, SshFrame, UploadPackResponse, list_refs_response::RefEntry,
-    ssh_frame,
+    ReadRefResponse, RefExpectation, SshFrame, UploadPack, UploadPackResponse,
+    list_refs_response::RefEntry, ssh_frame,
 };
 use mkit_rpc::mkit::rpc::v1::{ErrorCode, ProtocolVersion};
 use mkit_rpc::{FrameError, read_frame, write_frame};
@@ -111,7 +112,6 @@ fn run_listen_enc(addr: &str, repo_root: PathBuf) -> u8 {
     use commonware_codec::DecodeExt as _;
     use commonware_cryptography::Signer as _;
     use commonware_cryptography::ed25519::PrivateKey;
-    use mkit_transport_enc::{EncSession, recv_frame, send_frame};
     use std::sync::Arc;
     use zeroize::Zeroizing;
 
@@ -153,7 +153,7 @@ fn run_listen_enc(addr: &str, repo_root: PathBuf) -> u8 {
 
     let tx = Arc::new(FileTransport::new(&repo_root));
 
-    let serve_fn = move |sess: EncSession<
+    let serve_fn = move |sess: mkit_transport_enc::EncSession<
         mkit_transport_enc::tokio_io::TokioStream,
         mkit_transport_enc::tokio_io::TokioSink,
     >,
@@ -162,53 +162,7 @@ fn run_listen_enc(addr: &str, repo_root: PathBuf) -> u8 {
         // Each accepted connection gets its own future. `serve_tcp`
         // awaits this inside a per-connection `tokio::spawn`, so we
         // can `.await` freely without deadlocking the listener.
-        async move {
-            let (mut sender, mut receiver) = sess.into_parts();
-            // App-level Hello.
-            let frame = match recv_frame(&mut receiver).await {
-                Ok(f) => f,
-                Err(_) => return,
-            };
-            let proto = match frame.body {
-                Some(ssh_frame::Body::Hello(h)) => {
-                    h.proto.as_ref().map_or(0, buffa::EnumValue::to_i32)
-                }
-                _ => return,
-            };
-            if proto != ProtocolVersion::PROTOCOL_VERSION_1 as i32 {
-                return;
-            }
-            let resp = SshFrame {
-                body: Some(ssh_frame::Body::HelloResponse(Box::new(HelloResponse {
-                    proto: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-                    server_id: Some(format!("mkit serve-enc/{}", crate::cli::CLI_VERSION)),
-                    ..Default::default()
-                }))),
-                ..Default::default()
-            };
-            if send_frame(&mut sender, &resp).await.is_err() {
-                return;
-            }
-
-            // Verb loop. Mirrors the stdin/stdout `serve_loop`'s
-            // dispatch decisions but uses the async encrypted-frame
-            // helpers so we never block the listener's tokio worker.
-            loop {
-                let frame = match recv_frame(&mut receiver).await {
-                    Ok(f) => f,
-                    Err(_) => return,
-                };
-                if let Some(ssh_frame::Body::Close(_)) = frame.body {
-                    return;
-                }
-                if dispatch_enc_one(&tx, frame, &mut sender, &mut receiver)
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        }
+        async move { serve_enc_session(tx, sess).await }
     };
 
     match mkit_transport_enc::serve_tcp(addr, sk, serve_fn) {
@@ -216,6 +170,59 @@ fn run_listen_enc(addr: &str, repo_root: PathBuf) -> u8 {
         Err(e) => {
             eprintln!("mkit serve --listen-enc: {e}");
             exit::TEMPFAIL
+        }
+    }
+}
+
+#[cfg(feature = "enc-transport")]
+async fn serve_enc_session(
+    tx: std::sync::Arc<FileTransport>,
+    sess: mkit_transport_enc::EncSession<
+        mkit_transport_enc::tokio_io::TokioStream,
+        mkit_transport_enc::tokio_io::TokioSink,
+    >,
+) {
+    use mkit_transport_enc::{recv_frame, send_frame};
+
+    let (mut sender, mut receiver) = sess.into_parts();
+    // App-level Hello.
+    let Ok(frame) = recv_frame(&mut receiver).await else {
+        return;
+    };
+    let proto = match frame.body {
+        Some(ssh_frame::Body::Hello(h)) => h.proto.as_ref().map_or(0, buffa::EnumValue::to_i32),
+        _ => return,
+    };
+    if proto != ProtocolVersion::PROTOCOL_VERSION_1 as i32 {
+        return;
+    }
+    let resp = SshFrame {
+        body: Some(ssh_frame::Body::HelloResponse(Box::new(HelloResponse {
+            proto: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+            server_id: Some(format!("mkit serve-enc/{}", crate::cli::CLI_VERSION)),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    if send_frame(&mut sender, &resp).await.is_err() {
+        return;
+    }
+
+    // Verb loop. Mirrors the stdin/stdout `serve_loop`'s dispatch
+    // decisions but uses async encrypted-frame helpers so we never
+    // block the listener's tokio worker.
+    loop {
+        let Ok(frame) = recv_frame(&mut receiver).await else {
+            return;
+        };
+        if let Some(ssh_frame::Body::Close(_)) = frame.body {
+            return;
+        }
+        if dispatch_enc_one(&tx, frame, &mut sender, &mut receiver)
+            .await
+            .is_err()
+        {
+            return;
         }
     }
 }
@@ -346,8 +353,13 @@ async fn dispatch_enc_one(
             }
         }
         Some(ssh_frame::Body::UploadPack(header)) => {
-            let total = header.total_bytes.unwrap_or(0) as usize;
-            let mut accum = Vec::with_capacity(total);
+            let mut upload = match UploadDrain::new(&header) {
+                Ok(upload) => upload,
+                Err(e) => {
+                    return send_err(sender, ErrorCode::ERROR_CODE_INVALID_REQUEST, e.message())
+                        .await;
+                }
+            };
             loop {
                 let f = recv_frame(receiver).await.map_err(|_| ())?;
                 let Some(ssh_frame::Body::PackChunk(chunk)) = f.body else {
@@ -358,15 +370,23 @@ async fn dispatch_enc_one(
                     )
                     .await;
                 };
-                if let Some(d) = chunk.data {
-                    accum.extend_from_slice(&d);
-                }
-                if chunk.last.unwrap_or(false) {
+                let complete = match upload.push_chunk(&chunk) {
+                    Ok(complete) => complete,
+                    Err(e) => {
+                        return send_err(
+                            sender,
+                            ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                            e.message(),
+                        )
+                        .await;
+                    }
+                };
+                if complete {
                     break;
                 }
             }
-            let key = pack_key_from(header.pack_id.as_ref())?;
-            match tx.upload_pack(&accum, &key) {
+            let (bytes, key) = upload.into_parts();
+            match tx.upload_pack(&bytes, &key) {
                 Ok(()) => {
                     send_body(
                         sender,
@@ -677,10 +697,12 @@ fn dispatch(
             }
         }
         Some(ssh_frame::Body::UploadPack(header)) => {
-            // Drain pack chunks until we see last=true.
-            #[allow(clippy::cast_possible_truncation)]
-            let total_bytes = header.total_bytes.unwrap_or(0) as usize;
-            let mut accum = Vec::with_capacity(total_bytes);
+            let mut upload = match UploadDrain::new(&header) {
+                Ok(upload) => upload,
+                Err(e) => {
+                    return emit_error(w, ErrorCode::ERROR_CODE_INVALID_REQUEST, e.message());
+                }
+            };
             loop {
                 let frame: SshFrame = match read_frame(r) {
                     Ok(f) => f,
@@ -699,15 +721,18 @@ fn dispatch(
                         "expected PackChunk after UploadPack",
                     );
                 };
-                if let Some(data) = chunk.data {
-                    accum.extend_from_slice(&data);
-                }
-                if chunk.last.unwrap_or(false) {
+                let complete = match upload.push_chunk(&chunk) {
+                    Ok(complete) => complete,
+                    Err(e) => {
+                        return emit_error(w, ErrorCode::ERROR_CODE_INVALID_REQUEST, e.message());
+                    }
+                };
+                if complete {
                     break;
                 }
             }
-            let key = pack_key_from_bytes(header.pack_id.as_ref())?;
-            match tx.upload_pack(&accum, &key) {
+            let (bytes, key) = upload.into_parts();
+            match tx.upload_pack(&bytes, &key) {
                 Ok(()) => send(
                     w,
                     ssh_frame::Body::UploadPackResponse(Box::new(UploadPackResponse {
@@ -840,6 +865,104 @@ fn send(w: &mut impl Write, body: ssh_frame::Body) -> std::io::Result<()> {
     write_frame(w, &frame).map_err(|_| std::io::Error::other("frame write"))
 }
 
+struct UploadDrain {
+    key: PackKey,
+    expected_total: u64,
+    next_offset: u64,
+    chunks: u32,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UploadDrainError(&'static str);
+
+impl UploadDrainError {
+    fn message(self) -> &'static str {
+        self.0
+    }
+}
+
+impl UploadDrain {
+    fn new(header: &UploadPack) -> Result<Self, UploadDrainError> {
+        let key = pack_key_from_upload(header.pack_id.as_deref())?;
+        let expected_total = header
+            .total_bytes
+            .ok_or(UploadDrainError("UploadPack.total_bytes is required"))?;
+        if expected_total > MAX_BYTES_PER_CONN {
+            return Err(UploadDrainError(
+                "UploadPack.total_bytes exceeds server cap",
+            ));
+        }
+        Ok(Self {
+            key,
+            expected_total,
+            next_offset: 0,
+            chunks: 0,
+            bytes: Vec::new(),
+        })
+    }
+
+    fn push_chunk(&mut self, chunk: &PackChunk) -> Result<bool, UploadDrainError> {
+        self.chunks = self.chunks.saturating_add(1);
+        if self.chunks > MAX_FRAMES_PER_CONN {
+            return Err(UploadDrainError(
+                "too many PackChunk frames before last=true",
+            ));
+        }
+
+        let chunk_key = pack_key_from_upload(chunk.pack_id.as_deref())?;
+        if chunk_key.as_bytes() != self.key.as_bytes() {
+            return Err(UploadDrainError(
+                "PackChunk.pack_id does not match UploadPack",
+            ));
+        }
+
+        let offset = chunk
+            .offset
+            .ok_or(UploadDrainError("PackChunk.offset is required"))?;
+        if offset != self.next_offset {
+            return Err(UploadDrainError(
+                "PackChunk.offset is not the expected next offset",
+            ));
+        }
+
+        let data = chunk.data.as_deref().unwrap_or(&[]);
+        let data_len = u64::try_from(data.len())
+            .map_err(|_| UploadDrainError("PackChunk.data length overflows u64"))?;
+        let new_total = self
+            .next_offset
+            .checked_add(data_len)
+            .ok_or(UploadDrainError("PackChunk byte count overflow"))?;
+        if new_total > self.expected_total {
+            return Err(UploadDrainError(
+                "PackChunk data exceeds declared total_bytes",
+            ));
+        }
+
+        self.bytes.extend_from_slice(data);
+        self.next_offset = new_total;
+
+        if !chunk.last.unwrap_or(false) {
+            return Ok(false);
+        }
+        if self.next_offset != self.expected_total {
+            return Err(UploadDrainError(
+                "PackChunk stream ended before declared total_bytes",
+            ));
+        }
+        if hash(&self.bytes) != *self.key.as_bytes() {
+            return Err(UploadDrainError(
+                "uploaded pack bytes do not match UploadPack.pack_id",
+            ));
+        }
+        Ok(true)
+    }
+
+    fn into_parts(self) -> (Vec<u8>, PackKey) {
+        (self.bytes, self.key)
+    }
+}
+
 // Bypasses `send` because `ssh_error_frame` already returns a full
 // `SshFrame`; passing it through `send` would just wrap-and-unwrap.
 fn emit_error(w: &mut impl Write, code: ErrorCode, message: &str) -> std::io::Result<()> {
@@ -851,6 +974,16 @@ fn pack_key_from_bytes(bytes: Option<&Vec<u8>>) -> std::io::Result<PackKey> {
     let b = bytes.ok_or_else(|| std::io::Error::other("pack_id missing"))?;
     if b.len() != 32 {
         return Err(std::io::Error::other("pack_id must be 32 bytes"));
+    }
+    let mut h = [0u8; 32];
+    h.copy_from_slice(b);
+    Ok(PackKey(h))
+}
+
+fn pack_key_from_upload(bytes: Option<&[u8]>) -> Result<PackKey, UploadDrainError> {
+    let b = bytes.ok_or(UploadDrainError("pack_id missing"))?;
+    if b.len() != 32 {
+        return Err(UploadDrainError("pack_id must be 32 bytes"));
     }
     let mut h = [0u8; 32];
     h.copy_from_slice(b);
@@ -965,6 +1098,31 @@ mod tests {
     use super::*;
     use crate::exit;
     use std::fs;
+    use std::io::Cursor;
+
+    fn upload_header(pack_id: Vec<u8>, total_bytes: Option<u64>) -> UploadPack {
+        UploadPack {
+            pack_id: Some(pack_id),
+            total_bytes,
+            ..Default::default()
+        }
+    }
+
+    fn upload_chunk(pack_id: Vec<u8>, offset: Option<u64>, data: &[u8], last: bool) -> PackChunk {
+        PackChunk {
+            pack_id: Some(pack_id),
+            offset,
+            data: Some(data.to_vec()),
+            last: Some(last),
+            ..Default::default()
+        }
+    }
+
+    fn valid_pack() -> (Vec<u8>, PackKey) {
+        let bytes = b"valid pack bytes".to_vec();
+        let key = PackKey::new(hash(&bytes));
+        (bytes, key)
+    }
 
     #[test]
     fn resolve_repo_path_rejects_missing_path() {
@@ -985,6 +1143,286 @@ mod tests {
         fs::create_dir_all(td.path().join(".mkit")).unwrap();
         let resolved = resolve_repo_path(td.path().to_str().unwrap()).unwrap();
         assert!(resolved.join(".mkit").is_dir());
+    }
+
+    #[test]
+    fn upload_drain_accepts_valid_chunks() {
+        let (bytes, key) = valid_pack();
+        let mut drain = UploadDrain::new(&upload_header(
+            key.as_bytes().to_vec(),
+            Some(bytes.len() as u64),
+        ))
+        .unwrap();
+        assert!(
+            !drain
+                .push_chunk(&upload_chunk(
+                    key.as_bytes().to_vec(),
+                    Some(0),
+                    &bytes[..5],
+                    false
+                ))
+                .unwrap()
+        );
+        assert!(
+            drain
+                .push_chunk(&upload_chunk(
+                    key.as_bytes().to_vec(),
+                    Some(5),
+                    &bytes[5..],
+                    true,
+                ))
+                .unwrap()
+        );
+        let (got, got_key) = drain.into_parts();
+        assert_eq!(got, bytes);
+        assert_eq!(got_key.as_bytes(), key.as_bytes());
+    }
+
+    #[test]
+    fn upload_drain_rejects_malformed_streams() {
+        let (bytes, key) = valid_pack();
+        assert!(UploadDrain::new(&upload_header(key.as_bytes().to_vec(), None)).is_err());
+        assert!(
+            UploadDrain::new(&upload_header(
+                key.as_bytes().to_vec(),
+                Some(MAX_BYTES_PER_CONN + 1),
+            ))
+            .is_err()
+        );
+
+        let mut drain = UploadDrain::new(&upload_header(
+            key.as_bytes().to_vec(),
+            Some(bytes.len() as u64),
+        ))
+        .unwrap();
+        assert!(
+            drain
+                .push_chunk(&upload_chunk(
+                    key.as_bytes().to_vec(),
+                    Some(1),
+                    &bytes,
+                    true
+                ))
+                .is_err()
+        );
+
+        let mut drain = UploadDrain::new(&upload_header(
+            key.as_bytes().to_vec(),
+            Some(bytes.len() as u64),
+        ))
+        .unwrap();
+        assert!(
+            drain
+                .push_chunk(&upload_chunk(vec![0xAA; 32], Some(0), &bytes, true))
+                .is_err()
+        );
+
+        let mut drain = UploadDrain::new(&upload_header(
+            key.as_bytes().to_vec(),
+            Some(bytes.len() as u64 - 1),
+        ))
+        .unwrap();
+        assert!(
+            drain
+                .push_chunk(&upload_chunk(
+                    key.as_bytes().to_vec(),
+                    Some(0),
+                    &bytes,
+                    true
+                ))
+                .is_err()
+        );
+
+        let mut drain = UploadDrain::new(&upload_header(
+            key.as_bytes().to_vec(),
+            Some(bytes.len() as u64),
+        ))
+        .unwrap();
+        assert!(
+            drain
+                .push_chunk(&upload_chunk(
+                    key.as_bytes().to_vec(),
+                    Some(0),
+                    &bytes[..bytes.len() - 1],
+                    true,
+                ))
+                .is_err()
+        );
+
+        let wrong_bytes = b"wrong pack bytes";
+        let mut drain = UploadDrain::new(&upload_header(
+            key.as_bytes().to_vec(),
+            Some(wrong_bytes.len() as u64),
+        ))
+        .unwrap();
+        assert!(
+            drain
+                .push_chunk(&upload_chunk(
+                    key.as_bytes().to_vec(),
+                    Some(0),
+                    wrong_bytes,
+                    true,
+                ))
+                .is_err()
+        );
+    }
+
+    fn write_body(buf: &mut Vec<u8>, body: ssh_frame::Body) {
+        mkit_rpc::write_frame(
+            buf,
+            &SshFrame {
+                body: Some(body),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn serve_loop_rejects_invalid_upload_before_storage() {
+        let td = tempfile::tempdir().unwrap();
+        let tx = FileTransport::new(td.path());
+        let bogus_key = PackKey::new([0x77; 32]);
+
+        let mut input = Vec::new();
+        write_body(
+            &mut input,
+            ssh_frame::Body::Hello(Box::new(
+                mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
+                    .with_proto(ProtocolVersion::PROTOCOL_VERSION_1),
+            )),
+        );
+        write_body(
+            &mut input,
+            ssh_frame::Body::UploadPack(Box::new(upload_header(
+                bogus_key.as_bytes().to_vec(),
+                Some(5),
+            ))),
+        );
+        write_body(
+            &mut input,
+            ssh_frame::Body::PackChunk(Box::new(upload_chunk(
+                bogus_key.as_bytes().to_vec(),
+                Some(0),
+                b"wrong",
+                true,
+            ))),
+        );
+
+        let mut reader = Cursor::new(input);
+        let mut output = Vec::new();
+        assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
+        assert!(!tx.pack_exists(&bogus_key).unwrap());
+
+        let mut out = Cursor::new(output);
+        let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
+        let err: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
+        assert!(matches!(err.body, Some(ssh_frame::Body::Error(_))));
+    }
+
+    #[test]
+    fn serve_loop_rejected_upload_does_not_overwrite_existing_pack() {
+        let td = tempfile::tempdir().unwrap();
+        let tx = FileTransport::new(td.path());
+        let (bytes, key) = valid_pack();
+        tx.upload_pack(&bytes, &key).unwrap();
+
+        let mut input = Vec::new();
+        write_body(
+            &mut input,
+            ssh_frame::Body::Hello(Box::new(
+                mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
+                    .with_proto(ProtocolVersion::PROTOCOL_VERSION_1),
+            )),
+        );
+        write_body(
+            &mut input,
+            ssh_frame::Body::UploadPack(Box::new(upload_header(key.as_bytes().to_vec(), Some(5)))),
+        );
+        write_body(
+            &mut input,
+            ssh_frame::Body::PackChunk(Box::new(upload_chunk(
+                key.as_bytes().to_vec(),
+                Some(0),
+                b"wrong",
+                true,
+            ))),
+        );
+
+        let mut reader = Cursor::new(input);
+        let mut output = Vec::new();
+        assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
+        assert_eq!(tx.download_pack(&key).unwrap(), bytes);
+    }
+
+    #[cfg(feature = "enc-transport")]
+    #[test]
+    fn listen_enc_rejected_upload_does_not_overwrite_existing_pack() {
+        use commonware_codec::Encode as _;
+        use commonware_cryptography::Signer as _;
+        use commonware_cryptography::ed25519::PrivateKey;
+        use mkit_transport_enc::tcp::{
+            TokioExecutor, connect_tcp_with_executor, serve_tcp_with_addr,
+        };
+        use std::sync::{Arc, mpsc};
+        use std::thread;
+        use std::time::Duration;
+
+        let td = tempfile::tempdir().unwrap();
+        let tx = FileTransport::new(td.path());
+        let (bytes, key) = valid_pack();
+        tx.upload_pack(&bytes, &key).unwrap();
+
+        let exec = TokioExecutor::new().expect("tokio runtime");
+        let server_key = PrivateKey::from_seed(1001);
+        let server_pubkey = {
+            let encoded = server_key.public_key().encode();
+            let bytes = encoded.as_ref();
+            assert_eq!(bytes.len(), 32);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(bytes);
+            out
+        };
+
+        let server_tx = Arc::new(FileTransport::new(td.path()));
+        let (addr_tx, addr_rx) = mpsc::channel();
+        let exec_for_server = exec.clone();
+        let _server_handle = thread::spawn(move || {
+            let serve_fn =
+                move |sess: mkit_transport_enc::EncSession<
+                    mkit_transport_enc::tokio_io::TokioStream,
+                    mkit_transport_enc::tokio_io::TokioSink,
+                >,
+                      _peer: commonware_cryptography::ed25519::PublicKey| {
+                    let tx = server_tx.clone();
+                    async move { serve_enc_session(tx, sess).await }
+                };
+            let _ = serve_tcp_with_addr(
+                "127.0.0.1:0",
+                server_key,
+                exec_for_server,
+                move |addr| {
+                    let _ = addr_tx.send(addr);
+                },
+                serve_fn,
+            );
+        });
+
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("encrypted listener address");
+        let client_key = PrivateKey::from_seed(2002);
+        let client = connect_tcp_with_executor(
+            &addr.ip().to_string(),
+            addr.port(),
+            &server_pubkey,
+            client_key,
+            exec,
+        )
+        .expect("connect encrypted client");
+
+        assert!(client.upload_pack(b"wrong", &key).is_err());
+        assert_eq!(tx.download_pack(&key).unwrap(), bytes);
     }
 
     // Note: containment via MKIT_SERVE_ROOT is enforced — tested via

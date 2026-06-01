@@ -44,16 +44,23 @@ Hash value: 32 bytes of BLAKE3. Writer computes
 
 ## 2. Ref namespace
 
-Refs live under two namespaces:
+Refs live under three namespaces:
 
 ```
-refs/heads/<name>    branch refs
-refs/tags/<name>     tag refs
+refs/heads/<name>                  branch refs
+refs/tags/<name>                   tag refs
+refs/remotes/<remote>/<name>       remote-tracking branch refs
 ```
 
-On local disk (`.mkit/refs/heads/<name>`, `.mkit/refs/tags/<name>`).
-On transports, the same path shape is used relative to the transport's
-root.
+On local disk (`.mkit/refs/heads/<name>`, `.mkit/refs/tags/<name>`,
+`.mkit/refs/remotes/<remote>/<name>`). On transports, branch and tag refs
+use the same path shape relative to the transport's root.
+
+`refs/remotes/<remote>/<name>` is local-only remote-tracking state. The
+current single-remote CLI stores fetched branch tips under
+`refs/remotes/default/<name>` and never writes fetched tips directly to
+`refs/heads/<name>`. `mkit pull` may then fast-forward the current local
+branch from the matching remote-tracking ref.
 
 `HEAD` is a special file at `.mkit/HEAD` containing either:
 

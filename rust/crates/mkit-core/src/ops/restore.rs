@@ -657,6 +657,9 @@ fn clean_directory(
         if name_str.eq_ignore_ascii_case(".mkit") || name_str.eq_ignore_ascii_case(".git") {
             continue;
         }
+        if name_str == ".mkitignore" {
+            continue;
+        }
         let mut found = false;
         for te in tree_entries {
             if te.name.as_slice() == name_str.as_bytes() {
@@ -729,6 +732,9 @@ fn clean_directory_with_ignore(
             .to_string();
         // Hard-coded repo-metadata guard, ASCII case-insensitive.
         if name_str.eq_ignore_ascii_case(".mkit") || name_str.eq_ignore_ascii_case(".git") {
+            continue;
+        }
+        if name_str == ".mkitignore" {
             continue;
         }
         let mut found = false;

@@ -49,9 +49,31 @@ fn make_transport(server: &Server) -> S3Transport {
     .expect("construct S3 test transport")
 }
 
+fn make_prefixed_transport(server: &Server, prefix: &str) -> S3Transport {
+    S3Transport::with_parts(
+        server.url(),
+        "mybucket",
+        Some(prefix.to_owned()),
+        Credentials {
+            access_key_id: "AKIAEXAMPLE".to_string(),
+            secret_access_key: "SECRETEXAMPLE".to_string(),
+            region: "auto".to_string(),
+        },
+    )
+    .expect("construct S3 test transport")
+}
+
 fn sparse_path(tree_hash: &Hash, filter_hash: &Hash) -> String {
     format!(
         "/mybucket/sparse/{}/{}",
+        to_hex(tree_hash),
+        to_hex(filter_hash)
+    )
+}
+
+fn prefixed_sparse_path(prefix: &str, tree_hash: &Hash, filter_hash: &Hash) -> String {
+    format!(
+        "/mybucket/{prefix}/sparse/{}/{}",
         to_hex(tree_hash),
         to_hex(filter_hash)
     )
@@ -91,6 +113,41 @@ fn s3_sparse_fetch_round_trip_verifies() {
         &resp.proof
     ));
     assert_eq!(resp.manifest.tree_hash, th);
+}
+
+#[test]
+fn s3_sparse_fetch_uses_url_prefix_namespace() {
+    let tree = tree_for(&[b"a", b"b", b"c"]);
+    let th = tree_hash(&tree);
+    let filter = vec![PathBuf::from("a")];
+    let fh = hash_filter(&filter);
+
+    let (entries, manifest, proof) = build_sparse(&tree, &filter).unwrap();
+    let body = encode_sparse_response(&SparseResponse {
+        manifest,
+        entries,
+        proof,
+    })
+    .unwrap();
+
+    let mut server = Server::new();
+    let path = prefixed_sparse_path("repo-a", &th, &fh);
+    let _m = server
+        .mock("GET", path.as_str())
+        .with_status(200)
+        .with_body(body)
+        .create();
+
+    let tx = make_prefixed_transport(&server, "repo-a");
+    let resp = tx
+        .fetch_sparse_tree(&th, &filter)
+        .expect("S3 sparse fetch must succeed");
+    assert!(verify_sparse(
+        &resp.manifest,
+        &resp.entries,
+        &filter,
+        &resp.proof
+    ));
 }
 
 #[test]

@@ -162,6 +162,14 @@ server sees an unambiguous end-of-stream. The server emits
 `UploadPackResponse{}` once `last=true` is observed and the bytes
 verify against the announced digest.
 
+The server MUST reject malformed upload streams before storing bytes:
+`total_bytes` is required and MUST be within the server upload cap;
+every `PackChunk.pack_id` MUST match the `UploadPack.pack_id`; every
+`PackChunk.offset` MUST equal the next expected byte offset; the stream
+MUST end exactly at `total_bytes`; and `BLAKE3(received_bytes)` MUST
+equal `UploadPack.pack_id`. A rejected upload MUST NOT create or
+overwrite the destination pack.
+
 Pack downloads: client sends `DownloadPack { pack_id }`; server
 replies with `DownloadPackHeader { total_bytes }` followed by a
 sequence of `PackChunk`s ending in `last=true`. If the pack is
@@ -229,6 +237,11 @@ misbehaving or malicious client (see
 
 Each cap trips emits an `Error{ ERROR_CODE_INVALID_REQUEST }` and
 closes the connection with `exit::PROTOCOL_ERROR`.
+
+Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
+the declared upload length and additionally cap the number of chunk
+frames at `MAX_FRAMES_PER_CONN`, so a client cannot bypass the outer
+frame loop by streaming unbounded chunks inside one upload request.
 
 The framing layer's per-frame `MAX_FRAME_BYTES = 1 MiB` cap (per
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing)) bounds individual frames;
@@ -339,10 +352,30 @@ talks SigV4 against Cloudflare R2 (primary target) or AWS S3
 
 ### 6.1 Object layout
 
+The table below lists canonical repository-relative keys. For a URL of
+the form `mkit+s3://endpoint/bucket/prefix`, the transport prepends
+`prefix/` to every canonical object key and every `ListObjectsV2`
+query prefix. A no-prefix URL continues to address keys at bucket root.
+Prefixes MUST NOT be empty path segments, `.`, `..`, contain duplicate
+slashes, contain backslashes, or begin/end with `/`.
+
 | Object | S3 key |
 |---|---|
 | Pack | `packs/<64-hex-blake3-digest>` |
 | Ref  | `<ref-name>` (e.g. `refs/heads/main`) |
+
+Examples:
+
+| URL | Canonical key | Effective S3 path |
+|---|---|---|
+| `mkit+s3://host/bucket` | `packs/<hex>` | `/bucket/packs/<hex>` |
+| `mkit+s3://host/bucket/repo-a` | `packs/<hex>` | `/bucket/repo-a/packs/<hex>` |
+| `mkit+s3://host/bucket/repo-a` | `refs/heads/main` | `/bucket/repo-a/refs/heads/main` |
+
+For `list_refs("refs/heads/")` under `repo-a`, the transport sends
+`ListObjectsV2` to `/bucket?list-type=2&prefix=repo-a/refs/heads/`,
+fetches returned ref bodies through `/bucket/repo-a/...`, then strips
+both the URL namespace and requested ref prefix before returning names.
 
 The ref body is the 65-byte wire form: 64 hex chars + `\n`.
 
@@ -397,7 +430,7 @@ sparse delivery is content-addressed at a canonical object key the
 server pre-populates:
 
 ```
-GET /<bucket>/sparse/<tree-hex>/<filter-hex>
+GET /<bucket>[/<url-prefix>]/sparse/<tree-hex>/<filter-hex>
 ```
 
 The response body IS the SPEC-SPARSE-CHECKOUT §5 envelope. SigV4
