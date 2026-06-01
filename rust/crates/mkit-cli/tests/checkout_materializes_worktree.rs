@@ -249,6 +249,10 @@ fn checkout_respects_mkitignore() {
 
     let out = run_in(td.path(), &["checkout", "main"]);
     assert!(out.status.success(), "checkout failed: {out:?}");
+    assert_eq!(
+        fs::read_to_string(td.path().join(".mkitignore")).unwrap(),
+        "local.txt\n"
+    );
     assert_eq!(fs::read(td.path().join("local.txt")).unwrap(), b"untracked");
     assert_eq!(fs::read(td.path().join("tracked.txt")).unwrap(), b"v1");
 }

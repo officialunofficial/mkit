@@ -135,6 +135,31 @@ fn merge_fast_forwards_when_current_is_ancestor() {
     assert_ne!(head_hash(td.path()), c1);
 }
 
+#[test]
+fn merge_preserves_ignored_untracked_files() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"1\n", "c1");
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    make_commit(td.path(), "a.txt", b"2\n", "c2");
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+
+    fs::write(td.path().join(".mkitignore"), "local.txt\n").unwrap();
+    fs::write(td.path().join("local.txt"), b"local only\n").unwrap();
+
+    let out = run_in(td.path(), &["merge", "feature"]);
+    assert!(out.status.success(), "merge failed: {out:?}");
+    assert_eq!(
+        fs::read(td.path().join("local.txt")).unwrap(),
+        b"local only\n"
+    );
+    assert_eq!(
+        fs::read_to_string(td.path().join(".mkitignore")).unwrap(),
+        "local.txt\n"
+    );
+}
+
 // ---------- cherry-pick ---------------------------------------------------
 
 #[test]

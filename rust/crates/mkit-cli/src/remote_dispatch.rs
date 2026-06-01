@@ -25,7 +25,7 @@ use mkit_core::hash::Hash;
 use mkit_core::object::Object;
 use mkit_core::ops::merge::is_ancestor;
 use mkit_core::ops::reachable_objects;
-use mkit_core::ops::restore::{self, RestoreOptions};
+use mkit_core::ops::restore;
 use mkit_core::pack::{PackError, PackReader};
 use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_core::refs::{self, Head};
@@ -277,10 +277,10 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> 
     let tree = load_tree_hash(&store, remote_tip)?;
     crate::commands::ensure_restore_safe(cwd, &store, tree)
         .map_err(DispatchError::RestoreSafety)?;
+    crate::commands::restore_worktree_and_index(cwd, &store, tree)
+        .map_err(DispatchError::RestoreSafety)?;
     crate::commands::write_ref_recording_history(&mkit_dir, &branch, ref_condition, &remote_tip)?;
     refs::write_head_branch(&mkit_dir, &branch)?;
-    restore::restore_tree(&store, tree, cwd, &RestoreOptions::default())?;
-    crate::commands::sync_index_to_tree(cwd, &store, tree).map_err(DispatchError::RestoreSafety)?;
     Ok(n)
 }
 

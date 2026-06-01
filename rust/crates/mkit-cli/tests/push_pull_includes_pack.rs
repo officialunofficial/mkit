@@ -304,3 +304,50 @@ fn pull_all_refuses_dirty_worktree_before_fast_forward() {
         bob_tip
     );
 }
+
+#[test]
+fn pull_all_preserves_ignored_untracked_files() {
+    let alice = tempfile::tempdir().unwrap();
+    let bob = tempfile::tempdir().unwrap();
+
+    assert!(run_in(alice.path(), &["init"]).status.success());
+    assert!(run_in(alice.path(), &["keygen"]).status.success());
+    assert!(run_in(bob.path(), &["init"]).status.success());
+    assert!(run_in(bob.path(), &["keygen"]).status.success());
+
+    fs::write(alice.path().join("a.txt"), b"v1").unwrap();
+    assert!(run_in(alice.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(alice.path(), &["commit", "-m", "v1"])
+            .status
+            .success()
+    );
+
+    let tx: Arc<MemoryTransport> = Arc::new(MemoryTransport::new());
+    let _ = push_all(alice.path(), tx.as_ref()).unwrap();
+    pull_all(bob.path(), tx.as_ref()).expect("initial pull");
+
+    fs::write(alice.path().join("a.txt"), b"v2").unwrap();
+    assert!(run_in(alice.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(alice.path(), &["commit", "-m", "v2"])
+            .status
+            .success()
+    );
+    let _ = push_all(alice.path(), tx.as_ref()).unwrap();
+
+    fs::write(bob.path().join(".mkitignore"), "local.txt\n").unwrap();
+    fs::write(bob.path().join("local.txt"), b"local only\n").unwrap();
+
+    pull_all(bob.path(), tx.as_ref()).expect("fast-forward pull");
+
+    assert_eq!(fs::read(bob.path().join("a.txt")).unwrap(), b"v2");
+    assert_eq!(
+        fs::read(bob.path().join("local.txt")).unwrap(),
+        b"local only\n"
+    );
+    assert_eq!(
+        fs::read_to_string(bob.path().join(".mkitignore")).unwrap(),
+        "local.txt\n"
+    );
+}

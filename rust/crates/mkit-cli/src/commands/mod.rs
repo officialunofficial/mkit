@@ -45,7 +45,7 @@ use mkit_core::hash::Hash;
 use mkit_core::index::{EntryStatus, Index};
 use mkit_core::object::Object;
 use mkit_core::ops::diff::{DiffKind, diff_trees};
-use mkit_core::ops::restore::{RestoreOptions, matches_sparse};
+use mkit_core::ops::restore::{RestoreOptions, matches_sparse, restore_tree_to_worktree};
 use mkit_core::refs::{self, RefError, RefWriteCondition};
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
@@ -167,6 +167,17 @@ pub fn write_ref_recording_history(
 pub fn sync_index_to_tree(root: &Path, store: &ObjectStore, tree_hash: Hash) -> Result<(), String> {
     let idx = mkit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
     mkit_core::index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
+}
+
+/// Materialise `tree_hash` and align the index while preserving `.mkitignore` entries.
+pub fn restore_worktree_and_index(
+    root: &Path,
+    store: &ObjectStore,
+    tree_hash: Hash,
+) -> Result<(), String> {
+    restore_tree_to_worktree(store, &tree_hash, root, &RestoreOptions::default())
+        .map_err(|e| format!("restore worktree: {e}"))?;
+    sync_index_to_tree(root, store, tree_hash)
 }
 
 /// Refuse a destructive restore when the index/worktree contains user work.
