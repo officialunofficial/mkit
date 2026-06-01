@@ -37,6 +37,8 @@ pub const REFS_DIR: &str = "refs";
 pub const HEADS_DIR: &str = "refs/heads";
 /// Subdirectory holding tag refs (`.mkit/refs/tags`).
 pub const TAGS_DIR: &str = "refs/tags";
+/// Subdirectory holding remote-tracking refs (`.mkit/refs/remotes`).
+pub const REMOTES_DIR: &str = "refs/remotes";
 /// HEAD file relative to the `.mkit` root.
 pub const HEAD_FILE: &str = "HEAD";
 /// Shallow-boundary file relative to the `.mkit` root.
@@ -244,12 +246,13 @@ fn lowercase_nibble(b: u8) -> Option<u8> {
 
 /// Initialise the ref directory layout under `mkit_dir` (the
 /// `.mkit/` directory). Creates the `refs/`, `refs/heads/`,
-/// `refs/tags/` subdirectories and writes a default
+/// `refs/tags/`, `refs/remotes/` subdirectories and writes a default
 /// `HEAD = ref: refs/heads/main\n` if `HEAD` does not already exist.
 pub fn init(mkit_dir: &Path) -> RefResult<()> {
     fs::create_dir_all(mkit_dir.join(REFS_DIR))?;
     fs::create_dir_all(mkit_dir.join(HEADS_DIR))?;
     fs::create_dir_all(mkit_dir.join(TAGS_DIR))?;
+    fs::create_dir_all(mkit_dir.join(REMOTES_DIR))?;
     let head_path = mkit_dir.join(HEAD_FILE);
     if !head_path.exists() {
         let body = format!("{HEAD_REF_PREFIX}main\n");
@@ -515,6 +518,32 @@ pub fn list_refs(mkit_dir: &Path) -> RefResult<Vec<Ref>> {
 }
 
 // -----------------------------------------------------------------------------
+// Remote-tracking refs (refs/remotes/<remote>/<branch>)
+// -----------------------------------------------------------------------------
+
+/// Read a remote-tracking branch ref.
+pub fn read_remote_ref(mkit_dir: &Path, remote: &str, branch: &str) -> RefResult<Option<Hash>> {
+    validate_remote_and_branch(remote, branch)?;
+    read_ref_under(mkit_dir, &remote_ref_dir(remote), branch)
+}
+
+/// Write a remote-tracking branch ref unconditionally.
+pub fn write_remote_ref(mkit_dir: &Path, remote: &str, branch: &str, h: &Hash) -> RefResult<()> {
+    validate_remote_and_branch(remote, branch)?;
+    let path = ref_path(mkit_dir, &remote_ref_dir(remote), branch);
+    let wire = encode_ref_wire(h);
+    cas_write(&path, &wire, branch, RefWriteCondition::Any)
+}
+
+/// List all remote-tracking refs for one remote.
+pub fn list_remote_refs(mkit_dir: &Path, remote: &str) -> RefResult<Vec<Ref>> {
+    if !validate_ref_name(remote) {
+        return Err(RefError::InvalidRefName(remote.to_string()));
+    }
+    list_refs_under(mkit_dir, &remote_ref_dir(remote))
+}
+
+// -----------------------------------------------------------------------------
 // Tags (refs/tags/<name>)
 // -----------------------------------------------------------------------------
 
@@ -632,6 +661,20 @@ fn ref_path(mkit_dir: &Path, sub_dir: &str, name: &str) -> PathBuf {
         path.push(segment);
     }
     path
+}
+
+fn remote_ref_dir(remote: &str) -> String {
+    format!("{REMOTES_DIR}/{remote}")
+}
+
+fn validate_remote_and_branch(remote: &str, branch: &str) -> RefResult<()> {
+    if !validate_ref_name(remote) {
+        return Err(RefError::InvalidRefName(remote.to_string()));
+    }
+    if !validate_ref_name(branch) {
+        return Err(RefError::InvalidRefName(branch.to_string()));
+    }
+    Ok(())
 }
 
 fn read_ref_under(mkit_dir: &Path, sub_dir: &str, name: &str) -> RefResult<Option<Hash>> {

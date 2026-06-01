@@ -21,7 +21,6 @@ use mkit_core::ops::rebase::{
     RebaseState, cleanup_rebase, collect_commits_to_replay, is_rebase_in_progress, read_state,
     write_state,
 };
-use mkit_core::ops::restore::{self, RestoreOptions};
 use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
@@ -117,22 +116,22 @@ fn start(
         Ok(signing) => signing,
         Err(code) => return code,
     };
-    if let Err(e) = write_state(mkit_dir, &state) {
-        return emit_err(&format!("write rebase state: {e}"), exit::CANTCREAT);
-    }
-    // Start HEAD at `onto` and drive the replay.
-    if let Err(e) = refs::write_head_detached(mkit_dir, &onto) {
-        return emit_err(&format!("detach HEAD: {e}"), exit::CANTCREAT);
-    }
     let onto_tree = match load_tree_hash(store, onto) {
         Ok(t) => t,
         Err(c) => return c,
     };
-    if let Err(e) = restore::restore_tree(store, onto_tree, cwd, &RestoreOptions::default()) {
-        return emit_err(&format!("restore worktree: {e}"), exit::GENERAL_ERROR);
+    if let Err(e) = super::ensure_restore_safe(cwd, store, onto_tree) {
+        return emit_err(&e, exit::GENERAL_ERROR);
     }
-    if let Err(e) = super::sync_index_to_tree(cwd, store, onto_tree) {
-        return emit_err(&e, exit::CANTCREAT);
+    if let Err(e) = write_state(mkit_dir, &state) {
+        return emit_err(&format!("write rebase state: {e}"), exit::CANTCREAT);
+    }
+    // Start HEAD at `onto` and drive the replay.
+    if let Err(e) = super::restore_worktree_and_index(cwd, store, onto_tree) {
+        return emit_err(&e, exit::GENERAL_ERROR);
+    }
+    if let Err(e) = refs::write_head_detached(mkit_dir, &onto) {
+        return emit_err(&format!("detach HEAD: {e}"), exit::CANTCREAT);
     }
     replay(cwd, mkit_dir, store, Some(signing))
 }
@@ -152,8 +151,15 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
-    if let Err(e) = refs::write_head_branch(mkit_dir, &state.head_name) {
-        return emit_err(&format!("restore HEAD: {e}"), exit::CANTCREAT);
+    let orig_tree = match load_tree_hash(store, state.orig_head) {
+        Ok(tree) => tree,
+        Err(code) => return code,
+    };
+    if let Err(e) = super::ensure_restore_safe(cwd, store, orig_tree) {
+        return emit_err(&e, exit::GENERAL_ERROR);
+    }
+    if let Err(e) = super::restore_worktree_and_index(cwd, store, orig_tree) {
+        return emit_err(&e, exit::GENERAL_ERROR);
     }
     // Rebase abort rolls the branch tip back to `orig_head`. Route
     // through the history-MMR-coupled helper so the rollback append
@@ -168,9 +174,8 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     ) {
         return emit_err(&format!("restore ref: {e}"), exit::CANTCREAT);
     }
-    if let Ok(tree) = load_tree_hash(store, state.orig_head) {
-        let _ = restore::restore_tree(store, tree, cwd, &RestoreOptions::default());
-        let _ = super::sync_index_to_tree(cwd, store, tree);
+    if let Err(e) = refs::write_head_branch(mkit_dir, &state.head_name) {
+        return emit_err(&format!("restore HEAD: {e}"), exit::CANTCREAT);
     }
     let _ = cleanup_rebase(mkit_dir);
     let mut stderr = std::io::stderr().lock();
@@ -182,6 +187,7 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     exit::OK
 }
 
+#[allow(clippy::too_many_lines)]
 fn replay(
     cwd: &std::path::Path,
     mkit_dir: &std::path::Path,
@@ -236,6 +242,9 @@ fn replay(
             );
             return exit::GENERAL_ERROR;
         }
+        if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
         let new_hash = match build_commit(
             store,
             &mut signing.signer,
@@ -247,16 +256,11 @@ fn replay(
             Ok(h) => h,
             Err(c) => return c,
         };
+        if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
         if let Err(e) = refs::write_head_detached(mkit_dir, &new_hash) {
             return emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT);
-        }
-        if let Err(e) =
-            restore::restore_tree(store, result.tree_hash, cwd, &RestoreOptions::default())
-        {
-            return emit_err(&format!("restore worktree: {e}"), exit::GENERAL_ERROR);
-        }
-        if let Err(e) = super::sync_index_to_tree(cwd, store, result.tree_hash) {
-            return emit_err(&e, exit::CANTCREAT);
         }
         state.done.push(target);
         state.todo.remove(0);

@@ -35,8 +35,9 @@
 
 use crate::delta;
 use crate::hash::{self, Hash};
-use crate::object::MkitError;
-use crate::store::ObjectStore;
+use crate::object::{MkitError, Object};
+use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
+use std::sync::Arc;
 
 /// ASCII magic ("MKIT") at the start of every v1 pack.
 pub const MAGIC: &[u8; 4] = b"MKIT";
@@ -82,6 +83,12 @@ pub enum PackError {
     DeltaEntryTruncated,
     #[error("delta reconstruction failed: {0}")]
     DeltaApply(#[from] MkitError),
+    #[error("pack entry is not a canonical storable object: {0}")]
+    InvalidObject(MkitError),
+    #[error("pack entry resolves to pack-only delta object")]
+    NonStorableObject,
+    #[error("pack contains trailing bytes after declared entries")]
+    TrailingData,
     #[error("store I/O failure: {0}")]
     Store(#[from] crate::store::StoreError),
 }
@@ -263,12 +270,13 @@ impl PackReader {
         }
 
         let mut report = UnpackReport::default();
+        let mut pending_writes: Vec<Arc<[u8]>> = Vec::new();
         // Track raw entries we wrote in *this* pack so subsequent delta
         // entries can resolve their base from memory before falling back
         // to the on-disk store. We keep the resolved object bytes (raw
         // serialised SPEC-OBJECTS payload) so the delta apply doesn't
         // need to re-read them.
-        let mut in_pack: std::collections::HashMap<Hash, Vec<u8>> =
+        let mut in_pack: std::collections::HashMap<Hash, Arc<[u8]>> =
             std::collections::HashMap::new();
         let mut total_payload: u64 = 0;
         let mut pos = HEADER_LEN;
@@ -296,9 +304,12 @@ impl PackReader {
 
             match etype {
                 0x00 => {
-                    // raw — store payload, record by hash.
-                    let stored_hash = store.write(payload)?;
-                    in_pack.insert(stored_hash, payload.to_vec());
+                    // raw — validate and stage for writing after the whole pack parses.
+                    validate_storable_object(payload)?;
+                    let stored_hash = hash::hash(payload);
+                    let bytes: Arc<[u8]> = Arc::from(payload);
+                    in_pack.insert(stored_hash, Arc::clone(&bytes));
+                    pending_writes.push(bytes);
                     report.raw_count += 1;
                     report.stored.push(stored_hash);
                 }
@@ -313,15 +324,21 @@ impl PackReader {
                     // Resolve base: in-pack first, then on-disk.
                     let base_bytes: std::borrow::Cow<'_, [u8]> =
                         if let Some(b) = in_pack.get(&base_hash) {
-                            std::borrow::Cow::Borrowed(b)
+                            std::borrow::Cow::Borrowed(b.as_ref())
                         } else if store.contains(&base_hash) {
-                            std::borrow::Cow::Owned(store.read(&base_hash)?)
+                            let bytes = store.read(&base_hash)?;
+                            validate_storable_object(&bytes)?;
+                            std::borrow::Cow::Owned(bytes)
                         } else {
                             return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
                         };
+                    validate_delta_result_size(stream)?;
                     let resolved = delta::decode(base_bytes.as_ref(), stream)?;
-                    let stored_hash = store.write(&resolved)?;
-                    in_pack.insert(stored_hash, resolved);
+                    validate_storable_object(&resolved)?;
+                    let stored_hash = hash::hash(&resolved);
+                    let bytes: Arc<[u8]> = Arc::from(resolved);
+                    in_pack.insert(stored_hash, Arc::clone(&bytes));
+                    pending_writes.push(bytes);
                     report.delta_count += 1;
                     report.stored.push(stored_hash);
                 }
@@ -330,8 +347,41 @@ impl PackReader {
             }
         }
 
+        if pos != split {
+            return Err(PackError::TrailingData);
+        }
+
+        for bytes in pending_writes {
+            store.write(&bytes)?;
+        }
+
         Ok(report)
     }
+}
+
+fn validate_storable_object(bytes: &[u8]) -> Result<(), PackError> {
+    if bytes.len() > MAX_RAW_OBJECT_SIZE {
+        return Err(PackError::Store(crate::store::StoreError::ObjectTooLarge));
+    }
+    match crate::serialize::deserialize(bytes).map_err(PackError::InvalidObject)? {
+        Object::Delta(_) => Err(PackError::NonStorableObject),
+        Object::Blob(_)
+        | Object::Tree(_)
+        | Object::Commit(_)
+        | Object::Remix(_)
+        | Object::ChunkedBlob(_) => Ok(()),
+    }
+}
+
+fn validate_delta_result_size(stream: &[u8]) -> Result<(), PackError> {
+    if stream.len() < delta::HEADER_LEN {
+        return Err(PackError::DeltaApply(MkitError::UnexpectedEof));
+    }
+    let result_len = u32::from_le_bytes(stream[5..9].try_into().expect("4 bytes")) as usize;
+    if result_len > MAX_RAW_OBJECT_SIZE {
+        return Err(PackError::Store(crate::store::StoreError::ObjectTooLarge));
+    }
+    Ok(())
 }
 
 // =========================================================================
@@ -357,6 +407,12 @@ mod tests {
             data: payload.to_vec(),
         });
         crate::serialize::serialize(&blob).expect("serialize blob")
+    }
+
+    fn finish_pack_body(mut body: Vec<u8>) -> Vec<u8> {
+        let trailer = hash::hash(&body);
+        body.extend_from_slice(&trailer);
+        body
     }
 
     #[test]
@@ -420,6 +476,116 @@ mod tests {
         assert_eq!(report.delta_count, 1);
         assert_eq!(report.stored, vec![base_hash, target_hash]);
         assert_eq!(store.read(&target_hash).unwrap(), target_obj);
+    }
+
+    #[test]
+    fn rejects_raw_payload_that_is_not_canonical_object_without_store_write() {
+        let payload = b"not a serialized mkit object".to_vec();
+        let payload_hash = hash::hash(&payload);
+        let mut body = Vec::new();
+        body.extend_from_slice(MAGIC);
+        body.extend_from_slice(&VERSION.to_le_bytes());
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.push(0x00);
+        let payload_len = u32::try_from(payload.len()).unwrap();
+        body.extend_from_slice(&payload_len.to_le_bytes());
+        body.extend_from_slice(&payload);
+        let pack = finish_pack_body(body);
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(matches!(err, PackError::InvalidObject(_)), "got {err:?}");
+        assert!(!store.contains(&payload_hash));
+    }
+
+    #[test]
+    fn rejects_raw_delta_object_without_store_write() {
+        let delta = crate::object::Object::Delta(crate::object::Delta {
+            base_hash: [0xAB; 32],
+            result_size: 0,
+            instructions: Vec::new(),
+        });
+        let payload = crate::serialize::serialize(&delta).unwrap();
+        let payload_hash = hash::hash(&payload);
+        let mut w = PackWriter::new();
+        w.push_raw(payload_hash, payload).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(matches!(err, PackError::NonStorableObject), "got {err:?}");
+        assert!(!store.contains(&payload_hash));
+    }
+
+    #[test]
+    fn rejects_delta_resolving_to_non_object_without_partial_store_write() {
+        let base_obj = write_blob_via_serialize(b"base bytes");
+        let base_hash = hash::hash(&base_obj);
+        let invalid_target = b"not a serialized object".to_vec();
+        let invalid_hash = hash::hash(&invalid_target);
+        let stream = delta::encode(&base_obj, &invalid_target).unwrap();
+
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, base_obj).unwrap();
+        w.push_delta(&base_hash, &stream).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(matches!(err, PackError::InvalidObject(_)), "got {err:?}");
+        assert!(!store.contains(&base_hash));
+        assert!(!store.contains(&invalid_hash));
+    }
+
+    #[test]
+    fn rejects_delta_result_over_object_cap_without_partial_store_write() {
+        let base_obj = write_blob_via_serialize(b"base bytes");
+        let base_hash = hash::hash(&base_obj);
+        let mut stream = Vec::new();
+        stream.push(delta::STREAM_VERSION);
+        stream.extend_from_slice(&u32::try_from(base_obj.len()).unwrap().to_le_bytes());
+        stream.extend_from_slice(
+            &u32::try_from(MAX_RAW_OBJECT_SIZE + 1)
+                .unwrap()
+                .to_le_bytes(),
+        );
+
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, base_obj).unwrap();
+        w.push_delta(&base_hash, &stream).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PackError::Store(crate::store::StoreError::ObjectTooLarge)
+            ),
+            "got {err:?}"
+        );
+        assert!(!store.contains(&base_hash));
+    }
+
+    #[test]
+    fn rejects_trailing_bytes_after_declared_entries_without_store_write() {
+        let blob = write_blob_via_serialize(b"trailing bytes test");
+        let blob_hash = hash::hash(&blob);
+        let mut body = Vec::new();
+        body.extend_from_slice(MAGIC);
+        body.extend_from_slice(&VERSION.to_le_bytes());
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.push(0x00);
+        let blob_len = u32::try_from(blob.len()).unwrap();
+        body.extend_from_slice(&blob_len.to_le_bytes());
+        body.extend_from_slice(&blob);
+        body.extend_from_slice(b"junk");
+        let pack = finish_pack_body(body);
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(matches!(err, PackError::TrailingData), "got {err:?}");
+        assert!(!store.contains(&blob_hash));
     }
 
     #[test]

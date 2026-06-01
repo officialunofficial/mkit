@@ -98,6 +98,12 @@ SPEC-OBJECTS prologue). The reconstructed bytes are then hashed to
 produce the object's storage path — the same way a `raw` entry is
 stored.
 
+Readers MUST validate every `raw` payload and every reconstructed delta
+target as a canonical SPEC-OBJECTS object before storing it. Payloads
+that fail object deserialization, or deserialize as pack-only
+`Object::Delta`, are rejected and MUST NOT be written to the object
+store.
+
 Writers MAY emit all-`raw` packs for simplicity; readers MUST handle
 both mixes. mkit v1's `PackWriter` API is policy-free — it accepts
 whatever entries the caller pushes and does not itself decide raw
@@ -156,6 +162,10 @@ deliberate simplification. Consequences:
 - Random access to entries is O(n) scan since no entry index exists.
 
 Future v2 may add a trailing index, but v1 does not.
+
+Readers MUST reject any bytes between the end of the declared entry list
+and the 32-byte trailer. A pack with trailing data is malformed even if
+the trailer hashes those extra bytes correctly.
 
 ---
 
