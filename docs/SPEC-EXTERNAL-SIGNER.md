@@ -214,13 +214,14 @@ $ mkit-sign-ctap sign  --credential-id <base64url> [--pin <pin>]
 ```
 
 ```
-algorithms = [P256, ED25519_WEBAUTHN]
+algorithms = [P256]
 key_forms  = [OPAQUE_HANDLE]            # the credential_id
 supports_pin = true
 supports_certificate_chain = false
 requires_user_presence = true
 ```
 
+The reference CTAP signer currently supports P-256 credentials only.
 `SignResponse.public_key` is required, and `SignResponse.webauthn` is
 populated with `authenticator_data` + `client_data_json` so the verifier
 reconstructs the signed input. A CTAP signer that has a credential ID but

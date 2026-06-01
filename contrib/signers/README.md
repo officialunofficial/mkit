@@ -20,7 +20,7 @@ Write your signer to that spec and mkit will drive it via
 |-----------------------------------------------|-------------------------|-------------------------------------------------------------------------------------|
 | [`mkit-sign-file/`](mkit-sign-file/)          | **reference** (Rust)    | Raw 32-byte key on disk. Ed25519 / secp256k1 / P-256. Not production.               |
 | [`mkit-sign-se/`](mkit-sign-se/README.md)     | **reference** (Swift)   | Apple Secure Enclave, P-256 only. SwiftProtobuf on the v1 wire. Non-extractable key; optional Touch ID / Face ID gating. |
-| [`mkit-sign-ctap/`](mkit-sign-ctap/)          | **reference** (Rust)    | FIDO2/WebAuthn roaming authenticator over CTAP-HID (YubiKey, Nitrokey, SoloKey). P-256 + ED25519_WEBAUTHN. WebAuthn-wrapping mode — see SPEC-EXTERNAL-SIGNER §14. |
+| [`mkit-sign-ctap/`](mkit-sign-ctap/)          | **reference** (Rust)    | FIDO2/WebAuthn roaming authenticator over CTAP-HID (YubiKey, Nitrokey, SoloKey). P-256. WebAuthn-wrapping mode — see SPEC-EXTERNAL-SIGNER §14. |
 | [`mkit-sign-tpm/`](mkit-sign-tpm/README.md)   | **reference** (Rust)    | TPM 2.0 persistent-handle P-256 key. Linux/Windows-native. `tss-esapi` under the hood. |
 | `ledger/` *(planned)*                         | not yet                 | Ledger Nano X/S via HID. secp256k1 + Ed25519. User button confirmation.             |
 | `wallet-bridge/` *(planned)*                  | not yet                 | JSON-RPC bridge to a running browser wallet. secp256k1, `personal_sign`.            |

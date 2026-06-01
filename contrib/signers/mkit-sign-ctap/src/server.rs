@@ -15,7 +15,6 @@
 use std::io::{Read, Write};
 
 use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64_STD;
 use mkit_attest::build_client_data_json;
 use mkit_rpc::mkit::rpc::v1::signer::{
     Capabilities, HelloResponse, SignResponse, SignerFrame, WebAuthnData, signer_frame,
@@ -86,14 +85,9 @@ where
                         protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
                         signer_id: Some(format!("mkit-sign-ctap/{}", env!("CARGO_PKG_VERSION"))),
                         capabilities: buffa::MessageField::some(Capabilities {
-                            // CTAP authenticators sign over WebAuthn-
-                            // wrapped P-256 (most), or Ed25519
-                            // (a handful). We advertise the wrapping
-                            // algorithms the protocol enum names.
-                            algorithms: vec![
-                                RpcAlgorithm::ALGORITHM_P256.into(),
-                                RpcAlgorithm::ALGORITHM_ED25519_WEBAUTHN.into(),
-                            ],
+                            // The reference CTAP signer currently enrolls and
+                            // verifies P-256 credentials only.
+                            algorithms: vec![RpcAlgorithm::ALGORITHM_P256.into()],
                             key_forms: vec![KeyForm::KEY_FORM_OPAQUE_HANDLE.into()],
                             supports_pin: Some(true),
                             supports_certificate_chain: Some(false),
@@ -146,15 +140,14 @@ fn handle_sign<D: CtapDevice>(
     device: &D,
     defaults: &SignDefaults,
 ) -> SignerFrame {
-    // CTAP authenticators only speak P-256 ECDSA (and a handful Ed25519
-    // via webauthn wrapping). Reject anything else loudly.
+    // The reference CTAP signer only supports P-256 credentials. Reject
+    // other WebAuthn algorithms until their public-key/signature formats
+    // are implemented end-to-end.
     let algorithm = req.algorithm.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    if algorithm != RpcAlgorithm::ALGORITHM_P256 as i32
-        && algorithm != RpcAlgorithm::ALGORITHM_ED25519_WEBAUTHN as i32
-    {
+    if algorithm != RpcAlgorithm::ALGORITHM_P256 as i32 {
         return signer_error_frame(
             ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM,
-            "mkit-sign-ctap only signs ALGORITHM_P256 and ALGORITHM_ED25519_WEBAUTHN".to_owned(),
+            "mkit-sign-ctap only signs ALGORITHM_P256".to_owned(),
         );
     }
 
@@ -212,6 +205,14 @@ fn handle_sign_with_store<D: CtapDevice>(
     credential_id: &[u8],
     credential_id_b64: &str,
 ) -> SignerFrame {
+    let algorithm = req.algorithm.as_ref().map_or(0, buffa::EnumValue::to_i32);
+    if algorithm != RpcAlgorithm::ALGORITHM_P256 as i32 {
+        return signer_error_frame(
+            ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM,
+            "mkit-sign-ctap only signs ALGORITHM_P256".to_owned(),
+        );
+    }
+
     let Some(record) = store.find_by_credential_id(credential_id_b64) else {
         return signer_error_frame(
             ErrorCode::ERROR_CODE_INVALID_REQUEST,
@@ -310,13 +311,6 @@ fn from_hex_nibble(c: u8) -> Result<u8, &'static str> {
         b'A'..=b'F' => Ok(c - b'A' + 10),
         _ => Err("not hex"),
     }
-}
-
-// Helper used by both ALGORITHM_ED25519_WEBAUTHN and ALGORITHM_P256
-// signers — kept here so callers don't repeat themselves.
-#[allow(dead_code)]
-fn b64_encode(b: &[u8]) -> String {
-    B64_STD.encode(b)
 }
 
 #[cfg(test)]
@@ -441,8 +435,7 @@ mod tests {
             .iter()
             .map(buffa::EnumValue::to_i32)
             .collect();
-        assert!(alg_set.contains(&(RpcAlgorithm::ALGORITHM_P256 as i32)));
-        assert!(alg_set.contains(&(RpcAlgorithm::ALGORITHM_ED25519_WEBAUTHN as i32)));
+        assert_eq!(alg_set, vec![RpcAlgorithm::ALGORITHM_P256 as i32]);
         let key_forms: Vec<i32> = caps
             .key_forms
             .iter()
@@ -518,6 +511,34 @@ mod tests {
             err.message
                 .as_deref()
                 .is_some_and(|message| message.contains("credential metadata"))
+        );
+    }
+
+    #[test]
+    fn ed25519_webauthn_returns_unsupported_algorithm() {
+        let device = mock_device();
+        let store = store_with_mock_credential();
+        let req = SignRequest::default()
+            .with_algorithm(RpcAlgorithm::ALGORITHM_ED25519_WEBAUTHN)
+            .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+            .with_key_ref(b"mock-cred".to_vec())
+            .with_payload(b"x".to_vec());
+        let resp = handle_sign_with_store(
+            &req,
+            &device,
+            &SignDefaults::default(),
+            &store,
+            b"mock-cred",
+            "bW9jay1jcmVk",
+        );
+
+        let err = match resp.body.clone() {
+            Some(signer_frame::Body::Error(e)) => e,
+            other => panic!("expected Error, got {other:?}"),
+        };
+        assert_eq!(
+            err.code.as_ref().unwrap().to_i32(),
+            ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM as i32
         );
     }
 
