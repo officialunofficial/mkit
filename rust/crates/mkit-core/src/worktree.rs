@@ -430,6 +430,16 @@ fn open_regular_file(path: &Path) -> io::Result<fs::File> {
 
 #[cfg(not(unix))]
 fn open_regular_file(path: &Path) -> io::Result<fs::File> {
+    // Best-effort direct-symlink rejection on platforms without the
+    // Unix O_NOFOLLOW path. This does not close the swap race, but it
+    // keeps normal symlinks from being treated as regular files.
+    let meta = path.symlink_metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        ));
+    }
     fs::File::open(path)
 }
 

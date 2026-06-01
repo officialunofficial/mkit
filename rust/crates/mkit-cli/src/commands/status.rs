@@ -92,10 +92,14 @@ pub fn run(args: &[String]) -> u8 {
         _ => None,
     };
 
-    // Load the index, falling back to None when absent/empty.
-    let idx = index::read_index(&cwd)
-        .ok()
-        .filter(|idx| !idx.entries.is_empty());
+    // Load the index, falling back to None only when absent/empty.
+    // Corrupt or invalid persisted state must surface instead of
+    // silently reverting to the HEAD<->worktree comparison.
+    let idx = match index::read_index(&cwd) {
+        Ok(idx) if idx.entries.is_empty() => None,
+        Ok(idx) => Some(idx),
+        Err(e) => return emit_err(&format!("read index: {e}"), exit::GENERAL_ERROR),
+    };
 
     let entries = match status_diff(&store, head_tree.as_ref(), &cwd, idx.as_ref()) {
         Ok(e) => e,

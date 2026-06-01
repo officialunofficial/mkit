@@ -158,6 +158,40 @@ fn commit_with_empty_index_is_an_error() {
 }
 
 #[test]
+fn commit_reports_invalid_index_instead_of_nothing_staged() {
+    use mkit_core::hash::ZERO;
+    use mkit_core::index::{EntryStatus, Index, IndexEntry};
+
+    let td = init_repo();
+    let p = td.path();
+
+    let mut idx = Index::new();
+    idx.entries.push(IndexEntry {
+        path: "same.txt".into(),
+        status: EntryStatus::Blob,
+        object_hash: ZERO,
+    });
+    idx.entries.push(IndexEntry {
+        path: "same.txt".into(),
+        status: EntryStatus::Blob,
+        object_hash: ZERO,
+    });
+    fs::write(p.join(".mkit/index"), idx.serialize()).unwrap();
+
+    let out = run(p, &["commit", "-m", "should fail"]);
+    assert!(!out.status.success(), "commit must reject invalid index");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("read index") && stderr.contains("duplicate index path"),
+        "commit should surface the index integrity error, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("nothing staged"),
+        "invalid index must not be reported as an empty index: {stderr}"
+    );
+}
+
+#[test]
 fn add_dot_then_commit_reproduces_full_worktree_snapshot() {
     let td = init_repo();
     let p = td.path();

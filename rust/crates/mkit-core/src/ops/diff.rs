@@ -349,7 +349,7 @@ pub fn status_diff(
 
     let Some(idx) = index else {
         // Legacy fallback: HEAD↔worktree, everything labeled Unstaged.
-        let diff = diff_trees(store, head_tree.copied(), Some(work_tree_hash))?;
+        let diff = diff_worktree_trees(store, head_tree.copied(), Some(work_tree_hash))?;
         return Ok(diff
             .entries
             .into_iter()
@@ -673,6 +673,22 @@ mod tests {
         let head_hash = worktree::build_tree(&store, work.path()).unwrap();
         let result = status_diff(&store, Some(&head_hash), work.path(), None).unwrap();
         assert!(result.is_empty(), "expected clean, got {result:?}");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn status_no_index_ignores_unrepresentable_executable_mode_on_non_unix() {
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("run.sh"), b"#!/bin/sh\n").unwrap();
+        let h = worktree::hash_file(&store, &work.path().join("run.sh")).unwrap();
+        let head_hash = put_tree(&store, vec![entry(b"run.sh", EntryMode::Executable, h)]);
+
+        let result = status_diff(&store, Some(&head_hash), work.path(), None).unwrap();
+        assert!(
+            result.is_empty(),
+            "non-Unix should not report executable-only noise, got {result:?}"
+        );
     }
 
     #[test]

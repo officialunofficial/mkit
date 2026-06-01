@@ -36,7 +36,8 @@
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{MkitError, Object};
-use crate::store::ObjectStore;
+use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
+use std::sync::Arc;
 
 /// ASCII magic ("MKIT") at the start of every v1 pack.
 pub const MAGIC: &[u8; 4] = b"MKIT";
@@ -269,13 +270,13 @@ impl PackReader {
         }
 
         let mut report = UnpackReport::default();
-        let mut pending_writes: Vec<Vec<u8>> = Vec::new();
+        let mut pending_writes: Vec<Arc<[u8]>> = Vec::new();
         // Track raw entries we wrote in *this* pack so subsequent delta
         // entries can resolve their base from memory before falling back
         // to the on-disk store. We keep the resolved object bytes (raw
         // serialised SPEC-OBJECTS payload) so the delta apply doesn't
         // need to re-read them.
-        let mut in_pack: std::collections::HashMap<Hash, Vec<u8>> =
+        let mut in_pack: std::collections::HashMap<Hash, Arc<[u8]>> =
             std::collections::HashMap::new();
         let mut total_payload: u64 = 0;
         let mut pos = HEADER_LEN;
@@ -306,8 +307,9 @@ impl PackReader {
                     // raw — validate and stage for writing after the whole pack parses.
                     validate_storable_object(payload)?;
                     let stored_hash = hash::hash(payload);
-                    in_pack.insert(stored_hash, payload.to_vec());
-                    pending_writes.push(payload.to_vec());
+                    let bytes: Arc<[u8]> = Arc::from(payload);
+                    in_pack.insert(stored_hash, Arc::clone(&bytes));
+                    pending_writes.push(bytes);
                     report.raw_count += 1;
                     report.stored.push(stored_hash);
                 }
@@ -322,7 +324,7 @@ impl PackReader {
                     // Resolve base: in-pack first, then on-disk.
                     let base_bytes: std::borrow::Cow<'_, [u8]> =
                         if let Some(b) = in_pack.get(&base_hash) {
-                            std::borrow::Cow::Borrowed(b)
+                            std::borrow::Cow::Borrowed(b.as_ref())
                         } else if store.contains(&base_hash) {
                             let bytes = store.read(&base_hash)?;
                             validate_storable_object(&bytes)?;
@@ -330,11 +332,13 @@ impl PackReader {
                         } else {
                             return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
                         };
+                    validate_delta_result_size(stream)?;
                     let resolved = delta::decode(base_bytes.as_ref(), stream)?;
                     validate_storable_object(&resolved)?;
                     let stored_hash = hash::hash(&resolved);
-                    in_pack.insert(stored_hash, resolved.clone());
-                    pending_writes.push(resolved);
+                    let bytes: Arc<[u8]> = Arc::from(resolved);
+                    in_pack.insert(stored_hash, Arc::clone(&bytes));
+                    pending_writes.push(bytes);
                     report.delta_count += 1;
                     report.stored.push(stored_hash);
                 }
@@ -356,6 +360,9 @@ impl PackReader {
 }
 
 fn validate_storable_object(bytes: &[u8]) -> Result<(), PackError> {
+    if bytes.len() > MAX_RAW_OBJECT_SIZE {
+        return Err(PackError::Store(crate::store::StoreError::ObjectTooLarge));
+    }
     match crate::serialize::deserialize(bytes).map_err(PackError::InvalidObject)? {
         Object::Delta(_) => Err(PackError::NonStorableObject),
         Object::Blob(_)
@@ -364,6 +371,17 @@ fn validate_storable_object(bytes: &[u8]) -> Result<(), PackError> {
         | Object::Remix(_)
         | Object::ChunkedBlob(_) => Ok(()),
     }
+}
+
+fn validate_delta_result_size(stream: &[u8]) -> Result<(), PackError> {
+    if stream.len() < delta::HEADER_LEN {
+        return Err(PackError::DeltaApply(MkitError::UnexpectedEof));
+    }
+    let result_len = u32::from_le_bytes(stream[5..9].try_into().expect("4 bytes")) as usize;
+    if result_len > MAX_RAW_OBJECT_SIZE {
+        return Err(PackError::Store(crate::store::StoreError::ObjectTooLarge));
+    }
+    Ok(())
 }
 
 // =========================================================================
@@ -517,6 +535,36 @@ mod tests {
         assert!(matches!(err, PackError::InvalidObject(_)), "got {err:?}");
         assert!(!store.contains(&base_hash));
         assert!(!store.contains(&invalid_hash));
+    }
+
+    #[test]
+    fn rejects_delta_result_over_object_cap_without_partial_store_write() {
+        let base_obj = write_blob_via_serialize(b"base bytes");
+        let base_hash = hash::hash(&base_obj);
+        let mut stream = Vec::new();
+        stream.push(delta::STREAM_VERSION);
+        stream.extend_from_slice(&u32::try_from(base_obj.len()).unwrap().to_le_bytes());
+        stream.extend_from_slice(
+            &u32::try_from(MAX_RAW_OBJECT_SIZE + 1)
+                .unwrap()
+                .to_le_bytes(),
+        );
+
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, base_obj).unwrap();
+        w.push_delta(&base_hash, &stream).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PackError::Store(crate::store::StoreError::ObjectTooLarge)
+            ),
+            "got {err:?}"
+        );
+        assert!(!store.contains(&base_hash));
     }
 
     #[test]

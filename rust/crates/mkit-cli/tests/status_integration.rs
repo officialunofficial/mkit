@@ -80,6 +80,37 @@ fn status_clean_working_tree() {
     );
 }
 
+#[test]
+fn status_reports_invalid_index_instead_of_falling_back_to_worktree() {
+    use mkit_core::hash::ZERO;
+    use mkit_core::index::{EntryStatus, Index, IndexEntry};
+
+    let td = tempfile::tempdir().unwrap();
+    let p = td.path();
+    assert!(run_in(p, &["init"]).status.success());
+
+    let mut idx = Index::new();
+    idx.entries.push(IndexEntry {
+        path: "same.txt".into(),
+        status: EntryStatus::Blob,
+        object_hash: ZERO,
+    });
+    idx.entries.push(IndexEntry {
+        path: "same.txt".into(),
+        status: EntryStatus::Blob,
+        object_hash: ZERO,
+    });
+    fs::write(p.join(".mkit/index"), idx.serialize()).unwrap();
+
+    let out = run_in(p, &["status", "--porcelain"]);
+    assert!(!out.status.success(), "status must reject invalid index");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("read index") && stderr.contains("duplicate index path"),
+        "status should surface the index integrity error, got: {stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn status_clean_for_committed_executable_that_remains_executable() {
