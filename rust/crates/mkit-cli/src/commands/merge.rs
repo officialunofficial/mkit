@@ -313,6 +313,13 @@ fn restore_to(
     records: &[mkit_core::ops::conflict_state::ConflictRecord],
 ) -> Result<(), u8> {
     let target_tree = load_tree_hash(store, target)?;
+    // Pre-flight: refuse the abort *before* any mutation when restoring
+    // would clobber genuine user work on a non-conflict path. The reset
+    // below is destructive (it discards the user's in-progress conflict
+    // resolution), so it must not run if the abort is going to fail.
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree) {
+        return Err(emit_err(&e, exit::GENERAL_ERROR));
+    }
     // Discard the conflict material we materialised on the recorded
     // paths so the guarded restore below does not see them as user
     // "local changes" (it still protects unrelated dirty/untracked work).

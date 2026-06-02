@@ -276,6 +276,93 @@ fn write_bytes(abs: &Path, data: &[u8]) -> Result<(), String> {
     fs::write(abs, data).map_err(|e| format!("write {}: {e}", abs.display()))
 }
 
+/// Pre-abort safety gate: refuse the abort *before* it mutates anything
+/// when restoring to `target_tree` would overwrite genuine user work on
+/// a path that is **not** part of the recorded conflict set.
+///
+/// `--abort` works by first resetting the conflict paths (discarding the
+/// conflict material mkit itself wrote) and then doing a guarded restore
+/// to the pre-op tree. The conflict-path reset is destructive, so it
+/// must not run if the abort is going to be refused anyway: otherwise a
+/// failed abort would silently throw away the user's in-progress
+/// resolution of the conflicting files while leaving operation state in
+/// place. This check inspects only the non-conflict paths (the conflict
+/// paths are expected to be dirty — they hold markers / partial edits)
+/// and mirrors [`super::ensure_restore_safe`]'s staged / unstaged /
+/// untracked-collision detection for them.
+///
+/// # Errors
+/// Returns a message describing the blocking path when the abort would
+/// be unsafe, or propagates store / filesystem failures.
+pub fn ensure_abort_safe(
+    root: &Path,
+    store: &ObjectStore,
+    records: &[ConflictRecord],
+    target_tree: Hash,
+) -> Result<(), String> {
+    use std::collections::HashSet;
+
+    let conflict_paths: HashSet<&str> = records.iter().map(|r| r.path.as_str()).collect();
+    let is_conflict = |p: &str| conflict_paths.contains(p);
+
+    let current_tree = super::current_head_tree(root, store)?;
+    let idx = super::read_or_seed_index_from_head(root, store)?;
+    let index_tree = mkit_core::worktree::build_tree_from_index(store, &idx)
+        .map_err(|e| format!("check index state: {e}"))?;
+
+    // Staged changes on a non-conflict path.
+    let staged = mkit_core::ops::diff::diff_trees(store, current_tree, Some(index_tree))
+        .map_err(|e| format!("check staged changes: {e}"))?;
+    if let Some(entry) = staged.entries.iter().find(|e| !is_conflict(&e.path)) {
+        return Err(format!(
+            "abort would overwrite staged changes; commit, stash, or reset '{}' first",
+            entry.path
+        ));
+    }
+
+    // Unstaged worktree edits on a non-conflict path.
+    let worktree_tree =
+        mkit_core::worktree::build_tree(store, root).map_err(|e| format!("check worktree: {e}"))?;
+    let unstaged = mkit_core::ops::diff::diff_trees(store, Some(index_tree), Some(worktree_tree))
+        .map_err(|e| format!("check worktree: {e}"))?;
+    if let Some(entry) = unstaged
+        .entries
+        .iter()
+        .find(|e| e.kind != mkit_core::ops::diff::DiffKind::Added && !is_conflict(&e.path))
+    {
+        return Err(format!(
+            "abort would overwrite local changes; commit, stash, or reset '{}' first",
+            entry.path
+        ));
+    }
+
+    // Untracked path that collides with a non-conflict path the restore
+    // would write.
+    let target_writes: Vec<String> =
+        mkit_core::ops::diff::diff_trees(store, Some(index_tree), Some(target_tree))
+            .map_err(|e| format!("check restore target: {e}"))?
+            .entries
+            .into_iter()
+            .filter(|e| e.kind != mkit_core::ops::diff::DiffKind::Removed)
+            .filter(|e| !is_conflict(&e.path))
+            .map(|e| e.path)
+            .collect();
+    if !target_writes.is_empty() {
+        for entry in &unstaged.entries {
+            if entry.kind == mkit_core::ops::diff::DiffKind::Added
+                && !is_conflict(&entry.path)
+                && target_writes.iter().any(|t| t == &entry.path)
+            {
+                return Err(format!(
+                    "abort would overwrite untracked path '{}'; move or remove it first",
+                    entry.path
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Discard conflict material on the recorded conflict paths, resetting
 /// each back to its content in `target_tree` (the pre-op HEAD): write
 /// the target blob into the worktree (or delete the file when the path

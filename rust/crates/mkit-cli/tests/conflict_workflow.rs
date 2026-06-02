@@ -208,6 +208,58 @@ fn merge_abort_restores_everything() {
 }
 
 #[test]
+fn merge_abort_blocked_by_dirty_unrelated_file_preserves_resolution() {
+    // Data-loss regression: if `--abort` is refused because an UNRELATED
+    // tracked file is dirty, it must not have already discarded the
+    // user's in-progress resolution of the conflicting file. The abort
+    // must make no mutation and keep operation state intact so the user
+    // can retry after cleaning up the unrelated file.
+    let repo = Repo::new();
+    diverge_modify(&repo, "a.txt");
+    repo.commit_file("other.txt", b"orig\n", "add other");
+
+    fail(repo.path(), repo.xdg(), &["merge", "feature"]);
+
+    // User starts resolving the conflict (precious in-progress work).
+    repo.write("a.txt", b"precious-partial-resolution\n");
+    // An unrelated tracked file is dirtied — this must block the abort.
+    fs::write(repo.path().join("other.txt"), b"dirty-unrelated\n").unwrap();
+
+    let out = fail(repo.path(), repo.xdg(), &["merge", "--abort"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("overwrite") || stderr.contains("local changes"),
+        "expected abort to be refused on dirty unrelated file, got: {stderr}"
+    );
+
+    // Crucial: the failed abort did NOT clobber the in-progress
+    // resolution, and operation state is intact for a retry.
+    assert_eq!(
+        fs::read_to_string(repo.path().join("a.txt")).unwrap(),
+        "precious-partial-resolution\n",
+        "failed abort must not discard in-progress conflict resolution"
+    );
+    assert!(
+        repo.mkit_dir().join("MERGE_HEAD").exists(),
+        "operation state must be preserved when abort is refused"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("other.txt")).unwrap(),
+        "dirty-unrelated\n",
+        "unrelated dirty file must be untouched"
+    );
+
+    // After cleaning up the unrelated file, abort succeeds and restores.
+    fs::write(repo.path().join("other.txt"), b"orig\n").unwrap();
+    ok(repo.path(), repo.xdg(), &["merge", "--abort"]);
+    assert!(!repo.mkit_dir().join("MERGE_HEAD").exists());
+    assert_eq!(
+        fs::read_to_string(repo.path().join("a.txt")).unwrap(),
+        "ours\n"
+    );
+}
+
+#[test]
 fn merge_add_add_conflict() {
     let repo = Repo::new();
     repo.commit_file("base.txt", b"base\n", "base");

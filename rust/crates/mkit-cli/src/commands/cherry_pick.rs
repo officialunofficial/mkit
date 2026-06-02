@@ -256,6 +256,13 @@ fn restore_to(
     records: &[mkit_core::ops::conflict_state::ConflictRecord],
 ) -> Result<(), u8> {
     let target_tree = load_tree_hash(store, target)?;
+    // Pre-flight: refuse before any mutation when the abort would clobber
+    // genuine user work on a non-conflict path (the reset below discards
+    // the user's in-progress conflict resolution, so it must not run if
+    // the abort is going to fail).
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree) {
+        return Err(emit_err(&e, exit::GENERAL_ERROR));
+    }
     if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, records, target_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }

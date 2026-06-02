@@ -315,6 +315,15 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
     };
+    // Pre-flight: refuse before any mutation when the abort would clobber
+    // genuine user work on a non-conflict path. The conflict-path reset
+    // below is destructive, so it must not run if the abort is going to
+    // be refused by the guarded restore. The final restore target is
+    // `orig_tree`, so the safety of non-conflict paths is judged against
+    // it.
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, &records, orig_tree) {
+        return emit_err(&e, exit::GENERAL_ERROR);
+    }
     if !records.is_empty() {
         let head_hash = match refs::resolve_head(mkit_dir) {
             Ok(Some(h)) => h,
