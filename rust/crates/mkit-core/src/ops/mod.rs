@@ -6,6 +6,7 @@
 
 // Phase 5a — diff / graph / merge / cherry_pick (OPS1).
 pub mod cherry_pick;
+pub mod conflict_state;
 pub mod diff;
 pub mod graph;
 pub mod merge;
@@ -18,6 +19,10 @@ pub mod restore;
 pub mod stash;
 
 pub use cherry_pick::{CherryPickError, CherryPickResult, cherry_pick};
+pub use conflict_state::{
+    CherryPickState, ConflictRecord, ConflictStateError, MergeState, any_op_in_progress,
+    in_progress_op_name,
+};
 pub use diff::{
     DiffEntry, DiffError, DiffKind, DiffResult, StatusEntry, StatusStaging, diff_trees, status_diff,
 };
