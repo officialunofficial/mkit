@@ -10,6 +10,7 @@
 //! Also contains `status_diff` — the working-tree vs HEAD diff that
 //! powers `mkit status`.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::hash::Hash;
@@ -317,8 +318,8 @@ pub fn text_patch(old_bytes: &[u8], new_bytes: &[u8], old_path: &str, new_path: 
     }
 
     let mut out = String::new();
-    out.push_str(&format!("--- a/{old_path}\n"));
-    out.push_str(&format!("+++ b/{new_path}\n"));
+    let _ = writeln!(out, "--- a/{old_path}");
+    let _ = writeln!(out, "+++ b/{new_path}");
     for hunk in &hunks {
         render_hunk(&mut out, hunk, &old_lines, &new_lines);
     }
@@ -338,21 +339,18 @@ fn split_lines(text: &str) -> Vec<DiffLine<'_>> {
     let mut lines = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
-        match rest.find('\n') {
-            Some(idx) => {
-                lines.push(DiffLine {
-                    text: &rest[..idx],
-                    has_newline: true,
-                });
-                rest = &rest[idx + 1..];
-            }
-            None => {
-                lines.push(DiffLine {
-                    text: rest,
-                    has_newline: false,
-                });
-                rest = "";
-            }
+        if let Some(idx) = rest.find('\n') {
+            lines.push(DiffLine {
+                text: &rest[..idx],
+                has_newline: true,
+            });
+            rest = &rest[idx + 1..];
+        } else {
+            lines.push(DiffLine {
+                text: rest,
+                has_newline: false,
+            });
+            rest = "";
         }
     }
     lines
@@ -491,10 +489,11 @@ fn build_hunk(slice: &[DiffOp]) -> Hunk {
 }
 
 fn render_hunk(out: &mut String, hunk: &Hunk, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) {
-    out.push_str(&format!(
-        "@@ -{},{} +{},{} @@\n",
+    let _ = writeln!(
+        out,
+        "@@ -{},{} +{},{} @@",
         hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len
-    ));
+    );
     for op in &hunk.ops {
         match *op {
             DiffOp::Equal(oi, _) => emit_line(out, ' ', &old[oi]),

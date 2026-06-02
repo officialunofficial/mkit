@@ -217,7 +217,7 @@ fn remove_worktree_paths(root: &Path, idx: &Index, matches: &[usize]) -> Result<
 /// the upward walk for that branch.
 fn prune_empty_dirs(root: &Path, mut dirs: Vec<PathBuf>) {
     // Deepest paths first so children are pruned before parents.
-    dirs.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
     dirs.dedup();
     for dir in dirs {
         let mut cur = dir;
