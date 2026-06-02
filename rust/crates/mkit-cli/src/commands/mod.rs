@@ -16,6 +16,7 @@ pub mod cherry_pick;
 pub mod clone;
 pub mod commit;
 pub mod config_cmd;
+pub mod conflict;
 pub mod diff;
 pub mod fetch;
 pub mod hash_cmd;
