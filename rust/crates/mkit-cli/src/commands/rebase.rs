@@ -1,14 +1,22 @@
-//! `mkit rebase <branch> | --continue | --abort` — replay commits onto
-//! a different base.
+//! `mkit rebase <branch> | --continue | --abort | --skip` — replay
+//! commits onto a different base.
 //!
 //! The rebase state machine lives in `mkit_core::ops::rebase`. This
 //! shim loads / writes that state and drives the replay loop via
 //! [`mkit_core::ops::cherry_pick`].
 //!
-//! Scope: fast-forward-on-conflict stop is implemented; `--continue`
-//! resumes by consuming the head of `todo` (after the caller resolved
-//! the conflicting tree manually or via a future `mkit merge --continue`
-//! helper). `--abort` restores `HEAD` to `orig_head` and removes state.
+//! On conflict the loop **pauses**: it materialises conflict material
+//! into the worktree + index (via the shared `conflict` helper) and
+//! writes a `mkit-conflicts` sidecar inside `.mkit/rebase-apply/`.
+//!
+//! `--continue` does NOT re-run cherry-pick on the paused commit (the
+//! #177 bug). Instead it builds the rewritten commit's tree from the
+//! resolved index/worktree, creates the commit, moves `todo[0]` to
+//! `done`, and keeps replaying the remaining commits.
+//!
+//! `--skip` drops the current `todo[0]` with no replacement commit and
+//! continues. `--abort` restores `HEAD` to `orig_head` and removes all
+//! rebase state (including the sidecar).
 
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,14 +24,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use mkit_core::hash::Hash;
 use mkit_core::object::{Commit, Identity, Object};
 use mkit_core::ops::cherry_pick::cherry_pick;
-use mkit_core::ops::merge::ConflictKind;
+use mkit_core::ops::conflict_state::{self, in_progress_op_name};
 use mkit_core::ops::rebase::{
     RebaseState, cleanup_rebase, collect_commits_to_replay, is_rebase_in_progress, read_state,
-    write_state,
+    rebase_dir_path, write_state,
 };
 use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
+use mkit_core::worktree;
 
 use clap::Parser;
 
@@ -36,11 +45,14 @@ use crate::format;
 #[command(name = "mkit rebase", about = "Replay commits onto a different base.")]
 struct RebaseOpts {
     /// Continue an in-progress rebase after resolving conflicts.
-    #[arg(long = "continue", conflicts_with_all = ["abort", "branch"])]
+    #[arg(long = "continue", conflicts_with_all = ["abort", "skip", "branch"])]
     cont: bool,
     /// Abort the in-progress rebase and restore the original HEAD.
-    #[arg(long, conflicts_with_all = ["cont", "branch"])]
+    #[arg(long, conflicts_with_all = ["cont", "skip", "branch"])]
     abort: bool,
+    /// Skip the current commit (drop it) and continue the rebase.
+    #[arg(long, conflicts_with_all = ["cont", "abort", "branch"])]
+    skip: bool,
     /// Branch to replay commits onto.
     branch: Option<String>,
 }
@@ -64,11 +76,13 @@ pub fn run(args: &[String]) -> u8 {
     if opts.abort {
         abort(&cwd, &mkit_dir, &store)
     } else if opts.cont {
-        resume(&cwd, &mkit_dir, &store)
+        resume(&cwd, &mkit_dir, &store, false)
+    } else if opts.skip {
+        resume(&cwd, &mkit_dir, &store, true)
     } else if let Some(branch) = opts.branch.as_deref() {
         start(&cwd, &mkit_dir, &store, branch)
     } else {
-        super::usage_error("usage: mkit rebase <branch> | --continue | --abort")
+        super::usage_error("usage: mkit rebase <branch> | --continue | --abort | --skip")
     }
 }
 
@@ -78,9 +92,9 @@ fn start(
     store: &ObjectStore,
     branch: &str,
 ) -> u8 {
-    if is_rebase_in_progress(mkit_dir) {
+    if let Some(op) = in_progress_op_name(mkit_dir) {
         return emit_err(
-            "a rebase is already in progress (use --continue or --abort)",
+            &format!("a {op} is already in progress (use --continue or --abort)"),
             exit::GENERAL_ERROR,
         );
     }
@@ -136,11 +150,147 @@ fn start(
     replay(cwd, mkit_dir, store, Some(signing))
 }
 
-fn resume(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
+/// Resume after a pause. When `skip` is set, drop the paused `todo[0]`
+/// with no replacement commit; otherwise create the rewritten commit
+/// for `todo[0]` from the resolved index, then keep replaying.
+fn resume(
+    cwd: &std::path::Path,
+    mkit_dir: &std::path::Path,
+    store: &ObjectStore,
+    skip: bool,
+) -> u8 {
     if !is_rebase_in_progress(mkit_dir) {
         return emit_err("no rebase in progress", exit::GENERAL_ERROR);
     }
+    let rebase_dir = rebase_dir_path(mkit_dir);
+    let mut state = match read_state(mkit_dir) {
+        Ok(s) => s,
+        Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
+    };
+    let records = match conflict_state::read_conflicts(&rebase_dir) {
+        Ok(r) => r,
+        Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
+    };
+
+    if skip {
+        if let Err(code) =
+            skip_paused_commit(cwd, mkit_dir, store, &rebase_dir, &mut state, &records)
+        {
+            return code;
+        }
+    } else if !records.is_empty()
+        && let Err(code) =
+            commit_resolved_commit(cwd, mkit_dir, store, &rebase_dir, &mut state, &records)
+    {
+        return code;
+    }
+    // Either nothing was paused (plain resume) or we just consumed the
+    // paused commit; keep replaying the remaining todo.
     replay(cwd, mkit_dir, store, None)
+}
+
+/// `--skip`: drop the paused `todo[0]` with no replacement, discarding
+/// its conflict material from the worktree/index.
+fn skip_paused_commit(
+    cwd: &std::path::Path,
+    mkit_dir: &std::path::Path,
+    store: &ObjectStore,
+    rebase_dir: &std::path::Path,
+    state: &mut RebaseState,
+    records: &[conflict_state::ConflictRecord],
+) -> Result<(), u8> {
+    if state.todo.is_empty() {
+        return Err(emit_err(
+            "nothing to skip; no commit is paused",
+            exit::GENERAL_ERROR,
+        ));
+    }
+    let head_hash = match refs::resolve_head(mkit_dir) {
+        Ok(Some(h)) => h,
+        _ => state.onto,
+    };
+    let head_tree = load_tree_hash(store, head_hash)?;
+    if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, records, head_tree) {
+        return Err(emit_err(&e, exit::GENERAL_ERROR));
+    }
+    state.todo.remove(0);
+    persist_after_consume(mkit_dir, rebase_dir, state)
+}
+
+/// `--continue` on a paused commit: refuse if markers remain, build the
+/// rewritten commit's tree from the RESOLVED index (not the
+/// conflict-time tree), create the commit, and move `todo[0]` → `done`.
+fn commit_resolved_commit(
+    cwd: &std::path::Path,
+    mkit_dir: &std::path::Path,
+    store: &ObjectStore,
+    rebase_dir: &std::path::Path,
+    state: &mut RebaseState,
+    records: &[conflict_state::ConflictRecord],
+) -> Result<(), u8> {
+    match super::conflict::first_unresolved_marker(cwd, records) {
+        Ok(Some(path)) => {
+            return Err(emit_err(
+                &format!(
+                    "unresolved conflict markers remain in '{path}'; resolve and `mkit add` it"
+                ),
+                exit::GENERAL_ERROR,
+            ));
+        }
+        Ok(None) => {}
+        Err(e) => return Err(emit_err(&e, exit::GENERAL_ERROR)),
+    }
+    if state.todo.is_empty() {
+        return Err(emit_err(
+            "rebase state is inconsistent: no paused commit",
+            exit::GENERAL_ERROR,
+        ));
+    }
+    let target = state.todo[0];
+    let parent = match refs::resolve_head(mkit_dir) {
+        Ok(Some(h)) => h,
+        _ => state.onto,
+    };
+    let idx = super::read_or_seed_index_from_head(cwd, store)
+        .map_err(|e| emit_err(&e, exit::GENERAL_ERROR))?;
+    let tree_hash = worktree::build_tree_from_index(store, &idx)
+        .map_err(|e| emit_err(&format!("build tree from index: {e}"), exit::GENERAL_ERROR))?;
+    let mut signing = load_rebase_signing(cwd)?;
+    let new_hash = build_commit(
+        store,
+        &mut signing.signer,
+        signing.author.clone(),
+        parent,
+        target,
+        tree_hash,
+    )?;
+    if let Err(e) = super::restore_worktree_and_index(cwd, store, tree_hash) {
+        return Err(emit_err(&e, exit::GENERAL_ERROR));
+    }
+    if let Err(e) = refs::write_head_detached(mkit_dir, &new_hash) {
+        return Err(emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT));
+    }
+    state.done.push(target);
+    state.todo.remove(0);
+    persist_after_consume(mkit_dir, rebase_dir, state)
+}
+
+/// Clear the conflict sidecar and persist the updated rebase state.
+fn persist_after_consume(
+    mkit_dir: &std::path::Path,
+    rebase_dir: &std::path::Path,
+    state: &RebaseState,
+) -> Result<(), u8> {
+    if let Err(e) = conflict_state::write_conflicts(rebase_dir, &[]) {
+        return Err(emit_err(
+            &format!("clear conflicts: {e}"),
+            exit::GENERAL_ERROR,
+        ));
+    }
+    if let Err(e) = write_state(mkit_dir, state) {
+        return Err(emit_err(&format!("persist state: {e}"), exit::CANTCREAT));
+    }
+    Ok(())
 }
 
 fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
@@ -155,6 +305,29 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
         Ok(tree) => tree,
         Err(code) => return code,
     };
+    // Discard any conflict material we materialised before guarding the
+    // restore (the sidecar lives inside the rebase-apply dir). Reset the
+    // recorded conflict paths to the CURRENT detached-HEAD tree so the
+    // worktree/index match HEAD (no spurious staged/local changes); the
+    // guarded restore below then moves cleanly back to orig_head.
+    let rebase_dir = rebase_dir_path(mkit_dir);
+    let records = match conflict_state::read_conflicts(&rebase_dir) {
+        Ok(r) => r,
+        Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
+    };
+    if !records.is_empty() {
+        let head_hash = match refs::resolve_head(mkit_dir) {
+            Ok(Some(h)) => h,
+            _ => state.onto,
+        };
+        let head_tree = match load_tree_hash(store, head_hash) {
+            Ok(t) => t,
+            Err(c) => return c,
+        };
+        if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, &records, head_tree) {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
+    }
     if let Err(e) = super::ensure_restore_safe(cwd, store, orig_tree) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
@@ -164,8 +337,7 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     // Rebase abort rolls the branch tip back to `orig_head`. Route
     // through the history-MMR-coupled helper so the rollback append
     // is recorded under the repo lock; the MMR is append-only, so
-    // "rollback" surfaces as another leaf, not a rewind. That keeps
-    // the audit trail consistent with what actually happened.
+    // "rollback" surfaces as another leaf, not a rewind.
     if let Err(e) = super::write_ref_recording_history(
         mkit_dir,
         &state.head_name,
@@ -205,6 +377,7 @@ fn replay(
             Err(code) => return code,
         },
     };
+    let rebase_dir = rebase_dir_path(mkit_dir);
 
     while !state.todo.is_empty() {
         let target = state.todo[0];
@@ -221,24 +394,32 @@ fn replay(
             Err(e) => return emit_err(&format!("cherry-pick: {e}"), exit::GENERAL_ERROR),
         };
         if result.has_conflicts() {
+            // Pause: persist state, materialise conflict material into
+            // the worktree + index, and write the sidecar so
+            // `--continue` consumes the resolved tree (not re-running
+            // cherry-pick).
             let _ = write_state(mkit_dir, &state);
+            if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
+                return emit_err(&e, exit::GENERAL_ERROR);
+            }
+            let records =
+                match super::conflict::materialize_conflicts(cwd, store, &result.conflicts) {
+                    Ok(r) => r,
+                    Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+                };
+            if let Err(e) = conflict_state::write_conflicts(&rebase_dir, &records) {
+                return emit_err(&format!("write conflicts: {e}"), exit::CANTCREAT);
+            }
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(
                 stderr,
                 "rebase paused: conflict while replaying {}",
                 format::short_hash(&target, 8)
             );
-            for c in &result.conflicts {
-                let kind = match c.kind {
-                    ConflictKind::ModifyModify => "both modified",
-                    ConflictKind::DeleteModify => "delete/modify",
-                    ConflictKind::AddAdd => "both added",
-                };
-                let _ = writeln!(stderr, "  {} ({kind})", c.path);
-            }
             let _ = writeln!(
                 stderr,
-                "resolve conflicts, then run `mkit rebase --continue` or `mkit rebase --abort`"
+                "resolve the files above, `mkit add` them, then run `mkit rebase --continue` \
+                 (or `--skip` to drop this commit, or `--abort`)"
             );
             return exit::GENERAL_ERROR;
         }
@@ -269,9 +450,7 @@ fn replay(
         }
     }
 
-    // Finish: move the branch to current HEAD and reattach. Route
-    // the final advance through the history-MMR-coupled helper so the
-    // replayed tip lands as the next leaf in the branch's journal.
+    // Finish: move the branch to current HEAD and reattach.
     let final_head = match refs::resolve_head(mkit_dir) {
         Ok(Some(h)) => h,
         _ => state.onto,
