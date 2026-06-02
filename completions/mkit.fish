@@ -27,10 +27,25 @@ complete -c mkit -n "not __fish_seen_subcommand_from $__mkit_subcommands" \
 # Top-level flags.
 complete -c mkit -n "not __fish_seen_subcommand_from $__mkit_subcommands" \
     -l help -s h -d "Show help"
-complete -c mkit -n "not __fish_seen_subcommand_from $__mkit_subcommands" \
-    -l version -d "Print version"
+# No top-level --version flag; use the `version` subcommand.
 
 # Per-subcommand flags (kept minimal, mirrors mkit.bash).
+complete -c mkit -n "__fish_seen_subcommand_from add" \
+    -l all -s A -d "Stage all changes incl. deletions"
+complete -c mkit -n "__fish_seen_subcommand_from add" \
+    -l update -s u -d "Restage only tracked files"
+complete -c mkit -n "__fish_seen_subcommand_from rm" \
+    -l cached -d "Stage removal only; keep worktree file"
+complete -c mkit -n "__fish_seen_subcommand_from rm" \
+    -l recursive -s r -d "Remove a directory recursively"
+complete -c mkit -n "__fish_seen_subcommand_from rm" \
+    -l force -s f -d "Remove even if locally modified"
+complete -c mkit -n "__fish_seen_subcommand_from diff" \
+    -l staged -d "Diff HEAD vs the staged index"
+complete -c mkit -n "__fish_seen_subcommand_from diff" \
+    -l cached -d "Alias for --staged"
+complete -c mkit -n "__fish_seen_subcommand_from status" \
+    -l porcelain -d "Machine-readable XY output"
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -l all -s a -d "Stage tracked changes"
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
@@ -38,7 +53,7 @@ complete -c mkit -n "__fish_seen_subcommand_from commit" \
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
-    -l graph -d "Show ancestry graph"
+    -l graph -d "Accepted for compat; currently a no-op"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -s n -d "Limit number of commits" -r
 complete -c mkit -n "__fish_seen_subcommand_from push" \

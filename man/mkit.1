@@ -42,11 +42,45 @@ The highlights:
 Create a new
 .Nm
 repository in the current directory.
-.It Cm add Ar path ...
+.It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Ar path ...
 Stage files for the next commit. Respects
 .Pa .mkitignore .
-.It Cm rm Ar path ...
-Mark a file for deletion in the next commit.
+Multiple pathspecs may be given;
+.Ql .
+stages every non-ignored file under the current directory.
+.Fl A
+or
+.Fl Fl all
+stages every worktree change including deletions of tracked files (takes no
+path arguments).
+.Fl u
+or
+.Fl Fl update
+restages only already-tracked files \(em updating modified ones and recording
+deletions \(em without adding untracked paths (takes no path arguments).
+.Fl A
+and
+.Fl u
+are mutually exclusive. Interactive hunk staging
+.Pq Fl p
+is not supported.
+.It Cm rm Oo Fl Fl cached Oc Oo Fl r | Fl Fl recursive Oc Oo Fl f | Fl Fl force Oc Ar path ...
+Remove paths and stage the deletion for the next commit. By default this
+deletes the worktree file(s) and prunes now-empty parent directories.
+Multiple pathspecs are accepted.
+.Fl Fl cached
+stages the removal only, keeping the worktree file(s).
+.Fl r
+or
+.Fl Fl recursive
+is required to remove a directory and everything under it.
+.Fl f
+or
+.Fl Fl force
+removes files even when their worktree content has diverged from the staged
+blob; without it,
+.Cm rm
+refuses to destroy a locally-modified tracked file.
 .It Cm hash Ar file
 Hash
 .Ar file
@@ -87,10 +121,23 @@ lines starting with
 are stripped, and an empty message aborts the commit.
 .It Cm log Op Fl Fl oneline Op Fl Fl graph Op Fl n Ar N
 Show commit history.
-.It Cm diff Op Ar hash1 Ar hash2
-Show changes. With no args, compares HEAD to the working tree.
-.It Cm status
-Show the staged and working-tree changes.
+.Fl Fl graph
+is accepted for compatibility but is currently a no-op (no ASCII graph is
+drawn).
+.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Ar treeA Ar treeB Oc Ar path ...
+Show changes as a unified patch. With no arguments, compares the HEAD tree to
+a fresh worktree snapshot.
+.Fl Fl staged
+.Pq alias Fl Fl cached
+compares the HEAD tree to the staged index tree. Two 64-hex tree hashes diff
+those trees directly. Remaining positional arguments are pathspecs that limit
+the output. Commit-vs-commit diffing takes two
+.Em tree
+hashes, not commit refs or ranges.
+.It Cm status Op Fl Fl porcelain
+Show the staged and working-tree changes. There is no
+.Fl z
+NUL-termination or path-quoting support.
 .It Cm branch Op Fl d Ar name
 List, create, or delete branches.
 .It Cm checkout Ar branch
@@ -178,7 +225,11 @@ Internal subcommand: act as the server end of an
 .Cm mkit+ssh://
 transport.
 .It Cm version
-Print the version to stdout.
+Print the version to stdout as
+.Ql mkit <X.Y.Z> .
+This is the canonical version query: there is no top-level
+.Fl Fl version
+flag.
 .El
 .Sh ENVIRONMENT
 .Bl -tag -width "CLICOLOR_FORCE"

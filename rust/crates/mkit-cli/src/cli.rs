@@ -18,19 +18,26 @@ usage: mkit <command> [args]
 
 commands:
   init              Create a new mkit repository
-  add <path>        Stage a file for the next commit
-  add .             Stage all files (respects .mkitignore)
-  rm <path>         Mark a file for removal in the next commit
+  add [-A|-u] <path>...  Stage files for the next commit
+  add .             Stage all files under cwd (respects .mkitignore)
+  add -A            Stage all changes incl. deletions (no path args)
+  add -u            Restage only already-tracked files (no path args)
+  rm [--cached] [-r] [-f] <path>...  Remove path(s) and stage the deletion
+  rm --cached       Stage the removal only; keep the worktree file(s)
   hash <file>       Hash a file and store it as a blob
   cat <hash>        Display an object by its hash
   tree              Snapshot working directory as a tree object
   commit [-a] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
   log [--oneline] [--format=json] [--graph] [-n N]
-                    Show commit history (--format=json emits JSONL)
+                    Show commit history (--format=json emits JSONL;
+                    --graph is accepted but currently a no-op)
   status [--porcelain]
                     Show staged and working tree changes
-                    (--porcelain emits machine-readable XY lines on stdout)
-  diff              Show changes (HEAD vs workdir, or two trees)
+                    (--porcelain emits machine-readable XY lines on stdout;
+                    no -z/NUL or path-quoting support yet)
+  diff [--staged] [<treeA> <treeB>] [<path>...]
+                    Show changes as a unified patch (HEAD vs workdir,
+                    --staged for HEAD vs index, or two tree hashes)
   branch [--format=json]
                     List branches (* marks current; JSONL with --format=json)
   branch <name>     Create a branch at HEAD
@@ -82,7 +89,8 @@ commands:
                     Produce a signed DSSE attestation for a commit
   verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>]
                     Verify every attestation attached to a commit
-  version           Print version
+  version           Print version (canonical; there is no top-level
+                    `--version` flag — use the `version` subcommand)
 ";
 
 /// Strip lines beginning with `#` (after any leading whitespace) and

@@ -13,8 +13,8 @@ _mkit() {
     local -a commands
     commands=(
         'init:Create a new mkit repository'
-        'add:Stage a file for the next commit'
-        'rm:Mark a file for removal in the next commit'
+        'add:Stage files for the next commit (-A/-u, multi-path)'
+        'rm:Remove path(s) and stage the deletion (--cached/-r/-f)'
         'hash:Hash a file and store it as a blob'
         'cat:Display an object by its hash'
         'tree:Snapshot working directory as a tree object'
@@ -48,9 +48,9 @@ _mkit() {
         'help:Show help text'
     )
 
+    # No top-level --version flag; the `version` subcommand is canonical.
     _arguments -C \
         '(-h --help)'{-h,--help}'[show help]' \
-        '--version[print version]' \
         '1: :->command' \
         '*::arg:->args' \
         && return 0
@@ -61,6 +61,32 @@ _mkit() {
             ;;
         args)
             case $words[1] in
+                add)
+                    _arguments \
+                        '(-A --all)'{-A,--all}'[stage all changes incl. deletions]' \
+                        '(-u --update)'{-u,--update}'[restage only tracked files]' \
+                        '--help[show help]' \
+                        '*:file:_files'
+                    ;;
+                rm)
+                    _arguments \
+                        '--cached[stage removal only; keep worktree file]' \
+                        '(-r --recursive)'{-r,--recursive}'[remove a directory recursively]' \
+                        '(-f --force)'{-f,--force}'[remove even if locally modified]' \
+                        '--help[show help]' \
+                        '*:file:_files'
+                    ;;
+                diff)
+                    _arguments \
+                        '(--staged --cached)'{--staged,--cached}'[diff HEAD vs the staged index]' \
+                        '--help[show help]' \
+                        '*:file:_files'
+                    ;;
+                status)
+                    _arguments \
+                        '--porcelain[machine-readable XY output]' \
+                        '--help[show help]'
+                    ;;
                 commit)
                     _arguments \
                         '(-a --all)'{-a,--all}'[stage tracked changes before committing]' \

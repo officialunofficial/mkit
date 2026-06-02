@@ -25,17 +25,46 @@ no config needed.
 Working-tree commands:
 
 - `mkit init` — create a new repository in `.mkit/`.
-- `mkit add <path>` / `mkit add .` — stage a file (or every non-ignored
-  file) for the next commit.
-- `mkit rm <path>` — mark a file for removal in the next commit.
+- `mkit add [-A|-u] <path>...` / `mkit add .` — stage files for the next
+  commit. Multiple pathspecs may be given. `.` stages every non-ignored
+  file under the current directory. `-A`/`--all` stages every change in
+  the worktree including deletions of tracked files (takes no path
+  arguments). `-u`/`--update` restages only already-tracked files —
+  updating modified ones and recording deletions — without adding
+  untracked paths (takes no path arguments). `-A` and `-u` are mutually
+  exclusive. Interactive hunk staging (`add -p`) is **not supported**;
+  see "Divergences from Git" below.
+- `mkit rm [--cached] [-r|--recursive] [-f|--force] <path>...` — remove
+  paths and stage the deletion for the next commit. By default this
+  **deletes the worktree file(s)** and stages the removal; now-empty
+  parent directories are pruned. Multiple pathspecs are accepted.
+  - `--cached` — stage the removal only, leaving the worktree file(s)
+    on disk (the historical mkit behaviour).
+  - `-r`/`--recursive` — required to remove a directory and everything
+    under it; without it, a directory pathspec is refused.
+  - `-f`/`--force` — remove worktree files even when their content has
+    diverged from the staged blob. Without `--force`, `rm` refuses to
+    destroy a locally-modified tracked file (a dirty-worktree guard in
+    the spirit of the #176 restore guards); use `--cached` to keep the
+    file or `--force` to discard the local changes.
 - `mkit status [--porcelain]` — show staged and unstaged changes.
   Default-mode prose (banner + section headers + per-file lines) goes
   to **stderr**; stdout is reserved for `--porcelain` machine output.
   Porcelain emits one entry per line in `git status --porcelain=v1`
   format (`XY <path>`, with mkit's `T` for `ModeChanged` as the only
-  non-git extension). Empty stdout means clean.
-- `mkit diff [<hash1> <hash2>]` — show changes. With no args, compares
-  HEAD to the working directory.
+  non-git extension). Empty stdout means clean. There is **no `-z`/NUL
+  termination or path-quoting** support; see "Divergences from Git".
+- `mkit diff [--staged|--cached] [<treeA> <treeB>] [<path>...]` — show
+  changes as a unified patch. With no arguments, compares the HEAD tree
+  to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
+  the HEAD tree to the staged index tree — the change `mkit commit`
+  would record. Two 64-hex tree hashes diff those trees directly. Any
+  remaining positional arguments are pathspecs that limit the output to
+  entries at or below them. Output is a Git-compatible unified diff: a
+  `diff --mkit a/<path> b/<path>` header per changed path followed by
+  `@@`-delimited hunks (or `Binary files a/<p> and b/<p> differ` for
+  non-text blobs). The hunk algorithm is a line-based LCS unified diff,
+  not a full Myers diff — adequate for human-readable parity output.
 - `mkit stash [save|list|pop|drop|show]` — save/restore WIP changes.
 - `mkit sparse-checkout` — manage sparse checkout patterns.
 
@@ -51,7 +80,9 @@ History / commits:
 - `mkit log [--oneline] [--format=json] [--graph] [-n N]` — show
   commit history. `--format=json` emits JSONL (one JSON object per
   commit, newest first) with keys `hash`, `parents`, `tree`, `author`,
-  `timestamp`, `title`, `message`.
+  `timestamp`, `title`, `message`. **`--graph` is accepted for
+  compatibility but is currently a no-op** (no ASCII graph is drawn);
+  see "Divergences from Git" below.
 - `mkit blame [--format=json] <file>` — show line-level commit
   attribution. Default emits `<short12>\t<line_num>\t<text>` per line;
   `--format=json` emits JSONL with keys `hash`, `line_num`, `author`,
@@ -213,6 +244,32 @@ Config / keys / version:
 - `mkit config <key> [--format=json]` — show one value.
 - `mkit config <key> <value>` — set a configuration value.
 - `mkit version` — print the version. Emits exactly `mkit <X.Y.Z>\n`.
+  This is the **canonical** way to query the version: there is no
+  top-level `--version`/`-V` flag (`mkit --version` is treated as an
+  unknown command). See "Divergences from Git" below.
+
+## Divergences from Git
+
+mkit's local commands intentionally diverge from Git in a few places.
+These are documented behaviours, not bugs, with tracked follow-ups:
+
+- **`mkit log --graph` is a no-op.** The flag is accepted for
+  compatibility so existing scripts don't break, but no ASCII commit
+  graph is drawn. A real graph renderer is a follow-up.
+- **`mkit status` has no `-z` / NUL termination or path quoting.**
+  Porcelain output is newline-delimited with raw (unquoted) paths.
+  Paths containing newlines or other special bytes are therefore not
+  round-trippable through porcelain. NUL-termination and C-style path
+  quoting are a follow-up.
+- **Version: subcommand only, no `--version` flag.** Use `mkit version`
+  (or `mkit -h`/`mkit --help` for help). There is no top-level
+  `--version`/`-V`. Aligning this with Git's flag form is a follow-up.
+- **`mkit diff` commit-vs-commit takes two *tree* hashes**, not commit
+  refs/ranges. Pass two 64-hex tree hashes to diff them; commit-range
+  syntax (`A..B`) and named-ref diffing are not implemented.
+- **`mkit add -p` (interactive hunk staging) is not supported.** Stage
+  whole files with pathspecs, `.`, `-A`, or `-u`. Interactive hunk
+  selection is a follow-up.
 
 ## Config keys
 
