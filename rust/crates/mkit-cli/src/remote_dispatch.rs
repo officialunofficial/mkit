@@ -229,45 +229,154 @@ fn open_enc(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
 ///    `PackKey` used by [`Transport::upload_pack`].
 /// 5. Publish the ref with [`Transport::write_ref`].
 pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {
+    push_all_with(cwd, tx, None, false)
+}
+
+/// CAS-aware mirror push (`mkit push --all`). Pushes every local
+/// `refs/heads/*` to the remote, using the remote-tracking ref under
+/// `refs/remotes/<remote>/<branch>` as the CAS lease (Missing when no
+/// tracking ref exists, Match otherwise). `force` upgrades every write
+/// to an unconditional `Any`. On success each pushed branch's
+/// remote-tracking ref is advanced to the pushed tip.
+///
+/// `remote` is the remote NAME used for the local tracking-ref
+/// namespace; `None` means the legacy `default`.
+pub fn push_all_with(
+    cwd: &Path,
+    tx: &dyn Transport,
+    remote: Option<&str>,
+    force: bool,
+) -> Result<usize, DispatchError> {
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
     let store = ObjectStore::open(cwd)?;
     let refs_list = refs::list_refs(&mkit_dir)?;
+    let remote = remote.unwrap_or(DEFAULT_REMOTE);
     let mut n = 0;
     for r in refs_list {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
         }
         let Some(h) = r.hash else { continue };
-        let full_name = format!("refs/heads/{}", r.name);
-
-        // Walk the reachable set and figure out what the remote lacks.
-        // The current contract with the memory / file transports is one
-        // object per pack, keyed by the object's own digest. This keeps
-        // fetch simple (ask the remote for each hash as it walks the
-        // object graph) and means `pack_exists` is a per-object HEAD
-        // check against the same key we'd upload under.
-        let reachable = reachable_objects(&store, &h)?;
-        for obj in &reachable {
-            if crate::signal::is_shutdown() {
-                return Err(DispatchError::Interrupted);
+        let condition = if force {
+            refs::RefWriteCondition::Any
+        } else {
+            match refs::read_remote_ref(&mkit_dir, remote, &r.name)? {
+                Some(tracked) => refs::RefWriteCondition::Match(tracked),
+                None => refs::RefWriteCondition::Missing,
             }
-            let key = PackKey::from_hash(*obj);
-            if tx.pack_exists(&key)? {
-                continue;
-            }
-            let bytes = store.read(obj)?;
-            tx.upload_pack(&bytes, &key)?;
-        }
-        // Multi-object pack-level transfer (one pack per ref) is more
-        // efficient but requires the transport contract to advertise
-        // pack keys alongside refs — deferred. Per-object addressing
-        // keeps fetch simple and matches what file.rs / memory.rs
-        // already implement.
-
-        tx.write_ref(&full_name, &h)?;
+        };
+        push_branch(tx, &store, &r.name, h, condition)?;
+        refs::write_remote_ref(&mkit_dir, remote, &r.name, &h)?;
         n += 1;
     }
     Ok(n)
+}
+
+/// CAS lease policy for a default (current-branch → upstream) push.
+#[derive(Debug, Clone, Copy)]
+pub enum PushLease {
+    /// Force — unconditional `Any`.
+    Force,
+    /// `--force-with-lease` — require the remote tip to equal the local
+    /// remote-tracking ref (Match), or Missing when there is none.
+    /// Identical mechanism to the default safe push; semantically it is
+    /// the explicit, opt-in form that overwrites a fast-forward-failing
+    /// branch *only* if the remote hasn't moved past what we last saw.
+    WithLease,
+    /// Default safe push: Match the local remote-tracking ref, or
+    /// Missing when absent (first push of this branch).
+    FastForward,
+}
+
+/// Resolve the CAS condition for a single-branch push from the local
+/// remote-tracking ref `refs/remotes/<remote>/<branch>` and the lease
+/// policy.
+pub fn lease_condition(
+    cwd: &Path,
+    remote: &str,
+    branch: &str,
+    lease: PushLease,
+) -> Result<refs::RefWriteCondition, DispatchError> {
+    if matches!(lease, PushLease::Force) {
+        return Ok(refs::RefWriteCondition::Any);
+    }
+    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    Ok(match refs::read_remote_ref(&mkit_dir, remote, branch)? {
+        Some(tracked) => refs::RefWriteCondition::Match(tracked),
+        None => refs::RefWriteCondition::Missing,
+    })
+}
+
+/// Push the current branch to its upstream and, on success, advance the
+/// local remote-tracking ref `refs/remotes/<remote>/<branch>` to the
+/// pushed tip.
+///
+/// `remote` is the upstream remote NAME (for the tracking-ref
+/// namespace); `branch` is the local branch name; `remote_branch` is the
+/// branch name on the remote (`refs/heads/<remote_branch>`).
+pub fn push_branch_tracked(
+    cwd: &Path,
+    tx: &dyn Transport,
+    remote: &str,
+    branch: &str,
+    remote_branch: &str,
+    lease: PushLease,
+) -> Result<Hash, DispatchError> {
+    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let store = ObjectStore::open(cwd)?;
+    let tip = refs::read_ref(&mkit_dir, branch)?
+        .ok_or_else(|| DispatchError::RemoteBranchMissing(branch.to_owned()))?;
+    let condition = lease_condition(cwd, remote, remote_branch, lease)?;
+    push_branch(tx, &store, remote_branch, tip, condition)?;
+    refs::write_remote_ref(&mkit_dir, remote, remote_branch, &tip)?;
+    Ok(tip)
+}
+
+/// Push one branch: upload every object reachable from `tip` that the
+/// remote lacks, then CAS-write `refs/heads/<branch>` under `condition`.
+///
+/// On a CAS failure ([`TransportError::RefConflict`]) this returns
+/// [`DispatchError::NonFastForwardPush`] so callers can render an
+/// actionable fetch-then-retry hint. Does NOT touch local
+/// remote-tracking refs — the caller decides when to advance them.
+pub fn push_branch(
+    tx: &dyn Transport,
+    store: &ObjectStore,
+    branch: &str,
+    tip: Hash,
+    condition: refs::RefWriteCondition,
+) -> Result<(), DispatchError> {
+    // Walk the reachable set and figure out what the remote lacks.
+    // The current contract with the memory / file transports is one
+    // object per pack, keyed by the object's own digest. This keeps
+    // fetch simple (ask the remote for each hash as it walks the
+    // object graph) and means `pack_exists` is a per-object HEAD
+    // check against the same key we'd upload under.
+    let reachable = reachable_objects(store, &tip)?;
+    for obj in &reachable {
+        if crate::signal::is_shutdown() {
+            return Err(DispatchError::Interrupted);
+        }
+        let key = PackKey::from_hash(*obj);
+        if tx.pack_exists(&key)? {
+            continue;
+        }
+        let bytes = store.read(obj)?;
+        tx.upload_pack(&bytes, &key)?;
+    }
+    // Multi-object pack-level transfer (one pack per ref) is more
+    // efficient but requires the transport contract to advertise
+    // pack keys alongside refs — deferred. Per-object addressing
+    // keeps fetch simple and matches what file.rs / memory.rs
+    // already implement.
+    let full_name = format!("refs/heads/{branch}");
+    match tx.update_ref(&full_name, condition, &tip) {
+        Ok(()) => Ok(()),
+        Err(TransportError::RefConflict) => Err(DispatchError::NonFastForwardPush {
+            branch: branch.to_owned(),
+        }),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Fetch remote refs, then fast-forward the current local branch from
