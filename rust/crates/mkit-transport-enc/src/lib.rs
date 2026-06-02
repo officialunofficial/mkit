@@ -67,7 +67,10 @@ pub mod tcp;
 pub mod tokio_io;
 
 #[cfg(feature = "tcp")]
-pub use tcp::{TokioExecutor, connect_tcp, connect_tcp_with_executor, serve_tcp};
+pub use tcp::{
+    PeerPolicy, TokioExecutor, connect_tcp, connect_tcp_with_executor, serve_tcp,
+    serve_tcp_with_policy,
+};
 
 /// Re-export of the encrypted-stream `Sender` / `Receiver` types
 /// downstream callers need to plug a custom server-side verb loop on

@@ -232,27 +232,48 @@ wall-clock time or a multi-threaded executor.
    feature; default builds remain SSH-only.
 4. ~~**Server binary**~~ — done. `mkit serve --listen-enc <addr>`
    spawns an async accept loop via
-   `mkit_transport_enc::serve_tcp`. Bouncer is permissive in v0.x;
-   server prints its ephemeral pubkey to stderr at startup for
-   operators to copy into client URLs.
+   `mkit_transport_enc::serve_tcp_with_policy`. The listener is
+   **fail-closed** (issue #178): it refuses to bind unless the operator
+   supplies `--enc-authorized-peers <PATH>` (an allowlist of client
+   public keys) or passes `--unsafe-allow-any-enc-peer` (a dev escape
+   that prints a loud warning). The allowlist bouncer rejects any
+   unlisted dialer at the handshake — a rejected peer never receives a
+   `HelloResponse`, list-refs, packs, or update-ref. The server
+   identity is a **stable** raw-32 key loaded/auto-created from
+   `--enc-server-key <PATH>` (or a user-scoped default
+   `~/.config/mkit/enc/server.key`) so the advertised `?pubkey=` is
+   stable across restarts; only the unsafe allow-any mode keeps the
+   historic ephemeral per-process key. Peer-authorization and identity
+   key paths are CLI-supplied or user-scoped and are **never** read
+   from repo-local `.mkit/config`.
 
 ### 6.2 Phase 3 — deferred
 
-5. **Keystore integration** — clients and server still derive an
-   ephemeral `ed25519` private key per process via `getrandom`. Once
-   `mkit-keystore` grows an "encrypted-transport identity" slot, this
-   becomes a stable, on-disk key surfaced through the same backends
-   as the SSH host keys and signing keys.
+5. **Keystore integration** — the server identity and (optionally) the
+   client identity are now stable raw-32 key files on disk: the server
+   uses `--enc-server-key` / the user-scoped default, and a client can
+   pin its identity via the `MKIT_ENC_CLIENT_KEY` environment variable
+   (a user-scoped / CLI-supplied raw-32 key file) so an allowlisting
+   server can pin the client across restarts. When `MKIT_ENC_CLIENT_KEY`
+   is unset the client still derives an ephemeral per-process key (works
+   only against `--unsafe-allow-any-enc-peer` servers). Full
+   `mkit-keystore` integration — surfacing these identities through the
+   same backends as the SSH host keys and signing keys — remains the
+   deferred follow-up.
 6. **Tighten handshake bounds** — `default_handshake_config` still
    uses the generous 30 s / 30 s / 60 s envelope inherited from
    Phase 1 (deterministic-runtime tests). Real-network deployments
    should tighten `synchrony_bound` / `max_handshake_age` to ≤ 5 s
    and `handshake_timeout` to ≤ 10 s. Pending CI infra for a
    real-network e2e job.
-7. **Server-side keyring / bouncer policy** — `serve_tcp` currently
-   accepts any peer that completes the handshake. Phase 3 wires the
-   bouncer to consult an operator-supplied allowlist (a TOML file or
-   a keystore partition).
+7. ~~**Server-side keyring / bouncer policy**~~ — done (issue #178).
+   `serve_tcp_with_policy` consults a `PeerPolicy` — `AllowAny` (dev /
+   the explicit unsafe escape) or `Allowlist(HashSet<[u8;32]>)` built
+   from the `--enc-authorized-peers` file (one client pubkey per line,
+   64-hex or 43-char url-safe base64; `#` comments and blank lines
+   ignored). The bare `serve_tcp` retains `AllowAny` for the direct
+   e2e harness only. Surfacing the allowlist from a keystore partition
+   instead of a flat file remains a follow-up.
 8. **`publish = true`** — flip the `mkit-transport-enc` `Cargo.toml`
    flag so the crate ships to crates.io alongside the other
    transports. Requires keystore integration (#5) so the public
