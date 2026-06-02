@@ -268,6 +268,252 @@ fn join_path(prefix: &str, name: &[u8]) -> String {
 }
 
 // =====================================================================
+// text_patch — line-based unified diff (for `mkit diff` hunks)
+// =====================================================================
+
+/// Number of unchanged context lines emitted on each side of a hunk.
+const PATCH_CONTEXT: usize = 3;
+
+/// Render a unified-diff patch between two byte blobs.
+///
+/// `old_path` / `new_path` are the `a/…` and `b/…` labels for the
+/// `---`/`+++` headers (callers conventionally pass the same repo path
+/// for both). The output is a Git-compatible unified diff:
+///
+/// ```text
+/// --- a/<old_path>
+/// +++ b/<new_path>
+/// @@ -<l>,<n> +<l>,<n> @@
+///  context
+/// -removed
+/// +added
+/// ```
+///
+/// Either side that is not valid UTF-8 (a binary blob) yields a single
+/// `Binary files a/<old> and b/<new> differ` line instead of hunks,
+/// matching Git's behaviour — emitting markers into binary content
+/// would be meaningless.
+///
+/// The algorithm is a straightforward longest-common-subsequence over
+/// whole lines (not a full Myers diff): correct and deterministic, and
+/// adequate for human-readable parity output. Trailing-newline handling
+/// follows Git's `\ No newline at end of file` convention.
+#[must_use]
+pub fn text_patch(old_bytes: &[u8], new_bytes: &[u8], old_path: &str, new_path: &str) -> String {
+    let (Ok(old_text), Ok(new_text)) = (
+        std::str::from_utf8(old_bytes),
+        std::str::from_utf8(new_bytes),
+    ) else {
+        return format!("Binary files a/{old_path} and b/{new_path} differ\n");
+    };
+
+    let old_lines = split_lines(old_text);
+    let new_lines = split_lines(new_text);
+    let ops = lcs_diff(&old_lines, &new_lines);
+
+    let hunks = group_hunks(&ops, PATCH_CONTEXT);
+    if hunks.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("--- a/{old_path}\n"));
+    out.push_str(&format!("+++ b/{new_path}\n"));
+    for hunk in &hunks {
+        render_hunk(&mut out, hunk, &old_lines, &new_lines);
+    }
+    out
+}
+
+/// A single line plus whether the source had a trailing newline after it.
+struct DiffLine<'a> {
+    text: &'a str,
+    /// `true` when this line was terminated by `\n` in the source.
+    has_newline: bool,
+}
+
+/// Split text into lines, preserving whether the final line had a
+/// trailing newline. An empty input yields no lines.
+fn split_lines(text: &str) -> Vec<DiffLine<'_>> {
+    let mut lines = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        match rest.find('\n') {
+            Some(idx) => {
+                lines.push(DiffLine {
+                    text: &rest[..idx],
+                    has_newline: true,
+                });
+                rest = &rest[idx + 1..];
+            }
+            None => {
+                lines.push(DiffLine {
+                    text: rest,
+                    has_newline: false,
+                });
+                rest = "";
+            }
+        }
+    }
+    lines
+}
+
+/// One element of a line-level edit script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffOp {
+    /// Line present in both sides (indices into old, new).
+    Equal(usize, usize),
+    /// Line only in the old side (index into old).
+    Delete(usize),
+    /// Line only in the new side (index into new).
+    Insert(usize),
+}
+
+/// Compute a line-level edit script via classic LCS dynamic programming.
+fn lcs_diff(old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> Vec<DiffOp> {
+    let n = old.len();
+    let m = new.len();
+    // dp[i][j] = LCS length of old[i..] and new[j..].
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if lines_equal(&old[i], &new[j]) {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+
+    let mut ops = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if lines_equal(&old[i], &new[j]) {
+            ops.push(DiffOp::Equal(i, j));
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            ops.push(DiffOp::Delete(i));
+            i += 1;
+        } else {
+            ops.push(DiffOp::Insert(j));
+            j += 1;
+        }
+    }
+    while i < n {
+        ops.push(DiffOp::Delete(i));
+        i += 1;
+    }
+    while j < m {
+        ops.push(DiffOp::Insert(j));
+        j += 1;
+    }
+    ops
+}
+
+fn lines_equal(a: &DiffLine<'_>, b: &DiffLine<'_>) -> bool {
+    a.text == b.text && a.has_newline == b.has_newline
+}
+
+/// A contiguous group of edits plus surrounding context, with the
+/// 1-based starting line numbers and lengths for the `@@` header.
+struct Hunk {
+    old_start: usize,
+    old_len: usize,
+    new_start: usize,
+    new_len: usize,
+    ops: Vec<DiffOp>,
+}
+
+/// Group an edit script into hunks, each padded with up to `context`
+/// unchanged lines and merged when their context windows touch.
+fn group_hunks(ops: &[DiffOp], context: usize) -> Vec<Hunk> {
+    // Indices of ops that are actual changes.
+    let change_positions: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| !matches!(op, DiffOp::Equal(_, _)))
+        .map(|(idx, _)| idx)
+        .collect();
+    if change_positions.is_empty() {
+        return Vec::new();
+    }
+
+    // Build [start,end) op-index ranges around each change, merging
+    // ranges whose context windows overlap or abut.
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for &pos in &change_positions {
+        let start = pos.saturating_sub(context);
+        let end = (pos + context + 1).min(ops.len());
+        match ranges.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => ranges.push((start, end)),
+        }
+    }
+
+    ranges
+        .into_iter()
+        .map(|(start, end)| build_hunk(&ops[start..end]))
+        .collect()
+}
+
+fn build_hunk(slice: &[DiffOp]) -> Hunk {
+    let mut old_start = None;
+    let mut new_start = None;
+    let mut old_len = 0usize;
+    let mut new_len = 0usize;
+    for op in slice {
+        match *op {
+            DiffOp::Equal(oi, ni) => {
+                old_start.get_or_insert(oi);
+                new_start.get_or_insert(ni);
+                old_len += 1;
+                new_len += 1;
+            }
+            DiffOp::Delete(oi) => {
+                old_start.get_or_insert(oi);
+                old_len += 1;
+            }
+            DiffOp::Insert(ni) => {
+                new_start.get_or_insert(ni);
+                new_len += 1;
+            }
+        }
+    }
+    Hunk {
+        // Convert 0-based to 1-based; empty side starts at 0.
+        old_start: old_start.map_or(0, |s| s + 1),
+        old_len,
+        new_start: new_start.map_or(0, |s| s + 1),
+        new_len,
+        ops: slice.to_vec(),
+    }
+}
+
+fn render_hunk(out: &mut String, hunk: &Hunk, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) {
+    out.push_str(&format!(
+        "@@ -{},{} +{},{} @@\n",
+        hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len
+    ));
+    for op in &hunk.ops {
+        match *op {
+            DiffOp::Equal(oi, _) => emit_line(out, ' ', &old[oi]),
+            DiffOp::Delete(oi) => emit_line(out, '-', &old[oi]),
+            DiffOp::Insert(ni) => emit_line(out, '+', &new[ni]),
+        }
+    }
+}
+
+fn emit_line(out: &mut String, prefix: char, line: &DiffLine<'_>) {
+    out.push(prefix);
+    out.push_str(line.text);
+    out.push('\n');
+    if !line.has_newline {
+        out.push_str("\\ No newline at end of file\n");
+    }
+}
+
+// =====================================================================
 // status_diff — working-tree vs HEAD (for `mkit status`)
 // =====================================================================
 
@@ -814,6 +1060,70 @@ mod tests {
         let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
         assert_eq!(result.len(), 1, "expected only the staged addition");
         assert_eq!(result[0].staging, StatusStaging::Staged);
+    }
+
+    // -----------------------------------------------------------------
+    // text_patch unit tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn text_patch_modified_line_emits_hunk() {
+        let old = b"line1\nline2\nline3\n";
+        let new = b"line1\nCHANGED\nline3\n";
+        let patch = text_patch(old, new, "f.txt", "f.txt");
+        assert!(patch.starts_with("--- a/f.txt\n+++ b/f.txt\n"), "{patch}");
+        assert!(patch.contains("@@ -1,3 +1,3 @@"), "{patch}");
+        assert!(patch.contains("-line2\n"), "{patch}");
+        assert!(patch.contains("+CHANGED\n"), "{patch}");
+        assert!(patch.contains(" line1\n"), "{patch}");
+        assert!(patch.contains(" line3\n"), "{patch}");
+    }
+
+    #[test]
+    fn text_patch_pure_addition() {
+        let old = b"a\nb\n";
+        let new = b"a\nb\nc\n";
+        let patch = text_patch(old, new, "f", "f");
+        assert!(patch.contains("+c\n"), "{patch}");
+        // No deletion lines in the hunk body (the `---` header aside).
+        assert!(
+            !patch
+                .lines()
+                .any(|l| l.starts_with('-') && !l.starts_with("---")),
+            "should be no deletions: {patch}"
+        );
+    }
+
+    #[test]
+    fn text_patch_identical_is_empty() {
+        let patch = text_patch(b"same\n", b"same\n", "f", "f");
+        assert!(patch.is_empty(), "{patch}");
+    }
+
+    #[test]
+    fn text_patch_binary_reports_differ() {
+        let old = &[0x00, 0xff, 0x01][..];
+        let new = &[0x00, 0xfe, 0x02][..];
+        let patch = text_patch(old, new, "bin", "bin");
+        assert_eq!(patch, "Binary files a/bin and b/bin differ\n");
+    }
+
+    #[test]
+    fn text_patch_no_trailing_newline_marker() {
+        let old = b"x\ny";
+        let new = b"x\nz";
+        let patch = text_patch(old, new, "f", "f");
+        assert!(patch.contains("\\ No newline at end of file\n"), "{patch}");
+    }
+
+    #[test]
+    fn text_patch_separate_hunks_for_distant_changes() {
+        let old = b"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+        // Change line 1 and line 10; far enough apart for two hunks.
+        let new = b"A\nb\nc\nd\ne\nf\ng\nh\ni\nJ\n";
+        let patch = text_patch(old, new, "f", "f");
+        let hunk_count = patch.matches("@@ ").count();
+        assert_eq!(hunk_count, 2, "expected two hunks: {patch}");
     }
 
     /// HEAD empty; index has b.txt at v1; worktree has b.txt at v2.

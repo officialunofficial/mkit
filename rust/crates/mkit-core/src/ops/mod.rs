@@ -19,7 +19,8 @@ pub mod stash;
 
 pub use cherry_pick::{CherryPickError, CherryPickResult, cherry_pick};
 pub use diff::{
-    DiffEntry, DiffError, DiffKind, DiffResult, StatusEntry, StatusStaging, diff_trees, status_diff,
+    DiffEntry, DiffError, DiffKind, DiffResult, StatusEntry, StatusStaging, diff_trees,
+    status_diff, text_patch,
 };
 pub use graph::{collect_ancestor_set, reachable_objects};
 pub use merge::{Conflict, ConflictKind, MergeResult, find_merge_base, is_ancestor, merge_trees};
