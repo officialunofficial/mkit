@@ -83,6 +83,25 @@ fn rm_cached_keeps_worktree_file() {
 }
 
 #[test]
+fn rm_cached_keeps_dirty_worktree_file_untouched() {
+    // --cached skips the dirty guard (it never touches the worktree),
+    // but it must NOT modify or delete the locally-modified file.
+    let td = init_with_commit(&[("a.txt", b"clean")]);
+    fs::write(td.path().join("a.txt"), b"locally modified").unwrap();
+    let out = run_in(td.path(), &["rm", "--cached", "a.txt"]);
+    assert!(out.status.success(), "rm --cached failed: {out:?}");
+    assert!(
+        td.path().join("a.txt").exists(),
+        "rm --cached must keep the dirty worktree file"
+    );
+    assert_eq!(
+        fs::read(td.path().join("a.txt")).unwrap(),
+        b"locally modified",
+        "rm --cached must not alter the worktree file's content"
+    );
+}
+
+#[test]
 fn rm_refuses_dirty_file_without_force() {
     let td = init_with_commit(&[("a.txt", b"clean")]);
     fs::write(td.path().join("a.txt"), b"locally modified").unwrap();
@@ -292,4 +311,18 @@ fn add_rejects_all_with_paths() {
     let td = init_with_commit(&[("a.txt", b"a")]);
     let out = run_in(td.path(), &["add", "-A", "a.txt"]);
     assert!(!out.status.success(), "-A with a path must error");
+}
+
+#[test]
+fn add_rejects_update_with_paths() {
+    let td = init_with_commit(&[("a.txt", b"a")]);
+    let out = run_in(td.path(), &["add", "-u", "a.txt"]);
+    assert!(!out.status.success(), "-u with a path must error");
+}
+
+#[test]
+fn add_rejects_all_and_update_together() {
+    let td = init_with_commit(&[("a.txt", b"a")]);
+    let out = run_in(td.path(), &["add", "-A", "-u"]);
+    assert!(!out.status.success(), "-A and -u together must error");
 }
