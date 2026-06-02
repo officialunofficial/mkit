@@ -326,6 +326,22 @@ pub fn push_branch_tracked(
     let store = ObjectStore::open(cwd)?;
     let tip = refs::read_ref(&mkit_dir, branch)?
         .ok_or_else(|| DispatchError::RemoteBranchMissing(branch.to_owned()))?;
+    // Default safe push requires a TRUE fast-forward: the new tip must
+    // descend from the last-seen remote-tracking ref. The CAS `Match`
+    // lease alone only proves the remote hasn't moved since we last
+    // fetched — on its own it would still let a divergent local tip
+    // (e.g. after a local `reset` to an unrelated commit) overwrite the
+    // remote, which Git rejects as non-fast-forward. `--force-with-lease`
+    // (`WithLease`) intentionally skips this check (overwrite as long as
+    // the remote matches what we last saw); `Force` skips everything.
+    if matches!(lease, PushLease::FastForward)
+        && let Some(tracked) = refs::read_remote_ref(&mkit_dir, remote, remote_branch)?
+        && !is_ancestor(&store, tracked, tip)?
+    {
+        return Err(DispatchError::NonFastForwardPush {
+            branch: remote_branch.to_owned(),
+        });
+    }
     let condition = lease_condition(cwd, remote, remote_branch, lease)?;
     push_branch(tx, &store, remote_branch, tip, condition)?;
     refs::write_remote_ref(&mkit_dir, remote, remote_branch, &tip)?;

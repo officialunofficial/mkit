@@ -163,6 +163,74 @@ fn non_fast_forward_push_is_rejected_without_force() {
     );
 }
 
+/// True-fast-forward enforcement: a *divergent* local tip whose history
+/// does NOT descend from the last-seen remote-tracking ref must be
+/// rejected by default `push` even though the CAS `Match` lease still
+/// holds (the remote hasn't moved). This is the gap a bare `Match`
+/// lease leaves open — Git rejects it as non-fast-forward, and so do we.
+/// `--force-with-lease` intentionally still permits it (lease holds).
+#[test]
+fn default_push_rejects_divergent_tip_even_when_lease_holds() {
+    let td = repo_with_commit(b"hi"); // c1 (root)
+    let remote = tempfile::tempdir().unwrap();
+    let url = file_url(remote.path());
+    assert!(
+        run_in(td.path(), &["remote", "add", "origin", &url])
+            .status
+            .success()
+    );
+    let c1 = local_main(td.path());
+    assert!(run_in(td.path(), &["push", "origin"]).status.success());
+
+    // c2 on top of c1; push it so remote == tracking == c2.
+    fs::write(td.path().join("a.txt"), b"hi2").unwrap();
+    assert!(run_in(td.path(), &["add", "a.txt"]).status.success());
+    assert!(run_in(td.path(), &["commit", "-m", "c2"]).status.success());
+    assert!(run_in(td.path(), &["push"]).status.success());
+    let c2 = remote_main(remote.path()).unwrap();
+    assert_ne!(c1, c2);
+
+    // Reset the local branch back to c1 and commit c1' — a sibling of c2
+    // (parent = c1), so c1' is NOT a descendant of c2. The remote-tracking
+    // ref still says c2 and the remote still holds c2, so a bare CAS
+    // Match(c2) would PASS — only the ancestry check stops the clobber.
+    fs::write(td.path().join(".mkit/refs/heads/main"), format!("{c1}\n")).unwrap();
+    fs::write(td.path().join("a.txt"), b"hi3").unwrap();
+    assert!(run_in(td.path(), &["add", "a.txt"]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "c1prime"])
+            .status
+            .success()
+    );
+    let c1prime = local_main(td.path());
+    assert_ne!(c1prime, c2);
+
+    let out = run_in(td.path(), &["push"]);
+    assert!(
+        !out.status.success(),
+        "divergent (non-descendant) tip must be rejected by default push: {out:?}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("non-fast-forward"),
+        "expected non-fast-forward error for divergent tip: {stderr}"
+    );
+    // Remote untouched.
+    assert_eq!(remote_main(remote.path()).as_deref(), Some(c2.as_str()));
+
+    // --force-with-lease intentionally permits it: the lease (remote ==
+    // last-seen tracking ref c2) still holds, so the overwrite proceeds.
+    let out = run_in(td.path(), &["push", "--force-with-lease"]);
+    assert!(
+        out.status.success(),
+        "--force-with-lease should still permit a divergent tip when the lease holds: {out:?}"
+    );
+    assert_eq!(
+        remote_main(remote.path()).as_deref(),
+        Some(c1prime.as_str())
+    );
+}
+
 #[test]
 fn dry_run_contacts_nothing() {
     let td = repo_with_commit(b"hi");
