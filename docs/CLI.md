@@ -142,16 +142,77 @@ Branches / refs:
   run when staged changes, dirty tracked files, or untracked path
   collisions would be overwritten.
 - `mkit tag` — list, create, or delete tags.
-- `mkit merge <branch>` — three-way merge into HEAD. Fast-forwards and
-  clean merges refuse to overwrite staged changes, dirty tracked files,
-  or untracked path collisions.
-- `mkit cherry-pick <hash>` — apply a commit to the current branch.
-  Refuses to overwrite staged changes, dirty tracked files, or untracked
-  path collisions.
-- `mkit rebase <branch> | --continue | --abort` — replay commits onto
-  a different base. Restore steps refuse to overwrite staged changes,
-  dirty tracked files, or untracked path collisions.
+- `mkit merge <branch> | --continue | --abort` — three-way merge into
+  HEAD. Fast-forwards and clean merges refuse to overwrite staged
+  changes, dirty tracked files, or untracked path collisions. On
+  conflict, the conflicting paths are materialized for resolution and a
+  resumable state is recorded; see "Resolving conflicts" below.
+- `mkit cherry-pick <hash> | --continue | --abort` — apply a commit to
+  the current branch. Refuses to overwrite staged changes, dirty tracked
+  files, or untracked path collisions. On conflict, records resumable
+  state; see "Resolving conflicts" below.
+- `mkit rebase <branch> | --continue | --abort | --skip` — replay
+  commits onto a different base. Restore steps refuse to overwrite staged
+  changes, dirty tracked files, or untracked path collisions. On conflict
+  the rebase pauses with resumable state; `--skip` drops the current
+  commit. See "Resolving conflicts" below.
 - `mkit bisect start | good | bad | reset` — binary search for a bug.
+
+### Resolving conflicts
+
+`merge`, `cherry-pick`, and `rebase` all share one resumable-conflict
+workflow. When a 3-way merge cannot auto-resolve a path, the command:
+
+1. Materializes the conflicting paths into the worktree (and stages the
+   ours-side blob into `.mkit/index` so each path is "resolvable"):
+   - **text** modify/modify and add/add → classic 2-way Git markers
+     (`<<<<<<< ours` / `=======` / `>>>>>>> theirs`) are written into
+     the file.
+   - **binary**, **symlink / executable-mode**, **delete/modify**, and
+     **file-vs-directory** → no markers (they would corrupt the file);
+     the surviving side's content is left in place. Resolve these by
+     hand. Each prints a per-path note.
+2. Records resumable operation state under `.mkit/` (see below) and exits
+   non-zero.
+
+To finish, for each conflicting path: edit the worktree file to its
+resolved content (remove all conflict markers), `mkit add <path>`, then:
+
+```sh
+mkit merge --continue        # or cherry-pick --continue / rebase --continue
+```
+
+`--continue` refuses while any text-marker file still contains markers.
+The committed tree is built from the **resolved index/worktree** — not
+the conflict-time "ours wins" snapshot — so your edits (including a third
+distinct resolution) are what land.
+
+Alternatively:
+
+```sh
+mkit merge --abort           # restore HEAD, branch ref, index, and worktree
+mkit rebase --skip           # rebase only: drop the current commit, keep going
+```
+
+`--abort` restores the pre-operation state (or fails with a clear,
+recoverable error and changes nothing). Starting a new merge / cherry-pick
+/ rebase while one is already in progress is refused.
+
+#### Operation-state files
+
+All live under `.mkit/`; rebase keeps its state inside
+`.mkit/rebase-apply/`. These use Git-compatible names plus one documented
+mkit sidecar. The `.mkit/index` stays a single-stage **resolved** staging
+area — there are no unmerged index stages (SPEC-INDEX is unchanged).
+
+| File                          | Meaning                                              |
+| ----------------------------- | ---------------------------------------------------- |
+| `MERGE_HEAD`                  | other parent of an in-progress merge (presence ⇒ merge) |
+| `CHERRY_PICK_HEAD`            | commit being applied by an in-progress cherry-pick   |
+| `ORIG_HEAD`                   | HEAD before the operation, used by `--abort`         |
+| `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
+| `mkit-conflicts`              | mkit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
+| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `done`) plus a `mkit-conflicts` sidecar when paused |
 
 Remote / sync:
 
