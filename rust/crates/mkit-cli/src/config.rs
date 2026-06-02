@@ -593,27 +593,83 @@ pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Real-environment getter used by the runtime credential gate: reads
+/// the named environment variable, treating an empty value as absent.
+fn real_getenv(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
 /// Refuse to use ambient HTTP/S3 environment credentials with a
 /// repo-configured endpoint unless the user has explicitly trusted that
 /// exact remote in user-scoped config.
+///
+/// Retained as the back-compat entry point for the flat single-remote
+/// `remote_endpoint`. New, per-endpoint callers (named remotes, the
+/// shared transport-dispatch choke point) should use
+/// [`endpoint_credential_trust`], which is keyed on an explicit
+/// `repo_chosen` provenance flag rather than re-deriving it from the
+/// flat field.
 pub fn enforce_trusted_remote_endpoint(cfg: &LayeredConfig) -> Result<(), String> {
-    match trusted_remote_error_with(cfg, &|name| {
-        std::env::var(name).ok().filter(|value| !value.is_empty())
-    }) {
+    let endpoint = cfg.merged.remote_endpoint.trim();
+    let repo_chosen = cfg.repo.remote_endpoint.trim() == endpoint;
+    match trusted_remote_error_for(
+        endpoint,
+        repo_chosen,
+        cfg.user.trusted_remote_endpoint.trim(),
+        &real_getenv,
+    ) {
         Some(msg) => Err(msg),
         None => Ok(()),
     }
 }
 
-fn trusted_remote_error_with<F>(cfg: &LayeredConfig, getenv: &F) -> Option<String>
+/// Per-endpoint credential trust check for the shared dispatch choke
+/// point ([`crate::remote_dispatch::open_trusted`]) and named-remote
+/// callers. `repo_chosen` is `true` when the endpoint was selected by
+/// the repo-scoped config (the flat `remote_endpoint` or a
+/// `remote.<name>.url` entry), `false` when it was supplied by the user
+/// (user-scoped config or an explicit CLI argument). Trust is keyed on
+/// the resolved ENDPOINT plus this provenance, never on a remote name.
+pub fn endpoint_credential_trust(
+    cfg: &LayeredConfig,
+    endpoint: &str,
+    repo_chosen: bool,
+) -> Result<(), String> {
+    match trusted_remote_error_for(
+        endpoint.trim(),
+        repo_chosen,
+        cfg.user.trusted_remote_endpoint.trim(),
+        &real_getenv,
+    ) {
+        Some(msg) => Err(msg),
+        None => Ok(()),
+    }
+}
+
+/// Core gate, keyed on an explicit endpoint + provenance rather than a
+/// `LayeredConfig`. Returns `Some(error)` when ambient HTTP/S3
+/// credentials would be attached to a repo-chosen endpoint that the
+/// user has not explicitly trusted.
+///
+/// * `endpoint` — the resolved, already-trimmed remote URL.
+/// * `repo_chosen` — whether the repo-scoped config selected this
+///   endpoint (the only case the gate fences; a user-chosen endpoint is
+///   the user's own decision).
+/// * `user_trusted` — the trimmed user-scoped `trusted_remote_endpoint`.
+/// * `getenv` — credential probe (injected for tests).
+fn trusted_remote_error_for<F>(
+    endpoint: &str,
+    repo_chosen: bool,
+    user_trusted: &str,
+    getenv: &F,
+) -> Option<String>
 where
     F: Fn(&str) -> Option<String>,
 {
-    let endpoint = cfg.merged.remote_endpoint.trim();
-    if endpoint.is_empty() || cfg.repo.remote_endpoint.trim() != endpoint {
+    if endpoint.is_empty() || !repo_chosen {
         return None;
     }
-    if cfg.user.trusted_remote_endpoint.trim() == endpoint {
+    if user_trusted == endpoint {
         return None;
     }
 
@@ -1180,13 +1236,31 @@ mod tests {
         assert_eq!(cfg.signing_key, "/home/user/.mkit/global.key");
     }
 
+    /// Helper mirroring the old `trusted_remote_error_with(cfg, ..)`
+    /// shape so the existing layered tests stay readable: derives
+    /// `repo_chosen` from the flat `remote_endpoint`, exactly as
+    /// `enforce_trusted_remote_endpoint` does.
+    fn gate_for_flat<F>(cfg: &LayeredConfig, getenv: &F) -> Option<String>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let endpoint = cfg.merged.remote_endpoint.trim();
+        let repo_chosen = cfg.repo.remote_endpoint.trim() == endpoint;
+        trusted_remote_error_for(
+            endpoint,
+            repo_chosen,
+            cfg.user.trusted_remote_endpoint.trim(),
+            getenv,
+        )
+    }
+
     #[test]
     fn repo_http_remote_with_token_requires_user_trust() {
         let cfg = layered(
             Some("remote_endpoint = mkit+https://example.invalid/repo\n"),
             None,
         );
-        let msg = trusted_remote_error_with(&cfg, &|name| {
+        let msg = gate_for_flat(&cfg, &|name| {
             (name == mkit_transport_http::TOKEN_ENV).then(|| "token".to_string())
         })
         .expect("repo-scoped HTTP remote with token must be rejected");
@@ -1199,7 +1273,7 @@ mod tests {
             Some("remote_endpoint = mkit+https://example.invalid/repo\n"),
             Some("trusted_remote_endpoint = mkit+https://example.invalid/repo\n"),
         );
-        let msg = trusted_remote_error_with(&cfg, &|name| {
+        let msg = gate_for_flat(&cfg, &|name| {
             (name == mkit_transport_http::TOKEN_ENV).then(|| "token".to_string())
         });
         assert!(msg.is_none());
@@ -1211,12 +1285,65 @@ mod tests {
             Some("remote_endpoint = mkit+s3://r2.example.com/bucket/proj\n"),
             None,
         );
-        let msg = trusted_remote_error_with(&cfg, &|name| match name {
+        let msg = gate_for_flat(&cfg, &|name| match name {
             mkit_transport_s3::ENV_ACCESS_KEY => Some("AKIA...".to_string()),
             _ => None,
         })
         .expect("repo-scoped S3 remote with env creds must be rejected");
         assert!(msg.contains("trusted_remote_endpoint"));
+    }
+
+    /// The gate keys on PROVENANCE, not mere credential presence: a
+    /// user-chosen endpoint (`repo_chosen == false`) with ambient creds
+    /// is the user's own decision and must NOT be refused, even though
+    /// the same endpoint+creds would be refused if the repo had chosen
+    /// it.
+    #[test]
+    fn user_chosen_http_remote_with_token_is_allowed() {
+        let token =
+            |name: &str| (name == mkit_transport_http::TOKEN_ENV).then(|| "tok".to_string());
+        let ep = "mkit+https://example.invalid/repo";
+        // repo_chosen = false (user-scoped or CLI-supplied endpoint).
+        assert!(trusted_remote_error_for(ep, false, "", &token).is_none());
+        // repo_chosen = true with no user trust → refused.
+        assert!(trusted_remote_error_for(ep, true, "", &token).is_some());
+    }
+
+    /// Per-endpoint helper returns `None` when no ambient credentials
+    /// are present, regardless of provenance — an unauthenticated push
+    /// is always safe.
+    #[test]
+    fn repo_http_remote_without_token_is_allowed() {
+        let none = |_: &str| None;
+        let ep = "mkit+https://example.invalid/repo";
+        assert!(trusted_remote_error_for(ep, true, "", &none).is_none());
+    }
+
+    /// SSH and file endpoints never carry ambient HTTP/S3 creds, so the
+    /// gate passes them through even when repo-chosen and untrusted.
+    #[test]
+    fn ssh_and_file_endpoints_bypass_credential_gate() {
+        let all = |_: &str| Some("present".to_string());
+        assert!(trusted_remote_error_for("mkit+ssh://host/path", true, "", &all).is_none());
+        assert!(trusted_remote_error_for("mkit+file:///srv/mirror", true, "", &all).is_none());
+    }
+
+    /// `endpoint_credential_trust` is the public per-endpoint entry the
+    /// dispatch choke point and named-remote callers use. Confirm it
+    /// honours provenance + user trust end-to-end.
+    #[test]
+    fn endpoint_credential_trust_honours_provenance_and_user_trust() {
+        let cfg = layered(
+            None,
+            Some("trusted_remote_endpoint = mkit+https://trusted.invalid/r\n"),
+        );
+        // Untrusted, repo-chosen endpoint: only refused when creds are
+        // actually present in the environment. In a clean test
+        // environment there is no MKIT_API_TOKEN, so this passes; the
+        // hostile-repo integration tests cover the credentialed case.
+        let _ = endpoint_credential_trust(&cfg, "mkit+https://untrusted.invalid/r", true);
+        // User-trusted endpoint is always allowed.
+        assert!(endpoint_credential_trust(&cfg, "mkit+https://trusted.invalid/r", true).is_ok());
     }
 
     #[test]

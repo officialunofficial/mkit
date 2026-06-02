@@ -80,10 +80,52 @@ pub enum DispatchError {
     NotCommit,
     #[error("restore: {0}")]
     Restore(#[from] restore::RestoreError),
+    /// The per-endpoint credential-trust gate (#97) refused to build a
+    /// credential-bearing transport for a repo-chosen endpoint the user
+    /// has not explicitly trusted. The wrapped string is the actionable
+    /// message produced by [`crate::config::endpoint_credential_trust`].
+    #[error("{0}")]
+    UntrustedRemote(String),
+    /// A CAS ref write was rejected because the remote moved under us
+    /// (non-fast-forward). Callers map this to an actionable
+    /// fetch-then-retry / `--force-with-lease` hint.
+    #[error(
+        "updates were rejected for branch '{branch}' (non-fast-forward); fetch and merge first, or re-run with --force-with-lease / --force"
+    )]
+    NonFastForwardPush { branch: String },
+}
+
+/// Open a transport for `endpoint` only after the per-endpoint
+/// credential-trust gate (#97) approves it.
+///
+/// This is the single choke point through which push / fetch / pull
+/// (and named-remote callers in #175) MUST build a transport: it runs
+/// [`crate::config::endpoint_credential_trust`] — keyed on the resolved
+/// ENDPOINT and its `repo_chosen` provenance — *before* constructing
+/// the transport, so a credential-bearing HTTP/S3 transport is never
+/// instantiated for a repo-chosen endpoint the user hasn't trusted.
+///
+/// `repo_chosen` is `true` when the endpoint came from repo-scoped
+/// config (the flat `remote_endpoint` or a `remote.<name>.url`),
+/// `false` when it came from the user / an explicit CLI argument. Trust
+/// is per ENDPOINT, never per remote name.
+pub fn open_trusted(
+    endpoint: &str,
+    repo_chosen: bool,
+    cfg: &crate::config::LayeredConfig,
+) -> Result<Arc<dyn Transport>, DispatchError> {
+    crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
+        .map_err(DispatchError::UntrustedRemote)?;
+    open(endpoint)
 }
 
 /// Open a transport for the given URL. Returns a type-erased `Arc`
 /// so callers can treat all schemes uniformly.
+///
+/// Low-level scheme dispatch only — it does NOT enforce the credential
+/// gate. Production push / fetch / pull paths go through
+/// [`open_trusted`]; `open` stays public for file/memory integration
+/// tests that have no ambient credentials to fence.
 pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
     if let Some(rest) = url.strip_prefix("mkit+file://") {
         // mkit+file:///abs/path -> /abs/path
