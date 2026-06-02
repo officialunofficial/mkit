@@ -78,6 +78,7 @@ pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "attest.default_algorithm",
     "attest.external_signer_path",
     "attest.external_signer_args",
+    "attest.external_signer_timeout_secs",
     "attest.secp256k1_key_path",
     "attest.p256_key_path",
 ];
@@ -217,6 +218,14 @@ pub struct AttestConfig {
     /// pipe-separated string: `attest.external_signer_args = sign|--tag|demo`.
     /// User-scoped only.
     pub external_signer_args: Vec<String>,
+    /// Wall-clock budget (in seconds) for the entire external-signer
+    /// conversation: spawn → request-write → response-read →
+    /// stderr-drain → child-exit. On expiry mkit kills and reaps the
+    /// child. Empty / 0 = use the crate default (120s, generous for
+    /// hardware touch/PIN/biometric). User-scoped only — see
+    /// [`REPO_FORBIDDEN_KEYS`] (a hostile repo must not be able to set a
+    /// 0s "deny" timeout or a multi-hour hang).
+    pub external_signer_timeout_secs: Option<u64>,
     /// Per-algorithm repo-key paths for non-ed25519 signing.
     /// User-scoped only — see [`REPO_FORBIDDEN_KEYS`].
     pub secp256k1_key_path: String,
@@ -551,6 +560,12 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "attest.external_signer_path" => val.clone_into(&mut cfg.attest.external_signer_path),
         "attest.external_signer_args" => {
             cfg.attest.external_signer_args = parse_pipe_list(val);
+        }
+        "attest.external_signer_timeout_secs" => {
+            // Tolerate a malformed value on read (mirrors the rest of
+            // this parser): an unparseable number leaves the default in
+            // effect rather than aborting config load.
+            cfg.attest.external_signer_timeout_secs = val.trim().parse::<u64>().ok();
         }
         "attest.secp256k1_key_path" => val.clone_into(&mut cfg.attest.secp256k1_key_path),
         "attest.p256_key_path" => val.clone_into(&mut cfg.attest.p256_key_path),
@@ -1144,6 +1159,17 @@ mod tests {
                         ""
                     } else {
                         "<non-empty>"
+                    }
+                }
+                "attest.external_signer_timeout_secs" => {
+                    // Option<u64>; None when dropped from repo scope. The
+                    // SENTINEL string is non-numeric, so even on the
+                    // user path it would parse to None — assert the repo
+                    // path leaves it None.
+                    if cfg.attest.external_signer_timeout_secs.is_none() {
+                        ""
+                    } else {
+                        "<set>"
                     }
                 }
                 "attest.secp256k1_key_path" => cfg.attest.secp256k1_key_path.as_str(),
