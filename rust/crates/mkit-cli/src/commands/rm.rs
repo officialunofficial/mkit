@@ -1,4 +1,17 @@
-//! `mkit rm <path>` — mark a path for removal in the next commit.
+//! `mkit rm <pathspec>...` — remove paths from the worktree and stage
+//! the deletion for the next commit.
+//!
+//! Mirrors `git rm`:
+//!
+//! - default — stage the deletion AND delete the worktree file(s);
+//! - `--cached` — stage the deletion only, leaving the worktree intact;
+//! - `-r/--recursive` — required to remove a directory's entries;
+//! - `-f/--force` — override the safety guard that refuses to destroy a
+//!   tracked file whose worktree content differs from the staged blob.
+//!
+//! Multiple pathspecs may be given. The safety guard reuses the same
+//! "don't clobber user work" spirit as the #176 restore guards: a
+//! tracked-but-modified file is not deleted without `--force`.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -6,8 +19,9 @@ use std::path::{Component, Path, PathBuf};
 
 use clap::Parser;
 use mkit_core::hash::ZERO;
-use mkit_core::index::{self, EntryStatus, IndexEntry};
+use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
 use mkit_core::store::ObjectStore;
+use mkit_core::worktree;
 
 use crate::clap_shim;
 use crate::exit;
@@ -15,12 +29,27 @@ use crate::exit;
 #[derive(Debug, Parser)]
 #[command(
     name = "mkit rm",
-    about = "Mark a path for removal in the next commit."
+    about = "Remove paths from the worktree and stage their deletion."
 )]
 struct RmOpts {
-    /// Path to mark for removal. Directory paths remove every entry
-    /// at or below them.
-    path: String,
+    /// Keep the worktree file(s); only stage the removal in the index.
+    /// This is the historical mkit behaviour.
+    #[arg(long)]
+    cached: bool,
+
+    /// Allow removing a directory and everything under it.
+    #[arg(short = 'r', long)]
+    recursive: bool,
+
+    /// Remove worktree files even when they differ from the staged
+    /// blob (otherwise modified files are refused to avoid data loss).
+    #[arg(short = 'f', long)]
+    force: bool,
+
+    /// Paths to remove. A directory path removes every entry at or
+    /// below it (requires `-r`).
+    #[arg(required = true)]
+    paths: Vec<String>,
 }
 
 #[must_use]
@@ -29,7 +58,6 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
-    let path = &opts.path;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -42,28 +70,170 @@ pub fn run(args: &[String]) -> u8 {
         Ok(i) => i,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
-    let rel_path = match index_path_for_arg(&cwd, Path::new(path)) {
-        Ok(p) => p,
-        Err(e) => return emit_err(&e, exit::DATAERR),
-    };
-    let mut matched = false;
-    for entry in &mut idx.entries {
-        if super::index_path_matches_or_descends(&entry.path, &rel_path) {
-            entry.status = EntryStatus::Removed;
-            entry.object_hash = ZERO;
-            matched = true;
+
+    // Resolve every pathspec up front and gather the set of tracked
+    // index paths each one matches. A pathspec matching more than one
+    // entry (or being itself a directory) requires `-r`.
+    let mut targets: Vec<(String, Vec<usize>)> = Vec::new();
+    for raw in &opts.paths {
+        let rel = match index_path_for_arg(&cwd, Path::new(raw)) {
+            Ok(p) => p,
+            Err(e) => return emit_err(&e, exit::DATAERR),
+        };
+        let matches: Vec<usize> = idx
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                e.status != EntryStatus::Removed
+                    && super::index_path_matches_or_descends(&e.path, &rel)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if matches.is_empty() {
+            return emit_err(
+                &format!("pathspec '{raw}' did not match any tracked files"),
+                exit::GENERAL_ERROR,
+            );
+        }
+        // A pathspec that resolves to a strict descendant (i.e. it names
+        // a directory, not an exact tracked file) needs --recursive.
+        let names_dir = !idx
+            .entries
+            .iter()
+            .any(|e| e.status != EntryStatus::Removed && e.path == rel);
+        if names_dir && !opts.recursive {
+            return emit_err(
+                &format!("not removing '{raw}' recursively without -r"),
+                exit::GENERAL_ERROR,
+            );
+        }
+        targets.push((rel, matches));
+    }
+
+    // Safety pass (unless --force): refuse to destroy a worktree file
+    // whose content diverges from the staged blob. Skipped for
+    // --cached, which never touches the worktree.
+    if !opts.force && !opts.cached {
+        for (_, matches) in &targets {
+            for &i in matches {
+                if let Some(reason) = dirty_reason(&cwd, &store, &idx.entries[i]) {
+                    return emit_err(&reason, exit::GENERAL_ERROR);
+                }
+            }
         }
     }
-    if !matched {
-        idx.entries.push(IndexEntry {
-            path: rel_path,
-            status: EntryStatus::Removed,
-            object_hash: ZERO,
-        });
+
+    // Mutation pass: delete worktree files (unless --cached) then mark
+    // the index entries Removed.
+    let mut all_matches: Vec<usize> = targets
+        .iter()
+        .flat_map(|(_, m)| m.iter().copied())
+        .collect();
+    all_matches.sort_unstable();
+    all_matches.dedup();
+
+    if !opts.cached
+        && let Err(e) = remove_worktree_paths(&cwd, &idx, &all_matches)
+    {
+        return emit_err(&e, exit::GENERAL_ERROR);
     }
+
+    for &i in &all_matches {
+        idx.entries[i].status = EntryStatus::Removed;
+        idx.entries[i].object_hash = ZERO;
+    }
+
     match index::write_index(&cwd, &idx) {
         Ok(()) => exit::OK,
         Err(e) => emit_err(&format!("write index: {e}"), exit::CANTCREAT),
+    }
+}
+
+/// Return `Some(reason)` when the worktree file backing `entry` exists
+/// but differs from the staged blob — the case `git rm` refuses without
+/// `-f`. Returns `None` when the file is clean, absent, or a symlink
+/// whose hashing we treat the same as a regular blob.
+fn dirty_reason(root: &Path, store: &ObjectStore, entry: &IndexEntry) -> Option<String> {
+    let abs = root.join(&entry.path);
+    let meta = abs.symlink_metadata().ok()?;
+    // Compute the worktree object hash the same way `add` would.
+    let work_hash = if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(&abs).ok()?;
+        let target_str = target.to_str()?;
+        symlink_blob_hash(store, target_str)?
+    } else if meta.file_type().is_file() {
+        worktree::hash_file(store, &abs).ok()?
+    } else {
+        return None;
+    };
+    if work_hash == entry.object_hash {
+        None
+    } else {
+        Some(format!(
+            "'{}' has local modifications; use --cached to keep it, or --force to discard them",
+            entry.path
+        ))
+    }
+}
+
+/// Hash a symlink target as a blob (matching `worktree`/`add` semantics)
+/// so the dirty-check compares like-for-like with the index entry.
+fn symlink_blob_hash(store: &ObjectStore, target: &str) -> Option<mkit_core::hash::Hash> {
+    use mkit_core::object::{Blob, Object};
+    let blob = Object::Blob(Blob {
+        data: target.as_bytes().to_vec(),
+    });
+    let ser = mkit_core::serialize::serialize(&blob).ok()?;
+    store.write(&ser).ok()
+}
+
+/// Delete every worktree file named by the matched index entries, then
+/// prune directories left empty by those deletions.
+fn remove_worktree_paths(root: &Path, idx: &Index, matches: &[usize]) -> Result<(), String> {
+    let mut dirs_to_prune: Vec<PathBuf> = Vec::new();
+    for &i in matches {
+        let rel = &idx.entries[i].path;
+        let abs = root.join(rel);
+        match std::fs::symlink_metadata(&abs) {
+            Ok(_) => {
+                std::fs::remove_file(&abs).map_err(|e| format!("remove {}: {e}", abs.display()))?;
+            }
+            // Already gone — treat as success (idempotent).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("remove {}: {e}", abs.display())),
+        }
+        if let Some(parent) = abs.parent() {
+            dirs_to_prune.push(parent.to_path_buf());
+        }
+    }
+    prune_empty_dirs(root, dirs_to_prune);
+    Ok(())
+}
+
+/// Remove now-empty directories, walking upward toward `root` but never
+/// removing `root` itself. Best-effort: non-empty dirs and errors stop
+/// the upward walk for that branch.
+fn prune_empty_dirs(root: &Path, mut dirs: Vec<PathBuf>) {
+    // Deepest paths first so children are pruned before parents.
+    dirs.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+    dirs.dedup();
+    for dir in dirs {
+        let mut cur = dir;
+        while cur != root && cur.starts_with(root) {
+            let is_empty = match std::fs::read_dir(&cur) {
+                Ok(mut rd) => rd.next().is_none(),
+                Err(_) => break,
+            };
+            if !is_empty || std::fs::remove_dir(&cur).is_err() {
+                break;
+            }
+            match cur.parent() {
+                Some(p) => cur = p.to_path_buf(),
+                None => break,
+            }
+        }
     }
 }
 
