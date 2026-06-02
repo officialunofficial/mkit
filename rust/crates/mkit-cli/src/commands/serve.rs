@@ -285,6 +285,9 @@ fn decode_peer_pubkey_line(s: &str) -> Result<[u8; 32], String> {
         }
         return Ok(out);
     }
+    if s.len() == 43 && s.bytes().all(is_b64url_byte) {
+        return decode_b64url_pubkey(s);
+    }
     Err("peer key must be 64 hex chars or 43 url-safe base64 chars".to_string())
 }
 
@@ -295,6 +298,64 @@ fn hex_nibble(b: u8) -> Result<u8, String> {
         b'a'..=b'f' => Ok(10 + b - b'a'),
         b'A'..=b'F' => Ok(10 + b - b'A'),
         _ => Err("invalid hex digit".to_string()),
+    }
+}
+
+#[cfg(feature = "enc-transport")]
+const fn is_b64url_byte(b: u8) -> bool {
+    matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_')
+}
+
+/// Decode a 43-char unpadded url-safe base64 ed25519 public key into 32
+/// raw bytes. Mirrors `mkit-transport-enc`'s `?pubkey=` decoder, including
+/// the rejection of non-zero trailing bits in the final character so two
+/// distinct base64 strings cannot map to the same key.
+#[cfg(feature = "enc-transport")]
+#[allow(clippy::cast_possible_truncation)] // intentional byte extraction from packed 24-bit groups
+fn decode_b64url_pubkey(s: &str) -> Result<[u8; 32], String> {
+    let bytes = s.as_bytes();
+    // 43 chars -> pad to 44 (multiple of 4) with the zero-bit char.
+    let mut buf = [0u8; 44];
+    buf[..43].copy_from_slice(bytes);
+    buf[43] = b'A';
+    let mut out = [0u8; 32];
+    let mut out_pos = 0usize;
+    for chunk in buf.chunks_exact(4) {
+        let v0 = b64url_nibble(chunk[0])?;
+        let v1 = b64url_nibble(chunk[1])?;
+        let v2 = b64url_nibble(chunk[2])?;
+        let v3 = b64url_nibble(chunk[3])?;
+        let triple =
+            (u32::from(v0) << 18) | (u32::from(v1) << 12) | (u32::from(v2) << 6) | u32::from(v3);
+        if out_pos < 32 {
+            out[out_pos] = (triple >> 16) as u8;
+        }
+        if out_pos + 1 < 32 {
+            out[out_pos + 1] = (triple >> 8) as u8;
+        }
+        if out_pos + 2 < 32 {
+            out[out_pos + 2] = triple as u8;
+        }
+        out_pos += 3;
+    }
+    // The 43rd char (index 42) carries 6 bits, only the top 4 of which
+    // are significant; its two low bits MUST be zero.
+    let last = b64url_nibble(bytes[42])?;
+    if last & 0b0000_0011 != 0 {
+        return Err("base64 peer key has non-zero trailing bits".to_string());
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "enc-transport")]
+fn b64url_nibble(b: u8) -> Result<u8, String> {
+    match b {
+        b'A'..=b'Z' => Ok(b - b'A'),
+        b'a'..=b'z' => Ok(26 + b - b'a'),
+        b'0'..=b'9' => Ok(52 + b - b'0'),
+        b'-' => Ok(62),
+        b'_' => Ok(63),
+        _ => Err("invalid base64 url-safe digit".to_string()),
     }
 }
 
@@ -1732,6 +1793,65 @@ mod tests {
         assert_eq!(set.len(), 2);
         assert!(set.contains(&[0xAA; 32]));
         assert!(set.contains(&[0xBB; 32]));
+    }
+
+    /// The allowlist file accepts the SAME 43-char url-safe base64
+    /// encoding the `mkit+enc://?pubkey=` query uses, and it decodes to
+    /// the identical 32-byte key as the hex form. Without this the docs
+    /// and `--enc-authorized-peers` help would promise base64 support
+    /// that the parser silently rejected.
+    #[cfg(feature = "enc-transport")]
+    #[test]
+    #[allow(clippy::cast_possible_truncation)] // test-only b64 encoder
+    fn authorized_peers_parses_base64_matching_hex() {
+        // A key whose final byte's low bits are zero so the canonical
+        // 43-char base64 has zero trailing bits. All-0xAA: last byte 0xAA.
+        // Build from a real ed25519 public key to guarantee a valid pair
+        // of encodings.
+        use commonware_codec::Encode as _;
+        use commonware_cryptography::Signer as _;
+        use commonware_cryptography::ed25519::PrivateKey;
+
+        let pk = PrivateKey::from_seed(4242).public_key();
+        let raw: [u8; 32] = {
+            let enc = pk.encode();
+            let mut out = [0u8; 32];
+            out.copy_from_slice(enc.as_ref());
+            out
+        };
+        let hex = mkit_core::hash::to_hex(&raw);
+        // Round-trip the raw bytes through our own base64 decoder by
+        // first encoding with the standard alphabet.
+        let b64 = {
+            const A: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let mut s = String::new();
+            for chunk in raw.chunks(3) {
+                let b0 = u32::from(chunk[0]);
+                let b1 = chunk.get(1).copied().map_or(0, u32::from);
+                let b2 = chunk.get(2).copied().map_or(0, u32::from);
+                let n = (b0 << 16) | (b1 << 8) | b2;
+                let chars = match chunk.len() {
+                    1 => 2,
+                    2 => 3,
+                    _ => 4,
+                };
+                for i in 0..chars {
+                    let idx = ((n >> (18 - 6 * i)) & 0x3F) as usize;
+                    s.push(A[idx] as char);
+                }
+            }
+            s
+        };
+        assert_eq!(b64.len(), 43, "ed25519 key encodes to 43 b64 chars");
+
+        let td = tempfile::tempdir().unwrap();
+        let peers = td.path().join("peers.txt");
+        fs::write(&peers, format!("{hex}\n{b64}\n")).unwrap();
+        let set = load_authorized_peers(peers.to_str().unwrap()).unwrap();
+        // Both lines decode to the SAME key, so the set has one element.
+        assert_eq!(set.len(), 1, "hex and base64 forms must coincide");
+        assert!(set.contains(&raw));
     }
 
     #[cfg(feature = "enc-transport")]
