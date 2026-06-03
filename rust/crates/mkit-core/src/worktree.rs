@@ -169,9 +169,17 @@ fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> Wo
 /// paths. Entries with [`crate::index::EntryStatus::Removed`] are
 /// excluded; everything else maps to an [`EntryMode`] one-to-one.
 ///
+/// A file entry (Blob/Executable) may address either a single
+/// [`Blob`](crate::object::Blob) or, for content above
+/// [`CHUNK_THRESHOLD`], a [`ChunkedBlob`](crate::object::ChunkedBlob)
+/// manifest — exactly the two shapes `store_file_object` (and hence
+/// `add`/`hash_file`/`build_tree`) can produce. Symlink entries must be
+/// a single `Blob`. Any other object kind under a file entry is rejected.
+///
 /// # Errors
 /// - [`WorktreeError::Io`] on a [`crate::object::TreeEntry::validate_name`]
-///   failure (the path's leaf segment is reserved or alias-prone).
+///   failure (the path's leaf segment is reserved or alias-prone), or
+///   when a file entry points at a non-blob/non-chunked-blob object.
 /// - Wraps [`crate::MkitError`] surfaced by `serialize` / `store.write`.
 #[allow(clippy::items_after_statements, clippy::too_many_lines)]
 pub fn build_tree_from_index(
@@ -217,11 +225,23 @@ pub fn build_tree_from_index(
             }
             EntryStatus::Removed => unreachable!("filtered above"),
         };
-        if !matches!(store.read_object(&entry.object_hash)?, Object::Blob(_)) {
-            return Err(WorktreeError::Io(io::Error::other(format!(
-                "index entry '{}' points to a non-blob object",
-                entry.path
-            ))));
+        // A regular file (Blob/Executable) may be stored as a single
+        // Blob or, for content above CHUNK_THRESHOLD, a ChunkedBlob
+        // manifest — `add`/`hash_file`/`build_tree` all route through
+        // `store_file_object`. A Symlink is always a single Blob (its
+        // target path). Accept both blob shapes for file entries so the
+        // commit/index path agrees with the worktree-hashing path; a
+        // tree/commit/etc. under a file entry is still rejected.
+        match store.read_object(&entry.object_hash)? {
+            Object::Blob(_) => {}
+            Object::ChunkedBlob(_) if mode != EntryMode::Symlink => {}
+            other => {
+                return Err(WorktreeError::Io(io::Error::other(format!(
+                    "index entry '{}' points to a non-blob object (got {})",
+                    entry.path,
+                    other.object_type().name()
+                ))));
+            }
         }
 
         // Split "a/b/c.txt" into ["a", "b"] + "c.txt".
@@ -387,10 +407,31 @@ fn hash_file_with_metadata(
     path: &Path,
 ) -> WorktreeResult<(Hash, fs::Metadata)> {
     let (meta, data) = read_regular_file_bounded(path)?;
+    let hash = store_file_object(store, &data)?;
+    Ok((hash, meta))
+}
+
+/// Store a regular file's bytes as the canonical object and return its
+/// content-address.
+///
+/// This is the single source of truth for how file content maps to an
+/// object hash, shared by [`hash_file`], [`build_tree`], and `mkit add`
+/// so all three agree on the representation:
+///
+/// - At or below [`CHUNK_THRESHOLD`]: a single
+///   [`Blob`](crate::object::Blob).
+/// - Above the threshold: `FastCdc::v1` chunks, each stored as a `Blob`,
+///   addressed by a [`ChunkedBlob`](crate::object::ChunkedBlob) manifest.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn store_file_object(store: &ObjectStore, data: &[u8]) -> WorktreeResult<Hash> {
     if u64::try_from(data.len()).unwrap_or(u64::MAX) <= CHUNK_THRESHOLD {
-        let blob = Object::Blob(crate::object::Blob { data });
+        let blob = Object::Blob(crate::object::Blob {
+            data: data.to_vec(),
+        });
         let bytes = serialize::serialize(&blob)?;
-        return Ok((store.write(&bytes)?, meta));
+        return Ok(store.write(&bytes)?);
     }
 
     // Large file: split with FastCDC v1 via the public ChunkIterator,
@@ -399,7 +440,7 @@ fn hash_file_with_metadata(
     // (1_000_000); MAX_FILE_BYTES (1 GiB) ÷ FastCDC MIN_SIZE (16 KiB)
     // = ~65k, well under the cap.
     let total_size = data.len() as u64;
-    let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), &data)
+    let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), data)
         .map(|b| {
             let chunk_blob = Object::Blob(crate::object::Blob {
                 data: data[b.offset..b.offset + b.length].to_vec(),
@@ -415,7 +456,48 @@ fn hash_file_with_metadata(
         chunks,
     });
     let manifest_bytes = serialize::serialize(&manifest)?;
-    Ok((store.write(&manifest_bytes)?, meta))
+    Ok(store.write(&manifest_bytes)?)
+}
+
+/// Reassemble the full byte content of a `Blob` or `ChunkedBlob` object
+/// addressed by `hash`.
+///
+/// A plain [`Blob`](crate::object::Blob) returns its bytes directly. A
+/// [`ChunkedBlob`](crate::object::ChunkedBlob) manifest is reassembled
+/// by concatenating each referenced chunk (every chunk must itself be a
+/// `Blob`). This is the shared counterpart to [`store_file_object`] and
+/// backs `mkit cat`, `mkit diff`, conflict rendering, and blame so they
+/// all reconstruct large-file content the same way.
+///
+/// # Errors
+/// - [`WorktreeError::Store`] if `hash` or any chunk is missing.
+/// - [`WorktreeError::Io`] if `hash` (or a chunk) resolves to an object
+///   that is neither a `Blob` nor a `ChunkedBlob` of `Blob`s.
+pub fn read_blob(store: &ObjectStore, hash: &Hash) -> WorktreeResult<Vec<u8>> {
+    match store.read_object(hash)? {
+        Object::Blob(b) => Ok(b.data),
+        Object::ChunkedBlob(manifest) => {
+            let mut data = Vec::with_capacity(usize::try_from(manifest.total_size).unwrap_or(0));
+            for chunk in &manifest.chunks {
+                match store.read_object(chunk)? {
+                    Object::Blob(b) => data.extend_from_slice(&b.data),
+                    other => {
+                        return Err(WorktreeError::Io(io::Error::other(format!(
+                            "chunk {} is not a blob (got {})",
+                            crate::hash::to_hex(chunk),
+                            other.object_type().name()
+                        ))));
+                    }
+                }
+            }
+            Ok(data)
+        }
+        other => Err(WorktreeError::Io(io::Error::other(format!(
+            "object {} is not a blob (got {})",
+            crate::hash::to_hex(hash),
+            other.object_type().name()
+        )))),
+    }
 }
 
 #[cfg(unix)]
@@ -1154,5 +1236,72 @@ mod tests {
             msg.contains("non-blob"),
             "expected non-blob index object error, got: {msg}"
         );
+    }
+
+    /// A file entry whose object is a `ChunkedBlob` (the canonical
+    /// representation for > `CHUNK_THRESHOLD` content) is accepted by the
+    /// commit/index tree builder, NOT rejected as "non-blob" (#203). The
+    /// resulting tree carries an `EntryMode::Blob` pointing at the
+    /// manifest, exactly as `build_tree` produces for a large worktree
+    /// file.
+    #[test]
+    fn from_index_accepts_chunked_blob_for_file_entry() {
+        let (_sd, store) = fresh_store();
+        // Build a > CHUNK_THRESHOLD file's content and store it via the
+        // shared object path (lands as a ChunkedBlob).
+        let n = usize::try_from(CHUNK_THRESHOLD).unwrap() + 256 * 1024;
+        let mut big = Vec::with_capacity(n);
+        let mut state: u64 = 0x00C0_FFEE;
+        for _ in 0..n {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            big.push((z & 0xFF) as u8);
+        }
+        let chunked_hash = store_file_object(&store, &big).unwrap();
+        assert!(
+            matches!(
+                store.read_object(&chunked_hash).unwrap(),
+                Object::ChunkedBlob(_)
+            ),
+            "fixture must be a ChunkedBlob"
+        );
+
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "big.bin".into(),
+            status: EntryStatus::Blob,
+            object_hash: chunked_hash,
+        });
+        let root = build_tree_from_index(&store, &idx).unwrap();
+        let Object::Tree(t) = store.read_object(&root).unwrap() else {
+            panic!("expected tree");
+        };
+        assert_eq!(t.entries.len(), 1);
+        assert_eq!(t.entries[0].name, b"big.bin");
+        assert_eq!(t.entries[0].mode, EntryMode::Blob);
+        assert_eq!(t.entries[0].object_hash, chunked_hash);
+        // Reassembly via the shared helper round-trips the source bytes.
+        assert_eq!(read_blob(&store, &chunked_hash).unwrap(), big);
+    }
+
+    /// A symlink entry MUST still address a single `Blob` (its target
+    /// path); a `ChunkedBlob` under a symlink entry is rejected.
+    #[test]
+    fn from_index_rejects_chunked_blob_for_symlink_entry() {
+        let (_sd, store) = fresh_store();
+        let n = usize::try_from(CHUNK_THRESHOLD).unwrap() + 256 * 1024;
+        let big = vec![0xABu8; n];
+        let chunked_hash = store_file_object(&store, &big).unwrap();
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "link".into(),
+            status: EntryStatus::Symlink,
+            object_hash: chunked_hash,
+        });
+        let err = build_tree_from_index(&store, &idx).unwrap_err();
+        assert!(format!("{err}").contains("non-blob"));
     }
 }
