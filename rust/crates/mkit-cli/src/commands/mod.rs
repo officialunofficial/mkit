@@ -31,6 +31,7 @@ pub mod pull;
 pub mod push;
 pub mod rebase;
 pub mod remote;
+pub mod revspec;
 pub mod rm;
 pub mod serve;
 pub mod sparse_checkout;

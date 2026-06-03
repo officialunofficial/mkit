@@ -67,24 +67,16 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
 
-    // Resolve <name> — try ref first (branch / tag), then fall back to
-    // a raw 64-char commit hash.
-    let commit_hash: Hash = match refs::read_ref(&mkit_dir, name) {
-        Ok(Some(h)) => h,
-        Ok(None) => match refs::read_tag(&mkit_dir, name) {
-            Ok(Some(h)) => h,
-            Ok(None) => match mkit_core::hash::from_hex(name) {
-                Ok(h) if store.contains(&h) => h,
-                _ => {
-                    return emit_err(
-                        &format!("no such branch, tag, or commit: {name}"),
-                        exit::GENERAL_ERROR,
-                    );
-                }
-            },
-            Err(e) => return emit_err(&format!("read tag: {e}"), exit::GENERAL_ERROR),
-        },
-        Err(e) => return emit_err(&format!("read ref: {e}"), exit::GENERAL_ERROR),
+    // Resolve <name> through the shared revspec resolver (branch / tag /
+    // HEAD / full+short hash / `~n`/`^` navigation).
+    let commit_hash: Hash = match super::revspec::resolve_revision(&store, &mkit_dir, name) {
+        Ok(h) => h,
+        Err(e) => {
+            return emit_err(
+                &format!("no such branch, tag, or commit: {name} ({e})"),
+                exit::GENERAL_ERROR,
+            );
+        }
     };
 
     // Resolve the commit's tree so we can materialise it.

@@ -5,7 +5,15 @@
 //! - no args — HEAD tree vs a fresh worktree snapshot;
 //! - `--staged` / `--cached` — HEAD tree vs the staged index tree
 //!   (what `mkit commit` would record);
-//! - two tree hashes — diff those tree hashes against each other.
+//! - one revision (`<rev>`) — that revision's tree vs the worktree (or
+//!   vs the staged index with `--staged`);
+//! - two revisions (`<a> <b>`) or a range (`<a>..<b>`) — diff the two
+//!   resolved trees against each other.
+//!
+//! A leading positional that is not a resolvable revision is treated as
+//! the start of the pathspec list; a leading positional that *looks*
+//! like a revision (ref / commit / range) but fails to resolve is a
+//! hard error rather than a silent empty diff (#207).
 //!
 //! Trailing positional paths (pathspecs) filter the output to entries
 //! at or below those paths. Output is a Git-compatible unified diff:
@@ -15,13 +23,14 @@
 use std::io::Write;
 
 use clap::Parser;
-use mkit_core::hash::{Hash, from_hex};
+use mkit_core::hash::Hash;
 use mkit_core::object::Object;
 use mkit_core::ops::{DiffEntry, DiffKind, diff_trees, text_patch};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 
+use super::revspec;
 use crate::clap_shim;
 use crate::exit;
 
@@ -36,10 +45,11 @@ struct DiffOpts {
     #[arg(long, visible_alias = "cached")]
     staged: bool,
 
-    /// Optional two tree hashes to diff against each other, followed by
-    /// optional pathspecs to limit the output. With no hashes, diffs
-    /// HEAD vs worktree (or HEAD vs index with --staged); any
-    /// non-hex-hash arguments are treated as pathspecs.
+    /// Optional revisions (refs, full/short hashes, `HEAD~n`, or an
+    /// `A..B` range) followed by optional pathspecs to limit the
+    /// output. With no revisions, diffs HEAD vs worktree (or HEAD vs
+    /// index with --staged). A leading argument that is not a resolvable
+    /// revision starts the pathspec list.
     args: Vec<String>,
 }
 
@@ -59,36 +69,10 @@ pub fn run(args: &[String]) -> u8 {
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
-    // Two leading 64-hex arguments select explicit tree-vs-tree mode;
-    // anything else after them is a pathspec.
     let (old_tree, new_tree, pathspecs) =
-        if opts.args.len() >= 2 && is_hash(&opts.args[0]) && is_hash(&opts.args[1]) {
-            let a = match from_hex(&opts.args[0]) {
-                Ok(h) => h,
-                Err(e) => return emit_err(&format!("bad hash arg 1: {e}"), exit::DATAERR),
-            };
-            let b = match from_hex(&opts.args[1]) {
-                Ok(h) => h,
-                Err(e) => return emit_err(&format!("bad hash arg 2: {e}"), exit::DATAERR),
-            };
-            (Some(a), Some(b), opts.args[2..].to_vec())
-        } else {
-            let head_tree = match head_tree(&store, &mkit_dir) {
-                Ok(t) => t,
-                Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
-            };
-            let new_tree = if opts.staged {
-                match index_tree(&cwd, &store) {
-                    Ok(t) => t,
-                    Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
-                }
-            } else {
-                match worktree::build_tree(&store, &cwd) {
-                    Ok(h) => Some(h),
-                    Err(e) => return emit_err(&format!("build tree: {e}"), exit::GENERAL_ERROR),
-                }
-            };
-            (head_tree, new_tree, opts.args.clone())
+        match resolve_diff_endpoints(&store, &mkit_dir, &cwd, opts.staged, &opts.args) {
+            Ok(v) => v,
+            Err((msg, code)) => return emit_err(&msg, code),
         };
 
     let result = match diff_trees(&store, old_tree, new_tree) {
@@ -110,10 +94,196 @@ pub fn run(args: &[String]) -> u8 {
     exit::OK
 }
 
-/// Heuristic: a 64-char lowercase-or-uppercase hex string is treated as
-/// a tree hash; everything else is a pathspec.
-fn is_hash(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+/// `(old_tree, new_tree, pathspecs)` triple computed from the args.
+type DiffEndpoints = (Option<Hash>, Option<Hash>, Vec<String>);
+
+/// Decide the `old_tree` / `new_tree` / pathspecs triple from the
+/// `staged` flag and the positional args. Returns `(message, exit_code)`
+/// on error so the caller can route it through `emit_err`.
+///
+/// Cases:
+/// - `--staged <rev>...` (any positionals) — usage contradiction
+///   (#223): `--staged` already fixes both endpoints (HEAD vs index).
+/// - `<a>..<b> [paths…]` — range form; both ends resolved to trees.
+/// - `<a> <b> [paths…]` — two revisions, when both resolve.
+/// - `<a> [paths…]` — one revision vs worktree (or vs index w/--staged
+///   only in the no-positional case, handled above).
+/// - no leading revision — default HEAD-vs-worktree / HEAD-vs-index,
+///   all positionals are pathspecs.
+fn resolve_diff_endpoints(
+    store: &ObjectStore,
+    mkit_dir: &std::path::Path,
+    cwd: &std::path::Path,
+    staged: bool,
+    args: &[String],
+) -> Result<DiffEndpoints, (String, u8)> {
+    // #223: `--staged` with explicit revisions is contradictory —
+    // `--staged` already pins HEAD vs the index. Pathspecs are fine, but
+    // a leading revision is not. We only reject when the first arg
+    // actually resolves as a revision (so `mkit diff --staged path/`
+    // keeps working as a pathspec filter).
+    if staged {
+        if let Some(first) = args.first()
+            && looks_like_rev_request(first)
+            && revspec::resolve_revision(store, mkit_dir, strip_range_end(first).0).is_ok()
+        {
+            return Err((
+                "`--staged` diffs HEAD vs the index; it cannot take an explicit revision"
+                    .to_string(),
+                exit::USAGE,
+            ));
+        }
+        // No leading revision: HEAD vs index, all positionals = pathspecs.
+        let head = head_tree(store, mkit_dir).map_err(|e| (e, exit::GENERAL_ERROR))?;
+        let idx = index_tree(cwd, store).map_err(|e| (e, exit::GENERAL_ERROR))?;
+        return Ok((head, idx, args.to_vec()));
+    }
+
+    // Range form `A..B` as the first positional.
+    if let Some(first) = args.first()
+        && let Some((a, b)) = split_range(first)
+    {
+        let old = rev_to_tree(store, mkit_dir, a)?;
+        let new = rev_to_tree(store, mkit_dir, b)?;
+        return Ok((Some(old), Some(new), args[1..].to_vec()));
+    }
+
+    // Try to peel one or two leading revisions.
+    let first_rev = args
+        .first()
+        .and_then(|a| try_rev_to_tree(store, mkit_dir, a));
+    match first_rev {
+        None => {
+            // No leading revision → default HEAD vs worktree; all
+            // positionals are pathspecs. If the first arg *looked* like
+            // a revision but failed to resolve, error loudly (#207)
+            // rather than silently treating it as a pathspec.
+            if let Some(first) = args.first()
+                && looks_like_rev_request(first)
+            {
+                return Err((
+                    format!("bad revision '{first}': not a known ref, commit, or short hash"),
+                    exit::DATAERR,
+                ));
+            }
+            let head = head_tree(store, mkit_dir).map_err(|e| (e, exit::GENERAL_ERROR))?;
+            let new = worktree::build_tree(store, cwd)
+                .map(Some)
+                .map_err(|e| (format!("build tree: {e}"), exit::GENERAL_ERROR))?;
+            Ok((head, new, args.to_vec()))
+        }
+        Some(Err(e)) => Err(e),
+        Some(Ok(old)) => {
+            // One revision resolved. Is the second positional also a
+            // revision? If so, two-rev mode; otherwise rev-vs-worktree.
+            let second_rev = args
+                .get(1)
+                .and_then(|a| try_rev_to_tree(store, mkit_dir, a));
+            match second_rev {
+                Some(Ok(new)) => Ok((Some(old), Some(new), args[2..].to_vec())),
+                Some(Err(e)) => Err(e),
+                None => {
+                    let new = worktree::build_tree(store, cwd)
+                        .map(Some)
+                        .map_err(|e| (format!("build tree: {e}"), exit::GENERAL_ERROR))?;
+                    Ok((Some(old), new, args[1..].to_vec()))
+                }
+            }
+        }
+    }
+}
+
+/// Resolve a revision spec to a tree hash, mapping a commit/remix to its
+/// tree and accepting a bare tree hash as itself. `(message, code)` on
+/// failure.
+fn rev_to_tree(
+    store: &ObjectStore,
+    mkit_dir: &std::path::Path,
+    spec: &str,
+) -> Result<Hash, (String, u8)> {
+    let h = revspec::resolve_revision(store, mkit_dir, spec)
+        .map_err(|e| (format!("bad revision '{spec}': {e}"), exit::DATAERR))?;
+    object_to_tree(store, &h).map_err(|e| (e, exit::GENERAL_ERROR))
+}
+
+/// Like [`rev_to_tree`] but distinguishes "not a revision at all" (None)
+/// from "looks like a revision but is broken" (`Some(Err(..))`).
+fn try_rev_to_tree(
+    store: &ObjectStore,
+    mkit_dir: &std::path::Path,
+    spec: &str,
+) -> Option<Result<Hash, (String, u8)>> {
+    match revspec::resolve_revision(store, mkit_dir, spec) {
+        Ok(h) => Some(object_to_tree(store, &h).map_err(|e| (e, exit::GENERAL_ERROR))),
+        Err(revspec::RevError::Unknown(_)) => {
+            // Not a known ref/object. If it still *looks* like a
+            // revision request (ref-shaped or hash-shaped), surface the
+            // failure; otherwise it is a pathspec.
+            if looks_like_rev_request(spec) {
+                Some(Err((
+                    format!("bad revision '{spec}': not a known ref, commit, or short hash"),
+                    exit::DATAERR,
+                )))
+            } else {
+                None
+            }
+        }
+        Err(e) => Some(Err((format!("bad revision '{spec}': {e}"), exit::DATAERR))),
+    }
+}
+
+/// Map a resolved object hash to a tree hash: commit/remix → its tree,
+/// a tree → itself.
+fn object_to_tree(store: &ObjectStore, h: &Hash) -> Result<Hash, String> {
+    match store.read_object(h) {
+        Ok(Object::Commit(c)) => Ok(c.tree_hash),
+        Ok(Object::Remix(r)) => Ok(r.tree_hash),
+        Ok(Object::Tree(_)) => Ok(*h),
+        Ok(_) => Err(format!(
+            "{} is not a commit, remix, or tree",
+            mkit_core::hash::to_hex(h)
+        )),
+        Err(e) => Err(format!("read object: {e}")),
+    }
+}
+
+/// Split an `A..B` range. Returns `None` if there is no `..`.
+fn split_range(s: &str) -> Option<(&str, &str)> {
+    let (a, b) = s.split_once("..")?;
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    Some((a, b))
+}
+
+/// The left-hand end of a possible range, used for the `--staged`
+/// contradiction probe. Returns `(rev, is_range)`.
+fn strip_range_end(s: &str) -> (&str, bool) {
+    match s.split_once("..") {
+        Some((a, _)) if !a.is_empty() => (a, true),
+        _ => (s, false),
+    }
+}
+
+/// Heuristic for #207: does this argument look like the user *intended*
+/// a revision (so a resolve failure should be a hard error) rather than
+/// a pathspec? True for hash-shaped tokens, `A..B` ranges, and the
+/// literal `HEAD` (possibly with `~`/`^` navigation). A plain
+/// filesystem-y token (`src/`, `./x`, `*.rs`) is treated as a pathspec.
+fn looks_like_rev_request(s: &str) -> bool {
+    if s.contains("..") {
+        return true;
+    }
+    // A `~` or `^` navigation suffix is revision syntax, not a path.
+    let base = s.split(['~', '^']).next().unwrap_or(s);
+    if base == "HEAD" {
+        return true;
+    }
+    // Hash-shaped: ≥ MIN_SHORT_HASH hex chars with no path separators.
+    base.len() >= revspec::MIN_SHORT_HASH
+        && !base.contains('/')
+        && !base.contains('.')
+        && base.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn head_tree(store: &ObjectStore, mkit_dir: &std::path::Path) -> Result<Option<Hash>, String> {

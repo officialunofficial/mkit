@@ -6,6 +6,7 @@ use clap::Parser;
 use mkit_core::object::{Blob, Object};
 use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
+use mkit_core::worktree;
 
 use crate::clap_shim;
 use crate::exit;
@@ -33,8 +34,12 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    // Bounded + symlink-safe read (#223): refuse to follow a final
+    // symlink and cap the size at MAX_FILE_BYTES rather than slurping an
+    // arbitrarily large file (or a symlink target outside the repo)
+    // through `std::fs::read`.
+    let bytes = match worktree::read_regular_file_bounded(std::path::Path::new(path)) {
+        Ok((_, data)) => data,
         Err(e) => return emit_err(&format!("read {path}: {e}"), exit::NOINPUT),
     };
     let blob = Object::Blob(Blob { data: bytes });

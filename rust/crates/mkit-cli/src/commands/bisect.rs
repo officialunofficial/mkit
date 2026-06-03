@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 
-use mkit_core::hash::{self, Hash};
+use mkit_core::hash::Hash;
 use mkit_core::ops::bisect::{
     BisectState, BisectStep, cleanup_bisect, is_bisect_in_progress, next_step, read_state,
     write_state,
@@ -111,9 +111,9 @@ fn mark(store: &ObjectStore, mkit_dir: &std::path::Path, arg: Option<&str>, good
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
     let hash_: Hash = match arg {
-        Some(s) => match hash::from_hex(s) {
+        Some(s) => match super::revspec::resolve_revision(store, mkit_dir, s) {
             Ok(h) => h,
-            Err(e) => return emit_err(&format!("bad hash: {e}"), exit::DATAERR),
+            Err(e) => return emit_err(&format!("bad commit: {e}"), exit::DATAERR),
         },
         None => match refs::resolve_head(mkit_dir) {
             Ok(Some(h)) => h,
