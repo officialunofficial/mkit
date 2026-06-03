@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Annotated and signed tags** (`mkit tag -a` / `-s` / `-m`,
+  [#230](https://github.com/officialunofficial/mkit/issues/230)). Adds
+  a new storable object type `tag` (`object_type = 0x07`) carrying the
+  tagged object's hash + type, the tagger identity, a message, a
+  timestamp, the signer public key, and a 64-byte signature. `-a`
+  creates an unsigned annotated tag; `-s` creates a signed tag whose
+  signature is Ed25519 over the canonical tag bytes under a **new,
+  distinct** signing domain `mkit.tag\0` (deliberately separate from
+  the commit/remix domains to prevent cross-protocol signature reuse).
+  Lightweight `mkit tag <name>` is unchanged. `mkit verify <rev>` now
+  verifies signed tags (resolving a tag name to its tag object), and
+  `mkit cat` surfaces annotated-tag metadata. The new object type is an
+  **additive** allocation within object schema v1 — no existing object
+  layout, signing bytes, hash, or golden vector changes. New golden
+  vectors are pinned under `rust/tests/golden/phase9/`. Specs:
+  [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) §6a,
+  [`docs/SPEC-SIGNING.md`](docs/SPEC-SIGNING.md) §4a.
 - **`mkit-keystore` crate** — pluggable signing-key vault subsystem
   (PR [#109](https://github.com/officialunofficial/mkit/pull/109),
   hardened in

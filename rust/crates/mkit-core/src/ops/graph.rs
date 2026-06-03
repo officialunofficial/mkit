@@ -138,6 +138,12 @@ pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Ha
                     queue.push_back(c);
                 }
             }
+            Object::Tag(t) => {
+                // An annotated/signed tag points at one target object
+                // (SPEC-OBJECTS §6a). Walk it so a tag is a valid pack
+                // root.
+                queue.push_back(t.target);
+            }
             Object::Blob(_) | Object::Delta(_) => {
                 // Leaves — nothing to walk.
             }

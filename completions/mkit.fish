@@ -84,6 +84,16 @@ complete -c mkit -n "__fish_seen_subcommand_from branch" \
     -s D -d "Force-delete branch" -r
 complete -c mkit -n "__fish_seen_subcommand_from branch" \
     -s m -d "Rename branch" -r
+complete -c mkit -n "__fish_seen_subcommand_from tag" \
+    -l annotate -s a -d "Create an annotated tag object"
+complete -c mkit -n "__fish_seen_subcommand_from tag" \
+    -l sign -s s -d "Create a signed (Ed25519) tag object"
+complete -c mkit -n "__fish_seen_subcommand_from tag" \
+    -l message -s m -d "Tag message" -r
+complete -c mkit -n "__fish_seen_subcommand_from tag" \
+    -l delete -s d -d "Delete a tag" -r
+complete -c mkit -n "__fish_seen_subcommand_from tag" \
+    -l author -d "Override tagger identity" -r
 complete -c mkit -n "__fish_seen_subcommand_from rebase" \
     -l continue -d "Continue an in-progress rebase"
 complete -c mkit -n "__fish_seen_subcommand_from rebase" \

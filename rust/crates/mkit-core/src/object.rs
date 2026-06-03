@@ -33,6 +33,9 @@ pub enum ObjectType {
     Remix = 0x04,
     ChunkedBlob = 0x05,
     Delta = 0x06,
+    /// Annotated / signed tag. New in v1 (issue #230). See
+    /// `SPEC-OBJECTS.md` §6a and [`Tag`].
+    Tag = 0x07,
 }
 
 impl ObjectType {
@@ -46,6 +49,7 @@ impl ObjectType {
             Self::Remix => "remix",
             Self::ChunkedBlob => "chunked_blob",
             Self::Delta => "delta",
+            Self::Tag => "tag",
         }
     }
 
@@ -58,6 +62,7 @@ impl ObjectType {
             0x04 => Self::Remix,
             0x05 => Self::ChunkedBlob,
             0x06 => Self::Delta,
+            0x07 => Self::Tag,
             other => return Err(MkitError::InvalidObjectType(other)),
         })
     }
@@ -337,6 +342,52 @@ impl Remix {
     }
 }
 
+/// Annotated / signed tag object. See `SPEC-OBJECTS.md` §6a and
+/// `SPEC-SIGNING.md` §4a.
+///
+/// A tag binds a human-readable `name` to a `target` object (commit /
+/// remix / tree / blob), records the `tagger` identity, a free-form
+/// `message`, and a `timestamp`, and carries an Ed25519 `signature`
+/// over the canonical signing bytes (see [`crate::sign::tag_signing_bytes`]).
+///
+/// The `target_type` byte records what kind of object `target` names
+/// so a verifier need not fetch the target to display the tag. It is a
+/// [`ObjectType`] tag and MUST be one of the storable types (not
+/// `Delta`, which is pack-only).
+///
+/// `name` is 1..=[`TAG_NAME_MAX_LEN`] bytes. It is the short ref name
+/// (e.g. `v1.0.0`), not a full `refs/tags/...` path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tag {
+    pub target: Hash,
+    pub target_type: ObjectType,
+    pub name: Vec<u8>,
+    pub tagger: Identity,
+    pub signer: [u8; 32],
+    pub message: Vec<u8>,
+    pub timestamp: u64,
+    pub signature: [u8; 64],
+}
+
+/// Upper bound on a [`Tag`] `name` payload. Rejected at decode time as
+/// [`MkitError::TagNameInvalid`] for anything outside `1..=TAG_NAME_MAX_LEN`.
+pub const TAG_NAME_MAX_LEN: u16 = 4096;
+
+impl Tag {
+    /// Structural validity of the `name`: non-empty, within the length
+    /// bound, and free of the same forbidden bytes a ref name forbids
+    /// (`\0`, `/`, `\\`). The full ref-name grammar is enforced by
+    /// `refs::validate_ref_name` at write time; this is the
+    /// object-layer floor that the serializer guards.
+    #[must_use]
+    pub fn name_is_valid(&self) -> bool {
+        if self.name.is_empty() || self.name.len() > TAG_NAME_MAX_LEN as usize {
+            return false;
+        }
+        !self.name.iter().any(|&b| matches!(b, 0 | b'/' | b'\\'))
+    }
+}
+
 /// Chunked-blob manifest. See `SPEC-OBJECTS.md` §7.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkedBlob {
@@ -363,6 +414,7 @@ pub enum Object {
     Remix(Remix),
     ChunkedBlob(ChunkedBlob),
     Delta(Delta),
+    Tag(Tag),
 }
 
 impl Object {
@@ -376,6 +428,7 @@ impl Object {
             Self::Remix(_) => ObjectType::Remix,
             Self::ChunkedBlob(_) => ObjectType::ChunkedBlob,
             Self::Delta(_) => ObjectType::Delta,
+            Self::Tag(_) => ObjectType::Tag,
         }
     }
 }
@@ -386,7 +439,7 @@ impl Object {
 pub enum MkitError {
     #[error("input is shorter than the 6-byte v1 prologue")]
     EmptyData,
-    #[error("object_type byte {0:#04x} is not in 0x01..=0x06")]
+    #[error("object_type byte {0:#04x} is not in 0x01..=0x07")]
     InvalidObjectType(u8),
     #[error("magic at offset 1 is not \"MKT1\"")]
     InvalidMagic,
@@ -408,6 +461,10 @@ pub enum MkitError {
     TooManyParents,
     #[error("remix.source_count > 10_000")]
     TooManySources,
+    #[error("tag name is empty, too long, or contains a forbidden byte (\\0 / \\)")]
+    TagNameInvalid,
+    #[error("tag target_type byte {0:#04x} is not a storable object type")]
+    TagTargetTypeInvalid(u8),
     #[error("remix sources are not sorted by (upstream_id, commit_hash)")]
     InvalidSourceOrder,
     #[error("chunked_blob.chunk_count > 1_000_000")]
@@ -489,11 +546,12 @@ mod tests {
         assert_eq!(ObjectType::Remix.name(), "remix");
         assert_eq!(ObjectType::ChunkedBlob.name(), "chunked_blob");
         assert_eq!(ObjectType::Delta.name(), "delta");
+        assert_eq!(ObjectType::Tag.name(), "tag");
     }
 
     #[test]
     fn object_type_from_u8_accepts_valid_range() {
-        for b in 0x01u8..=0x06 {
+        for b in 0x01u8..=0x07 {
             assert!(
                 ObjectType::from_u8(b).is_ok(),
                 "byte {b:#04x} should decode"
@@ -512,9 +570,29 @@ mod tests {
             Err(MkitError::InvalidObjectType(0xFF))
         ));
         assert!(matches!(
-            ObjectType::from_u8(0x07),
-            Err(MkitError::InvalidObjectType(0x07))
+            ObjectType::from_u8(0x08),
+            Err(MkitError::InvalidObjectType(0x08))
         ));
+    }
+
+    #[test]
+    fn tag_name_validity() {
+        let t = |name: &[u8]| Tag {
+            target: ZERO,
+            target_type: ObjectType::Commit,
+            name: name.to_vec(),
+            tagger: Identity::ed25519([0xaa; 32]),
+            signer: [0; 32],
+            message: vec![],
+            timestamp: 0,
+            signature: [0; 64],
+        };
+        assert!(t(b"v1.0.0").name_is_valid());
+        assert!(!t(b"").name_is_valid());
+        assert!(!t(b"a/b").name_is_valid());
+        assert!(!t(b"a\\b").name_is_valid());
+        assert!(!t(b"a\0b").name_is_valid());
+        assert!(!t(&vec![b'a'; TAG_NAME_MAX_LEN as usize + 1]).name_is_valid());
     }
 
     #[test]

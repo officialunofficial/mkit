@@ -65,6 +65,9 @@ _mkit_complete() {
         branch)
             COMPREPLY=( $(compgen -W "-d -D -m --help" -- "$cur") )
             ;;
+        tag)
+            COMPREPLY=( $(compgen -W "-a --annotate -s --sign -m --message -d --delete --author --help" -- "$cur") )
+            ;;
         rebase)
             COMPREPLY=( $(compgen -W "--continue --abort --help" -- "$cur") )
             ;;

@@ -26,7 +26,7 @@ _mkit() {
         'diff:Show changes'
         'branch:List, create, rename, or delete branches'
         'checkout:Switch HEAD to a branch and restore files'
-        'tag:List, create, or delete tags'
+        'tag:List/create/delete tags (-a/-s/-m for annotated/signed)'
         'config:Show or set configuration values'
         'merge:Merge a branch into HEAD'
         'push:Push to remote'
@@ -136,6 +136,15 @@ _mkit() {
                         '-d[delete branch (safe)]:branch:' \
                         '-D[force-delete branch]:branch:' \
                         '-m[rename branch]:branch:' \
+                        '--help[show help]'
+                    ;;
+                tag)
+                    _arguments \
+                        '(-a --annotate)'{-a,--annotate}'[create an annotated tag object]' \
+                        '(-s --sign)'{-s,--sign}'[create a signed (Ed25519) tag object]' \
+                        '(-m --message)'{-m,--message}'[tag message]:message:' \
+                        '(-d --delete)'{-d,--delete}'[delete a tag]' \
+                        '--author[override tagger identity]:spec:' \
                         '--help[show help]'
                     ;;
                 rebase)
