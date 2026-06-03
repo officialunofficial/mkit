@@ -179,7 +179,7 @@ fn second_mutating_command_blocks_on_worktree_lock() {
 
     let mkit_dir = repo.mkit_dir();
     // Hold the worktree lock for the duration of the command attempt.
-    let _held =
+    let held =
         mkit_core::repo_lock::acquire_default(&mkit_dir, "worktree.lock").expect("acquire lock");
 
     let start = Instant::now();
@@ -202,7 +202,7 @@ fn second_mutating_command_blocks_on_worktree_lock() {
         "expected the second mutator to block on the lock, waited only {elapsed:?}"
     );
 
-    drop(_held);
+    drop(held);
     // After release, the same command succeeds.
     ok(repo.path(), repo.xdg(), &["add", "b.txt"]);
 }
