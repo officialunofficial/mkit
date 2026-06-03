@@ -355,29 +355,10 @@ fn emit_entry_patch(
     Ok(())
 }
 
-/// Read a blob's bytes from the store, reassembling chunked blobs.
+/// Read a blob's bytes from the store, reassembling chunked blobs via
+/// the shared core helper so diff/cat/checkout agree (#203).
 fn read_blob(store: &ObjectStore, h: &Hash) -> Result<Vec<u8>, String> {
-    match store.read_object(h) {
-        Ok(Object::Blob(b)) => Ok(b.data),
-        Ok(Object::ChunkedBlob(manifest)) => {
-            let mut data = Vec::new();
-            for chunk in &manifest.chunks {
-                match store.read_object(chunk) {
-                    Ok(Object::Blob(b)) => data.extend_from_slice(&b.data),
-                    Ok(_) => {
-                        return Err(format!(
-                            "chunk {} is not a blob",
-                            mkit_core::hash::to_hex(chunk)
-                        ));
-                    }
-                    Err(e) => return Err(format!("read chunk: {e}")),
-                }
-            }
-            Ok(data)
-        }
-        Ok(_) => Err("object is not a blob".to_string()),
-        Err(e) => Err(format!("read object: {e}")),
-    }
+    worktree::read_blob(store, h).map_err(|e| format!("read object: {e}"))
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {

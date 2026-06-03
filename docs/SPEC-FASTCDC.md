@@ -108,13 +108,39 @@ mkit-core the worktree picks `CHUNK_THRESHOLD = 1 MiB`
 (`worktree::CHUNK_THRESHOLD`). v1 specifies only that **once a file
 is chunked**, the parameters above MUST be used.
 
-Implementation status: end-to-end wiring is in place.
-`worktree::hash_file` splits files larger than `CHUNK_THRESHOLD` with
+Implementation status: end-to-end wiring is in place across the
+hashing, staging, commit, and read-back paths (issue #203).
+
+A single helper, `worktree::store_file_object`, is the one place that
+decides a regular file's object representation: at or below
+`CHUNK_THRESHOLD` it writes a single `Blob`; above it, it splits with
 `FastCdc::v1`, stores each chunk as its own `Blob`, and writes a
-`ChunkedBlob` manifest (with `chunk_size = 0` to denote content-
-defined chunking) whose hash lands in the parent tree. The byte-level
-chunk boundaries are pinned by the goldens in §8; the worktree round-
-trip is covered by `worktree::tests::large_file_becomes_chunked_blob`.
+`ChunkedBlob` manifest (with `chunk_size = 0` to denote content-defined
+chunking) whose hash lands in the parent tree. Every caller routes
+through it, so a given file produces the same object/hash regardless of
+the path that computes it:
+
+- `worktree::{hash_file, build_tree}` — diff, status, tree, and the
+  `rm`/`checkout` dirty-checks;
+- `mkit add` (`add_one` / `stage_tracked_changes`) — staging into the
+  index;
+- `worktree::build_tree_from_index` — the commit/index tree build now
+  accepts a `ChunkedBlob` under a regular-file (Blob/Executable) entry,
+  so committing a > 1 MiB file no longer fails with a "non-blob object"
+  error.
+
+Read-back is symmetric: `worktree::read_blob` reassembles a `Blob` or
+`ChunkedBlob` into the full byte stream, and backs `mkit cat`,
+`mkit diff`, and worktree restore (`mkit checkout`). `mkit cat` on a
+`ChunkedBlob` hash streams the reassembled content rather than an object
+placeholder.
+
+The byte-level chunk boundaries are pinned by the goldens in §8; the
+worktree round-trip is covered by
+`worktree::tests::large_file_becomes_chunked_blob`, the index-path
+acceptance by `worktree::tests::from_index_accepts_chunked_blob_for_file_entry`,
+and the full add → commit → status/diff/rm → checkout → cat round-trip
+by the `chunked_blob_roundtrip` integration suite in mkit-cli.
 
 ---
 
