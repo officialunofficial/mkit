@@ -165,10 +165,12 @@ fn flush_run(run: &mut String, out: &mut String) {
     run.clear();
 }
 
-/// Normalize a command's stdout into a comparable, order-independent set of
-/// non-empty, object-id-masked lines. (Porcelain status is the same set in
-/// both tools regardless of line order.)
-fn normalize(s: &str) -> Vec<String> {
+/// Unordered, object-id-masked **set** of non-empty lines. Use ONLY for
+/// output whose contract is a set, not a sequence — i.e. porcelain status,
+/// where one line per path appears in either tool regardless of order.
+/// Diff / log / plumbing output is order- and blank-line-sensitive; use
+/// [`normalize_ordered`] for those.
+fn normalize_set(s: &str) -> Vec<String> {
     let mut lines: Vec<String> = s
         .lines()
         .map(mask_object_ids)
@@ -178,16 +180,38 @@ fn normalize(s: &str) -> Vec<String> {
     lines
 }
 
-fn assert_parity(label: &str, git: &Output, mkit: &Output) {
+/// Ordered, object-id-masked lines — preserves line order and blank lines.
+/// Use for diff / log / plumbing output, where order and blanks are part of
+/// the contract.
+fn normalize_ordered(s: &str) -> Vec<String> {
+    s.lines().map(mask_object_ids).collect()
+}
+
+/// Set-equality parity assertion (porcelain status only).
+fn assert_parity_set(label: &str, git: &Output, mkit: &Output) {
     assert!(git.status.success(), "{label}: git command failed: {git:?}");
     assert!(
         mkit.status.success(),
         "{label}: mkit command failed: {mkit:?}"
     );
     assert_eq!(
-        normalize(&stdout(git)),
-        normalize(&stdout(mkit)),
+        normalize_set(&stdout(git)),
+        normalize_set(&stdout(mkit)),
         "{label}: git/mkit output diverged (modulo hash length)"
+    );
+}
+
+/// Order- and blank-line-sensitive parity assertion (diff / log / plumbing).
+fn assert_parity_ordered(label: &str, git: &Output, mkit: &Output) {
+    assert!(git.status.success(), "{label}: git command failed: {git:?}");
+    assert!(
+        mkit.status.success(),
+        "{label}: mkit command failed: {mkit:?}"
+    );
+    assert_eq!(
+        normalize_ordered(&stdout(git)),
+        normalize_ordered(&stdout(mkit)),
+        "{label}: git/mkit output diverged (modulo hash length, order-sensitive)"
     );
 }
 
@@ -205,9 +229,9 @@ fn clean_repo_status_is_empty_in_both() {
     h.init_both();
     let g = h.git(&["status", "--porcelain"]);
     let m = h.mkit(&["status", "--porcelain"]);
-    assert_parity("clean status", &g, &m);
+    assert_parity_set("clean status", &g, &m);
     assert!(
-        normalize(&stdout(&g)).is_empty(),
+        normalize_set(&stdout(&g)).is_empty(),
         "a clean repo must have empty porcelain status"
     );
 }
@@ -227,7 +251,7 @@ fn status_porcelain_untracked_matches_git() {
     h.write_both("untracked.txt", b"hi\n");
     let g = h.git(&["status", "--porcelain"]);
     let m = h.mkit(&["status", "--porcelain"]);
-    assert_parity("untracked status", &g, &m); // expect `?? untracked.txt`
+    assert_parity_set("untracked status", &g, &m); // expect `?? untracked.txt`
 }
 
 #[test]
@@ -243,7 +267,7 @@ fn status_porcelain_staged_add_matches_git() {
     assert!(h.mkit(&["add", "a.txt"]).status.success());
     let g = h.git(&["status", "--porcelain"]);
     let m = h.mkit(&["status", "--porcelain"]);
-    assert_parity("staged-add status", &g, &m); // expect `A  a.txt`
+    assert_parity_set("staged-add status", &g, &m); // expect `A  a.txt`
 }
 
 #[test]
@@ -261,7 +285,7 @@ fn status_porcelain_staged_modification_matches_git() {
     assert!(h.mkit(&["add", "a.txt"]).status.success());
     let g = h.git(&["status", "--porcelain"]);
     let m = h.mkit(&["status", "--porcelain"]);
-    assert_parity("staged-modification status", &g, &m); // expect `M  a.txt`
+    assert_parity_set("staged-modification status", &g, &m); // expect `M  a.txt`
 }
 
 // =====================================================================
@@ -282,7 +306,7 @@ fn status_porcelain_v2_matches_git() {
     assert!(h.mkit(&["add", "a.txt"]).status.success());
     let g = h.git(&["status", "--porcelain=v2"]);
     let m = h.mkit(&["status", "--porcelain=v2"]);
-    assert_parity("status --porcelain=v2", &g, &m);
+    assert_parity_set("status --porcelain=v2", &g, &m);
 }
 
 #[test]
@@ -298,7 +322,7 @@ fn diff_unified_matches_git() {
     h.write_both("f.txt", b"line1\nCHANGED\nline3\n");
     let g = h.git(&["diff"]);
     let m = h.mkit(&["diff"]);
-    assert_parity("diff (unified)", &g, &m);
+    assert_parity_ordered("diff (unified)", &g, &m);
 }
 
 #[test]
@@ -313,7 +337,7 @@ fn log_oneline_matches_git() {
     h.commit_both(&["a.txt"], "only commit");
     let g = h.git(&["log", "--oneline"]);
     let m = h.mkit(&["log", "--oneline"]);
-    assert_parity("log --oneline", &g, &m);
+    assert_parity_ordered("log --oneline", &g, &m);
 }
 
 // =====================================================================

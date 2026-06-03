@@ -43,6 +43,7 @@ creeping; revisit post-v1 if demand warrants.
 | Status | Meaning |
 |--------|---------|
 | ✅ shipped | Behaves like Git's in-matrix subset today |
+| ⚠️ shipped, divergent | Works, but with a known divergence to reconcile (noted + tracked) |
 | 📝 docs-only gap | Implemented; docs/tests need alignment (no code) |
 | 🔨 to implement | In scope, not yet built — owned by the listed phase/issue |
 | 🚫 non-goal | Explicitly out of scope for v1 |
@@ -57,17 +58,17 @@ creeping; revisit post-v1 if demand warrants.
 | `add` | pathspecs, `-A`, `-u` | same | ✅ | — | — | `-p` is separate (#258) |
 | `rm` | `--cached`, `-r`, `-f` + dirty guard | same | ✅ | — | — | guard is an mkit safety divergence |
 | `mv` | rename, `-f` | absent (by-design, being reversed) | 🔨 | 2 | #250 | guarded: refuses to clobber w/o `-f` |
-| `status` | `--porcelain[=v1]`, `-s` | v1 only | ✅ | — | — | v2/`-z`/quoting below |
+| `status` | `--porcelain[=v1]`, `-s` — **simple paths only** | v1, no path quoting | ✅ | — | — | C-style quoting of special paths / `-z` / v2 → Phase 1 (next row) |
 | `status` | `--porcelain=v2`, `-z`, path quoting | not present | 🔨 | 1 | #249 | agent-parsed machine output |
 | `diff` | HEAD/worktree, `--staged`, pathspecs | same | ✅ | — | — | |
 | `diff` | `<rev>`, `<a>..<b>` ranges | **implemented** (`split_range`/`rev_to_tree`) | 📝 | 0 | #248 | fix stale `docs/CLI.md:450-452` |
 | `diff` | `--name-only`, `--name-status`, `--stat`, `-z` | absent | 🔨 | 1 | #249 | `-z` applies to name-only/name-status only |
 | `diff` | byte-exact hunks (Myers/histogram) | LCS unified diff | 🔨 | 4 | #257 | header is `diff --mkit`, not `diff --git` |
 | `commit` | `-m`, `-a`, `--amend`, `--author` | same | ✅ | — | — | signed; amend leaves unreachable obj until gc |
-| `log` | history, `--oneline`, `-n`, `--format=json` | same | ✅ | — | — | |
+| `log` | history, `-n`, `--format=json`, `--oneline` (**full-length IDs**) | same | ✅ | — | — | Git-compatible hash abbreviation is Phase 0 (next row) |
 | `log` | `--abbrev-commit`, `--abbrev[=n]`, abbreviated `--oneline` | full-length hashes | 🔨 | 0 | #248 | display-side only; `rev-parse` is Phase 3 |
 | `log` | `--graph`, `<a>..<b>` range walk | `--graph` is a no-op | 🔨 | 1 | #249 | real ASCII graph + commit-range walking |
-| `branch` | list/create/`-d`/`-D`/`-m` | same | ✅ | — | — | |
+| `branch` | create, list, `-d`/`-D`/`-m` | same (see notes) | ⚠️ | 1 | #249 | **known divergences to reconcile:** default list prints a short id (Git omits it); `-D <missing>` no-ops (Git errors). Tracked in Phase 1. |
 | `checkout` | switch branch, restore files | same | ✅ | — | — | guarded against clobber |
 | `tag` | lightweight/`-a`/`-s`/`-m`/`-d` | same | ✅ | — | — | |
 | `merge` / `cherry-pick` / `rebase` | merge, pick, replay + conflict workflow | same | ✅ | — | — | `rebase -i` separate (#259) |
@@ -127,8 +128,9 @@ mkit deliberately refuses Git's silent data-loss defaults. These are
 Outputs that tools parse must be **stable and Git-shaped**, normalized only by
 hash length:
 
-- `status --porcelain=v1` — `XY <path>`, newline-delimited (shipped). mkit adds
-  `T` for mode-change as the sole extension.
+- `status --porcelain=v1` — `XY <path>`, newline-delimited, **simple paths only**
+  (no C-style quoting of special paths and no `-z` yet — Phase 1, #249). mkit
+  adds `T` for mode-change as the sole extension.
 - `status --porcelain=v2` / `-z` / C-quoting — Phase 1 (#249).
 - Plumbing (`rev-parse`, `cat-file`, `ls-files`, `ls-tree`, `show-ref`,
   `for-each-ref`) — exact flag contracts defined in Phase 3 (#251); output
