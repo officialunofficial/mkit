@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
 use crate::object::{self, EntryMode, Object, TreeEntry};
-use crate::store::ObjectStore;
+use crate::store::{MAX_TREE_DEPTH, ObjectStore};
 use crate::worktree;
 
 const SPARSE_FILE: &str = ".mkit/sparse-checkout";
@@ -57,6 +57,8 @@ pub enum RestoreError {
     NotADirectory(PathBuf),
     #[error("path component is not valid UTF-8")]
     InvalidUtf8,
+    #[error("tree nesting exceeds {} levels", MAX_TREE_DEPTH)]
+    TreeTooDeep,
     #[error(transparent)]
     Object(#[from] object::MkitError),
     #[error(transparent)]
@@ -292,10 +294,11 @@ pub fn restore_tree_to_worktree(
     };
     fs::create_dir_all(root)?;
     let mut report = RestoreReport::default();
-    restore_tree_to_worktree_inner(store, *tree, root, opts, "", &ignore_list, &mut report)?;
+    restore_tree_to_worktree_inner(store, *tree, root, opts, "", &ignore_list, &mut report, 0)?;
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn restore_tree_to_worktree_inner(
     store: &ObjectStore,
     tree_hash: Hash,
@@ -304,7 +307,11 @@ fn restore_tree_to_worktree_inner(
     path_prefix: &str,
     ignore: &IgnoreList,
     report: &mut RestoreReport,
+    depth: usize,
 ) -> RestoreResult<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
     let obj = store.read_object(&tree_hash)?;
     let Object::Tree(tree) = obj else {
         return Err(RestoreError::NotATree);
@@ -373,6 +380,7 @@ fn restore_tree_to_worktree_inner(
                     &full_path,
                     ignore,
                     report,
+                    depth + 1,
                 )?;
             }
             EntryMode::Symlink => {

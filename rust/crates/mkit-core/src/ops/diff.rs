@@ -16,7 +16,7 @@ use std::path::Path;
 use crate::hash::Hash;
 use crate::index::Index;
 use crate::object::{EntryMode, Object, TreeEntry};
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
 use crate::worktree::{self, WorktreeError};
 
 /// What kind of change a [`DiffEntry`] represents.
@@ -101,6 +101,7 @@ fn diff_trees_inner(
         "",
         &mut out,
         ignore_regular_executable_mode,
+        0,
     )?;
     Ok(DiffResult { entries: out })
 }
@@ -113,7 +114,11 @@ fn diff_entries_recursive(
     prefix: &str,
     out: &mut Vec<DiffEntry>,
     ignore_regular_executable_mode: bool,
+    depth: usize,
 ) -> Result<(), StoreError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(StoreError::TreeTooDeep);
+    }
     let mut i = 0usize;
     let mut j = 0usize;
 
@@ -122,11 +127,11 @@ fn diff_entries_recursive(
         let n = &new_entries[j];
         match o.name.as_slice().cmp(n.name.as_slice()) {
             std::cmp::Ordering::Less => {
-                add_removed_entries(store, o, prefix, out)?;
+                add_removed_entries(store, o, prefix, out, depth)?;
                 i += 1;
             }
             std::cmp::Ordering::Greater => {
-                add_added_entries(store, n, prefix, out)?;
+                add_added_entries(store, n, prefix, out, depth)?;
                 j += 1;
             }
             std::cmp::Ordering::Equal => {
@@ -142,6 +147,7 @@ fn diff_entries_recursive(
                             &sub_prefix,
                             out,
                             ignore_regular_executable_mode,
+                            depth + 1,
                         )?;
                     }
                     // identical subtree hashes -> nothing changed below
@@ -169,11 +175,11 @@ fn diff_entries_recursive(
     }
 
     while i < old_entries.len() {
-        add_removed_entries(store, &old_entries[i], prefix, out)?;
+        add_removed_entries(store, &old_entries[i], prefix, out, depth)?;
         i += 1;
     }
     while j < new_entries.len() {
-        add_added_entries(store, &new_entries[j], prefix, out)?;
+        add_added_entries(store, &new_entries[j], prefix, out, depth)?;
         j += 1;
     }
     Ok(())
@@ -191,12 +197,16 @@ fn add_removed_entries(
     entry: &TreeEntry,
     prefix: &str,
     out: &mut Vec<DiffEntry>,
+    depth: usize,
 ) -> Result<(), StoreError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(StoreError::TreeTooDeep);
+    }
     if entry.mode == EntryMode::Tree {
         let sub_prefix = join_path(prefix, &entry.name);
         let sub = load_tree(store, entry.object_hash)?;
         for sub_entry in &sub {
-            add_removed_entries(store, sub_entry, &sub_prefix, out)?;
+            add_removed_entries(store, sub_entry, &sub_prefix, out, depth + 1)?;
         }
     } else {
         out.push(DiffEntry {
@@ -214,12 +224,16 @@ fn add_added_entries(
     entry: &TreeEntry,
     prefix: &str,
     out: &mut Vec<DiffEntry>,
+    depth: usize,
 ) -> Result<(), StoreError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(StoreError::TreeTooDeep);
+    }
     if entry.mode == EntryMode::Tree {
         let sub_prefix = join_path(prefix, &entry.name);
         let sub = load_tree(store, entry.object_hash)?;
         for sub_entry in &sub {
-            add_added_entries(store, sub_entry, &sub_prefix, out)?;
+            add_added_entries(store, sub_entry, &sub_prefix, out, depth + 1)?;
         }
     } else {
         out.push(DiffEntry {
