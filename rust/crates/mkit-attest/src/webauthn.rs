@@ -76,20 +76,98 @@ impl WebAuthnWrapping {
     }
 }
 
-/// Verify a `WebAuthn`-wrapped P-256 signature against a DSSE PAE.
+/// Authenticator-data flag bit: User Present (UP). Set when the
+/// authenticator confirmed a physical gesture (touch).
+const AUTH_FLAG_UP: u8 = 0x01;
+/// Authenticator-data flag bit: User Verified (UV). Set when the
+/// authenticator additionally verified the user (PIN / biometric).
+const AUTH_FLAG_UV: u8 = 0x04;
+
+/// Ceremony policy for [`verify_webauthn_wrapping_with_policy`].
 ///
-/// Steps, each surfacing a distinct typed error so downstream code
-/// can pattern-match on the specific failure:
+/// Each knob is **independent** by design — strict UV would lock out a
+/// UP-only roaming authenticator, and a strict counter would reject the
+/// many authenticators that report `signCount == 0` — so they are never
+/// coupled. [`WebAuthnPolicy::permissive`] (also the [`Default`]) leaves
+/// every knob off, exactly reproducing the pre-policy
+/// cryptographic-only behaviour.
 ///
-/// 1. Parse `client_data_json` as UTF-8 JSON.
-/// 2. Assert `type == "webauthn.get"`.
-/// 3. Assert `challenge == base64url_nopad(pae)` — this is the
-///    binding that ties the `WebAuthn` ceremony to the mkit DSSE
-///    payload.
-/// 4. Reconstruct signed bytes as `authenticator_data ||
-///    SHA256(client_data_json)`.
-/// 5. Delegate to [`verify_p256`] with those bytes under
-///    `pubkey_sec1`.
+/// These checks layer on top of (and never replace) the cryptographic
+/// wrapping verification: even a fully-permissive policy still requires
+/// the challenge to bind to the PAE and the signature to verify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebAuthnPolicy {
+    /// Expected Relying Party ID. When `Some`, the first 32 bytes of
+    /// `authenticatorData` (the rpIdHash) must equal
+    /// `SHA256(expected_rp_id)`. When `None`, the RP ID is not checked.
+    pub expected_rp_id: Option<String>,
+    /// Allowed `origin` values from `clientDataJSON`. When `Some`, the
+    /// origin must match one entry exactly. When `None`, any origin is
+    /// accepted.
+    pub allowed_origins: Option<Vec<String>>,
+    /// Require the User Present (UP) flag. Off by default.
+    pub require_user_presence: bool,
+    /// Require the User Verified (UV) flag. Off by default (would break
+    /// UP-only authenticators).
+    pub require_user_verification: bool,
+    /// Allow `crossOrigin: true` in `clientDataJSON`. Defaults to `true`
+    /// (permissive). Set `false` to reject cross-origin ceremonies.
+    pub allow_cross_origin: bool,
+    /// Previously-observed signature counter. When `Some`, the
+    /// assertion's `signCount` must be `>=` this value (rollback is
+    /// rejected). `signCount == 0` with `previous_sign_count == Some(0)`
+    /// is accepted. When `None`, the counter is not enforced.
+    pub previous_sign_count: Option<u32>,
+}
+
+impl Default for WebAuthnPolicy {
+    /// The [`Default`] is [`WebAuthnPolicy::permissive`] — note this is
+    /// NOT the field-wise zero default (`allow_cross_origin` is `true`),
+    /// which is why `Default` is hand-written.
+    fn default() -> Self {
+        Self::permissive()
+    }
+}
+
+impl WebAuthnPolicy {
+    /// The hardware-friendly default: no RP-ID binding, any origin,
+    /// UP/UV not required, cross-origin allowed, counter not enforced.
+    /// This reproduces the behaviour of [`verify_webauthn_wrapping`]
+    /// exactly (cryptographic checks only).
+    #[must_use]
+    pub fn permissive() -> Self {
+        Self {
+            expected_rp_id: None,
+            allowed_origins: None,
+            require_user_presence: false,
+            require_user_verification: false,
+            allow_cross_origin: true,
+            previous_sign_count: None,
+        }
+    }
+}
+
+/// Verify a `WebAuthn`-wrapped P-256 signature against a DSSE PAE,
+/// applying [`WebAuthnPolicy`] ceremony checks.
+///
+/// This is the policy-aware counterpart of [`verify_webauthn_wrapping`]
+/// (which delegates here with [`WebAuthnPolicy::permissive`]). The
+/// cryptographic steps are identical; the policy adds RP-ID-hash,
+/// origin, `crossOrigin`, UP/UV-flag, and counter-rollback checks, each
+/// surfacing a distinct typed error.
+///
+/// Order of operations:
+/// 1. Length / `authenticatorData` shape check (>= 37 bytes).
+/// 2. Parse `authenticatorData`: rpIdHash(0..32), flags(32),
+///    signCount(33..37 big-endian).
+/// 3. Policy: rpIdHash == `SHA256(expected_rp_id)` if set.
+/// 4. Policy: UP/UV flags if required.
+/// 5. Policy: signCount >= `previous_sign_count` if set.
+/// 6. Parse `clientDataJSON`; assert `type == "webauthn.get"`.
+/// 7. Policy: origin in allow-list if set; crossOrigin allowed.
+/// 8. Assert `challenge == base64url_nopad(pae)`.
+/// 9. Reconstruct `authenticatorData || SHA256(clientDataJSON)` and
+///    delegate to [`verify_p256`].
 ///
 /// Why this shape: a direct signer over `SHA256(pae)` would be
 /// incompatible with every `WebAuthn` authenticator on the market —
@@ -98,31 +176,72 @@ impl WebAuthnWrapping {
 /// the host preserves mkit's "we control the signed bytes" invariant
 /// without forking the DSSE spec.
 ///
+/// NOTE: this helper enforces *ceremony* policy only. Trust-root binding
+/// (which public key is authorised to attest) stays in envelope
+/// verification — see `docs/SPEC-EXTERNAL-SIGNER.md` §14.
+///
 /// # Errors
-/// * [`Error::WebAuthnBadClientDataJson`] — `client_data_json` is not
-///   parseable as a JSON object with string `type` / `challenge`.
-/// * [`Error::WebAuthnBadClientDataJson`] — `type` is not literally
-///   `"webauthn.get"`. The `create`-ceremony type is explicitly NOT
-///   accepted by this helper — enrollment does not produce assertions.
-/// * [`Error::WebAuthnChallengeMismatch`] — `challenge` decoded to
-///   bytes that are not equal to the PAE bytes.
 /// * [`Error::WebAuthnBadAuthenticatorData`] — `authenticator_data`
 ///   is shorter than the 37-byte minimum (rpIdHash + flags + signCount).
-/// * [`Error::WebAuthnSignatureFailed`] — crypto verdict says no. The
-///   underlying `verify_p256` error is folded into this one variant so
-///   callers have a single "the `WebAuthn` signature didn't verify"
-///   branch.
-pub fn verify_webauthn_wrapping(
+/// * [`Error::WebAuthnRpIdMismatch`] — rpIdHash != SHA256(expected RP ID).
+/// * [`Error::WebAuthnUserPresenceRequired`] — UP flag clear but required.
+/// * [`Error::WebAuthnUserVerificationRequired`] — UV flag clear but required.
+/// * [`Error::WebAuthnCounterRollback`] — signCount < previous counter.
+/// * [`Error::WebAuthnBadClientDataJson`] — `client_data_json` is not a
+///   JSON object with string `type` / `challenge`, or `type` is not
+///   `"webauthn.get"`. The `create`-ceremony type is explicitly refused.
+/// * [`Error::WebAuthnOriginNotAllowed`] — origin not in allow-list.
+/// * [`Error::WebAuthnCrossOriginNotAllowed`] — crossOrigin=true but disallowed.
+/// * [`Error::WebAuthnChallengeMismatch`] — `challenge` decoded to bytes
+///   not equal to the PAE bytes.
+/// * [`Error::WebAuthnSignatureFailed`] — crypto verdict says no.
+pub fn verify_webauthn_wrapping_with_policy(
     pae: &[u8],
     wrapping: &WebAuthnWrapping,
     pubkey_sec1: &[u8],
     sig_compact: &[u8],
+    policy: &WebAuthnPolicy,
 ) -> Result<(), Error> {
     // Minimum authenticatorData is 37 bytes: 32 (rpIdHash) + 1 (flags)
     // + 4 (signCount). Anything shorter cannot be a well-formed
     // assertion and pre-empts the crypto step with a clearer error.
+    // This bound also guarantees the fixed-offset slices below are
+    // always in range.
     if wrapping.authenticator_data.len() < 37 {
         return Err(Error::WebAuthnBadAuthenticatorData);
+    }
+    let auth = &wrapping.authenticator_data;
+    let rp_id_hash = &auth[0..32];
+    let flags = auth[32];
+    // signCount is a 4-byte big-endian unsigned counter at offset 33.
+    let sign_count = u32::from_be_bytes([auth[33], auth[34], auth[35], auth[36]]);
+
+    // -- Policy: RP-ID hash binding ----------------------------------
+    if let Some(rp_id) = policy.expected_rp_id.as_deref() {
+        let expected = Sha256::digest(rp_id.as_bytes());
+        // Constant-time-ish equality is not required here: rpIdHash is
+        // not secret, and a timing oracle on a 32-byte public hash
+        // leaks nothing useful.
+        if rp_id_hash != expected.as_slice() {
+            return Err(Error::WebAuthnRpIdMismatch);
+        }
+    }
+
+    // -- Policy: UP / UV flags (independent knobs) -------------------
+    if policy.require_user_presence && (flags & AUTH_FLAG_UP) == 0 {
+        return Err(Error::WebAuthnUserPresenceRequired);
+    }
+    if policy.require_user_verification && (flags & AUTH_FLAG_UV) == 0 {
+        return Err(Error::WebAuthnUserVerificationRequired);
+    }
+
+    // -- Policy: counter rollback ------------------------------------
+    if let Some(prev) = policy.previous_sign_count
+        && sign_count < prev
+    {
+        // signCount == 0 with prev == 0 passes (0 >= 0); only a strict
+        // decrease is rejected. Many authenticators always report 0.
+        return Err(Error::WebAuthnCounterRollback);
     }
 
     // Parse clientDataJSON. We intentionally use serde_json here
@@ -140,6 +259,30 @@ pub fn verify_webauthn_wrapping(
         .ok_or(Error::WebAuthnBadClientDataJson)?;
     if ty != "webauthn.get" {
         return Err(Error::WebAuthnBadClientDataJson);
+    }
+
+    // -- Policy: origin allow-list -----------------------------------
+    if let Some(allowed) = policy.allowed_origins.as_deref() {
+        let origin = obj
+            .get("origin")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(Error::WebAuthnOriginNotAllowed)?;
+        if !allowed.iter().any(|o| o == origin) {
+            return Err(Error::WebAuthnOriginNotAllowed);
+        }
+    }
+
+    // -- Policy: crossOrigin -----------------------------------------
+    if !policy.allow_cross_origin {
+        // Absent crossOrigin is treated as false per the WebAuthn spec
+        // default. Only an explicit `true` is rejected.
+        let cross = obj
+            .get("crossOrigin")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if cross {
+            return Err(Error::WebAuthnCrossOriginNotAllowed);
+        }
     }
 
     let challenge_str = obj
@@ -168,6 +311,38 @@ pub fn verify_webauthn_wrapping(
     to_verify.extend_from_slice(&cd_hash);
 
     verify_p256(pubkey_sec1, &to_verify, sig_compact).map_err(|_| Error::WebAuthnSignatureFailed)
+}
+
+/// Verify a `WebAuthn`-wrapped P-256 signature against a DSSE PAE,
+/// performing cryptographic-only checks (no ceremony policy).
+///
+/// This is a thin compatibility wrapper that delegates to
+/// [`verify_webauthn_wrapping_with_policy`] with
+/// [`WebAuthnPolicy::permissive`]. It checks the `type`, the challenge
+/// binding, the `authenticatorData` shape, and the signature — but does
+/// NOT check RP-ID, origin, `crossOrigin`, UP/UV flags, or the counter.
+/// Callers that need those guarantees must use the policy-aware variant.
+///
+/// # Errors
+/// See [`verify_webauthn_wrapping_with_policy`]; only the
+/// non-policy variants can be returned here:
+/// [`Error::WebAuthnBadAuthenticatorData`],
+/// [`Error::WebAuthnBadClientDataJson`],
+/// [`Error::WebAuthnChallengeMismatch`],
+/// [`Error::WebAuthnSignatureFailed`].
+pub fn verify_webauthn_wrapping(
+    pae: &[u8],
+    wrapping: &WebAuthnWrapping,
+    pubkey_sec1: &[u8],
+    sig_compact: &[u8],
+) -> Result<(), Error> {
+    verify_webauthn_wrapping_with_policy(
+        pae,
+        wrapping,
+        pubkey_sec1,
+        sig_compact,
+        &WebAuthnPolicy::permissive(),
+    )
 }
 
 /// Convenience: build a `clientDataJSON` body for a given PAE + origin.
@@ -418,6 +593,335 @@ mod tests {
             matches!(err, Error::WebAuthnBadClientDataJson),
             "got {err:?}"
         );
+    }
+
+    /// Like [`mock_auth_data`] but with caller-chosen flags and
+    /// signCount, so policy tests can flip individual bits.
+    fn mock_auth_data_full(rp_id: &str, flags: u8, sign_count: u32) -> Vec<u8> {
+        let rp_id_hash = Sha256::digest(rp_id.as_bytes());
+        let mut out = Vec::with_capacity(37);
+        out.extend_from_slice(&rp_id_hash);
+        out.push(flags);
+        out.extend_from_slice(&sign_count.to_be_bytes());
+        out
+    }
+
+    /// Sign with explicit flags / signCount / crossOrigin so each policy
+    /// knob can be exercised in isolation.
+    fn sign_webauthn_full(
+        pae: &[u8],
+        rp_id: &str,
+        origin: &str,
+        flags: u8,
+        sign_count: u32,
+        cross_origin: bool,
+        secret: [u8; 32],
+    ) -> (WebAuthnWrapping, Vec<u8>) {
+        let auth_data = mock_auth_data_full(rp_id, flags, sign_count);
+        let cdj = build_client_data_json(pae, origin, cross_origin);
+        let mut to_sign = Vec::with_capacity(auth_data.len() + 32);
+        to_sign.extend_from_slice(&auth_data);
+        to_sign.extend_from_slice(&Sha256::digest(&cdj));
+        let sk = SigningKey::from_bytes(&secret.into()).unwrap();
+        let sig: P256Sig = sk.sign(&to_sign);
+        let sig = sig.normalize_s().unwrap_or(sig);
+        (
+            WebAuthnWrapping {
+                authenticator_data: auth_data,
+                client_data_json: cdj,
+            },
+            sig.to_bytes().to_vec(),
+        )
+    }
+
+    #[test]
+    fn permissive_policy_allows_up_only_and_zero_counter() {
+        // flags = UP only (0x01), signCount = 0 — the hardware-friendly
+        // baseline the permissive default must accept.
+        let pae = b"pae";
+        let (wrap, sig) = sign_webauthn_full(
+            pae,
+            "mkit.local",
+            "https://mkit.local",
+            AUTH_FLAG_UP,
+            0,
+            false,
+            TEST_SECRET,
+        );
+        let signer = P256Signer::new(TEST_SECRET).unwrap();
+        verify_webauthn_wrapping_with_policy(
+            pae,
+            &wrap,
+            &signer.public_key_sec1(),
+            &sig,
+            &WebAuthnPolicy::permissive(),
+        )
+        .expect("permissive policy accepts UP-only, signCount=0");
+    }
+
+    #[test]
+    fn policy_rejects_wrong_rp_id() {
+        let pae = b"pae";
+        let (wrap, sig) = sign_webauthn(pae, "mkit.local", "https://mkit.local", TEST_SECRET);
+        let signer = P256Signer::new(TEST_SECRET).unwrap();
+        let policy = WebAuthnPolicy {
+            expected_rp_id: Some("evil.example".to_owned()),
+            ..WebAuthnPolicy::permissive()
+        };
+        let err = verify_webauthn_wrapping_with_policy(
+            pae,
+            &wrap,
+            &signer.public_key_sec1(),
+            &sig,
+            &policy,
+        )
+        .expect_err("wrong RP ID must be rejected");
+        assert!(matches!(err, Error::WebAuthnRpIdMismatch), "got {err:?}");
+    }
+
+    #[test]
+    fn policy_accepts_matching_rp_id() {
+        let pae = b"pae";
+        let (wrap, sig) = sign_webauthn(pae, "mkit.local", "https://mkit.local", TEST_SECRET);
+        let signer = P256Signer::new(TEST_SECRET).unwrap();
+        let policy = WebAuthnPolicy {
+            expected_rp_id: Some("mkit.local".to_owned()),
+            ..WebAuthnPolicy::permissive()
+        };
+        verify_webauthn_wrapping_with_policy(pae, &wrap, &signer.public_key_sec1(), &sig, &policy)
+            .expect("matching RP ID verifies");
+    }
+
+    #[test]
+    fn policy_rejects_origin_not_in_allowlist() {
+        let pae = b"pae";
+        let (wrap, sig) = sign_webauthn(pae, "mkit.local", "https://mkit.local", TEST_SECRET);
+        let signer = P256Signer::new(TEST_SECRET).unwrap();
+        let policy = WebAuthnPolicy {
+            allowed_origins: Some(vec!["https://other.example".to_owned()]),
+            ..WebAuthnPolicy::permissive()
+        };
+        let err = verify_webauthn_wrapping_with_policy(
+            pae,
+            &wrap,
+            &signer.public_key_sec1(),
+            &sig,
+            &policy,
+        )
+        .expect_err("origin not in allow-list must be rejected");
+        assert!(
+            matches!(err, Error::WebAuthnOriginNotAllowed),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn policy_accepts_allowed_origin() {
+        let pae = b"pae";
+        let (wrap, sig) = sign_webauthn(pae, "mkit.local", "https://mkit.local", TEST_SECRET);
+        let signer = P256Signer::new(TEST_SECRET).unwrap();
+        let policy = WebAuthnPolicy {
+            allowed_origins: Some(vec![
+                "https://mkit.local".to_owned(),
+                "https://other.example".to_owned(),
+            ]),
+            ..WebAuthnPolicy::permissive()
+        };
+        verify_webauthn_wrapping_with_policy(pae, &wrap, &signer.public_key_sec1(), &sig, &policy)
+            .expect("allowed origin verifies");
+    }
+
+    #[test]
+    fn policy_rejects_missing_user_presence() {
+        // flags = UV only (0x04), no UP bit — require_user_presence must
+        // reject it.
+        let pae = b"pae";
+        let (wrap, sig) = sign_webauthn_full(
+            pae,
+            "mkit.local",
+            "https://mkit.local",
+            AUTH_FLAG_UV,
+            0,
+            false,
+            TEST_SECRET,
+        );
+        let signer = P256Signer::new(TEST_SECRET).unwrap();
+        let policy = WebAuthnPolicy {
+            require_user_presence: true,
+            ..WebAuthnPolicy::permissive()
+        };
+        let err = verify_webauthn_wrapping_with_policy(
+            pae,
+            &wrap,
+            &signer.public_key_sec1(),
+            &sig,
+            &policy,
+        )
+        .expect_err("missing UP must be rejected");
+        assert!(
+            matches!(err, Error::WebAuthnUserPresenceRequired),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn policy_rejects_missing_user_verification() {
+        // flags = UP only (0x01), no UV bit — require_user_verification
+        // must reject it. This is the knob that, if defaulted on, would
+        // break UP-only authenticators — hence it stays independent.
+        let pae = b"pae";
+        let (wrap, sig) = sign_webauthn_full(
+            pae,
+            "mkit.local",
+            "https://mkit.local",
+            AUTH_FLAG_UP,
+            0,
+            false,
+            TEST_SECRET,
+        );
+        let signer = P256Signer::new(TEST_SECRET).unwrap();
+        let policy = WebAuthnPolicy {
+            require_user_verification: true,
+            ..WebAuthnPolicy::permissive()
+        };
+        let err = verify_webauthn_wrapping_with_policy(
+            pae,
+            &wrap,
+            &signer.public_key_sec1(),
+            &sig,
+            &policy,
+        )
+        .expect_err("missing UV must be rejected");
+        assert!(
+            matches!(err, Error::WebAuthnUserVerificationRequired),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn policy_rejects_cross_origin_when_disallowed() {
+        let pae = b"pae";
+        let (wrap, sig) = sign_webauthn_full(
+            pae,
+            "mkit.local",
+            "https://mkit.local",
+            AUTH_FLAG_UP,
+            0,
+            true, // crossOrigin: true
+            TEST_SECRET,
+        );
+        let signer = P256Signer::new(TEST_SECRET).unwrap();
+        let policy = WebAuthnPolicy {
+            allow_cross_origin: false,
+            ..WebAuthnPolicy::permissive()
+        };
+        let err = verify_webauthn_wrapping_with_policy(
+            pae,
+            &wrap,
+            &signer.public_key_sec1(),
+            &sig,
+            &policy,
+        )
+        .expect_err("crossOrigin=true must be rejected when disallowed");
+        assert!(
+            matches!(err, Error::WebAuthnCrossOriginNotAllowed),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn policy_rejects_counter_rollback() {
+        // signCount = 3 but policy has seen 5 — a decrease signals a
+        // possibly-cloned authenticator.
+        let pae = b"pae";
+        let (wrap, sig) = sign_webauthn_full(
+            pae,
+            "mkit.local",
+            "https://mkit.local",
+            AUTH_FLAG_UP,
+            3,
+            false,
+            TEST_SECRET,
+        );
+        let signer = P256Signer::new(TEST_SECRET).unwrap();
+        let policy = WebAuthnPolicy {
+            previous_sign_count: Some(5),
+            ..WebAuthnPolicy::permissive()
+        };
+        let err = verify_webauthn_wrapping_with_policy(
+            pae,
+            &wrap,
+            &signer.public_key_sec1(),
+            &sig,
+            &policy,
+        )
+        .expect_err("counter rollback must be rejected");
+        assert!(matches!(err, Error::WebAuthnCounterRollback), "got {err:?}");
+    }
+
+    #[test]
+    fn policy_allows_counter_advance_and_zero_equal() {
+        let signer = P256Signer::new(TEST_SECRET).unwrap();
+        let pae = b"pae";
+
+        // signCount 7 >= previously-seen 5: accepted.
+        let (wrap, sig) = sign_webauthn_full(
+            pae,
+            "mkit.local",
+            "https://mkit.local",
+            AUTH_FLAG_UP,
+            7,
+            false,
+            TEST_SECRET,
+        );
+        let policy = WebAuthnPolicy {
+            previous_sign_count: Some(5),
+            ..WebAuthnPolicy::permissive()
+        };
+        verify_webauthn_wrapping_with_policy(pae, &wrap, &signer.public_key_sec1(), &sig, &policy)
+            .expect("counter advance verifies");
+
+        // signCount 0 with previously-seen 0: accepted (0 >= 0).
+        let (wrap0, sig0) = sign_webauthn_full(
+            pae,
+            "mkit.local",
+            "https://mkit.local",
+            AUTH_FLAG_UP,
+            0,
+            false,
+            TEST_SECRET,
+        );
+        let policy0 = WebAuthnPolicy {
+            previous_sign_count: Some(0),
+            ..WebAuthnPolicy::permissive()
+        };
+        verify_webauthn_wrapping_with_policy(
+            pae,
+            &wrap0,
+            &signer.public_key_sec1(),
+            &sig0,
+            &policy0,
+        )
+        .expect("signCount 0 with prev 0 verifies");
+    }
+
+    #[test]
+    fn bare_helper_delegates_permissively() {
+        // The bare helper must behave exactly like the permissive
+        // policy: UP-only / signCount=0 / cross-origin all pass.
+        let pae = b"pae";
+        let (wrap, sig) = sign_webauthn_full(
+            pae,
+            "mkit.local",
+            "https://anything.example",
+            AUTH_FLAG_UP,
+            0,
+            true,
+            TEST_SECRET,
+        );
+        let signer = P256Signer::new(TEST_SECRET).unwrap();
+        verify_webauthn_wrapping(pae, &wrap, &signer.public_key_sec1(), &sig)
+            .expect("bare helper is permissive");
     }
 
     #[test]

@@ -24,7 +24,10 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use mkit_rpc::mkit::rpc::v1::signer::{
     Hello, SignRequest, SignResponse, SignerFrame, signer_frame,
@@ -35,9 +38,25 @@ use mkit_rpc::{FrameError, read_frame, write_frame};
 use crate::Error;
 use crate::algorithm::Algorithm;
 use crate::signer::Signer;
+#[cfg(feature = "algo-p256")]
+use crate::webauthn::WebAuthnPolicy;
 
 /// Cap for child-stderr drain. 1 MiB is generous; stderr is advisory.
 const MAX_STDERR_DRAIN: usize = 1024 * 1024;
+
+/// Default wall-clock budget for the entire signer conversation
+/// (spawn → request-write → response-read → stderr-drain → child-exit).
+///
+/// Deliberately generous: hardware-backed signers (`YubiKey`, secure
+/// enclave, smartcard) routinely block on a physical touch, a PIN entry,
+/// or a biometric prompt before they emit a single byte of stdout. A
+/// tight default would make those signers unusable. Callers that drive
+/// only software signers can tighten this via [`ExternalSigner::with_timeout`]
+/// (or the `attest.external_signer_timeout_secs` config key).
+// 120 seconds = 2 minutes; written in seconds because `Duration::from_mins`
+// is not const-stable on the pinned toolchain.
+#[allow(clippy::duration_suboptimal_units)]
+pub const DEFAULT_EXTERNAL_SIGNER_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug)]
 pub struct ExternalSigner {
@@ -45,6 +64,14 @@ pub struct ExternalSigner {
     cached_keyid: Option<String>,
     algorithm: Algorithm,
     args: Vec<String>,
+    /// Single wall-clock budget covering the whole sign conversation.
+    /// On expiry the child is killed and reaped and an
+    /// [`Error::ExternalSignerTimeout`] (phase-named) is returned.
+    timeout: Duration,
+    /// Ceremony policy applied when the signer returns a `WebAuthn`
+    /// assertion. Defaults to [`WebAuthnPolicy::permissive`].
+    #[cfg(feature = "algo-p256")]
+    webauthn_policy: WebAuthnPolicy,
 }
 
 impl ExternalSigner {
@@ -83,6 +110,9 @@ impl ExternalSigner {
             cached_keyid: None,
             algorithm,
             args: Vec::new(),
+            timeout: DEFAULT_EXTERNAL_SIGNER_TIMEOUT,
+            #[cfg(feature = "algo-p256")]
+            webauthn_policy: WebAuthnPolicy::permissive(),
         })
     }
 
@@ -99,6 +129,27 @@ impl ExternalSigner {
         self.args = args.into_iter().map(Into::into).collect();
         self
     }
+
+    /// Override the wall-clock budget for the whole sign conversation.
+    /// See [`DEFAULT_EXTERNAL_SIGNER_TIMEOUT`] for the rationale behind
+    /// the generous default. A zero duration is treated as "deadline
+    /// already passed" and will time out at the first blocking step,
+    /// which is the intended behaviour for a hard kill-switch.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Override the [`WebAuthnPolicy`] applied to `WebAuthn` assertions
+    /// returned by the signer. The default is
+    /// [`WebAuthnPolicy::permissive`].
+    #[cfg(feature = "algo-p256")]
+    #[must_use]
+    pub fn with_webauthn_policy(mut self, policy: WebAuthnPolicy) -> Self {
+        self.webauthn_policy = policy;
+        self
+    }
 }
 
 impl Signer for ExternalSigner {
@@ -113,7 +164,13 @@ impl Signer for ExternalSigner {
     }
 
     fn sign(&mut self, pae: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut child = Command::new(&self.binary_path)
+        // Single wall-clock budget for the entire conversation. Every
+        // blocking step in `run_conversation` is measured against this
+        // one deadline, so a signer that is slow across several phases
+        // still cannot exceed the total budget.
+        let deadline = Instant::now() + self.timeout;
+
+        let child = Command::new(&self.binary_path)
             .args(&self.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -121,8 +178,48 @@ impl Signer for ExternalSigner {
             .spawn()
             .map_err(|e| Error::ExternalSignerSpawn(e.to_string()))?;
 
-        // Build the request: Hello + SignRequest. We fire both before
-        // reading any response so the signer can pipeline.
+        let (signature, key_id) = self.run_conversation(child, pae, deadline)?;
+        self.cached_keyid = Some(key_id);
+        Ok(signature)
+    }
+}
+
+impl ExternalSigner {
+    /// Drive the bounded sign conversation against an already-spawned
+    /// child: concurrent stderr drain, bounded request-write, bounded
+    /// response-read, bounded stderr-drain join, bounded child-exit. On
+    /// ANY error the child is killed+reaped and the stderr drain joined
+    /// (via [`Conversation::fail`]) before returning, so there is never
+    /// a leaked child or thread.
+    fn run_conversation(
+        &self,
+        mut child: Child,
+        pae: &[u8],
+        deadline: Instant,
+    ) -> Result<(Vec<u8>, String), Error> {
+        // --- Concurrent stderr drain (the deadlock fix) ------------
+        //
+        // Spawn the stderr drain IMMEDIATELY, before we write the
+        // request or read any stdout: if the child floods stderr before
+        // emitting stdout and nobody drains it, the child blocks on a
+        // full stderr pipe while we block reading stdout — a two-pipe
+        // deadlock. The drain thread reads to EOF unconditionally,
+        // capturing only a bounded prefix but never ceasing to discard.
+        let Some(stderr) = child.stderr.take() else {
+            terminate_child_now(&mut child);
+            return Err(Error::ExternalSignerSpawn("stderr not piped".into()));
+        };
+        let stderr_join = spawn_stderr_drainer(stderr);
+        let mut conv = Conversation {
+            child,
+            stderr_join: Some(stderr_join),
+        };
+
+        // --- Write the request (Hello + SignRequest) --------------
+        //
+        // Fired together so the signer can pipeline. The write runs on
+        // its own thread so a child that never reads stdin (while its
+        // stdout pipe fills) cannot wedge us past the deadline.
         let hello = SignerFrame {
             body: Some(signer_frame::Body::Hello(Box::new(
                 Hello::default()
@@ -144,67 +241,355 @@ impl Signer for ExternalSigner {
             ..Default::default()
         };
 
-        {
-            let stdin = child
-                .stdin
-                .as_mut()
-                .ok_or_else(|| Error::ExternalSignerSpawn("stdin not piped".into()))?;
-            write_frame(stdin, &hello)
-                .map_err(|e| Error::ExternalSignerSpawn(format!("write hello: {e}")))?;
-            write_frame(stdin, &sign_req)
-                .map_err(|e| Error::ExternalSignerSpawn(format!("write sign request: {e}")))?;
+        let Some(stdin) = conv.child.stdin.take() else {
+            return Err(conv.fail(Error::ExternalSignerSpawn("stdin not piped".into())));
+        };
+        let write_rx = spawn_request_writer(stdin, hello, sign_req);
+        match recv_until_deadline(&write_rx, deadline) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(conv.fail(e)),
+            Err(()) => return Err(conv.fail(Error::ExternalSignerTimeout("request-write"))),
         }
-        // Drop stdin handle so the child sees EOF.
-        drop(child.stdin.take());
 
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| Error::ExternalSignerSpawn("stdout not piped".into()))?;
+        // --- Read the response (bounded) --------------------------
+        let Some(stdout) = conv.child.stdout.take() else {
+            return Err(conv.fail(Error::ExternalSignerSpawn("stdout not piped".into())));
+        };
+        let stdout_rx = spawn_stdout_reader(stdout);
 
-        // Drain HelloResponse + SignResponse | Error. We tolerate
-        // signers that emit only the response (skipping the hello) by
+        // Tolerate signers that emit only the response (skip Hello) by
         // peeking at the first frame.
-        let resp = read_frame_or_err(&mut stdout)?;
+        let resp = match recv_frame_until_deadline(&stdout_rx, deadline) {
+            Ok(frame) => frame,
+            Err(FrameTimeout::Timeout) => {
+                return Err(conv.fail(Error::ExternalSignerTimeout("response-read")));
+            }
+            Err(FrameTimeout::Frame(e)) => return Err(conv.fail(e)),
+        };
         let (signature, key_id) = match resp.body {
             Some(signer_frame::Body::HelloResponse(_)) => {
-                // Read next frame: SignResponse | Error.
-                let next = read_frame_or_err(&mut stdout)?;
-                extract_signature(next, self.algorithm, pae)?
+                let next = match recv_frame_until_deadline(&stdout_rx, deadline) {
+                    Ok(frame) => frame,
+                    Err(FrameTimeout::Timeout) => {
+                        return Err(conv.fail(Error::ExternalSignerTimeout("response-read")));
+                    }
+                    Err(FrameTimeout::Frame(e)) => return Err(conv.fail(e)),
+                };
+                match self.extract_signature_with_policy(next, pae) {
+                    Ok(v) => v,
+                    Err(e) => return Err(conv.fail(e)),
+                }
             }
             Some(signer_frame::Body::SignResponse(_) | signer_frame::Body::Error(_)) => {
-                extract_signature(resp, self.algorithm, pae)?
+                match self.extract_signature_with_policy(resp, pae) {
+                    Ok(v) => v,
+                    Err(e) => return Err(conv.fail(e)),
+                }
             }
             other => {
-                return Err(Error::ExternalSignerBadResponse(format!(
-                    "unexpected first frame: {}",
-                    frame_name(&other),
-                )));
+                let msg = format!("unexpected first frame: {}", frame_name(&other));
+                return Err(conv.fail(Error::ExternalSignerBadResponse(msg)));
             }
         };
 
-        // Drain stderr for diagnostic surfacing on non-zero exit.
-        let stderr = drain_capped(
-            child
-                .stderr
-                .take()
-                .ok_or_else(|| Error::ExternalSignerSpawn("stderr not piped".into()))?,
-        )?;
+        // --- Drain stderr to completion (bounded) -----------------
+        //
+        // Join the drain thread to collect the captured prefix. It
+        // reaches EOF once the child closes stderr — on (or just before)
+        // exit. `take()` hands ownership out of the guard so the guard's
+        // Drop won't double-join.
+        let stderr_join = conv.stderr_join.take().expect("stderr_join present");
+        let stderr_bytes = match join_until_deadline(stderr_join, deadline) {
+            Some(Ok(bytes)) => bytes,
+            // A panicked drain thread just yields empty diagnostics.
+            Some(Err(())) => Vec::new(),
+            None => return Err(conv.fail(Error::ExternalSignerTimeout("stderr-drain"))),
+        };
 
-        let status = child
-            .wait()
-            .map_err(|e| Error::ExternalSignerSpawn(format!("wait: {e}")))?;
-
+        // --- Wait for child exit (bounded) ------------------------
+        //
+        // Reap even with a valid response in hand: avoids a zombie and
+        // honours the exit status. A signer that writes a valid response
+        // then never exits is bounded here.
+        if wait_child_until_deadline(&mut conv.child, deadline).is_none() {
+            return Err(conv.fail(Error::ExternalSignerTimeout("child-exit")));
+        }
+        // A missing status here means the child was already reaped (or a
+        // benign race): we have a verified response and the child is no
+        // longer alive, so treat it as success.
+        let Ok(Some(status)) = conv.child.try_wait() else {
+            return Ok((signature, key_id));
+        };
         if !status.success() {
-            // Surface the child's stderr to the caller — even if we
-            // got a successful response frame, a non-zero exit
-            // signals the signer didn't trust its own output.
-            let msg = String::from_utf8_lossy(&stderr).into_owned();
+            // A non-zero exit means the signer didn't trust its own
+            // output even though we got a response frame — surface its
+            // stderr to the caller.
+            let msg = String::from_utf8_lossy(&stderr_bytes).into_owned();
             return Err(Error::ExternalSignerFailed(msg));
         }
 
-        self.cached_keyid = Some(key_id);
-        Ok(signature)
+        Ok((signature, key_id))
+    }
+
+    /// Validate + extract the signature from a response frame, applying
+    /// this signer's configured [`WebAuthnPolicy`] on the `WebAuthn` path.
+    fn extract_signature_with_policy(
+        &self,
+        frame: SignerFrame,
+        pae: &[u8],
+    ) -> Result<(Vec<u8>, String), Error> {
+        #[cfg(feature = "algo-p256")]
+        {
+            extract_signature(frame, self.algorithm, pae, &self.webauthn_policy)
+        }
+        #[cfg(not(feature = "algo-p256"))]
+        {
+            extract_signature(frame, self.algorithm, pae)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Bounded-execution helpers (mirrors mkit-transport-ssh's reader/timeout
+// pattern; intentionally no async runtime in mkit-attest).
+// ---------------------------------------------------------------------
+
+/// Owns the child + its stderr-drain thread for the duration of a sign
+/// conversation. Centralises teardown so every error path kills+reaps
+/// the child and joins the drain thread exactly once. The `Drop` impl is
+/// a safety net for any path that forgets to call [`Conversation::fail`]
+/// (e.g. a future panic-unwind): it kills the child and joins the drain.
+struct Conversation {
+    child: Child,
+    stderr_join: Option<thread::JoinHandle<Vec<u8>>>,
+}
+
+/// Grace period for joining the stderr-drain thread on a teardown path
+/// before detaching it. The thread only ends when its stderr pipe
+/// reaches EOF; after we SIGKILL the direct child a *grandchild* may
+/// still hold the inherited stderr write-end open (e.g. a reparented
+/// `sleep`), so an unconditional join could block until that grandchild
+/// exits — which on a hung signer is never. We therefore wait only
+/// briefly (the kill usually closes the pipe immediately) and then
+/// detach: the thread holds nothing but a pipe fd and a bounded `Vec`,
+/// so dropping its handle leaks no meaningful resource and the thread
+/// exits at the latest when the process does.
+const STDERR_JOIN_GRACE: Duration = Duration::from_millis(200);
+
+impl Conversation {
+    /// Tear down on the error path: kill+reap the child, then join the
+    /// drain thread within [`STDERR_JOIN_GRACE`] (detaching it if a
+    /// surviving grandchild still holds the stderr pipe open), then hand
+    /// the error straight back.
+    fn fail(&mut self, err: Error) -> Error {
+        terminate_child_now(&mut self.child);
+        if let Some(join) = self.stderr_join.take() {
+            detach_join_with_grace(join);
+        }
+        err
+    }
+}
+
+impl Drop for Conversation {
+    fn drop(&mut self) {
+        // Best-effort: the happy path and `fail` have normally already
+        // reaped/joined, so these are no-ops. This only fires if a path
+        // returned without going through `fail`.
+        terminate_child_now(&mut self.child);
+        if let Some(join) = self.stderr_join.take() {
+            detach_join_with_grace(join);
+        }
+    }
+}
+
+/// Join a stderr-drain thread but never block past [`STDERR_JOIN_GRACE`].
+/// If the thread is still reading at the deadline (its pipe held open by
+/// a reparented grandchild), the handle is simply dropped — the thread
+/// is detached and will exit when the pipe finally closes or the process
+/// ends.
+fn detach_join_with_grace(handle: thread::JoinHandle<Vec<u8>>) {
+    let deadline = Instant::now() + STDERR_JOIN_GRACE;
+    loop {
+        if handle.is_finished() {
+            let _ = handle.join();
+            return;
+        }
+        if Instant::now() >= deadline {
+            // Detach: drop the handle without joining.
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Spawn a thread that drains the child's stderr to EOF, capturing only
+/// a diagnostic prefix (capped at [`MAX_STDERR_DRAIN`]) but NEVER
+/// stopping reading. Returns a join handle yielding the captured prefix.
+fn spawn_stderr_drainer<R: Read + Send + 'static>(mut r: R) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match r.read(&mut chunk) {
+                // EOF (0) or a read error both end the drain.
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    // Keep draining unconditionally so the child's
+                    // stderr pipe never fills; only the captured prefix
+                    // is bounded.
+                    if out.len() < MAX_STDERR_DRAIN {
+                        let room = MAX_STDERR_DRAIN - out.len();
+                        out.extend_from_slice(&chunk[..n.min(room)]);
+                    }
+                }
+            }
+        }
+        out
+    })
+}
+
+/// Spawn a thread that writes the Hello + `SignRequest` frames to the
+/// child's stdin, then closes stdin (drops the handle) so the child sees
+/// EOF. Reports the result over a channel.
+fn spawn_request_writer(
+    mut stdin: std::process::ChildStdin,
+    hello: SignerFrame,
+    sign_req: SignerFrame,
+) -> mpsc::Receiver<Result<(), Error>> {
+    let (tx, rx) = mpsc::sync_channel::<Result<(), Error>>(1);
+    thread::spawn(move || {
+        let result = (|| {
+            write_frame(&mut stdin, &hello)
+                .map_err(|e| Error::ExternalSignerSpawn(format!("write hello: {e}")))?;
+            write_frame(&mut stdin, &sign_req)
+                .map_err(|e| Error::ExternalSignerSpawn(format!("write sign request: {e}")))?;
+            Ok(())
+        })();
+        // Drop stdin so the child sees EOF before we report completion.
+        drop(stdin);
+        let _ = tx.send(result);
+    });
+    rx
+}
+
+/// Spawn a thread that reads `SignerFrame`s from the child's stdout and
+/// forwards each over a channel. Mirrors the SSH transport's
+/// `spawn_stdout_reader`.
+fn spawn_stdout_reader(
+    mut stdout: std::process::ChildStdout,
+) -> mpsc::Receiver<Result<SignerFrame, FrameError>> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        loop {
+            let frame = read_frame::<_, SignerFrame>(&mut stdout);
+            let should_stop = frame.is_err();
+            if tx.send(frame).is_err() || should_stop {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// A `SignerFrame` read that either timed out or surfaced a typed error.
+enum FrameTimeout {
+    Timeout,
+    Frame(Error),
+}
+
+/// Block on `rx` until the deadline, mapping a `FrameError` through
+/// [`map_frame_error`].
+fn recv_frame_until_deadline(
+    rx: &mpsc::Receiver<Result<SignerFrame, FrameError>>,
+    deadline: Instant,
+) -> Result<SignerFrame, FrameTimeout> {
+    match recv_until_deadline(rx, deadline) {
+        Ok(Ok(frame)) => Ok(frame),
+        Ok(Err(e)) => Err(FrameTimeout::Frame(map_frame_error(e))),
+        Err(()) => Err(FrameTimeout::Timeout),
+    }
+}
+
+/// Receive a single value from `rx`, bounded by `deadline`. Returns
+/// `Err(())` on timeout or on the sender hanging up (a hung-up sender
+/// before any value is treated as a timeout because the child died
+/// without producing the expected frame).
+fn recv_until_deadline<T>(rx: &mpsc::Receiver<T>, deadline: Instant) -> Result<T, ()> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match rx.recv_timeout(remaining) {
+        Ok(v) => Ok(v),
+        Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => Err(()),
+    }
+}
+
+/// Join a stderr-drain thread, bounded by `deadline`. Returns
+/// `Some(Ok(bytes))` on a clean join, `Some(Err(()))` on a panicked
+/// thread, and `None` on timeout (the thread is still blocked reading).
+fn join_until_deadline(
+    handle: thread::JoinHandle<Vec<u8>>,
+    deadline: Instant,
+) -> Option<Result<Vec<u8>, ()>> {
+    loop {
+        if handle.is_finished() {
+            return Some(handle.join().map_err(|_| ()));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        thread::sleep(core::cmp::min(
+            Duration::from_millis(10),
+            deadline.saturating_duration_since(now),
+        ));
+    }
+}
+
+/// Poll `child.try_wait()` until it exits or the deadline passes.
+/// Returns `Some(())` if the child exited within budget, `None` on
+/// timeout (caller is expected to kill+reap).
+fn wait_child_until_deadline(child: &mut Child, deadline: Instant) -> Option<()> {
+    loop {
+        match child.try_wait() {
+            // Exited (Some) or un-waitable (Err, e.g. already reaped):
+            // either way the child is no longer running, so stop polling.
+            Ok(Some(_)) | Err(_) => return Some(()),
+            Ok(None) => {}
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        thread::sleep(core::cmp::min(
+            Duration::from_millis(10),
+            deadline.saturating_duration_since(now),
+        ));
+    }
+}
+
+/// Kill and reap the child unconditionally. Both calls are best-effort:
+/// on a child that already exited they are harmless no-ops.
+fn terminate_child_now(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Map a `FrameError` from the stdout reader to the crate's error type,
+/// preserving the diagnostic distinctions `read_frame_or_err` made.
+fn map_frame_error(e: FrameError) -> Error {
+    match e {
+        FrameError::LengthTruncated => {
+            Error::ExternalSignerBadResponse("child closed stdout before sending a frame".into())
+        }
+        FrameError::LengthTooLarge(n) => {
+            Error::ExternalSignerBadResponse(format!("frame length {n} exceeds 1 MiB cap"))
+        }
+        FrameError::BodyTruncated { expected, .. } => Error::ExternalSignerBadResponse(format!(
+            "frame body truncated (expected {expected} bytes)"
+        )),
+        FrameError::DecodeFailed => {
+            Error::ExternalSignerBadResponse("frame failed to decode as SignerFrame".into())
+        }
+        FrameError::Io(e) => Error::ExternalSignerSpawn(format!("read frame: {e}")),
     }
 }
 
@@ -230,29 +615,12 @@ fn rpc_key_form_for(_a: Algorithm) -> KeyForm {
     KeyForm::KEY_FORM_RAW_BYTES
 }
 
-fn read_frame_or_err<R: Read>(r: &mut R) -> Result<SignerFrame, Error> {
-    match read_frame::<_, SignerFrame>(r) {
-        Ok(f) => Ok(f),
-        Err(FrameError::LengthTruncated) => Err(Error::ExternalSignerBadResponse(
-            "child closed stdout before sending a frame".into(),
-        )),
-        Err(FrameError::LengthTooLarge(n)) => Err(Error::ExternalSignerBadResponse(format!(
-            "frame length {n} exceeds 1 MiB cap"
-        ))),
-        Err(FrameError::BodyTruncated { expected, .. }) => Err(Error::ExternalSignerBadResponse(
-            format!("frame body truncated (expected {expected} bytes)"),
-        )),
-        Err(FrameError::DecodeFailed) => Err(Error::ExternalSignerBadResponse(
-            "frame failed to decode as SignerFrame".into(),
-        )),
-        Err(FrameError::Io(e)) => Err(Error::ExternalSignerSpawn(format!("read frame: {e}"))),
-    }
-}
-
+#[cfg(feature = "algo-p256")]
 fn extract_signature(
     frame: SignerFrame,
     expected_algorithm: Algorithm,
     pae: &[u8],
+    webauthn_policy: &WebAuthnPolicy,
 ) -> Result<(Vec<u8>, String), Error> {
     match frame.body {
         Some(signer_frame::Body::SignResponse(sr)) => {
@@ -262,7 +630,14 @@ fn extract_signature(
             let key_id = sr.key_id.clone().ok_or_else(|| {
                 Error::ExternalSignerBadResponse("SignResponse missing key_id".into())
             })?;
-            validate_sign_response(&sr, expected_algorithm, pae, &signature, &key_id)?;
+            validate_sign_response_with_policy(
+                &sr,
+                expected_algorithm,
+                pae,
+                &signature,
+                &key_id,
+                webauthn_policy,
+            )?;
             Ok((signature, key_id))
         }
         Some(signer_frame::Body::Error(e)) => {
@@ -276,7 +651,115 @@ fn extract_signature(
     }
 }
 
+#[cfg(not(feature = "algo-p256"))]
+fn extract_signature(
+    frame: SignerFrame,
+    expected_algorithm: Algorithm,
+    pae: &[u8],
+) -> Result<(Vec<u8>, String), Error> {
+    match frame.body {
+        Some(signer_frame::Body::SignResponse(sr)) => {
+            let signature = sr.signature.clone().ok_or_else(|| {
+                Error::ExternalSignerBadResponse("SignResponse missing signature".into())
+            })?;
+            let key_id = sr.key_id.clone().ok_or_else(|| {
+                Error::ExternalSignerBadResponse("SignResponse missing key_id".into())
+            })?;
+            validate_sign_response_inner(&sr, expected_algorithm, pae, &signature, &key_id)?;
+            Ok((signature, key_id))
+        }
+        Some(signer_frame::Body::Error(e)) => {
+            let msg = e.message.unwrap_or_default();
+            Err(Error::ExternalSignerFailed(msg))
+        }
+        other => Err(Error::ExternalSignerBadResponse(format!(
+            "expected SignResponse or Error, got {}",
+            frame_name(&other),
+        ))),
+    }
+}
+
+/// Self-consistency check with the permissive `WebAuthn` policy. Stable
+/// 5-arg entry point used by tests; the production sign path uses
+/// [`validate_sign_response_with_policy`] with the signer's configured
+/// policy (p256 builds) or [`validate_sign_response_inner`] (no-p256).
+#[cfg(test)]
 fn validate_sign_response(
+    sr: &SignResponse,
+    expected_algorithm: Algorithm,
+    pae: &[u8],
+    signature: &[u8],
+    key_id: &str,
+) -> Result<(), Error> {
+    #[cfg(feature = "algo-p256")]
+    {
+        validate_sign_response_with_policy(
+            sr,
+            expected_algorithm,
+            pae,
+            signature,
+            key_id,
+            &WebAuthnPolicy::permissive(),
+        )
+    }
+    #[cfg(not(feature = "algo-p256"))]
+    {
+        validate_sign_response_inner(sr, expected_algorithm, pae, signature, key_id)
+    }
+}
+
+/// Self-consistency check, applying `webauthn_policy` on the `WebAuthn`
+/// path. Only present when `algo-p256` is enabled (`WebAuthn` requires
+/// P-256).
+#[cfg(feature = "algo-p256")]
+fn validate_sign_response_with_policy(
+    sr: &SignResponse,
+    expected_algorithm: Algorithm,
+    pae: &[u8],
+    signature: &[u8],
+    key_id: &str,
+    webauthn_policy: &WebAuthnPolicy,
+) -> Result<(), Error> {
+    let actual_algorithm = sr
+        .algorithm
+        .as_ref()
+        .ok_or_else(|| Error::ExternalSignerBadResponse("SignResponse missing algorithm".into()))?
+        .to_i32();
+    let expected_rpc = rpc_algorithm_for(expected_algorithm) as i32;
+    if actual_algorithm != expected_rpc {
+        return Err(Error::ExternalSignerBadResponse(format!(
+            "SignResponse algorithm mismatch: got {actual_algorithm}, expected {expected_rpc}"
+        )));
+    }
+
+    if sr.webauthn.is_set() {
+        return validate_webauthn_response(
+            sr,
+            expected_algorithm,
+            pae,
+            signature,
+            key_id,
+            webauthn_policy,
+        );
+    }
+
+    let public_key = sr.public_key.as_deref().ok_or_else(|| {
+        Error::ExternalSignerBadResponse("SignResponse missing public_key".into())
+    })?;
+
+    match expected_algorithm {
+        Algorithm::Ed25519 => validate_ed25519_response(public_key, pae, signature, key_id),
+        Algorithm::Secp256k1 => validate_secp256k1_response(public_key, pae, signature, key_id),
+        Algorithm::P256 => validate_p256_response(public_key, pae, signature, key_id),
+        #[cfg(feature = "bls-threshold")]
+        Algorithm::Bls12381Threshold => Ok(()),
+    }
+}
+
+/// Self-consistency check for builds without `algo-p256`. A WebAuthn
+/// marker is rejected because WebAuthn verification needs P-256.
+#[cfg(not(feature = "algo-p256"))]
+fn validate_sign_response_inner(
     sr: &SignResponse,
     expected_algorithm: Algorithm,
     pae: &[u8],
@@ -296,7 +779,7 @@ fn validate_sign_response(
     }
 
     if sr.webauthn.is_set() {
-        return validate_webauthn_response(sr, expected_algorithm, pae, signature, key_id);
+        return Err(Error::AlgorithmNotEnabled(Algorithm::P256));
     }
 
     let public_key = sr.public_key.as_deref().ok_or_else(|| {
@@ -312,12 +795,14 @@ fn validate_sign_response(
     }
 }
 
+#[cfg(feature = "algo-p256")]
 fn validate_webauthn_response(
     sr: &SignResponse,
     expected_algorithm: Algorithm,
     pae: &[u8],
     signature: &[u8],
     key_id: &str,
+    webauthn_policy: &WebAuthnPolicy,
 ) -> Result<(), Error> {
     if expected_algorithm != Algorithm::P256 {
         return Err(Error::ExternalSignerBadResponse(
@@ -327,11 +812,15 @@ fn validate_webauthn_response(
     let public_key = sr.public_key.as_deref().ok_or_else(|| {
         Error::ExternalSignerBadResponse("WebAuthn SignResponse missing public_key".into())
     })?;
-    #[cfg(feature = "algo-p256")]
     {
-        use crate::webauthn::{WebAuthnWrapping, verify_webauthn_wrapping};
+        use crate::webauthn::{WebAuthnWrapping, verify_webauthn_wrapping_with_policy};
         use p256::ecdsa::VerifyingKey;
 
+        // Explicit SEC1 shape assertion before any verification: a
+        // WebAuthn assertion is always P-256, so the returned public key
+        // MUST be a valid SEC1 point. `from_sec1_bytes` rejects the
+        // wrong length, a non-point, and the identity — defense in depth
+        // ahead of `verify_webauthn_wrapping_with_policy`'s own decode.
         let vk = VerifyingKey::from_sec1_bytes(public_key).map_err(|_| {
             Error::ExternalSignerBadResponse(
                 "WebAuthn SignResponse public_key is not a valid P-256 SEC1 key".into(),
@@ -351,16 +840,17 @@ fn validate_webauthn_response(
             authenticator_data: authenticator_data.to_vec(),
             client_data_json: client_data_json.to_vec(),
         };
-        verify_webauthn_wrapping(pae, &wrapping, public_key, signature)?;
+        verify_webauthn_wrapping_with_policy(
+            pae,
+            &wrapping,
+            public_key,
+            signature,
+            webauthn_policy,
+        )?;
 
         let compressed = vk.to_encoded_point(true);
         let canonical = format!("p256:{}", hex_lower(compressed.as_bytes()));
         require_matching_canonical_keyid(key_id, &[("p256", &canonical)])
-    }
-    #[cfg(not(feature = "algo-p256"))]
-    {
-        let _ = public_key;
-        Err(Error::AlgorithmNotEnabled(Algorithm::P256))
     }
 }
 
@@ -507,24 +997,6 @@ fn frame_name(b: &Option<signer_frame::Body>) -> &'static str {
         Some(Body::Error(_)) => "error",
         None => "(empty body)",
     }
-}
-
-fn drain_capped<R: Read>(mut r: R) -> Result<Vec<u8>, Error> {
-    let mut out = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let n = r
-            .read(&mut chunk)
-            .map_err(|e| Error::ExternalSignerSpawn(format!("read: {e}")))?;
-        if n == 0 {
-            break;
-        }
-        if out.len() + n > MAX_STDERR_DRAIN {
-            return Err(Error::ExternalSignerOutputTooLarge);
-        }
-        out.extend_from_slice(&chunk[..n]);
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -749,5 +1221,187 @@ mod tests {
         let err =
             validate_sign_response(&bad, Algorithm::P256, PAE, &sig, &bad_key_id).unwrap_err();
         assert!(err.to_string().contains("key_id mismatch"));
+    }
+
+    // -- Bounded-execution tests (unix-gated spawn tests) -----------
+    //
+    // Each test writes a tiny `#!/bin/sh` child to a tempdir, chmods it
+    // +x, and drives an `ExternalSigner` against it with a short timeout
+    // so the suite stays fast. Mirrors the SSH transport's
+    // `wait_child_timeout_kills_stalled_child` style.
+    #[cfg(all(unix, feature = "algo-ed25519"))]
+    mod bounded {
+        use super::*;
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::time::Duration;
+
+        /// Write `script` to a tempdir as an executable, returning the
+        /// tempdir (kept alive) and the absolute path to the binary.
+        fn write_script(script: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("signer.sh");
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(script.as_bytes()).unwrap();
+            f.flush().unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+            (dir, path)
+        }
+
+        /// Serialize a valid Ed25519 `SignResponse` (Hello + `SignResponse`)
+        /// to a length-prefixed frame byte stream, base64-free, written
+        /// to a file the child can `cat`.
+        fn valid_response_frames_file(dir: &std::path::Path) -> std::path::PathBuf {
+            use ed25519_dalek::{Signer as _, SigningKey};
+
+            let sk = SigningKey::from_bytes(&[0x42; 32]);
+            let pk = sk.verifying_key().to_bytes().to_vec();
+            let sig = sk.sign(PAE).to_bytes().to_vec();
+            let hello_resp = SignerFrame {
+                body: Some(signer_frame::Body::HelloResponse(Box::<
+                    mkit_rpc::mkit::rpc::v1::signer::HelloResponse,
+                >::default(
+                ))),
+                ..Default::default()
+            };
+            let sign_resp = SignerFrame {
+                body: Some(signer_frame::Body::SignResponse(Box::new(
+                    SignResponse::default()
+                        .with_signature(sig)
+                        .with_public_key(pk)
+                        .with_algorithm(RpcAlgorithm::ALGORITHM_ED25519)
+                        .with_key_id("opaque:test".to_owned()),
+                ))),
+                ..Default::default()
+            };
+            let mut bytes = Vec::new();
+            write_frame(&mut bytes, &hello_resp).unwrap();
+            write_frame(&mut bytes, &sign_resp).unwrap();
+            let path = dir.join("response.bin");
+            std::fs::write(&path, &bytes).unwrap();
+            path
+        }
+
+        #[test]
+        fn hang_before_stdout_times_out_and_reaps_child() {
+            // Child reads stdin then sleeps forever without writing
+            // stdout — the classic "hung on a touch that never comes".
+            let (_dir, path) = write_script("#!/bin/sh\ncat >/dev/null\nsleep 600\n");
+            let mut signer = ExternalSigner::new(&path)
+                .unwrap()
+                .with_timeout(Duration::from_millis(300));
+            let err = signer.sign(PAE).expect_err("must time out");
+            // A hung child must produce a bounded timeout. The expected
+            // phase is `response-read` (the child reads stdin then sleeps
+            // without writing stdout), but under heavy CPU load an earlier
+            // phase (e.g. request-write) can consume the budget first, so
+            // we assert only that it is a bounded timeout.
+            assert!(
+                matches!(err, Error::ExternalSignerTimeout(_)),
+                "expected a bounded timeout, got {err:?}"
+            );
+            // No assertion on the child handle (it's dropped inside
+            // sign), but the call returned promptly which proves the
+            // child was killed+reaped rather than blocking forever.
+        }
+
+        #[test]
+        fn fills_stderr_before_stdout_does_not_deadlock() {
+            // Child floods stderr (well past a pipe buffer) BEFORE
+            // emitting any stdout, then hangs. Without the concurrent
+            // stderr drain this would deadlock; with it, we still hit the
+            // response-read timeout cleanly (bounded, no hang).
+            let (_dir, path) = write_script(
+                "#!/bin/sh\ncat >/dev/null\n\
+                 yes deadlock-flood-line | head -c 2000000 1>&2\n\
+                 sleep 600\n",
+            );
+            let mut signer = ExternalSigner::new(&path)
+                .unwrap()
+                .with_timeout(Duration::from_millis(500));
+            let err = signer
+                .sign(PAE)
+                .expect_err("must not deadlock; must time out");
+            // The load-bearing property here is "no deadlock": with the
+            // concurrent stderr drain the call returns a bounded timeout
+            // instead of wedging forever. The expected phase is
+            // `response-read`, but as with the other bounded tests an
+            // earlier phase can trip first under CPU load, so we assert
+            // only on boundedness.
+            assert!(
+                matches!(err, Error::ExternalSignerTimeout(_)),
+                "expected a bounded timeout (no deadlock), got {err:?}"
+            );
+        }
+
+        #[test]
+        fn valid_response_then_never_exits_is_bounded() {
+            // Child emits a valid Hello+SignResponse, then sleeps forever
+            // without closing. We must still bound the wait: the response
+            // is consumed but the child-exit phase trips the deadline.
+            let dir = tempfile::tempdir().unwrap();
+            let resp = valid_response_frames_file(dir.path());
+            let script = format!(
+                "#!/bin/sh\ncat >/dev/null\ncat '{}'\nsleep 600\n",
+                resp.display()
+            );
+            let bin = dir.path().join("signer.sh");
+            std::fs::write(&bin, script).unwrap();
+            let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).unwrap();
+
+            let mut signer = ExternalSigner::new(&bin)
+                .unwrap()
+                .with_timeout(Duration::from_millis(1500));
+            let err = signer
+                .sign(PAE)
+                .expect_err("valid response but no exit must trip a bounded timeout");
+            // The acceptance criterion is BOUNDEDNESS: a signer that emits
+            // a valid response then never exits must return *some* timeout
+            // rather than hang. Which phase trips first
+            // (response-read / stderr-drain / child-exit) is scheduling-
+            // dependent — under CPU load the response-read budget can be
+            // consumed before the child's stdout is ever scheduled — so we
+            // assert only that it is a bounded timeout, not a specific
+            // phase. The point proven is "no hang", which the prompt
+            // return promptly already demonstrates.
+            assert!(
+                matches!(err, Error::ExternalSignerTimeout(_)),
+                "expected a bounded timeout, got {err:?}"
+            );
+        }
+
+        #[test]
+        fn valid_response_and_clean_exit_succeeds() {
+            // Control: the same valid response, but the child exits
+            // promptly. This must succeed within the timeout, proving the
+            // bounded path doesn't break the happy case.
+            let dir = tempfile::tempdir().unwrap();
+            let resp = valid_response_frames_file(dir.path());
+            let script = format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", resp.display());
+            let bin = dir.path().join("signer.sh");
+            std::fs::write(&bin, script).unwrap();
+            let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).unwrap();
+
+            // Generous budget on purpose: this test asserts SUCCESS, so a
+            // tight wall-clock would false-fail on a loaded CI box where
+            // the spawned shell can't be scheduled promptly (a saturated
+            // machine has been observed to delay a trivial `cat` by
+            // several seconds). The point of the test is that the bounded
+            // path doesn't break the happy case, not how fast it is — so
+            // the timeout only needs to be comfortably above any realistic
+            // scheduling delay.
+            let mut signer = ExternalSigner::new(&bin)
+                .unwrap()
+                .with_timeout(Duration::from_secs(30));
+            let sig = signer.sign(PAE).expect("happy path within timeout");
+            assert_eq!(sig.len(), 64, "Ed25519 signature is 64 bytes");
+            assert_eq!(signer.keyid().unwrap(), "opaque:test");
+        }
     }
 }

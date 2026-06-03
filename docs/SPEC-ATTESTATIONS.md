@@ -404,6 +404,18 @@ and MUST be absolute (relative paths are rejected at construction to
 close a `$PATH` resolution race). The child receives the PAE inside
 `SignRequest.payload` on stdin — never on argv.
 
+**Bounded execution.** mkit bounds the whole signer conversation with a
+single wall-clock deadline (spawn → request-write → response-read →
+stderr-drain → child-exit) and concurrently drains the child's stderr so
+a stderr-heavy signer cannot deadlock against a blocked stdout read. On
+timeout the child is killed and reaped. The deadline defaults to 120s
+(generous for hardware touch/PIN/biometric) and is configurable via the
+user-scoped `attest.external_signer_timeout_secs`. See
+[SPEC-EXTERNAL-SIGNER §2.1](SPEC-EXTERNAL-SIGNER.md#21-timeout--liveness).
+WebAuthn assertions are additionally validated against a configurable
+ceremony policy (RP-ID, origin, UP/UV, crossOrigin, counter) — see
+[SPEC-EXTERNAL-SIGNER §6.1](SPEC-EXTERNAL-SIGNER.md#61-webauthn-verifier-policy).
+
 **Signer argv.** The subprocess is spawned with an optional argv
 vector in addition to the protobuf request on stdin. By default the
 vector is empty. There are three ways to populate it, each
@@ -644,6 +656,7 @@ default_algorithm    = "ed25519" | "secp256k1" | "p256"   (user-scoped)
 signer               = "repo-key" | "external" | "keystore"  (user-scoped)
 external_signer_path = /abs/path/to/binary               (user-scoped; required when signer = external)
 external_signer_args = a|b|c                             (user-scoped; pipe-separated argv, optional)
+external_signer_timeout_secs = 120                       (user-scoped; whole-conversation deadline, default 120)
 secp256k1_key_path   = .mkit/keys/secp256k1.key          (user-scoped; default shown)
 p256_key_path        = .mkit/keys/p256.key               (user-scoped; default shown)
 
