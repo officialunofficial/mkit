@@ -141,6 +141,33 @@ mkit does NOT defend:
 - A user who disables host-key checking at the OpenSSH layer.
 - A user who pins a known-bad CA in their system trust store.
 
+#### 3.4.1 Encrypted transport (`mkit+enc://`) peer authentication
+
+The encrypted-stream transport uses two independent, *directional*
+authentication mechanisms — do not conflate them:
+
+- **Server-to-client** — the `?pubkey=<…>` value in the client's
+  `mkit+enc://<host>:<port>?pubkey=<key>` URL pins the **server's**
+  static ed25519 key. The client's `dial` aborts the handshake if the
+  remote's actual key does not match. This authenticates the SERVER to
+  the CLIENT (there is no TOFU; see SPEC-TRANSPORT-ENC §1). It does
+  **not** say anything about who the client is.
+- **Client-to-server** — authentication of the dialing client is the
+  job of the server's bouncer **allowlist**, not of `?pubkey=`. Issue
+  #178 makes `mkit serve --listen-enc` **fail-closed**: it refuses to
+  bind without an `--enc-authorized-peers` allowlist (or the explicit
+  `--unsafe-allow-any-enc-peer` dev escape). A client whose static
+  ed25519 key is not on the allowlist is rejected at the handshake and
+  never receives a `HelloResponse`, list-refs, packs, or update-ref.
+  This closes the previous "accepts any peer" gap where the listener
+  hardcoded a permissive bouncer.
+
+The server identity is a stable key file (so pinned client `?pubkey=`
+values survive restarts) and the allowlist / identity key paths are
+user-scoped or CLI-only — never read from repo-local `.mkit/config`
+(§4), so a hostile clone can neither authorize itself as a peer nor
+swap the server identity.
+
 ### 3.5 Compromised release pipeline runner
 
 Attacker has code execution on the GitHub Actions runner that
@@ -218,6 +245,21 @@ endpoint in user-scoped `trusted_remote_endpoint`. This closes the
 hostile-clone credential-exfiltration channel tracked in issue #97
 without breaking safe portable defaults for unauthenticated mirrors
 and SSH-bearing remotes.
+
+The gate is enforced at a single transport-dispatch choke point
+(`remote_dispatch::open_trusted`), which runs the per-endpoint check
+*before* it constructs any credential-bearing transport. The check is
+keyed on the **resolved endpoint plus its provenance** — `repo_chosen`
+(selected by repo-scoped config: the flat `remote_endpoint` or a
+`remote.<name>.url` entry) versus user-chosen (user-scoped config or an
+explicit CLI argument) — never on a remote *name*. This means the same
+fence applies uniformly whether the credential-bearing endpoint comes
+from the legacy single-remote field or from a named remote: a hostile
+clone cannot smuggle ambient credentials to a new host by hiding the
+endpoint behind a named remote, and a user-chosen endpoint with the
+user's own credentials is never second-guessed. Unauthenticated and
+SSH/file flows carry no ambient HTTP/S3 credentials and pass the gate
+unchanged.
 
 ---
 

@@ -240,6 +240,16 @@ When you add a key to `Config`:
 - This spec does not cover trust-roots file selection — see
   THREAT-MODEL §5. The trust-roots path is implicitly
   user-scoped-only because there is no repo config knob that sets it.
+- The encrypted-transport peer-authorization allowlist and the
+  server/client identity keys (issue #178) are likewise
+  **user-scoped / CLI-only**. They are supplied as command-line flags
+  (`--enc-authorized-peers`, `--enc-server-key`) or via a user-scoped
+  environment variable (`MKIT_ENC_CLIENT_KEY`) and a user-scoped
+  default path (`~/.config/mkit/enc/server.key`). They are members of
+  the user-scoped key family alongside the legacy signing-key paths and
+  trust-roots, and are **never** read from repo-local `.mkit/config` —
+  there is no repo config knob that sets them, so a hostile repo cannot
+  authorize itself as a peer or swap the server/client identity.
 
 ---
 

@@ -264,6 +264,180 @@ fn s3_tampered_shard_is_rejected_via_manifest_hash() {
     let _ = &shards; // silence linter — we still own the vec
 }
 
+fn one_retry_backoff() -> BackoffIterator {
+    BackoffIterator::with(Duration::from_millis(1), Duration::from_millis(1), 1)
+}
+
+fn build_transport_one_retry(endpoint: &str) -> S3Transport {
+    let mut t = S3Transport::with_parts(endpoint, "bucket", None, demo_creds())
+        .expect("construct transport");
+    t.set_clock(fixed_clock);
+    t.set_sleeper(noop_sleep);
+    t.set_backoff(one_retry_backoff);
+    t
+}
+
+/// #181 fix A: an idempotent shard GET that returns 503 once then 200
+/// is retried and succeeds. The mock asserts both attempts were made.
+#[test]
+fn s3_shard_get_retries_on_503_then_succeeds() {
+    let mut server = mockito::Server::new();
+    let pack = synthetic_pack(64 * 1024);
+    let key = key_for(&pack);
+    let (shards, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+    let manifest_bytes = encode_manifest(&manifest).unwrap();
+    let hex = mkit_core::hash::to_hex(key.as_bytes());
+
+    let _m_manifest = server
+        .mock(
+            "GET",
+            format!("/bucket/packs/{hex}/shards.manifest").as_str(),
+        )
+        .with_status(200)
+        .with_body(manifest_bytes)
+        .create();
+
+    // Shard 0: 503 once then 200 (one_retry_backoff allows one retry).
+    let flaky_path = format!("/bucket/packs/{hex}/shards/0");
+    let flaky_5xx = server
+        .mock("GET", flaky_path.as_str())
+        .with_status(503)
+        .expect(1)
+        .create();
+    let flaky_ok = server
+        .mock("GET", flaky_path.as_str())
+        .with_status(200)
+        .with_body(shards[0].bytes.clone())
+        .expect(1)
+        .create();
+    for shard in shards.iter().skip(1) {
+        let path = format!("/bucket/packs/{hex}/shards/{}", shard.index);
+        let _m = server
+            .mock("GET", path.as_str())
+            .with_status(200)
+            .with_body(shard.bytes.clone())
+            .create();
+    }
+
+    let t = build_transport_one_retry(&server.url());
+    assert_eq!(t.download_pack(&key).unwrap(), pack);
+    flaky_5xx.assert();
+    flaky_ok.assert();
+}
+
+/// #181 fix A: a shard GET returning 403 is NOT retried (terminal).
+/// The mock asserts it was hit exactly once. Quorum is reached from
+/// the remaining shards so the overall download still succeeds.
+#[test]
+fn s3_shard_get_does_not_retry_on_403() {
+    let mut server = mockito::Server::new();
+    let pack = synthetic_pack(64 * 1024);
+    let key = key_for(&pack);
+    let (shards, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+    let manifest_bytes = encode_manifest(&manifest).unwrap();
+    let hex = mkit_core::hash::to_hex(key.as_bytes());
+
+    let _m_manifest = server
+        .mock(
+            "GET",
+            format!("/bucket/packs/{hex}/shards.manifest").as_str(),
+        )
+        .with_status(200)
+        .with_body(manifest_bytes)
+        .create();
+
+    let denied_path = format!("/bucket/packs/{hex}/shards/0");
+    let denied = server
+        .mock("GET", denied_path.as_str())
+        .with_status(403)
+        .expect(1)
+        .create();
+    for shard in shards.iter().skip(1) {
+        let path = format!("/bucket/packs/{hex}/shards/{}", shard.index);
+        let _m = server
+            .mock("GET", path.as_str())
+            .with_status(200)
+            .with_body(shard.bytes.clone())
+            .create();
+    }
+
+    let t = build_transport(&server.url()); // 5-attempt ladder
+    assert_eq!(t.download_pack(&key).unwrap(), pack);
+    denied.assert();
+}
+
+/// #181 fix B: a stalled straggler (a shard with no mock → fails fast)
+/// does not block the download once quorum is reached. K extras are
+/// dropped, leaving exactly `minimum` shards; the collection loop must
+/// return without joining the failed stragglers.
+#[test]
+fn s3_shard_download_does_not_block_on_straggler_after_quorum() {
+    let mut server = mockito::Server::new();
+    let dropped = [16u16, 17, 18, 19];
+    let (pack, key, _mocks) = publish_sharded(&mut server, 64 * 1024, &dropped);
+    let t = build_transport(&server.url());
+    assert_eq!(t.download_pack(&key).unwrap(), pack);
+}
+
+/// #180 regression: shard retries MUST keep using the EFFECTIVE PREFIX
+/// path for both the manifest and the shard objects. Here the transport
+/// is built with prefix `repo-a` but mockito ONLY serves the prefixed
+/// paths (`/bucket/repo-a/packs/...`). If a retry ever dropped the
+/// prefix, the request would 404 against the unprefixed path and the
+/// round trip would fail. We also flake shard 0 with a 503 to force the
+/// retry path specifically through the prefixed key.
+#[test]
+fn s3_shard_retry_preserves_effective_prefix() {
+    let mut server = mockito::Server::new();
+    let prefix = "repo-a";
+    let pack = synthetic_pack(64 * 1024);
+    let key = key_for(&pack);
+    let (shards, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+    let manifest_bytes = encode_manifest(&manifest).unwrap();
+    let hex = mkit_core::hash::to_hex(key.as_bytes());
+
+    let _m_manifest = server
+        .mock(
+            "GET",
+            format!("/bucket/{prefix}/packs/{hex}/shards.manifest").as_str(),
+        )
+        .with_status(200)
+        .with_body(manifest_bytes)
+        .create();
+
+    // Shard 0 under the PREFIXED path: 503 then 200. A retry that
+    // dropped the prefix would miss this mock and 404.
+    let flaky_path = format!("/bucket/{prefix}/packs/{hex}/shards/0");
+    let flaky_5xx = server
+        .mock("GET", flaky_path.as_str())
+        .with_status(503)
+        .expect(1)
+        .create();
+    let flaky_ok = server
+        .mock("GET", flaky_path.as_str())
+        .with_status(200)
+        .with_body(shards[0].bytes.clone())
+        .expect(1)
+        .create();
+    for shard in shards.iter().skip(1) {
+        let path = format!("/bucket/{prefix}/packs/{hex}/shards/{}", shard.index);
+        let _m = server
+            .mock("GET", path.as_str())
+            .with_status(200)
+            .with_body(shard.bytes.clone())
+            .create();
+    }
+
+    let mut t = S3Transport::with_parts(server.url(), "bucket", Some(prefix.into()), demo_creds())
+        .expect("construct transport");
+    t.set_clock(fixed_clock);
+    t.set_sleeper(noop_sleep);
+    t.set_backoff(one_retry_backoff);
+    assert_eq!(t.download_pack(&key).unwrap(), pack);
+    flaky_5xx.assert();
+    flaky_ok.assert();
+}
+
 // Helper used by the build to confirm a Shard struct is reachable.
 #[allow(dead_code)]
 fn _shard_helper() -> Shard {

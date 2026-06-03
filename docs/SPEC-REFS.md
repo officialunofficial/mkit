@@ -57,10 +57,20 @@ On local disk (`.mkit/refs/heads/<name>`, `.mkit/refs/tags/<name>`,
 use the same path shape relative to the transport's root.
 
 `refs/remotes/<remote>/<name>` is local-only remote-tracking state. The
-current single-remote CLI stores fetched branch tips under
+single-remote CLI stores fetched branch tips under
 `refs/remotes/default/<name>` and never writes fetched tips directly to
 `refs/heads/<name>`. `mkit pull` may then fast-forward the current local
 branch from the matching remote-tracking ref.
+
+Named remotes (`mkit remote add <name> <url>`) store their tracking refs
+under `refs/remotes/<name>/<branch>`. `mkit push` uses the local
+remote-tracking ref as its **CAS lease**: a default (current-branch)
+push writes the remote `refs/heads/<branch>` with a `Match(tracked)`
+condition (or `Missing` for a first push), so a remote that has moved
+past the tip we last saw rejects the update as non-fast-forward. On a
+successful push, mkit advances the local `refs/remotes/<remote>/<branch>`
+to the pushed tip. `--force-with-lease` keeps this lease; `--force`
+drops to an unconditional write.
 
 `HEAD` is a special file at `.mkit/HEAD` containing either:
 
@@ -280,6 +290,43 @@ Listing `.mkit/refs/heads/` is recursive (nested directories like
 defeat adversarial nesting. Files that fail `validate_ref_name` or
 whose bytes do not decode to a valid ref wire are silently skipped
 from listings.
+
+### 6.1 Operation-state files (merge / cherry-pick / rebase)
+
+Resumable history operations persist their state under `.mkit/` using
+Git-compatible names plus one documented mkit sidecar. These are not
+refs (they are not listed by `listRefs` and are not part of the ref
+namespace); they are operation scratch state consumed by
+`--continue` / `--abort` / `--skip`.
+
+```
+.mkit/MERGE_HEAD           64-hex + '\n'  — other parent of an in-progress merge
+.mkit/CHERRY_PICK_HEAD     64-hex + '\n'  — commit being applied by a cherry-pick
+.mkit/ORIG_HEAD            64-hex + '\n'  — HEAD before the operation (for --abort)
+.mkit/MERGE_MSG            raw bytes      — pending merge commit message
+.mkit/CHERRY_PICK_MSG      raw bytes      — pending cherry-pick commit message
+.mkit/mkit-conflicts       sidecar (below)
+.mkit/rebase-apply/        rebase state dir; holds a mkit-conflicts sidecar when paused
+```
+
+Presence of `MERGE_HEAD` ⇒ a merge is in progress; `CHERRY_PICK_HEAD` ⇒
+a cherry-pick; `rebase-apply/` ⇒ a rebase. Starting any of the three
+while one is already in progress is refused.
+
+The `mkit-conflicts` sidecar is line-oriented, one line per conflicting
+path, tab-separated, with the path last (so it may not contain a tab):
+
+```
+<kind>\t<base_hex|->\t<ours_hex|->\t<theirs_hex|->\t<path>\n
+```
+
+where `<kind>` ∈ {`modify`, `addadd`, `deletemodify`}, a missing side is
+encoded as a single `-`, and `<path>` is validated with the same rules
+as a staged index path (SPEC-INDEX §2). Hash files tolerate trailing
+whitespace on read. The whole sidecar is capped at 1 MiB. This sidecar
+does **not** change the `.mkit/index` format: the index remains a
+single-stage **resolved** staging area (no unmerged stages); conflict
+base/ours/theirs material lives only in this sidecar.
 
 ---
 

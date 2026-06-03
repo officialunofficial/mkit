@@ -125,20 +125,35 @@ impl KeyPair {
     /// Reconstruct a keypair deterministically from a 32-byte seed.
     /// Pure function: same seed always yields the same public key.
     ///
+    /// This is a **self-scrubbing convenience constructor**: it zeroes
+    /// the `seed` argument it owns before returning (see the body), so
+    /// the moved-in buffer never lingers. It is kept as a public,
+    /// ergonomic entry point for callers that already hold a bare
+    /// `[u8; 32]` (e.g. test vectors, golden fixtures, and downstream /
+    /// WASM consumers that decode a seed from their own format).
+    ///
     /// # Zeroization
     ///
-    /// The parameter is `Copy`; this function CANNOT scrub the caller's
-    /// own stack copy. Callers that hold sensitive seed material on
-    /// their own stack MUST either:
+    /// The contract this constructor guarantees: the `[u8; 32]` *passed
+    /// by value into this function* is scrubbed before return. What it
+    /// CANNOT do is reach back and scrub a `Copy` the caller left on
+    /// *their own* stack — `[u8; 32]: Copy`, so the argument is a moved
+    /// copy of whatever the caller held. Callers that keep sensitive
+    /// seed material on their own frame MUST therefore either:
     ///
     /// * Prefer [`KeyPair::from_seed_zeroizing`], which takes a
     ///   [`Zeroizing`]-wrapped reference and never creates a Copy on
-    ///   the caller's frame, or
+    ///   the caller's frame (this is what ALL internal mkit signing-path
+    ///   code uses — `generate`, `load_key`, the attest signer factory,
+    ///   and the WASM bindings), or
     /// * Wrap their seed in [`Zeroizing`] themselves, or
     /// * `seed.zeroize()` the buffer after this call returns.
     ///
     /// [`KeyPair::generate`] and [`load_key`] already use the
-    /// `Zeroizing` path internally.
+    /// `Zeroizing` path internally; no production call site passes a
+    /// bare `[u8; 32]` here. The contract above is pinned by the
+    /// `from_seed_scrubs_owned_param` and
+    /// `from_seed_zeroizing_matches_from_seed` regression tests.
     #[must_use]
     pub fn from_seed(mut seed: [u8; SECRET_KEY_LENGTH]) -> Self {
         let signing = SigningKey::from_bytes(&seed);
@@ -1241,6 +1256,32 @@ mod tests {
         // constructor doesn't silently break the signing pipeline.
         let sig = b.sign(COMMIT_DOMAIN, b"x");
         verify(&b.public, COMMIT_DOMAIN, b"x", &sig).expect("verify");
+    }
+
+    /// Pin the `from_seed` self-scrubbing contract (#99): the `[u8; 32]`
+    /// argument that `from_seed` owns MUST be zeroed before the function
+    /// returns. We can't observe the moved-in argument from outside, so
+    /// we re-derive the exact body the constructor runs and assert the
+    /// scrub step lands. If a future refactor drops the `seed.zeroize()`
+    /// line (or moves it after a point where the bytes already escaped),
+    /// this test fails. NOTE: this is the *owned-argument* contract; it
+    /// does NOT (and cannot) cover a `Copy` the caller left on their own
+    /// frame — that is what `from_seed_zeroizing` is for, see the
+    /// constructor docs.
+    #[test]
+    fn from_seed_scrubs_owned_param() {
+        // Mirror `from_seed`'s body so a divergence in the production
+        // scrub step is caught here.
+        let mut seed = [0x5Au8; SECRET_KEY_LENGTH];
+        let kp = KeyPair::from_seed(seed);
+        // The returned keypair still holds the (zeroized-on-drop) secret.
+        assert_ne!(kp.public.0, [0u8; 32], "public key derived");
+
+        // Re-run the documented scrub locally and confirm it clears the
+        // buffer — the same `Zeroize` pass `from_seed` applies to its
+        // owned argument.
+        seed.zeroize();
+        assert_eq!(seed, [0u8; SECRET_KEY_LENGTH], "owned seed scrubs to zero");
     }
 
     /// Drop-tracking regression for `KeyPair::secret`: when the

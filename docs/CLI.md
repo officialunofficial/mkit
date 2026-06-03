@@ -173,16 +173,77 @@ Branches / refs:
   run when staged changes, dirty tracked files, or untracked path
   collisions would be overwritten.
 - `mkit tag` — list, create, or delete tags.
-- `mkit merge <branch>` — three-way merge into HEAD. Fast-forwards and
-  clean merges refuse to overwrite staged changes, dirty tracked files,
-  or untracked path collisions.
-- `mkit cherry-pick <hash>` — apply a commit to the current branch.
-  Refuses to overwrite staged changes, dirty tracked files, or untracked
-  path collisions.
-- `mkit rebase <branch> | --continue | --abort` — replay commits onto
-  a different base. Restore steps refuse to overwrite staged changes,
-  dirty tracked files, or untracked path collisions.
+- `mkit merge <branch> | --continue | --abort` — three-way merge into
+  HEAD. Fast-forwards and clean merges refuse to overwrite staged
+  changes, dirty tracked files, or untracked path collisions. On
+  conflict, the conflicting paths are materialized for resolution and a
+  resumable state is recorded; see "Resolving conflicts" below.
+- `mkit cherry-pick <hash> | --continue | --abort` — apply a commit to
+  the current branch. Refuses to overwrite staged changes, dirty tracked
+  files, or untracked path collisions. On conflict, records resumable
+  state; see "Resolving conflicts" below.
+- `mkit rebase <branch> | --continue | --abort | --skip` — replay
+  commits onto a different base. Restore steps refuse to overwrite staged
+  changes, dirty tracked files, or untracked path collisions. On conflict
+  the rebase pauses with resumable state; `--skip` drops the current
+  commit. See "Resolving conflicts" below.
 - `mkit bisect start | good | bad | reset` — binary search for a bug.
+
+### Resolving conflicts
+
+`merge`, `cherry-pick`, and `rebase` all share one resumable-conflict
+workflow. When a 3-way merge cannot auto-resolve a path, the command:
+
+1. Materializes the conflicting paths into the worktree (and stages the
+   ours-side blob into `.mkit/index` so each path is "resolvable"):
+   - **text** modify/modify and add/add → classic 2-way Git markers
+     (`<<<<<<< ours` / `=======` / `>>>>>>> theirs`) are written into
+     the file.
+   - **binary**, **symlink / executable-mode**, **delete/modify**, and
+     **file-vs-directory** → no markers (they would corrupt the file);
+     the surviving side's content is left in place. Resolve these by
+     hand. Each prints a per-path note.
+2. Records resumable operation state under `.mkit/` (see below) and exits
+   non-zero.
+
+To finish, for each conflicting path: edit the worktree file to its
+resolved content (remove all conflict markers), `mkit add <path>`, then:
+
+```sh
+mkit merge --continue        # or cherry-pick --continue / rebase --continue
+```
+
+`--continue` refuses while any text-marker file still contains markers.
+The committed tree is built from the **resolved index/worktree** — not
+the conflict-time "ours wins" snapshot — so your edits (including a third
+distinct resolution) are what land.
+
+Alternatively:
+
+```sh
+mkit merge --abort           # restore HEAD, branch ref, index, and worktree
+mkit rebase --skip           # rebase only: drop the current commit, keep going
+```
+
+`--abort` restores the pre-operation state (or fails with a clear,
+recoverable error and changes nothing). Starting a new merge / cherry-pick
+/ rebase while one is already in progress is refused.
+
+#### Operation-state files
+
+All live under `.mkit/`; rebase keeps its state inside
+`.mkit/rebase-apply/`. These use Git-compatible names plus one documented
+mkit sidecar. The `.mkit/index` stays a single-stage **resolved** staging
+area — there are no unmerged index stages (SPEC-INDEX is unchanged).
+
+| File                          | Meaning                                              |
+| ----------------------------- | ---------------------------------------------------- |
+| `MERGE_HEAD`                  | other parent of an in-progress merge (presence ⇒ merge) |
+| `CHERRY_PICK_HEAD`            | commit being applied by an in-progress cherry-pick   |
+| `ORIG_HEAD`                   | HEAD before the operation, used by `--abort`         |
+| `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
+| `mkit-conflicts`              | mkit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
+| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `done`) plus a `mkit-conflicts` sidecar when paused |
 
 Remote / sync:
 
@@ -208,12 +269,33 @@ Remote / sync:
 - `mkit serve <path> --listen-enc <addr>` — bind a TCP socket on
   `<addr>` (e.g. `0.0.0.0:9418`) and serve the same protocol over
   an encrypted-stream transport. Requires building the binary with
-  `--features enc-transport`. The server prints its ephemeral
-  ed25519 public key to stderr at startup; clients dial
-  `mkit+enc://<host>:<port>?pubkey=<key>` after copying that key
-  out-of-band. The default port advertised by `mkit+enc://` URLs
-  when none is supplied is **9418**. Keystore integration for a
-  stable per-host key is deferred (see SPEC-TRANSPORT-ENC §6.2).
+  `--features enc-transport`. **Fail-closed**: the listener refuses to
+  bind unless one of the following is supplied:
+  - `--enc-authorized-peers <PATH>` — an allowlist of authorized client
+    public keys, one per line (64-hex or 43-char url-safe base64; `#`
+    comments and blank lines ignored). A client whose static ed25519
+    key is not listed is rejected at the handshake and receives no data.
+    This path MUST be CLI-supplied or user-scoped — peer-authorization
+    is never read from repo-local `.mkit/config`.
+  - `--unsafe-allow-any-enc-peer` — a development escape that accepts
+    ANY peer. Prints a loud warning; never use in production.
+  These two flags are mutually exclusive.
+
+  `--enc-server-key <PATH>` selects the server's stable raw 32-byte
+  ed25519 key file (auto-created with `0600`/`0700` hardening on first
+  run). When allowlisting and the flag is omitted, the key is
+  auto-created at the user-scoped default `~/.config/mkit/enc/server.key`
+  so the advertised `?pubkey=` is **stable across restarts**. Only the
+  unsafe allow-any mode without a key file falls back to an ephemeral
+  per-process key. The server prints its public key to stderr at
+  startup; clients dial `mkit+enc://<host>:<port>?pubkey=<key>` after
+  copying that key out-of-band. A client may pin its own identity (so
+  an allowlisting server can recognise it across restarts) by pointing
+  the `MKIT_ENC_CLIENT_KEY` environment variable at a user-scoped raw
+  32-byte key file; otherwise the client uses an ephemeral key. The
+  default port advertised by `mkit+enc://` URLs when none is supplied
+  is **9418**. Full keystore integration is deferred (see
+  SPEC-TRANSPORT-ENC §6.2).
 - `mkit pack-shard <hash> [--out <dir>] [--force]` — encode a stored
   pack into Reed-Solomon shards plus a manifest, ready to publish to
   an HTTP / S3 origin. Producer side of SPEC-PACK-SHARDS Phase 2. The

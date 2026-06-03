@@ -8,7 +8,7 @@ use std::io::Write;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::clap_shim;
-use crate::config::{self, Config};
+use crate::config::{self, Config, RemoteEntry};
 use crate::exit;
 use crate::format;
 
@@ -38,10 +38,19 @@ struct RemoteOpts {
 
 #[derive(Debug, Subcommand)]
 enum RemoteCmd {
-    /// Configure the remote URL (must be `mkit+<scheme>://...`).
-    Add { url: String },
+    /// Configure a remote. With one argument, sets the flat default
+    /// remote (`mkit remote add <url>`). With two, adds/updates a named
+    /// remote (`mkit remote add <name> <url>`). The URL must be
+    /// `mkit+<scheme>://...`.
+    Add {
+        name_or_url: String,
+        url: Option<String>,
+    },
     /// Alias for `add`.
-    Set { url: String },
+    Set {
+        name_or_url: String,
+        url: Option<String>,
+    },
 }
 
 #[must_use]
@@ -61,7 +70,14 @@ pub fn run(args: &[String]) -> u8 {
 
     match opts.sub {
         None => show(&cfg, matches!(opts.format, RemoteFormat::Json)),
-        Some(RemoteCmd::Add { url } | RemoteCmd::Set { url }) => {
+        Some(RemoteCmd::Add { name_or_url, url } | RemoteCmd::Set { name_or_url, url }) => {
+            // Two forms:
+            //   `mkit remote add <url>`         -> flat default remote
+            //   `mkit remote add <name> <url>`  -> named remote
+            let (name, url) = match url {
+                Some(url) => (Some(name_or_url), url),
+                None => (None, name_or_url),
+            };
             let Some(scheme) = validate_url(&url) else {
                 return emit_err(
                     &format!(
@@ -71,8 +87,30 @@ pub fn run(args: &[String]) -> u8 {
                     exit::PROTOCOL_ERROR,
                 );
             };
-            cfg.remote_endpoint = url;
-            scheme.clone_into(&mut cfg.remote_type);
+            if let Some(name) = name {
+                if !mkit_core::refs::validate_ref_name(&name)
+                    || name.contains('.')
+                    || name == config::DEFAULT_REMOTE_NAME
+                {
+                    return emit_err(
+                        &format!(
+                            "invalid remote name '{name}': must be a dot-free ref-safe name \
+                             (and not the reserved `default`)"
+                        ),
+                        exit::PROTOCOL_ERROR,
+                    );
+                }
+                cfg.remotes.insert(
+                    name,
+                    RemoteEntry {
+                        url,
+                        remote_type: scheme.to_owned(),
+                    },
+                );
+            } else {
+                cfg.remote_endpoint = url;
+                scheme.clone_into(&mut cfg.remote_type);
+            }
             match config::write(&cwd, &cfg) {
                 Ok(()) => exit::OK,
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
@@ -91,7 +129,8 @@ fn validate_url(url: &str) -> Option<&'static str> {
 }
 
 fn show(cfg: &Config, json: bool) -> u8 {
-    if cfg.remote_endpoint.is_empty() {
+    let has_default = !cfg.remote_endpoint.is_empty();
+    if !has_default && cfg.remotes.is_empty() {
         // Empty listing → empty stdout in both modes. The default
         // mode emits a human note on stderr.
         if !json {
@@ -102,24 +141,65 @@ fn show(cfg: &Config, json: bool) -> u8 {
     }
     let mut stdout = std::io::stdout().lock();
     if json {
-        // Single-line JSON object (future multi-remote support would
-        // switch this to JSONL).
-        let _ = stdout.write_all(b"{");
-        let _ = write!(
-            stdout,
-            "\"url\":\"{}\"",
-            format::json_escape(&cfg.remote_endpoint)
-        );
-        let _ = write!(
-            stdout,
-            ",\"transport\":\"{}\"",
-            format::json_escape(&cfg.remote_type)
-        );
-        let _ = stdout.write_all(b"}\n");
+        // Additive shape: when only the default remote is configured,
+        // emit the historical single-line object so existing JSON
+        // snapshots stay valid. When named remotes exist, emit one JSON
+        // object per line (JSONL) carrying a `name` field; the default
+        // remote (if any) appears as `name=default`.
+        if has_default && cfg.remotes.is_empty() {
+            let _ = stdout.write_all(b"{");
+            let _ = write!(
+                stdout,
+                "\"url\":\"{}\"",
+                format::json_escape(&cfg.remote_endpoint)
+            );
+            let _ = write!(
+                stdout,
+                ",\"transport\":\"{}\"",
+                format::json_escape(&cfg.remote_type)
+            );
+            let _ = stdout.write_all(b"}\n");
+            return exit::OK;
+        }
+        if has_default {
+            let _ = writeln!(
+                stdout,
+                "{{\"name\":\"{}\",\"url\":\"{}\",\"transport\":\"{}\"}}",
+                config::DEFAULT_REMOTE_NAME,
+                format::json_escape(&cfg.remote_endpoint),
+                format::json_escape(&cfg.remote_type)
+            );
+        }
+        for (name, entry) in &cfg.remotes {
+            let _ = writeln!(
+                stdout,
+                "{{\"name\":\"{}\",\"url\":\"{}\",\"transport\":\"{}\"}}",
+                format::json_escape(name),
+                format::json_escape(&entry.url),
+                format::json_escape(&entry.remote_type)
+            );
+        }
         return exit::OK;
     }
-    let _ = writeln!(stdout, "remote_endpoint = {}", cfg.remote_endpoint);
-    let _ = writeln!(stdout, "remote_type = {}", cfg.remote_type);
+    // Default (human) form. Keep the legacy two-line output when only
+    // the flat default remote is configured.
+    if has_default && cfg.remotes.is_empty() {
+        let _ = writeln!(stdout, "remote_endpoint = {}", cfg.remote_endpoint);
+        let _ = writeln!(stdout, "remote_type = {}", cfg.remote_type);
+        return exit::OK;
+    }
+    if has_default {
+        let _ = writeln!(
+            stdout,
+            "{}\t{} ({})",
+            config::DEFAULT_REMOTE_NAME,
+            cfg.remote_endpoint,
+            cfg.remote_type
+        );
+    }
+    for (name, entry) in &cfg.remotes {
+        let _ = writeln!(stdout, "{name}\t{} ({})", entry.url, entry.remote_type);
+    }
     exit::OK
 }
 

@@ -67,8 +67,38 @@ does NOT pass:
 - The algorithm on argv (it goes inside `SignRequest`).
 - Any environment variables it didn't already inherit.
 
-The signer's stdin and stdout are pipes; stderr is inherited and is
-free-form for human-readable diagnostics.
+The signer's stdin and stdout are pipes. **stderr is also a pipe** that
+mkit drains concurrently for the lifetime of the conversation (it is
+NOT inherited): a dedicated reader thread discards stderr to EOF,
+capturing only a bounded diagnostic prefix (1 MiB) for error reporting.
+This concurrent drain is mandatory — without it a signer that writes a
+large diagnostic to stderr before emitting its stdout response would
+deadlock (the signer blocks on a full stderr pipe; mkit blocks reading
+stdout). Signers MAY write free-form human-readable diagnostics to
+stderr at any time without fear of blocking.
+
+### 2.1 Timeout & liveness
+
+mkit bounds the entire signer conversation with a single wall-clock
+deadline covering every phase: **spawn → request-write → response-read →
+stderr-drain → child-exit**. On expiry mkit KILLS and REAPS the child
+(no zombie, no orphaned hardware session) and returns a typed,
+phase-named timeout error so the operator can tell a hung touch-prompt
+(`response-read`) from a signer that produced a valid response but never
+exited (`child-exit`).
+
+The default deadline is **120 seconds**, chosen to be generous:
+hardware-backed signers routinely block on a physical touch, a PIN
+entry, or a biometric prompt before emitting any output. Operators who
+drive only fast software signers MAY tighten it via the user-scoped
+config key `attest.external_signer_timeout_secs` (an unsigned integer
+number of seconds; `0` means "deadline already passed" — a hard
+fail-fast). Like `attest.external_signer_path`, this key is **user-scoped
+only** and is rejected from per-repo `.mkit/config`: a hostile repo must
+not be able to set a multi-hour hang or a `0`-second denial-of-service.
+
+Signers SHOULD therefore make progress promptly once any required human
+gesture completes, and MUST NOT assume an unbounded wait.
 
 ---
 
@@ -159,6 +189,55 @@ of the reference canonical prefixes (`blake3:`, `ed25519:`,
 opaque and are accepted so third-party signer namespaces keep working.
 WebAuthn responses are validated by the WebAuthn verifier using the
 `webauthn` extension rather than this raw-payload check.
+
+### 6.1 WebAuthn verifier policy
+
+When a `SignResponse` carries the `webauthn` extension, mkit verifies
+the assertion with a **two-layer** check:
+
+1. **Cryptographic wrapping (always enforced).** `type == "webauthn.get"`,
+   `clientDataJSON.challenge == base64url-nopad(PAE)` (this is the
+   binding that ties the ceremony to the mkit payload),
+   `authenticatorData` is at least 37 bytes, and the signature verifies
+   against `authenticatorData ‖ SHA-256(clientDataJSON)` under the
+   returned P-256 public key. The `public_key` MUST be a valid SEC1
+   P-256 point. This is what the low-level helper
+   `verify_webauthn_wrapping` does.
+
+2. **Ceremony policy (configurable, layered on top).** An independent
+   set of knobs, each defaulting **permissive / hardware-friendly**:
+
+   | Knob | Default | Checks |
+   |---|---|---|
+   | expected RP ID | off | `authenticatorData[0..32]` (rpIdHash) `== SHA-256(rp_id)` |
+   | allowed origins | off (any) | `clientDataJSON.origin` is in the allow-list |
+   | require user presence (UP) | off | `authenticatorData` flag bit 0 set |
+   | require user verification (UV) | off | `authenticatorData` flag bit 2 set |
+   | allow cross-origin | true | reject `clientDataJSON.crossOrigin == true` when false |
+   | previous sign counter | off | `authenticatorData[33..37]` (BE u32) `>=` previous; rollback rejected |
+
+   UP, UV, and the counter are **independent** knobs on purpose: a
+   strict UV requirement would lock out UP-only roaming authenticators,
+   and a strict counter would reject the many authenticators that always
+   report `signCount == 0`. The permissive default accepts UP-only and
+   `signCount == 0`.
+
+All policy inputs derive from the existing `authenticator_data` and
+`client_data_json` fields — **there is no proto change**. RP-ID hash,
+flags, and signCount live inside `authenticator_data`; origin and
+crossOrigin live inside `client_data_json`.
+
+**Wiring decision.** `verify_webauthn_wrapping` has no `verify-attest`
+consumer today — it is invoked only by the external signer's
+self-consistency check. mkit therefore exposes a policy-aware
+`verify_webauthn_wrapping_with_policy(pae, wrapping, pubkey, sig, &policy)`
+and keeps the bare `verify_webauthn_wrapping` as a thin, permissive
+delegate documented as **cryptographic-only**. The external signer
+routes its WebAuthn self-consistency check through the policy-aware
+variant with the signer's configured `WebAuthnPolicy` (default
+permissive). This is a ceremony-policy layer only: **trust-root binding**
+(which public key is authorised to attest) stays in DSSE envelope
+verification, not in this helper.
 
 ---
 

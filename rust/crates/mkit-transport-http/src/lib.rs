@@ -67,6 +67,17 @@ pub const TOKEN_ENV: &str = "MKIT_API_TOKEN";
 #[allow(clippy::duration_suboptimal_units)]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Per-request timeout for a single shard GET.
+///
+/// Shards are small (a pack is split into `N+K` Reed-Solomon pieces),
+/// so a generous-but-bounded timeout keeps a stalled straggler from
+/// pinning a detached worker thread forever. Once `minimum_shards` have
+/// arrived the collection loop stops waiting and drops the remaining
+/// handles; this timeout guarantees those detached workers terminate on
+/// their own instead of leaking for the process lifetime.
+#[cfg(feature = "pack-shards")]
+const SHARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 // Pack-body limit lives canonically in mkit-core; re-exported so
 // existing `http::PACK_BODY_LIMIT` / `http::PACK_BODY_LIMIT_USIZE`
 // call sites keep working.
@@ -903,33 +914,25 @@ impl HttpTransport {
         }
 
         let (tx, rx) = mpsc::channel::<(u16, TransportResult<Vec<u8>>)>();
-        let mut handles = Vec::with_capacity(total as usize);
         let total_u16: u16 = u16::try_from(total).unwrap_or(u16::MAX);
+        // Workers are intentionally *detached* (we never join them).
+        // Once quorum or the failure threshold is reached the collection
+        // loop below stops waiting; a slow straggler must not be able to
+        // block the download by holding a join. The per-request
+        // SHARD_REQUEST_TIMEOUT guarantees each detached worker
+        // terminates on its own instead of leaking.
+        let backoff = self.backoff;
+        let sleep = self.sleep;
         for i in 0..total_u16 {
             let tx = tx.clone();
             let url = self.shard_url(key, i)?;
             let client = self.client.clone();
             let token = self.token.clone();
-            handles.push(std::thread::spawn(move || {
-                let mut req = client.get(url);
-                if let Some(t) = &token
-                    && let Ok(v) = HeaderValue::from_str(&format!("Bearer {t}"))
-                {
-                    req = req.header(AUTHORIZATION, v);
-                }
-                let result: TransportResult<Vec<u8>> = match req.send() {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        if status.is_success() {
-                            HttpTransport::read_body_capped(resp)
-                        } else {
-                            Err(map_status(status, TransportError::PackNotFound))
-                        }
-                    }
-                    Err(_) => Err(TransportError::ConnectionFailed),
-                };
+            std::thread::spawn(move || {
+                let result =
+                    fetch_shard_with_retry(&client, &url, token.as_deref(), backoff, sleep);
                 let _ = tx.send((i, result));
-            }));
+            });
         }
         drop(tx);
 
@@ -949,16 +952,59 @@ impl HttpTransport {
                 }
             }
         }
-
-        for h in handles {
-            let _ = h.join();
-        }
+        // Deliberately do not join the spawned workers: stragglers are
+        // dropped, not awaited. They are bounded by SHARD_REQUEST_TIMEOUT.
 
         if shards.len() < minimum as usize {
             return Err(TransportError::PackNotFound);
         }
 
         decode_pack_from_shards(&shards, &manifest).map_err(|_| TransportError::InvalidResponse)
+    }
+}
+
+/// Fetch a single shard via an idempotent GET, retrying transient
+/// failures through the supplied backoff ladder.
+///
+/// Retries ONLY on `ConnectionFailed` / 429 / 5xx (the same classes
+/// `is_retryable` gates). Terminal classes — 401/403 (`AccessDenied`),
+/// 404 (`PackNotFound`), and body-size caps (`PayloadTooLarge`) — return
+/// immediately without retrying. Each attempt carries a bounded
+/// per-request timeout so a stalled peer can never wedge the worker.
+#[cfg(feature = "pack-shards")]
+fn fetch_shard_with_retry(
+    client: &Client,
+    url: &Url,
+    token: Option<&str>,
+    backoff: fn() -> BackoffIterator,
+    sleep: fn(Duration),
+) -> TransportResult<Vec<u8>> {
+    let mut ladder = backoff();
+    loop {
+        let mut req = client.get(url.clone()).timeout(SHARD_REQUEST_TIMEOUT);
+        if let Some(t) = token
+            && let Ok(v) = HeaderValue::from_str(&format!("Bearer {t}"))
+        {
+            req = req.header(AUTHORIZATION, v);
+        }
+        let err = match req.send() {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    // Body-decode / size-cap failures are terminal — never retried.
+                    return HttpTransport::read_body_capped(resp);
+                }
+                map_status(status, TransportError::PackNotFound)
+            }
+            Err(_) => TransportError::ConnectionFailed,
+        };
+        if is_retryable(&err)
+            && let Some(delay) = ladder.next()
+        {
+            sleep(delay);
+            continue;
+        }
+        return Err(err);
     }
 }
 
@@ -1806,6 +1852,154 @@ mod tests {
         #[test]
         fn shard_advertise_value_is_default_config() {
             assert_eq!(pack_shards::accept_pack_shards_advertise(), "16+4");
+        }
+
+        fn make_transport_with_retry(
+            server: &mockito::Server,
+            backoff: fn() -> BackoffIterator,
+            sleep: fn(Duration),
+        ) -> HttpTransport {
+            let base = Url::parse(&format!("{}/myproj", server.url())).unwrap();
+            HttpTransport::new_for_test_with_retry(base, None, backoff, sleep)
+        }
+
+        fn three_attempt_backoff() -> BackoffIterator {
+            BackoffIterator::with(Duration::from_millis(1), Duration::from_millis(1), 3)
+        }
+
+        fn five_attempt_backoff() -> BackoffIterator {
+            BackoffIterator::with(Duration::from_millis(1), Duration::from_millis(1), 5)
+        }
+
+        /// A shard that returns 503 twice then 200 is retried on the
+        /// idempotent GET and ultimately succeeds. Asserts the mock saw
+        /// all three attempts.
+        #[test]
+        fn shard_get_retries_on_5xx_then_succeeds() {
+            let mut server = mockito::Server::new();
+            let pack = synthetic_pack(64 * 1024);
+            let key = key_for(&pack);
+            let (shards, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+            let manifest_bytes = encode_manifest(&manifest).unwrap();
+
+            let pack_path = format!("/myproj/packs/{}", key.to_hex());
+            let _pm = server
+                .mock("GET", pack_path.as_str())
+                .with_status(200)
+                .with_header(X_PACK_SHARDS_HEADER, "16+4")
+                .with_body("")
+                .expect_at_least(1)
+                .create();
+            let manifest_path = format!("/myproj/packs/{}/shards.manifest", key.to_hex());
+            let _mm = server
+                .mock("GET", manifest_path.as_str())
+                .with_status(200)
+                .with_body(manifest_bytes)
+                .create();
+
+            // Shard 0: 503 twice then 200. The two 503s plus the final
+            // 200 require a 3-attempt ladder.
+            let flaky_path = format!("/myproj/packs/{}/shards/0", key.to_hex());
+            let flaky_5xx = server
+                .mock("GET", flaky_path.as_str())
+                .with_status(503)
+                .expect(2)
+                .create();
+            let flaky_ok = server
+                .mock("GET", flaky_path.as_str())
+                .with_status(200)
+                .with_body(shards[0].bytes.clone())
+                .expect(1)
+                .create();
+
+            // Remaining shards always 200.
+            let mut others = Vec::new();
+            for shard in shards.iter().skip(1) {
+                let path = format!("/myproj/packs/{}/shards/{}", key.to_hex(), shard.index);
+                others.push(
+                    server
+                        .mock("GET", path.as_str())
+                        .with_status(200)
+                        .with_body(shard.bytes.clone())
+                        .create(),
+                );
+            }
+
+            let t = make_transport_with_retry(&server, three_attempt_backoff, no_sleep);
+            let got = t.download_pack(&key).unwrap();
+            assert_eq!(got, pack);
+            flaky_5xx.assert();
+            flaky_ok.assert();
+        }
+
+        /// A shard returning 403 is NOT retried — the worker reports the
+        /// terminal error immediately (asserted via `expect(1)`).
+        #[test]
+        fn shard_get_does_not_retry_on_403() {
+            let mut server = mockito::Server::new();
+            let pack = synthetic_pack(64 * 1024);
+            let key = key_for(&pack);
+            let (shards, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+            let manifest_bytes = encode_manifest(&manifest).unwrap();
+
+            let pack_path = format!("/myproj/packs/{}", key.to_hex());
+            let _pm = server
+                .mock("GET", pack_path.as_str())
+                .with_status(200)
+                .with_header(X_PACK_SHARDS_HEADER, "16+4")
+                .with_body("")
+                .expect_at_least(1)
+                .create();
+            let manifest_path = format!("/myproj/packs/{}/shards.manifest", key.to_hex());
+            let _mm = server
+                .mock("GET", manifest_path.as_str())
+                .with_status(200)
+                .with_body(manifest_bytes)
+                .create();
+
+            // Shard 0: 403, must be hit exactly once (no retry).
+            let denied_path = format!("/myproj/packs/{}/shards/0", key.to_hex());
+            let denied = server
+                .mock("GET", denied_path.as_str())
+                .with_status(403)
+                .expect(1)
+                .create();
+            // Remaining 19 shards all 200 — quorum (16) is reachable
+            // without shard 0, so the overall download still succeeds.
+            let mut others = Vec::new();
+            for shard in shards.iter().skip(1) {
+                let path = format!("/myproj/packs/{}/shards/{}", key.to_hex(), shard.index);
+                others.push(
+                    server
+                        .mock("GET", path.as_str())
+                        .with_status(200)
+                        .with_body(shard.bytes.clone())
+                        .create(),
+                );
+            }
+
+            let t = make_transport_with_retry(&server, five_attempt_backoff, no_sleep);
+            let got = t.download_pack(&key).unwrap();
+            assert_eq!(got, pack);
+            denied.assert();
+        }
+
+        /// Straggler bound: one shard never responds (mockito has no
+        /// mock for it, so the request fails fast as `ConnectionFailed`),
+        /// yet quorum is reached from the other shards and the download
+        /// returns without waiting on the straggler's worker — the
+        /// detached worker is never joined.
+        #[test]
+        fn shard_download_does_not_block_on_straggler_after_quorum() {
+            // Drop exactly K shards (the extras). The remaining `minimum`
+            // shards form quorum; the collection loop must return as soon
+            // as quorum is met without joining the (failed) stragglers.
+            let mut server = mockito::Server::new();
+            let dropped = [16u16, 17, 18, 19];
+            let (pack, key, _mocks) = publish_sharded(&mut server, 64 * 1024, &dropped);
+            let t = make_transport(&server, None);
+            let got = t.download_pack(&key).unwrap();
+            assert_eq!(got, pack);
         }
     }
 
