@@ -84,7 +84,10 @@ pub use sign::{
     commit_signing_hash, remix_signing_bytes, remix_signing_hash, sign_commit, sign_remix, verify,
     verify_commit, verify_remix,
 };
-pub use store::{MAX_RAW_OBJECT_SIZE, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError, StoreResult};
+pub use store::{
+    MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError,
+    StoreResult,
+};
 
 // Phase 3 — content-defined chunker (FastCDC v1).
 pub use chunker::{
@@ -116,7 +119,8 @@ pub use refs::{
 };
 pub use repo_lock::{DEFAULT_TIMEOUT as LOCK_DEFAULT_TIMEOUT, LockError, LockResult, RepoLock};
 pub use worktree::{
-    CHUNK_THRESHOLD, MAX_FILE_BYTES, WorktreeError, WorktreeResult, validate_symlink_target,
+    CHUNK_THRESHOLD, MAX_FILE_BYTES, WorktreeError, WorktreeResult, read_blob, store_file_object,
+    validate_symlink_target,
 };
 
 // Cross-transport types. The SSH-specific wire bytes live in

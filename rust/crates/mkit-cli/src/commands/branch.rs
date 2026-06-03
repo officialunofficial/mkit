@@ -48,7 +48,10 @@ pub fn run(args: &[String]) -> u8 {
     match (opts.delete, opts.name.as_deref()) {
         (false, None) => list(&mkit_dir, matches!(opts.format, BranchFormat::Json)),
         (true, None) => super::usage_error("usage: mkit branch -d <name>"),
-        (true, Some(name)) => match refs::delete_ref(&mkit_dir, name) {
+        // `delete_ref_safe` refuses to delete the branch HEAD currently
+        // points at (issue #206) — deleting the current branch would
+        // leave HEAD dangling.
+        (true, Some(name)) => match refs::delete_ref_safe(&mkit_dir, name) {
             Ok(()) => exit::OK,
             Err(e) => emit_err(&format!("delete {name}: {e}"), exit::GENERAL_ERROR),
         },
@@ -57,17 +60,21 @@ pub fn run(args: &[String]) -> u8 {
                 return emit_err("no HEAD commit to branch from", exit::GENERAL_ERROR);
             };
             // `mkit branch <name>` creates a new branch at HEAD.
-            // Route through `write_ref_recording_history` so the new
-            // branch picks up a fresh history-MMR journal (the empty
-            // pre-leaf root + this first append) on builds with
-            // `--features history-mmr`.
+            // `MustNotExist` (issue #206) refuses to silently clobber an
+            // existing branch of the same name. Route through
+            // `write_ref_recording_history` so the new branch picks up a
+            // fresh history-MMR journal (the empty pre-leaf root + this
+            // first append) on builds with `--features history-mmr`.
             match super::write_ref_recording_history(
                 &mkit_dir,
                 name,
-                refs::RefWriteCondition::Any,
+                refs::RefWriteCondition::Missing,
                 &h,
             ) {
                 Ok(()) => exit::OK,
+                Err(refs::RefError::Conflict(_)) => {
+                    emit_err(&format!("branch '{name}' already exists"), exit::CANTCREAT)
+                }
                 Err(e) => emit_err(&format!("write {name}: {e}"), exit::CANTCREAT),
             }
         }

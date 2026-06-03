@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use crate::atomic::write_atomic;
 use crate::hash::{HASH_LEN, Hash};
 use crate::object::{EntryMode, Object};
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
 
 /// Magic bytes — ASCII `"MKIX"`.
 pub const MAGIC: [u8; 4] = *b"MKIX";
@@ -174,6 +174,10 @@ pub enum IndexError {
     /// A tree walk found a non-tree object where a tree hash was expected.
     #[error("object is not a tree")]
     NotTree,
+    /// A tree walk exceeded [`MAX_TREE_DEPTH`] nesting levels — likely a
+    /// crafted untrusted repo trying to overflow the native stack.
+    #[error("tree nesting exceeds {} levels", MAX_TREE_DEPTH)]
+    TreeTooDeep,
 }
 
 /// Result alias used throughout this module.
@@ -288,7 +292,7 @@ pub fn write_index(root: &Path, idx: &Index) -> IndexResult<()> {
 /// if `tree_hash` does not point at a tree object.
 pub fn from_tree(store: &ObjectStore, tree_hash: Hash) -> IndexResult<Index> {
     let mut idx = Index::new();
-    push_tree_entries(store, tree_hash, "", &mut idx)?;
+    push_tree_entries(store, tree_hash, "", &mut idx, 0)?;
     Ok(idx)
 }
 
@@ -297,7 +301,11 @@ fn push_tree_entries(
     tree_hash: Hash,
     prefix: &str,
     idx: &mut Index,
+    depth: usize,
 ) -> IndexResult<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(IndexError::TreeTooDeep);
+    }
     let Object::Tree(tree) = store.read_object(&tree_hash)? else {
         return Err(IndexError::NotTree);
     };
@@ -309,7 +317,9 @@ fn push_tree_entries(
             format!("{prefix}/{name}")
         };
         match entry.mode {
-            EntryMode::Tree => push_tree_entries(store, entry.object_hash, &path, idx)?,
+            EntryMode::Tree => {
+                push_tree_entries(store, entry.object_hash, &path, idx, depth + 1)?;
+            }
             EntryMode::Blob | EntryMode::Executable | EntryMode::Symlink => {
                 if !validate_index_path(&path) {
                     return Err(IndexError::InvalidPath(path));

@@ -16,7 +16,7 @@ use std::path::Path;
 
 use mkit_core::hash::Hash;
 use mkit_core::index::{self, EntryStatus, IndexEntry};
-use mkit_core::object::Object;
+use mkit_core::object::{EntryMode, Object};
 use mkit_core::ops::conflict_state::ConflictRecord;
 use mkit_core::ops::merge::{Conflict, ConflictKind};
 use mkit_core::store::ObjectStore;
@@ -74,6 +74,13 @@ fn side_is_blob_or_absent(store: &ObjectStore, side: Option<Hash>) -> bool {
     }
 }
 
+/// `true` when a side's tree mode is a symlink or executable — shapes
+/// that conflict markers cannot represent and that must round-trip their
+/// exact mode (#214).
+fn side_is_special_mode(mode: Option<EntryMode>) -> bool {
+    matches!(mode, Some(EntryMode::Symlink | EntryMode::Executable))
+}
+
 /// Classify a single conflict given its blob contents.
 ///
 /// # Errors
@@ -89,17 +96,18 @@ pub fn classify(store: &ObjectStore, c: &Conflict) -> Result<ConflictClass, Stri
             {
                 return Ok(ConflictClass::Special);
             }
-            // Mode changes (symlink/executable) are recorded at the tree
-            // level via the merge engine, but the conflict struct carries
-            // only hashes. We treat any non-UTF-8 / NUL-bearing side as
-            // binary; symlinks store their target as text so they would
-            // otherwise look "textual" — but writing markers into a
-            // symlink target is meaningless, so we detect them and route
-            // to Special. The merge engine reports a symlink-vs-blob
-            // shape as modify/modify; we can only inspect bytes here, so
-            // a same-named symlink/blob pair that is valid UTF-8 falls
-            // through to TextMarkers, which is acceptable (the user sees
-            // a regular file with markers and resolves manually).
+            // Symlink / executable on either side (#214): the merge
+            // engine now carries the real `EntryMode`, so we route these
+            // to Special unambiguously instead of guessing from bytes.
+            // Writing conflict markers into a symlink target is
+            // meaningless, and an executable's content is rarely a clean
+            // text merge — the user resolves manually and the ours-side
+            // mode is preserved into the worktree + index.
+            if side_is_special_mode(c.ours_mode) || side_is_special_mode(c.theirs_mode) {
+                return Ok(ConflictClass::Special);
+            }
+            // Otherwise fall back to the byte heuristic: any non-UTF-8 /
+            // NUL-bearing side is binary; everything else is text.
             let ours_text = match c.ours_hash {
                 Some(h) => is_text(&read_blob(store, h)?),
                 None => true,
@@ -160,7 +168,7 @@ pub fn materialize_conflicts(
                 stage_ours(&mut idx, store, c);
             }
             ConflictClass::Binary => {
-                materialize_side(store, &abs, c.ours_hash, c.theirs_hash)?;
+                materialize_conflict_side(store, &abs, c)?;
                 let _ = writeln!(
                     stderr,
                     "  {} (binary conflict — resolve manually, then `mkit add`)",
@@ -169,10 +177,9 @@ pub fn materialize_conflicts(
                 stage_ours(&mut idx, store, c);
             }
             ConflictClass::DeleteModify => {
-                // Keep the surviving (modified) side in the worktree.
-                if let Some(modified) = c.ours_hash.or(c.theirs_hash) {
-                    write_blob_to_worktree(store, &abs, modified)?;
-                }
+                // Keep the surviving (modified) side in the worktree,
+                // honouring its exec/symlink mode (#214).
+                materialize_conflict_side(store, &abs, c)?;
                 let _ = writeln!(
                     stderr,
                     "  {} (delete/modify — keep with `mkit add` or drop with `mkit rm`)",
@@ -181,7 +188,7 @@ pub fn materialize_conflicts(
                 stage_ours(&mut idx, store, c);
             }
             ConflictClass::Special => {
-                materialize_side(store, &abs, c.ours_hash, c.theirs_hash)?;
+                materialize_conflict_side(store, &abs, c)?;
                 let _ = writeln!(
                     stderr,
                     "  {} (mode/symlink conflict — resolve manually, then `mkit add`)",
@@ -197,19 +204,35 @@ pub fn materialize_conflicts(
     Ok(records)
 }
 
+/// Map a tree [`EntryMode`] to the index [`EntryStatus`] that preserves
+/// it. `Tree` has no single-file index representation and is reported by
+/// the caller (which only stages blob ours-sides), so it falls back to
+/// `Blob` defensively.
+fn status_for_mode(mode: EntryMode) -> EntryStatus {
+    match mode {
+        EntryMode::Executable => EntryStatus::Executable,
+        EntryMode::Symlink => EntryStatus::Symlink,
+        EntryMode::Blob | EntryMode::Tree => EntryStatus::Blob,
+    }
+}
+
 /// Stage the ours-side blob for a conflict into the index (or mark
 /// removed when ours deleted it). Keeps the index a single-stage
 /// resolved snapshot.
+///
+/// The ours-side [`EntryMode`] carried on the [`Conflict`] (#214) is
+/// preserved into the staged [`EntryStatus`] so executable bits and
+/// symlinks survive `--continue` across merge / cherry-pick / rebase —
+/// `build_tree_from_index` derives the committed tree mode from the
+/// index status, so a default-`Blob` here would silently demote an
+/// executable or symlink to a plain file.
 fn stage_ours(idx: &mut mkit_core::index::Index, store: &ObjectStore, c: &Conflict) {
     let entry = match c.ours_hash {
         // Only stage a blob ours-side. A tree ours-side (file-vs-dir)
         // is left for the user to resolve and `mkit add`.
         Some(h) if is_blob(store, h) => IndexEntry {
             path: c.path.clone(),
-            // We cannot recover the original `EntryMode` from a bare
-            // hash, so default to `Blob`; symlink/exec nuances are
-            // resolved when the user re-`mkit add`s the worktree file.
-            status: EntryStatus::Blob,
+            status: c.ours_mode.map_or(EntryStatus::Blob, status_for_mode),
             object_hash: h,
         },
         Some(_) => return,
@@ -245,28 +268,103 @@ fn write_text_markers(abs: &Path, ours: &[u8], theirs: &[u8]) -> Result<(), Stri
     write_bytes(abs, &buf)
 }
 
-fn materialize_side(
+/// Materialise the surviving side of a binary / special conflict into
+/// the worktree, honouring its tree mode (#214).
+///
+/// We prefer the ours-side (the side `stage_ours` records in the index)
+/// so the worktree file and the staged index entry agree; if ours is
+/// absent or a tree we fall back to theirs. Symlink sides become a real
+/// symlink (not a regular file holding the target text); executable
+/// sides get the exec bit. If neither side is a blob, whatever is
+/// already in the worktree is left untouched.
+fn materialize_conflict_side(store: &ObjectStore, abs: &Path, c: &Conflict) -> Result<(), String> {
+    let pick = [(c.ours_hash, c.ours_mode), (c.theirs_hash, c.theirs_mode)]
+        .into_iter()
+        .find_map(|(h, m)| match h {
+            Some(h) if is_blob(store, h) => Some((h, m)),
+            _ => None,
+        });
+    let Some((h, mode)) = pick else {
+        return Ok(());
+    };
+    match mode {
+        Some(EntryMode::Symlink) => write_symlink_to_worktree(store, abs, h),
+        Some(EntryMode::Executable) => write_blob_to_worktree(store, abs, h, true),
+        _ => write_blob_to_worktree(store, abs, h, false),
+    }
+}
+
+fn write_blob_to_worktree(
     store: &ObjectStore,
     abs: &Path,
-    ours: Option<Hash>,
-    theirs: Option<Hash>,
+    h: Hash,
+    executable: bool,
 ) -> Result<(), String> {
-    // Prefer a blob side; a tree side (file-vs-directory) cannot be
-    // written as a file. If neither side is a blob, leave whatever is
-    // already in the worktree untouched.
-    let blob_side = [ours, theirs]
-        .into_iter()
-        .flatten()
-        .find(|h| is_blob(store, *h));
-    if let Some(h) = blob_side {
-        write_blob_to_worktree(store, abs, h)?;
+    let data = read_blob(store, h)?;
+    // Replace any existing symlink/file at the path so a prior shape
+    // does not shadow the regular file we are about to write.
+    let _ = fs::remove_file(abs);
+    write_bytes(abs, &data)?;
+    if executable {
+        set_executable(abs)?;
     }
     Ok(())
 }
 
-fn write_blob_to_worktree(store: &ObjectStore, abs: &Path, h: Hash) -> Result<(), String> {
+/// Materialise a symlink blob (payload = target string) as a real
+/// symlink, mirroring `restore::restore_symlink`'s `..`-free target
+/// validation so a conflict cannot smuggle an escaping link.
+fn write_symlink_to_worktree(store: &ObjectStore, abs: &Path, h: Hash) -> Result<(), String> {
     let data = read_blob(store, h)?;
-    write_bytes(abs, &data)
+    let target = core::str::from_utf8(&data)
+        .map_err(|_| format!("symlink target for {} is not UTF-8", abs.display()))?;
+    if !mkit_core::worktree::validate_symlink_target(target) {
+        return Err(format!(
+            "refusing to materialise unsafe symlink target {target:?} for {}",
+            abs.display()
+        ));
+    }
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create dir {}: {e}", parent.display()))?;
+    }
+    // Remove any existing file/symlink so the create does not race a
+    // stale entry of the wrong shape.
+    let _ = fs::remove_file(abs);
+    create_symlink(target, abs).map_err(|e| format!("create symlink {}: {e}", abs.display()))
+}
+
+#[cfg(unix)]
+fn set_executable(abs: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perm = fs::metadata(abs)
+        .map_err(|e| format!("stat {}: {e}", abs.display()))?
+        .permissions();
+    perm.set_mode(0o755);
+    fs::set_permissions(abs, perm).map_err(|e| format!("chmod {}: {e}", abs.display()))
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn set_executable(_abs: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(_target: &str, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlink creation is not supported on this target",
+    ))
 }
 
 fn write_bytes(abs: &Path, data: &[u8]) -> Result<(), String> {
@@ -398,8 +496,17 @@ pub fn reset_conflict_paths(
     for r in records {
         let abs = root.join(&r.path);
         if let Some(target_entry) = target_map.get(r.path.as_str()) {
-            // Restore the path's pre-op content + index entry.
-            write_blob_to_worktree(store, &abs, target_entry.object_hash)?;
+            // Restore the path's pre-op content + index entry, honouring
+            // the recorded symlink/exec mode (#214).
+            match target_entry.status {
+                EntryStatus::Symlink => {
+                    write_symlink_to_worktree(store, &abs, target_entry.object_hash)?;
+                }
+                EntryStatus::Executable => {
+                    write_blob_to_worktree(store, &abs, target_entry.object_hash, true)?;
+                }
+                _ => write_blob_to_worktree(store, &abs, target_entry.object_hash, false)?,
+            }
             let entry = (*target_entry).clone();
             if let Some(pos) = idx.find_entry(&r.path) {
                 idx.entries[pos] = entry;

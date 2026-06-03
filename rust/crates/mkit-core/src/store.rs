@@ -40,6 +40,23 @@ pub const OBJECTS_DIR: &str = "objects";
 /// and [`ObjectStore::read`].
 pub const MAX_RAW_OBJECT_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
 
+/// Hard cap on tree-walk recursion depth.
+///
+/// Every core tree-walker (`index::from_tree`, `ops::diff`, `ops::merge`,
+/// `ops::restore`) recurses one native stack frame per directory level.
+/// Content-addressing prevents true cycles (a child's hash can never equal
+/// its parent's), but a crafted untrusted repo can still nest a few thousand
+/// single-entry trees in a tiny pack and overflow the stack — a denial of
+/// service reachable from `clone`/`checkout`/`merge`/`diff`. Walkers thread a
+/// depth counter and abort with a typed `TreeTooDeep` error once
+/// `depth > MAX_TREE_DEPTH`.
+///
+/// 128 is far beyond any legitimately-deep source tree (Git's own working
+/// trees rarely exceed a couple dozen levels) while remaining comfortably
+/// within a default 8 MiB thread stack. Mirrors the `MAX_REF_DEPTH` cap on
+/// the ref-tree walker in `refs.rs`.
+pub const MAX_TREE_DEPTH: usize = 128;
+
 /// Errors raised by the [`ObjectStore`] surface. Distinct from
 /// [`MkitError`] so callers can pattern-match on filesystem failures
 /// without losing the structured-decode-error variants.
@@ -53,6 +70,8 @@ pub enum StoreError {
     ObjectNotFound(String),
     #[error("object exceeds {} byte cap", MAX_RAW_OBJECT_SIZE)]
     ObjectTooLarge,
+    #[error("tree nesting exceeds {} levels", MAX_TREE_DEPTH)]
+    TreeTooDeep,
     #[error("on-disk bytes hash to {actual}, expected {expected}")]
     HashMismatch { expected: String, actual: String },
     #[error(transparent)]
