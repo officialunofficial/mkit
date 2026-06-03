@@ -46,12 +46,16 @@ complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -l cached -d "Alias for --staged"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
     -l porcelain -d "Machine-readable XY output"
+complete -c mkit -n "__fish_seen_subcommand_from status" \
+    -s s -l short -d "Short format; alias for --porcelain=v1"
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -l all -s a -d "Stage tracked changes"
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -s m -d "Commit message" -r
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
+complete -c mkit -n "__fish_seen_subcommand_from log" \
+    -l format -d "Output format (json)" -r -a json
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l graph -d "Accepted for compat; currently a no-op"
 complete -c mkit -n "__fish_seen_subcommand_from log" \

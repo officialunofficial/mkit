@@ -97,6 +97,39 @@ pub fn json_escape(s: &str) -> String {
     out
 }
 
+/// Render a Unix timestamp (seconds since the epoch, UTC) as a stable,
+/// human-readable string: `YYYY-MM-DD HH:MM:SS +0000`.
+///
+/// The format is fixed UTC (`+0000`) and intentionally locale- and
+/// timezone-independent so log output is reproducible across machines.
+/// Machine-readable callers (e.g. `mkit log --format=json`) keep the
+/// raw integer instead — only the default human log uses this.
+///
+/// Implemented with Howard Hinnant's civil-from-days algorithm to avoid
+/// pulling in a date/time crate. Valid for the entire `u64` range.
+#[must_use]
+pub fn human_date_utc(secs: u64) -> String {
+    let days = i64::try_from(secs / 86_400).unwrap_or(i64::MAX);
+    let rem = secs % 86_400;
+    let hour = rem / 3_600;
+    let minute = (rem % 3_600) / 60;
+    let second = rem % 60;
+
+    // Civil date from a day count relative to 1970-01-01 (Hinnant).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if month <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} +0000")
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -141,6 +174,23 @@ mod tests {
         assert_eq!(json_escape("\x01"), "\\u0001");
         // \x7f stays unescaped (only chars < 0x20 are special).
         assert_eq!(json_escape("\x7f"), "\x7f");
+    }
+
+    #[test]
+    fn human_date_utc_epoch() {
+        assert_eq!(human_date_utc(0), "1970-01-01 00:00:00 +0000");
+    }
+
+    #[test]
+    fn human_date_utc_known_instant() {
+        // 1700000000 = 2023-11-14 22:13:20 UTC.
+        assert_eq!(human_date_utc(1_700_000_000), "2023-11-14 22:13:20 +0000");
+    }
+
+    #[test]
+    fn human_date_utc_leap_day() {
+        // 1582934400 = 2020-02-29 00:00:00 UTC (leap day).
+        assert_eq!(human_date_utc(1_582_934_400), "2020-02-29 00:00:00 +0000");
     }
 
     #[test]

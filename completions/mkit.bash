@@ -42,13 +42,13 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--staged --cached --help" -- "$cur") )
             ;;
         status)
-            COMPREPLY=( $(compgen -W "--porcelain --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--porcelain -s --short --help" -- "$cur") )
             ;;
         commit)
             COMPREPLY=( $(compgen -W "-a --all -m --help" -- "$cur") )
             ;;
         log)
-            COMPREPLY=( $(compgen -W "--oneline --graph -n --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--oneline --format --graph -n --help" -- "$cur") )
             ;;
         push)
             COMPREPLY=( $(compgen -W "--dry-run --help" -- "$cur") )

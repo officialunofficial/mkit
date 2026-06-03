@@ -17,11 +17,13 @@ commands:
   tree              Snapshot working directory as a tree object
   commit [-a] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
   log [--oneline] [--format=json] [--graph] [-n N]
-                    Show commit history (--format=json emits JSONL;
-                    --graph is accepted but currently a no-op)
-  status [--porcelain]
+                    Show commit history (default prints the full message
+                    body + a UTC date; --format=json emits JSONL with the
+                    raw timestamp; --graph is accepted but currently a no-op)
+  status [--porcelain] [-s|--short]
                     Show staged and working tree changes
-                    (--porcelain emits machine-readable XY lines on stdout;
+                    (--porcelain, or its -s/--short alias, emits
+                    machine-readable XY lines on stdout;
                     no -z/NUL or path-quoting support yet)
   diff [--staged] [<treeA> <treeB>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
