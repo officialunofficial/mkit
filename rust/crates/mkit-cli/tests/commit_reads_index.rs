@@ -849,7 +849,8 @@ fn rm_directory_stages_tracked_descendants() {
     ok(p, &["add", "."]);
     ok(p, &["commit", "-m", "first"]);
 
-    ok(p, &["rm", "sub"]);
+    // Removing a directory now requires -r (Git-parity, #188).
+    ok(p, &["rm", "-r", "sub"]);
     ok(p, &["commit", "-m", "drop sub"]);
 
     let body = head_tree_body(p);

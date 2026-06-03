@@ -20,11 +20,24 @@ use crate::exit;
 #[derive(Debug, Parser)]
 #[command(
     name = "mkit add",
-    about = "Stage a file (or `.` for the whole worktree)."
+    about = "Stage files (paths, `.`, `-A`, or `-u`) into the index."
 )]
 struct AddOpts {
-    /// Path to stage. Pass `.` to stage every non-ignored file.
-    path: String,
+    /// Stage every change in the worktree, including deletions of
+    /// tracked files. Equivalent to `mkit add .` plus deletion
+    /// detection; takes no path arguments.
+    #[arg(short = 'A', long)]
+    all: bool,
+
+    /// Restage only files already tracked in the index: update modified
+    /// ones and record deletions, without adding untracked paths. Takes
+    /// no path arguments.
+    #[arg(short = 'u', long)]
+    update: bool,
+
+    /// Paths to stage. Pass `.` to stage every non-ignored file under
+    /// the current directory. Multiple paths may be given.
+    paths: Vec<String>,
 }
 
 /// Refresh already-tracked index entries from the worktree.
@@ -115,7 +128,6 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
-    let target = &opts.path;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -124,30 +136,77 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
+
+    // Mode selection. `-A` and `-u` are mutually exclusive with each
+    // other and with positional paths.
+    if opts.all && opts.update {
+        return emit_err("cannot combine -A/--all with -u/--update", exit::USAGE);
+    }
+    if (opts.all || opts.update) && !opts.paths.is_empty() {
+        return emit_err(
+            "-A/--all and -u/--update take no path arguments",
+            exit::USAGE,
+        );
+    }
+
+    if opts.update {
+        // Tracked-only restage, reusing the shared helper that backs
+        // `commit -a`.
+        return match stage_tracked_changes(&cwd, &store) {
+            Ok(()) => exit::OK,
+            Err(e) => emit_err(&e, exit::GENERAL_ERROR),
+        };
+    }
+
     let mut idx = match super::read_or_seed_index_from_head(&cwd, &store) {
         Ok(i) => i,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
-    if target == "." {
-        let ignores = match ignore::load(&cwd) {
-            Ok(i) => i,
-            Err(e) => return emit_err(&format!(".mkitignore: {e}"), exit::GENERAL_ERROR),
-        };
-        let mut seen = HashSet::new();
-        if let Err(code) = add_tree(&cwd, &cwd, &store, &mut idx, &ignores, &mut seen) {
+
+    if opts.all {
+        // Stage everything under cwd, then record deletions of tracked
+        // files that vanished from the worktree.
+        if let Err(code) = add_whole_worktree(&cwd, &store, &mut idx) {
             return code;
         }
-        mark_missing_paths_removed(&cwd, &mut idx, &seen);
+    } else if opts.paths.is_empty() {
+        return emit_err(
+            "no paths given (use `.`, -A, -u, or one or more paths)",
+            exit::USAGE,
+        );
     } else {
-        match add_one(&cwd, Path::new(target), &store, &mut idx) {
-            Ok(_) => {}
-            Err(code) => return code,
+        for target in &opts.paths {
+            if target == "." {
+                if let Err(code) = add_whole_worktree(&cwd, &store, &mut idx) {
+                    return code;
+                }
+            } else {
+                match add_one(&cwd, Path::new(target), &store, &mut idx) {
+                    Ok(_) => {}
+                    Err(code) => return code,
+                }
+            }
         }
     }
+
     match index::write_index(&cwd, &idx) {
         Ok(()) => exit::OK,
         Err(e) => emit_err(&format!("write index: {e}"), exit::CANTCREAT),
     }
+}
+
+/// Stage every non-ignored worktree file under `root`, then mark any
+/// tracked path missing from the worktree as removed. Backs both
+/// `mkit add .` and `mkit add -A`.
+fn add_whole_worktree(root: &Path, store: &ObjectStore, idx: &mut Index) -> Result<(), u8> {
+    let ignores = match ignore::load(root) {
+        Ok(i) => i,
+        Err(e) => return Err(emit_err(&format!(".mkitignore: {e}"), exit::GENERAL_ERROR)),
+    };
+    let mut seen = HashSet::new();
+    add_tree(root, root, store, idx, &ignores, &mut seen)?;
+    mark_missing_paths_removed(root, idx, &seen);
+    Ok(())
 }
 
 fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Result<String, u8> {

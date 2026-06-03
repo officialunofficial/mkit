@@ -15,7 +15,8 @@ _mkit_complete() {
     _init_completion || return 0
 
     local subcommands="init add rm hash cat tree commit log status diff branch checkout tag config merge push pull fetch stash clone remote key keygen cherry-pick rebase bisect sparse-checkout serve blame verify attest verify-attest version help"
-    local top_flags="--help -h --version"
+    # No top-level --version flag; use the `version` subcommand.
+    local top_flags="--help -h"
 
     # First non-flag word is the subcommand.
     if [[ $cword -eq 1 ]]; then
@@ -31,6 +32,18 @@ _mkit_complete() {
     # surface the --help / --version / well-documented flags so shell
     # users get tab-completion for the common fast-path.
     case "${words[1]}" in
+        add)
+            COMPREPLY=( $(compgen -W "-A --all -u --update --help" -- "$cur") )
+            ;;
+        rm)
+            COMPREPLY=( $(compgen -W "--cached -r --recursive -f --force --help" -- "$cur") )
+            ;;
+        diff)
+            COMPREPLY=( $(compgen -W "--staged --cached --help" -- "$cur") )
+            ;;
+        status)
+            COMPREPLY=( $(compgen -W "--porcelain --help" -- "$cur") )
+            ;;
         commit)
             COMPREPLY=( $(compgen -W "-a --all -m --help" -- "$cur") )
             ;;
