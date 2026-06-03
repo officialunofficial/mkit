@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use crate::hash::Hash;
 use crate::object::{EntryMode, Object, Tree, TreeEntry};
 use crate::serialize;
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
 
 /// Distinct conflict kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,6 +100,7 @@ pub fn merge_trees(
         "",
         &mut merged,
         &mut conflicts,
+        0,
     )?;
 
     let tree_hash = put_tree(store, merged)?;
@@ -310,6 +311,7 @@ fn recurse_subtree_merge(
     prefix: &str,
     merged: &mut Vec<TreeEntry>,
     conflicts: &mut Vec<Conflict>,
+    depth: usize,
 ) -> Result<(), StoreError> {
     let sub_prefix = join_path(prefix, entry_name);
     let base_entries = load_entries(store, base_sub)?;
@@ -325,6 +327,7 @@ fn recurse_subtree_merge(
         &sub_prefix,
         &mut sub_merged,
         conflicts,
+        depth + 1,
     )?;
 
     let sub_hash = put_tree(store, sub_merged)?;
@@ -341,7 +344,11 @@ fn merge_entries_recursive(
     prefix: &str,
     merged: &mut Vec<TreeEntry>,
     conflicts: &mut Vec<Conflict>,
+    depth: usize,
 ) -> Result<(), StoreError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(StoreError::TreeTooDeep);
+    }
     let mut bi = 0usize;
     let mut oi = 0usize;
     let mut ti = 0usize;
@@ -407,6 +414,7 @@ fn merge_entries_recursive(
                             prefix,
                             merged,
                             conflicts,
+                            depth,
                         )?;
                     } else {
                         add_entry(merged, min_name, o.mode, o.object_hash);
@@ -423,6 +431,7 @@ fn merge_entries_recursive(
                             prefix,
                             merged,
                             conflicts,
+                            depth,
                         )?;
                     } else {
                         add_entry(merged, min_name, t.mode, t.object_hash);
@@ -439,6 +448,7 @@ fn merge_entries_recursive(
                             prefix,
                             merged,
                             conflicts,
+                            depth,
                         )?;
                     } else {
                         add_entry(merged, min_name, o.mode, o.object_hash);
@@ -457,6 +467,7 @@ fn merge_entries_recursive(
                         prefix,
                         merged,
                         conflicts,
+                        depth,
                     )?;
                 } else {
                     // Both changed differently -> modify/modify conflict.
@@ -496,6 +507,7 @@ fn merge_entries_recursive(
                         prefix,
                         merged,
                         conflicts,
+                        depth,
                     )?;
                 } else {
                     conflicts.push(Conflict {

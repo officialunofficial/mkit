@@ -84,7 +84,10 @@ pub use sign::{
     commit_signing_hash, remix_signing_bytes, remix_signing_hash, sign_commit, sign_remix, verify,
     verify_commit, verify_remix,
 };
-pub use store::{MAX_RAW_OBJECT_SIZE, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError, StoreResult};
+pub use store::{
+    MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError,
+    StoreResult,
+};
 
 // Phase 3 — content-defined chunker (FastCDC v1).
 pub use chunker::{
