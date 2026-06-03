@@ -51,6 +51,14 @@ enum RemoteCmd {
         name_or_url: String,
         url: Option<String>,
     },
+    /// Remove a named remote (`mkit remote remove <name>`). Use the
+    /// reserved name `default` to clear the flat default remote.
+    #[command(alias = "rm")]
+    Remove { name: String },
+    /// Rename a named remote (`mkit remote rename <old> <new>`). Also
+    /// rewrites any `branch.<b>.remote` upstream pointing at `<old>`.
+    #[command(alias = "mv")]
+    Rename { old: String, new: String },
 }
 
 #[must_use]
@@ -98,23 +106,8 @@ pub fn run(args: &[String]) -> u8 {
                 );
             };
             if let Some(name) = name {
-                if config::validate_value(&name).is_err() {
-                    return emit_err(
-                        &format!("invalid remote name '{name}': contains control characters"),
-                        exit::PROTOCOL_ERROR,
-                    );
-                }
-                if !mkit_core::refs::validate_ref_name(&name)
-                    || name.contains('.')
-                    || name == config::DEFAULT_REMOTE_NAME
-                {
-                    return emit_err(
-                        &format!(
-                            "invalid remote name '{name}': must be a dot-free ref-safe name \
-                             (and not the reserved `default`)"
-                        ),
-                        exit::PROTOCOL_ERROR,
-                    );
+                if let Err(code) = validate_remote_name(&name) {
+                    return code;
                 }
                 cfg.remotes.insert(
                     name,
@@ -132,7 +125,86 @@ pub fn run(args: &[String]) -> u8 {
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
             }
         }
+        Some(RemoteCmd::Remove { name }) => {
+            // Removing a remote only touches the repo-scoped address
+            // book. The user-scoped `trusted_remote_endpoint` (#97) is
+            // keyed by exact URL, not by remote name, and is never
+            // serialised by `config::write`, so the credential-trust
+            // boundary is unaffected: a later remote reusing the same URL
+            // would still be trusted, and one with a new URL still
+            // requires an explicit `config trusted_remote_endpoint`.
+            if name == config::DEFAULT_REMOTE_NAME {
+                if cfg.remote_endpoint.is_empty() {
+                    return emit_err("no default remote configured", exit::GENERAL_ERROR);
+                }
+                cfg.remote_endpoint.clear();
+                cfg.remote_type.clear();
+                cfg.remote_bucket.clear();
+            } else if cfg.remotes.remove(&name).is_none() {
+                return emit_err(&format!("remote '{name}' not found"), exit::GENERAL_ERROR);
+            }
+            match config::write(&cwd, &cfg) {
+                Ok(()) => exit::OK,
+                Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
+            }
+        }
+        Some(RemoteCmd::Rename { old, new }) => {
+            if old == config::DEFAULT_REMOTE_NAME || new == config::DEFAULT_REMOTE_NAME {
+                return emit_err(
+                    "cannot rename the reserved `default` remote; use `remote add`/`remote remove`",
+                    exit::PROTOCOL_ERROR,
+                );
+            }
+            if let Err(code) = validate_remote_name(&new) {
+                return code;
+            }
+            let Some(entry) = cfg.remotes.remove(&old) else {
+                return emit_err(&format!("remote '{old}' not found"), exit::GENERAL_ERROR);
+            };
+            if cfg.remotes.contains_key(&new) {
+                // Put the source back so a failed rename is a no-op.
+                cfg.remotes.insert(old, entry);
+                return emit_err(&format!("remote '{new}' already exists"), exit::CANTCREAT);
+            }
+            cfg.remotes.insert(new.clone(), entry);
+            // Repoint any branch upstreams that tracked the old name.
+            for up in cfg.branch_upstreams.values_mut() {
+                if up.remote == old {
+                    up.remote.clone_from(&new);
+                }
+            }
+            match config::write(&cwd, &cfg) {
+                Ok(()) => exit::OK,
+                Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
+            }
+        }
     }
+}
+
+/// Validate a named-remote name: rejects control characters, non
+/// ref-safe names, dots (which would collide with the
+/// `remote.<name>.<field>` config key grammar), and the reserved
+/// `default` name. Returns the CLI exit code to propagate on failure.
+fn validate_remote_name(name: &str) -> Result<(), u8> {
+    if config::validate_value(name).is_err() {
+        return Err(emit_err(
+            &format!("invalid remote name '{name}': contains control characters"),
+            exit::PROTOCOL_ERROR,
+        ));
+    }
+    if !mkit_core::refs::validate_ref_name(name)
+        || name.contains('.')
+        || name == config::DEFAULT_REMOTE_NAME
+    {
+        return Err(emit_err(
+            &format!(
+                "invalid remote name '{name}': must be a dot-free ref-safe name \
+                 (and not the reserved `default`)"
+            ),
+            exit::PROTOCOL_ERROR,
+        ));
+    }
+    Ok(())
 }
 
 fn validate_url(url: &str) -> Option<&'static str> {

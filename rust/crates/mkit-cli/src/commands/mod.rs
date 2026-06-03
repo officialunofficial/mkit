@@ -31,6 +31,8 @@ pub mod pull;
 pub mod push;
 pub mod rebase;
 pub mod remote;
+pub mod reset;
+pub mod restore;
 pub mod revspec;
 pub mod rm;
 pub mod serve;

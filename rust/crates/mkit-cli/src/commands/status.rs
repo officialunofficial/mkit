@@ -18,9 +18,11 @@
 //! Scripts should use `--porcelain` (see below) for stdout output
 //! that is safe to parse.
 //!
-//! ## `--porcelain[=v1]` output
+//! ## `--porcelain[=v1]` / `-s` (`--short`) output
 //!
-//! Compatible with `git status --porcelain` — one entry per line,
+//! `-s`/`--short` is an alias for `--porcelain=v1`; both select the
+//! same renderer. Compatible with `git status --porcelain` — one entry
+//! per line,
 //! two-character XY status code, space, path:
 //!
 //! ```text
@@ -63,6 +65,11 @@ struct StatusOpts {
     /// `v1` matches `git status --porcelain=v1`.
     #[arg(long, value_name = "VERSION", num_args = 0..=1, default_missing_value = "v1")]
     porcelain: Option<PorcelainVersion>,
+
+    /// Short format. Alias for `--porcelain=v1`: emits the same
+    /// XY-code-plus-path lines on stdout. (No `-z`/NUL support.)
+    #[arg(short = 's', long = "short")]
+    short: bool,
 }
 
 #[must_use]
@@ -71,7 +78,9 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
-    let porcelain = opts.porcelain.is_some();
+    // `-s`/`--short` is an alias for `--porcelain=v1`; both select the
+    // line-oriented XY renderer on stdout.
+    let porcelain = opts.porcelain.is_some() || opts.short;
 
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
