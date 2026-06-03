@@ -73,13 +73,21 @@ Working-tree commands:
 
 History / commits:
 
-- `mkit commit [-a|--all] [--amend] -m <msg>` — create a signed commit
-  from the staging index. The index is built by `mkit add` / `mkit rm`;
-  `commit` with an empty index is an error. Use `mkit add .` to snapshot
-  the whole worktree before committing. `-a` / `--all` follows Git's
-  tracked-only shortcut: it stages modified tracked files and tracked
-  deletions before committing, but does not add untracked files.
-  `mkit commit -am <msg>` is accepted as shorthand for `-a -m <msg>`.
+- `mkit commit [-a|--all] [--amend] [--author <spec>] -m <msg>` — create
+  a signed commit from the staging index. The index is built by `mkit
+  add` / `mkit rm`; `commit` with an empty index is an error. Use `mkit
+  add .` to snapshot the whole worktree before committing. `-a` / `--all`
+  follows Git's tracked-only shortcut: it stages modified tracked files
+  and tracked deletions before committing, but does not add untracked
+  files. `mkit commit -am <msg>` is accepted as shorthand for `-a -m
+  <msg>`. `--author <spec>` overrides the recorded author Identity for
+  this commit (highest precedence — above `user.identity` config and the
+  signing-key-derived default). The `<spec>` grammar is `ed25519:<hex>`
+  (32-byte public key), `did:key:<hex>` (opaque DID-key bytes), or
+  `opaque:<bytes>` (raw UTF-8); note this differs from the `user.identity`
+  *config* grammar (which also accepts `mid:<N>` and raw encoded hex).
+  The signature is always produced by your signing key regardless of the
+  recorded author.
   `--amend` **replaces HEAD** instead of adding a new commit: the new
   commit re-uses HEAD's parent(s) as its own parent(s), takes its tree
   from the index, and is re-signed; the branch is moved to it and the
@@ -300,12 +308,14 @@ area — there are no unmerged index stages (SPEC-INDEX is unchanged).
 
 Remote / sync:
 
-- `mkit remote [--format=json]` — show the configured remote.
-  `--format=json` emits a single JSON object `{"url":"...","transport":"..."}`;
-  unset remote → empty stdout.
-- `mkit remote add <url>` — set the remote. URL MUST start with
+- `mkit remote [--format=json]` — show the configured remotes.
+  `--format=json` emits the remote configuration as JSON; an unset
+  remote produces empty stdout.
+- `mkit remote add [<name>] <url>` — add a remote. With a `<name>`,
+  registers a named remote (`remote.<name>.url`); without one, sets the
+  flat default `remote_endpoint`. The URL MUST start with
   `mkit+<scheme>://` (see below).
-- `mkit remote set <url>` — alias for `mkit remote add`.
+- `mkit remote set [<name>] <url>` — alias for `mkit remote add`.
 - `mkit remote remove <name>` (alias `rm`) — delete a named remote. The
   reserved name `default` clears the flat `remote_endpoint`.
 - `mkit remote rename <old> <new>` (alias `mv`) — rename a named remote
@@ -314,7 +324,14 @@ Remote / sync:
   touches the user-scoped `trusted_remote_endpoint`, which is keyed by
   exact URL rather than remote name (so the #97 credential-trust gate is
   preserved).
-- `mkit clone [--depth N] [--sparse ...] <url>` — clone a repository.
+- `mkit clone [--depth N] [--sparse ...] <url> [<dir>]` — clone a
+  repository into `<dir>` (defaults to the final URL path segment).
+  `--sparse <pattern>...` persists the patterns and materialises only the
+  matching files via the verifiable sparse-checkout pipeline (requires a
+  build with `--features sparse-checkout`). **`--depth N` is parsed but
+  not yet wired**: passing it fails with a clear `--depth is not yet
+  wired` usage error rather than silently producing a full clone; see
+  "Divergences from Git".
 - `mkit fetch` — download from remote without merging. Fetched branch
   tips are stored under `refs/remotes/default/<branch>` and do not move
   local branches.
@@ -323,8 +340,19 @@ Remote / sync:
   explicit merge/rebase flows after resolving the divergence. Fresh repos
   with no local branch tip initialize the current branch/worktree from
   the remote default branch.
-- `mkit push [--dry-run]` — push refs and packs to the configured
-  remote.
+- `mkit push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]`
+  — push refs and packs to a remote. With no `<remote>`, pushes the
+  **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
+  tracking pair), falling back to the configured default remote; an
+  explicit `<remote>` name overrides that choice. The default push is
+  CAS-protected: a non-fast-forward is rejected using the remote-tracking
+  ref as the lease. `--all` mirrors every `refs/heads/*` (also CAS-safe).
+  `--force` overwrites the remote branch unconditionally (skips CAS);
+  `--force-with-lease` overwrites only if the remote hasn't moved past
+  our last-seen tip (the two are mutually exclusive). `--dry-run`
+  resolves the push plan without contacting the remote. Every endpoint
+  flows through the per-endpoint credential-trust gate, which is keyed on
+  the resolved endpoint URL, never the remote name.
 - `mkit serve <path>` — internal SSH transport server. Speaks the
   mkit-rpc SSH framing on stdin/stdout by default.
 - `mkit serve <path> --listen-enc <addr>` — bind a TCP socket on
@@ -425,6 +453,43 @@ These are documented behaviours, not bugs, with tracked follow-ups:
 - **`mkit add -p` (interactive hunk staging) is not supported.** Stage
   whole files with pathspecs, `.`, `-A`, or `-u`. Interactive hunk
   selection is a follow-up.
+- **`mkit clone --depth N` is parsed but not yet wired.** The flag is
+  accepted by the parser but `clone` rejects it with a `--depth is not
+  yet wired` usage error rather than silently producing a full clone.
+  Shallow-clone history truncation is a follow-up.
+- **`mkit reset --hard` is intentionally not implemented.** `reset`
+  offers `--soft` (move HEAD only) and `--mixed` (move HEAD + reset the
+  index; the default); both leave the worktree untouched. For a guarded
+  worktree-resetting path use `mkit checkout <commit>`, which refuses to
+  clobber dirty/untracked files.
+
+### Commands deliberately not implemented (by design)
+
+The following Git commands are **intentionally absent** from mkit. These
+are design decisions, not missing features, and are tracked as closed
+"wontfix-by-design" follow-ups. mkit offers equivalent workflows for
+each:
+
+- **`mkit revert` — not implemented.** mkit has no inverse-commit
+  command. To undo a change, reset/checkout to the desired state and
+  commit forward, or `cherry-pick` a hand-built inverse. A first-class
+  `revert` may be reconsidered if demand warrants it, but it is out of
+  scope by design (decision #224).
+- **`mkit mv` — not implemented.** There is no rename/move command;
+  mkit's content-addressed model records moves implicitly (the blob hash
+  is unchanged and the path simply moves between tree entries). Move the
+  file in the worktree, then `mkit add` the new path and `mkit rm` (or
+  `mkit add -A`) the old one. Rename *detection* in diff/log output is a
+  separate, unscheduled follow-up (decision #226).
+- **`mkit clean` — not implemented.** mkit will not bulk-delete
+  untracked files. Remove stray files with your shell (`rm`), which keeps
+  the destructive step explicit and outside mkit's data path (decision
+  #226).
+
+Note: object garbage collection (`mkit gc`) is **not shipped** — it is a
+separate, unscheduled milestone (issue #233). Commands that leave
+unreachable objects (notably `commit --amend` and `reset`) say so
+explicitly; those objects remain on disk until `gc` lands.
 
 ## Config keys
 
