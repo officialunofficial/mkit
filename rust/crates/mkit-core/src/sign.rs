@@ -21,7 +21,7 @@
 //! deterministic from the seed.
 
 use crate::hash::{HASH_LEN, Hash};
-use crate::object::{Commit, Identity, MAGIC, MkitError, ObjectType, Remix, SCHEMA_VERSION};
+use crate::object::{Commit, Identity, MAGIC, MkitError, ObjectType, Remix, SCHEMA_VERSION, Tag};
 
 use core::fmt;
 use std::path::Path;
@@ -52,6 +52,14 @@ pub const COMMIT_DOMAIN: &[u8] = b"mkit.commit\x00";
 /// Domain separator used when signing remix objects. Eleven bytes
 /// including the trailing `\x00`.
 pub const REMIX_DOMAIN: &[u8] = b"mkit.remix\x00";
+
+/// Domain separator used when signing annotated/signed tag objects
+/// (issue #230). Nine bytes including the trailing `\x00`.
+///
+/// DELIBERATELY DISTINCT from [`COMMIT_DOMAIN`] / [`REMIX_DOMAIN`] so a
+/// tag signature can never be replayed as a commit/remix signature, or
+/// vice versa — see `docs/SPEC-SIGNING.md` §2 and §4a.
+pub const TAG_DOMAIN: &[u8] = b"mkit.tag\x00";
 
 /// 32-byte Ed25519 public key.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -289,6 +297,13 @@ pub fn remix_signing_hash(r: &Remix) -> Result<Hash, MkitError> {
     Ok(domain_digest(REMIX_DOMAIN, &sb))
 }
 
+/// Public helper:
+/// `BLAKE3(len_le16(TAG_DOMAIN) || TAG_DOMAIN || tag_signing_bytes(t))`.
+pub fn tag_signing_hash(t: &Tag) -> Result<Hash, MkitError> {
+    let sb = tag_signing_bytes(t)?;
+    Ok(domain_digest(TAG_DOMAIN, &sb))
+}
+
 fn write_prologue(buf: &mut Vec<u8>, t: ObjectType) {
     buf.push(t as u8);
     buf.extend_from_slice(&MAGIC);
@@ -374,6 +389,57 @@ pub fn remix_signing_bytes(r: &Remix) -> Result<Vec<u8>, MkitError> {
     buf.extend_from_slice(&r.timestamp.to_le_bytes());
     buf.extend_from_slice(&r.signer);
     Ok(buf)
+}
+
+/// Serialize a tag's fields for signing. SPEC-SIGNING §4a.
+///
+/// INCLUDED, in order:
+/// 1. Object prologue: `[type=0x07][magic="MKT1"][schema_version=0x01]`.
+/// 2. `target` (32) and `target_type` (u8).
+/// 3. `name`: `[len:u32 LE][name bytes]`.
+/// 4. Identity tagger: `[kind:u8][len:u16 LE][payload:len]`.
+/// 5. `message`: `[len:u32 LE][message bytes]`.
+/// 6. `timestamp` (u64 LE).
+/// 7. `signer` (32).
+///
+/// EXCLUDED: `signature` (a signature cannot cover itself).
+pub fn tag_signing_bytes(t: &Tag) -> Result<Vec<u8>, MkitError> {
+    if !t.name_is_valid() {
+        return Err(MkitError::TagNameInvalid);
+    }
+    if matches!(t.target_type, ObjectType::Delta) {
+        return Err(MkitError::TagTargetTypeInvalid(t.target_type as u8));
+    }
+    let mut buf = Vec::with_capacity(
+        6 + 32 + 1 + 4 + t.name.len() + 3 + t.tagger.bytes.len() + 4 + t.message.len() + 8 + 32,
+    );
+    write_prologue(&mut buf, ObjectType::Tag);
+    buf.extend_from_slice(&t.target);
+    buf.push(t.target_type as u8);
+    let nlen = u32::try_from(t.name.len()).map_err(|_| MkitError::TagNameInvalid)?;
+    buf.extend_from_slice(&nlen.to_le_bytes());
+    buf.extend_from_slice(&t.name);
+    write_identity(&mut buf, &t.tagger)?;
+    let mlen = u32::try_from(t.message.len()).map_err(|_| MkitError::UnexpectedEof)?;
+    buf.extend_from_slice(&mlen.to_le_bytes());
+    buf.extend_from_slice(&t.message);
+    buf.extend_from_slice(&t.timestamp.to_le_bytes());
+    buf.extend_from_slice(&t.signer);
+    Ok(buf)
+}
+
+/// Sign a tag object.
+pub fn sign_tag(t: &Tag, kp: &KeyPair) -> Result<Signature, MkitError> {
+    let sb = tag_signing_bytes(t)?;
+    Ok(kp.sign(TAG_DOMAIN, &sb))
+}
+
+/// Verify a tag against the public key embedded in `t.signer`.
+pub fn verify_tag(t: &Tag) -> Result<(), MkitError> {
+    let sb = tag_signing_bytes(t)?;
+    let pk = PublicKey(t.signer);
+    let sig = Signature(t.signature);
+    verify(&pk, TAG_DOMAIN, &sb, &sig)
 }
 
 /// Sign a commit object. Returns the 64-byte signature.
@@ -717,7 +783,7 @@ pub fn save_raw_32_create_new(path: &Path, secret: &[u8; 32]) -> Result<bool, Mk
 mod tests {
     use super::*;
     use crate::hash::{ZERO, hash};
-    use crate::object::{Identity, IdentityKind, RemixSource};
+    use crate::object::{Identity, IdentityKind, ObjectType, RemixSource, Tag};
 
     fn fixed_kp() -> KeyPair {
         KeyPair::from_seed([0x42; 32])
@@ -958,6 +1024,85 @@ mod tests {
         };
         r.signature = sign_remix(&r, &kp).unwrap().0;
         verify_remix(&r).expect("verify ok");
+    }
+
+    // ------------------------------------------------------------------
+    // Tag sign + verify + cross-protocol domain separation.
+    // ------------------------------------------------------------------
+
+    fn build_tag(kp: &KeyPair, msg: &[u8]) -> Tag {
+        Tag {
+            target: hash(b"target"),
+            target_type: ObjectType::Commit,
+            name: b"v1.0.0".to_vec(),
+            tagger: ed25519_id(kp.public.0),
+            signer: kp.public.0,
+            message: msg.to_vec(),
+            timestamp: 1_711_300_000,
+            signature: [0u8; 64],
+        }
+    }
+
+    #[test]
+    fn sign_then_verify_tag() {
+        let kp = fixed_kp();
+        let mut t = build_tag(&kp, b"release");
+        t.signature = sign_tag(&t, &kp).unwrap().0;
+        verify_tag(&t).expect("verify ok");
+    }
+
+    #[test]
+    fn tampered_tag_message_fails_verify() {
+        let kp = fixed_kp();
+        let mut t = build_tag(&kp, b"release");
+        t.signature = sign_tag(&t, &kp).unwrap().0;
+        t.message = b"tampered".to_vec();
+        assert!(matches!(verify_tag(&t), Err(MkitError::SignatureInvalid)));
+    }
+
+    #[test]
+    fn tampered_tag_target_fails_verify() {
+        let kp = fixed_kp();
+        let mut t = build_tag(&kp, b"release");
+        t.signature = sign_tag(&t, &kp).unwrap().0;
+        t.target = hash(b"other");
+        assert!(matches!(verify_tag(&t), Err(MkitError::SignatureInvalid)));
+    }
+
+    #[test]
+    fn tag_domain_differs_from_commit_and_remix() {
+        // The three domains must be pairwise distinct constants.
+        assert_ne!(TAG_DOMAIN, COMMIT_DOMAIN);
+        assert_ne!(TAG_DOMAIN, REMIX_DOMAIN);
+        let bytes = b"abc";
+        let dt = domain_digest(TAG_DOMAIN, bytes);
+        assert_ne!(dt, domain_digest(COMMIT_DOMAIN, bytes));
+        assert_ne!(dt, domain_digest(REMIX_DOMAIN, bytes));
+    }
+
+    /// Cross-protocol replay guard: a signature produced over the tag
+    /// domain MUST NOT verify under the commit/remix domain (and vice
+    /// versa), even with the same key and the same signing bytes.
+    #[test]
+    fn tag_signature_does_not_verify_as_commit_or_remix() {
+        let kp = fixed_kp();
+        let bytes = b"shared signing bytes";
+        let tag_sig = kp.sign(TAG_DOMAIN, bytes);
+        assert!(matches!(
+            verify(&kp.public, COMMIT_DOMAIN, bytes, &tag_sig),
+            Err(MkitError::SignatureInvalid)
+        ));
+        assert!(matches!(
+            verify(&kp.public, REMIX_DOMAIN, bytes, &tag_sig),
+            Err(MkitError::SignatureInvalid)
+        ));
+        // And the converse: a commit-domain signature must not verify
+        // under the tag domain.
+        let commit_sig = kp.sign(COMMIT_DOMAIN, bytes);
+        assert!(matches!(
+            verify(&kp.public, TAG_DOMAIN, bytes, &commit_sig),
+            Err(MkitError::SignatureInvalid)
+        ));
     }
 
     // ------------------------------------------------------------------

@@ -12,7 +12,8 @@
 use crate::hash::{HASH_LEN, Hash};
 use crate::object::{
     Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind, MAGIC,
-    MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, Tree, TreeEntry,
+    MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, TAG_NAME_MAX_LEN, Tag, Tree,
+    TreeEntry,
 };
 
 const PROLOGUE_LEN: usize = 6;
@@ -42,6 +43,7 @@ pub fn serialize(obj: &Object) -> Result<Vec<u8>, MkitError> {
         Object::Remix(r) => write_remix(&mut buf, r)?,
         Object::ChunkedBlob(cb) => write_chunked_blob(&mut buf, cb)?,
         Object::Delta(d) => write_delta(&mut buf, d)?,
+        Object::Tag(t) => write_tag(&mut buf, t)?,
     }
     Ok(buf)
 }
@@ -67,6 +69,7 @@ pub fn deserialize(data: &[u8]) -> Result<Object, MkitError> {
         ObjectType::Remix => Object::Remix(read_remix(&mut r)?),
         ObjectType::ChunkedBlob => Object::ChunkedBlob(read_chunked_blob(&mut r)?),
         ObjectType::Delta => Object::Delta(read_delta(&mut r)?),
+        ObjectType::Tag => Object::Tag(read_tag(&mut r)?),
     };
     if r.remaining() != 0 {
         return Err(MkitError::TrailingData);
@@ -169,6 +172,31 @@ fn write_remix(buf: &mut Vec<u8>, r: &Remix) -> Result<(), MkitError> {
     Ok(())
 }
 
+/// Reject pack-only / non-storable target types. A tag MUST point at a
+/// type that can live in the object store (`Delta` is pack-only).
+fn check_tag_target_type(t: ObjectType) -> Result<(), MkitError> {
+    if matches!(t, ObjectType::Delta) {
+        return Err(MkitError::TagTargetTypeInvalid(t as u8));
+    }
+    Ok(())
+}
+
+fn write_tag(buf: &mut Vec<u8>, t: &Tag) -> Result<(), MkitError> {
+    if !t.name_is_valid() {
+        return Err(MkitError::TagNameInvalid);
+    }
+    check_tag_target_type(t.target_type)?;
+    buf.extend_from_slice(&t.target);
+    buf.push(t.target_type as u8);
+    write_lp_bytes(buf, "tag.name", &t.name)?;
+    write_identity(buf, &t.tagger)?;
+    write_lp_bytes(buf, "tag.message", &t.message)?;
+    write_u64_le(buf, t.timestamp);
+    buf.extend_from_slice(&t.signer);
+    buf.extend_from_slice(&t.signature);
+    Ok(())
+}
+
 fn write_chunked_blob(buf: &mut Vec<u8>, cb: &ChunkedBlob) -> Result<(), MkitError> {
     write_u64_le(buf, cb.total_size);
     write_u32_le(buf, cb.chunk_size);
@@ -225,6 +253,19 @@ fn estimated_body_len(obj: &Object) -> usize {
         }
         Object::ChunkedBlob(cb) => 8 + 4 + 4 + cb.chunks.len() * 32,
         Object::Delta(d) => 32 + 4 + 4 + d.instructions.len(),
+        Object::Tag(t) => {
+            32 + 1
+                + 4
+                + t.name.len()
+                + 1
+                + 2
+                + t.tagger.bytes.len()
+                + 4
+                + t.message.len()
+                + 8
+                + 32
+                + 64
+        }
     }
 }
 
@@ -475,6 +516,39 @@ fn read_remix(r: &mut Reader<'_>) -> Result<Remix, MkitError> {
     })
 }
 
+fn read_tag(r: &mut Reader<'_>) -> Result<Tag, MkitError> {
+    let target = r.read_hash()?;
+    let target_type = ObjectType::from_u8(r.read_u8()?)?;
+    check_tag_target_type(target_type)?;
+    // `name` is length-prefixed; bound it by TAG_NAME_MAX_LEN before we
+    // copy so a bogus header can't force a large allocation.
+    let name_len = r.read_u32()? as usize;
+    if name_len == 0 || name_len > TAG_NAME_MAX_LEN as usize {
+        return Err(MkitError::TagNameInvalid);
+    }
+    r.need(name_len)?;
+    let name = r.data[r.pos..r.pos + name_len].to_vec();
+    r.pos += name_len;
+    if name.iter().any(|&b| matches!(b, 0 | b'/' | b'\\')) {
+        return Err(MkitError::TagNameInvalid);
+    }
+    let tagger = r.read_identity()?;
+    let message = r.read_lp_bytes()?;
+    let timestamp = r.read_u64()?;
+    let signer = r.read_fixed::<32>()?;
+    let signature = r.read_fixed::<64>()?;
+    Ok(Tag {
+        target,
+        target_type,
+        name,
+        tagger,
+        signer,
+        message,
+        timestamp,
+        signature,
+    })
+}
+
 fn read_chunked_blob(r: &mut Reader<'_>) -> Result<ChunkedBlob, MkitError> {
     let total_size = r.read_u64()?;
     let chunk_size = r.read_u32()?;
@@ -661,6 +735,66 @@ mod tests {
             chunks: vec![hash(b"x"), hash(b"y")],
         });
         assert_eq!(deserialize(&serialize(&obj).unwrap()).unwrap(), obj);
+    }
+
+    fn sample_tag() -> Tag {
+        Tag {
+            target: hash(b"target-commit"),
+            target_type: ObjectType::Commit,
+            name: b"v1.0.0".to_vec(),
+            tagger: ed25519_id(),
+            signer: [0xAA; 32],
+            message: b"release 1.0.0".to_vec(),
+            timestamp: 1_711_300_000,
+            signature: [0xCC; 64],
+        }
+    }
+
+    #[test]
+    fn tag_roundtrip() {
+        let obj = Object::Tag(sample_tag());
+        let bytes = serialize(&obj).unwrap();
+        assert_eq!(bytes[0], 0x07, "tag object_type tag");
+        assert_eq!(&bytes[1..5], b"MKT1");
+        assert_eq!(bytes[5], 0x01);
+        assert_eq!(deserialize(&bytes).unwrap(), obj);
+    }
+
+    #[test]
+    fn tag_empty_message_roundtrip() {
+        let mut t = sample_tag();
+        t.message = vec![];
+        let obj = Object::Tag(t);
+        assert_eq!(deserialize(&serialize(&obj).unwrap()).unwrap(), obj);
+    }
+
+    #[test]
+    fn tag_rejects_empty_name() {
+        let mut t = sample_tag();
+        t.name = vec![];
+        assert_eq!(serialize(&Object::Tag(t)), Err(MkitError::TagNameInvalid));
+    }
+
+    #[test]
+    fn tag_rejects_delta_target_type() {
+        let mut t = sample_tag();
+        t.target_type = ObjectType::Delta;
+        assert_eq!(
+            serialize(&Object::Tag(t)),
+            Err(MkitError::TagTargetTypeInvalid(ObjectType::Delta as u8))
+        );
+    }
+
+    #[test]
+    fn tag_decode_rejects_forbidden_name_byte() {
+        // Hand-craft a tag whose name embeds a `/`. The writer would
+        // reject it, so build the wire bytes directly.
+        let mut buf = vec![0x07, b'M', b'K', b'T', b'1', 0x01];
+        buf.extend_from_slice(&[0u8; 32]); // target
+        buf.push(ObjectType::Commit as u8); // target_type
+        buf.extend_from_slice(&3u32.to_le_bytes()); // name_len
+        buf.extend_from_slice(b"a/b");
+        assert_eq!(deserialize(&buf), Err(MkitError::TagNameInvalid));
     }
 
     // ---- Negative tests ----
