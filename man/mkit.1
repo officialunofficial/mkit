@@ -389,6 +389,16 @@ and
 Internal subcommand: act as the server end of an
 .Cm mkit+ssh://
 transport.
+.It Cm pack-shard Oo Fl Fl out Ar dir Oc Oo Fl Fl force Oc Ar hash
+Encode a stored pack into Reed-Solomon shards plus a manifest, ready to
+publish to an HTTP or S3 origin (producer side of SPEC-PACK-SHARDS Phase
+2). The pack must already be in the local object store. Output lands
+under
+.Pa <out>/packs/<hex>/shards/<index>
+with the manifest written last, so racing readers see either no manifest
+(clean fall-through to the monolithic pack) or the manifest plus every
+shard. Requires building the binary with
+.Cm --features pack-shards .
 .It Cm version
 Print the version to stdout as
 .Ql mkit <X.Y.Z> .

@@ -43,6 +43,7 @@ _mkit() {
         'bisect:Binary search for a bad commit'
         'sparse-checkout:Manage sparse checkout patterns'
         'serve:Start SSH transport server (internal)'
+        'pack-shard:Encode a stored pack into Reed-Solomon shards'
         'blame:Show line-level commit attribution'
         'verify:Verify the signature on a commit'
         'attest:Produce a signed DSSE attestation for a commit'
@@ -193,6 +194,13 @@ _mkit() {
                         'import[import a key into the keystore]' \
                         'export[export a key from the keystore]' \
                         'delete[delete a key from the keystore]'
+                    ;;
+                pack-shard)
+                    _arguments \
+                        '--out[output directory]:_files -/' \
+                        '--force[overwrite existing shards]' \
+                        '--help[show help]' \
+                        '1:hash:'
                     ;;
                 attest)
                     _arguments \
