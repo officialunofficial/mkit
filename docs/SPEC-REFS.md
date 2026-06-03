@@ -291,6 +291,43 @@ defeat adversarial nesting. Files that fail `validate_ref_name` or
 whose bytes do not decode to a valid ref wire are silently skipped
 from listings.
 
+### 6.1 Operation-state files (merge / cherry-pick / rebase)
+
+Resumable history operations persist their state under `.mkit/` using
+Git-compatible names plus one documented mkit sidecar. These are not
+refs (they are not listed by `listRefs` and are not part of the ref
+namespace); they are operation scratch state consumed by
+`--continue` / `--abort` / `--skip`.
+
+```
+.mkit/MERGE_HEAD           64-hex + '\n'  — other parent of an in-progress merge
+.mkit/CHERRY_PICK_HEAD     64-hex + '\n'  — commit being applied by a cherry-pick
+.mkit/ORIG_HEAD            64-hex + '\n'  — HEAD before the operation (for --abort)
+.mkit/MERGE_MSG            raw bytes      — pending merge commit message
+.mkit/CHERRY_PICK_MSG      raw bytes      — pending cherry-pick commit message
+.mkit/mkit-conflicts       sidecar (below)
+.mkit/rebase-apply/        rebase state dir; holds a mkit-conflicts sidecar when paused
+```
+
+Presence of `MERGE_HEAD` ⇒ a merge is in progress; `CHERRY_PICK_HEAD` ⇒
+a cherry-pick; `rebase-apply/` ⇒ a rebase. Starting any of the three
+while one is already in progress is refused.
+
+The `mkit-conflicts` sidecar is line-oriented, one line per conflicting
+path, tab-separated, with the path last (so it may not contain a tab):
+
+```
+<kind>\t<base_hex|->\t<ours_hex|->\t<theirs_hex|->\t<path>\n
+```
+
+where `<kind>` ∈ {`modify`, `addadd`, `deletemodify`}, a missing side is
+encoded as a single `-`, and `<path>` is validated with the same rules
+as a staged index path (SPEC-INDEX §2). Hash files tolerate trailing
+whitespace on read. The whole sidecar is capped at 1 MiB. This sidecar
+does **not** change the `.mkit/index` format: the index remains a
+single-stage **resolved** staging area (no unmerged stages); conflict
+base/ours/theirs material lives only in this sidecar.
+
 ---
 
 ## 7. Test vectors

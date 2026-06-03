@@ -16,6 +16,7 @@ pub mod cherry_pick;
 pub mod clone;
 pub mod commit;
 pub mod config_cmd;
+pub mod conflict;
 pub mod diff;
 pub mod fetch;
 pub mod hash_cmd;
@@ -294,7 +295,7 @@ fn is_ignored_worktree_path(
     ignore.is_ignored(name, meta.is_dir())
 }
 
-fn current_head_tree(root: &Path, store: &ObjectStore) -> Result<Option<Hash>, String> {
+pub(crate) fn current_head_tree(root: &Path, store: &ObjectStore) -> Result<Option<Hash>, String> {
     let mkit_dir = root.join(mkit_core::MKIT_DIR);
     let Some(head_hash) =
         refs::resolve_head(&mkit_dir).map_err(|e| format!("resolve HEAD: {e}"))?
