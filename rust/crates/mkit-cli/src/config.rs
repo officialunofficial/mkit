@@ -711,7 +711,18 @@ pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
             let _ = writeln!(out, "branch.{branch}.merge = {}", up.branch);
         }
     }
-    fs::write(&path, out)?;
+    // Atomic replace: write to a sibling temp file then rename over the
+    // target so a crash mid-write can never leave a truncated config
+    // (which would silently drop remotes / upstream tracking). The temp
+    // file shares the destination directory so the rename stays on one
+    // filesystem.
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".config.")
+        .tempfile_in(dir)?;
+    tmp.write_all(out.as_bytes())?;
+    tmp.flush()?;
+    tmp.persist(&path).map_err(|e| ConfigError::Io(e.error))?;
     Ok(())
 }
 
