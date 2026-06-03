@@ -302,7 +302,11 @@ impl CtapDevice for MockCtapDevice {
     }
 }
 
-/// Hex helper shared between real + mock. Lowercase, no separators.
+/// Hex helper for the hardware (`ctap-hw`) credential path. Lowercase,
+/// no separators. Only the real device impl and the unit tests call it,
+/// so a default (mock-only, non-test) build legitimately leaves it
+/// unused.
+#[cfg_attr(not(feature = "ctap-hw"), allow(dead_code))]
 pub(crate) fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
