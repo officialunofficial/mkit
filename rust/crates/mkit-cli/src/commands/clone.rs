@@ -58,6 +58,16 @@ pub fn run(args: &[String]) -> u8 {
     // `mkit checkout` honours them. Phase 2 sparse fetch over the
     // wire is wired through `mkit checkout --sparse` itself.
     let url = opts.url.as_str();
+    // Reject control characters (newline et al.) before the URL is
+    // persisted to `.mkit/config` via `config::write` (which emits values
+    // raw) — a newline would inject extra `key = value` lines into the
+    // config (config injection). Mirrors the `mkit remote add` check.
+    if config::validate_value(url).is_err() {
+        return emit_err(
+            &format!("invalid remote URL '{url}': contains control characters"),
+            exit::PROTOCOL_ERROR,
+        );
+    }
     let target: PathBuf = match opts.dir.as_deref() {
         Some(d) => PathBuf::from(d),
         None => PathBuf::from(derive_dir_from_url(url)),

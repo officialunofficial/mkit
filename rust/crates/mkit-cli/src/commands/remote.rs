@@ -78,6 +78,16 @@ pub fn run(args: &[String]) -> u8 {
                 Some(url) => (Some(name_or_url), url),
                 None => (None, name_or_url),
             };
+            // Reject control characters (newline et al.) before the URL
+            // ever reaches `config::write`, which emits values raw — a
+            // newline would inject extra `key = value` lines into
+            // `.mkit/config` (config injection).
+            if config::validate_value(&url).is_err() {
+                return emit_err(
+                    &format!("invalid remote URL '{url}': contains control characters"),
+                    exit::PROTOCOL_ERROR,
+                );
+            }
             let Some(scheme) = validate_url(&url) else {
                 return emit_err(
                     &format!(
@@ -88,6 +98,12 @@ pub fn run(args: &[String]) -> u8 {
                 );
             };
             if let Some(name) = name {
+                if config::validate_value(&name).is_err() {
+                    return emit_err(
+                        &format!("invalid remote name '{name}': contains control characters"),
+                        exit::PROTOCOL_ERROR,
+                    );
+                }
                 if !mkit_core::refs::validate_ref_name(&name)
                     || name.contains('.')
                     || name == config::DEFAULT_REMOTE_NAME

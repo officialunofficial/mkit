@@ -281,6 +281,18 @@ Remote / sync:
     ANY peer. Prints a loud warning; never use in production.
   These two flags are mutually exclusive.
 
+  Post-handshake resource bounds (slow-loris hardening):
+  - `--enc-idle-timeout-secs <SECS>` — per-frame idle timeout applied
+    after the handshake completes. A peer that does not send its next
+    verb/upload frame within this window has its session dropped, so a
+    peer that finishes the handshake then stalls cannot pin a worker +
+    socket indefinitely. `0` disables the timeout (not recommended).
+    Default: `60`.
+  - `--enc-handshake-timeout-secs <SECS>` — overall deadline for
+    completing the cryptographic handshake. SPEC-TRANSPORT-ENC §6.2
+    recommends tightening to ≤5–10s on real networks; the default is
+    deliberately generous. Default: `60`.
+
   `--enc-server-key <PATH>` selects the server's stable raw 32-byte
   ed25519 key file (auto-created with `0600`/`0700` hardening on first
   run). When allowlisting and the flag is omitted, the key is

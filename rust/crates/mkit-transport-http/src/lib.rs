@@ -83,6 +83,18 @@ const SHARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 // call sites keep working.
 pub use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
 
+/// Cap for a single control-plane ref/upload JSON body (`read_ref`,
+/// `upload_pack` response). These responses are tiny — a 64-hex hash
+/// plus minimal JSON framing — so a few KiB is generous. Mirrors the S3
+/// transport's `REF_BODY_LIMIT` intent; an attacker-controlled or
+/// MITM'd endpoint must not be able to OOM us with a multi-GB body.
+const CONTROL_BODY_LIMIT: usize = 4 * 1024;
+
+/// Cap for a `list_refs` JSON body. Larger than a single ref but still
+/// bounded so a hostile remote can't return an unbounded list. Mirrors
+/// the S3 transport's `REF_LIST_BODY_LIMIT` (16 MiB).
+const REF_LIST_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
 /// HTTP request header advertising client willingness to receive a
 /// pack as `N+K` Reed-Solomon shards. Value is `"<N>+<K>"`. Per
 /// SPEC-PACK-SHARDS §5, sent by the client on `download_pack` when the
@@ -130,12 +142,37 @@ pub fn validate_http_scheme(url: &Url) -> TransportResult<()> {
     }
 }
 
+/// Maximum number of HTTP redirects we follow before giving up.
+const MAX_REDIRECTS: usize = 5;
+
+/// Explicit reqwest redirect policy (#223): follow up to
+/// [`MAX_REDIRECTS`] hops, but REFUSE any redirect that downgrades the
+/// scheme (`https` → `http`). A downgrade would silently move
+/// authenticated traffic (the `MKIT_API_TOKEN` bearer) onto a plaintext
+/// channel, so we stop with an error rather than relying on reqwest's
+/// permissive defaults.
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            return attempt.error("too many redirects");
+        }
+        // Refuse https -> http downgrade. (http -> https upgrade and
+        // same-scheme redirects are allowed.)
+        if let Some(prev) = attempt.previous().last()
+            && prev.scheme() == "https"
+            && attempt.url().scheme() != "https"
+        {
+            return attempt.error("refusing redirect that downgrades https to a weaker scheme");
+        }
+        attempt.follow()
+    })
+}
+
 /// Blocking HTTP transport for the mkit VCS Worker dialect.
 ///
 /// Construction: [`HttpTransport::connect`] parses a `mkit+https://` (or
 /// `mkit+http://` for local testing) URL, strips the `mkit+` prefix, and
 /// reads `MKIT_API_TOKEN` from the environment.
-#[derive(Debug)]
 pub struct HttpTransport {
     /// Base URL (scheme + host + port + `/<project>`). No trailing slash.
     base: Url,
@@ -150,6 +187,19 @@ pub struct HttpTransport {
     /// Sleep hook between retry attempts. Production sleeps for the
     /// full delay; tests inject a no-op or recorder.
     sleep: fn(Duration),
+}
+
+// Manual redacting `Debug` (mirrors `S3Transport`): the `token` field is
+// the `MKIT_API_TOKEN` bearer secret and MUST NOT leak through `{:?}` /
+// `dbg!` / `tracing` of this struct or any struct embedding it. We only
+// reveal *whether* a token is present, never its value.
+impl std::fmt::Debug for HttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpTransport")
+            .field("base", &self.base)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl HttpTransport {
@@ -172,6 +222,7 @@ impl HttpTransport {
 
         let client = Client::builder()
             .timeout(DEFAULT_TIMEOUT)
+            .redirect(redirect_policy())
             .build()
             .map_err(|_| TransportError::ConnectionFailed)?;
 
@@ -194,6 +245,7 @@ impl HttpTransport {
     pub fn new_for_test(base: Url, token: Option<String>) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(5))
+            .redirect(redirect_policy())
             .build()
             .expect("default reqwest client");
         Self {
@@ -324,8 +376,17 @@ impl HttpTransport {
     /// running cap at [`PACK_BODY_LIMIT_USIZE`]. Shared by the
     /// monolithic-pack and shard-body paths.
     fn read_body_capped(resp: Response) -> TransportResult<Vec<u8>> {
+        Self::read_body_capped_to(resp, PACK_BODY_LIMIT_USIZE)
+    }
+
+    /// Stream a reqwest blocking response body into a `Vec<u8>` with a
+    /// running cap of `cap` bytes. The cap is enforced as the body is
+    /// read (never trusting `Content-Length`), so a hostile remote that
+    /// omits or lies about the header still can't OOM us — we stop and
+    /// return [`TransportError::PayloadTooLarge`] the moment the cap is
+    /// crossed.
+    fn read_body_capped_to(resp: Response, cap: usize) -> TransportResult<Vec<u8>> {
         let mut reader = resp;
-        let cap = PACK_BODY_LIMIT_USIZE;
         let mut buf = Vec::new();
         let mut chunk = vec![0u8; 64 * 1024];
         loop {
@@ -514,9 +575,11 @@ impl Transport for HttpTransport {
 
         // Parse `{"key": "<hex>"}` and cross-check against the caller's
         // pre-computed digest so a misbehaving server can't silently
-        // swap the pack under us.
+        // swap the pack under us. Cap the read so a hostile/compromised
+        // remote can't OOM us with an unbounded response body.
+        let body = Self::read_body_capped_to(resp, CONTROL_BODY_LIMIT)?;
         let parsed: PackUploadResponse =
-            resp.json().map_err(|_| TransportError::InvalidResponse)?;
+            serde_json::from_slice(&body).map_err(|_| TransportError::InvalidResponse)?;
         let server_key = from_hex(&parsed.key).map_err(|_| TransportError::InvalidResponse)?;
         if server_key != *key.as_bytes() {
             return Err(TransportError::InvalidResponse);
@@ -656,7 +719,11 @@ impl Transport for HttpTransport {
             ));
         }
 
-        let parsed: RefPayload = resp.json().map_err(|_| TransportError::InvalidResponse)?;
+        // Cap the read so a hostile remote can't OOM us with a giant body
+        // in place of the tiny `{"hash": "<hex>"}` payload.
+        let body = Self::read_body_capped_to(resp, CONTROL_BODY_LIMIT)?;
+        let parsed: RefPayload =
+            serde_json::from_slice(&body).map_err(|_| TransportError::InvalidResponse)?;
         let h = from_hex(&parsed.hash).map_err(|_| TransportError::InvalidResponse)?;
         Ok(Some(h))
     }
@@ -675,7 +742,11 @@ impl Transport for HttpTransport {
             ));
         }
 
-        let parsed: RefListResponse = resp.json().map_err(|_| TransportError::InvalidResponse)?;
+        // Cap the read at the list limit so a hostile remote can't OOM us
+        // with an unbounded ref-list body (never trusting Content-Length).
+        let body = Self::read_body_capped_to(resp, REF_LIST_BODY_LIMIT)?;
+        let parsed: RefListResponse =
+            serde_json::from_slice(&body).map_err(|_| TransportError::InvalidResponse)?;
 
         let mut out: Vec<Ref> = Vec::with_capacity(parsed.refs.len());
         let full_prefix = prefix.trim_end_matches('/');
@@ -797,6 +868,10 @@ mod sparse_fetch {
             if !status.is_success() {
                 return Err(map_status(status, TransportError::PackNotFound));
             }
+            // Cheap pre-check: if the server advertises an honest
+            // oversized Content-Length, refuse before reading. But do
+            // NOT trust the header — the running-cap reader below enforces
+            // the bound even when the header is missing or lies.
             if let Some(len) = resp.content_length()
                 && len > SPARSE_WIRE_MAX_BYTES as u64
             {
@@ -804,10 +879,7 @@ mod sparse_fetch {
                     usize::try_from(len).unwrap_or(usize::MAX),
                 ));
             }
-            let body_bytes = resp.bytes().map_err(|_| TransportError::ConnectionFailed)?;
-            if body_bytes.len() > SPARSE_WIRE_MAX_BYTES {
-                return Err(TransportError::PayloadTooLarge(body_bytes.len()));
-            }
+            let body_bytes = HttpTransport::read_body_capped_to_pub(resp, SPARSE_WIRE_MAX_BYTES)?;
             decode_sparse_response(&body_bytes).map_err(|_| TransportError::InvalidResponse)
         }
     }
@@ -873,6 +945,9 @@ impl HttpTransport {
     }
     fn apply_auth_pub(&self, req: RequestBuilder) -> RequestBuilder {
         self.apply_auth(req)
+    }
+    fn read_body_capped_to_pub(resp: Response, cap: usize) -> TransportResult<Vec<u8>> {
+        Self::read_body_capped_to(resp, cap)
     }
 }
 
@@ -1247,6 +1322,57 @@ mod tests {
     }
 
     #[test]
+    fn read_ref_oversized_body_is_payload_too_large() {
+        // A multi-MB body in place of the tiny `{"hash":...}` payload
+        // must be rejected by the running cap, not buffered to OOM.
+        let mut server = Server::new();
+        let huge = vec![b'a'; CONTROL_BODY_LIMIT + 1];
+        let _m = server
+            .mock("GET", "/myproj/refs/refs/heads/main")
+            .with_status(200)
+            .with_body(huge)
+            .create();
+        let t = make_transport(&server, None);
+        assert!(matches!(
+            t.read_ref("refs/heads/main"),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn list_refs_oversized_body_is_payload_too_large() {
+        let mut server = Server::new();
+        let huge = vec![b'a'; REF_LIST_BODY_LIMIT + 1];
+        let _m = server
+            .mock("GET", Matcher::Regex(r"^/myproj/refs\?prefix=".to_string()))
+            .with_status(200)
+            .with_body(huge)
+            .create();
+        let t = make_transport(&server, None);
+        assert!(matches!(
+            t.list_refs("refs/heads/"),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn upload_pack_oversized_response_is_payload_too_large() {
+        let mut server = Server::new();
+        let key = sample_key(0x55);
+        let huge = vec![b'a'; CONTROL_BODY_LIMIT + 1];
+        let _m = server
+            .mock("POST", "/myproj/packs")
+            .with_status(201)
+            .with_body(huge)
+            .create();
+        let t = make_transport(&server, None);
+        assert!(matches!(
+            t.upload_pack(b"pack", &key),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
+    }
+
+    #[test]
     fn read_ref_404_returns_none() {
         let mut server = Server::new();
         let _m = server
@@ -1605,6 +1731,53 @@ mod tests {
             .create();
         let t = make_transport(&server, None);
         assert_eq!(t.download_pack(&key).unwrap(), b"public");
+    }
+
+    #[test]
+    fn debug_redacts_bearer_token() {
+        let base = Url::parse("http://127.0.0.1:1/myproj").unwrap();
+        let t = HttpTransport::new_for_test(base, Some("super-secret-token".into()));
+        let dbg = format!("{t:?}");
+        assert!(
+            !dbg.contains("super-secret-token"),
+            "Debug leaked bearer token: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"), "Debug missing redaction: {dbg}");
+    }
+
+    #[test]
+    fn debug_shows_absent_token_as_none() {
+        let base = Url::parse("http://127.0.0.1:1/myproj").unwrap();
+        let t = HttpTransport::new_for_test(base, None);
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("None"), "Debug should show token: None: {dbg}");
+        assert!(!dbg.contains("<redacted>"));
+    }
+
+    #[test]
+    fn redirect_loop_is_bounded_not_followed_forever() {
+        // A server that 301-redirects to itself must not cause an
+        // unbounded redirect chase: the explicit redirect policy caps the
+        // hop count, so the request fails (mapped to ConnectionFailed
+        // after retries) instead of hanging. Asserts the policy is wired.
+        let mut server = Server::new();
+        let loc = format!("{}/myproj/refs/refs/heads/main", server.url());
+        let _m = server
+            .mock("GET", "/myproj/refs/refs/heads/main")
+            .with_status(301)
+            .with_header("location", loc.as_str())
+            .create();
+        let t = make_transport(&server, None);
+        let err = t.read_ref("refs/heads/main").unwrap_err();
+        // Either a connection-level error (redirect policy aborted the
+        // send) or a non-success status mapped through; never a hang.
+        assert!(
+            matches!(
+                err,
+                TransportError::ConnectionFailed | TransportError::InvalidRef(_)
+            ),
+            "unexpected error for bounded redirect loop: {err:?}"
+        );
     }
 
     // -- 502 bad gateway (5xx family) --------------------------------------

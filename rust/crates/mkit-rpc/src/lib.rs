@@ -34,6 +34,9 @@
 //! `signer2.proto` / `ssh2.proto` files rather than mutating v1.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// This crate (including the generated protobuf modules) contains zero
+// `unsafe` — enforce that it stays that way.
+#![forbid(unsafe_code)]
 
 // Generated protobuf modules. `_includes.rs` is emitted by
 // buffa-build; it sets up the module tree for common.proto,

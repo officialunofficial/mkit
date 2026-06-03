@@ -446,6 +446,27 @@ fn read_ref_invalid_body_returns_invalid_response() {
     ));
 }
 
+/// A ref body that exceeds `REF_BODY_LIMIT` (256 bytes) must surface a
+/// non-retryable `PayloadTooLarge` (#223: was a retryable 507), and the
+/// transport must NOT retry it — exactly one GET is expected.
+#[test]
+fn read_ref_oversized_body_is_payload_too_large_and_not_retried() {
+    let mut server = mockito::Server::new();
+    let oversized = vec![b'a'; 4096];
+    let m = server
+        .mock("GET", mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(oversized)
+        .expect(1) // exactly one request — no retry storm
+        .create();
+    let t = build_transport(&server.url());
+    assert!(matches!(
+        t.read_ref("refs/heads/main"),
+        Err(TransportError::PayloadTooLarge(_))
+    ));
+    m.assert();
+}
+
 // -- listRefs -----------------------------------------------------------------
 
 #[test]
@@ -505,8 +526,10 @@ fn list_refs_uses_url_prefix_namespace_and_strips_it() {
     </ListBucketResult>"#;
     let m_list = server
         .mock("GET", "/bucket")
+        // Query is canonically percent-encoded before signing (#215);
+        // `/` becomes `%2F`.
         .match_query(mockito::Matcher::Exact(
-            "list-type=2&prefix=repo-a/refs/heads/".to_owned(),
+            "list-type=2&prefix=repo-a%2Frefs%2Fheads%2F".to_owned(),
         ))
         .with_status(200)
         .with_body(xml)

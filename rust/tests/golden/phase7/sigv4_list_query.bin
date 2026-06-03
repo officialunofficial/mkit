@@ -1,0 +1,16 @@
+{
+  "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+  "canonical_request": "GET\n/mkit-storage/\nlist-type=2&prefix=refs%2Fheads%2F\nhost:abc123.r2.cloudflarestorage.com\nx-amz-content-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nx-amz-date:20240324T170640Z\n\nhost;x-amz-content-sha256;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "description": "SigV4 canonical_request + string_to_sign + signature for a non-empty ListObjectsV2 query whose prefix value contains '/' (#215). query is the canonical percent-encoded + key-sorted form.",
+  "endpoint": "https://abc123.r2.cloudflarestorage.com",
+  "method": "GET",
+  "name": "sigv4_list_query",
+  "path": "/mkit-storage/",
+  "payload": "",
+  "query": "list-type=2&prefix=refs%2Fheads%2F",
+  "region": "auto",
+  "secret_access_key": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+  "signature_hex": "b63aca83efd222f4356b8492eee6965dc3b23009088b771ed4ddd178f85959e5",
+  "string_to_sign": "AWS4-HMAC-SHA256\n20240324T170640Z\n20240324/auto/s3/aws4_request\n59f7437d728981efca9841002c2ba6f2256a224224c6f1215ba8f7a13b350921",
+  "timestamp": 1711300000
+}

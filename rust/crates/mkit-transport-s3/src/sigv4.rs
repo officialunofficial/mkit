@@ -16,11 +16,25 @@ use sha2::{Digest, Sha256};
 type HmacSha256 = Hmac<Sha256>;
 
 /// S3 credentials used by the SigV4 signer.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually (mirroring `S3Transport`'s redacting
+/// `Debug`) so the `secret_access_key` is never leaked through `{:?}` /
+/// `dbg!` / `tracing` of this struct or any struct embedding it.
+#[derive(Clone)]
 pub struct Credentials {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub region: String,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<redacted>")
+            .field("region", &self.region)
+            .finish()
+    }
 }
 
 /// Output of [`sign_request`]. Caller attaches these three headers to the
@@ -76,6 +90,56 @@ pub fn derive_signing_key(secret: &str, date: &str, region: &str) -> [u8; 32] {
     let region_key = hmac_sha256(&date_key, region.as_bytes());
     let service_key = hmac_sha256(&region_key, b"s3");
     hmac_sha256(&service_key, b"aws4_request")
+}
+
+/// Percent-encode a single byte per AWS SigV4 canonical-query rules
+/// (RFC 3986 unreserved set: `A-Z a-z 0-9 - _ . ~` pass through; every
+/// other byte — including `/` — becomes `%XX` with UPPERCASE hex).
+fn encode_uri_component(out: &mut String, s: &str) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+    }
+}
+
+/// Build the AWS SigV4 canonical query string from raw (unencoded) key/value
+/// pairs: each key and value is URI-encoded (RFC 3986), pairs are sorted by
+/// encoded key (then encoded value), and joined with `&`.
+///
+/// This is the exact normalization AWS S3 re-derives server-side before
+/// recomputing the signature, so the bytes produced here MUST match the
+/// `query` component used both to sign and to build the request URL.
+/// Cloudflare R2 is lenient about encoding; real AWS S3 is not (an
+/// unencoded `/` in a value yields `403 SignatureDoesNotMatch`).
+#[must_use]
+pub fn canonical_query_string(pairs: &[(&str, &str)]) -> String {
+    let mut encoded: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(k, v)| {
+            let mut ek = String::new();
+            encode_uri_component(&mut ek, k);
+            let mut ev = String::new();
+            encode_uri_component(&mut ev, v);
+            (ek, ev)
+        })
+        .collect();
+    encoded.sort();
+    let mut out = String::new();
+    for (i, (k, v)) in encoded.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        out.push_str(k);
+        out.push('=');
+        out.push_str(v);
+    }
+    out
 }
 
 /// Strip the `https://` / `http://` prefix from an endpoint URL to produce
@@ -349,6 +413,75 @@ mod tests {
         assert_eq!(a.authorization, b.authorization);
         assert_eq!(a.canonical_request, b.canonical_request);
         assert_eq!(a.string_to_sign, b.string_to_sign);
+    }
+
+    #[test]
+    fn credentials_debug_redacts_secret() {
+        let creds = Credentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+            region: "auto".into(),
+        };
+        let dbg = format!("{creds:?}");
+        assert!(
+            !dbg.contains("wJalrXUtnFEMI"),
+            "Debug leaked secret_access_key: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"), "Debug missing redaction: {dbg}");
+        // Non-secret fields remain visible for diagnostics.
+        assert!(dbg.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(dbg.contains("auto"));
+    }
+
+    #[test]
+    fn canonical_query_encodes_slash_and_sorts() {
+        // `/` -> `%2F`; keys already sorted (list-type < prefix).
+        assert_eq!(
+            canonical_query_string(&[("list-type", "2"), ("prefix", "refs/heads/")]),
+            "list-type=2&prefix=refs%2Fheads%2F"
+        );
+        // Unsorted input is sorted by encoded key.
+        assert_eq!(
+            canonical_query_string(&[("prefix", "a/b"), ("list-type", "2")]),
+            "list-type=2&prefix=a%2Fb"
+        );
+        // Reserved characters in a value are all percent-encoded with
+        // uppercase hex; unreserved (`-_.~`) pass through.
+        assert_eq!(
+            canonical_query_string(&[("k", "a+b c/d=e&f-_.~")]),
+            "k=a%2Bb%20c%2Fd%3De%26f-_.~"
+        );
+        assert_eq!(canonical_query_string(&[]), "");
+    }
+
+    // A non-empty-query GET whose value contains `/`. The canonical
+    // request MUST carry the percent-encoded form (`%2F`), matching what
+    // real AWS S3 re-derives before recomputing the signature. With the
+    // pre-fix (raw `/`) signer this canonical request — and therefore the
+    // signature — differed from AWS's, yielding 403 on list_refs.
+    #[test]
+    fn sign_list_query_canonical_request_is_percent_encoded() {
+        let query = canonical_query_string(&[("list-type", "2"), ("prefix", "refs/heads/")]);
+        assert_eq!(query, "list-type=2&prefix=refs%2Fheads%2F");
+        let sig = sign_request(
+            &demo_creds(),
+            "GET",
+            "/mkit-storage/",
+            &query,
+            b"",
+            "https://abc123.r2.cloudflarestorage.com",
+            1_711_300_000,
+        );
+        // Second line of the canonical request is the path; third line is
+        // the canonical query string. Assert the encoded query is present
+        // and the raw `/`-in-value form is absent.
+        assert!(
+            sig.canonical_request
+                .contains("\nlist-type=2&prefix=refs%2Fheads%2F\n"),
+            "canonical request missing percent-encoded query: {}",
+            sig.canonical_request
+        );
+        assert!(!sig.canonical_request.contains("prefix=refs/heads/"));
     }
 
     #[test]

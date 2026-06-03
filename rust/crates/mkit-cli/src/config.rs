@@ -937,7 +937,26 @@ pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
         out.push_str(value);
         out.push('\n');
     }
-    fs::write(&path, out)?;
+    // Atomic temp + fsync + rename so a crash mid-write can't leave the
+    // security-sensitive user config half-written (#223). A reader either
+    // sees the old contents or the fully-updated file, never a torn one.
+    write_atomic_user_config(&path, out.as_bytes())?;
+    Ok(())
+}
+
+/// Atomically write `bytes` to `path`: write into a sibling temp file,
+/// fsync it, then rename over the destination. Mirrors the key-save
+/// path's temp+rename hardening.
+fn write_atomic_user_config(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
+    use tempfile::NamedTempFile;
+    let parent = path.parent().ok_or(ConfigError::Io(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "user config path has no parent",
+    )))?;
+    let mut tmp = NamedTempFile::new_in(parent)?;
+    tmp.as_file_mut().write_all(bytes)?;
+    tmp.as_file_mut().sync_all()?;
+    tmp.persist(path).map_err(|e| ConfigError::Io(e.error))?;
     Ok(())
 }
 
