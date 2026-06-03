@@ -220,6 +220,49 @@ pub fn pop(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()>
     Ok(())
 }
 
+/// Apply a stash entry's tree to the worktree **without** removing the
+/// entry. Index 0 = newest. This is the non-destructive complement to
+/// [`pop`]: it leaves the stash stack untouched so the same entry can be
+/// re-applied or popped later.
+///
+/// # Safety against data loss
+/// Like [`pop`], this restores **unconditionally** — it does not run the
+/// #176 destructive-restore guard itself. Callers exposing `apply` to
+/// users **must** run [`entry_tree_hash`] + `ensure_restore_safe` first,
+/// exactly as `pop` does, so uncommitted edits on unrelated paths are
+/// never clobbered.
+///
+/// # Errors
+/// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
+/// - [`StashError::NotACommit`] if the stored object is not a Commit.
+pub fn apply(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()> {
+    let list = read_list(repo_root)?;
+    if idx >= list.entries.len() {
+        return Err(StashError::IndexOutOfRange(idx));
+    }
+    let entry = &list.entries[idx];
+    let obj = store.read_object(&entry.commit_hash)?;
+    let Object::Commit(commit) = obj else {
+        return Err(StashError::NotACommit);
+    };
+    restore::restore_tree(
+        store,
+        commit.tree_hash,
+        repo_root,
+        &RestoreOptions::default(),
+    )?;
+    Ok(())
+}
+
+/// Drop **all** stash entries, leaving an empty stack. Idempotent — a
+/// missing or already-empty manifest is not an error.
+///
+/// # Errors
+/// - [`StashError::Io`] if the manifest cannot be written.
+pub fn clear(repo_root: &Path) -> StashResult<()> {
+    write_list(repo_root, &StashList::default())
+}
+
 /// Render `stash show [<stash>]` output: header + unified-diff-style listing.
 ///
 /// Output format:
@@ -581,6 +624,53 @@ mod tests {
             output.contains("A new.txt"),
             "missing added entry: {output}"
         );
+    }
+
+    #[test]
+    fn apply_restores_tree_and_keeps_entry() {
+        let (tmp, store) = fresh_store();
+        build_stash_fixture(&store, tmp.path());
+        assert_eq!(read_list(tmp.path()).unwrap().entries.len(), 1);
+
+        apply(&store, tmp.path(), 0).unwrap();
+
+        // The stash tree was materialised into the worktree.
+        assert_eq!(
+            fs::read(tmp.path().join("existing.txt")).unwrap(),
+            b"modified content"
+        );
+        assert_eq!(
+            fs::read(tmp.path().join("new.txt")).unwrap(),
+            b"brand new file"
+        );
+        // ...and the entry is still on the stack (apply, not pop).
+        assert_eq!(
+            read_list(tmp.path()).unwrap().entries.len(),
+            1,
+            "apply must not drop the entry"
+        );
+    }
+
+    #[test]
+    fn apply_out_of_range_returns_error() {
+        let (tmp, _store) = fresh_store();
+        let store = ObjectStore::open(tmp.path()).unwrap();
+        let err = apply(&store, tmp.path(), 0).unwrap_err();
+        assert!(matches!(err, StashError::IndexOutOfRange(0)));
+    }
+
+    #[test]
+    fn clear_empties_the_stack() {
+        let (tmp, store) = fresh_store();
+        build_stash_fixture(&store, tmp.path());
+        assert_eq!(read_list(tmp.path()).unwrap().entries.len(), 1);
+
+        clear(tmp.path()).unwrap();
+        assert!(read_list(tmp.path()).unwrap().entries.is_empty());
+
+        // Idempotent: clearing an already-empty stack is fine.
+        clear(tmp.path()).unwrap();
+        assert!(read_list(tmp.path()).unwrap().entries.is_empty());
     }
 
     #[test]
