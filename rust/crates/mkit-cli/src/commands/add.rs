@@ -72,10 +72,17 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
             Err(e) => return Err(format!("metadata {}: {e}", abs.display())),
         };
 
-        let (status, bytes) = if meta.file_type().is_file() {
+        // Regular files route through `store_file_object` so large
+        // (> CHUNK_THRESHOLD) content lands as a ChunkedBlob, matching
+        // `worktree::{build_tree,hash_file}` and keeping commit/status/rm
+        // hashes consistent (#203). Symlinks are always a single Blob of
+        // their target path.
+        let (status, h) = if meta.file_type().is_file() {
             let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
                 .map_err(|e| format!("read {}: {e}", abs.display()))?;
-            (file_status_from_meta(&opened_meta, entry.status), bytes)
+            let h =
+                worktree::store_file_object(store, &bytes).map_err(|e| format!("store: {e}"))?;
+            (file_status_from_meta(&opened_meta, entry.status), h)
         } else if meta.file_type().is_symlink() {
             let target = std::fs::read_link(&abs)
                 .map_err(|e| format!("read link {}: {e}", abs.display()))?;
@@ -85,16 +92,18 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
             if !worktree::validate_symlink_target(target_str) {
                 return Err(format!("invalid symlink target: {target_str}"));
             }
-            (EntryStatus::Symlink, target_str.as_bytes().to_vec())
+            let blob = Object::Blob(Blob {
+                data: target_str.as_bytes().to_vec(),
+            });
+            let ser = serialize::serialize(&blob).map_err(|e| format!("serialize: {e}"))?;
+            let h = store.write(&ser).map_err(|e| format!("store: {e}"))?;
+            (EntryStatus::Symlink, h)
         } else {
             entry.status = EntryStatus::Removed;
             entry.object_hash = ZERO;
             continue;
         };
 
-        let blob = Object::Blob(Blob { data: bytes });
-        let ser = serialize::serialize(&blob).map_err(|e| format!("serialize: {e}"))?;
-        let h = store.write(&ser).map_err(|e| format!("store: {e}"))?;
         entry.status = status;
         entry.object_hash = h;
     }
@@ -135,6 +144,10 @@ pub fn run(args: &[String]) -> u8 {
     let store = match ObjectStore::open(&cwd) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
+    };
+    let _lock = match super::acquire_worktree_lock(&cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
     };
 
     // Mode selection. `-A` and `-u` are mutually exclusive with each
@@ -229,10 +242,16 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
     let previous_status = idx
         .find_entry(&rel_str)
         .map_or(EntryStatus::Blob, |existing| idx.entries[existing].status);
-    let (status, bytes) = if meta.file_type().is_file() {
+    // Regular files route through `store_file_object` so large
+    // (> CHUNK_THRESHOLD) content lands as a ChunkedBlob, matching
+    // `worktree::{build_tree,hash_file}` (#203). Symlinks stay a single
+    // Blob of their target path.
+    let (status, h) = if meta.file_type().is_file() {
         let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
             .map_err(|e| emit_err(&format!("read {}: {e}", abs.display()), exit::NOINPUT))?;
-        (file_status_from_meta(&opened_meta, previous_status), bytes)
+        let h = worktree::store_file_object(store, &bytes)
+            .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
+        (file_status_from_meta(&opened_meta, previous_status), h)
     } else if meta.file_type().is_symlink() {
         let target = std::fs::read_link(&abs)
             .map_err(|e| emit_err(&format!("read link {}: {e}", abs.display()), exit::NOINPUT))?;
@@ -246,19 +265,21 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
                 exit::DATAERR,
             ));
         }
-        (EntryStatus::Symlink, target_str.into_bytes())
+        let blob = Object::Blob(Blob {
+            data: target_str.into_bytes(),
+        });
+        let ser = serialize::serialize(&blob)
+            .map_err(|e| emit_err(&format!("serialize: {e}"), exit::DATAERR))?;
+        let h = store
+            .write(&ser)
+            .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
+        (EntryStatus::Symlink, h)
     } else {
         return Err(emit_err(
             &format!("not a regular file: {}", abs.display()),
             exit::NOINPUT,
         ));
     };
-    let blob = Object::Blob(Blob { data: bytes });
-    let ser = serialize::serialize(&blob)
-        .map_err(|e| emit_err(&format!("serialize: {e}"), exit::DATAERR))?;
-    let h = store
-        .write(&ser)
-        .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
     let entry = IndexEntry {
         path: rel_str.clone(),
         status,
