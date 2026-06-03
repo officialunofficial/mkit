@@ -68,20 +68,38 @@ impl Store {
                 .map_err(|e| SignerError::Store(format!("mkdir {}: {e}", parent.display())))?;
         }
         // Write to a sibling tempfile + rename so a crash never leaves
-        // a half-written credentials.json.
-        let tmp = path.with_extension("json.tmp");
+        // a half-written credentials.json. The temp name carries the
+        // PID so concurrent writers don't share one, and we create it
+        // with O_EXCL (`create_new`) so a pre-existing file or
+        // attacker-planted symlink at the temp path is never followed
+        // or truncated.
+        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|e| SignerError::Store(format!("encode: {e}")))?;
         {
-            let mut f = fs::File::create(&tmp)
+            let mut open_opts = fs::OpenOptions::new();
+            open_opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                open_opts.mode(0o600);
+            }
+            let mut f = open_opts
+                .open(&tmp)
                 .map_err(|e| SignerError::Store(format!("create {}: {e}", tmp.display())))?;
             f.write_all(&bytes)
                 .map_err(|e| SignerError::Store(format!("write {}: {e}", tmp.display())))?;
             f.sync_all()
                 .map_err(|e| SignerError::Store(format!("fsync {}: {e}", tmp.display())))?;
         }
-        fs::rename(&tmp, path)
-            .map_err(|e| SignerError::Store(format!("rename {}: {e}", path.display())))?;
+        if let Err(e) = fs::rename(&tmp, path) {
+            // Don't leak the temp file if the rename fails.
+            let _ = fs::remove_file(&tmp);
+            return Err(SignerError::Store(format!(
+                "rename {}: {e}",
+                path.display()
+            )));
+        }
         // Best-effort chmod 0600. Metadata is not secret, but the
         // keyid names a credential and we don't want to leak
         // enumeration fodder on a multi-user host.

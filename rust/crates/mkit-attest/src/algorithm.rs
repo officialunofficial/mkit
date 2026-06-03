@@ -35,10 +35,13 @@ pub enum Algorithm {
     /// BLS12-381 M-of-N threshold (`MinSig` variant — signature in
     /// G1, public key in G2). Used by the release-party flow; see
     /// `docs/SPEC-RELEASE-THRESHOLD.md`. No COSE id is registered for
-    /// BLS threshold; [`Algorithm::cose_id`] returns a project-local
-    /// negative integer (`-256`) chosen outside the IANA reserved
-    /// ranges. The wire-level identifier is `Algorithm::
-    /// ALGORITHM_BLS12381_THRESHOLD = 5` in the mkit-rpc proto.
+    /// BLS threshold; [`Algorithm::cose_id`] returns a **provisional**
+    /// project-local negative integer (`-256`) chosen outside the IANA
+    /// reserved ranges. This value is NOT stable — it will be swapped
+    /// for the assigned id (in a patch release) if IANA ever registers
+    /// one, so do not persist it as a long-lived identifier. The stable
+    /// wire-level identifier is `Algorithm::ALGORITHM_BLS12381_THRESHOLD
+    /// = 5` in the mkit-rpc proto.
     ///
     /// Feature-gated behind `bls-threshold` because the `Signer`
     /// implementation pulls a sizeable dep tree (blst); the enum
@@ -60,10 +63,10 @@ impl Algorithm {
             Self::Secp256k1 => -47,
             Self::P256 => -7,
             // No IANA COSE id is registered for BLS12-381 threshold.
-            // -256 is outside the assigned range (lowest assigned is
-            // -65535 in 2026) and gives us room — if IANA ever
-            // registers one, we swap to the assigned value in a
-            // patch release.
+            // -256 is a PROVISIONAL project-local id, outside the
+            // assigned range (lowest assigned is -65535 in 2026) and
+            // gives us room — if IANA ever registers one, we swap to the
+            // assigned value in a patch release. Treat it as unstable.
             #[cfg(feature = "bls-threshold")]
             Self::Bls12381Threshold => -256,
         }

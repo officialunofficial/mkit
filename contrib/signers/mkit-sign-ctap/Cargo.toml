@@ -23,13 +23,16 @@ name = "mkit-sign-ctap"
 path = "src/main.rs"
 
 [features]
-# `ctap-hw` (default) pulls in the `ctap-hid-fido2` driver and lets
-# the binary talk to a real authenticator. Disable when building in
-# environments without `hidapi` / `libudev` (e.g. some CI containers,
-# `wasm32-unknown-unknown`); the resulting binary still compiles and
-# unit-tests run with the in-process mock device, but `enroll` /
-# `sign` / `list-credentials` against real hardware are unavailable.
-default = ["ctap-hw"]
+# `ctap-hw` pulls in the `ctap-hid-fido2` driver and lets the binary
+# talk to a real authenticator. It is OFF by default — symmetric with
+# `mkit-sign-tpm`'s `tpm2` feature — because the driver needs native
+# `hidapi` / `libudev` (Linux: `libudev-dev` / `systemd-devel`) that
+# bare CI containers, macOS-without-extras, and `wasm32-unknown-unknown`
+# don't have. Without it the binary still compiles and unit tests run
+# against the in-process mock device; build with `--features ctap-hw`
+# to enable `enroll` / `sign` / `list-credentials` against real
+# hardware (requires the libudev development package on Linux).
+default = []
 ctap-hw = ["dep:ctap-hid-fido2"]
 
 [dependencies]

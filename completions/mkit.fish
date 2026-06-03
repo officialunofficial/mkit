@@ -17,7 +17,7 @@ complete -c mkit -f
 set -l __mkit_subcommands \
     init add rm restore reset hash cat tree commit log reflog status diff branch checkout \
     tag config merge push pull fetch stash clone remote key keygen \
-    cherry-pick rebase bisect sparse-checkout serve blame verify \
+    cherry-pick rebase bisect sparse-checkout serve pack-shard blame verify \
     attest verify-attest version help
 
 # Subcommand list (only when no subcommand has been entered yet).
@@ -138,6 +138,12 @@ complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
     -l trust-roots -d "Trust roots path" -r
 complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
     -l algorithm -d "Algorithm filter" -r
+
+# pack-shard flags.
+complete -c mkit -n "__fish_seen_subcommand_from pack-shard" \
+    -l out -d "Output directory" -r
+complete -c mkit -n "__fish_seen_subcommand_from pack-shard" \
+    -l force -d "Overwrite existing shards"
 
 # Generic --help on any subcommand.
 complete -c mkit -n "__fish_seen_subcommand_from $__mkit_subcommands" \

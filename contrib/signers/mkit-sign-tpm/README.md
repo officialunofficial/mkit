@@ -9,8 +9,9 @@ Headline properties:
 
 - **P-256 only.** Every modern TPM 2.0 implements NIST P-256 (ECC-256);
   some add secp256k1 or BrainpoolP256, but this signer deliberately
-  rejects any `algorithm` other than `"p256"` with exit code 2 —
-  protocol simplicity beats curve-zoo support.
+  rejects any `algorithm` other than `ALGORITHM_P256` with an `Error`
+  frame (`ERROR_CODE_UNSUPPORTED_ALGORITHM`) — protocol simplicity beats
+  curve-zoo support.
 - **Non-extractable private key.** The signing scalar is generated
   inside the TPM during `keygen` and persisted to an owner-hierarchy
   handle (`0x81010001`-style). It never leaves the TPM.
@@ -122,24 +123,59 @@ the CLI surface is still minimal.
 
 ### `sign`
 
-Implements the external-signer v1 protocol. Reads one line of JSON
-from stdin and writes one line of JSON to stdout:
+Enters the external-signer v1 protocol loop. The wire is
+**length-prefixed protobuf `SignerFrame` messages** (4-byte
+little-endian length prefix, `MAX_FRAME_BYTES = 1 MiB`) on stdin and
+stdout — NOT a JSON line protocol. See
+[`docs/SPEC-EXTERNAL-SIGNER.md`](../../../docs/SPEC-EXTERNAL-SIGNER.md)
+and [`docs/SPEC-RPC.md`](../../../docs/SPEC-RPC.md); the schema is
+[`rust/crates/mkit-rpc/proto/signer.proto`](../../../rust/crates/mkit-rpc/proto/signer.proto).
 
-```console
-$ PAE='DSSEv1 28 application/vnd.in-toto+json 2 {}'
-$ PAE_B64=$(printf '%s' "$PAE" | base64 | tr -d '\n')
-$ printf '{"pae_base64":"%s","algorithm":"p256"}\n' "$PAE_B64" \
-    | mkit-sign-tpm sign --handle 0x81010001
-{"keyid":"p256:…","sig_base64":"…"}
+The conversation:
+
+```
+mkit   -> signer:  SignerFrame{ Hello{ protocol = PROTOCOL_VERSION_1,
+                                        want_capabilities } }
+signer -> mkit:    SignerFrame{ HelloResponse{ protocol, signer_id,
+                                                capabilities } }
+mkit   -> signer:  SignerFrame{ SignRequest{ algorithm = ALGORITHM_P256,
+                                              key_form  = KEY_FORM_OPAQUE_HANDLE,
+                                              key_ref   = <4-byte BE handle>,
+                                              payload   = <PAE> } }
+signer -> mkit:    SignerFrame{ SignResponse{ signature, public_key,
+                                              algorithm, key_id } }
+                     OR
+                   SignerFrame{ Error{ code, message } }
 ```
 
-Exit codes:
+`mkit-sign-tpm` advertises:
 
-- **0** on success, one line of JSON on stdout.
-- **2** specifically for `algorithm != "p256"`, empty stdout, reject
-  message on stderr.
-- **1** for everything else (bad handle, TPM unreachable, malformed
-  request, TPM refused the sign, …).
+```
+algorithms = [P256]
+key_forms  = [OPAQUE_HANDLE]            # 4-byte BE persistent handle
+supports_pin = false
+supports_certificate_chain = false
+requires_user_presence = false
+```
+
+The signer loops on stdin, processing successive `Hello` / `SignRequest`
+pairs until the caller closes the stream; a clean EOF on the length
+prefix is a graceful shutdown.
+
+**Exit / error model** (per SPEC-EXTERNAL-SIGNER §7):
+
+- **Per-request failures are `Error` frames, not process exits.** A
+  `SignRequest` whose `algorithm` is not `ALGORITHM_P256` is answered
+  with an `Error` frame carrying `ERROR_CODE_UNSUPPORTED_ALGORITHM`; an
+  unsupported key form yields `ERROR_CODE_UNSUPPORTED_KEY_FORM`; an
+  ill-formed `key_ref` or missing handle yields
+  `ERROR_CODE_INVALID_REQUEST`; a TPM failure yields
+  `ERROR_CODE_HARDWARE_ERROR`. The signer **keeps running** after an
+  error frame so mkit can issue further requests on the same connection.
+- **The process exits non-zero only for setup-phase failures** — bad
+  argv, TPM unreachable at startup, or a fatal framing error (oversize
+  or truncated frame). In that case the signer MUST NOT have emitted a
+  partial stdout frame.
 
 The signature is the 64-byte compact `r ‖ s` big-endian form the spec
 requires, low-S normalised. TPM 2.0 does not implement RFC 6979, so
@@ -163,43 +199,38 @@ Evicts the persistent handle from the TPM. Irreversible.
 
 ## Wiring mkit to use it
 
-`.mkit/config`:
+mkit drives external signers through three **user-scoped** config keys
+(`$XDG_CONFIG_HOME/mkit/config`, never per-repo `.mkit/config` — a
+hostile repo must not be able to point your attestations at an arbitrary
+binary):
 
-```toml
-[attest]
-signer = "external"
-external_signer = "/usr/local/bin/mkit-sign-tpm-myproject"
-```
-
-### Known limitation: `--handle` is not passed through today
-
-mkit's external-signer invocation today sends the signer an **empty
-argv**. That means `mkit-sign-tpm sign --handle <H>` — which is how
-you tell this binary *which* TPM key to use — can't be selected by
-mkit directly; the binary would be invoked with no `--handle`
-argument and exit on the "missing --handle" path.
-
-Team Phi is landing a `--tag` / `--handle` pass-through in parallel.
-Until that ships, wrap the binary in a trivial shell script that
-hard-codes your chosen handle and point mkit at the wrapper:
-
-`~/.local/bin/mkit-sign-tpm-myproject`:
-
-```sh
-#!/bin/sh
-exec /usr/local/bin/mkit-sign-tpm sign --handle 0x81010001
-```
-
-Then:
+- `attest.signer = external` — select the external signer.
+- `attest.external_signer_path = /absolute/path/to/binary` — the binary
+  to spawn. MUST be absolute (mkit rejects relative paths to close the
+  `$PATH` resolution race).
+- `attest.external_signer_args = sign|--handle|0x81010001` — argv tokens
+  passed verbatim, **pipe-separated** (no shell interpolation).
 
 ```console
-$ chmod 755 ~/.local/bin/mkit-sign-tpm-myproject
-$ mkit config set attest.external_signer "$HOME/.local/bin/mkit-sign-tpm-myproject"
+$ mkit config attest.signer external
+$ mkit config attest.external_signer_path /usr/local/bin/mkit-sign-tpm
+$ mkit config attest.external_signer_args 'sign|--handle|0x81010001'
 ```
 
-(The same wrapper pattern is how `mkit-sign-file` handles its `--key`
-plumbing and `mkit-sign-se` handles `--tag` — see
-`contrib/signers/README.md`.)
+These keys may also be overridden per-invocation with
+`mkit attest --signer external` and repeated `--external-signer-arg`
+flags.
+
+### Selecting the persistent handle
+
+mkit prefers `SignRequest.key_ref` (the 4-byte big-endian persistent
+handle) on the wire. When `key_ref` is empty the signer falls back to
+the `--handle` value supplied on argv via `attest.external_signer_args`
+(per SPEC-EXTERNAL-SIGNER §8.3). So either source works; the argv
+default is the simplest for a single-key deployment, as shown above. An
+ill-formed `key_ref` (wrong length) is rejected with
+`ERROR_CODE_INVALID_REQUEST` rather than silently falling through to the
+argv default.
 
 ---
 
@@ -220,7 +251,7 @@ plumbing and `mkit-sign-se` handles `--tag` — see
   record the public key (the `p256:<hex>` keyid) before you rely on
   the signer in production**, and plan a key-rotation policy against
   device loss.
-- **Installation path.** Treat `attest.external_signer` as a
+- **Installation path.** Treat `attest.external_signer_path` as a
   code-execution sink (same class as `git config core.editor`). For
   any deployment where the local user account is less trusted than
   the user who configured mkit, install the binary on a root-owned,
@@ -239,8 +270,9 @@ $ cargo test -p mkit-sign-tpm
 # or libtss2-dev.
 $ cargo test -p mkit-sign-tpm --features tpm2 -- --ignored
 
-# End-to-end shell test — keygen → sign → openssl verify → reject
-# wrong algorithm → delete. Skips cleanly on TPM-less hosts.
+# End-to-end shell test — keygen → drive the protobuf SignerFrame wire
+# → openssl verify → reject wrong algorithm (Error frame) → delete.
+# Skips cleanly on TPM-less hosts.
 $ ./tests/e2e.sh
 ```
 
@@ -256,6 +288,7 @@ failing.
 
 Reference implementation for TPM 2.0 signers. Alongside `mkit-sign-se`
 (Apple Secure Enclave) it is a blueprint for platform-specific signers
-— same argv / subcommand / JSON shape, different secret store.
-Follow-ups: PCR-bound auth policies, Windows TBS TCTI wiring, optional
-attestation-key quote export for stronger endorsement chains.
+— same protobuf `SignerFrame` wire and subcommand surface, different
+secret store. Follow-ups: PCR-bound auth policies, Windows TBS TCTI
+wiring, optional attestation-key quote export for stronger endorsement
+chains.

@@ -175,15 +175,16 @@ pub fn aggregate(sharing: &Sharing<V>, partials: &[Vec<u8>]) -> Result<Vec<u8>, 
 /// Verify an aggregated threshold signature against the cohort's
 /// group public key.
 ///
-/// `aggregate_pubkey` is the G1 compressed public key returned by
-/// [`ThresholdSigner::aggregate_public_key`] (48 bytes). `message` is
-/// the same PAE the holders signed.
+/// `aggregate_pubkey` is the G2 compressed public key returned by
+/// [`ThresholdSigner::aggregate_public_key`] (96 bytes). `signature`
+/// is a G1 compressed encoding (48 bytes) in the pinned `MinSig`
+/// variant. `message` is the same PAE the holders signed.
 ///
 /// # Errors
 /// * [`Error::BlsThresholdPublicKeyDecode`] — `aggregate_pubkey` is
-///   not a valid G1 compressed encoding.
+///   not a valid G2 compressed encoding (wrong length, off-curve, etc.).
 /// * [`Error::BlsThresholdSignatureDecode`] — `signature` is not a
-///   valid G2 compressed encoding (wrong length, off-curve, etc.).
+///   valid G1 compressed encoding (wrong length, off-curve, etc.).
 /// * [`Error::BlsThresholdVerifyFailed`] — the signature is well-
 ///   formed but does not verify against `aggregate_pubkey`.
 pub fn verify(aggregate_pubkey: &[u8], message: &[u8], signature: &[u8]) -> Result<(), Error> {
