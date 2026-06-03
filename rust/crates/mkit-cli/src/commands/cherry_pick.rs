@@ -17,7 +17,7 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use mkit_core::hash::{self, Hash};
+use mkit_core::hash::Hash;
 use mkit_core::object::{Commit, Object};
 use mkit_core::ops::cherry_pick::cherry_pick;
 use mkit_core::ops::conflict_state::{
@@ -42,7 +42,7 @@ struct CherryPickOpts {
     /// Abort the in-progress cherry-pick and restore the original HEAD.
     #[arg(long, conflicts_with_all = ["cont", "commit"])]
     abort: bool,
-    /// 64-char hex commit hash to replay.
+    /// Commit to replay: a ref, full/short hash, or `HEAD~n` revspec.
     commit: Option<String>,
 }
 
@@ -81,9 +81,9 @@ fn start(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore,
             exit::GENERAL_ERROR,
         );
     }
-    let target: Hash = match hash::from_hex(hex) {
+    let target: Hash = match super::revspec::resolve_revision(store, mkit_dir, hex) {
         Ok(h) => h,
-        Err(e) => return emit_err(&format!("bad commit hash: {e}"), exit::DATAERR),
+        Err(e) => return emit_err(&format!("bad commit: {e}"), exit::DATAERR),
     };
 
     let ours = match refs::resolve_head(mkit_dir) {
