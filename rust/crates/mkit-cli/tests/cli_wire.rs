@@ -465,3 +465,53 @@ fn sparse_checkout_disable_refuses_untracked_file_that_full_restore_would_remove
         "a.txt\n"
     );
 }
+
+// ---------- branch / tag ref-write safety (#206) -------------------------
+
+#[test]
+fn branch_create_collision_is_rejected() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"one\n", "c1");
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+
+    let out = run_in(td.path(), &["branch", "feature"]);
+    assert!(
+        !out.status.success(),
+        "duplicate branch should fail: {out:?}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("already exists"),
+        "expected collision diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
+fn branch_delete_current_is_rejected() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"one\n", "c1");
+    // HEAD points at `main`; deleting it must be refused.
+    let out = run_in(td.path(), &["branch", "-d", "main"]);
+    assert!(
+        !out.status.success(),
+        "deleting current branch should fail: {out:?}"
+    );
+}
+
+#[test]
+fn tag_create_collision_is_rejected() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"one\n", "c1");
+    assert!(run_in(td.path(), &["tag", "v1"]).status.success());
+
+    let out = run_in(td.path(), &["tag", "v1"]);
+    assert!(!out.status.success(), "duplicate tag should fail: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("already exists"),
+        "expected collision diagnostic, got: {stderr}"
+    );
+}
