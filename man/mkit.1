@@ -142,13 +142,28 @@ NUL-termination or path-quoting support.
 List, create, or delete branches.
 .It Cm checkout Ar branch
 Switch HEAD to a branch and restore files from its tree.
-.It Cm tag Oo Ar name Oc Op Fl d Ar name
+.It Cm tag Oo Fl a | Fl s Oc Oo Fl m Ar msg Oc Oo Ar name Oc Op Ar commit
 List, create, or delete tags. With no arguments, prints the list of
-tags. With a
+tags, marking each annotated or signed tag. With a
 .Ar name
-argument, creates a tag at HEAD. With
-.Fl d ,
-deletes the named tag.
+argument and no flags, creates a lightweight tag pointing straight at
+.Ar commit
+.Pq default HEAD .
+.Fl a
+creates an annotated tag object (name, tagger identity, message,
+timestamp);
+.Fl s
+creates a signed annotated tag whose 64-byte field is an Ed25519
+signature over the canonical tag bytes under the distinct
+.Sy mkit.tag
+domain.
+.Fl m
+supplies the message; without it
+.Ev EDITOR
+is launched.
+.Fl d
+deletes the named tag. Verify a signed tag with
+.Cm mkit verify Ar name .
 .It Cm sparse-checkout Cm set | Cm list | Cm disable | Cm reapply Op Ar pattern ...
 Manage the sparse-checkout pattern set at
 .Pa .mkit/sparse-checkout .
@@ -193,8 +208,12 @@ Save or restore a snapshot of working-tree changes.
 .It Cm blame Ar file
 Line-level attribution of the committed state of
 .Ar file .
-.It Cm verify Ar hash
-Verify the signature on a commit object.
+.It Cm verify Ar rev
+Verify the signature on a commit, remix, or signed tag.
+.Ar rev
+is an object hash, a branch or tag name, or
+.Cm HEAD ;
+a tag name resolves to its annotated-tag object when one exists.
 .It Cm attest Oo Fl Fl commit Ar hash Oc Op Fl Fl algorithm Ar alg Op Fl Fl signer Ar kind Op Fl Fl predicate-type Ar uri Op Fl Fl predicate-file Ar path
 Produce a signed DSSE attestation for the given commit (defaults to
 HEAD). Multiple

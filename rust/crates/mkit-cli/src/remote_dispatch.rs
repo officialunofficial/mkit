@@ -643,6 +643,9 @@ fn fetch_object_closure(
                         queue.push_back(c);
                     }
                 }
+                Object::Tag(t) => {
+                    queue.push_back(t.target);
+                }
                 Object::Blob(_) | Object::Delta(_) => {}
             }
         }

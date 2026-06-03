@@ -87,7 +87,9 @@ History / commits:
   attribution. Default emits `<short12>\t<line_num>\t<text>` per line;
   `--format=json` emits JSONL with keys `hash`, `line_num`, `author`,
   `timestamp`, `text`.
-- `mkit verify <hash>` — verify the signature on a commit or remix.
+- `mkit verify <rev>` — verify the signature on a commit, remix, or
+  signed tag. `<rev>` is an object hash, a branch/tag name, or `HEAD`; a
+  tag name resolves to its annotated-tag object when one exists.
 - `mkit cat <hash>` — display an object by its hash.
 - `mkit hash <file>` — hash a file and store it as a blob.
 - `mkit tree` — snapshot the working directory as a tree object.
@@ -173,6 +175,19 @@ Branches / refs:
   run when staged changes, dirty tracked files, or untracked path
   collisions would be overwritten.
 - `mkit tag` — list, create, or delete tags.
+  - `mkit tag` (no args) — list tags; annotated/signed tags are marked.
+  - `mkit tag <name> [<commit>]` — create a lightweight tag (a ref
+    pointing straight at `<commit>`, default HEAD).
+  - `mkit tag -a <name> [-m <msg>] [<commit>]` — create an annotated tag
+    object (target, tagger identity, message, timestamp). Without `-m`,
+    `$EDITOR` is launched.
+  - `mkit tag -s <name> [-m <msg>] [<commit>]` — create a signed
+    annotated tag: an Ed25519 signature over the canonical tag bytes
+    under the distinct `mkit.tag` domain. Verify with
+    `mkit verify <name>`.
+  - `mkit tag -d <name>` — delete a tag.
+  - `--author <spec>` overrides the tagger identity (same grammar as
+    `commit --author`).
 - `mkit merge <branch> | --continue | --abort` — three-way merge into
   HEAD. Fast-forwards and clean merges refuse to overwrite staged
   changes, dirty tracked files, or untracked path collisions. On

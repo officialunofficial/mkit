@@ -43,7 +43,10 @@ commands:
   branch <name>     Create a branch at HEAD
   branch -d <name>  Delete a branch
   checkout <branch> Switch HEAD to a branch and restore files
-  tag               List, create, or delete tags
+  tag [<name>] [<commit>]  List tags, or create a lightweight tag
+  tag -a <name> [-m <msg>] [<commit>]  Create an annotated tag object
+  tag -s <name> [-m <msg>] [<commit>]  Create a signed (Ed25519) tag object
+  tag -d <name>     Delete a tag
   config [--format=json]  Show all configuration values (JSON with --format=json)
   config <key> [--format=json]  Show one value
   config <key> <value>  Set a configuration value
@@ -84,7 +87,7 @@ commands:
   pack-shard <hash>  Encode a stored pack into Reed-Solomon shards (feature: pack-shards)
   blame [--format=json] <file>
                     Show line-level commit attribution (JSONL with --format=json)
-  verify <hash>     Verify the signature on a commit or remix
+  verify <rev>      Verify the signature on a commit, remix, or signed tag
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
          [--additional-signer \"algorithm=<alg>,signer=<kind>[,path=<p>]\"]...
                     Produce a signed DSSE attestation for a commit
