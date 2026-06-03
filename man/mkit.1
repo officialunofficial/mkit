@@ -81,6 +81,56 @@ removes files even when their worktree content has diverged from the staged
 blob; without it,
 .Cm rm
 refuses to destroy a locally-modified tracked file.
+.It Cm restore Oo Fl Fl staged Oc Oo Fl Fl worktree Oc Oo Fl Fl source Ar rev Oc Oo Fl f | Fl Fl force Oc Ar path ...
+Restore path(s) in the worktree and/or unstage them. With no flag (or
+.Fl Fl worktree ) ,
+the worktree file(s) are rewritten from the staged index content,
+discarding un-staged worktree edits.
+.Fl Fl staged
+instead reverts the index entry for each path to its
+.Cm HEAD
+version (unstaging it) while leaving the worktree file untouched;
+.Fl Fl staged Fl Fl worktree
+does both. A directory path restores every tracked entry at or below it.
+.Fl Fl source Ar rev
+takes the restored content from
+.Ar rev Ns 's
+tree (resolved as a branch, tag,
+.Cm HEAD ,
+full or short hash, or
+.Cm HEAD~ Ns Ar n Ns / Ns Cm ^
+navigation) instead of the index/HEAD default. The worktree restore
+refuses to overwrite a file whose content diverges from the staged blob;
+.Fl f
+or
+.Fl Fl force
+discards that un-staged edit. A worktree restore never removes neighbouring
+files \(em it only rewrites the named tracked paths.
+.It Cm reset Oo Fl Fl soft | Fl Fl mixed Oc Op Ar commit
+Move
+.Cm HEAD
+.Pq and the current branch
+to
+.Ar commit
+.Pq default Cm HEAD ,
+resolved through the shared revision grammar (branch, tag,
+.Cm HEAD ,
+full or short hash,
+.Cm HEAD~ Ns Ar n Ns / Ns Cm ^ ) .
+.Fl Fl soft
+moves
+.Cm HEAD
+only, leaving the index and worktree untouched.
+.Fl Fl mixed
+.Pq the default
+also resets the index to the target commit's tree while leaving the
+worktree. The destructive
+.Fl Fl hard
+variant
+.Pq also resetting the worktree
+is intentionally not implemented;
+.Cm checkout Ar commit
+provides a guarded worktree-resetting path instead.
 .It Cm hash Ar file
 Hash
 .Ar file
@@ -152,8 +202,20 @@ is equivalent to
 both emit machine-readable XY-code-plus-path lines on stdout. There is no
 .Fl z
 NUL-termination or path-quoting support.
-.It Cm branch Op Fl d Ar name
-List, create, or delete branches.
+.It Cm branch Oo Fl d | Fl D | Fl m Oc Op Ar name ...
+List, create, rename, or delete branches. With no arguments, lists
+branches.  With one
+.Ar name ,
+creates a branch at HEAD.
+.Fl d
+deletes a branch (refuses the current branch);
+.Fl D
+force-deletes (an absent branch is a clean no-op, but the current branch
+is still refused).
+.Fl m Oo Ar old Oc Ar new
+renames a branch \(em the current branch when
+.Ar old
+is omitted \(em and moves HEAD if the renamed branch is checked out.
 .It Cm checkout Ar branch
 Switch HEAD to a branch and restore files from its tree.
 .It Cm tag Oo Ar name Oc Op Fl d Ar name
@@ -192,18 +254,46 @@ Push HEAD's commit chain to the configured remote.
 Download or download-and-merge from the remote.
 .It Cm clone Op Fl Fl depth Ar N Op Fl Fl sparse ... Ar url
 Clone a remote into a new working directory.
-.It Cm remote Oo Cm add | Cm set Oc Ar url
-Configure the
-.Ar origin
-remote. URLs MUST use the strict
+.It Cm remote Oo Cm add | Cm set | Cm remove | Cm rename Oc Op Ar args ...
+Show or configure remotes. With no subcommand, lists the configured
+remotes.
+.Cm add
+(alias
+.Cm set )
+adds the flat default remote
+.Pq Cm remote add Ar url
+or a named remote
+.Pq Cm remote add Ar name url ;
+URLs MUST use the strict
 .Ql mkit+<scheme>://
 form.
+.Cm remove Ar name
+.Pq alias Cm rm
+deletes a named remote
+.Pq the reserved Ar default No name clears the flat remote ;
+.Cm rename Ar old new
+.Pq alias Cm mv
+renames a named remote and repoints any branch upstream tracking it.
+Removing or renaming a remote never touches the user-scoped
+.Ar trusted_remote_endpoint ,
+which is keyed by exact URL rather than remote name.
 .It Cm cherry-pick Ar hash
 Apply a single commit from elsewhere onto HEAD.
 .It Cm bisect Cm start | Cm good | Cm bad | Cm reset
 Binary-search for the commit that introduced a regression.
-.It Cm stash Op Cm save Fl m Ar msg | Cm list | Cm pop Op Ar N | Cm drop Op Ar N | Cm show Op Ar N
+.It Cm stash Op Cm save Fl m Ar msg | Cm list | Cm pop Op Ar N | Cm apply Op Ar N | Cm drop Op Ar N | Cm clear | Cm show Op Ar N
 Save or restore a snapshot of working-tree changes.
+.Cm pop
+applies entry
+.Ar N
+and removes it;
+.Cm apply
+applies entry
+.Ar N
+but leaves it on the stack. Both run the destructive-restore guard so
+uncommitted edits on unrelated paths are never clobbered.
+.Cm clear
+removes every stash entry.
 .It Cm blame Ar file
 Line-level attribution of the committed state of
 .Ar file .
