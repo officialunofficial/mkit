@@ -166,8 +166,36 @@ pub fn list(repo_root: &Path) -> StashResult<StashList> {
     read_list(repo_root)
 }
 
+/// Resolve the tree hash recorded by stash entry `idx` (newest = 0)
+/// without mutating anything. Callers use this to run a restore-safety
+/// pre-flight (the #176 guard) over the stash tree before [`pop`].
+///
+/// # Errors
+/// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
+/// - [`StashError::NotACommit`] if the stored object is not a Commit.
+pub fn entry_tree_hash(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<Hash> {
+    let list = read_list(repo_root)?;
+    if idx >= list.entries.len() {
+        return Err(StashError::IndexOutOfRange(idx));
+    }
+    let obj = store.read_object(&list.entries[idx].commit_hash)?;
+    let Object::Commit(commit) = obj else {
+        return Err(StashError::NotACommit);
+    };
+    Ok(commit.tree_hash)
+}
+
 /// Pop a stash: restore its tree into the worktree and remove the
 /// entry. Index 0 = newest.
+///
+/// # Safety against data loss
+/// This restores **unconditionally** — it does not itself run the #176
+/// destructive-restore guard, because that guard lives in the CLI layer
+/// (`commands::ensure_restore_safe`). Callers that expose `pop` to users
+/// **must** run [`entry_tree_hash`] + the guard first so uncommitted
+/// edits on unrelated paths are never clobbered. The stash entry is
+/// dropped only after a successful restore (restore failure short-
+/// circuits via `?`, leaving the entry in place for a retry).
 ///
 /// # Errors
 /// - [`StashError::IndexOutOfRange`] if `index` is past the end.
