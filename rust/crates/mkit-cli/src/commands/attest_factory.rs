@@ -281,9 +281,15 @@ fn build_external_signer(
                 .into(),
         ));
     }
-    let ext = ExternalSigner::with_algorithm(&config.external_signer_path, algorithm)
+    let mut ext = ExternalSigner::with_algorithm(&config.external_signer_path, algorithm)
         .map_err(|e| FactoryError::ExternalSignerPath(e.to_string()))?
         .with_args(config.external_signer_args.clone());
+    // Apply the user-scoped timeout override if set; otherwise the
+    // crate default (DEFAULT_EXTERNAL_SIGNER_TIMEOUT, 120s) stays in
+    // effect. A 0 value means "fail fast" (deadline already passed).
+    if let Some(secs) = config.external_signer_timeout_secs {
+        ext = ext.with_timeout(std::time::Duration::from_secs(secs));
+    }
     Ok(Box::new(ext))
 }
 

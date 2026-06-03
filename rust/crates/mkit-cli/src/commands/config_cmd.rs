@@ -156,6 +156,7 @@ const CONFIG_KEYS: &[&str] = &[
     "attest.default_algorithm",
     "attest.external_signer_args",
     "attest.external_signer_path",
+    "attest.external_signer_timeout_secs",
     "attest.p256_key_path",
     "attest.secp256k1_key_path",
     "attest.signer",
@@ -202,6 +203,11 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
             Some(Cow::Owned(cfg.attest.external_signer_args.join("|")))
         }
         "attest.external_signer_path" => Some(Cow::Borrowed(&cfg.attest.external_signer_path)),
+        "attest.external_signer_timeout_secs" => Some(Cow::Owned(
+            cfg.attest
+                .external_signer_timeout_secs
+                .map_or_else(String::new, |s| s.to_string()),
+        )),
         "attest.secp256k1_key_path" => {
             Some(Cow::Borrowed(cfg.attest.secp256k1_key_path_or_default()))
         }

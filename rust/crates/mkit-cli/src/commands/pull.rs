@@ -36,10 +36,8 @@ pub fn run(args: &[String]) -> u8 {
             exit::CONFIG_ERROR,
         );
     }
-    if let Err(msg) = config::enforce_trusted_remote_endpoint(&cfg) {
-        return emit_err(&msg, exit::CONFIG_ERROR);
-    }
-    match remote_dispatch::open(endpoint) {
+    let repo_chosen = cfg.repo.remote_endpoint.trim() == endpoint;
+    match remote_dispatch::open_trusted(endpoint, repo_chosen, &cfg) {
         Ok(tx) => match remote_dispatch::pull_all(&cwd, tx.as_ref()) {
             Ok(n) => {
                 let mut stderr = std::io::stderr().lock();
@@ -51,6 +49,9 @@ pub fn run(args: &[String]) -> u8 {
             }
             Err(e) => emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),
         },
+        Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
+            emit_err(&msg, exit::CONFIG_ERROR)
+        }
         Err(e) => emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     }
 }

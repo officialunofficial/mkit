@@ -24,6 +24,7 @@
 //! warning and otherwise ignored. See `docs/THREAT-MODEL.md` for the
 //! threat model that motivates the split.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::io::Write as _;
@@ -78,6 +79,7 @@ pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "attest.default_algorithm",
     "attest.external_signer_path",
     "attest.external_signer_args",
+    "attest.external_signer_timeout_secs",
     "attest.secp256k1_key_path",
     "attest.p256_key_path",
 ];
@@ -118,6 +120,31 @@ pub struct Config {
     /// `[attest]` section. Separate struct so new attest knobs don't
     /// balloon the flat `Config`.
     pub attest: AttestConfig,
+    /// Named remotes keyed by name (`remote.<name>.url` /
+    /// `remote.<name>.type`). Repo-safe — addresses, same class as the
+    /// flat `remote_endpoint`. The legacy flat `remote_endpoint` /
+    /// `remote_type` act as the implicit `default` remote.
+    pub remotes: std::collections::BTreeMap<String, RemoteEntry>,
+    /// Per-branch upstream tracking keyed by local branch name
+    /// (`branch.<branch>.remote` / `branch.<branch>.merge`). Repo-safe.
+    pub branch_upstreams: std::collections::BTreeMap<String, Upstream>,
+}
+
+/// A named remote's stored address. `type` is a dispatch hint derived
+/// from the URL scheme at `mkit remote add` time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteEntry {
+    pub url: String,
+    pub remote_type: String,
+}
+
+/// Per-branch upstream: the remote name plus the remote branch this
+/// local branch tracks (`branch.<b>.merge` stores the bare branch
+/// name, e.g. `main`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Upstream {
+    pub remote: String,
+    pub branch: String,
 }
 
 /// `[key]` section for keystore-backed signing. All fields are user-scoped.
@@ -217,6 +244,14 @@ pub struct AttestConfig {
     /// pipe-separated string: `attest.external_signer_args = sign|--tag|demo`.
     /// User-scoped only.
     pub external_signer_args: Vec<String>,
+    /// Wall-clock budget (in seconds) for the entire external-signer
+    /// conversation: spawn → request-write → response-read →
+    /// stderr-drain → child-exit. On expiry mkit kills and reaps the
+    /// child. Empty / 0 = use the crate default (120s, generous for
+    /// hardware touch/PIN/biometric). User-scoped only — see
+    /// [`REPO_FORBIDDEN_KEYS`] (a hostile repo must not be able to set a
+    /// 0s "deny" timeout or a multi-hour hang).
+    pub external_signer_timeout_secs: Option<u64>,
     /// Per-algorithm repo-key paths for non-ed25519 signing.
     /// User-scoped only — see [`REPO_FORBIDDEN_KEYS`].
     pub secp256k1_key_path: String,
@@ -554,12 +589,77 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "attest.external_signer_args" => {
             cfg.attest.external_signer_args = parse_pipe_list(val);
         }
+        "attest.external_signer_timeout_secs" => {
+            // Tolerate a malformed value on read (mirrors the rest of
+            // this parser): an unparseable number leaves the default in
+            // effect rather than aborting config load.
+            cfg.attest.external_signer_timeout_secs = val.trim().parse::<u64>().ok();
+        }
         "attest.secp256k1_key_path" => val.clone_into(&mut cfg.attest.secp256k1_key_path),
         "attest.p256_key_path" => val.clone_into(&mut cfg.attest.p256_key_path),
+        // Dotted section keys: `remote.<name>.{url,type}` (repo-safe
+        // addresses) and `branch.<b>.{remote,merge}` (per-branch
+        // upstream). Each remote endpoint still flows through the #97
+        // per-endpoint gate, so a named remote cannot smuggle ambient
+        // creds.
+        _ if apply_section_kv(cfg, key, val) => {}
         // Legacy keys — silently ignored.
         "author_mid" | "project_id" | "network" => {}
         _ if key.ends_with("_url") => {}
         _ => {} // unknown keys: tolerate on read
+    }
+}
+
+/// Apply a `<section>.<name>.<field>` key (named remotes, branch
+/// upstreams). Returns `true` if the key matched a known section/field
+/// (regardless of whether the name validated), so the caller's match
+/// arm can treat it as handled.
+fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> bool {
+    let mut parts = key.splitn(3, '.');
+    let (Some(section), Some(name), Some(field)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    // Only flat, ref-safe names (no further dots) are accepted.
+    let valid_name = !name.is_empty() && mkit_core::refs::validate_ref_name(name);
+    match (section, field) {
+        ("remote", "url") => {
+            if valid_name {
+                val.clone_into(&mut cfg.remotes.entry(name.to_owned()).or_default().url);
+            }
+            true
+        }
+        ("remote", "type") => {
+            if valid_name {
+                val.clone_into(&mut cfg.remotes.entry(name.to_owned()).or_default().remote_type);
+            }
+            true
+        }
+        ("branch", "remote") => {
+            if valid_name {
+                val.clone_into(
+                    &mut cfg
+                        .branch_upstreams
+                        .entry(name.to_owned())
+                        .or_default()
+                        .remote,
+                );
+            }
+            true
+        }
+        ("branch", "merge") => {
+            if valid_name {
+                val.clone_into(
+                    &mut cfg
+                        .branch_upstreams
+                        .entry(name.to_owned())
+                        .or_default()
+                        .branch,
+                );
+            }
+            true
+        }
+        _ => false,
     }
 }
 
@@ -591,31 +691,187 @@ pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
             out.push('\n');
         }
     }
+    // Named remotes (`remote.<name>.url` / `.type`). BTreeMap iteration
+    // is sorted, so output is deterministic. `writeln!` into a `String`
+    // is infallible.
+    for (name, entry) in &cfg.remotes {
+        if !entry.url.is_empty() {
+            let _ = writeln!(out, "remote.{name}.url = {}", entry.url);
+        }
+        if !entry.remote_type.is_empty() {
+            let _ = writeln!(out, "remote.{name}.type = {}", entry.remote_type);
+        }
+    }
+    // Per-branch upstream tracking (`branch.<b>.remote` / `.merge`).
+    for (branch, up) in &cfg.branch_upstreams {
+        if !up.remote.is_empty() {
+            let _ = writeln!(out, "branch.{branch}.remote = {}", up.remote);
+        }
+        if !up.branch.is_empty() {
+            let _ = writeln!(out, "branch.{branch}.merge = {}", up.branch);
+        }
+    }
     fs::write(&path, out)?;
     Ok(())
+}
+
+/// The implicit name of the legacy flat `remote_endpoint` /
+/// `remote_type` remote.
+pub const DEFAULT_REMOTE_NAME: &str = "default";
+
+/// A resolved remote: its endpoint URL plus whether the repo-scoped
+/// config selected it (`repo_chosen`), which the #97 credential gate
+/// keys on. Returned by [`resolve_remote`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRemote {
+    pub name: String,
+    pub endpoint: String,
+    pub repo_chosen: bool,
+}
+
+/// Resolve a remote NAME to its endpoint + provenance.
+///
+/// - `default` (or an empty name): the flat `remote_endpoint`; chosen by
+///   the repo iff the repo layer set it.
+/// - any other name: a `remote.<name>.url` entry. Named remotes are
+///   stored repo-scoped, so a named remote present in the repo layer is
+///   `repo_chosen`; one present only in the user layer is not.
+///
+/// Returns `None` when the name is unknown / its URL is empty.
+#[must_use]
+pub fn resolve_remote(cfg: &LayeredConfig, name: &str) -> Option<ResolvedRemote> {
+    let name = if name.is_empty() {
+        DEFAULT_REMOTE_NAME
+    } else {
+        name
+    };
+    if name == DEFAULT_REMOTE_NAME && !cfg.merged.remote_endpoint.trim().is_empty() {
+        let endpoint = cfg.merged.remote_endpoint.trim().to_owned();
+        let repo_chosen = cfg.repo.remote_endpoint.trim() == endpoint;
+        return Some(ResolvedRemote {
+            name: DEFAULT_REMOTE_NAME.to_owned(),
+            endpoint,
+            repo_chosen,
+        });
+    }
+    let entry = cfg.merged.remotes.get(name)?;
+    let endpoint = entry.url.trim();
+    if endpoint.is_empty() {
+        return None;
+    }
+    let repo_chosen = cfg
+        .repo
+        .remotes
+        .get(name)
+        .is_some_and(|e| e.url.trim() == endpoint);
+    Some(ResolvedRemote {
+        name: name.to_owned(),
+        endpoint: endpoint.to_owned(),
+        repo_chosen,
+    })
+}
+
+/// Resolve the upstream (remote name, remote branch) for a local branch.
+/// Falls back to the `default` remote tracking the same-named branch
+/// when no explicit `branch.<b>.{remote,merge}` is configured *and* a
+/// default remote exists.
+#[must_use]
+pub fn resolve_upstream(cfg: &LayeredConfig, branch: &str) -> Option<Upstream> {
+    if let Some(up) = cfg.merged.branch_upstreams.get(branch)
+        && !up.remote.is_empty()
+        && !up.branch.is_empty()
+    {
+        return Some(up.clone());
+    }
+    // Implicit fallback: a configured default remote tracks the
+    // same-named branch. Only offered when a default endpoint exists so
+    // callers can still produce an actionable "no upstream" error.
+    if !cfg.merged.remote_endpoint.trim().is_empty() {
+        return Some(Upstream {
+            remote: DEFAULT_REMOTE_NAME.to_owned(),
+            branch: branch.to_owned(),
+        });
+    }
+    None
+}
+
+/// Real-environment getter used by the runtime credential gate: reads
+/// the named environment variable, treating an empty value as absent.
+fn real_getenv(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 /// Refuse to use ambient HTTP/S3 environment credentials with a
 /// repo-configured endpoint unless the user has explicitly trusted that
 /// exact remote in user-scoped config.
+///
+/// Retained as the back-compat entry point for the flat single-remote
+/// `remote_endpoint`. New, per-endpoint callers (named remotes, the
+/// shared transport-dispatch choke point) should use
+/// [`endpoint_credential_trust`], which is keyed on an explicit
+/// `repo_chosen` provenance flag rather than re-deriving it from the
+/// flat field.
 pub fn enforce_trusted_remote_endpoint(cfg: &LayeredConfig) -> Result<(), String> {
-    match trusted_remote_error_with(cfg, &|name| {
-        std::env::var(name).ok().filter(|value| !value.is_empty())
-    }) {
+    let endpoint = cfg.merged.remote_endpoint.trim();
+    let repo_chosen = cfg.repo.remote_endpoint.trim() == endpoint;
+    match trusted_remote_error_for(
+        endpoint,
+        repo_chosen,
+        cfg.user.trusted_remote_endpoint.trim(),
+        &real_getenv,
+    ) {
         Some(msg) => Err(msg),
         None => Ok(()),
     }
 }
 
-fn trusted_remote_error_with<F>(cfg: &LayeredConfig, getenv: &F) -> Option<String>
+/// Per-endpoint credential trust check for the shared dispatch choke
+/// point ([`crate::remote_dispatch::open_trusted`]) and named-remote
+/// callers. `repo_chosen` is `true` when the endpoint was selected by
+/// the repo-scoped config (the flat `remote_endpoint` or a
+/// `remote.<name>.url` entry), `false` when it was supplied by the user
+/// (user-scoped config or an explicit CLI argument). Trust is keyed on
+/// the resolved ENDPOINT plus this provenance, never on a remote name.
+pub fn endpoint_credential_trust(
+    cfg: &LayeredConfig,
+    endpoint: &str,
+    repo_chosen: bool,
+) -> Result<(), String> {
+    match trusted_remote_error_for(
+        endpoint.trim(),
+        repo_chosen,
+        cfg.user.trusted_remote_endpoint.trim(),
+        &real_getenv,
+    ) {
+        Some(msg) => Err(msg),
+        None => Ok(()),
+    }
+}
+
+/// Core gate, keyed on an explicit endpoint + provenance rather than a
+/// `LayeredConfig`. Returns `Some(error)` when ambient HTTP/S3
+/// credentials would be attached to a repo-chosen endpoint that the
+/// user has not explicitly trusted.
+///
+/// * `endpoint` — the resolved, already-trimmed remote URL.
+/// * `repo_chosen` — whether the repo-scoped config selected this
+///   endpoint (the only case the gate fences; a user-chosen endpoint is
+///   the user's own decision).
+/// * `user_trusted` — the trimmed user-scoped `trusted_remote_endpoint`.
+/// * `getenv` — credential probe (injected for tests).
+fn trusted_remote_error_for<F>(
+    endpoint: &str,
+    repo_chosen: bool,
+    user_trusted: &str,
+    getenv: &F,
+) -> Option<String>
 where
     F: Fn(&str) -> Option<String>,
 {
-    let endpoint = cfg.merged.remote_endpoint.trim();
-    if endpoint.is_empty() || cfg.repo.remote_endpoint.trim() != endpoint {
+    if endpoint.is_empty() || !repo_chosen {
         return None;
     }
-    if cfg.user.trusted_remote_endpoint.trim() == endpoint {
+    if user_trusted == endpoint {
         return None;
     }
 
@@ -1148,6 +1404,17 @@ mod tests {
                         "<non-empty>"
                     }
                 }
+                "attest.external_signer_timeout_secs" => {
+                    // Option<u64>; None when dropped from repo scope. The
+                    // SENTINEL string is non-numeric, so even on the
+                    // user path it would parse to None — assert the repo
+                    // path leaves it None.
+                    if cfg.attest.external_signer_timeout_secs.is_none() {
+                        ""
+                    } else {
+                        "<set>"
+                    }
+                }
                 "attest.secp256k1_key_path" => cfg.attest.secp256k1_key_path.as_str(),
                 "attest.p256_key_path" => cfg.attest.p256_key_path.as_str(),
                 // If a new key appears in `REPO_FORBIDDEN_KEYS` without
@@ -1182,13 +1449,31 @@ mod tests {
         assert_eq!(cfg.signing_key, "/home/user/.mkit/global.key");
     }
 
+    /// Helper mirroring the old `trusted_remote_error_with(cfg, ..)`
+    /// shape so the existing layered tests stay readable: derives
+    /// `repo_chosen` from the flat `remote_endpoint`, exactly as
+    /// `enforce_trusted_remote_endpoint` does.
+    fn gate_for_flat<F>(cfg: &LayeredConfig, getenv: &F) -> Option<String>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let endpoint = cfg.merged.remote_endpoint.trim();
+        let repo_chosen = cfg.repo.remote_endpoint.trim() == endpoint;
+        trusted_remote_error_for(
+            endpoint,
+            repo_chosen,
+            cfg.user.trusted_remote_endpoint.trim(),
+            getenv,
+        )
+    }
+
     #[test]
     fn repo_http_remote_with_token_requires_user_trust() {
         let cfg = layered(
             Some("remote_endpoint = mkit+https://example.invalid/repo\n"),
             None,
         );
-        let msg = trusted_remote_error_with(&cfg, &|name| {
+        let msg = gate_for_flat(&cfg, &|name| {
             (name == mkit_transport_http::TOKEN_ENV).then(|| "token".to_string())
         })
         .expect("repo-scoped HTTP remote with token must be rejected");
@@ -1201,7 +1486,7 @@ mod tests {
             Some("remote_endpoint = mkit+https://example.invalid/repo\n"),
             Some("trusted_remote_endpoint = mkit+https://example.invalid/repo\n"),
         );
-        let msg = trusted_remote_error_with(&cfg, &|name| {
+        let msg = gate_for_flat(&cfg, &|name| {
             (name == mkit_transport_http::TOKEN_ENV).then(|| "token".to_string())
         });
         assert!(msg.is_none());
@@ -1213,12 +1498,65 @@ mod tests {
             Some("remote_endpoint = mkit+s3://r2.example.com/bucket/proj\n"),
             None,
         );
-        let msg = trusted_remote_error_with(&cfg, &|name| match name {
+        let msg = gate_for_flat(&cfg, &|name| match name {
             mkit_transport_s3::ENV_ACCESS_KEY => Some("AKIA...".to_string()),
             _ => None,
         })
         .expect("repo-scoped S3 remote with env creds must be rejected");
         assert!(msg.contains("trusted_remote_endpoint"));
+    }
+
+    /// The gate keys on PROVENANCE, not mere credential presence: a
+    /// user-chosen endpoint (`repo_chosen == false`) with ambient creds
+    /// is the user's own decision and must NOT be refused, even though
+    /// the same endpoint+creds would be refused if the repo had chosen
+    /// it.
+    #[test]
+    fn user_chosen_http_remote_with_token_is_allowed() {
+        let token =
+            |name: &str| (name == mkit_transport_http::TOKEN_ENV).then(|| "tok".to_string());
+        let ep = "mkit+https://example.invalid/repo";
+        // repo_chosen = false (user-scoped or CLI-supplied endpoint).
+        assert!(trusted_remote_error_for(ep, false, "", &token).is_none());
+        // repo_chosen = true with no user trust → refused.
+        assert!(trusted_remote_error_for(ep, true, "", &token).is_some());
+    }
+
+    /// Per-endpoint helper returns `None` when no ambient credentials
+    /// are present, regardless of provenance — an unauthenticated push
+    /// is always safe.
+    #[test]
+    fn repo_http_remote_without_token_is_allowed() {
+        let none = |_: &str| None;
+        let ep = "mkit+https://example.invalid/repo";
+        assert!(trusted_remote_error_for(ep, true, "", &none).is_none());
+    }
+
+    /// SSH and file endpoints never carry ambient HTTP/S3 creds, so the
+    /// gate passes them through even when repo-chosen and untrusted.
+    #[test]
+    fn ssh_and_file_endpoints_bypass_credential_gate() {
+        let all = |_: &str| Some("present".to_string());
+        assert!(trusted_remote_error_for("mkit+ssh://host/path", true, "", &all).is_none());
+        assert!(trusted_remote_error_for("mkit+file:///srv/mirror", true, "", &all).is_none());
+    }
+
+    /// `endpoint_credential_trust` is the public per-endpoint entry the
+    /// dispatch choke point and named-remote callers use. Confirm it
+    /// honours provenance + user trust end-to-end.
+    #[test]
+    fn endpoint_credential_trust_honours_provenance_and_user_trust() {
+        let cfg = layered(
+            None,
+            Some("trusted_remote_endpoint = mkit+https://trusted.invalid/r\n"),
+        );
+        // Untrusted, repo-chosen endpoint: only refused when creds are
+        // actually present in the environment. In a clean test
+        // environment there is no MKIT_API_TOKEN, so this passes; the
+        // hostile-repo integration tests cover the credentialed case.
+        let _ = endpoint_credential_trust(&cfg, "mkit+https://untrusted.invalid/r", true);
+        // User-trusted endpoint is always allowed.
+        assert!(endpoint_credential_trust(&cfg, "mkit+https://trusted.invalid/r", true).is_ok());
     }
 
     #[test]
@@ -1367,5 +1705,101 @@ mod tests {
         apply_file(&mut cfg, &path, ConfigScope::User).unwrap();
         assert_eq!(cfg.signing_key, "/b");
         assert_eq!(cfg.default_branch, "trunk");
+    }
+
+    #[test]
+    fn named_remote_keys_parse_repo_safe() {
+        let cfg = layer(
+            Some(
+                "remote.origin.url = mkit+file:///srv/m\n\
+                 remote.origin.type = file\n\
+                 branch.main.remote = origin\n\
+                 branch.main.merge = main\n",
+            ),
+            None,
+        );
+        let origin = cfg.remotes.get("origin").expect("origin present");
+        assert_eq!(origin.url, "mkit+file:///srv/m");
+        assert_eq!(origin.remote_type, "file");
+        let up = cfg.branch_upstreams.get("main").expect("upstream present");
+        assert_eq!(up.remote, "origin");
+        assert_eq!(up.branch, "main");
+    }
+
+    #[test]
+    fn named_remote_roundtrips_through_write() {
+        let td = TempDir::new().unwrap();
+        let mut cfg = Config::with_defaults();
+        cfg.remotes.insert(
+            "origin".into(),
+            RemoteEntry {
+                url: "mkit+https://h/r".into(),
+                remote_type: "http".into(),
+            },
+        );
+        cfg.branch_upstreams.insert(
+            "main".into(),
+            Upstream {
+                remote: "origin".into(),
+                branch: "main".into(),
+            },
+        );
+        write(td.path(), &cfg).unwrap();
+        let reloaded = read_or_default(td.path()).unwrap();
+        assert_eq!(
+            reloaded.remotes.get("origin").unwrap().url,
+            "mkit+https://h/r"
+        );
+        assert_eq!(
+            reloaded.branch_upstreams.get("main").unwrap().remote,
+            "origin"
+        );
+    }
+
+    #[test]
+    fn resolve_remote_default_and_named_provenance() {
+        // Named remote in the repo layer is repo_chosen.
+        let lc = layered(
+            Some("remote.origin.url = mkit+https://h/r\nremote.origin.type = http\n"),
+            None,
+        );
+        let r = resolve_remote(&lc, "origin").expect("origin resolves");
+        assert_eq!(r.endpoint, "mkit+https://h/r");
+        assert!(r.repo_chosen);
+
+        // Flat default endpoint in the repo layer is repo_chosen.
+        let lc = layered(Some("remote_endpoint = mkit+https://h/d\n"), None);
+        let r = resolve_remote(&lc, "default").expect("default resolves");
+        assert!(r.repo_chosen);
+
+        // User-layer flat endpoint is NOT repo_chosen.
+        let lc = layered(None, Some("remote_endpoint = mkit+https://h/u\n"));
+        let r = resolve_remote(&lc, "").expect("empty -> default");
+        assert!(!r.repo_chosen);
+
+        // Unknown name resolves to None.
+        let lc = layered(None, None);
+        assert!(resolve_remote(&lc, "nope").is_none());
+    }
+
+    #[test]
+    fn resolve_upstream_explicit_and_fallback() {
+        let lc = layered(
+            Some("branch.main.remote = origin\nbranch.main.merge = trunk\n"),
+            None,
+        );
+        let up = resolve_upstream(&lc, "main").unwrap();
+        assert_eq!(up.remote, "origin");
+        assert_eq!(up.branch, "trunk");
+
+        // Fallback to default remote tracking same-named branch.
+        let lc = layered(Some("remote_endpoint = mkit+file:///srv\n"), None);
+        let up = resolve_upstream(&lc, "feature").unwrap();
+        assert_eq!(up.remote, DEFAULT_REMOTE_NAME);
+        assert_eq!(up.branch, "feature");
+
+        // No upstream + no default remote → None.
+        let lc = layered(None, None);
+        assert!(resolve_upstream(&lc, "main").is_none());
     }
 }
