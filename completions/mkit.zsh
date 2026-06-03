@@ -22,7 +22,7 @@ _mkit() {
         'log:Show commit history'
         'status:Show staged and working tree changes'
         'diff:Show changes'
-        'branch:List, create, or delete branches'
+        'branch:List, create, rename, or delete branches'
         'checkout:Switch HEAD to a branch and restore files'
         'tag:List, create, or delete tags'
         'config:Show or set configuration values'
@@ -32,7 +32,7 @@ _mkit() {
         'fetch:Download from remote without merging'
         'stash:Stash working-dir changes'
         'clone:Clone a repository'
-        'remote:Show or configure the origin remote'
+        'remote:Show, add, remove, or rename remotes'
         'key:Manage user-scoped keystore keys (generate/list/import/export/delete)'
         'keygen:Generate a new Ed25519 signing keypair'
         'cherry-pick:Apply a commit to the current branch'
@@ -113,7 +113,9 @@ _mkit() {
                     ;;
                 branch)
                     _arguments \
-                        '-d[delete branch]:branch:' \
+                        '-d[delete branch (safe)]:branch:' \
+                        '-D[force-delete branch]:branch:' \
+                        '-m[rename branch]:branch:' \
                         '--help[show help]'
                     ;;
                 rebase)
@@ -134,13 +136,17 @@ _mkit() {
                         'save[stash working-dir changes]' \
                         'list[list stash entries]' \
                         'pop[apply and remove stash entry]' \
+                        'apply[apply stash entry without removing it]' \
                         'drop[remove stash entry]' \
+                        'clear[remove all stash entries]' \
                         'show[show diff of stash entry]'
                     ;;
                 remote)
                     _values 'remote subcommand' \
                         'add[add a remote]' \
-                        'set[alias for add]'
+                        'set[alias for add]' \
+                        'remove[remove a named remote]' \
+                        'rename[rename a named remote]'
                     ;;
                 key)
                     _values 'key subcommand' \

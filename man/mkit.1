@@ -138,8 +138,20 @@ hashes, not commit refs or ranges.
 Show the staged and working-tree changes. There is no
 .Fl z
 NUL-termination or path-quoting support.
-.It Cm branch Op Fl d Ar name
-List, create, or delete branches.
+.It Cm branch Oo Fl d | Fl D | Fl m Oc Op Ar name ...
+List, create, rename, or delete branches. With no arguments, lists
+branches.  With one
+.Ar name ,
+creates a branch at HEAD.
+.Fl d
+deletes a branch (refuses the current branch);
+.Fl D
+force-deletes (an absent branch is a clean no-op, but the current branch
+is still refused).
+.Fl m Oo Ar old Oc Ar new
+renames a branch \(em the current branch when
+.Ar old
+is omitted \(em and moves HEAD if the renamed branch is checked out.
 .It Cm checkout Ar branch
 Switch HEAD to a branch and restore files from its tree.
 .It Cm tag Oo Ar name Oc Op Fl d Ar name
@@ -178,18 +190,46 @@ Push HEAD's commit chain to the configured remote.
 Download or download-and-merge from the remote.
 .It Cm clone Op Fl Fl depth Ar N Op Fl Fl sparse ... Ar url
 Clone a remote into a new working directory.
-.It Cm remote Oo Cm add | Cm set Oc Ar url
-Configure the
-.Ar origin
-remote. URLs MUST use the strict
+.It Cm remote Oo Cm add | Cm set | Cm remove | Cm rename Oc Op Ar args ...
+Show or configure remotes. With no subcommand, lists the configured
+remotes.
+.Cm add
+(alias
+.Cm set )
+adds the flat default remote
+.Pq Cm remote add Ar url
+or a named remote
+.Pq Cm remote add Ar name url ;
+URLs MUST use the strict
 .Ql mkit+<scheme>://
 form.
+.Cm remove Ar name
+.Pq alias Cm rm
+deletes a named remote
+.Pq the reserved Ar default No name clears the flat remote ;
+.Cm rename Ar old new
+.Pq alias Cm mv
+renames a named remote and repoints any branch upstream tracking it.
+Removing or renaming a remote never touches the user-scoped
+.Ar trusted_remote_endpoint ,
+which is keyed by exact URL rather than remote name.
 .It Cm cherry-pick Ar hash
 Apply a single commit from elsewhere onto HEAD.
 .It Cm bisect Cm start | Cm good | Cm bad | Cm reset
 Binary-search for the commit that introduced a regression.
-.It Cm stash Op Cm save Fl m Ar msg | Cm list | Cm pop Op Ar N | Cm drop Op Ar N | Cm show Op Ar N
+.It Cm stash Op Cm save Fl m Ar msg | Cm list | Cm pop Op Ar N | Cm apply Op Ar N | Cm drop Op Ar N | Cm clear | Cm show Op Ar N
 Save or restore a snapshot of working-tree changes.
+.Cm pop
+applies entry
+.Ar N
+and removes it;
+.Cm apply
+applies entry
+.Ar N
+but leaves it on the stack. Both run the destructive-restore guard so
+uncommitted edits on unrelated paths are never clobbered.
+.Cm clear
+removes every stash entry.
 .It Cm blame Ar file
 Line-level attribution of the committed state of
 .Ar file .
