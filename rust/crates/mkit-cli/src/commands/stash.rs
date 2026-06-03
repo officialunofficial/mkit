@@ -82,6 +82,19 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
 
+    // `save`, `pop`, and `drop` mutate the worktree/index/manifest and
+    // must serialise against other worktree commands. `list` and `show`
+    // are read-only and run unlocked.
+    let _lock = match opts.sub {
+        StashCmd::Save(_) | StashCmd::Pop { .. } | StashCmd::Drop { .. } => {
+            match super::acquire_worktree_lock(&cwd) {
+                Ok(l) => Some(l),
+                Err(code) => return code,
+            }
+        }
+        StashCmd::List | StashCmd::Show { .. } => None,
+    };
+
     match opts.sub {
         StashCmd::Save(save) => match stash::save(&store, &cwd, &save.message) {
             Ok(()) => {
@@ -111,14 +124,28 @@ pub fn run(args: &[String]) -> u8 {
             }
             Err(e) => emit_err(&format!("stash list: {e}"), exit::GENERAL_ERROR),
         },
-        StashCmd::Pop { index } => match stash::pop(&store, &cwd, index) {
-            Ok(()) => {
-                let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "popped stash@{{{index}}}");
-                exit::OK
+        StashCmd::Pop { index } => {
+            // #205: run the #176 destructive-restore guard over the
+            // stash tree BEFORE restoring, so a `stash pop` never
+            // silently clobbers uncommitted edits on unrelated paths.
+            // `stash::pop` drops the entry only after a successful
+            // restore, so refusing here leaves the stash intact.
+            let tree_hash = match stash::entry_tree_hash(&store, &cwd, index) {
+                Ok(h) => h,
+                Err(e) => return emit_err(&format!("stash pop: {e}"), exit::GENERAL_ERROR),
+            };
+            if let Err(e) = super::ensure_restore_safe(&cwd, &store, tree_hash) {
+                return emit_err(&format!("stash pop: {e}"), exit::GENERAL_ERROR);
             }
-            Err(e) => emit_err(&format!("stash pop: {e}"), exit::GENERAL_ERROR),
-        },
+            match stash::pop(&store, &cwd, index) {
+                Ok(()) => {
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(stderr, "popped stash@{{{index}}}");
+                    exit::OK
+                }
+                Err(e) => emit_err(&format!("stash pop: {e}"), exit::GENERAL_ERROR),
+            }
+        }
         StashCmd::Drop { index } => match stash::drop(&cwd, index) {
             Ok(()) => {
                 let mut stderr = std::io::stderr().lock();

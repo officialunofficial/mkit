@@ -72,6 +72,10 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let _lock = match super::acquire_worktree_lock(&cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
 
     if opts.abort {
         abort(&cwd, &mkit_dir, &store)
