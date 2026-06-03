@@ -14,7 +14,7 @@ _mkit_complete() {
     local cur prev words cword
     _init_completion || return 0
 
-    local subcommands="init add rm hash cat tree commit log status diff branch checkout tag config merge push pull fetch stash clone remote key keygen cherry-pick rebase bisect sparse-checkout serve blame verify attest verify-attest version help"
+    local subcommands="init add rm restore reset hash cat tree commit log status diff branch checkout tag config merge push pull fetch stash clone remote key keygen cherry-pick rebase bisect sparse-checkout serve blame verify attest verify-attest version help"
     # No top-level --version flag; use the `version` subcommand.
     local top_flags="--help -h"
 
@@ -37,6 +37,12 @@ _mkit_complete() {
             ;;
         rm)
             COMPREPLY=( $(compgen -W "--cached -r --recursive -f --force --help" -- "$cur") )
+            ;;
+        restore)
+            COMPREPLY=( $(compgen -W "--staged --worktree --source -f --force --help" -- "$cur") )
+            ;;
+        reset)
+            COMPREPLY=( $(compgen -W "--soft --mixed --help" -- "$cur") )
             ;;
         diff)
             COMPREPLY=( $(compgen -W "--staged --cached --help" -- "$cur") )
