@@ -505,8 +505,10 @@ fn list_refs_uses_url_prefix_namespace_and_strips_it() {
     </ListBucketResult>"#;
     let m_list = server
         .mock("GET", "/bucket")
+        // Query is canonically percent-encoded before signing (#215);
+        // `/` becomes `%2F`.
         .match_query(mockito::Matcher::Exact(
-            "list-type=2&prefix=repo-a/refs/heads/".to_owned(),
+            "list-type=2&prefix=repo-a%2Frefs%2Fheads%2F".to_owned(),
         ))
         .with_status(200)
         .with_body(xml)

@@ -251,9 +251,14 @@ impl S3Transport {
 
     /// Build the canonical query string for `ListObjectsV2` scoped to a
     /// prefix. `prefix` MAY be empty to list every key.
+    ///
+    /// The query is URI-encoded and key-sorted via
+    /// [`sigv4::canonical_query_string`] so the bytes signed match what
+    /// real AWS S3 re-derives server-side (a raw `/` in the prefix would
+    /// otherwise yield `403 SignatureDoesNotMatch`; R2 is lenient).
     #[must_use]
     pub fn build_list_query(prefix: &str) -> String {
-        format!("list-type=2&prefix={prefix}")
+        sigv4::canonical_query_string(&[("list-type", "2"), ("prefix", prefix)])
     }
 
     // -- HTTP core --
@@ -1025,9 +1030,11 @@ mod tests {
 
     #[test]
     fn list_query_format() {
+        // `/` MUST be percent-encoded as `%2F` and keys sorted, so the
+        // signed query matches what real AWS S3 re-derives server-side.
         assert_eq!(
             S3Transport::build_list_query("refs/heads/"),
-            "list-type=2&prefix=refs/heads/"
+            "list-type=2&prefix=refs%2Fheads%2F"
         );
         assert_eq!(S3Transport::build_list_query(""), "list-type=2&prefix=");
     }
