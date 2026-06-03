@@ -15,7 +15,7 @@
 complete -c mkit -f
 
 set -l __mkit_subcommands \
-    init add rm hash cat tree commit log status diff branch checkout \
+    init add rm restore reset hash cat tree commit log status diff branch checkout \
     tag config merge push pull fetch stash clone remote key keygen \
     cherry-pick rebase bisect sparse-checkout serve blame verify \
     attest verify-attest version help
@@ -40,6 +40,18 @@ complete -c mkit -n "__fish_seen_subcommand_from rm" \
     -l recursive -s r -d "Remove a directory recursively"
 complete -c mkit -n "__fish_seen_subcommand_from rm" \
     -l force -s f -d "Remove even if locally modified"
+complete -c mkit -n "__fish_seen_subcommand_from restore" \
+    -l staged -s S -d "Unstage: restore index entry from HEAD"
+complete -c mkit -n "__fish_seen_subcommand_from restore" \
+    -l worktree -s W -d "Restore the worktree file"
+complete -c mkit -n "__fish_seen_subcommand_from restore" \
+    -l source -d "Restore content from this revision" -r
+complete -c mkit -n "__fish_seen_subcommand_from restore" \
+    -l force -s f -d "Overwrite locally-modified files"
+complete -c mkit -n "__fish_seen_subcommand_from reset" \
+    -l soft -d "Move HEAD only; keep index and worktree"
+complete -c mkit -n "__fish_seen_subcommand_from reset" \
+    -l mixed -d "Move HEAD and reset the index (default)"
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -l staged -d "Diff HEAD vs the staged index"
 complete -c mkit -n "__fish_seen_subcommand_from diff" \

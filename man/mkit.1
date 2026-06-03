@@ -81,6 +81,56 @@ removes files even when their worktree content has diverged from the staged
 blob; without it,
 .Cm rm
 refuses to destroy a locally-modified tracked file.
+.It Cm restore Oo Fl Fl staged Oc Oo Fl Fl worktree Oc Oo Fl Fl source Ar rev Oc Oo Fl f | Fl Fl force Oc Ar path ...
+Restore path(s) in the worktree and/or unstage them. With no flag (or
+.Fl Fl worktree ) ,
+the worktree file(s) are rewritten from the staged index content,
+discarding un-staged worktree edits.
+.Fl Fl staged
+instead reverts the index entry for each path to its
+.Cm HEAD
+version (unstaging it) while leaving the worktree file untouched;
+.Fl Fl staged Fl Fl worktree
+does both. A directory path restores every tracked entry at or below it.
+.Fl Fl source Ar rev
+takes the restored content from
+.Ar rev Ns 's
+tree (resolved as a branch, tag,
+.Cm HEAD ,
+full or short hash, or
+.Cm HEAD~ Ns Ar n Ns / Ns Cm ^
+navigation) instead of the index/HEAD default. The worktree restore
+refuses to overwrite a file whose content diverges from the staged blob;
+.Fl f
+or
+.Fl Fl force
+discards that un-staged edit. A worktree restore never removes neighbouring
+files \(em it only rewrites the named tracked paths.
+.It Cm reset Oo Fl Fl soft | Fl Fl mixed Oc Op Ar commit
+Move
+.Cm HEAD
+.Pq and the current branch
+to
+.Ar commit
+.Pq default Cm HEAD ,
+resolved through the shared revision grammar (branch, tag,
+.Cm HEAD ,
+full or short hash,
+.Cm HEAD~ Ns Ar n Ns / Ns Cm ^ ) .
+.Fl Fl soft
+moves
+.Cm HEAD
+only, leaving the index and worktree untouched.
+.Fl Fl mixed
+.Pq the default
+also resets the index to the target commit's tree while leaving the
+worktree. The destructive
+.Fl Fl hard
+variant
+.Pq also resetting the worktree
+is intentionally not implemented;
+.Cm checkout Ar commit
+provides a guarded worktree-resetting path instead.
 .It Cm hash Ar file
 Hash
 .Ar file

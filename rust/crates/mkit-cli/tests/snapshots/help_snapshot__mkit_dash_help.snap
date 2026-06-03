@@ -12,6 +12,13 @@ commands:
   add -u            Restage only already-tracked files (no path args)
   rm [--cached] [-r] [-f] <path>...  Remove path(s) and stage the deletion
   rm --cached       Stage the removal only; keep the worktree file(s)
+  restore [--staged] [--worktree] [--source <rev>] [-f] <path>...
+                    Discard worktree changes for path(s) (restore from the
+                    index), or --staged to unstage (restore the index entry
+                    from HEAD); -f overrides the un-staged-edit guard
+  reset [--soft|--mixed] [<commit>]
+                    Move HEAD/branch (--soft) or HEAD + reset the index to
+                    the commit's tree (--mixed, default); worktree untouched
   hash <file>       Hash a file and store it as a blob
   cat <hash>        Display an object by its hash
   tree              Snapshot working directory as a tree object

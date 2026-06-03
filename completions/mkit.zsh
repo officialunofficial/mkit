@@ -15,6 +15,8 @@ _mkit() {
         'init:Create a new mkit repository'
         'add:Stage files for the next commit (-A/-u, multi-path)'
         'rm:Remove path(s) and stage the deletion (--cached/-r/-f)'
+        'restore:Discard worktree changes for path(s), or --staged to unstage'
+        'reset:Move HEAD (--soft) or HEAD + index (--mixed) to a commit'
         'hash:Hash a file and store it as a blob'
         'cat:Display an object by its hash'
         'tree:Snapshot working directory as a tree object'
@@ -75,6 +77,22 @@ _mkit() {
                         '(-f --force)'{-f,--force}'[remove even if locally modified]' \
                         '--help[show help]' \
                         '*:file:_files'
+                    ;;
+                restore)
+                    _arguments \
+                        '(-S --staged)'{-S,--staged}'[unstage: restore index entry from HEAD]' \
+                        '(-W --worktree)'{-W,--worktree}'[restore the worktree file]' \
+                        '--source[restore content from this revision]:rev:' \
+                        '(-f --force)'{-f,--force}'[overwrite locally-modified files]' \
+                        '--help[show help]' \
+                        '*:file:_files'
+                    ;;
+                reset)
+                    _arguments \
+                        '--soft[move HEAD only; keep index and worktree]' \
+                        '--mixed[move HEAD and reset the index (default)]' \
+                        '--help[show help]' \
+                        '*:commit:'
                     ;;
                 diff)
                     _arguments \
