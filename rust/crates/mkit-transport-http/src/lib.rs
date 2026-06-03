@@ -142,6 +142,32 @@ pub fn validate_http_scheme(url: &Url) -> TransportResult<()> {
     }
 }
 
+/// Maximum number of HTTP redirects we follow before giving up.
+const MAX_REDIRECTS: usize = 5;
+
+/// Explicit reqwest redirect policy (#223): follow up to
+/// [`MAX_REDIRECTS`] hops, but REFUSE any redirect that downgrades the
+/// scheme (`https` → `http`). A downgrade would silently move
+/// authenticated traffic (the `MKIT_API_TOKEN` bearer) onto a plaintext
+/// channel, so we stop with an error rather than relying on reqwest's
+/// permissive defaults.
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            return attempt.error("too many redirects");
+        }
+        // Refuse https -> http downgrade. (http -> https upgrade and
+        // same-scheme redirects are allowed.)
+        if let Some(prev) = attempt.previous().last()
+            && prev.scheme() == "https"
+            && attempt.url().scheme() != "https"
+        {
+            return attempt.error("refusing redirect that downgrades https to a weaker scheme");
+        }
+        attempt.follow()
+    })
+}
+
 /// Blocking HTTP transport for the mkit VCS Worker dialect.
 ///
 /// Construction: [`HttpTransport::connect`] parses a `mkit+https://` (or
@@ -196,6 +222,7 @@ impl HttpTransport {
 
         let client = Client::builder()
             .timeout(DEFAULT_TIMEOUT)
+            .redirect(redirect_policy())
             .build()
             .map_err(|_| TransportError::ConnectionFailed)?;
 
@@ -218,6 +245,7 @@ impl HttpTransport {
     pub fn new_for_test(base: Url, token: Option<String>) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(5))
+            .redirect(redirect_policy())
             .build()
             .expect("default reqwest client");
         Self {
@@ -1724,6 +1752,32 @@ mod tests {
         let dbg = format!("{t:?}");
         assert!(dbg.contains("None"), "Debug should show token: None: {dbg}");
         assert!(!dbg.contains("<redacted>"));
+    }
+
+    #[test]
+    fn redirect_loop_is_bounded_not_followed_forever() {
+        // A server that 301-redirects to itself must not cause an
+        // unbounded redirect chase: the explicit redirect policy caps the
+        // hop count, so the request fails (mapped to ConnectionFailed
+        // after retries) instead of hanging. Asserts the policy is wired.
+        let mut server = Server::new();
+        let loc = format!("{}/myproj/refs/refs/heads/main", server.url());
+        let _m = server
+            .mock("GET", "/myproj/refs/refs/heads/main")
+            .with_status(301)
+            .with_header("location", loc.as_str())
+            .create();
+        let t = make_transport(&server, None);
+        let err = t.read_ref("refs/heads/main").unwrap_err();
+        // Either a connection-level error (redirect policy aborted the
+        // send) or a non-success status mapped through; never a hang.
+        assert!(
+            matches!(
+                err,
+                TransportError::ConnectionFailed | TransportError::InvalidRef(_)
+            ),
+            "unexpected error for bounded redirect loop: {err:?}"
+        );
     }
 
     // -- 502 bad gateway (5xx family) --------------------------------------

@@ -16,6 +16,8 @@
 //! 5 attempts; `412 Precondition Failed` NEVER retries so CAS writes
 //! can't silently turn into duplicate PUTs.
 
+// This crate contains zero `unsafe` — enforce that it stays that way.
+#![forbid(unsafe_code)]
 // Narrative-heavy module docs fight `doc_markdown`; the
 // `duration_suboptimal_units` lint insists on `from_mins(1)` for our 60s
 // HTTP timeout which obscures intent (we mean seconds, not minutes).
@@ -380,7 +382,11 @@ fn extract_response(
         // unbounded, so we cap manually.
         let all = resp.bytes().map_err(|_| TransportError::ConnectionFailed)?;
         if all.len() > limit {
-            return Err(TransportError::ServerError { status: 507 });
+            // Non-retryable: re-fetching the same oversized object would
+            // just exceed the cap again. (Previously mapped to a 507,
+            // which `is_retryable` treats as a retryable 5xx, so the
+            // backoff loop would have retried the doomed fetch.)
+            return Err(TransportError::PayloadTooLarge(all.len()));
         }
         all.to_vec()
     } else {

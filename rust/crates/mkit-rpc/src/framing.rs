@@ -79,17 +79,24 @@ where
         return Err(FrameError::LengthTooLarge(len));
     }
 
+    // Read the body with a manual fill loop (rather than `read_exact`) so
+    // a short read reports the TRUE number of bytes received in
+    // `BodyTruncated.actual` instead of a hardcoded 0.
     let mut body = vec![0u8; len as usize];
-    r.read_exact(&mut body).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            FrameError::BodyTruncated {
-                expected: len,
-                actual: 0,
+    let mut filled = 0usize;
+    while filled < body.len() {
+        match r.read(&mut body[filled..]) {
+            Ok(0) => {
+                return Err(FrameError::BodyTruncated {
+                    expected: len,
+                    actual: filled,
+                });
             }
-        } else {
-            FrameError::Io(e)
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(FrameError::Io(e)),
         }
-    })?;
+    }
 
     M::decode_from_slice(&body).map_err(|_| FrameError::DecodeFailed)
 }
@@ -147,6 +154,23 @@ mod tests {
         match read_frame::<_, SignerFrame>(&mut cur) {
             Err(FrameError::LengthTruncated) => {}
             other => panic!("expected LengthTruncated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_truncated_reports_true_actual_count() {
+        // Advertise a 10-byte body but supply only 3 bytes. The error
+        // must report the actual count (3), not a hardcoded 0.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&10u32.to_le_bytes());
+        buf.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // 3 body bytes only
+        let mut cur = Cursor::new(buf);
+        match read_frame::<_, SignerFrame>(&mut cur) {
+            Err(FrameError::BodyTruncated { expected, actual }) => {
+                assert_eq!(expected, 10);
+                assert_eq!(actual, 3, "actual byte count must reflect bytes read");
+            }
+            other => panic!("expected BodyTruncated, got {other:?}"),
         }
     }
 }
