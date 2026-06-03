@@ -53,6 +53,61 @@ fn push_rejects_repo_configured_http_remote_with_token() {
     assert!(stderr.contains("trusted_remote_endpoint"));
 }
 
+/// The gate keys on PROVENANCE, not mere credential presence. A
+/// user-scoped `remote_endpoint` (the user's own decision, not a hostile
+/// clone's) carrying a token must NOT be refused. We do not have the
+/// remote actually reachable, so the push proceeds *past* the gate and
+/// then fails to connect — but it must NOT fail with the trust refusal.
+#[test]
+fn push_does_not_refuse_user_scoped_endpoint_with_token() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path();
+    assert!(run_in_with_env(root, &["init"], &[], None).status.success());
+    // Endpoint lives ONLY in user-scoped config — i.e. the user chose
+    // it, so `repo_chosen` is false and the gate must pass.
+    let out = run_in_with_env(
+        root,
+        &["push"],
+        &[("MKIT_API_TOKEN", "secret-xyz")],
+        Some("remote_endpoint = mkit+https://example.invalid/repo\n"),
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("refusing repo-configured remote"),
+        "user-scoped endpoint must not trip the credential gate: {stderr}"
+    );
+}
+
+/// A repo-configured HTTP remote that the user has explicitly trusted in
+/// user-scoped `trusted_remote_endpoint` proceeds past the gate even
+/// with a token present (it then fails to connect to the unreachable
+/// host, but NOT with the trust refusal).
+#[test]
+fn push_allows_repo_remote_when_user_trusts_endpoint() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path();
+    assert!(run_in_with_env(root, &["init"], &[], None).status.success());
+    let add = run_in_with_env(
+        root,
+        &["remote", "add", "mkit+https://example.invalid/repo"],
+        &[],
+        None,
+    );
+    assert!(add.status.success(), "remote add failed: {add:?}");
+
+    let out = run_in_with_env(
+        root,
+        &["push"],
+        &[("MKIT_API_TOKEN", "secret-xyz")],
+        Some("trusted_remote_endpoint = mkit+https://example.invalid/repo\n"),
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("refusing repo-configured remote"),
+        "user-trusted endpoint must pass the credential gate: {stderr}"
+    );
+}
+
 #[test]
 fn push_rejects_repo_configured_s3_remote_with_env_creds() {
     let td = tempfile::tempdir().unwrap();

@@ -219,6 +219,21 @@ hostile-clone credential-exfiltration channel tracked in issue #97
 without breaking safe portable defaults for unauthenticated mirrors
 and SSH-bearing remotes.
 
+The gate is enforced at a single transport-dispatch choke point
+(`remote_dispatch::open_trusted`), which runs the per-endpoint check
+*before* it constructs any credential-bearing transport. The check is
+keyed on the **resolved endpoint plus its provenance** — `repo_chosen`
+(selected by repo-scoped config: the flat `remote_endpoint` or a
+`remote.<name>.url` entry) versus user-chosen (user-scoped config or an
+explicit CLI argument) — never on a remote *name*. This means the same
+fence applies uniformly whether the credential-bearing endpoint comes
+from the legacy single-remote field or from a named remote: a hostile
+clone cannot smuggle ambient credentials to a new host by hiding the
+endpoint behind a named remote, and a user-chosen endpoint with the
+user's own credentials is never second-guessed. Unauthenticated and
+SSH/file flows carry no ambient HTTP/S3 credentials and pass the gate
+unchanged.
+
 ---
 
 ## 5. Trust-roots scope
