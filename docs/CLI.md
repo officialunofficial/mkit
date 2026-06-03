@@ -95,11 +95,16 @@ History / commits:
   commit's message is reused (no editor is launched). The superseded
   commit becomes an unreachable object and is only reclaimed once
   `mkit gc` ships (issue #233).
-- `mkit log [--oneline] [--format=json] [--graph] [-n N]` — show
+- `mkit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N]` — show
   commit history. The default format prints the **full commit message
   body**, indented by four spaces, and renders the timestamp as a stable
   UTC date in the form `YYYY-MM-DD HH:MM:SS +0000`. `--oneline` condenses
-  each commit to `<8-hex> <title>`. `--format=json` emits JSONL (one JSON
+  each commit to `<abbrev-hex> <title>`. `--abbrev-commit` abbreviates the
+  commit id in the default format too, and `--abbrev[=N]` sets the
+  abbreviation length (bare `--abbrev` and `--oneline` default to 7; the
+  length is clamped to `[4, 64]`). Note the abbreviated id is a BLAKE3
+  prefix, so it is longer than a Git SHA-1 prefix of the same `N`.
+  `--format=json` emits JSONL (one JSON
   object per commit, newest first) with keys `hash`, `parents`, `tree`,
   `author`, `timestamp`, `title`, `message`; the `timestamp` stays a raw
   Unix-seconds integer for machine consumption. **`--graph` is accepted
@@ -427,9 +432,10 @@ Config / keys / version:
 - `mkit config <key> [--format=json]` — show one value.
 - `mkit config <key> <value>` — set a configuration value.
 - `mkit version` — print the version. Emits exactly `mkit <X.Y.Z>\n`.
-  This is the **canonical** way to query the version: there is no
-  top-level `--version`/`-V` flag (`mkit --version` is treated as an
-  unknown command). See "Divergences from Git" below.
+  The top-level `mkit --version` / `mkit -V` flags are aliases of this
+  subcommand and emit the identical string. Note this is `mkit <X.Y.Z>`,
+  not Git's `git version <X.Y.Z>` form — an intentional, documented
+  divergence (the string is pinned by packaging asserts).
 
 ## Divergences from Git
 
@@ -444,12 +450,6 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   Paths containing newlines or other special bytes are therefore not
   round-trippable through porcelain. NUL-termination and C-style path
   quoting are a follow-up.
-- **Version: subcommand only, no `--version` flag.** Use `mkit version`
-  (or `mkit -h`/`mkit --help` for help). There is no top-level
-  `--version`/`-V`. Aligning this with Git's flag form is a follow-up.
-- **`mkit diff` commit-vs-commit takes two *tree* hashes**, not commit
-  refs/ranges. Pass two 64-hex tree hashes to diff them; commit-range
-  syntax (`A..B`) and named-ref diffing are not implemented.
 - **`mkit add -p` (interactive hunk staging) is not supported.** Stage
   whole files with pathspecs, `.`, `-A`, or `-u`. Interactive hunk
   selection is a follow-up.

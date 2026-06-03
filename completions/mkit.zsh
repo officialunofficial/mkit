@@ -52,9 +52,10 @@ _mkit() {
         'help:Show help text'
     )
 
-    # No top-level --version flag; the `version` subcommand is canonical.
+    # Top-level flags. --version/-V are aliases of the `version` subcommand.
     _arguments -C \
         '(-h --help)'{-h,--help}'[show help]' \
+        '(-V --version)'{-V,--version}'[print version]' \
         '1: :->command' \
         '*::arg:->args' \
         && return 0
@@ -118,6 +119,8 @@ _mkit() {
                 log)
                     _arguments \
                         '--oneline[condensed output]' \
+                        '--abbrev-commit[abbreviate commit ids]' \
+                        '--abbrev[set abbreviation length]:length:' \
                         '--format[output format]:format:(json)' \
                         '--graph[include ASCII graph]' \
                         '-n[limit number of commits]:count:' \

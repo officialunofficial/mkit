@@ -61,11 +61,11 @@ creeping; revisit post-v1 if demand warrants.
 | `status` | `--porcelain[=v1]`, `-s` — **simple paths only** | v1, no path quoting | ✅ | — | — | C-style quoting of special paths / `-z` / v2 → Phase 1 (next row) |
 | `status` | `--porcelain=v2`, `-z`, path quoting | not present | 🔨 | 1 | #249 | agent-parsed machine output |
 | `diff` | HEAD/worktree, `--staged`, pathspecs | same | ✅ | — | — | |
-| `diff` | `<rev>`, `<a>..<b>` ranges | **implemented** (`split_range`/`rev_to_tree`) | 📝 | 0 | #248 | fix stale `docs/CLI.md:450-452` |
+| `diff` | `<rev>`, `<a>..<b>` ranges | implemented (`split_range`/`rev_to_tree`) | ✅ | 0 | #248 | docs reconciled (stale CLI.md divergence removed) |
 | `diff` | `--name-only`, `--name-status`, `--stat`, `-z` | absent | 🔨 | 1 | #249 | `-z` applies to name-only/name-status only |
 | `diff` | byte-exact hunks (Myers/histogram) | LCS unified diff | 🔨 | 4 | #257 | header is `diff --mkit`, not `diff --git` |
 | `commit` | `-m`, `-a`, `--amend`, `--author` | same | ✅ | — | — | signed; amend leaves unreachable obj until gc |
-| `log` | history, `-n`, `--format=json`, `--oneline` (**full-length IDs**) | same | ✅ | — | — | Git-compatible hash abbreviation is Phase 0 (next row) |
+| `log` | history, `-n`, `--format=json`, `--oneline`, `--abbrev-commit`, `--abbrev[=N]` | same | ✅ | 0 | #248 | `--oneline`/`--abbrev-commit` abbreviate (default 7); abbreviated id is a BLAKE3 prefix |
 | `log` | `--abbrev-commit`, `--abbrev[=n]`, abbreviated `--oneline` | full-length hashes | 🔨 | 0 | #248 | display-side only; `rev-parse` is Phase 3 |
 | `log` | `--graph`, `<a>..<b>` range walk | `--graph` is a no-op | 🔨 | 1 | #249 | real ASCII graph + commit-range walking |
 | `branch` | create, list, `-d`/`-D`/`-m` | same (see notes) | ⚠️ | 1 | #249 | **known divergences to reconcile:** default list prints a short id (Git omits it); `-D <missing>` no-ops (Git errors). Tracked in Phase 1. |
@@ -101,8 +101,8 @@ creeping; revisit post-v1 if demand warrants.
 | `config user.name` / `user.email` | accept + map | flat `user.identity` only | 🔨 | 2 | #250 | **user-scope / non-authoritative only**; never feeds signed `Identity` (keeps `REPO_FORBIDDEN_KEYS` guard) |
 | `config core.*` | accept honored subset | absent | 🔨 | 2 | #250 | display/no-op where not meaningful |
 | `.gitignore` | nested, `**`, anchored `/`, dir-relative, negation order | `.mkitignore`, basename/root-only | 🔨 | 3 | #256 | matcher upgrade; v1 glob subset decided in #256 |
-| abbreviated hashes | short prefix resolution + display | short prefixes resolve already | 🔨 | 0 | #248 | display flags in Phase 0; `rev-parse` in Phase 3 |
-| `--version` / `-V` | top-level flag | `mkit version` subcommand | 🔨 | 0 | #248 | |
+| abbreviated hashes | short prefix resolution + display | resolve + `log --abbrev[=N]`/`--oneline` | ✅ | 0 | #248 | display side shipped; `rev-parse --short` is Phase 3 |
+| `--version` / `-V` | top-level flag | `mkit --version`/`-V` alias `version` | ✅ | 0 | #248 | emits `mkit <X.Y.Z>` (not git's `git version …`) |
 | `.git/` repo detection | — | — | 🚫 | — | #254 | non-goal in core; opt-in alias shim only |
 
 ---

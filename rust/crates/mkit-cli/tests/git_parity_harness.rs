@@ -215,6 +215,41 @@ fn assert_parity_ordered(label: &str, git: &Output, mkit: &Output) {
     );
 }
 
+/// Mask a **leading** abbreviated-hash token. `--oneline` output is
+/// `<abbrev-id> <subject>`, and the abbreviation length differs between
+/// git (SHA-1 prefix) and mkit (BLAKE3 prefix) — `mask_object_ids` only
+/// catches full 40/64-hex, so the short leading id needs its own mask.
+/// Only the first whitespace-delimited token is masked, so subjects are
+/// still compared verbatim.
+fn mask_leading_short_hash(line: &str) -> String {
+    let mut parts = line.splitn(2, ' ');
+    let first = parts.next().unwrap_or("");
+    let is_short_hash = first.len() >= 4
+        && first
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'));
+    match (is_short_hash, parts.next()) {
+        (true, Some(rest)) => format!("<oid> {rest}"),
+        _ => line.to_owned(),
+    }
+}
+
+/// Ordered parity assertion for `--oneline`-style output: masks the
+/// leading abbreviated id per line, then compares verbatim.
+fn assert_parity_oneline(label: &str, git: &Output, mkit: &Output) {
+    assert!(git.status.success(), "{label}: git command failed: {git:?}");
+    assert!(
+        mkit.status.success(),
+        "{label}: mkit command failed: {mkit:?}"
+    );
+    let mask = |s: &str| s.lines().map(mask_leading_short_hash).collect::<Vec<_>>();
+    assert_eq!(
+        mask(&stdout(git)),
+        mask(&stdout(mkit)),
+        "{label}: git/mkit oneline output diverged (modulo abbreviated id)"
+    );
+}
+
 // =====================================================================
 // Smoke: the harness itself is isolated and consistent.
 // =====================================================================
@@ -288,6 +323,21 @@ fn status_porcelain_staged_modification_matches_git() {
     assert_parity_set("staged-modification status", &g, &m); // expect `M  a.txt`
 }
 
+#[test]
+fn log_oneline_matches_git() {
+    if !git_available() {
+        eprintln!("skipping: real `git` not on PATH");
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"hello\n");
+    h.commit_both(&["a.txt"], "only commit");
+    let g = h.git(&["log", "--oneline"]);
+    let m = h.mkit(&["log", "--oneline"]);
+    assert_parity_oneline("log --oneline", &g, &m); // `<abbrev> only commit`
+}
+
 // =====================================================================
 // Pending rows — ignored until the owning phase ships them. Each carries
 // the comparison so un-ignoring is a one-line change once implemented.
@@ -323,21 +373,6 @@ fn diff_unified_matches_git() {
     let g = h.git(&["diff"]);
     let m = h.mkit(&["diff"]);
     assert_parity_ordered("diff (unified)", &g, &m);
-}
-
-#[test]
-#[ignore = "Phase 0 (#248): log --oneline hash abbreviation not implemented; short-hash normalization TBD"]
-fn log_oneline_matches_git() {
-    if !git_available() {
-        return;
-    }
-    let h = Harness::new();
-    h.init_both();
-    h.write_both("a.txt", b"hello\n");
-    h.commit_both(&["a.txt"], "only commit");
-    let g = h.git(&["log", "--oneline"]);
-    let m = h.mkit(&["log", "--oneline"]);
-    assert_parity_ordered("log --oneline", &g, &m);
 }
 
 // =====================================================================

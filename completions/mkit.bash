@@ -15,8 +15,8 @@ _mkit_complete() {
     _init_completion || return 0
 
     local subcommands="init add rm restore reset hash cat tree commit log reflog status diff branch checkout tag config merge push pull fetch stash clone remote key keygen cherry-pick rebase bisect sparse-checkout serve pack-shard blame verify attest verify-attest version help"
-    # No top-level --version flag; use the `version` subcommand.
-    local top_flags="--help -h"
+    # Top-level flags. --version/-V are aliases of the `version` subcommand.
+    local top_flags="--help -h --version -V"
 
     # First non-flag word is the subcommand.
     if [[ $cword -eq 1 ]]; then
@@ -54,7 +54,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "-a --all --amend -m --help" -- "$cur") )
             ;;
         log)
-            COMPREPLY=( $(compgen -W "--oneline --format --graph -n --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --graph -n --help" -- "$cur") )
             ;;
         reflog)
             COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )
