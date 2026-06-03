@@ -15,7 +15,7 @@
 complete -c mkit -f
 
 set -l __mkit_subcommands \
-    init add rm hash cat tree commit log reflog status diff branch checkout \
+    init add rm restore reset hash cat tree commit log reflog status diff branch checkout \
     tag config merge push pull fetch stash clone remote key keygen \
     cherry-pick rebase bisect sparse-checkout serve blame verify \
     attest verify-attest version help
@@ -40,12 +40,26 @@ complete -c mkit -n "__fish_seen_subcommand_from rm" \
     -l recursive -s r -d "Remove a directory recursively"
 complete -c mkit -n "__fish_seen_subcommand_from rm" \
     -l force -s f -d "Remove even if locally modified"
+complete -c mkit -n "__fish_seen_subcommand_from restore" \
+    -l staged -s S -d "Unstage: restore index entry from HEAD"
+complete -c mkit -n "__fish_seen_subcommand_from restore" \
+    -l worktree -s W -d "Restore the worktree file"
+complete -c mkit -n "__fish_seen_subcommand_from restore" \
+    -l source -d "Restore content from this revision" -r
+complete -c mkit -n "__fish_seen_subcommand_from restore" \
+    -l force -s f -d "Overwrite locally-modified files"
+complete -c mkit -n "__fish_seen_subcommand_from reset" \
+    -l soft -d "Move HEAD only; keep index and worktree"
+complete -c mkit -n "__fish_seen_subcommand_from reset" \
+    -l mixed -d "Move HEAD and reset the index (default)"
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -l staged -d "Diff HEAD vs the staged index"
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -l cached -d "Alias for --staged"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
     -l porcelain -d "Machine-readable XY output"
+complete -c mkit -n "__fish_seen_subcommand_from status" \
+    -s s -l short -d "Short format; alias for --porcelain=v1"
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -l all -s a -d "Stage tracked changes"
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
@@ -54,6 +68,8 @@ complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -s m -d "Commit message" -r
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
+complete -c mkit -n "__fish_seen_subcommand_from log" \
+    -l format -d "Output format (json)" -r -a json
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l graph -d "Accepted for compat; currently a no-op"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
@@ -69,7 +85,21 @@ complete -c mkit -n "__fish_seen_subcommand_from clone" \
 complete -c mkit -n "__fish_seen_subcommand_from clone" \
     -l sparse -d "Sparse checkout"
 complete -c mkit -n "__fish_seen_subcommand_from branch" \
-    -s d -d "Delete branch" -r
+    -s d -d "Delete branch (safe)" -r
+complete -c mkit -n "__fish_seen_subcommand_from branch" \
+    -s D -d "Force-delete branch" -r
+complete -c mkit -n "__fish_seen_subcommand_from branch" \
+    -s m -d "Rename branch" -r
+complete -c mkit -n "__fish_seen_subcommand_from tag" \
+    -l annotate -s a -d "Create an annotated tag object"
+complete -c mkit -n "__fish_seen_subcommand_from tag" \
+    -l sign -s s -d "Create a signed (Ed25519) tag object"
+complete -c mkit -n "__fish_seen_subcommand_from tag" \
+    -l message -s m -d "Tag message" -r
+complete -c mkit -n "__fish_seen_subcommand_from tag" \
+    -l delete -s d -d "Delete a tag" -r
+complete -c mkit -n "__fish_seen_subcommand_from tag" \
+    -l author -d "Override tagger identity" -r
 complete -c mkit -n "__fish_seen_subcommand_from rebase" \
     -l continue -d "Continue an in-progress rebase"
 complete -c mkit -n "__fish_seen_subcommand_from rebase" \
@@ -80,11 +110,11 @@ complete -c mkit -n "__fish_seen_subcommand_from bisect; \
     and not __fish_seen_subcommand_from start good bad reset" \
     -a "start good bad reset"
 complete -c mkit -n "__fish_seen_subcommand_from stash; \
-    and not __fish_seen_subcommand_from save list pop drop show" \
-    -a "save list pop drop show"
+    and not __fish_seen_subcommand_from save list pop apply drop clear show" \
+    -a "save list pop apply drop clear show"
 complete -c mkit -n "__fish_seen_subcommand_from remote; \
-    and not __fish_seen_subcommand_from add set" \
-    -a "add set"
+    and not __fish_seen_subcommand_from add set remove rename" \
+    -a "add set remove rename"
 complete -c mkit -n "__fish_seen_subcommand_from key; \
     and not __fish_seen_subcommand_from generate list import export delete" \
     -a "generate list import export delete"

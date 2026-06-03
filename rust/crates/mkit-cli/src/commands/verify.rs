@@ -1,11 +1,11 @@
-//! `mkit verify <hash>` — verify the signature on a commit or remix.
+//! `mkit verify <rev>` — verify the signature on a commit, remix, or
+//! signed tag.
 
 use std::io::Write;
 
 use clap::Parser;
-use mkit_core::hash::from_hex;
 use mkit_core::object::Object;
-use mkit_core::sign::{verify_commit, verify_remix};
+use mkit_core::sign::{verify_commit, verify_remix, verify_tag};
 use mkit_core::store::ObjectStore;
 
 use crate::clap_shim;
@@ -14,11 +14,13 @@ use crate::exit;
 #[derive(Debug, Parser)]
 #[command(
     name = "mkit verify",
-    about = "Verify the signature on a commit or remix."
+    about = "Verify the signature on a commit, remix, or signed tag."
 )]
 struct VerifyOpts {
-    /// 64-char hex object hash.
-    hash: String,
+    /// Revision to verify: an object hash (full or short), a branch /
+    /// tag name, or `HEAD`. A tag name resolves to its annotated-tag
+    /// object when one exists.
+    revision: String,
 }
 
 #[must_use]
@@ -27,7 +29,6 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
-    let hex = &opts.hash;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -36,9 +37,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let h = match from_hex(hex) {
+    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let h = match super::revspec::resolve_revision(&store, &mkit_dir, &opts.revision) {
         Ok(h) => h,
-        Err(e) => return emit_err(&format!("bad hash: {e}"), exit::DATAERR),
+        Err(e) => return emit_err(&format!("{e}"), exit::DATAERR),
     };
     let obj = match store.read_object(&h) {
         Ok(o) => o,
@@ -47,8 +49,12 @@ pub fn run(args: &[String]) -> u8 {
     let res = match &obj {
         Object::Commit(c) => verify_commit(c),
         Object::Remix(r) => verify_remix(r),
+        Object::Tag(t) => verify_tag(t),
         _ => {
-            return emit_err("object is neither a commit nor a remix", exit::DATAERR);
+            return emit_err(
+                "object is not a commit, remix, or signed tag",
+                exit::DATAERR,
+            );
         }
     };
     let mut stdout = std::io::stdout().lock();

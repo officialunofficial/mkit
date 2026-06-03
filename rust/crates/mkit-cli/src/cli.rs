@@ -24,6 +24,13 @@ commands:
   add -u            Restage only already-tracked files (no path args)
   rm [--cached] [-r] [-f] <path>...  Remove path(s) and stage the deletion
   rm --cached       Stage the removal only; keep the worktree file(s)
+  restore [--staged] [--worktree] [--source <rev>] [-f] <path>...
+                    Discard worktree changes for path(s) (restore from the
+                    index), or --staged to unstage (restore the index entry
+                    from HEAD); -f overrides the un-staged-edit guard
+  reset [--soft|--mixed] [<commit>]
+                    Move HEAD/branch (--soft) or HEAD + reset the index to
+                    the commit's tree (--mixed, default); worktree untouched
   hash <file>       Hash a file and store it as a blob
   cat <hash>        Display an object by its hash
   tree              Snapshot working directory as a tree object
@@ -32,8 +39,9 @@ commands:
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable until `gc` ships.
   log [--oneline] [--format=json] [--graph] [-n N]
-                    Show commit history (--format=json emits JSONL;
-                    --graph is accepted but currently a no-op)
+                    Show commit history (default prints the full message
+                    body + a UTC date; --format=json emits JSONL with the
+                    raw timestamp; --graph is accepted but currently a no-op)
   reflog [<ref>] [--format=json] [-n N]
                     Show a branch's recorded movement history (read-only).
                     Lists the branch's first-parent chain (newest first,
@@ -42,9 +50,10 @@ commands:
                     the journaled ref-history MMR. Not a full Git reflog:
                     @{N} indexes the reachable chain, so superseded commits
                     (after amend/reset) are not listed.
-  status [--porcelain]
+  status [--porcelain] [-s|--short]
                     Show staged and working tree changes
-                    (--porcelain emits machine-readable XY lines on stdout;
+                    (--porcelain, or its -s/--short alias, emits
+                    machine-readable XY lines on stdout;
                     no -z/NUL or path-quoting support yet)
   diff [--staged] [<treeA> <treeB>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
@@ -52,9 +61,14 @@ commands:
   branch [--format=json]
                     List branches (* marks current; JSONL with --format=json)
   branch <name>     Create a branch at HEAD
-  branch -d <name>  Delete a branch
+  branch -d <name>  Delete a branch (safe; refuses the current branch)
+  branch -D <name>  Force-delete a branch (absent branch is a no-op)
+  branch -m [<old>] <new>  Rename a branch (current branch if <old> omitted)
   checkout <branch> Switch HEAD to a branch and restore files
-  tag               List, create, or delete tags
+  tag [<name>] [<commit>]  List tags, or create a lightweight tag
+  tag -a <name> [-m <msg>] [<commit>]  Create an annotated tag object
+  tag -s <name> [-m <msg>] [<commit>]  Create a signed (Ed25519) tag object
+  tag -d <name>     Delete a tag
   config [--format=json]  Show all configuration values (JSON with --format=json)
   config <key> [--format=json]  Show one value
   config <key> <value>  Set a configuration value
@@ -73,12 +87,16 @@ commands:
   stash save -m <msg>  Stash with a message
   stash list        List stash entries
   stash pop [N]     Apply and remove stash entry N (default 0)
+  stash apply [N]   Apply stash entry N without removing it (default 0)
   stash drop [N]    Remove stash entry N without applying
+  stash clear       Remove all stash entries
   stash show [N]    Show diff of stash entry N
   clone [--depth N] [--sparse ...] <url>  Clone a repository
   remote [--format=json]  Show remote configuration (JSON with --format=json)
   remote add [<name>] <url>  Add a remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
   remote set [<name>] <url>  Alias for 'remote add'
+  remote remove <name>  Remove a named remote (`default` clears the flat remote)
+  remote rename <old> <new>  Rename a named remote
   key generate|list|import|export|delete  Manage user-scoped keystore keys
   keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
                     Generate a new signing key (defaults to Ed25519)
@@ -95,7 +113,7 @@ commands:
   pack-shard <hash>  Encode a stored pack into Reed-Solomon shards (feature: pack-shards)
   blame [--format=json] <file>
                     Show line-level commit attribution (JSONL with --format=json)
-  verify <hash>     Verify the signature on a commit or remix
+  verify <rev>      Verify the signature on a commit, remix, or signed tag
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
          [--additional-signer \"algorithm=<alg>,signer=<kind>[,path=<p>]\"]...
                     Produce a signed DSSE attestation for a commit
@@ -144,6 +162,8 @@ mod tests {
             "init",
             "add",
             "rm",
+            "restore",
+            "reset",
             "hash",
             "cat",
             "tree",

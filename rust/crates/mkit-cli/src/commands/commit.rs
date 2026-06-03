@@ -26,7 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use mkit_core::index;
-use mkit_core::object::{Commit, Identity, IdentityKind, Object};
+use mkit_core::object::{Commit, Identity, IdentityKind, Object, Tag};
 use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
 use mkit_core::sign::{self, KeyPair};
@@ -341,6 +341,33 @@ impl CommitSigner {
                         format!(
                             "keystore Ed25519 public key must be 32 bytes, got {}",
                             public.len()
+                        ),
+                        exit::DATAERR,
+                    )
+                })
+            }
+        }
+    }
+
+    /// Sign a [`Tag`] under the distinct tag domain. Mirrors
+    /// [`Self::sign_commit`]: legacy keypairs sign directly, keystore
+    /// signers sign the pre-computed tag signing hash.
+    pub(super) fn sign_tag(&mut self, tag: &Tag) -> Result<[u8; 64], (String, u8)> {
+        match self {
+            Self::Legacy(kp) => sign::sign_tag(tag, kp)
+                .map(|signature| signature.0)
+                .map_err(|error| (format!("sign: {error}"), exit::GENERAL_ERROR)),
+            Self::Keystore(signer) => {
+                let digest = sign::tag_signing_hash(tag)
+                    .map_err(|error| (format!("tag signing hash: {error}"), exit::DATAERR))?;
+                let signature = signer
+                    .sign(&digest)
+                    .map_err(|error| (format!("keystore sign: {error}"), exit::DATAERR))?;
+                signature.try_into().map_err(|signature: Vec<u8>| {
+                    (
+                        format!(
+                            "keystore Ed25519 signature must be 64 bytes, got {}",
+                            signature.len()
                         ),
                         exit::DATAERR,
                     )

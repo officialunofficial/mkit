@@ -78,6 +78,18 @@ pub fn run(args: &[String]) -> u8 {
             let _ = stdout.write_all(&c.message);
             let _ = writeln!(stdout);
         }
+        Object::Tag(t) => {
+            let _ = writeln!(stdout, "object {}", format::hex_hash(&t.target));
+            let _ = writeln!(stdout, "type {}", t.target_type.name());
+            let _ = writeln!(stdout, "tag {}", String::from_utf8_lossy(&t.name));
+            let _ = writeln!(stdout, "tagger {}", format::short_identity(&t.tagger));
+            let _ = writeln!(stdout, "timestamp {}", t.timestamp);
+            let signed = t.signature != [0u8; 64];
+            let _ = writeln!(stdout, "signed {signed}");
+            let _ = writeln!(stdout);
+            let _ = stdout.write_all(&t.message);
+            let _ = writeln!(stdout);
+        }
         other => {
             let _ = writeln!(stdout, "{other}");
         }

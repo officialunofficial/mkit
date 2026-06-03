@@ -27,9 +27,13 @@ ObjectType (u8)         name
 0x04                    remix
 0x05                    chunked_blob
 0x06                    delta
+0x07                    tag            (annotated / signed tag; new in v1, issue #230)
 ```
 
-Unchanged in v1.
+`0x01`–`0x06` are unchanged in v1. `0x07` (tag) is additive: it appends
+a new storable object type and does NOT alter the layout, signing bytes,
+or hashes of any pre-existing type, so all earlier golden vectors remain
+valid. Readers MUST accept `0x01..=0x07`.
 
 `delta` objects are **pack-only**. They MUST NOT appear in the object store
 and MUST NOT be served by `downloadObject`-style APIs. Deltas are resolved
@@ -62,7 +66,7 @@ The prologue applies to **all six object types**. Rationale:
    overhead a stored blob already carries.
 
 Readers MUST reject any of:
-- `object_type` not in `0x01..0x06` → `InvalidObjectType`
+- `object_type` not in `0x01..0x07` → `InvalidObjectType`
 - `magic` != `"MKT1"` → `InvalidMagic`
 - `schema_version` != `0x01` → `UnsupportedObjectVersion`
 
@@ -236,6 +240,54 @@ interprets it.
 
 ---
 
+## 6a. Tag (`0x07`)
+
+An **annotated / signed tag** object (issue #230). Lightweight tags are
+*not* objects — they are a bare `refs/tags/<name>` ref pointing straight
+at a commit (see SPEC-REFS). A tag object is created only by
+`mkit tag -a` (annotated) or `mkit tag -s` (signed); in both cases the
+`refs/tags/<name>` ref points at the **tag object hash**, and the tag
+object's `target` field points at the tagged object.
+
+```
+[prologue 6]                              object_type=0x07
+[32 bytes target]                         hash of the tagged object
+[u8 target_type]                          ObjectType of target (0x01..=0x05, 0x07; NOT 0x06 delta)
+[u32 LE name_len]                         1..=4096
+[name_len bytes name]                     short tag name (e.g. "v1.0.0"); no \0 / \\
+[Identity tagger]                         see §9
+[u32 LE message_len]
+[message_len bytes message]               UTF-8, NOT null-terminated; may be empty
+[u64 LE timestamp]                        seconds since Unix epoch
+[32 bytes signer]                         Ed25519 public key
+[64 bytes signature]                      Ed25519 over the tag signing bytes (SPEC-SIGNING §4a)
+```
+
+Rules:
+
+- `target_type` MUST be a storable object type. `0x06` (delta) is
+  pack-only and rejected with `TagTargetTypeInvalid`. Recording the
+  target type lets a verifier display the tag without fetching the
+  target.
+- `name` is the **short** ref name, not a full `refs/tags/...` path.
+  Empty, over 4096 bytes, or containing `\0` / `/` / `\\` →
+  `TagNameInvalid`. The full ref-name grammar (SPEC-REFS) is enforced at
+  ref-write time; the object layer enforces only this floor so the wire
+  form is unambiguous.
+- An **annotated, unsigned** tag carries an all-zero `signature`
+  (`0x00`×64). A verifier MUST treat an all-zero signature as
+  "unsigned" — it does not verify as a valid Ed25519 signature, so
+  `mkit verify` on an unsigned annotated tag fails the signature check.
+- A **signed** tag's `signature` is `Ed25519.sign(signer_seed,
+  tag_signing_hash)` (SPEC-SIGNING §4a). `signer` is the verification
+  key; `tagger` is an independent attribution claim (same separation as
+  commit `author` vs `signer`, SPEC-SIGNING §6).
+
+The tag object is content-addressed like every other object; its hash is
+`BLAKE3(serialised tag bytes)`.
+
+---
+
 ## 7. Chunked blob (`0x05`)
 
 ```
@@ -336,6 +388,13 @@ This prevents trivial amplification and prologue-replay attacks.
 |---------|----------|------------------------------------------------------------------|
 | `0x01`  | v1.0     | First mkit format. See §2 for prologue. No v0 compatibility.     |
 
+`schema_version` stays at `0x01`. Adding the `tag` object type (`0x07`,
+#230) is an **additive object-type allocation within v1**: it introduces
+a new `object_type` byte and a new body layout but changes no existing
+type's bytes, so `schema_version` is NOT bumped and every pre-tag golden
+vector is unaffected. A version bump is reserved for changes that alter
+an existing type's layout.
+
 Future versions MUST increment `schema_version` and MUST preserve the
 `"MKT1"` magic prefix. The magic byte string is normative — readers are
 allowed to route on `magic` before consulting `schema_version`, enabling
@@ -361,11 +420,16 @@ multi-version readers.
    commit_hash)**: verify sort orders by secondary key.
 7. **ChunkedBlob with `chunk_size=0` and 3 chunks**: verify prologue
    present and length=6+8+4+4+32*3=118.
+8. **Annotated tag** (`target_type=0x03`, ed25519 tagger, non-empty
+   message, all-zero signature): record serialised bytes + BLAKE3.
+9. **Signed tag** (same shape, signed with seed `[0x07;32]` over the
+   `mkit.tag\0` domain): record serialised bytes, the canonical tag
+   signing bytes, the signing hash, and the 64-byte Ed25519 signature.
 
-These vectors are committed as golden files under
-`rust/tests/golden/phase1/` (with a `MANIFEST.txt` and per-vector
-`.json` sidecar carrying the BLAKE3 digest), so external implementations
-can cross-verify byte-for-byte.
+Vectors 1–7 are committed under `rust/tests/golden/phase1/`; the tag
+vectors 8–9 under `rust/tests/golden/phase9/`. Each phase ships a
+`MANIFEST.txt` and per-vector `.json` sidecar carrying the BLAKE3
+digest, so external implementations can cross-verify byte-for-byte.
 
 ---
 

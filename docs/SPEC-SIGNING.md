@@ -38,12 +38,13 @@ bytes) and R-17 (cross-domain signature confusion).
 
 ## 2. Domain separation
 
-mkit defines two distinct signing domains. They MUST produce disjoint
+mkit defines three distinct signing domains. They MUST produce disjoint
 signable byte strings for any possible input.
 
 ```
 COMMIT_DOMAIN   = "mkit.commit\x00"       (12 bytes)
 REMIX_DOMAIN    = "mkit.remix\x00"        (11 bytes)
+TAG_DOMAIN      = "mkit.tag\x00"          (9 bytes)
 ```
 
 The terminal `\x00` is part of the domain string. It is there to ensure
@@ -52,7 +53,11 @@ length-extension-resistance in BLAKE3 is not strictly required, since
 BLAKE3 is not susceptible, but the null makes the prefix property
 obvious to static analysis).
 
-`COMMIT_DOMAIN` covers commits and `REMIX_DOMAIN` covers remixes.
+`COMMIT_DOMAIN` covers commits, `REMIX_DOMAIN` covers remixes, and
+`TAG_DOMAIN` covers annotated/signed tag objects (§4a, issue #230). The
+tag domain is **deliberately distinct** from the commit/remix domains so
+a tag signature can never be replayed as a commit/remix signature, or
+vice versa.
 
 ### 2.1 Signing-hash derivation
 
@@ -150,14 +155,52 @@ signing_hash = BLAKE3(u16_le(11) || "mkit.remix\x00" || signing_bytes)
 
 ---
 
+## 4a. Tag signing bytes
+
+For a tag T (SPEC-OBJECTS §6a):
+
+```
+signing_bytes = PROLOGUE                   // object_type=0x07
+              || target                    // 32 bytes, hash of tagged object
+              || target_type               // 1 byte ObjectType
+              || u32 LE(name_len) || name_bytes
+              || Identity(tagger)
+              || u32 LE(message_len) || message_bytes
+              || u64 LE(timestamp)
+              || signer_pubkey
+```
+
+Excluded: `signature` (a signature cannot cover itself). Every other tag
+field is covered, so flipping the `target`, `target_type`, `name`,
+`tagger`, `message`, `timestamp`, or `signer` invalidates the signature.
+
+```
+signing_hash = BLAKE3(u16_le(9) || "mkit.tag\x00" || signing_bytes)
+```
+
+The tag's `signature` field is `Ed25519.sign(signer_seed, signing_hash)`.
+
+An **annotated, unsigned** tag (`mkit tag -a`) carries an all-zero
+`signature` (`0x00`×64). It is a valid object but not a valid signature:
+`verify_tag` over an all-zero signature fails the strict Ed25519 check.
+A **signed** tag (`mkit tag -s`) carries a real signature that
+`mkit verify <tag>` accepts.
+
+---
+
 ## 5. Cross-domain collision proof sketch
 
 Commit signing input always begins with `u16_le(12)` followed by the 12-byte
 domain string `"mkit.commit\x00"`; remix signing input begins with
-`u16_le(11)` followed by the 11-byte string `"mkit.remix\x00"`.
+`u16_le(11)` followed by the 11-byte string `"mkit.remix\x00"`; tag
+signing input begins with `u16_le(9)` followed by the 9-byte string
+`"mkit.tag\x00"`.
 
-- `"mkit.commit\x00"` and `"mkit.remix\x00"` share 5 bytes and differ at
-  byte 5 (`c` 0x63 vs `r` 0x72).
+- All three domain *lengths* (12 / 11 / 9) differ, so the 2-byte LE
+  length prefix alone already distinguishes them before any domain byte
+  is read.
+- The domain strings differ at byte 5 (`c` 0x63 / `r` 0x72 / `\0` 0x00),
+  giving a second, independent separator.
 
 Because the domain length and the first differing domain byte occur strictly
 before any possible user-controlled content (domains are compile-time
@@ -165,8 +208,8 @@ constants), no user input can make one domain's hash input equal another's.
 BLAKE3 is collision-resistant, so distinct inputs have cryptographically
 distinct digests.
 
-Therefore, a signature over a commit-domain digest cannot be replayed as
-a signature over a remix-domain digest, nor vice versa.
+Therefore, a signature over any one of the commit / remix / tag domain
+digests cannot be replayed as a signature over either of the other two.
 
 This is the defence against R-17. The previous scheme used only the
 ObjectType tag byte (0x03/0x04) as separator — one byte of domain — and
@@ -304,6 +347,13 @@ ergonomics, not a security property.
    fixed author, fixed message, fixed timestamp. Record hash.
 7. **Key file roundtrip**: generate keypair, write seed, re-load,
    sign-then-verify a commit. Round-trip stable.
+8. **Tag signing bytes + hash + signature**: annotated tag with
+   `target_type=0x03`, fixed ed25519 tagger, non-empty message, fixed
+   timestamp; record `tag_signing_bytes`, `signing_hash`, and (signing
+   with seed `[0x07;32]`) the 64-byte signature. Pinned under
+   `rust/tests/golden/phase9/`.
+9. **Tag cross-domain negative**: a tag-domain signature MUST NOT verify
+   under `"mkit.commit\x00"` or `"mkit.remix\x00"`, and vice versa.
 
 ---
 

@@ -2,7 +2,10 @@
 //!
 //! Output modes:
 //!
-//! - default — human-oriented multi-line per commit on stdout.
+//! - default — human-oriented multi-line per commit on stdout. The
+//!   full commit message body is printed indented (four spaces) and the
+//!   timestamp is rendered as a stable UTC date
+//!   (`YYYY-MM-DD HH:MM:SS +0000`), not the raw integer.
 //! - `--oneline` — `<8-hex> <title>` per commit on stdout.
 //! - `--format=json` — JSONL, one self-contained JSON object per
 //!   commit. Suitable for piping into `jq`.
@@ -133,9 +136,17 @@ pub fn run(args: &[String]) -> u8 {
             Format::Default => {
                 let _ = writeln!(stdout, "commit {}", format::hex_hash(&cur));
                 let _ = writeln!(stdout, "Author: {}", format::short_identity(&c.author));
-                let _ = writeln!(stdout, "Date:   {}", c.timestamp);
+                let _ = writeln!(stdout, "Date:   {}", format::human_date_utc(c.timestamp));
                 let _ = writeln!(stdout);
-                let _ = writeln!(stdout, "    {title}");
+                // Full message body, indented like git. Each line is
+                // prefixed with four spaces; blank lines stay blank.
+                for line in full_message.lines() {
+                    if line.is_empty() {
+                        let _ = writeln!(stdout);
+                    } else {
+                        let _ = writeln!(stdout, "    {line}");
+                    }
+                }
                 let _ = writeln!(stdout);
             }
             Format::Json => {

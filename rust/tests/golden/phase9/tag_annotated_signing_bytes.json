@@ -1,0 +1,7 @@
+{
+  "name": "tag_annotated_signing_bytes",
+  "description": "canonical tag signing bytes (SPEC-SIGNING §4a): prologue, target+target_type, name, tagger, message, timestamp, signer; excludes signature",
+  "bin": "tag_annotated_signing_bytes.bin",
+  "size": 146,
+  "blake3": "17c63f598c5c7e6833f9ba5bae14519f1b0801f595849906d46a9320050472a5"
+}

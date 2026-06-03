@@ -15,6 +15,8 @@ _mkit() {
         'init:Create a new mkit repository'
         'add:Stage files for the next commit (-A/-u, multi-path)'
         'rm:Remove path(s) and stage the deletion (--cached/-r/-f)'
+        'restore:Discard worktree changes for path(s), or --staged to unstage'
+        'reset:Move HEAD (--soft) or HEAD + index (--mixed) to a commit'
         'hash:Hash a file and store it as a blob'
         'cat:Display an object by its hash'
         'tree:Snapshot working directory as a tree object'
@@ -23,9 +25,9 @@ _mkit() {
         'reflog:Show a branch movement history (read-only)'
         'status:Show staged and working tree changes'
         'diff:Show changes'
-        'branch:List, create, or delete branches'
+        'branch:List, create, rename, or delete branches'
         'checkout:Switch HEAD to a branch and restore files'
-        'tag:List, create, or delete tags'
+        'tag:List/create/delete tags (-a/-s/-m for annotated/signed)'
         'config:Show or set configuration values'
         'merge:Merge a branch into HEAD'
         'push:Push to remote'
@@ -33,7 +35,7 @@ _mkit() {
         'fetch:Download from remote without merging'
         'stash:Stash working-dir changes'
         'clone:Clone a repository'
-        'remote:Show or configure the origin remote'
+        'remote:Show, add, remove, or rename remotes'
         'key:Manage user-scoped keystore keys (generate/list/import/export/delete)'
         'keygen:Generate a new Ed25519 signing keypair'
         'cherry-pick:Apply a commit to the current branch'
@@ -77,6 +79,22 @@ _mkit() {
                         '--help[show help]' \
                         '*:file:_files'
                     ;;
+                restore)
+                    _arguments \
+                        '(-S --staged)'{-S,--staged}'[unstage: restore index entry from HEAD]' \
+                        '(-W --worktree)'{-W,--worktree}'[restore the worktree file]' \
+                        '--source[restore content from this revision]:rev:' \
+                        '(-f --force)'{-f,--force}'[overwrite locally-modified files]' \
+                        '--help[show help]' \
+                        '*:file:_files'
+                    ;;
+                reset)
+                    _arguments \
+                        '--soft[move HEAD only; keep index and worktree]' \
+                        '--mixed[move HEAD and reset the index (default)]' \
+                        '--help[show help]' \
+                        '*:commit:'
+                    ;;
                 diff)
                     _arguments \
                         '(--staged --cached)'{--staged,--cached}'[diff HEAD vs the staged index]' \
@@ -86,6 +104,7 @@ _mkit() {
                 status)
                     _arguments \
                         '--porcelain[machine-readable XY output]' \
+                        '(-s --short)'{-s,--short}'[short format; alias for --porcelain=v1]' \
                         '--help[show help]'
                     ;;
                 commit)
@@ -98,6 +117,7 @@ _mkit() {
                 log)
                     _arguments \
                         '--oneline[condensed output]' \
+                        '--format[output format]:format:(json)' \
                         '--graph[include ASCII graph]' \
                         '-n[limit number of commits]:count:' \
                         '--help[show help]'
@@ -122,7 +142,18 @@ _mkit() {
                     ;;
                 branch)
                     _arguments \
-                        '-d[delete branch]:branch:' \
+                        '-d[delete branch (safe)]:branch:' \
+                        '-D[force-delete branch]:branch:' \
+                        '-m[rename branch]:branch:' \
+                        '--help[show help]'
+                    ;;
+                tag)
+                    _arguments \
+                        '(-a --annotate)'{-a,--annotate}'[create an annotated tag object]' \
+                        '(-s --sign)'{-s,--sign}'[create a signed (Ed25519) tag object]' \
+                        '(-m --message)'{-m,--message}'[tag message]:message:' \
+                        '(-d --delete)'{-d,--delete}'[delete a tag]' \
+                        '--author[override tagger identity]:spec:' \
                         '--help[show help]'
                     ;;
                 rebase)
@@ -143,13 +174,17 @@ _mkit() {
                         'save[stash working-dir changes]' \
                         'list[list stash entries]' \
                         'pop[apply and remove stash entry]' \
+                        'apply[apply stash entry without removing it]' \
                         'drop[remove stash entry]' \
+                        'clear[remove all stash entries]' \
                         'show[show diff of stash entry]'
                     ;;
                 remote)
                     _values 'remote subcommand' \
                         'add[add a remote]' \
-                        'set[alias for add]'
+                        'set[alias for add]' \
+                        'remove[remove a named remote]' \
+                        'rename[rename a named remote]'
                     ;;
                 key)
                     _values 'key subcommand' \

@@ -369,7 +369,8 @@ fn validate_storable_object(bytes: &[u8]) -> Result<(), PackError> {
         | Object::Tree(_)
         | Object::Commit(_)
         | Object::Remix(_)
-        | Object::ChunkedBlob(_) => Ok(()),
+        | Object::ChunkedBlob(_)
+        | Object::Tag(_) => Ok(()),
     }
 }
 

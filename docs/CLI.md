@@ -47,10 +47,11 @@ Working-tree commands:
     destroy a locally-modified tracked file (a dirty-worktree guard in
     the spirit of the #176 restore guards); use `--cached` to keep the
     file or `--force` to discard the local changes.
-- `mkit status [--porcelain]` — show staged and unstaged changes.
-  Default-mode prose (banner + section headers + per-file lines) goes
-  to **stderr**; stdout is reserved for `--porcelain` machine output.
-  Porcelain emits one entry per line in `git status --porcelain=v1`
+- `mkit status [--porcelain] [-s|--short]` — show staged and unstaged
+  changes. Default-mode prose (banner + section headers + per-file
+  lines) goes to **stderr**; stdout is reserved for machine output.
+  `-s`/`--short` is an alias for `--porcelain=v1`; both select the same
+  renderer. Porcelain emits one entry per line in `git status --porcelain=v1`
   format (`XY <path>`, with mkit's `T` for `ModeChanged` as the only
   non-git extension). Empty stdout means clean. There is **no `-z`/NUL
   termination or path-quoting** support; see "Divergences from Git".
@@ -65,7 +66,9 @@ Working-tree commands:
   `@@`-delimited hunks (or `Binary files a/<p> and b/<p> differ` for
   non-text blobs). The hunk algorithm is a line-based LCS unified diff,
   not a full Myers diff — adequate for human-readable parity output.
-- `mkit stash [save|list|pop|drop|show]` — save/restore WIP changes.
+- `mkit stash [save|list|pop|apply|drop|clear|show]` — save/restore WIP
+  changes. `apply` restores an entry without removing it; `clear` drops
+  every entry.
 - `mkit sparse-checkout` — manage sparse checkout patterns.
 
 History / commits:
@@ -85,10 +88,14 @@ History / commits:
   commit becomes an unreachable object and is only reclaimed once
   `mkit gc` ships (issue #233).
 - `mkit log [--oneline] [--format=json] [--graph] [-n N]` — show
-  commit history. `--format=json` emits JSONL (one JSON object per
-  commit, newest first) with keys `hash`, `parents`, `tree`, `author`,
-  `timestamp`, `title`, `message`. **`--graph` is accepted for
-  compatibility but is currently a no-op** (no ASCII graph is drawn);
+  commit history. The default format prints the **full commit message
+  body**, indented by four spaces, and renders the timestamp as a stable
+  UTC date in the form `YYYY-MM-DD HH:MM:SS +0000`. `--oneline` condenses
+  each commit to `<8-hex> <title>`. `--format=json` emits JSONL (one JSON
+  object per commit, newest first) with keys `hash`, `parents`, `tree`,
+  `author`, `timestamp`, `title`, `message`; the `timestamp` stays a raw
+  Unix-seconds integer for machine consumption. **`--graph` is accepted
+  for compatibility but is currently a no-op** (no ASCII graph is drawn);
   see "Divergences from Git" below.
 - `mkit reflog [<ref>] [--format=json] [-n N]` — **read-only** view of a
   branch's recorded movement history. Defaults to the branch `HEAD`
@@ -111,7 +118,9 @@ History / commits:
   attribution. Default emits `<short12>\t<line_num>\t<text>` per line;
   `--format=json` emits JSONL with keys `hash`, `line_num`, `author`,
   `timestamp`, `text`.
-- `mkit verify <hash>` — verify the signature on a commit or remix.
+- `mkit verify <rev>` — verify the signature on a commit, remix, or
+  signed tag. `<rev>` is an object hash, a branch/tag name, or `HEAD`; a
+  tag name resolves to its annotated-tag object when one exists.
 - `mkit cat <hash>` — display an object by its hash.
 - `mkit hash <file>` — hash a file and store it as a blob.
 - `mkit tree` — snapshot the working directory as a tree object.
@@ -193,10 +202,30 @@ Branches / refs:
 - `mkit branch` / `mkit branch <name>` / `mkit branch -d <name>` —
   list, create, or delete branches. `--format=json` on the list form
   emits JSONL with keys `name`, `current`, `hash`.
+- `mkit branch -D <name>` — force-delete. mkit does not track per-branch
+  merge status, so `-D` differs from `-d` only in that an absent branch
+  is a clean no-op; both still refuse the checked-out branch (deleting
+  it would dangle HEAD).
+- `mkit branch -m [<old>] <new>` — rename a branch (the current branch
+  when `<old>` is omitted). CAS-guarded: refuses to clobber an existing
+  `<new>`, and moves HEAD when the renamed branch is checked out.
 - `mkit checkout <branch>` — switch HEAD and restore files. Refuses to
   run when staged changes, dirty tracked files, or untracked path
   collisions would be overwritten.
 - `mkit tag` — list, create, or delete tags.
+  - `mkit tag` (no args) — list tags; annotated/signed tags are marked.
+  - `mkit tag <name> [<commit>]` — create a lightweight tag (a ref
+    pointing straight at `<commit>`, default HEAD).
+  - `mkit tag -a <name> [-m <msg>] [<commit>]` — create an annotated tag
+    object (target, tagger identity, message, timestamp). Without `-m`,
+    `$EDITOR` is launched.
+  - `mkit tag -s <name> [-m <msg>] [<commit>]` — create a signed
+    annotated tag: an Ed25519 signature over the canonical tag bytes
+    under the distinct `mkit.tag` domain. Verify with
+    `mkit verify <name>`.
+  - `mkit tag -d <name>` — delete a tag.
+  - `--author <spec>` overrides the tagger identity (same grammar as
+    `commit --author`).
 - `mkit merge <branch> | --continue | --abort` — three-way merge into
   HEAD. Fast-forwards and clean merges refuse to overwrite staged
   changes, dirty tracked files, or untracked path collisions. On
@@ -277,6 +306,14 @@ Remote / sync:
 - `mkit remote add <url>` — set the remote. URL MUST start with
   `mkit+<scheme>://` (see below).
 - `mkit remote set <url>` — alias for `mkit remote add`.
+- `mkit remote remove <name>` (alias `rm`) — delete a named remote. The
+  reserved name `default` clears the flat `remote_endpoint`.
+- `mkit remote rename <old> <new>` (alias `mv`) — rename a named remote
+  and repoint any `branch.<b>.remote` upstream tracking it. Refuses to
+  clobber an existing `<new>`. Removing or renaming a remote never
+  touches the user-scoped `trusted_remote_endpoint`, which is keyed by
+  exact URL rather than remote name (so the #97 credential-trust gate is
+  preserved).
 - `mkit clone [--depth N] [--sparse ...] <url>` — clone a repository.
 - `mkit fetch` — download from remote without merging. Fetched branch
   tips are stored under `refs/remotes/default/<branch>` and do not move

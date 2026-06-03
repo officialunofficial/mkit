@@ -76,13 +76,15 @@ pub use sparse::{
 pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher, to_hex, to_hex_bytes};
 pub use object::{
     Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind, MAGIC,
-    MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, Tree, TreeEntry,
+    MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, TAG_NAME_MAX_LEN, Tag, Tree,
+    TreeEntry,
 };
 pub use serialize::{deserialize, serialize};
 pub use sign::{
-    COMMIT_DOMAIN, KeyPair, PublicKey, REMIX_DOMAIN, SecretSeed, Signature, commit_signing_bytes,
-    commit_signing_hash, remix_signing_bytes, remix_signing_hash, sign_commit, sign_remix, verify,
-    verify_commit, verify_remix,
+    COMMIT_DOMAIN, KeyPair, PublicKey, REMIX_DOMAIN, SecretSeed, Signature, TAG_DOMAIN,
+    commit_signing_bytes, commit_signing_hash, remix_signing_bytes, remix_signing_hash,
+    sign_commit, sign_remix, sign_tag, tag_signing_bytes, tag_signing_hash, verify, verify_commit,
+    verify_remix, verify_tag,
 };
 pub use store::{
     MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError,
