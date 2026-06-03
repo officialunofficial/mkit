@@ -103,6 +103,7 @@ _mkit() {
                 status)
                     _arguments \
                         '--porcelain[machine-readable XY output]' \
+                        '(-s --short)'{-s,--short}'[short format; alias for --porcelain=v1]' \
                         '--help[show help]'
                     ;;
                 commit)
@@ -114,6 +115,7 @@ _mkit() {
                 log)
                     _arguments \
                         '--oneline[condensed output]' \
+                        '--format[output format]:format:(json)' \
                         '--graph[include ASCII graph]' \
                         '-n[limit number of commits]:count:' \
                         '--help[show help]'

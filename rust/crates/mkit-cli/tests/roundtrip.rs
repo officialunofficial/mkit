@@ -82,6 +82,51 @@ fn add_commit_log_roundtrip() {
 }
 
 #[test]
+fn default_log_prints_full_body_and_human_date() {
+    let td = tempfile::tempdir().unwrap();
+    assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
+    fs::write(td.path().join("hello.txt"), b"hi\n").unwrap();
+    assert!(run_in(td.path(), &["add", "hello.txt"]).status.success());
+
+    // Multi-line commit message: title + blank line + body lines.
+    let msg = "summary line\n\nbody line one\nbody line two";
+    assert!(
+        run_in(td.path(), &["commit", "-m", msg]).status.success(),
+        "commit failed"
+    );
+
+    let out = run_in(td.path(), &["log"]);
+    assert!(out.status.success(), "log failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+
+    // Full body present, each non-empty line indented by four spaces.
+    assert!(
+        stdout.contains("    summary line"),
+        "title not indented: {stdout}"
+    );
+    assert!(
+        stdout.contains("    body line one") && stdout.contains("    body line two"),
+        "default log dropped the message body: {stdout}"
+    );
+
+    // Date rendered human-readable (UTC), not the raw integer. Match
+    // the stable `Date:   YYYY-MM-DD HH:MM:SS +0000` shape.
+    let date_line = stdout
+        .lines()
+        .find(|l| l.starts_with("Date:"))
+        .expect("Date line present");
+    let val = date_line.trim_start_matches("Date:").trim();
+    assert!(
+        val.ends_with("+0000")
+            && val.len() == "2023-11-14 22:13:20 +0000".len()
+            && val.as_bytes()[4] == b'-'
+            && val.as_bytes()[7] == b'-',
+        "date not human-readable: {date_line:?}"
+    );
+}
+
+#[test]
 fn cat_after_hash_prints_stored_blob() {
     let td = tempfile::tempdir().unwrap();
     assert!(run_in(td.path(), &["init"]).status.success());

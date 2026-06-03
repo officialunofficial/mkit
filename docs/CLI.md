@@ -47,10 +47,11 @@ Working-tree commands:
     destroy a locally-modified tracked file (a dirty-worktree guard in
     the spirit of the #176 restore guards); use `--cached` to keep the
     file or `--force` to discard the local changes.
-- `mkit status [--porcelain]` — show staged and unstaged changes.
-  Default-mode prose (banner + section headers + per-file lines) goes
-  to **stderr**; stdout is reserved for `--porcelain` machine output.
-  Porcelain emits one entry per line in `git status --porcelain=v1`
+- `mkit status [--porcelain] [-s|--short]` — show staged and unstaged
+  changes. Default-mode prose (banner + section headers + per-file
+  lines) goes to **stderr**; stdout is reserved for machine output.
+  `-s`/`--short` is an alias for `--porcelain=v1`; both select the same
+  renderer. Porcelain emits one entry per line in `git status --porcelain=v1`
   format (`XY <path>`, with mkit's `T` for `ModeChanged` as the only
   non-git extension). Empty stdout means clean. There is **no `-z`/NUL
   termination or path-quoting** support; see "Divergences from Git".
@@ -80,10 +81,14 @@ History / commits:
   deletions before committing, but does not add untracked files.
   `mkit commit -am <msg>` is accepted as shorthand for `-a -m <msg>`.
 - `mkit log [--oneline] [--format=json] [--graph] [-n N]` — show
-  commit history. `--format=json` emits JSONL (one JSON object per
-  commit, newest first) with keys `hash`, `parents`, `tree`, `author`,
-  `timestamp`, `title`, `message`. **`--graph` is accepted for
-  compatibility but is currently a no-op** (no ASCII graph is drawn);
+  commit history. The default format prints the **full commit message
+  body**, indented by four spaces, and renders the timestamp as a stable
+  UTC date in the form `YYYY-MM-DD HH:MM:SS +0000`. `--oneline` condenses
+  each commit to `<8-hex> <title>`. `--format=json` emits JSONL (one JSON
+  object per commit, newest first) with keys `hash`, `parents`, `tree`,
+  `author`, `timestamp`, `title`, `message`; the `timestamp` stays a raw
+  Unix-seconds integer for machine consumption. **`--graph` is accepted
+  for compatibility but is currently a no-op** (no ASCII graph is drawn);
   see "Divergences from Git" below.
 - `mkit blame [--format=json] <file>` — show line-level commit
   attribution. Default emits `<short12>\t<line_num>\t<text>` per line;

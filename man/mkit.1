@@ -169,8 +169,17 @@ on
 lines starting with
 .Ql #
 are stripped, and an empty message aborts the commit.
-.It Cm log Op Fl Fl oneline Op Fl Fl graph Op Fl n Ar N
-Show commit history.
+.It Cm log Op Fl Fl oneline Op Fl Fl format Ar json Op Fl Fl graph Op Fl n Ar N
+Show commit history. The default format prints the full commit message body,
+indented by four spaces, and renders the timestamp as a stable UTC date in the
+form
+.Ql YYYY-MM-DD HH:MM:SS +0000 .
+.Fl Fl oneline
+condenses each commit to
+.Ql <8-hex> <title> .
+.Fl Fl format Ar json
+emits one JSON object per commit on stdout, keeping the raw integer Unix
+timestamp for machine consumption.
 .Fl Fl graph
 is accepted for compatibility but is currently a no-op (no ASCII graph is
 drawn).
@@ -184,8 +193,13 @@ those trees directly. Remaining positional arguments are pathspecs that limit
 the output. Commit-vs-commit diffing takes two
 .Em tree
 hashes, not commit refs or ranges.
-.It Cm status Op Fl Fl porcelain
-Show the staged and working-tree changes. There is no
+.It Cm status Oo Fl Fl porcelain Oc Oo Fl s | Fl Fl short Oc
+Show the staged and working-tree changes.
+.Fl s
+.Pq alias Fl Fl short
+is equivalent to
+.Fl Fl porcelain Ns = Ns Cm v1 :
+both emit machine-readable XY-code-plus-path lines on stdout. There is no
 .Fl z
 NUL-termination or path-quoting support.
 .It Cm branch Oo Fl d | Fl D | Fl m Oc Op Ar name ...

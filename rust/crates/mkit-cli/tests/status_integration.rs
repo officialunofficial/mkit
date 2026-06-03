@@ -295,6 +295,39 @@ fn missing_index_with_clean_head_is_reported_clean() {
 // `mkit status > /tmp/out` produces an empty file in clean state.
 // -----------------------------------------------------------------------
 
+// -----------------------------------------------------------------------
+// `-s` / `--short` is an alias for `--porcelain`: identical stdout.
+// -----------------------------------------------------------------------
+
+#[test]
+fn short_flag_matches_porcelain() {
+    let td = init_with_commit(&[("a.txt", b"v1")]);
+    // Create an unstaged edit + an untracked file so output is non-empty.
+    fs::write(td.path().join("a.txt"), b"v2").unwrap();
+    fs::write(td.path().join("new.txt"), b"x").unwrap();
+
+    let porc = run_in(td.path(), &["status", "--porcelain"]);
+    let short_s = run_in(td.path(), &["status", "-s"]);
+    let short_long = run_in(td.path(), &["status", "--short"]);
+    assert!(porc.status.success() && short_s.status.success() && short_long.status.success());
+
+    let porc_out = String::from_utf8(porc.stdout).unwrap();
+    assert_eq!(
+        String::from_utf8(short_s.stdout).unwrap(),
+        porc_out,
+        "`-s` stdout must match `--porcelain`"
+    );
+    assert_eq!(
+        String::from_utf8(short_long.stdout).unwrap(),
+        porc_out,
+        "`--short` stdout must match `--porcelain`"
+    );
+    assert!(
+        has_entry(&porc_out, " M", "a.txt") && has_entry(&porc_out, "??", "new.txt"),
+        "expected non-empty short/porcelain output, got: {porc_out:?}"
+    );
+}
+
 #[test]
 fn default_mode_writes_prose_to_stderr_not_stdout() {
     let td = init_with_commit(&[("a.txt", b"hello")]);
