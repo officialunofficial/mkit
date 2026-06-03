@@ -20,6 +20,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "pack-shard",
     "commit",
     "log",
+    "reflog",
     "blame",
     "verify",
     "cat",

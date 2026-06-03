@@ -20,6 +20,7 @@ _mkit() {
         'tree:Snapshot working directory as a tree object'
         'commit:Create a signed commit'
         'log:Show commit history'
+        'reflog:Show a branch movement history (read-only)'
         'status:Show staged and working tree changes'
         'diff:Show changes'
         'branch:List, create, or delete branches'
@@ -90,6 +91,7 @@ _mkit() {
                 commit)
                     _arguments \
                         '(-a --all)'{-a,--all}'[stage tracked changes before committing]' \
+                        '--amend[replace HEAD instead of adding a new commit]' \
                         '-m[commit message]:message:' \
                         '--help[show help]'
                     ;;
@@ -99,6 +101,13 @@ _mkit() {
                         '--graph[include ASCII graph]' \
                         '-n[limit number of commits]:count:' \
                         '--help[show help]'
+                    ;;
+                reflog)
+                    _arguments \
+                        '--format[output format]:format:(default json)' \
+                        '-n[limit number of entries]:count:' \
+                        '--help[show help]' \
+                        '1:ref:'
                     ;;
                 push)
                     _arguments \

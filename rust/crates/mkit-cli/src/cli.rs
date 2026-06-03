@@ -27,10 +27,21 @@ commands:
   hash <file>       Hash a file and store it as a blob
   cat <hash>        Display an object by its hash
   tree              Snapshot working directory as a tree object
-  commit [-a] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
+  commit [-a] [--amend] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
+  commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
+                    move the branch. Reuses HEAD's message if -m omitted.
+                    The superseded commit becomes unreachable until `gc` ships.
   log [--oneline] [--format=json] [--graph] [-n N]
                     Show commit history (--format=json emits JSONL;
                     --graph is accepted but currently a no-op)
+  reflog [<ref>] [--format=json] [-n N]
+                    Show a branch's recorded movement history (read-only).
+                    Lists the branch's first-parent chain (newest first,
+                    addressed <ref>@{N}); defaults to HEAD's branch. With
+                    --features history-mmr, cross-checks each entry against
+                    the journaled ref-history MMR. Not a full Git reflog:
+                    @{N} indexes the reachable chain, so superseded commits
+                    (after amend/reset) are not listed.
   status [--porcelain]
                     Show staged and working tree changes
                     (--porcelain emits machine-readable XY lines on stdout;
@@ -138,6 +149,7 @@ mod tests {
             "tree",
             "commit",
             "log",
+            "reflog",
             "status",
             "diff",
             "branch",
