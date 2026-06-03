@@ -177,12 +177,33 @@ Remote / sync:
 - `mkit serve <path> --listen-enc <addr>` — bind a TCP socket on
   `<addr>` (e.g. `0.0.0.0:9418`) and serve the same protocol over
   an encrypted-stream transport. Requires building the binary with
-  `--features enc-transport`. The server prints its ephemeral
-  ed25519 public key to stderr at startup; clients dial
-  `mkit+enc://<host>:<port>?pubkey=<key>` after copying that key
-  out-of-band. The default port advertised by `mkit+enc://` URLs
-  when none is supplied is **9418**. Keystore integration for a
-  stable per-host key is deferred (see SPEC-TRANSPORT-ENC §6.2).
+  `--features enc-transport`. **Fail-closed**: the listener refuses to
+  bind unless one of the following is supplied:
+  - `--enc-authorized-peers <PATH>` — an allowlist of authorized client
+    public keys, one per line (64-hex or 43-char url-safe base64; `#`
+    comments and blank lines ignored). A client whose static ed25519
+    key is not listed is rejected at the handshake and receives no data.
+    This path MUST be CLI-supplied or user-scoped — peer-authorization
+    is never read from repo-local `.mkit/config`.
+  - `--unsafe-allow-any-enc-peer` — a development escape that accepts
+    ANY peer. Prints a loud warning; never use in production.
+  These two flags are mutually exclusive.
+
+  `--enc-server-key <PATH>` selects the server's stable raw 32-byte
+  ed25519 key file (auto-created with `0600`/`0700` hardening on first
+  run). When allowlisting and the flag is omitted, the key is
+  auto-created at the user-scoped default `~/.config/mkit/enc/server.key`
+  so the advertised `?pubkey=` is **stable across restarts**. Only the
+  unsafe allow-any mode without a key file falls back to an ephemeral
+  per-process key. The server prints its public key to stderr at
+  startup; clients dial `mkit+enc://<host>:<port>?pubkey=<key>` after
+  copying that key out-of-band. A client may pin its own identity (so
+  an allowlisting server can recognise it across restarts) by pointing
+  the `MKIT_ENC_CLIENT_KEY` environment variable at a user-scoped raw
+  32-byte key file; otherwise the client uses an ephemeral key. The
+  default port advertised by `mkit+enc://` URLs when none is supplied
+  is **9418**. Full keystore integration is deferred (see
+  SPEC-TRANSPORT-ENC §6.2).
 - `mkit pack-shard <hash> [--out <dir>] [--force]` — encode a stored
   pack into Reed-Solomon shards plus a manifest, ready to publish to
   an HTTP / S3 origin. Producer side of SPEC-PACK-SHARDS Phase 2. The

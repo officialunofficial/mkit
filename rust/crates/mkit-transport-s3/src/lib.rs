@@ -809,6 +809,54 @@ impl HttpResponse {
 // Pack-Shards client (feature-gated)
 // ---------------------------------------------------------------------------
 
+/// Per-request timeout for a single shard GET.
+///
+/// Bounds a stalled straggler so a detached worker can never pin a
+/// thread for the process lifetime. See the HTTP transport's
+/// `SHARD_REQUEST_TIMEOUT` for the matching rationale.
+#[cfg(feature = "pack-shards")]
+const SHARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Fetch a single shard, retrying transient failures through the
+/// supplied backoff ladder.
+///
+/// Retries ONLY on `ConnectionFailed` / 429 / 5xx (per `is_retryable`).
+/// `AccessDenied` (401/403), `PackNotFound` (404), and `PayloadTooLarge`
+/// are terminal and return immediately. The shard object key is built
+/// from the EFFECTIVE PREFIX inside [`fetch_one_shard`], preserving
+/// #180's namespace isolation across retries.
+#[cfg(feature = "pack-shards")]
+#[allow(clippy::too_many_arguments)]
+fn fetch_one_shard_with_retry(
+    client: &Client,
+    endpoint: &str,
+    bucket: &str,
+    prefix: Option<&str>,
+    creds: &Credentials,
+    digest: &Hash,
+    index: u16,
+    clock: fn() -> i64,
+    backoff: fn() -> BackoffIterator,
+    sleeper: fn(Duration),
+) -> TransportResult<Vec<u8>> {
+    let mut ladder = backoff();
+    loop {
+        let ts = clock();
+        let err = match fetch_one_shard(client, endpoint, bucket, prefix, creds, digest, index, ts)
+        {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => e,
+        };
+        if is_retryable(&err)
+            && let Some(delay) = ladder.next()
+        {
+            sleeper(delay);
+            continue;
+        }
+        return Err(err);
+    }
+}
+
 #[cfg(feature = "pack-shards")]
 fn fetch_one_shard(
     client: &Client,
@@ -834,6 +882,7 @@ fn fetch_one_shard(
     let url = format!("{endpoint}{path}");
     let resp = client
         .request(Method::GET, &url)
+        .timeout(SHARD_REQUEST_TIMEOUT)
         .header("Authorization", signed.authorization)
         .header("x-amz-date", signed.x_amz_date)
         .header("x-amz-content-sha256", signed.x_amz_content_sha256)
@@ -897,8 +946,14 @@ impl S3Transport {
         let total_u16: u16 = u16::try_from(total).unwrap_or(u16::MAX);
 
         let (tx, rx) = mpsc::channel::<(u16, TransportResult<Vec<u8>>)>();
-        let mut handles = Vec::with_capacity(total as usize);
         let digest: Hash = *key.as_bytes();
+        // Workers are *detached* (never joined): once quorum or the
+        // failure threshold is reached the collection loop stops waiting
+        // so a slow straggler cannot block the download. Each shard GET
+        // carries SHARD_REQUEST_TIMEOUT so detached workers terminate.
+        let clock = self.clock;
+        let backoff = self.backoff;
+        let sleeper = self.sleeper;
         for i in 0..total_u16 {
             let tx = tx.clone();
             let endpoint = self.endpoint.clone();
@@ -906,10 +961,8 @@ impl S3Transport {
             let prefix = self.prefix.clone();
             let creds = self.creds.clone();
             let client = self.client.clone();
-            let clock = self.clock;
-            handles.push(std::thread::spawn(move || {
-                let ts = clock();
-                let result = fetch_one_shard(
+            std::thread::spawn(move || {
+                let result = fetch_one_shard_with_retry(
                     &client,
                     &endpoint,
                     &bucket,
@@ -917,10 +970,12 @@ impl S3Transport {
                     &creds,
                     &digest,
                     i,
-                    ts,
+                    clock,
+                    backoff,
+                    sleeper,
                 );
                 let _ = tx.send((i, result));
-            }));
+            });
         }
         drop(tx);
 
@@ -939,9 +994,8 @@ impl S3Transport {
                 }
             }
         }
-        for h in handles {
-            let _ = h.join();
-        }
+        // Detached workers are not joined; stragglers are bounded by
+        // SHARD_REQUEST_TIMEOUT.
 
         if shards.len() < minimum as usize {
             return Err(TransportError::PackNotFound);

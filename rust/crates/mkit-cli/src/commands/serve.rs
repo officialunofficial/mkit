@@ -40,12 +40,38 @@ struct ServeOpts {
     /// `enc-transport` cargo feature. Phase 2 of issue #156 — see
     /// SPEC-TRANSPORT-ENC §6 item 4.
     ///
-    /// The listener generates an ephemeral ed25519 keypair per
-    /// process by default; keystore integration is deferred (#5 in
-    /// the punch list). Clients establish trust out-of-band via the
-    /// `?pubkey=<…>` query parameter on their `mkit+enc://` URL.
+    /// FAIL-CLOSED: the listener refuses to bind unless either
+    /// `--enc-authorized-peers <PATH>` is supplied (an allowlist of
+    /// client public keys) or `--unsafe-allow-any-enc-peer` is passed.
+    /// Server identity is loaded from `--enc-server-key <PATH>` (a
+    /// user-scoped raw 32-byte key file) so clients can pin
+    /// `?pubkey=<…>` across restarts; with the unsafe flag and no key
+    /// file an ephemeral per-process key is generated instead.
     #[arg(long = "listen-enc", value_name = "ADDR")]
     listen_enc: Option<String>,
+
+    /// Path to an allowlist of authorized client public keys, one per
+    /// line (64-hex or 43-char url-safe base64; `#` comments and blank
+    /// lines ignored). A client whose static ed25519 key is not listed
+    /// is rejected at the handshake and never receives any data.
+    ///
+    /// MUST be a CLI-supplied or user-scoped path — peer-authorization
+    /// is NEVER read from repo-local `.mkit/config`.
+    #[arg(long = "enc-authorized-peers", value_name = "PATH")]
+    enc_authorized_peers: Option<String>,
+
+    /// Path to the server's stable raw 32-byte ed25519 key file. When
+    /// allowlisting, this is auto-created at a user-scoped default path
+    /// if omitted so the advertised `?pubkey=` is stable across
+    /// restarts. User-scoped/CLI-only; never repo-local.
+    #[arg(long = "enc-server-key", value_name = "PATH")]
+    enc_server_key: Option<String>,
+
+    /// Dev/test escape hatch: accept ANY encrypted peer (fail-open).
+    /// Prints a loud warning. Intended only for local development and
+    /// the direct-listen e2e harness — NEVER for production.
+    #[arg(long = "unsafe-allow-any-enc-peer", default_value_t = false)]
+    unsafe_allow_any_enc_peer: bool,
 }
 
 // -- Per-connection resource caps -------------------------------------------
@@ -74,7 +100,13 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if let Some(addr) = opts.listen_enc.as_deref() {
-        return run_listen_enc(addr, repo_root);
+        return run_listen_enc(
+            addr,
+            repo_root,
+            opts.enc_authorized_peers.as_deref(),
+            opts.enc_server_key.as_deref(),
+            opts.unsafe_allow_any_enc_peer,
+        );
     }
 
     let tx = FileTransport::new(&repo_root);
@@ -91,7 +123,13 @@ pub fn run(args: &[String]) -> u8 {
 /// `UNAVAILABLE` so package builders shipping the bare-bones binary
 /// get a clear signal.
 #[cfg(not(feature = "enc-transport"))]
-fn run_listen_enc(_addr: &str, _repo_root: PathBuf) -> u8 {
+fn run_listen_enc(
+    _addr: &str,
+    _repo_root: PathBuf,
+    _authorized_peers: Option<&str>,
+    _server_key: Option<&str>,
+    _unsafe_allow_any: bool,
+) -> u8 {
     eprintln!(
         "mkit serve --listen-enc requires the `enc-transport` cargo feature; \
          rebuild with `--features enc-transport` to enable it."
@@ -108,43 +146,80 @@ fn run_listen_enc(_addr: &str, _repo_root: PathBuf) -> u8 {
     clippy::box_default,
     clippy::too_many_lines
 )]
-fn run_listen_enc(addr: &str, repo_root: PathBuf) -> u8 {
-    use commonware_codec::DecodeExt as _;
+fn run_listen_enc(
+    addr: &str,
+    repo_root: PathBuf,
+    authorized_peers: Option<&str>,
+    server_key: Option<&str>,
+    unsafe_allow_any: bool,
+) -> u8 {
     use commonware_cryptography::Signer as _;
-    use commonware_cryptography::ed25519::PrivateKey;
+    use mkit_transport_enc::PeerPolicy;
     use std::sync::Arc;
-    use zeroize::Zeroizing;
 
-    // Ephemeral signing key. Same caveat as remote_dispatch's
-    // dialer key — keystore integration is deferred. The
-    // server's public key is what clients pin via the
-    // `?pubkey=<…>` query parameter; operators currently must read
-    // the printed key off the serve process's stderr.
+    // --- Fail-closed gate (issue #178) ---------------------------------
     //
-    // The previous shape passed only 64 bits of entropy (a `u64`
-    // seed via `PrivateKey::from_seed`) — commonware's own
-    // documentation calls `from_seed` "insecure" and reserves it
-    // for examples / testing. Draw 32 bytes (≥256 bits) from
-    // `getrandom` and hand them to the Ed25519 SigningKey via
-    // commonware-codec's `DecodeExt::decode`, mirroring
-    // `PrivateKey`'s own `Read` impl. The intermediate bytes are
-    // wrapped in `Zeroizing` so the stack copy is scrubbed on drop;
-    // the resulting `PrivateKey` carries its own `Secret`-based
-    // zeroization for the lifetime of the value.
-    let mut secret = Zeroizing::new([0u8; 32]);
-    if getrandom::fill(secret.as_mut()).is_err() {
-        eprintln!("mkit serve --listen-enc: failed to read system RNG for ephemeral key");
-        return exit::TEMPFAIL;
-    }
-    let sk = match PrivateKey::decode(secret.as_ref()) {
-        Ok(sk) => sk,
-        Err(e) => {
-            eprintln!("mkit serve --listen-enc: ephemeral key construction failed: {e}");
-            return exit::TEMPFAIL;
+    // The encrypted listener historically accepted ANY peer. We now
+    // refuse to bind unless the operator has either supplied an
+    // allowlist of authorized client keys or explicitly opted into the
+    // unsafe allow-any escape. The peer-authorization config is NEVER
+    // read from repo-local `.mkit/config`: it comes only from the CLI
+    // flag (a CLI-supplied or user-scoped path).
+    let policy = match (authorized_peers, unsafe_allow_any) {
+        (Some(_), true) => {
+            eprintln!(
+                "mkit serve --listen-enc: --enc-authorized-peers and \
+                 --unsafe-allow-any-enc-peer are mutually exclusive"
+            );
+            return exit::USAGE;
+        }
+        (Some(path), false) => match load_authorized_peers(path) {
+            Ok(set) if set.is_empty() => {
+                eprintln!(
+                    "mkit serve --listen-enc: --enc-authorized-peers '{path}' \
+                     contained no valid peer keys; refusing to bind (fail-closed)"
+                );
+                return exit::CONFIG_ERROR;
+            }
+            Ok(set) => PeerPolicy::Allowlist(set),
+            Err(msg) => {
+                eprintln!("mkit serve --listen-enc: {msg}");
+                return exit::CONFIG_ERROR;
+            }
+        },
+        (None, true) => {
+            eprintln!(
+                "============================================================\n\
+                 WARNING: mkit serve --listen-enc --unsafe-allow-any-enc-peer\n\
+                 The encrypted listener will accept ANY client that completes\n\
+                 the handshake. There is NO client authentication. Use this\n\
+                 only for local development or testing, NEVER in production.\n\
+                 ============================================================"
+            );
+            PeerPolicy::AllowAny
+        }
+        (None, false) => {
+            eprintln!(
+                "mkit serve --listen-enc: refusing to bind without peer authorization.\n\
+                 Pass --enc-authorized-peers <PATH> with an allowlist of client public keys,\n\
+                 or --unsafe-allow-any-enc-peer to accept any peer (development only)."
+            );
+            return exit::CONFIG_ERROR;
         }
     };
-    // `secret` drops here and is zeroized; `sk` holds an internal
-    // `Secret` that scrubs on its own drop.
+
+    // --- Server identity ----------------------------------------------
+    //
+    // When allowlisting we want a STABLE server key so clients can pin
+    // `?pubkey=` across restarts. Load it from the supplied/derived
+    // user-scoped path (auto-created on first run). With the unsafe
+    // allow-any escape and no key file we keep the historic ephemeral
+    // per-process key.
+    let sk = match resolve_server_key(server_key, &policy) {
+        Ok(sk) => sk,
+        Err(code) => return code,
+    };
+
     let pk = sk.public_key().to_string();
     eprintln!(
         "mkit serve --listen-enc on {addr} (server pubkey = {pk}); \
@@ -165,13 +240,231 @@ fn run_listen_enc(addr: &str, repo_root: PathBuf) -> u8 {
         async move { serve_enc_session(tx, sess).await }
     };
 
-    match mkit_transport_enc::serve_tcp(addr, sk, serve_fn) {
+    match mkit_transport_enc::serve_tcp_with_policy(addr, sk, policy, serve_fn) {
         Ok(()) => exit::OK,
         Err(e) => {
             eprintln!("mkit serve --listen-enc: {e}");
             exit::TEMPFAIL
         }
     }
+}
+
+/// Parse an authorized-peers allowlist file into a set of raw 32-byte
+/// ed25519 public keys. Accepts one key per line as 64-hex or 43-char
+/// url-safe base64. Blank lines and `#` comments are ignored. The path
+/// MUST be CLI-supplied / user-scoped — this function is never fed a
+/// repo-local config value.
+#[cfg(feature = "enc-transport")]
+fn load_authorized_peers(path: &str) -> Result<std::collections::HashSet<[u8; 32]>, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read authorized-peers file '{path}': {e}"))?;
+    let mut set = std::collections::HashSet::new();
+    for (lineno, raw) in contents.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let key = decode_peer_pubkey_line(line)
+            .map_err(|msg| format!("authorized-peers '{path}' line {}: {msg}", lineno + 1))?;
+        set.insert(key);
+    }
+    Ok(set)
+}
+
+/// Decode a single allowlist entry (64-hex or 43-char url-safe base64)
+/// into a raw 32-byte ed25519 public key. Reuses the same encodings the
+/// `mkit+enc://?pubkey=` query accepts.
+#[cfg(feature = "enc-transport")]
+fn decode_peer_pubkey_line(s: &str) -> Result<[u8; 32], String> {
+    if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let mut out = [0u8; 32];
+        for (i, byte) in out.iter_mut().enumerate() {
+            let hi = hex_nibble(s.as_bytes()[i * 2])?;
+            let lo = hex_nibble(s.as_bytes()[i * 2 + 1])?;
+            *byte = (hi << 4) | lo;
+        }
+        return Ok(out);
+    }
+    if s.len() == 43 && s.bytes().all(is_b64url_byte) {
+        return decode_b64url_pubkey(s);
+    }
+    Err("peer key must be 64 hex chars or 43 url-safe base64 chars".to_string())
+}
+
+#[cfg(feature = "enc-transport")]
+fn hex_nibble(b: u8) -> Result<u8, String> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(10 + b - b'a'),
+        b'A'..=b'F' => Ok(10 + b - b'A'),
+        _ => Err("invalid hex digit".to_string()),
+    }
+}
+
+#[cfg(feature = "enc-transport")]
+const fn is_b64url_byte(b: u8) -> bool {
+    matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_')
+}
+
+/// Decode a 43-char unpadded url-safe base64 ed25519 public key into 32
+/// raw bytes. Mirrors `mkit-transport-enc`'s `?pubkey=` decoder, including
+/// the rejection of non-zero trailing bits in the final character so two
+/// distinct base64 strings cannot map to the same key.
+#[cfg(feature = "enc-transport")]
+#[allow(clippy::cast_possible_truncation)] // intentional byte extraction from packed 24-bit groups
+fn decode_b64url_pubkey(s: &str) -> Result<[u8; 32], String> {
+    let bytes = s.as_bytes();
+    // 43 chars -> pad to 44 (multiple of 4) with the zero-bit char.
+    let mut buf = [0u8; 44];
+    buf[..43].copy_from_slice(bytes);
+    buf[43] = b'A';
+    let mut out = [0u8; 32];
+    let mut out_pos = 0usize;
+    for chunk in buf.chunks_exact(4) {
+        let v0 = b64url_nibble(chunk[0])?;
+        let v1 = b64url_nibble(chunk[1])?;
+        let v2 = b64url_nibble(chunk[2])?;
+        let v3 = b64url_nibble(chunk[3])?;
+        let triple =
+            (u32::from(v0) << 18) | (u32::from(v1) << 12) | (u32::from(v2) << 6) | u32::from(v3);
+        if out_pos < 32 {
+            out[out_pos] = (triple >> 16) as u8;
+        }
+        if out_pos + 1 < 32 {
+            out[out_pos + 1] = (triple >> 8) as u8;
+        }
+        if out_pos + 2 < 32 {
+            out[out_pos + 2] = triple as u8;
+        }
+        out_pos += 3;
+    }
+    // The 43rd char (index 42) carries 6 bits, only the top 4 of which
+    // are significant; its two low bits MUST be zero.
+    let last = b64url_nibble(bytes[42])?;
+    if last & 0b0000_0011 != 0 {
+        return Err("base64 peer key has non-zero trailing bits".to_string());
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "enc-transport")]
+fn b64url_nibble(b: u8) -> Result<u8, String> {
+    match b {
+        b'A'..=b'Z' => Ok(b - b'A'),
+        b'a'..=b'z' => Ok(26 + b - b'a'),
+        b'0'..=b'9' => Ok(52 + b - b'0'),
+        b'-' => Ok(62),
+        b'_' => Ok(63),
+        _ => Err("invalid base64 url-safe digit".to_string()),
+    }
+}
+
+/// Resolve the server's signing key.
+///
+/// - Allowlisting: load (or auto-create) a STABLE raw-32 key from the
+///   supplied `--enc-server-key` path, or a user-scoped default
+///   (`~/.config/mkit/enc/server.key`). A stable key is required so
+///   pinned client `?pubkey=` values survive restarts.
+/// - `AllowAny` (unsafe) with no key file: keep the historic ephemeral
+///   per-process key.
+#[cfg(feature = "enc-transport")]
+fn resolve_server_key(
+    server_key: Option<&str>,
+    policy: &mkit_transport_enc::PeerPolicy,
+) -> Result<commonware_cryptography::ed25519::PrivateKey, u8> {
+    use mkit_transport_enc::PeerPolicy;
+
+    match (server_key, policy) {
+        (Some(path), _) => load_or_create_server_key(std::path::Path::new(path)),
+        (None, PeerPolicy::Allowlist(_)) => {
+            let Some(home) = crate::config::home_dir_for_euid() else {
+                eprintln!(
+                    "mkit serve --listen-enc: cannot resolve a user-scoped key path; \
+                     pass --enc-server-key <PATH>"
+                );
+                return Err(exit::CONFIG_ERROR);
+            };
+            let path = home.join(".config/mkit/enc/server.key");
+            load_or_create_server_key(&path)
+        }
+        (None, PeerPolicy::AllowAny) => ephemeral_server_key(),
+    }
+}
+
+/// Load a stable raw-32 server key from `path`, creating it (and its
+/// parent directories) on first run with `0700`/`0600` hardening.
+#[cfg(feature = "enc-transport")]
+fn load_or_create_server_key(
+    path: &std::path::Path,
+) -> Result<commonware_cryptography::ed25519::PrivateKey, u8> {
+    use commonware_codec::DecodeExt as _;
+    use commonware_cryptography::ed25519::PrivateKey;
+
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "mkit serve --listen-enc: create key dir '{}': {e}",
+                    parent.display()
+                );
+                return Err(exit::CANTCREAT);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        let mut secret = zeroize::Zeroizing::new([0u8; 32]);
+        if getrandom::fill(secret.as_mut()).is_err() {
+            eprintln!("mkit serve --listen-enc: failed to read system RNG for server key");
+            return Err(exit::TEMPFAIL);
+        }
+        // `save_raw_32_create_new` refuses to clobber an existing key and
+        // applies the same 0600/owner hardening as `load_raw_32`.
+        match mkit_core::sign::save_raw_32_create_new(path, &secret) {
+            Ok(_created) => {}
+            Err(e) => {
+                eprintln!(
+                    "mkit serve --listen-enc: write server key '{}': {e}",
+                    path.display()
+                );
+                return Err(exit::CANTCREAT);
+            }
+        }
+    }
+
+    let seed = match mkit_core::sign::load_raw_32(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "mkit serve --listen-enc: load server key '{}': {e}",
+                path.display()
+            );
+            return Err(exit::NOPERM);
+        }
+    };
+    PrivateKey::decode(seed.as_ref()).map_err(|e| {
+        eprintln!("mkit serve --listen-enc: server key construction failed: {e}");
+        exit::DATAERR
+    })
+}
+
+/// Generate an ephemeral per-process server key (allow-any/unsafe only).
+#[cfg(feature = "enc-transport")]
+fn ephemeral_server_key() -> Result<commonware_cryptography::ed25519::PrivateKey, u8> {
+    use commonware_codec::DecodeExt as _;
+    use commonware_cryptography::ed25519::PrivateKey;
+
+    let mut secret = zeroize::Zeroizing::new([0u8; 32]);
+    if getrandom::fill(secret.as_mut()).is_err() {
+        eprintln!("mkit serve --listen-enc: failed to read system RNG for ephemeral key");
+        return Err(exit::TEMPFAIL);
+    }
+    PrivateKey::decode(secret.as_ref()).map_err(|e| {
+        eprintln!("mkit serve --listen-enc: ephemeral key construction failed: {e}");
+        exit::TEMPFAIL
+    })
 }
 
 #[cfg(feature = "enc-transport")]
@@ -1429,4 +1722,144 @@ mod tests {
     // an integration test in tests/ rather than here, since this
     // crate forbids `unsafe` (which `std::env::set_var` requires
     // since Rust 1.92).
+
+    #[cfg(feature = "enc-transport")]
+    fn enc_repo() -> tempfile::TempDir {
+        let td = tempfile::tempdir().unwrap();
+        fs::create_dir_all(td.path().join(".mkit")).unwrap();
+        td
+    }
+
+    /// Fail-closed: `serve --listen-enc` with neither an authorized-peers
+    /// file nor the unsafe flag returns `CONFIG_ERROR` before binding.
+    #[cfg(feature = "enc-transport")]
+    #[test]
+    fn listen_enc_fails_closed_without_peer_auth() {
+        let td = enc_repo();
+        let args = vec![
+            td.path().to_str().unwrap().to_string(),
+            "--listen-enc".to_string(),
+            "127.0.0.1:0".to_string(),
+        ];
+        assert_eq!(run(&args), exit::CONFIG_ERROR);
+    }
+
+    /// An authorized-peers file that exists but parses to no valid keys
+    /// is rejected (fail-closed), not silently treated as allow-any.
+    #[cfg(feature = "enc-transport")]
+    #[test]
+    fn listen_enc_rejects_empty_authorized_peers() {
+        let td = enc_repo();
+        let peers = td.path().join("peers.txt");
+        fs::write(&peers, "# only comments\n\n").unwrap();
+        let args = vec![
+            td.path().to_str().unwrap().to_string(),
+            "--listen-enc".to_string(),
+            "127.0.0.1:0".to_string(),
+            "--enc-authorized-peers".to_string(),
+            peers.to_str().unwrap().to_string(),
+        ];
+        assert_eq!(run(&args), exit::CONFIG_ERROR);
+    }
+
+    /// Supplying both `--enc-authorized-peers` and the unsafe flag is a
+    /// usage error.
+    #[cfg(feature = "enc-transport")]
+    #[test]
+    fn listen_enc_rejects_conflicting_flags() {
+        let td = enc_repo();
+        let peers = td.path().join("peers.txt");
+        fs::write(&peers, format!("{}\n", "aa".repeat(32))).unwrap();
+        let args = vec![
+            td.path().to_str().unwrap().to_string(),
+            "--listen-enc".to_string(),
+            "127.0.0.1:0".to_string(),
+            "--enc-authorized-peers".to_string(),
+            peers.to_str().unwrap().to_string(),
+            "--unsafe-allow-any-enc-peer".to_string(),
+        ];
+        assert_eq!(run(&args), exit::USAGE);
+    }
+
+    #[cfg(feature = "enc-transport")]
+    #[test]
+    fn authorized_peers_parses_hex_and_skips_comments() {
+        let td = tempfile::tempdir().unwrap();
+        let peers = td.path().join("peers.txt");
+        let k1 = "aa".repeat(32);
+        let k2 = "bb".repeat(32);
+        fs::write(&peers, format!("# header\n{k1}\n\n  {k2}  \n")).unwrap();
+        let set = load_authorized_peers(peers.to_str().unwrap()).unwrap();
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&[0xAA; 32]));
+        assert!(set.contains(&[0xBB; 32]));
+    }
+
+    /// The allowlist file accepts the SAME 43-char url-safe base64
+    /// encoding the `mkit+enc://?pubkey=` query uses, and it decodes to
+    /// the identical 32-byte key as the hex form. Without this the docs
+    /// and `--enc-authorized-peers` help would promise base64 support
+    /// that the parser silently rejected.
+    #[cfg(feature = "enc-transport")]
+    #[test]
+    #[allow(clippy::cast_possible_truncation)] // test-only b64 encoder
+    fn authorized_peers_parses_base64_matching_hex() {
+        // A key whose final byte's low bits are zero so the canonical
+        // 43-char base64 has zero trailing bits. All-0xAA: last byte 0xAA.
+        // Build from a real ed25519 public key to guarantee a valid pair
+        // of encodings.
+        use commonware_codec::Encode as _;
+        use commonware_cryptography::Signer as _;
+        use commonware_cryptography::ed25519::PrivateKey;
+
+        let pk = PrivateKey::from_seed(4242).public_key();
+        let raw: [u8; 32] = {
+            let enc = pk.encode();
+            let mut out = [0u8; 32];
+            out.copy_from_slice(enc.as_ref());
+            out
+        };
+        let hex = mkit_core::hash::to_hex(&raw);
+        // Round-trip the raw bytes through our own base64 decoder by
+        // first encoding with the standard alphabet.
+        let b64 = {
+            const A: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let mut s = String::new();
+            for chunk in raw.chunks(3) {
+                let b0 = u32::from(chunk[0]);
+                let b1 = chunk.get(1).copied().map_or(0, u32::from);
+                let b2 = chunk.get(2).copied().map_or(0, u32::from);
+                let n = (b0 << 16) | (b1 << 8) | b2;
+                let chars = match chunk.len() {
+                    1 => 2,
+                    2 => 3,
+                    _ => 4,
+                };
+                for i in 0..chars {
+                    let idx = ((n >> (18 - 6 * i)) & 0x3F) as usize;
+                    s.push(A[idx] as char);
+                }
+            }
+            s
+        };
+        assert_eq!(b64.len(), 43, "ed25519 key encodes to 43 b64 chars");
+
+        let td = tempfile::tempdir().unwrap();
+        let peers = td.path().join("peers.txt");
+        fs::write(&peers, format!("{hex}\n{b64}\n")).unwrap();
+        let set = load_authorized_peers(peers.to_str().unwrap()).unwrap();
+        // Both lines decode to the SAME key, so the set has one element.
+        assert_eq!(set.len(), 1, "hex and base64 forms must coincide");
+        assert!(set.contains(&raw));
+    }
+
+    #[cfg(feature = "enc-transport")]
+    #[test]
+    fn authorized_peers_rejects_malformed_key() {
+        let td = tempfile::tempdir().unwrap();
+        let peers = td.path().join("peers.txt");
+        fs::write(&peers, "not-a-valid-key\n").unwrap();
+        assert!(load_authorized_peers(peers.to_str().unwrap()).is_err());
+    }
 }

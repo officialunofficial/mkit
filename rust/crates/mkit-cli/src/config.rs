@@ -389,7 +389,8 @@ pub fn resolve_key_path(root: &Path, value: &str) -> Result<PathBuf, ConfigError
 /// check, parent-dir mode check, etc.). Falling back to `$HOME` would
 /// re-introduce the exact attack we're trying to close, so we don't.
 #[cfg(unix)]
-fn home_dir_for_euid() -> Option<PathBuf> {
+#[must_use]
+pub fn home_dir_for_euid() -> Option<PathBuf> {
     use std::ffi::CStr;
     use std::os::unix::ffi::OsStringExt;
 
@@ -436,7 +437,8 @@ fn home_dir_for_euid() -> Option<PathBuf> {
 }
 
 #[cfg(not(unix))]
-fn home_dir_for_euid() -> Option<PathBuf> {
+#[must_use]
+pub fn home_dir_for_euid() -> Option<PathBuf> {
     // Windows: there's no `getpwuid` equivalent. `%USERPROFILE%` is
     // the conventional environment variable but is no more
     // tamper-resistant than `$HOME` on Unix. Document the gap and
