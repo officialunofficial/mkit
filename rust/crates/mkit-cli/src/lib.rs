@@ -76,6 +76,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "status" => commands::status::run(&rest),
         "commit" => commands::commit::run(&rest),
         "log" => commands::log::run(&rest),
+        "reflog" => commands::reflog::run(&rest),
         "branch" => commands::branch::run(&rest),
         "tag" => commands::tag::run(&rest),
         "checkout" => commands::checkout::run(&rest),

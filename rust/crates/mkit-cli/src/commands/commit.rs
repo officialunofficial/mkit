@@ -56,6 +56,19 @@ struct CommitOptions {
     /// (mirrors `git commit -a`).
     #[arg(short = 'a', long)]
     all: bool,
+    /// Replace the current commit (HEAD) instead of adding a new one.
+    ///
+    /// The new commit re-uses HEAD's parent(s) as its own parent(s)
+    /// (so it supersedes HEAD rather than building on it), takes its
+    /// tree from the staging index, and is re-signed. The branch is
+    /// moved to the new commit; the superseded commit becomes
+    /// unreachable. If `-m` is omitted, the previous commit's message
+    /// is reused (no `$EDITOR` is launched).
+    ///
+    /// NOTE: the superseded commit is not deleted — it stays on disk as
+    /// an unreachable object until `mkit gc` ships (see issue #233).
+    #[arg(long)]
+    amend: bool,
 }
 
 #[must_use]
@@ -88,15 +101,33 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
 
+    // ---- When amending, load the commit being replaced. ------------
+    // `--amend` re-creates HEAD: the new commit inherits HEAD's parents
+    // (so it supersedes HEAD rather than stacking on it) and, when no
+    // `-m` is given, reuses HEAD's message verbatim.
+    let amend_target = if opts.amend {
+        match resolve_amend_target(&mkit_dir, &store) {
+            Ok(commit) => Some(commit),
+            Err((m, c)) => return emit_err(&m, c),
+        }
+    } else {
+        None
+    };
+
     // ---- Resolve / prompt for message. -----------------------------
+    // `--amend` without `-m` reuses the superseded commit's message and
+    // never launches `$EDITOR`.
     let msg = match opts.message {
         Some(m) => m,
-        None => match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
-            Ok(m) if !m.is_empty() => m,
-            Ok(_) => {
-                return emit_err("empty commit message — aborting", exit::USAGE);
-            }
-            Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
+        None => match &amend_target {
+            Some(prev) => String::from_utf8_lossy(&prev.message).into_owned(),
+            None => match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
+                Ok(m) if !m.is_empty() => m,
+                Ok(_) => {
+                    return emit_err("empty commit message — aborting", exit::USAGE);
+                }
+                Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
+            },
         },
     };
 
@@ -147,9 +178,15 @@ pub fn run(args: &[String]) -> u8 {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("build tree: {e}"), exit::GENERAL_ERROR),
     };
-    let parents = match refs::resolve_head(&mkit_dir) {
-        Ok(Some(h)) => vec![h],
-        _ => vec![],
+    // Parent selection. A normal commit builds on HEAD. An `--amend`
+    // replaces HEAD, so it adopts HEAD's *parents* — the superseded
+    // commit drops out of the chain entirely.
+    let parents = match &amend_target {
+        Some(prev) => prev.parents.clone(),
+        None => match refs::resolve_head(&mkit_dir) {
+            Ok(Some(h)) => vec![h],
+            _ => vec![],
+        },
     };
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -183,9 +220,14 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&e, exit::CANTCREAT);
     }
     let mut stderr = std::io::stderr().lock();
+    let verb = if amend_target.is_some() {
+        "amended"
+    } else {
+        "committed"
+    };
     let _ = writeln!(
         stderr,
-        "committed {} ({})",
+        "{verb} {} ({})",
         format::short_hash(&commit_hash, 8),
         msg.lines().next().unwrap_or("")
     );
@@ -409,6 +451,40 @@ fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8
         ),
     })?;
     Ok(CommitSigner::Keystore(signer))
+}
+
+/// Resolve the commit that `--amend` will replace.
+///
+/// Returns the decoded HEAD [`Commit`]. The new amended commit reuses
+/// this commit's parents and (absent `-m`) its message. Errors when
+/// HEAD has no commit yet (nothing to amend) or when HEAD does not
+/// resolve to a `Commit` object.
+fn resolve_amend_target(
+    mkit_dir: &std::path::Path,
+    store: &ObjectStore,
+) -> Result<Commit, (String, u8)> {
+    let head = refs::resolve_head(mkit_dir)
+        .map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?
+        .ok_or_else(|| {
+            (
+                "nothing to amend: HEAD has no commit yet".to_owned(),
+                exit::USAGE,
+            )
+        })?;
+    match store.read_object(&head) {
+        Ok(Object::Commit(c)) => Ok(c),
+        Ok(_) => Err((
+            format!(
+                "cannot amend: HEAD {} is not a commit",
+                format::hex_hash(&head)
+            ),
+            exit::DATAERR,
+        )),
+        Err(e) => Err((
+            format!("read HEAD commit {}: {e}", format::hex_hash(&head)),
+            exit::DATAERR,
+        )),
+    }
 }
 
 /// Advance the branch pointed to by HEAD (or HEAD itself, if detached)

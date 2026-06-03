@@ -15,7 +15,7 @@
 complete -c mkit -f
 
 set -l __mkit_subcommands \
-    init add rm restore reset hash cat tree commit log status diff branch checkout \
+    init add rm restore reset hash cat tree commit log reflog status diff branch checkout \
     tag config merge push pull fetch stash clone remote key keygen \
     cherry-pick rebase bisect sparse-checkout serve blame verify \
     attest verify-attest version help
@@ -63,6 +63,8 @@ complete -c mkit -n "__fish_seen_subcommand_from status" \
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -l all -s a -d "Stage tracked changes"
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
+    -l amend -d "Replace HEAD instead of adding a new commit"
+complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -s m -d "Commit message" -r
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
@@ -72,6 +74,10 @@ complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l graph -d "Accepted for compat; currently a no-op"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -s n -d "Limit number of commits" -r
+complete -c mkit -n "__fish_seen_subcommand_from reflog" \
+    -l format -d "Output format (default|json)" -r -a "default json"
+complete -c mkit -n "__fish_seen_subcommand_from reflog" \
+    -s n -d "Limit number of entries" -r
 complete -c mkit -n "__fish_seen_subcommand_from push" \
     -l dry-run -d "Show what would be pushed"
 complete -c mkit -n "__fish_seen_subcommand_from clone" \

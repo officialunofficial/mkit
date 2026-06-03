@@ -148,7 +148,7 @@ Honors
 the same way
 .Cm add
 does.
-.It Cm commit Op Fl a | Fl Fl all Op Fl m Ar message
+.It Cm commit Oo Fl a | Fl Fl all Oc Op Fl Fl amend Op Fl m Ar message
 Create a signed commit. With
 .Fl a
 or
@@ -169,6 +169,19 @@ on
 lines starting with
 .Ql #
 are stripped, and an empty message aborts the commit.
+.Pp
+With
+.Fl Fl amend ,
+replace the current commit instead of adding a new one: the new commit
+re-uses HEAD's parent(s) as its own parent(s), takes its tree from the
+staging index, is re-signed, and the branch is moved to it. If
+.Fl m
+is omitted the previous commit's message is reused and no editor is
+launched. The superseded commit is not deleted; it remains on disk as an
+unreachable object until
+.Cm gc
+ships
+.Pq issue #233 .
 .It Cm log Op Fl Fl oneline Op Fl Fl format Ar json Op Fl Fl graph Op Fl n Ar N
 Show commit history. The default format prints the full commit message body,
 indented by four spaces, and renders the timestamp as a stable UTC date in the
@@ -183,6 +196,35 @@ timestamp for machine consumption.
 .Fl Fl graph
 is accepted for compatibility but is currently a no-op (no ASCII graph is
 drawn).
+.It Cm reflog Oo Ar ref Oc Oo Fl Fl format Ns = Ns Cm json Oc Op Fl n Ar N
+Show a branch's recorded movement history, read-only. Walks the branch
+tip's first-parent chain newest-first, addressing each entry
+.Ar ref Ns Cm @{ Ns Ar N Ns Cm } ,
+where
+.Cm @{0}
+is the current tip. Defaults to the branch
+.Cm HEAD
+points at; a detached
+.Cm HEAD
+needs an explicit
+.Ar ref
+because the ref-history journal is keyed per-branch.
+.Pp
+The underlying journal is the per-branch, append-only commit-history MMR
+written by every branch advance. It stores a count of advances and a
+tamper-evident root, but its leaf digests cannot be decoded back to
+commit hashes, so the listed hashes are reconstructed from the
+first-parent chain. On a build with
+.Cm --features history-mmr
+each listed entry is additionally cross-checked against the journaled
+MMR root via an inclusion proof. This is
+.Em not
+a full Git reflog:
+.Cm @{ Ns Ar N Ns Cm }
+indexes the reachable chain, so commits superseded by
+.Cm commit --amend
+or a reset are no longer listed. This command never mutates refs, the
+journal, or any object.
 .It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Ar treeA Ar treeB Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.

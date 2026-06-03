@@ -73,13 +73,20 @@ Working-tree commands:
 
 History / commits:
 
-- `mkit commit [-a|--all] -m <msg>` — create a signed commit from the
-  staging index. The index is built by `mkit add` / `mkit rm`; `commit`
-  with an empty index is an error. Use `mkit add .` to snapshot the
-  whole worktree before committing. `-a` / `--all` follows Git's
+- `mkit commit [-a|--all] [--amend] -m <msg>` — create a signed commit
+  from the staging index. The index is built by `mkit add` / `mkit rm`;
+  `commit` with an empty index is an error. Use `mkit add .` to snapshot
+  the whole worktree before committing. `-a` / `--all` follows Git's
   tracked-only shortcut: it stages modified tracked files and tracked
   deletions before committing, but does not add untracked files.
   `mkit commit -am <msg>` is accepted as shorthand for `-a -m <msg>`.
+  `--amend` **replaces HEAD** instead of adding a new commit: the new
+  commit re-uses HEAD's parent(s) as its own parent(s), takes its tree
+  from the index, and is re-signed; the branch is moved to it and the
+  move is recorded in the ref-history journal. Without `-m` the previous
+  commit's message is reused (no editor is launched). The superseded
+  commit becomes an unreachable object and is only reclaimed once
+  `mkit gc` ships (issue #233).
 - `mkit log [--oneline] [--format=json] [--graph] [-n N]` — show
   commit history. The default format prints the **full commit message
   body**, indented by four spaces, and renders the timestamp as a stable
@@ -90,6 +97,23 @@ History / commits:
   Unix-seconds integer for machine consumption. **`--graph` is accepted
   for compatibility but is currently a no-op** (no ASCII graph is drawn);
   see "Divergences from Git" below.
+- `mkit reflog [<ref>] [--format=json] [-n N]` — **read-only** view of a
+  branch's recorded movement history. Defaults to the branch `HEAD`
+  points at (a detached `HEAD` needs an explicit `<ref>`, since the
+  ref-history journal is keyed per-branch). Walks the branch tip's
+  first-parent chain newest-first, addressing each entry `<ref>@{N}`
+  (`@{0}` is the current tip). The underlying journal (the per-branch
+  commit-history MMR written on every branch advance) stores a count of
+  advances and a tamper-evident root, but its leaf digests cannot be
+  decoded back to commit hashes — so the listed hashes are reconstructed
+  from the reachable chain. On a build with `--features history-mmr`
+  each entry is additionally cross-checked against the journaled MMR root
+  via an inclusion proof, and the recorded-advance count is printed.
+  `--format=json` emits JSONL with keys `ref`, `selector`, `index`,
+  `hash`, `title`, `journaled` (`true`/`false`/`null`). **This is not a
+  full Git reflog:** `@{N}` indexes the reachable first-parent chain, so
+  commits superseded by `commit --amend` or a reset are not listed; see
+  "Divergences from Git" below.
 - `mkit blame [--format=json] <file>` — show line-level commit
   attribution. Default emits `<short12>\t<line_num>\t<text>` per line;
   `--format=json` emits JSONL with keys `hash`, `line_num`, `author`,
