@@ -41,8 +41,15 @@ mkit commit -m "first commit"
 
 # push to a remote (strict scheme — mkit+{file,https,s3,ssh}://)
 mkit remote add origin mkit+file:///srv/mkit/my-repo
-mkit push
+mkit push origin            # first push records `origin` as the branch upstream
+mkit push                   # subsequent pushes go to the recorded upstream
 ```
+
+`mkit push` (no args) pushes the current branch to its upstream only,
+rejecting a non-fast-forward update unless you pass `--force-with-lease`
+or `--force`. Use `mkit push --all` to mirror every local branch (also
+CAS-safe). `mkit remote add <url>` (no name) still configures the flat
+default remote for back-compat.
 
 Full CLI reference: [`docs/CLI.md`](docs/CLI.md).
 

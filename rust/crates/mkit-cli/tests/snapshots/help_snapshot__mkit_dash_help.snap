@@ -35,7 +35,8 @@ commands:
   config ssh.user_known_hosts_file <path>  Custom SSH known_hosts file
   config ssh.identity_file <path>  SSH private key file
   merge <branch>    Merge a branch into HEAD
-  push [--dry-run]  Push refs and packs to the configured remote
+  push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]
+                    Push current branch to its upstream (--all mirrors every branch)
   pull              Pull changes from remote
   fetch             Download from remote without merging
   stash             Stash working dir changes (save WIP)
@@ -46,8 +47,8 @@ commands:
   stash show [N]    Show diff of stash entry N
   clone [--depth N] [--sparse ...] <url>  Clone a repository
   remote [--format=json]  Show remote configuration (JSON with --format=json)
-  remote add <url>  Add remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
-  remote set <url>  Alias for 'remote add'
+  remote add [<name>] <url>  Add a remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
+  remote set [<name>] <url>  Alias for 'remote add'
   key generate|list|import|export|delete  Manage user-scoped keystore keys
   keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
                     Generate a new signing key (defaults to Ed25519)
