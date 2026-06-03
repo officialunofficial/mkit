@@ -290,11 +290,13 @@ fn merge_delete_modify_conflict() {
     // feature modifies a.txt
     ok(repo.path(), repo.xdg(), &["checkout", "feature"]);
     repo.commit_file("a.txt", b"theirs-modified\n", "theirs modifies");
-    // main deletes a.txt (rm stages removal; remove the worktree file
-    // too — worktree-file removal is PR5 scope, out of #177).
+    // main deletes a.txt. `mkit rm` stages the removal; whether it also
+    // removes the worktree file depends on the rm worktree-removal work
+    // (#188/PR5), so tolerate an already-removed file rather than assuming
+    // it still exists — keeps this test correct in isolation and combined.
     ok(repo.path(), repo.xdg(), &["checkout", "main"]);
     ok(repo.path(), repo.xdg(), &["rm", "a.txt"]);
-    fs::remove_file(repo.path().join("a.txt")).unwrap();
+    let _ = fs::remove_file(repo.path().join("a.txt"));
     repo.commit("ours deletes");
 
     fail(repo.path(), repo.xdg(), &["merge", "feature"]);
