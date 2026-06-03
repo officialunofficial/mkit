@@ -62,8 +62,13 @@ fn create(mkit_dir: &std::path::Path, name: &str) -> u8 {
     let Ok(Some(h)) = refs::resolve_head(mkit_dir) else {
         return emit_err("no HEAD commit to tag", exit::GENERAL_ERROR);
     };
-    match refs::write_tag(mkit_dir, name, &h) {
+    // `MustNotExist` (issue #206) refuses to silently overwrite an
+    // existing tag of the same name.
+    match refs::update_tag(mkit_dir, name, refs::RefWriteCondition::Missing, &h) {
         Ok(()) => exit::OK,
+        Err(refs::RefError::Conflict(_)) => {
+            emit_err(&format!("tag '{name}' already exists"), exit::CANTCREAT)
+        }
         Err(e) => emit_err(&format!("write tag {name}: {e}"), exit::CANTCREAT),
     }
 }

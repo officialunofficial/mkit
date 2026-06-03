@@ -44,6 +44,14 @@ pub struct Conflict {
     pub base_hash: Option<Hash>,
     pub ours_hash: Option<Hash>,
     pub theirs_hash: Option<Hash>,
+    /// Tree mode of the ours-side entry (`None` when ours deleted the
+    /// path). Carried so a downstream resolver can stage the ours-side
+    /// with its real exec/symlink mode instead of defaulting to a plain
+    /// blob (#214).
+    pub ours_mode: Option<EntryMode>,
+    /// Tree mode of the theirs-side entry (`None` when theirs deleted
+    /// the path).
+    pub theirs_mode: Option<EntryMode>,
 }
 
 /// Result of [`merge_trees`]. The `tree_hash` is always populated —
@@ -458,6 +466,8 @@ fn merge_entries_recursive(
                         base_hash: Some(b.object_hash),
                         ours_hash: Some(o.object_hash),
                         theirs_hash: Some(t.object_hash),
+                        ours_mode: Some(o.mode),
+                        theirs_mode: Some(t.mode),
                     });
                     // Ours wins in the merged tree.
                     add_entry(merged, min_name, o.mode, o.object_hash);
@@ -494,6 +504,8 @@ fn merge_entries_recursive(
                         base_hash: None,
                         ours_hash: Some(o.object_hash),
                         theirs_hash: Some(t.object_hash),
+                        ours_mode: Some(o.mode),
+                        theirs_mode: Some(t.mode),
                     });
                     add_entry(merged, min_name, o.mode, o.object_hash);
                 }
@@ -510,6 +522,8 @@ fn merge_entries_recursive(
                         base_hash: Some(b.object_hash),
                         ours_hash: Some(o.object_hash),
                         theirs_hash: None,
+                        ours_mode: Some(o.mode),
+                        theirs_mode: None,
                     });
                     add_entry(merged, min_name, o.mode, o.object_hash);
                 }
@@ -526,6 +540,8 @@ fn merge_entries_recursive(
                         base_hash: Some(b.object_hash),
                         ours_hash: None,
                         theirs_hash: Some(t.object_hash),
+                        ours_mode: None,
+                        theirs_mode: Some(t.mode),
                     });
                     add_entry(merged, min_name, t.mode, t.object_hash);
                 }
