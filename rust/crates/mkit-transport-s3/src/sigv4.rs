@@ -16,11 +16,25 @@ use sha2::{Digest, Sha256};
 type HmacSha256 = Hmac<Sha256>;
 
 /// S3 credentials used by the SigV4 signer.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually (mirroring `S3Transport`'s redacting
+/// `Debug`) so the `secret_access_key` is never leaked through `{:?}` /
+/// `dbg!` / `tracing` of this struct or any struct embedding it.
+#[derive(Clone)]
 pub struct Credentials {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub region: String,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<redacted>")
+            .field("region", &self.region)
+            .finish()
+    }
 }
 
 /// Output of [`sign_request`]. Caller attaches these three headers to the
@@ -399,6 +413,24 @@ mod tests {
         assert_eq!(a.authorization, b.authorization);
         assert_eq!(a.canonical_request, b.canonical_request);
         assert_eq!(a.string_to_sign, b.string_to_sign);
+    }
+
+    #[test]
+    fn credentials_debug_redacts_secret() {
+        let creds = Credentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+            region: "auto".into(),
+        };
+        let dbg = format!("{creds:?}");
+        assert!(
+            !dbg.contains("wJalrXUtnFEMI"),
+            "Debug leaked secret_access_key: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"), "Debug missing redaction: {dbg}");
+        // Non-secret fields remain visible for diagnostics.
+        assert!(dbg.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(dbg.contains("auto"));
     }
 
     #[test]

@@ -135,7 +135,6 @@ pub fn validate_http_scheme(url: &Url) -> TransportResult<()> {
 /// Construction: [`HttpTransport::connect`] parses a `mkit+https://` (or
 /// `mkit+http://` for local testing) URL, strips the `mkit+` prefix, and
 /// reads `MKIT_API_TOKEN` from the environment.
-#[derive(Debug)]
 pub struct HttpTransport {
     /// Base URL (scheme + host + port + `/<project>`). No trailing slash.
     base: Url,
@@ -150,6 +149,19 @@ pub struct HttpTransport {
     /// Sleep hook between retry attempts. Production sleeps for the
     /// full delay; tests inject a no-op or recorder.
     sleep: fn(Duration),
+}
+
+// Manual redacting `Debug` (mirrors `S3Transport`): the `token` field is
+// the `MKIT_API_TOKEN` bearer secret and MUST NOT leak through `{:?}` /
+// `dbg!` / `tracing` of this struct or any struct embedding it. We only
+// reveal *whether* a token is present, never its value.
+impl std::fmt::Debug for HttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpTransport")
+            .field("base", &self.base)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl HttpTransport {
@@ -1605,6 +1617,27 @@ mod tests {
             .create();
         let t = make_transport(&server, None);
         assert_eq!(t.download_pack(&key).unwrap(), b"public");
+    }
+
+    #[test]
+    fn debug_redacts_bearer_token() {
+        let base = Url::parse("http://127.0.0.1:1/myproj").unwrap();
+        let t = HttpTransport::new_for_test(base, Some("super-secret-token".into()));
+        let dbg = format!("{t:?}");
+        assert!(
+            !dbg.contains("super-secret-token"),
+            "Debug leaked bearer token: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"), "Debug missing redaction: {dbg}");
+    }
+
+    #[test]
+    fn debug_shows_absent_token_as_none() {
+        let base = Url::parse("http://127.0.0.1:1/myproj").unwrap();
+        let t = HttpTransport::new_for_test(base, None);
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("None"), "Debug should show token: None: {dbg}");
+        assert!(!dbg.contains("<redacted>"));
     }
 
     // -- 502 bad gateway (5xx family) --------------------------------------
