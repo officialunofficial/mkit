@@ -91,7 +91,11 @@ fn branch_rename_current_moves_head() {
 
     assert!(!mkit.join(format!("refs/heads/{current}")).exists());
     assert!(mkit.join("refs/heads/renamed-main").exists());
-    assert_eq!(head_branch(&mkit), "renamed-main", "HEAD must follow rename");
+    assert_eq!(
+        head_branch(&mkit),
+        "renamed-main",
+        "HEAD must follow rename"
+    );
 }
 
 #[test]
@@ -167,7 +171,11 @@ fn remote_remove_drops_named_remote() {
     assert!(!read_config(root).contains("remote.origin"));
 
     // Removing a missing remote errors.
-    assert!(!run_in(root, x, &["remote", "remove", "origin"]).status.success());
+    assert!(
+        !run_in(root, x, &["remote", "remove", "origin"])
+            .status
+            .success()
+    );
 }
 
 #[test]
@@ -239,7 +247,11 @@ fn remote_remove_preserves_trusted_endpoint() {
     let before = fs::read_to_string(&user_cfg).unwrap();
     assert!(before.contains(url));
 
-    assert!(run_in(root, x, &["remote", "remove", "origin"]).status.success());
+    assert!(
+        run_in(root, x, &["remote", "remove", "origin"])
+            .status
+            .success()
+    );
 
     // The user-scoped trust record is untouched by repo-config rewrites.
     let after = fs::read_to_string(&user_cfg).unwrap();
