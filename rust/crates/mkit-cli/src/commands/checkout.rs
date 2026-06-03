@@ -62,6 +62,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
+    let _lock = match super::acquire_worktree_lock(&cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
 
     // Resolve <name> — try ref first (branch / tag), then fall back to
     // a raw 64-char commit hash.
@@ -116,23 +120,23 @@ pub fn run(args: &[String]) -> u8 {
     #[cfg(not(feature = "sparse-checkout"))]
     let sparse_opts: RestoreOptions = RestoreOptions::default();
 
-    // Materialise the tree. `clean=true` is the default — `checkout`
-    // reshapes the worktree to the branch tip. `.mkitignore` is
-    // honoured inside the helper so locally-ignored files (editor
-    // swapfiles, build artefacts) survive the transition.
+    // Run the destructive-restore safety gate (#176) BEFORE touching
+    // anything. This is read-only — it refuses the checkout if dirty
+    // tracked files or untracked collisions would be clobbered.
     if let Err(e) = super::ensure_restore_safe_with_options(&cwd, &store, tree_hash, &sparse_opts) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
-    let report = match restore_tree_to_worktree(&store, &tree_hash, &cwd, &sparse_opts) {
-        Ok(r) => r,
-        Err(e) => return emit_err(&format!("restore: {e}"), exit::CANTCREAT),
-    };
-    if let Err(e) = super::sync_index_to_tree(&cwd, &store, tree_hash) {
-        return emit_err(&e, exit::CANTCREAT);
-    }
 
-    // Update HEAD last. If the input was a ref name we know we saw a
-    // branch/tag above; for tags + bare commit hashes we go detached.
+    // Update HEAD FIRST, before mutating the worktree/index (#223). The
+    // failure modes are asymmetric: if we materialised the new tree and
+    // *then* HEAD failed to advance, the worktree would hold the new
+    // branch's files while HEAD still pointed at the old branch — a
+    // silent, hard-to-diagnose split. Writing HEAD first inverts the
+    // hazard: a subsequent worktree/index failure leaves HEAD on the new
+    // branch with a stale worktree, which `mkit status` surfaces as
+    // ordinary local changes and a re-run of `mkit checkout` repairs.
+    // The `ensure_restore_safe` gate above already guaranteed no real
+    // user work is at risk, so the stale-worktree window is benign.
     let is_branch = matches!(refs::read_ref(&mkit_dir, name), Ok(Some(_)));
     let head_err = if is_branch {
         refs::write_head_branch(&mkit_dir, name)
@@ -141,6 +145,18 @@ pub fn run(args: &[String]) -> u8 {
     };
     if let Err(e) = head_err {
         return emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT);
+    }
+
+    // Materialise the tree. `clean=true` is the default — `checkout`
+    // reshapes the worktree to the branch tip. `.mkitignore` is
+    // honoured inside the helper so locally-ignored files (editor
+    // swapfiles, build artefacts) survive the transition.
+    let report = match restore_tree_to_worktree(&store, &tree_hash, &cwd, &sparse_opts) {
+        Ok(r) => r,
+        Err(e) => return emit_err(&format!("restore: {e}"), exit::CANTCREAT),
+    };
+    if let Err(e) = super::sync_index_to_tree(&cwd, &store, tree_hash) {
+        return emit_err(&e, exit::CANTCREAT);
     }
 
     let mut stderr = std::io::stderr().lock();

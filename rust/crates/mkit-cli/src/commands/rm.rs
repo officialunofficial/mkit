@@ -66,6 +66,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
+    let _lock = match super::acquire_worktree_lock(&cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
     let mut idx = match super::read_or_seed_index_from_head(&cwd, &store) {
         Ok(i) => i,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
