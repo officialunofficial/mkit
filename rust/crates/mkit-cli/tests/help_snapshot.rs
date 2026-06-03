@@ -13,6 +13,8 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "init",
     "add",
     "rm",
+    "restore",
+    "reset",
     "status",
     "diff",
     "stash",
