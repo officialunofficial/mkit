@@ -83,6 +83,18 @@ const SHARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 // call sites keep working.
 pub use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
 
+/// Cap for a single control-plane ref/upload JSON body (`read_ref`,
+/// `upload_pack` response). These responses are tiny — a 64-hex hash
+/// plus minimal JSON framing — so a few KiB is generous. Mirrors the S3
+/// transport's `REF_BODY_LIMIT` intent; an attacker-controlled or
+/// MITM'd endpoint must not be able to OOM us with a multi-GB body.
+const CONTROL_BODY_LIMIT: usize = 4 * 1024;
+
+/// Cap for a `list_refs` JSON body. Larger than a single ref but still
+/// bounded so a hostile remote can't return an unbounded list. Mirrors
+/// the S3 transport's `REF_LIST_BODY_LIMIT` (16 MiB).
+const REF_LIST_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
 /// HTTP request header advertising client willingness to receive a
 /// pack as `N+K` Reed-Solomon shards. Value is `"<N>+<K>"`. Per
 /// SPEC-PACK-SHARDS §5, sent by the client on `download_pack` when the
@@ -336,8 +348,17 @@ impl HttpTransport {
     /// running cap at [`PACK_BODY_LIMIT_USIZE`]. Shared by the
     /// monolithic-pack and shard-body paths.
     fn read_body_capped(resp: Response) -> TransportResult<Vec<u8>> {
+        Self::read_body_capped_to(resp, PACK_BODY_LIMIT_USIZE)
+    }
+
+    /// Stream a reqwest blocking response body into a `Vec<u8>` with a
+    /// running cap of `cap` bytes. The cap is enforced as the body is
+    /// read (never trusting `Content-Length`), so a hostile remote that
+    /// omits or lies about the header still can't OOM us — we stop and
+    /// return [`TransportError::PayloadTooLarge`] the moment the cap is
+    /// crossed.
+    fn read_body_capped_to(resp: Response, cap: usize) -> TransportResult<Vec<u8>> {
         let mut reader = resp;
-        let cap = PACK_BODY_LIMIT_USIZE;
         let mut buf = Vec::new();
         let mut chunk = vec![0u8; 64 * 1024];
         loop {
@@ -526,9 +547,11 @@ impl Transport for HttpTransport {
 
         // Parse `{"key": "<hex>"}` and cross-check against the caller's
         // pre-computed digest so a misbehaving server can't silently
-        // swap the pack under us.
+        // swap the pack under us. Cap the read so a hostile/compromised
+        // remote can't OOM us with an unbounded response body.
+        let body = Self::read_body_capped_to(resp, CONTROL_BODY_LIMIT)?;
         let parsed: PackUploadResponse =
-            resp.json().map_err(|_| TransportError::InvalidResponse)?;
+            serde_json::from_slice(&body).map_err(|_| TransportError::InvalidResponse)?;
         let server_key = from_hex(&parsed.key).map_err(|_| TransportError::InvalidResponse)?;
         if server_key != *key.as_bytes() {
             return Err(TransportError::InvalidResponse);
@@ -668,7 +691,11 @@ impl Transport for HttpTransport {
             ));
         }
 
-        let parsed: RefPayload = resp.json().map_err(|_| TransportError::InvalidResponse)?;
+        // Cap the read so a hostile remote can't OOM us with a giant body
+        // in place of the tiny `{"hash": "<hex>"}` payload.
+        let body = Self::read_body_capped_to(resp, CONTROL_BODY_LIMIT)?;
+        let parsed: RefPayload =
+            serde_json::from_slice(&body).map_err(|_| TransportError::InvalidResponse)?;
         let h = from_hex(&parsed.hash).map_err(|_| TransportError::InvalidResponse)?;
         Ok(Some(h))
     }
@@ -687,7 +714,11 @@ impl Transport for HttpTransport {
             ));
         }
 
-        let parsed: RefListResponse = resp.json().map_err(|_| TransportError::InvalidResponse)?;
+        // Cap the read at the list limit so a hostile remote can't OOM us
+        // with an unbounded ref-list body (never trusting Content-Length).
+        let body = Self::read_body_capped_to(resp, REF_LIST_BODY_LIMIT)?;
+        let parsed: RefListResponse =
+            serde_json::from_slice(&body).map_err(|_| TransportError::InvalidResponse)?;
 
         let mut out: Vec<Ref> = Vec::with_capacity(parsed.refs.len());
         let full_prefix = prefix.trim_end_matches('/');
@@ -809,6 +840,10 @@ mod sparse_fetch {
             if !status.is_success() {
                 return Err(map_status(status, TransportError::PackNotFound));
             }
+            // Cheap pre-check: if the server advertises an honest
+            // oversized Content-Length, refuse before reading. But do
+            // NOT trust the header — the running-cap reader below enforces
+            // the bound even when the header is missing or lies.
             if let Some(len) = resp.content_length()
                 && len > SPARSE_WIRE_MAX_BYTES as u64
             {
@@ -816,10 +851,7 @@ mod sparse_fetch {
                     usize::try_from(len).unwrap_or(usize::MAX),
                 ));
             }
-            let body_bytes = resp.bytes().map_err(|_| TransportError::ConnectionFailed)?;
-            if body_bytes.len() > SPARSE_WIRE_MAX_BYTES {
-                return Err(TransportError::PayloadTooLarge(body_bytes.len()));
-            }
+            let body_bytes = HttpTransport::read_body_capped_to_pub(resp, SPARSE_WIRE_MAX_BYTES)?;
             decode_sparse_response(&body_bytes).map_err(|_| TransportError::InvalidResponse)
         }
     }
@@ -885,6 +917,9 @@ impl HttpTransport {
     }
     fn apply_auth_pub(&self, req: RequestBuilder) -> RequestBuilder {
         self.apply_auth(req)
+    }
+    fn read_body_capped_to_pub(resp: Response, cap: usize) -> TransportResult<Vec<u8>> {
+        Self::read_body_capped_to(resp, cap)
     }
 }
 
@@ -1256,6 +1291,57 @@ mod tests {
             .create();
         let t = make_transport(&server, None);
         assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn read_ref_oversized_body_is_payload_too_large() {
+        // A multi-MB body in place of the tiny `{"hash":...}` payload
+        // must be rejected by the running cap, not buffered to OOM.
+        let mut server = Server::new();
+        let huge = vec![b'a'; CONTROL_BODY_LIMIT + 1];
+        let _m = server
+            .mock("GET", "/myproj/refs/refs/heads/main")
+            .with_status(200)
+            .with_body(huge)
+            .create();
+        let t = make_transport(&server, None);
+        assert!(matches!(
+            t.read_ref("refs/heads/main"),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn list_refs_oversized_body_is_payload_too_large() {
+        let mut server = Server::new();
+        let huge = vec![b'a'; REF_LIST_BODY_LIMIT + 1];
+        let _m = server
+            .mock("GET", Matcher::Regex(r"^/myproj/refs\?prefix=".to_string()))
+            .with_status(200)
+            .with_body(huge)
+            .create();
+        let t = make_transport(&server, None);
+        assert!(matches!(
+            t.list_refs("refs/heads/"),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn upload_pack_oversized_response_is_payload_too_large() {
+        let mut server = Server::new();
+        let key = sample_key(0x55);
+        let huge = vec![b'a'; CONTROL_BODY_LIMIT + 1];
+        let _m = server
+            .mock("POST", "/myproj/packs")
+            .with_status(201)
+            .with_body(huge)
+            .create();
+        let t = make_transport(&server, None);
+        assert!(matches!(
+            t.upload_pack(b"pack", &key),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
     }
 
     #[test]
