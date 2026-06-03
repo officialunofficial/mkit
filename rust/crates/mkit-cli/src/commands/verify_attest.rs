@@ -383,6 +383,21 @@ fn flush_trust_root(reg: &mut Registry, keyid: &str, kind: &str, pubkey_hex: &st
     let Some(pk_bytes) = hex_decode(pubkey_hex) else {
         return;
     };
+    // #223: cross-check the keyid against the declared pubkey so a
+    // trust-roots file that lists keyid `secp256k1:<A>` next to
+    // `pubkey_hex = <B>` (a copy-paste mix-up that would silently trust
+    // the wrong key) is rejected rather than loaded. Skip the entry on a
+    // mismatch — `verify-attest` then reports the keyid as
+    // `UnknownKeyid` instead of verifying against the wrong pubkey.
+    if !keyid_matches_pubkey(keyid, &pk_bytes) {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "note: trust-root '{}' dropped — keyid does not match its pubkey_hex",
+            short_keyid(keyid)
+        );
+        return;
+    }
     match kind {
         "ed25519" if pk_bytes.len() == 32 => {
             let mut arr = [0u8; 32];
@@ -412,6 +427,34 @@ fn flush_trust_root(reg: &mut Registry, keyid: &str, kind: &str, pubkey_hex: &st
         _ => {
             // Unknown kind — skip.
         }
+    }
+}
+
+/// Cross-check (#223) that the keyid is consistent with the declared
+/// public key bytes. The canonical keyid shape is `<prefix>:<body>`:
+///
+/// - `blake3:<hex>` — body is `blake3(pubkey)`; verify the digest.
+/// - `ed25519` / `secp256k1` / `p256` / `bls12381-thr:<hex>` — body is
+///   the raw lowercase-hex pubkey; verify it equals `pubkey_hex`.
+/// - Anything else (unknown prefix, no `:` separator) is left to the
+///   downstream `kind`-based loader and not cross-checked here — return
+///   `true` so forward-compatible keyids are not dropped.
+fn keyid_matches_pubkey(keyid: &str, pubkey: &[u8]) -> bool {
+    let Some((prefix, body)) = keyid.split_once(':') else {
+        return true;
+    };
+    let body = body.to_ascii_lowercase();
+    match prefix {
+        "blake3" => {
+            let digest = mkit_core::hash::hash(pubkey);
+            body == mkit_core::hash::to_hex(&digest)
+        }
+        "ed25519" | "secp256k1" | "p256" | "bls12381-thr" => {
+            body == mkit_core::hash::to_hex_bytes(pubkey)
+        }
+        // Unknown / opaque (e.g. `sigstore:`) keyids carry no embedded
+        // pubkey to compare against.
+        _ => true,
     }
 }
 
@@ -496,36 +539,43 @@ mod tests {
     fn load_trust_roots_parses_ed25519_block() {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("tr.toml");
+        // Canonical ed25519 keyid embeds the raw pubkey hex as its body.
         let hex = "aa".repeat(32);
+        let keyid = format!("ed25519:{hex}");
         fs::write(
             &path,
             format!(
-                "[[trust_root]]\nkeyid = \"ed25519:abc\"\nkind = \"ed25519\"\npubkey_hex = \"{hex}\"\n"
+                "[[trust_root]]\nkeyid = \"{keyid}\"\nkind = \"ed25519\"\npubkey_hex = \"{hex}\"\n"
             ),
         )
         .unwrap();
         let reg = load_trust_roots(&path).unwrap();
-        assert!(reg.lookup("ed25519:abc").is_some());
+        assert!(reg.lookup(&keyid).is_some());
     }
 
     #[test]
     fn load_trust_roots_tolerates_comments_and_blank_lines() {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("tr.toml");
-        let hex = "bb".repeat(32);
+        // `blake3:` keyid embeds blake3(pubkey); compute it so the
+        // keyid↔pubkey cross-check passes.
+        let pk = [0xbbu8; 32];
+        let hex = mkit_core::hash::to_hex_bytes(&pk);
+        let digest = mkit_core::hash::to_hex(&mkit_core::hash::hash(&pk));
+        let keyid = format!("blake3:{digest}");
         fs::write(
             &path,
             format!(
                 "# leading comment\n\n\
                  [[trust_root]]\n# mid-comment\n\
-                 keyid = \"blake3:xyz\"\n\
+                 keyid = \"{keyid}\"\n\
                  kind = \"ed25519\"\n\
                  pubkey_hex = \"{hex}\"\n\n\n"
             ),
         )
         .unwrap();
         let reg = load_trust_roots(&path).unwrap();
-        assert!(reg.lookup("blake3:xyz").is_some());
+        assert!(reg.lookup(&keyid).is_some());
     }
 
     #[test]
@@ -534,17 +584,53 @@ mod tests {
         let path = td.path().join("tr.toml");
         let hex_a = "aa".repeat(32);
         let hex_b = "cc".repeat(32);
+        let keyid_a = format!("ed25519:{hex_a}");
+        let keyid_b = format!("ed25519:{hex_b}");
         fs::write(
             &path,
             format!(
-                "[[trust_root]]\nkeyid = \"ed25519:a\"\nkind = \"ed25519\"\npubkey_hex = \"{hex_a}\"\n\
-                 [[trust_root]]\nkeyid = \"ed25519:b\"\nkind = \"ed25519\"\npubkey_hex = \"{hex_b}\"\n"
+                "[[trust_root]]\nkeyid = \"{keyid_a}\"\nkind = \"ed25519\"\npubkey_hex = \"{hex_a}\"\n\
+                 [[trust_root]]\nkeyid = \"{keyid_b}\"\nkind = \"ed25519\"\npubkey_hex = \"{hex_b}\"\n"
             ),
         )
         .unwrap();
         let reg = load_trust_roots(&path).unwrap();
-        assert!(reg.lookup("ed25519:a").is_some());
-        assert!(reg.lookup("ed25519:b").is_some());
+        assert!(reg.lookup(&keyid_a).is_some());
+        assert!(reg.lookup(&keyid_b).is_some());
+    }
+
+    #[test]
+    fn load_trust_roots_drops_keyid_pubkey_mismatch() {
+        // #223: keyid embeds pubkey `aa..`, but pubkey_hex says `bb..`.
+        // The entry must be dropped, not silently trusted.
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("tr.toml");
+        let keyid_hex = "aa".repeat(32);
+        let wrong_pubkey = "bb".repeat(32);
+        let keyid = format!("ed25519:{keyid_hex}");
+        fs::write(
+            &path,
+            format!(
+                "[[trust_root]]\nkeyid = \"{keyid}\"\nkind = \"ed25519\"\npubkey_hex = \"{wrong_pubkey}\"\n"
+            ),
+        )
+        .unwrap();
+        let reg = load_trust_roots(&path).unwrap();
+        assert!(reg.lookup(&keyid).is_none());
+    }
+
+    #[test]
+    fn keyid_matches_pubkey_canonical_and_blake3() {
+        let pk = [0x11u8; 32];
+        let hex = mkit_core::hash::to_hex_bytes(&pk);
+        assert!(keyid_matches_pubkey(&format!("ed25519:{hex}"), &pk));
+        assert!(keyid_matches_pubkey(&format!("secp256k1:{hex}"), &pk));
+        let digest = mkit_core::hash::to_hex(&mkit_core::hash::hash(&pk));
+        assert!(keyid_matches_pubkey(&format!("blake3:{digest}"), &pk));
+        // Opaque / unknown prefixes are not cross-checked.
+        assert!(keyid_matches_pubkey("sigstore:https://x", &pk));
+        // Mismatched body is rejected.
+        assert!(!keyid_matches_pubkey("ed25519:dead", &pk));
     }
 
     /// `[[trust_root]]` blocks with `kind = "bls12381-thr"` (or the

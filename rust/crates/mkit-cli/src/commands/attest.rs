@@ -67,6 +67,12 @@ use crate::exit;
 const DEFAULT_PREDICATE_TYPE: &str =
     "https://github.com/officialunofficial/mkit/spec/predicate/empty/v1";
 
+/// Hard cap on a `--predicate-file` body (#223). A DSSE predicate is a
+/// small JSON object; refusing anything past 1 MiB stops a runaway or
+/// hostile file from being slurped whole into memory before the JSON
+/// parse even runs.
+const MAX_PREDICATE_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "mkit attest",
@@ -284,9 +290,9 @@ pub fn run(args: &[String]) -> u8 {
 
     // --- Build predicate bytes. ------------------------------------
     let predicate_bytes: Vec<u8> = match parsed.predicate_file.as_deref() {
-        Some(p) => match std::fs::read(p) {
+        Some(p) => match read_predicate_file(p) {
             Ok(b) => b,
-            Err(e) => return emit_err(&format!("predicate file '{p}': {e}"), exit::NOINPUT),
+            Err((msg, code)) => return emit_err(&msg, code),
         },
         None => b"{}".to_vec(),
     };
@@ -432,6 +438,35 @@ fn factory_error_code(e: &FactoryError) -> u8 {
         }
         _ => exit::CONFIG_ERROR,
     }
+}
+
+/// Read a `--predicate-file` with a size cap (#223). Stats the file
+/// first so an oversized predicate is rejected before any large read,
+/// then reads with a bounded `take` as defence-in-depth against a file
+/// that grows between the stat and the read.
+fn read_predicate_file(path: &str) -> Result<Vec<u8>, (String, u8)> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| (format!("predicate file '{path}': {e}"), exit::NOINPUT))?;
+    if meta.len() > MAX_PREDICATE_BYTES {
+        return Err((
+            format!("predicate file '{path}' exceeds {MAX_PREDICATE_BYTES}-byte cap"),
+            exit::DATAERR,
+        ));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|e| (format!("predicate file '{path}': {e}"), exit::NOINPUT))?;
+    let mut data = Vec::new();
+    file.take(MAX_PREDICATE_BYTES + 1)
+        .read_to_end(&mut data)
+        .map_err(|e| (format!("predicate file '{path}': {e}"), exit::NOINPUT))?;
+    if data.len() as u64 > MAX_PREDICATE_BYTES {
+        return Err((
+            format!("predicate file '{path}' exceeds {MAX_PREDICATE_BYTES}-byte cap"),
+            exit::DATAERR,
+        ));
+    }
+    Ok(data)
 }
 
 /// Parse `--commit` value or fall back to HEAD.
