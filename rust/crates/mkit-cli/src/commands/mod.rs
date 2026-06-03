@@ -74,6 +74,39 @@ pub fn usage_error(msg: &str) -> u8 {
     exit::USAGE
 }
 
+/// Basename of the repo-level lock that serialises worktree/index
+/// read-modify-write commands (`add`, `rm`, `commit`, `merge`,
+/// `checkout`, `rebase`, `cherry-pick`, `stash`, `sparse-checkout`).
+///
+/// Ref-only mutations (`branch`/`tag`) and config-only mutations do not
+/// take this lock — they rely on ref-CAS / atomic-config writes instead.
+pub const WORKTREE_LOCK: &str = "worktree.lock";
+
+/// Acquire the shared worktree/index lock for the repo rooted at `root`.
+///
+/// Hold the returned guard across the whole read-modify-write so a
+/// second mutating `mkit` blocks (then times out) instead of racing on
+/// the worktree + `.mkit/index`. On failure, the lock message has
+/// already been printed to stderr and the returned [`u8`] is the exit
+/// code to propagate.
+///
+/// Mirrors the pattern already used in `sparse_checkout` and
+/// `remote_dispatch`; new mutating commands should reuse this helper
+/// rather than calling `repo_lock::acquire_default` directly.
+///
+/// # Errors
+/// Returns [`exit::TEMPFAIL`] when the lock cannot be taken within the
+/// default timeout (another `mkit` holds it, or a stale lockfile is
+/// present).
+pub fn acquire_worktree_lock(root: &Path) -> Result<mkit_core::repo_lock::RepoLock, u8> {
+    let mkit_dir = root.join(mkit_core::MKIT_DIR);
+    mkit_core::repo_lock::acquire_default(&mkit_dir, WORKTREE_LOCK).map_err(|e| {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "error: repo lock: {e}");
+        exit::TEMPFAIL
+    })
+}
+
 pub(crate) fn index_path_matches_or_descends(path: &str, base: &str) -> bool {
     path == base || index_path_descends_from(path, base)
 }
