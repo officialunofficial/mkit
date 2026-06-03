@@ -69,7 +69,7 @@ pub mod tokio_io;
 #[cfg(feature = "tcp")]
 pub use tcp::{
     PeerPolicy, TokioExecutor, connect_tcp, connect_tcp_with_executor, serve_tcp,
-    serve_tcp_with_policy,
+    serve_tcp_with_policy, serve_tcp_with_policy_and_bounds,
 };
 
 /// Re-export of the encrypted-stream `Sender` / `Receiver` types
@@ -318,13 +318,51 @@ impl<I: Stream, O: Sink, E: Executor> EncTransport<I, O, E> {
 ///   SPEC-TRANSPORT-ENC §4.
 #[must_use]
 pub fn default_handshake_config(signing_key: PrivateKey) -> EncConfig<PrivateKey> {
+    default_handshake_config_with_bounds(signing_key, EncHandshakeBounds::default())
+}
+
+/// Operator-tunable handshake/synchrony bounds (#216).
+///
+/// SPEC-TRANSPORT-ENC §6.2 recommends tightening these to ≤5–10s for
+/// real networks. They are exposed so a production listener can pick a
+/// tighter ladder than the (deliberately generous) Phase-1 defaults
+/// without flaky-CI failures in the in-tree deterministic tests.
+#[derive(Debug, Clone, Copy)]
+pub struct EncHandshakeBounds {
+    /// Acceptable clock skew between the two peers.
+    pub synchrony_bound: Duration,
+    /// Maximum age of a handshake message before it is rejected.
+    pub max_handshake_age: Duration,
+    /// Overall deadline for completing the handshake.
+    pub handshake_timeout: Duration,
+}
+
+impl Default for EncHandshakeBounds {
+    fn default() -> Self {
+        // Phase-1 defaults: deliberately generous (30s / 30s / 60s) to
+        // keep flaky-CI failures out of the in-tree deterministic test.
+        Self {
+            synchrony_bound: Duration::from_secs(30),
+            max_handshake_age: Duration::from_secs(30),
+            handshake_timeout: Duration::from_mins(1),
+        }
+    }
+}
+
+/// Like [`default_handshake_config`] but with operator-supplied
+/// [`EncHandshakeBounds`].
+#[must_use]
+pub fn default_handshake_config_with_bounds(
+    signing_key: PrivateKey,
+    bounds: EncHandshakeBounds,
+) -> EncConfig<PrivateKey> {
     EncConfig {
         signing_key,
         namespace: HANDSHAKE_NAMESPACE.to_vec(),
         max_message_size: MAX_FRAME_BYTES,
-        synchrony_bound: Duration::from_secs(30),
-        max_handshake_age: Duration::from_secs(30),
-        handshake_timeout: Duration::from_mins(1),
+        synchrony_bound: bounds.synchrony_bound,
+        max_handshake_age: bounds.max_handshake_age,
+        handshake_timeout: bounds.handshake_timeout,
     }
 }
 
@@ -617,6 +655,30 @@ pub async fn recv_frame<I: Stream>(receiver: &mut Receiver<I>) -> TransportResul
     let bufs = receiver.recv().await.map_err(stream_err)?;
     let buf = bufs.coalesce();
     SshFrame::decode_from_slice(buf.as_ref()).map_err(|_| TransportError::ProtocolError)
+}
+
+/// Receive one [`SshFrame`] but fail with [`TransportError::ConnectionFailed`]
+/// if no complete frame arrives within `idle`.
+///
+/// This is the post-handshake slow-loris guard for the encrypted
+/// listener (#216): a peer that completes the handshake but then stalls
+/// the verb loop (or an upload's chunk stream) must not be able to pin a
+/// tokio worker + socket indefinitely. The handshake itself is already
+/// bounded by [`default_handshake_config`]; this caps every *subsequent*
+/// frame read.
+///
+/// Requires a tokio runtime context (the `serve_tcp` listener provides
+/// one), so it is gated on the `tcp` feature.
+#[cfg(feature = "tcp")]
+pub async fn recv_frame_within<I: Stream>(
+    receiver: &mut Receiver<I>,
+    idle: core::time::Duration,
+) -> TransportResult<SshFrame> {
+    match tokio::time::timeout(idle, recv_frame(receiver)).await {
+        Ok(res) => res,
+        // Timed out waiting for the next frame — treat the peer as gone.
+        Err(_elapsed) => Err(TransportError::ConnectionFailed),
+    }
 }
 
 /// Variant of [`send_frame`] used during the application-level Hello

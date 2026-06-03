@@ -72,6 +72,30 @@ struct ServeOpts {
     /// the direct-listen e2e harness — NEVER for production.
     #[arg(long = "unsafe-allow-any-enc-peer", default_value_t = false)]
     unsafe_allow_any_enc_peer: bool,
+
+    /// Post-handshake per-frame idle timeout, in seconds, for the
+    /// encrypted listener (#216). After the handshake completes, a peer
+    /// that does not send the next verb/upload frame within this window
+    /// has its session dropped — preventing a slow-loris peer from
+    /// pinning a worker + socket forever. `0` disables the timeout
+    /// (NOT recommended). Default: 60s.
+    #[arg(
+        long = "enc-idle-timeout-secs",
+        value_name = "SECS",
+        default_value_t = 60
+    )]
+    enc_idle_timeout_secs: u64,
+
+    /// Handshake completion deadline, in seconds, for the encrypted
+    /// listener (#216). SPEC-TRANSPORT-ENC §6.2 recommends tightening to
+    /// ≤5–10s on real networks; the default is deliberately generous.
+    /// Default: 60s.
+    #[arg(
+        long = "enc-handshake-timeout-secs",
+        value_name = "SECS",
+        default_value_t = 60
+    )]
+    enc_handshake_timeout_secs: u64,
 }
 
 // -- Per-connection resource caps -------------------------------------------
@@ -106,6 +130,8 @@ pub fn run(args: &[String]) -> u8 {
             opts.enc_authorized_peers.as_deref(),
             opts.enc_server_key.as_deref(),
             opts.unsafe_allow_any_enc_peer,
+            opts.enc_idle_timeout_secs,
+            opts.enc_handshake_timeout_secs,
         );
     }
 
@@ -123,12 +149,15 @@ pub fn run(args: &[String]) -> u8 {
 /// `UNAVAILABLE` so package builders shipping the bare-bones binary
 /// get a clear signal.
 #[cfg(not(feature = "enc-transport"))]
+#[allow(clippy::too_many_arguments)]
 fn run_listen_enc(
     _addr: &str,
     _repo_root: PathBuf,
     _authorized_peers: Option<&str>,
     _server_key: Option<&str>,
     _unsafe_allow_any: bool,
+    _idle_timeout_secs: u64,
+    _handshake_timeout_secs: u64,
 ) -> u8 {
     eprintln!(
         "mkit serve --listen-enc requires the `enc-transport` cargo feature; \
@@ -144,7 +173,8 @@ fn run_listen_enc(
     clippy::items_after_statements,
     clippy::cast_possible_truncation,
     clippy::box_default,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::too_many_arguments
 )]
 fn run_listen_enc(
     addr: &str,
@@ -152,10 +182,13 @@ fn run_listen_enc(
     authorized_peers: Option<&str>,
     server_key: Option<&str>,
     unsafe_allow_any: bool,
+    idle_timeout_secs: u64,
+    handshake_timeout_secs: u64,
 ) -> u8 {
     use commonware_cryptography::Signer as _;
-    use mkit_transport_enc::PeerPolicy;
+    use mkit_transport_enc::{EncHandshakeBounds, PeerPolicy};
     use std::sync::Arc;
+    use std::time::Duration;
 
     // --- Fail-closed gate (issue #178) ---------------------------------
     //
@@ -228,6 +261,9 @@ fn run_listen_enc(
 
     let tx = Arc::new(FileTransport::new(&repo_root));
 
+    // Post-handshake per-frame idle timeout (#216). `0` disables it.
+    let idle_timeout = (idle_timeout_secs != 0).then(|| Duration::from_secs(idle_timeout_secs));
+
     let serve_fn = move |sess: mkit_transport_enc::EncSession<
         mkit_transport_enc::tokio_io::TokioStream,
         mkit_transport_enc::tokio_io::TokioSink,
@@ -237,10 +273,18 @@ fn run_listen_enc(
         // Each accepted connection gets its own future. `serve_tcp`
         // awaits this inside a per-connection `tokio::spawn`, so we
         // can `.await` freely without deadlocking the listener.
-        async move { serve_enc_session(tx, sess).await }
+        async move { serve_enc_session(tx, sess, idle_timeout).await }
     };
 
-    match mkit_transport_enc::serve_tcp_with_policy(addr, sk, policy, serve_fn) {
+    // Operator-tunable handshake bounds (#216). `synchrony_bound` /
+    // `max_handshake_age` keep their generous defaults; only the overall
+    // completion deadline is exposed as a flag for now.
+    let bounds = EncHandshakeBounds {
+        handshake_timeout: Duration::from_secs(handshake_timeout_secs),
+        ..EncHandshakeBounds::default()
+    };
+
+    match mkit_transport_enc::serve_tcp_with_policy_and_bounds(addr, sk, policy, bounds, serve_fn) {
         Ok(()) => exit::OK,
         Err(e) => {
             eprintln!("mkit serve --listen-enc: {e}");
@@ -474,12 +518,15 @@ async fn serve_enc_session(
         mkit_transport_enc::tokio_io::TokioStream,
         mkit_transport_enc::tokio_io::TokioSink,
     >,
+    idle_timeout: Option<std::time::Duration>,
 ) {
-    use mkit_transport_enc::{recv_frame, send_frame};
+    use mkit_transport_enc::send_frame;
 
     let (mut sender, mut receiver) = sess.into_parts();
-    // App-level Hello.
-    let Ok(frame) = recv_frame(&mut receiver).await else {
+    // App-level Hello — also bounded by the idle timeout so a peer that
+    // completes the cryptographic handshake then stalls before sending
+    // the app Hello can't pin the worker either.
+    let Ok(frame) = recv_frame_idle(&mut receiver, idle_timeout).await else {
         return;
     };
     let proto = match frame.body {
@@ -505,18 +552,36 @@ async fn serve_enc_session(
     // decisions but uses async encrypted-frame helpers so we never
     // block the listener's tokio worker.
     loop {
-        let Ok(frame) = recv_frame(&mut receiver).await else {
+        let Ok(frame) = recv_frame_idle(&mut receiver, idle_timeout).await else {
             return;
         };
         if let Some(ssh_frame::Body::Close(_)) = frame.body {
             return;
         }
-        if dispatch_enc_one(&tx, frame, &mut sender, &mut receiver)
+        if dispatch_enc_one(&tx, frame, &mut sender, &mut receiver, idle_timeout)
             .await
             .is_err()
         {
             return;
         }
+    }
+}
+
+/// Receive one frame, applying the post-handshake idle timeout when set
+/// (#216). With `None` the read is unbounded (operator opted out via
+/// `--enc-idle-timeout-secs 0`).
+#[cfg(feature = "enc-transport")]
+async fn recv_frame_idle(
+    receiver: &mut mkit_transport_enc::EncReceiver<mkit_transport_enc::tokio_io::TokioStream>,
+    idle_timeout: Option<std::time::Duration>,
+) -> Result<SshFrame, ()> {
+    match idle_timeout {
+        Some(d) => mkit_transport_enc::recv_frame_within(receiver, d)
+            .await
+            .map_err(|_| ()),
+        None => mkit_transport_enc::recv_frame(receiver)
+            .await
+            .map_err(|_| ()),
     }
 }
 
@@ -541,10 +606,11 @@ async fn dispatch_enc_one(
     frame: SshFrame,
     sender: &mut mkit_transport_enc::EncSender<mkit_transport_enc::tokio_io::TokioSink>,
     receiver: &mut mkit_transport_enc::EncReceiver<mkit_transport_enc::tokio_io::TokioStream>,
+    idle_timeout: Option<std::time::Duration>,
 ) -> Result<(), ()> {
     use mkit_core::protocol::PackKey;
     use mkit_rpc::mkit::rpc::v1::ssh::DownloadPackHeader;
-    use mkit_transport_enc::{recv_frame, send_frame};
+    use mkit_transport_enc::send_frame;
 
     async fn send_body(
         sender: &mut mkit_transport_enc::EncSender<mkit_transport_enc::tokio_io::TokioSink>,
@@ -654,7 +720,7 @@ async fn dispatch_enc_one(
                 }
             };
             loop {
-                let f = recv_frame(receiver).await.map_err(|_| ())?;
+                let f = recv_frame_idle(receiver, idle_timeout).await?;
                 let Some(ssh_frame::Body::PackChunk(chunk)) = f.body else {
                     return send_err(
                         sender,
@@ -1688,7 +1754,11 @@ mod tests {
                 >,
                       _peer: commonware_cryptography::ed25519::PublicKey| {
                     let tx = server_tx.clone();
-                    async move { serve_enc_session(tx, sess).await }
+                    // Tests drive a cooperative client, so the idle
+                    // timeout is irrelevant here; keep it generous.
+                    async move {
+                        serve_enc_session(tx, sess, Some(std::time::Duration::from_secs(30))).await;
+                    }
                 };
             let _ = serve_tcp_with_addr(
                 "127.0.0.1:0",

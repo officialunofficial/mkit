@@ -56,7 +56,10 @@ use rand_core::{CryptoRng, RngCore};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::tokio_io::{TokioSink, TokioStream, split_tcp};
-use crate::{EncInitError, EncSession, EncTransport, default_handshake_config};
+use crate::{
+    EncHandshakeBounds, EncInitError, EncSession, EncTransport, default_handshake_config,
+    default_handshake_config_with_bounds,
+};
 
 // ---------------------------------------------------------------------------
 // TokioExecutor — Executor trait impl that owns its own tokio runtime
@@ -511,6 +514,39 @@ where
         addr,
         signing_key,
         policy,
+        EncHandshakeBounds::default(),
+        executor,
+        None::<fn(SocketAddr)>,
+        serve_fn,
+    )
+}
+
+/// Variant of [`serve_tcp_with_policy`] that also accepts operator-tunable
+/// [`EncHandshakeBounds`] (#216) for tightening the handshake/synchrony
+/// deadlines on real networks.
+///
+/// # Errors
+///
+/// - `EncInitError::HandshakeFailed` if `addr` is unparseable or
+///   `bind` fails.
+pub fn serve_tcp_with_policy_and_bounds<F, Fut>(
+    addr: &str,
+    signing_key: PrivateKey,
+    policy: PeerPolicy,
+    bounds: EncHandshakeBounds,
+    serve_fn: F,
+) -> Result<(), EncInitError>
+where
+    F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
+    Fut: core::future::Future<Output = ()> + Send + 'static,
+{
+    let executor = TokioExecutor::new()
+        .map_err(|e| EncInitError::HandshakeFailed(format!("tokio runtime init failed: {e}")))?;
+    serve_tcp_inner(
+        addr,
+        signing_key,
+        policy,
+        bounds,
         executor,
         None::<fn(SocketAddr)>,
         serve_fn,
@@ -539,7 +575,15 @@ where
     F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
     Fut: core::future::Future<Output = ()> + Send + 'static,
 {
-    serve_tcp_inner(addr, signing_key, policy, executor, Some(addr_cb), serve_fn)
+    serve_tcp_inner(
+        addr,
+        signing_key,
+        policy,
+        EncHandshakeBounds::default(),
+        executor,
+        Some(addr_cb),
+        serve_fn,
+    )
 }
 
 /// Back-compat [`serve_tcp_with_addr`] using [`PeerPolicy::AllowAny`].
@@ -565,6 +609,7 @@ where
         addr,
         signing_key,
         PeerPolicy::AllowAny,
+        EncHandshakeBounds::default(),
         executor,
         Some(addr_cb),
         serve_fn,
@@ -579,6 +624,7 @@ fn serve_tcp_inner<F, Fut>(
     addr: &str,
     signing_key: PrivateKey,
     policy: PeerPolicy,
+    bounds: EncHandshakeBounds,
     executor: TokioExecutor,
     addr_cb: Option<impl FnOnce(SocketAddr) + Send + 'static>,
     serve_fn: F,
@@ -619,7 +665,7 @@ where
                     Err(_) => return,
                 };
                 let ctx = TokioContext::new(pool);
-                let cfg = default_handshake_config(signing_key);
+                let cfg = default_handshake_config_with_bounds(signing_key, bounds);
                 // The bouncer runs inside the handshake: a peer the
                 // policy rejects gets `PeerRejected` and never receives
                 // a HelloResponse / any application data.
@@ -816,5 +862,106 @@ mod tests {
                 "non-allowlisted client must not complete a round trip, got {result:?}"
             );
         }
+    }
+
+    /// #216 slow-loris guard: a peer that completes the handshake but
+    /// then goes silent must NOT pin the server session forever. The
+    /// `serve_fn` reads with `recv_frame_within(<short idle>)`; the
+    /// session future must return (signalled over a channel) well within
+    /// a bounded wall-clock window even though the client never sends a
+    /// frame.
+    #[test]
+    fn post_handshake_idle_timeout_drops_silent_peer() {
+        use crate::recv_frame_within;
+        use commonware_cryptography::Signer as _;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let exec = TokioExecutor::new().expect("runtime");
+        let server_key = PrivateKey::from_seed(4242);
+        let server_pubkey = {
+            use commonware_codec::Encode as _;
+            let encoded = server_key.public_key().encode();
+            let mut out = [0u8; 32];
+            out.copy_from_slice(encoded.as_ref());
+            out
+        };
+        let client_key = PrivateKey::from_seed(2424);
+
+        let (addr_tx, addr_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let exec_for_server = exec.clone();
+        let _server = thread::spawn(move || {
+            let done_tx = done_tx.clone();
+            let serve_fn = move |sess: EncSession<TokioStream, TokioSink>, _peer: PublicKey| {
+                let done_tx = done_tx.clone();
+                let (_sender, mut receiver) = sess.into_parts();
+                async move {
+                    // Short idle deadline: the silent client never sends,
+                    // so this returns ConnectionFailed quickly instead of
+                    // blocking forever.
+                    let r = recv_frame_within(&mut receiver, Duration::from_millis(300)).await;
+                    let _ = done_tx.send(r.is_err());
+                }
+            };
+            let _ = serve_tcp_with_addr_and_policy(
+                "127.0.0.1:0",
+                server_key,
+                PeerPolicy::AllowAny,
+                exec_for_server,
+                move |addr| {
+                    let _ = addr_tx.send(addr);
+                },
+                serve_fn,
+            );
+        });
+
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("listener address");
+
+        // Client completes the handshake, then deliberately stays silent.
+        let server_pk = server_pubkey;
+        let _client = thread::spawn(move || {
+            let pool = acquire_network_buffer_pool();
+            let ctx = TokioContext::new(pool);
+            let exec2 = TokioExecutor::new().expect("client runtime");
+            let _ = exec2.handle().block_on(async move {
+                let tcp = TcpStream::connect(addr).await.ok()?;
+                let (sink, stream) = split_tcp(tcp).ok()?;
+                let cfg = default_handshake_config(client_key);
+                let peer = decode_peer_pubkey(&server_pk).ok()?;
+                let (_sender, _receiver) = dial(ctx, cfg, peer, stream, sink).await.ok()?;
+                // Hold the connection open without sending anything.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Some(())
+            });
+        });
+
+        // The session must report completion (timed out → is_err == true)
+        // well before the client's 5s hold elapses.
+        let timed_out = done_rx
+            .recv_timeout(Duration::from_secs(4))
+            .expect("server session did not return — slow-loris guard failed");
+        assert!(
+            timed_out,
+            "silent peer should have been dropped via idle timeout"
+        );
+    }
+
+    #[test]
+    fn handshake_bounds_thread_through_config() {
+        use crate::{EncHandshakeBounds, default_handshake_config_with_bounds};
+        use commonware_cryptography::Signer as _;
+        let sk = PrivateKey::from_seed(1);
+        let bounds = EncHandshakeBounds {
+            synchrony_bound: Duration::from_secs(5),
+            max_handshake_age: Duration::from_secs(6),
+            handshake_timeout: Duration::from_secs(7),
+        };
+        let cfg = default_handshake_config_with_bounds(sk, bounds);
+        assert_eq!(cfg.synchrony_bound, Duration::from_secs(5));
+        assert_eq!(cfg.max_handshake_age, Duration::from_secs(6));
+        assert_eq!(cfg.handshake_timeout, Duration::from_secs(7));
     }
 }
