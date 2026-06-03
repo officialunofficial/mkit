@@ -41,6 +41,7 @@
 //! transport never spawns tasks of its own, so this constraint is
 //! purely about external callers.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -370,20 +371,79 @@ fn decode_peer_pubkey(bytes: &[u8; 32]) -> Result<PublicKey, EncInitError> {
 }
 
 // ---------------------------------------------------------------------------
+// Peer-authorization policy (issue #178)
+// ---------------------------------------------------------------------------
+
+/// Server-side peer-authorization policy for the encrypted listener.
+///
+/// The `commonware_stream::encrypted::listen` bouncer is a
+/// `FnOnce(PublicKey) -> Future<bool>` consulted during the handshake.
+/// Before any application bytes flow, the bouncer decides whether the
+/// dialing peer's static ed25519 key is allowed. A rejected peer never
+/// receives a `HelloResponse`, list-refs, packs, or update-ref — the
+/// session is torn down at the handshake layer.
+///
+/// - [`PeerPolicy::AllowAny`] accepts every dialer. This is the historic
+///   v0.x behaviour and is retained ONLY for the direct-listen e2e test
+///   harness and the explicit `--unsafe-allow-any-enc-peer` operator
+///   escape. It is fail-OPEN and must never be the implicit default.
+/// - [`PeerPolicy::Allowlist`] accepts only dialers whose 32-byte
+///   ed25519 public key is in the set. This is the fail-CLOSED posture
+///   `mkit serve --listen-enc` uses once an authorized-peers file is
+///   configured.
+#[derive(Clone, Debug)]
+pub enum PeerPolicy {
+    /// Accept any dialer (fail-open; dev / e2e only).
+    AllowAny,
+    /// Accept only dialers whose 32-byte ed25519 public key is listed.
+    Allowlist(HashSet<[u8; 32]>),
+}
+
+impl PeerPolicy {
+    /// Decide whether `peer` is authorized. `AllowAny` always accepts;
+    /// `Allowlist` checks set membership against the peer's encoded
+    /// 32-byte ed25519 public key.
+    fn admits(&self, peer: &PublicKey) -> bool {
+        match self {
+            PeerPolicy::AllowAny => true,
+            PeerPolicy::Allowlist(set) => match encode_pubkey(peer) {
+                Some(bytes) => set.contains(&bytes),
+                None => false,
+            },
+        }
+    }
+}
+
+/// Encode a `PublicKey` to its raw 32-byte ed25519 representation for
+/// allowlist comparison. Returns `None` if the encoded form is not
+/// exactly 32 bytes (should never happen for ed25519, but we fail
+/// closed rather than panic).
+fn encode_pubkey(peer: &PublicKey) -> Option<[u8; 32]> {
+    use commonware_codec::Encode as _;
+    let encoded = peer.encode();
+    let bytes = encoded.as_ref();
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(bytes);
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------
 // serve_tcp — Phase 2 listener
 // ---------------------------------------------------------------------------
 
 /// Accept one or more incoming encrypted connections on `addr` and
 /// hand each one off to `serve_fn`. The provided closure is an **async**
 /// fn that receives an already-authenticated [`EncSession`] paired with
-/// the dialer's public key (so operator-supplied keyring checks can
-/// decide whether to proceed).
+/// the dialer's public key.
 ///
-/// The bouncer is **permissive by default** — v0.x ships allowing any
-/// peer to complete the handshake. SPEC-TRANSPORT-ENC §6 item 5 calls
-/// out keystore integration; until that lands, deployers who need
-/// per-peer authorization should layer it inside `serve_fn` after the
-/// session is established.
+/// This back-compat entry point uses [`PeerPolicy::AllowAny`] — it
+/// accepts any dialer. It is retained for the direct-listen e2e test
+/// harness and callers that have explicitly opted into the unsafe
+/// allow-any escape. Production servers MUST use
+/// [`serve_tcp_with_policy`] with a [`PeerPolicy::Allowlist`].
 ///
 /// `serve_fn` is invoked on a fresh tokio task per accepted connection,
 /// so it gets to `.await` freely and stays inside the listener's
@@ -404,16 +464,42 @@ where
     F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
     Fut: core::future::Future<Output = ()> + Send + 'static,
 {
-    let executor = TokioExecutor::new()
-        .map_err(|e| EncInitError::HandshakeFailed(format!("tokio runtime init failed: {e}")))?;
-    serve_tcp_with_executor(addr, signing_key, executor, serve_fn)
+    serve_tcp_with_policy(addr, signing_key, PeerPolicy::AllowAny, serve_fn)
 }
 
-/// Variant of [`serve_tcp`] that reuses an existing [`TokioExecutor`].
+/// Variant of [`serve_tcp`] that enforces a [`PeerPolicy`].
+///
+/// # Errors
+///
+/// - `EncInitError::HandshakeFailed` if `addr` is unparseable or
+///   `bind` fails.
+pub fn serve_tcp_with_policy<F, Fut>(
+    addr: &str,
+    signing_key: PrivateKey,
+    policy: PeerPolicy,
+    serve_fn: F,
+) -> Result<(), EncInitError>
+where
+    F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
+    Fut: core::future::Future<Output = ()> + Send + 'static,
+{
+    let executor = TokioExecutor::new()
+        .map_err(|e| EncInitError::HandshakeFailed(format!("tokio runtime init failed: {e}")))?;
+    serve_tcp_with_executor(addr, signing_key, policy, executor, serve_fn)
+}
+
+/// Variant of [`serve_tcp_with_policy`] that reuses an existing
+/// [`TokioExecutor`].
+///
+/// # Errors
+///
+/// - `EncInitError::HandshakeFailed` if `addr` is unparseable or
+///   `bind` fails.
 #[allow(clippy::needless_pass_by_value)]
 pub fn serve_tcp_with_executor<F, Fut>(
     addr: &str,
     signing_key: PrivateKey,
+    policy: PeerPolicy,
     executor: TokioExecutor,
     serve_fn: F,
 ) -> Result<(), EncInitError>
@@ -421,49 +507,48 @@ where
     F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
     Fut: core::future::Future<Output = ()> + Send + 'static,
 {
-    let pool = acquire_network_buffer_pool();
-    let addr_owned = addr.to_string();
-    let serve_fn = Arc::new(serve_fn);
-    executor.handle().block_on(async move {
-        let bind_addr: SocketAddr = addr_owned
-            .parse()
-            .map_err(|e| EncInitError::HandshakeFailed(format!("parse '{addr_owned}': {e}")))?;
-        let listener = TcpListener::bind(bind_addr)
-            .await
-            .map_err(|e| EncInitError::HandshakeFailed(format!("bind {bind_addr}: {e}")))?;
-        loop {
-            let (tcp, _peer_addr) = match listener.accept().await {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-            let pool = pool.clone();
-            let signing_key = signing_key.clone();
-            let serve_fn = serve_fn.clone();
-            tokio::spawn(async move {
-                let (sink, stream) = match split_tcp(tcp) {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
-                let ctx = TokioContext::new(pool);
-                let cfg = default_handshake_config(signing_key);
-                if let Ok((peer, sender, receiver)) =
-                    listen(ctx, |_| async { true }, cfg, stream, sink).await
-                {
-                    let sess = EncSession::new(sender, receiver);
-                    serve_fn(sess, peer).await;
-                }
-                // Per-connection handshake failure is logged (when
-                // tracing is wired) and dropped. Other peers keep
-                // accepting.
-            });
-        }
-        Ok::<_, EncInitError>(())
-    })
+    serve_tcp_inner(
+        addr,
+        signing_key,
+        policy,
+        executor,
+        None::<fn(SocketAddr)>,
+        serve_fn,
+    )
 }
 
-/// Same as [`serve_tcp`] but returns the bound `SocketAddr` to the
-/// caller before entering the accept loop. Used by the e2e test to
-/// pick up the OS-assigned port when binding `127.0.0.1:0`.
+/// Same as [`serve_tcp_with_executor`] but returns the bound
+/// `SocketAddr` to the caller before entering the accept loop, and
+/// enforces a [`PeerPolicy`]. Used by the e2e / unit tests to pick up
+/// the OS-assigned port when binding `127.0.0.1:0`.
+///
+/// # Errors
+///
+/// - `EncInitError::HandshakeFailed` if `addr` is unparseable or
+///   `bind` fails.
+#[allow(clippy::needless_pass_by_value)]
+pub fn serve_tcp_with_addr_and_policy<F, Fut>(
+    addr: &str,
+    signing_key: PrivateKey,
+    policy: PeerPolicy,
+    executor: TokioExecutor,
+    addr_cb: impl FnOnce(SocketAddr) + Send + 'static,
+    serve_fn: F,
+) -> Result<(), EncInitError>
+where
+    F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
+    Fut: core::future::Future<Output = ()> + Send + 'static,
+{
+    serve_tcp_inner(addr, signing_key, policy, executor, Some(addr_cb), serve_fn)
+}
+
+/// Back-compat [`serve_tcp_with_addr`] using [`PeerPolicy::AllowAny`].
+/// Retained so the existing e2e harness compiles unchanged.
+///
+/// # Errors
+///
+/// - `EncInitError::HandshakeFailed` if `addr` is unparseable or
+///   `bind` fails.
 #[allow(clippy::needless_pass_by_value)]
 pub fn serve_tcp_with_addr<F, Fut>(
     addr: &str,
@@ -476,9 +561,36 @@ where
     F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
     Fut: core::future::Future<Output = ()> + Send + 'static,
 {
+    serve_tcp_inner(
+        addr,
+        signing_key,
+        PeerPolicy::AllowAny,
+        executor,
+        Some(addr_cb),
+        serve_fn,
+    )
+}
+
+/// Shared accept-loop implementation for every `serve_tcp*` entry point.
+/// The `policy` is consulted by the handshake bouncer; a rejected peer
+/// never reaches `serve_fn`.
+#[allow(clippy::needless_pass_by_value)]
+fn serve_tcp_inner<F, Fut>(
+    addr: &str,
+    signing_key: PrivateKey,
+    policy: PeerPolicy,
+    executor: TokioExecutor,
+    addr_cb: Option<impl FnOnce(SocketAddr) + Send + 'static>,
+    serve_fn: F,
+) -> Result<(), EncInitError>
+where
+    F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
+    Fut: core::future::Future<Output = ()> + Send + 'static,
+{
     let pool = acquire_network_buffer_pool();
     let addr_owned = addr.to_string();
     let serve_fn = Arc::new(serve_fn);
+    let policy = Arc::new(policy);
     executor.handle().block_on(async move {
         let bind_addr: SocketAddr = addr_owned
             .parse()
@@ -486,10 +598,12 @@ where
         let listener = TcpListener::bind(bind_addr)
             .await
             .map_err(|e| EncInitError::HandshakeFailed(format!("bind {bind_addr}: {e}")))?;
-        let local = listener
-            .local_addr()
-            .map_err(|e| EncInitError::HandshakeFailed(format!("local_addr: {e}")))?;
-        addr_cb(local);
+        if let Some(cb) = addr_cb {
+            let local = listener
+                .local_addr()
+                .map_err(|e| EncInitError::HandshakeFailed(format!("local_addr: {e}")))?;
+            cb(local);
+        }
         loop {
             let (tcp, _peer_addr) = match listener.accept().await {
                 Ok(p) => p,
@@ -498,6 +612,7 @@ where
             let pool = pool.clone();
             let signing_key = signing_key.clone();
             let serve_fn = serve_fn.clone();
+            let policy = policy.clone();
             tokio::spawn(async move {
                 let (sink, stream) = match split_tcp(tcp) {
                     Ok(p) => p,
@@ -505,12 +620,23 @@ where
                 };
                 let ctx = TokioContext::new(pool);
                 let cfg = default_handshake_config(signing_key);
-                if let Ok((peer, sender, receiver)) =
-                    listen(ctx, |_| async { true }, cfg, stream, sink).await
+                // The bouncer runs inside the handshake: a peer the
+                // policy rejects gets `PeerRejected` and never receives
+                // a HelloResponse / any application data.
+                let bouncer = {
+                    let policy = policy.clone();
+                    move |peer: PublicKey| {
+                        let policy = policy.clone();
+                        async move { policy.admits(&peer) }
+                    }
+                };
+                if let Ok((peer, sender, receiver)) = listen(ctx, bouncer, cfg, stream, sink).await
                 {
                     let sess = EncSession::new(sender, receiver);
                     serve_fn(sess, peer).await;
                 }
+                // Per-connection handshake failure (including policy
+                // rejection) is dropped; other peers keep accepting.
             });
         }
         Ok::<_, EncInitError>(())
@@ -549,5 +675,146 @@ mod tests {
         // Debug repr matches (config + num_classes) — they would
         // differ only across distinct pool constructions.
         assert_eq!(format!("{p1:?}"), format!("{p2:?}"));
+    }
+
+    /// `PeerPolicy::Allowlist` admits a listed key and rejects an
+    /// unlisted one; `AllowAny` admits both. This pins the bouncer
+    /// decision in isolation from the TCP machinery.
+    #[test]
+    fn peer_policy_allowlist_membership() {
+        use commonware_cryptography::Signer as _;
+        let allowed = PrivateKey::from_seed(11).public_key();
+        let denied = PrivateKey::from_seed(22).public_key();
+
+        let mut set = HashSet::new();
+        set.insert(encode_pubkey(&allowed).unwrap());
+        let allowlist = PeerPolicy::Allowlist(set);
+
+        assert!(allowlist.admits(&allowed));
+        assert!(!allowlist.admits(&denied));
+
+        assert!(PeerPolicy::AllowAny.admits(&allowed));
+        assert!(PeerPolicy::AllowAny.admits(&denied));
+    }
+
+    /// End-to-end over real TCP: an allowlisted client completes the
+    /// handshake and the application `Hello` round-trip; a client whose
+    /// key is NOT on the allowlist is rejected at the handshake and
+    /// never establishes a session (no `HelloResponse`).
+    #[test]
+    fn allowlist_admits_listed_rejects_unlisted_over_tcp() {
+        use commonware_codec::Encode as _;
+        use commonware_cryptography::Signer as _;
+        use std::sync::mpsc;
+        use std::thread;
+
+        fn pubkey_bytes(sk: &PrivateKey) -> [u8; 32] {
+            let encoded = sk.public_key().encode();
+            let mut out = [0u8; 32];
+            out.copy_from_slice(encoded.as_ref());
+            out
+        }
+
+        let exec = TokioExecutor::new().expect("runtime");
+        let server_key = PrivateKey::from_seed(7777);
+        let server_pubkey = pubkey_bytes(&server_key);
+
+        let allowed_client = PrivateKey::from_seed(8888);
+        let denied_client = PrivateKey::from_seed(9999);
+
+        // Allowlist only the "allowed" client's key.
+        let mut set = HashSet::new();
+        set.insert(pubkey_bytes(&allowed_client));
+        let policy = PeerPolicy::Allowlist(set);
+
+        let (addr_tx, addr_rx) = mpsc::channel();
+        let exec_for_server = exec.clone();
+        let _server = thread::spawn(move || {
+            // serve_fn echoes a single byte so a connected client can
+            // observe a completed session. Rejected peers never reach it.
+            let serve_fn = move |sess: EncSession<TokioStream, TokioSink>, _peer: PublicKey| {
+                let (mut sender, mut receiver) = sess.into_parts();
+                async move {
+                    if let Ok(bufs) = receiver.recv().await {
+                        let _ = sender.send(bufs.coalesce().as_ref().to_vec()).await;
+                    }
+                }
+            };
+            let _ = serve_tcp_with_addr_and_policy(
+                "127.0.0.1:0",
+                server_key,
+                policy,
+                exec_for_server,
+                move |addr| {
+                    let _ = addr_tx.send(addr);
+                },
+                serve_fn,
+            );
+        });
+
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("listener address");
+
+        // Allowlisted client: handshake + app round-trip succeed.
+        {
+            let pool = acquire_network_buffer_pool();
+            let ctx = TokioContext::new(pool);
+            let server_pk = server_pubkey;
+            let result = exec.handle().block_on(async move {
+                let tcp = TcpStream::connect(addr)
+                    .await
+                    .map_err(|e| EncInitError::HandshakeFailed(format!("connect: {e}")))?;
+                let (sink, stream) = split_tcp(tcp)
+                    .map_err(|e| EncInitError::HandshakeFailed(format!("split: {e}")))?;
+                let cfg = default_handshake_config(allowed_client);
+                let peer = decode_peer_pubkey(&server_pk)?;
+                let (mut sender, mut receiver) = dial(ctx, cfg, peer, stream, sink).await?;
+                sender
+                    .send(b"ping".to_vec())
+                    .await
+                    .map_err(|e| EncInitError::HandshakeFailed(format!("send: {e}")))?;
+                let echo = receiver
+                    .recv()
+                    .await
+                    .map_err(|e| EncInitError::HandshakeFailed(format!("recv: {e}")))?;
+                Ok::<_, EncInitError>(echo.coalesce().as_ref().to_vec())
+            });
+            assert_eq!(result.expect("allowlisted round trip"), b"ping");
+        }
+
+        // Non-allowlisted client: handshake is rejected. The dial either
+        // returns PeerRejected or the subsequent receive fails — in no
+        // case do we get the application echo back.
+        {
+            let pool = acquire_network_buffer_pool();
+            let ctx = TokioContext::new(pool);
+            let server_pk = server_pubkey;
+            let result = exec.handle().block_on(async move {
+                let tcp = TcpStream::connect(addr)
+                    .await
+                    .map_err(|e| EncInitError::HandshakeFailed(format!("connect: {e}")))?;
+                let (sink, stream) = split_tcp(tcp)
+                    .map_err(|e| EncInitError::HandshakeFailed(format!("split: {e}")))?;
+                let cfg = default_handshake_config(denied_client);
+                let peer = decode_peer_pubkey(&server_pk)?;
+                let (mut sender, mut receiver) = dial(ctx, cfg, peer, stream, sink).await?;
+                // If we somehow got past the handshake, prove no echo
+                // comes back.
+                sender
+                    .send(b"ping".to_vec())
+                    .await
+                    .map_err(|e| EncInitError::HandshakeFailed(format!("send: {e}")))?;
+                let echo = receiver
+                    .recv()
+                    .await
+                    .map_err(|e| EncInitError::HandshakeFailed(format!("recv: {e}")))?;
+                Ok::<_, EncInitError>(echo.coalesce().as_ref().to_vec())
+            });
+            assert!(
+                result.is_err(),
+                "non-allowlisted client must not complete a round trip, got {result:?}"
+            );
+        }
     }
 }

@@ -57,10 +57,20 @@ On local disk (`.mkit/refs/heads/<name>`, `.mkit/refs/tags/<name>`,
 use the same path shape relative to the transport's root.
 
 `refs/remotes/<remote>/<name>` is local-only remote-tracking state. The
-current single-remote CLI stores fetched branch tips under
+single-remote CLI stores fetched branch tips under
 `refs/remotes/default/<name>` and never writes fetched tips directly to
 `refs/heads/<name>`. `mkit pull` may then fast-forward the current local
 branch from the matching remote-tracking ref.
+
+Named remotes (`mkit remote add <name> <url>`) store their tracking refs
+under `refs/remotes/<name>/<branch>`. `mkit push` uses the local
+remote-tracking ref as its **CAS lease**: a default (current-branch)
+push writes the remote `refs/heads/<branch>` with a `Match(tracked)`
+condition (or `Missing` for a first push), so a remote that has moved
+past the tip we last saw rejects the update as non-fast-forward. On a
+successful push, mkit advances the local `refs/remotes/<remote>/<branch>`
+to the pushed tip. `--force-with-lease` keeps this lease; `--force`
+drops to an unconditional write.
 
 `HEAD` is a special file at `.mkit/HEAD` containing either:
 
