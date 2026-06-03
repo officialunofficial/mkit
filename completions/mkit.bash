@@ -63,7 +63,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--depth --sparse --help" -- "$cur") )
             ;;
         branch)
-            COMPREPLY=( $(compgen -W "-d --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-d -D -m --help" -- "$cur") )
             ;;
         rebase)
             COMPREPLY=( $(compgen -W "--continue --abort --help" -- "$cur") )
@@ -72,10 +72,10 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "start good bad reset" -- "$cur") )
             ;;
         stash)
-            COMPREPLY=( $(compgen -W "save list pop drop show" -- "$cur") )
+            COMPREPLY=( $(compgen -W "save list pop apply drop clear show" -- "$cur") )
             ;;
         remote)
-            COMPREPLY=( $(compgen -W "add set" -- "$cur") )
+            COMPREPLY=( $(compgen -W "add set remove rename" -- "$cur") )
             ;;
         key)
             COMPREPLY=( $(compgen -W "generate list import export delete --help" -- "$cur") )

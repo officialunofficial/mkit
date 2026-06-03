@@ -75,7 +75,11 @@ complete -c mkit -n "__fish_seen_subcommand_from clone" \
 complete -c mkit -n "__fish_seen_subcommand_from clone" \
     -l sparse -d "Sparse checkout"
 complete -c mkit -n "__fish_seen_subcommand_from branch" \
-    -s d -d "Delete branch" -r
+    -s d -d "Delete branch (safe)" -r
+complete -c mkit -n "__fish_seen_subcommand_from branch" \
+    -s D -d "Force-delete branch" -r
+complete -c mkit -n "__fish_seen_subcommand_from branch" \
+    -s m -d "Rename branch" -r
 complete -c mkit -n "__fish_seen_subcommand_from rebase" \
     -l continue -d "Continue an in-progress rebase"
 complete -c mkit -n "__fish_seen_subcommand_from rebase" \
@@ -86,11 +90,11 @@ complete -c mkit -n "__fish_seen_subcommand_from bisect; \
     and not __fish_seen_subcommand_from start good bad reset" \
     -a "start good bad reset"
 complete -c mkit -n "__fish_seen_subcommand_from stash; \
-    and not __fish_seen_subcommand_from save list pop drop show" \
-    -a "save list pop drop show"
+    and not __fish_seen_subcommand_from save list pop apply drop clear show" \
+    -a "save list pop apply drop clear show"
 complete -c mkit -n "__fish_seen_subcommand_from remote; \
-    and not __fish_seen_subcommand_from add set" \
-    -a "add set"
+    and not __fish_seen_subcommand_from add set remove rename" \
+    -a "add set remove rename"
 complete -c mkit -n "__fish_seen_subcommand_from key; \
     and not __fish_seen_subcommand_from generate list import export delete" \
     -a "generate list import export delete"
