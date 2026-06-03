@@ -466,6 +466,76 @@ fn sparse_checkout_disable_refuses_untracked_file_that_full_restore_would_remove
     );
 }
 
+// ---------- diff (revision resolver, #207) -------------------------------
+
+#[test]
+fn diff_head_tilde_one_shows_second_commit_change() {
+    // PR-B / #207: `mkit diff HEAD~1` must resolve the revision to its
+    // tree and emit a real diff against the worktree (which mirrors the
+    // tip), NOT silently treat `HEAD~1` as a pathspec and exit empty.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"one\n", "c1");
+    make_commit(td.path(), "b.txt", b"two\n", "c2");
+
+    let out = run_in(td.path(), &["diff", "HEAD~1"]);
+    assert!(out.status.success(), "diff HEAD~1 failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    // The worktree (== HEAD == c2) differs from HEAD~1 (== c1) by b.txt.
+    assert!(
+        stdout.contains("b.txt"),
+        "expected b.txt in diff HEAD~1 output, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn diff_branch_ref_resolves_and_diffs() {
+    // `mkit diff <branch>` resolves the branch tip to its tree.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"one\n", "c1");
+    assert!(run_in(td.path(), &["branch", "base"]).status.success());
+    make_commit(td.path(), "b.txt", b"two\n", "c2");
+
+    let out = run_in(td.path(), &["diff", "base"]);
+    assert!(out.status.success(), "diff base failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("b.txt"),
+        "expected b.txt in diff base output, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn diff_bad_revision_errors_not_silent_empty() {
+    // A hash-shaped arg that resolves to nothing is a hard error (#207),
+    // not a silent empty diff.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"one\n", "c1");
+
+    let bogus = "ab".repeat(32);
+    let out = run_in(td.path(), &["diff", &bogus]);
+    assert!(!out.status.success(), "bad revision should fail: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.to_lowercase().contains("revision"),
+        "expected a revision diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
+fn diff_staged_with_revision_is_usage_error() {
+    // #223: `--staged` already fixes HEAD vs index; an explicit revision
+    // is contradictory.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", b"one\n", "c1");
+
+    let out = run_in(td.path(), &["diff", "--staged", "HEAD"]);
+    assert!(!out.status.success(), "--staged HEAD should fail: {out:?}");
+}
+
 // ---------- branch / tag ref-write safety (#206) -------------------------
 
 #[test]
