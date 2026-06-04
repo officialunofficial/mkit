@@ -266,14 +266,17 @@ fn staged_change_remains_visible_after_worktree_revert() {
     fs::write(p.join("a.txt"), b"v1").unwrap();
 
     // Status MUST surface the staged delta — the index still has v2.
+    // Per git porcelain, this is one combined record `MM a.txt`: X=M is
+    // the staged (index-vs-HEAD) change, Y=M is the worktree-vs-index
+    // change (the revert). The staged side stays visible in column X.
     let (stdout, _) = status_porcelain(p);
     assert!(
         !stdout.is_empty(),
         "status hid a staged change behind a worktree revert"
     );
     assert!(
-        has_entry(&stdout, "M ", "a.txt"),
-        "expected staged `M ` for a.txt; got: {stdout:?}"
+        has_entry(&stdout, "MM", "a.txt"),
+        "expected combined `MM` (staged M in X) for a.txt; got: {stdout:?}"
     );
 }
 

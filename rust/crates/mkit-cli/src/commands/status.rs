@@ -145,17 +145,45 @@ pub fn run(args: &[String]) -> u8 {
 /// for paths that contain newlines or other special bytes.
 fn render_porcelain(entries: &[StatusEntry], z: bool) -> u8 {
     let mut stdout = std::io::stdout().lock();
-    for e in entries {
-        let code = porcelain_code(e.staging, e.diff.kind);
+    for (xy, path) in combine_porcelain(entries) {
+        // `xy` is two ASCII status columns by construction.
+        let code = std::str::from_utf8(&xy).unwrap_or("??");
         if z {
-            let _ = write!(stdout, "{code} {}\0", e.diff.path);
-        } else if let Some(quoted) = c_quote_path(&e.diff.path) {
+            let _ = write!(stdout, "{code} {path}\0");
+        } else if let Some(quoted) = c_quote_path(path) {
             let _ = writeln!(stdout, "{code} {quoted}");
         } else {
-            let _ = writeln!(stdout, "{code} {}", e.diff.path);
+            let _ = writeln!(stdout, "{code} {path}");
         }
     }
     exit::OK
+}
+
+/// Collapse `status_diff`'s per-(staging) entries into one `XY` record
+/// per path, matching `git status --porcelain`. A path that is staged
+/// **and** further changed in the worktree produces a single combined
+/// code (e.g. `MM`, `AM`) rather than two records. `X` is the staged
+/// (index-vs-HEAD) side, `Y` the unstaged (worktree-vs-index) side;
+/// `porcelain_code` already returns each side in its column, so we OR the
+/// non-space columns together. First-seen path order is preserved.
+fn combine_porcelain(entries: &[StatusEntry]) -> Vec<([u8; 2], &str)> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut codes: std::collections::HashMap<&str, [u8; 2]> = std::collections::HashMap::new();
+    for e in entries {
+        let c = porcelain_code(e.staging, e.diff.kind).as_bytes();
+        let slot = codes.entry(&e.diff.path).or_insert_with(|| {
+            order.push(&e.diff.path);
+            [b' ', b' ']
+        });
+        // Fill each column from whichever entry sets it (non-space wins).
+        if c[0] != b' ' {
+            slot[0] = c[0];
+        }
+        if c[1] != b' ' {
+            slot[1] = c[1];
+        }
+    }
+    order.into_iter().map(|p| (codes[p], p)).collect()
 }
 
 /// C-style-quote `path` the way Git does for porcelain output when a path
@@ -360,6 +388,64 @@ mod tests {
         assert_eq!(c_quote_path("é").as_deref(), Some(r#""\303\251""#));
         // Combined with ASCII: only the non-ASCII bytes are octal-escaped.
         assert_eq!(c_quote_path("x-é").as_deref(), Some(r#""x-\303\251""#));
+    }
+
+    fn entry(path: &str, staging: StatusStaging, kind: DiffKind) -> StatusEntry {
+        StatusEntry {
+            diff: mkit_core::ops::DiffEntry {
+                path: path.to_string(),
+                kind,
+                old_hash: None,
+                new_hash: None,
+            },
+            staging,
+        }
+    }
+
+    fn combined(entries: &[StatusEntry]) -> Vec<(String, String)> {
+        combine_porcelain(entries)
+            .into_iter()
+            .map(|(xy, p)| (std::str::from_utf8(&xy).unwrap().to_string(), p.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn combine_merges_staged_and_unstaged_same_path_into_one_record() {
+        use DiffKind::Modified;
+        use StatusStaging::{Staged, Unstaged};
+        // Staged modify + further worktree modify on the same path → one
+        // `MM a.txt` record, not two (git porcelain semantics).
+        let entries = [
+            entry("a.txt", Staged, Modified),
+            entry("a.txt", Unstaged, Modified),
+        ];
+        assert_eq!(combined(&entries), vec![("MM".into(), "a.txt".into())]);
+    }
+
+    #[test]
+    fn combine_staged_add_plus_worktree_modify_is_am() {
+        let entries = [
+            entry("n.txt", StatusStaging::Staged, DiffKind::Added),
+            entry("n.txt", StatusStaging::Unstaged, DiffKind::Modified),
+        ];
+        assert_eq!(combined(&entries), vec![("AM".into(), "n.txt".into())]);
+    }
+
+    #[test]
+    fn combine_preserves_lone_records_and_untracked() {
+        let entries = [
+            entry("staged.txt", StatusStaging::Staged, DiffKind::Added),
+            entry("dirty.txt", StatusStaging::Unstaged, DiffKind::Modified),
+            entry("new.txt", StatusStaging::Unstaged, DiffKind::Added), // untracked → ??
+        ];
+        assert_eq!(
+            combined(&entries),
+            vec![
+                ("A ".into(), "staged.txt".into()),
+                (" M".into(), "dirty.txt".into()),
+                ("??".into(), "new.txt".into()),
+            ]
+        );
     }
 
     #[test]
