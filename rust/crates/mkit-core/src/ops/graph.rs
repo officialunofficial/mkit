@@ -124,14 +124,40 @@ pub fn reachable_closure<'a, I>(store: &ObjectStore, roots: I) -> Result<BTreeSe
 where
     I: IntoIterator<Item = &'a Hash>,
 {
+    // Push-path callers tolerate cap truncation (they split pushes), so
+    // the truncation flag is dropped here. gc must NOT — it uses
+    // [`reachable_closure_checked`] and fails closed.
+    reachable_closure_checked(store, roots).map(|(out, _truncated)| out)
+}
+
+/// Like [`reachable_closure`] but also reports whether the
+/// [`MAX_REACHABLE`] cap truncated the walk (`true` = incomplete). A
+/// caller that would *delete* unreachable objects (gc) MUST treat
+/// `truncated == true` as fatal: beyond the cap the "unreachable" verdict
+/// is unsound, so pruning would drop live data.
+///
+/// # Errors
+///
+/// Propagates [`StoreError`] as [`reachable_objects`] does.
+pub fn reachable_closure_checked<'a, I>(
+    store: &ObjectStore,
+    roots: I,
+) -> Result<(BTreeSet<Hash>, bool), StoreError>
+where
+    I: IntoIterator<Item = &'a Hash>,
+{
     let mut out: BTreeSet<Hash> = BTreeSet::new();
     let mut queue: VecDeque<Hash> = VecDeque::new();
     for root in roots {
         queue.push_back(*root);
     }
 
+    let mut truncated = false;
     while let Some(h) = queue.pop_front() {
         if out.len() >= MAX_REACHABLE {
+            // Still had work to do but hit the cap — the closure is
+            // incomplete.
+            truncated = true;
             break;
         }
         if !out.insert(h) {
@@ -176,7 +202,7 @@ where
             }
         }
     }
-    Ok(out)
+    Ok((out, truncated))
 }
 
 // =====================================================================

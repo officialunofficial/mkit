@@ -31,7 +31,7 @@ all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 | Merge in progress | `.mkit/MERGE_HEAD` (+`ORIG_HEAD`) | `merge_head`, `orig_head` |
 | Cherry-pick in progress | `.mkit/CHERRY_PICK_HEAD` (+`ORIG_HEAD`) | `cherry_pick_head`, `orig_head` |
 | Rebase in progress | `.mkit/rebase-apply/{orig-head,onto,todo,done}` | `orig_head`, `onto`, every `todo` + `done` commit |
-| Conflict sidecar | `.mkit/mkit-conflicts` | each record's `base`/`ours`/`theirs` blob (when present) |
+| Conflict sidecar | `.mkit/mkit-conflicts` and `.mkit/rebase-apply/mkit-conflicts` | each record's `base`/`ours`/`theirs` blob (when present) |
 | Attestations | `.mkit/attestations/<commit-hex>/` | each attested commit (dir name) |
 
 The live keep-set is the reachable closure over those roots:
@@ -45,9 +45,18 @@ chunks, tags → target; blobs/deltas are leaves), capped at
 
 `collect_roots` returns an error if **any** source cannot be read, and
 `gc` MUST abort on that error rather than prune against a partial root
-set. The same applies to a root or referenced object missing from the
-store during the closure walk (`StoreError::ObjectNotFound` propagates):
-gc must not delete based on an incomplete walk.
+set. In particular:
+
+- Refs are walked **strictly** (not via the lenient `refs::list_*`): an
+  unreadable file, undecodable content, or a ref tree deeper than the
+  walk depth cap is an error, never a silent skip. (Dot-prefixed
+  atomic-write temp files are ignored.)
+- A root or referenced object missing from the store during the closure
+  walk (`StoreError::ObjectNotFound`) propagates.
+- If the closure hits the [`MAX_REACHABLE`] cap, `live_objects` returns
+  `GcRootsError::Truncated` — beyond the cap the "unreachable" verdict is
+  unsound, so gc must abort rather than prune. (The push path, by
+  contrast, tolerates cap truncation and splits the push.)
 
 ## Recovery gap (Part 2 — not yet implemented)
 

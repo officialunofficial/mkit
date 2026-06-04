@@ -29,6 +29,8 @@ pub use diff::{
     status_diff, text_patch,
 };
 pub use gc::{GcRootsError, collect_roots, live_objects};
-pub use graph::{collect_ancestor_set, reachable_closure, reachable_objects};
+pub use graph::{
+    collect_ancestor_set, reachable_closure, reachable_closure_checked, reachable_objects,
+};
 pub use merge::{Conflict, ConflictKind, MergeResult, find_merge_base, is_ancestor, merge_trees};
 pub use restore::{RestoreOptions, RestoreReport, restore_tree_to_worktree};
