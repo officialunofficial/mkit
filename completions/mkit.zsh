@@ -39,6 +39,7 @@ _mkit() {
         'key:Manage user-scoped keystore keys (generate/list/import/export/delete)'
         'keygen:Generate a new Ed25519 signing keypair'
         'cherry-pick:Apply a commit to the current branch'
+        'revert:Create a new commit undoing a previous commit'
         'rebase:Replay commits onto a different base'
         'bisect:Binary search for a bad commit'
         'gc:Reclaim unreachable objects'
@@ -165,6 +166,12 @@ _mkit() {
                     _arguments \
                         '--continue[continue after conflict resolution]' \
                         '--abort[abort rebase]' \
+                        '--help[show help]'
+                    ;;
+                revert)
+                    _arguments \
+                        '--continue[continue after conflict resolution]' \
+                        '--abort[abort revert]' \
                         '--help[show help]'
                     ;;
                 bisect)

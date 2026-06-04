@@ -11,6 +11,7 @@ pub mod diff;
 pub mod gc;
 pub mod graph;
 pub mod merge;
+pub mod revert;
 
 // Phase 5b — rebase / bisect / blame / stash / restore (OPS2).
 pub mod bisect;
@@ -22,8 +23,8 @@ pub mod stash;
 
 pub use cherry_pick::{CherryPickError, CherryPickResult, cherry_pick};
 pub use conflict_state::{
-    CherryPickState, ConflictRecord, ConflictStateError, MergeState, any_op_in_progress,
-    in_progress_op_name,
+    CherryPickState, ConflictRecord, ConflictStateError, MergeState, RevertState,
+    any_op_in_progress, in_progress_op_name,
 };
 pub use diff::{
     DiffEntry, DiffError, DiffKind, DiffResult, StatusEntry, StatusStaging, diff_trees,
@@ -36,3 +37,4 @@ pub use graph::{
 pub use merge::{Conflict, ConflictKind, MergeResult, find_merge_base, is_ancestor, merge_trees};
 pub use recovery::{RecoveryEntry, RecoveryError, RetentionPolicy};
 pub use restore::{RestoreOptions, RestoreReport, restore_tree_to_worktree};
+pub use revert::{RevertError, RevertResult, revert};

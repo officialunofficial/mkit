@@ -95,6 +95,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "clone" => commands::clone::run(&rest),
         "merge" => commands::merge::run(&rest),
         "cherry-pick" => commands::cherry_pick::run(&rest),
+        "revert" => commands::revert::run(&rest),
         "rebase" => commands::rebase::run(&rest),
         "bisect" => commands::bisect::run(&rest),
         "gc" => commands::gc::run(&rest),

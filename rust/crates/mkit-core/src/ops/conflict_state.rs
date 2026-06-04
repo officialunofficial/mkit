@@ -11,8 +11,10 @@
 //!   Presence ⇒ a merge is in progress.
 //! - `CHERRY_PICK_HEAD`  — 64-hex of the commit being picked.
 //!   Presence ⇒ a cherry-pick is in progress.
+//! - `REVERT_HEAD`       — 64-hex of the commit being reverted.
+//!   Presence ⇒ a revert is in progress.
 //! - `ORIG_HEAD`         — 64-hex of HEAD before the op (for `--abort`).
-//! - `MERGE_MSG` / `CHERRY_PICK_MSG` — pending commit message bytes.
+//! - `MERGE_MSG` / `CHERRY_PICK_MSG` / `REVERT_MSG` — pending commit message bytes.
 //! - `mkit-conflicts`    — the sidecar: one line per conflicting path,
 //!   recording the conflict kind and the base/ours/theirs blob hashes.
 //!   Used by `--abort` cleanup and by the "unresolved conflicts remain"
@@ -52,6 +54,10 @@ pub const ORIG_HEAD: &str = "ORIG_HEAD";
 pub const MERGE_MSG: &str = "MERGE_MSG";
 /// File name: pending cherry-pick commit message.
 pub const CHERRY_PICK_MSG: &str = "CHERRY_PICK_MSG";
+/// File name: commit being reverted by an in-progress revert.
+pub const REVERT_HEAD: &str = "REVERT_HEAD";
+/// File name: pending revert commit message.
+pub const REVERT_MSG: &str = "REVERT_MSG";
 /// File name: the conflict sidecar (also used inside `rebase-apply/`).
 pub const CONFLICTS_FILE: &str = "mkit-conflicts";
 
@@ -248,6 +254,76 @@ pub struct CherryPickState {
     pub message: Vec<u8>,
 }
 
+/// Persisted state for an in-progress revert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevertState {
+    /// The commit being reverted.
+    pub revert_head: Hash,
+    /// HEAD before the revert started.
+    pub orig_head: Hash,
+    /// Pending commit message (the generated `Revert "..."` message).
+    pub message: Vec<u8>,
+}
+
+/// Write revert state + the conflict sidecar.
+///
+/// # Errors
+/// [`ConflictStateError::Io`] on filesystem failures.
+pub fn write_revert_state(
+    mkit_dir: &Path,
+    state: &RevertState,
+    conflicts: &[ConflictRecord],
+) -> ConflictStateResult<()> {
+    fs::create_dir_all(mkit_dir)?;
+    write_hex_file(mkit_dir, REVERT_HEAD, &state.revert_head)?;
+    write_hex_file(mkit_dir, ORIG_HEAD, &state.orig_head)?;
+    fs::write(mkit_dir.join(REVERT_MSG), &state.message)?;
+    fs::write(
+        mkit_dir.join(CONFLICTS_FILE),
+        serialize_conflicts(conflicts),
+    )?;
+    Ok(())
+}
+
+/// Read revert state. Returns `Ok(None)` when none is in progress.
+///
+/// # Errors
+/// [`ConflictStateError::Invalid`] on malformed state.
+pub fn read_revert_state(mkit_dir: &Path) -> ConflictStateResult<Option<RevertState>> {
+    let Some(revert_head) = read_hex_file(&mkit_dir.join(REVERT_HEAD))? else {
+        return Ok(None);
+    };
+    let orig_head = read_hex_file(&mkit_dir.join(ORIG_HEAD))?.ok_or(ConflictStateError::Invalid)?;
+    let message = match fs::read(mkit_dir.join(REVERT_MSG)) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(ConflictStateError::Io(e)),
+    };
+    Ok(Some(RevertState {
+        revert_head,
+        orig_head,
+        message,
+    }))
+}
+
+/// Remove all revert state files (idempotent).
+///
+/// # Errors
+/// [`ConflictStateError::Io`] on filesystem failures other than absence.
+pub fn clear_revert_state(mkit_dir: &Path) -> ConflictStateResult<()> {
+    remove_if_present(&mkit_dir.join(REVERT_HEAD))?;
+    remove_if_present(&mkit_dir.join(REVERT_MSG))?;
+    remove_if_present(&mkit_dir.join(ORIG_HEAD))?;
+    remove_if_present(&mkit_dir.join(CONFLICTS_FILE))?;
+    Ok(())
+}
+
+/// `true` when a revert is in progress (`REVERT_HEAD` present).
+#[must_use]
+pub fn is_revert_in_progress(mkit_dir: &Path) -> bool {
+    mkit_dir.join(REVERT_HEAD).exists()
+}
+
 /// Write merge state + the conflict sidecar.
 ///
 /// # Errors
@@ -406,6 +482,7 @@ pub fn is_cherry_pick_in_progress(mkit_dir: &Path) -> bool {
 pub fn any_op_in_progress(mkit_dir: &Path) -> bool {
     is_merge_in_progress(mkit_dir)
         || is_cherry_pick_in_progress(mkit_dir)
+        || is_revert_in_progress(mkit_dir)
         || crate::ops::rebase::is_rebase_in_progress(mkit_dir)
 }
 
@@ -416,6 +493,8 @@ pub fn in_progress_op_name(mkit_dir: &Path) -> Option<&'static str> {
         Some("merge")
     } else if is_cherry_pick_in_progress(mkit_dir) {
         Some("cherry-pick")
+    } else if is_revert_in_progress(mkit_dir) {
+        Some("revert")
     } else if crate::ops::rebase::is_rebase_in_progress(mkit_dir) {
         Some("rebase")
     } else {
