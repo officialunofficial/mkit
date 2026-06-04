@@ -100,6 +100,30 @@ fn user_name_is_repo_scoped_not_user_scoped() {
 }
 
 #[test]
+fn unrelated_repo_write_does_not_leak_user_scoped_aliases() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    // A user-scoped (global) user.email, as a user might keep for all repos.
+    fs::create_dir_all(x.join("mkit")).unwrap();
+    fs::write(x.join("mkit/config"), b"user.email = private@example.com\n").unwrap();
+
+    // Setting an unrelated repo key must NOT copy the user-scoped value
+    // into the repo config (which travels with clones).
+    assert!(
+        run_in(root, x, &["config", "default_branch", "trunk"])
+            .status
+            .success()
+    );
+    let repo_cfg = fs::read_to_string(root.join(".mkit/config")).unwrap();
+    assert!(
+        !repo_cfg.contains("private@example.com"),
+        "user-scoped user.email leaked into repo config: {repo_cfg:?}"
+    );
+    // The merged value is still readable (it lives in the user config).
+    assert_eq!(config_get(root, x, "user.email"), "private@example.com");
+}
+
+#[test]
 fn user_name_does_not_spoof_the_signed_author() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
