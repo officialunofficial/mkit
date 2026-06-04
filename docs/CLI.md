@@ -47,6 +47,18 @@ Working-tree commands:
     destroy a locally-modified tracked file (a dirty-worktree guard in
     the spirit of the #176 restore guards); use `--cached` to keep the
     file or `--force` to discard the local changes.
+- `mkit mv [-f|--force] <source>... <dest>` — move or rename a tracked
+  path and stage the change. `mv <src> <dst>` renames `src` to `dst`, or
+  moves it into `dst` when `dst` is an existing directory; with more than
+  one source, `<dest>` must be an existing directory. The worktree file is
+  moved and the index updated (the source staged as removed, the
+  destination staged with the source's blob and mode — content is
+  unchanged, so the existing object is reused). Because mkit has no rename
+  detection, `mkit status` reports the move as a deletion plus an addition
+  rather than git's `R`; the committed result is equivalent.
+  - `-f`/`--force` — overwrite an existing destination. Without it, `mv`
+    refuses to clobber an existing path (matching git's `mv` guard) — an
+    mkit data-loss guard. A missing or untracked source is refused.
 - `mkit status [--porcelain] [-s|--short] [-z]` — show staged and unstaged
   changes. Default-mode prose (banner + section headers + per-file
   lines) goes to **stderr**; stdout is reserved for machine output.

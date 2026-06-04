@@ -26,6 +26,7 @@ pub mod key;
 pub mod keygen;
 pub mod log;
 pub mod merge;
+pub mod mv;
 #[cfg(feature = "pack-shards")]
 pub mod pack_shard;
 pub mod pull;
@@ -154,6 +155,92 @@ pub(crate) fn c_quote_path(path: &str) -> Option<String> {
     }
     out.push('"');
     Some(out)
+}
+
+/// Resolve a CLI path argument to a repo-relative, `/`-separated index
+/// path, validating it. Shared by `rm` and `mv` so both resolve and
+/// validate pathspecs identically (absolute args are mapped under the
+/// repo root, `.`/`..` are normalized, and the result is checked against
+/// [`mkit_core::index::validate_index_path`]).
+pub(crate) fn index_path_for_arg(root: &Path, arg: &Path) -> Result<String, String> {
+    use std::path::Component;
+    let rel = if arg.is_absolute() {
+        absolute_arg_to_repo_relative(root, arg)?
+    } else {
+        arg.to_path_buf()
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    for component in rel.as_path().components() {
+        match component {
+            Component::Normal(part) => {
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| "path is not valid UTF-8".to_string())?;
+                parts.push(part.to_string());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts.pop().is_none() {
+                    return Err(format!("invalid path: {}", arg.display()));
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(format!("invalid path: {}", arg.display()));
+            }
+        }
+    }
+
+    let path = parts.join("/");
+    if !mkit_core::index::validate_index_path(&path) {
+        return Err(format!("invalid path: {path}"));
+    }
+    Ok(path)
+}
+
+/// Map an absolute path argument to a path relative to the repo `root`,
+/// erroring if it escapes the repository. Handles not-yet-existing tail
+/// components (the leaf may not exist yet, e.g. an `mv` destination).
+pub(crate) fn absolute_arg_to_repo_relative(
+    root: &Path,
+    arg: &Path,
+) -> Result<std::path::PathBuf, String> {
+    use std::ffi::OsString;
+    let root = root.canonicalize().map_err(|e| format!("repo root: {e}"))?;
+
+    if let Ok(rel) = arg.strip_prefix(&root) {
+        return Ok(rel.to_path_buf());
+    }
+
+    let mut suffix: Vec<OsString> = vec![
+        arg.file_name()
+            .ok_or_else(|| format!("invalid path: {}", arg.display()))?
+            .to_os_string(),
+    ];
+    let mut ancestor = arg
+        .parent()
+        .ok_or_else(|| format!("invalid path: {}", arg.display()))?;
+    while ancestor.symlink_metadata().is_err() {
+        let name = ancestor
+            .file_name()
+            .ok_or_else(|| format!("path is outside repository: {}", arg.display()))?;
+        suffix.push(name.to_os_string());
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| format!("path is outside repository: {}", arg.display()))?;
+    }
+
+    let mut normalized = ancestor
+        .canonicalize()
+        .map_err(|e| format!("path {}: {e}", ancestor.display()))?;
+    for component in suffix.iter().rev() {
+        normalized.push(component);
+    }
+
+    normalized
+        .strip_prefix(&root)
+        .map(Path::to_path_buf)
+        .map_err(|_| format!("path is outside repository: {}", arg.display()))
 }
 
 pub(crate) fn index_path_matches_or_descends(path: &str, base: &str) -> bool {

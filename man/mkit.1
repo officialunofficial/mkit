@@ -81,6 +81,29 @@ removes files even when their worktree content has diverged from the staged
 blob; without it,
 .Cm rm
 refuses to destroy a locally-modified tracked file.
+.It Cm mv Oo Fl f | Fl Fl force Oc Ar source ... Ar dest
+Move or rename a tracked path and stage the change.
+.Cm mv Ar src Ar dst
+renames
+.Ar src
+to
+.Ar dst ,
+or moves it into
+.Ar dst
+when that is an existing directory; with more than one source,
+.Ar dest
+must be an existing directory. The worktree file is moved and the index
+updated (source staged as removed, destination staged with the source's blob
+and mode). mkit has no rename detection, so
+.Cm status
+reports the move as a delete plus an add rather than git's
+.Ql R .
+.Fl f
+or
+.Fl Fl force
+overwrites an existing destination; without it,
+.Cm mv
+refuses to clobber one. A missing or untracked source is refused.
 .It Cm restore Oo Fl Fl staged Oc Oo Fl Fl worktree Oc Oo Fl Fl source Ar rev Oc Oo Fl f | Fl Fl force Oc Ar path ...
 Restore path(s) in the worktree and/or unstage them. With no flag (or
 .Fl Fl worktree ) ,

@@ -34,6 +34,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "init",
     "add",
     "rm",
+    "mv",
     "restore",
     "reset",
     "status",

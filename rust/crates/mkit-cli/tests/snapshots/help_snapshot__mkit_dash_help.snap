@@ -12,6 +12,9 @@ commands:
   add -u            Restage only already-tracked files (no path args)
   rm [--cached] [-r] [-f] <path>...  Remove path(s) and stage the deletion
   rm --cached       Stage the removal only; keep the worktree file(s)
+  mv [-f] <source>... <dest>  Move/rename tracked path(s) and stage it
+                    (into <dest> when it is an existing directory; -f
+                    overwrites an existing destination)
   restore [--staged] [--worktree] [--source <rev>] [-f] <path>...
                     Discard worktree changes for path(s) (restore from the
                     index), or --staged to unstage (restore the index entry

@@ -13,9 +13,8 @@
 //! "don't clobber user work" spirit as the #176 restore guards: a
 //! tracked-but-modified file is not deleted without `--force`.
 
-use std::ffi::OsString;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use mkit_core::hash::ZERO;
@@ -80,7 +79,7 @@ pub fn run(args: &[String]) -> u8 {
     // entry (or being itself a directory) requires `-r`.
     let mut targets: Vec<(String, Vec<usize>)> = Vec::new();
     for raw in &opts.paths {
-        let rel = match index_path_for_arg(&cwd, Path::new(raw)) {
+        let rel = match super::index_path_for_arg(&cwd, Path::new(raw)) {
             Ok(p) => p,
             Err(e) => return emit_err(&e, exit::DATAERR),
         };
@@ -239,79 +238,6 @@ fn prune_empty_dirs(root: &Path, mut dirs: Vec<PathBuf>) {
             }
         }
     }
-}
-
-fn index_path_for_arg(root: &Path, arg: &Path) -> Result<String, String> {
-    let rel = if arg.is_absolute() {
-        absolute_arg_to_repo_relative(root, arg)?
-    } else {
-        arg.to_path_buf()
-    };
-
-    let mut parts: Vec<String> = Vec::new();
-    for component in rel.as_path().components() {
-        match component {
-            Component::Normal(part) => {
-                let part = part
-                    .to_str()
-                    .ok_or_else(|| "path is not valid UTF-8".to_string())?;
-                parts.push(part.to_string());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if parts.pop().is_none() {
-                    return Err(format!("invalid path: {}", arg.display()));
-                }
-            }
-            Component::Prefix(_) | Component::RootDir => {
-                return Err(format!("invalid path: {}", arg.display()));
-            }
-        }
-    }
-
-    let path = parts.join("/");
-    if !index::validate_index_path(&path) {
-        return Err(format!("invalid path: {path}"));
-    }
-    Ok(path)
-}
-
-fn absolute_arg_to_repo_relative(root: &Path, arg: &Path) -> Result<PathBuf, String> {
-    let root = root.canonicalize().map_err(|e| format!("repo root: {e}"))?;
-
-    if let Ok(rel) = arg.strip_prefix(&root) {
-        return Ok(rel.to_path_buf());
-    }
-
-    let mut suffix: Vec<OsString> = vec![
-        arg.file_name()
-            .ok_or_else(|| format!("invalid path: {}", arg.display()))?
-            .to_os_string(),
-    ];
-    let mut ancestor = arg
-        .parent()
-        .ok_or_else(|| format!("invalid path: {}", arg.display()))?;
-    while ancestor.symlink_metadata().is_err() {
-        let name = ancestor
-            .file_name()
-            .ok_or_else(|| format!("path is outside repository: {}", arg.display()))?;
-        suffix.push(name.to_os_string());
-        ancestor = ancestor
-            .parent()
-            .ok_or_else(|| format!("path is outside repository: {}", arg.display()))?;
-    }
-
-    let mut normalized = ancestor
-        .canonicalize()
-        .map_err(|e| format!("path {}: {e}", ancestor.display()))?;
-    for component in suffix.iter().rev() {
-        normalized.push(component);
-    }
-
-    normalized
-        .strip_prefix(&root)
-        .map(Path::to_path_buf)
-        .map_err(|_| format!("path is outside repository: {}", arg.display()))
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {
