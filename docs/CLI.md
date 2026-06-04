@@ -303,11 +303,16 @@ mkit merge --continue        # or cherry-pick --continue / rebase --continue
 ```
 
 `--continue` refuses while any text-marker file still contains markers,
-**and** refuses if a regular conflicted file was edited in the worktree
-but not `mkit add`-ed (so an unstaged resolution can't be silently
-dropped). The committed tree is built from the **resolved index/worktree**
-— not the conflict-time "ours wins" snapshot — so your edits (including a
-third distinct resolution) and the merge's clean changes both land.
+**and** refuses whenever a conflicted path's worktree resolution does not
+match what is staged in the index — so an unstaged resolution can't be
+silently dropped. This covers every shape: an edited regular **or
+executable** file, a path deleted without `mkit rm`, and a file replaced
+by a symlink or directory without `mkit add`. An *unchanged* conflict
+(the worktree still equals the auto-staged ours-side, including its
+executable / symlink mode) needs no re-`add` and continues. The committed
+tree is built from the **resolved index/worktree** — not the
+conflict-time "ours wins" snapshot — so your edits (including a third
+distinct resolution) and the merge's clean changes both land.
 
 Alternatively:
 
