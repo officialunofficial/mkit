@@ -24,6 +24,11 @@ pub enum RevertError {
     NotACommit,
     #[error("target commit's first parent does not refer to a commit object")]
     ParentNotACommit,
+    /// Reverting a merge commit is ambiguous — different parents yield
+    /// different inverse patches — and mainline selection (`-m`) is not
+    /// yet supported, so we refuse rather than silently pick parent 0.
+    #[error("cannot revert a merge commit ({0} parents); mainline selection is not yet supported")]
+    IsMergeCommit(usize),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -67,6 +72,13 @@ pub fn revert(
     let Object::Commit(target_commit) = store.read_object(&target_hash)? else {
         return Err(RevertError::NotACommit);
     };
+
+    // A merge commit has no single "the change it introduced": the
+    // inverse depends on which parent is the mainline. Refuse (fail
+    // closed) until `-m` is supported, rather than silently pick parent 0.
+    if target_commit.parents.len() > 1 {
+        return Err(RevertError::IsMergeCommit(target_commit.parents.len()));
+    }
 
     let parent_tree: Option<Hash> = if target_commit.parents.is_empty() {
         None
@@ -224,6 +236,20 @@ mod tests {
         assert!(matches!(
             revert(&s, blob, empty),
             Err(RevertError::NotACommit)
+        ));
+    }
+
+    #[test]
+    fn reverting_a_merge_commit_is_refused() {
+        let (_d, s) = store();
+        let blob = put_blob(&s, b"x");
+        let t = make_tree(&s, vec![entry(b"a.txt", blob)]);
+        let p1 = make_commit(&s, t, &[], "p1");
+        let p2 = make_commit(&s, t, &[], "p2");
+        let merge = make_commit(&s, t, &[p1, p2], "merge");
+        assert!(matches!(
+            revert(&s, merge, t),
+            Err(RevertError::IsMergeCommit(2))
         ));
     }
 }

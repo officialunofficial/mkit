@@ -42,6 +42,11 @@ struct RevertOpts {
     /// Abort the in-progress revert and restore the original HEAD.
     #[arg(long, conflicts_with_all = ["cont", "commit"])]
     abort: bool,
+    /// Stage the reverted tree in the index + worktree without creating a
+    /// commit (like `git revert --no-commit`). Applies to a clean revert;
+    /// if the revert conflicts, resolve it with `--continue` / `--abort`.
+    #[arg(short = 'n', long = "no-commit", conflicts_with_all = ["cont", "abort"])]
+    no_commit: bool,
     /// Commit to revert: a ref, full/short hash, or `HEAD~n` revspec.
     commit: Option<String>,
 }
@@ -71,13 +76,19 @@ pub fn run(args: &[String]) -> u8 {
     } else if opts.cont {
         cont(&cwd, &mkit_dir, &store)
     } else if let Some(hex) = opts.commit.as_deref() {
-        start(&cwd, &mkit_dir, &store, hex)
+        start(&cwd, &mkit_dir, &store, hex, opts.no_commit)
     } else {
         super::usage_error("usage: mkit revert <commit> | --continue | --abort")
     }
 }
 
-fn start(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore, hex: &str) -> u8 {
+fn start(
+    cwd: &std::path::Path,
+    mkit_dir: &std::path::Path,
+    store: &ObjectStore,
+    hex: &str,
+    no_commit: bool,
+) -> u8 {
     if let Some(op) = in_progress_op_name(mkit_dir) {
         return emit_err(
             &format!("a {op} is already in progress (use --continue or --abort)"),
@@ -132,6 +143,22 @@ fn start(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore,
     if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
+
+    // --no-commit: apply the reverted tree to the index + worktree but do
+    // not create a commit or move HEAD. The user commits when ready.
+    if no_commit {
+        if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "staged revert of {} (no commit; run `mkit commit` when ready)",
+            format::short_hash(&target, 8),
+        );
+        return exit::OK;
+    }
+
     let commit_hash = match create_commit(cwd, store, result.tree_hash, ours, &result.message) {
         Ok(h) => h,
         Err(code) => return code,

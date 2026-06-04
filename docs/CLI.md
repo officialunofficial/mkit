@@ -252,13 +252,18 @@ Branches / refs:
   the current branch. Refuses to overwrite staged changes, dirty tracked
   files, or untracked path collisions. On conflict, records resumable
   state; see "Resolving conflicts" below.
-- `mkit revert <commit> | --continue | --abort` — create a new commit
-  that undoes `<commit>` (the inverse of cherry-pick: it applies the
-  reverse of the target's diff). The commit message is
+- `mkit revert <commit> | --continue | --abort` `[-n|--no-commit]` —
+  create a new commit that undoes `<commit>` (the inverse of cherry-pick:
+  it applies the reverse of the target's diff). The commit message is
   `Revert "<subject>"` with a `This reverts commit <hash>.` trailer.
   This is a **forward** commit — it does not rewrite history, so the
   reverted commit stays reachable (no gc/recovery interaction). Same
   safety guards and resumable conflict workflow as cherry-pick.
+  `-n`/`--no-commit` stages the reverted tree (index + worktree) without
+  committing, so you can revert several commits and commit once.
+  **Reverting a merge commit is refused** — the inverse depends on which
+  parent is the mainline, and `-m`/mainline selection is not yet
+  supported.
 - `mkit rebase <branch> | --continue | --abort | --skip` — replay
   commits onto a different base. Restore steps refuse to overwrite staged
   changes, dirty tracked files, or untracked path collisions. On conflict

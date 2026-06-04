@@ -119,3 +119,56 @@ fn revert_continue_without_revert_in_progress_errors() {
     let out = run_in(root, &["revert", "--continue"]);
     assert!(!out.status.success(), "no revert in progress must error");
 }
+
+#[test]
+fn revert_no_commit_stages_without_committing() {
+    let td = init_repo();
+    let root = td.path();
+    commit(root, "a.txt", b"a\n", "base");
+    commit(root, "b.txt", b"b\n", "add b");
+    let added = main_tip(root);
+
+    let out = run_in(root, &["revert", "--no-commit", &added]);
+    assert!(out.status.success(), "revert --no-commit: {out:?}");
+
+    // The reverted change is applied to the worktree...
+    assert!(
+        !root.join("b.txt").exists(),
+        "--no-commit still applies the revert"
+    );
+    // ...but HEAD did NOT move (no commit created).
+    assert_eq!(
+        main_tip(root),
+        added,
+        "--no-commit must not create a commit"
+    );
+}
+
+#[test]
+fn revert_refuses_a_merge_commit() {
+    let td = init_repo();
+    let root = td.path();
+    commit(root, "base.txt", b"base\n", "base");
+    assert!(run_in(root, &["branch", "feature"]).status.success());
+    commit(root, "a.txt", b"a\n", "on main");
+    assert!(run_in(root, &["checkout", "feature"]).status.success());
+    commit(root, "b.txt", b"b\n", "on feature");
+    assert!(run_in(root, &["checkout", "main"]).status.success());
+    // Non-fast-forward merge → a real 2-parent merge commit.
+    assert!(
+        run_in(root, &["merge", "feature"]).status.success(),
+        "merge"
+    );
+    let merge = main_tip(root);
+
+    let out = run_in(root, &["revert", &merge]);
+    assert!(
+        !out.status.success(),
+        "reverting a merge commit must be refused"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("merge commit"),
+        "error should explain the merge-commit refusal: {stderr}"
+    );
+}

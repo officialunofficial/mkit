@@ -74,7 +74,7 @@ creeping; revisit post-v1 if demand warrants.
 | `rebase -i` | interactive todo list | absent | 🔨 | 4 | #259 | promoted everyday-safe only after Phase 5 |
 | `restore` / `reset` | `--staged`/`--worktree`/`--soft`/`--mixed` | same | ✅ | — | — | |
 | `reset --hard` | reset worktree | absent (by-design, being reversed) | 🔨 | 2 | #250 | guarded; `-f` override is an mkit divergence |
-| `revert` | inverse-commit, conflict-aware | same | ✅ | 2 | #255 | forward commit (not gated on gc); reuses the conflict workflow |
+| `revert` | inverse-commit, `--no-commit`, conflict-aware | same; merge `-m` not yet supported | ✅ | 2 | #255 | forward commit (not gated on gc); reuses the conflict workflow; reverting a merge is refused pending mainline selection |
 | `clean` | `-n`/`-f`/`-d`/`-x`/`-X`, pathspecs | absent (by-design, being reversed) | 🔨 | 2 | #250 | refuses unless `-f` (Git semantics) |
 | `stash` | save/list/pop/apply/drop/clear/show | same | ✅ | — | — | |
 | `gc` | prune unreachable objects | mark-and-sweep, recovery-aware | ✅ | — | #233 | `-n`/`--grace-secs`; fail-closed; see SPEC-GC.md |
