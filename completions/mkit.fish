@@ -98,6 +98,8 @@ complete -c mkit -n "__fish_seen_subcommand_from clone" \
 complete -c mkit -n "__fish_seen_subcommand_from clone" \
     -l sparse -d "Sparse checkout"
 complete -c mkit -n "__fish_seen_subcommand_from branch" \
+    -s v -l verbose -d "Show abbreviated id + subject"
+complete -c mkit -n "__fish_seen_subcommand_from branch" \
     -s d -d "Delete branch (safe)" -r
 complete -c mkit -n "__fish_seen_subcommand_from branch" \
     -s D -d "Force-delete branch" -r

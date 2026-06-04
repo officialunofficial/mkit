@@ -546,6 +546,50 @@ fn diff_name_only_quotes_special_paths_like_git() {
 }
 
 // =====================================================================
+// Passing subset — branch list / delete reconciliation (#249).
+// =====================================================================
+
+#[test]
+fn branch_default_list_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"x\n");
+    h.commit_both(&["a.txt"], "init");
+    assert!(h.git(&["branch", "feature"]).status.success());
+    assert!(h.mkit(&["branch", "feature"]).status.success());
+    // Default `branch` lists `<marker> <name>` with no commit id, sorted
+    // by name (`  feature`, `* main`). No object id, so compare ordered.
+    let g = h.git(&["branch"]);
+    let m = h.mkit(&["branch"]);
+    assert_parity_ordered("branch (default list)", &g, &m);
+}
+
+#[test]
+fn branch_delete_missing_fails_like_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"x\n");
+    h.commit_both(&["a.txt"], "init");
+    // `branch -D <missing>` errors in git; mkit must too (no silent no-op).
+    let g = h.git(&["branch", "-D", "ghost"]);
+    let m = h.mkit(&["branch", "-D", "ghost"]);
+    assert!(
+        !g.status.success(),
+        "git should reject -D of missing: {g:?}"
+    );
+    assert!(
+        !m.status.success(),
+        "mkit -D of a missing branch must fail like git: {m:?}"
+    );
+}
+
+// =====================================================================
 // Pending rows — ignored until the owning phase ships them. Each carries
 // the comparison so un-ignoring is a one-line change once implemented.
 // =====================================================================

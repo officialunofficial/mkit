@@ -228,12 +228,17 @@ Attestations:
 Branches / refs:
 
 - `mkit branch` / `mkit branch <name>` / `mkit branch -d <name>` —
-  list, create, or delete branches. `--format=json` on the list form
-  emits JSONL with keys `name`, `current`, `hash`.
+  list, create, or delete branches. The default list prints `<marker>
+  <name>` with no commit id (like `git branch`); `* ` marks the current
+  branch. `-v`/`--verbose` adds the abbreviated tip id and commit subject
+  (`<marker> <name> <short> <subject>`, name column padded like
+  `git branch -v`); the abbreviated id is a BLAKE3 prefix, not a 40-hex
+  SHA-1 prefix. `--format=json` on the list form emits JSONL with keys
+  `name`, `current`, `hash`.
 - `mkit branch -D <name>` — force-delete. mkit does not track per-branch
-  merge status, so `-D` differs from `-d` only in that an absent branch
-  is a clean no-op; both still refuse the checked-out branch (deleting
-  it would dangle HEAD).
+  merge status, so `-D` behaves like `-d` here: both error on an absent
+  branch (like `git branch -D <missing>`) and both refuse the checked-out
+  branch (deleting it would dangle HEAD).
 - `mkit branch -m [<old>] <new>` — rename a branch (the current branch
   when `<old>` is omitted). CAS-guarded: refuses to clobber an existing
   `<new>`, and moves HEAD when the renamed branch is checked out.

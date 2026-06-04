@@ -2,17 +2,28 @@
 //!
 //! Output modes for the list form:
 //!
-//! - default — `<marker> <name> <short8>` per line, `*` marks current.
+//! - default — `<marker> <name>` per line, `*` marks current. Matches
+//!   `git branch`: the commit id is **not** shown (it moved behind `-v`).
+//! - `-v` / `--verbose` — `<marker> <name> <short> <subject>`, the name
+//!   column padded to the longest branch name, like `git branch -v`. The
+//!   abbreviated id is a BLAKE3 prefix (the documented hash-length
+//!   divergence), not a 40-hex SHA-1 prefix.
 //! - `--format=json` — JSONL: `{"name":"...","current":bool,"hash":"<64-hex>"}`.
 
 use std::io::Write;
 
 use clap::{Parser, ValueEnum};
+use mkit_core::object::Object;
 use mkit_core::refs::{self, Head};
+use mkit_core::store::ObjectStore;
 
 use crate::clap_shim;
 use crate::exit;
 use crate::format;
+
+/// Abbreviated-id length for `branch -v`, matching `log`'s default and
+/// git's default `core.abbrev` (7) in shape (mkit's id is a BLAKE3 prefix).
+const DEFAULT_ABBREV: usize = 7;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum BranchFormat {
@@ -25,6 +36,7 @@ enum BranchFormat {
     name = "mkit branch",
     about = "List, create, rename, or delete branches."
 )]
+#[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct BranchOpts {
     /// Delete the named branch (safe — refuses the current branch and a
     /// non-existent branch).
@@ -40,6 +52,10 @@ struct BranchOpts {
     /// renamed branch is the checked-out one.
     #[arg(short = 'm', long)]
     rename: bool,
+    /// Verbose list: also show each branch tip's abbreviated id and
+    /// commit subject (like `git branch -v`).
+    #[arg(short = 'v', long)]
+    verbose: bool,
     /// Output format for the list form. JSONL with `--format=json`.
     #[arg(long, value_enum, default_value = "default")]
     format: BranchFormat,
@@ -74,7 +90,12 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     match opts.names.as_slice() {
-        [] => list(&mkit_dir, matches!(opts.format, BranchFormat::Json)),
+        [] => list(
+            &cwd,
+            &mkit_dir,
+            matches!(opts.format, BranchFormat::Json),
+            opts.verbose,
+        ),
         [name] => create(&mkit_dir, name),
         _ => super::usage_error("usage: mkit branch <name>  (create takes one name)"),
     }
@@ -104,9 +125,10 @@ fn create(mkit_dir: &std::path::Path, name: &str) -> u8 {
 /// Both `-d` and `-D` route through `delete_ref_safe`, which refuses to
 /// delete the branch HEAD currently points at (issue #206) — deleting
 /// the current branch would leave HEAD dangling, and git refuses this
-/// even under `-D`. mkit does not track per-branch merge status, so the
-/// only material difference is that `-D` (force) treats an absent branch
-/// as a no-op success instead of an error.
+/// even under `-D`. mkit does not track per-branch merge status, so `-d`
+/// and `-D` behave identically here. Like git, **both** error on a
+/// missing branch (`error: branch '<name>' not found`); `-D` does not
+/// silently no-op, so a typo'd name is surfaced rather than swallowed.
 fn delete(mkit_dir: &std::path::Path, names: &[String], force: bool) -> u8 {
     let [name] = names else {
         let flag = if force { "-D" } else { "-d" };
@@ -114,8 +136,9 @@ fn delete(mkit_dir: &std::path::Path, names: &[String], force: bool) -> u8 {
     };
     match refs::delete_ref_safe(mkit_dir, name) {
         Ok(()) => exit::OK,
-        // Force-delete of a missing branch is a clean no-op.
-        Err(refs::RefError::NotFound(_)) if force => exit::OK,
+        Err(refs::RefError::NotFound(_)) => {
+            emit_err(&format!("branch '{name}' not found"), exit::GENERAL_ERROR)
+        }
         Err(e) => emit_err(&format!("delete {name}: {e}"), exit::GENERAL_ERROR),
     }
 }
@@ -185,7 +208,7 @@ fn rename(mkit_dir: &std::path::Path, names: &[String]) -> u8 {
     exit::OK
 }
 
-fn list(mkit_dir: &std::path::Path, json: bool) -> u8 {
+fn list(cwd: &std::path::Path, mkit_dir: &std::path::Path, json: bool, verbose: bool) -> u8 {
     let current = match refs::read_head(mkit_dir) {
         Ok(Head::Branch(n)) => Some(n),
         _ => None,
@@ -210,17 +233,59 @@ fn list(mkit_dir: &std::path::Path, json: bool) -> u8 {
         }
         return exit::OK;
     }
-    for r in refs {
-        let marker = current
+
+    let marker_for = |name: &str| {
+        current
             .as_deref()
-            .map_or(' ', |cur| if cur == r.name { '*' } else { ' ' });
-        let short = r
-            .hash
-            .map(|h| format::short_hash(&h, 8))
-            .unwrap_or_default();
-        let _ = writeln!(stdout, "{marker} {} {short}", r.name);
+            .map_or(' ', |cur| if cur == name { '*' } else { ' ' })
+    };
+
+    if !verbose {
+        // Default: `<marker> <name>` only — `git branch` omits the id.
+        for r in &refs {
+            let _ = writeln!(stdout, "{} {}", marker_for(&r.name), r.name);
+        }
+        return exit::OK;
+    }
+
+    // Verbose: `<marker> <name> <short> <subject>`, name column padded to
+    // the longest branch name (like `git branch -v`). The tip subject is
+    // the first line of the commit/remix message.
+    let store = match ObjectStore::open(cwd) {
+        Ok(s) => s,
+        Err(e) => return emit_err(&format!("open store: {e}"), exit::GENERAL_ERROR),
+    };
+    let width = refs.iter().map(|r| r.name.len()).max().unwrap_or(0);
+    for r in &refs {
+        let marker = marker_for(&r.name);
+        match &r.hash {
+            Some(h) => {
+                let short = format::short_hash(h, DEFAULT_ABBREV);
+                let subject = tip_subject(&store, h);
+                let _ = writeln!(stdout, "{marker} {:<width$} {short} {subject}", r.name);
+            }
+            None => {
+                let _ = writeln!(stdout, "{marker} {:<width$}", r.name);
+            }
+        }
     }
     exit::OK
+}
+
+/// First line of a branch tip's commit (or remix) message, for `-v`.
+/// Returns an empty string if the tip can't be read or isn't a
+/// commit/remix — `-v` is a display aid and must not fail the listing.
+fn tip_subject(store: &ObjectStore, hash: &mkit_core::hash::Hash) -> String {
+    let message = match store.read_object(hash) {
+        Ok(Object::Commit(c)) => c.message,
+        Ok(Object::Remix(r)) => r.message,
+        _ => return String::new(),
+    };
+    String::from_utf8_lossy(&message)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_owned()
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {

@@ -66,8 +66,10 @@ commands:
                     A/D/M (T = mode change) letter; -z NUL-terminates those
                     records with raw paths (else special-byte paths are
                     C-style quoted)
-  branch [--format=json]
-                    List branches (* marks current; JSONL with --format=json)
+  branch [-v|--verbose] [--format=json]
+                    List branches (* marks current; no commit id by
+                    default, like git; -v adds the abbreviated id +
+                    subject; JSONL with --format=json)
   branch <name>     Create a branch at HEAD
   branch -d <name>  Delete a branch (safe; refuses the current branch)
   branch -D <name>  Force-delete a branch (absent branch is a no-op)
