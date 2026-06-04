@@ -196,18 +196,27 @@ fn resolve_diff_endpoints(
 ) -> Result<DiffEndpoints, (String, u8)> {
     // #223: `--staged` with explicit revisions is contradictory —
     // `--staged` already pins HEAD vs the index. Pathspecs are fine, but
-    // a leading revision is not. We only reject when the first arg
-    // actually resolves as a revision (so `mkit diff --staged path/`
-    // keeps working as a pathspec filter).
+    // a leading argument that *looks* like a revision is not, and must
+    // fail closed: if it resolves it is the contradiction (#223), and if
+    // it does not it is a bad revision (#207). Either way we error rather
+    // than silently treating a typo'd hash as a no-match pathspec (which
+    // would empty-succeed and diverge from `git diff --cached <bad-rev>`).
+    // A non-rev-looking leading arg (e.g. `path/`, `file.txt`) still falls
+    // through as a pathspec filter.
     if staged {
         if let Some(first) = args.first()
             && looks_like_rev_request(first)
-            && revspec::resolve_revision(store, mkit_dir, strip_range_end(first).0).is_ok()
         {
+            if revspec::resolve_revision(store, mkit_dir, strip_range_end(first).0).is_ok() {
+                return Err((
+                    "`--staged` diffs HEAD vs the index; it cannot take an explicit revision"
+                        .to_string(),
+                    exit::USAGE,
+                ));
+            }
             return Err((
-                "`--staged` diffs HEAD vs the index; it cannot take an explicit revision"
-                    .to_string(),
-                exit::USAGE,
+                format!("bad revision '{first}': not a known ref, commit, or short hash"),
+                exit::DATAERR,
             ));
         }
         // No leading revision: HEAD vs index, all positionals = pathspecs.

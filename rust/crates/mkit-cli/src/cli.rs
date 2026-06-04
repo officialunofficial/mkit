@@ -57,7 +57,7 @@ commands:
                     its -s/--short alias, emits machine-readable XY lines;
                     special-byte paths are C-style quoted; -z NUL-terminates
                     records with raw paths)
-  diff [--staged] [--name-only|--name-status] [-z] [<rev> [<rev>] | <a>..<b>] [<path>...]
+  diff [--staged|--cached] [--name-only|--name-status] [-z] [<rev> [<rev>] | <a>..<b>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
                     --staged for HEAD vs index, a single revision vs the
                     worktree, two revisions, or an A..B range; revisions
