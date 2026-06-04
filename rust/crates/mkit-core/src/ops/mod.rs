@@ -8,6 +8,7 @@
 pub mod cherry_pick;
 pub mod conflict_state;
 pub mod diff;
+pub mod gc;
 pub mod graph;
 pub mod merge;
 
@@ -27,6 +28,9 @@ pub use diff::{
     DiffEntry, DiffError, DiffKind, DiffResult, StatusEntry, StatusStaging, diff_trees,
     status_diff, text_patch,
 };
-pub use graph::{collect_ancestor_set, reachable_objects};
+pub use gc::{GcRootsError, collect_roots, live_objects};
+pub use graph::{
+    collect_ancestor_set, reachable_closure, reachable_closure_checked, reachable_objects,
+};
 pub use merge::{Conflict, ConflictKind, MergeResult, find_merge_base, is_ancestor, merge_trees};
 pub use restore::{RestoreOptions, RestoreReport, restore_tree_to_worktree};
