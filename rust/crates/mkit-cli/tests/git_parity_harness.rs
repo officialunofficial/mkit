@@ -660,6 +660,51 @@ fn diff_stat_scaled_graph_matches_git() {
 }
 
 // =====================================================================
+// Passing subset — mv guard parity (#250). The happy-path move shows as
+// `R` under git (rename detection) but delete+add under mkit, so only the
+// guard/error behavior is compared differentially (both must fail).
+// =====================================================================
+
+#[test]
+fn mv_existing_dest_refused_like_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"aaa\n");
+    h.write_both("b.txt", b"bbb\n");
+    h.commit_both(&["a.txt", "b.txt"], "init");
+    // Moving onto an existing path is refused without -f in both tools.
+    let g = h.git(&["mv", "a.txt", "b.txt"]);
+    let m = h.mkit(&["mv", "a.txt", "b.txt"]);
+    assert!(!g.status.success(), "git mv should refuse clobber: {g:?}");
+    assert!(!m.status.success(), "mkit mv should refuse clobber: {m:?}");
+}
+
+#[test]
+fn mv_untracked_source_fails_like_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("tracked.txt", b"t\n");
+    h.commit_both(&["tracked.txt"], "init");
+    h.write_both("untracked.txt", b"u\n");
+    let g = h.git(&["mv", "untracked.txt", "dest.txt"]);
+    let m = h.mkit(&["mv", "untracked.txt", "dest.txt"]);
+    assert!(
+        !g.status.success(),
+        "git mv should reject untracked source: {g:?}"
+    );
+    assert!(
+        !m.status.success(),
+        "mkit mv should reject untracked source: {m:?}"
+    );
+}
+
+// =====================================================================
 // Passing subset — branch list / delete reconciliation (#249).
 // =====================================================================
 

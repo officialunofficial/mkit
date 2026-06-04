@@ -15,6 +15,7 @@ _mkit() {
         'init:Create a new mkit repository'
         'add:Stage files for the next commit (-A/-u, multi-path)'
         'rm:Remove path(s) and stage the deletion (--cached/-r/-f)'
+        'mv:Move/rename tracked path(s) and stage it (-f to overwrite)'
         'restore:Discard worktree changes for path(s), or --staged to unstage'
         'reset:Move HEAD (--soft) or HEAD + index (--mixed) to a commit'
         'hash:Hash a file and store it as a blob'
@@ -80,6 +81,12 @@ _mkit() {
                         '--cached[stage removal only; keep worktree file]' \
                         '(-r --recursive)'{-r,--recursive}'[remove a directory recursively]' \
                         '(-f --force)'{-f,--force}'[remove even if locally modified]' \
+                        '--help[show help]' \
+                        '*:file:_files'
+                    ;;
+                mv)
+                    _arguments \
+                        '(-f --force)'{-f,--force}'[overwrite an existing destination]' \
                         '--help[show help]' \
                         '*:file:_files'
                     ;;

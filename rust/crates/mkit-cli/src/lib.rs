@@ -74,6 +74,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "tree" => commands::tree::run(&rest),
         "add" => commands::add::run(&rest),
         "rm" => commands::rm::run(&rest),
+        "mv" => commands::mv::run(&rest),
         "restore" => commands::restore::run(&rest),
         "reset" => commands::reset::run(&rest),
         "status" => commands::status::run(&rest),

@@ -57,7 +57,7 @@ creeping; revisit post-v1 if demand warrants.
 | `init` | create repo | `.mkit/` repo | ✅ | — | — | marker differs (`.mkit/`) |
 | `add` | pathspecs, `-A`, `-u` | same | ✅ | — | — | `-p` is separate (#258) |
 | `rm` | `--cached`, `-r`, `-f` + dirty guard | same | ✅ | — | — | guard is an mkit safety divergence |
-| `mv` | rename, `-f` | absent (by-design, being reversed) | 🔨 | 2 | #250 | guarded: refuses to clobber w/o `-f` |
+| `mv` | rename single file, `-f`, into-dir | same | ✅ | 2 | #250 | guarded: refuses to clobber w/o `-f` (incl. dangling symlink); rejects missing/untracked source; keeps writes inside the repo. No rename detection → `status` shows delete+add not `R`. **Directory moves (`mv dir newdir`) not yet supported** (refused with a clear error; follow-up). |
 | `status` | `--porcelain[=v1]`, `-s`, `-z`, C-style path quoting | same | ✅ | 1 | #249 | tracked changes combine into one `XY` record per path (e.g. `MM`); untracked stays its own `??` record, so a staged-delete-plus-untracked path emits both `D ` and `??` like git; quoting matches git `core.quotePath`; `-z` = raw NUL-terminated |
 | `status` | `--porcelain=v2` | not present | 🔨 | 1 | #249 | needs per-path modes/hashes in the diff layer (follow-up) |
 | `diff` | HEAD/worktree, `--staged`, pathspecs | same | ✅ | — | — | |
@@ -115,6 +115,8 @@ mkit deliberately refuses Git's silent data-loss defaults. These are
 
 - `rm` / `restore` / `reset --hard` / `clean` / `stash pop` — refuse to destroy
   locally-modified or untracked content without an explicit `-f`/`--force`.
+- `mv` — refuses to overwrite an existing destination without `-f` (matches
+  git's `mv` clobber guard).
 - `checkout` — refuses to clobber dirty/untracked files.
 - Repo-local config — `user.identity` and other security-sensitive keys are in
   `REPO_FORBIDDEN_KEYS` so a hostile clone cannot spoof the signed author or
