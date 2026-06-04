@@ -21,6 +21,18 @@
 //! NOTE: the *producers* (recording at the amend/reset/rebase rewrite
 //! sites) are Part 2b — this module is the format, store, retention
 //! policy, and gc-root integration.
+//!
+//! ## Concurrency
+//!
+//! [`record`] and [`expire`] are **not** internally synchronized.
+//! [`expire`] reads-filters-rewrites the log, so an [`record`] append
+//! that interleaves between its read and its atomic replace would be
+//! clobbered — and the superseded commit would silently drop out of
+//! [`roots`], un-pinning it for gc. Callers MUST therefore hold the repo
+//! lock, which every mutating command and `mkit gc` already do (they
+//! serialize via `worktree.lock`); gc's "expire then collect roots"
+//! sequence must run under that same lock. This module assumes that
+//! invariant rather than taking a second, nested lock.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -28,7 +40,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::Path;
 
-use crate::atomic::write_atomic;
+use crate::atomic::{sync_parent_dir, write_atomic};
 use crate::hash::{self, Hash};
 
 /// File name under `.mkit/` for the append-only recovery log.
@@ -89,6 +101,16 @@ impl Default for RetentionPolicy {
 /// Append `entry` to the recovery log, creating it if absent. The
 /// zero-hash is rejected (nothing to recover).
 ///
+/// **Durable**: the appended line is `fsync`'d (and the parent directory
+/// `fsync`'d) before returning, so a crash cannot leave a ref rewrite
+/// durable while its recovery entry is lost — that would reopen the
+/// unrecoverable-superseded-commit gap this log exists to close.
+///
+/// **Not internally synchronized**: callers MUST hold the repo lock (as
+/// every mutating command and `mkit gc` do). See the module-level
+/// concurrency note — a concurrent [`expire`] could otherwise clobber a
+/// racing append.
+///
 /// # Errors
 /// [`RecoveryError::InvalidField`] if `op`/`branch` contain a tab or
 /// newline; [`RecoveryError::Io`] on filesystem failure.
@@ -110,11 +132,13 @@ pub fn record(mkit_dir: &Path, entry: &RecoveryEntry) -> Result<()> {
         hash::to_hex(&entry.superseded),
         entry.branch,
     );
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(mkit_dir.join(RECOVERY_LOG))?;
+    let path = mkit_dir.join(RECOVERY_LOG);
+    let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
     f.write_all(line.as_bytes())?;
+    // fsync the data, then the directory entry (cheap — records happen
+    // only on history rewrites, and durability is the whole point).
+    f.sync_all()?;
+    sync_parent_dir(mkit_dir)?;
     Ok(())
 }
 
@@ -150,7 +174,11 @@ pub fn roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>> {
 
 /// Drop entries that are both older than `policy.grace_secs` (relative to
 /// `now`, unix seconds) and not among the most recent `policy.keep_last`.
-/// Rewrites the log atomically. Returns the number of entries pruned.
+/// Rewrites the log atomically (durably, via [`write_atomic`]). Returns
+/// the number of entries pruned.
+///
+/// Must be called under the repo lock — see the module concurrency note;
+/// a concurrent [`record`] append would otherwise be lost in the rewrite.
 ///
 /// # Errors
 /// [`RecoveryError`] on a strict read or filesystem failure.

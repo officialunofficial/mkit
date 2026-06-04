@@ -72,7 +72,15 @@ logged hash is a GC root (clock-free, strict/fail-closed parse), and
 (default: younger than 90 days **or** among the most recent 50) so they
 stop pinning objects. A gc run expires first, then computes roots.
 
-**Status:** the log format, store, retention policy, and gc-root
+`record` is durable — it `fsync`s the log file and its parent directory
+before returning — so a crash cannot leave a ref rewrite persisted while
+its recovery entry is lost. `record` and `expire` are **not** internally
+synchronized: callers MUST hold the repo lock (`worktree.lock`, which all
+mutating commands and gc take), and gc MUST run its "expire → collect
+roots → prune" sequence under that lock, so a producer append cannot race
+an `expire` rewrite and vanish.
+
+**Status:** the log format, durable store, retention policy, and gc-root
 integration are implemented (Part 2a). The **producers** — recording at
 the `commit --amend` / `reset` / `rebase` rewrite sites — are Part 2b.
 Until producers land the log is empty, so pre-producer superseded commits
