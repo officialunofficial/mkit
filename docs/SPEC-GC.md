@@ -33,6 +33,7 @@ all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 | Rebase in progress | `.mkit/rebase-apply/{orig-head,onto,todo,done}` | `orig_head`, `onto`, every `todo` + `done` commit |
 | Conflict sidecar | `.mkit/mkit-conflicts` and `.mkit/rebase-apply/mkit-conflicts` | each record's `base`/`ours`/`theirs` blob (when present) |
 | Attestations | `.mkit/attestations/<commit-hex>/` | each attested commit (dir name) |
+| Recovery log | `.mkit/recovery-log` | each superseded commit (until expired) |
 
 The live keep-set is the reachable closure over those roots:
 `ops::gc::live_objects(store, mkit_dir)` = `reachable_closure(store,
@@ -58,24 +59,29 @@ set. In particular:
   unsound, so gc must abort rather than prune. (The push path, by
   contrast, tolerates cap truncation and splits the push.)
 
-## Recovery gap (Part 2 — not yet implemented)
+## Recovery log (Part 2)
 
 The per-branch history journal (`.mkit/history/…`, the MMR behind
 `reflog`) stores **only opaque digests**; its leaves cannot be decoded
-back to commit hashes. Therefore commits superseded by `commit --amend`,
-`reset`, or `rebase` are **not** recoverable from any on-disk source once
-they fall out of the root set above — and they are intentionally **not**
-roots here (that is exactly what gc reclaims).
+back to commit hashes. So commits superseded by `commit --amend`,
+`reset`, or `rebase` cannot be recovered from it. The **recovery log**
+(`.mkit/recovery-log`, `ops::recovery`) closes that gap: each rewrite
+appends the superseded tip (`<unix_ts>\t<op>\t<64-hex>\t<branch>`), every
+logged hash is a GC root (clock-free, strict/fail-closed parse), and
+`recovery::expire(now, policy)` drops entries past the retention policy
+(default: younger than 90 days **or** among the most recent 50) so they
+stop pinning objects. A gc run expires first, then computes roots.
 
-Before `mkit gc` may delete such commits, Part 2 must add:
+`record` is durable — it `fsync`s the log file and its parent directory
+before returning — so a crash cannot leave a ref rewrite persisted while
+its recovery entry is lost. `record` and `expire` are **not** internally
+synchronized: callers MUST hold the repo lock (`worktree.lock`, which all
+mutating commands and gc take), and gc MUST run its "expire → collect
+roots → prune" sequence under that lock, so a producer append cannot race
+an `expire` rewrite and vanish.
 
-1. a **recovery log** that records superseded tips (hash + timestamp)
-   when a history-rewriting command moves a branch, so they can be
-   surfaced and restored; and
-2. a **retention / grace policy** (e.g. keep entries younger than a grace
-   window, and keep the last N superseded tips) so a recent mistake is
-   recoverable.
-
-Until Part 2 lands, gc must treat the recovery-log entries (once they
-exist) as additional roots, and document that pre-recovery-log superseded
-commits are unrecoverable. See #260.
+**Status:** the log format, durable store, retention policy, and gc-root
+integration are implemented (Part 2a). The **producers** — recording at
+the `commit --amend` / `reset` / `rebase` rewrite sites — are Part 2b.
+Until producers land the log is empty, so pre-producer superseded commits
+remain unrecoverable; `mkit gc` (#233) stays sequenced behind Part 2b.

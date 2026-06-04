@@ -101,7 +101,7 @@ pub(crate) fn write_create_new(
 }
 
 #[cfg(unix)]
-fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
     match File::open(parent) {
         Ok(dir) => dir.sync_all(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -111,6 +111,6 @@ fn sync_parent_dir(parent: &Path) -> io::Result<()> {
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
-fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
