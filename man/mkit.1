@@ -182,14 +182,23 @@ unreachable object until
 .Cm gc
 ships
 .Pq issue #233 .
-.It Cm log Op Fl Fl oneline Op Fl Fl format Ar json Op Fl Fl graph Op Fl n Ar N
+.It Cm log Op Fl Fl oneline Op Fl Fl abbrev-commit Op Fl Fl abbrev Ns = Ns Ar N Op Fl Fl format Ar json Op Fl Fl graph Op Fl n Ar N
 Show commit history. The default format prints the full commit message body,
 indented by four spaces, and renders the timestamp as a stable UTC date in the
 form
 .Ql YYYY-MM-DD HH:MM:SS +0000 .
 .Fl Fl oneline
 condenses each commit to
-.Ql <8-hex> <title> .
+.Ql <abbrev-hex> <title> .
+.Fl Fl abbrev-commit
+abbreviates the commit id in the default format too, and
+.Fl Fl abbrev Ns = Ns Ar N
+sets the abbreviation length (bare
+.Fl Fl abbrev
+and
+.Fl Fl oneline
+default to 7, clamped to the range 4 to 64). The abbreviated id is a BLAKE3
+prefix, so it is longer than a Git SHA-1 prefix of the same length.
 .Fl Fl format Ar json
 emits one JSON object per commit on stdout, keeping the raw integer Unix
 timestamp for machine consumption.
@@ -225,16 +234,19 @@ indexes the reachable chain, so commits superseded by
 .Cm commit --amend
 or a reset are no longer listed. This command never mutates refs, the
 journal, or any object.
-.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Ar treeA Ar treeB Oc Ar path ...
+.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.
 .Fl Fl staged
 .Pq alias Fl Fl cached
-compares the HEAD tree to the staged index tree. Two 64-hex tree hashes diff
-those trees directly. Remaining positional arguments are pathspecs that limit
-the output. Commit-vs-commit diffing takes two
-.Em tree
-hashes, not commit refs or ranges.
+compares the HEAD tree to the staged index tree. A single revision compares
+that revision against the worktree; two revisions, or an
+.Ar a Ns .. Ns Ar b
+range, diff the two resolved trees directly. Revisions may be refs, commit
+hashes, short hashes, or
+.Ql HEAD~n
+(a raw 64-hex tree hash also works). Remaining positional arguments are
+pathspecs that limit the output.
 .It Cm status Oo Fl Fl porcelain Oc Oo Fl s | Fl Fl short Oc
 Show the staged and working-tree changes.
 .Fl s
@@ -402,9 +414,16 @@ shard. Requires building the binary with
 .It Cm version
 Print the version to stdout as
 .Ql mkit <X.Y.Z> .
-This is the canonical version query: there is no top-level
+The top-level
 .Fl Fl version
-flag.
+and
+.Fl V
+flags are aliases of this subcommand and emit the identical string. Note this
+is
+.Ql mkit <X.Y.Z> ,
+not Git's
+.Ql git version <X.Y.Z>
+form \(em an intentional, packaging-pinned divergence.
 .El
 .Sh ENVIRONMENT
 .Bl -tag -width "CLICOLOR_FORCE"

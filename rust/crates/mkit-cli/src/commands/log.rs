@@ -6,7 +6,9 @@
 //!   full commit message body is printed indented (four spaces) and the
 //!   timestamp is rendered as a stable UTC date
 //!   (`YYYY-MM-DD HH:MM:SS +0000`), not the raw integer.
-//! - `--oneline` — `<8-hex> <title>` per commit on stdout.
+//! - `--oneline` — `<abbrev-hex> <title>` per commit on stdout. The
+//!   abbreviation length defaults to 7 (`DEFAULT_ABBREV`) and is
+//!   overridable with `--abbrev[=N]`.
 //! - `--format=json` — JSONL, one self-contained JSON object per
 //!   commit. Suitable for piping into `jq`.
 //!
@@ -28,6 +30,10 @@ use crate::clap_shim;
 use crate::exit;
 use crate::format;
 use crate::signal;
+
+/// Default abbreviated-hash length, matching git's nominal `core.abbrev`
+/// starting point. Overridable with `--abbrev[=N]`.
+const DEFAULT_ABBREV: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Format {
@@ -57,6 +63,16 @@ struct LogOpts {
     #[arg(short = 'n')]
     limit: Option<usize>,
 
+    /// Abbreviate commit hashes in the default format (implied by
+    /// `--oneline`).
+    #[arg(long = "abbrev-commit")]
+    abbrev_commit: bool,
+
+    /// Minimum length of abbreviated hashes. Bare `--abbrev` uses the
+    /// default (7); `--abbrev=N` sets the length.
+    #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "7")]
+    abbrev: Option<usize>,
+
     /// Render an ASCII graph. Accepted for compatibility; Phase-10
     /// follow-up.
     #[arg(long)]
@@ -73,6 +89,21 @@ impl LogOpts {
             None => Format::Default,
         }
     }
+
+    /// Abbreviation length for commit ids, or `None` to print the full
+    /// 64-hex hash. `--abbrev=N` sets the length (and implies
+    /// abbreviation); `--abbrev-commit` (or the `Oneline` format)
+    /// abbreviates at `DEFAULT_ABBREV`. `short_hash` clamps the length
+    /// to `[4, 64]`, so out-of-range `N` is harmless.
+    fn abbrev_len(&self) -> Option<usize> {
+        if let Some(n) = self.abbrev {
+            return Some(n);
+        }
+        if self.abbrev_commit || self.render_format() == Format::Oneline {
+            return Some(DEFAULT_ABBREV);
+        }
+        None
+    }
 }
 
 #[must_use]
@@ -82,6 +113,7 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
     let fmt = opts.render_format();
+    let abbrev = opts.abbrev_len();
     let _ = opts.graph; // accepted, currently no-op.
 
     let cwd = match std::env::current_dir() {
@@ -131,10 +163,15 @@ pub fn run(args: &[String]) -> u8 {
         let title = full_message.lines().next().unwrap_or("");
         match fmt {
             Format::Oneline => {
-                let _ = writeln!(stdout, "{} {}", format::short_hash(&cur, 8), title);
+                let id = format::short_hash(&cur, abbrev.unwrap_or(DEFAULT_ABBREV));
+                let _ = writeln!(stdout, "{id} {title}");
             }
             Format::Default => {
-                let _ = writeln!(stdout, "commit {}", format::hex_hash(&cur));
+                let id = match abbrev {
+                    Some(n) => format::short_hash(&cur, n),
+                    None => format::hex_hash(&cur),
+                };
+                let _ = writeln!(stdout, "commit {id}");
                 let _ = writeln!(stdout, "Author: {}", format::short_identity(&c.author));
                 let _ = writeln!(stdout, "Date:   {}", format::human_date_utc(c.timestamp));
                 let _ = writeln!(stdout);
@@ -228,6 +265,8 @@ mod tests {
             oneline: true,
             format: Some(Format::Default),
             limit: None,
+            abbrev_commit: false,
+            abbrev: None,
             graph: false,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -239,6 +278,8 @@ mod tests {
             oneline: true,
             format: None,
             limit: None,
+            abbrev_commit: false,
+            abbrev: None,
             graph: false,
         };
         assert_eq!(opts.render_format(), Format::Oneline);
@@ -250,6 +291,8 @@ mod tests {
             oneline: false,
             format: None,
             limit: None,
+            abbrev_commit: false,
+            abbrev: None,
             graph: false,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -261,8 +304,46 @@ mod tests {
             oneline: false,
             format: Some(Format::Json),
             limit: None,
+            abbrev_commit: false,
+            abbrev: None,
             graph: false,
         };
         assert_eq!(opts.render_format(), Format::Json);
+    }
+
+    fn opts_for_abbrev(oneline: bool, abbrev_commit: bool, abbrev: Option<usize>) -> LogOpts {
+        LogOpts {
+            oneline,
+            format: None,
+            limit: None,
+            abbrev_commit,
+            abbrev,
+            graph: false,
+        }
+    }
+
+    #[test]
+    fn abbrev_len_off_by_default() {
+        assert_eq!(opts_for_abbrev(false, false, None).abbrev_len(), None);
+    }
+
+    #[test]
+    fn abbrev_len_default_for_oneline_and_abbrev_commit() {
+        assert_eq!(
+            opts_for_abbrev(true, false, None).abbrev_len(),
+            Some(DEFAULT_ABBREV)
+        );
+        assert_eq!(
+            opts_for_abbrev(false, true, None).abbrev_len(),
+            Some(DEFAULT_ABBREV)
+        );
+    }
+
+    #[test]
+    fn abbrev_len_explicit_value_wins() {
+        assert_eq!(
+            opts_for_abbrev(true, false, Some(12)).abbrev_len(),
+            Some(12)
+        );
     }
 }

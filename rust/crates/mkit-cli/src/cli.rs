@@ -38,10 +38,12 @@ commands:
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable until `gc` ships.
-  log [--oneline] [--format=json] [--graph] [-n N]
+  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N]
                     Show commit history (default prints the full message
-                    body + a UTC date; --format=json emits JSONL with the
-                    raw timestamp; --graph is accepted but currently a no-op)
+                    body + a UTC date; --oneline/--abbrev-commit abbreviate
+                    the commit id, --abbrev[=N] sets the length (default 7);
+                    --format=json emits JSONL with the raw timestamp;
+                    --graph is accepted but currently a no-op)
   reflog [<ref>] [--format=json] [-n N]
                     Show a branch's recorded movement history (read-only).
                     Lists the branch's first-parent chain (newest first,
@@ -55,9 +57,11 @@ commands:
                     (--porcelain, or its -s/--short alias, emits
                     machine-readable XY lines on stdout;
                     no -z/NUL or path-quoting support yet)
-  diff [--staged] [<treeA> <treeB>] [<path>...]
+  diff [--staged] [<rev> [<rev>] | <a>..<b>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
-                    --staged for HEAD vs index, or two tree hashes)
+                    --staged for HEAD vs index, a single revision vs the
+                    worktree, two revisions, or an A..B range; revisions
+                    are refs, commits, or short hashes)
   branch [--format=json]
                     List branches (* marks current; JSONL with --format=json)
   branch <name>     Create a branch at HEAD
@@ -119,8 +123,8 @@ commands:
                     Produce a signed DSSE attestation for a commit
   verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>]
                     Verify every attestation attached to a commit
-  version           Print version (canonical; there is no top-level
-                    `--version` flag — use the `version` subcommand)
+  version           Print version. Also available as the top-level
+                    `--version` / `-V` flags; all emit `mkit <X.Y.Z>`.
 ";
 
 /// Strip lines beginning with `#` (after any leading whitespace) and

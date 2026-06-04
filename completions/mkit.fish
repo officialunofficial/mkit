@@ -24,10 +24,11 @@ set -l __mkit_subcommands \
 complete -c mkit -n "not __fish_seen_subcommand_from $__mkit_subcommands" \
     -a "$__mkit_subcommands"
 
-# Top-level flags.
+# Top-level flags. --version/-V are aliases of the `version` subcommand.
 complete -c mkit -n "not __fish_seen_subcommand_from $__mkit_subcommands" \
     -l help -s h -d "Show help"
-# No top-level --version flag; use the `version` subcommand.
+complete -c mkit -n "not __fish_seen_subcommand_from $__mkit_subcommands" \
+    -l version -s V -d "Print version"
 
 # Per-subcommand flags (kept minimal, mirrors mkit.bash).
 complete -c mkit -n "__fish_seen_subcommand_from add" \
@@ -68,6 +69,10 @@ complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -s m -d "Commit message" -r
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
+complete -c mkit -n "__fish_seen_subcommand_from log" \
+    -l abbrev-commit -d "Abbreviate commit ids"
+complete -c mkit -n "__fish_seen_subcommand_from log" \
+    -l abbrev -d "Abbreviation length (default 7)"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l format -d "Output format (json)" -r -a json
 complete -c mkit -n "__fish_seen_subcommand_from log" \
