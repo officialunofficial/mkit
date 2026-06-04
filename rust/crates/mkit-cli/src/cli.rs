@@ -57,9 +57,11 @@ commands:
                     (--porcelain, or its -s/--short alias, emits
                     machine-readable XY lines on stdout;
                     no -z/NUL or path-quoting support yet)
-  diff [--staged] [<treeA> <treeB>] [<path>...]
+  diff [--staged] [<rev> [<rev>] | <a>..<b>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
-                    --staged for HEAD vs index, or two tree hashes)
+                    --staged for HEAD vs index, a single revision vs the
+                    worktree, two revisions, or an A..B range; revisions
+                    are refs, commits, or short hashes)
   branch [--format=json]
                     List branches (* marks current; JSONL with --format=json)
   branch <name>     Create a branch at HEAD

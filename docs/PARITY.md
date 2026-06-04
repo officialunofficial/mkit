@@ -66,7 +66,6 @@ creeping; revisit post-v1 if demand warrants.
 | `diff` | byte-exact hunks (Myers/histogram) | LCS unified diff | 🔨 | 4 | #257 | header is `diff --mkit`, not `diff --git` |
 | `commit` | `-m`, `-a`, `--amend`, `--author` | same | ✅ | — | — | signed; amend leaves unreachable obj until gc |
 | `log` | history, `-n`, `--format=json`, `--oneline`, `--abbrev-commit`, `--abbrev[=N]` | same | ✅ | 0 | #248 | `--oneline`/`--abbrev-commit` abbreviate (default 7); abbreviated id is a BLAKE3 prefix |
-| `log` | `--abbrev-commit`, `--abbrev[=n]`, abbreviated `--oneline` | full-length hashes | 🔨 | 0 | #248 | display-side only; `rev-parse` is Phase 3 |
 | `log` | `--graph`, `<a>..<b>` range walk | `--graph` is a no-op | 🔨 | 1 | #249 | real ASCII graph + commit-range walking |
 | `branch` | create, list, `-d`/`-D`/`-m` | same (see notes) | ⚠️ | 1 | #249 | **known divergences to reconcile:** default list prints a short id (Git omits it); `-D <missing>` no-ops (Git errors). Tracked in Phase 1. |
 | `checkout` | switch branch, restore files | same | ✅ | — | — | guarded against clobber |
