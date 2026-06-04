@@ -357,7 +357,9 @@ mod tests {
     #[test]
     fn c_quote_octal_escapes_non_ascii() {
         // "é" is UTF-8 0xC3 0xA9 → \303\251 (matches git core.quotePath).
-        assert_eq!(c_quote_path("café").as_deref(), Some(r#""caf\303\251""#));
+        assert_eq!(c_quote_path("é").as_deref(), Some(r#""\303\251""#));
+        // Combined with ASCII: only the non-ASCII bytes are octal-escaped.
+        assert_eq!(c_quote_path("x-é").as_deref(), Some(r#""x-\303\251""#));
     }
 
     #[test]
