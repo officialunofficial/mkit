@@ -99,9 +99,36 @@ pub const MAX_REACHABLE: usize = 10_000_000;
 ///   store before pushing.
 /// - Other [`StoreError`] variants propagate as-is.
 pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Hash>, StoreError> {
+    reachable_closure(store, std::iter::once(root))
+}
+
+/// Collect every object reachable from **any** of `roots` — the
+/// multi-root generalization of [`reachable_objects`]. This is the
+/// closure `mkit gc` (#233) keeps live: seed it with the full retention
+/// root set from [`super::gc::collect_roots`] and every object NOT in the
+/// result is unreachable.
+///
+/// Identical walk semantics to [`reachable_objects`] (commits/remixes →
+/// tree + parents, trees → entries, chunked-blobs → chunks, tags →
+/// target, blobs/deltas are leaves), deduped via the returned
+/// [`BTreeSet`], and capped at [`MAX_REACHABLE`] total objects. With a
+/// single root the result is byte-identical to [`reachable_objects`].
+///
+/// # Errors
+///
+/// Propagates [`StoreError`] as [`reachable_objects`] does — notably
+/// [`StoreError::ObjectNotFound`] for a missing root or referenced
+/// object, so a caller (gc) fails closed rather than under-counting the
+/// live set.
+pub fn reachable_closure<'a, I>(store: &ObjectStore, roots: I) -> Result<BTreeSet<Hash>, StoreError>
+where
+    I: IntoIterator<Item = &'a Hash>,
+{
     let mut out: BTreeSet<Hash> = BTreeSet::new();
     let mut queue: VecDeque<Hash> = VecDeque::new();
-    queue.push_back(*root);
+    for root in roots {
+        queue.push_back(*root);
+    }
 
     while let Some(h) = queue.pop_front() {
         if out.len() >= MAX_REACHABLE {
