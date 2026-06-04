@@ -111,10 +111,11 @@ impl Repo {
     }
 }
 
-/// #214: an executable ours-side that conflicts with a non-exec theirs
-/// must stay executable through `--continue` even when the user resolves
-/// the *content* in the worktree without re-running `mkit add` to fix the
-/// mode. The committed tree mode comes from the staged ours-side mode.
+/// #214 + #269: an executable ours-side that conflicts with a non-exec
+/// theirs must stay executable through `--continue`. The user resolves
+/// the content, restores the exec bit, and stages it; both the
+/// resolved content (#269: an edited resolution must not be silently
+/// dropped) and the executable mode (#214) survive the commit.
 #[test]
 fn merge_continue_preserves_ours_exec_bit() {
     let repo = Repo::new();
@@ -141,18 +142,28 @@ fn merge_continue_preserves_ours_exec_bit() {
 
     fail(repo.path(), repo.xdg(), &["merge", "feature"]);
 
-    // Resolve content only — do NOT re-`mkit add` (so the staged
-    // ours-side mode is what `--continue` commits). The marker-bearing
-    // file must be rewritten to a clean resolution.
+    // Resolve the content, restore the exec bit (the rewrite reset perms),
+    // and stage it. #269: an edited resolution must be staged —
+    // `--continue` refuses an unstaged edit rather than silently committing
+    // the stale staged content.
     repo.write("script.sh", b"echo resolved\n");
-    // Re-stage the resolved content; the staged entry must keep its
-    // executable status carried from the conflict.
+    fs::set_permissions(
+        repo.path().join("script.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    repo.add("script.sh");
     ok(repo.path(), repo.xdg(), &["merge", "--continue"]);
 
     assert_eq!(
         repo.head_tree_mode("script.sh"),
         EntryMode::Executable,
         "exec bit must survive merge --continue (#214)"
+    );
+    assert_eq!(
+        fs::read(repo.path().join("script.sh")).unwrap(),
+        b"echo resolved\n",
+        "the resolved content must be committed, not the stale staged ours (#269)"
     );
 }
 

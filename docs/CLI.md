@@ -280,8 +280,11 @@ Branches / refs:
 `merge`, `cherry-pick`, and `rebase` all share one resumable-conflict
 workflow. When a 3-way merge cannot auto-resolve a path, the command:
 
-1. Materializes the conflicting paths into the worktree (and stages the
-   ours-side blob into `.mkit/index` so each path is "resolvable"):
+1. Applies the merge's **clean (non-conflicting) changes** to the index
+   and worktree (so e.g. files the operation adds/removes/modifies away
+   from the conflict are already staged), then materializes the
+   conflicting paths into the worktree (staging the ours-side blob so
+   each path is "resolvable"):
    - **text** modify/modify and add/add → classic 2-way Git markers
      (`<<<<<<< ours` / `=======` / `>>>>>>> theirs`) are written into
      the file.
@@ -299,10 +302,17 @@ resolved content (remove all conflict markers), `mkit add <path>`, then:
 mkit merge --continue        # or cherry-pick --continue / rebase --continue
 ```
 
-`--continue` refuses while any text-marker file still contains markers.
-The committed tree is built from the **resolved index/worktree** — not
-the conflict-time "ours wins" snapshot — so your edits (including a third
-distinct resolution) are what land.
+`--continue` refuses while any text-marker file still contains markers,
+**and** refuses whenever a conflicted path's worktree resolution does not
+match what is staged in the index — so an unstaged resolution can't be
+silently dropped. This covers every shape: an edited regular **or
+executable** file, a path deleted without `mkit rm`, and a file replaced
+by a symlink or directory without `mkit add`. An *unchanged* conflict
+(the worktree still equals the auto-staged ours-side, including its
+executable / symlink mode) needs no re-`add` and continues. The committed
+tree is built from the **resolved index/worktree** — not the
+conflict-time "ours wins" snapshot — so your edits (including a third
+distinct resolution) and the merge's clean changes both land.
 
 Alternatively:
 

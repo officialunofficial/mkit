@@ -20,6 +20,7 @@ use mkit_core::object::{EntryMode, Object};
 use mkit_core::ops::conflict_state::ConflictRecord;
 use mkit_core::ops::merge::{Conflict, ConflictKind};
 use mkit_core::store::ObjectStore;
+use mkit_core::worktree;
 
 /// Classification of how a conflicting path is presented to the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +138,15 @@ pub fn classify(store: &ObjectStore, c: &Conflict) -> Result<ConflictClass, Stri
 /// `mkit add` after resolution updates it normally and `--continue`
 /// builds the tree from the resolved index/worktree.
 ///
+/// `merged_tree` is the operation's full merge-result tree (holding
+/// "ours" at every conflicted path and the clean changes everywhere
+/// else). It is applied to the index + worktree FIRST — otherwise the
+/// non-conflicting changes would never reach the index and `--continue`
+/// (which builds from the index) would silently drop them (#269). The
+/// caller runs [`super::ensure_restore_safe`] over `merged_tree` first,
+/// so this never clobbers dirty tracked or untracked content. Conflict
+/// markers are then overlaid on the conflicted paths.
+///
 /// Returns the per-path [`ConflictRecord`]s for the sidecar.
 ///
 /// # Errors
@@ -144,9 +154,13 @@ pub fn classify(store: &ObjectStore, c: &Conflict) -> Result<ConflictClass, Stri
 pub fn materialize_conflicts(
     root: &Path,
     store: &ObjectStore,
+    merged_tree: Hash,
     conflicts: &[Conflict],
 ) -> Result<Vec<ConflictRecord>, String> {
-    let mut idx = super::read_or_seed_index_from_head(root, store)?;
+    // Apply the merged result (clean changes + "ours" at conflict paths)
+    // to the index and worktree, then overlay markers below.
+    super::restore_worktree_and_index(root, store, merged_tree)?;
+    let mut idx = index::read_index(root).map_err(|e| format!("read index: {e}"))?;
     let mut records = Vec::with_capacity(conflicts.len());
     let mut stderr = std::io::stderr().lock();
 
@@ -538,6 +552,105 @@ pub fn reset_conflict_paths(
 ///
 /// # Errors
 /// Propagates filesystem read failures.
+/// `true` when `meta` has any executable bit set (Unix). On other
+/// platforms mkit never records `Executable`, so this is always false.
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+#[cfg(not(unix))]
+fn is_executable(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// The canonical `(EntryStatus, Hash)` for the current worktree state at
+/// `abs`, mirroring exactly how `mkit add` would stage it (regular →
+/// Blob/Executable + `store_file_object`; symlink → Symlink + blob of the
+/// link target). `None` when the path is absent or a directory — neither
+/// has a single-file index representation.
+///
+/// # Errors
+/// Read/store failures as a message string.
+fn worktree_object(store: &ObjectStore, abs: &Path) -> Result<Option<(EntryStatus, Hash)>, String> {
+    let meta = match abs.symlink_metadata() {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("stat {}: {e}", abs.display())),
+    };
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        let target =
+            std::fs::read_link(abs).map_err(|e| format!("read link {}: {e}", abs.display()))?;
+        let target_str = target
+            .to_str()
+            .ok_or_else(|| format!("symlink target not UTF-8: {}", abs.display()))?;
+        let h = worktree::store_file_object(store, target_str.as_bytes())
+            .map_err(|e| format!("store symlink: {e}"))?;
+        return Ok(Some((EntryStatus::Symlink, h)));
+    }
+    if ft.is_file() {
+        let (opened, bytes) = worktree::read_regular_file_bounded(abs)
+            .map_err(|e| format!("read {}: {e}", abs.display()))?;
+        let h = worktree::store_file_object(store, &bytes).map_err(|e| format!("store: {e}"))?;
+        let status = if is_executable(&opened) {
+            EntryStatus::Executable
+        } else {
+            EntryStatus::Blob
+        };
+        return Ok(Some((status, h)));
+    }
+    Ok(None) // directory or other special file
+}
+
+/// Refuse `--continue` when a conflicted path's worktree resolution does
+/// not match what is staged in the index. The final tree is built from
+/// the index, so any unstaged resolution would be silently dropped and
+/// then overwritten by the worktree restore (#269).
+///
+/// This compares the worktree's canonical `(status, hash)` against the
+/// staged index entry, so it catches every shape of unstaged resolution:
+/// an edited regular **or executable** file, a path deleted/replaced
+/// (file→symlink, file→dir) without `mkit rm`/`mkit add`, etc. An
+/// *unchanged* conflict (worktree still equals the staged ours-side,
+/// including its exec/symlink mode) matches and continues without a
+/// re-`add` — preserving the #214 mode-resolution contract.
+///
+/// # Errors
+/// Returns a message naming the first unstaged-resolution path.
+pub fn ensure_conflict_paths_staged(
+    root: &Path,
+    store: &ObjectStore,
+    records: &[ConflictRecord],
+) -> Result<(), String> {
+    let idx = index::read_index(root).map_err(|e| format!("read index: {e}"))?;
+    for r in records {
+        let wt = worktree_object(store, &root.join(&r.path))?;
+        // The staged entry for this path (if any). A `Removed` entry means
+        // "ours deleted it"; absence means no staged content.
+        let staged = idx.entries.iter().find(|e| e.path == r.path);
+        let staged_live = staged.filter(|e| e.status != EntryStatus::Removed);
+        let resolved = match (&wt, staged_live) {
+            // Worktree gone (deleted/dir) and nothing live staged → the
+            // deletion is recorded; consistent.
+            (None, None) => true,
+            // Worktree content matches the live staged entry exactly
+            // (content + mode) → resolved (incl. the unchanged #214 case).
+            (Some((ws, wh)), Some(e)) => *ws == e.status && *wh == e.object_hash,
+            // Worktree has content but nothing live staged, or worktree
+            // gone while content is still staged → unstaged resolution.
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        if !resolved {
+            return Err(format!(
+                "'{0}' is resolved in the worktree but not staged; run `mkit add {0}` (or `mkit rm {0}`) then `--continue`",
+                r.path
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn first_unresolved_marker(
     root: &Path,
     records: &[ConflictRecord],
