@@ -109,6 +109,7 @@ _mkit() {
                     _arguments \
                         '--porcelain[machine-readable XY output]' \
                         '(-s --short)'{-s,--short}'[short format; alias for --porcelain=v1]' \
+                        '-z[NUL-terminate records; raw unquoted paths]' \
                         '--help[show help]'
                     ;;
                 commit)

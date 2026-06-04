@@ -289,6 +289,23 @@ fn status_porcelain_untracked_matches_git() {
     assert_parity_set("untracked status", &g, &m); // expect `?? untracked.txt`
 }
 
+#[cfg(unix)]
+#[test]
+fn status_porcelain_quotes_special_paths_like_git() {
+    if !git_available() {
+        eprintln!("skipping: real `git` not on PATH");
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    // A tab in the name: both git (core.quotePath default) and mkit must
+    // emit the same C-style-quoted porcelain line `?? "a\tb.txt"`.
+    h.write_both("a\tb.txt", b"x\n");
+    let g = h.git(&["status", "--porcelain"]);
+    let m = h.mkit(&["status", "--porcelain"]);
+    assert_parity_set("quoted special path", &g, &m);
+}
+
 #[test]
 fn status_porcelain_staged_add_matches_git() {
     if !git_available() {

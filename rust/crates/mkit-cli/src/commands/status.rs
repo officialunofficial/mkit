@@ -36,6 +36,11 @@
 //! state. mkit's `DiffKind::ModeChanged` renders as `T` (a non-git
 //! extension). `??` is the conventional code for untracked files.
 //!
+//! Paths containing special bytes are C-style quoted (matching git's
+//! default `core.quotePath`). With `-z`, records are NUL-terminated and
+//! paths are emitted raw (unquoted) — the round-trip-safe form for paths
+//! with newlines or other special bytes; `-z` implies porcelain.
+//!
 //! Empty stdout means "nothing to commit, working tree clean."
 
 use std::io::Write;
@@ -67,9 +72,15 @@ struct StatusOpts {
     porcelain: Option<PorcelainVersion>,
 
     /// Short format. Alias for `--porcelain=v1`: emits the same
-    /// XY-code-plus-path lines on stdout. (No `-z`/NUL support.)
+    /// XY-code-plus-path lines on stdout.
     #[arg(short = 's', long = "short")]
     short: bool,
+
+    /// NUL-terminate entries instead of newline, and emit raw (unquoted)
+    /// paths — like `git status -z`. Implies porcelain output. Without
+    /// `-z`, paths with special bytes are C-style quoted.
+    #[arg(short = 'z')]
+    z: bool,
 }
 
 #[must_use]
@@ -78,9 +89,9 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
-    // `-s`/`--short` is an alias for `--porcelain=v1`; both select the
-    // line-oriented XY renderer on stdout.
-    let porcelain = opts.porcelain.is_some() || opts.short;
+    // `-s`/`--short` is an alias for `--porcelain=v1`; `-z` also implies
+    // porcelain output. All select the line-oriented XY renderer on stdout.
+    let porcelain = opts.porcelain.is_some() || opts.short || opts.z;
 
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
@@ -116,23 +127,77 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if porcelain {
-        render_porcelain(&entries)
+        render_porcelain(&entries, opts.z)
     } else {
         render_human(&mkit_dir, &entries)
     }
 }
 
-/// `--porcelain[=v1]` output — line-oriented XY-code-plus-path, one
-/// entry per line. Empty stdout means clean. Matches `git status
-/// --porcelain` for the codes mkit and git share; `T ` (`ModeChanged`)
-/// is the only non-git extension.
-fn render_porcelain(entries: &[StatusEntry]) -> u8 {
+/// `--porcelain[=v1]` output — XY-code-plus-path, one entry per record.
+/// Empty stdout means clean. Matches `git status --porcelain` for the
+/// codes mkit and git share; `T ` (`ModeChanged`) is the only non-git
+/// extension.
+///
+/// With `z = false` (default), records are newline-terminated and a path
+/// containing special bytes is C-style quoted (matching git's default
+/// `core.quotePath`). With `z = true` (`-z`), records are NUL-terminated
+/// and paths are emitted **raw** (unquoted) — the round-trip-safe form
+/// for paths that contain newlines or other special bytes.
+fn render_porcelain(entries: &[StatusEntry], z: bool) -> u8 {
     let mut stdout = std::io::stdout().lock();
     for e in entries {
         let code = porcelain_code(e.staging, e.diff.kind);
-        let _ = writeln!(stdout, "{code} {}", e.diff.path);
+        if z {
+            let _ = write!(stdout, "{code} {}\0", e.diff.path);
+        } else if let Some(quoted) = c_quote_path(&e.diff.path) {
+            let _ = writeln!(stdout, "{code} {quoted}");
+        } else {
+            let _ = writeln!(stdout, "{code} {}", e.diff.path);
+        }
     }
     exit::OK
+}
+
+/// C-style-quote `path` the way Git does for porcelain output when a path
+/// contains bytes that need escaping. Returns `None` when the path is
+/// "plain" (all printable ASCII except `"`/`\`) and can be emitted as-is.
+///
+/// Quoting rule (matches Git's `quote_c_style` with the default
+/// `core.quotePath=true`): quote if any byte is a control char (`< 0x20`),
+/// `"`, `\`, or non-printable / non-ASCII (`>= 0x7f`). Inside the quotes,
+/// the common control chars use their `\a\b\t\n\v\f\r` escapes, `"` and
+/// `\` are backslash-escaped, printable ASCII is literal, and everything
+/// else is a 3-digit `\NNN` octal escape (per UTF-8 byte).
+fn c_quote_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let needs = bytes
+        .iter()
+        .any(|&b| b < 0x20 || b == b'"' || b == b'\\' || b >= 0x7f);
+    if !needs {
+        return None;
+    }
+    let mut out = String::with_capacity(bytes.len() + 2);
+    out.push('"');
+    for &b in bytes {
+        match b {
+            0x07 => out.push_str("\\a"),
+            0x08 => out.push_str("\\b"),
+            0x09 => out.push_str("\\t"),
+            0x0a => out.push_str("\\n"),
+            0x0b => out.push_str("\\v"),
+            0x0c => out.push_str("\\f"),
+            0x0d => out.push_str("\\r"),
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(b as char),
+            other => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\{other:03o}");
+            }
+        }
+    }
+    out.push('"');
+    Some(out)
 }
 
 /// Map (staging, kind) → two-char XY code per the porcelain format.
@@ -266,6 +331,33 @@ mod tests {
             porcelain_code(StatusStaging::Unstaged, DiffKind::Removed),
             " D",
         );
+    }
+
+    #[test]
+    fn c_quote_leaves_plain_paths_alone() {
+        assert_eq!(c_quote_path("a.txt"), None);
+        assert_eq!(c_quote_path("dir/with space.txt"), None); // space is plain
+        assert_eq!(c_quote_path("weird-but-ascii_!@#$%.rs"), None);
+    }
+
+    #[test]
+    fn c_quote_escapes_special_bytes() {
+        assert_eq!(c_quote_path("a\tb.txt").as_deref(), Some(r#""a\tb.txt""#));
+        assert_eq!(
+            c_quote_path("line\nfeed").as_deref(),
+            Some(r#""line\nfeed""#)
+        );
+        assert_eq!(c_quote_path("q\"x").as_deref(), Some(r#""q\"x""#));
+        assert_eq!(
+            c_quote_path("back\\slash").as_deref(),
+            Some(r#""back\\slash""#)
+        );
+    }
+
+    #[test]
+    fn c_quote_octal_escapes_non_ascii() {
+        // "é" is UTF-8 0xC3 0xA9 → \303\251 (matches git core.quotePath).
+        assert_eq!(c_quote_path("café").as_deref(), Some(r#""caf\303\251""#));
     }
 
     #[test]

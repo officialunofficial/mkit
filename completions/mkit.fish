@@ -61,6 +61,8 @@ complete -c mkit -n "__fish_seen_subcommand_from status" \
     -l porcelain -d "Machine-readable XY output"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
     -s s -l short -d "Short format; alias for --porcelain=v1"
+complete -c mkit -n "__fish_seen_subcommand_from status" \
+    -s z -d "NUL-terminate records; raw unquoted paths"
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -l all -s a -d "Stage tracked changes"
 complete -c mkit -n "__fish_seen_subcommand_from commit" \

@@ -47,14 +47,18 @@ Working-tree commands:
     destroy a locally-modified tracked file (a dirty-worktree guard in
     the spirit of the #176 restore guards); use `--cached` to keep the
     file or `--force` to discard the local changes.
-- `mkit status [--porcelain] [-s|--short]` — show staged and unstaged
+- `mkit status [--porcelain] [-s|--short] [-z]` — show staged and unstaged
   changes. Default-mode prose (banner + section headers + per-file
   lines) goes to **stderr**; stdout is reserved for machine output.
   `-s`/`--short` is an alias for `--porcelain=v1`; both select the same
   renderer. Porcelain emits one entry per line in `git status --porcelain=v1`
   format (`XY <path>`, with mkit's `T` for `ModeChanged` as the only
-  non-git extension). Empty stdout means clean. There is **no `-z`/NUL
-  termination or path-quoting** support; see "Divergences from Git".
+  non-git extension). Paths with special bytes are **C-style quoted**
+  (matching git's default `core.quotePath`). `-z` (which implies
+  porcelain) NUL-terminates records and emits **raw, unquoted** paths —
+  the round-trip-safe form for paths containing newlines or other special
+  bytes. Empty stdout means clean. (`--porcelain=v2` is not yet
+  implemented — see "Divergences from Git".)
 - `mkit diff [--staged|--cached] [<rev> [<rev>] | <a>..<b>] [<path>...]` — show
   changes as a unified patch. With no arguments, compares the HEAD tree
   to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
@@ -487,11 +491,11 @@ These are documented behaviours, not bugs, with tracked follow-ups:
 - **`mkit log --graph` is a no-op.** The flag is accepted for
   compatibility so existing scripts don't break, but no ASCII commit
   graph is drawn. A real graph renderer is a follow-up.
-- **`mkit status` has no `-z` / NUL termination or path quoting.**
-  Porcelain output is newline-delimited with raw (unquoted) paths.
-  Paths containing newlines or other special bytes are therefore not
-  round-trippable through porcelain. NUL-termination and C-style path
-  quoting are a follow-up.
+- **`mkit status --porcelain=v2` is not yet implemented.** Only
+  `--porcelain[=v1]` (with `-z` and C-style path quoting) is supported.
+  The v2 format additionally reports per-path object modes and hashes,
+  which requires the diff layer to carry mode information; that is a
+  follow-up.
 - **`mkit add -p` (interactive hunk staging) is not supported.** Stage
   whole files with pathspecs, `.`, `-A`, or `-u`. Interactive hunk
   selection is a follow-up.

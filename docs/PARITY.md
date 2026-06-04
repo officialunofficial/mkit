@@ -58,8 +58,8 @@ creeping; revisit post-v1 if demand warrants.
 | `add` | pathspecs, `-A`, `-u` | same | ✅ | — | — | `-p` is separate (#258) |
 | `rm` | `--cached`, `-r`, `-f` + dirty guard | same | ✅ | — | — | guard is an mkit safety divergence |
 | `mv` | rename, `-f` | absent (by-design, being reversed) | 🔨 | 2 | #250 | guarded: refuses to clobber w/o `-f` |
-| `status` | `--porcelain[=v1]`, `-s` — **simple paths only** | v1, no path quoting | ✅ | — | — | C-style quoting of special paths / `-z` / v2 → Phase 1 (next row) |
-| `status` | `--porcelain=v2`, `-z`, path quoting | not present | 🔨 | 1 | #249 | agent-parsed machine output |
+| `status` | `--porcelain[=v1]`, `-s`, `-z`, C-style path quoting | same | ✅ | 1 | #249 | quoting matches git `core.quotePath`; `-z` = raw NUL-terminated |
+| `status` | `--porcelain=v2` | not present | 🔨 | 1 | #249 | needs per-path modes/hashes in the diff layer (follow-up) |
 | `diff` | HEAD/worktree, `--staged`, pathspecs | same | ✅ | — | — | |
 | `diff` | `<rev>`, `<a>..<b>` ranges | implemented (`split_range`/`rev_to_tree`) | ✅ | 0 | #248 | docs reconciled (stale CLI.md divergence removed) |
 | `diff` | `--name-only`, `--name-status`, `--stat`, `-z` | absent | 🔨 | 1 | #249 | `-z` applies to name-only/name-status only |
@@ -128,10 +128,12 @@ mkit deliberately refuses Git's silent data-loss defaults. These are
 Outputs that tools parse must be **stable and Git-shaped**, normalized only by
 hash length:
 
-- `status --porcelain=v1` — `XY <path>`, newline-delimited, **simple paths only**
-  (no C-style quoting of special paths and no `-z` yet — Phase 1, #249). mkit
-  adds `T` for mode-change as the sole extension.
-- `status --porcelain=v2` / `-z` / C-quoting — Phase 1 (#249).
+- `status --porcelain=v1` — `XY <path>`, newline-delimited; special-byte
+  paths are C-style quoted (git `core.quotePath`), and `-z` emits raw,
+  NUL-terminated records. mkit adds `T` for mode-change as the sole
+  extension.
+- `status --porcelain=v2` — not yet implemented; needs per-path modes +
+  hashes in the diff layer (Phase 1 follow-up, #249).
 - Plumbing (`rev-parse`, `cat-file`, `ls-files`, `ls-tree`, `show-ref`,
   `for-each-ref`) — exact flag contracts defined in Phase 3 (#251); output
   matches Git modulo 64-hex vs 40-hex hashes.
