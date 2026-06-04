@@ -468,6 +468,16 @@ fn replay(
         Ok(Some(h)) => h,
         _ => state.onto,
     };
+    // The original tip is superseded by the replayed history. Record it
+    // BEFORE finalizing the branch (still under the worktree lock) so it
+    // survives gc once the in-progress rebase state — which currently
+    // pins it — is cleaned up below. Abort if the log can't be written.
+    if state.orig_head != final_head
+        && let Err((m, c)) =
+            super::record_superseded(mkit_dir, "rebase", &state.head_name, state.orig_head)
+    {
+        return emit_err(&m, c);
+    }
     if let Err(e) = super::write_ref_recording_history(
         mkit_dir,
         &state.head_name,

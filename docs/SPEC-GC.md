@@ -80,8 +80,9 @@ mutating commands and gc take), and gc MUST run its "expire → collect
 roots → prune" sequence under that lock, so a producer append cannot race
 an `expire` rewrite and vanish.
 
-**Status:** the log format, durable store, retention policy, and gc-root
-integration are implemented (Part 2a). The **producers** — recording at
-the `commit --amend` / `reset` / `rebase` rewrite sites — are Part 2b.
-Until producers land the log is empty, so pre-producer superseded commits
-remain unrecoverable; `mkit gc` (#233) stays sequenced behind Part 2b.
+**Status:** the recovery log (Part 2a) **and** its producers (Part 2b)
+are implemented — `commit --amend`, `reset`, and `rebase` each record the
+superseded tip (op tokens `amend`/`reset`/`rebase`) before moving the
+ref, under the worktree lock. The only remaining piece of the model is
+the **`mkit gc` command itself** (#233): expire the recovery log, compute
+`live_objects`, then prune `store ∖ live` — all under the repo lock.

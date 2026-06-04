@@ -104,6 +104,19 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("read target commit: {e}"), exit::GENERAL_ERROR),
     };
 
+    // If reset moves the branch off its current tip, that old tip may
+    // become unreachable — record it BEFORE the move (under the worktree
+    // lock) so it stays recoverable, and abort if the log can't be
+    // written. A no-op move (old == target) records nothing.
+    if let Ok(Some(old_head)) = refs::resolve_head(&mkit_dir)
+        && old_head != target
+    {
+        let branch = super::head_branch_name(&mkit_dir);
+        if let Err((msg, code)) = super::record_superseded(&mkit_dir, "reset", &branch, old_head) {
+            return emit_err(&msg, code);
+        }
+    }
+
     // Move HEAD / the current branch FIRST. As in `checkout`, advancing
     // the ref before the index keeps the failure modes benign: a later
     // index-write failure leaves HEAD on the target with a stale index,
