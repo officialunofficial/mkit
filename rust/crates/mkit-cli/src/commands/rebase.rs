@@ -244,6 +244,9 @@ fn commit_resolved_commit(
         Ok(None) => {}
         Err(e) => return Err(emit_err(&e, exit::GENERAL_ERROR)),
     }
+    if let Err(e) = super::conflict::ensure_conflict_paths_staged(cwd, store, records) {
+        return Err(emit_err(&e, exit::GENERAL_ERROR));
+    }
     if state.todo.is_empty() {
         return Err(emit_err(
             "rebase state is inconsistent: no paused commit",
@@ -415,11 +418,15 @@ fn replay(
             if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
                 return emit_err(&e, exit::GENERAL_ERROR);
             }
-            let records =
-                match super::conflict::materialize_conflicts(cwd, store, &result.conflicts) {
-                    Ok(r) => r,
-                    Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
-                };
+            let records = match super::conflict::materialize_conflicts(
+                cwd,
+                store,
+                result.tree_hash,
+                &result.conflicts,
+            ) {
+                Ok(r) => r,
+                Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+            };
             if let Err(e) = conflict_state::write_conflicts(&rebase_dir, &records) {
                 return emit_err(&format!("write conflicts: {e}"), exit::CANTCREAT);
             }

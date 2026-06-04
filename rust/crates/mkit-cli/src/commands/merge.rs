@@ -169,7 +169,12 @@ fn start(
         if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
-        let records = match super::conflict::materialize_conflicts(cwd, store, &result.conflicts) {
+        let records = match super::conflict::materialize_conflicts(
+            cwd,
+            store,
+            result.tree_hash,
+            &result.conflicts,
+        ) {
             Ok(r) => r,
             Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
         };
@@ -240,6 +245,9 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
         }
         Ok(None) => {}
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+    }
+    if let Err(e) = super::conflict::ensure_conflict_paths_staged(cwd, store, &records) {
+        return emit_err(&e, exit::GENERAL_ERROR);
     }
 
     // Build the final tree from the resolved index — NOT the

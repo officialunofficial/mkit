@@ -20,6 +20,7 @@ use mkit_core::object::{EntryMode, Object};
 use mkit_core::ops::conflict_state::ConflictRecord;
 use mkit_core::ops::merge::{Conflict, ConflictKind};
 use mkit_core::store::ObjectStore;
+use mkit_core::worktree;
 
 /// Classification of how a conflicting path is presented to the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +138,15 @@ pub fn classify(store: &ObjectStore, c: &Conflict) -> Result<ConflictClass, Stri
 /// `mkit add` after resolution updates it normally and `--continue`
 /// builds the tree from the resolved index/worktree.
 ///
+/// `merged_tree` is the operation's full merge-result tree (holding
+/// "ours" at every conflicted path and the clean changes everywhere
+/// else). It is applied to the index + worktree FIRST — otherwise the
+/// non-conflicting changes would never reach the index and `--continue`
+/// (which builds from the index) would silently drop them (#269). The
+/// caller runs [`super::ensure_restore_safe`] over `merged_tree` first,
+/// so this never clobbers dirty tracked or untracked content. Conflict
+/// markers are then overlaid on the conflicted paths.
+///
 /// Returns the per-path [`ConflictRecord`]s for the sidecar.
 ///
 /// # Errors
@@ -144,9 +154,13 @@ pub fn classify(store: &ObjectStore, c: &Conflict) -> Result<ConflictClass, Stri
 pub fn materialize_conflicts(
     root: &Path,
     store: &ObjectStore,
+    merged_tree: Hash,
     conflicts: &[Conflict],
 ) -> Result<Vec<ConflictRecord>, String> {
-    let mut idx = super::read_or_seed_index_from_head(root, store)?;
+    // Apply the merged result (clean changes + "ours" at conflict paths)
+    // to the index and worktree, then overlay markers below.
+    super::restore_worktree_and_index(root, store, merged_tree)?;
+    let mut idx = index::read_index(root).map_err(|e| format!("read index: {e}"))?;
     let mut records = Vec::with_capacity(conflicts.len());
     let mut stderr = std::io::stderr().lock();
 
@@ -538,6 +552,56 @@ pub fn reset_conflict_paths(
 ///
 /// # Errors
 /// Propagates filesystem read failures.
+/// Refuse `--continue` when a conflicted **regular file** has been edited
+/// in the worktree but the resolution was not staged. The final tree is
+/// built from the index, so an unstaged edit would be silently dropped
+/// and then overwritten by the worktree restore (#269) — this catches the
+/// common "edit, remove markers, forget `mkit add`" mistake.
+///
+/// Scope (deliberate): only `Blob`-status index entries are checked.
+/// Executable / symlink (mode) conflicts have an explicit
+/// auto-resolve-to-ours-mode contract (#214) where `--continue` works
+/// without re-`add`ing, so they are skipped. A path absent from the
+/// worktree (resolved by deletion), or with no non-removed `Blob` entry,
+/// is left alone — the index already reflects the intent.
+///
+/// # Errors
+/// Returns a message naming the first edited-but-unstaged path.
+pub fn ensure_conflict_paths_staged(
+    root: &Path,
+    store: &ObjectStore,
+    records: &[ConflictRecord],
+) -> Result<(), String> {
+    let idx = index::read_index(root).map_err(|e| format!("read index: {e}"))?;
+    for r in records {
+        let abs = root.join(&r.path);
+        let Ok(meta) = abs.symlink_metadata() else {
+            continue; // absent → resolved by deletion; index reflects it.
+        };
+        if !meta.file_type().is_file() {
+            continue; // a worktree symlink/dir isn't a regular-file edit.
+        }
+        // Only guard regular blobs; mode (exec/symlink) conflicts follow
+        // the #214 auto-stage-ours contract.
+        let Some(staged) = idx
+            .entries
+            .iter()
+            .find(|e| e.path == r.path && e.status == EntryStatus::Blob)
+        else {
+            continue;
+        };
+        let wt_hash =
+            worktree::hash_file(store, &abs).map_err(|e| format!("hash {}: {e}", r.path))?;
+        if staged.object_hash != wt_hash {
+            return Err(format!(
+                "'{0}' is resolved in the worktree but not staged; run `mkit add {0}` (or `mkit rm {0}`) then `--continue`",
+                r.path
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn first_unresolved_marker(
     root: &Path,
     records: &[ConflictRecord],
