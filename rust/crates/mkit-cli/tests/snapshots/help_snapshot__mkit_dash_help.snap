@@ -100,6 +100,9 @@ commands:
   bisect good [hash] Mark a commit as good
   bisect bad [hash]  Mark a commit as bad
   bisect reset       End bisect and restore original state
+  gc [-n] [--grace-secs SECS]
+                    Reclaim unreachable objects older than the grace
+                    window (default 14d); -n/--dry-run previews
   sparse-checkout    Manage sparse checkout patterns
   serve <path>       Start SSH transport server (internal)
   pack-shard <hash>  Encode a stored pack into Reed-Solomon shards (feature: pack-shards)

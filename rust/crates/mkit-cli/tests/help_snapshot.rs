@@ -56,6 +56,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "cherry-pick",
     "rebase",
     "bisect",
+    "gc",
     "remote",
     "clone",
     "fetch",

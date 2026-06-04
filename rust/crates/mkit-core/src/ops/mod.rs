@@ -29,7 +29,7 @@ pub use diff::{
     DiffEntry, DiffError, DiffKind, DiffResult, StatusEntry, StatusStaging, diff_trees,
     status_diff, text_patch,
 };
-pub use gc::{GcRootsError, collect_roots, live_objects};
+pub use gc::{GcReport, GcRootsError, collect_roots, live_objects, run_gc};
 pub use graph::{
     collect_ancestor_set, reachable_closure, reachable_closure_checked, reachable_objects,
 };

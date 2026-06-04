@@ -172,6 +172,37 @@ pub fn roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>> {
         .collect())
 }
 
+/// Whether the entry at position `i` of a `total`-length log is retained
+/// under `policy`: kept if fresher than `grace_secs` OR among the last
+/// `keep_last`. Shared by [`expire`] and [`would_expire`] so the preview
+/// can't drift from the real prune.
+fn is_retained(
+    i: usize,
+    e: &RecoveryEntry,
+    total: usize,
+    now: u64,
+    policy: &RetentionPolicy,
+) -> bool {
+    let fresh = now.saturating_sub(e.timestamp) <= policy.grace_secs;
+    let keep_floor = total.saturating_sub(policy.keep_last);
+    fresh || i >= keep_floor
+}
+
+/// Count how many entries [`expire`] would prune, **without** mutating the
+/// log. For `gc --dry-run` previews.
+///
+/// # Errors
+/// [`RecoveryError`] from a strict [`read_all`].
+pub fn would_expire(mkit_dir: &Path, now: u64, policy: &RetentionPolicy) -> Result<usize> {
+    let all = read_all(mkit_dir)?;
+    let total = all.len();
+    Ok(all
+        .iter()
+        .enumerate()
+        .filter(|(i, e)| !is_retained(*i, e, total, now, policy))
+        .count())
+}
+
 /// Drop entries that are both older than `policy.grace_secs` (relative to
 /// `now`, unix seconds) and not among the most recent `policy.keep_last`.
 /// Rewrites the log atomically (durably, via [`write_atomic`]). Returns
@@ -188,15 +219,10 @@ pub fn expire(mkit_dir: &Path, now: u64, policy: &RetentionPolicy) -> Result<usi
     if total == 0 {
         return Ok(0);
     }
-    // Indices counted from the end are within `keep_last`.
-    let keep_floor = total.saturating_sub(policy.keep_last);
     let kept: Vec<RecoveryEntry> = all
         .into_iter()
         .enumerate()
-        .filter(|(i, e)| {
-            let fresh = now.saturating_sub(e.timestamp) <= policy.grace_secs;
-            fresh || *i >= keep_floor
-        })
+        .filter(|(i, e)| is_retained(*i, e, total, now, policy))
         .map(|(_, e)| e)
         .collect();
     let pruned = total - kept.len();
@@ -326,6 +352,27 @@ mod tests {
         .unwrap();
         assert_eq!(pruned, 1, "the ts=10 entry is old and not in last-1");
         assert_eq!(roots(&md).unwrap(), BTreeSet::from([h(2), h(3)]));
+    }
+
+    #[test]
+    fn would_expire_counts_without_mutating() {
+        let (_d, md) = md();
+        record(&md, &entry(10, 1)).unwrap();
+        record(&md, &entry(850, 2)).unwrap();
+        record(&md, &entry(900, 3)).unwrap();
+        let policy = RetentionPolicy {
+            grace_secs: 200,
+            keep_last: 1,
+        };
+        let before = read_all(&md).unwrap();
+        let n = would_expire(&md, 1000, &policy).unwrap();
+        assert_eq!(n, 1, "ts=10 is the only expirable entry");
+        // The log itself is untouched by the preview.
+        assert_eq!(
+            read_all(&md).unwrap(),
+            before,
+            "would_expire must not mutate"
+        );
     }
 
     #[test]

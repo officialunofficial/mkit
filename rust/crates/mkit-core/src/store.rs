@@ -212,6 +212,80 @@ impl ObjectStore {
         let obj = serialize::deserialize(&bytes)?;
         Ok(obj)
     }
+
+    /// Enumerate every object hash currently in the store by walking
+    /// `objects/<2-hex>/<62-hex>`. Entries whose names are not the
+    /// expected hex shape (stray files, atomic-write temp files, unknown
+    /// dirs) are skipped — they are not objects. Used by `gc` to find
+    /// prune candidates.
+    ///
+    /// # Errors
+    /// [`StoreError::Io`] if a directory cannot be read (gc must then
+    /// fail closed rather than prune against a partial enumeration).
+    pub fn iter_object_hashes(&self) -> StoreResult<Vec<Hash>> {
+        let mut out = Vec::new();
+        let shards = match fs::read_dir(&self.objects_root) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(StoreError::Io(e)),
+        };
+        for shard in shards {
+            let shard = shard?;
+            if !shard.file_type()?.is_dir() {
+                continue;
+            }
+            let dir_name = shard.file_name();
+            let Some(dir) = dir_name.to_str() else {
+                continue;
+            };
+            if dir.len() != 2 || !dir.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            for entry in fs::read_dir(shard.path())? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let file_name = entry.file_name();
+                let Some(file) = file_name.to_str() else {
+                    continue;
+                };
+                if file.len() != 62 {
+                    continue;
+                }
+                // Reassemble the 64-hex id and parse it; skips non-objects.
+                if let Ok(h) = hash::from_hex(&format!("{dir}{file}")) {
+                    out.push(h);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Filesystem metadata for object `h` (size + mtime), for gc's
+    /// grace-window check.
+    ///
+    /// # Errors
+    /// [`StoreError::ObjectNotFound`] if absent, else [`StoreError::Io`].
+    pub fn object_metadata(&self, h: &Hash) -> StoreResult<fs::Metadata> {
+        fs::metadata(self.path_for(h)).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
+            _ => StoreError::Io(e),
+        })
+    }
+
+    /// Delete object `h` from the store. Idempotent: a missing object is
+    /// not an error (it may have been pruned already).
+    ///
+    /// # Errors
+    /// [`StoreError::Io`] on a filesystem failure other than not-found.
+    pub fn remove_object(&self, h: &Hash) -> StoreResult<()> {
+        match fs::remove_file(self.path_for(h)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(StoreError::Io(e)),
+        }
+    }
 }
 
 /// Atomically write `bytes` to `final_path`. We write to a sibling temp

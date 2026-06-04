@@ -19,6 +19,7 @@ pub mod config_cmd;
 pub mod conflict;
 pub mod diff;
 pub mod fetch;
+pub mod gc;
 pub mod hash_cmd;
 pub mod init;
 pub mod key;

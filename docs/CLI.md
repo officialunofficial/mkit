@@ -97,8 +97,8 @@ History / commits:
   from the index, and is re-signed; the branch is moved to it and the
   move is recorded in the ref-history journal. Without `-m` the previous
   commit's message is reused (no editor is launched). The superseded
-  commit becomes an unreachable object and is only reclaimed once
-  `mkit gc` ships (issue #233).
+  commit is recorded in the recovery log so it stays recoverable, and is
+  reclaimed by `mkit gc` once it falls out of the retention window.
 - `mkit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N]` — show
   commit history. The default format prints the **full commit message
   body**, indented by four spaces, and renders the timestamp as a stable
@@ -258,6 +258,22 @@ Branches / refs:
   the rebase pauses with resumable state; `--skip` drops the current
   commit. See "Resolving conflicts" below.
 - `mkit bisect start | good | bad | reset` — binary search for a bug.
+- `mkit gc [-n|--dry-run] [--grace-secs <secs>]` — reclaim unreachable
+  objects (mark-and-sweep). Under the repo lock it expires stale recovery
+  entries, computes the live set reachable from the retention roots (refs,
+  stash, in-progress operations, attestations, and the recovery log of
+  commits superseded by `commit --amend`/`reset`/`rebase`), then deletes
+  unreachable objects older than the grace window (default 14 days).
+  `-n`/`--dry-run` reports what would be pruned without deleting.
+  `--grace-secs 0` prunes every unreachable object, but **bypasses the
+  grace window** — the grace window is gc's concurrency-safety net (some
+  root-publishing paths such as `tag` and `fetch` write an object before
+  publishing the ref that makes it reachable), so `--grace-secs 0` must
+  only be run when **no other mkit process is operating on the repo**
+  (gc prints a warning). **Fail-closed:** a missing/corrupt root, a
+  malformed ref, or the reachability cap aborts the run with nothing
+  deleted, and an object whose age can't be read is kept. See
+  [`docs/SPEC-GC.md`](SPEC-GC.md).
 
 ### Resolving conflicts
 
@@ -490,10 +506,11 @@ each:
   the destructive step explicit and outside mkit's data path (decision
   #226).
 
-Note: object garbage collection (`mkit gc`) is **not shipped** — it is a
-separate, unscheduled milestone (issue #233). Commands that leave
-unreachable objects (notably `commit --amend` and `reset`) say so
-explicitly; those objects remain on disk until `gc` lands.
+Note: object garbage collection (`mkit gc`) **is shipped** (issue #233).
+History-rewriting commands (`commit --amend`, `reset`, `rebase`) record
+the superseded commit in the recovery log, and `mkit gc` reclaims
+unreachable objects once they fall outside the grace window. See
+[`docs/SPEC-GC.md`](SPEC-GC.md).
 
 ## Config keys
 
