@@ -241,11 +241,22 @@ fn render_stat<'a>(
             StatChange::Text { added, deleted } => {
                 let total = added + deleted;
                 let graph = stat_graph(added, deleted, graph_width, max_change, scaled);
-                writeln!(
-                    out,
-                    " {name:<name_width$} | {total:>number_width$} {graph}",
-                    name = r.name,
-                )
+                // git emits `| 0` with no trailing space/graph for a
+                // zero-change row (empty-file add, mode-only); the graph
+                // (and its leading space) appear only when there is one.
+                if graph.is_empty() {
+                    writeln!(
+                        out,
+                        " {name:<name_width$} | {total:>number_width$}",
+                        name = r.name
+                    )
+                } else {
+                    writeln!(
+                        out,
+                        " {name:<name_width$} | {total:>number_width$} {graph}",
+                        name = r.name,
+                    )
+                }
                 .map_err(|e| format!("write: {e}"))?;
             }
             StatChange::Binary { old_len, new_len } => {
@@ -264,8 +275,12 @@ fn render_stat<'a>(
 }
 
 /// The ` N files changed[, I insertions(+)][, D deletions(-)]` summary
-/// line. Pluralization matches git, and a clause is omitted when its
-/// count is zero (`1 file changed, 1 insertion(+)` has no deletions part).
+/// line, matching git's `print_stat_summary`. git's clause rule: show
+/// insertions when `ins != 0 || del == 0`, and deletions when
+/// `del != 0 || ins == 0`. So a one-sided change shows only its side
+/// (`1 file changed, 1 insertion(+)`), while a zero-change diff (mode-only,
+/// binary-only, empty-file add) shows BOTH `0 insertions(+), 0
+/// deletions(-)`. Pluralization is git's (`insertion`/`insertions`).
 fn stat_summary(rows: &[StatRow]) -> String {
     use std::fmt::Write as _;
     let (mut ins, mut del) = (0usize, 0usize);
@@ -280,14 +295,14 @@ fn stat_summary(rows: &[StatRow]) -> String {
         rows.len(),
         if rows.len() == 1 { "file" } else { "files" }
     );
-    if ins > 0 {
+    if ins != 0 || del == 0 {
         let _ = write!(
             summary,
             ", {ins} insertion{}(+)",
             if ins == 1 { "" } else { "s" }
         );
     }
-    if del > 0 {
+    if del != 0 || ins == 0 {
         let _ = write!(
             summary,
             ", {del} deletion{}(-)",

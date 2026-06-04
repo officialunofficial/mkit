@@ -555,9 +555,11 @@ fn diff_stat_matches_git() {
     stage_add_delete_modify(&h);
     // Unscaled multi-file diffstat: per-file `<name> | <count> <graph>`
     // rows (name-sorted: del, m, new) + the `N files changed, …` summary.
+    // Byte-exact: --stat carries no object ids, so order, column padding,
+    // and (the absence of) trailing whitespace are all part of the contract.
     let g = h.git(&["diff", "--cached", "--stat"]);
     let m = h.mkit(&["diff", "--staged", "--stat"]);
-    assert_parity_ordered("diff --stat", &g, &m);
+    assert_parity_bytes("diff --stat", &g, &m);
 }
 
 #[test]
@@ -576,7 +578,49 @@ fn diff_stat_single_insertion_summary_matches_git() {
     // deletions clause since there are none).
     let g = h.git(&["diff", "--cached", "--stat"]);
     let m = h.mkit(&["diff", "--staged", "--stat"]);
-    assert_parity_ordered("diff --stat singular summary", &g, &m);
+    assert_parity_bytes("diff --stat singular summary", &g, &m);
+}
+
+#[test]
+fn diff_stat_empty_file_zero_change_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("seed.txt", b"x\n");
+    h.commit_both(&["seed.txt"], "init");
+    // Adding an empty file is a zero-change row: git prints `<name> | 0`
+    // with NO trailing space, and the summary still shows BOTH zero
+    // clauses (` 1 file changed, 0 insertions(+), 0 deletions(-)`).
+    h.write_both("empty.txt", b"");
+    assert!(h.git(&["add", "empty.txt"]).status.success());
+    assert!(h.mkit(&["add", "empty.txt"]).status.success());
+    let g = h.git(&["diff", "--cached", "--stat"]);
+    let m = h.mkit(&["diff", "--staged", "--stat"]);
+    assert_parity_bytes("diff --stat zero-change row", &g, &m);
+}
+
+#[test]
+fn diff_stat_nul_file_is_binary_like_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    // A blob containing a NUL byte is valid UTF-8 but Git (and now mkit)
+    // classify it as binary by the NUL heuristic, so --stat shows
+    // `Bin <old> -> <new> bytes`, not line counts. (Filename avoids
+    // Windows reserved device names like `nul`, which mkit's tree guard
+    // refuses cross-platform.)
+    h.write_both("payload.dat", b"hello\x00world\n");
+    h.commit_both(&["payload.dat"], "init");
+    h.write_both("payload.dat", b"HELLO\x00WORLD\nmore\n");
+    assert!(h.git(&["add", "payload.dat"]).status.success());
+    assert!(h.mkit(&["add", "payload.dat"]).status.success());
+    let g = h.git(&["diff", "--cached", "--stat"]);
+    let m = h.mkit(&["diff", "--staged", "--stat"]);
+    assert_parity_bytes("diff --stat NUL=binary", &g, &m);
 }
 
 #[test]
@@ -612,7 +656,7 @@ fn diff_stat_scaled_graph_matches_git() {
     );
     let g = h.git(&["diff", "--cached", "--stat"]);
     let m = h.mkit(&["diff", "--staged", "--stat"]);
-    assert_parity_ordered("diff --stat (scaled)", &g, &m);
+    assert_parity_bytes("diff --stat (scaled)", &g, &m);
 }
 
 // =====================================================================
