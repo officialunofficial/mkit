@@ -1,8 +1,10 @@
 # SPEC-GC — garbage-collection retention roots & recovery
 
-Status: **draft**. Part 1 (retention roots + live closure) is implemented
-in `mkit-core` (`ops::gc`). Part 2 (recovery log + retention policy) and
-the `mkit gc` command itself are not yet shipped. Tracks #260 → #233.
+Status: **draft**. The recovery model (#260) is implemented: Part 1
+(retention roots + live closure, `ops::gc`), Part 2a (recovery log +
+retention policy, `ops::recovery`), and Part 2b (producers — amend/reset/
+rebase record the superseded tip). The **`mkit gc` command itself is not
+yet shipped** (#233) — it is the only remaining piece. Tracks #260 → #233.
 
 ## Why this spec exists
 
