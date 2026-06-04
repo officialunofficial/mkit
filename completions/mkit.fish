@@ -17,7 +17,7 @@ complete -c mkit -f
 set -l __mkit_subcommands \
     init add rm restore reset hash cat tree commit log reflog status diff branch checkout \
     tag config merge push pull fetch stash clone remote key keygen \
-    cherry-pick rebase bisect sparse-checkout serve pack-shard blame verify \
+    cherry-pick rebase bisect gc sparse-checkout serve pack-shard blame verify \
     attest verify-attest version help
 
 # Subcommand list (only when no subcommand has been entered yet).
@@ -114,6 +114,8 @@ complete -c mkit -n "__fish_seen_subcommand_from rebase" \
 complete -c mkit -n "__fish_seen_subcommand_from bisect; \
     and not __fish_seen_subcommand_from start good bad reset" \
     -a "start good bad reset"
+complete -c mkit -n "__fish_seen_subcommand_from gc" -l dry-run -s n -d "Preview without deleting"
+complete -c mkit -n "__fish_seen_subcommand_from gc" -l grace-secs -d "Keep objects younger than SECS"
 complete -c mkit -n "__fish_seen_subcommand_from stash; \
     and not __fish_seen_subcommand_from save list pop apply drop clear show" \
     -a "save list pop apply drop clear show"

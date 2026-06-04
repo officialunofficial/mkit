@@ -77,6 +77,7 @@ creeping; revisit post-v1 if demand warrants.
 | `revert` | inverse-commit, conflict-aware | absent (by-design, being reversed) | 🔨 | 2 | #255 | forward commit; not gated on gc |
 | `clean` | `-n`/`-f`/`-d`/`-x`/`-X`, pathspecs | absent (by-design, being reversed) | 🔨 | 2 | #250 | refuses unless `-f` (Git semantics) |
 | `stash` | save/list/pop/apply/drop/clear/show | same | ✅ | — | — | |
+| `gc` | prune unreachable objects | mark-and-sweep, recovery-aware | ✅ | — | #233 | `-n`/`--grace-secs`; fail-closed; see SPEC-GC.md |
 | `add -p` | interactive hunk staging | absent | 🔨 | 4 | #258 | partial staging / synthetic index blobs |
 
 ## Plumbing commands (read-only first, mutating later)
@@ -118,9 +119,9 @@ mkit deliberately refuses Git's silent data-loss defaults. These are
   `REPO_FORBIDDEN_KEYS` so a hostile clone cannot spoof the signed author or
   redirect signing/transport trust. Git-style `user.name`/`user.email` aliases
   must respect this (user-scope / non-authoritative only).
-- History-rewriting commands (`commit --amend`, `reset`, `rebase`) document
-  that superseded commits are unreachable until the recovery model + `gc`
-  (#260 → #233) land.
+- History-rewriting commands (`commit --amend`, `reset`, `rebase`) record the
+  superseded commit in the recovery log so `gc` keeps it recoverable within the
+  retention window (#260 + #233, shipped).
 
 ## Machine-output contract (for agents & scripts)
 

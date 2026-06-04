@@ -199,6 +199,86 @@ pub fn live_objects(store: &ObjectStore, mkit_dir: &Path) -> Result<BTreeSet<Has
     Ok(live)
 }
 
+/// Outcome of a [`run_gc`] sweep.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GcReport {
+    /// Objects examined in the store.
+    pub scanned: usize,
+    /// Objects retained because they are reachable from a root.
+    pub live: usize,
+    /// Unreachable objects retained anyway — within the grace window, or
+    /// whose age could not be determined (kept fail-safe).
+    pub kept_recent: usize,
+    /// Unreachable objects pruned (or that *would* be pruned in a dry run).
+    pub pruned: usize,
+    /// Bytes reclaimed by the pruned objects.
+    pub bytes_reclaimed: u64,
+    /// True if this was a dry run (nothing deleted).
+    pub dry_run: bool,
+}
+
+/// Mark-and-sweep prune: keep every object reachable from the retention
+/// roots ([`live_objects`]) plus every unreachable object younger than
+/// `grace_secs` (relative to `now_secs`); delete the rest. With
+/// `dry_run`, computes the report without deleting anything.
+///
+/// **Fail closed / fail safe.** If the live set can't be computed (a
+/// missing/corrupt root, a malformed ref, or the reachability cap), this
+/// returns an error and deletes nothing. An object whose age can't be
+/// read is kept, never pruned. The caller MUST hold the repo lock so the
+/// live set can't shift mid-sweep (see [`super::recovery`]); `gc` runs
+/// `recovery::expire` then this, all under that lock.
+///
+/// # Errors
+/// [`GcRootsError`] from [`live_objects`], store enumeration, or a delete.
+pub fn run_gc(
+    store: &ObjectStore,
+    mkit_dir: &Path,
+    now_secs: u64,
+    grace_secs: u64,
+    dry_run: bool,
+) -> Result<GcReport, GcRootsError> {
+    // Compute the keep-set FIRST; if this fails we delete nothing.
+    let live = live_objects(store, mkit_dir)?;
+    let all = store.iter_object_hashes()?;
+
+    let mut report = GcReport {
+        dry_run,
+        ..GcReport::default()
+    };
+    for h in all {
+        report.scanned += 1;
+        if live.contains(&h) {
+            report.live += 1;
+            continue;
+        }
+        // Unreachable. Keep it if it is within the grace window, or if
+        // its age cannot be determined (fail safe — never delete when
+        // uncertain).
+        let Ok(meta) = store.object_metadata(&h) else {
+            report.kept_recent += 1;
+            continue;
+        };
+        let age_known_old = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .is_some_and(|mtime| now_secs.saturating_sub(mtime) >= grace_secs);
+        if !age_known_old {
+            report.kept_recent += 1;
+            continue;
+        }
+        let len = meta.len();
+        if !dry_run {
+            store.remove_object(&h)?;
+        }
+        report.pruned += 1;
+        report.bytes_reclaimed += len;
+    }
+    Ok(report)
+}
+
 /// Strict, fail-closed walk of a ref namespace directory (e.g.
 /// `refs/heads`), inserting every ref's target hash into `roots`.
 ///
@@ -433,6 +513,93 @@ mod tests {
         assert!(
             collect_roots(&md).unwrap().contains(&c),
             "nested remote-tracking ref must be a root"
+        );
+    }
+
+    #[test]
+    fn run_gc_prunes_orphans_but_never_a_live_object() {
+        let (d, s) = repo();
+        let md = mkit_dir(&d);
+        // Live: a branch commit + its tree + blob.
+        let (kept, kept_blob) = commit_one(&s, b"keep", b"keep", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        let live = live_objects(&s, &md).unwrap();
+        // Orphans: unreferenced commit + its tree + blob.
+        let (orphan, orphan_blob) = commit_one(&s, b"orphan", b"orphan", vec![]);
+
+        // grace=0 → all unreachable objects are old enough to prune.
+        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+
+        // The safety invariant: every live object still present.
+        for h in &live {
+            assert!(s.contains(h), "gc must never delete a live object");
+        }
+        // Orphan closure gone.
+        assert!(
+            !s.contains(&orphan) && !s.contains(&orphan_blob),
+            "orphans pruned"
+        );
+        assert_eq!(report.live, live.len());
+        assert!(
+            report.pruned >= 2,
+            "orphan commit + blob pruned: {report:?}"
+        );
+        // Sanity: kept objects accounted as live.
+        assert!(s.contains(&kept) && s.contains(&kept_blob));
+    }
+
+    #[test]
+    fn run_gc_grace_window_keeps_recent_orphans() {
+        let (d, s) = repo();
+        let md = mkit_dir(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        let (orphan, _) = commit_one(&s, b"o", b"o", vec![]);
+
+        // Huge grace window with now=0 → nothing is "old", so the orphan
+        // is kept despite being unreachable.
+        let report = run_gc(&s, &md, 0, u64::MAX, false).unwrap();
+        assert!(s.contains(&orphan), "recent orphan kept by grace window");
+        assert_eq!(report.pruned, 0);
+        assert!(report.kept_recent >= 1, "{report:?}");
+    }
+
+    #[test]
+    fn run_gc_dry_run_deletes_nothing() {
+        let (d, s) = repo();
+        let md = mkit_dir(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        let (orphan, _) = commit_one(&s, b"o", b"o", vec![]);
+
+        let report = run_gc(&s, &md, u64::MAX, 0, true).unwrap();
+        assert!(report.dry_run && report.pruned >= 1, "{report:?}");
+        assert!(s.contains(&orphan), "dry run must not delete the orphan");
+    }
+
+    #[test]
+    fn run_gc_keeps_recovery_logged_orphan() {
+        let (d, s) = repo();
+        let md = mkit_dir(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        // An orphan that is recorded in the recovery log must survive gc.
+        let (superseded, superseded_blob) = commit_one(&s, b"old", b"old", vec![]);
+        super::super::recovery::record(
+            &md,
+            &super::super::recovery::RecoveryEntry {
+                timestamp: 1,
+                op: "amend".into(),
+                superseded,
+                branch: "main".into(),
+            },
+        )
+        .unwrap();
+
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert!(
+            s.contains(&superseded) && s.contains(&superseded_blob),
+            "a recovery-logged commit must not be pruned"
         );
     }
 

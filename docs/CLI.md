@@ -258,6 +258,17 @@ Branches / refs:
   the rebase pauses with resumable state; `--skip` drops the current
   commit. See "Resolving conflicts" below.
 - `mkit bisect start | good | bad | reset` — binary search for a bug.
+- `mkit gc [-n|--dry-run] [--grace-secs <secs>]` — reclaim unreachable
+  objects (mark-and-sweep). Under the repo lock it expires stale recovery
+  entries, computes the live set reachable from the retention roots (refs,
+  stash, in-progress operations, attestations, and the recovery log of
+  commits superseded by `commit --amend`/`reset`/`rebase`), then deletes
+  unreachable objects older than the grace window (default 14 days).
+  `-n`/`--dry-run` reports what would be pruned without deleting;
+  `--grace-secs 0` prunes every unreachable object. **Fail-closed:** a
+  missing/corrupt root, a malformed ref, or the reachability cap aborts
+  the run with nothing deleted, and an object whose age can't be read is
+  kept. See [`docs/SPEC-GC.md`](SPEC-GC.md).
 
 ### Resolving conflicts
 

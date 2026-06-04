@@ -1,10 +1,12 @@
 # SPEC-GC — garbage-collection retention roots & recovery
 
-Status: **draft**. The recovery model (#260) is implemented: Part 1
-(retention roots + live closure, `ops::gc`), Part 2a (recovery log +
-retention policy, `ops::recovery`), and Part 2b (producers — amend/reset/
-rebase record the superseded tip). The **`mkit gc` command itself is not
-yet shipped** (#233) — it is the only remaining piece. Tracks #260 → #233.
+Status: **implemented**. The recovery model (#260) — Part 1 (retention
+roots + live closure, `ops::gc`), Part 2a (recovery log + retention
+policy, `ops::recovery`), Part 2b (producers — amend/reset/rebase record
+the superseded tip) — **and the `mkit gc` command itself (#233)** are all
+shipped. `mkit gc` runs `recovery::expire` → `ops::gc::run_gc`
+(`live_objects` then prune `store ∖ live`, skipping objects within the
+grace window) under the repo lock.
 
 ## Why this spec exists
 
@@ -82,9 +84,11 @@ mutating commands and gc take), and gc MUST run its "expire → collect
 roots → prune" sequence under that lock, so a producer append cannot race
 an `expire` rewrite and vanish.
 
-**Status:** the recovery log (Part 2a) **and** its producers (Part 2b)
-are implemented — `commit --amend`, `reset`, and `rebase` each record the
-superseded tip (op tokens `amend`/`reset`/`rebase`) before moving the
-ref, under the worktree lock. The only remaining piece of the model is
-the **`mkit gc` command itself** (#233): expire the recovery log, compute
-`live_objects`, then prune `store ∖ live` — all under the repo lock.
+**Status:** complete. The recovery log (Part 2a) and its producers
+(Part 2b) are implemented — `commit --amend`, `reset`, and `rebase` each
+record the superseded tip (op tokens `amend`/`reset`/`rebase`) before
+moving the ref, under the worktree lock — and the **`mkit gc` command**
+(#233) consumes them: under the repo lock it expires the recovery log,
+computes `live_objects`, then prunes `store ∖ live`, keeping unreachable
+objects younger than the grace window (default 14 days; `--grace-secs 0`
+prunes all, `--dry-run` previews).

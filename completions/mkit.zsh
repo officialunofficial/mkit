@@ -41,6 +41,7 @@ _mkit() {
         'cherry-pick:Apply a commit to the current branch'
         'rebase:Replay commits onto a different base'
         'bisect:Binary search for a bad commit'
+        'gc:Reclaim unreachable objects'
         'sparse-checkout:Manage sparse checkout patterns'
         'serve:Start SSH transport server (internal)'
         'pack-shard:Encode a stored pack into Reed-Solomon shards'
@@ -172,6 +173,12 @@ _mkit() {
                         'good[mark a commit as good]' \
                         'bad[mark a commit as bad]' \
                         'reset[end bisect and restore HEAD]'
+                    ;;
+                gc)
+                    _arguments \
+                        '(-n --dry-run)'{-n,--dry-run}'[preview without deleting]' \
+                        '--grace-secs[keep unreachable objects younger than SECS]:secs:' \
+                        '--help[show help]'
                     ;;
                 stash)
                     _values 'stash subcommand' \

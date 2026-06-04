@@ -97,6 +97,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "cherry-pick" => commands::cherry_pick::run(&rest),
         "rebase" => commands::rebase::run(&rest),
         "bisect" => commands::bisect::run(&rest),
+        "gc" => commands::gc::run(&rest),
         "stash" => commands::stash::run(&rest),
         "blame" => commands::blame::run(&rest),
         "serve" => commands::serve::run(&rest),
