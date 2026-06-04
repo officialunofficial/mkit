@@ -57,6 +57,12 @@ complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -l staged -d "Diff HEAD vs the staged index"
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -l cached -d "Alias for --staged"
+complete -c mkit -n "__fish_seen_subcommand_from diff" \
+    -l name-only -d "List changed paths only"
+complete -c mkit -n "__fish_seen_subcommand_from diff" \
+    -l name-status -d "List status letter + path"
+complete -c mkit -n "__fish_seen_subcommand_from diff" \
+    -s z -d "NUL-terminate name-only/name-status records, raw paths"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
     -l porcelain -d "Machine-readable XY output"
 complete -c mkit -n "__fish_seen_subcommand_from status" \

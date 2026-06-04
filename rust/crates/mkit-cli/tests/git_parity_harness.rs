@@ -328,6 +328,20 @@ fn assert_parity_nul(label: &str, git: &Output, mkit: &Output) {
     );
 }
 
+/// Byte-exact stdout parity. For output that carries no object ids,
+/// order, field pairing, and NUL framing are all part of the contract —
+/// so compare the raw bytes directly rather than splitting into a set
+/// (which `assert_parity_nul` does, and which would miss a swapped
+/// `status\0path` pairing or a reordered record in `--name-status -z`).
+fn assert_parity_bytes(label: &str, git: &Output, mkit: &Output) {
+    assert!(git.status.success(), "{label}: git failed: {git:?}");
+    assert!(mkit.status.success(), "{label}: mkit failed: {mkit:?}");
+    assert_eq!(
+        git.stdout, mkit.stdout,
+        "{label}: stdout bytes diverged (order/pairing/framing sensitive)"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn status_z_matches_git() {
@@ -421,6 +435,114 @@ fn log_oneline_matches_git() {
     let g = h.git(&["log", "--oneline"]);
     let m = h.mkit(&["log", "--oneline"]);
     assert_parity_oneline("log --oneline", &g, &m); // `<abbrev> only commit`
+}
+
+// =====================================================================
+// Passing subset — diff --name-only / --name-status / -z. Unlike the
+// unified patch (whose `diff --mkit` header diverges, Phase 4), these
+// formats carry no header or object id, so they match git byte-for-byte.
+// =====================================================================
+
+/// Stage one of each change kind against HEAD so a staged diff reports
+/// `A`/`D`/`M` for three distinct paths (name-sorted: del, m, new).
+fn stage_add_delete_modify(h: &Harness) {
+    h.write_both("m.txt", b"one\n");
+    h.write_both("del.txt", b"gone\n");
+    h.commit_both(&["m.txt", "del.txt"], "init");
+    h.write_both("m.txt", b"two\n"); // modify
+    h.write_both("new.txt", b"new\n"); // add
+    assert!(h.git(&["add", "m.txt", "new.txt"]).status.success());
+    assert!(h.git(&["rm", "del.txt"]).status.success());
+    assert!(h.mkit(&["add", "m.txt", "new.txt"]).status.success());
+    assert!(h.mkit(&["rm", "del.txt"]).status.success());
+}
+
+#[test]
+fn diff_name_only_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    stage_add_delete_modify(&h);
+    let g = h.git(&["diff", "--cached", "--name-only"]);
+    let m = h.mkit(&["diff", "--staged", "--name-only"]);
+    assert_parity_ordered("diff --name-only", &g, &m); // del.txt, m.txt, new.txt
+}
+
+#[test]
+fn diff_name_status_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    stage_add_delete_modify(&h);
+    let g = h.git(&["diff", "--cached", "--name-status"]);
+    let m = h.mkit(&["diff", "--staged", "--name-status"]);
+    assert_parity_ordered("diff --name-status", &g, &m); // D del / M m / A new
+}
+
+#[cfg(unix)]
+#[test]
+fn diff_name_status_z_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    stage_add_delete_modify(&h);
+    // `-z`: status letter and path are each NUL-terminated, paths raw.
+    // Byte-exact so a swapped `letter\0path` pairing or reordered record
+    // would be caught (the set-based assert_parity_nul would not).
+    let g = h.git(&["diff", "--cached", "--name-status", "-z"]);
+    let m = h.mkit(&["diff", "--staged", "--name-status", "-z"]);
+    assert_parity_bytes("diff --name-status -z", &g, &m);
+}
+
+#[test]
+fn diff_staged_rejects_bad_rev_like_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"x\n");
+    h.commit_both(&["a.txt"], "init");
+    // A hash-shaped leading arg that resolves to nothing must fail closed
+    // in staged mode, like `git diff --cached <bad-rev>` (which errors
+    // rather than treating it as a no-match pathspec and empty-succeeding).
+    let g = h.git(&["diff", "--cached", "--name-only", "deadbeefdeadbeef"]);
+    let m = h.mkit(&["diff", "--staged", "--name-only", "deadbeefdeadbeef"]);
+    assert!(
+        !g.status.success(),
+        "git should reject bad staged rev: {g:?}"
+    );
+    assert!(
+        !m.status.success(),
+        "mkit must not empty-succeed on a bad staged rev: {m:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn diff_name_only_quotes_special_paths_like_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    // A tab in the name: default --name-only C-style quotes it like git's
+    // core.quotePath; with -z the same path is emitted raw.
+    h.write_both("a\tb.txt", b"x\n");
+    assert!(h.git(&["add", "a\tb.txt"]).status.success());
+    assert!(h.mkit(&["add", "a\tb.txt"]).status.success());
+    let g = h.git(&["diff", "--cached", "--name-only"]);
+    let m = h.mkit(&["diff", "--staged", "--name-only"]);
+    assert_parity_ordered("diff --name-only quoted", &g, &m); // "a\tb.txt"
+    let gz = h.git(&["diff", "--cached", "--name-only", "-z"]);
+    let mz = h.mkit(&["diff", "--staged", "--name-only", "-z"]);
+    assert_parity_bytes("diff --name-only -z raw", &gz, &mz);
 }
 
 // =====================================================================
