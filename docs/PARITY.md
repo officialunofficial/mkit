@@ -63,7 +63,7 @@ creeping; revisit post-v1 if demand warrants.
 | `diff` | HEAD/worktree, `--staged`, pathspecs | same | ✅ | — | — | |
 | `diff` | `<rev>`, `<a>..<b>` ranges | implemented (`split_range`/`rev_to_tree`) | ✅ | 0 | #248 | docs reconciled (stale CLI.md divergence removed) |
 | `diff` | `--name-only`, `--name-status`, `-z` | same | ✅ | 1 | #249 | `A`/`D`/`M` (`T` = mkit mode change); special-byte paths C-quoted, `-z` = raw NUL (status letter + path each NUL-terminated); `-z` only with name-only/-status |
-| `diff` | `--stat` | absent | 🔨 | 1 | #249 | byte-exact diffstat (width-scaling + summary line) is a Phase-1 follow-up |
+| `diff` | `--stat` | same | ✅ | 1 | #249 | byte-exact diffstat: padded name column, `+`/`-` graph scaled to width via git's `scale_linear` (honors `COLUMNS`, default 80), summary line with git pluralization; binary → `Bin … bytes` |
 | `diff` | byte-exact hunks (Myers/histogram) | LCS unified diff | 🔨 | 4 | #257 | header is `diff --mkit`, not `diff --git` |
 | `commit` | `-m`, `-a`, `--amend`, `--author` | same | ✅ | — | — | signed; amend leaves unreachable obj until gc |
 | `log` | history, `-n`, `--format=json`, `--oneline`, `--abbrev-commit`, `--abbrev[=N]` | same | ✅ | 0 | #248 | `--oneline`/`--abbrev-commit` abbreviate (default 7); abbreviated id is a BLAKE3 prefix |

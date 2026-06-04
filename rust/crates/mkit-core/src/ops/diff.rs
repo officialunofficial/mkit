@@ -340,6 +340,44 @@ pub fn text_patch(old_bytes: &[u8], new_bytes: &[u8], old_path: &str, new_path: 
     out
 }
 
+/// Added / deleted line counts between two blobs, by the same whole-line
+/// LCS the unified patch uses. `None` when either side is **binary** —
+/// matching Git's heuristic of a NUL byte within the first 8000 bytes
+/// (independent of UTF-8 validity), so `diff --stat` renders `Bin …` for
+/// exactly the blobs Git would.
+///
+/// Used by `diff --stat`; kept here so the stat counts always agree with
+/// the `+`/`-` lines `text_patch` would emit for the same blobs. Counting
+/// uses a lossy UTF-8 view — newline positions (and thus line counts) are
+/// preserved for any non-binary blob, including non-UTF-8 text.
+#[must_use]
+pub fn diff_line_counts(old_bytes: &[u8], new_bytes: &[u8]) -> Option<(usize, usize)> {
+    if is_binary(old_bytes) || is_binary(new_bytes) {
+        return None;
+    }
+    let old_text = String::from_utf8_lossy(old_bytes);
+    let new_text = String::from_utf8_lossy(new_bytes);
+    let old_lines = split_lines(&old_text);
+    let new_lines = split_lines(&new_text);
+    let mut added = 0;
+    let mut deleted = 0;
+    for op in lcs_diff(&old_lines, &new_lines) {
+        match op {
+            DiffOp::Insert(_) => added += 1,
+            DiffOp::Delete(_) => deleted += 1,
+            DiffOp::Equal(_, _) => {}
+        }
+    }
+    Some((added, deleted))
+}
+
+/// Git's binary heuristic (`buffer_is_binary`): a NUL byte within the
+/// first 8000 bytes marks the blob binary, regardless of UTF-8 validity.
+fn is_binary(bytes: &[u8]) -> bool {
+    const FIRST_FEW_BYTES: usize = 8000;
+    bytes.iter().take(FIRST_FEW_BYTES).any(|&b| b == 0)
+}
+
 /// A single line plus whether the source had a trailing newline after it.
 struct DiffLine<'a> {
     text: &'a str,
@@ -690,6 +728,20 @@ mod tests {
     use crate::object::{Blob, Tree};
     use crate::serialize;
     use tempfile::TempDir;
+
+    #[test]
+    fn diff_line_counts_counts_text_and_flags_binary() {
+        // Plain text: +2/-1 (b→B replaced, d,e added).
+        assert_eq!(
+            diff_line_counts(b"a\nb\nc\n", b"a\nB\nc\nd\ne\n"),
+            Some((3, 1))
+        );
+        // A NUL byte → binary by git's heuristic, even though valid UTF-8.
+        assert_eq!(diff_line_counts(b"a\nb\n", b"a\x00b\n"), None);
+        assert_eq!(diff_line_counts(b"x\x00y", b"z"), None);
+        // No NUL but invalid UTF-8 → still counted as text (lossy), not binary.
+        assert!(diff_line_counts(b"\xff\xfe\n", b"\xff\xfe\nmore\n").is_some());
+    }
 
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().unwrap();

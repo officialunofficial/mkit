@@ -59,7 +59,7 @@ Working-tree commands:
   the round-trip-safe form for paths containing newlines or other special
   bytes. Empty stdout means clean. (`--porcelain=v2` is not yet
   implemented — see "Divergences from Git".)
-- `mkit diff [--staged|--cached] [--name-only|--name-status] [-z] [<rev> [<rev>] | <a>..<b>] [<path>...]`
+- `mkit diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b>] [<path>...]`
   — show changes as a unified patch. With no arguments, compares the HEAD
   tree to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
   the HEAD tree to the staged index tree — the change `mkit commit`
@@ -76,11 +76,16 @@ Working-tree commands:
   not a full Myers diff — adequate for human-readable parity output.
   `--name-only` instead lists one changed path per line; `--name-status`
   prefixes each with a status letter (`A`/`D`/`M`; `T` marks an mkit mode
-  change). In these summary modes special-byte paths are C-style quoted
-  (git `core.quotePath`); `-z` instead NUL-terminates records and emits
-  raw paths (in `--name-status -z` the status letter and path are each
-  their own NUL-terminated field). `-z` is only valid with `--name-only`
-  / `--name-status`.
+  change). `--stat` shows a diffstat: one `<name> | <count> <graph>` row
+  per file (name column padded, `+`/`-` graph scaled to the terminal
+  width like `git diff --stat`, honoring `COLUMNS`; default 80) followed
+  by a ` N files changed, … insertions(+), … deletions(-)` summary; binary
+  files render `Bin <old> -> <new> bytes`. In `--name-only`/`--name-status`
+  /`--stat` modes special-byte paths are C-style quoted (git
+  `core.quotePath`); `-z` instead NUL-terminates records and emits raw
+  paths (in `--name-status -z` the status letter and path are each their
+  own NUL-terminated field). `-z` is only valid with `--name-only` /
+  `--name-status`.
 - `mkit stash [save|list|pop|apply|drop|clear|show]` — save/restore WIP
   changes. `apply` restores an entry without removing it; `clear` drops
   every entry.

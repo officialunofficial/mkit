@@ -62,6 +62,8 @@ complete -c mkit -n "__fish_seen_subcommand_from diff" \
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -l name-status -d "List status letter + path"
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
+    -l stat -d "Diffstat: counts + graph + summary"
+complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -s z -d "NUL-terminate name-only/name-status records, raw paths"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
     -l porcelain -d "Machine-readable XY output"

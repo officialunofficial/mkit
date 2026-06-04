@@ -57,15 +57,16 @@ commands:
                     its -s/--short alias, emits machine-readable XY lines;
                     special-byte paths are C-style quoted; -z NUL-terminates
                     records with raw paths)
-  diff [--staged|--cached] [--name-only|--name-status] [-z] [<rev> [<rev>] | <a>..<b>] [<path>...]
+  diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
                     --staged for HEAD vs index, a single revision vs the
                     worktree, two revisions, or an A..B range; revisions
                     are refs, commits, or short hashes). --name-only lists
                     changed paths; --name-status prefixes each with an
-                    A/D/M (T = mode change) letter; -z NUL-terminates those
-                    records with raw paths (else special-byte paths are
-                    C-style quoted)
+                    A/D/M (T = mode change) letter; --stat shows per-file
+                    change counts + a +/- graph and a summary line; -z
+                    NUL-terminates name-only/-status records with raw paths
+                    (else special-byte paths are C-style quoted)
   branch [-v|--verbose] [--format=json]
                     List branches (* marks current; no commit id by
                     default, like git; -v adds the abbreviated id +
