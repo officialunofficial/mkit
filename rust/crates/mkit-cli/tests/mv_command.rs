@@ -126,3 +126,89 @@ fn mv_missing_source_is_refused() {
         "mv of a missing source must fail: {out:?}"
     );
 }
+
+#[test]
+fn mv_directory_source_is_refused_clearly() {
+    let (td, xdg) = repo(&[("dir/file.txt", b"x\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    // Directory moves are not yet supported — must fail with a clear
+    // message, not silently or with a confusing error.
+    let out = run_in(root, x, &["mv", "dir", "newdir"]);
+    assert!(
+        !out.status.success(),
+        "mv of a directory must be refused: {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("directories"),
+        "expected a directory-not-supported message, got: {stderr:?}"
+    );
+    // Nothing moved.
+    assert!(root.join("dir/file.txt").exists());
+    assert!(!root.join("newdir").exists());
+}
+
+#[test]
+fn mv_multi_source_is_atomic_on_a_bad_source() {
+    // The KEY guard: a later bad source must not leave earlier files moved.
+    let (td, xdg) = repo(&[("a.txt", b"a\n"), ("dst/keep.txt", b"k\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join("untracked.txt"), b"u\n").unwrap();
+
+    // a.txt is valid, untracked.txt is not; dst/ is an existing dir.
+    let out = run_in(root, x, &["mv", "a.txt", "untracked.txt", "dst"]);
+    assert!(
+        !out.status.success(),
+        "batch with a bad source must fail: {out:?}"
+    );
+    // a.txt must NOT have been moved (validation happens before any move).
+    assert!(
+        root.join("a.txt").exists(),
+        "valid source moved despite batch failure"
+    );
+    assert!(
+        !root.join("dst/a.txt").exists(),
+        "a.txt was partially moved"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn mv_refuses_dangling_symlink_destination_without_force() {
+    use std::os::unix::fs::symlink;
+    let (td, xdg) = repo(&[("a.txt", b"a\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    // A dangling symlink "exists" for clobber purposes (git refuses too);
+    // `Path::exists()` would wrongly report false.
+    symlink("/nonexistent/target", root.join("danglink")).unwrap();
+
+    let out = run_in(root, x, &["mv", "a.txt", "danglink"]);
+    assert!(
+        !out.status.success(),
+        "mv onto a dangling symlink must be refused without -f: {out:?}"
+    );
+    assert!(root.join("a.txt").exists(), "source must be untouched");
+}
+
+#[cfg(unix)]
+#[test]
+fn mv_refuses_destination_escaping_repo_via_symlinked_dir() {
+    use std::os::unix::fs::symlink;
+    let (td, xdg) = repo(&[("a.txt", b"a\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    // A repo-local symlink pointing outside the repo must not become a
+    // write path: mkit keeps moves inside the repository.
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), root.join("link_out")).unwrap();
+
+    let out = run_in(root, x, &["mv", "a.txt", "link_out/moved.txt"]);
+    assert!(
+        !out.status.success(),
+        "mv to a path escaping the repo must be refused: {out:?}"
+    );
+    assert!(root.join("a.txt").exists(), "source must be untouched");
+    assert!(
+        !outside.path().join("moved.txt").exists(),
+        "nothing should be written outside the repository"
+    );
+}

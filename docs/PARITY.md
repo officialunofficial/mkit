@@ -57,7 +57,7 @@ creeping; revisit post-v1 if demand warrants.
 | `init` | create repo | `.mkit/` repo | ✅ | — | — | marker differs (`.mkit/`) |
 | `add` | pathspecs, `-A`, `-u` | same | ✅ | — | — | `-p` is separate (#258) |
 | `rm` | `--cached`, `-r`, `-f` + dirty guard | same | ✅ | — | — | guard is an mkit safety divergence |
-| `mv` | rename, `-f` | same | ✅ | 2 | #250 | guarded: refuses to clobber w/o `-f`; moves into an existing dir; rejects missing/untracked source. No rename detection, so `status` shows delete+add not `R` (documented) |
+| `mv` | rename single file, `-f`, into-dir | same | ✅ | 2 | #250 | guarded: refuses to clobber w/o `-f` (incl. dangling symlink); rejects missing/untracked source; keeps writes inside the repo. No rename detection → `status` shows delete+add not `R`. **Directory moves (`mv dir newdir`) not yet supported** (refused with a clear error; follow-up). |
 | `status` | `--porcelain[=v1]`, `-s`, `-z`, C-style path quoting | same | ✅ | 1 | #249 | tracked changes combine into one `XY` record per path (e.g. `MM`); untracked stays its own `??` record, so a staged-delete-plus-untracked path emits both `D ` and `??` like git; quoting matches git `core.quotePath`; `-z` = raw NUL-terminated |
 | `status` | `--porcelain=v2` | not present | 🔨 | 1 | #249 | needs per-path modes/hashes in the diff layer (follow-up) |
 | `diff` | HEAD/worktree, `--staged`, pathspecs | same | ✅ | — | — | |
