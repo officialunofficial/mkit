@@ -264,11 +264,16 @@ Branches / refs:
   stash, in-progress operations, attestations, and the recovery log of
   commits superseded by `commit --amend`/`reset`/`rebase`), then deletes
   unreachable objects older than the grace window (default 14 days).
-  `-n`/`--dry-run` reports what would be pruned without deleting;
-  `--grace-secs 0` prunes every unreachable object. **Fail-closed:** a
-  missing/corrupt root, a malformed ref, or the reachability cap aborts
-  the run with nothing deleted, and an object whose age can't be read is
-  kept. See [`docs/SPEC-GC.md`](SPEC-GC.md).
+  `-n`/`--dry-run` reports what would be pruned without deleting.
+  `--grace-secs 0` prunes every unreachable object, but **bypasses the
+  grace window** — the grace window is gc's concurrency-safety net (some
+  root-publishing paths such as `tag` and `fetch` write an object before
+  publishing the ref that makes it reachable), so `--grace-secs 0` must
+  only be run when **no other mkit process is operating on the repo**
+  (gc prints a warning). **Fail-closed:** a missing/corrupt root, a
+  malformed ref, or the reachability cap aborts the run with nothing
+  deleted, and an object whose age can't be read is kept. See
+  [`docs/SPEC-GC.md`](SPEC-GC.md).
 
 ### Resolving conflicts
 

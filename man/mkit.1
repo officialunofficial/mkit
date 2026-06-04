@@ -358,10 +358,18 @@ older than the grace window
 .Pq default 14 days .
 .Fl n
 .Pq Fl Fl dry-run
-previews without deleting;
+previews without deleting.
 .Fl Fl grace-secs Ar 0
-prunes every unreachable object. Fails closed: a corrupt root or unreadable ref
-aborts with nothing removed.
+prunes every unreachable object, but bypasses the grace window — that window is
+gc's concurrency-safety net (some root publishers such as
+.Cm tag
+and
+.Cm fetch
+write an object before publishing its ref), so
+.Fl Fl grace-secs Ar 0
+must be run only when no other mkit process is operating on the repo (gc prints
+a warning). Fails closed: a corrupt root or unreadable ref aborts with nothing
+removed.
 .It Cm stash Op Cm save Fl m Ar msg | Cm list | Cm pop Op Ar N | Cm apply Op Ar N | Cm drop Op Ar N | Cm clear | Cm show Op Ar N
 Save or restore a snapshot of working-tree changes.
 .Cm pop

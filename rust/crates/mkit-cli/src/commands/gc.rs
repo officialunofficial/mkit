@@ -49,7 +49,9 @@ struct GcOpts {
     dry_run: bool,
 
     /// Keep unreachable objects younger than this many seconds (default
-    /// 14 days). `0` prunes every unreachable object.
+    /// 14 days). `0` prunes every unreachable object, but bypasses the
+    /// grace window that protects in-flight objects — only safe when no
+    /// other mkit process is operating on the repo.
     #[arg(long = "grace-secs", value_name = "SECS", default_value_t = DEFAULT_GRACE_SECS)]
     grace_secs: u64,
 }
@@ -70,9 +72,12 @@ pub fn run(args: &[String]) -> u8 {
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
-    // Serialize against every mutating command for the whole run, so the
-    // live set can't shift between expire, the reachability walk, and the
-    // sweep.
+    // Hold the worktree lock for the whole run. This serializes gc
+    // against worktree/index-mutating commands and other gc runs. It does
+    // NOT serialize against the non-worktree root publishers (`tag`,
+    // `fetch`, `attest`) — those don't take this lock yet (#267), so the
+    // grace window is what protects their in-flight objects from a
+    // concurrent prune.
     let _lock = match super::acquire_worktree_lock(&cwd) {
         Ok(l) => l,
         Err(code) => return code,
