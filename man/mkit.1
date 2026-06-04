@@ -247,15 +247,19 @@ hashes, short hashes, or
 .Ql HEAD~n
 (a raw 64-hex tree hash also works). Remaining positional arguments are
 pathspecs that limit the output.
-.It Cm status Oo Fl Fl porcelain Oc Oo Fl s | Fl Fl short Oc
+.It Cm status Oo Fl Fl porcelain Oc Oo Fl s | Fl Fl short Oc Oo Fl z Oc
 Show the staged and working-tree changes.
 .Fl s
 .Pq alias Fl Fl short
 is equivalent to
 .Fl Fl porcelain Ns = Ns Cm v1 :
-both emit machine-readable XY-code-plus-path lines on stdout. There is no
+both emit machine-readable XY-code-plus-path lines on stdout. Paths with
+special bytes are C-style quoted (matching git's default
+.Cm core.quotePath ) .
 .Fl z
-NUL-termination or path-quoting support.
+.Pq which implies porcelain
+NUL-terminates records and emits raw, unquoted paths.
+.Pq Fl Fl porcelain Ns = Ns Cm v2 No is not yet implemented .
 .It Cm branch Oo Fl d | Fl D | Fl m Oc Op Ar name ...
 List, create, rename, or delete branches. With no arguments, lists
 branches.  With one

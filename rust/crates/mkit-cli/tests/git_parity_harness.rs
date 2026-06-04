@@ -289,6 +289,91 @@ fn status_porcelain_untracked_matches_git() {
     assert_parity_set("untracked status", &g, &m); // expect `?? untracked.txt`
 }
 
+#[cfg(unix)]
+#[test]
+fn status_porcelain_quotes_special_paths_like_git() {
+    if !git_available() {
+        eprintln!("skipping: real `git` not on PATH");
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    // A tab in the name: both git (core.quotePath default) and mkit must
+    // emit the same C-style-quoted porcelain line `?? "a\tb.txt"`.
+    h.write_both("a\tb.txt", b"x\n");
+    let g = h.git(&["status", "--porcelain"]);
+    let m = h.mkit(&["status", "--porcelain"]);
+    assert_parity_set("quoted special path", &g, &m);
+}
+
+/// Parity for `-z` output: split on NUL into an order-independent set of
+/// records (status -z carries no object hashes, so no masking needed).
+fn assert_parity_nul(label: &str, git: &Output, mkit: &Output) {
+    assert!(git.status.success(), "{label}: git failed: {git:?}");
+    assert!(mkit.status.success(), "{label}: mkit failed: {mkit:?}");
+    let recs = |o: &Output| {
+        let s = String::from_utf8_lossy(&o.stdout);
+        let mut v: Vec<String> = s
+            .split('\0')
+            .filter(|r| !r.is_empty())
+            .map(str::to_string)
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        recs(git),
+        recs(mkit),
+        "{label}: -z records diverged (raw NUL-terminated)"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn status_z_matches_git() {
+    if !git_available() {
+        eprintln!("skipping: real `git` not on PATH");
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    // A staged change that is then re-edited in the worktree → one
+    // combined `MM` record (not two), matching git porcelain.
+    h.write_both("tracked.txt", b"v1\n");
+    h.commit_both(&["tracked.txt"], "init");
+    h.write_both("tracked.txt", b"v2\n");
+    assert!(h.git(&["add", "tracked.txt"]).status.success());
+    assert!(h.mkit(&["add", "tracked.txt"]).status.success());
+    h.write_both("tracked.txt", b"v3\n");
+    // A special-byte untracked path → `-z` emits it raw (unquoted).
+    h.write_both("a\tb.txt", b"x\n");
+
+    let g = h.git(&["status", "-z"]);
+    let m = h.mkit(&["status", "-z"]);
+    assert_parity_nul("status -z", &g, &m);
+}
+
+#[test]
+fn status_rm_cached_keeps_staged_delete_and_untracked() {
+    if !git_available() {
+        eprintln!("skipping: real `git` not on PATH");
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"hello\n");
+    h.commit_both(&["a.txt"], "init");
+    // Un-track a.txt but leave it on disk. Git porcelain emits TWO records
+    // for the same path: `D  a.txt` (staged delete vs HEAD) and `?? a.txt`
+    // (the worktree file the index no longer knows). mkit must not collapse
+    // them into a lone `?? a.txt`, which would hide the staged deletion.
+    assert!(h.git(&["rm", "--cached", "a.txt"]).status.success());
+    assert!(h.mkit(&["rm", "--cached", "a.txt"]).status.success());
+    let g = h.git(&["status", "--porcelain"]);
+    let m = h.mkit(&["status", "--porcelain"]);
+    assert_parity_set("rm --cached status", &g, &m); // expect `D  a.txt` + `?? a.txt`
+}
+
 #[test]
 fn status_porcelain_staged_add_matches_git() {
     if !git_available() {

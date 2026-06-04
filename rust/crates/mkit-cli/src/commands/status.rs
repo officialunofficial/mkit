@@ -36,6 +36,11 @@
 //! state. mkit's `DiffKind::ModeChanged` renders as `T` (a non-git
 //! extension). `??` is the conventional code for untracked files.
 //!
+//! Paths containing special bytes are C-style quoted (matching git's
+//! default `core.quotePath`). With `-z`, records are NUL-terminated and
+//! paths are emitted raw (unquoted) — the round-trip-safe form for paths
+//! with newlines or other special bytes; `-z` implies porcelain.
+//!
 //! Empty stdout means "nothing to commit, working tree clean."
 
 use std::io::Write;
@@ -67,9 +72,15 @@ struct StatusOpts {
     porcelain: Option<PorcelainVersion>,
 
     /// Short format. Alias for `--porcelain=v1`: emits the same
-    /// XY-code-plus-path lines on stdout. (No `-z`/NUL support.)
+    /// XY-code-plus-path lines on stdout.
     #[arg(short = 's', long = "short")]
     short: bool,
+
+    /// NUL-terminate entries instead of newline, and emit raw (unquoted)
+    /// paths — like `git status -z`. Implies porcelain output. Without
+    /// `-z`, paths with special bytes are C-style quoted.
+    #[arg(short = 'z')]
+    z: bool,
 }
 
 #[must_use]
@@ -78,9 +89,9 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
-    // `-s`/`--short` is an alias for `--porcelain=v1`; both select the
-    // line-oriented XY renderer on stdout.
-    let porcelain = opts.porcelain.is_some() || opts.short;
+    // `-s`/`--short` is an alias for `--porcelain=v1`; `-z` also implies
+    // porcelain output. All select the line-oriented XY renderer on stdout.
+    let porcelain = opts.porcelain.is_some() || opts.short || opts.z;
 
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
@@ -116,23 +127,127 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if porcelain {
-        render_porcelain(&entries)
+        render_porcelain(&entries, opts.z)
     } else {
         render_human(&mkit_dir, &entries)
     }
 }
 
-/// `--porcelain[=v1]` output — line-oriented XY-code-plus-path, one
-/// entry per line. Empty stdout means clean. Matches `git status
-/// --porcelain` for the codes mkit and git share; `T ` (`ModeChanged`)
-/// is the only non-git extension.
-fn render_porcelain(entries: &[StatusEntry]) -> u8 {
+/// `--porcelain[=v1]` output — XY-code-plus-path, one entry per record.
+/// Empty stdout means clean. Matches `git status --porcelain` for the
+/// codes mkit and git share; `T ` (`ModeChanged`) is the only non-git
+/// extension.
+///
+/// With `z = false` (default), records are newline-terminated and a path
+/// containing special bytes is C-style quoted (matching git's default
+/// `core.quotePath`). With `z = true` (`-z`), records are NUL-terminated
+/// and paths are emitted **raw** (unquoted) — the round-trip-safe form
+/// for paths that contain newlines or other special bytes.
+fn render_porcelain(entries: &[StatusEntry], z: bool) -> u8 {
     let mut stdout = std::io::stdout().lock();
-    for e in entries {
-        let code = porcelain_code(e.staging, e.diff.kind);
-        let _ = writeln!(stdout, "{code} {}", e.diff.path);
+    for (xy, path) in combine_porcelain(entries) {
+        // `xy` is two ASCII status columns by construction.
+        let code = std::str::from_utf8(&xy).unwrap_or("??");
+        if z {
+            let _ = write!(stdout, "{code} {path}\0");
+        } else if let Some(quoted) = c_quote_path(path) {
+            let _ = writeln!(stdout, "{code} {quoted}");
+        } else {
+            let _ = writeln!(stdout, "{code} {path}");
+        }
     }
     exit::OK
+}
+
+/// Collapse `status_diff`'s per-(staging) entries into porcelain records,
+/// matching `git status --porcelain`.
+///
+/// A path that is staged **and** further changed in the worktree produces
+/// a single combined code (e.g. `MM`, `AM`) rather than two records: `X`
+/// is the staged (index-vs-HEAD) side, `Y` the unstaged (worktree-vs-index)
+/// side, and `porcelain_code` already returns each side in its column, so
+/// we OR the non-space columns together.
+///
+/// **Untracked entries are the exception** — git treats them as a separate
+/// category, never folded into a tracked path's `XY`. A path can be both
+/// staged-for-deletion *and* present as untracked on disk (`mkit rm
+/// --cached <f>` with the file still there): git emits **two** records,
+/// `D  <f>` then `?? <f>`. So an untracked entry (`Unstaged` + `Added`)
+/// always becomes its own `??` record and is never merged — otherwise the
+/// `??` would clobber the staged `D `, hiding a deletion `commit` records.
+///
+/// Output order matches git: all tracked-change records first (first-seen
+/// order), then all untracked records.
+fn combine_porcelain(entries: &[StatusEntry]) -> Vec<([u8; 2], &str)> {
+    let mut tracked_order: Vec<&str> = Vec::new();
+    let mut tracked: std::collections::HashMap<&str, [u8; 2]> = std::collections::HashMap::new();
+    let mut untracked: Vec<&str> = Vec::new();
+    for e in entries {
+        // Untracked: a worktree path the index doesn't know about. Never
+        // merged — it is always its own `??` record (see doc comment).
+        if e.staging == StatusStaging::Unstaged && e.diff.kind == DiffKind::Added {
+            untracked.push(&e.diff.path);
+            continue;
+        }
+        let c = porcelain_code(e.staging, e.diff.kind).as_bytes();
+        let slot = tracked.entry(&e.diff.path).or_insert_with(|| {
+            tracked_order.push(&e.diff.path);
+            [b' ', b' ']
+        });
+        // Fill each column from whichever entry sets it (non-space wins).
+        if c[0] != b' ' {
+            slot[0] = c[0];
+        }
+        if c[1] != b' ' {
+            slot[1] = c[1];
+        }
+    }
+    let mut out: Vec<([u8; 2], &str)> =
+        tracked_order.into_iter().map(|p| (tracked[p], p)).collect();
+    out.extend(untracked.into_iter().map(|p| ([b'?', b'?'], p)));
+    out
+}
+
+/// C-style-quote `path` the way Git does for porcelain output when a path
+/// contains bytes that need escaping. Returns `None` when the path is
+/// "plain" (all printable ASCII except `"`/`\`) and can be emitted as-is.
+///
+/// Quoting rule (matches Git's `quote_c_style` with the default
+/// `core.quotePath=true`): quote if any byte is a control char (`< 0x20`),
+/// `"`, `\`, or non-printable / non-ASCII (`>= 0x7f`). Inside the quotes,
+/// the common control chars use their `\a\b\t\n\v\f\r` escapes, `"` and
+/// `\` are backslash-escaped, printable ASCII is literal, and everything
+/// else is a 3-digit `\NNN` octal escape (per UTF-8 byte).
+fn c_quote_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let needs = bytes
+        .iter()
+        .any(|&b| b < 0x20 || b == b'"' || b == b'\\' || b >= 0x7f);
+    if !needs {
+        return None;
+    }
+    let mut out = String::with_capacity(bytes.len() + 2);
+    out.push('"');
+    for &b in bytes {
+        match b {
+            0x07 => out.push_str("\\a"),
+            0x08 => out.push_str("\\b"),
+            0x09 => out.push_str("\\t"),
+            0x0a => out.push_str("\\n"),
+            0x0b => out.push_str("\\v"),
+            0x0c => out.push_str("\\f"),
+            0x0d => out.push_str("\\r"),
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(b as char),
+            other => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\{other:03o}");
+            }
+        }
+    }
+    out.push('"');
+    Some(out)
 }
 
 /// Map (staging, kind) → two-char XY code per the porcelain format.
@@ -265,6 +380,135 @@ mod tests {
         assert_eq!(
             porcelain_code(StatusStaging::Unstaged, DiffKind::Removed),
             " D",
+        );
+    }
+
+    #[test]
+    fn c_quote_leaves_plain_paths_alone() {
+        assert_eq!(c_quote_path("a.txt"), None);
+        assert_eq!(c_quote_path("dir/with space.txt"), None); // space is plain
+        assert_eq!(c_quote_path("weird-but-ascii_!@#$%.rs"), None);
+    }
+
+    #[test]
+    fn c_quote_escapes_special_bytes() {
+        assert_eq!(c_quote_path("a\tb.txt").as_deref(), Some(r#""a\tb.txt""#));
+        assert_eq!(
+            c_quote_path("line\nfeed").as_deref(),
+            Some(r#""line\nfeed""#)
+        );
+        assert_eq!(c_quote_path("q\"x").as_deref(), Some(r#""q\"x""#));
+        assert_eq!(
+            c_quote_path("back\\slash").as_deref(),
+            Some(r#""back\\slash""#)
+        );
+    }
+
+    #[test]
+    fn c_quote_octal_escapes_non_ascii() {
+        // "é" is UTF-8 0xC3 0xA9 → \303\251 (matches git core.quotePath).
+        assert_eq!(c_quote_path("é").as_deref(), Some(r#""\303\251""#));
+        // Combined with ASCII: only the non-ASCII bytes are octal-escaped.
+        assert_eq!(c_quote_path("x-é").as_deref(), Some(r#""x-\303\251""#));
+    }
+
+    fn entry(path: &str, staging: StatusStaging, kind: DiffKind) -> StatusEntry {
+        StatusEntry {
+            diff: mkit_core::ops::DiffEntry {
+                path: path.to_string(),
+                kind,
+                old_hash: None,
+                new_hash: None,
+            },
+            staging,
+        }
+    }
+
+    fn combined(entries: &[StatusEntry]) -> Vec<(String, String)> {
+        combine_porcelain(entries)
+            .into_iter()
+            .map(|(xy, p)| (std::str::from_utf8(&xy).unwrap().to_string(), p.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn combine_merges_staged_and_unstaged_same_path_into_one_record() {
+        use DiffKind::Modified;
+        use StatusStaging::{Staged, Unstaged};
+        // Staged modify + further worktree modify on the same path → one
+        // `MM a.txt` record, not two (git porcelain semantics).
+        let entries = [
+            entry("a.txt", Staged, Modified),
+            entry("a.txt", Unstaged, Modified),
+        ];
+        assert_eq!(combined(&entries), vec![("MM".into(), "a.txt".into())]);
+    }
+
+    #[test]
+    fn combine_staged_add_plus_worktree_modify_is_am() {
+        let entries = [
+            entry("n.txt", StatusStaging::Staged, DiffKind::Added),
+            entry("n.txt", StatusStaging::Unstaged, DiffKind::Modified),
+        ];
+        assert_eq!(combined(&entries), vec![("AM".into(), "n.txt".into())]);
+    }
+
+    #[test]
+    fn combine_preserves_lone_records_and_untracked() {
+        let entries = [
+            entry("staged.txt", StatusStaging::Staged, DiffKind::Added),
+            entry("dirty.txt", StatusStaging::Unstaged, DiffKind::Modified),
+            entry("new.txt", StatusStaging::Unstaged, DiffKind::Added), // untracked → ??
+        ];
+        assert_eq!(
+            combined(&entries),
+            vec![
+                ("A ".into(), "staged.txt".into()),
+                (" M".into(), "dirty.txt".into()),
+                ("??".into(), "new.txt".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn combine_keeps_staged_delete_and_untracked_at_same_path_separate() {
+        use DiffKind::{Added, Removed};
+        use StatusStaging::{Staged, Unstaged};
+        // `mkit rm --cached a.txt` with the file still on disk: the index
+        // dropped a.txt (staged delete vs HEAD → `D `) but the worktree
+        // still has it, unknown to the index (untracked → `??`). Git emits
+        // BOTH records — the staged deletion must not be clobbered by `??`.
+        let entries = [
+            entry("a.txt", Staged, Removed),
+            entry("a.txt", Unstaged, Added),
+        ];
+        assert_eq!(
+            combined(&entries),
+            vec![("D ".into(), "a.txt".into()), ("??".into(), "a.txt".into())]
+        );
+    }
+
+    #[test]
+    fn combine_orders_all_tracked_before_untracked_like_git() {
+        use DiffKind::{Added, Modified, Removed};
+        use StatusStaging::{Staged, Unstaged};
+        // Mixed: staged-delete-with-untracked (a.txt), a tracked unstaged
+        // modify (m.txt), and a pure untracked file (b.txt). Git groups all
+        // tracked changes first, then all `??` records.
+        let entries = [
+            entry("a.txt", Staged, Removed),
+            entry("a.txt", Unstaged, Added),
+            entry("m.txt", Unstaged, Modified),
+            entry("b.txt", Unstaged, Added),
+        ];
+        assert_eq!(
+            combined(&entries),
+            vec![
+                ("D ".into(), "a.txt".into()),
+                (" M".into(), "m.txt".into()),
+                ("??".into(), "a.txt".into()),
+                ("??".into(), "b.txt".into()),
+            ]
         );
     }
 
