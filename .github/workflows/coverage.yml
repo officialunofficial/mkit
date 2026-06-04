@@ -3,10 +3,19 @@ name: Coverage
 on:
   push:
     branches: [main]
-  pull_request:
+  # Expensive CI: on PRs, run only once a review is approved (gated below).
+  pull_request_review:
+    types: [submitted]
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Cancel superseded approval runs; pushes to main are never cancelled.
+  # (On pull_request_review github.ref is the default branch, so we can't key
+  # the guard off github.ref — gate on the event name instead.)
+  cancel-in-progress: ${{ github.event_name == 'pull_request_review' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,10 +25,19 @@ env:
 jobs:
   llvm-cov:
     name: cargo-llvm-cov (nextest)
+    # Run on main pushes; on PRs only after an approving review.
+    if: >-
+      github.event_name != 'pull_request_review' ||
+      (github.event.review.state == 'approved' &&
+       github.event.pull_request.base.ref == 'main')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          # pull_request_review defaults to the base branch — check out the
+          # PR head so coverage reflects the PR. github.sha on push.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       # Phase-2 commonware adoption doubled the workspace target footprint.
       # cargo-llvm-cov compiles instrumented binaries that are ~3x larger
@@ -118,3 +136,9 @@ jobs:
           flags: rust
           name: cargo-llvm-cov
           fail_ci_if_error: false
+          # Point Codecov at the PR head on approval so the diff overlay lands
+          # on the right commit; fall back to github.sha on push so
+          # override_commit is never empty. override_pr is naturally empty on
+          # push — a baseline upload has no PR.
+          override_commit: ${{ github.event.pull_request.head.sha || github.sha }}
+          override_pr: ${{ github.event.pull_request.number }}

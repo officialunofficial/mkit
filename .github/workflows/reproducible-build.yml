@@ -14,10 +14,11 @@ name: Reproducible Build Smoke Test
 # would install `diffoscope` via apt and emit an HTML report to artifacts.
 
 on:
-  pull_request:
-    paths:
-      - 'rust/**'
-      - '.github/workflows/reproducible-build.yml'
+  # Expensive CI: on PRs, run only once a review is approved. Note
+  # pull_request_review can't filter by path, so this now runs on any
+  # approved PR regardless of which files changed.
+  pull_request_review:
+    types: [submitted]
   push:
     branches:
       - main
@@ -32,6 +33,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Cancel superseded approval runs; pushes/schedules to main are never
+  # cancelled. (On pull_request_review github.ref is the default branch, so we
+  # can't key the guard off github.ref — gate on the event name instead.)
+  cancel-in-progress: ${{ github.event_name == 'pull_request_review' }}
+
 env:
   RUST_VERSION: "1.95.0"
   BINARY_NAME: mkit
@@ -39,10 +47,18 @@ env:
 jobs:
   two-pass-build:
     name: Build twice, diff outputs
+    # Run on push/schedule/dispatch; on PRs only after an approving review.
+    if: >-
+      github.event_name != 'pull_request_review' ||
+      github.event.review.state == 'approved'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          # pull_request_review defaults to the base branch — check out the
+          # PR head. github.sha is correct on push/schedule.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Install Rust ${{ env.RUST_VERSION }}
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
