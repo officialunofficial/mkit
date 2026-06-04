@@ -32,7 +32,7 @@ use std::io::Write;
 use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::object::Object;
-use mkit_core::ops::{DiffEntry, DiffKind, diff_trees, text_patch};
+use mkit_core::ops::{DiffEntry, DiffKind, diff_line_counts, diff_trees, text_patch};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
@@ -62,6 +62,12 @@ struct DiffOpts {
     /// and the name of each changed file (like `git diff --name-status`).
     #[arg(long)]
     name_status: bool,
+
+    /// Show a diffstat: per-file changed-line counts and a `+`/`-` graph,
+    /// plus a summary line (like `git diff --stat`). Honors `COLUMNS`
+    /// (default 80) for the graph width.
+    #[arg(long, conflicts_with_all = ["name_only", "name_status"])]
+    stat: bool,
 
     /// NUL-terminate `--name-only` / `--name-status` records and emit raw
     /// (unquoted) paths — like `git diff -z`. In `--name-status`, the
@@ -115,12 +121,19 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     let normalized: Vec<String> = pathspecs.iter().map(|p| normalize_pathspec(p)).collect();
+    let selected = result
+        .entries
+        .iter()
+        .filter(|e| normalized.is_empty() || path_matches_any(&e.path, &normalized));
 
     let mut stdout = std::io::stdout().lock();
-    for e in &result.entries {
-        if !normalized.is_empty() && !path_matches_any(&e.path, &normalized) {
-            continue;
-        }
+    if opts.stat {
+        return match render_stat(&mut stdout, &store, selected) {
+            Ok(()) => exit::OK,
+            Err(msg) => emit_err(&msg, exit::GENERAL_ERROR),
+        };
+    }
+    for e in selected {
         let res = if opts.name_only || opts.name_status {
             emit_entry_name(&mut stdout, e, opts.name_status, opts.z);
             Ok(())
@@ -132,6 +145,224 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
     exit::OK
+}
+
+/// One row of `--stat` output: a display name plus its change shape.
+struct StatRow {
+    /// Display name — C-style quoted (git `core.quotePath`) when needed.
+    name: String,
+    change: StatChange,
+}
+
+enum StatChange {
+    /// Text change: added / deleted line counts.
+    Text { added: usize, deleted: usize },
+    /// Binary change: old / new byte sizes (rendered as `Bin … bytes`).
+    Binary { old_len: usize, new_len: usize },
+}
+
+/// Render `git diff --stat`-compatible output: one `<name> | <count>
+/// <graph>` row per changed file, then a `N files changed, …` summary.
+///
+/// Layout matches git: the name column is padded to the longest display
+/// name, the count column is right-aligned to the widest total, and the
+/// `+`/`-` graph is scaled to the terminal width when the largest change
+/// would overflow it. Width = `COLUMNS` (if a positive integer) else 80,
+/// exactly as git does even when stdout is not a tty.
+fn render_stat<'a>(
+    out: &mut impl Write,
+    store: &ObjectStore,
+    entries: impl Iterator<Item = &'a DiffEntry>,
+) -> Result<(), String> {
+    // Gather per-file change shapes (and the blob bytes we need to count).
+    let mut rows: Vec<StatRow> = Vec::new();
+    for e in entries {
+        let name = c_quote_name(&e.path);
+        let change = if e.kind == DiffKind::ModeChanged {
+            // Pure mode flip — no content delta. git shows `| 0`.
+            StatChange::Text {
+                added: 0,
+                deleted: 0,
+            }
+        } else {
+            let old_bytes = match e.old_hash {
+                Some(h) => read_blob(store, &h)?,
+                None => Vec::new(),
+            };
+            let new_bytes = match e.new_hash {
+                Some(h) => read_blob(store, &h)?,
+                None => Vec::new(),
+            };
+            match diff_line_counts(&old_bytes, &new_bytes) {
+                Some((added, deleted)) => StatChange::Text { added, deleted },
+                None => StatChange::Binary {
+                    old_len: old_bytes.len(),
+                    new_len: new_bytes.len(),
+                },
+            }
+        };
+        rows.push(StatRow { name, change });
+    }
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    // Column metrics. `max_change` and the count-column width come from
+    // text rows only (binary rows render `Bin …`, not a number).
+    let name_width = rows
+        .iter()
+        .map(|r| r.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let max_change = rows
+        .iter()
+        .filter_map(|r| match r.change {
+            StatChange::Text { added, deleted } => Some(added + deleted),
+            StatChange::Binary { .. } => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let number_width = decimal_width(max_change);
+
+    // Graph width: COLUMNS (or 80) minus the fixed framing (leading space,
+    // " | ", the count column, and the space before the graph) — the
+    // reservation git uses, derived empirically as `name + number + 6`.
+    let total_width = terminal_columns();
+    let graph_width = total_width
+        .saturating_sub(name_width)
+        .saturating_sub(number_width)
+        .saturating_sub(6)
+        .max(1);
+    // git scales the graph only when the largest change can't fit.
+    let scaled = max_change > graph_width;
+
+    for r in &rows {
+        match r.change {
+            StatChange::Text { added, deleted } => {
+                let total = added + deleted;
+                let graph = stat_graph(added, deleted, graph_width, max_change, scaled);
+                writeln!(
+                    out,
+                    " {name:<name_width$} | {total:>number_width$} {graph}",
+                    name = r.name,
+                )
+                .map_err(|e| format!("write: {e}"))?;
+            }
+            StatChange::Binary { old_len, new_len } => {
+                writeln!(
+                    out,
+                    " {name:<name_width$} | Bin {old_len} -> {new_len} bytes",
+                    name = r.name,
+                )
+                .map_err(|e| format!("write: {e}"))?;
+            }
+        }
+    }
+
+    writeln!(out, "{}", stat_summary(&rows)).map_err(|e| format!("write: {e}"))?;
+    Ok(())
+}
+
+/// The ` N files changed[, I insertions(+)][, D deletions(-)]` summary
+/// line. Pluralization matches git, and a clause is omitted when its
+/// count is zero (`1 file changed, 1 insertion(+)` has no deletions part).
+fn stat_summary(rows: &[StatRow]) -> String {
+    use std::fmt::Write as _;
+    let (mut ins, mut del) = (0usize, 0usize);
+    for r in rows {
+        if let StatChange::Text { added, deleted } = r.change {
+            ins += added;
+            del += deleted;
+        }
+    }
+    let mut summary = format!(
+        " {} {} changed",
+        rows.len(),
+        if rows.len() == 1 { "file" } else { "files" }
+    );
+    if ins > 0 {
+        let _ = write!(
+            summary,
+            ", {ins} insertion{}(+)",
+            if ins == 1 { "" } else { "s" }
+        );
+    }
+    if del > 0 {
+        let _ = write!(
+            summary,
+            ", {del} deletion{}(-)",
+            if del == 1 { "" } else { "s" }
+        );
+    }
+    summary
+}
+
+/// The `+`/`-` graph for one file. Unscaled: literal `added` `+` then
+/// `deleted` `-`. Scaled (git's algorithm): scale the total to the graph
+/// width via [`scale_linear`], then split it across `+`/`-`.
+fn stat_graph(
+    added: usize,
+    deleted: usize,
+    graph_width: usize,
+    max_change: usize,
+    scaled: bool,
+) -> String {
+    let (plus, minus) = if scaled {
+        let mut total = scale_linear(added + deleted, graph_width, max_change);
+        if total < 2 && added > 0 && deleted > 0 {
+            total = 2;
+        }
+        if added < deleted {
+            let a = scale_linear(added, graph_width, max_change);
+            (a, total - a)
+        } else {
+            let d = scale_linear(deleted, graph_width, max_change);
+            (total - d, d)
+        }
+    } else {
+        (added, deleted)
+    };
+    let mut g = "+".repeat(plus);
+    g.push_str(&"-".repeat(minus));
+    g
+}
+
+/// git's diffstat scaling: map `it` changes onto `width` columns. Returns
+/// 0 for no change, else at least 1 (so any change shows at least one
+/// mark) — `1 + it*(width-1)/max_change`, integer arithmetic, matching
+/// git's `scale_linear`.
+fn scale_linear(it: usize, width: usize, max_change: usize) -> usize {
+    if it == 0 {
+        return 0;
+    }
+    1 + it * (width - 1) / max_change
+}
+
+/// Number of decimal digits needed to print `n` (at least 1, for `0`).
+fn decimal_width(n: usize) -> usize {
+    let mut w = 1;
+    let mut v = n;
+    while v >= 10 {
+        v /= 10;
+        w += 1;
+    }
+    w
+}
+
+/// Graph width source: `COLUMNS` when it parses to a positive integer,
+/// else git's piped default of 80.
+fn terminal_columns() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.trim().parse::<usize>().ok())
+        .filter(|&c| c > 0)
+        .unwrap_or(80)
+}
+
+/// Display name for stat/summary rows: C-style quoted like git's default
+/// `core.quotePath` when the path has special bytes, else the raw path.
+fn c_quote_name(path: &str) -> String {
+    super::c_quote_path(path).unwrap_or_else(|| path.to_string())
 }
 
 /// Status letter for `--name-status`. mkit's `ModeChanged` maps to `T`
@@ -478,6 +709,44 @@ mod tests {
         assert_eq!(name_status_letter(DiffKind::Removed), 'D');
         assert_eq!(name_status_letter(DiffKind::Modified), 'M');
         assert_eq!(name_status_letter(DiffKind::ModeChanged), 'T');
+    }
+
+    #[test]
+    fn decimal_width_counts_digits() {
+        assert_eq!(decimal_width(0), 1);
+        assert_eq!(decimal_width(9), 1);
+        assert_eq!(decimal_width(10), 2);
+        assert_eq!(decimal_width(201), 3);
+    }
+
+    #[test]
+    fn scale_linear_matches_git_formula() {
+        // it == 0 → 0; otherwise 1 + it*(width-1)/max_change.
+        assert_eq!(scale_linear(0, 47, 201), 0);
+        // The values verified against real git: a.txt total 13 → 3,
+        // its single deletion → 1; the 201-change file fills the width.
+        assert_eq!(scale_linear(13, 47, 201), 3);
+        assert_eq!(scale_linear(1, 47, 201), 1);
+        assert_eq!(scale_linear(201, 47, 201), 47);
+    }
+
+    #[test]
+    fn stat_graph_unscaled_is_literal() {
+        // When not scaling, the graph is `added` '+' then `deleted` '-'.
+        assert_eq!(stat_graph(3, 0, 66, 4, false), "+++");
+        assert_eq!(stat_graph(3, 1, 66, 4, false), "+++-");
+        assert_eq!(stat_graph(0, 1, 66, 4, false), "-");
+    }
+
+    #[test]
+    fn stat_graph_scaled_splits_like_git() {
+        // a.txt: +12/-1 over graph_width 47, max_change 201 → "++-".
+        assert_eq!(stat_graph(12, 1, 47, 201, true), "++-");
+        // the max-change file fills the width: 46 '+' + 1 '-'.
+        assert_eq!(
+            stat_graph(200, 1, 47, 201, true),
+            format!("{}-", "+".repeat(46))
+        );
     }
 
     #[test]

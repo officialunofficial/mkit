@@ -340,6 +340,34 @@ pub fn text_patch(old_bytes: &[u8], new_bytes: &[u8], old_path: &str, new_path: 
     out
 }
 
+/// Added / deleted line counts between two blobs, by the same whole-line
+/// LCS the unified patch uses. `None` when either side is binary
+/// (non-UTF-8) — `diff --stat` renders `Bin …` for those.
+///
+/// Used by `diff --stat`; kept here so the stat counts always agree with
+/// the `+`/`-` lines `text_patch` would emit for the same blobs.
+#[must_use]
+pub fn diff_line_counts(old_bytes: &[u8], new_bytes: &[u8]) -> Option<(usize, usize)> {
+    let (Ok(old_text), Ok(new_text)) = (
+        std::str::from_utf8(old_bytes),
+        std::str::from_utf8(new_bytes),
+    ) else {
+        return None;
+    };
+    let old_lines = split_lines(old_text);
+    let new_lines = split_lines(new_text);
+    let mut added = 0;
+    let mut deleted = 0;
+    for op in lcs_diff(&old_lines, &new_lines) {
+        match op {
+            DiffOp::Insert(_) => added += 1,
+            DiffOp::Delete(_) => deleted += 1,
+            DiffOp::Equal(_, _) => {}
+        }
+    }
+    Some((added, deleted))
+}
+
 /// A single line plus whether the source had a trailing newline after it.
 struct DiffLine<'a> {
     text: &'a str,

@@ -545,6 +545,76 @@ fn diff_name_only_quotes_special_paths_like_git() {
     assert_parity_bytes("diff --name-only -z raw", &gz, &mz);
 }
 
+#[test]
+fn diff_stat_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    stage_add_delete_modify(&h);
+    // Unscaled multi-file diffstat: per-file `<name> | <count> <graph>`
+    // rows (name-sorted: del, m, new) + the `N files changed, …` summary.
+    let g = h.git(&["diff", "--cached", "--stat"]);
+    let m = h.mkit(&["diff", "--staged", "--stat"]);
+    assert_parity_ordered("diff --stat", &g, &m);
+}
+
+#[test]
+fn diff_stat_single_insertion_summary_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("f.txt", b"x\n");
+    h.commit_both(&["f.txt"], "init");
+    h.write_both("f.txt", b"x\ny\n"); // exactly one inserted line
+    assert!(h.git(&["add", "f.txt"]).status.success());
+    assert!(h.mkit(&["add", "f.txt"]).status.success());
+    // Pluralization: "1 file changed, 1 insertion(+)" (singular, no
+    // deletions clause since there are none).
+    let g = h.git(&["diff", "--cached", "--stat"]);
+    let m = h.mkit(&["diff", "--staged", "--stat"]);
+    assert_parity_ordered("diff --stat singular summary", &g, &m);
+}
+
+#[test]
+fn diff_stat_scaled_graph_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("small.txt", b"x\n");
+    h.write_both("really-long-filename.txt", b"x\n");
+    h.commit_both(&["small.txt", "really-long-filename.txt"], "init");
+    // A small change beside a 200-line rewrite: the big file overflows the
+    // ~80-col graph, so git scales both files' graphs via scale_linear.
+    // This exercises the scaling + column-width math, not just the literal
+    // path. Both tools read COLUMNS identically (default 80 when unset).
+    h.write_both("small.txt", b"a\nb\nc\n");
+    let mut big = String::new();
+    for i in 0..200 {
+        use std::fmt::Write as _;
+        let _ = writeln!(big, "line{i}");
+    }
+    h.write_both("really-long-filename.txt", big.as_bytes());
+    assert!(
+        h.git(&["add", "small.txt", "really-long-filename.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        h.mkit(&["add", "small.txt", "really-long-filename.txt"])
+            .status
+            .success()
+    );
+    let g = h.git(&["diff", "--cached", "--stat"]);
+    let m = h.mkit(&["diff", "--staged", "--stat"]);
+    assert_parity_ordered("diff --stat (scaled)", &g, &m);
+}
+
 // =====================================================================
 // Passing subset — branch list / delete reconciliation (#249).
 // =====================================================================

@@ -234,7 +234,7 @@ indexes the reachable chain, so commits superseded by
 .Cm commit --amend
 or a reset are no longer listed. This command never mutates refs, the
 journal, or any object.
-.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b Oc Ar path ...
+.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.
 .Fl Fl staged
@@ -254,6 +254,17 @@ prefixes each with an
 .Ql A Ns / Ns Ql D Ns / Ns Ql M
 status letter
 .Pq Ql T marks an mkit mode change .
+.Fl Fl stat
+shows a diffstat: a padded
+.Ql <name> | <count> <graph>
+row per file (the
+.Ql +/-
+graph scaled to the terminal width, honoring
+.Ev COLUMNS ,
+default 80) and a
+.Ql N files changed, ... insertions(+), ... deletions(-)
+summary; binary files render
+.Ql Bin <old> -> <new> bytes .
 In these summary modes special-byte paths are C-style quoted (git
 .Ql core.quotePath ) ;
 .Fl z

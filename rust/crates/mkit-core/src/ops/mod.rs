@@ -27,8 +27,8 @@ pub use conflict_state::{
     any_op_in_progress, in_progress_op_name,
 };
 pub use diff::{
-    DiffEntry, DiffError, DiffKind, DiffResult, StatusEntry, StatusStaging, diff_trees,
-    status_diff, text_patch,
+    DiffEntry, DiffError, DiffKind, DiffResult, StatusEntry, StatusStaging, diff_line_counts,
+    diff_trees, status_diff, text_patch,
 };
 pub use gc::{GcReport, GcRootsError, collect_roots, live_objects, run_gc};
 pub use graph::{
