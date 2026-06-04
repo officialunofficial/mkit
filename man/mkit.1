@@ -495,6 +495,16 @@ Read or write a config key. Recognized keys include
 .Cm ssh.user_known_hosts_file ,
 and
 .Cm ssh.identity_file .
+The git-compatibility aliases
+.Cm user.name
+and
+.Cm user.email
+are accepted and round-tripped but are
+.Em non-authoritative :
+they never set the signed commit author (that is
+.Cm user.identity
+or the signing key), so they are repo-safe, unlike
+.Cm user.identity .
 .It Cm serve Ar path
 Internal subcommand: act as the server end of an
 .Cm mkit+ssh://

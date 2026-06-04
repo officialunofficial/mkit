@@ -704,6 +704,31 @@ fn mv_untracked_source_fails_like_git() {
     );
 }
 
+#[test]
+fn config_user_name_round_trips_like_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    // `git config user.name X` then `git config user.name` echoes X; mkit's
+    // git-compat alias does the same (it stays non-authoritative — mkit's
+    // signed author is the key/`user.identity`, not this value).
+    assert!(
+        h.git(&["config", "user.name", "Alice Example"])
+            .status
+            .success()
+    );
+    assert!(
+        h.mkit(&["config", "user.name", "Alice Example"])
+            .status
+            .success()
+    );
+    let g = h.git(&["config", "user.name"]);
+    let m = h.mkit(&["config", "user.name"]);
+    assert_parity_bytes("config user.name round-trip", &g, &m);
+}
+
 // =====================================================================
 // Passing subset — branch list / delete reconciliation (#249).
 // =====================================================================

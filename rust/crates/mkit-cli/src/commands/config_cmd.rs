@@ -129,6 +129,12 @@ fn write_user_scoped(key: &str, value: &str) -> u8 {
 /// and routed to user-scoped storage before this is called.
 fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
     match key {
+        // Git-compatibility aliases. Accepted and round-tripped, but
+        // **non-authoritative**: they never feed the signed commit author
+        // (that is `user.identity` / the signing key), so they are
+        // repo-safe and not in `REPO_FORBIDDEN_KEYS`.
+        "user.name" => value.clone_into(&mut cfg.user_name),
+        "user.email" => value.clone_into(&mut cfg.user_email),
         "default_branch" => value.clone_into(&mut cfg.default_branch),
         "remote_endpoint" => value.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => value.clone_into(&mut cfg.remote_bucket),
@@ -175,12 +181,16 @@ const CONFIG_KEYS: &[&str] = &[
     "ssh.strict_host_key_checking",
     "ssh.user_known_hosts_file",
     "trusted_remote_endpoint",
+    "user.email",
     "user.identity",
+    "user.name",
 ];
 
 fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
     match key {
         "user.identity" => Some(Cow::Borrowed(&cfg.user_identity)),
+        "user.name" => Some(Cow::Borrowed(&cfg.user_name)),
+        "user.email" => Some(Cow::Borrowed(&cfg.user_email)),
         "trusted_remote_endpoint" => Some(Cow::Borrowed(&cfg.trusted_remote_endpoint)),
         "signing_key" => Some(Cow::Borrowed(&cfg.signing_key)),
         "default_branch" => Some(Cow::Borrowed(&cfg.default_branch)),
