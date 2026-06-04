@@ -54,6 +54,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "tag",
     "merge",
     "cherry-pick",
+    "revert",
     "rebase",
     "bisect",
     "gc",

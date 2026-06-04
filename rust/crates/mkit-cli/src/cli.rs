@@ -105,6 +105,9 @@ commands:
   keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
                     Generate a new signing key (defaults to Ed25519)
   cherry-pick <hash> Apply a commit to the current branch
+  revert <commit> | --continue | --abort
+                    Create a new commit undoing <commit> (forward commit;
+                    conflict-aware)
   rebase <branch>    Replay commits onto a different base
   rebase --continue  Continue rebase after conflict resolution
   rebase --abort     Abort rebase and restore original state

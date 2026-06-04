@@ -35,6 +35,7 @@ pub mod reflog;
 pub mod remote;
 pub mod reset;
 pub mod restore;
+pub mod revert;
 pub mod revspec;
 pub mod rm;
 pub mod serve;

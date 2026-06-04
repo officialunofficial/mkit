@@ -252,6 +252,13 @@ Branches / refs:
   the current branch. Refuses to overwrite staged changes, dirty tracked
   files, or untracked path collisions. On conflict, records resumable
   state; see "Resolving conflicts" below.
+- `mkit revert <commit> | --continue | --abort` — create a new commit
+  that undoes `<commit>` (the inverse of cherry-pick: it applies the
+  reverse of the target's diff). The commit message is
+  `Revert "<subject>"` with a `This reverts commit <hash>.` trailer.
+  This is a **forward** commit — it does not rewrite history, so the
+  reverted commit stays reachable (no gc/recovery interaction). Same
+  safety guards and resumable conflict workflow as cherry-pick.
 - `mkit rebase <branch> | --continue | --abort | --skip` — replay
   commits onto a different base. Restore steps refuse to overwrite staged
   changes, dirty tracked files, or untracked path collisions. On conflict
@@ -500,11 +507,6 @@ are design decisions, not missing features, and are tracked as closed
 "wontfix-by-design" follow-ups. mkit offers equivalent workflows for
 each:
 
-- **`mkit revert` — not implemented.** mkit has no inverse-commit
-  command. To undo a change, reset/checkout to the desired state and
-  commit forward, or `cherry-pick` a hand-built inverse. A first-class
-  `revert` may be reconsidered if demand warrants it, but it is out of
-  scope by design (decision #224).
 - **`mkit mv` — not implemented.** There is no rename/move command;
   mkit's content-addressed model records moves implicitly (the blob hash
   is unchanged and the path simply moves between tree entries). Move the

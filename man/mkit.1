@@ -348,6 +348,18 @@ Removing or renaming a remote never touches the user-scoped
 which is keyed by exact URL rather than remote name.
 .It Cm cherry-pick Ar hash
 Apply a single commit from elsewhere onto HEAD.
+.It Cm revert Ar commit | Fl Fl continue | Fl Fl abort
+Create a new commit that undoes
+.Ar commit
+(the inverse of cherry-pick). A normal forward commit — it does not rewrite
+history, so the reverted commit stays reachable. On conflict the resolvable
+workflow applies:
+.Fl Fl continue
+after
+.Cm add Ns -ing
+resolutions, or
+.Fl Fl abort
+to restore HEAD.
 .It Cm bisect Cm start | Cm good | Cm bad | Cm reset
 Binary-search for the commit that introduced a regression.
 .It Cm gc Oo Fl n | Fl Fl dry-run Oc Oo Fl Fl grace-secs Ar secs Oc

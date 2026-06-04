@@ -17,7 +17,7 @@ complete -c mkit -f
 set -l __mkit_subcommands \
     init add rm restore reset hash cat tree commit log reflog status diff branch checkout \
     tag config merge push pull fetch stash clone remote key keygen \
-    cherry-pick rebase bisect gc sparse-checkout serve pack-shard blame verify \
+    cherry-pick revert rebase bisect gc sparse-checkout serve pack-shard blame verify \
     attest verify-attest version help
 
 # Subcommand list (only when no subcommand has been entered yet).
@@ -109,6 +109,10 @@ complete -c mkit -n "__fish_seen_subcommand_from rebase" \
     -l continue -d "Continue an in-progress rebase"
 complete -c mkit -n "__fish_seen_subcommand_from rebase" \
     -l abort -d "Abort an in-progress rebase"
+complete -c mkit -n "__fish_seen_subcommand_from revert" \
+    -l continue -d "Continue an in-progress revert"
+complete -c mkit -n "__fish_seen_subcommand_from revert" \
+    -l abort -d "Abort an in-progress revert"
 
 # Subcommands of subcommands.
 complete -c mkit -n "__fish_seen_subcommand_from bisect; \

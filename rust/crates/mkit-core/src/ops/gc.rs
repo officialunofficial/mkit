@@ -145,6 +145,10 @@ pub fn collect_roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
         add(c.cherry_pick_head, &mut roots);
         add(c.orig_head, &mut roots);
     }
+    if let Some(r) = conflict_state::read_revert_state(mkit_dir)? {
+        add(r.revert_head, &mut roots);
+        add(r.orig_head, &mut roots);
+    }
 
     // In-progress rebase: target + every commit still to replay or
     // already replayed onto the new base.
