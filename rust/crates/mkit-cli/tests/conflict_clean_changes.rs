@@ -142,3 +142,37 @@ fn continue_refuses_resolved_but_unstaged_regular_file() {
         "continue succeeds once staged"
     );
 }
+
+#[test]
+fn continue_refuses_unstaged_deletion_resolution() {
+    let td = init_repo();
+    let root = td.path();
+    let feature = setup_conflict_with_clean_add(root);
+
+    let out = run_in(root, &["cherry-pick", &feature]);
+    assert!(!out.status.success(), "cherry-pick should conflict");
+
+    // Resolve by DELETING the conflicted file, but forget `mkit rm` — the
+    // stale staged ours-entry would otherwise be committed (#269 finding 1).
+    fs::remove_file(root.join("a.txt")).unwrap();
+    let cont = run_in(root, &["cherry-pick", "--continue"]);
+    assert!(
+        !cont.status.success(),
+        "continue must refuse an unstaged deletion resolution"
+    );
+    let err = String::from_utf8_lossy(&cont.stderr);
+    assert!(err.contains("a.txt"), "error should name the path: {err}");
+
+    // `mkit rm` then continue succeeds (a.txt stays deleted).
+    assert!(run_in(root, &["rm", "a.txt"]).status.success());
+    assert!(
+        run_in(root, &["cherry-pick", "--continue"])
+            .status
+            .success(),
+        "continue succeeds once the deletion is staged"
+    );
+    assert!(
+        !root.join("a.txt").exists(),
+        "deletion resolution committed"
+    );
+}
