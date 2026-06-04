@@ -107,14 +107,21 @@ pub fn run(args: &[String]) -> u8 {
     // If reset moves the branch off its current tip, that old tip may
     // become unreachable — record it BEFORE the move (under the worktree
     // lock) so it stays recoverable, and abort if the log can't be
-    // written. A no-op move (old == target) records nothing.
-    if let Ok(Some(old_head)) = refs::resolve_head(&mkit_dir)
-        && old_head != target
-    {
-        let branch = super::head_branch_name(&mkit_dir);
-        if let Err((msg, code)) = super::record_superseded(&mkit_dir, "reset", &branch, old_head) {
-            return emit_err(&msg, code);
+    // written. Fail closed: an unreadable/corrupt current ref
+    // (`resolve_head` Err) aborts rather than letting `move_head` clobber
+    // it unlogged. `Ok(None)` is an unborn branch (nothing to supersede);
+    // a no-op move (old == target) records nothing.
+    match refs::resolve_head(&mkit_dir) {
+        Ok(Some(old_head)) if old_head != target => {
+            let branch = super::head_branch_name(&mkit_dir);
+            if let Err((msg, code)) =
+                super::record_superseded(&mkit_dir, "reset", &branch, old_head)
+            {
+                return emit_err(&msg, code);
+            }
         }
+        Ok(_) => {}
+        Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
     }
 
     // Move HEAD / the current branch FIRST. As in `checkout`, advancing

@@ -123,6 +123,35 @@ fn noop_reset_records_nothing() {
 }
 
 #[test]
+fn reset_aborts_and_does_not_move_a_corrupt_current_ref() {
+    let td = init_repo();
+    let root = td.path();
+    commit(root, "a.txt", b"one\n", "one");
+    let c1 = main_tip(root); // valid full hash, used as explicit target
+    commit(root, "b.txt", b"two\n", "two");
+
+    // Corrupt the current branch ref. `resolve_head` then errors, so
+    // reset must abort BEFORE move_head clobbers it unlogged.
+    let main_ref = root.join(".mkit/refs/heads/main");
+    fs::write(&main_ref, b"not-a-valid-ref\n").unwrap();
+
+    let out = run_in(root, &["reset", "--soft", &c1]);
+    assert!(
+        !out.status.success(),
+        "reset must fail closed on an unreadable current ref"
+    );
+    assert_eq!(
+        fs::read_to_string(&main_ref).unwrap().trim(),
+        "not-a-valid-ref",
+        "the corrupt ref must NOT be moved"
+    );
+    assert!(
+        recovery_log(root).is_empty(),
+        "no recovery entry should be written when reset aborts"
+    );
+}
+
+#[test]
 fn rebase_records_original_tip() {
     let td = init_repo();
     let root = td.path();

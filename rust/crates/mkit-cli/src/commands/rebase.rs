@@ -464,9 +464,13 @@ fn replay(
     }
 
     // Finish: move the branch to current HEAD and reattach.
+    // Fail closed on a corrupt/unreadable HEAD rather than silently
+    // falling back to `onto` (which would discard the replayed commits
+    // unrecorded). `Ok(None)` is the legitimate empty-rebase case.
     let final_head = match refs::resolve_head(mkit_dir) {
         Ok(Some(h)) => h,
-        _ => state.onto,
+        Ok(None) => state.onto,
+        Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
     };
     // The original tip is superseded by the replayed history. Record it
     // BEFORE finalizing the branch (still under the worktree lock) so it
