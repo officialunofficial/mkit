@@ -13,6 +13,16 @@
 //! objects written just before a reference that points at them. Use
 //! `--dry-run` to preview, and `--grace-secs 0` to prune every
 //! unreachable object regardless of age.
+//!
+//! Concurrency: gc holds the repo lock, but some root-publishing paths
+//! (e.g. `tag`, `fetch`) write an object before publishing the ref that
+//! makes it reachable and do not yet take that lock. The grace window is
+//! therefore the concurrency-safety mechanism — like Git, where the
+//! default `gc.pruneExpire` protects in-flight objects and `prune
+//! --expire=now` is the explicit unsafe mode. `--grace-secs 0` bypasses
+//! that net, so it must only be run when no other mkit process is
+//! operating on the repo (a warning is printed). Serializing every root
+//! publisher under the repo lock is tracked as a follow-up.
 
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,11 +82,31 @@ pub fn run(args: &[String]) -> u8 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
 
+    if opts.grace_secs == 0 && !opts.dry_run {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "warning: --grace-secs 0 prunes every unreachable object, bypassing the grace window; \
+             ensure no other mkit process is operating on this repo"
+        );
+    }
+
     // Expire stale recovery entries first so they stop pinning objects;
     // abort on error (fail closed — don't prune against a half-expired log).
-    let expired = match recovery::expire(&mkit_dir, now, &RetentionPolicy::default()) {
-        Ok(n) => n,
-        Err(e) => return emit_err(&format!("expire recovery log: {e}"), exit::CANTCREAT),
+    // A dry run must not mutate state, so it only *counts* what would
+    // expire (and therefore reports a conservative prune set, since those
+    // soon-to-expire commits are still pinned during the preview).
+    let policy = RetentionPolicy::default();
+    let expired = if opts.dry_run {
+        match recovery::would_expire(&mkit_dir, now, &policy) {
+            Ok(n) => n,
+            Err(e) => return emit_err(&format!("recovery log: {e}"), exit::GENERAL_ERROR),
+        }
+    } else {
+        match recovery::expire(&mkit_dir, now, &policy) {
+            Ok(n) => n,
+            Err(e) => return emit_err(&format!("expire recovery log: {e}"), exit::CANTCREAT),
+        }
     };
 
     let report = match run_gc(&store, &mkit_dir, now, opts.grace_secs, opts.dry_run) {
@@ -85,14 +115,14 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     let mut stderr = std::io::stderr().lock();
-    let verb = if report.dry_run {
-        "would prune"
+    let (prune_verb, expire_verb) = if report.dry_run {
+        ("would prune", "would expire")
     } else {
-        "pruned"
+        ("pruned", "expired")
     };
     let _ = writeln!(
         stderr,
-        "gc{}: {verb} {} object(s), {} bytes; scanned {}, live {}, kept-recent {}; expired {} recovery entr{}",
+        "gc{}: {prune_verb} {} object(s), {} bytes; scanned {}, live {}, kept-recent {}; {expire_verb} {} recovery entr{}",
         if report.dry_run { " (dry run)" } else { "" },
         report.pruned,
         report.bytes_reclaimed,

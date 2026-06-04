@@ -81,6 +81,11 @@ pub enum GcRootsError {
     /// A ref directory nested deeper than [`MAX_REF_WALK_DEPTH`].
     #[error("ref tree too deep at {0} (fail closed)")]
     RefTooDeep(String),
+    /// `.mkit` or `.mkit/objects` is a symlink. A deletion-capable gc
+    /// refuses, since pruning would follow the link and unlink files
+    /// outside the repo.
+    #[error("refusing to gc: {0} is a symlink (objects may live outside the repo)")]
+    SymlinkedStore(String),
 }
 
 /// Collect the complete set of GC retention roots for the repo at
@@ -238,6 +243,13 @@ pub fn run_gc(
     grace_secs: u64,
     dry_run: bool,
 ) -> Result<GcReport, GcRootsError> {
+    // Refuse to delete through a symlinked store: if `.mkit` or
+    // `.mkit/objects` is a symlink, `remove_object` would unlink the
+    // link target's files — potentially outside the repo. (Dry runs are
+    // safe but we reject uniformly so a preview matches the real run.)
+    reject_symlink(mkit_dir)?;
+    reject_symlink(store.objects_root())?;
+
     // Compute the keep-set FIRST; if this fails we delete nothing.
     let live = live_objects(store, mkit_dir)?;
     let all = store.iter_object_hashes()?;
@@ -368,6 +380,19 @@ fn read_optional_hash(path: &Path) -> Result<Option<Hash>, GcRootsError> {
 // =====================================================================
 // Tests
 // =====================================================================
+
+/// Error if `path` is a symlink — a deletion-capable gc must not follow
+/// it (the target may be outside the repo). Absent path is fine.
+fn reject_symlink(path: &Path) -> Result<(), GcRootsError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            Err(GcRootsError::SymlinkedStore(path.display().to_string()))
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -562,6 +587,35 @@ mod tests {
         assert!(s.contains(&orphan), "recent orphan kept by grace window");
         assert_eq!(report.pruned, 0);
         assert!(report.kept_recent >= 1, "{report:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_gc_refuses_symlinked_objects_dir() {
+        use std::os::unix::fs::symlink;
+        let (d, s) = repo();
+        let md = mkit_dir(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+
+        // Replace `.mkit/objects` with a symlink to an external dir. A
+        // deletion-capable gc must refuse rather than prune through it.
+        let external = d.path().join("external-objects");
+        let real_objects = md.join("objects");
+        fs::create_dir_all(&external).unwrap();
+        // Move existing shards out so the symlink target holds them.
+        for entry in fs::read_dir(&real_objects).unwrap() {
+            let entry = entry.unwrap();
+            fs::rename(entry.path(), external.join(entry.file_name())).unwrap();
+        }
+        fs::remove_dir_all(&real_objects).unwrap();
+        symlink(&external, &real_objects).unwrap();
+
+        let err = run_gc(&s, &md, u64::MAX, 0, false).unwrap_err();
+        assert!(
+            matches!(err, GcRootsError::SymlinkedStore(_)),
+            "gc must refuse a symlinked objects dir, got {err:?}"
+        );
     }
 
     #[test]

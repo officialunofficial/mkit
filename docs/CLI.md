@@ -97,8 +97,8 @@ History / commits:
   from the index, and is re-signed; the branch is moved to it and the
   move is recorded in the ref-history journal. Without `-m` the previous
   commit's message is reused (no editor is launched). The superseded
-  commit becomes an unreachable object and is only reclaimed once
-  `mkit gc` ships (issue #233).
+  commit is recorded in the recovery log so it stays recoverable, and is
+  reclaimed by `mkit gc` once it falls out of the retention window.
 - `mkit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N]` — show
   commit history. The default format prints the **full commit message
   body**, indented by four spaces, and renders the timestamp as a stable
@@ -501,10 +501,11 @@ each:
   the destructive step explicit and outside mkit's data path (decision
   #226).
 
-Note: object garbage collection (`mkit gc`) is **not shipped** — it is a
-separate, unscheduled milestone (issue #233). Commands that leave
-unreachable objects (notably `commit --amend` and `reset`) say so
-explicitly; those objects remain on disk until `gc` lands.
+Note: object garbage collection (`mkit gc`) **is shipped** (issue #233).
+History-rewriting commands (`commit --amend`, `reset`, `rebase`) record
+the superseded commit in the recovery log, and `mkit gc` reclaims
+unreachable objects once they fall outside the grace window. See
+[`docs/SPEC-GC.md`](SPEC-GC.md).
 
 ## Config keys
 
