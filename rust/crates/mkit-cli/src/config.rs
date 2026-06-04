@@ -678,6 +678,15 @@ fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> bool {
 /// Write the given `Config` to `<root>/.mkit/config`. Only repo-scoped
 /// (non-forbidden) fields are emitted; security-sensitive fields live
 /// in the user-scoped file and must be written there explicitly.
+///
+/// **Contract:** `cfg` MUST be a repo-scoped config — either
+/// [`read_layered`]`(root).repo` for a read-modify-write, or a freshly
+/// built [`Config`] (e.g. on `clone`). NEVER pass a merged config
+/// ([`read_or_default`] / [`read_layered`]`.merged`): this serializer
+/// emits repo-safe fields such as `user.name` / `user.email`, so a
+/// user-scoped value would be materialized into the clone-traveling
+/// `.mkit/config` (a privacy/scope leak). Callers that need the effective
+/// (merged) value for *reads* should use it only for reads.
 pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
     let path = root.join(CONFIG_FILE);
     if let Some(parent) = path.parent() {

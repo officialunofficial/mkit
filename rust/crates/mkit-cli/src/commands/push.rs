@@ -248,11 +248,14 @@ fn record_upstream_if_unset(
     {
         return;
     }
-    // Re-read the on-disk repo config and add the upstream entry without
-    // disturbing the existing remotes / flat fields.
-    let Ok(mut on_disk) = config::read_or_default(cwd) else {
+    // Re-read the on-disk REPO config (not the merged view) and add the
+    // upstream entry without disturbing the existing remotes / flat
+    // fields. Using the repo layer ensures user-scoped values (e.g. a
+    // private `user.email`) are never materialized into `.mkit/config`.
+    let Ok(layered) = config::read_layered(cwd) else {
         return;
     };
+    let mut on_disk = layered.repo;
     on_disk.branch_upstreams.insert(
         branch.to_owned(),
         config::Upstream {

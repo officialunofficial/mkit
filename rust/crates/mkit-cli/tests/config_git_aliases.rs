@@ -124,6 +124,32 @@ fn unrelated_repo_write_does_not_leak_user_scoped_aliases() {
 }
 
 #[test]
+fn remote_add_does_not_leak_user_scoped_aliases() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir_all(x.join("mkit")).unwrap();
+    fs::write(x.join("mkit/config"), b"user.email = private@example.com\n").unwrap();
+
+    // `remote add` is another repo-config writer; it must persist only the
+    // repo layer, not the merged view, so the user-scoped email stays out
+    // of the clone-traveling repo config.
+    assert!(
+        run_in(root, x, &["remote", "add", "origin", "mkit+file:///tmp/r"])
+            .status
+            .success()
+    );
+    let repo_cfg = fs::read_to_string(root.join(".mkit/config")).unwrap();
+    assert!(
+        !repo_cfg.contains("private@example.com"),
+        "user-scoped user.email leaked into repo config via remote add: {repo_cfg:?}"
+    );
+    assert!(
+        repo_cfg.contains("remote.origin.url"),
+        "remote was not recorded: {repo_cfg:?}"
+    );
+}
+
+#[test]
 fn user_name_does_not_spoof_the_signed_author() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());

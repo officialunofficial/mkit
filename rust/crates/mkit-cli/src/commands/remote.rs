@@ -62,6 +62,7 @@ enum RemoteCmd {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // flat dispatch over the remote subcommands
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_shim::parse::<RemoteOpts>("mkit remote", args) {
         Ok(o) => o,
@@ -71,13 +72,21 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mut cfg = match config::read_or_default(&cwd) {
+    let layered = match config::read_layered(&cwd) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
+    // `show` reflects the merged view; every mutating subcommand operates
+    // on and persists ONLY the repo layer, so a user-scoped value (e.g. a
+    // private `user.email`) is never materialized into the clone-traveling
+    // `.mkit/config` by `config::write`.
+    if opts.sub.is_none() {
+        return show(&layered.merged, matches!(opts.format, RemoteFormat::Json));
+    }
+    let mut cfg = layered.repo;
 
     match opts.sub {
-        None => show(&cfg, matches!(opts.format, RemoteFormat::Json)),
+        None => unreachable!("handled above"),
         Some(RemoteCmd::Add { name_or_url, url } | RemoteCmd::Set { name_or_url, url }) => {
             // Two forms:
             //   `mkit remote add <url>`         -> flat default remote
