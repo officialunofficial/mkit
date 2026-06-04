@@ -463,11 +463,33 @@ fn replay(
         }
     }
 
-    // Finish: move the branch to current HEAD and reattach.
+    // Finish: move the branch to current HEAD and reattach. HEAD is
+    // detached to a hash for the entire rebase (start detaches to `onto`,
+    // each replay advances it), so a finalized rebase ALWAYS resolves to
+    // `Some` — even an empty rebase leaves HEAD at `onto`. `None`/`Err`
+    // therefore means HEAD was lost or corrupted mid-rebase: fail closed
+    // rather than silently move the branch to `onto` and drop the
+    // replayed tip.
     let final_head = match refs::resolve_head(mkit_dir) {
         Ok(Some(h)) => h,
-        _ => state.onto,
+        Ok(None) => {
+            return emit_err(
+                "rebase: HEAD missing at finalize (in-progress state may be corrupted); aborting",
+                exit::DATAERR,
+            );
+        }
+        Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
     };
+    // The original tip is superseded by the replayed history. Record it
+    // BEFORE finalizing the branch (still under the worktree lock) so it
+    // survives gc once the in-progress rebase state — which currently
+    // pins it — is cleaned up below. Abort if the log can't be written.
+    if state.orig_head != final_head
+        && let Err((m, c)) =
+            super::record_superseded(mkit_dir, "rebase", &state.head_name, state.orig_head)
+    {
+        return emit_err(&m, c);
+    }
     if let Err(e) = super::write_ref_recording_history(
         mkit_dir,
         &state.head_name,

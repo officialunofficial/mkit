@@ -50,8 +50,9 @@ use mkit_core::hash::Hash;
 use mkit_core::index::{EntryStatus, Index};
 use mkit_core::object::Object;
 use mkit_core::ops::diff::{DiffKind, diff_trees};
+use mkit_core::ops::recovery::{self, RecoveryEntry};
 use mkit_core::ops::restore::{RestoreOptions, matches_sparse, restore_tree_to_worktree};
-use mkit_core::refs::{self, RefError, RefWriteCondition};
+use mkit_core::refs::{self, Head, RefError, RefWriteCondition};
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 use std::fs;
@@ -195,6 +196,45 @@ pub fn write_ref_recording_history(
     {
         refs::update_ref(mkit_dir, branch, condition, new_hash)
     }
+}
+
+/// Current branch name for recovery logging — empty for a detached HEAD
+/// or an unreadable/symbolic-only HEAD.
+#[must_use]
+pub fn head_branch_name(mkit_dir: &Path) -> String {
+    match refs::read_head(mkit_dir) {
+        Ok(Head::Branch(name)) => name,
+        _ => String::new(),
+    }
+}
+
+/// Record `superseded` (the old branch tip a history-rewriting op is
+/// about to replace) in the recovery log so `mkit gc` keeps it
+/// recoverable.
+///
+/// Call this **before** moving the ref and while holding the worktree
+/// lock (every caller does both): recording first guarantees that a
+/// persisted ref move always has a persisted recovery entry, and the
+/// lock keeps a concurrent `recovery::expire` from clobbering the append.
+/// On failure the caller MUST abort the rewrite (propagate the returned
+/// error) rather than orphan an unrecoverable commit. The zero hash is a
+/// no-op inside [`recovery::record`].
+pub fn record_superseded(
+    mkit_dir: &Path,
+    op: &str,
+    branch: &str,
+    superseded: Hash,
+) -> Result<(), (String, u8)> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let entry = RecoveryEntry {
+        timestamp,
+        op: op.to_owned(),
+        superseded,
+        branch: branch.to_owned(),
+    };
+    recovery::record(mkit_dir, &entry).map_err(|e| (format!("recovery log: {e}"), exit::CANTCREAT))
 }
 
 /// Rewrite `.mkit/index` so it exactly mirrors `tree_hash`.

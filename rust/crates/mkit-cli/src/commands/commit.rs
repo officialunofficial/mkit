@@ -213,6 +213,22 @@ pub fn run(args: &[String]) -> u8 {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("store commit: {e}"), exit::CANTCREAT),
     };
+    // Amend supersedes the old HEAD. Record it BEFORE moving the branch
+    // (under the worktree lock) so the superseded commit stays
+    // recoverable; abort if the recovery log can't be written.
+    if amend_target.is_some() {
+        match refs::resolve_head(&mkit_dir) {
+            Ok(Some(old_head)) => {
+                let branch = super::head_branch_name(&mkit_dir);
+                if let Err((m, c)) = super::record_superseded(&mkit_dir, "amend", &branch, old_head)
+                {
+                    return emit_err(&m, c);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
+        }
+    }
     if let Err((m, c)) = advance_head(&mkit_dir, &commit_hash) {
         return emit_err(&m, c);
     }

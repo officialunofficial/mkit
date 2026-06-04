@@ -25,8 +25,8 @@
 //!
 //! RECOVERY (#260): commits superseded by `commit --amend`, `reset`, or
 //! `rebase` are unrecoverable from the opaque-digest history journal, so
-//! [`super::recovery`] logs them and they are roots here. Wiring the
-//! *producers* (recording at the rewrite sites) is Part 2b.
+//! [`super::recovery`] logs them (the commands record the old tip before
+//! moving the ref) and they are roots here.
 
 use std::collections::BTreeSet;
 use std::fs;
