@@ -16,6 +16,7 @@ pub mod merge;
 pub mod bisect;
 pub mod blame;
 pub mod rebase;
+pub mod recovery;
 pub mod restore;
 pub mod stash;
 
@@ -33,4 +34,5 @@ pub use graph::{
     collect_ancestor_set, reachable_closure, reachable_closure_checked, reachable_objects,
 };
 pub use merge::{Conflict, ConflictKind, MergeResult, find_merge_base, is_ancestor, merge_trees};
+pub use recovery::{RecoveryEntry, RecoveryError, RetentionPolicy};
 pub use restore::{RestoreOptions, RestoreReport, restore_tree_to_worktree};

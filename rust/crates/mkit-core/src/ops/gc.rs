@@ -19,13 +19,14 @@
 //!   sidecar's base/ours/theirs blob hashes.
 //! - **Attestations** — every `attestations/<commit>/` directory pins
 //!   its commit so an attested commit is never orphaned.
+//! - **Recovery log** — every commit recorded as superseded by a
+//!   history-rewriting op (see [`super::recovery`]); retained so it stays
+//!   recoverable until `recovery::expire` drops it past the window.
 //!
-//! NOTE ON RECOVERY (#260): the per-branch history journal stores only
-//! opaque MMR digests, so commits superseded by `commit --amend`,
-//! `reset`, or `rebase` are **not** recoverable from it and are **not**
-//! roots here. Reclaiming them safely needs a dedicated recovery log +
-//! retention/grace policy — the follow-up half of #260, tracked
-//! separately. This module is the reachability foundation only.
+//! RECOVERY (#260): commits superseded by `commit --amend`, `reset`, or
+//! `rebase` are unrecoverable from the opaque-digest history journal, so
+//! [`super::recovery`] logs them and they are roots here. Wiring the
+//! *producers* (recording at the rewrite sites) is Part 2b.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -38,6 +39,7 @@ use crate::store::{ObjectStore, StoreError};
 use super::conflict_state::{self, ORIG_HEAD};
 use super::graph::reachable_closure_checked;
 use super::rebase::{self, REBASE_DIR};
+use super::recovery;
 use super::stash;
 use crate::refs::{self, HEADS_DIR, REMOTES_DIR, TAGS_DIR};
 
@@ -63,6 +65,8 @@ pub enum GcRootsError {
     ConflictState(#[from] conflict_state::ConflictStateError),
     #[error("rebase state: {0}")]
     Rebase(#[from] rebase::RebaseError),
+    #[error("recovery log: {0}")]
+    Recovery(#[from] recovery::RecoveryError),
     #[error("object store: {0}")]
     Store(#[from] StoreError),
     #[error("malformed object id on disk: {0}")]
@@ -165,6 +169,14 @@ pub fn collect_roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
 
     // Attested commits — pinned so an attestation never dangles.
     for h in attested_commits(mkit_dir)? {
+        add(h, &mut roots);
+    }
+
+    // Recovery log — commits superseded by amend/reset/rebase, retained
+    // so they stay recoverable. Clock-free here: `recovery::expire` (a
+    // gc maintenance step) drops entries past the retention window so
+    // they stop pinning objects.
+    for h in recovery::roots(mkit_dir)? {
         add(h, &mut roots);
     }
 
@@ -421,6 +433,27 @@ mod tests {
         assert!(
             collect_roots(&md).unwrap().contains(&c),
             "nested remote-tracking ref must be a root"
+        );
+    }
+
+    #[test]
+    fn collect_roots_includes_recovery_log_entries() {
+        let (d, s) = repo();
+        let md = mkit_dir(&d);
+        let (superseded, _) = commit_one(&s, b"old", b"old", vec![]);
+        super::super::recovery::record(
+            &md,
+            &super::super::recovery::RecoveryEntry {
+                timestamp: 1,
+                op: "amend".into(),
+                superseded,
+                branch: "main".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            collect_roots(&md).unwrap().contains(&superseded),
+            "a superseded commit in the recovery log must be a root"
         );
     }
 
