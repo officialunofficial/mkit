@@ -60,7 +60,8 @@ commands:
                     subject; JSONL with --format=json)
   branch <name>     Create a branch at HEAD
   branch -d <name>  Delete a branch (safe; refuses the current branch)
-  branch -D <name>  Force-delete a branch (absent branch is a no-op)
+  branch -D <name>  Force-delete a branch (errors on an absent branch,
+                    like git; still refuses the current branch)
   branch -m [<old>] <new>  Rename a branch (current branch if <old> omitted)
   checkout <branch> Switch HEAD to a branch and restore files
   tag [<name>] [<commit>]  List tags, or create a lightweight tag

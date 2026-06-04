@@ -42,9 +42,10 @@ struct BranchOpts {
     /// non-existent branch).
     #[arg(short = 'd', long)]
     delete: bool,
-    /// Force-delete the named branch. Like `-d` it still refuses the
-    /// branch HEAD points at (that would leave HEAD dangling), but it
-    /// reports a clean success when the branch is absent.
+    /// Force-delete the named branch. mkit tracks no per-branch merge
+    /// state, so `-D` behaves like `-d`: it still refuses the branch HEAD
+    /// points at (that would leave HEAD dangling) and, like git, errors on
+    /// an absent branch rather than reporting a silent success.
     #[arg(short = 'D')]
     force_delete: bool,
     /// Rename a branch. `branch -m <old> <new>` renames `<old>`;
