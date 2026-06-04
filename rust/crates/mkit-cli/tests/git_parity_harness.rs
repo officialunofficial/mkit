@@ -354,6 +354,27 @@ fn status_z_matches_git() {
 }
 
 #[test]
+fn status_rm_cached_keeps_staged_delete_and_untracked() {
+    if !git_available() {
+        eprintln!("skipping: real `git` not on PATH");
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"hello\n");
+    h.commit_both(&["a.txt"], "init");
+    // Un-track a.txt but leave it on disk. Git porcelain emits TWO records
+    // for the same path: `D  a.txt` (staged delete vs HEAD) and `?? a.txt`
+    // (the worktree file the index no longer knows). mkit must not collapse
+    // them into a lone `?? a.txt`, which would hide the staged deletion.
+    assert!(h.git(&["rm", "--cached", "a.txt"]).status.success());
+    assert!(h.mkit(&["rm", "--cached", "a.txt"]).status.success());
+    let g = h.git(&["status", "--porcelain"]);
+    let m = h.mkit(&["status", "--porcelain"]);
+    assert_parity_set("rm --cached status", &g, &m); // expect `D  a.txt` + `?? a.txt`
+}
+
+#[test]
 fn status_porcelain_staged_add_matches_git() {
     if !git_available() {
         eprintln!("skipping: real `git` not on PATH");

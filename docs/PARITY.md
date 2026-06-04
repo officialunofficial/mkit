@@ -58,7 +58,7 @@ creeping; revisit post-v1 if demand warrants.
 | `add` | pathspecs, `-A`, `-u` | same | ✅ | — | — | `-p` is separate (#258) |
 | `rm` | `--cached`, `-r`, `-f` + dirty guard | same | ✅ | — | — | guard is an mkit safety divergence |
 | `mv` | rename, `-f` | absent (by-design, being reversed) | 🔨 | 2 | #250 | guarded: refuses to clobber w/o `-f` |
-| `status` | `--porcelain[=v1]`, `-s`, `-z`, C-style path quoting | same | ✅ | 1 | #249 | one combined `XY` record per path (e.g. `MM`); quoting matches git `core.quotePath`; `-z` = raw NUL-terminated |
+| `status` | `--porcelain[=v1]`, `-s`, `-z`, C-style path quoting | same | ✅ | 1 | #249 | tracked changes combine into one `XY` record per path (e.g. `MM`); untracked stays its own `??` record, so a staged-delete-plus-untracked path emits both `D ` and `??` like git; quoting matches git `core.quotePath`; `-z` = raw NUL-terminated |
 | `status` | `--porcelain=v2` | not present | 🔨 | 1 | #249 | needs per-path modes/hashes in the diff layer (follow-up) |
 | `diff` | HEAD/worktree, `--staged`, pathspecs | same | ✅ | — | — | |
 | `diff` | `<rev>`, `<a>..<b>` ranges | implemented (`split_range`/`rev_to_tree`) | ✅ | 0 | #248 | docs reconciled (stale CLI.md divergence removed) |

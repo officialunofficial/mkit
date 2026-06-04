@@ -159,20 +159,39 @@ fn render_porcelain(entries: &[StatusEntry], z: bool) -> u8 {
     exit::OK
 }
 
-/// Collapse `status_diff`'s per-(staging) entries into one `XY` record
-/// per path, matching `git status --porcelain`. A path that is staged
-/// **and** further changed in the worktree produces a single combined
-/// code (e.g. `MM`, `AM`) rather than two records. `X` is the staged
-/// (index-vs-HEAD) side, `Y` the unstaged (worktree-vs-index) side;
-/// `porcelain_code` already returns each side in its column, so we OR the
-/// non-space columns together. First-seen path order is preserved.
+/// Collapse `status_diff`'s per-(staging) entries into porcelain records,
+/// matching `git status --porcelain`.
+///
+/// A path that is staged **and** further changed in the worktree produces
+/// a single combined code (e.g. `MM`, `AM`) rather than two records: `X`
+/// is the staged (index-vs-HEAD) side, `Y` the unstaged (worktree-vs-index)
+/// side, and `porcelain_code` already returns each side in its column, so
+/// we OR the non-space columns together.
+///
+/// **Untracked entries are the exception** — git treats them as a separate
+/// category, never folded into a tracked path's `XY`. A path can be both
+/// staged-for-deletion *and* present as untracked on disk (`mkit rm
+/// --cached <f>` with the file still there): git emits **two** records,
+/// `D  <f>` then `?? <f>`. So an untracked entry (`Unstaged` + `Added`)
+/// always becomes its own `??` record and is never merged — otherwise the
+/// `??` would clobber the staged `D `, hiding a deletion `commit` records.
+///
+/// Output order matches git: all tracked-change records first (first-seen
+/// order), then all untracked records.
 fn combine_porcelain(entries: &[StatusEntry]) -> Vec<([u8; 2], &str)> {
-    let mut order: Vec<&str> = Vec::new();
-    let mut codes: std::collections::HashMap<&str, [u8; 2]> = std::collections::HashMap::new();
+    let mut tracked_order: Vec<&str> = Vec::new();
+    let mut tracked: std::collections::HashMap<&str, [u8; 2]> = std::collections::HashMap::new();
+    let mut untracked: Vec<&str> = Vec::new();
     for e in entries {
+        // Untracked: a worktree path the index doesn't know about. Never
+        // merged — it is always its own `??` record (see doc comment).
+        if e.staging == StatusStaging::Unstaged && e.diff.kind == DiffKind::Added {
+            untracked.push(&e.diff.path);
+            continue;
+        }
         let c = porcelain_code(e.staging, e.diff.kind).as_bytes();
-        let slot = codes.entry(&e.diff.path).or_insert_with(|| {
-            order.push(&e.diff.path);
+        let slot = tracked.entry(&e.diff.path).or_insert_with(|| {
+            tracked_order.push(&e.diff.path);
             [b' ', b' ']
         });
         // Fill each column from whichever entry sets it (non-space wins).
@@ -183,7 +202,10 @@ fn combine_porcelain(entries: &[StatusEntry]) -> Vec<([u8; 2], &str)> {
             slot[1] = c[1];
         }
     }
-    order.into_iter().map(|p| (codes[p], p)).collect()
+    let mut out: Vec<([u8; 2], &str)> =
+        tracked_order.into_iter().map(|p| (tracked[p], p)).collect();
+    out.extend(untracked.into_iter().map(|p| ([b'?', b'?'], p)));
+    out
 }
 
 /// C-style-quote `path` the way Git does for porcelain output when a path
@@ -444,6 +466,48 @@ mod tests {
                 ("A ".into(), "staged.txt".into()),
                 (" M".into(), "dirty.txt".into()),
                 ("??".into(), "new.txt".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn combine_keeps_staged_delete_and_untracked_at_same_path_separate() {
+        use DiffKind::{Added, Removed};
+        use StatusStaging::{Staged, Unstaged};
+        // `mkit rm --cached a.txt` with the file still on disk: the index
+        // dropped a.txt (staged delete vs HEAD → `D `) but the worktree
+        // still has it, unknown to the index (untracked → `??`). Git emits
+        // BOTH records — the staged deletion must not be clobbered by `??`.
+        let entries = [
+            entry("a.txt", Staged, Removed),
+            entry("a.txt", Unstaged, Added),
+        ];
+        assert_eq!(
+            combined(&entries),
+            vec![("D ".into(), "a.txt".into()), ("??".into(), "a.txt".into())]
+        );
+    }
+
+    #[test]
+    fn combine_orders_all_tracked_before_untracked_like_git() {
+        use DiffKind::{Added, Modified, Removed};
+        use StatusStaging::{Staged, Unstaged};
+        // Mixed: staged-delete-with-untracked (a.txt), a tracked unstaged
+        // modify (m.txt), and a pure untracked file (b.txt). Git groups all
+        // tracked changes first, then all `??` records.
+        let entries = [
+            entry("a.txt", Staged, Removed),
+            entry("a.txt", Unstaged, Added),
+            entry("m.txt", Unstaged, Modified),
+            entry("b.txt", Unstaged, Added),
+        ];
+        assert_eq!(
+            combined(&entries),
+            vec![
+                ("D ".into(), "a.txt".into()),
+                (" M".into(), "m.txt".into()),
+                ("??".into(), "a.txt".into()),
+                ("??".into(), "b.txt".into()),
             ]
         );
     }
