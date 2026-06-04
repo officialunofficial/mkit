@@ -234,7 +234,7 @@ indexes the reachable chain, so commits superseded by
 .Cm commit --amend
 or a reset are no longer listed. This command never mutates refs, the
 journal, or any object.
-.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b Oc Ar path ...
+.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.
 .Fl Fl staged
@@ -247,6 +247,20 @@ hashes, short hashes, or
 .Ql HEAD~n
 (a raw 64-hex tree hash also works). Remaining positional arguments are
 pathspecs that limit the output.
+.Fl Fl name-only
+lists one changed path per line;
+.Fl Fl name-status
+prefixes each with an
+.Ql A Ns / Ns Ql D Ns / Ns Ql M
+status letter
+.Pq Ql T marks an mkit mode change .
+In these summary modes special-byte paths are C-style quoted (git
+.Ql core.quotePath ) ;
+.Fl z
+instead NUL-terminates records and emits raw paths, and is only valid with
+.Fl Fl name-only
+or
+.Fl Fl name-status .
 .It Cm status Oo Fl Fl porcelain Oc Oo Fl s | Fl Fl short Oc Oo Fl z Oc
 Show the staged and working-tree changes.
 .Fl s

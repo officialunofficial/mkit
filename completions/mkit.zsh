@@ -102,6 +102,9 @@ _mkit() {
                 diff)
                     _arguments \
                         '(--staged --cached)'{--staged,--cached}'[diff HEAD vs the staged index]' \
+                        '(--name-only --name-status)--name-only[list changed paths only]' \
+                        '(--name-only --name-status)--name-status[list status letter + path]' \
+                        '-z[NUL-terminate name-only/name-status records, raw paths]' \
                         '--help[show help]' \
                         '*:file:_files'
                     ;;

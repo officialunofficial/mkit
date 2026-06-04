@@ -113,6 +113,49 @@ pub fn acquire_worktree_lock(root: &Path) -> Result<mkit_core::repo_lock::RepoLo
     })
 }
 
+/// C-style-quote `path` the way Git does for porcelain / `--name-*`
+/// output when a path contains bytes that need escaping. Returns `None`
+/// when the path is "plain" (all printable ASCII except `"`/`\`) and can
+/// be emitted as-is. Shared by `status` and `diff --name-only/-status`.
+///
+/// Quoting rule (matches Git's `quote_c_style` with the default
+/// `core.quotePath=true`): quote if any byte is a control char (`< 0x20`),
+/// `"`, `\`, or non-printable / non-ASCII (`>= 0x7f`). Inside the quotes,
+/// the common control chars use their `\a\b\t\n\v\f\r` escapes, `"` and
+/// `\` are backslash-escaped, printable ASCII is literal, and everything
+/// else is a 3-digit `\NNN` octal escape (per UTF-8 byte).
+pub(crate) fn c_quote_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let needs = bytes
+        .iter()
+        .any(|&b| b < 0x20 || b == b'"' || b == b'\\' || b >= 0x7f);
+    if !needs {
+        return None;
+    }
+    let mut out = String::with_capacity(bytes.len() + 2);
+    out.push('"');
+    for &b in bytes {
+        match b {
+            0x07 => out.push_str("\\a"),
+            0x08 => out.push_str("\\b"),
+            0x09 => out.push_str("\\t"),
+            0x0a => out.push_str("\\n"),
+            0x0b => out.push_str("\\v"),
+            0x0c => out.push_str("\\f"),
+            0x0d => out.push_str("\\r"),
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x20..=0x7e => out.push(b as char),
+            other => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\{other:03o}");
+            }
+        }
+    }
+    out.push('"');
+    Some(out)
+}
+
 pub(crate) fn index_path_matches_or_descends(path: &str, base: &str) -> bool {
     path == base || index_path_descends_from(path, base)
 }
@@ -467,5 +510,39 @@ pub fn read_or_seed_index_from_head(
         Object::Remix(r) => mkit_core::index::from_tree(store, r.tree_hash)
             .map_err(|e| format!("index from HEAD: {e}")),
         _ => Err("HEAD does not resolve to a commit or remix".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::c_quote_path;
+
+    #[test]
+    fn c_quote_leaves_plain_paths_alone() {
+        assert_eq!(c_quote_path("a.txt"), None);
+        assert_eq!(c_quote_path("dir/with space.txt"), None); // space is plain
+        assert_eq!(c_quote_path("weird-but-ascii_!@#$%.rs"), None);
+    }
+
+    #[test]
+    fn c_quote_escapes_special_bytes() {
+        assert_eq!(c_quote_path("a\tb.txt").as_deref(), Some(r#""a\tb.txt""#));
+        assert_eq!(
+            c_quote_path("line\nfeed").as_deref(),
+            Some(r#""line\nfeed""#)
+        );
+        assert_eq!(c_quote_path("q\"x").as_deref(), Some(r#""q\"x""#));
+        assert_eq!(
+            c_quote_path("back\\slash").as_deref(),
+            Some(r#""back\\slash""#)
+        );
+    }
+
+    #[test]
+    fn c_quote_octal_escapes_non_ascii() {
+        // "é" is UTF-8 0xC3 0xA9 → \303\251 (matches git core.quotePath).
+        assert_eq!(c_quote_path("é").as_deref(), Some(r#""\303\251""#));
+        // Combined with ASCII: only the non-ASCII bytes are octal-escaped.
+        assert_eq!(c_quote_path("x-é").as_deref(), Some(r#""x-\303\251""#));
     }
 }

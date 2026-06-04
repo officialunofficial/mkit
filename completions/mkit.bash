@@ -45,7 +45,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--soft --mixed --help" -- "$cur") )
             ;;
         diff)
-            COMPREPLY=( $(compgen -W "--staged --cached --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--staged --cached --name-only --name-status -z --help" -- "$cur") )
             ;;
         status)
             COMPREPLY=( $(compgen -W "--porcelain -s --short -z --help" -- "$cur") )

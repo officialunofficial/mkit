@@ -16,9 +16,16 @@
 //! hard error rather than a silent empty diff (#207).
 //!
 //! Trailing positional paths (pathspecs) filter the output to entries
-//! at or below those paths. Output is a Git-compatible unified diff:
-//! a `diff --mkit a/<p> b/<p>` header per changed path followed by the
-//! `text_patch` hunks (or `Binary files … differ`).
+//! at or below those paths. The default output is a Git-compatible
+//! unified diff: a `diff --mkit a/<p> b/<p>` header per changed path
+//! followed by the `text_patch` hunks (or `Binary files … differ`).
+//!
+//! `--name-only` / `--name-status` switch to summary output: one record
+//! per changed path — just the path, or an `A`/`D`/`M` status letter
+//! (`T` for an mkit mode change) plus the path. Special-byte paths are
+//! C-style quoted (git `core.quotePath`); `-z` instead NUL-terminates
+//! records and emits raw paths (and, for `--name-status`, NUL-terminates
+//! the status letter and path as separate fields).
 
 use std::io::Write;
 
@@ -39,11 +46,29 @@ use crate::exit;
     name = "mkit diff",
     about = "Show changes as a unified patch (HEAD vs worktree, --staged, or two trees)."
 )]
+#[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct DiffOpts {
     /// Diff the staged index tree against HEAD (the change `mkit commit`
     /// would record) instead of HEAD vs worktree.
     #[arg(long, visible_alias = "cached")]
     staged: bool,
+
+    /// Show only the names of changed files, one per line, instead of a
+    /// patch (like `git diff --name-only`).
+    #[arg(long, conflicts_with = "name_status")]
+    name_only: bool,
+
+    /// Show a status letter (`A`/`D`/`M`; `T` for an mkit mode change)
+    /// and the name of each changed file (like `git diff --name-status`).
+    #[arg(long)]
+    name_status: bool,
+
+    /// NUL-terminate `--name-only` / `--name-status` records and emit raw
+    /// (unquoted) paths — like `git diff -z`. In `--name-status`, the
+    /// status letter and path are each NUL-terminated. Only valid with
+    /// `--name-only` / `--name-status`.
+    #[arg(short = 'z')]
+    z: bool,
 
     /// Optional revisions (refs, full/short hashes, `HEAD~n`, or an
     /// `A..B` range) followed by optional pathspecs to limit the
@@ -59,6 +84,15 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    // `-z` only governs the `--name-only` / `--name-status` record
+    // framing (per the parity matrix); it has no defined meaning for the
+    // unified-patch output yet, so reject it rather than silently ignore.
+    if opts.z && !(opts.name_only || opts.name_status) {
+        return emit_err(
+            "`-z` is only valid with `--name-only` or `--name-status`",
+            exit::USAGE,
+        );
+    }
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -87,11 +121,54 @@ pub fn run(args: &[String]) -> u8 {
         if !normalized.is_empty() && !path_matches_any(&e.path, &normalized) {
             continue;
         }
-        if let Err(msg) = emit_entry_patch(&mut stdout, &store, e) {
+        let res = if opts.name_only || opts.name_status {
+            emit_entry_name(&mut stdout, e, opts.name_status, opts.z);
+            Ok(())
+        } else {
+            emit_entry_patch(&mut stdout, &store, e)
+        };
+        if let Err(msg) = res {
             return emit_err(&msg, exit::GENERAL_ERROR);
         }
     }
     exit::OK
+}
+
+/// Status letter for `--name-status`. mkit's `ModeChanged` maps to `T`
+/// (git's type-change letter) — a documented mkit extension, since mkit
+/// tracks a pure mode flip as its own diff kind.
+fn name_status_letter(kind: DiffKind) -> char {
+    match kind {
+        DiffKind::Added => 'A',
+        DiffKind::Removed => 'D',
+        DiffKind::Modified => 'M',
+        DiffKind::ModeChanged => 'T',
+    }
+}
+
+/// Emit one `--name-only` / `--name-status` record for a changed entry.
+///
+/// Newline mode: `<path>\n` (name-only) or `<letter>\t<path>\n`
+/// (name-status); a path with special bytes is C-style quoted like git's
+/// default `core.quotePath`. `-z` mode: paths are raw (unquoted) and
+/// records are NUL-terminated — `<path>\0`, or `<letter>\0<path>\0` where
+/// the status letter and path are each their own NUL-terminated field
+/// (matching `git diff --name-status -z`).
+fn emit_entry_name(out: &mut impl Write, e: &DiffEntry, name_status: bool, z: bool) {
+    if z {
+        if name_status {
+            let _ = write!(out, "{}\0", name_status_letter(e.kind));
+        }
+        let _ = write!(out, "{}\0", e.path);
+        return;
+    }
+    let path = super::c_quote_path(&e.path);
+    let shown = path.as_deref().unwrap_or(&e.path);
+    if name_status {
+        let _ = writeln!(out, "{}\t{shown}", name_status_letter(e.kind));
+    } else {
+        let _ = writeln!(out, "{shown}");
+    }
 }
 
 /// `(old_tree, new_tree, pathspecs)` triple computed from the args.
@@ -365,4 +442,71 @@ fn emit_err(msg: &str, code: u8) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "error: {msg}");
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn de(path: &str, kind: DiffKind) -> DiffEntry {
+        DiffEntry {
+            path: path.to_string(),
+            kind,
+            old_hash: None,
+            new_hash: None,
+        }
+    }
+
+    fn render(e: &DiffEntry, name_status: bool, z: bool) -> String {
+        let mut buf = Vec::new();
+        emit_entry_name(&mut buf, e, name_status, z);
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn name_status_letters_cover_every_kind() {
+        assert_eq!(name_status_letter(DiffKind::Added), 'A');
+        assert_eq!(name_status_letter(DiffKind::Removed), 'D');
+        assert_eq!(name_status_letter(DiffKind::Modified), 'M');
+        assert_eq!(name_status_letter(DiffKind::ModeChanged), 'T');
+    }
+
+    #[test]
+    fn name_only_newline_plain_path() {
+        assert_eq!(
+            render(&de("a.txt", DiffKind::Modified), false, false),
+            "a.txt\n"
+        );
+    }
+
+    #[test]
+    fn name_status_newline_is_letter_tab_path() {
+        assert_eq!(
+            render(&de("a.txt", DiffKind::Added), true, false),
+            "A\ta.txt\n"
+        );
+    }
+
+    #[test]
+    fn name_only_quotes_special_path_in_newline_mode() {
+        // A tab is C-style quoted like git core.quotePath.
+        assert_eq!(
+            render(&de("a\tb.txt", DiffKind::Modified), false, false),
+            "\"a\\tb.txt\"\n"
+        );
+    }
+
+    #[test]
+    fn z_mode_is_raw_and_nul_terminated() {
+        // name-only -z: `<path>\0`, path emitted raw (unquoted).
+        assert_eq!(
+            render(&de("a\tb.txt", DiffKind::Modified), false, true),
+            "a\tb.txt\0"
+        );
+        // name-status -z: `<letter>\0<path>\0` — two NUL-terminated fields.
+        assert_eq!(
+            render(&de("del.txt", DiffKind::Removed), true, true),
+            "D\0del.txt\0"
+        );
+    }
 }

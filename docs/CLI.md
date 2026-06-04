@@ -59,21 +59,28 @@ Working-tree commands:
   the round-trip-safe form for paths containing newlines or other special
   bytes. Empty stdout means clean. (`--porcelain=v2` is not yet
   implemented — see "Divergences from Git".)
-- `mkit diff [--staged|--cached] [<rev> [<rev>] | <a>..<b>] [<path>...]` — show
-  changes as a unified patch. With no arguments, compares the HEAD tree
-  to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
+- `mkit diff [--staged|--cached] [--name-only|--name-status] [-z] [<rev> [<rev>] | <a>..<b>] [<path>...]`
+  — show changes as a unified patch. With no arguments, compares the HEAD
+  tree to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
   the HEAD tree to the staged index tree — the change `mkit commit`
   would record. A single revision compares that revision against the
   worktree; two revisions (or an `<a>..<b>` range) diff the two
   resolved trees directly. Revisions may be refs, commit hashes, short
   hashes, or `HEAD~n` (a raw 64-hex tree hash also works, since it
   resolves to itself). Any remaining positional arguments are pathspecs
-  that limit the output to entries at or below them. Output is a
+  that limit the output to entries at or below them. The default output is a
   Git-compatible unified diff: a
   `diff --mkit a/<path> b/<path>` header per changed path followed by
   `@@`-delimited hunks (or `Binary files a/<p> and b/<p> differ` for
   non-text blobs). The hunk algorithm is a line-based LCS unified diff,
   not a full Myers diff — adequate for human-readable parity output.
+  `--name-only` instead lists one changed path per line; `--name-status`
+  prefixes each with a status letter (`A`/`D`/`M`; `T` marks an mkit mode
+  change). In these summary modes special-byte paths are C-style quoted
+  (git `core.quotePath`); `-z` instead NUL-terminates records and emits
+  raw paths (in `--name-status -z` the status letter and path are each
+  their own NUL-terminated field). `-z` is only valid with `--name-only`
+  / `--name-status`.
 - `mkit stash [save|list|pop|apply|drop|clear|show]` — save/restore WIP
   changes. `apply` restores an entry without removing it; `clear` drops
   every entry.
