@@ -274,16 +274,26 @@ special bytes are C-style quoted (matching git's default
 .Pq which implies porcelain
 NUL-terminates records and emits raw, unquoted paths.
 .Pq Fl Fl porcelain Ns = Ns Cm v2 No is not yet implemented .
-.It Cm branch Oo Fl d | Fl D | Fl m Oc Op Ar name ...
+.It Cm branch Oo Fl v | Fl Fl verbose Oc Oo Fl d | Fl D | Fl m Oc Op Ar name ...
 List, create, rename, or delete branches. With no arguments, lists
-branches.  With one
+branches as
+.Ql <marker> <name>
+with no commit id, like
+.Xr git 1 Cm branch ;
+.Ql * Ns \&
+marks the current branch.
+.Fl v
+.Pq Fl Fl verbose
+adds the abbreviated tip id and commit subject (a BLAKE3 prefix, not a
+40-hex SHA-1 prefix). With one
 .Ar name ,
 creates a branch at HEAD.
 .Fl d
 deletes a branch (refuses the current branch);
 .Fl D
-force-deletes (an absent branch is a clean no-op, but the current branch
-is still refused).
+force-deletes. Both error on an absent branch (like
+.Xr git 1 Cm branch Fl D ) ,
+and both still refuse the current branch.
 .Fl m Oo Ar old Oc Ar new
 renames a branch \(em the current branch when
 .Ar old

@@ -152,9 +152,11 @@ _mkit() {
                     ;;
                 branch)
                     _arguments \
+                        '(-v --verbose)'{-v,--verbose}'[show abbreviated id + subject]' \
                         '-d[delete branch (safe)]:branch:' \
                         '-D[force-delete branch]:branch:' \
                         '-m[rename branch]:branch:' \
+                        '--format[output format]:format:(default json)' \
                         '--help[show help]'
                     ;;
                 tag)

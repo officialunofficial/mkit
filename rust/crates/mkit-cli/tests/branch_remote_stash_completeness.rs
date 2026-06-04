@@ -3,7 +3,7 @@
 //!
 //! Covers:
 //! - `branch -m` rename (moves the ref; moves HEAD when current).
-//! - `branch -D` force-delete (incl. absent = no-op, current = refused).
+//! - `branch -D` force-delete (incl. absent = error like git, current = refused).
 //! - `remote remove` / `remote rename` (named-remote config mutations,
 //!   trust boundary preserved).
 //! - `stash apply` (keeps the entry, guarded) and `stash clear`.
@@ -55,6 +55,51 @@ fn head_branch(mkit_dir: &Path) -> String {
 // ---------------------------------------------------------------------------
 // branch -m / -D
 // ---------------------------------------------------------------------------
+
+#[test]
+fn branch_default_list_omits_id_verbose_shows_id_and_subject() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(run_in(root, x, &["branch", "feature"]).status.success());
+
+    // Default list: `<marker> <name>` only — no id appended (git parity).
+    // The marker field is the first two bytes (`* ` or `  `); the rest is
+    // exactly the branch name, so it must contain no further whitespace.
+    let plain = run_in(root, x, &["branch"]);
+    assert!(plain.status.success(), "branch failed: {plain:?}");
+    let plain_out = String::from_utf8_lossy(&plain.stdout);
+    for line in plain_out.lines() {
+        let rest = &line[2..];
+        assert!(
+            !rest.contains(' '),
+            "default list must be `<marker> <name>` only (no id), got: {line:?}"
+        );
+    }
+
+    // `-v`: `<marker> <name> <short-id> <subject>` — id + subject present.
+    let verbose = run_in(root, x, &["branch", "-v"]);
+    assert!(verbose.status.success(), "branch -v failed: {verbose:?}");
+    let v_out = String::from_utf8_lossy(&verbose.stdout);
+    let current_line = v_out
+        .lines()
+        .find(|l| l.trim_start().starts_with('*'))
+        .expect("a current-branch line");
+    let cols: Vec<&str> = current_line.split_whitespace().collect();
+    // ["*", "<name>", "<short>", "initial"]
+    assert!(
+        cols.len() >= 4,
+        "verbose line missing fields: {current_line:?}"
+    );
+    let short = cols[2];
+    assert!(
+        short.len() >= 7 && short.chars().all(|c| c.is_ascii_hexdigit()),
+        "expected an abbreviated hex id, got: {short:?}"
+    );
+    assert!(
+        v_out.contains("initial"),
+        "verbose output must include the commit subject: {v_out:?}"
+    );
+}
 
 #[test]
 fn branch_rename_two_args_moves_ref() {
@@ -124,14 +169,24 @@ fn branch_force_delete_removes_branch() {
 }
 
 #[test]
-fn branch_force_delete_absent_is_noop_success() {
+fn branch_delete_absent_errors_for_both_d_and_force() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    // `-d` on a missing branch errors; `-D` is a clean no-op.
+    // Parity reconciliation (#249): like `git branch -D <missing>`, both
+    // `-d` and `-D` error on an absent branch — `-D` no longer silently
+    // no-ops, so a typo'd name is surfaced rather than swallowed.
     let safe = run_in(root, x, &["branch", "-d", "ghost"]);
     assert!(!safe.status.success(), "-d on missing branch must error");
     let forced = run_in(root, x, &["branch", "-D", "ghost"]);
-    assert!(forced.status.success(), "-D on missing branch is a no-op");
+    assert!(
+        !forced.status.success(),
+        "-D on a missing branch must error like git, not no-op: {forced:?}"
+    );
+    let stderr = String::from_utf8_lossy(&forced.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "expected a 'not found' message, got: {stderr:?}"
+    );
 }
 
 #[test]
