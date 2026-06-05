@@ -696,7 +696,7 @@ fn clean_dry_run_d_lists_untracked_dirs_like_git() {
     // `-d` lists the untracked directory as `untrackeddir/` in both tools.
     let g = h.git(&["clean", "-n", "-d"]);
     let m = h.mkit(&["clean", "-n", "-d"]);
-    assert_parity_ordered("clean -nd", &g, &m);
+    assert_parity_ordered("clean -n -d", &g, &m);
 }
 
 #[test]
