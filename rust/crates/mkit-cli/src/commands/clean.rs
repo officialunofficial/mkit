@@ -7,9 +7,9 @@
 //! *directories* are left alone (git semantics). Ignored files are kept
 //! unless `-x` (also remove ignored) or `-X` (remove *only* ignored).
 //!
-//! Ignore matching uses mkit's `.mkitignore` matcher (basename/root-only,
-//! the documented subset pending the `.gitignore` upgrade in #256), so
-//! `-x`/`-X` honor that subset.
+//! Ignore matching uses the shared path-aware matcher (`.gitignore` +
+//! `.mkitignore`, #256), so `-x`/`-X` honor anchored/`**`/multi-segment
+//! patterns and a file under an ignored directory counts as ignored.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -88,10 +88,11 @@ pub fn run(args: &[String]) -> u8 {
     };
     let ignore = match ignore::load(&cwd) {
         Ok(i) => i,
-        Err(e) => return emit_err(&format!("read .mkitignore: {e}"), exit::GENERAL_ERROR),
+        Err(e) => return emit_err(&format!("read ignore file: {e}"), exit::GENERAL_ERROR),
     };
 
-    let mut victims: Vec<Victim> = match collect_dir(&cwd, &cwd, "", &index, &ignore, &opts) {
+    let mut victims: Vec<Victim> = match collect_dir(&cwd, &cwd, "", false, &index, &ignore, &opts)
+    {
         Ok((_root_fully_removable, v)) => v,
         Err(e) => return emit_err(&format!("scan worktree: {e}"), exit::GENERAL_ERROR),
     };
@@ -150,6 +151,7 @@ fn collect_dir(
     root: &Path,
     dir: &Path,
     prefix: &str,
+    parent_ignored: bool,
     index: &Index,
     ignore: &IgnoreList,
     opts: &CleanOpts,
@@ -185,23 +187,27 @@ fn collect_dir(
         let abs = root.join(&path);
         // A symlink is treated as a file (never followed/recursed).
         let is_dir = std::fs::symlink_metadata(&abs)?.is_dir();
+        // A path under an ignored directory is ignored too (git "can't
+        // re-include under an excluded dir"); OR in the inherited bit. This
+        // must be computed BEFORE the tracked check so a tracked-but-ignored
+        // directory (e.g. node_modules/ with a tracked file inside) still
+        // propagates the ignored bit to its untracked descendants.
+        let ignored = parent_ignored || ignore.is_ignored(&path, is_dir);
 
         if super::index_tracks_path_or_descendant(index, &path) {
             // Tracked content keeps the dir alive; descend into a tracked
-            // directory to clean any untracked files inside it.
+            // directory to clean any untracked files inside it, carrying the
+            // ignored bit so ignored untracked descendants are kept.
             fully_removable = false;
             if is_dir {
-                let (_full, sub) = collect_dir(root, &abs, &path, index, ignore, opts)?;
+                let (_full, sub) = collect_dir(root, &abs, &path, ignored, index, ignore, opts)?;
                 victims.extend(sub);
             }
             continue;
         }
 
         // Untracked. `-X` keeps only ignored entries; otherwise keep
-        // non-ignored entries and ignored ones only with `-x`. The matcher
-        // is basename-based (like `worktree::build_tree`), so match on the
-        // entry name, not the full path.
-        let ignored = ignore.is_ignored(name, is_dir);
+        // non-ignored entries and ignored ones only with `-x`.
         let include = if opts.only_ignored {
             ignored
         } else {
@@ -213,7 +219,7 @@ fn collect_dir(
                 fully_removable = false; // untracked dirs need -d
                 continue;
             }
-            let (sub_full, sub) = collect_dir(root, &abs, &path, index, ignore, opts)?;
+            let (sub_full, sub) = collect_dir(root, &abs, &path, ignored, index, ignore, opts)?;
             if sub_full && include {
                 // The whole subtree is removable → one `dir/` victim.
                 victims.push(Victim {

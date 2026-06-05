@@ -73,10 +73,10 @@ pub fn run(args: &[String]) -> u8 {
     if opts.others {
         let ignore = match ignore::load(&cwd) {
             Ok(i) => i,
-            Err(e) => return emit_err(&format!("read .mkitignore: {e}"), exit::GENERAL_ERROR),
+            Err(e) => return emit_err(&format!("read ignore file: {e}"), exit::GENERAL_ERROR),
         };
         let mut others: Vec<String> = Vec::new();
-        if let Err(e) = collect_others(&cwd, &cwd, "", &idx, &ignore, &opts, &mut others) {
+        if let Err(e) = collect_others(&cwd, &cwd, "", false, &idx, &ignore, &opts, &mut others) {
             return emit_err(&format!("scan worktree: {e}"), exit::GENERAL_ERROR);
         }
         others.sort();
@@ -139,10 +139,17 @@ fn git_mode(status: EntryStatus) -> &'static str {
 
 /// Recursively gather untracked worktree files under `dir`, applying the
 /// `--exclude-standard` / `--ignored` filters.
+///
+/// `parent_ignored` carries down whether an ancestor directory is ignored:
+/// git treats everything under an excluded directory as excluded (you cannot
+/// re-include a file whose parent dir is ignored), so a file is ignored if
+/// any ancestor is or it matches a pattern itself. Matching is against the
+/// repo-relative path so anchored/multi-segment patterns apply.
 fn collect_others(
     root: &Path,
     dir: &Path,
     prefix: &str,
+    parent_ignored: bool,
     idx: &index::Index,
     ignore: &IgnoreList,
     opts: &LsFilesOpts,
@@ -167,19 +174,19 @@ fn collect_others(
         };
         let abs = root.join(&path);
         let is_dir = std::fs::symlink_metadata(&abs)?.is_dir();
+        let entry_ignored = parent_ignored || ignore.is_ignored(&path, is_dir);
         if is_dir {
-            collect_others(root, &abs, &path, idx, ignore, opts, out)?;
+            collect_others(root, &abs, &path, entry_ignored, idx, ignore, opts, out)?;
             continue;
         }
         // Untracked = not present in the index (any non-removed entry).
         if super::index_tracks_path_or_descendant(idx, &path) {
             continue;
         }
-        let ignored = ignore.is_ignored(name, false);
         let include = if opts.ignored {
-            ignored // --ignored: only ignored
+            entry_ignored // --ignored: only ignored
         } else if opts.exclude_standard {
-            !ignored // drop ignored
+            !entry_ignored // drop ignored
         } else {
             true // all untracked
         };

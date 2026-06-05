@@ -25,15 +25,18 @@ no config needed.
 Working-tree commands:
 
 - `mkit init` — create a new repository in `.mkit/`.
-- `mkit add [-A|-u] <path>...` / `mkit add .` — stage files for the next
-  commit. Multiple pathspecs may be given. `.` stages every non-ignored
+- `mkit add [-A|-u] [-f] <path>...` / `mkit add .` — stage files for the
+  next commit. Multiple pathspecs may be given. `.` stages every non-ignored
   file under the current directory. `-A`/`--all` stages every change in
   the worktree including deletions of tracked files (takes no path
   arguments). `-u`/`--update` restages only already-tracked files —
   updating modified ones and recording deletions — without adding
   untracked paths (takes no path arguments). `-A` and `-u` are mutually
-  exclusive. Interactive hunk staging (`add -p`) is **not supported**;
-  see "Divergences from Git" below.
+  exclusive. An explicitly-named path that is ignored (by
+  `.gitignore`/`.mkitignore`) is refused unless `-f`/`--force` is given
+  (git parity); already-tracked paths are never subject to ignore.
+  Interactive hunk staging (`add -p`) is **not supported**; see
+  "Divergences from Git" below.
 - `mkit rm [--cached] [-r|--recursive] [-f|--force] <path>...` — remove
   paths and stage the deletion for the next commit. By default this
   **deletes the worktree file(s)** and stages the removal; now-empty
@@ -205,8 +208,9 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   (`--stage`) prints stage info as `<mode> <hash> <stage>\t<path>` (git
   octal mode; `<stage>` is always `0` — mkit has no merge stages). `--others`
   lists untracked worktree files instead; `--exclude-standard` drops
-  `.mkitignore`-ignored ones and `--ignored` inverts to show only ignored
-  files (`--ignored` requires `--others`, like git's `-i` outside an
+  ignored ones (per `.gitignore`/`.mkitignore`) and `--ignored` inverts to
+  show only ignored files (`--ignored` requires `--others`, like git's `-i`
+  outside an
   `-o`/`-c` selection). `-z` NUL-terminates records and emits raw paths
   (otherwise special-byte paths — including under `-s` — are C-style quoted).
 - `mkit rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
@@ -338,8 +342,8 @@ Branches / refs:
   the scope to matching top-level entries and whole directories (`.` means
   everything under cwd); a pathspec naming a file *inside* an otherwise
   fully-removable untracked directory is a known limitation — name the
-  directory or use `.`. Ignore matching uses mkit's `.mkitignore` matcher
-  (basename-based subset pending the `.gitignore` upgrade, #256).
+  directory or use `.`. Ignore matching uses the shared path-aware ignore
+  matcher (see "Ignore files" below).
 - `mkit tag` — list, create, or delete tags.
   - `mkit tag` (no args) — list tags; annotated/signed tags are marked.
   - `mkit tag <name> [<commit>]` — create a lightweight tag (a ref
@@ -598,6 +602,37 @@ Config / keys / version:
   not Git's `git version <X.Y.Z>` form — an intentional, documented
   divergence (the string is pinned by packaging asserts).
 
+## Ignore files
+
+mkit reads ignore patterns from **both** `.gitignore` and `.mkitignore` at
+the repository root. `.gitignore` is applied first and `.mkitignore` last, so
+under gitignore's last-match-wins rule a repo's own `.mkitignore` can override
+(including re-include via `!`) anything `.gitignore` set. Matching is honored
+by `add`, `clean`, `ls-files --others`, `restore`/`checkout`, and the
+worktree tree-builder.
+
+Matching is **path-relative** and follows the gitignore semantics for this
+v1 subset:
+
+- A pattern with no `/` (other than a trailing one) matches at **any depth**
+  (`*.log` matches `a/b/c.log`). A pattern containing a `/` — including a
+  leading `/` — is **anchored** to the repo root (`/foo` matches only the
+  top-level `foo`; `src/gen` only that path).
+- `*` and `?` match within a single path segment; `[abc]`, `[a-z]`, and
+  `[!abc]` character classes are supported; `\` escapes the next character.
+- `**` as a whole segment crosses `/`: leading `**/` and middle `/**/` match
+  zero or more directories, and a trailing `/**` matches everything *inside*
+  a directory.
+- A trailing `/` restricts a pattern to directories. A leading `!` negates
+  (last match wins); `\#` / `\!` escape a leading `#` / `!` to a literal.
+  Trailing unescaped spaces are trimmed.
+- `.mkit` and `.git` are always ignored (matched on the basename, ASCII
+  case-insensitively).
+
+**Deferred (documented non-goals for now, #256):** nested per-directory
+ignore files (only the repo root is read), global excludes
+(`core.excludesFile`), and escaped trailing spaces.
+
 ## Divergences from Git
 
 mkit's local commands intentionally diverge from Git in a few places.
@@ -627,9 +662,9 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   safety divergence, `--hard` **refuses** (without `-f`/`--force`) when
   discarding would lose locally-modified or staged content, or overwrite
   such a colliding untracked path; with `-f` it is overwritten. git's
-  `reset --hard` discards silently. The guard also covers tracked files
-  matching `.mkitignore` (which the worktree comparison would otherwise
-  skip). `<commit>` defaults to `HEAD`.
+  `reset --hard` discards silently. The guard re-checks each dropped path
+  directly, so it also covers a tracked file that matches an ignore rule
+  (`.gitignore`/`.mkitignore`). `<commit>` defaults to `HEAD`.
 
 ### Commands deliberately not implemented (by design)
 

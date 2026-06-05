@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use crate::chunker::{ChunkIterator, FastCdc};
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
+use crate::index::{self, Index};
 use crate::object::{ChunkedBlob, EntryMode, Object, Tree, TreeEntry};
 use crate::serialize;
 use crate::store::ObjectStore;
@@ -77,22 +78,66 @@ pub fn validate_symlink_target(target: &str) -> bool {
     true
 }
 
-/// Build a tree object for `dir` and its subdirectories. Honours
-/// `.mkitignore` loaded from `dir`.
+/// Build a tree object for `dir` and its subdirectories. Honours the
+/// `.gitignore` + `.mkitignore` ignore files loaded from `dir`.
+///
+/// Ignore rules only exclude **untracked** content: a path that is tracked
+/// (or whose subtree holds tracked content) is always included even if it
+/// matches an ignore rule, so a tracked file matching `.gitignore` is never
+/// dropped from the worktree snapshot (which would misreport it as a deletion
+/// in status/diff). The staging index at `<dir>/.mkit/index` provides the
+/// tracked set; an absent index means nothing is tracked.
 ///
 /// # Errors
 /// See [`WorktreeError`].
 pub fn build_tree(store: &ObjectStore, dir: &Path) -> WorktreeResult<Hash> {
+    build_tree_filtered(store, dir, None)
+}
+
+/// Like [`build_tree`], but the caller supplies the authoritative tracked
+/// set (`index`). Callers that seed their index from `HEAD` when no index
+/// file exists yet (status, restore safety) MUST pass it here so a tracked
+/// file that matches an ignore rule is not dropped right after a checkout.
+/// `None` falls back to the on-disk `<dir>/.mkit/index` (empty if absent).
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn build_tree_filtered(
+    store: &ObjectStore,
+    dir: &Path,
+    index: Option<&Index>,
+) -> WorktreeResult<Hash> {
     let ignores = ignore::load(dir).map_err(|e| match e {
         crate::ignore::IgnoreError::Io(io) => WorktreeError::Io(io),
         crate::ignore::IgnoreError::FileTooLarge => {
-            WorktreeError::Io(io::Error::other(".mkitignore exceeds 1 MiB"))
+            WorktreeError::Io(io::Error::other("ignore file exceeds 1 MiB"))
         }
     })?;
-    build_tree_inner(store, dir, &ignores)
+    // Tracked set for ignore exemption: the caller's index if given, else the
+    // on-disk index (missing/unreadable = empty = nothing tracked).
+    let loaded;
+    let index = if let Some(i) = index {
+        i
+    } else {
+        loaded = index::read_index(dir).unwrap_or_default();
+        &loaded
+    };
+    build_tree_inner(store, dir, "", &ignores, index, false)
 }
 
-fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> WorktreeResult<Hash> {
+/// `rel_dir` is the path of `dir` relative to the repo root (empty at the
+/// root), so ignore patterns can be matched against full repo-relative paths
+/// rather than bare basenames. `parent_ignored` carries down whether an
+/// ancestor directory is ignored (git "everything under an excluded dir is
+/// excluded"); `index` is the tracked set used to exempt tracked content.
+fn build_tree_inner(
+    store: &ObjectStore,
+    dir: &Path,
+    rel_dir: &str,
+    ignores: &IgnoreList,
+    index: &Index,
+    parent_ignored: bool,
+) -> WorktreeResult<Hash> {
     let mut entries: Vec<TreeEntry> = Vec::new();
 
     for entry in fs::read_dir(dir)? {
@@ -105,7 +150,17 @@ fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> Wo
         // `symlink_metadata` does not follow symlinks.
         let meta = entry.path().symlink_metadata()?;
         let is_dir = meta.is_dir();
-        if ignores.is_ignored(&name_str, is_dir) {
+        let rel_path = if rel_dir.is_empty() {
+            name_str.clone()
+        } else {
+            format!("{rel_dir}/{name_str}")
+        };
+        // Exclude ignored content, but only when it is UNTRACKED — a tracked
+        // path (or a dir holding tracked content) is always kept so status/
+        // diff see it. An ignored dir with tracked content is descended into
+        // (carrying the ignored bit) so its untracked children stay excluded.
+        let entry_ignored = parent_ignored || ignores.is_ignored(&rel_path, is_dir);
+        if entry_ignored && !index.tracks_path_or_descendant(&rel_path) {
             continue;
         }
 
@@ -125,7 +180,14 @@ fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> Wo
                 object_hash: h,
             });
         } else if meta.file_type().is_dir() {
-            let h = build_tree_inner(store, &entry.path(), ignores)?;
+            let h = build_tree_inner(
+                store,
+                &entry.path(),
+                &rel_path,
+                ignores,
+                index,
+                entry_ignored,
+            )?;
             entries.push(TreeEntry {
                 name: name_str.into_bytes(),
                 mode: EntryMode::Tree,

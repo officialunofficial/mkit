@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::hash::Hash;
-use crate::index::Index;
+use crate::index::{Index, IndexError};
 use crate::object::{EntryMode, Object, TreeEntry};
 use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
 use crate::worktree::{self, WorktreeError};
@@ -602,6 +602,9 @@ pub enum DiffError {
     /// Error building the worktree snapshot.
     #[error(transparent)]
     Worktree(#[from] WorktreeError),
+    /// Error seeding the tracked set from a tree.
+    #[error(transparent)]
+    Index(#[from] IndexError),
 }
 
 /// Compare HEAD ↔ index and index ↔ worktree, returning a list of
@@ -641,8 +644,20 @@ pub fn status_diff(
     worktree_root: &Path,
     index: Option<&Index>,
 ) -> Result<Vec<StatusEntry>, DiffError> {
-    // Always snapshot the worktree — the index↔worktree leg uses it.
-    let work_tree_hash = worktree::build_tree(store, worktree_root)?;
+    // Always snapshot the worktree — the index↔worktree leg uses it. The
+    // tracked set for ignore exemption is the staging index if present, else
+    // the HEAD tree's paths (seeded here) — without it a tracked file
+    // matching an ignore rule would be dropped and misreported as a deletion.
+    let head_seed;
+    let tracked = if let Some(i) = index {
+        Some(i)
+    } else if let Some(ht) = head_tree {
+        head_seed = crate::index::from_tree(store, *ht)?;
+        Some(&head_seed)
+    } else {
+        None
+    };
+    let work_tree_hash = worktree::build_tree_filtered(store, worktree_root, tracked)?;
 
     let Some(idx) = index else {
         // Legacy fallback: HEAD↔worktree, everything labeled Unstaged.

@@ -499,9 +499,7 @@ fn resolve_diff_endpoints(
                 ));
             }
             let head = head_tree(store, mkit_dir).map_err(|e| (e, exit::GENERAL_ERROR))?;
-            let new = worktree::build_tree(store, cwd)
-                .map(Some)
-                .map_err(|e| (format!("build tree: {e}"), exit::GENERAL_ERROR))?;
+            let new = Some(worktree_tree_filtered(store, cwd)?);
             Ok((head, new, args.to_vec()))
         }
         Some(Err(e)) => Err(e),
@@ -515,9 +513,7 @@ fn resolve_diff_endpoints(
                 Some(Ok(new)) => Ok((Some(old), Some(new), args[2..].to_vec())),
                 Some(Err(e)) => Err(e),
                 None => {
-                    let new = worktree::build_tree(store, cwd)
-                        .map(Some)
-                        .map_err(|e| (format!("build tree: {e}"), exit::GENERAL_ERROR))?;
+                    let new = Some(worktree_tree_filtered(store, cwd)?);
                     Ok((Some(old), new, args[1..].to_vec()))
                 }
             }
@@ -528,6 +524,19 @@ fn resolve_diff_endpoints(
 /// Resolve a revision spec to a tree hash, mapping a commit/remix to its
 /// tree and accepting a bare tree hash as itself. `(message, code)` on
 /// failure.
+/// Snapshot the worktree, seeding the tracked set from the index (or HEAD
+/// when no index file exists) so a tracked file matching an ignore rule is
+/// not dropped from the snapshot and misreported as a deletion.
+fn worktree_tree_filtered(
+    store: &ObjectStore,
+    cwd: &std::path::Path,
+) -> Result<Hash, (String, u8)> {
+    let idx =
+        super::read_or_seed_index_from_head(cwd, store).map_err(|e| (e, exit::GENERAL_ERROR))?;
+    worktree::build_tree_filtered(store, cwd, Some(&idx))
+        .map_err(|e| (format!("build tree: {e}"), exit::GENERAL_ERROR))
+}
+
 fn rev_to_tree(
     store: &ObjectStore,
     mkit_dir: &std::path::Path,
