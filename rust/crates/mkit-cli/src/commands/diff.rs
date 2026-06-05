@@ -35,6 +35,7 @@ use std::io::Write;
 use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::object::{EntryMode, Object};
+use mkit_core::ops::merge::find_merge_base;
 use mkit_core::ops::{DiffEntry, DiffKind, diff_line_counts, diff_trees, unified_hunks};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
@@ -475,6 +476,28 @@ fn resolve_diff_endpoints(
         return Ok((head, idx, args.to_vec()));
     }
 
+    // Symmetric range `A...B` = diff the merge base of A and B against B
+    // (git semantics). Must be checked before `A..B` (which it contains).
+    if let Some(first) = args.first()
+        && let Some((a, b)) = split_symmetric(first)
+    {
+        let commit_a = revspec::resolve_revision(store, mkit_dir, a)
+            .map_err(|e| (format!("bad revision '{a}': {e}"), exit::DATAERR))?;
+        let commit_b = revspec::resolve_revision(store, mkit_dir, b)
+            .map_err(|e| (format!("bad revision '{b}': {e}"), exit::DATAERR))?;
+        let mb = find_merge_base(store, commit_a, commit_b)
+            .map_err(|e| (format!("merge base: {e}"), exit::GENERAL_ERROR))?
+            .ok_or_else(|| {
+                (
+                    format!("no merge base between '{a}' and '{b}'"),
+                    exit::DATAERR,
+                )
+            })?;
+        let old = object_to_tree(store, &mb).map_err(|e| (e, exit::GENERAL_ERROR))?;
+        let new = object_to_tree(store, &commit_b).map_err(|e| (e, exit::GENERAL_ERROR))?;
+        return Ok((Some(old), Some(new), args[1..].to_vec()));
+    }
+
     // Range form `A..B` as the first positional.
     if let Some(first) = args.first()
         && let Some((a, b)) = split_range(first)
@@ -599,6 +622,16 @@ fn split_range(s: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((a, b))
+}
+
+/// Split a symmetric `A...B` range. An empty side defaults to `HEAD`
+/// (`A...` = `A...HEAD`, `...B` = `HEAD...B`).
+fn split_symmetric(s: &str) -> Option<(&str, &str)> {
+    let (a, b) = s.split_once("...")?;
+    Some((
+        if a.is_empty() { "HEAD" } else { a },
+        if b.is_empty() { "HEAD" } else { b },
+    ))
 }
 
 /// The left-hand end of a possible range, used for the `--staged`

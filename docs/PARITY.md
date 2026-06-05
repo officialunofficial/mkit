@@ -67,7 +67,8 @@ creeping; revisit post-v1 if demand warrants.
 | `diff` | byte-exact hunks (Myers) | same | ✅ | 4 | #257 | Myers diff + git change-compaction; full `diff --git` header (`new file`/`deleted file`/`index`/`--- a/p`/`+++ b/p`, `/dev/null`); byte-matches `git diff` modulo the abbreviated `index` ids (BLAKE3 vs SHA-1). git's optional indent heuristic not applied |
 | `commit` | `-m`, `-a`, `--amend`, `--author` | same | ✅ | — | — | signed; amend leaves unreachable obj until gc |
 | `log` | history, `-n`, `--format=json`, `--oneline`, `--abbrev-commit`, `--abbrev[=N]` | same | ✅ | 0 | #248 | `--oneline`/`--abbrev-commit` abbreviate (default 7); abbreviated id is a BLAKE3 prefix |
-| `log` | `<rev>`, `<a>..<b>` range walk | same | ✅ | 1 | #249 | `<rev>` start (annotated tags peeled), `A..B`/`A..`/`..B` ranges; reverse-chrono + topological order = git `--date-order` (matches git default for linear/monotonic-timestamp history); `A...B` deferred to #252 |
+| `log` | `<rev>`, `<a>..<b>`, `<a>...<b>` ranges | same | ✅ | 1 | #249, #252 | `<rev>` start (annotated tags peeled), `A..B`/`A..`/`..B` ranges, `A...B` symmetric difference (excludes the merge base's ancestors); reverse-chrono + topological order = git `--date-order` (matches git default for linear/monotonic-timestamp history) |
+| `diff` | `<a>...<b>` symmetric range | same | ✅ | 4 | #252 | diffs `merge-base(a,b)` against `b` (git semantics); single merge base (criss-cross multi-base is a documented edge) |
 | `log` | `--graph` | `--graph` is a no-op | 🔨 | 1 | #249 | real ASCII graph pending (mkit's default body also diverges) |
 | `branch` | create, list, `-v`, `-d`/`-D`/`-m` | same | ✅ | 1 | #249 | default list is `<marker> <name>` (no id, like git); `-v` adds abbreviated id + subject; `-D <missing>` errors like git (no silent no-op). Prior Phase-1 divergences reconciled. |
 | `checkout` | switch branch, restore files | same | ✅ | — | — | guarded against clobber |

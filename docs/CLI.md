@@ -81,13 +81,14 @@ Working-tree commands:
   the round-trip-safe form for paths containing newlines or other special
   bytes. Empty stdout means clean. (`--porcelain=v2` is not yet
   implemented — see "Divergences from Git".)
-- `mkit diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b>] [<path>...]`
+- `mkit diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
   — show changes as a unified patch. With no arguments, compares the HEAD
   tree to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
   the HEAD tree to the staged index tree — the change `mkit commit`
   would record. A single revision compares that revision against the
   worktree; two revisions (or an `<a>..<b>` range) diff the two
-  resolved trees directly. Revisions may be refs, commit hashes, short
+  resolved trees directly; a symmetric `<a>...<b>` range diffs the
+  **merge base** of `a` and `b` against `b` (git semantics). Revisions may be refs, commit hashes, short
   hashes, or `HEAD~n` (a raw 64-hex tree hash also works, since it
   resolves to itself). Any remaining positional arguments are pathspecs
   that limit the output to entries at or below them. The default output is a
@@ -141,16 +142,17 @@ History / commits:
   commit's message is reused (no editor is launched). The superseded
   commit is recorded in the recovery log so it stays recoverable, and is
   reclaimed by `mkit gc` once it falls out of the retention window.
-- `mkit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B>]` — show
+- `mkit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]` — show
   commit history. With no argument the walk starts at `HEAD`; an optional
-  `<rev>` starts it there instead, and a range `<A>..<B>` shows commits
+  `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
-  is `A..HEAD` and `..B` is `HEAD..B`). Commits are ordered
+  is `A..HEAD` and `..B` is `HEAD..B`), and a symmetric range `<A>...<B>`
+  shows commits reachable from `A` or `B` but not their common ancestors
+  (the merge base). Commits are ordered
   reverse-chronologically with a topological tie-break (a parent never
   precedes a child) — git's `--date-order`, which matches git's default for
   linear and monotonic-timestamp history (it can differ only on merge DAGs
-  with skewed/imported timestamps). `A...B` symmetric ranges are not yet
-  supported (#252). The default format prints the **full commit message
+  with skewed/imported timestamps). The default format prints the **full commit message
   body**, indented by four spaces, and renders the timestamp as a stable
   UTC date in the form `YYYY-MM-DD HH:MM:SS +0000`. `--oneline` condenses
   each commit to `<abbrev-hex> <title>`. `--abbrev-commit` abbreviates the
