@@ -318,7 +318,7 @@ unreachable object until
 .Cm gc
 ships
 .Pq issue #233 .
-.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Ar rev | Ar A Ns .. Ns Ar B Oc
+.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
 Show commit history. With no argument the walk starts at
 .Cm HEAD ;
 an optional
@@ -334,9 +334,13 @@ but not
 Commits are ordered reverse-chronologically with a topological tie-break (a
 parent never precedes a child) \(em git's
 .Fl Fl date-order ,
-which matches git's default for linear and monotonic-timestamp history.
+which matches git's default for linear and monotonic-timestamp history. An
 .Ar A Ns ... Ns Ar B
-symmetric ranges are not yet supported. The default format prints the full commit message body,
+symmetric range shows commits reachable from
+.Ar A
+or
+.Ar B
+but not their common ancestors. The default format prints the full commit message body,
 indented by four spaces, and renders the timestamp as a stable UTC date in the
 form
 .Ql YYYY-MM-DD HH:MM:SS +0000 .
@@ -387,7 +391,7 @@ indexes the reachable chain, so commits superseded by
 .Cm commit --amend
 or a reset are no longer listed. This command never mutates refs, the
 journal, or any object.
-.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b Oc Ar path ...
+.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.
 .Fl Fl staged
@@ -395,7 +399,15 @@ a fresh worktree snapshot.
 compares the HEAD tree to the staged index tree. A single revision compares
 that revision against the worktree; two revisions, or an
 .Ar a Ns .. Ns Ar b
-range, diff the two resolved trees directly. Revisions may be refs, commit
+range, diff the two resolved trees directly. A symmetric
+.Ar a Ns ... Ns Ar b
+range diffs the merge base of
+.Ar a
+and
+.Ar b
+against
+.Ar b .
+Revisions may be refs, commit
 hashes, short hashes, or
 .Ql HEAD~n
 (a raw 64-hex tree hash also works). Remaining positional arguments are

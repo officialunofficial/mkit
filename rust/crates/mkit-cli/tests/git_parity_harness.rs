@@ -557,6 +557,55 @@ fn log_annotated_tag_range_matches_git() {
     );
 }
 
+#[test]
+fn log_and_diff_symmetric_range_match_git() {
+    if !git_available() {
+        eprintln!("skipping: real `git` not on PATH");
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    // Common ancestor c1, then c2 on `main` and c3 on `feat`.
+    h.write_both("a.txt", b"base\n");
+    h.commit_both(&["a.txt"], "c1");
+    assert!(h.git(&["branch", "feat"]).status.success());
+    assert!(h.mkit(&["branch", "feat"]).status.success());
+    h.write_both("m.txt", b"m\n");
+    h.commit_both(&["m.txt"], "c2");
+    assert!(h.git(&["checkout", "feat"]).status.success());
+    assert!(h.mkit(&["checkout", "feat"]).status.success());
+    h.write_both("f.txt", b"f\n");
+    h.commit_both(&["f.txt"], "c3");
+
+    // `log main...feat`: the symmetric difference is a *set* {c2, c3}; the
+    // order tie-breaks on commit date, which the harness pins to one value
+    // for git but not mkit — so compare the masked subject sets.
+    let g = h.git(&["log", "--oneline", "main...feat"]);
+    let m = h.mkit(&["log", "--oneline", "main...feat"]);
+    assert!(g.status.success() && m.status.success(), "log failed");
+    let subjects = |o: &Output| {
+        let mut v: Vec<String> = stdout(o)
+            .lines()
+            .filter_map(|l| l.split_once(' ').map(|(_, s)| s.to_string()))
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        subjects(&g),
+        subjects(&m),
+        "log main...feat commit set diverged"
+    );
+
+    // `diff main...feat` = merge-base(c1) vs feat(c3) — a deterministic
+    // tree diff, so byte-match it.
+    assert_parity_diff(
+        "diff main...feat",
+        &h.git(&["diff", "main...feat"]),
+        &h.mkit(&["diff", "main...feat"]),
+    );
+}
+
 // =====================================================================
 // Passing subset — diff --name-only / --name-status / -z. These carry no
 // header or object id, so they match git byte-for-byte. (The unified patch

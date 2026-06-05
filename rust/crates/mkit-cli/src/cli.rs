@@ -62,14 +62,15 @@ commands:
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable until `gc` ships.
-  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B>]
+  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]
                     Show commit history (default prints the full message
                     body + a UTC date; --oneline/--abbrev-commit abbreviate
                     the commit id, --abbrev[=N] sets the length (default 7);
                     --format=json emits JSONL with the raw timestamp;
                     --graph is accepted but currently a no-op). Optional
                     <rev> starts the walk there; <A>..<B> shows commits in B
-                    not in A (empty side = HEAD)
+                    not in A; <A>...<B> the symmetric difference (empty
+                    side = HEAD)
   reflog [<ref>] [--format=json] [-n N]
                     Show a branch's recorded movement history (read-only).
                     Lists the branch's first-parent chain (newest first,
@@ -83,10 +84,11 @@ commands:
                     its -s/--short alias, emits machine-readable XY lines;
                     special-byte paths are C-style quoted; -z NUL-terminates
                     records with raw paths)
-  diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b>] [<path>...]
+  diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
                     --staged for HEAD vs index, a single revision vs the
-                    worktree, two revisions, or an A..B range; revisions
+                    worktree, two revisions, an A..B range, or an A...B
+                    symmetric range = merge-base(a,b) vs b; revisions
                     are refs, commits, or short hashes). --name-only lists
                     changed paths; --name-status prefixes each with an
                     A/D/M (T = mode change) letter; --stat shows per-file

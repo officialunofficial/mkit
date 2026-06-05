@@ -1,14 +1,14 @@
-//! `mkit log [<rev>] [<A>..<B>]` — walk commit history.
+//! `mkit log [<rev>] [<A>..<B> | <A>...<B>]` — walk commit history.
 //!
 //! With no argument the walk starts at `HEAD`. A single `<rev>` starts there
 //! instead; a range `A..B` shows commits reachable from `B` but not `A`
 //! (empty side = `HEAD`, so `A..` is `A..HEAD` and `..B` is `HEAD..B`).
-//! Commits are ordered reverse-chronologically with a topological tie-break
-//! (a parent never precedes a child) — git's `--date-order`. This is
-//! identical to git's default for linear history and monotonic-timestamp
-//! merges; it can differ only on merge DAGs with non-monotonic (skewed or
-//! imported) timestamps. `A...B` symmetric ranges are a Phase-4 follow-up
-//! (#252).
+//! An `A...B` symmetric range shows commits reachable from `A` or `B` but not
+//! their common ancestors (the merge base). Commits are ordered
+//! reverse-chronologically with a topological tie-break (a parent never
+//! precedes a child) — git's `--date-order`. This is identical to git's
+//! default for linear history and monotonic-timestamp merges; it can differ
+//! only on merge DAGs with non-monotonic (skewed or imported) timestamps.
 //!
 //! Output modes:
 //!
@@ -37,6 +37,7 @@ use clap::{Parser, ValueEnum};
 use mkit_core::Hash;
 use mkit_core::object::{Commit, Object};
 use mkit_core::ops::graph::collect_ancestor_set;
+use mkit_core::ops::merge::find_merge_base;
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
@@ -93,8 +94,9 @@ struct LogOpts {
     #[arg(long)]
     graph: bool,
 
-    /// Optional starting revision (`<rev>`) or range (`A..B`, `A..`, `..B`).
-    /// Defaults to `HEAD`. An empty range side means `HEAD`.
+    /// Optional starting revision (`<rev>`), range (`A..B`, `A..`, `..B`), or
+    /// symmetric range (`A...B`). Defaults to `HEAD`; an empty range side
+    /// means `HEAD`.
     start: Option<String>,
 }
 
@@ -144,17 +146,13 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    // Resolve the revision selection: default HEAD, a single `<rev>`, or a
-    // `A..B` range (empty side = HEAD). `A...B` symmetric ranges are a
-    // Phase-4 follow-up (#252).
-    let selection = match parse_rev_arg(opts.start.as_deref()) {
-        Ok(s) => s,
-        Err(msg) => return emit_err(&msg, exit::USAGE),
-    };
-    let include = match resolve_tip(&store, &mkit_dir, selection.include.as_deref()) {
-        Ok(Some(h)) => h,
+    // Resolve the revision selection: default HEAD, a single `<rev>`, a
+    // `A..B` range, or an `A...B` symmetric range (empty side = HEAD).
+    let selection = parse_rev_arg(opts.start.as_deref());
+    let (tips, excluded) = match resolve_selection(&store, &mkit_dir, &selection) {
+        Ok(Some(v)) => v,
         Ok(None) => {
-            // No HEAD yet and no explicit include → nothing to show.
+            // No HEAD yet and no explicit revision → nothing to show.
             if opts.start.is_none() && matches!(fmt, Format::Default | Format::Oneline) {
                 let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(stderr, "no commits yet");
@@ -164,22 +162,7 @@ pub fn run(args: &[String]) -> u8 {
         Err(msg) => return emit_err(&msg, exit::DATAERR),
     };
 
-    // Excluded set: ancestors of the range's left side (`A` in `A..B`).
-    let mut excluded: HashSet<Hash> = HashSet::new();
-    if let Some(exclude_spec) = selection.exclude {
-        match resolve_tip(&store, &mkit_dir, Some(&exclude_spec)) {
-            Ok(Some(a)) => {
-                if let Err(e) = collect_ancestor_set(&store, a, &mut excluded) {
-                    return emit_err(&format!("walk range base: {e}"), exit::DATAERR);
-                }
-            }
-            // An empty/HEAD-less left side excludes nothing.
-            Ok(None) => {}
-            Err(msg) => return emit_err(&msg, exit::DATAERR),
-        }
-    }
-
-    let ordered = match ordered_commits(&store, include, &excluded) {
+    let ordered = match ordered_commits(&store, &tips, &excluded) {
         Ok(v) => v,
         Err(code) => return code,
     };
@@ -195,46 +178,98 @@ pub fn run(args: &[String]) -> u8 {
     exit::OK
 }
 
-/// A resolved revision selection for `log`.
-struct RevSelection {
-    /// The revision whose history to show (`None` = HEAD).
-    include: Option<String>,
-    /// For a range `A..B`, the left side `A` whose ancestors are excluded.
-    exclude: Option<String>,
+/// The include tips to walk plus the excluded ancestor set, resolved from a
+/// [`RevSelection`].
+type WalkSet = (Vec<Hash>, HashSet<Hash>);
+
+/// A parsed `log` revision selection.
+enum RevSelection {
+    /// No argument → walk `HEAD`.
+    Default,
+    /// A single `<rev>` → walk its history.
+    Single(String),
+    /// `A..B` → reachable from `B` but not `A`.
+    Range { exclude: String, include: String },
+    /// `A...B` → reachable from `A` or `B` but not their common ancestors.
+    Symmetric { a: String, b: String },
 }
 
-/// Parse the optional `<rev>` / `A..B` positional into a [`RevSelection`].
-/// An empty range side resolves to `HEAD`. `A...B` is rejected (#252).
-fn parse_rev_arg(arg: Option<&str>) -> Result<RevSelection, String> {
+/// Parse the optional `<rev>` / `A..B` / `A...B` positional. An empty range
+/// side resolves to `HEAD`.
+fn parse_rev_arg(arg: Option<&str>) -> RevSelection {
     let Some(s) = arg else {
-        return Ok(RevSelection {
-            include: None,
-            exclude: None,
-        });
+        return RevSelection::Default;
     };
-    if s.contains("...") {
-        return Err(format!(
-            "symmetric range '{s}' (A...B) is not supported yet (#252); use A..B"
-        ));
+    let to_spec = |side: &str| {
+        if side.is_empty() {
+            "HEAD".to_string()
+        } else {
+            side.to_string()
+        }
+    };
+    // Check `...` before `..` since the former contains the latter.
+    if let Some((a, b)) = s.split_once("...") {
+        return RevSelection::Symmetric {
+            a: to_spec(a),
+            b: to_spec(b),
+        };
     }
     if let Some((a, b)) = s.split_once("..") {
-        let to_spec = |side: &str| {
-            if side.is_empty() {
-                "HEAD".to_string()
-            } else {
-                side.to_string()
-            }
+        return RevSelection::Range {
+            exclude: to_spec(a),
+            include: to_spec(b),
         };
-        Ok(RevSelection {
-            include: Some(to_spec(b)),
-            exclude: Some(to_spec(a)),
-        })
-    } else {
-        Ok(RevSelection {
-            include: Some(s.to_string()),
-            exclude: None,
-        })
     }
+    RevSelection::Single(s.to_string())
+}
+
+/// Resolve a [`RevSelection`] into the set of include tips to walk and the
+/// excluded ancestor set. `Ok(None)` means there is nothing to show (e.g. a
+/// HEAD-less repo with no explicit revision).
+fn resolve_selection(
+    store: &ObjectStore,
+    mkit_dir: &std::path::Path,
+    sel: &RevSelection,
+) -> Result<Option<WalkSet>, String> {
+    let mut excluded: HashSet<Hash> = HashSet::new();
+    let tips: Vec<Hash> = match sel {
+        RevSelection::Default => match resolve_tip(store, mkit_dir, None)? {
+            Some(h) => vec![h],
+            None => return Ok(None),
+        },
+        RevSelection::Single(spec) => match resolve_tip(store, mkit_dir, Some(spec))? {
+            Some(h) => vec![h],
+            None => return Ok(None),
+        },
+        RevSelection::Range { exclude, include } => {
+            let Some(inc) = resolve_tip(store, mkit_dir, Some(include))? else {
+                return Ok(None);
+            };
+            if let Some(a) = resolve_tip(store, mkit_dir, Some(exclude))? {
+                collect_ancestor_set(store, a, &mut excluded)
+                    .map_err(|e| format!("walk range base: {e}"))?;
+            }
+            vec![inc]
+        }
+        RevSelection::Symmetric { a, b } => {
+            let ra = resolve_tip(store, mkit_dir, Some(a))?;
+            let rb = resolve_tip(store, mkit_dir, Some(b))?;
+            // Exclude the common ancestors (ancestors of the merge base).
+            if let (Some(x), Some(y)) = (ra, rb)
+                && let Some(mb) =
+                    find_merge_base(store, x, y).map_err(|e| format!("merge base: {e}"))?
+            {
+                collect_ancestor_set(store, mb, &mut excluded)
+                    .map_err(|e| format!("walk merge base: {e}"))?;
+            }
+            let tips: Vec<Hash> = ra.into_iter().chain(rb).collect();
+            if tips.is_empty() {
+                return Ok(None);
+            }
+            tips
+        }
+    };
+    Ok(Some((tips, excluded)))
 }
 
 /// Resolve a tip spec to a commit hash. `None` spec = HEAD (which may be
@@ -301,20 +336,20 @@ impl Eq for HeapItem {}
 /// Hard cap on commits collected for one `log` invocation.
 const MAX_LOG_COMMITS: usize = 1_000_000;
 
-/// Collect the commits reachable from `include` (minus `excluded`) in git's
-/// `--date-order`: reverse-chronological by commit timestamp, with a parent
-/// never shown before any of its children (topological tie-break). Uses an
-/// in-degree + max-heap revwalk so equal-timestamp linear history keeps its
+/// Collect the commits reachable from any of `tips` (minus `excluded`) in
+/// git's `--date-order`: reverse-chronological by commit timestamp, with a
+/// parent never shown before any of its children (topological tie-break). Uses
+/// an in-degree + max-heap revwalk so equal-timestamp linear history keeps its
 /// natural child→parent order. Matches git's *default* order for linear and
 /// monotonic-timestamp history.
 fn ordered_commits(
     store: &ObjectStore,
-    include: Hash,
+    tips: &[Hash],
     excluded: &HashSet<Hash>,
 ) -> Result<Vec<(Hash, Commit)>, u8> {
     // 1. Collect the candidate commit set (DFS over parents, skip excluded).
     let mut commits: HashMap<Hash, Commit> = HashMap::new();
-    let mut stack = vec![include];
+    let mut stack: Vec<Hash> = tips.to_vec();
     while let Some(h) = stack.pop() {
         if excluded.contains(&h) || commits.contains_key(&h) {
             continue;

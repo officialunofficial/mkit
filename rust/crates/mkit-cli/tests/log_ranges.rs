@@ -1,6 +1,7 @@
-//! `mkit log` revision arguments and ranges (#249 Phase 1) — the
-//! mkit-specific paths the differential harness can't compare (the `A...B`
-//! rejection, empty/reverse ranges, range + `-n`).
+//! `mkit log` / `mkit diff` revision arguments and ranges (#249, #252) — the
+//! mkit-specific paths the differential harness can't compare deterministically
+//! (empty/reverse ranges, range + `-n`, and the `A...B` symmetric range for
+//! both `log` and `diff`).
 
 use std::fs;
 use std::path::Path;
@@ -115,13 +116,93 @@ fn log_range_with_limit() {
     );
 }
 
+/// A branched repo: base `c1`, then `c2` on `main` and `c3` on `feat`
+/// (common ancestor `c1`). Leaves `HEAD` on `feat` (= c3).
+fn branched_repo() -> (tempfile::TempDir, tempfile::TempDir) {
+    let td = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(run_in(root, x, &["init"]).status.success());
+    assert!(run_in(root, x, &["keygen"]).status.success());
+    fs::write(root.join("a.txt"), b"base\n").unwrap();
+    assert!(run_in(root, x, &["add", "a.txt"]).status.success());
+    assert!(run_in(root, x, &["commit", "-m", "c1"]).status.success());
+    assert!(run_in(root, x, &["branch", "feat"]).status.success());
+    // c2 on main.
+    fs::write(root.join("m.txt"), b"m\n").unwrap();
+    assert!(run_in(root, x, &["add", "m.txt"]).status.success());
+    assert!(run_in(root, x, &["commit", "-m", "c2"]).status.success());
+    // c3 on feat.
+    assert!(run_in(root, x, &["checkout", "feat"]).status.success());
+    fs::write(root.join("f.txt"), b"f\n").unwrap();
+    assert!(run_in(root, x, &["add", "f.txt"]).status.success());
+    assert!(run_in(root, x, &["commit", "-m", "c3"]).status.success());
+    (td, xdg)
+}
+
 #[test]
-fn log_symmetric_range_is_rejected() {
-    let (td, xdg) = repo_with_four();
-    let out = run_in(td.path(), xdg.path(), &["log", "HEAD~2...HEAD"]);
+fn log_symmetric_range_shows_both_sides() {
+    let (td, xdg) = branched_repo();
+    let (root, x) = (td.path(), xdg.path());
+    // `main...HEAD` = reachable from main OR feat, but not the common
+    // ancestor c1 → {c2, c3} (order may vary, so compare as a set).
+    let mut sym = subjects(root, x, &["main...HEAD"]);
+    sym.sort();
+    assert_eq!(sym, ["c2", "c3"], "symmetric range");
+    // The asymmetric `main..HEAD` excludes everything reachable from main
+    // (c2 and the shared c1) → only c3.
+    assert_eq!(
+        subjects(root, x, &["main..HEAD"]),
+        ["c3"],
+        "asymmetric range"
+    );
+    // Empty left side: `...HEAD` = `HEAD...HEAD` → empty.
     assert!(
-        !out.status.success(),
-        "A...B symmetric range is not supported yet: {out:?}"
+        subjects(root, x, &["...HEAD"]).iter().all(String::is_empty),
+        "HEAD...HEAD is empty"
+    );
+}
+
+#[test]
+fn diff_symmetric_range_is_merge_base_vs_b() {
+    let (td, xdg) = branched_repo();
+    let (root, x) = (td.path(), xdg.path());
+    // `diff main...HEAD` = diff merge-base(main, feat)=c1 against feat=c3,
+    // so it shows f.txt added and does NOT show m.txt (which is on main).
+    let out = run_in(root, x, &["diff", "main...HEAD"]);
+    assert!(out.status.success(), "diff failed: {out:?}");
+    let s = out_str(&out);
+    assert!(
+        s.contains("diff --git a/f.txt b/f.txt"),
+        "f.txt added: {s:?}"
+    );
+    assert!(s.contains("new file mode"), "new file header: {s:?}");
+    assert!(!s.contains("m.txt"), "m.txt must not appear: {s:?}");
+}
+
+#[test]
+fn diff_symmetric_range_peels_annotated_tag() {
+    // An annotated tag on the `A...B` side must be peeled to its commit
+    // before merge-base resolution — otherwise the tag object errors / has
+    // no merge base.
+    let (td, xdg) = branched_repo();
+    let (root, x) = (td.path(), xdg.path());
+    // Tag `main` (= c2) annotated; HEAD is feat (= c3).
+    assert!(
+        run_in(root, x, &["tag", "-a", "v1", "main", "-m", "tag main"])
+            .status
+            .success()
+    );
+    let out = run_in(root, x, &["diff", "v1...HEAD"]);
+    assert!(
+        out.status.success(),
+        "tagged symmetric diff failed: {out:?}"
+    );
+    let s = out_str(&out);
+    // merge-base(c2, c3) = c1, diff c1 vs c3 → f.txt added.
+    assert!(
+        s.contains("diff --git a/f.txt b/f.txt"),
+        "f.txt added: {s:?}"
     );
 }
 
