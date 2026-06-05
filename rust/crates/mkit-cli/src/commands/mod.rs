@@ -13,6 +13,7 @@ pub mod branch;
 pub mod cat;
 pub mod checkout;
 pub mod cherry_pick;
+pub mod clean;
 pub mod clone;
 pub mod commit;
 pub mod config_cmd;
@@ -241,6 +242,71 @@ pub(crate) fn absolute_arg_to_repo_relative(
         .strip_prefix(&root)
         .map(Path::to_path_buf)
         .map_err(|_| format!("path is outside repository: {}", arg.display()))
+}
+
+/// The worktree's current staged representation `(status, hash)` for
+/// `path`: a regular file (with its exec bit), a symlink (blob of its
+/// target), or `None` when the path is missing or not a stageable type
+/// (e.g. a directory). Mirrors how `add` stages one entry, so a caller can
+/// compare a worktree path to an index entry by **content AND mode/type** —
+/// catching symlink-target and chmod-only changes that a content-only hash
+/// would miss.
+pub(crate) fn worktree_entry_state(
+    root: &Path,
+    store: &ObjectStore,
+    path: &str,
+) -> Result<Option<(EntryStatus, Hash)>, String> {
+    let abs = root.join(path);
+    let meta = match abs.symlink_metadata() {
+        Ok(m) => m,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(format!("metadata {}: {e}", abs.display())),
+    };
+    if meta.file_type().is_file() {
+        let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
+            .map_err(|e| format!("read {}: {e}", abs.display()))?;
+        let h = worktree::store_file_object(store, &bytes).map_err(|e| format!("store: {e}"))?;
+        Ok(Some((file_exec_status(&opened_meta), h)))
+    } else if meta.file_type().is_symlink() {
+        let target =
+            fs::read_link(&abs).map_err(|e| format!("read link {}: {e}", abs.display()))?;
+        let target_str = target
+            .to_str()
+            .ok_or_else(|| "symlink target is not valid UTF-8".to_string())?;
+        if !worktree::validate_symlink_target(target_str) {
+            return Err(format!("invalid symlink target: {target_str}"));
+        }
+        let blob = Object::Blob(mkit_core::object::Blob {
+            data: target_str.as_bytes().to_vec(),
+        });
+        let ser = mkit_core::serialize::serialize(&blob).map_err(|e| format!("serialize: {e}"))?;
+        let h = store.write(&ser).map_err(|e| format!("store: {e}"))?;
+        Ok(Some((EntryStatus::Symlink, h)))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(unix)]
+fn file_exec_status(meta: &fs::Metadata) -> EntryStatus {
+    use std::os::unix::fs::PermissionsExt;
+    if meta.permissions().mode() & 0o111 != 0 {
+        EntryStatus::Executable
+    } else {
+        EntryStatus::Blob
+    }
+}
+
+#[cfg(not(unix))]
+fn file_exec_status(_meta: &fs::Metadata) -> EntryStatus {
+    EntryStatus::Blob
 }
 
 pub(crate) fn index_path_matches_or_descends(path: &str, base: &str) -> bool {
@@ -556,7 +622,7 @@ fn collect_worktree_paths(
     Ok(())
 }
 
-fn index_tracks_path_or_descendant(index: &Index, path: &str) -> bool {
+pub(crate) fn index_tracks_path_or_descendant(index: &Index, path: &str) -> bool {
     index.entries.iter().any(|entry| {
         entry.status != EntryStatus::Removed
             && (entry.path == path || index_path_descends_from(&entry.path, path))

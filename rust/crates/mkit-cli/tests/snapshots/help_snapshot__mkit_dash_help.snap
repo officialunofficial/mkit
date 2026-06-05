@@ -19,9 +19,11 @@ commands:
                     Discard worktree changes for path(s) (restore from the
                     index), or --staged to unstage (restore the index entry
                     from HEAD); -f overrides the un-staged-edit guard
-  reset [--soft|--mixed] [<commit>]
+  reset [--soft|--mixed|--hard] [-f] [<commit>]
                     Move HEAD/branch (--soft) or HEAD + reset the index to
-                    the commit's tree (--mixed, default); worktree untouched
+                    the commit's tree (--mixed, default); worktree untouched.
+                    --hard also resets the worktree (keeps untracked files);
+                    refuses to discard dirty/staged content without -f
   hash <file>       Hash a file and store it as a blob
   cat <hash>        Display an object by its hash
   tree              Snapshot working directory as a tree object
@@ -68,6 +70,10 @@ commands:
                     like git; still refuses the current branch)
   branch -m [<old>] <new>  Rename a branch (current branch if <old> omitted)
   checkout <branch> Switch HEAD to a branch and restore files
+  clean [-n] [-f] [-d] [-x|-X] [<path>...]
+                    Remove untracked files (refuses without -f; -n
+                    previews). -d also removes untracked dirs; -x includes
+                    ignored files, -X removes only ignored
   tag [<name>] [<commit>]  List tags, or create a lightweight tag
   tag -a <name> [-m <msg>] [<commit>]  Create an annotated tag object
   tag -s <name> [-m <msg>] [<commit>]  Create a signed (Ed25519) tag object

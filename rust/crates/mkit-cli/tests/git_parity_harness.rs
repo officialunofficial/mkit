@@ -660,6 +660,69 @@ fn diff_stat_scaled_graph_matches_git() {
 }
 
 // =====================================================================
+// Passing subset — clean dry-run parity (#250). `git clean -n` and
+// `mkit clean -n` print identical `Would remove <path>` lines (no object
+// ids); reset --hard isn't compared (git discards silently, mkit guards).
+// =====================================================================
+
+#[test]
+fn clean_dry_run_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("tracked.txt", b"t\n");
+    h.commit_both(&["tracked.txt"], "init");
+    // Untracked files (no ignore involved → identical in both).
+    h.write_both("a-untracked.txt", b"u\n");
+    h.write_both("z-untracked.txt", b"u\n");
+    let g = h.git(&["clean", "-n"]);
+    let m = h.mkit(&["clean", "-n"]);
+    assert_parity_ordered("clean -n", &g, &m);
+}
+
+#[test]
+fn clean_dry_run_d_lists_untracked_dirs_like_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("tracked.txt", b"t\n");
+    h.commit_both(&["tracked.txt"], "init");
+    h.write_both("top.txt", b"u\n");
+    h.write_both("untrackeddir/inner.txt", b"d\n");
+    // `-d` lists the untracked directory as `untrackeddir/` in both tools.
+    let g = h.git(&["clean", "-n", "-d"]);
+    let m = h.mkit(&["clean", "-n", "-d"]);
+    assert_parity_ordered("clean -n -d", &g, &m);
+}
+
+#[test]
+fn clean_without_force_refused_like_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("tracked.txt", b"t\n");
+    h.commit_both(&["tracked.txt"], "init");
+    h.write_both("untracked.txt", b"u\n");
+    // Both refuse to delete without -f (git's clean.requireForce default).
+    let g = h.git(&["clean"]);
+    let m = h.mkit(&["clean"]);
+    assert!(
+        !g.status.success(),
+        "git clean must refuse without -f: {g:?}"
+    );
+    assert!(
+        !m.status.success(),
+        "mkit clean must refuse without -f: {m:?}"
+    );
+}
+
+// =====================================================================
 // Passing subset — mv guard parity (#250). The happy-path move shows as
 // `R` under git (rename detection) but delete+add under mkit, so only the
 // guard/error behavior is compared differentially (both must fail).

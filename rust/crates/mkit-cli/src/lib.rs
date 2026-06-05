@@ -84,6 +84,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "branch" => commands::branch::run(&rest),
         "tag" => commands::tag::run(&rest),
         "checkout" => commands::checkout::run(&rest),
+        "clean" => commands::clean::run(&rest),
         "diff" => commands::diff::run(&rest),
         "verify" => commands::verify::run(&rest),
         "attest" => commands::attest::run(&rest),

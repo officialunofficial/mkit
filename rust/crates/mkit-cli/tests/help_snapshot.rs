@@ -52,6 +52,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "tree",
     "branch",
     "checkout",
+    "clean",
     "tag",
     "merge",
     "cherry-pick",
