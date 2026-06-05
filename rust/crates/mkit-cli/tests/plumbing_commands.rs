@@ -133,6 +133,48 @@ fn ls_tree_z_is_nul_terminated_and_recurses() {
 }
 
 #[test]
+fn ls_tree_pathspec_descends_into_subtree() {
+    // A pathspec naming a file inside a sub-tree must resolve to that blob,
+    // like git (the non-recursive walk has to descend the named path).
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+
+    let file = out_str(&run_in(root, x, &["ls-tree", "HEAD", "sub/inner.txt"]));
+    assert!(
+        file.ends_with("\tsub/inner.txt") && file.contains(" blob "),
+        "expected the blob for sub/inner.txt, got: {file:?}"
+    );
+    // The directory name alone prints the tree line.
+    let dir = out_str(&run_in(root, x, &["ls-tree", "HEAD", "sub"]));
+    assert!(
+        dir.contains(" tree ") && dir.ends_with("\tsub"),
+        "expected tree line: {dir:?}"
+    );
+    // A trailing slash lists the directory's contents.
+    let contents = out_str(&run_in(root, x, &["ls-tree", "HEAD", "sub/"]));
+    assert!(
+        contents.ends_with("\tsub/inner.txt"),
+        "expected contents listing: {contents:?}"
+    );
+}
+
+#[test]
+fn show_ref_exits_nonzero_when_namespace_empty() {
+    // git returns exit 1 when nothing matches; a repo with a commit (so a
+    // branch) but no tags must make `show-ref --tags` fail.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let out = run_in(root, x, &["show-ref", "--tags"]);
+    assert!(
+        !out.status.success(),
+        "show-ref --tags with no tags must exit non-zero: {out:?}"
+    );
+    assert!(out.stdout.is_empty(), "no output expected: {out:?}");
+    // --heads still succeeds (the default branch exists).
+    assert!(run_in(root, x, &["show-ref", "--heads"]).status.success());
+}
+
+#[test]
 fn show_ref_heads_and_tags_filter() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());

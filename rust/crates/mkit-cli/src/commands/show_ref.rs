@@ -58,7 +58,13 @@ pub fn run(args: &[String]) -> u8 {
     for (name, hash) in &lines {
         let _ = writeln!(stdout, "{hash} {name}");
     }
-    exit::OK
+    // Like git, exit non-zero (no diagnostic) when nothing matched, so a
+    // script can test for the existence of any head/tag.
+    if lines.is_empty() {
+        exit::GENERAL_ERROR
+    } else {
+        exit::OK
+    }
 }
 
 /// Push `(<prefix><name>, hex hash)` for every ref with a readable hash.

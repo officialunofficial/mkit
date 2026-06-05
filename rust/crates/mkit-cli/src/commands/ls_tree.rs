@@ -57,7 +57,9 @@ pub fn run(args: &[String]) -> u8 {
         Err(msg) => return emit_err(&msg, exit::GENERAL_ERROR),
     };
 
-    let normalized: Vec<String> = pathspecs.iter().map(|p| normalize(p)).collect();
+    // Each pathspec is (normalized-path, had-trailing-slash). A trailing
+    // slash (`sub/`) means "list the directory's contents".
+    let specs: Vec<(String, bool)> = pathspecs.iter().map(|p| normalize(p)).collect();
     let mut stdout = std::io::stdout().lock();
     if let Err(msg) = list(
         &store,
@@ -65,7 +67,7 @@ pub fn run(args: &[String]) -> u8 {
         "",
         opts.recursive,
         opts.z,
-        &normalized,
+        &specs,
         &mut stdout,
     ) {
         return emit_err(&msg, exit::GENERAL_ERROR);
@@ -73,15 +75,22 @@ pub fn run(args: &[String]) -> u8 {
     exit::OK
 }
 
-/// Recursively emit a tree's entries. Trees are recursed (and their own
-/// line omitted) under `-r`; otherwise a tree prints as `040000 tree`.
+/// Recursively emit a tree's entries, honoring pathspecs like git.
+///
+/// Without pathspecs: list immediate entries (a sub-tree prints as
+/// `040000 tree`), recursing only under `-r`. With pathspecs we descend
+/// into a sub-tree whenever a pathspec lies **within** it (e.g.
+/// `sub/inner.txt` descends through `sub`), when `-r` recurses a selected
+/// tree, or when a `sub/` pathspec asks to list its contents; a sub-tree
+/// named exactly by a pathspec (no trailing slash, no `-r`) prints as a
+/// tree line. An entry is printed when it equals or lies under a pathspec.
 fn list(
     store: &ObjectStore,
     tree_hash: &Hash,
     prefix: &str,
     recursive: bool,
     z: bool,
-    pathspecs: &[String],
+    pathspecs: &[(String, bool)],
     out: &mut impl Write,
 ) -> Result<(), String> {
     let Object::Tree(tree) = store
@@ -99,24 +108,54 @@ fn list(
         } else {
             format!("{prefix}/{name}")
         };
-        if e.mode == EntryMode::Tree && recursive {
-            list(store, &e.object_hash, &path, recursive, z, pathspecs, out)?;
+        let is_tree = e.mode == EntryMode::Tree;
+
+        if pathspecs.is_empty() {
+            if is_tree && recursive {
+                list(store, &e.object_hash, &path, recursive, z, pathspecs, out)?;
+            } else {
+                emit_entry(e, &path, z, out);
+            }
             continue;
         }
-        if !pathspecs.is_empty() && !path_matches(&path, pathspecs) {
-            continue;
-        }
-        let (mode, ty) = git_mode_and_type(e.mode);
-        let hash = format::hex_hash(&e.object_hash);
-        if z {
-            let _ = write!(out, "{mode} {ty} {hash}\t{path}\0");
-        } else {
-            let shown = super::c_quote_path(&path);
-            let shown = shown.as_deref().unwrap_or(&path);
-            let _ = writeln!(out, "{mode} {ty} {hash}\t{shown}");
+
+        // `path` equals or lies under a pathspec.
+        let matched = pathspecs
+            .iter()
+            .any(|(s, _)| super::index_path_matches_or_descends(&path, s));
+        // A pathspec lies strictly under `path` (a dir on the way to a
+        // deeper target) — descend to reach it.
+        let ancestor = pathspecs
+            .iter()
+            .any(|(s, _)| super::index_path_descends_from(s, &path));
+        // `path` is named with a trailing slash → list its contents.
+        let list_contents = pathspecs.iter().any(|(s, slash)| *slash && &path == s);
+
+        if is_tree {
+            if ancestor || list_contents || (matched && recursive) {
+                list(store, &e.object_hash, &path, recursive, z, pathspecs, out)?;
+            } else if matched {
+                emit_entry(e, &path, z, out);
+            }
+        } else if matched {
+            emit_entry(e, &path, z, out);
         }
     }
     Ok(())
+}
+
+/// Emit one `<mode> <type> <hash>\t<name>` record (NUL-terminated raw under
+/// `-z`, else newline-terminated with the name C-style quoted if needed).
+fn emit_entry(e: &mkit_core::object::TreeEntry, path: &str, z: bool, out: &mut impl Write) {
+    let (mode, ty) = git_mode_and_type(e.mode);
+    let hash = format::hex_hash(&e.object_hash);
+    if z {
+        let _ = write!(out, "{mode} {ty} {hash}\t{path}\0");
+    } else {
+        let shown = super::c_quote_path(path);
+        let shown = shown.as_deref().unwrap_or(path);
+        let _ = writeln!(out, "{mode} {ty} {hash}\t{shown}");
+    }
 }
 
 /// Map an [`EntryMode`] to git's octal mode + object type token.
@@ -154,16 +193,13 @@ fn object_to_tree(store: &ObjectStore, h: &Hash) -> Result<Hash, String> {
     }
 }
 
-fn normalize(spec: &str) -> String {
+/// Normalize a pathspec to `(repo-relative path, had-trailing-slash)`.
+fn normalize(spec: &str) -> (String, bool) {
     let s = spec.replace('\\', "/");
     let s = s.strip_prefix("./").unwrap_or(&s);
-    s.strip_suffix('/').unwrap_or(s).to_string()
-}
-
-fn path_matches(path: &str, specs: &[String]) -> bool {
-    specs
-        .iter()
-        .any(|s| super::index_path_matches_or_descends(path, s))
+    let dir_slash = s.ends_with('/');
+    let s = s.strip_suffix('/').unwrap_or(s);
+    (s.to_string(), dir_slash)
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {
