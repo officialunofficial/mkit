@@ -485,6 +485,43 @@ fn log_oneline_matches_git() {
     assert_parity_oneline("log --oneline", &g, &m); // `<abbrev> only commit`
 }
 
+#[test]
+fn log_revision_and_range_match_git() {
+    if !git_available() {
+        eprintln!("skipping: real `git` not on PATH");
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    for (f, m) in [
+        ("a.txt", "c1"),
+        ("b.txt", "c2"),
+        ("c.txt", "c3"),
+        ("d.txt", "c4"),
+    ] {
+        h.write_both(f, b"x\n");
+        h.commit_both(&[f], m);
+    }
+    // A single revision starts the walk there (HEAD~1 and its ancestors).
+    assert_parity_oneline(
+        "log --oneline HEAD~1",
+        &h.git(&["log", "--oneline", "HEAD~1"]),
+        &h.mkit(&["log", "--oneline", "HEAD~1"]),
+    );
+    // `A..B` excludes the left side and its ancestors.
+    assert_parity_oneline(
+        "log --oneline HEAD~3..HEAD",
+        &h.git(&["log", "--oneline", "HEAD~3..HEAD"]),
+        &h.mkit(&["log", "--oneline", "HEAD~3..HEAD"]),
+    );
+    // Open-ended `A..` = `A..HEAD`.
+    assert_parity_oneline(
+        "log --oneline HEAD~2..",
+        &h.git(&["log", "--oneline", "HEAD~2.."]),
+        &h.mkit(&["log", "--oneline", "HEAD~2.."]),
+    );
+}
+
 // =====================================================================
 // Passing subset — diff --name-only / --name-status / -z. Unlike the
 // unified patch (whose `diff --mkit` header diverges, Phase 4), these
