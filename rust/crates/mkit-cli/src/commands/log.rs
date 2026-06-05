@@ -4,8 +4,11 @@
 //! instead; a range `A..B` shows commits reachable from `B` but not `A`
 //! (empty side = `HEAD`, so `A..` is `A..HEAD` and `..B` is `HEAD..B`).
 //! Commits are ordered reverse-chronologically with a topological tie-break
-//! (a parent never precedes a child), matching git's default. `A...B`
-//! symmetric ranges are a Phase-4 follow-up (#252).
+//! (a parent never precedes a child) — git's `--date-order`. This is
+//! identical to git's default for linear history and monotonic-timestamp
+//! merges; it can differ only on merge DAGs with non-monotonic (skewed or
+//! imported) timestamps. `A...B` symmetric ranges are a Phase-4 follow-up
+//! (#252).
 //!
 //! Output modes:
 //!
@@ -236,21 +239,37 @@ fn parse_rev_arg(arg: Option<&str>) -> Result<RevSelection, String> {
 
 /// Resolve a tip spec to a commit hash. `None` spec = HEAD (which may be
 /// absent → `Ok(None)`). An explicit spec that fails to resolve is an error.
+/// The resolved hash is peeled through annotated/signed tag objects so
+/// `log <tag>` / `<tag>..HEAD` walk the tagged commit, like git.
 fn resolve_tip(
     store: &ObjectStore,
     mkit_dir: &std::path::Path,
     spec: Option<&str>,
 ) -> Result<Option<Hash>, String> {
-    match spec {
-        None => Ok(refs::resolve_head(mkit_dir).ok().flatten()),
-        Some("HEAD") => match refs::resolve_head(mkit_dir).ok().flatten() {
-            Some(h) => Ok(Some(h)),
-            None => Ok(None),
-        },
-        Some(s) => revspec::resolve_revision(store, mkit_dir, s)
-            .map(Some)
-            .map_err(|e| format!("bad revision '{s}': {e}")),
+    let raw = match spec {
+        None | Some("HEAD") => refs::resolve_head(mkit_dir).ok().flatten(),
+        Some(s) => Some(
+            revspec::resolve_revision(store, mkit_dir, s)
+                .map_err(|e| format!("bad revision '{s}': {e}"))?,
+        ),
+    };
+    Ok(raw.map(|h| peel_tags(store, h)))
+}
+
+/// Maximum tag-of-tag chain length to follow when peeling (cycle guard).
+const MAX_TAG_DEPTH: usize = 16;
+
+/// Follow `Object::Tag` targets to the first non-tag object, so an
+/// annotated/signed tag resolves to the commit it points at. A non-tag (or
+/// unreadable) object stops the peel and is returned as-is.
+fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
+    for _ in 0..MAX_TAG_DEPTH {
+        match store.read_object(&h) {
+            Ok(Object::Tag(t)) => h = t.target,
+            _ => break,
+        }
     }
+    h
 }
 
 /// A commit ready to emit, ordered by timestamp (newest first) with the hash
@@ -283,10 +302,11 @@ impl Eq for HeapItem {}
 const MAX_LOG_COMMITS: usize = 1_000_000;
 
 /// Collect the commits reachable from `include` (minus `excluded`) in git's
-/// default order: reverse-chronological by commit timestamp, with a parent
+/// `--date-order`: reverse-chronological by commit timestamp, with a parent
 /// never shown before any of its children (topological tie-break). Uses an
 /// in-degree + max-heap revwalk so equal-timestamp linear history keeps its
-/// natural child→parent order.
+/// natural child→parent order. Matches git's *default* order for linear and
+/// monotonic-timestamp history.
 fn ordered_commits(
     store: &ObjectStore,
     include: Hash,

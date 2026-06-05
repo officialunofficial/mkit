@@ -126,6 +126,36 @@ fn log_symmetric_range_is_rejected() {
 }
 
 #[test]
+fn log_peels_annotated_tag_on_include_and_exclude() {
+    // An annotated/signed tag must be peeled to its commit for both the
+    // include side (`log <tag>`) and the exclude side (`<tag>..HEAD`), like
+    // git — otherwise the tag object is rejected / excludes nothing.
+    let td = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(run_in(root, x, &["init"]).status.success());
+    assert!(run_in(root, x, &["keygen"]).status.success());
+    fs::write(root.join("a.txt"), b"1\n").unwrap();
+    assert!(run_in(root, x, &["add", "a.txt"]).status.success());
+    assert!(run_in(root, x, &["commit", "-m", "c1"]).status.success());
+    // Annotated tag at c1 (HEAD), then two more commits.
+    assert!(
+        run_in(root, x, &["tag", "-a", "v1", "-m", "tag c1"])
+            .status
+            .success()
+    );
+    for (f, m) in [("b.txt", "c2"), ("c.txt", "c3")] {
+        fs::write(root.join(f), b"x\n").unwrap();
+        assert!(run_in(root, x, &["add", f]).status.success());
+        assert!(run_in(root, x, &["commit", "-m", m]).status.success());
+    }
+    // include side: `log v1` peels to c1 and walks its ancestors (just c1).
+    assert_eq!(subjects(root, x, &["v1"]), ["c1"]);
+    // exclude side: `v1..HEAD` excludes c1 and its ancestors → c3, c2.
+    assert_eq!(subjects(root, x, &["v1..HEAD"]), ["c3", "c2"]);
+}
+
+#[test]
 fn log_bad_revision_errors() {
     let (td, xdg) = repo_with_four();
     let out = run_in(td.path(), xdg.path(), &["log", "no-such-ref"]);

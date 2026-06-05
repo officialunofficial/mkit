@@ -143,7 +143,9 @@ History / commits:
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
   is `A..HEAD` and `..B` is `HEAD..B`). Commits are ordered
   reverse-chronologically with a topological tie-break (a parent never
-  precedes a child), matching git; `A...B` symmetric ranges are not yet
+  precedes a child) — git's `--date-order`, which matches git's default for
+  linear and monotonic-timestamp history (it can differ only on merge DAGs
+  with skewed/imported timestamps). `A...B` symmetric ranges are not yet
   supported (#252). The default format prints the **full commit message
   body**, indented by four spaces, and renders the timestamp as a stable
   UTC date in the form `YYYY-MM-DD HH:MM:SS +0000`. `--oneline` condenses

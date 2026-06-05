@@ -67,7 +67,7 @@ creeping; revisit post-v1 if demand warrants.
 | `diff` | byte-exact hunks (Myers/histogram) | LCS unified diff | 🔨 | 4 | #257 | header is `diff --mkit`, not `diff --git` |
 | `commit` | `-m`, `-a`, `--amend`, `--author` | same | ✅ | — | — | signed; amend leaves unreachable obj until gc |
 | `log` | history, `-n`, `--format=json`, `--oneline`, `--abbrev-commit`, `--abbrev[=N]` | same | ✅ | 0 | #248 | `--oneline`/`--abbrev-commit` abbreviate (default 7); abbreviated id is a BLAKE3 prefix |
-| `log` | `<rev>`, `<a>..<b>` range walk | same | ✅ | 1 | #249 | `<rev>` start, `A..B`/`A..`/`..B` ranges; reverse-chrono + topological order like git; `A...B` deferred to #252 |
+| `log` | `<rev>`, `<a>..<b>` range walk | same | ✅ | 1 | #249 | `<rev>` start (annotated tags peeled), `A..B`/`A..`/`..B` ranges; reverse-chrono + topological order = git `--date-order` (matches git default for linear/monotonic-timestamp history); `A...B` deferred to #252 |
 | `log` | `--graph` | `--graph` is a no-op | 🔨 | 1 | #249 | real ASCII graph pending (mkit's default body also diverges) |
 | `branch` | create, list, `-v`, `-d`/`-D`/`-m` | same | ✅ | 1 | #249 | default list is `<marker> <name>` (no id, like git); `-v` adds abbreviated id + subject; `-D <missing>` errors like git (no silent no-op). Prior Phase-1 divergences reconciled. |
 | `checkout` | switch branch, restore files | same | ✅ | — | — | guarded against clobber |
