@@ -20,11 +20,14 @@ _mkit() {
         'reset:Move HEAD (--soft) or HEAD + index (--mixed) to a commit'
         'hash:Hash a file and store it as a blob'
         'cat:Display an object by its hash'
-        'cat-file:Show an object'\''s type (-t), size (-s), or content (-p)'
+        'cat-file:Show an object'\''s type (-t), size (-s), content (-p), or --batch'
         'tree:Snapshot working directory as a tree object'
         'ls-tree:List a tree'\''s entries (-r recurse, -z NUL)'
+        'ls-files:List tracked or untracked files'
         'rev-parse:Resolve revisions to object ids'
         'show-ref:List refs as <hash> <refname> (--heads/--tags)'
+        'for-each-ref:Iterate refs with an optional --format'
+        'symbolic-ref:Read a symbolic ref (e.g. HEAD)'
         'commit:Create a signed commit'
         'log:Show commit history'
         'reflog:Show a branch movement history (read-only)'
@@ -135,9 +138,10 @@ _mkit() {
                     ;;
                 cat-file)
                     _arguments \
-                        '(-t -s -p)-t[print object type]' \
-                        '(-t -s -p)-s[print object size]' \
-                        '(-t -s -p)-p[pretty-print object content]' \
+                        '(-t -s -p --batch)-t[print object type]' \
+                        '(-t -s -p --batch)-s[print object size]' \
+                        '(-t -s -p --batch)-p[pretty-print object content]' \
+                        '(-t -s -p --batch)--batch[read object names from stdin]' \
                         '--help[show help]' \
                         '*:object:'
                     ;;
@@ -147,6 +151,15 @@ _mkit() {
                         '-z[NUL-terminate records, raw paths]' \
                         '--help[show help]' \
                         '*:tree-ish:'
+                    ;;
+                ls-files)
+                    _arguments \
+                        '(-s --stage)'{-s,--stage}'[show stage info]' \
+                        '-z[NUL-terminate records, raw paths]' \
+                        '--others[list untracked worktree files]' \
+                        '--ignored[show only ignored files]' \
+                        '--exclude-standard[drop .mkitignore-ignored files]' \
+                        '--help[show help]'
                     ;;
                 rev-parse)
                     _arguments \
@@ -162,6 +175,18 @@ _mkit() {
                         '--heads[only refs/heads]' \
                         '--tags[only refs/tags]' \
                         '--help[show help]'
+                    ;;
+                for-each-ref)
+                    _arguments \
+                        '--format=[output format with %(atom) tokens]:fmt:' \
+                        '--help[show help]' \
+                        '*:pattern:'
+                    ;;
+                symbolic-ref)
+                    _arguments \
+                        '--short[print the short ref name]' \
+                        '--help[show help]' \
+                        '*:name:'
                     ;;
                 status)
                     _arguments \

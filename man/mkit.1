@@ -190,7 +190,7 @@ and print the resulting BLAKE3 hash on stdout.
 Decode and print the object identified by
 .Ar hash
 on stdout.
-.It Cm cat-file Brq Fl t | Fl s | Fl p Ar object
+.It Cm cat-file Bro Fl t | Fl s | Fl p Brc Ar object | Cm cat-file Fl Fl batch
 Inspect a stored object (read-only plumbing, like
 .Xr git 1 Cm cat-file ) .
 .Fl t
@@ -203,6 +203,11 @@ trees/commits), and
 pretty-prints (blob bytes, a tree as
 .Ql <mode> <type> <hash>\et<name>
 lines, or a commit/tag summary).
+.Fl Fl batch
+reads object names from stdin (one per line) and emits a
+.Ql <hash> <type> <size>
+header plus the content for each
+.Pq Ql <name> missing No for unknown objects .
 .Ar object
 resolves through the shared revspec grammar.
 .It Cm tree
@@ -220,6 +225,24 @@ List a tree's entries as
 recurses (leaf blobs with full paths, no tree lines);
 .Fl z
 NUL-terminates records with raw paths.
+.It Cm ls-files Oo Fl s Oc Oo Fl z Oc Oo Fl Fl others Oc Oo Fl Fl ignored Oc Op Fl Fl exclude-standard
+List files in the index or untracked worktree files (like
+.Xr git 1 Cm ls-files ) .
+Default prints tracked paths, sorted.
+.Fl s
+adds stage info
+.Pq Ql <mode> <hash> <stage>\et<path> , No stage always 0 ;
+.Fl Fl others
+lists untracked files instead;
+.Fl Fl exclude-standard
+drops
+.Pa .mkitignore Ns -ignored
+files and
+.Fl Fl ignored
+shows only those
+.Pq Fl Fl ignored No requires Fl Fl others ;
+.Fl z
+NUL-terminates records with raw paths.
 .It Cm rev-parse Oo Fl Fl verify Oc Oo Fl Fl short Ns Op = Ns Ar N Oc Oo Fl Fl abbrev-ref Oc Oo Fl Fl show-toplevel Oc Op Ar rev ...
 Resolve revisions to object ids.
 .Fl Fl short
@@ -234,6 +257,26 @@ List refs as
 sorted by name.
 .Fl Fl heads Ns / Ns Fl Fl tags
 filter to that namespace.
+.It Cm for-each-ref Oo Fl Fl format Ns = Ns Ar fmt Oc Op Ar pattern ...
+Iterate refs (heads and tags), sorted by name (like
+.Xr git 1 Cm for-each-ref ) .
+The default line is
+.Ql <objectname> <objecttype>\et<refname> ;
+.Fl Fl format
+substitutes
+.Ql %(atom)
+tokens
+.Pq Cm refname , refname:short , objectname , objectname:short , objecttype .
+Optional
+.Ar pattern
+arguments filter by ref-name prefix.
+.It Cm symbolic-ref Oo Fl Fl short Oc Ar name
+Read a symbolic ref (currently only
+.Cm HEAD ) ,
+printing its target
+.Pq Ql refs/heads/main , No or Ql main No with Fl Fl short .
+Errors when HEAD is detached. Writing symbolic refs is a later
+parity phase.
 .It Cm commit Oo Fl a | Fl Fl all Oc Op Fl Fl amend Op Fl m Ar message
 Create a signed commit. With
 .Fl a

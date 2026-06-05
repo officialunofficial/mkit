@@ -179,14 +179,19 @@ History / commits:
 
 Read-only plumbing (object/ref inspection, for scripts and agents):
 
-- `mkit cat-file (-t | -s | -p) <object>` — inspect a stored object (like
-  `git cat-file`). `-t` prints the type (`blob`/`tree`/`commit`/`tag`;
-  mkit's `remix` is the one non-git type); `-s` prints the size (the
-  content byte length for blobs — matching git — but mkit's serialized
-  size for trees/commits, which differs); `-p` pretty-prints (a blob's raw
-  bytes, a tree as `<mode> <type> <hash>\t<name>` lines, or a readable
-  commit/tag summary). `<object>` resolves through the shared revspec
-  grammar (hash, ref, `HEAD`, `HEAD~n`/`^`).
+- `mkit cat-file (-t | -s | -p) <object>` / `mkit cat-file --batch` —
+  inspect a stored object (like `git cat-file`). `-t` prints the type
+  (`blob`/`tree`/`commit`/`tag`; mkit's `remix` is the one non-git type);
+  `-s` prints the size (the content byte length for blobs — matching git —
+  but mkit's serialized size for trees/commits, which differs); `-p`
+  pretty-prints (a blob's raw bytes, a tree as `<mode> <type> <hash>\t<name>`
+  lines, or a readable commit/tag summary). `--batch` reads object names
+  from stdin (one per line) and emits, per object, a `<hash> <type> <size>`
+  header line followed by the content and a trailing newline (`<name>
+  missing` for unknown objects); `<size>` is the byte length of the content
+  that follows, so blobs are byte-exact with git while commit/tree content
+  (and its size) is mkit-shaped, as with `-p`. `<object>` resolves through
+  the shared revspec grammar (hash, ref, `HEAD`, `HEAD~n`/`^`).
 - `mkit ls-tree [-r] [-z] <tree-ish> [<path>...]` — list a tree's entries
   as `<mode> <type> <hash>\t<name>` (git octal modes
   `100644`/`100755`/`120000`/`040000`; the hash is 64-hex BLAKE3). `-r`
@@ -194,6 +199,16 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   (like git); `-z` NUL-terminates records and emits raw paths (otherwise
   special-byte paths are C-style quoted). Trailing pathspecs limit the
   listing.
+- `mkit ls-files [-s] [-z] [--others] [--ignored] [--exclude-standard]` —
+  list files in the index or untracked worktree files (like
+  `git ls-files`). Default prints tracked paths, one per line, sorted. `-s`
+  (`--stage`) prints stage info as `<mode> <hash> <stage>\t<path>` (git
+  octal mode; `<stage>` is always `0` — mkit has no merge stages). `--others`
+  lists untracked worktree files instead; `--exclude-standard` drops
+  `.mkitignore`-ignored ones and `--ignored` inverts to show only ignored
+  files (`--ignored` requires `--others`, like git's `-i` outside an
+  `-o`/`-c` selection). `-z` NUL-terminates records and emits raw paths
+  (otherwise special-byte paths — including under `-s` — are C-style quoted).
 - `mkit rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
   — resolve revisions to object ids. Bare `<rev>...` prints each resolved
   64-hex id; `--short[=N]` abbreviates (default 7, a BLAKE3 prefix);
@@ -203,6 +218,18 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
 - `mkit show-ref [--heads] [--tags]` — list refs as `<hash> <refname>`,
   sorted by ref name. Default shows both `refs/heads/*` and `refs/tags/*`;
   `--heads`/`--tags` filter to one namespace.
+- `mkit for-each-ref [--format=<fmt>] [<pattern>...]` — iterate refs (heads
+  and tags), sorted by ref name (like `git for-each-ref`). The default line
+  is `<objectname> <objecttype>\t<refname>`. `--format` substitutes
+  `%(atom)` tokens (`refname`, `refname:short`, `objectname`,
+  `objectname:short`, `objecttype`; `%%` is a literal `%`); the object id is
+  64-hex BLAKE3. Optional `<pattern>` arguments filter to refs whose full
+  name equals or is under each pattern.
+- `mkit symbolic-ref [--short] <name>` — read a symbolic ref (currently only
+  `HEAD`), like `git symbolic-ref`. Prints the full target ref
+  (`refs/heads/main`), or just the branch name with `--short`. Errors when
+  HEAD is detached / not symbolic. Writing symbolic refs is a later parity
+  phase (#252).
 
 Attestations:
 

@@ -38,17 +38,25 @@ commands:
                     refuses to discard dirty/staged content without -f
   hash <file>       Hash a file and store it as a blob
   cat <hash>        Display an object by its hash
-  cat-file (-t|-s|-p) <object>  Show an object's type, size, or content
-                    (-p: blob bytes, tree listing, or commit/tag summary)
+  cat-file (-t|-s|-p) <object> | cat-file --batch
+                    Show an object's type, size, or content
+                    (-p: blob bytes, tree listing, or commit/tag summary;
+                    --batch reads object names from stdin, takes no <object>)
   tree              Snapshot working directory as a tree object
   ls-tree [-r] [-z] <tree-ish> [<path>...]
                     List a tree's entries as `<mode> <type> <hash>\t<name>`
                     (-r recurses; -z NUL-terminates with raw paths)
+  ls-files [-s] [-z] [--others] [--ignored] [--exclude-standard]
+                    List tracked files (-s adds stage info; --others lists
+                    untracked; --exclude-standard drops ignored)
   rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]
                     Resolve revisions to object ids (--short abbreviates,
                     --abbrev-ref HEAD prints the branch, --show-toplevel
                     prints the repo root)
   show-ref [--heads] [--tags]  List refs as `<hash> <refname>`
+  for-each-ref [--format=<fmt>] [<pattern>...]
+                    Iterate refs, optionally with a %(atom) format string
+  symbolic-ref [--short] <name>  Read a symbolic ref (e.g. HEAD)
   commit [-a] [--amend] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
@@ -210,8 +218,11 @@ mod tests {
             "cat-file",
             "tree",
             "ls-tree",
+            "ls-files",
             "rev-parse",
             "show-ref",
+            "for-each-ref",
+            "symbolic-ref",
             "commit",
             "log",
             "reflog",
