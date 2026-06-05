@@ -177,6 +177,33 @@ History / commits:
 - `mkit hash <file>` — hash a file and store it as a blob.
 - `mkit tree` — snapshot the working directory as a tree object.
 
+Read-only plumbing (object/ref inspection, for scripts and agents):
+
+- `mkit cat-file (-t | -s | -p) <object>` — inspect a stored object (like
+  `git cat-file`). `-t` prints the type (`blob`/`tree`/`commit`/`tag`;
+  mkit's `remix` is the one non-git type); `-s` prints the size (the
+  content byte length for blobs — matching git — but mkit's serialized
+  size for trees/commits, which differs); `-p` pretty-prints (a blob's raw
+  bytes, a tree as `<mode> <type> <hash>\t<name>` lines, or a readable
+  commit/tag summary). `<object>` resolves through the shared revspec
+  grammar (hash, ref, `HEAD`, `HEAD~n`/`^`).
+- `mkit ls-tree [-r] [-z] <tree-ish> [<path>...]` — list a tree's entries
+  as `<mode> <type> <hash>\t<name>` (git octal modes
+  `100644`/`100755`/`120000`/`040000`; the hash is 64-hex BLAKE3). `-r`
+  recurses, showing leaf blobs with full paths and omitting tree lines
+  (like git); `-z` NUL-terminates records and emits raw paths (otherwise
+  special-byte paths are C-style quoted). Trailing pathspecs limit the
+  listing.
+- `mkit rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
+  — resolve revisions to object ids. Bare `<rev>...` prints each resolved
+  64-hex id; `--short[=N]` abbreviates (default 7, a BLAKE3 prefix);
+  `--abbrev-ref HEAD` prints the current branch; `--verify` errors on an
+  unresolvable revision; `--show-toplevel` prints the repository root (the
+  directory holding `.mkit`, found by walking up from cwd).
+- `mkit show-ref [--heads] [--tags]` — list refs as `<hash> <refname>`,
+  sorted by ref name. Default shows both `refs/heads/*` and `refs/tags/*`;
+  `--heads`/`--tags` filter to one namespace.
+
 Attestations:
 
 - `mkit attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>]

@@ -837,6 +837,123 @@ fn branch_delete_missing_fails_like_git() {
 }
 
 // =====================================================================
+// Passing subset — read-only plumbing (#251, Phase 3). rev-parse /
+// show-ref / ls-tree output is parity-able modulo hash length; cat-file
+// on a blob is byte-exact (type / size / content carry no object id).
+// =====================================================================
+
+#[test]
+fn rev_parse_head_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"x\n");
+    h.commit_both(&["a.txt"], "init");
+    // Full HEAD id (masked) and the symbolic branch name both match.
+    assert_parity_ordered(
+        "rev-parse HEAD",
+        &h.git(&["rev-parse", "HEAD"]),
+        &h.mkit(&["rev-parse", "HEAD"]),
+    );
+    assert_parity_bytes(
+        "rev-parse --abbrev-ref HEAD",
+        &h.git(&["rev-parse", "--abbrev-ref", "HEAD"]),
+        &h.mkit(&["rev-parse", "--abbrev-ref", "HEAD"]),
+    );
+}
+
+#[test]
+fn show_ref_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"x\n");
+    h.commit_both(&["a.txt"], "init");
+    assert!(h.git(&["tag", "v1"]).status.success());
+    assert!(h.mkit(&["tag", "v1"]).status.success());
+    // `<oid> refs/heads/main` + `<oid> refs/tags/v1`, sorted by refname.
+    assert_parity_ordered("show-ref", &h.git(&["show-ref"]), &h.mkit(&["show-ref"]));
+    assert_parity_ordered(
+        "show-ref --heads",
+        &h.git(&["show-ref", "--heads"]),
+        &h.mkit(&["show-ref", "--heads"]),
+    );
+}
+
+#[test]
+fn ls_tree_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("file.txt", b"hello\n");
+    h.write_both("sub/inner.txt", b"nested\n");
+    h.commit_both(&["file.txt", "sub/inner.txt"], "init");
+    // Non-recursive: file + `sub` as a tree line. Recursive: leaf blobs
+    // with full paths, no tree lines. Both modulo hash length.
+    assert_parity_ordered(
+        "ls-tree HEAD",
+        &h.git(&["ls-tree", "HEAD"]),
+        &h.mkit(&["ls-tree", "HEAD"]),
+    );
+    assert_parity_ordered(
+        "ls-tree -r HEAD",
+        &h.git(&["ls-tree", "-r", "HEAD"]),
+        &h.mkit(&["ls-tree", "-r", "HEAD"]),
+    );
+}
+
+#[test]
+fn cat_file_blob_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("file.txt", b"hello\n");
+    h.commit_both(&["file.txt"], "init");
+    // Extract each tool's blob hash for file.txt from its own ls-tree
+    // (`<mode> blob <hash>\tfile.txt`).
+    let git_blob = blob_hash_from_ls_tree(&stdout(&h.git(&["ls-tree", "HEAD"])), "file.txt");
+    let mkit_blob = blob_hash_from_ls_tree(&stdout(&h.mkit(&["ls-tree", "HEAD"])), "file.txt");
+    // type / size / content are object-id-free → byte-exact parity.
+    assert_parity_bytes(
+        "cat-file -t blob",
+        &h.git(&["cat-file", "-t", &git_blob]),
+        &h.mkit(&["cat-file", "-t", &mkit_blob]),
+    );
+    assert_parity_bytes(
+        "cat-file -s blob",
+        &h.git(&["cat-file", "-s", &git_blob]),
+        &h.mkit(&["cat-file", "-s", &mkit_blob]),
+    );
+    assert_parity_bytes(
+        "cat-file -p blob",
+        &h.git(&["cat-file", "-p", &git_blob]),
+        &h.mkit(&["cat-file", "-p", &mkit_blob]),
+    );
+}
+
+/// Pull the `<hash>` field for `name` out of `ls-tree` output
+/// (`<mode> <type> <hash>\t<name>`).
+fn blob_hash_from_ls_tree(out: &str, name: &str) -> String {
+    for line in out.lines() {
+        let Some((meta, path)) = line.split_once('\t') else {
+            continue;
+        };
+        if path == name {
+            return meta.split_whitespace().nth(2).unwrap_or("").to_string();
+        }
+    }
+    panic!("no ls-tree entry for {name} in: {out:?}");
+}
+
+// =====================================================================
 // Pending rows — ignored until the owning phase ships them. Each carries
 // the comparison so un-ignoring is a one-line change once implemented.
 // =====================================================================

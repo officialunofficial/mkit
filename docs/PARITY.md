@@ -85,11 +85,11 @@ creeping; revisit post-v1 if demand warrants.
 
 | Command | Git-compatible subset (in scope) | mkit current state | Status | Phase | Issue | Notes |
 |---------|----------------------------------|--------------------|--------|-------|-------|-------|
-| `rev-parse` | `--verify`, `--short`, `--abbrev-ref`, `--show-toplevel` | absent | 🔨 | 3 | #251 | whole command lands in Phase 3 (not split) |
-| `cat-file` | `-p`, `-t`, `-s`, `--batch` | `cat <hash>` exists | 🔨 | 3 | #251 | extends existing `cat` |
+| `rev-parse` | `--verify`, `--short`, `--abbrev-ref`, `--show-toplevel` | same | ✅ | 3 | #251 | id is 64-hex BLAKE3 (vs 40-hex SHA-1); `--short` = BLAKE3 prefix |
+| `cat-file` | `-t`, `-s`, `-p` | same | ✅ | 3 | #251 | `-s`/`-p` byte-exact for blobs; tree `-p` is `<mode> <type> <hash>\t<name>` (modulo hash); commit/tag `-p` and `remix` type are mkit-shaped. `--batch` is a follow-up |
 | `ls-files` | `-s`, `-z`, `--others`, `--ignored`, `--exclude-standard` | absent | 🔨 | 3 | #251 | |
-| `ls-tree` | `-r`, `-z` | `tree` (native) exists | 🔨 | 3 | #251 | |
-| `show-ref` | `--heads`, `--tags` | absent | 🔨 | 3 | #251 | |
+| `ls-tree` | `-r`, `-z` | same | ✅ | 3 | #251 | `<mode> <type> <hash>\t<name>` modulo hash length; `-r` omits tree lines like git; `-z` raw NUL |
+| `show-ref` | `--heads`, `--tags` | same | ✅ | 3 | #251 | `<hash> <refname>` sorted, modulo hash length |
 | `for-each-ref` | `--format` | absent | 🔨 | 3 | #251 | |
 | `show` | object/commit display | partial via `cat`/`log` | 🔨 | 3 | #251 | |
 | `symbolic-ref` | read | partial (HEAD handling) | 🔨 | 3 | #251 | read in Phase 3 |
