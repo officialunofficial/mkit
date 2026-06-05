@@ -129,6 +129,43 @@ fn reset_hard_removes_tracked_file_absent_from_target_keeps_untracked() {
     assert!(root.join("untracked.txt").exists(), "untracked file kept");
 }
 
+#[cfg(unix)]
+#[test]
+fn reset_hard_refuses_discarding_mode_only_change_to_ignored_tracked_dropped_file() {
+    // Finding 1 (mode case): a chmod-only change has the same content hash,
+    // so the dropped-path guard must compare mode/type too, not just bytes.
+    use std::os::unix::fs::PermissionsExt;
+    let (td, xdg) = repo(&[("base.txt", b"base\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join("hook.sh"), b"#!/bin/sh\n").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    assert!(
+        run_in(root, x, &["commit", "-m", "add hook"])
+            .status
+            .success()
+    );
+    fs::write(root.join(".mkitignore"), b"*.sh\n").unwrap();
+    assert!(run_in(root, x, &["add", ".mkitignore"]).status.success());
+    assert!(
+        run_in(root, x, &["commit", "-m", "ignore sh"])
+            .status
+            .success()
+    );
+    // chmod +x — same content, different mode.
+    let p = root.join("hook.sh");
+    let mut perm = fs::metadata(&p).unwrap().permissions();
+    perm.set_mode(0o755);
+    fs::set_permissions(&p, perm).unwrap();
+
+    // HEAD~2 drops hook.sh; the mode change must be protected without -f.
+    let refused = run_in(root, x, &["reset", "--hard", "HEAD~2"]);
+    assert!(
+        !refused.status.success(),
+        "reset --hard must refuse to discard a mode-only change without -f: {refused:?}"
+    );
+    assert!(root.join("hook.sh").exists(), "the file must be untouched");
+}
+
 // ---------------------------------------------------------------------------
 // clean
 // ---------------------------------------------------------------------------

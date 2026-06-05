@@ -281,9 +281,11 @@ Branches / refs:
   untouched (git needs the double-force `-ff` to remove one, which mkit
   doesn't offer). `-x` also removes ignored files, `-X` removes *only*
   ignored (`-x` and `-X` are mutually exclusive). Trailing pathspecs limit
-  the scope (`.` means everything under cwd). Ignore matching uses mkit's
-  `.mkitignore` matcher (basename-based subset pending the `.gitignore`
-  upgrade, #256).
+  the scope to matching top-level entries and whole directories (`.` means
+  everything under cwd); a pathspec naming a file *inside* an otherwise
+  fully-removable untracked directory is a known limitation — name the
+  directory or use `.`. Ignore matching uses mkit's `.mkitignore` matcher
+  (basename-based subset pending the `.gitignore` upgrade, #256).
 - `mkit tag` — list, create, or delete tags.
   - `mkit tag` (no args) — list tags; annotated/signed tags are marked.
   - `mkit tag <name> [<commit>]` — create a lightweight tag (a ref
