@@ -67,6 +67,9 @@ pub fn run(args: &[String]) -> u8 {
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
     if opts.batch {
+        if opts.object.is_some() {
+            return super::usage_error("mkit cat-file --batch takes no object argument");
+        }
         return run_batch(&store, &mkit_dir);
     }
     if !(opts.type_ || opts.size || opts.pretty) {

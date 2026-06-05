@@ -295,6 +295,73 @@ fn ls_files_others_and_ignored_filters() {
 }
 
 #[test]
+fn ls_files_ignored_without_others_errors() {
+    // `--ignored` only filters the `--others` walk; alone it must fail
+    // closed (git rejects `-i` outside an `-o`/`-c` selection) rather than
+    // silently printing the tracked listing.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let out = run_in(root, x, &["ls-files", "--ignored"]);
+    assert!(
+        !out.status.success(),
+        "ls-files --ignored without --others must error: {out:?}"
+    );
+    assert!(out.stdout.is_empty(), "no tracked listing leaked: {out:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn ls_files_stage_quotes_special_paths() {
+    // `-s` (no `-z`) must C-quote special-byte pathnames like the default
+    // listing does — git's `core.quotePath` default.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join("a\tb.txt"), b"x\n").unwrap();
+    assert!(run_in(root, x, &["add", "a\tb.txt"]).status.success());
+    let staged = out_str(&run_in(root, x, &["ls-files", "-s"]));
+    assert!(
+        staged.contains("\t\"a\\tb.txt\""),
+        "tab path C-quoted in -s output: {staged:?}"
+    );
+    // `-z` keeps the raw byte (no quoting, NUL-terminated).
+    let z = run_in(root, x, &["ls-files", "-s", "-z"]);
+    let raw = String::from_utf8_lossy(&z.stdout);
+    assert!(
+        raw.contains("\ta\tb.txt\0"),
+        "raw tab path under -z: {raw:?}"
+    );
+}
+
+#[test]
+fn cat_file_batch_rejects_object_argument() {
+    // git: "batch modes take no arguments". A stray object arg must error,
+    // not silently ignore it.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let out = run_in(root, x, &["cat-file", "--batch", "HEAD"]);
+    assert!(
+        !out.status.success(),
+        "cat-file --batch with an object arg must error: {out:?}"
+    );
+}
+
+#[test]
+fn for_each_ref_pattern_with_trailing_slash_matches() {
+    // Both `refs/heads` and `refs/heads/` must select branch refs (the
+    // trailing slash must not turn into an empty `refs/heads//` component).
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(run_in(root, x, &["tag", "v1"]).status.success());
+    for pattern in ["refs/heads", "refs/heads/"] {
+        let out = out_str(&run_in(root, x, &["for-each-ref", pattern]));
+        assert!(
+            out.contains("\trefs/heads/main") && !out.contains("refs/tags/"),
+            "pattern {pattern:?} should list only branch refs: {out:?}"
+        );
+    }
+}
+
+#[test]
 fn for_each_ref_default_and_format() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());

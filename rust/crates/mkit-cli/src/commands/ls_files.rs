@@ -36,7 +36,7 @@ struct LsFilesOpts {
     /// Drop `.mkitignore`-ignored files (with `--others`).
     #[arg(long = "exclude-standard")]
     exclude_standard: bool,
-    /// Show only ignored files (with `--others`).
+    /// Show only ignored files (requires `--others`).
     #[arg(long)]
     ignored: bool,
 }
@@ -59,6 +59,13 @@ pub fn run(args: &[String]) -> u8 {
         Ok(i) => i,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
+
+    // `--ignored` (and an exclude filter) only mean something for the
+    // `--others` walk; git rejects `-i` outside an `-o`/`-c` selection rather
+    // than silently printing the tracked listing, so we fail closed too.
+    if opts.ignored && !opts.others {
+        return super::usage_error("mkit ls-files --ignored must be used with --others");
+    }
 
     let mut stdout = std::io::stdout().lock();
     let sep = if opts.z { '\0' } else { '\n' };
@@ -89,11 +96,13 @@ pub fn run(args: &[String]) -> u8 {
     for e in entries {
         if opts.stage {
             let mode = git_mode(e.status);
+            // Like the default listing, the `-s` pathname is C-style quoted
+            // when not in `-z` mode (git's `core.quotePath` default).
             let _ = write!(
                 stdout,
                 "{mode} {} 0\t{}{sep}",
                 format::hex_hash(&e.object_hash),
-                e.path
+                shown_path(&e.path, opts.z)
             );
         } else {
             write_path(&mut stdout, &e.path, opts.z, sep);
@@ -102,14 +111,21 @@ pub fn run(args: &[String]) -> u8 {
     exit::OK
 }
 
-fn write_path(out: &mut impl Write, path: &str, z: bool, sep: char) {
+/// The displayed form of a path: raw bytes under `-z`, otherwise git-style
+/// C-quoted when it contains special bytes.
+fn shown_path(path: &str, z: bool) -> std::borrow::Cow<'_, str> {
     if z {
-        let _ = write!(out, "{path}{sep}");
+        std::borrow::Cow::Borrowed(path)
     } else {
-        // git ls-files C-style quotes special-byte paths by default.
-        let shown = super::c_quote_path(path);
-        let _ = write!(out, "{}{sep}", shown.as_deref().unwrap_or(path));
+        match super::c_quote_path(path) {
+            Some(q) => std::borrow::Cow::Owned(q),
+            None => std::borrow::Cow::Borrowed(path),
+        }
     }
+}
+
+fn write_path(out: &mut impl Write, path: &str, z: bool, sep: char) {
+    let _ = write!(out, "{}{sep}", shown_path(path, z));
 }
 
 /// git octal mode for a tracked index entry.

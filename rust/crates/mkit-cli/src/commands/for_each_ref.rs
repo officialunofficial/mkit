@@ -74,7 +74,7 @@ pub fn run(args: &[String]) -> u8 {
         rows.retain(|r| {
             opts.patterns
                 .iter()
-                .any(|p| r.refname == *p || r.refname.starts_with(&format!("{p}/")))
+                .any(|p| ref_matches_pattern(&r.refname, p))
         });
     }
 
@@ -90,6 +90,15 @@ pub fn run(args: &[String]) -> u8 {
         let _ = writeln!(stdout, "{line}");
     }
     exit::OK
+}
+
+/// git matches a ref against a literal pattern either completely or up to a
+/// `/` boundary, so `refs/heads` and `refs/heads/` both select every branch
+/// ref. Trim a trailing `/` from the pattern so it doesn't become an empty
+/// (always-failing) `refs/heads//` component.
+fn ref_matches_pattern(refname: &str, pattern: &str) -> bool {
+    let p = pattern.trim_end_matches('/');
+    refname == p || refname.starts_with(&format!("{p}/"))
 }
 
 fn push_rows(store: &ObjectStore, out: &mut Vec<RefRow>, rs: &[refs::Ref], prefix: &str) {

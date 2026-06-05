@@ -206,8 +206,9 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   octal mode; `<stage>` is always `0` — mkit has no merge stages). `--others`
   lists untracked worktree files instead; `--exclude-standard` drops
   `.mkitignore`-ignored ones and `--ignored` inverts to show only ignored
-  files. `-z` NUL-terminates records and emits raw paths (otherwise
-  special-byte paths are C-style quoted).
+  files (`--ignored` requires `--others`, like git's `-i` outside an
+  `-o`/`-c` selection). `-z` NUL-terminates records and emits raw paths
+  (otherwise special-byte paths — including under `-s` — are C-style quoted).
 - `mkit rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
   — resolve revisions to object ids. Bare `<rev>...` prints each resolved
   64-hex id; `--short[=N]` abbreviates (default 7, a BLAKE3 prefix);
