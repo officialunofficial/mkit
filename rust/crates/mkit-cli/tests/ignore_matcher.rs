@@ -249,6 +249,33 @@ fn tracked_file_matching_gitignore_stays_visible_and_restages() {
 }
 
 #[test]
+fn tracked_ignored_file_not_deleted_in_status_without_index_file() {
+    // The seed-from-HEAD path: with NO on-disk index (as right after a
+    // checkout), a tracked file matching .gitignore must still be recognized
+    // as tracked, not reported as a deletion.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join("debug.log"), b"v1\n").unwrap();
+    assert!(run_in(root, x, &["add", "debug.log"]).status.success());
+    assert!(
+        run_in(root, x, &["commit", "-m", "track log"])
+            .status
+            .success()
+    );
+    fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    // Simulate a fresh checkout: remove the staging index file entirely.
+    let _ = fs::remove_file(root.join(".mkit").join("index"));
+
+    let status = out_str(&run_in(root, x, &["status", "--porcelain"]));
+    assert!(
+        !status
+            .lines()
+            .any(|l| l.contains("debug.log") && l.trim_start().starts_with('D')),
+        "tracked file matching .gitignore must not show as deleted without an index file: {status:?}"
+    );
+}
+
+#[test]
 fn clean_fd_keeps_untracked_sibling_in_ignored_dir_with_tracked_content() {
     // An ignored directory that ALSO holds tracked content must still shield
     // its untracked siblings from `clean -fd` (without -x). Guards the

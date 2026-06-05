@@ -232,7 +232,12 @@ pub fn run(args: &[String]) -> u8 {
 fn add_whole_worktree(root: &Path, store: &ObjectStore, idx: &mut Index) -> Result<(), u8> {
     let ignores = match ignore::load(root) {
         Ok(i) => i,
-        Err(e) => return Err(emit_err(&format!(".mkitignore: {e}"), exit::GENERAL_ERROR)),
+        Err(e) => {
+            return Err(emit_err(
+                &format!("read ignore file: {e}"),
+                exit::GENERAL_ERROR,
+            ));
+        }
     };
     let mut seen = HashSet::new();
     add_tree(root, root, false, store, idx, &ignores, &mut seen)?;

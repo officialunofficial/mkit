@@ -432,9 +432,11 @@ pub fn ensure_abort_safe(
         ));
     }
 
-    // Unstaged worktree edits on a non-conflict path.
-    let worktree_tree =
-        mkit_core::worktree::build_tree(store, root).map_err(|e| format!("check worktree: {e}"))?;
+    // Unstaged worktree edits on a non-conflict path. Pass the seeded index
+    // as the tracked set so a tracked file matching an ignore rule isn't
+    // dropped from the snapshot and misread as a deletion.
+    let worktree_tree = mkit_core::worktree::build_tree_filtered(store, root, Some(&idx))
+        .map_err(|e| format!("check worktree: {e}"))?;
     let unstaged = mkit_core::ops::diff::diff_trees(store, Some(index_tree), Some(worktree_tree))
         .map_err(|e| format!("check worktree: {e}"))?;
     if let Some(entry) = unstaged
