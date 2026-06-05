@@ -15,7 +15,7 @@
 complete -c mkit -f
 
 set -l __mkit_subcommands \
-    init add rm mv restore reset hash cat cat-file tree ls-tree rev-parse show-ref commit log reflog status diff branch checkout clean \
+    init add rm mv restore reset hash cat cat-file tree ls-tree ls-files rev-parse show-ref for-each-ref symbolic-ref commit log reflog status diff branch checkout clean \
     tag config merge push pull fetch stash clone remote key keygen \
     cherry-pick revert rebase bisect gc sparse-checkout serve pack-shard blame verify \
     attest verify-attest version help
@@ -87,10 +87,22 @@ complete -c mkit -n "__fish_seen_subcommand_from cat-file" \
     -s s -d "Print object size"
 complete -c mkit -n "__fish_seen_subcommand_from cat-file" \
     -s p -d "Pretty-print object content"
+complete -c mkit -n "__fish_seen_subcommand_from cat-file" \
+    -l batch -d "Read object names from stdin"
 complete -c mkit -n "__fish_seen_subcommand_from ls-tree" \
     -s r -d "Recurse into sub-trees"
 complete -c mkit -n "__fish_seen_subcommand_from ls-tree" \
     -s z -d "NUL-terminate records, raw paths"
+complete -c mkit -n "__fish_seen_subcommand_from ls-files" \
+    -s s -l stage -d "Show stage info"
+complete -c mkit -n "__fish_seen_subcommand_from ls-files" \
+    -s z -d "NUL-terminate records, raw paths"
+complete -c mkit -n "__fish_seen_subcommand_from ls-files" \
+    -l others -d "List untracked worktree files"
+complete -c mkit -n "__fish_seen_subcommand_from ls-files" \
+    -l ignored -d "Show only ignored files"
+complete -c mkit -n "__fish_seen_subcommand_from ls-files" \
+    -l exclude-standard -d "Drop .mkitignore-ignored files"
 complete -c mkit -n "__fish_seen_subcommand_from rev-parse" \
     -l verify -d "Error on an unresolvable revision"
 complete -c mkit -n "__fish_seen_subcommand_from rev-parse" \
@@ -103,6 +115,10 @@ complete -c mkit -n "__fish_seen_subcommand_from show-ref" \
     -l heads -d "Only refs/heads"
 complete -c mkit -n "__fish_seen_subcommand_from show-ref" \
     -l tags -d "Only refs/tags"
+complete -c mkit -n "__fish_seen_subcommand_from for-each-ref" \
+    -l format -d "Output format with %(atom) tokens"
+complete -c mkit -n "__fish_seen_subcommand_from symbolic-ref" \
+    -l short -d "Print the short ref name"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
     -l porcelain -d "Machine-readable XY output"
 complete -c mkit -n "__fish_seen_subcommand_from status" \

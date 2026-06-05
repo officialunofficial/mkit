@@ -8,7 +8,10 @@
 //!   which differs from git's (different object format);
 //! - `-p` — pretty-print: a blob's raw bytes, a tree as
 //!   `<mode> <type> <hash>\t<name>` lines (git-shaped, modulo hash length),
-//!   or a readable commit/tag/remix summary.
+//!   or a readable commit/tag/remix summary;
+//! - `--batch` — read object names from stdin (one per line) and emit, per
+//!   object, a `<hash> <type> <size>` header then the content (or
+//!   `<name> missing` for unknown objects).
 //!
 //! `<object>` is resolved through the shared revspec grammar (full/short
 //! hash, ref, `HEAD`, `HEAD~n`/`^`).
@@ -27,18 +30,24 @@ use crate::format;
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit cat-file", about = "Inspect a stored object.")]
+#[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct CatFileOpts {
     /// Print the object type.
-    #[arg(short = 't', conflicts_with_all = ["size", "pretty"])]
+    #[arg(short = 't', conflicts_with_all = ["size", "pretty", "batch"])]
     type_: bool,
     /// Print the object size.
-    #[arg(short = 's', conflicts_with = "pretty")]
+    #[arg(short = 's', conflicts_with_all = ["pretty", "batch"])]
     size: bool,
     /// Pretty-print the object content.
-    #[arg(short = 'p')]
+    #[arg(short = 'p', conflicts_with = "batch")]
     pretty: bool,
-    /// Object to inspect (hash, ref, HEAD, …).
-    object: String,
+    /// Batch mode: read object names from stdin, emitting
+    /// `<hash> <type> <size>` then content for each (`<name> missing` for
+    /// unknown objects).
+    #[arg(long)]
+    batch: bool,
+    /// Object to inspect (hash, ref, HEAD, …). Omitted in `--batch` mode.
+    object: Option<String>,
 }
 
 #[must_use]
@@ -47,9 +56,6 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
-    if !(opts.type_ || opts.size || opts.pretty) {
-        return super::usage_error("usage: mkit cat-file (-t | -s | -p) <object>");
-    }
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -60,9 +66,19 @@ pub fn run(args: &[String]) -> u8 {
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
-    let h = match revspec::resolve_revision(&store, &mkit_dir, &opts.object) {
+    if opts.batch {
+        return run_batch(&store, &mkit_dir);
+    }
+    if !(opts.type_ || opts.size || opts.pretty) {
+        return super::usage_error("usage: mkit cat-file (-t | -s | -p) <object>  |  --batch");
+    }
+    let Some(object) = opts.object.as_deref() else {
+        return super::usage_error("usage: mkit cat-file (-t | -s | -p) <object>");
+    };
+
+    let h = match revspec::resolve_revision(&store, &mkit_dir, object) {
         Ok(h) => h,
-        Err(e) => return emit_err(&format!("bad object '{}': {e}", opts.object), exit::DATAERR),
+        Err(e) => return emit_err(&format!("bad object '{object}': {e}"), exit::DATAERR),
     };
     let obj = match store.read_object(&h) {
         Ok(o) => o,
@@ -87,6 +103,53 @@ pub fn run(args: &[String]) -> u8 {
         Ok(()) => exit::OK,
         Err(msg) => emit_err(&msg, exit::GENERAL_ERROR),
     }
+}
+
+/// `--batch`: read object names (one per line) from stdin and emit, per
+/// object, a `<hash> <type> <size>` header line followed by the content and
+/// a trailing newline. Unknown objects print `<name> missing`, matching
+/// `git cat-file --batch`. `<size>` is the byte length of the content that
+/// follows, so blobs are byte-exact with git; commit/tree/tag content is
+/// mkit-shaped (and so is its size), as with `-p`.
+fn run_batch(store: &ObjectStore, mkit_dir: &std::path::Path) -> u8 {
+    use std::io::BufRead;
+
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout().lock();
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => return emit_err(&format!("read stdin: {e}"), exit::NOINPUT),
+        };
+        let name = line.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let Ok(h) = revspec::resolve_revision(store, mkit_dir, name) else {
+            let _ = writeln!(stdout, "{name} missing");
+            continue;
+        };
+        let Ok(obj) = store.read_object(&h) else {
+            let _ = writeln!(stdout, "{name} missing");
+            continue;
+        };
+        // Render content to a buffer so the advertised size is exactly the
+        // byte length we emit (self-consistent for every object type).
+        let mut buf: Vec<u8> = Vec::new();
+        if let Err(msg) = pretty_print(store, &h, &obj, &mut buf) {
+            return emit_err(&msg, exit::GENERAL_ERROR);
+        }
+        let _ = writeln!(
+            stdout,
+            "{} {} {}",
+            format::hex_hash(&h),
+            git_type(&obj),
+            buf.len()
+        );
+        let _ = stdout.write_all(&buf);
+        let _ = stdout.write_all(b"\n");
+    }
+    exit::OK
 }
 
 /// git-compatible type token. mkit's `remix` has no git equivalent.

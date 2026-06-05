@@ -17,8 +17,9 @@
 //!   enforces only the currently-passing subset (no `rust.yml` change needed —
 //!   `cargo nextest` skips ignored tests by default).
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn mkit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mkit")
@@ -92,6 +93,53 @@ impl Harness {
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .output()
             .expect("spawn mkit")
+    }
+
+    /// Run `git` with `input` piped to stdin (for `cat-file --batch`).
+    fn git_stdin(&self, args: &[&str], input: &[u8]) -> Output {
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(&self.git_repo)
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("GIT_CONFIG_GLOBAL", self.home.join("gitconfig-absent"))
+            .env(
+                "GIT_CONFIG_SYSTEM",
+                self.home.join("gitconfig-system-absent"),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn git");
+        child
+            .stdin
+            .take()
+            .expect("git stdin")
+            .write_all(input)
+            .expect("write git stdin");
+        child.wait_with_output().expect("git output")
+    }
+
+    /// Run `mkit` with `input` piped to stdin (for `cat-file --batch`).
+    fn mkit_stdin(&self, args: &[&str], input: &[u8]) -> Output {
+        let mut child = Command::new(mkit_bin())
+            .args(args)
+            .current_dir(&self.mkit_repo)
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn mkit");
+        child
+            .stdin
+            .take()
+            .expect("mkit stdin")
+            .write_all(input)
+            .expect("write mkit stdin");
+        child.wait_with_output().expect("mkit output")
     }
 
     fn init_both(&self) {
@@ -951,6 +999,135 @@ fn blob_hash_from_ls_tree(out: &str, name: &str) -> String {
         }
     }
     panic!("no ls-tree entry for {name} in: {out:?}");
+}
+
+#[test]
+fn cat_file_batch_blob_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("file.txt", b"hello\n");
+    h.commit_both(&["file.txt"], "init");
+    // Feed each tool its own blob id; the `<oid> blob <size>` header masks to
+    // parity and `hello` content is byte-identical. A trailing `missing`
+    // record exercises the unknown-object path in both tools.
+    let git_blob = blob_hash_from_ls_tree(&stdout(&h.git(&["ls-tree", "HEAD"])), "file.txt");
+    let mkit_blob = blob_hash_from_ls_tree(&stdout(&h.mkit(&["ls-tree", "HEAD"])), "file.txt");
+    let g = h.git_stdin(&["cat-file", "--batch"], format!("{git_blob}\n").as_bytes());
+    let m = h.mkit_stdin(
+        &["cat-file", "--batch"],
+        format!("{mkit_blob}\n").as_bytes(),
+    );
+    assert_parity_ordered("cat-file --batch blob", &g, &m);
+}
+
+#[test]
+fn ls_files_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("file.txt", b"hello\n");
+    h.write_both("sub/inner.txt", b"nested\n");
+    h.commit_both(&["file.txt", "sub/inner.txt"], "init");
+    // Default tracked listing (object-id-free → byte-exact, sorted).
+    assert_parity_bytes("ls-files", &h.git(&["ls-files"]), &h.mkit(&["ls-files"]));
+    // `-s` carries the blob hash → mask modulo length, order-sensitive.
+    assert_parity_ordered(
+        "ls-files -s",
+        &h.git(&["ls-files", "-s"]),
+        &h.mkit(&["ls-files", "-s"]),
+    );
+    // Untracked listing (object-id-free → byte-exact).
+    h.write_both("other.txt", b"x\n");
+    assert_parity_bytes(
+        "ls-files --others",
+        &h.git(&["ls-files", "--others"]),
+        &h.mkit(&["ls-files", "--others"]),
+    );
+}
+
+#[test]
+fn ls_files_exclude_standard_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    // git reads .gitignore, mkit reads .mkitignore — write the matching
+    // ignore file into each repo so both exclude `secret.log`. The ignore
+    // file also ignores itself, so the differently-named control files
+    // (.gitignore vs .mkitignore) don't show up and skew the comparison.
+    std::fs::write(h.git_repo.join(".gitignore"), b"*.log\n.gitignore\n")
+        .expect("write .gitignore");
+    std::fs::write(h.mkit_repo.join(".mkitignore"), b"*.log\n.mkitignore\n")
+        .expect("write .mkitignore");
+    h.write_both("keep.txt", b"k\n");
+    h.write_both("secret.log", b"s\n");
+    // `--others --exclude-standard` drops the ignored `secret.log` and the
+    // self-ignored control file, leaving only `keep.txt`. Object-id-free →
+    // byte-exact.
+    assert_parity_bytes(
+        "ls-files --others --exclude-standard",
+        &h.git(&["ls-files", "--others", "--exclude-standard"]),
+        &h.mkit(&["ls-files", "--others", "--exclude-standard"]),
+    );
+}
+
+#[test]
+fn for_each_ref_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"x\n");
+    h.commit_both(&["a.txt"], "init");
+    assert!(h.git(&["tag", "v1"]).status.success());
+    assert!(h.mkit(&["tag", "v1"]).status.success());
+    // Default `<oid> <objecttype>\t<refname>`, sorted by refname → masked.
+    assert_parity_ordered(
+        "for-each-ref",
+        &h.git(&["for-each-ref"]),
+        &h.mkit(&["for-each-ref"]),
+    );
+    // Object-id-free format → byte-exact parity.
+    assert_parity_bytes(
+        "for-each-ref --format refname/objecttype",
+        &h.git(&["for-each-ref", "--format=%(refname) %(objecttype)"]),
+        &h.mkit(&["for-each-ref", "--format=%(refname) %(objecttype)"]),
+    );
+    // `refname:short` strips the `refs/heads/` + `refs/tags/` prefixes.
+    assert_parity_bytes(
+        "for-each-ref --format refname:short",
+        &h.git(&["for-each-ref", "--format=%(refname:short)"]),
+        &h.mkit(&["for-each-ref", "--format=%(refname:short)"]),
+    );
+}
+
+#[test]
+fn symbolic_ref_head_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"x\n");
+    h.commit_both(&["a.txt"], "init");
+    // `refs/heads/main` and (with --short) `main` — object-id-free, byte-exact.
+    assert_parity_bytes(
+        "symbolic-ref HEAD",
+        &h.git(&["symbolic-ref", "HEAD"]),
+        &h.mkit(&["symbolic-ref", "HEAD"]),
+    );
+    assert_parity_bytes(
+        "symbolic-ref --short HEAD",
+        &h.git(&["symbolic-ref", "--short", "HEAD"]),
+        &h.mkit(&["symbolic-ref", "--short", "HEAD"]),
+    );
 }
 
 // =====================================================================

@@ -86,13 +86,13 @@ creeping; revisit post-v1 if demand warrants.
 | Command | Git-compatible subset (in scope) | mkit current state | Status | Phase | Issue | Notes |
 |---------|----------------------------------|--------------------|--------|-------|-------|-------|
 | `rev-parse` | `--verify`, `--short`, `--abbrev-ref`, `--show-toplevel` | same | ✅ | 3 | #251 | id is 64-hex BLAKE3 (vs 40-hex SHA-1); `--short` = BLAKE3 prefix |
-| `cat-file` | `-t`, `-s`, `-p` | same | ✅ | 3 | #251 | `-s`/`-p` byte-exact for blobs; tree `-p` is `<mode> <type> <hash>\t<name>` (modulo hash); commit/tag `-p` and `remix` type are mkit-shaped. `--batch` is a follow-up |
-| `ls-files` | `-s`, `-z`, `--others`, `--ignored`, `--exclude-standard` | absent | 🔨 | 3 | #251 | |
+| `cat-file` | `-t`, `-s`, `-p`, `--batch` | same | ✅ | 3 | #251 | `-s`/`-p` byte-exact for blobs; tree `-p` is `<mode> <type> <hash>\t<name>` (modulo hash); commit/tag `-p` and `remix` type are mkit-shaped. `--batch` header is `<hash> <type> <size>`; `<size>` matches the emitted content (byte-exact for blobs, mkit-shaped otherwise); unknown → `<name> missing` |
+| `ls-files` | `-s`, `-z`, `--others`, `--ignored`, `--exclude-standard` | same | ✅ | 3 | #251 | `-s` is `<mode> <hash> 0\t<path>` (modulo hash; stage always 0 — no merge stages); tracked/others paths sorted; `-z` raw NUL |
 | `ls-tree` | `-r`, `-z` | same | ✅ | 3 | #251 | `<mode> <type> <hash>\t<name>` modulo hash length; `-r` omits tree lines like git; `-z` raw NUL |
 | `show-ref` | `--heads`, `--tags` | same | ✅ | 3 | #251 | `<hash> <refname>` sorted, modulo hash length |
-| `for-each-ref` | `--format` | absent | 🔨 | 3 | #251 | |
-| `show` | object/commit display | partial via `cat`/`log` | 🔨 | 3 | #251 | |
-| `symbolic-ref` | read | partial (HEAD handling) | 🔨 | 3 | #251 | read in Phase 3 |
+| `for-each-ref` | `--format` | same | ✅ | 3 | #251 | default `<objectname> <objecttype>\t<refname>`; `%(atom)` subset: refname[:short], objectname[:short], objecttype (modulo hash length) |
+| `show` | object/commit display | partial via `cat`/`log` | 🔨 | 3 | #251 | deferred — commit+diff display diverges from git |
+| `symbolic-ref` | read | same (HEAD) | ✅ | 3 | #251 | reads HEAD only; full target or `--short`; detached → error |
 | `symbolic-ref` / `update-ref` | write | absent | 🔨 | 4 | #252 | mutating — guarded, later phase |
 
 ## Config & format conventions

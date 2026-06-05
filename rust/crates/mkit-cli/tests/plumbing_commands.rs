@@ -1,10 +1,12 @@
-//! Read-only plumbing — `rev-parse` / `cat-file` / `ls-tree` / `show-ref`
-//! (#251, Phase 3). Covers the mkit-specific paths the differential
-//! harness can't compare (abbreviated BLAKE3 ids, repo-root path, `-z`).
+//! Read-only plumbing — `rev-parse` / `cat-file` / `ls-tree` / `ls-files` /
+//! `show-ref` / `for-each-ref` / `symbolic-ref` (#251, Phase 3). Covers the
+//! mkit-specific paths the differential harness can't compare (abbreviated
+//! BLAKE3 ids, repo-root path, `-z`, detached HEAD, unsupported format atoms).
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
-use std::process::Output;
+use std::process::{Output, Stdio};
 
 fn mkit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mkit")
@@ -17,6 +19,25 @@ fn run_in(cwd: &Path, xdg: &Path, args: &[&str]) -> Output {
         .env("XDG_CONFIG_HOME", xdg)
         .output()
         .expect("spawn mkit")
+}
+
+fn run_in_stdin(cwd: &Path, xdg: &Path, args: &[&str], input: &[u8]) -> Output {
+    let mut child = std::process::Command::new(mkit_bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mkit");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input)
+        .expect("write stdin");
+    child.wait_with_output().expect("output")
 }
 
 fn repo() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -195,4 +216,146 @@ fn show_ref_heads_and_tags_filter() {
         tags.contains("refs/tags/v1") && !tags.contains("refs/heads/"),
         "tags: {tags:?}"
     );
+}
+
+#[test]
+fn cat_file_batch_emits_header_and_content() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let full = out_str(&run_in(root, x, &["rev-parse", "HEAD"]));
+    // One known commit + one unknown id → `<hash> commit <size>` + content,
+    // then `<name> missing` for the bad id.
+    let bad = "f".repeat(64);
+    let input = format!("{full}\n{bad}\n");
+    let out = run_in_stdin(root, x, &["cat-file", "--batch"], input.as_bytes());
+    assert!(out.status.success(), "batch failed: {out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let header = text.lines().next().unwrap_or("");
+    let mut fields = header.split_whitespace();
+    assert_eq!(
+        fields.next(),
+        Some(full.as_str()),
+        "header hash: {header:?}"
+    );
+    assert_eq!(fields.next(), Some("commit"), "header type: {header:?}");
+    let size: usize = fields.next().unwrap().parse().expect("size is a number");
+    assert!(size > 0, "commit content is non-empty: {header:?}");
+    assert!(
+        text.contains(&format!("{bad} missing")),
+        "unknown id reported missing: {text:?}"
+    );
+}
+
+#[test]
+fn ls_files_lists_tracked_with_stage_info() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    // Default: tracked paths, sorted, one per line.
+    let plain = out_str(&run_in(root, x, &["ls-files"]));
+    assert_eq!(
+        plain, "file.txt\nsub/inner.txt",
+        "tracked listing: {plain:?}"
+    );
+    // `-s` prepends `<mode> <hash> 0` with a 64-hex BLAKE3 id, stage 0.
+    let staged = out_str(&run_in(root, x, &["ls-files", "-s"]));
+    let first = staged.lines().next().unwrap_or("");
+    let mut f = first.split_whitespace();
+    assert_eq!(f.next(), Some("100644"), "git mode: {first:?}");
+    assert_eq!(f.next().map(str::len), Some(64), "64-hex hash: {first:?}");
+    assert_eq!(f.next(), Some("0"), "stage is 0: {first:?}");
+    assert!(first.ends_with("\tfile.txt"), "tab + path: {first:?}");
+}
+
+#[test]
+fn ls_files_others_and_ignored_filters() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".mkitignore"), b"*.log\n").unwrap();
+    fs::write(root.join("new.txt"), b"n\n").unwrap();
+    fs::write(root.join("debug.log"), b"d\n").unwrap();
+    // --others lists every untracked file (ignored ones included).
+    let others = out_str(&run_in(root, x, &["ls-files", "--others"]));
+    assert!(others.contains("new.txt"), "others: {others:?}");
+    assert!(
+        others.contains("debug.log"),
+        "others includes ignored: {others:?}"
+    );
+    // --exclude-standard drops the ignored `debug.log`.
+    let excl = out_str(&run_in(
+        root,
+        x,
+        &["ls-files", "--others", "--exclude-standard"],
+    ));
+    assert!(excl.contains("new.txt"), "excl keeps new.txt: {excl:?}");
+    assert!(!excl.contains("debug.log"), "excl drops ignored: {excl:?}");
+    // --ignored shows only the ignored file.
+    let ign = out_str(&run_in(root, x, &["ls-files", "--others", "--ignored"]));
+    assert!(ign.contains("debug.log"), "ignored shows it: {ign:?}");
+    assert!(!ign.contains("new.txt"), "ignored excludes others: {ign:?}");
+}
+
+#[test]
+fn for_each_ref_default_and_format() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(run_in(root, x, &["tag", "v1"]).status.success());
+    // Default `<oid> <objecttype>\t<refname>`, sorted (heads before tags).
+    let def = out_str(&run_in(root, x, &["for-each-ref"]));
+    let lines: Vec<&str> = def.lines().collect();
+    assert!(lines[0].ends_with("\trefs/heads/main"), "head row: {def:?}");
+    assert!(lines[0].contains(" commit\t"), "head is a commit: {def:?}");
+    assert!(
+        lines.iter().any(|l| l.ends_with("\trefs/tags/v1")),
+        "tag row present: {def:?}"
+    );
+    // A custom format with the short-name atom.
+    let fmt = out_str(&run_in(
+        root,
+        x,
+        &["for-each-ref", "--format=%(refname:short)"],
+    ));
+    assert!(
+        fmt.lines().any(|l| l == "main") && fmt.lines().any(|l| l == "v1"),
+        "short refnames: {fmt:?}"
+    );
+}
+
+#[test]
+fn for_each_ref_rejects_unknown_atom() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let out = run_in(root, x, &["for-each-ref", "--format=%(bogus)"]);
+    assert!(!out.status.success(), "unknown %(atom) must error: {out:?}");
+}
+
+#[test]
+fn symbolic_ref_reads_head() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    assert_eq!(
+        out_str(&run_in(root, x, &["symbolic-ref", "HEAD"])),
+        "refs/heads/main"
+    );
+    assert_eq!(
+        out_str(&run_in(root, x, &["symbolic-ref", "--short", "HEAD"])),
+        "main"
+    );
+}
+
+#[test]
+fn symbolic_ref_errors_on_detached_and_non_head() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    // A non-HEAD name is unsupported (mkit reads only HEAD).
+    assert!(
+        !run_in(root, x, &["symbolic-ref", "refs/heads/main"])
+            .status
+            .success(),
+        "non-HEAD symbolic-ref must error"
+    );
+    // Detached HEAD is not a symbolic ref → error, like git.
+    let full = out_str(&run_in(root, x, &["rev-parse", "HEAD"]));
+    assert!(run_in(root, x, &["checkout", &full]).status.success());
+    let out = run_in(root, x, &["symbolic-ref", "HEAD"]);
+    assert!(!out.status.success(), "detached HEAD must error: {out:?}");
 }

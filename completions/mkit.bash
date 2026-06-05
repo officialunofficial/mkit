@@ -14,7 +14,7 @@ _mkit_complete() {
     local cur prev words cword
     _init_completion || return 0
 
-    local subcommands="init add rm mv restore reset hash cat cat-file tree ls-tree rev-parse show-ref commit log reflog status diff branch checkout clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc sparse-checkout serve pack-shard blame verify attest verify-attest version help"
+    local subcommands="init add rm mv restore reset hash cat cat-file tree ls-tree ls-files rev-parse show-ref for-each-ref symbolic-ref commit log reflog status diff branch checkout clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc sparse-checkout serve pack-shard blame verify attest verify-attest version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.
     local top_flags="--help -h --version -V"
 
@@ -54,16 +54,25 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--staged --cached --name-only --name-status --stat -z --help" -- "$cur") )
             ;;
         cat-file)
-            COMPREPLY=( $(compgen -W "-t -s -p --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-t -s -p --batch --help" -- "$cur") )
             ;;
         ls-tree)
             COMPREPLY=( $(compgen -W "-r -z --help" -- "$cur") )
+            ;;
+        ls-files)
+            COMPREPLY=( $(compgen -W "-s --stage -z --others --ignored --exclude-standard --help" -- "$cur") )
             ;;
         rev-parse)
             COMPREPLY=( $(compgen -W "--verify --short --abbrev-ref --show-toplevel --help" -- "$cur") )
             ;;
         show-ref)
             COMPREPLY=( $(compgen -W "--heads --tags --help" -- "$cur") )
+            ;;
+        for-each-ref)
+            COMPREPLY=( $(compgen -W "--format --help" -- "$cur") )
+            ;;
+        symbolic-ref)
+            COMPREPLY=( $(compgen -W "--short --help" -- "$cur") )
             ;;
         status)
             COMPREPLY=( $(compgen -W "--porcelain -s --short -z --help" -- "$cur") )
