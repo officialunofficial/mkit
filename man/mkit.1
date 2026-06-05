@@ -391,7 +391,7 @@ indexes the reachable chain, so commits superseded by
 .Cm commit --amend
 or a reset are no longer listed. This command never mutates refs, the
 journal, or any object.
-.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b Oc Ar path ...
+.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.
 .Fl Fl staged
@@ -399,7 +399,15 @@ a fresh worktree snapshot.
 compares the HEAD tree to the staged index tree. A single revision compares
 that revision against the worktree; two revisions, or an
 .Ar a Ns .. Ns Ar b
-range, diff the two resolved trees directly. Revisions may be refs, commit
+range, diff the two resolved trees directly. A symmetric
+.Ar a Ns ... Ns Ar b
+range diffs the merge base of
+.Ar a
+and
+.Ar b
+against
+.Ar b .
+Revisions may be refs, commit
 hashes, short hashes, or
 .Ql HEAD~n
 (a raw 64-hex tree hash also works). Remaining positional arguments are

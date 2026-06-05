@@ -181,6 +181,32 @@ fn diff_symmetric_range_is_merge_base_vs_b() {
 }
 
 #[test]
+fn diff_symmetric_range_peels_annotated_tag() {
+    // An annotated tag on the `A...B` side must be peeled to its commit
+    // before merge-base resolution — otherwise the tag object errors / has
+    // no merge base.
+    let (td, xdg) = branched_repo();
+    let (root, x) = (td.path(), xdg.path());
+    // Tag `main` (= c2) annotated; HEAD is feat (= c3).
+    assert!(
+        run_in(root, x, &["tag", "-a", "v1", "main", "-m", "tag main"])
+            .status
+            .success()
+    );
+    let out = run_in(root, x, &["diff", "v1...HEAD"]);
+    assert!(
+        out.status.success(),
+        "tagged symmetric diff failed: {out:?}"
+    );
+    let s = out_str(&out);
+    // merge-base(c2, c3) = c1, diff c1 vs c3 → f.txt added.
+    assert!(
+        s.contains("diff --git a/f.txt b/f.txt"),
+        "f.txt added: {s:?}"
+    );
+}
+
+#[test]
 fn log_peels_annotated_tag_on_include_and_exclude() {
     // An annotated/signed tag must be peeled to its commit for both the
     // include side (`log <tag>`) and the exclude side (`<tag>..HEAD`), like

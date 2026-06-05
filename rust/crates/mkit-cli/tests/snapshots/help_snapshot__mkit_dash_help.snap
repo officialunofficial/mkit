@@ -72,10 +72,11 @@ commands:
                     its -s/--short alias, emits machine-readable XY lines;
                     special-byte paths are C-style quoted; -z NUL-terminates
                     records with raw paths)
-  diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b>] [<path>...]
+  diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
                     --staged for HEAD vs index, a single revision vs the
-                    worktree, two revisions, or an A..B range; revisions
+                    worktree, two revisions, an A..B range, or an A...B
+                    symmetric range = merge-base(a,b) vs b; revisions
                     are refs, commits, or short hashes). --name-only lists
                     changed paths; --name-status prefixes each with an
                     A/D/M (T = mode change) letter; --stat shows per-file

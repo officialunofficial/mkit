@@ -481,10 +481,18 @@ fn resolve_diff_endpoints(
     if let Some(first) = args.first()
         && let Some((a, b)) = split_symmetric(first)
     {
-        let commit_a = revspec::resolve_revision(store, mkit_dir, a)
-            .map_err(|e| (format!("bad revision '{a}': {e}"), exit::DATAERR))?;
-        let commit_b = revspec::resolve_revision(store, mkit_dir, b)
-            .map_err(|e| (format!("bad revision '{b}': {e}"), exit::DATAERR))?;
+        // Peel annotated/signed tags to their commit before merge-base
+        // resolution, like git (and like `log` does for its range bases).
+        let commit_a = peel_tags(
+            store,
+            revspec::resolve_revision(store, mkit_dir, a)
+                .map_err(|e| (format!("bad revision '{a}': {e}"), exit::DATAERR))?,
+        );
+        let commit_b = peel_tags(
+            store,
+            revspec::resolve_revision(store, mkit_dir, b)
+                .map_err(|e| (format!("bad revision '{b}': {e}"), exit::DATAERR))?,
+        );
         let mb = find_merge_base(store, commit_a, commit_b)
             .map_err(|e| (format!("merge base: {e}"), exit::GENERAL_ERROR))?
             .ok_or_else(|| {
@@ -598,6 +606,19 @@ fn try_rev_to_tree(
         }
         Err(e) => Some(Err((format!("bad revision '{spec}': {e}"), exit::DATAERR))),
     }
+}
+
+/// Follow `Object::Tag` targets to the first non-tag object, so an
+/// annotated/signed tag resolves to the commit it points at (bounded against
+/// a tag-of-tag cycle). A non-tag / unreadable object is returned unchanged.
+fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
+    for _ in 0..16 {
+        match store.read_object(&h) {
+            Ok(Object::Tag(t)) => h = t.target,
+            _ => break,
+        }
+    }
+    h
 }
 
 /// Map a resolved object hash to a tree hash: commit/remix → its tree,
