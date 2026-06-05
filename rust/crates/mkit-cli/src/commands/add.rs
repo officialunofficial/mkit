@@ -35,6 +35,11 @@ struct AddOpts {
     #[arg(short = 'u', long)]
     update: bool,
 
+    /// Allow staging an explicitly-named path that is ignored by
+    /// `.gitignore`/`.mkitignore` (git refuses these without `-f`).
+    #[arg(short = 'f', long)]
+    force: bool,
+
     /// Paths to stage. Pass `.` to stage every non-ignored file under
     /// the current directory. Multiple paths may be given.
     paths: Vec<String>,
@@ -188,13 +193,26 @@ pub fn run(args: &[String]) -> u8 {
             exit::USAGE,
         );
     } else {
+        // Explicit paths are checked against the ignore list (git refuses an
+        // ignored path unless `-f`). Loaded once and shared across paths.
+        let ignores = match ignore::load(&cwd) {
+            Ok(i) => i,
+            Err(e) => return emit_err(&format!("read ignore file: {e}"), exit::GENERAL_ERROR),
+        };
         for target in &opts.paths {
             if target == "." {
                 if let Err(code) = add_whole_worktree(&cwd, &store, &mut idx) {
                     return code;
                 }
             } else {
-                match add_one(&cwd, Path::new(target), &store, &mut idx) {
+                match add_one(
+                    &cwd,
+                    Path::new(target),
+                    &store,
+                    &mut idx,
+                    &ignores,
+                    opts.force,
+                ) {
                     Ok(_) => {}
                     Err(code) => return code,
                 }
@@ -222,7 +240,14 @@ fn add_whole_worktree(root: &Path, store: &ObjectStore, idx: &mut Index) -> Resu
     Ok(())
 }
 
-fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Result<String, u8> {
+fn add_one(
+    root: &Path,
+    rel: &Path,
+    store: &ObjectStore,
+    idx: &mut Index,
+    ignores: &IgnoreList,
+    force: bool,
+) -> Result<String, u8> {
     let abs = if rel.is_absolute() {
         rel.to_path_buf()
     } else {
@@ -242,6 +267,16 @@ fn add_one(root: &Path, rel: &Path, store: &ObjectStore, idx: &mut Index) -> Res
     let previous_status = idx
         .find_entry(&rel_str)
         .map_or(EntryStatus::Blob, |existing| idx.entries[existing].status);
+    // An ignored path named explicitly is refused unless `-f` — but a path
+    // that is *already tracked* is never subject to ignore (git parity).
+    let already_tracked =
+        previous_status != EntryStatus::Removed && idx.find_entry(&rel_str).is_some();
+    if !force && !already_tracked && ignores.is_ignored_with_ancestors(&rel_str, meta.is_dir()) {
+        return Err(emit_err(
+            &format!("path '{rel_str}' is ignored; use -f to add it anyway"),
+            exit::USAGE,
+        ));
+    }
     // Regular files route through `store_file_object` so large
     // (> CHUNK_THRESHOLD) content lands as a ChunkedBlob, matching
     // `worktree::{build_tree,hash_file}` (#203). Symlinks stay a single
@@ -331,7 +366,9 @@ fn add_tree(
         if meta.file_type().is_dir() {
             add_tree(root, &p, store, idx, ignores, seen)?;
         } else if meta.file_type().is_file() || meta.file_type().is_symlink() {
-            let rel = add_one(root, &p, store, idx)?;
+            // The walk above already excluded ignored paths, so `force` here
+            // just skips a redundant ignore re-check.
+            let rel = add_one(root, &p, store, idx, ignores, true)?;
             seen.insert(rel);
         }
     }

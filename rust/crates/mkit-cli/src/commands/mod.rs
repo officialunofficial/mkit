@@ -524,7 +524,7 @@ pub fn ensure_restore_safe_with_options(
         return Ok(());
     }
 
-    let ignore = mkit_core::ignore::load(root).map_err(|e| format!("read .mkitignore: {e}"))?;
+    let ignore = mkit_core::ignore::load(root).map_err(|e| format!("read ignore file: {e}"))?;
     let mut worktree_paths = Vec::new();
     collect_worktree_paths(root, root, "", &mut worktree_paths)
         .map_err(|e| format!("check untracked paths: {e}"))?;
@@ -544,6 +544,7 @@ pub fn ensure_restore_safe_with_options(
             !index_tracks_path_or_descendant(&idx, path)
                 && restore_affects_path(options, path)
                 && *path != ".mkitignore"
+                && *path != ".gitignore"
                 && !is_ignored_worktree_path(root, &ignore, path)
         })
     {
@@ -571,9 +572,9 @@ fn is_ignored_worktree_path(
     let Ok(meta) = fs::symlink_metadata(&full_path) else {
         return false;
     };
-    // Match on the repo-relative path (anchored/multi-segment aware), not the
-    // bare basename.
-    ignore.is_ignored(path, meta.is_dir())
+    // Match on the repo-relative path, and treat a path under an ignored
+    // directory as ignored too (no top-down walk here to carry that bit).
+    ignore.is_ignored_with_ancestors(path, meta.is_dir())
 }
 
 pub(crate) fn current_head_tree(root: &Path, store: &ObjectStore) -> Result<Option<Hash>, String> {

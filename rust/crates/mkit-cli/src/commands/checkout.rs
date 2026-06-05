@@ -163,11 +163,8 @@ pub fn run(args: &[String]) -> u8 {
     }
     let _ = writeln!(
         stderr,
-        "  {} file(s), {} dir(s), {} symlink(s) restored ({} ignored)",
-        report.files_written,
-        report.directories_created,
-        report.symlinks_written,
-        report.skipped_by_ignore
+        "  {} file(s), {} dir(s), {} symlink(s) restored",
+        report.files_written, report.directories_created, report.symlinks_written,
     );
     exit::OK
 }

@@ -257,16 +257,16 @@ pub struct RestoreReport {
     pub symlinks_written: u32,
     /// Number of directories created (or that already existed as dirs).
     pub directories_created: u32,
-    /// Number of tree entries skipped because they matched `.mkitignore`.
-    pub skipped_by_ignore: u32,
 }
 
 /// Materialise `tree_hash` into `root` as a working tree.
 ///
 /// Thin wrapper around [`restore_tree`] that additionally:
-/// 1. Loads `<root>/.mkitignore` and skips any matched entries — the
-///    checkout path MUST NOT overwrite files the user deliberately
-///    ignored (editor swapfiles, local-only build artefacts, …).
+/// 1. Loads `<root>/.gitignore` + `<root>/.mkitignore`. Ignore rules do NOT
+///    gate which tree entries are materialised — tracked content is always
+///    written (git parity) — they only protect *untracked* worktree files
+///    (editor swapfiles, local-only build artefacts, …) from the
+///    `clean=true` sweep.
 /// 2. Returns a [`RestoreReport`] with counts the `mkit checkout` UX
 ///    prints for the user.
 ///
@@ -337,12 +337,11 @@ fn restore_tree_to_worktree_inner(
         } else {
             format!("{path_prefix}/{name}")
         };
-        let is_dir = entry.mode == EntryMode::Tree;
-        // Match against the repo-relative path (anchored/multi-segment aware).
-        if ignore.is_ignored(&full_path, is_dir) {
-            report.skipped_by_ignore += 1;
-            continue;
-        }
+        // NOTE: ignore rules do NOT gate materialization. Tree entries are
+        // tracked content and must always be written (git parity — skipping
+        // them would desync the index from the worktree). Ignore rules only
+        // protect *untracked* worktree files during the clean sweep below /
+        // in `clean_directory_with_ignore`.
         match entry.mode {
             EntryMode::Blob | EntryMode::Executable => {
                 if let Some(patterns) = options.sparse_patterns.as_deref()
@@ -1344,13 +1343,15 @@ mod tests {
     }
 
     #[test]
-    fn worktree_restore_respects_mkitignore() {
+    fn worktree_restore_writes_tracked_entries_and_keeps_untracked_ignored() {
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();
-        // Pre-seed an ignore file + a locally-present-but-ignored file
-        // that must NOT be deleted.
-        fs::write(target.path().join(".mkitignore"), "secret.txt\n").unwrap();
-        fs::write(target.path().join("secret.txt"), b"local-only").unwrap();
+        // Pre-seed an ignore file, an UNTRACKED ignored file (must survive the
+        // clean sweep), and a tracked path that happens to match the ignore
+        // pattern but IS in the target tree (must be written — git parity).
+        fs::write(target.path().join(".mkitignore"), "*.tmp\nsecret.txt\n").unwrap();
+        fs::write(target.path().join("scratch.tmp"), b"local-only").unwrap();
+        fs::write(target.path().join("secret.txt"), b"OLD-LOCAL").unwrap();
         let secret_blob = put_blob(&store, b"COMMITTED-SECRET");
         let ok_blob = put_blob(&store, b"ok");
         let root = put_tree_with(
@@ -1368,19 +1369,23 @@ mod tests {
                 },
             ],
         );
-        // With `clean=true` (default) the checkout sweep must still
-        // leave the ignored file alone: the ignore check covers both
-        // tree-entry restoration AND the cleanup sweep.
         let report =
             restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default())
                 .unwrap();
-        assert_eq!(report.files_written, 1);
-        assert_eq!(report.skipped_by_ignore, 1);
+        // Both tracked entries materialise — ignore rules never gate writes.
+        assert_eq!(report.files_written, 2);
         assert_eq!(
             fs::read(target.path().join("secret.txt")).unwrap(),
-            b"local-only"
+            b"COMMITTED-SECRET",
+            "a tracked tree entry is written even if it matches an ignore rule"
         );
         assert_eq!(fs::read(target.path().join("ok.txt")).unwrap(), b"ok");
+        // The UNTRACKED ignored file is preserved by the clean sweep.
+        assert_eq!(
+            fs::read(target.path().join("scratch.tmp")).unwrap(),
+            b"local-only",
+            "an untracked ignored file must survive the clean sweep"
+        );
     }
 
     #[cfg(unix)]

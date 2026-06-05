@@ -77,8 +77,8 @@ pub fn validate_symlink_target(target: &str) -> bool {
     true
 }
 
-/// Build a tree object for `dir` and its subdirectories. Honours
-/// `.mkitignore` loaded from `dir`.
+/// Build a tree object for `dir` and its subdirectories. Honours the
+/// `.gitignore` + `.mkitignore` ignore files loaded from `dir`.
 ///
 /// # Errors
 /// See [`WorktreeError`].
@@ -86,7 +86,7 @@ pub fn build_tree(store: &ObjectStore, dir: &Path) -> WorktreeResult<Hash> {
     let ignores = ignore::load(dir).map_err(|e| match e {
         crate::ignore::IgnoreError::Io(io) => WorktreeError::Io(io),
         crate::ignore::IgnoreError::FileTooLarge => {
-            WorktreeError::Io(io::Error::other(".mkitignore exceeds 1 MiB"))
+            WorktreeError::Io(io::Error::other("ignore file exceeds 1 MiB"))
         }
     })?;
     build_tree_inner(store, dir, "", &ignores)

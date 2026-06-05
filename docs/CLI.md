@@ -25,15 +25,18 @@ no config needed.
 Working-tree commands:
 
 - `mkit init` — create a new repository in `.mkit/`.
-- `mkit add [-A|-u] <path>...` / `mkit add .` — stage files for the next
-  commit. Multiple pathspecs may be given. `.` stages every non-ignored
+- `mkit add [-A|-u] [-f] <path>...` / `mkit add .` — stage files for the
+  next commit. Multiple pathspecs may be given. `.` stages every non-ignored
   file under the current directory. `-A`/`--all` stages every change in
   the worktree including deletions of tracked files (takes no path
   arguments). `-u`/`--update` restages only already-tracked files —
   updating modified ones and recording deletions — without adding
   untracked paths (takes no path arguments). `-A` and `-u` are mutually
-  exclusive. Interactive hunk staging (`add -p`) is **not supported**;
-  see "Divergences from Git" below.
+  exclusive. An explicitly-named path that is ignored (by
+  `.gitignore`/`.mkitignore`) is refused unless `-f`/`--force` is given
+  (git parity); already-tracked paths are never subject to ignore.
+  Interactive hunk staging (`add -p`) is **not supported**; see
+  "Divergences from Git" below.
 - `mkit rm [--cached] [-r|--recursive] [-f|--force] <path>...` — remove
   paths and stage the deletion for the next commit. By default this
   **deletes the worktree file(s)** and stages the removal; now-empty
@@ -205,8 +208,9 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   (`--stage`) prints stage info as `<mode> <hash> <stage>\t<path>` (git
   octal mode; `<stage>` is always `0` — mkit has no merge stages). `--others`
   lists untracked worktree files instead; `--exclude-standard` drops
-  `.mkitignore`-ignored ones and `--ignored` inverts to show only ignored
-  files (`--ignored` requires `--others`, like git's `-i` outside an
+  ignored ones (per `.gitignore`/`.mkitignore`) and `--ignored` inverts to
+  show only ignored files (`--ignored` requires `--others`, like git's `-i`
+  outside an
   `-o`/`-c` selection). `-z` NUL-terminates records and emits raw paths
   (otherwise special-byte paths — including under `-s` — are C-style quoted).
 - `mkit rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`

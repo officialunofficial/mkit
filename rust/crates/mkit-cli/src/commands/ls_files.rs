@@ -73,7 +73,7 @@ pub fn run(args: &[String]) -> u8 {
     if opts.others {
         let ignore = match ignore::load(&cwd) {
             Ok(i) => i,
-            Err(e) => return emit_err(&format!("read .mkitignore: {e}"), exit::GENERAL_ERROR),
+            Err(e) => return emit_err(&format!("read ignore file: {e}"), exit::GENERAL_ERROR),
         };
         let mut others: Vec<String> = Vec::new();
         if let Err(e) = collect_others(&cwd, &cwd, "", false, &idx, &ignore, &opts, &mut others) {

@@ -81,6 +81,7 @@ _mkit() {
                     _arguments \
                         '(-A --all)'{-A,--all}'[stage all changes incl. deletions]' \
                         '(-u --update)'{-u,--update}'[restage only tracked files]' \
+                        '(-f --force)'{-f,--force}'[stage an ignored path]' \
                         '--help[show help]' \
                         '*:file:_files'
                     ;;

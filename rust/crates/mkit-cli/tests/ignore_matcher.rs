@@ -158,3 +158,82 @@ fn ls_files_others_excludes_files_under_ignored_dir() {
         "--ignored lists only the ignored subtree: {ign:?}"
     );
 }
+
+#[test]
+fn clean_fd_keeps_files_under_ignored_dir_without_x() {
+    // `clean -fd` (no -x) must NOT delete files under an ignored directory —
+    // the whole ignored subtree is kept, while an unrelated untracked dir is
+    // removed. Guards against the ancestor-ignore propagation gap.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".mkitignore"), "node_modules/\n").unwrap();
+    fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+    fs::write(root.join("node_modules/pkg/index.js"), b"x\n").unwrap();
+    fs::create_dir(root.join("junk")).unwrap();
+    fs::write(root.join("junk/tmp.txt"), b"t\n").unwrap();
+
+    assert!(run_in(root, x, &["clean", "-fd"]).status.success());
+    assert!(
+        root.join("node_modules/pkg/index.js").exists(),
+        "files under an ignored dir must survive clean -fd"
+    );
+    assert!(
+        !root.join("junk").exists(),
+        "an unrelated untracked dir is removed by clean -fd"
+    );
+}
+
+#[test]
+fn clean_fdx_removes_ignored_dir() {
+    // `clean -fdX` removes ONLY ignored content — the ignored directory and
+    // everything under it, even though the children match no pattern.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".mkitignore"), "node_modules/\n").unwrap();
+    fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+    fs::write(root.join("node_modules/pkg/index.js"), b"x\n").unwrap();
+    fs::write(root.join("keep.txt"), b"k\n").unwrap();
+
+    assert!(run_in(root, x, &["clean", "-fdX"]).status.success());
+    assert!(
+        !root.join("node_modules").exists(),
+        "clean -fdX removes the ignored directory and its contents"
+    );
+    assert!(
+        root.join("keep.txt").exists(),
+        "clean -X keeps non-ignored untracked files"
+    );
+}
+
+#[test]
+fn add_explicit_ignored_path_refused_without_force() {
+    // git refuses an explicitly-named ignored path unless `-f`.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".mkitignore"), "*.secret\n").unwrap();
+    fs::write(root.join("app.secret"), b"s\n").unwrap();
+    fs::write(root.join("app.txt"), b"t\n").unwrap();
+
+    // Plain add of the ignored path errors and stages nothing.
+    let refused = run_in(root, x, &["add", "app.secret"]);
+    assert!(
+        !refused.status.success(),
+        "ignored add must error: {refused:?}"
+    );
+    assert!(
+        !out_str(&run_in(root, x, &["ls-files"])).contains("app.secret"),
+        "the ignored path must not have been staged"
+    );
+    // A non-ignored explicit path still works.
+    assert!(run_in(root, x, &["add", "app.txt"]).status.success());
+    // `-f` overrides and stages the ignored path.
+    assert!(
+        run_in(root, x, &["add", "-f", "app.secret"])
+            .status
+            .success()
+    );
+    assert!(
+        out_str(&run_in(root, x, &["ls-files"])).contains("app.secret"),
+        "-f must stage the ignored path"
+    );
+}

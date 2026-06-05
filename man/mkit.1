@@ -42,8 +42,10 @@ The highlights:
 Create a new
 .Nm
 repository in the current directory.
-.It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Ar path ...
+.It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Oo Fl f Oc Ar path ...
 Stage files for the next commit. Respects
+.Pa .gitignore
+and
 .Pa .mkitignore .
 Multiple pathspecs may be given;
 .Ql .
@@ -61,7 +63,12 @@ deletions \(em without adding untracked paths (takes no path arguments).
 .Fl A
 and
 .Fl u
-are mutually exclusive. Interactive hunk staging
+are mutually exclusive.
+.Fl f
+or
+.Fl Fl force
+stages an explicitly-named ignored path (git refuses these without it;
+already-tracked paths are never subject to ignore). Interactive hunk staging
 .Pq Fl p
 is not supported.
 .It Cm rm Oo Fl Fl cached Oc Oo Fl r | Fl Fl recursive Oc Oo Fl f | Fl Fl force Oc Ar path ...

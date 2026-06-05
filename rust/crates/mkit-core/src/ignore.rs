@@ -141,6 +141,30 @@ impl IgnoreList {
         }
         ignored
     }
+
+    /// Like [`is_ignored`](Self::is_ignored), but also returns `true` when any
+    /// **ancestor directory** of `rel_path` is ignored — git treats
+    /// everything under an excluded directory as excluded.
+    ///
+    /// Use this for one-shot path tests (an explicit `add <path>`, the restore
+    /// safety gate) where there is no top-down walk to carry the
+    /// ancestor-ignored bit. Walkers that descend top-down should instead
+    /// thread their own ancestor flag (cheaper) and skip ignored directories.
+    #[must_use]
+    pub fn is_ignored_with_ancestors(&self, rel_path: &str, is_dir: bool) -> bool {
+        let trimmed = rel_path.trim_matches('/');
+        if trimmed.is_empty() {
+            return false;
+        }
+        let segs: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+        // Each strict ancestor is a directory; if one is ignored, so is this.
+        for i in 1..segs.len() {
+            if self.is_ignored(&segs[..i].join("/"), true) {
+                return true;
+            }
+        }
+        self.is_ignored(trimmed, is_dir)
+    }
 }
 
 /// Load and merge `.gitignore` then `.mkitignore` from `dir`. Returns an
@@ -589,6 +613,18 @@ mod tests {
     }
 
     // --- glob_match public helper --------------------------------------
+
+    #[test]
+    fn is_ignored_with_ancestors_catches_files_under_ignored_dir() {
+        let il = parse("node_modules/\n");
+        // The directory itself and any descendant (file or dir).
+        assert!(il.is_ignored_with_ancestors("node_modules", true));
+        assert!(il.is_ignored_with_ancestors("node_modules/pkg/index.js", false));
+        // Unrelated paths are unaffected.
+        assert!(!il.is_ignored_with_ancestors("src/main.rs", false));
+        // The plain matcher does NOT catch the descendant (no walk context).
+        assert!(!il.is_ignored("node_modules/pkg/index.js", false));
+    }
 
     #[test]
     fn glob_match_exact() {
