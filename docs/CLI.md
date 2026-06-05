@@ -662,9 +662,9 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   safety divergence, `--hard` **refuses** (without `-f`/`--force`) when
   discarding would lose locally-modified or staged content, or overwrite
   such a colliding untracked path; with `-f` it is overwritten. git's
-  `reset --hard` discards silently. The guard also covers tracked files
-  matching `.mkitignore` (which the worktree comparison would otherwise
-  skip). `<commit>` defaults to `HEAD`.
+  `reset --hard` discards silently. The guard re-checks each dropped path
+  directly, so it also covers a tracked file that matches an ignore rule
+  (`.gitignore`/`.mkitignore`). `<commit>` defaults to `HEAD`.
 
 ### Commands deliberately not implemented (by design)
 

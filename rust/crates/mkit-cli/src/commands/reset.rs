@@ -150,11 +150,11 @@ pub fn run(args: &[String]) -> u8 {
     // Guard BEFORE any mutation, unless `-f`. The shared `checkout` guard
     // refuses if discarding would lose locally-modified, staged, or
     // colliding-untracked content — an mkit safety divergence (git's
-    // `reset --hard` discards silently). That guard compares the worktree
-    // via `worktree::build_tree`, which honors `.mkitignore`, so it cannot
-    // see a tracked file that matches an ignore pattern; check the dropped
-    // paths directly so a locally-modified ignored-but-tracked file is not
-    // discarded silently.
+    // `reset --hard` discards silently). The guard's worktree snapshot now
+    // keeps tracked files even when they match an ignore rule, but the
+    // dropped-path set (paths present at HEAD/index and gone in the target)
+    // is computed and re-checked here directly regardless, so a
+    // locally-modified ignored-but-tracked file is never discarded silently.
     if opts.hard && !opts.force {
         if let Err(e) =
             super::ensure_restore_safe_with_options(&cwd, &store, tree_hash, &restore_opts)
@@ -294,9 +294,9 @@ fn dropped_tracked_paths(
 /// The first dropped path whose worktree entry differs from its indexed
 /// `(status, hash)` — a local edit to content, mode (exec bit), or symlink
 /// target. `None` if every dropped path is unmodified, missing, or a
-/// directory (no file to lose). Guards `reset --hard` against silently
-/// discarding edits to tracked files that match `.mkitignore` (which the
-/// shared `build_tree` guard skips entirely).
+/// directory (no file to lose). This is a direct per-dropped-path check, so
+/// `reset --hard` never silently discards a local edit — independent of how
+/// the shared worktree-snapshot guard treats ignored files.
 fn locally_modified_dropped_path(
     cwd: &std::path::Path,
     store: &ObjectStore,
