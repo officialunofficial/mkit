@@ -10,7 +10,6 @@
 //! Also contains `status_diff` — the working-tree vs HEAD diff that
 //! powers `mkit status`.
 
-use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::hash::Hash;
@@ -107,6 +106,11 @@ fn diff_trees_inner(
         ignore_regular_executable_mode,
         0,
     )?;
+    // git orders diff entries by pathname. The name-sorted walk is already
+    // sorted for the common cases; sort to also cover a dir/file replacement
+    // (`d` sorts before `d/x.txt`), where a single tree position emits both a
+    // shallower and a deeper path.
+    out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(DiffResult { entries: out })
 }
 
@@ -155,6 +159,14 @@ fn diff_entries_recursive(
                         )?;
                     }
                     // identical subtree hashes -> nothing changed below
+                } else if o.mode == EntryMode::Tree || n.mode == EntryMode::Tree {
+                    // A directory replaced by a file (or vice versa). git
+                    // models this as the old subtree's leaves all deleted plus
+                    // the new entry added — never a single Modified blob whose
+                    // tree hash would be misread as a blob by the patch
+                    // renderer.
+                    add_removed_entries(store, o, prefix, out, depth)?;
+                    add_added_entries(store, n, prefix, out, depth)?;
                 } else if o.mode != n.mode && o.object_hash == n.object_hash {
                     if !ignore_regular_executable_mode || !regular_executable_pair(o.mode, n.mode) {
                         out.push(DiffEntry {
@@ -330,31 +342,35 @@ pub fn text_patch(old_bytes: &[u8], new_bytes: &[u8], old_path: &str, new_path: 
     match unified_hunks(old_bytes, new_bytes) {
         None => format!("Binary files a/{old_path} and b/{new_path} differ\n"),
         Some(hunks) if hunks.is_empty() => String::new(),
-        Some(hunks) => format!("--- a/{old_path}\n+++ b/{new_path}\n{hunks}"),
+        Some(hunks) => {
+            format!(
+                "--- a/{old_path}\n+++ b/{new_path}\n{}",
+                String::from_utf8_lossy(&hunks)
+            )
+        }
     }
 }
 
 /// The hunk body of a unified diff between two blobs: the `@@ … @@` headers
-/// and their `+`/`-`/context lines, with no `---`/`+++` file headers. Returns
-/// `None` when either side is **binary** (a caller emits a `Binary files …`
-/// line instead). An empty string means the blobs are textually identical.
+/// and their `+`/`-`/context lines, with no `---`/`+++` file headers, as raw
+/// bytes (git diffs are byte-oriented and do not require UTF-8). Returns
+/// `None` when either side is **binary** by git's heuristic — a NUL byte in
+/// the first 8000 bytes — so a caller emits a `Binary files …` line instead.
+/// An empty result means the blobs are textually identical.
 ///
 /// Splitting the hunk body out lets callers wrap it in a git-shaped
 /// `diff --git` header (with `/dev/null` for adds/deletes) while keeping the
 /// algorithm — Myers diff with git-style hunk compaction — in one place.
 #[must_use]
-pub fn unified_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<String> {
-    let (Ok(old_text), Ok(new_text)) = (
-        std::str::from_utf8(old_bytes),
-        std::str::from_utf8(new_bytes),
-    ) else {
+pub fn unified_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<u8>> {
+    if is_binary(old_bytes) || is_binary(new_bytes) {
         return None;
-    };
-    let old_lines = split_lines(old_text);
-    let new_lines = split_lines(new_text);
+    }
+    let old_lines = split_lines(old_bytes);
+    let new_lines = split_lines(new_bytes);
     let ops = edit_script(&old_lines, &new_lines);
     let hunks = group_hunks(&ops, PATCH_CONTEXT);
-    let mut out = String::new();
+    let mut out = Vec::new();
     for hunk in &hunks {
         render_hunk(&mut out, hunk, &old_lines, &new_lines);
     }
@@ -368,18 +384,16 @@ pub fn unified_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<String> {
 /// exactly the blobs Git would.
 ///
 /// Used by `diff --stat`; kept here so the stat counts always agree with
-/// the `+`/`-` lines `text_patch` would emit for the same blobs. Counting
-/// uses a lossy UTF-8 view — newline positions (and thus line counts) are
-/// preserved for any non-binary blob, including non-UTF-8 text.
+/// the `+`/`-` lines `text_patch` would emit for the same blobs. Lines are
+/// split on `\n` bytes, so the counts hold for any non-binary blob, including
+/// non-UTF-8 text.
 #[must_use]
 pub fn diff_line_counts(old_bytes: &[u8], new_bytes: &[u8]) -> Option<(usize, usize)> {
     if is_binary(old_bytes) || is_binary(new_bytes) {
         return None;
     }
-    let old_text = String::from_utf8_lossy(old_bytes);
-    let new_text = String::from_utf8_lossy(new_bytes);
-    let old_lines = split_lines(&old_text);
-    let new_lines = split_lines(&new_text);
+    let old_lines = split_lines(old_bytes);
+    let new_lines = split_lines(new_bytes);
     let mut added = 0;
     let mut deleted = 0;
     for op in edit_script(&old_lines, &new_lines) {
@@ -399,20 +413,21 @@ fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(FIRST_FEW_BYTES).any(|&b| b == 0)
 }
 
-/// A single line plus whether the source had a trailing newline after it.
+/// A single line (raw bytes) plus whether the source had a trailing newline
+/// after it.
 struct DiffLine<'a> {
-    text: &'a str,
+    text: &'a [u8],
     /// `true` when this line was terminated by `\n` in the source.
     has_newline: bool,
 }
 
-/// Split text into lines, preserving whether the final line had a
+/// Split bytes into lines on `\n`, preserving whether the final line had a
 /// trailing newline. An empty input yields no lines.
-fn split_lines(text: &str) -> Vec<DiffLine<'_>> {
+fn split_lines(text: &[u8]) -> Vec<DiffLine<'_>> {
     let mut lines = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
-        if let Some(idx) = rest.find('\n') {
+        if let Some(idx) = rest.iter().position(|&b| b == b'\n') {
             lines.push(DiffLine {
                 text: &rest[..idx],
                 has_newline: true,
@@ -423,7 +438,7 @@ fn split_lines(text: &str) -> Vec<DiffLine<'_>> {
                 text: rest,
                 has_newline: false,
             });
-            rest = "";
+            rest = b"";
         }
     }
     lines
@@ -683,27 +698,38 @@ fn build_hunk(slice: &[DiffOp]) -> Hunk {
     }
 }
 
-fn render_hunk(out: &mut String, hunk: &Hunk, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) {
-    let _ = writeln!(
-        out,
-        "@@ -{},{} +{},{} @@",
-        hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len
+/// Format one side of an `@@` range as git does: `start,len`, but the `,len`
+/// is omitted when `len == 1` (`@@ -1 +1 @@`).
+fn hunk_range(start: usize, len: usize) -> String {
+    if len == 1 {
+        start.to_string()
+    } else {
+        format!("{start},{len}")
+    }
+}
+
+fn render_hunk(out: &mut Vec<u8>, hunk: &Hunk, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) {
+    let header = format!(
+        "@@ -{} +{} @@\n",
+        hunk_range(hunk.old_start, hunk.old_len),
+        hunk_range(hunk.new_start, hunk.new_len)
     );
+    out.extend_from_slice(header.as_bytes());
     for op in &hunk.ops {
         match *op {
-            DiffOp::Equal(oi, _) => emit_line(out, ' ', &old[oi]),
-            DiffOp::Delete(oi) => emit_line(out, '-', &old[oi]),
-            DiffOp::Insert(ni) => emit_line(out, '+', &new[ni]),
+            DiffOp::Equal(oi, _) => emit_line(out, b' ', &old[oi]),
+            DiffOp::Delete(oi) => emit_line(out, b'-', &old[oi]),
+            DiffOp::Insert(ni) => emit_line(out, b'+', &new[ni]),
         }
     }
 }
 
-fn emit_line(out: &mut String, prefix: char, line: &DiffLine<'_>) {
+fn emit_line(out: &mut Vec<u8>, prefix: u8, line: &DiffLine<'_>) {
     out.push(prefix);
-    out.push_str(line.text);
-    out.push('\n');
+    out.extend_from_slice(line.text);
+    out.push(b'\n');
     if !line.has_newline {
-        out.push_str("\\ No newline at end of file\n");
+        out.extend_from_slice(b"\\ No newline at end of file\n");
     }
 }
 
@@ -1329,6 +1355,37 @@ mod tests {
         let new = &[0x00, 0xfe, 0x02][..];
         let patch = text_patch(old, new, "bin", "bin");
         assert_eq!(patch, "Binary files a/bin and b/bin differ\n");
+    }
+
+    #[test]
+    fn text_patch_nul_byte_is_binary_like_git() {
+        // A NUL byte makes the blob binary by git's heuristic even though it
+        // is valid UTF-8 — must NOT emit a textual hunk with an embedded NUL.
+        let patch = text_patch(b"a\0b\n", b"a\0c\n", "f", "f");
+        assert_eq!(patch, "Binary files a/f and b/f differ\n");
+    }
+
+    #[test]
+    fn unified_hunks_non_utf8_without_nul_is_text_like_git() {
+        // Invalid UTF-8 but no NUL: git treats it as text and diffs it
+        // byte-wise. The raw bytes survive into the hunk (single-line hunk →
+        // `@@ -1 +1 @@`, no `,1`).
+        let hunks = unified_hunks(b"\xff\n", b"\xfe\n").expect("not binary");
+        assert_eq!(
+            hunks,
+            b"@@ -1 +1 @@\n-\xff\n+\xfe\n".to_vec(),
+            "got {hunks:?}"
+        );
+    }
+
+    #[test]
+    fn hunk_header_omits_count_one_like_git() {
+        // A one-line-each change: git writes `@@ -1 +1 @@`, not `-1,1 +1,1`.
+        let patch = text_patch(b"old\n", b"new\n", "f", "f");
+        assert_eq!(
+            patch, "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n",
+            "{patch}"
+        );
     }
 
     #[test]

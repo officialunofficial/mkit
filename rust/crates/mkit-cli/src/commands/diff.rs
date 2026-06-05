@@ -692,8 +692,11 @@ fn emit_entry_patch(
     store: &ObjectStore,
     e: &DiffEntry,
 ) -> Result<(), String> {
-    let p = &e.path;
-    let _ = writeln!(out, "diff --git a/{p} b/{p}");
+    // git C-style quotes special-byte paths in the header (core.quotePath),
+    // quoting the whole `a/<path>` / `b/<path>` token as a unit.
+    let a_path = quoted_side('a', &e.path);
+    let b_path = quoted_side('b', &e.path);
+    let _ = writeln!(out, "diff --git {a_path} {b_path}");
 
     match e.kind {
         DiffKind::ModeChanged => {
@@ -735,11 +738,11 @@ fn emit_entry_patch(
         Some(h) => read_blob(store, &h)?,
         None => Vec::new(),
     };
-    // `--- a/p` / `+++ b/p`, with `/dev/null` for the absent side.
+    // `--- a/p` / `+++ b/p` (quoted), with `/dev/null` for the absent side.
     let (minus, plus) = match e.kind {
-        DiffKind::Added => ("/dev/null".to_string(), format!("b/{p}")),
-        DiffKind::Removed => (format!("a/{p}"), "/dev/null".to_string()),
-        _ => (format!("a/{p}"), format!("b/{p}")),
+        DiffKind::Added => ("/dev/null".to_string(), b_path.clone()),
+        DiffKind::Removed => (a_path.clone(), "/dev/null".to_string()),
+        _ => (a_path.clone(), b_path.clone()),
     };
     match unified_hunks(&old_bytes, &new_bytes) {
         None => {
@@ -749,10 +752,18 @@ fn emit_entry_patch(
         Some(hunks) => {
             let _ = writeln!(out, "--- {minus}");
             let _ = writeln!(out, "+++ {plus}");
-            let _ = out.write_all(hunks.as_bytes());
+            let _ = out.write_all(&hunks);
         }
     }
     Ok(())
+}
+
+/// The git-quoted `a/<path>` / `b/<path>` token for a patch header: C-style
+/// quoted (with surrounding quotes) when the path has special bytes, else the
+/// plain `<side>/<path>`.
+fn quoted_side(side: char, path: &str) -> String {
+    let s = format!("{side}/{path}");
+    super::c_quote_path(&s).unwrap_or(s)
 }
 
 /// Read a blob's bytes from the store, reassembling chunked blobs via
