@@ -89,10 +89,18 @@ pub fn build_tree(store: &ObjectStore, dir: &Path) -> WorktreeResult<Hash> {
             WorktreeError::Io(io::Error::other(".mkitignore exceeds 1 MiB"))
         }
     })?;
-    build_tree_inner(store, dir, &ignores)
+    build_tree_inner(store, dir, "", &ignores)
 }
 
-fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> WorktreeResult<Hash> {
+/// `rel_dir` is the path of `dir` relative to the repo root (empty at the
+/// root), so ignore patterns can be matched against full repo-relative paths
+/// rather than bare basenames.
+fn build_tree_inner(
+    store: &ObjectStore,
+    dir: &Path,
+    rel_dir: &str,
+    ignores: &IgnoreList,
+) -> WorktreeResult<Hash> {
     let mut entries: Vec<TreeEntry> = Vec::new();
 
     for entry in fs::read_dir(dir)? {
@@ -105,7 +113,12 @@ fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> Wo
         // `symlink_metadata` does not follow symlinks.
         let meta = entry.path().symlink_metadata()?;
         let is_dir = meta.is_dir();
-        if ignores.is_ignored(&name_str, is_dir) {
+        let rel_path = if rel_dir.is_empty() {
+            name_str.clone()
+        } else {
+            format!("{rel_dir}/{name_str}")
+        };
+        if ignores.is_ignored(&rel_path, is_dir) {
             continue;
         }
 
@@ -125,7 +138,7 @@ fn build_tree_inner(store: &ObjectStore, dir: &Path, ignores: &IgnoreList) -> Wo
                 object_hash: h,
             });
         } else if meta.file_type().is_dir() {
-            let h = build_tree_inner(store, &entry.path(), ignores)?;
+            let h = build_tree_inner(store, &entry.path(), &rel_path, ignores)?;
             entries.push(TreeEntry {
                 name: name_str.into_bytes(),
                 mode: EntryMode::Tree,

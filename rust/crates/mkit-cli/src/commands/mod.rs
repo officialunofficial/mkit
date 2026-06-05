@@ -571,10 +571,9 @@ fn is_ignored_worktree_path(
     let Ok(meta) = fs::symlink_metadata(&full_path) else {
         return false;
     };
-    let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    ignore.is_ignored(name, meta.is_dir())
+    // Match on the repo-relative path (anchored/multi-segment aware), not the
+    // bare basename.
+    ignore.is_ignored(path, meta.is_dir())
 }
 
 pub(crate) fn current_head_tree(root: &Path, store: &ObjectStore) -> Result<Option<Hash>, String> {

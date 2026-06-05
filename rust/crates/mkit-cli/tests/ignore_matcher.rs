@@ -1,0 +1,160 @@
+//! End-to-end coverage for the path-aware `.gitignore`/`.mkitignore` matcher
+//! (#256). The unit-level grammar is exercised in `mkit_core::ignore`; these
+//! tests prove the upgraded semantics actually flow through the real
+//! commands that consume the matcher — `add` (worktree tree-builder) and
+//! `ls-files --others`.
+
+use std::fs;
+use std::path::Path;
+use std::process::Output;
+
+fn mkit_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_mkit")
+}
+
+fn run_in(cwd: &Path, xdg: &Path, args: &[&str]) -> Output {
+    std::process::Command::new(mkit_bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg)
+        .output()
+        .expect("spawn mkit")
+}
+
+fn out_str(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+/// Fresh repo with a signing key (commits are always signed).
+fn repo() -> (tempfile::TempDir, tempfile::TempDir) {
+    let td = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(run_in(root, x, &["init"]).status.success());
+    assert!(run_in(root, x, &["keygen"]).status.success());
+    (td, xdg)
+}
+
+#[test]
+fn anchored_pattern_ignores_root_only_through_add() {
+    // A leading-slash pattern is anchored to the repo root: it must ignore
+    // `secret.txt` at the top level but NOT `sub/secret.txt`.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".mkitignore"), "/secret.txt\n").unwrap();
+    fs::write(root.join("secret.txt"), b"top\n").unwrap();
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub/secret.txt"), b"nested\n").unwrap();
+
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert!(
+        !tracked.contains("\nsecret.txt") && !tracked.starts_with("secret.txt"),
+        "anchored /secret.txt must not be staged at root: {tracked:?}"
+    );
+    assert!(
+        tracked.contains("sub/secret.txt"),
+        "the nested secret.txt is not anchored and must be staged: {tracked:?}"
+    );
+}
+
+#[test]
+fn double_star_dir_pattern_ignores_at_any_depth() {
+    // `**/build/` ignores a `build` directory at any depth — verify the
+    // contents never get staged.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".mkitignore"), "**/build/\n").unwrap();
+    fs::create_dir_all(root.join("a/build")).unwrap();
+    fs::write(root.join("a/build/out.o"), b"x\n").unwrap();
+    fs::write(root.join("a/keep.txt"), b"k\n").unwrap();
+
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert!(
+        tracked.contains("a/keep.txt"),
+        "kept file staged: {tracked:?}"
+    );
+    assert!(
+        !tracked.contains("build"),
+        "nothing under a/build should be staged: {tracked:?}"
+    );
+}
+
+#[test]
+fn gitignore_is_read_too() {
+    // With no `.mkitignore`, a `.gitignore` must still be honored by `add`.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    fs::write(root.join("debug.log"), b"x\n").unwrap();
+    fs::write(root.join("app.txt"), b"y\n").unwrap();
+
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert!(tracked.contains("app.txt"), "app.txt staged: {tracked:?}");
+    assert!(
+        !tracked.contains("debug.log"),
+        ".gitignore *.log must be honored: {tracked:?}"
+    );
+}
+
+#[test]
+fn mkitignore_reinclude_overrides_gitignore() {
+    // `.mkitignore` is applied last, so its re-include (`!`) wins over a
+    // `.gitignore` exclusion under last-match-wins.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    fs::write(root.join(".mkitignore"), "!keep.log\n").unwrap();
+    fs::write(root.join("keep.log"), b"k\n").unwrap();
+    fs::write(root.join("drop.log"), b"d\n").unwrap();
+
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert!(
+        tracked.contains("keep.log"),
+        "re-included keep.log must be staged: {tracked:?}"
+    );
+    assert!(
+        !tracked.contains("drop.log"),
+        "drop.log stays ignored: {tracked:?}"
+    );
+}
+
+#[test]
+fn ls_files_others_excludes_files_under_ignored_dir() {
+    // A file under an ignored directory must be treated as ignored by
+    // `ls-files --others --exclude-standard` (ancestor-dir exclusion), even
+    // though the file's own name matches no pattern.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".mkitignore"), "node_modules/\n").unwrap();
+    fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+    fs::write(root.join("node_modules/pkg/index.js"), b"x\n").unwrap();
+    fs::write(root.join("main.rs"), b"y\n").unwrap();
+
+    // Without --exclude-standard, everything untracked is listed.
+    let all = out_str(&run_in(root, x, &["ls-files", "--others"]));
+    assert!(
+        all.contains("node_modules/pkg/index.js"),
+        "all others: {all:?}"
+    );
+    // With --exclude-standard, the whole ignored subtree is dropped.
+    let excl = out_str(&run_in(
+        root,
+        x,
+        &["ls-files", "--others", "--exclude-standard"],
+    ));
+    assert!(excl.contains("main.rs"), "main.rs kept: {excl:?}");
+    assert!(
+        !excl.contains("node_modules"),
+        "ignored subtree dropped: {excl:?}"
+    );
+    // And --ignored shows exactly that subtree.
+    let ign = out_str(&run_in(root, x, &["ls-files", "--others", "--ignored"]));
+    assert!(
+        ign.contains("node_modules/pkg/index.js") && !ign.contains("main.rs"),
+        "--ignored lists only the ignored subtree: {ign:?}"
+    );
+}

@@ -314,13 +314,18 @@ fn add_tree(
         .map_err(|e| emit_err(&format!("read dir {}: {e}", dir.display()), exit::NOINPUT))?;
     for ent in rd.flatten() {
         let p = ent.path();
-        let name = ent.file_name();
-        let name_s = name.to_string_lossy();
         let meta = p
             .symlink_metadata()
             .map_err(|e| emit_err(&format!("metadata {}: {e}", p.display()), exit::NOINPUT))?;
         let is_dir = meta.file_type().is_dir();
-        if ignores.is_ignored(&name_s, is_dir) {
+        // Match ignore patterns against the repo-relative path (so anchored
+        // and multi-segment patterns work), not just the basename.
+        let rel_path = p
+            .strip_prefix(root)
+            .unwrap_or(&p)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if ignores.is_ignored(&rel_path, is_dir) {
             continue;
         }
         if meta.file_type().is_dir() {

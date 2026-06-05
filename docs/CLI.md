@@ -338,8 +338,8 @@ Branches / refs:
   the scope to matching top-level entries and whole directories (`.` means
   everything under cwd); a pathspec naming a file *inside* an otherwise
   fully-removable untracked directory is a known limitation — name the
-  directory or use `.`. Ignore matching uses mkit's `.mkitignore` matcher
-  (basename-based subset pending the `.gitignore` upgrade, #256).
+  directory or use `.`. Ignore matching uses the shared path-aware ignore
+  matcher (see "Ignore files" below).
 - `mkit tag` — list, create, or delete tags.
   - `mkit tag` (no args) — list tags; annotated/signed tags are marked.
   - `mkit tag <name> [<commit>]` — create a lightweight tag (a ref
@@ -597,6 +597,37 @@ Config / keys / version:
   subcommand and emit the identical string. Note this is `mkit <X.Y.Z>`,
   not Git's `git version <X.Y.Z>` form — an intentional, documented
   divergence (the string is pinned by packaging asserts).
+
+## Ignore files
+
+mkit reads ignore patterns from **both** `.gitignore` and `.mkitignore` at
+the repository root. `.gitignore` is applied first and `.mkitignore` last, so
+under gitignore's last-match-wins rule a repo's own `.mkitignore` can override
+(including re-include via `!`) anything `.gitignore` set. Matching is honored
+by `add`, `clean`, `ls-files --others`, `restore`/`checkout`, and the
+worktree tree-builder.
+
+Matching is **path-relative** and follows the gitignore semantics for this
+v1 subset:
+
+- A pattern with no `/` (other than a trailing one) matches at **any depth**
+  (`*.log` matches `a/b/c.log`). A pattern containing a `/` — including a
+  leading `/` — is **anchored** to the repo root (`/foo` matches only the
+  top-level `foo`; `src/gen` only that path).
+- `*` and `?` match within a single path segment; `[abc]`, `[a-z]`, and
+  `[!abc]` character classes are supported; `\` escapes the next character.
+- `**` as a whole segment crosses `/`: leading `**/` and middle `/**/` match
+  zero or more directories, and a trailing `/**` matches everything *inside*
+  a directory.
+- A trailing `/` restricts a pattern to directories. A leading `!` negates
+  (last match wins); `\#` / `\!` escape a leading `#` / `!` to a literal.
+  Trailing unescaped spaces are trimmed.
+- `.mkit` and `.git` are always ignored (matched on the basename, ASCII
+  case-insensitively).
+
+**Deferred (documented non-goals for now, #256):** nested per-directory
+ignore files (only the repo root is read), global excludes
+(`core.excludesFile`), and escaped trailing spaces.
 
 ## Divergences from Git
 

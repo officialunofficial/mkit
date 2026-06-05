@@ -198,10 +198,9 @@ fn collect_dir(
         }
 
         // Untracked. `-X` keeps only ignored entries; otherwise keep
-        // non-ignored entries and ignored ones only with `-x`. The matcher
-        // is basename-based (like `worktree::build_tree`), so match on the
-        // entry name, not the full path.
-        let ignored = ignore.is_ignored(name, is_dir);
+        // non-ignored entries and ignored ones only with `-x`. Match on the
+        // repo-relative path so anchored/multi-segment patterns work.
+        let ignored = ignore.is_ignored(&path, is_dir);
         let include = if opts.only_ignored {
             ignored
         } else {

@@ -338,8 +338,8 @@ fn restore_tree_to_worktree_inner(
             format!("{path_prefix}/{name}")
         };
         let is_dir = entry.mode == EntryMode::Tree;
-        // `is_ignored` matches against a basename per `crate::ignore`.
-        if ignore.is_ignored(name, is_dir) {
+        // Match against the repo-relative path (anchored/multi-segment aware).
+        if ignore.is_ignored(&full_path, is_dir) {
             report.skipped_by_ignore += 1;
             continue;
         }
@@ -742,7 +742,7 @@ fn clean_directory_with_ignore(
         if name_str.eq_ignore_ascii_case(".mkit") || name_str.eq_ignore_ascii_case(".git") {
             continue;
         }
-        if name_str == ".mkitignore" {
+        if name_str == ".mkitignore" || name_str == ".gitignore" {
             continue;
         }
         let mut found = false;
@@ -757,16 +757,17 @@ fn clean_directory_with_ignore(
         }
         let meta = entry.metadata()?;
         let is_dir = meta.is_dir();
-        // Respect `.mkitignore` — don't touch locally-ignored files.
-        if ignore.is_ignored(&name_str, is_dir) {
+        let full_path = if path_prefix.is_empty() {
+            name_str.clone()
+        } else {
+            format!("{path_prefix}/{name_str}")
+        };
+        // Respect ignore rules — don't touch locally-ignored files. Match on
+        // the repo-relative path (anchored/multi-segment aware).
+        if ignore.is_ignored(&full_path, is_dir) {
             continue;
         }
         if let Some(patterns) = sparse_patterns {
-            let full_path = if path_prefix.is_empty() {
-                name_str.clone()
-            } else {
-                format!("{path_prefix}/{name_str}")
-            };
             let allow = matches_sparse(patterns, &full_path, is_dir)
                 || (is_dir && could_match_descendant(patterns, &full_path));
             if !allow {
