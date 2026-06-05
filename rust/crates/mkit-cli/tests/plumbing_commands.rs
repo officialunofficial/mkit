@@ -247,6 +247,31 @@ fn cat_file_batch_emits_header_and_content() {
 }
 
 #[test]
+fn cat_file_batch_one_record_per_line_no_trim() {
+    // git emits one record per input line without trimming: a blank line is
+    // an empty (unresolvable) name → ` missing`, and a name padded with
+    // spaces stays unresolved (no sneaky `HEAD` lookup). mkit must match.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    // Three input lines: blank, " HEAD " (padded), and a real id.
+    let full = out_str(&run_in(root, x, &["rev-parse", "HEAD"]));
+    let input = format!("\n HEAD \n{full}\n");
+    let out = run_in_stdin(root, x, &["cat-file", "--batch"], input.as_bytes());
+    assert!(out.status.success(), "batch failed: {out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    // Line 1: blank name → ` missing` (leading space, name is empty).
+    assert_eq!(lines[0], " missing", "blank line → ` missing`: {text:?}");
+    // Line 2: padded ` HEAD ` is not trimmed → unresolved missing record.
+    assert_eq!(
+        lines[1], " HEAD  missing",
+        "padded HEAD stays missing: {text:?}"
+    );
+    // The real id still resolves to a `commit` header afterwards.
+    assert!(lines[2].contains(" commit "), "real id resolves: {text:?}");
+}
+
+#[test]
 fn ls_files_lists_tracked_with_stage_info() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());

@@ -120,15 +120,15 @@ fn run_batch(store: &ObjectStore, mkit_dir: &std::path::Path) -> u8 {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
-        let line = match line {
+        // One output record per input line. The whole line is the object
+        // name (no trimming, no skipping) — mkit has no `%(rest)` format —
+        // so a blank or whitespace-bearing line simply fails to resolve and
+        // yields a `<name> missing` record, exactly like git.
+        let name = match line {
             Ok(l) => l,
             Err(e) => return emit_err(&format!("read stdin: {e}"), exit::NOINPUT),
         };
-        let name = line.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let Ok(h) = revspec::resolve_revision(store, mkit_dir, name) else {
+        let Ok(h) = revspec::resolve_revision(store, mkit_dir, &name) else {
             let _ = writeln!(stdout, "{name} missing");
             continue;
         };
