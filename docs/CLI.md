@@ -179,8 +179,8 @@ History / commits:
 
 Read-only plumbing (object/ref inspection, for scripts and agents):
 
-- `mkit cat-file (-t | -s | -p | --batch) <object>` — inspect a stored
-  object (like `git cat-file`). `-t` prints the type
+- `mkit cat-file (-t | -s | -p) <object>` / `mkit cat-file --batch` —
+  inspect a stored object (like `git cat-file`). `-t` prints the type
   (`blob`/`tree`/`commit`/`tag`; mkit's `remix` is the one non-git type);
   `-s` prints the size (the content byte length for blobs — matching git —
   but mkit's serialized size for trees/commits, which differs); `-p`

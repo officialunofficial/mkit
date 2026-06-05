@@ -38,9 +38,10 @@ commands:
                     refuses to discard dirty/staged content without -f
   hash <file>       Hash a file and store it as a blob
   cat <hash>        Display an object by its hash
-  cat-file (-t|-s|-p|--batch) <object>  Show an object's type, size, or content
+  cat-file (-t|-s|-p) <object> | cat-file --batch
+                    Show an object's type, size, or content
                     (-p: blob bytes, tree listing, or commit/tag summary;
-                    --batch reads object names from stdin)
+                    --batch reads object names from stdin, takes no <object>)
   tree              Snapshot working directory as a tree object
   ls-tree [-r] [-z] <tree-ish> [<path>...]
                     List a tree's entries as `<mode> <type> <hash>\t<name>`
