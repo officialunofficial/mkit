@@ -131,27 +131,13 @@ pub fn run(args: &[String]) -> u8 {
         clean: false,
         sparse_patterns: None,
     };
-    // Run the same dirty/untracked guard as `checkout` BEFORE any
-    // mutation, unless `-f`. It refuses if discarding would lose
-    // locally-modified, staged, or colliding-untracked content — an mkit
-    // safety divergence (git's `reset --hard` discards silently).
-    if opts.hard
-        && !opts.force
-        && let Err(e) =
-            super::ensure_restore_safe_with_options(&cwd, &store, tree_hash, &restore_opts)
-    {
-        return emit_err(
-            &format!("{e}\nhint: use `mkit reset --hard -f` to discard these changes"),
-            exit::GENERAL_ERROR,
-        );
-    }
 
-    // For --hard, capture the tracked paths the target DROPS, computed from
-    // the current index BEFORE it is re-synced. `clean = false` won't
-    // delete these, so we remove them from the worktree ourselves — git
-    // `reset --hard` removes tracked files absent from the target while
-    // leaving untracked files untouched.
-    let hard_removed: Vec<String> = if opts.hard {
+    // For --hard, capture the tracked paths the target DROPS — each with
+    // its current index blob hash — computed from the current index BEFORE
+    // it is re-synced. `clean = false` won't delete these, so we remove
+    // them ourselves; the hashes let the guard below detect local edits to
+    // ignored-but-tracked files that the shared guard cannot see.
+    let hard_removed: Vec<(String, Hash)> = if opts.hard {
         match dropped_tracked_paths(&cwd, &store, tree_hash) {
             Ok(p) => p,
             Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
@@ -159,6 +145,34 @@ pub fn run(args: &[String]) -> u8 {
     } else {
         Vec::new()
     };
+
+    // Guard BEFORE any mutation, unless `-f`. The shared `checkout` guard
+    // refuses if discarding would lose locally-modified, staged, or
+    // colliding-untracked content — an mkit safety divergence (git's
+    // `reset --hard` discards silently). That guard compares the worktree
+    // via `worktree::build_tree`, which honors `.mkitignore`, so it cannot
+    // see a tracked file that matches an ignore pattern; check the dropped
+    // paths directly so a locally-modified ignored-but-tracked file is not
+    // discarded silently.
+    if opts.hard && !opts.force {
+        if let Err(e) =
+            super::ensure_restore_safe_with_options(&cwd, &store, tree_hash, &restore_opts)
+        {
+            return emit_err(
+                &format!("{e}\nhint: use `mkit reset --hard -f` to discard these changes"),
+                exit::GENERAL_ERROR,
+            );
+        }
+        if let Some(path) = locally_modified_dropped_path(&cwd, &store, &hard_removed) {
+            return emit_err(
+                &format!(
+                    "reset --hard would discard local changes to '{path}'\n\
+                     hint: use `mkit reset --hard -f` to discard these changes"
+                ),
+                exit::GENERAL_ERROR,
+            );
+        }
+    }
 
     // If reset moves the branch off its current tip, that old tip may
     // become unreachable — record it BEFORE the move (under the worktree
@@ -199,17 +213,12 @@ pub fn run(args: &[String]) -> u8 {
         if let Err(e) = restore_tree_to_worktree(&store, &tree_hash, &cwd, &restore_opts) {
             return emit_err(&format!("reset worktree: {e}"), exit::CANTCREAT);
         }
-        for path in &hard_removed {
-            let abs = cwd.join(path);
-            match std::fs::remove_file(&abs) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return emit_err(
-                        &format!("reset worktree: remove {path}: {e}"),
-                        exit::CANTCREAT,
-                    );
-                }
+        for (path, _) in &hard_removed {
+            if let Err(e) = remove_dropped_path(&cwd.join(path)) {
+                return emit_err(
+                    &format!("reset worktree: remove {path}: {e}"),
+                    exit::CANTCREAT,
+                );
             }
         }
     }
@@ -246,14 +255,15 @@ fn move_head(mkit_dir: &std::path::Path, target: &Hash) -> Result<(), (String, u
 }
 
 /// Tracked paths present in the current index but absent from the target
-/// tree — for `--hard` these worktree files are deleted (git removes
-/// tracked files the target drops; `restore_tree_to_worktree` with
-/// `clean = false` writes/overwrites but never deletes).
+/// tree, each paired with its current index blob hash — for `--hard` these
+/// worktree files are deleted (git removes tracked files the target drops;
+/// `restore_tree_to_worktree` with `clean = false` writes/overwrites but
+/// never deletes). The hash lets the caller detect local edits.
 fn dropped_tracked_paths(
     cwd: &std::path::Path,
     store: &ObjectStore,
     target_tree: Hash,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<(String, Hash)>, String> {
     let idx = super::read_or_seed_index_from_head(cwd, store)?;
     let index_tree =
         worktree::build_tree_from_index(store, &idx).map_err(|e| format!("index tree: {e}"))?;
@@ -262,9 +272,44 @@ fn dropped_tracked_paths(
         .entries
         .into_iter()
         .filter(|e| e.kind == DiffKind::Removed)
-        .map(|e| e.path)
+        .filter_map(|e| e.old_hash.map(|h| (e.path, h)))
         .collect();
     Ok(removed)
+}
+
+/// The first dropped path whose worktree file differs from its indexed
+/// blob (a local edit), or `None` if every dropped file is unmodified /
+/// already gone. Used to guard `reset --hard` against silently discarding
+/// edits to tracked files that match `.mkitignore` (which the shared
+/// guard's `build_tree` comparison skips).
+fn locally_modified_dropped_path(
+    cwd: &std::path::Path,
+    store: &ObjectStore,
+    dropped: &[(String, Hash)],
+) -> Option<String> {
+    for (path, expected) in dropped {
+        match worktree::hash_file(store, &cwd.join(path)) {
+            Ok(h) if h != *expected => return Some(path.clone()),
+            // Unchanged, unreadable, or a non-file (dir/symlink) at the
+            // path — nothing to protect here; deletion is handled safely.
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Delete a dropped tracked path from the worktree. A regular file or
+/// symlink is removed; a directory (untracked content that replaced the
+/// tracked file) is LEFT in place rather than recursively deleted, and a
+/// missing path is a no-op — so this never crashes on `IsADirectory` and
+/// never nukes untracked directories.
+fn remove_dropped_path(abs: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(abs) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => std::fs::remove_file(abs),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {

@@ -204,6 +204,127 @@ fn clean_force_d_removes_untracked_directories() {
 }
 
 #[test]
+fn clean_fd_keeps_ignored_files_inside_untracked_dir() {
+    // Finding 1: -fd must not wholesale-delete an untracked dir that holds
+    // an ignored file (git keeps the ignored file and the dir around it).
+    let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".mkitignore"), b"*.log\n").unwrap();
+    fs::create_dir(root.join("tmp")).unwrap();
+    fs::write(root.join("tmp/debug.log"), b"ignored\n").unwrap();
+    fs::write(root.join("tmp/normal.txt"), b"untracked\n").unwrap();
+
+    let out = run_in(root, x, &["clean", "-f", "-d"]);
+    assert!(out.status.success(), "clean -fd failed: {out:?}");
+    assert!(
+        !root.join("tmp/normal.txt").exists(),
+        "untracked file removed"
+    );
+    assert!(
+        root.join("tmp/debug.log").exists(),
+        "ignored file inside untracked dir must be kept without -x"
+    );
+    assert!(
+        root.join("tmp").exists(),
+        "dir with a surviving file must stay"
+    );
+}
+
+#[test]
+fn clean_fd_protects_nested_repository() {
+    // Finding 2: -fd must not delete a nested repository's metadata.
+    let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir_all(root.join("nested/.mkit")).unwrap();
+    fs::write(root.join("nested/file.txt"), b"inner\n").unwrap();
+
+    let out = run_in(root, x, &["clean", "-f", "-d"]);
+    assert!(out.status.success(), "clean -fd failed: {out:?}");
+    assert!(
+        root.join("nested/.mkit").exists(),
+        "nested repository metadata must be protected from clean -fd"
+    );
+    assert!(
+        root.join("nested/file.txt").exists(),
+        "nested repo left intact"
+    );
+}
+
+#[test]
+fn clean_fd_dot_pathspec_cleans_everything() {
+    // Finding 5: `clean -fd .` must clean under cwd, not no-op.
+    let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join("untracked.txt"), b"u\n").unwrap();
+    fs::create_dir(root.join("untrackeddir")).unwrap();
+    fs::write(root.join("untrackeddir/f.txt"), b"d\n").unwrap();
+
+    let out = run_in(root, x, &["clean", "-f", "-d", "."]);
+    assert!(out.status.success(), "clean -fd . failed: {out:?}");
+    assert!(!root.join("untracked.txt").exists(), "file cleaned by '.'");
+    assert!(!root.join("untrackeddir").exists(), "dir cleaned by '.'");
+}
+
+#[test]
+fn clean_x_and_capital_x_conflict() {
+    // Finding 6: -x and -X are mutually exclusive.
+    let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    let out = run_in(root, x, &["clean", "-n", "-x", "-X"]);
+    assert!(
+        !out.status.success(),
+        "-x and -X together must be rejected: {out:?}"
+    );
+}
+
+#[test]
+fn reset_hard_refuses_discarding_modified_ignored_but_tracked_dropped_file() {
+    // Finding 3: a file tracked before an ignore pattern matched it is
+    // invisible to the shared (build_tree) guard; if it is locally modified
+    // and the target drops it, reset --hard must still refuse without -f.
+    let (td, xdg) = repo(&[("base.txt", b"base\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    // Track secret.key BEFORE any ignore exists (add . respects ignore, so
+    // a file matching a pattern can only be tracked beforehand).
+    fs::write(root.join("secret.key"), b"v1\n").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    assert!(
+        run_in(root, x, &["commit", "-m", "add secret"])
+            .status
+            .success()
+    );
+    // Now add an ignore rule matching the already-tracked file.
+    fs::write(root.join(".mkitignore"), b"*.key\n").unwrap();
+    assert!(run_in(root, x, &["add", ".mkitignore"]).status.success());
+    assert!(
+        run_in(root, x, &["commit", "-m", "ignore keys"])
+            .status
+            .success()
+    );
+    // Locally modify the ignored-but-tracked file.
+    fs::write(root.join("secret.key"), b"v2-modified\n").unwrap();
+
+    // HEAD~2 (base) drops secret.key. Without -f it must refuse (lose v2).
+    let refused = run_in(root, x, &["reset", "--hard", "HEAD~2"]);
+    assert!(
+        !refused.status.success(),
+        "reset --hard must refuse to discard a modified ignored-but-tracked file: {refused:?}"
+    );
+    assert_eq!(fs::read(root.join("secret.key")).unwrap(), b"v2-modified\n");
+
+    // -f discards it (and drops the file).
+    let forced = run_in(root, x, &["reset", "--hard", "-f", "HEAD~2"]);
+    assert!(
+        forced.status.success(),
+        "reset --hard -f failed: {forced:?}"
+    );
+    assert!(
+        !root.join("secret.key").exists(),
+        "dropped file removed with -f"
+    );
+}
+
+#[test]
 fn clean_respects_ignore_unless_x() {
     let (td, xdg) = repo(&[("tracked.txt", b"t\n")]);
     let (root, x) = (td.path(), xdg.path());

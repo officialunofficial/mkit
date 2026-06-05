@@ -74,9 +74,9 @@ creeping; revisit post-v1 if demand warrants.
 | `merge` / `cherry-pick` / `rebase` | merge, pick, replay + conflict workflow | same | ✅ | — | — | `rebase -i` separate (#259) |
 | `rebase -i` | interactive todo list | absent | 🔨 | 4 | #259 | promoted everyday-safe only after Phase 5 |
 | `restore` / `reset` | `--staged`/`--worktree`/`--soft`/`--mixed` | same | ✅ | — | — | |
-| `reset --hard` | reset worktree | same | ✅ | 2 | #250 | resets HEAD+index+worktree to target; removes dropped tracked files, KEEPS untracked (like git); refuses to discard dirty/staged without `-f` (mkit divergence — git discards silently) |
+| `reset --hard` | reset worktree | same | ✅ | 2 | #250 | resets HEAD+index+worktree to target; removes dropped tracked files, keeps untracked (like git) except a target-colliding untracked path; refuses to discard dirty/staged or overwrite a colliding untracked path without `-f` (mkit divergence — git discards silently); guard also covers tracked files matching `.mkitignore` |
 | `revert` | inverse-commit, `--no-commit`, conflict-aware | same; merge `-m` not yet supported | ✅ | 2 | #255 | forward commit (not gated on gc); reuses the conflict workflow; reverting a merge is refused pending mainline selection |
-| `clean` | `-n`/`-f`/`-d`/`-x`/`-X`, pathspecs | same | ✅ | 2 | #250 | refuses unless `-f` (git `clean.requireForce`); `-n` previews `Would remove …`; `-d` removes untracked dirs; `-x`/`-X` use mkit's `.mkitignore` matcher (basename/root subset, #256) |
+| `clean` | `-n`/`-f`/`-d`/`-x`/`-X`, pathspecs | same | ✅ | 2 | #250 | refuses unless `-f` (git `clean.requireForce`); `-n` previews `Would remove …`; `-d` removes untracked dirs but keeps ignored files + protects nested repos (no `-ff`); `-x`/`-X` mutually exclusive, use mkit's `.mkitignore` matcher (basename subset, #256); pathspecs supported (`.` = all under cwd) |
 | `stash` | save/list/pop/apply/drop/clear/show | same | ✅ | — | — | |
 | `gc` | prune unreachable objects | mark-and-sweep, recovery-aware | ✅ | — | #233 | `-n`/`--grace-secs`; fail-closed; see SPEC-GC.md |
 | `add -p` | interactive hunk staging | absent | 🔨 | 4 | #258 | partial staging / synthetic index blobs |

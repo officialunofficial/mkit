@@ -273,11 +273,17 @@ Branches / refs:
   from the worktree. **Destructive, so it refuses to delete without an
   explicit `-f`** (matching git's `clean.requireForce` default); `-n`
   previews with `Would remove <path>` lines. Without `-d`, untracked
-  directories are left alone (git semantics); `-d` removes them too (shown
-  as `<dir>/`). Ignored files are kept unless `-x` (remove ignored too) or
-  `-X` (remove *only* ignored). Trailing pathspecs limit the scope. Ignore
-  matching uses mkit's `.mkitignore` matcher (basename/root-only subset
-  pending the `.gitignore` upgrade, #256).
+  directories are left alone (git semantics); `-d` recurses into them and
+  removes them — but, like git, an untracked directory is only removed
+  *wholesale* (shown `<dir>/`) when nothing inside survives: **ignored
+  files are kept** (unless `-x`) and keep their parent directory, and a
+  **nested repository** (a subdirectory containing `.mkit`/`.git`) is left
+  untouched (git needs the double-force `-ff` to remove one, which mkit
+  doesn't offer). `-x` also removes ignored files, `-X` removes *only*
+  ignored (`-x` and `-X` are mutually exclusive). Trailing pathspecs limit
+  the scope (`.` means everything under cwd). Ignore matching uses mkit's
+  `.mkitignore` matcher (basename-based subset pending the `.gitignore`
+  upgrade, #256).
 - `mkit tag` — list, create, or delete tags.
   - `mkit tag` (no args) — list tags; annotated/signed tags are marked.
   - `mkit tag <name> [<commit>]` — create a lightweight tag (a ref
@@ -560,10 +566,14 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   HEAD only; `--mixed` (the default) also resets the index; both leave the
   worktree untouched. `--hard` additionally resets the worktree to the
   target tree — overwriting tracked-file changes and removing tracked
-  files the target drops, while **keeping untracked files** (like git).
-  As a safety divergence, `--hard` **refuses to discard** locally-modified
-  or staged content unless `-f`/`--force` is given (git's `reset --hard`
-  discards silently). `<commit>` defaults to `HEAD`.
+  files the target drops. Untracked files are kept (like git), **except**
+  an untracked path that *collides* with one the target writes. As a
+  safety divergence, `--hard` **refuses** (without `-f`/`--force`) when
+  discarding would lose locally-modified or staged content, or overwrite
+  such a colliding untracked path; with `-f` it is overwritten. git's
+  `reset --hard` discards silently. The guard also covers tracked files
+  matching `.mkitignore` (which the worktree comparison would otherwise
+  skip). `<commit>` defaults to `HEAD`.
 
 ### Commands deliberately not implemented (by design)
 
