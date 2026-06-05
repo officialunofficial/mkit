@@ -485,6 +485,78 @@ fn log_oneline_matches_git() {
     assert_parity_oneline("log --oneline", &g, &m); // `<abbrev> only commit`
 }
 
+#[test]
+fn log_revision_and_range_match_git() {
+    if !git_available() {
+        eprintln!("skipping: real `git` not on PATH");
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    for (f, m) in [
+        ("a.txt", "c1"),
+        ("b.txt", "c2"),
+        ("c.txt", "c3"),
+        ("d.txt", "c4"),
+    ] {
+        h.write_both(f, b"x\n");
+        h.commit_both(&[f], m);
+    }
+    // A single revision starts the walk there (HEAD~1 and its ancestors).
+    assert_parity_oneline(
+        "log --oneline HEAD~1",
+        &h.git(&["log", "--oneline", "HEAD~1"]),
+        &h.mkit(&["log", "--oneline", "HEAD~1"]),
+    );
+    // `A..B` excludes the left side and its ancestors.
+    assert_parity_oneline(
+        "log --oneline HEAD~3..HEAD",
+        &h.git(&["log", "--oneline", "HEAD~3..HEAD"]),
+        &h.mkit(&["log", "--oneline", "HEAD~3..HEAD"]),
+    );
+    // Open-ended `A..` = `A..HEAD`.
+    assert_parity_oneline(
+        "log --oneline HEAD~2..",
+        &h.git(&["log", "--oneline", "HEAD~2.."]),
+        &h.mkit(&["log", "--oneline", "HEAD~2.."]),
+    );
+}
+
+#[test]
+fn log_annotated_tag_range_matches_git() {
+    if !git_available() {
+        eprintln!("skipping: real `git` not on PATH");
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"1\n");
+    h.commit_both(&["a.txt"], "c1");
+    // An annotated tag at c1 in both repos — log must peel it to the commit.
+    assert!(h.git(&["tag", "-a", "v1", "-m", "tag c1"]).status.success());
+    assert!(
+        h.mkit(&["tag", "-a", "v1", "-m", "tag c1"])
+            .status
+            .success()
+    );
+    h.write_both("b.txt", b"2\n");
+    h.commit_both(&["b.txt"], "c2");
+    h.write_both("c.txt", b"3\n");
+    h.commit_both(&["c.txt"], "c3");
+    // Include side: `log <tag>` walks the tagged commit's history.
+    assert_parity_oneline(
+        "log --oneline v1 (annotated)",
+        &h.git(&["log", "--oneline", "v1"]),
+        &h.mkit(&["log", "--oneline", "v1"]),
+    );
+    // Exclude side: `<tag>..HEAD` excludes the tagged commit + ancestors.
+    assert_parity_oneline(
+        "log --oneline v1..HEAD (annotated)",
+        &h.git(&["log", "--oneline", "v1..HEAD"]),
+        &h.mkit(&["log", "--oneline", "v1..HEAD"]),
+    );
+}
+
 // =====================================================================
 // Passing subset — diff --name-only / --name-status / -z. Unlike the
 // unified patch (whose `diff --mkit` header diverges, Phase 4), these

@@ -318,8 +318,25 @@ unreachable object until
 .Cm gc
 ships
 .Pq issue #233 .
-.It Cm log Op Fl Fl oneline Op Fl Fl abbrev-commit Op Fl Fl abbrev Ns = Ns Ar N Op Fl Fl format Ar json Op Fl Fl graph Op Fl n Ar N
-Show commit history. The default format prints the full commit message body,
+.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Ar rev | Ar A Ns .. Ns Ar B Oc
+Show commit history. With no argument the walk starts at
+.Cm HEAD ;
+an optional
+.Ar rev
+starts it there instead, and a range
+.Ar A Ns .. Ns Ar B
+shows commits reachable from
+.Ar B
+but not
+.Ar A
+(an empty side means
+.Cm HEAD ) .
+Commits are ordered reverse-chronologically with a topological tie-break (a
+parent never precedes a child) \(em git's
+.Fl Fl date-order ,
+which matches git's default for linear and monotonic-timestamp history.
+.Ar A Ns ... Ns Ar B
+symmetric ranges are not yet supported. The default format prints the full commit message body,
 indented by four spaces, and renders the timestamp as a stable UTC date in the
 form
 .Ql YYYY-MM-DD HH:MM:SS +0000 .

@@ -50,12 +50,14 @@ commands:
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable until `gc` ships.
-  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N]
+  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B>]
                     Show commit history (default prints the full message
                     body + a UTC date; --oneline/--abbrev-commit abbreviate
                     the commit id, --abbrev[=N] sets the length (default 7);
                     --format=json emits JSONL with the raw timestamp;
-                    --graph is accepted but currently a no-op)
+                    --graph is accepted but currently a no-op). Optional
+                    <rev> starts the walk there; <A>..<B> shows commits in B
+                    not in A (empty side = HEAD)
   reflog [<ref>] [--format=json] [-n N]
                     Show a branch's recorded movement history (read-only).
                     Lists the branch's first-parent chain (newest first,
