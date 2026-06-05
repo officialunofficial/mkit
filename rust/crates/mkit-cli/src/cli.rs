@@ -38,7 +38,17 @@ commands:
                     refuses to discard dirty/staged content without -f
   hash <file>       Hash a file and store it as a blob
   cat <hash>        Display an object by its hash
+  cat-file (-t|-s|-p) <object>  Show an object's type, size, or content
+                    (-p: blob bytes, tree listing, or commit/tag summary)
   tree              Snapshot working directory as a tree object
+  ls-tree [-r] [-z] <tree-ish> [<path>...]
+                    List a tree's entries as `<mode> <type> <hash>\t<name>`
+                    (-r recurses; -z NUL-terminates with raw paths)
+  rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]
+                    Resolve revisions to object ids (--short abbreviates,
+                    --abbrev-ref HEAD prints the branch, --show-toplevel
+                    prints the repo root)
+  show-ref [--heads] [--tags]  List refs as `<hash> <refname>`
   commit [-a] [--amend] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
@@ -197,7 +207,11 @@ mod tests {
             "reset",
             "hash",
             "cat",
+            "cat-file",
             "tree",
+            "ls-tree",
+            "rev-parse",
+            "show-ref",
             "commit",
             "log",
             "reflog",

@@ -15,7 +15,7 @@
 complete -c mkit -f
 
 set -l __mkit_subcommands \
-    init add rm mv restore reset hash cat tree commit log reflog status diff branch checkout clean \
+    init add rm mv restore reset hash cat cat-file tree ls-tree rev-parse show-ref commit log reflog status diff branch checkout clean \
     tag config merge push pull fetch stash clone remote key keygen \
     cherry-pick revert rebase bisect gc sparse-checkout serve pack-shard blame verify \
     attest verify-attest version help
@@ -81,6 +81,28 @@ complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -l stat -d "Diffstat: counts + graph + summary"
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -s z -d "NUL-terminate name-only/name-status records, raw paths"
+complete -c mkit -n "__fish_seen_subcommand_from cat-file" \
+    -s t -d "Print object type"
+complete -c mkit -n "__fish_seen_subcommand_from cat-file" \
+    -s s -d "Print object size"
+complete -c mkit -n "__fish_seen_subcommand_from cat-file" \
+    -s p -d "Pretty-print object content"
+complete -c mkit -n "__fish_seen_subcommand_from ls-tree" \
+    -s r -d "Recurse into sub-trees"
+complete -c mkit -n "__fish_seen_subcommand_from ls-tree" \
+    -s z -d "NUL-terminate records, raw paths"
+complete -c mkit -n "__fish_seen_subcommand_from rev-parse" \
+    -l verify -d "Error on an unresolvable revision"
+complete -c mkit -n "__fish_seen_subcommand_from rev-parse" \
+    -l short -d "Abbreviate the id (default 7)"
+complete -c mkit -n "__fish_seen_subcommand_from rev-parse" \
+    -l abbrev-ref -d "Print the short symbolic name"
+complete -c mkit -n "__fish_seen_subcommand_from rev-parse" \
+    -l show-toplevel -d "Print the repository root"
+complete -c mkit -n "__fish_seen_subcommand_from show-ref" \
+    -l heads -d "Only refs/heads"
+complete -c mkit -n "__fish_seen_subcommand_from show-ref" \
+    -l tags -d "Only refs/tags"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
     -l porcelain -d "Machine-readable XY output"
 complete -c mkit -n "__fish_seen_subcommand_from status" \

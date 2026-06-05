@@ -20,7 +20,11 @@ _mkit() {
         'reset:Move HEAD (--soft) or HEAD + index (--mixed) to a commit'
         'hash:Hash a file and store it as a blob'
         'cat:Display an object by its hash'
+        'cat-file:Show an object'\''s type (-t), size (-s), or content (-p)'
         'tree:Snapshot working directory as a tree object'
+        'ls-tree:List a tree'\''s entries (-r recurse, -z NUL)'
+        'rev-parse:Resolve revisions to object ids'
+        'show-ref:List refs as <hash> <refname> (--heads/--tags)'
         'commit:Create a signed commit'
         'log:Show commit history'
         'reflog:Show a branch movement history (read-only)'
@@ -128,6 +132,36 @@ _mkit() {
                         '-z[NUL-terminate name-only/name-status records, raw paths]' \
                         '--help[show help]' \
                         '*:file:_files'
+                    ;;
+                cat-file)
+                    _arguments \
+                        '(-t -s -p)-t[print object type]' \
+                        '(-t -s -p)-s[print object size]' \
+                        '(-t -s -p)-p[pretty-print object content]' \
+                        '--help[show help]' \
+                        '*:object:'
+                    ;;
+                ls-tree)
+                    _arguments \
+                        '-r[recurse into sub-trees]' \
+                        '-z[NUL-terminate records, raw paths]' \
+                        '--help[show help]' \
+                        '*:tree-ish:'
+                    ;;
+                rev-parse)
+                    _arguments \
+                        '--verify[error on an unresolvable revision]' \
+                        '--short=[abbreviate to N chars]:N:' \
+                        '--abbrev-ref[print the short symbolic name]' \
+                        '--show-toplevel[print the repository root]' \
+                        '--help[show help]' \
+                        '*:rev:'
+                    ;;
+                show-ref)
+                    _arguments \
+                        '--heads[only refs/heads]' \
+                        '--tags[only refs/tags]' \
+                        '--help[show help]'
                     ;;
                 status)
                     _arguments \

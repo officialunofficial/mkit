@@ -190,6 +190,21 @@ and print the resulting BLAKE3 hash on stdout.
 Decode and print the object identified by
 .Ar hash
 on stdout.
+.It Cm cat-file Brq Fl t | Fl s | Fl p Ar object
+Inspect a stored object (read-only plumbing, like
+.Xr git 1 Cm cat-file ) .
+.Fl t
+prints the type
+.Pq Cm blob Ns / Ns Cm tree Ns / Ns Cm commit Ns / Ns Cm tag Ns ; mkit's Cm remix No is the one non-git type ,
+.Fl s
+the size (content byte length for blobs, mkit's serialized size for
+trees/commits), and
+.Fl p
+pretty-prints (blob bytes, a tree as
+.Ql <mode> <type> <hash>\et<name>
+lines, or a commit/tag summary).
+.Ar object
+resolves through the shared revspec grammar.
 .It Cm tree
 Snapshot the working directory as a tree object and print the tree hash.
 Honors
@@ -197,6 +212,28 @@ Honors
 the same way
 .Cm add
 does.
+.It Cm ls-tree Oo Fl r Oc Oo Fl z Oc Ar tree-ish Op Ar path ...
+List a tree's entries as
+.Ql <mode> <type> <hash>\et<name>
+(git octal modes; 64-hex BLAKE3 hash).
+.Fl r
+recurses (leaf blobs with full paths, no tree lines);
+.Fl z
+NUL-terminates records with raw paths.
+.It Cm rev-parse Oo Fl Fl verify Oc Oo Fl Fl short Ns Op = Ns Ar N Oc Oo Fl Fl abbrev-ref Oc Oo Fl Fl show-toplevel Oc Op Ar rev ...
+Resolve revisions to object ids.
+.Fl Fl short
+abbreviates (default 7, a BLAKE3 prefix);
+.Fl Fl abbrev-ref Cm HEAD
+prints the current branch;
+.Fl Fl show-toplevel
+prints the repository root.
+.It Cm show-ref Oo Fl Fl heads Oc Op Fl Fl tags
+List refs as
+.Ql <hash> <refname> ,
+sorted by name.
+.Fl Fl heads Ns / Ns Fl Fl tags
+filter to that namespace.
 .It Cm commit Oo Fl a | Fl Fl all Oc Op Fl Fl amend Op Fl m Ar message
 Create a signed commit. With
 .Fl a
