@@ -28,6 +28,7 @@ _mkit() {
         'diff:Show changes'
         'branch:List, create, rename, or delete branches'
         'checkout:Switch HEAD to a branch and restore files'
+        'clean:Remove untracked files (-n preview, -f delete, -d dirs, -x/-X ignored)'
         'tag:List/create/delete tags (-a/-s/-m for annotated/signed)'
         'config:Show or set configuration values'
         'merge:Merge a branch into HEAD'
@@ -101,10 +102,22 @@ _mkit() {
                     ;;
                 reset)
                     _arguments \
-                        '--soft[move HEAD only; keep index and worktree]' \
-                        '--mixed[move HEAD and reset the index (default)]' \
+                        '(--soft --mixed --hard)--soft[move HEAD only; keep index and worktree]' \
+                        '(--soft --mixed --hard)--mixed[move HEAD and reset the index (default)]' \
+                        '(--soft --mixed --hard)--hard[also reset the worktree (keeps untracked)]' \
+                        '(-f --force)'{-f,--force}'[with --hard, discard dirty/staged content]' \
                         '--help[show help]' \
                         '*:commit:'
+                    ;;
+                clean)
+                    _arguments \
+                        '(-n --dry-run)'{-n,--dry-run}'[preview without deleting]' \
+                        '(-f --force)'{-f,--force}'[actually delete (required)]' \
+                        '-d[also remove untracked directories]' \
+                        '(-x -X)-x[also remove ignored files]' \
+                        '(-x -X)-X[remove only ignored files]' \
+                        '--help[show help]' \
+                        '*:file:_files'
                     ;;
                 diff)
                     _arguments \

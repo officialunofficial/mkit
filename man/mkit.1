@@ -129,7 +129,7 @@ or
 .Fl Fl force
 discards that un-staged edit. A worktree restore never removes neighbouring
 files \(em it only rewrites the named tracked paths.
-.It Cm reset Oo Fl Fl soft | Fl Fl mixed Oc Op Ar commit
+.It Cm reset Oo Fl Fl soft | Fl Fl mixed | Fl Fl hard Oc Oo Fl f Oc Op Ar commit
 Move
 .Cm HEAD
 .Pq and the current branch
@@ -147,13 +147,39 @@ only, leaving the index and worktree untouched.
 .Fl Fl mixed
 .Pq the default
 also resets the index to the target commit's tree while leaving the
-worktree. The destructive
+worktree.
 .Fl Fl hard
-variant
-.Pq also resetting the worktree
-is intentionally not implemented;
-.Cm checkout Ar commit
-provides a guarded worktree-resetting path instead.
+additionally resets the worktree to the target tree \(em overwriting
+tracked-file changes and removing tracked files the target drops, while
+keeping untracked files (like git). As a safety divergence,
+.Fl Fl hard
+refuses to discard locally-modified or staged content unless
+.Fl f
+.Pq Fl Fl force
+is given;
+.Xr git 1 Cm reset Fl Fl hard
+discards silently.
+.It Cm clean Oo Fl n Oc Oo Fl f Oc Oo Fl d Oc Oo Fl x | Fl X Oc Op Ar path ...
+Remove untracked files from the worktree. Destructive, so it refuses to
+delete without
+.Fl f
+.Pq matching git's Cm clean.requireForce ;
+.Fl n
+previews with
+.Ql Would remove <path>
+lines. Without
+.Fl d ,
+untracked directories are left alone;
+.Fl d
+removes them too. Ignored files are kept unless
+.Fl x
+.Pq remove ignored too
+or
+.Fl X
+.Pq remove only ignored .
+Ignore matching uses mkit's
+.Pa .mkitignore
+matcher (basename/root-only subset).
 .It Cm hash Ar file
 Hash
 .Ar file

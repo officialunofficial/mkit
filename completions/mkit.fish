@@ -15,7 +15,7 @@
 complete -c mkit -f
 
 set -l __mkit_subcommands \
-    init add rm mv restore reset hash cat tree commit log reflog status diff branch checkout \
+    init add rm mv restore reset hash cat tree commit log reflog status diff branch checkout clean \
     tag config merge push pull fetch stash clone remote key keygen \
     cherry-pick revert rebase bisect gc sparse-checkout serve pack-shard blame verify \
     attest verify-attest version help
@@ -55,6 +55,20 @@ complete -c mkit -n "__fish_seen_subcommand_from reset" \
     -l soft -d "Move HEAD only; keep index and worktree"
 complete -c mkit -n "__fish_seen_subcommand_from reset" \
     -l mixed -d "Move HEAD and reset the index (default)"
+complete -c mkit -n "__fish_seen_subcommand_from reset" \
+    -l hard -d "Also reset the worktree (keeps untracked)"
+complete -c mkit -n "__fish_seen_subcommand_from reset" \
+    -s f -l force -d "With --hard, discard dirty/staged content"
+complete -c mkit -n "__fish_seen_subcommand_from clean" \
+    -s n -l dry-run -d "Preview without deleting"
+complete -c mkit -n "__fish_seen_subcommand_from clean" \
+    -s f -l force -d "Actually delete (required)"
+complete -c mkit -n "__fish_seen_subcommand_from clean" \
+    -s d -d "Also remove untracked directories"
+complete -c mkit -n "__fish_seen_subcommand_from clean" \
+    -s x -d "Also remove ignored files"
+complete -c mkit -n "__fish_seen_subcommand_from clean" \
+    -s X -d "Remove only ignored files"
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -l staged -d "Diff HEAD vs the staged index"
 complete -c mkit -n "__fish_seen_subcommand_from diff" \

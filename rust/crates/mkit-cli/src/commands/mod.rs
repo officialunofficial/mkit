@@ -13,6 +13,7 @@ pub mod branch;
 pub mod cat;
 pub mod checkout;
 pub mod cherry_pick;
+pub mod clean;
 pub mod clone;
 pub mod commit;
 pub mod config_cmd;
@@ -556,7 +557,7 @@ fn collect_worktree_paths(
     Ok(())
 }
 
-fn index_tracks_path_or_descendant(index: &Index, path: &str) -> bool {
+pub(crate) fn index_tracks_path_or_descendant(index: &Index, path: &str) -> bool {
     index.entries.iter().any(|entry| {
         entry.status != EntryStatus::Removed
             && (entry.path == path || index_path_descends_from(&entry.path, path))

@@ -269,6 +269,15 @@ Branches / refs:
 - `mkit checkout <branch>` — switch HEAD and restore files. Refuses to
   run when staged changes, dirty tracked files, or untracked path
   collisions would be overwritten.
+- `mkit clean [-n] [-f] [-d] [-x|-X] [<path>...]` — remove untracked files
+  from the worktree. **Destructive, so it refuses to delete without an
+  explicit `-f`** (matching git's `clean.requireForce` default); `-n`
+  previews with `Would remove <path>` lines. Without `-d`, untracked
+  directories are left alone (git semantics); `-d` removes them too (shown
+  as `<dir>/`). Ignored files are kept unless `-x` (remove ignored too) or
+  `-X` (remove *only* ignored). Trailing pathspecs limit the scope. Ignore
+  matching uses mkit's `.mkitignore` matcher (basename/root-only subset
+  pending the `.gitignore` upgrade, #256).
 - `mkit tag` — list, create, or delete tags.
   - `mkit tag` (no args) — list tags; annotated/signed tags are marked.
   - `mkit tag <name> [<commit>]` — create a lightweight tag (a ref
@@ -547,29 +556,26 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   accepted by the parser but `clone` rejects it with a `--depth is not
   yet wired` usage error rather than silently producing a full clone.
   Shallow-clone history truncation is a follow-up.
-- **`mkit reset --hard` is intentionally not implemented.** `reset`
-  offers `--soft` (move HEAD only) and `--mixed` (move HEAD + reset the
-  index; the default); both leave the worktree untouched. For a guarded
-  worktree-resetting path use `mkit checkout <commit>`, which refuses to
-  clobber dirty/untracked files.
+- `mkit reset [--soft|--mixed|--hard] [-f] [<commit>]` — `--soft` moves
+  HEAD only; `--mixed` (the default) also resets the index; both leave the
+  worktree untouched. `--hard` additionally resets the worktree to the
+  target tree — overwriting tracked-file changes and removing tracked
+  files the target drops, while **keeping untracked files** (like git).
+  As a safety divergence, `--hard` **refuses to discard** locally-modified
+  or staged content unless `-f`/`--force` is given (git's `reset --hard`
+  discards silently). `<commit>` defaults to `HEAD`.
 
 ### Commands deliberately not implemented (by design)
 
-The following Git commands are **intentionally absent** from mkit. These
-are design decisions, not missing features, and are tracked as closed
-"wontfix-by-design" follow-ups. mkit offers equivalent workflows for
-each:
-
-- **`mkit mv` — not implemented.** There is no rename/move command;
-  mkit's content-addressed model records moves implicitly (the blob hash
-  is unchanged and the path simply moves between tree entries). Move the
-  file in the worktree, then `mkit add` the new path and `mkit rm` (or
-  `mkit add -A`) the old one. Rename *detection* in diff/log output is a
-  separate, unscheduled follow-up (decision #226).
-- **`mkit clean` — not implemented.** mkit will not bulk-delete
-  untracked files. Remove stray files with your shell (`rm`), which keeps
-  the destructive step explicit and outside mkit's data path (decision
-  #226).
+Several Git commands that were once "wontfix-by-design" have been
+**reinstated under safety guards** as part of the git-parity work
+(Phase 2, #250): `mkit revert`, `mkit mv`, `mkit clean`, and
+`mkit reset --hard` are all available and documented above. Each keeps an
+mkit data-loss guard — e.g. `clean` and `reset --hard` refuse to delete or
+discard without an explicit `-f` — rather than adopting git's silent
+destructive default. Rename *detection* in diff/log output remains a
+separate, unscheduled follow-up (decision #226): `mkit mv` stages the move
+but `status` shows it as a delete + add, not `R`.
 
 Note: object garbage collection (`mkit gc`) **is shipped** (issue #233).
 History-rewriting commands (`commit --amend`, `reset`, `rebase`) record
