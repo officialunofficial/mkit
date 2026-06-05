@@ -348,6 +348,8 @@ mod tests {
                 kind,
                 old_hash: None,
                 new_hash: None,
+                old_mode: None,
+                new_mode: None,
             },
             staging,
         }

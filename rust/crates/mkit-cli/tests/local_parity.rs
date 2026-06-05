@@ -189,7 +189,9 @@ fn diff_emits_unified_hunks_for_modified_file() {
     let out = run_in(td.path(), &["diff"]);
     assert!(out.status.success(), "diff failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("diff --mkit a/f.txt b/f.txt"), "{stdout}");
+    assert!(stdout.contains("diff --git a/f.txt b/f.txt"), "{stdout}");
+    assert!(stdout.contains("--- a/f.txt"), "{stdout}");
+    assert!(stdout.contains("+++ b/f.txt"), "{stdout}");
     assert!(stdout.contains("@@ "), "expected a hunk header: {stdout}");
     assert!(stdout.contains("-line2"), "{stdout}");
     assert!(stdout.contains("+CHANGED"), "{stdout}");

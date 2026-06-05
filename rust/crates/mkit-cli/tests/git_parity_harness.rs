@@ -558,9 +558,10 @@ fn log_annotated_tag_range_matches_git() {
 }
 
 // =====================================================================
-// Passing subset — diff --name-only / --name-status / -z. Unlike the
-// unified patch (whose `diff --mkit` header diverges, Phase 4), these
-// formats carry no header or object id, so they match git byte-for-byte.
+// Passing subset — diff --name-only / --name-status / -z. These carry no
+// header or object id, so they match git byte-for-byte. (The unified patch
+// also matches now, modulo the abbreviated `index` ids — see the
+// `diff_unified_*` tests with `assert_parity_diff`.)
 // =====================================================================
 
 /// Stage one of each change kind against HEAD so a staged diff reports
@@ -1223,9 +1224,39 @@ fn status_porcelain_v2_matches_git() {
     assert_parity_set("status --porcelain=v2", &g, &m);
 }
 
+/// Mask the abbreviated blob ids on a `diff --git` `index` line — git's
+/// SHA-1 prefixes and mkit's BLAKE3 prefixes can't match, but everything
+/// else on the line (and every other line) must. Non-`index` lines fall back
+/// to the full-hash masker.
+fn mask_diff_line(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix("index ") {
+        let mut parts = rest.splitn(2, ' ');
+        let _hashes = parts.next();
+        match parts.next() {
+            Some(mode) => format!("index <oid>..<oid> {mode}"),
+            None => "index <oid>..<oid>".to_string(),
+        }
+    } else {
+        mask_object_ids(line)
+    }
+}
+
+/// Order-sensitive unified-diff parity: like [`assert_parity_ordered`] but
+/// also masks `index` abbreviated ids, so the full `git diff` shape (header,
+/// `index`, `--- a/p`/`+++ b/p`, `@@` hunks, `+`/`-` lines) is compared.
+fn assert_parity_diff(label: &str, git: &Output, mkit: &Output) {
+    assert!(git.status.success(), "{label}: git failed: {git:?}");
+    assert!(mkit.status.success(), "{label}: mkit failed: {mkit:?}");
+    let norm = |o: &Output| stdout(o).lines().map(mask_diff_line).collect::<Vec<_>>();
+    assert_eq!(
+        norm(git),
+        norm(mkit),
+        "{label}: git/mkit unified diff diverged (modulo abbreviated ids)"
+    );
+}
+
 #[test]
-#[ignore = "Phase 4 (#257): diff header is `diff --mkit` not `diff --git`; Myers hunk parity pending"]
-fn diff_unified_matches_git() {
+fn diff_unified_modify_matches_git() {
     if !git_available() {
         return;
     }
@@ -1234,9 +1265,71 @@ fn diff_unified_matches_git() {
     h.write_both("f.txt", b"line1\nline2\nline3\n");
     h.commit_both(&["f.txt"], "init");
     h.write_both("f.txt", b"line1\nCHANGED\nline3\n");
-    let g = h.git(&["diff"]);
-    let m = h.mkit(&["diff"]);
-    assert_parity_ordered("diff (unified)", &g, &m);
+    assert_parity_diff("diff (modify)", &h.git(&["diff"]), &h.mkit(&["diff"]));
+}
+
+#[test]
+fn diff_unified_multi_hunk_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    // Ten lines; change line 2 and line 9 → two separate hunks.
+    let mut base = String::new();
+    for n in 1..=10 {
+        use std::fmt::Write as _;
+        let _ = writeln!(base, "line{n}");
+    }
+    h.write_both("f.txt", base.as_bytes());
+    h.commit_both(&["f.txt"], "init");
+    let edited = base
+        .replace("line2\n", "TWO\n")
+        .replace("line9\n", "NINE\n");
+    h.write_both("f.txt", edited.as_bytes());
+    assert_parity_diff("diff (multi-hunk)", &h.git(&["diff"]), &h.mkit(&["diff"]));
+}
+
+#[test]
+fn diff_unified_add_delete_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("keep.txt", b"keep\n");
+    h.write_both("gone.txt", b"a\nb\nc\n");
+    h.commit_both(&["keep.txt", "gone.txt"], "init");
+    // Stage a brand-new file and a deletion — `diff --staged` shows both with
+    // `new file mode` / `deleted file mode` + `/dev/null` headers.
+    h.write_both("new.txt", b"hello\nworld\n");
+    assert!(h.git(&["add", "new.txt"]).status.success());
+    assert!(h.mkit(&["add", "new.txt"]).status.success());
+    assert!(h.git(&["rm", "gone.txt"]).status.success());
+    assert!(h.mkit(&["rm", "gone.txt"]).status.success());
+    assert_parity_diff(
+        "diff --staged (add+delete)",
+        &h.git(&["diff", "--staged"]),
+        &h.mkit(&["diff", "--staged"]),
+    );
+}
+
+#[test]
+fn diff_unified_no_newline_at_eof_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("f.txt", b"a\nb\nc\n");
+    h.commit_both(&["f.txt"], "init");
+    // Drop the trailing newline → `\ No newline at end of file`.
+    h.write_both("f.txt", b"a\nb\nc");
+    assert_parity_diff(
+        "diff (no newline at eof)",
+        &h.git(&["diff"]),
+        &h.mkit(&["diff"]),
+    );
 }
 
 // =====================================================================

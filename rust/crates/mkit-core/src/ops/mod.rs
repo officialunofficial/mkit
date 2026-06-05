@@ -28,7 +28,7 @@ pub use conflict_state::{
 };
 pub use diff::{
     DiffEntry, DiffError, DiffKind, DiffResult, StatusEntry, StatusStaging, diff_line_counts,
-    diff_trees, status_diff, text_patch,
+    diff_trees, status_diff, text_patch, unified_hunks,
 };
 pub use gc::{GcReport, GcRootsError, collect_roots, live_objects, run_gc};
 pub use graph::{
