@@ -187,27 +187,27 @@ fn collect_dir(
         let abs = root.join(&path);
         // A symlink is treated as a file (never followed/recursed).
         let is_dir = std::fs::symlink_metadata(&abs)?.is_dir();
+        // A path under an ignored directory is ignored too (git "can't
+        // re-include under an excluded dir"); OR in the inherited bit. This
+        // must be computed BEFORE the tracked check so a tracked-but-ignored
+        // directory (e.g. node_modules/ with a tracked file inside) still
+        // propagates the ignored bit to its untracked descendants.
+        let ignored = parent_ignored || ignore.is_ignored(&path, is_dir);
 
         if super::index_tracks_path_or_descendant(index, &path) {
             // Tracked content keeps the dir alive; descend into a tracked
-            // directory to clean any untracked files inside it. A tracked
-            // path is never ignored, so the ancestor-ignored bit does not
-            // propagate through it.
+            // directory to clean any untracked files inside it, carrying the
+            // ignored bit so ignored untracked descendants are kept.
             fully_removable = false;
             if is_dir {
-                let (_full, sub) =
-                    collect_dir(root, &abs, &path, parent_ignored, index, ignore, opts)?;
+                let (_full, sub) = collect_dir(root, &abs, &path, ignored, index, ignore, opts)?;
                 victims.extend(sub);
             }
             continue;
         }
 
         // Untracked. `-X` keeps only ignored entries; otherwise keep
-        // non-ignored entries and ignored ones only with `-x`. Match on the
-        // repo-relative path; a path under an ignored directory is ignored
-        // too (git "can't re-include under an excluded dir"), so OR in the
-        // inherited bit and propagate it when descending.
-        let ignored = parent_ignored || ignore.is_ignored(&path, is_dir);
+        // non-ignored entries and ignored ones only with `-x`.
         let include = if opts.only_ignored {
             ignored
         } else {

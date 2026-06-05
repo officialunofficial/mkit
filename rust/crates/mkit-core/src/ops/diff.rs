@@ -641,8 +641,10 @@ pub fn status_diff(
     worktree_root: &Path,
     index: Option<&Index>,
 ) -> Result<Vec<StatusEntry>, DiffError> {
-    // Always snapshot the worktree — the index↔worktree leg uses it.
-    let work_tree_hash = worktree::build_tree(store, worktree_root)?;
+    // Always snapshot the worktree — the index↔worktree leg uses it. Pass
+    // the caller's index as the tracked set so a tracked file matching an
+    // ignore rule isn't dropped (which would misreport it as a deletion).
+    let work_tree_hash = worktree::build_tree_filtered(store, worktree_root, index)?;
 
     let Some(idx) = index else {
         // Legacy fallback: HEAD↔worktree, everything labeled Unstaged.

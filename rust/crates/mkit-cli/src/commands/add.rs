@@ -235,7 +235,7 @@ fn add_whole_worktree(root: &Path, store: &ObjectStore, idx: &mut Index) -> Resu
         Err(e) => return Err(emit_err(&format!(".mkitignore: {e}"), exit::GENERAL_ERROR)),
     };
     let mut seen = HashSet::new();
-    add_tree(root, root, store, idx, &ignores, &mut seen)?;
+    add_tree(root, root, false, store, idx, &ignores, &mut seen)?;
     mark_missing_paths_removed(root, idx, &seen);
     Ok(())
 }
@@ -340,6 +340,7 @@ fn remove_file_directory_conflicts(idx: &mut Index, path: &str) {
 fn add_tree(
     root: &Path,
     dir: &Path,
+    parent_ignored: bool,
     store: &ObjectStore,
     idx: &mut Index,
     ignores: &IgnoreList,
@@ -360,14 +361,20 @@ fn add_tree(
             .unwrap_or(&p)
             .to_string_lossy()
             .replace('\\', "/");
-        if ignores.is_ignored(&rel_path, is_dir) {
+        // Ignore only excludes UNTRACKED content: an ignored file that is
+        // already tracked (or an ignored dir holding tracked content) is
+        // still visited so `add .`/`add -A` refresh tracked modifications,
+        // matching git. The ancestor-ignored bit propagates so a tracked
+        // dir's untracked-ignored children stay excluded.
+        let entry_ignored = parent_ignored || ignores.is_ignored(&rel_path, is_dir);
+        if entry_ignored && !super::index_tracks_path_or_descendant(idx, &rel_path) {
             continue;
         }
         if meta.file_type().is_dir() {
-            add_tree(root, &p, store, idx, ignores, seen)?;
+            add_tree(root, &p, entry_ignored, store, idx, ignores, seen)?;
         } else if meta.file_type().is_file() || meta.file_type().is_symlink() {
-            // The walk above already excluded ignored paths, so `force` here
-            // just skips a redundant ignore re-check.
+            // The include decision was made above, so `force` skips a
+            // redundant ignore re-check in `add_one`.
             let rel = add_one(root, &p, store, idx, ignores, true)?;
             seen.insert(rel);
         }

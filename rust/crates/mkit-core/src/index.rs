@@ -98,6 +98,21 @@ impl Index {
         self.entries.iter().position(|e| e.path == path)
     }
 
+    /// `true` if `path` is itself tracked (a non-removed entry) or is an
+    /// ancestor directory of a tracked path. Used to decide whether an
+    /// ignored worktree path must still be visited because it (or its
+    /// subtree) holds tracked content. `O(n)`.
+    #[must_use]
+    pub fn tracks_path_or_descendant(&self, path: &str) -> bool {
+        self.entries.iter().any(|e| {
+            e.status != EntryStatus::Removed
+                && (e.path == path
+                    || (e.path.len() > path.len()
+                        && e.path.starts_with(path)
+                        && e.path.as_bytes().get(path.len()) == Some(&b'/')))
+        })
+    }
+
     /// Count non-removed entries.
     #[must_use]
     pub fn staged_count(&self) -> usize {
@@ -403,6 +418,29 @@ mod tests {
         assert_eq!(&bytes[5..9], &0u32.to_le_bytes());
         let parsed = deserialize(&bytes).unwrap();
         assert_eq!(parsed, idx);
+    }
+
+    #[test]
+    fn tracks_path_or_descendant_matches_self_and_ancestors() {
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "src/lib.rs".to_string(),
+            status: EntryStatus::Blob,
+            object_hash: seed_hash("lib"),
+        });
+        idx.entries.push(IndexEntry {
+            path: "removed.txt".to_string(),
+            status: EntryStatus::Removed,
+            object_hash: hash::ZERO,
+        });
+        // Exact tracked path and its ancestor directory both match.
+        assert!(idx.tracks_path_or_descendant("src/lib.rs"));
+        assert!(idx.tracks_path_or_descendant("src"));
+        // A prefix that is not a path-segment boundary does not match.
+        assert!(!idx.tracks_path_or_descendant("sr"));
+        // Unrelated and removed-only paths do not match.
+        assert!(!idx.tracks_path_or_descendant("docs"));
+        assert!(!idx.tracks_path_or_descendant("removed.txt"));
     }
 
     #[test]

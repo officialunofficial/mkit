@@ -761,9 +761,11 @@ fn clean_directory_with_ignore(
         } else {
             format!("{path_prefix}/{name_str}")
         };
-        // Respect ignore rules — don't touch locally-ignored files. Match on
-        // the repo-relative path (anchored/multi-segment aware).
-        if ignore.is_ignored(&full_path, is_dir) {
+        // Respect ignore rules — don't touch locally-ignored files. Use
+        // ancestor-aware matching so an untracked file *under* an ignored
+        // directory is preserved too (the safety gate exempts it, so the
+        // sweep must not delete it).
+        if ignore.is_ignored_with_ancestors(&full_path, is_dir) {
             continue;
         }
         if let Some(patterns) = sparse_patterns {
@@ -1385,6 +1387,45 @@ mod tests {
             fs::read(target.path().join("scratch.tmp")).unwrap(),
             b"local-only",
             "an untracked ignored file must survive the clean sweep"
+        );
+    }
+
+    #[test]
+    fn worktree_restore_clean_keeps_untracked_under_ignored_dir() {
+        // The clean sweep must not delete an untracked file that lives *under*
+        // an ignored directory, even when that directory is part of the
+        // target tree (so it gets recursed into).
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        fs::write(target.path().join(".mkitignore"), "dist/\n").unwrap();
+        fs::create_dir(target.path().join("dist")).unwrap();
+        fs::write(target.path().join("dist/local.tmp"), b"local").unwrap();
+        // Target tree: dist/ (tree) holding a tracked app.js.
+        let app_blob = put_blob(&store, b"APP");
+        let dist_tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"app.js".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: app_blob,
+            }],
+        );
+        let root = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"dist".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: dist_tree,
+            }],
+        );
+        restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default()).unwrap();
+        // Tracked content materialised...
+        assert_eq!(fs::read(target.path().join("dist/app.js")).unwrap(), b"APP");
+        // ...and the untracked file under the ignored dir is preserved.
+        assert_eq!(
+            fs::read(target.path().join("dist/local.tmp")).unwrap(),
+            b"local",
+            "an untracked file under an ignored dir must survive the clean sweep"
         );
     }
 

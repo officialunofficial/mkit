@@ -206,6 +206,84 @@ fn clean_fdx_removes_ignored_dir() {
 }
 
 #[test]
+fn tracked_file_matching_gitignore_stays_visible_and_restages() {
+    // A file that is tracked BEFORE a matching ignore rule appears must keep
+    // behaving like a tracked file: it stays in the worktree snapshot (not
+    // misreported as deleted) and `add .` still restages its modifications.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join("debug.log"), b"v1\n").unwrap();
+    assert!(run_in(root, x, &["add", "debug.log"]).status.success());
+    assert!(
+        run_in(root, x, &["commit", "-m", "track log"])
+            .status
+            .success()
+    );
+
+    // Now an ignore rule appears, and the tracked file is modified.
+    fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    fs::write(root.join("debug.log"), b"v2\n").unwrap();
+
+    // Finding 1: it must NOT be reported as a deletion, and stays tracked.
+    let status = out_str(&run_in(root, x, &["status", "--porcelain"]));
+    assert!(
+        !status
+            .lines()
+            .any(|l| l.contains("debug.log") && l.trim_start().starts_with('D')),
+        "tracked file matching .gitignore must not show as deleted: {status:?}"
+    );
+    assert!(
+        out_str(&run_in(root, x, &["ls-files"])).contains("debug.log"),
+        "the tracked file stays tracked despite the ignore rule"
+    );
+
+    // Finding 2: `add .` restages the tracked file's modification.
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let staged = out_str(&run_in(root, x, &["status", "--porcelain"]));
+    assert!(
+        staged
+            .lines()
+            .any(|l| l.contains("debug.log") && l.starts_with('M')),
+        "add . must restage the tracked-but-ignored modification: {staged:?}"
+    );
+}
+
+#[test]
+fn clean_fd_keeps_untracked_sibling_in_ignored_dir_with_tracked_content() {
+    // An ignored directory that ALSO holds tracked content must still shield
+    // its untracked siblings from `clean -fd` (without -x). Guards the
+    // tracked-descend branch's ancestor-ignore propagation.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+    fs::create_dir(root.join("node_modules")).unwrap();
+    fs::write(root.join("node_modules/tracked.js"), b"t\n").unwrap();
+    // Track a file inside the ignored dir (force past the ignore rule).
+    assert!(
+        run_in(root, x, &["add", "-f", "node_modules/tracked.js"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(root, x, &["commit", "-m", "track one"])
+            .status
+            .success()
+    );
+    // An untracked sibling under the same ignored dir.
+    fs::write(root.join("node_modules/local.tmp"), b"l\n").unwrap();
+
+    assert!(run_in(root, x, &["clean", "-fd"]).status.success());
+    assert!(
+        root.join("node_modules/local.tmp").exists(),
+        "untracked sibling under an ignored dir must survive clean -fd"
+    );
+    assert!(
+        root.join("node_modules/tracked.js").exists(),
+        "tracked file is never cleaned"
+    );
+}
+
+#[test]
 fn add_explicit_ignored_path_refused_without_force() {
     // git refuses an explicitly-named ignored path unless `-f`.
     let (td, xdg) = repo();

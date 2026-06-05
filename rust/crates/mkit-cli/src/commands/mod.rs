@@ -497,7 +497,7 @@ pub fn ensure_restore_safe_with_options(
         ));
     }
 
-    let worktree_tree = worktree::build_tree(store, root)
+    let worktree_tree = worktree::build_tree_filtered(store, root, Some(&idx))
         .map_err(|e| format!("check working tree changes: {e}"))?;
     let unstaged = diff_trees(store, Some(index_tree), Some(worktree_tree))
         .map_err(|e| format!("check working tree changes: {e}"))?;
