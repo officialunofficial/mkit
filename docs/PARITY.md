@@ -99,7 +99,7 @@ creeping; revisit post-v1 if demand warrants.
 
 | Convention | Git-compatible subset (in scope) | mkit current state | Status | Phase | Issue | Notes |
 |------------|----------------------------------|--------------------|--------|-------|-------|-------|
-| `config user.name` / `user.email` | accept + map | flat `user.identity` only | 🔨 | 2 | #250 | **user-scope / non-authoritative only**; never feeds signed `Identity` (keeps `REPO_FORBIDDEN_KEYS` guard) |
+| `config user.name` / `user.email` | accept + round-trip | same | ✅ | 2 | #250 | **non-authoritative**: stored/round-tripped but never feed the signed `Identity` (that stays `user.identity`, still in `REPO_FORBIDDEN_KEYS`). Repo-safe precisely because inert — proven by a no-spoof test |
 | `config core.*` | accept honored subset | absent | 🔨 | 2 | #250 | display/no-op where not meaningful |
 | `.gitignore` | nested, `**`, anchored `/`, dir-relative, negation order | `.mkitignore`, basename/root-only | 🔨 | 3 | #256 | matcher upgrade; v1 glob subset decided in #256 |
 | abbreviated hashes | short prefix resolution + display | resolve + `log --abbrev[=N]`/`--oneline` | ✅ | 0 | #248 | display side shipped; `rev-parse --short` is Phase 3 |

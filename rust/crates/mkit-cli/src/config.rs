@@ -102,6 +102,14 @@ pub struct Config {
     /// Hex-encoded Identity: `[kind:u8][len:u16 LE][bytes]`. Empty =
     /// derive from the signing key's public key at commit time.
     pub user_identity: String,
+    /// Git-compatibility alias `user.name`. **Non-authoritative**: stored
+    /// and round-tripped for parity with `git config user.name`, but it
+    /// NEVER feeds the cryptographic commit author (which is
+    /// [`user_identity`](Self::user_identity) / the signing key). Repo-safe.
+    pub user_name: String,
+    /// Git-compatibility alias `user.email`. Non-authoritative, exactly
+    /// like [`user_name`](Self::user_name) — never feeds the signed author.
+    pub user_email: String,
     /// Exact remote endpoint the user has explicitly trusted for
     /// ambient HTTP/S3 environment credentials. User-scoped only.
     pub trusted_remote_endpoint: String,
@@ -568,6 +576,10 @@ fn warn_forbidden_repo_key(path: &Path, key: &str) {
 fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
     match key {
         "user.identity" => val.clone_into(&mut cfg.user_identity),
+        // Git-compatibility aliases — non-authoritative (never feed the
+        // signed author), so they are repo-safe to read at any scope.
+        "user.name" => val.clone_into(&mut cfg.user_name),
+        "user.email" => val.clone_into(&mut cfg.user_email),
         "trusted_remote_endpoint" => val.clone_into(&mut cfg.trusted_remote_endpoint),
         "signer" => val.clone_into(&mut cfg.signer),
         "key.backend" => val.clone_into(&mut cfg.key.backend),
@@ -666,6 +678,15 @@ fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> bool {
 /// Write the given `Config` to `<root>/.mkit/config`. Only repo-scoped
 /// (non-forbidden) fields are emitted; security-sensitive fields live
 /// in the user-scoped file and must be written there explicitly.
+///
+/// **Contract:** `cfg` MUST be a repo-scoped config — either
+/// [`read_layered`]`(root).repo` for a read-modify-write, or a freshly
+/// built [`Config`] (e.g. on `clone`). NEVER pass a merged config
+/// ([`read_or_default`] / [`read_layered`]`.merged`): this serializer
+/// emits repo-safe fields such as `user.name` / `user.email`, so a
+/// user-scoped value would be materialized into the clone-traveling
+/// `.mkit/config` (a privacy/scope leak). Callers that need the effective
+/// (merged) value for *reads* should use it only for reads.
 pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
     let path = root.join(CONFIG_FILE);
     if let Some(parent) = path.parent() {
@@ -679,6 +700,10 @@ pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
     // signer or non-Ed25519 key path against attacker-chosen content.
     let mut out = String::new();
     for (k, v) in [
+        // `user.name`/`user.email` are repo-safe git-compat aliases
+        // (non-authoritative — they never feed the signed author).
+        ("user.name", cfg.user_name.as_str()),
+        ("user.email", cfg.user_email.as_str()),
         ("default_branch", cfg.default_branch.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),

@@ -41,15 +41,19 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mut cfg = match config::read_or_default(&cwd) {
-        Ok(c) => c,
+    // Read both layers: the merged view drives `show`, but a write must
+    // persist ONLY the repo layer — serializing the merged config would
+    // copy user-scoped values (e.g. a private `user.email`) into
+    // `.mkit/config`, which travels with clones.
+    let layered = match config::read_layered(&cwd) {
+        Ok(l) => l,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
     let json = matches!(opts.format, ConfigFormat::Json);
 
     match opts.args.len() {
-        0 => return show_all(&cfg, json),
-        1 => return show_one(&cfg, &opts.args[0], json),
+        0 => return show_all(&layered.merged, json),
+        1 => return show_one(&layered.merged, &opts.args[0], json),
         2 => {}
         _ => {
             return super::usage_error(&format!(
@@ -81,10 +85,14 @@ pub fn run(args: &[String]) -> u8 {
     if REPO_FORBIDDEN_KEYS.contains(&key) {
         return write_user_scoped(key, &normalized_value);
     }
-    if let Err(code) = apply(&mut cfg, key, &normalized_value) {
+    // Apply to the repo layer only and persist that — never the merged
+    // config — so user-scoped values are not materialized into the repo
+    // file (see the scope note above).
+    let mut repo_cfg = layered.repo;
+    if let Err(code) = apply(&mut repo_cfg, key, &normalized_value) {
         return code;
     }
-    match config::write(&cwd, &cfg) {
+    match config::write(&cwd, &repo_cfg) {
         Ok(()) => exit::OK,
         Err(e) => emit_err(&format!("write config: {e}"), exit::CANTCREAT),
     }
@@ -129,6 +137,12 @@ fn write_user_scoped(key: &str, value: &str) -> u8 {
 /// and routed to user-scoped storage before this is called.
 fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
     match key {
+        // Git-compatibility aliases. Accepted and round-tripped, but
+        // **non-authoritative**: they never feed the signed commit author
+        // (that is `user.identity` / the signing key), so they are
+        // repo-safe and not in `REPO_FORBIDDEN_KEYS`.
+        "user.name" => value.clone_into(&mut cfg.user_name),
+        "user.email" => value.clone_into(&mut cfg.user_email),
         "default_branch" => value.clone_into(&mut cfg.default_branch),
         "remote_endpoint" => value.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => value.clone_into(&mut cfg.remote_bucket),
@@ -175,12 +189,16 @@ const CONFIG_KEYS: &[&str] = &[
     "ssh.strict_host_key_checking",
     "ssh.user_known_hosts_file",
     "trusted_remote_endpoint",
+    "user.email",
     "user.identity",
+    "user.name",
 ];
 
 fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
     match key {
         "user.identity" => Some(Cow::Borrowed(&cfg.user_identity)),
+        "user.name" => Some(Cow::Borrowed(&cfg.user_name)),
+        "user.email" => Some(Cow::Borrowed(&cfg.user_email)),
         "trusted_remote_endpoint" => Some(Cow::Borrowed(&cfg.trusted_remote_endpoint)),
         "signing_key" => Some(Cow::Borrowed(&cfg.signing_key)),
         "default_branch" => Some(Cow::Borrowed(&cfg.default_branch)),

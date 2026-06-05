@@ -513,6 +513,14 @@ Config / keys / version:
   `--format=json` emits a flat JSON object with every known key.
 - `mkit config <key> [--format=json]` — show one value.
 - `mkit config <key> <value>` — set a configuration value.
+  - `user.name` / `user.email` — git-compatibility aliases. They are
+    accepted and round-trip like `git config user.name`, but are
+    **non-authoritative**: mkit's commit author is cryptographic
+    (`user.identity` or the signing key's derived Identity), and these
+    values **never** feed it. They are repo-safe (stored in
+    `.mkit/config`) precisely because they cannot influence the signed
+    author — unlike `user.identity`, which stays user-scoped and in
+    `REPO_FORBIDDEN_KEYS` so a hostile clone cannot spoof authorship.
 - `mkit version` — print the version. Emits exactly `mkit <X.Y.Z>\n`.
   The top-level `mkit --version` / `mkit -V` flags are aliases of this
   subcommand and emit the identical string. Note this is `mkit <X.Y.Z>`,
