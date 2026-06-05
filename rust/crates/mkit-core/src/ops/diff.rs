@@ -328,15 +328,17 @@ const PATCH_CONTEXT: usize = 3;
 /// +added
 /// ```
 ///
-/// Either side that is not valid UTF-8 (a binary blob) yields a single
-/// `Binary files a/<old> and b/<new> differ` line instead of hunks,
-/// matching Git's behaviour — emitting markers into binary content
-/// would be meaningless.
+/// Either side that is **binary** by Git's heuristic — a NUL byte in the
+/// first 8000 bytes — yields a single `Binary files a/<old> and b/<new>
+/// differ` line instead of hunks, matching Git.
 ///
-/// The algorithm is a straightforward longest-common-subsequence over
-/// whole lines (not a full Myers diff): correct and deterministic, and
-/// adequate for human-readable parity output. Trailing-newline handling
-/// follows Git's `\ No newline at end of file` convention.
+/// The algorithm is the greedy Myers diff with Git-style hunk compaction
+/// (see [`unified_hunks`]); the hunks byte-match `git diff`. Trailing-newline
+/// handling follows Git's `\ No newline at end of file` convention.
+///
+/// Note this returns a `String` via lossy UTF-8 conversion, so a non-UTF-8
+/// (but non-binary) blob's raw bytes are not preserved here — use
+/// [`unified_hunks`] for byte-exact output.
 #[must_use]
 pub fn text_patch(old_bytes: &[u8], new_bytes: &[u8], old_path: &str, new_path: &str) -> String {
     match unified_hunks(old_bytes, new_bytes) {
@@ -377,8 +379,8 @@ pub fn unified_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Added / deleted line counts between two blobs, by the same whole-line
-/// LCS the unified patch uses. `None` when either side is **binary** —
+/// Added / deleted line counts between two blobs, from the same Myers edit
+/// script the unified patch uses. `None` when either side is **binary** —
 /// matching Git's heuristic of a NUL byte within the first 8000 bytes
 /// (independent of UTF-8 validity), so `diff --stat` renders `Bin …` for
 /// exactly the blobs Git would.
