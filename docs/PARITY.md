@@ -64,7 +64,7 @@ creeping; revisit post-v1 if demand warrants.
 | `diff` | `<rev>`, `<a>..<b>` ranges | implemented (`split_range`/`rev_to_tree`) | ✅ | 0 | #248 | docs reconciled (stale CLI.md divergence removed) |
 | `diff` | `--name-only`, `--name-status`, `-z` | same | ✅ | 1 | #249 | `A`/`D`/`M` (`T` = mkit mode change); special-byte paths C-quoted, `-z` = raw NUL (status letter + path each NUL-terminated); `-z` only with name-only/-status |
 | `diff` | `--stat` | same | ✅ | 1 | #249 | byte-exact diffstat: padded name column, `+`/`-` graph scaled to width via git's `scale_linear` (honors `COLUMNS`, default 80), summary line with git pluralization; binary → `Bin … bytes` |
-| `diff` | byte-exact hunks (Myers/histogram) | LCS unified diff | 🔨 | 4 | #257 | header is `diff --mkit`, not `diff --git` |
+| `diff` | byte-exact hunks (Myers) | same | ✅ | 4 | #257 | Myers diff + git change-compaction; full `diff --git` header (`new file`/`deleted file`/`index`/`--- a/p`/`+++ b/p`, `/dev/null`); byte-matches `git diff` modulo the abbreviated `index` ids (BLAKE3 vs SHA-1). git's optional indent heuristic not applied |
 | `commit` | `-m`, `-a`, `--amend`, `--author` | same | ✅ | — | — | signed; amend leaves unreachable obj until gc |
 | `log` | history, `-n`, `--format=json`, `--oneline`, `--abbrev-commit`, `--abbrev[=N]` | same | ✅ | 0 | #248 | `--oneline`/`--abbrev-commit` abbreviate (default 7); abbreviated id is a BLAKE3 prefix |
 | `log` | `<rev>`, `<a>..<b>` range walk | same | ✅ | 1 | #249 | `<rev>` start (annotated tags peeled), `A..B`/`A..`/`..B` ranges; reverse-chrono + topological order = git `--date-order` (matches git default for linear/monotonic-timestamp history); `A...B` deferred to #252 |

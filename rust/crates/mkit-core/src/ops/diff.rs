@@ -10,7 +10,6 @@
 //! Also contains `status_diff` — the working-tree vs HEAD diff that
 //! powers `mkit status`.
 
-use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::hash::Hash;
@@ -41,6 +40,10 @@ pub struct DiffEntry {
     pub kind: DiffKind,
     pub old_hash: Option<Hash>,
     pub new_hash: Option<Hash>,
+    /// File mode on each side (`None` when the side is absent), used to
+    /// render git-shaped `new file mode`/`index` header lines.
+    pub old_mode: Option<EntryMode>,
+    pub new_mode: Option<EntryMode>,
 }
 
 /// Sorted (by path) sequence of [`DiffEntry`].
@@ -103,6 +106,11 @@ fn diff_trees_inner(
         ignore_regular_executable_mode,
         0,
     )?;
+    // git orders diff entries by pathname. The name-sorted walk is already
+    // sorted for the common cases; sort to also cover a dir/file replacement
+    // (`d` sorts before `d/x.txt`), where a single tree position emits both a
+    // shallower and a deeper path.
+    out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(DiffResult { entries: out })
 }
 
@@ -151,6 +159,14 @@ fn diff_entries_recursive(
                         )?;
                     }
                     // identical subtree hashes -> nothing changed below
+                } else if o.mode == EntryMode::Tree || n.mode == EntryMode::Tree {
+                    // A directory replaced by a file (or vice versa). git
+                    // models this as the old subtree's leaves all deleted plus
+                    // the new entry added — never a single Modified blob whose
+                    // tree hash would be misread as a blob by the patch
+                    // renderer.
+                    add_removed_entries(store, o, prefix, out, depth)?;
+                    add_added_entries(store, n, prefix, out, depth)?;
                 } else if o.mode != n.mode && o.object_hash == n.object_hash {
                     if !ignore_regular_executable_mode || !regular_executable_pair(o.mode, n.mode) {
                         out.push(DiffEntry {
@@ -158,6 +174,8 @@ fn diff_entries_recursive(
                             kind: DiffKind::ModeChanged,
                             old_hash: Some(o.object_hash),
                             new_hash: Some(n.object_hash),
+                            old_mode: Some(o.mode),
+                            new_mode: Some(n.mode),
                         });
                     }
                 } else if o.object_hash != n.object_hash || o.mode != n.mode {
@@ -166,6 +184,8 @@ fn diff_entries_recursive(
                         kind: DiffKind::Modified,
                         old_hash: Some(o.object_hash),
                         new_hash: Some(n.object_hash),
+                        old_mode: Some(o.mode),
+                        new_mode: Some(n.mode),
                     });
                 }
                 i += 1;
@@ -214,6 +234,8 @@ fn add_removed_entries(
             kind: DiffKind::Removed,
             old_hash: Some(entry.object_hash),
             new_hash: None,
+            old_mode: Some(entry.mode),
+            new_mode: None,
         });
     }
     Ok(())
@@ -241,6 +263,8 @@ fn add_added_entries(
             kind: DiffKind::Added,
             old_hash: None,
             new_hash: Some(entry.object_hash),
+            old_mode: None,
+            new_mode: Some(entry.mode),
         });
     }
     Ok(())
@@ -304,64 +328,77 @@ const PATCH_CONTEXT: usize = 3;
 /// +added
 /// ```
 ///
-/// Either side that is not valid UTF-8 (a binary blob) yields a single
-/// `Binary files a/<old> and b/<new> differ` line instead of hunks,
-/// matching Git's behaviour — emitting markers into binary content
-/// would be meaningless.
+/// Either side that is **binary** by Git's heuristic — a NUL byte in the
+/// first 8000 bytes — yields a single `Binary files a/<old> and b/<new>
+/// differ` line instead of hunks, matching Git.
 ///
-/// The algorithm is a straightforward longest-common-subsequence over
-/// whole lines (not a full Myers diff): correct and deterministic, and
-/// adequate for human-readable parity output. Trailing-newline handling
-/// follows Git's `\ No newline at end of file` convention.
+/// The algorithm is the greedy Myers diff with Git-style hunk compaction
+/// (see [`unified_hunks`]); the hunks byte-match `git diff`. Trailing-newline
+/// handling follows Git's `\ No newline at end of file` convention.
+///
+/// Note this returns a `String` via lossy UTF-8 conversion, so a non-UTF-8
+/// (but non-binary) blob's raw bytes are not preserved here — use
+/// [`unified_hunks`] for byte-exact output.
 #[must_use]
 pub fn text_patch(old_bytes: &[u8], new_bytes: &[u8], old_path: &str, new_path: &str) -> String {
-    let (Ok(old_text), Ok(new_text)) = (
-        std::str::from_utf8(old_bytes),
-        std::str::from_utf8(new_bytes),
-    ) else {
-        return format!("Binary files a/{old_path} and b/{new_path} differ\n");
-    };
-
-    let old_lines = split_lines(old_text);
-    let new_lines = split_lines(new_text);
-    let ops = lcs_diff(&old_lines, &new_lines);
-
-    let hunks = group_hunks(&ops, PATCH_CONTEXT);
-    if hunks.is_empty() {
-        return String::new();
+    match unified_hunks(old_bytes, new_bytes) {
+        None => format!("Binary files a/{old_path} and b/{new_path} differ\n"),
+        Some(hunks) if hunks.is_empty() => String::new(),
+        Some(hunks) => {
+            format!(
+                "--- a/{old_path}\n+++ b/{new_path}\n{}",
+                String::from_utf8_lossy(&hunks)
+            )
+        }
     }
+}
 
-    let mut out = String::new();
-    let _ = writeln!(out, "--- a/{old_path}");
-    let _ = writeln!(out, "+++ b/{new_path}");
+/// The hunk body of a unified diff between two blobs: the `@@ … @@` headers
+/// and their `+`/`-`/context lines, with no `---`/`+++` file headers, as raw
+/// bytes (git diffs are byte-oriented and do not require UTF-8). Returns
+/// `None` when either side is **binary** by git's heuristic — a NUL byte in
+/// the first 8000 bytes — so a caller emits a `Binary files …` line instead.
+/// An empty result means the blobs are textually identical.
+///
+/// Splitting the hunk body out lets callers wrap it in a git-shaped
+/// `diff --git` header (with `/dev/null` for adds/deletes) while keeping the
+/// algorithm — Myers diff with git-style hunk compaction — in one place.
+#[must_use]
+pub fn unified_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<u8>> {
+    if is_binary(old_bytes) || is_binary(new_bytes) {
+        return None;
+    }
+    let old_lines = split_lines(old_bytes);
+    let new_lines = split_lines(new_bytes);
+    let ops = edit_script(&old_lines, &new_lines);
+    let hunks = group_hunks(&ops, PATCH_CONTEXT);
+    let mut out = Vec::new();
     for hunk in &hunks {
         render_hunk(&mut out, hunk, &old_lines, &new_lines);
     }
-    out
+    Some(out)
 }
 
-/// Added / deleted line counts between two blobs, by the same whole-line
-/// LCS the unified patch uses. `None` when either side is **binary** —
+/// Added / deleted line counts between two blobs, from the same Myers edit
+/// script the unified patch uses. `None` when either side is **binary** —
 /// matching Git's heuristic of a NUL byte within the first 8000 bytes
 /// (independent of UTF-8 validity), so `diff --stat` renders `Bin …` for
 /// exactly the blobs Git would.
 ///
 /// Used by `diff --stat`; kept here so the stat counts always agree with
-/// the `+`/`-` lines `text_patch` would emit for the same blobs. Counting
-/// uses a lossy UTF-8 view — newline positions (and thus line counts) are
-/// preserved for any non-binary blob, including non-UTF-8 text.
+/// the `+`/`-` lines `text_patch` would emit for the same blobs. Lines are
+/// split on `\n` bytes, so the counts hold for any non-binary blob, including
+/// non-UTF-8 text.
 #[must_use]
 pub fn diff_line_counts(old_bytes: &[u8], new_bytes: &[u8]) -> Option<(usize, usize)> {
     if is_binary(old_bytes) || is_binary(new_bytes) {
         return None;
     }
-    let old_text = String::from_utf8_lossy(old_bytes);
-    let new_text = String::from_utf8_lossy(new_bytes);
-    let old_lines = split_lines(&old_text);
-    let new_lines = split_lines(&new_text);
+    let old_lines = split_lines(old_bytes);
+    let new_lines = split_lines(new_bytes);
     let mut added = 0;
     let mut deleted = 0;
-    for op in lcs_diff(&old_lines, &new_lines) {
+    for op in edit_script(&old_lines, &new_lines) {
         match op {
             DiffOp::Insert(_) => added += 1,
             DiffOp::Delete(_) => deleted += 1,
@@ -378,20 +415,21 @@ fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(FIRST_FEW_BYTES).any(|&b| b == 0)
 }
 
-/// A single line plus whether the source had a trailing newline after it.
+/// A single line (raw bytes) plus whether the source had a trailing newline
+/// after it.
 struct DiffLine<'a> {
-    text: &'a str,
+    text: &'a [u8],
     /// `true` when this line was terminated by `\n` in the source.
     has_newline: bool,
 }
 
-/// Split text into lines, preserving whether the final line had a
+/// Split bytes into lines on `\n`, preserving whether the final line had a
 /// trailing newline. An empty input yields no lines.
-fn split_lines(text: &str) -> Vec<DiffLine<'_>> {
+fn split_lines(text: &[u8]) -> Vec<DiffLine<'_>> {
     let mut lines = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
-        if let Some(idx) = rest.find('\n') {
+        if let Some(idx) = rest.iter().position(|&b| b == b'\n') {
             lines.push(DiffLine {
                 text: &rest[..idx],
                 has_newline: true,
@@ -402,7 +440,7 @@ fn split_lines(text: &str) -> Vec<DiffLine<'_>> {
                 text: rest,
                 has_newline: false,
             });
-            rest = "";
+            rest = b"";
         }
     }
     lines
@@ -419,44 +457,166 @@ enum DiffOp {
     Insert(usize),
 }
 
-/// Compute a line-level edit script via classic LCS dynamic programming.
-fn lcs_diff(old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> Vec<DiffOp> {
+/// Compute a line-level edit script using the greedy Myers diff, then
+/// canonicalize hunk boundaries the way git's xdiff does (slide each run of
+/// changed lines as far down as identical neighbours allow). The result
+/// matches `git diff`'s hunks for the common cases — same algorithm, same
+/// boundary convention — modulo git's optional indent heuristic.
+fn edit_script(old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> Vec<DiffOp> {
+    let (mut old_changed, mut new_changed) = myers_changed(old, new);
+    compact_changes(old, &mut old_changed);
+    compact_changes(new, &mut new_changed);
+    script_from_flags(old, new, &old_changed, &new_changed)
+}
+
+/// Run the greedy Myers diff and mark which old lines are deletions and which
+/// new lines are insertions. Lines left unmarked are the matched (equal)
+/// lines that pair up in order.
+//
+// Myers indexes paths by signed diagonal `k = x - y`, so the V array and
+// backtrack inherently convert between `isize` (diagonals, offsets) and
+// `usize` (line indices). The values are bounded by `n + m`, well within
+// range, so the sign/wrap casts are safe; `x`/`y`/`k`/`d`/`v` are the
+// algorithm's canonical names.
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::many_single_char_names
+)]
+fn myers_changed(old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> (Vec<bool>, Vec<bool>) {
     let n = old.len();
     let m = new.len();
-    // dp[i][j] = LCS length of old[i..] and new[j..].
-    let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[i][j] = if lines_equal(&old[i], &new[j]) {
-                dp[i + 1][j + 1] + 1
+    let mut old_changed = vec![false; n];
+    let mut new_changed = vec![false; m];
+    if n == 0 {
+        new_changed.fill(true);
+        return (old_changed, new_changed);
+    }
+    if m == 0 {
+        old_changed.fill(true);
+        return (old_changed, new_changed);
+    }
+
+    let max = n + m;
+    let offset = max as isize; // shift so diagonal k maps to a non-negative index
+    let mut v = vec![0isize; 2 * max + 1];
+    let mut trace: Vec<Vec<isize>> = Vec::new();
+
+    let idx = |k: isize| (k + offset) as usize;
+    let mut found = max as isize;
+    'outer: for d in 0..=max as isize {
+        trace.push(v.clone());
+        let mut k = -d;
+        while k <= d {
+            // Greedy: extend the furthest-reaching path on diagonal k.
+            let mut x = if k == -d || (k != d && v[idx(k - 1)] < v[idx(k + 1)]) {
+                v[idx(k + 1)] // down → an insertion (consume a new line)
             } else {
-                dp[i + 1][j].max(dp[i][j + 1])
+                v[idx(k - 1)] + 1 // right → a deletion (consume an old line)
             };
+            let mut y = x - k;
+            while (x as usize) < n
+                && (y as usize) < m
+                && lines_equal(&old[x as usize], &new[y as usize])
+            {
+                x += 1;
+                y += 1;
+            }
+            v[idx(k)] = x;
+            if x as usize >= n && y as usize >= m {
+                found = d;
+                break 'outer;
+            }
+            k += 2;
         }
     }
 
+    // Backtrack through the saved V snapshots to recover the edits.
+    let mut x = n as isize;
+    let mut y = m as isize;
+    for d in (0..=found).rev() {
+        let vd = &trace[d as usize];
+        let k = x - y;
+        let down = k == -d || (k != d && vd[idx(k - 1)] < vd[idx(k + 1)]);
+        let prev_k = if down { k + 1 } else { k - 1 };
+        let prev_x = vd[idx(prev_k)];
+        let prev_y = prev_x - prev_k;
+        // Walk back down the snake (matched lines) — no flags set there.
+        while x > prev_x && y > prev_y {
+            x -= 1;
+            y -= 1;
+        }
+        if d > 0 {
+            if down {
+                new_changed[(y - 1) as usize] = true; // insertion
+                y -= 1;
+            } else {
+                old_changed[(x - 1) as usize] = true; // deletion
+                x -= 1;
+            }
+        }
+    }
+    (old_changed, new_changed)
+}
+
+/// Slide each maximal run of changed lines downward while the line leaving the
+/// top of the run equals the line entering at the bottom — git's
+/// `xdl_change_compact` canonical placement, so a change among identical
+/// neighbours lands where git puts it.
+fn compact_changes(lines: &[DiffLine<'_>], changed: &mut [bool]) {
+    let n = lines.len();
+    let mut i = 0;
+    while i < n {
+        if !changed[i] {
+            i += 1;
+            continue;
+        }
+        // [start, end) is a run of changed lines.
+        let start = i;
+        let mut end = i;
+        while end < n && changed[end] {
+            end += 1;
+        }
+        // Slide down: the line at `start` leaves the run and the line at
+        // `end` joins it, valid only when they are identical.
+        let (mut s, mut e) = (start, end);
+        while e < n && lines_equal(&lines[s], &lines[e]) {
+            changed[s] = false;
+            changed[e] = true;
+            s += 1;
+            e += 1;
+        }
+        i = e;
+    }
+}
+
+/// Build the `DiffOp` sequence from the per-side changed flags, in git's
+/// order: within each change region, all deletions precede all insertions;
+/// matched lines pair up as `Equal`.
+fn script_from_flags(
+    old: &[DiffLine<'_>],
+    new: &[DiffLine<'_>],
+    old_changed: &[bool],
+    new_changed: &[bool],
+) -> Vec<DiffOp> {
+    let (n, m) = (old.len(), new.len());
     let mut ops = Vec::new();
     let (mut i, mut j) = (0usize, 0usize);
-    while i < n && j < m {
-        if lines_equal(&old[i], &new[j]) {
+    while i < n || j < m {
+        if i < n && j < m && !old_changed[i] && !new_changed[j] {
             ops.push(DiffOp::Equal(i, j));
             i += 1;
             j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            ops.push(DiffOp::Delete(i));
-            i += 1;
         } else {
-            ops.push(DiffOp::Insert(j));
-            j += 1;
+            while i < n && old_changed[i] {
+                ops.push(DiffOp::Delete(i));
+                i += 1;
+            }
+            while j < m && new_changed[j] {
+                ops.push(DiffOp::Insert(j));
+                j += 1;
+            }
         }
-    }
-    while i < n {
-        ops.push(DiffOp::Delete(i));
-        i += 1;
-    }
-    while j < m {
-        ops.push(DiffOp::Insert(j));
-        j += 1;
     }
     ops
 }
@@ -540,27 +700,38 @@ fn build_hunk(slice: &[DiffOp]) -> Hunk {
     }
 }
 
-fn render_hunk(out: &mut String, hunk: &Hunk, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) {
-    let _ = writeln!(
-        out,
-        "@@ -{},{} +{},{} @@",
-        hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len
+/// Format one side of an `@@` range as git does: `start,len`, but the `,len`
+/// is omitted when `len == 1` (`@@ -1 +1 @@`).
+fn hunk_range(start: usize, len: usize) -> String {
+    if len == 1 {
+        start.to_string()
+    } else {
+        format!("{start},{len}")
+    }
+}
+
+fn render_hunk(out: &mut Vec<u8>, hunk: &Hunk, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) {
+    let header = format!(
+        "@@ -{} +{} @@\n",
+        hunk_range(hunk.old_start, hunk.old_len),
+        hunk_range(hunk.new_start, hunk.new_len)
     );
+    out.extend_from_slice(header.as_bytes());
     for op in &hunk.ops {
         match *op {
-            DiffOp::Equal(oi, _) => emit_line(out, ' ', &old[oi]),
-            DiffOp::Delete(oi) => emit_line(out, '-', &old[oi]),
-            DiffOp::Insert(ni) => emit_line(out, '+', &new[ni]),
+            DiffOp::Equal(oi, _) => emit_line(out, b' ', &old[oi]),
+            DiffOp::Delete(oi) => emit_line(out, b'-', &old[oi]),
+            DiffOp::Insert(ni) => emit_line(out, b'+', &new[ni]),
         }
     }
 }
 
-fn emit_line(out: &mut String, prefix: char, line: &DiffLine<'_>) {
+fn emit_line(out: &mut Vec<u8>, prefix: u8, line: &DiffLine<'_>) {
     out.push(prefix);
-    out.push_str(line.text);
-    out.push('\n');
+    out.extend_from_slice(line.text);
+    out.push(b'\n');
     if !line.has_newline {
-        out.push_str("\\ No newline at end of file\n");
+        out.extend_from_slice(b"\\ No newline at end of file\n");
     }
 }
 
@@ -1189,6 +1360,37 @@ mod tests {
     }
 
     #[test]
+    fn text_patch_nul_byte_is_binary_like_git() {
+        // A NUL byte makes the blob binary by git's heuristic even though it
+        // is valid UTF-8 — must NOT emit a textual hunk with an embedded NUL.
+        let patch = text_patch(b"a\0b\n", b"a\0c\n", "f", "f");
+        assert_eq!(patch, "Binary files a/f and b/f differ\n");
+    }
+
+    #[test]
+    fn unified_hunks_non_utf8_without_nul_is_text_like_git() {
+        // Invalid UTF-8 but no NUL: git treats it as text and diffs it
+        // byte-wise. The raw bytes survive into the hunk (single-line hunk →
+        // `@@ -1 +1 @@`, no `,1`).
+        let hunks = unified_hunks(b"\xff\n", b"\xfe\n").expect("not binary");
+        assert_eq!(
+            hunks,
+            b"@@ -1 +1 @@\n-\xff\n+\xfe\n".to_vec(),
+            "got {hunks:?}"
+        );
+    }
+
+    #[test]
+    fn hunk_header_omits_count_one_like_git() {
+        // A one-line-each change: git writes `@@ -1 +1 @@`, not `-1,1 +1,1`.
+        let patch = text_patch(b"old\n", b"new\n", "f", "f");
+        assert_eq!(
+            patch, "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n",
+            "{patch}"
+        );
+    }
+
+    #[test]
     fn text_patch_no_trailing_newline_marker() {
         let old = b"x\ny";
         let new = b"x\nz";
@@ -1204,6 +1406,30 @@ mod tests {
         let patch = text_patch(old, new, "f", "f");
         let hunk_count = patch.matches("@@ ").count();
         assert_eq!(hunk_count, 2, "expected two hunks: {patch}");
+    }
+
+    #[test]
+    fn text_patch_inserts_compact_to_git_position() {
+        // Inserting a line into a run of identical lines: git's change
+        // compaction places the `+` at the *bottom* of the run (just before
+        // the differing line). Verifies the Myers + compaction pipeline picks
+        // the same canonical boundary git does.
+        let patch = text_patch(b"a\na\nb\n", b"a\na\na\nb\n", "f", "f");
+        assert_eq!(
+            patch, "--- a/f\n+++ b/f\n@@ -1,3 +1,4 @@\n a\n a\n+a\n b\n",
+            "{patch}"
+        );
+    }
+
+    #[test]
+    fn text_patch_deletes_compact_to_git_position() {
+        // The dual: deleting from a run of identical lines removes the bottom
+        // one (the `-` lands just before the differing line).
+        let patch = text_patch(b"a\na\na\nb\n", b"a\na\nb\n", "f", "f");
+        assert_eq!(
+            patch, "--- a/f\n+++ b/f\n@@ -1,4 +1,3 @@\n a\n a\n-a\n b\n",
+            "{patch}"
+        );
     }
 
     /// HEAD empty; index has b.txt at v1; worktree has b.txt at v2.

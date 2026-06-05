@@ -91,11 +91,15 @@ Working-tree commands:
   hashes, or `HEAD~n` (a raw 64-hex tree hash also works, since it
   resolves to itself). Any remaining positional arguments are pathspecs
   that limit the output to entries at or below them. The default output is a
-  Git-compatible unified diff: a
-  `diff --mkit a/<path> b/<path>` header per changed path followed by
-  `@@`-delimited hunks (or `Binary files a/<p> and b/<p> differ` for
-  non-text blobs). The hunk algorithm is a line-based LCS unified diff,
-  not a full Myers diff — adequate for human-readable parity output.
+  git-shaped unified diff: a `diff --git a/<path> b/<path>` header per changed
+  path (with `new file mode`/`deleted file mode`/`old mode`/`new mode` lines,
+  an `index <old>..<new> <mode>` line, and `--- a/<p>`/`+++ b/<p>` using
+  `/dev/null` for adds/deletes) followed by `@@`-delimited hunks (or
+  `Binary files … differ` for non-text blobs). The hunk algorithm is the
+  Myers diff with git's change-compaction, so the output **byte-matches
+  `git diff`** apart from the abbreviated `index` ids, which are BLAKE3
+  prefixes rather than SHA-1 (git's optional indent heuristic is not
+  applied).
   `--name-only` instead lists one changed path per line; `--name-status`
   prefixes each with a status letter (`A`/`D`/`M`; `T` marks an mkit mode
   change). `--stat` shows a diffstat: one `<name> | <count> <graph>` row

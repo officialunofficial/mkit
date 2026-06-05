@@ -17,8 +17,11 @@
 //!
 //! Trailing positional paths (pathspecs) filter the output to entries
 //! at or below those paths. The default output is a Git-compatible
-//! unified diff: a `diff --mkit a/<p> b/<p>` header per changed path
-//! followed by the `text_patch` hunks (or `Binary files … differ`).
+//! unified diff: a git-shaped `diff --git a/<p> b/<p>` header per changed
+//! path (with `new file mode`/`deleted file mode`/`index`/`--- a/p`/`+++ b/p`
+//! lines, `/dev/null` for adds/deletes) followed by Myers-diff hunks (or a
+//! `Binary files … differ` line). The `index` ids are abbreviated BLAKE3
+//! prefixes — the one inherent divergence from `git diff`.
 //!
 //! `--name-only` / `--name-status` switch to summary output: one record
 //! per changed path — just the path, or an `A`/`D`/`M` status letter
@@ -31,8 +34,8 @@ use std::io::Write;
 
 use clap::Parser;
 use mkit_core::hash::Hash;
-use mkit_core::object::Object;
-use mkit_core::ops::{DiffEntry, DiffKind, diff_line_counts, diff_trees, text_patch};
+use mkit_core::object::{EntryMode, Object};
+use mkit_core::ops::{DiffEntry, DiffKind, diff_line_counts, diff_trees, unified_hunks};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
@@ -40,6 +43,7 @@ use mkit_core::worktree;
 use super::revspec;
 use crate::clap_shim;
 use crate::exit;
+use crate::format;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -661,26 +665,69 @@ fn path_matches_any(path: &str, specs: &[String]) -> bool {
         .any(|spec| super::index_path_matches_or_descends(path, spec))
 }
 
-/// Emit the `diff --mkit` header plus hunks for one changed entry.
+/// Abbreviated all-zero blob id git prints for an absent side of `index`.
+const ZERO_ABBREV: &str = "0000000";
+
+/// git octal mode string for a [`DiffEntry`] side (`None` → regular file).
+fn git_octal(mode: Option<EntryMode>) -> &'static str {
+    match mode {
+        Some(EntryMode::Executable) => "100755",
+        Some(EntryMode::Symlink) => "120000",
+        Some(EntryMode::Tree) => "040000",
+        _ => "100644",
+    }
+}
+
+/// Abbreviated blob id for an `index` line side (`None` → all-zero).
+fn abbrev(h: Option<Hash>) -> String {
+    h.map_or_else(|| ZERO_ABBREV.to_string(), |h| format::short_hash(&h, 7))
+}
+
+/// Emit a git-shaped `diff --git` header plus unified-diff hunks for one
+/// changed entry. The `index <old>..<new>` ids are abbreviated BLAKE3
+/// prefixes (longer than git's SHA-1 prefixes for the same `core.abbrev`),
+/// the one inherent divergence; everything else matches `git diff`.
 fn emit_entry_patch(
     out: &mut impl Write,
     store: &ObjectStore,
     e: &DiffEntry,
 ) -> Result<(), String> {
-    let _ = writeln!(out, "diff --mkit a/{} b/{}", e.path, e.path);
+    // git C-style quotes special-byte paths in the header (core.quotePath),
+    // quoting the whole `a/<path>` / `b/<path>` token as a unit.
+    let a_path = quoted_side('a', &e.path);
+    let b_path = quoted_side('b', &e.path);
+    let _ = writeln!(out, "diff --git {a_path} {b_path}");
+
     match e.kind {
         DiffKind::ModeChanged => {
-            // Same content, mode flip — no textual hunk to show.
-            let _ = writeln!(out, "mode changed: {}", e.path);
+            // Identical content, mode flip — only the mode lines, no hunks.
+            let _ = writeln!(out, "old mode {}", git_octal(e.old_mode));
+            let _ = writeln!(out, "new mode {}", git_octal(e.new_mode));
             return Ok(());
         }
         DiffKind::Added => {
-            let _ = writeln!(out, "new file: {}", e.path);
+            let _ = writeln!(out, "new file mode {}", git_octal(e.new_mode));
+            let _ = writeln!(out, "index {}..{}", ZERO_ABBREV, abbrev(e.new_hash));
         }
         DiffKind::Removed => {
-            let _ = writeln!(out, "deleted file: {}", e.path);
+            let _ = writeln!(out, "deleted file mode {}", git_octal(e.old_mode));
+            let _ = writeln!(out, "index {}..{}", abbrev(e.old_hash), ZERO_ABBREV);
         }
-        DiffKind::Modified => {}
+        DiffKind::Modified if e.old_mode != e.new_mode => {
+            // Content and mode both changed: mode lines, index without mode.
+            let _ = writeln!(out, "old mode {}", git_octal(e.old_mode));
+            let _ = writeln!(out, "new mode {}", git_octal(e.new_mode));
+            let _ = writeln!(out, "index {}..{}", abbrev(e.old_hash), abbrev(e.new_hash));
+        }
+        DiffKind::Modified => {
+            let _ = writeln!(
+                out,
+                "index {}..{} {}",
+                abbrev(e.old_hash),
+                abbrev(e.new_hash),
+                git_octal(e.new_mode)
+            );
+        }
     }
 
     let old_bytes = match e.old_hash {
@@ -691,9 +738,32 @@ fn emit_entry_patch(
         Some(h) => read_blob(store, &h)?,
         None => Vec::new(),
     };
-    let patch = text_patch(&old_bytes, &new_bytes, &e.path, &e.path);
-    let _ = out.write_all(patch.as_bytes());
+    // `--- a/p` / `+++ b/p` (quoted), with `/dev/null` for the absent side.
+    let (minus, plus) = match e.kind {
+        DiffKind::Added => ("/dev/null".to_string(), b_path.clone()),
+        DiffKind::Removed => (a_path.clone(), "/dev/null".to_string()),
+        _ => (a_path.clone(), b_path.clone()),
+    };
+    match unified_hunks(&old_bytes, &new_bytes) {
+        None => {
+            let _ = writeln!(out, "Binary files {minus} and {plus} differ");
+        }
+        Some(hunks) if hunks.is_empty() => {}
+        Some(hunks) => {
+            let _ = writeln!(out, "--- {minus}");
+            let _ = writeln!(out, "+++ {plus}");
+            let _ = out.write_all(&hunks);
+        }
+    }
     Ok(())
+}
+
+/// The git-quoted `a/<path>` / `b/<path>` token for a patch header: C-style
+/// quoted (with surrounding quotes) when the path has special bytes, else the
+/// plain `<side>/<path>`.
+fn quoted_side(side: char, path: &str) -> String {
+    let s = format!("{side}/{path}");
+    super::c_quote_path(&s).unwrap_or(s)
 }
 
 /// Read a blob's bytes from the store, reassembling chunked blobs via
@@ -718,6 +788,8 @@ mod tests {
             kind,
             old_hash: None,
             new_hash: None,
+            old_mode: None,
+            new_mode: None,
         }
     }
 
