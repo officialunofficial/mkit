@@ -1335,19 +1335,29 @@ fn config_core_inert_key_matches_git() {
 // =====================================================================
 
 #[test]
-#[ignore = "Phase 1 (#249): status --porcelain=v2 not implemented yet"]
 fn status_porcelain_v2_matches_git() {
     if !git_available() {
         return;
     }
     let h = Harness::new();
     h.init_both();
-    h.write_both("a.txt", b"hello\n");
-    assert!(h.git(&["add", "a.txt"]).status.success());
-    assert!(h.mkit(&["add", "a.txt"]).status.success());
+    // Baseline commit, then a mix of change kinds: staged add, unstaged
+    // modify of a tracked file, staged delete, and an untracked file.
+    h.write_both("tracked.txt", b"v1\n");
+    h.write_both("doomed.txt", b"bye\n");
+    h.commit_both(&["tracked.txt", "doomed.txt"], "init");
+    h.write_both("added.txt", b"new\n");
+    assert!(h.git(&["add", "added.txt"]).status.success());
+    assert!(h.mkit(&["add", "added.txt"]).status.success());
+    assert!(h.git(&["rm", "doomed.txt"]).status.success());
+    assert!(h.mkit(&["rm", "doomed.txt"]).status.success());
+    h.write_both("tracked.txt", b"v2\n"); // unstaged modify
+    h.write_both("untracked.txt", b"u\n");
+    // Each `1 …` line carries object ids (masked) + octal modes; `?` lines
+    // for untracked. Order-independent, hash-masked set comparison.
     let g = h.git(&["status", "--porcelain=v2"]);
     let m = h.mkit(&["status", "--porcelain=v2"]);
-    assert_parity_set("status --porcelain=v2", &g, &m);
+    assert_parity_set("status --porcelain=v2 (mixed)", &g, &m);
 }
 
 /// Mask the abbreviated blob ids on a `diff --git` `index` line — git's

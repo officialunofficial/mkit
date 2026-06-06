@@ -60,7 +60,7 @@ creeping; revisit post-v1 if demand warrants.
 | `rm` | `--cached`, `-r`, `-f` + dirty guard | same | ✅ | — | — | guard is an mkit safety divergence |
 | `mv` | rename single file, `-f`, into-dir | same | ✅ | 2 | #250 | guarded: refuses to clobber w/o `-f` (incl. dangling symlink); rejects missing/untracked source; keeps writes inside the repo. No rename detection → `status` shows delete+add not `R`. **Directory moves (`mv dir newdir`) not yet supported** (refused with a clear error; follow-up). |
 | `status` | `--porcelain[=v1]`, `-s`, `-z`, C-style path quoting | same | ✅ | 1 | #249 | tracked changes combine into one `XY` record per path (e.g. `MM`); untracked stays its own `??` record, so a staged-delete-plus-untracked path emits both `D ` and `??` like git; quoting matches git `core.quotePath`; `-z` = raw NUL-terminated |
-| `status` | `--porcelain=v2` | not present | 🔨 | 1 | #249 | needs per-path modes/hashes in the diff layer (follow-up) |
+| `status` | `--porcelain=v2` | same | ✅ | 1 | #249 | `1 <XY> N... <mH> <mI> <mW> <hH> <hI> <path>` (octal modes; full 64-hex BLAKE3 ids modulo length) + `? <path>` for untracked; no rename `2` lines (no rename detection); `--branch` header lines not emitted |
 | `diff` | HEAD/worktree, `--staged`, pathspecs | same | ✅ | — | — | |
 | `diff` | `<rev>`, `<a>..<b>` ranges | implemented (`split_range`/`rev_to_tree`) | ✅ | 0 | #248 | docs reconciled (stale CLI.md divergence removed) |
 | `diff` | `--name-only`, `--name-status`, `-z` | same | ✅ | 1 | #249 | `A`/`D`/`M` (`T` = mkit mode change); special-byte paths C-quoted, `-z` = raw NUL (status letter + path each NUL-terminated); `-z` only with name-only/-status |
@@ -139,8 +139,12 @@ hash length:
   paths are C-style quoted (git `core.quotePath`), and `-z` emits raw,
   NUL-terminated records. mkit adds `T` for mode-change as the sole
   extension.
-- `status --porcelain=v2` — not yet implemented; needs per-path modes +
-  hashes in the diff layer (Phase 1 follow-up, #249).
+- `status --porcelain=v2` — git's richer per-path format: `1 <XY> <sub>
+  <mH> <mI> <mW> <hH> <hI> <path>` for tracked changes (octal modes; full
+  64-hex BLAKE3 object ids, masked to git's length in the differential
+  harness; `<sub>` always `N...`) and `? <path>` for untracked. `-z` raw
+  NUL-terminated. No rename `2` lines (mkit has no rename detection); no
+  `--branch` header lines.
 - Plumbing (`rev-parse`, `cat-file`, `ls-files`, `ls-tree`, `show-ref`,
   `for-each-ref`) — exact flag contracts defined in Phase 3 (#251); output
   matches Git modulo 64-hex vs 40-hex hashes.

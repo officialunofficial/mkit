@@ -85,11 +85,12 @@ commands:
                     the journaled ref-history MMR. Not a full Git reflog:
                     @{N} indexes the reachable chain, so superseded commits
                     (after amend/reset) are not listed.
-  status [--porcelain] [-s|--short] [-z]
+  status [--porcelain[=v1|v2]] [-s|--short] [-z]
                     Show staged and working tree changes (--porcelain, or
                     its -s/--short alias, emits machine-readable XY lines;
-                    special-byte paths are C-style quoted; -z NUL-terminates
-                    records with raw paths)
+                    --porcelain=v2 emits git's richer per-path format with
+                    modes + object ids; special-byte paths are C-style
+                    quoted; -z NUL-terminates records with raw paths)
   diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
                     --staged for HEAD vs index, a single revision vs the

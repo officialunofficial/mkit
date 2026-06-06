@@ -42,11 +42,32 @@
 //! with newlines or other special bytes; `-z` implies porcelain.
 //!
 //! Empty stdout means "nothing to commit, working tree clean."
+//!
+//! ## `--porcelain=v2` output
+//!
+//! Selects git's richer per-path format. Each changed tracked path is a
+//! `1` record:
+//!
+//! ```text
+//! 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
+//! ```
+//!
+//! where `XY` uses `.` (not space) for an unchanged column, `<sub>` is
+//! always `N...` (mkit is never a submodule), `<mH>/<mI>/<mW>` are the
+//! octal file modes in HEAD / index / worktree, and `<hH>/<hI>` are the
+//! HEAD and index object ids (full 64-hex BLAKE3; git's are 40-hex
+//! SHA-1, so the differential harness masks length). Untracked paths are
+//! `? <path>` records. mkit emits no rename (`2`) records — it has no
+//! rename detection — and no `--branch` header lines. Path quoting and
+//! `-z` semantics match the v1 renderer.
 
 use std::io::Write;
 
+use std::path::Path;
+
 use clap::{Parser, ValueEnum};
-use mkit_core::index;
+use mkit_core::Hash;
+use mkit_core::index::{self, EntryStatus, Index};
 use mkit_core::object::Object;
 use mkit_core::ops::{DiffKind, StatusEntry, StatusStaging, status_diff};
 use mkit_core::refs;
@@ -54,10 +75,12 @@ use mkit_core::store::ObjectStore;
 
 use crate::clap_shim;
 use crate::exit;
+use crate::format;
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum PorcelainVersion {
     V1,
+    V2,
 }
 
 #[derive(Debug, Parser)]
@@ -127,7 +150,11 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if porcelain {
-        render_porcelain(&entries, opts.z)
+        if opts.porcelain == Some(PorcelainVersion::V2) {
+            render_porcelain_v2(&store, head_tree.as_ref(), &cwd, &entries, opts.z)
+        } else {
+            render_porcelain(&entries, opts.z)
+        }
     } else {
         render_human(&mkit_dir, &entries)
     }
@@ -157,6 +184,115 @@ fn render_porcelain(entries: &[StatusEntry], z: bool) -> u8 {
         }
     }
     exit::OK
+}
+
+/// `--porcelain=v2` output — git's richer per-path format. Each changed
+/// tracked path is a `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` line
+/// (mkit emits no rename `2` lines — it has no rename detection — and no
+/// submodules, so `<sub>` is always `N...`); untracked paths are `? <path>`.
+///
+/// `<XY>` uses `.` for an unchanged column (vs v1's space). `<mH>`/`<mI>` are
+/// the HEAD/index octal modes, `<mW>` the worktree mode (`000000` when the
+/// side is absent); `<hH>`/`<hI>` are the HEAD/index object ids (full 64-hex
+/// BLAKE3 — longer than git's SHA-1, the documented hash-length divergence).
+/// Without `--branch` there are no header lines, matching git.
+fn render_porcelain_v2(
+    store: &ObjectStore,
+    head_tree: Option<&Hash>,
+    root: &Path,
+    entries: &[StatusEntry],
+    z: bool,
+) -> u8 {
+    // HEAD paths (mode+id) via a flattened tree; the effective staging index
+    // (seeded from HEAD when no index file exists) for the index columns.
+    let head_index = match head_tree {
+        Some(h) => match index::from_tree(store, *h) {
+            Ok(i) => i,
+            Err(e) => return emit_err(&format!("read HEAD tree: {e}"), exit::GENERAL_ERROR),
+        },
+        None => Index::new(),
+    };
+    let work_index = match super::read_or_seed_index_from_head(root, store) {
+        Ok(i) => i,
+        Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+    };
+
+    let mut stdout = std::io::stdout().lock();
+    for (xy, path) in combine_porcelain(entries) {
+        if xy == [b'?', b'?'] {
+            emit_v2_record(&mut stdout, "? ", path, z);
+            continue;
+        }
+        // v2 uses `.` for an unchanged column, not a space.
+        let x = if xy[0] == b' ' { '.' } else { xy[0] as char };
+        let y = if xy[1] == b' ' { '.' } else { xy[1] as char };
+        let (m_head, h_head) = v2_mode_and_id(&head_index, path);
+        let (m_index, h_index) = v2_mode_and_id(&work_index, path);
+        let m_work = worktree_mode(root, path);
+        let prefix = format!("1 {x}{y} N... {m_head} {m_index} {m_work} {h_head} {h_index} ");
+        emit_v2_record(&mut stdout, &prefix, path, z);
+    }
+    exit::OK
+}
+
+/// Write one v2 record: `<prefix><path>` with git's quoting/termination —
+/// raw + NUL under `-z`, else C-style quoted + newline.
+fn emit_v2_record(out: &mut impl Write, prefix: &str, path: &str, z: bool) {
+    if z {
+        let _ = write!(out, "{prefix}{path}\0");
+    } else if let Some(quoted) = super::c_quote_path(path) {
+        let _ = writeln!(out, "{prefix}{quoted}");
+    } else {
+        let _ = writeln!(out, "{prefix}{path}");
+    }
+}
+
+/// The octal mode and full object id for `path` in `index` (a real index or a
+/// flattened HEAD tree). Absent / removed → `000000` and the all-zero id.
+fn v2_mode_and_id(index: &Index, path: &str) -> (&'static str, String) {
+    match index.find_entry(path) {
+        Some(i) if index.entries[i].status != EntryStatus::Removed => {
+            let e = &index.entries[i];
+            (git_mode(e.status), format::hex_hash(&e.object_hash))
+        }
+        _ => ("000000", format::hex_hash(&mkit_core::hash::ZERO)),
+    }
+}
+
+/// git octal mode for an index entry's status.
+fn git_mode(status: EntryStatus) -> &'static str {
+    match status {
+        EntryStatus::Executable => "100755",
+        EntryStatus::Symlink => "120000",
+        _ => "100644",
+    }
+}
+
+/// The worktree octal mode for `path` (`000000` if it is absent).
+fn worktree_mode(root: &Path, path: &str) -> &'static str {
+    let Ok(meta) = std::fs::symlink_metadata(root.join(path)) else {
+        return "000000";
+    };
+    if meta.is_symlink() {
+        "120000"
+    } else if meta.is_dir() {
+        "040000"
+    } else if is_executable(&meta) {
+        "100755"
+    } else {
+        "100644"
+    }
+}
+
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_meta: &std::fs::Metadata) -> bool {
+    false
 }
 
 /// Collapse `status_diff`'s per-(staging) entries into porcelain records,
