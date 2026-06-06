@@ -1360,6 +1360,44 @@ fn status_porcelain_v2_matches_git() {
     assert_parity_set("status --porcelain=v2 (mixed)", &g, &m);
 }
 
+/// A tracked file replaced on disk by a directory is **not** a valid
+/// worktree side for that path: git (and mkit) report the tracked file as
+/// deleted in the worktree (`mW = 000000`). The worktree mode must never be
+/// reported as `040000` for the tracked path. Uses an empty replacement
+/// directory so the comparison is exactly the tracked-side `1 .D … f`
+/// record — git suppresses untracked entries that collide with a tracked
+/// path, an untracked-walk divergence orthogonal to the v2 mode columns.
+#[test]
+fn status_porcelain_v2_file_replaced_by_dir_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("f", b"file contents\n");
+    h.commit_both(&["f"], "init");
+    // Replace the tracked file `f` with a directory.
+    for repo in [&h.git_repo, &h.mkit_repo] {
+        std::fs::remove_file(repo.join("f")).expect("remove tracked file");
+        std::fs::create_dir(repo.join("f")).expect("create dir at path");
+    }
+    let g = h.git(&["status", "--porcelain=v2"]);
+    let m = h.mkit(&["status", "--porcelain=v2"]);
+    assert_parity_set("status --porcelain=v2 (file→dir)", &g, &m);
+    // Belt-and-suspenders: the tracked record must carry mW = 000000, never
+    // the `040000` a raw directory stat would yield.
+    let out = String::from_utf8(m.stdout).expect("utf-8");
+    let rec = out
+        .lines()
+        .find(|l| l.ends_with(" f"))
+        .expect("tracked `f` record present");
+    let mw = rec.split(' ').nth(5).expect("mW field");
+    assert_eq!(
+        mw, "000000",
+        "worktree mode for dir-replaced file must be 000000"
+    );
+}
+
 /// Mask the abbreviated blob ids on a `diff --git` `index` line — git's
 /// SHA-1 prefixes and mkit's BLAKE3 prefixes can't match, but everything
 /// else on the line (and every other line) must. Non-`index` lines fall back

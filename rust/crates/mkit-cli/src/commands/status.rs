@@ -68,7 +68,6 @@ use std::path::Path;
 use clap::{Parser, ValueEnum};
 use mkit_core::Hash;
 use mkit_core::index::{self, EntryStatus, Index};
-use mkit_core::object::Object;
 use mkit_core::ops::{DiffKind, StatusEntry, StatusStaging, status_diff};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
@@ -126,13 +125,12 @@ pub fn run(args: &[String]) -> u8 {
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
-    // Resolve HEAD tree hash (None on a HEAD-less repo).
-    let head_tree: Option<mkit_core::Hash> = match refs::resolve_head(&mkit_dir) {
-        Ok(Some(commit_hash)) => match store.read_object(&commit_hash) {
-            Ok(Object::Commit(c)) => Some(c.tree_hash),
-            _ => None,
-        },
-        _ => None,
+    // Resolve HEAD tree hash (None on a HEAD-less repo). Use the shared
+    // helper so a `Remix` HEAD is compared against its tree like every
+    // other command, not treated as "no HEAD".
+    let head_tree: Option<mkit_core::Hash> = match super::current_head_tree(&cwd, &store) {
+        Ok(t) => t,
+        Err(e) => return emit_err(&format!("status: {e}"), exit::GENERAL_ERROR),
     };
 
     // Load the index, falling back to None only when absent/empty.
@@ -268,19 +266,26 @@ fn git_mode(status: EntryStatus) -> &'static str {
     }
 }
 
-/// The worktree octal mode for `path` (`000000` if it is absent).
+/// The worktree octal mode for `path`. `000000` unless the path is a
+/// *stageable* worktree object — a regular file or a symlink. A directory
+/// (or any other non-file type) at a tracked file path is **not** a valid
+/// worktree side for that path: status reports the tracked file as deleted
+/// (`mW = 000000`) and surfaces anything inside as a separate `?` record,
+/// so reporting `040000` here would misrepresent it as still present.
 fn worktree_mode(root: &Path, path: &str) -> &'static str {
     let Ok(meta) = std::fs::symlink_metadata(root.join(path)) else {
         return "000000";
     };
     if meta.is_symlink() {
         "120000"
-    } else if meta.is_dir() {
-        "040000"
-    } else if is_executable(&meta) {
-        "100755"
+    } else if meta.is_file() {
+        if is_executable(&meta) {
+            "100755"
+        } else {
+            "100644"
+        }
     } else {
-        "100644"
+        "000000"
     }
 }
 
