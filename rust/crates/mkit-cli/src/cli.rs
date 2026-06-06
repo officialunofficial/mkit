@@ -57,7 +57,12 @@ commands:
   show-ref [--heads] [--tags]  List refs as `<hash> <refname>`
   for-each-ref [--format=<fmt>] [<pattern>...]
                     Iterate refs, optionally with a %(atom) format string
-  symbolic-ref [--short] <name>  Read a symbolic ref (e.g. HEAD)
+  symbolic-ref [--short] <name> [<ref>]
+                    Read a symbolic ref, or (with <ref>) repoint it
+                    (e.g. symbolic-ref HEAD refs/heads/main)
+  update-ref [-d] <ref> [<newvalue> [<oldvalue>]]
+                    Create/update/delete refs/heads/* or refs/tags/*
+                    (<oldvalue> compare-and-swap; all-zero = must be absent)
   commit [-a] [--amend] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
@@ -228,6 +233,7 @@ mod tests {
             "show-ref",
             "for-each-ref",
             "symbolic-ref",
+            "update-ref",
             "commit",
             "log",
             "reflog",

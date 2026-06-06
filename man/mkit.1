@@ -277,13 +277,38 @@ tokens
 Optional
 .Ar pattern
 arguments filter by ref-name prefix.
-.It Cm symbolic-ref Oo Fl Fl short Oc Ar name
-Read a symbolic ref (currently only
-.Cm HEAD ) ,
-printing its target
-.Pq Ql refs/heads/main , No or Ql main No with Fl Fl short .
-Errors when HEAD is detached. Writing symbolic refs is a later
-parity phase.
+.It Cm symbolic-ref Oo Fl Fl short Oc Ar name Op Ar ref
+Read or write a symbolic ref (currently only
+.Cm HEAD ) .
+Without
+.Ar ref ,
+prints the target
+.Pq Ql refs/heads/main , No or Ql main No with Fl Fl short ;
+errors when HEAD is detached. With
+.Ar ref
+(which must be under
+.Pa refs/heads/ ) ,
+repoints HEAD at that branch \(em the plumbing form, which does not touch the
+worktree; the branch need not exist yet.
+.It Cm update-ref Oo Fl d Oc Ar ref Oo Ar newvalue Oo Ar oldvalue Oc Oc
+Create, update, or delete a ref under
+.Pa refs/heads/
+or
+.Pa refs/tags/ .
+.Ar newvalue
+and
+.Ar oldvalue
+resolve through the revspec grammar. With no
+.Ar oldvalue
+the write is unconditional; with one it is a compare-and-swap that fails
+unless the ref currently holds that value (an all-zero
+.Ar oldvalue
+requires the ref to be absent).
+.Fl d
+deletes the ref (optionally checking
+.Ar oldvalue
+first); deleting a branch refuses the currently checked-out one, an mkit
+safety divergence.
 .It Cm commit Oo Fl a | Fl Fl all Oc Op Fl Fl amend Op Fl m Ar message
 Create a signed commit. With
 .Fl a

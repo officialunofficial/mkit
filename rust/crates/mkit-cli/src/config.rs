@@ -136,7 +136,30 @@ pub struct Config {
     /// Per-branch upstream tracking keyed by local branch name
     /// (`branch.<branch>.remote` / `branch.<branch>.merge`). Repo-safe.
     pub branch_upstreams: std::collections::BTreeMap<String, Upstream>,
+    /// Allowlisted, **inert** `core.*` git-compat keys (see
+    /// [`CORE_ALLOWED_KEYS`]). Accepted and round-tripped for parity but
+    /// **not honored** by mkit — they are cosmetic settings git stores
+    /// per-repo. Dangerous `core.*` keys ([`CORE_DENIED_KEYS`]) are rejected
+    /// rather than stored. Keyed by the bare suffix (e.g. `autocrlf`).
+    pub core: std::collections::BTreeMap<String, String>,
 }
+
+/// Inert `core.*` keys accepted for git compatibility. They are stored and
+/// round-tripped but mkit does not act on them (it has no CRLF translation,
+/// honors exec bits natively, etc.). Repo-safe precisely because inert.
+pub const CORE_ALLOWED_KEYS: &[&str] = &[
+    "autocrlf",
+    "bare",
+    "filemode",
+    "ignorecase",
+    "quotepath",
+    "symlinks",
+];
+
+/// Dangerous `core.*` keys that mkit refuses to store: they would change what
+/// commands or hooks mkit invokes if it honored them, so a hostile repo (or a
+/// typo) must not be able to set them. Rejected with a clear message.
+pub const CORE_DENIED_KEYS: &[&str] = &["editor", "fsmonitor", "hookspath", "pager", "sshcommand"];
 
 /// A named remote's stored address. `type` is a dispatch hint derived
 /// from the URL scheme at `mkit remote add` time.
@@ -574,6 +597,12 @@ fn warn_forbidden_repo_key(path: &Path, key: &str) {
 /// Apply one parsed key/value pair to `cfg`. Unknown / legacy keys are
 /// tolerated (silent) for forward compat with hand-edited files.
 fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
+    // Inert git-compat `core.*` keys: store only the allowlisted ones
+    // (dangerous keys are dropped on read, like any other unknown key).
+    if let Some(suffix) = core_allowed_suffix(key) {
+        cfg.core.insert(suffix, val.to_string());
+        return;
+    }
     match key {
         "user.identity" => val.clone_into(&mut cfg.user_identity),
         // Git-compatibility aliases — non-authoritative (never feed the
@@ -620,6 +649,16 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         _ if key.ends_with("_url") => {}
         _ => {} // unknown keys: tolerate on read
     }
+}
+
+/// If `key` is `core.<x>` with `<x>` an allowlisted inert key (matched
+/// case-insensitively, like git), return the canonical lowercase suffix.
+#[must_use]
+pub fn core_allowed_suffix(key: &str) -> Option<String> {
+    let suffix = key.strip_prefix("core.")?.to_ascii_lowercase();
+    CORE_ALLOWED_KEYS
+        .contains(&suffix.as_str())
+        .then_some(suffix)
 }
 
 /// Apply a `<section>.<name>.<field>` key (named remotes, branch
@@ -735,6 +774,10 @@ pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
         if !up.branch.is_empty() {
             let _ = writeln!(out, "branch.{branch}.merge = {}", up.branch);
         }
+    }
+    // Inert git-compat `core.*` keys — repo-safe (mkit never acts on them).
+    for (k, v) in &cfg.core {
+        let _ = writeln!(out, "core.{k} = {v}");
     }
     // Atomic replace: write to a sibling temp file then rename over the
     // target so a crash mid-write can never leave a truncated config

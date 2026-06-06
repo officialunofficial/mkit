@@ -27,7 +27,8 @@ _mkit() {
         'rev-parse:Resolve revisions to object ids'
         'show-ref:List refs as <hash> <refname> (--heads/--tags)'
         'for-each-ref:Iterate refs with an optional --format'
-        'symbolic-ref:Read a symbolic ref (e.g. HEAD)'
+        'symbolic-ref:Read or write a symbolic ref (e.g. HEAD)'
+        'update-ref:Create, update, or delete a ref (guarded)'
         'commit:Create a signed commit'
         'log:Show commit history'
         'reflog:Show a branch movement history (read-only)'
@@ -188,6 +189,12 @@ _mkit() {
                         '--short[print the short ref name]' \
                         '--help[show help]' \
                         '*:name:'
+                    ;;
+                update-ref)
+                    _arguments \
+                        '(-d --delete)'{-d,--delete}'[delete the ref]' \
+                        '--help[show help]' \
+                        '*:ref:'
                     ;;
                 status)
                     _arguments \

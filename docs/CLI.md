@@ -243,11 +243,22 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   `objectname:short`, `objecttype`; `%%` is a literal `%`); the object id is
   64-hex BLAKE3. Optional `<pattern>` arguments filter to refs whose full
   name equals or is under each pattern.
-- `mkit symbolic-ref [--short] <name>` — read a symbolic ref (currently only
-  `HEAD`), like `git symbolic-ref`. Prints the full target ref
-  (`refs/heads/main`), or just the branch name with `--short`. Errors when
-  HEAD is detached / not symbolic. Writing symbolic refs is a later parity
-  phase (#252).
+- `mkit symbolic-ref [--short] <name> [<ref>]` — read or write a symbolic ref
+  (currently only `HEAD`), like `git symbolic-ref`. Without `<ref>`, prints
+  the full target (`refs/heads/main`), or just the branch name with `--short`;
+  errors when HEAD is detached / not symbolic. With `<ref>` (which must be
+  under `refs/heads/`), repoints HEAD at that branch — the plumbing form,
+  which does **not** touch the worktree; the branch need not exist yet
+  (matching git).
+- `mkit update-ref [-d] <ref> [<newvalue> [<oldvalue>]]` — create, update, or
+  delete a ref under `refs/heads/` or `refs/tags/` (other namespaces are
+  rejected), like `git update-ref`. `<newvalue>`/`<oldvalue>` resolve through
+  the revspec grammar. With no `<oldvalue>` the write is unconditional; with
+  one it is a compare-and-swap that fails unless the ref currently holds that
+  value (an all-zero `<oldvalue>` requires the ref to be absent). `-d` deletes
+  the ref (optionally verifying `<oldvalue>` first); deleting a branch refuses
+  the currently checked-out one — an mkit safety divergence (git's plumbing
+  would, leaving HEAD dangling).
 
 Attestations:
 
@@ -610,6 +621,14 @@ Config / keys / version:
     `.mkit/config`) precisely because they cannot influence the signed
     author — unlike `user.identity`, which stays user-scoped and in
     `REPO_FORBIDDEN_KEYS` so a hostile clone cannot spoof authorship.
+  - `core.*` — git-compatibility keys. An **inert** allowlist
+    (`core.autocrlf`, `core.bare`, `core.filemode`, `core.ignorecase`,
+    `core.quotepath`, `core.symlinks`) is accepted and round-tripped for
+    parity but **not honored** — mkit has no CRLF translation, tracks exec
+    bits natively, etc. Dangerous `core.*` keys that would change what mkit
+    runs (`core.sshCommand`, `core.pager`, `core.editor`, `core.hooksPath`,
+    `core.fsmonitor`) are **rejected** rather than stored. Names match
+    case-insensitively and canonicalize to lowercase, like git.
 - `mkit version` — print the version. Emits exactly `mkit <X.Y.Z>\n`.
   The top-level `mkit --version` / `mkit -V` flags are aliases of this
   subcommand and emit the identical string. Note this is `mkit <X.Y.Z>`,
@@ -892,3 +911,25 @@ cp completions/mkit.zsh /usr/local/share/zsh/site-functions/_mkit
 Then restart your shell (or run `compinit` on zsh). Completion covers
 the full subcommand list plus common flags; per-argument completion
 (branch names, remote URLs) is deferred to a future release.
+
+### Using mkit as `git` (opt-in shim)
+
+`mkit` exposes a git-compatible CLI surface, so existing git habits — and AI
+agents that emit `git <cmd>` — can drive it. `contrib/git-shim/mkit-git` is an
+**opt-in** forwarder (`git <args>` → `mkit <args>`) that you install yourself;
+it is never installed automatically and **never shadows the real `git`**.
+
+```sh
+# simplest (interactive shells):
+alias git=mkit
+
+# or, to also cover scripts/agents, put the shim on PATH as `git` for a
+# specific project/environment, ahead of the real git:
+ln -s "$PWD/contrib/git-shim/mkit-git" ~/.local/mkit-shim/git
+export PATH="$HOME/.local/mkit-shim:$PATH"
+command -v git && git version   # verify it resolves to the shim
+```
+
+See `contrib/git-shim/README.md` for details. The shim is a pure forwarder:
+an unsupported command exits with mkit's usage error rather than falling
+through to real git.

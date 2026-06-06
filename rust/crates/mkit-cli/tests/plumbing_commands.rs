@@ -451,3 +451,159 @@ fn symbolic_ref_errors_on_detached_and_non_head() {
     let out = run_in(root, x, &["symbolic-ref", "HEAD"]);
     assert!(!out.status.success(), "detached HEAD must error: {out:?}");
 }
+
+#[test]
+fn update_ref_create_update_and_cas() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let head = out_str(&run_in(root, x, &["rev-parse", "HEAD"]));
+    // Create refs/heads/feature at HEAD.
+    assert!(
+        run_in(root, x, &["update-ref", "refs/heads/feature", "HEAD"])
+            .status
+            .success()
+    );
+    assert_eq!(out_str(&run_in(root, x, &["rev-parse", "feature"])), head);
+
+    // Second commit so the branch can move to a new value.
+    fs::write(root.join("z.txt"), b"z\n").unwrap();
+    assert!(run_in(root, x, &["add", "z.txt"]).status.success());
+    assert!(run_in(root, x, &["commit", "-m", "c2"]).status.success());
+    let head2 = out_str(&run_in(root, x, &["rev-parse", "HEAD"]));
+
+    // CAS with the correct old value succeeds.
+    assert!(
+        run_in(
+            root,
+            x,
+            &["update-ref", "refs/heads/feature", &head2, &head]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(out_str(&run_in(root, x, &["rev-parse", "feature"])), head2);
+    // CAS with the wrong old value fails (current is head2, not head).
+    assert!(
+        !run_in(root, x, &["update-ref", "refs/heads/feature", &head, &head])
+            .status
+            .success(),
+        "stale CAS must fail"
+    );
+    // All-zero old = "must be absent": fails for an existing ref...
+    let zero = "0".repeat(64);
+    assert!(
+        !run_in(
+            root,
+            x,
+            &["update-ref", "refs/heads/feature", &head2, &zero]
+        )
+        .status
+        .success(),
+        "create-only on an existing ref must fail"
+    );
+    // ...but succeeds for a brand-new ref.
+    assert!(
+        run_in(root, x, &["update-ref", "refs/heads/fresh", &head2, &zero])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn update_ref_delete_and_guards() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    // Create then delete a tag ref.
+    assert!(
+        run_in(root, x, &["update-ref", "refs/tags/v9", "HEAD"])
+            .status
+            .success()
+    );
+    assert!(out_str(&run_in(root, x, &["show-ref", "--tags"])).contains("refs/tags/v9"));
+    assert!(
+        run_in(root, x, &["update-ref", "-d", "refs/tags/v9"])
+            .status
+            .success()
+    );
+    assert!(
+        !run_in(root, x, &["show-ref", "--tags"]).status.success(),
+        "tag namespace empty after delete"
+    );
+    // Deleting the current branch is refused (mkit safety divergence).
+    assert!(
+        !run_in(root, x, &["update-ref", "-d", "refs/heads/main"])
+            .status
+            .success(),
+        "delete of current branch must be refused"
+    );
+    // Unsupported namespace is rejected.
+    assert!(
+        !run_in(root, x, &["update-ref", "refs/remotes/origin/main", "HEAD"])
+            .status
+            .success(),
+        "unsupported ref namespace must error"
+    );
+}
+
+#[test]
+fn symbolic_ref_write_repoints_head() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(
+        run_in(root, x, &["update-ref", "refs/heads/feature", "HEAD"])
+            .status
+            .success()
+    );
+    // Repoint HEAD at the branch (plumbing form).
+    assert!(
+        run_in(root, x, &["symbolic-ref", "HEAD", "refs/heads/feature"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        out_str(&run_in(root, x, &["symbolic-ref", "HEAD"])),
+        "refs/heads/feature"
+    );
+    // A non-refs/heads target is rejected.
+    assert!(
+        !run_in(root, x, &["symbolic-ref", "HEAD", "refs/tags/v1"])
+            .status
+            .success(),
+        "HEAD can only point at a branch"
+    );
+}
+
+#[test]
+fn config_core_allowlist_and_rejects_dangerous() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    // An allowlisted inert key round-trips...
+    assert!(
+        run_in(root, x, &["config", "core.autocrlf", "true"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        out_str(&run_in(root, x, &["config", "core.autocrlf"])),
+        "true"
+    );
+    // ...and matches case-insensitively (lowercased like git).
+    assert_eq!(
+        out_str(&run_in(root, x, &["config", "core.AutoCRLF"])),
+        "true"
+    );
+    // A dangerous key is rejected, not stored.
+    assert!(
+        !run_in(root, x, &["config", "core.sshCommand", "evil"])
+            .status
+            .success(),
+        "core.sshCommand must be rejected"
+    );
+    // An unknown core key is rejected too.
+    assert!(
+        !run_in(root, x, &["config", "core.bogus", "x"])
+            .status
+            .success(),
+        "unknown core key must be rejected"
+    );
+}

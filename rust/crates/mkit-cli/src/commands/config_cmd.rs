@@ -153,6 +153,28 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
                 exit::CONFIG_ERROR,
             ));
         }
+        // Inert git-compat `core.*` keys: store the allowlisted ones, and
+        // refuse the dangerous ones (they would change what mkit executes if
+        // honored). Anything else under `core.` is an unknown key.
+        k if k.starts_with("core.") => {
+            if let Some(suffix) = config::core_allowed_suffix(k) {
+                cfg.core.insert(suffix, value.to_string());
+            } else if config::CORE_DENIED_KEYS
+                .contains(&k.trim_start_matches("core.").to_ascii_lowercase().as_str())
+            {
+                return Err(emit_err(
+                    &format!(
+                        "config key `{key}` is not honored by mkit and is rejected for safety"
+                    ),
+                    exit::CONFIG_ERROR,
+                ));
+            } else {
+                return Err(emit_err(
+                    &format!("unknown config key: {key}"),
+                    exit::CONFIG_ERROR,
+                ));
+            }
+        }
         _ => {
             return Err(emit_err(
                 &format!("unknown config key: {key}"),
@@ -231,6 +253,14 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         }
         "attest.p256_key_path" => Some(Cow::Borrowed(cfg.attest.p256_key_path_or_default())),
         "attest.signer" => Some(Cow::Borrowed(cfg.attest.signer_or_fallback())),
+        // Inert git-compat `core.*` keys: an allowlisted key returns its
+        // stored value (empty if unset, like the other keys); anything else
+        // under `core.` is unknown.
+        k if k.starts_with("core.") => config::core_allowed_suffix(k).map(|suffix| {
+            cfg.core
+                .get(&suffix)
+                .map_or(Cow::Borrowed(""), |v| Cow::Owned(v.clone()))
+        }),
         _ => None,
     }
 }
@@ -253,12 +283,24 @@ fn show_all(cfg: &Config, json: bool) -> u8 {
                 format::json_escape(&v)
             );
         }
+        // Dynamic, set-only `core.*` git-compat keys.
+        for (k, v) in &cfg.core {
+            let _ = write!(
+                stdout,
+                ",\"core.{}\":\"{}\"",
+                format::json_escape(k),
+                format::json_escape(v)
+            );
+        }
         let _ = stdout.write_all(b"}\n");
         return exit::OK;
     }
     for key in CONFIG_KEYS {
         let v = lookup(cfg, key).unwrap_or(Cow::Borrowed(""));
         let _ = writeln!(stdout, "{key} = {v}");
+    }
+    for (k, v) in &cfg.core {
+        let _ = writeln!(stdout, "core.{k} = {v}");
     }
     exit::OK
 }

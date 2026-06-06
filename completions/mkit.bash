@@ -14,7 +14,7 @@ _mkit_complete() {
     local cur prev words cword
     _init_completion || return 0
 
-    local subcommands="init add rm mv restore reset hash cat cat-file tree ls-tree ls-files rev-parse show-ref for-each-ref symbolic-ref commit log reflog status diff branch checkout clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc sparse-checkout serve pack-shard blame verify attest verify-attest version help"
+    local subcommands="init add rm mv restore reset hash cat cat-file tree ls-tree ls-files rev-parse show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc sparse-checkout serve pack-shard blame verify attest verify-attest version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.
     local top_flags="--help -h --version -V"
 
@@ -73,6 +73,9 @@ _mkit_complete() {
             ;;
         symbolic-ref)
             COMPREPLY=( $(compgen -W "--short --help" -- "$cur") )
+            ;;
+        update-ref)
+            COMPREPLY=( $(compgen -W "-d --delete --help" -- "$cur") )
             ;;
         status)
             COMPREPLY=( $(compgen -W "--porcelain -s --short -z --help" -- "$cur") )

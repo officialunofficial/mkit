@@ -20,7 +20,8 @@ cannot share bytes with Git's SHA-1/SHA-256 store).
   A literal Git SHA pasted into mkit will never resolve. We match the UX
   *shape* (short prefixes, abbreviated display) but not the length.
 - **Repo marker** — mkit uses `.mkit/`, not `.git/`. Repo detection by `.git/`
-  is **not** added to core; the opt-in `git` alias shim (Phase 6, #254) is the
+  is **not** added to core; the opt-in `git` alias shim (Phase 6, #254 —
+  shipped at `contrib/git-shim/mkit-git`, never installed by default) is the
   only bridge.
 
 ## v1 non-goals (explicit)
@@ -95,14 +96,15 @@ creeping; revisit post-v1 if demand warrants.
 | `for-each-ref` | `--format` | same | ✅ | 3 | #251 | default `<objectname> <objecttype>\t<refname>`; `%(atom)` subset: refname[:short], objectname[:short], objecttype (modulo hash length) |
 | `show` | object/commit display | partial via `cat`/`log` | 🔨 | 3 | #251 | deferred — commit+diff display diverges from git |
 | `symbolic-ref` | read | same (HEAD) | ✅ | 3 | #251 | reads HEAD only; full target or `--short`; detached → error |
-| `symbolic-ref` / `update-ref` | write | absent | 🔨 | 4 | #252 | mutating — guarded, later phase |
+| `symbolic-ref` | write (HEAD → refs/heads/<b>) | same | ✅ | 4 | #254 | repoints HEAD without touching the worktree; target need not exist yet |
+| `update-ref` | `[-d] <ref> [<new> [<old>]]` | same | ✅ | 4 | #254 | refs/heads/* + refs/tags/* only; CAS via `<old>` (all-zero = must be absent); `-d` refuses the current branch (mkit safety divergence) |
 
 ## Config & format conventions
 
 | Convention | Git-compatible subset (in scope) | mkit current state | Status | Phase | Issue | Notes |
 |------------|----------------------------------|--------------------|--------|-------|-------|-------|
 | `config user.name` / `user.email` | accept + round-trip | same | ✅ | 2 | #250 | **non-authoritative**: stored/round-tripped but never feed the signed `Identity` (that stays `user.identity`, still in `REPO_FORBIDDEN_KEYS`). Repo-safe precisely because inert — proven by a no-spoof test |
-| `config core.*` | accept honored subset | absent | 🔨 | 2 | #250 | display/no-op where not meaningful |
+| `config core.*` | accept inert subset, reject dangerous | same | ✅ | 2 | #254 | inert allowlist (autocrlf/bare/filemode/ignorecase/quotepath/symlinks) stored & round-tripped but **not honored**; dangerous keys (sshCommand/pager/editor/hooksPath/fsmonitor) **rejected**; case-insensitive, lowercased like git |
 | `.gitignore` | `**`, anchored `/`, dir-relative, negation, char classes | path-relative; reads `.gitignore` + `.mkitignore` (root) | ✅ | 3 | #256 | v1 subset: path-relative matching, anchored leading `/`, multi-segment patterns, `**` (leading/middle/trailing), `[...]` classes, `\` escapes, negation (last-match-wins), trailing-space trim. Reads both files at the repo **root**; `.mkitignore` applied last (wins). **Deferred:** nested per-directory ignore files, `core.excludesFile` global excludes, escaped trailing spaces |
 | abbreviated hashes | short prefix resolution + display | resolve + `log --abbrev[=N]`/`--oneline` | ✅ | 0 | #248 | display side shipped; `rev-parse --short` is Phase 3 |
 | `--version` / `-V` | top-level flag | `mkit --version`/`-V` alias `version` | ✅ | 0 | #248 | emits `mkit <X.Y.Z>` (not git's `git version …`) |

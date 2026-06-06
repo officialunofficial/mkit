@@ -15,7 +15,7 @@
 complete -c mkit -f
 
 set -l __mkit_subcommands \
-    init add rm mv restore reset hash cat cat-file tree ls-tree ls-files rev-parse show-ref for-each-ref symbolic-ref commit log reflog status diff branch checkout clean \
+    init add rm mv restore reset hash cat cat-file tree ls-tree ls-files rev-parse show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout clean \
     tag config merge push pull fetch stash clone remote key keygen \
     cherry-pick revert rebase bisect gc sparse-checkout serve pack-shard blame verify \
     attest verify-attest version help
@@ -121,6 +121,8 @@ complete -c mkit -n "__fish_seen_subcommand_from for-each-ref" \
     -l format -d "Output format with %(atom) tokens"
 complete -c mkit -n "__fish_seen_subcommand_from symbolic-ref" \
     -l short -d "Print the short ref name"
+complete -c mkit -n "__fish_seen_subcommand_from update-ref" \
+    -l delete -s d -d "Delete the ref"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
     -l porcelain -d "Machine-readable XY output"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
