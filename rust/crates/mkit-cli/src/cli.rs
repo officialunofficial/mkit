@@ -62,7 +62,8 @@ commands:
                     (e.g. symbolic-ref HEAD refs/heads/main)
   update-ref [-d] <ref> [<newvalue> [<oldvalue>]]
                     Create/update/delete refs/heads/* or refs/tags/*
-                    (<oldvalue> compare-and-swap; all-zero = must be absent)
+                    (<oldvalue> compare-and-swap; all-zero = must be absent,
+                    update mode only; -d's <oldvalue> must be concrete)
   commit [-a] [--amend] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.

@@ -301,14 +301,16 @@ and
 resolve through the revspec grammar. With no
 .Ar oldvalue
 the write is unconditional; with one it is a compare-and-swap that fails
-unless the ref currently holds that value (an all-zero
+unless the ref currently holds that value. In update mode an all-zero
 .Ar oldvalue
-requires the ref to be absent).
+requires the ref to be absent (git's create-only form).
 .Fl d
-deletes the ref (optionally checking
+deletes the ref, optionally checking a
+.Em concrete
 .Ar oldvalue
-first); deleting a branch refuses the currently checked-out one, an mkit
-safety divergence.
+first \(em an all-zero value is rejected in delete mode, since a ref asserted
+absent has nothing to delete. Deleting a branch refuses the currently
+checked-out one, an mkit safety divergence.
 .It Cm commit Oo Fl a | Fl Fl all Oc Op Fl Fl amend Op Fl m Ar message
 Create a signed commit. With
 .Fl a
