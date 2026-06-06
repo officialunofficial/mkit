@@ -97,7 +97,7 @@ creeping; revisit post-v1 if demand warrants.
 | `show` | object/commit display | partial via `cat`/`log` | 🔨 | 3 | #251 | deferred — commit+diff display diverges from git |
 | `symbolic-ref` | read | same (HEAD) | ✅ | 3 | #251 | reads HEAD only; full target or `--short`; detached → error |
 | `symbolic-ref` | write (HEAD → refs/heads/<b>) | same | ✅ | 4 | #254 | repoints HEAD without touching the worktree; target need not exist yet |
-| `update-ref` | `[-d] <ref> [<new> [<old>]]` | same | ✅ | 4 | #254 | refs/heads/* + refs/tags/* only; CAS via `<old>` (all-zero = must be absent); `-d` refuses the current branch (mkit safety divergence) |
+| `update-ref` | `[-d] <ref> [<new> [<old>]]` | same | ✅ | 4 | #254 | refs/heads/* + refs/tags/* only; CAS via `<old>` (all-zero = must be absent, update mode only; `-d`'s `<old>` must be concrete); branch moves go through the history-MMR ref-write path; `-d` refuses the current branch (mkit safety divergence) |
 
 ## Config & format conventions
 

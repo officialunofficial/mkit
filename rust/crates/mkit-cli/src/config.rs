@@ -651,11 +651,24 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
     }
 }
 
-/// If `key` is `core.<x>` with `<x>` an allowlisted inert key (matched
-/// case-insensitively, like git), return the canonical lowercase suffix.
+/// `true` if `key` is in the `core` section (`core.<x>`), matched
+/// case-insensitively like git (`Core.x`, `CORE.x` all count).
+#[must_use]
+pub fn is_core_section(key: &str) -> bool {
+    key.split_once('.')
+        .is_some_and(|(section, _)| section.eq_ignore_ascii_case("core"))
+}
+
+/// If `key` is `core.<x>` (section matched case-insensitively) with `<x>` an
+/// allowlisted inert key, return the canonical lowercase suffix. git lowercases
+/// both the section and the variable name, so `Core.AutoCRLF` → `autocrlf`.
 #[must_use]
 pub fn core_allowed_suffix(key: &str) -> Option<String> {
-    let suffix = key.strip_prefix("core.")?.to_ascii_lowercase();
+    let (section, name) = key.split_once('.')?;
+    if !section.eq_ignore_ascii_case("core") {
+        return None;
+    }
+    let suffix = name.to_ascii_lowercase();
     CORE_ALLOWED_KEYS
         .contains(&suffix.as_str())
         .then_some(suffix)

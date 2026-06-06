@@ -153,15 +153,18 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
                 exit::CONFIG_ERROR,
             ));
         }
-        // Inert git-compat `core.*` keys: store the allowlisted ones, and
-        // refuse the dangerous ones (they would change what mkit executes if
-        // honored). Anything else under `core.` is an unknown key.
-        k if k.starts_with("core.") => {
+        // Inert git-compat `core.*` keys (section matched case-insensitively):
+        // store the allowlisted ones, and refuse the dangerous ones (they
+        // would change what mkit executes if honored). Anything else under
+        // `core.` is an unknown key.
+        k if config::is_core_section(k) => {
+            let name = k
+                .split_once('.')
+                .map_or("", |(_, n)| n)
+                .to_ascii_lowercase();
             if let Some(suffix) = config::core_allowed_suffix(k) {
                 cfg.core.insert(suffix, value.to_string());
-            } else if config::CORE_DENIED_KEYS
-                .contains(&k.trim_start_matches("core.").to_ascii_lowercase().as_str())
-            {
+            } else if config::CORE_DENIED_KEYS.contains(&name.as_str()) {
                 return Err(emit_err(
                     &format!(
                         "config key `{key}` is not honored by mkit and is rejected for safety"
@@ -253,10 +256,10 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         }
         "attest.p256_key_path" => Some(Cow::Borrowed(cfg.attest.p256_key_path_or_default())),
         "attest.signer" => Some(Cow::Borrowed(cfg.attest.signer_or_fallback())),
-        // Inert git-compat `core.*` keys: an allowlisted key returns its
-        // stored value (empty if unset, like the other keys); anything else
-        // under `core.` is unknown.
-        k if k.starts_with("core.") => config::core_allowed_suffix(k).map(|suffix| {
+        // Inert git-compat `core.*` keys (section matched case-insensitively):
+        // an allowlisted key returns its stored value (empty if unset, like
+        // the other keys); anything else under `core.` is unknown.
+        k if config::is_core_section(k) => config::core_allowed_suffix(k).map(|suffix| {
             cfg.core
                 .get(&suffix)
                 .map_or(Cow::Borrowed(""), |v| Cow::Owned(v.clone()))

@@ -6,8 +6,11 @@
 //! `<newvalue>` / `<oldvalue>` resolve through the shared revspec grammar
 //! (ref, full/short hash, `HEAD~n`). Without `<oldvalue>` the write is
 //! unconditional; with one it is a compare-and-swap that fails unless the ref
-//! currently holds that value. An all-zero `<oldvalue>` means "the ref must
-//! not already exist" (git's convention).
+//! currently holds that value. In **update** mode an all-zero `<oldvalue>`
+//! means "the ref must not already exist" (git's create-only convention); in
+//! `-d` (delete) mode `<oldvalue>`, if given, must be a concrete value the
+//! ref currently holds (an all-zero value is rejected — you cannot delete a
+//! ref asserted to be absent).
 //!
 //! Safety divergence: `-d` on a branch uses the same guard as `branch -d` —
 //! it refuses to delete the currently checked-out branch (git's plumbing
@@ -97,7 +100,11 @@ pub fn run(args: &[String]) -> u8 {
         },
     };
     let res = match ns {
-        Namespace::Head => refs::update_ref(&mkit_dir, name, condition, &newhash),
+        // Branch moves MUST funnel through the history-recording helper so a
+        // `--features history-mmr` build advances the ref and its journal
+        // together under lock (the CLI ref-write invariant). Tags are not
+        // history-tracked (the journal is keyed per branch).
+        Namespace::Head => super::write_ref_recording_history(&mkit_dir, name, condition, &newhash),
         Namespace::Tag => refs::update_tag(&mkit_dir, name, condition, &newhash),
     };
     match res {

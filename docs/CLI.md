@@ -255,10 +255,12 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   rejected), like `git update-ref`. `<newvalue>`/`<oldvalue>` resolve through
   the revspec grammar. With no `<oldvalue>` the write is unconditional; with
   one it is a compare-and-swap that fails unless the ref currently holds that
-  value (an all-zero `<oldvalue>` requires the ref to be absent). `-d` deletes
-  the ref (optionally verifying `<oldvalue>` first); deleting a branch refuses
-  the currently checked-out one — an mkit safety divergence (git's plumbing
-  would, leaving HEAD dangling).
+  value. In update mode an all-zero `<oldvalue>` requires the ref to be absent
+  (git's create-only form). `-d` deletes the ref (optionally verifying a
+  **concrete** `<oldvalue>` first — an all-zero value is rejected, since a ref
+  asserted absent has nothing to delete); deleting a branch refuses the
+  currently checked-out one — an mkit safety divergence (git's plumbing would,
+  leaving HEAD dangling).
 
 Attestations:
 
