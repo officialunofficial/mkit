@@ -1252,6 +1252,83 @@ fn symbolic_ref_head_matches_git() {
     );
 }
 
+#[test]
+fn update_ref_create_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"x\n");
+    h.commit_both(&["a.txt"], "init");
+    // Create refs/heads/feature at HEAD in both, then the ref listing
+    // matches modulo hash length.
+    assert!(
+        h.git(&["update-ref", "refs/heads/feature", "HEAD"])
+            .status
+            .success()
+    );
+    assert!(
+        h.mkit(&["update-ref", "refs/heads/feature", "HEAD"])
+            .status
+            .success()
+    );
+    assert_parity_ordered(
+        "show-ref after update-ref create",
+        &h.git(&["show-ref", "--heads"]),
+        &h.mkit(&["show-ref", "--heads"]),
+    );
+}
+
+#[test]
+fn symbolic_ref_write_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("a.txt", b"x\n");
+    h.commit_both(&["a.txt"], "init");
+    assert!(h.git(&["branch", "feature"]).status.success());
+    assert!(h.mkit(&["branch", "feature"]).status.success());
+    // Repoint HEAD at the branch, then read it back — byte-identical.
+    assert!(
+        h.git(&["symbolic-ref", "HEAD", "refs/heads/feature"])
+            .status
+            .success()
+    );
+    assert!(
+        h.mkit(&["symbolic-ref", "HEAD", "refs/heads/feature"])
+            .status
+            .success()
+    );
+    assert_parity_bytes(
+        "symbolic-ref HEAD after write",
+        &h.git(&["symbolic-ref", "HEAD"]),
+        &h.mkit(&["symbolic-ref", "HEAD"]),
+    );
+}
+
+#[test]
+fn config_core_inert_key_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    assert!(h.git(&["config", "core.autocrlf", "true"]).status.success());
+    assert!(
+        h.mkit(&["config", "core.autocrlf", "true"])
+            .status
+            .success()
+    );
+    assert_parity_bytes(
+        "config core.autocrlf round-trip",
+        &h.git(&["config", "core.autocrlf"]),
+        &h.mkit(&["config", "core.autocrlf"]),
+    );
+}
+
 // =====================================================================
 // Pending rows — ignored until the owning phase ships them. Each carries
 // the comparison so un-ignoring is a one-line change once implemented.

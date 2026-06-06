@@ -53,6 +53,7 @@ pub mod status;
 pub mod symbolic_ref;
 pub mod tag;
 pub mod tree;
+pub mod update_ref;
 pub mod verify;
 pub mod verify_attest;
 
