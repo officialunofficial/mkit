@@ -1366,7 +1366,8 @@ fn status_porcelain_v2_matches_git() {
 /// reported as `040000` for the tracked path. Uses an empty replacement
 /// directory so the comparison is exactly the tracked-side `1 .D … f`
 /// record — git suppresses untracked entries that collide with a tracked
-/// path, an untracked-walk divergence orthogonal to the v2 mode columns.
+/// path, a shared untracked-walk divergence orthogonal to the v2 mode
+/// columns, tracked separately in #288.
 #[test]
 fn status_porcelain_v2_file_replaced_by_dir_matches_git() {
     if !git_available() {

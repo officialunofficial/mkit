@@ -683,6 +683,13 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1) and mkit emits no
   rename (`2`) records — it has no rename detection. `--branch` header
   lines are not emitted.
+- **Untracked-walk path collisions (#288).** When a tracked path is
+  shadowed on disk by a directory (e.g. a tracked file replaced by a
+  directory), git lists only the tracked-side deletion, whereas mkit also
+  lists the directory's contents as untracked. This is a shared
+  untracked-discovery divergence affecting `status` (v1 and v2),
+  `ls-files --others`, and `clean`; the tracked-side `status` output
+  (including `mW = 000000` for the shadowed file) matches git.
 - **`mkit add -p` (interactive hunk staging) is not supported.** Stage
   whole files with pathspecs, `.`, `-A`, or `-u`. Interactive hunk
   selection is a follow-up.
