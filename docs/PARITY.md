@@ -60,7 +60,7 @@ creeping; revisit post-v1 if demand warrants.
 | `rm` | `--cached`, `-r`, `-f` + dirty guard | same | ✅ | — | — | guard is an mkit safety divergence |
 | `mv` | rename single file, `-f`, into-dir | same | ✅ | 2 | #250 | guarded: refuses to clobber w/o `-f` (incl. dangling symlink); rejects missing/untracked source; keeps writes inside the repo. No rename detection → `status` shows delete+add not `R`. **Directory moves (`mv dir newdir`) not yet supported** (refused with a clear error; follow-up). |
 | `status` | `--porcelain[=v1]`, `-s`, `-z`, C-style path quoting | same | ✅ | 1 | #249 | tracked changes combine into one `XY` record per path (e.g. `MM`); untracked stays its own `??` record, so a staged-delete-plus-untracked path emits both `D ` and `??` like git; quoting matches git `core.quotePath`; `-z` = raw NUL-terminated |
-| `status` | `--porcelain=v2` | same | ✅ | 1 | #249 | `1 <XY> N... <mH> <mI> <mW> <hH> <hI> <path>` (octal modes; full 64-hex BLAKE3 ids modulo length) + `? <path>` for untracked; no rename `2` lines (no rename detection); `--branch` header lines not emitted. Known shared untracked-walk divergence (#288): when a tracked path is shadowed by a directory, mkit still lists the directory's contents as untracked while git suppresses them — affects v1/v2 status, `ls-files --others`, `clean` |
+| `status` | `--porcelain=v2` | same | ✅ | 1 | #249 | `1 <XY> N... <mH> <mI> <mW> <hH> <hI> <path>` (octal modes; full 64-hex BLAKE3 ids modulo length) + `? <path>` for untracked; no rename `2` lines (no rename detection); `--branch` header lines not emitted. A tracked path shadowed on disk by a directory is suppressed like git — only the tracked-side deletion is reported (#288) |
 | `diff` | HEAD/worktree, `--staged`, pathspecs | same | ✅ | — | — | |
 | `diff` | `<rev>`, `<a>..<b>` ranges | implemented (`split_range`/`rev_to_tree`) | ✅ | 0 | #248 | docs reconciled (stale CLI.md divergence removed) |
 | `diff` | `--name-only`, `--name-status`, `-z` | same | ✅ | 1 | #249 | `A`/`D`/`M` (`T` = mkit mode change); special-byte paths C-quoted, `-z` = raw NUL (status letter + path each NUL-terminated); `-z` only with name-only/-status |
@@ -145,13 +145,14 @@ hash length:
   harness; `<sub>` always `N...`) and `? <path>` for untracked. `-z` raw
   NUL-terminated. No rename `2` lines (mkit has no rename detection); no
   `--branch` header lines. The tracked-side columns match git, including
-  `mW = 000000` when a tracked file is shadowed by a directory; the only
-  remaining gap is the shared untracked-walk divergence below.
-- **Untracked-walk collision (#288)** — git suppresses untracked entries
-  whose path collides with a tracked entry (e.g. a tracked file replaced
-  on disk by a directory: git lists only the tracked-side deletion, mkit
-  also lists the directory's contents as untracked). Shared across v1/v2
-  `status`, `ls-files --others`, and `clean`; tracked outside #287.
+  `mW = 000000` when a tracked file is shadowed by a directory.
+- **Untracked-walk collision (#288, resolved)** — when a tracked path is
+  shadowed on disk by a directory (e.g. a tracked file replaced by a
+  directory), `status` (v1 and v2) and `clean` now match git: they report
+  only the tracked-side deletion and suppress the directory's contents as
+  untracked. Note the behavior is **not** uniform across consumers — git's
+  `ls-files --others` is raw plumbing and still *lists* the shadowed
+  directory's contents; mkit matches that too.
 - Plumbing (`rev-parse`, `cat-file`, `ls-files`, `ls-tree`, `show-ref`,
   `for-each-ref`) — exact flag contracts defined in Phase 3 (#251); output
   matches Git modulo 64-hex vs 40-hex hashes.
