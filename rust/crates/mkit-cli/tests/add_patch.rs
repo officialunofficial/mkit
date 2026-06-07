@@ -269,6 +269,94 @@ fn patch_conflicts_with_all() {
     assert!(!out.status.success(), "-p with -A must fail");
 }
 
+#[test]
+fn patch_refuses_ignored_path_without_force() {
+    let td = init_repo();
+    let p = td.path();
+    fs::write(p.join(".mkitignore"), b"secret.txt\n").unwrap();
+    fs::write(p.join("secret.txt"), "topsecret\n").unwrap();
+
+    // Without -f, an ignored untracked path must be refused (matching `add`).
+    let out = run_stdin(p, &["add", "-p", "secret.txt"], b"y\n");
+    assert!(
+        !out.status.success(),
+        "add -p of an ignored path must be refused without -f"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("ignored"),
+        "expected an 'ignored' refusal message"
+    );
+}
+
+#[test]
+fn patch_stages_ignored_path_with_force() {
+    let td = init_repo();
+    let p = td.path();
+    fs::write(p.join("seed.txt"), b"seed\n").unwrap();
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "seed"]);
+
+    fs::write(p.join(".mkitignore"), b"secret.txt\n").unwrap();
+    fs::write(p.join("secret.txt"), "topsecret\n").unwrap();
+
+    // With -f, the ignored path can be patched in.
+    let out = run_stdin(p, &["add", "-p", "-f", "secret.txt"], b"y\n");
+    assert!(
+        out.status.success(),
+        "add -p -f of an ignored path should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    ok(p, &["commit", "-m", "force ignored"]);
+    assert_eq!(head_blob_body(p, "secret.txt"), "topsecret\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn patch_refuses_path_escaping_through_symlinked_parent() {
+    use std::os::unix::fs::symlink;
+    let td = init_repo();
+    let p = td.path();
+    // A repo symlink pointing at an external directory.
+    let external = tempfile::tempdir().unwrap();
+    fs::write(external.path().join("file.txt"), "external secret\n").unwrap();
+    symlink(external.path(), p.join("link_out")).unwrap();
+
+    // `link_out/file.txt` is lexically in-repo but resolves outside; refuse.
+    let out = run_stdin(p, &["add", "-p", "link_out/file.txt"], b"y\n");
+    assert!(
+        !out.status.success(),
+        "add -p must refuse a path escaping via a symlinked parent"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("outside repository"),
+        "expected an 'outside repository' refusal, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn plain_add_refuses_path_escaping_through_symlinked_parent() {
+    use std::os::unix::fs::symlink;
+    let td = init_repo();
+    let p = td.path();
+    let external = tempfile::tempdir().unwrap();
+    fs::write(external.path().join("file.txt"), "external secret\n").unwrap();
+    symlink(external.path(), p.join("link_out")).unwrap();
+
+    // The same guard applies to plain `add` of an explicit escaping path.
+    let out = run(p, &["add", "link_out/file.txt"]);
+    assert!(
+        !out.status.success(),
+        "add must refuse a path escaping via a symlinked parent"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("outside repository"),
+        "expected an 'outside repository' refusal, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn patch_refuses_symlink() {

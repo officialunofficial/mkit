@@ -40,9 +40,12 @@ Working-tree commands:
   per hunk: `y` stage, `n` skip, `a` stage this and all later hunks, `d`
   skip this and all later hunks, `q` quit (keeping hunks already chosen).
   It requires explicit path arguments, is incompatible with `-A`/`-u`,
-  and operates on regular text files only (binary files and symlinks are
-  refused). The hunk view and prompts go to stderr; `s` (split) and `e`
-  (manual edit) are follow-ups.
+  and operates on regular text files only: a binary file is **skipped**
+  with a message (the command still succeeds), and symlinks/directories
+  are **refused**. An explicitly-named ignored path is refused unless
+  `-f`/`--force` (like plain `add`); a path that escapes the repo through
+  a symlinked parent is refused. The hunk view and prompts go to stderr;
+  `s` (split) and `e` (manual edit) are follow-ups.
 - `mkit rm [--cached] [-r|--recursive] [-f|--force] <path>...` — remove
   paths and stage the deletion for the next commit. By default this
   **deletes the worktree file(s)** and stages the removal; now-empty

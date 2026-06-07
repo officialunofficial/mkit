@@ -82,7 +82,7 @@ creeping; revisit post-v1 if demand warrants.
 | `clean` | `-n`/`-f`/`-d`/`-x`/`-X`, pathspecs | same | ✅ | 2 | #250 | refuses unless `-f` (git `clean.requireForce`); `-n` previews `Would remove …`; `-d` removes untracked dirs but keeps ignored files + protects nested repos (no `-ff`); `-x`/`-X` mutually exclusive, use the shared path-aware ignore matcher (#256); pathspecs select top-level entries / whole dirs (`.` = all under cwd; naming a file inside a removable untracked dir is a known limitation) |
 | `stash` | save/list/pop/apply/drop/clear/show | same | ✅ | — | — | |
 | `gc` | prune unreachable objects | mark-and-sweep, recovery-aware | ✅ | — | #233 | `-n`/`--grace-secs`; fail-closed; see SPEC-GC.md |
-| `add -p` | interactive hunk staging | same | ✅ | 4 | #258 | per-hunk `y/n/q/a/d`; regular text files only (binary/symlink refused); explicit paths required; `s` (split) / `e` (manual edit) are follow-ups |
+| `add -p` | interactive hunk staging | same | ✅ | 4 | #258 | per-hunk `y/n/q/a/d`; regular text files only (binary skipped with a message, symlink/dir refused); explicit paths required; ignored paths need `-f`; symlinked-parent escapes refused; `s` (split) / `e` (manual edit) are follow-ups |
 
 ## Plumbing commands (read-only first, mutating later)
 

@@ -83,8 +83,18 @@ stages it and all later hunks in the file,
 .Ql d
 skips it and all later hunks, and
 .Ql q
-quits (keeping hunks already chosen). It requires explicit path arguments
-and operates on regular text files only \(em binary files and symlinks are
+quits (keeping hunks already chosen). It requires explicit path arguments,
+is incompatible with
+.Fl A
+and
+.Fl u ,
+and operates on regular text files only: a binary file is skipped with a
+message (the command still succeeds), while symlinks and directories are
+refused. An explicitly-named ignored path is refused unless
+.Fl f
+(like plain
+.Cm add ) ,
+and a path escaping the repository through a symlinked parent directory is
 refused.
 .It Cm rm Oo Fl Fl cached Oc Oo Fl r | Fl Fl recursive Oc Oo Fl f | Fl Fl force Oc Ar path ...
 Remove paths and stage the deletion for the next commit. By default this

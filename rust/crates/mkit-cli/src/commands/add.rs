@@ -180,7 +180,7 @@ pub fn run(args: &[String]) -> u8 {
         if opts.paths.is_empty() {
             return emit_err("-p/--patch requires one or more file paths", exit::USAGE);
         }
-        return run_patch(&cwd, &store, &opts.paths);
+        return run_patch(&cwd, &store, &opts.paths, opts.force);
     }
 
     // Mode selection. `-A` and `-u` are mutually exclusive with each
@@ -233,14 +233,19 @@ pub fn run(args: &[String]) -> u8 {
                     return code;
                 }
             } else {
-                match add_one(
-                    &cwd,
-                    Path::new(target),
-                    &store,
-                    &mut idx,
-                    &ignores,
-                    opts.force,
-                ) {
+                // Reject an explicit path that escapes the repo through a
+                // symlinked parent before reading/staging it (the bulk `.`/`-A`
+                // walk can't reach outside, so it is exempt).
+                let p = Path::new(target);
+                let abs = if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    cwd.join(p)
+                };
+                if let Err(e) = ensure_within_repo(&cwd, &abs) {
+                    return emit_err(&e, exit::DATAERR);
+                }
+                match add_one(&cwd, p, &store, &mut idx, &ignores, opts.force) {
                     Ok(_) => {}
                     Err(code) => return code,
                 }
@@ -449,16 +454,28 @@ struct PatchOutcome {
 /// seeded from HEAD (so a base exists for already-committed files) and only
 /// written back if at least one hunk was staged — selecting nothing leaves
 /// the index untouched, matching `git add -p`.
-fn run_patch(root: &Path, store: &ObjectStore, paths: &[String]) -> u8 {
+fn run_patch(root: &Path, store: &ObjectStore, paths: &[String], force: bool) -> u8 {
     let mut idx = match super::read_or_seed_index_from_head(root, store) {
         Ok(i) => i,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+    };
+    let ignores = match ignore::load(root) {
+        Ok(i) => i,
+        Err(e) => return emit_err(&format!("read ignore file: {e}"), exit::GENERAL_ERROR),
     };
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut any_staged = false;
     for target in paths {
-        match patch_one_file(root, Path::new(target), store, &mut idx, &mut input) {
+        match patch_one_file(
+            root,
+            Path::new(target),
+            store,
+            &mut idx,
+            &ignores,
+            force,
+            &mut input,
+        ) {
             Ok(outcome) => {
                 any_staged |= outcome.staged;
                 if outcome.quit {
@@ -479,6 +496,8 @@ fn patch_one_file(
     rel: &Path,
     store: &ObjectStore,
     idx: &mut Index,
+    ignores: &IgnoreList,
+    force: bool,
     input: &mut impl BufRead,
 ) -> Result<PatchOutcome, u8> {
     let abs = if rel.is_absolute() {
@@ -497,12 +516,30 @@ fn patch_one_file(
     if !index::validate_index_path(&rel_str) {
         return Err(emit_err(&format!("invalid path: {rel_str}"), exit::DATAERR));
     }
+    // Refuse a path that reaches outside the repo through a symlinked parent
+    // directory (e.g. `link_out/file.txt`): the lexical `rel_str` would be an
+    // in-repo index path, but reading `abs` follows the symlink and would
+    // stage external content. git refuses to add "beyond a symbolic link".
+    if let Err(e) = ensure_within_repo(root, &abs) {
+        return Err(emit_err(&e, exit::DATAERR));
+    }
     // Interactive hunk staging is for regular text files only. Directories,
     // symlinks, and special files are refused with a clear message (git's
     // `add -p` likewise only patches regular files).
     if !meta.file_type().is_file() {
         return Err(emit_err(
             &format!("-p/--patch supports regular files only: {rel_str}"),
+            exit::USAGE,
+        ));
+    }
+    // An explicitly-named ignored path is refused unless `-f`, matching plain
+    // `add`; an already-tracked path is never subject to ignore (git parity).
+    let already_tracked = idx
+        .find_entry(&rel_str)
+        .is_some_and(|i| idx.entries[i].status != EntryStatus::Removed);
+    if !force && !already_tracked && ignores.is_ignored_with_ancestors(&rel_str, false) {
+        return Err(emit_err(
+            &format!("path '{rel_str}' is ignored; use -f to add it anyway"),
             exit::USAGE,
         ));
     }
@@ -659,6 +696,30 @@ fn range_str(start: usize, len: usize) -> String {
         start.to_string()
     } else {
         format!("{start},{len}")
+    }
+}
+
+/// Reject an explicitly-named path that escapes the repository through a
+/// symlinked parent directory. The leaf may be a regular file, but if any
+/// ancestor component is a symlink pointing outside the repo, canonicalizing
+/// the parent resolves it and `strip_prefix(root)` fails — so we refuse
+/// rather than read/stage external content under an in-repo index path.
+///
+/// Only used for explicitly-named paths; the `.`/`-A` worktree walk never
+/// descends symlinked directories (they are staged as symlinks), so it
+/// cannot reach outside this way.
+fn ensure_within_repo(root: &Path, abs: &Path) -> Result<(), String> {
+    let parent = abs
+        .parent()
+        .ok_or_else(|| format!("invalid path: {}", abs.display()))?;
+    let real_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("path {}: {e}", parent.display()))?;
+    let real_root = root.canonicalize().map_err(|e| format!("repo root: {e}"))?;
+    if real_parent == real_root || real_parent.starts_with(&real_root) {
+        Ok(())
+    } else {
+        Err(format!("path is outside repository: {}", abs.display()))
     }
 }
 
