@@ -42,7 +42,7 @@ The highlights:
 Create a new
 .Nm
 repository in the current directory.
-.It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Oo Fl f Oc Ar path ...
+.It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Oo Fl f Oc Oo Fl p Oc Ar path ...
 Stage files for the next commit. Respects
 .Pa .gitignore
 and
@@ -68,9 +68,24 @@ are mutually exclusive.
 or
 .Fl Fl force
 stages an explicitly-named ignored path (git refuses these without it;
-already-tracked paths are never subject to ignore). Interactive hunk staging
-.Pq Fl p
-is not supported.
+already-tracked paths are never subject to ignore).
+.Fl p
+or
+.Fl Fl patch
+interactively presents each hunk between the staged (or HEAD) blob and the
+worktree file, staging only the ones you accept: per hunk,
+.Ql y
+stages it,
+.Ql n
+skips it,
+.Ql a
+stages it and all later hunks in the file,
+.Ql d
+skips it and all later hunks, and
+.Ql q
+quits (keeping hunks already chosen). It requires explicit path arguments
+and operates on regular text files only \(em binary files and symlinks are
+refused.
 .It Cm rm Oo Fl Fl cached Oc Oo Fl r | Fl Fl recursive Oc Oo Fl f | Fl Fl force Oc Ar path ...
 Remove paths and stage the deletion for the next commit. By default this
 deletes the worktree file(s) and prunes now-empty parent directories.

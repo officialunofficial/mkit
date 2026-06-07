@@ -37,6 +37,8 @@ complete -c mkit -n "__fish_seen_subcommand_from add" \
     -l update -s u -d "Restage only tracked files"
 complete -c mkit -n "__fish_seen_subcommand_from add" \
     -l force -s f -d "Stage an ignored path"
+complete -c mkit -n "__fish_seen_subcommand_from add" \
+    -l patch -s p -d "Interactively choose hunks to stage"
 complete -c mkit -n "__fish_seen_subcommand_from rm" \
     -l cached -d "Stage removal only; keep worktree file"
 complete -c mkit -n "__fish_seen_subcommand_from rm" \
