@@ -622,3 +622,47 @@ fn config_core_allowlist_and_rejects_dangerous() {
         "unknown core key must be rejected"
     );
 }
+
+#[test]
+fn status_porcelain_v2_line_shape() {
+    // Pin the exact v2 line format (the differential harness only compares
+    // it modulo hash length): `1 <XY> N... <mH> <mI> <mW> <hH> <hI> <path>`
+    // for tracked changes, `? <path>` for untracked.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join("new.txt"), b"n\n").unwrap();
+    assert!(run_in(root, x, &["add", "new.txt"]).status.success()); // staged add
+    fs::write(root.join("file.txt"), b"changed\n").unwrap(); // tracked, unstaged modify
+    fs::write(root.join("untracked.txt"), b"u\n").unwrap();
+
+    let out = out_str(&run_in(root, x, &["status", "--porcelain=v2"]));
+    let lines: Vec<&str> = out.lines().collect();
+
+    // Staged add: HEAD side absent (000000 / zero id), index+worktree 100644.
+    let added = lines
+        .iter()
+        .find(|l| l.ends_with(" new.txt"))
+        .unwrap_or_else(|| panic!("no new.txt line: {out}"));
+    let f: Vec<&str> = added.split(' ').collect();
+    assert_eq!(
+        &f[..6],
+        ["1", "A.", "N...", "000000", "100644", "100644"],
+        "{added}"
+    );
+    assert_eq!(f[6].len(), 64, "hH is full 64-hex: {added}");
+    assert_eq!(f[7].len(), 64, "hI is full 64-hex: {added}");
+    assert_eq!(f[8], "new.txt");
+
+    // Unstaged modify of a tracked file: `.M`, all three modes 100644.
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("1 .M N... 100644 100644 100644 ") && l.ends_with(" file.txt")),
+        "expected an unstaged-modify v2 line: {out}"
+    );
+    // Untracked is a `?` record (single question mark, not `??`).
+    assert!(
+        lines.contains(&"? untracked.txt"),
+        "expected untracked v2 record: {out}"
+    );
+}

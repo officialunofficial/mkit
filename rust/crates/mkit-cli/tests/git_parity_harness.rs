@@ -1335,19 +1335,68 @@ fn config_core_inert_key_matches_git() {
 // =====================================================================
 
 #[test]
-#[ignore = "Phase 1 (#249): status --porcelain=v2 not implemented yet"]
 fn status_porcelain_v2_matches_git() {
     if !git_available() {
         return;
     }
     let h = Harness::new();
     h.init_both();
-    h.write_both("a.txt", b"hello\n");
-    assert!(h.git(&["add", "a.txt"]).status.success());
-    assert!(h.mkit(&["add", "a.txt"]).status.success());
+    // Baseline commit, then a mix of change kinds: staged add, unstaged
+    // modify of a tracked file, staged delete, and an untracked file.
+    h.write_both("tracked.txt", b"v1\n");
+    h.write_both("doomed.txt", b"bye\n");
+    h.commit_both(&["tracked.txt", "doomed.txt"], "init");
+    h.write_both("added.txt", b"new\n");
+    assert!(h.git(&["add", "added.txt"]).status.success());
+    assert!(h.mkit(&["add", "added.txt"]).status.success());
+    assert!(h.git(&["rm", "doomed.txt"]).status.success());
+    assert!(h.mkit(&["rm", "doomed.txt"]).status.success());
+    h.write_both("tracked.txt", b"v2\n"); // unstaged modify
+    h.write_both("untracked.txt", b"u\n");
+    // Each `1 …` line carries object ids (masked) + octal modes; `?` lines
+    // for untracked. Order-independent, hash-masked set comparison.
     let g = h.git(&["status", "--porcelain=v2"]);
     let m = h.mkit(&["status", "--porcelain=v2"]);
-    assert_parity_set("status --porcelain=v2", &g, &m);
+    assert_parity_set("status --porcelain=v2 (mixed)", &g, &m);
+}
+
+/// A tracked file replaced on disk by a directory is **not** a valid
+/// worktree side for that path: git (and mkit) report the tracked file as
+/// deleted in the worktree (`mW = 000000`). The worktree mode must never be
+/// reported as `040000` for the tracked path. Uses an empty replacement
+/// directory so the comparison is exactly the tracked-side `1 .D … f`
+/// record — git suppresses untracked entries that collide with a tracked
+/// path, a shared untracked-walk divergence orthogonal to the v2 mode
+/// columns, tracked separately in #288.
+#[test]
+fn status_porcelain_v2_file_replaced_by_dir_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("f", b"file contents\n");
+    h.commit_both(&["f"], "init");
+    // Replace the tracked file `f` with a directory.
+    for repo in [&h.git_repo, &h.mkit_repo] {
+        std::fs::remove_file(repo.join("f")).expect("remove tracked file");
+        std::fs::create_dir(repo.join("f")).expect("create dir at path");
+    }
+    let g = h.git(&["status", "--porcelain=v2"]);
+    let m = h.mkit(&["status", "--porcelain=v2"]);
+    assert_parity_set("status --porcelain=v2 (file→dir)", &g, &m);
+    // Belt-and-suspenders: the tracked record must carry mW = 000000, never
+    // the `040000` a raw directory stat would yield.
+    let out = String::from_utf8(m.stdout).expect("utf-8");
+    let rec = out
+        .lines()
+        .find(|l| l.ends_with(" f"))
+        .expect("tracked `f` record present");
+    let mw = rec.split(' ').nth(5).expect("mW field");
+    assert_eq!(
+        mw, "000000",
+        "worktree mode for dir-replaced file must be 000000"
+    );
 }
 
 /// Mask the abbreviated blob ids on a `diff --git` `index` line — git's

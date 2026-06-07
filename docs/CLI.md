@@ -69,18 +69,21 @@ Working-tree commands:
     symlinked parent directory is refused (git would silently follow it).
     Moving a tracked **directory** (`mv dir newdir`) is not yet supported
     and is refused with a clear error (single-file moves only for now).
-- `mkit status [--porcelain] [-s|--short] [-z]` — show staged and unstaged
-  changes. Default-mode prose (banner + section headers + per-file
+- `mkit status [--porcelain[=v1|v2]] [-s|--short] [-z]` — show staged and
+  unstaged changes. Default-mode prose (banner + section headers + per-file
   lines) goes to **stderr**; stdout is reserved for machine output.
   `-s`/`--short` is an alias for `--porcelain=v1`; both select the same
   renderer. Porcelain emits one entry per line in `git status --porcelain=v1`
   format (`XY <path>`, with mkit's `T` for `ModeChanged` as the only
-  non-git extension). Paths with special bytes are **C-style quoted**
+  non-git extension). `--porcelain=v2` selects git's richer per-path
+  format — `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` for tracked
+  changes (octal modes; full 64-hex BLAKE3 object ids; `<sub>` always
+  `N...`) and `? <path>` for untracked — with no rename (`2`) records and
+  no `--branch` header lines. Paths with special bytes are **C-style quoted**
   (matching git's default `core.quotePath`). `-z` (which implies
   porcelain) NUL-terminates records and emits **raw, unquoted** paths —
   the round-trip-safe form for paths containing newlines or other special
-  bytes. Empty stdout means clean. (`--porcelain=v2` is not yet
-  implemented — see "Divergences from Git".)
+  bytes. Empty stdout means clean.
 - `mkit diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
   — show changes as a unified patch. With no arguments, compares the HEAD
   tree to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
@@ -676,11 +679,17 @@ These are documented behaviours, not bugs, with tracked follow-ups:
 - **`mkit log --graph` is a no-op.** The flag is accepted for
   compatibility so existing scripts don't break, but no ASCII commit
   graph is drawn. A real graph renderer is a follow-up.
-- **`mkit status --porcelain=v2` is not yet implemented.** Only
-  `--porcelain[=v1]` (with `-z` and C-style path quoting) is supported.
-  The v2 format additionally reports per-path object modes and hashes,
-  which requires the diff layer to carry mode information; that is a
-  follow-up.
+- **`mkit status --porcelain=v2`** matches git's format except that object
+  ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1) and mkit emits no
+  rename (`2`) records — it has no rename detection. `--branch` header
+  lines are not emitted.
+- **Untracked-walk path collisions (#288).** When a tracked path is
+  shadowed on disk by a directory (e.g. a tracked file replaced by a
+  directory), git lists only the tracked-side deletion, whereas mkit also
+  lists the directory's contents as untracked. This is a shared
+  untracked-discovery divergence affecting `status` (v1 and v2),
+  `ls-files --others`, and `clean`; the tracked-side `status` output
+  (including `mW = 000000` for the shadowed file) matches git.
 - **`mkit add -p` (interactive hunk staging) is not supported.** Stage
   whole files with pathspecs, `.`, `-A`, or `-u`. Interactive hunk
   selection is a follow-up.
