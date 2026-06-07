@@ -48,8 +48,9 @@ struct AddOpts {
     /// Interactively choose hunks to stage from each named file (like
     /// `git add -p`). Prompts per hunk: `y` stage, `n` skip, `a` stage
     /// the rest of the file, `d` skip the rest, `q` quit. Regular text
-    /// files only; binary files and symlinks are refused. Requires
-    /// explicit path arguments.
+    /// files only: binary files are skipped (the command still succeeds),
+    /// while symlinks and directories are refused. Requires explicit path
+    /// arguments.
     #[arg(short = 'p', long)]
     patch: bool,
 
@@ -700,15 +701,24 @@ fn range_str(start: usize, len: usize) -> String {
 }
 
 /// Reject an explicitly-named path that escapes the repository through a
-/// symlinked parent directory. The leaf may be a regular file, but if any
-/// ancestor component is a symlink pointing outside the repo, canonicalizing
-/// the parent resolves it and `strip_prefix(root)` fails — so we refuse
-/// rather than read/stage external content under an in-repo index path.
+/// symlinked parent directory. Two refusals, matching git's "beyond a
+/// symbolic link" behavior:
+///
+/// 1. The path escapes the repo — its canonical parent is not under the
+///    canonical repo root (covers `..` traversal and symlinks pointing
+///    outside).
+/// 2. Any intermediate (non-leaf) path component is a symlink — even one
+///    resolving back *inside* the repo. Staging under the lexical path (e.g.
+///    `link_in/file.txt`) would record an index/tree shape the worktree
+///    snapshot can never reproduce, since the snapshot treats `link_in` as a
+///    symlink, not a directory. A symlink as the *leaf* is fine (it is staged
+///    as a symlink).
 ///
 /// Only used for explicitly-named paths; the `.`/`-A` worktree walk never
-/// descends symlinked directories (they are staged as symlinks), so it
-/// cannot reach outside this way.
+/// descends symlinked directories, so it cannot reach through one this way.
 fn ensure_within_repo(root: &Path, abs: &Path) -> Result<(), String> {
+    use std::path::Component;
+
     let parent = abs
         .parent()
         .ok_or_else(|| format!("invalid path: {}", abs.display()))?;
@@ -716,11 +726,31 @@ fn ensure_within_repo(root: &Path, abs: &Path) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("path {}: {e}", parent.display()))?;
     let real_root = root.canonicalize().map_err(|e| format!("repo root: {e}"))?;
-    if real_parent == real_root || real_parent.starts_with(&real_root) {
-        Ok(())
-    } else {
-        Err(format!("path is outside repository: {}", abs.display()))
+    if real_parent != real_root && !real_parent.starts_with(&real_root) {
+        return Err(format!("path is outside repository: {}", abs.display()));
     }
+
+    // Reject a symlink anywhere in the parent chain (between root and the
+    // leaf). `abs` is `root.join(rel)` for relative args, so stripping root
+    // yields the user-supplied components to check; an absolute arg that does
+    // not lie lexically under root is already caught by the escape check.
+    if let Ok(rel) = abs.strip_prefix(root) {
+        let comps: Vec<Component<'_>> = rel.components().collect();
+        let parent_count = comps.len().saturating_sub(1); // exclude the leaf
+        let mut cur = root.to_path_buf();
+        for comp in &comps[..parent_count] {
+            if let Component::Normal(name) = comp {
+                cur.push(name);
+                if matches!(cur.symlink_metadata(), Ok(m) if m.file_type().is_symlink()) {
+                    return Err(format!(
+                        "path traverses a symbolic link ({}): refusing to stage beyond it",
+                        cur.display()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {

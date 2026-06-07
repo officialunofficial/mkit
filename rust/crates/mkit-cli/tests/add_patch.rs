@@ -359,6 +359,54 @@ fn plain_add_refuses_path_escaping_through_symlinked_parent() {
 
 #[cfg(unix)]
 #[test]
+fn patch_refuses_path_through_internal_symlinked_dir() {
+    use std::os::unix::fs::symlink;
+    let td = init_repo();
+    let p = td.path();
+    // A real in-repo directory and a symlink to it, both inside the repo.
+    fs::create_dir(p.join("real_dir")).unwrap();
+    fs::write(p.join("real_dir/file.txt"), "v1\nv2\n").unwrap();
+    symlink("real_dir", p.join("link_in")).unwrap();
+
+    // `link_in/file.txt` resolves inside the repo, but traverses a symlink:
+    // git refuses ("beyond a symbolic link"), and staging it under the
+    // lexical path would record a tree the worktree snapshot can't reproduce.
+    let out = run_stdin(p, &["add", "-p", "link_in/file.txt"], b"y\n");
+    assert!(
+        !out.status.success(),
+        "add -p must refuse a path through an internal symlinked dir"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("symbolic link"),
+        "expected a 'symbolic link' refusal, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn plain_add_refuses_path_through_internal_symlinked_dir() {
+    use std::os::unix::fs::symlink;
+    let td = init_repo();
+    let p = td.path();
+    fs::create_dir(p.join("real_dir")).unwrap();
+    fs::write(p.join("real_dir/file.txt"), "v1\n").unwrap();
+    symlink("real_dir", p.join("link_in")).unwrap();
+
+    let out = run(p, &["add", "link_in/file.txt"]);
+    assert!(
+        !out.status.success(),
+        "add must refuse a path through an internal symlinked dir"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("symbolic link"),
+        "expected a 'symbolic link' refusal, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn patch_refuses_symlink() {
     use std::os::unix::fs::symlink;
     let td = init_repo();
