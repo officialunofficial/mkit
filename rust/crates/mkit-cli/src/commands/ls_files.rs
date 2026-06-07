@@ -176,6 +176,10 @@ fn collect_others(
         let is_dir = std::fs::symlink_metadata(&abs)?.is_dir();
         let entry_ignored = parent_ignored || ignore.is_ignored(&path, is_dir);
         if is_dir {
+            // NOTE: unlike `status` and `clean`, git's `ls-files --others`
+            // does NOT suppress a directory that shadows a tracked file — it
+            // lists the contents (`f/child`) as raw untracked plumbing. So no
+            // collision check here; descend normally (#288).
             collect_others(root, &abs, &path, entry_ignored, idx, ignore, opts, out)?;
             continue;
         }

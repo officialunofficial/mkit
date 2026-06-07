@@ -113,6 +113,22 @@ impl Index {
         })
     }
 
+    /// `true` if a tracked (non-removed) entry exists at *exactly* `path`.
+    ///
+    /// Because the index stores only leaf paths (files / symlinks / exec
+    /// files, never directories), a hit means `path` is tracked as a
+    /// non-directory object. Used by the untracked-discovery walks to detect
+    /// a worktree directory that shadows a tracked file: git suppresses the
+    /// directory's contents as untracked in that case (#288), reporting only
+    /// the tracked-side deletion. A `Removed` tombstone does **not** count —
+    /// the path is no longer tracked, so its replacement is genuinely
+    /// untracked. `O(n)`.
+    #[must_use]
+    pub fn has_tracked_file_at(&self, path: &str) -> bool {
+        self.find_entry(path)
+            .is_some_and(|i| self.entries[i].status != EntryStatus::Removed)
+    }
+
     /// Count non-removed entries.
     #[must_use]
     pub fn staged_count(&self) -> usize {
@@ -441,6 +457,37 @@ mod tests {
         // Unrelated and removed-only paths do not match.
         assert!(!idx.tracks_path_or_descendant("docs"));
         assert!(!idx.tracks_path_or_descendant("removed.txt"));
+    }
+
+    #[test]
+    fn has_tracked_file_at_exact_only_and_not_removed() {
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "f".to_string(),
+            status: EntryStatus::Blob,
+            object_hash: seed_hash("f"),
+        });
+        idx.entries.push(IndexEntry {
+            path: "gone".to_string(),
+            status: EntryStatus::Removed,
+            object_hash: hash::ZERO,
+        });
+        // Exact tracked file matches.
+        assert!(idx.has_tracked_file_at("f"));
+        // Unlike `tracks_path_or_descendant`, an ancestor directory does NOT
+        // match — only an exact tracked leaf does (the collision predicate).
+        idx.entries.push(IndexEntry {
+            path: "dir/inner.txt".to_string(),
+            status: EntryStatus::Blob,
+            object_hash: seed_hash("inner"),
+        });
+        assert!(!idx.has_tracked_file_at("dir"));
+        assert!(idx.has_tracked_file_at("dir/inner.txt"));
+        // A `Removed` tombstone must NOT suppress — the path is no longer
+        // tracked, so a replacement at that path is genuinely untracked.
+        assert!(!idx.has_tracked_file_at("gone"));
+        // Unrelated path.
+        assert!(!idx.has_tracked_file_at("other"));
     }
 
     #[test]

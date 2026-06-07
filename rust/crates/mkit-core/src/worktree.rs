@@ -180,6 +180,14 @@ fn build_tree_inner(
                 object_hash: h,
             });
         } else if meta.file_type().is_dir() {
+            // A directory on disk at a path tracked as a *file* shadows that
+            // tracked entry. git reports only the tracked-side deletion and
+            // suppresses the directory's contents as untracked (#288); mirror
+            // that by leaving the whole subtree out of the snapshot, so the
+            // tracked file reads as deleted and nothing inside surfaces.
+            if index.has_tracked_file_at(&rel_path) {
+                continue;
+            }
             let h = build_tree_inner(
                 store,
                 &entry.path(),

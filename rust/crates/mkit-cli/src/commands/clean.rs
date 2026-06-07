@@ -194,6 +194,18 @@ fn collect_dir(
         // propagates the ignored bit to its untracked descendants.
         let ignored = parent_ignored || ignore.is_ignored(&path, is_dir);
 
+        // A directory shadowing a path tracked as a *file* is not untracked
+        // content: git reports only the tracked-side deletion and suppresses
+        // the directory's contents (#288). Skip the whole subtree — this must
+        // precede the `index_tracks_path_or_descendant` branch below, which
+        // would otherwise treat `f` as a tracked-descendant and descend into
+        // `f/`, deleting `f/child`. The dir stays (shadows a tracked path), so
+        // clear `fully_removable`.
+        if is_dir && index.has_tracked_file_at(&path) {
+            fully_removable = false;
+            continue;
+        }
+
         if super::index_tracks_path_or_descendant(index, &path) {
             // Tracked content keeps the dir alive; descend into a tracked
             // directory to clean any untracked files inside it, carrying the

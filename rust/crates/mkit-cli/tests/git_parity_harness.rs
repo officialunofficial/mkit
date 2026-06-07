@@ -1360,33 +1360,37 @@ fn status_porcelain_v2_matches_git() {
     assert_parity_set("status --porcelain=v2 (mixed)", &g, &m);
 }
 
-/// A tracked file replaced on disk by a directory is **not** a valid
-/// worktree side for that path: git (and mkit) report the tracked file as
-/// deleted in the worktree (`mW = 000000`). The worktree mode must never be
-/// reported as `040000` for the tracked path. Uses an empty replacement
-/// directory so the comparison is exactly the tracked-side `1 .D … f`
-/// record — git suppresses untracked entries that collide with a tracked
-/// path, a shared untracked-walk divergence orthogonal to the v2 mode
-/// columns, tracked separately in #288.
+/// Replace a tracked file `f` on disk with a directory `f/` holding a child.
+/// git suppresses the colliding untracked contents and reports only the
+/// tracked-side deletion (`1 .D … f`, `mW = 000000`); mkit must match (#288).
+/// A *non-empty* replacement directory is what actually exercises the
+/// collision — an empty dir has no child to (wrongly) surface as untracked.
+fn setup_file_replaced_by_dir(h: &Harness) {
+    h.init_both();
+    h.write_both("f", b"file contents\n");
+    h.commit_both(&["f"], "init");
+    for repo in [&h.git_repo, &h.mkit_repo] {
+        std::fs::remove_file(repo.join("f")).expect("remove tracked file");
+        std::fs::create_dir(repo.join("f")).expect("create dir at path");
+        std::fs::write(repo.join("f/child"), b"inside\n").expect("write child");
+    }
+}
+
 #[test]
 fn status_porcelain_v2_file_replaced_by_dir_matches_git() {
     if !git_available() {
         return;
     }
     let h = Harness::new();
-    h.init_both();
-    h.write_both("f", b"file contents\n");
-    h.commit_both(&["f"], "init");
-    // Replace the tracked file `f` with a directory.
-    for repo in [&h.git_repo, &h.mkit_repo] {
-        std::fs::remove_file(repo.join("f")).expect("remove tracked file");
-        std::fs::create_dir(repo.join("f")).expect("create dir at path");
-    }
+    setup_file_replaced_by_dir(&h);
     let g = h.git(&["status", "--porcelain=v2"]);
     let m = h.mkit(&["status", "--porcelain=v2"]);
-    assert_parity_set("status --porcelain=v2 (file→dir)", &g, &m);
-    // Belt-and-suspenders: the tracked record must carry mW = 000000, never
-    // the `040000` a raw directory stat would yield.
+    // Ordered (not set): the only line on both sides is the tracked deletion;
+    // `? f/child` must be absent. A set compare would mask a stray untracked
+    // line if both happened to emit one, so pin the exact line list.
+    assert_parity_ordered("status --porcelain=v2 (file→dir)", &g, &m);
+    // The tracked record must carry mW = 000000, never the `040000` a raw
+    // directory stat would yield.
     let out = String::from_utf8(m.stdout).expect("utf-8");
     let rec = out
         .lines()
@@ -1397,6 +1401,55 @@ fn status_porcelain_v2_file_replaced_by_dir_matches_git() {
         mw, "000000",
         "worktree mode for dir-replaced file must be 000000"
     );
+    assert!(
+        !out.lines().any(|l| l.contains("f/child")),
+        "v2: untracked dir contents must be suppressed: {out}"
+    );
+}
+
+#[test]
+fn status_porcelain_v1_file_replaced_by_dir_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    setup_file_replaced_by_dir(&h);
+    let g = h.git(&["status", "--porcelain"]);
+    let m = h.mkit(&["status", "--porcelain"]);
+    assert_parity_ordered("status --porcelain (file→dir)", &g, &m);
+}
+
+#[test]
+fn ls_files_others_lists_tracked_path_collision_like_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    setup_file_replaced_by_dir(&h);
+    // Unlike `status`/`clean`, git's `ls-files --others` is raw plumbing: it
+    // LISTS `f/child` even though `f` collides with a tracked entry. Guard
+    // that mkit matches and does not over-suppress here.
+    let g = h.git(&["ls-files", "--others", "--exclude-standard"]);
+    let m = h.mkit(&["ls-files", "--others", "--exclude-standard"]);
+    assert_parity_ordered("ls-files --others (file→dir)", &g, &m);
+    assert!(
+        String::from_utf8_lossy(&m.stdout).contains("f/child"),
+        "ls-files --others must list f/child like git"
+    );
+}
+
+#[test]
+fn clean_preview_suppresses_tracked_path_collision() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    setup_file_replaced_by_dir(&h);
+    // `clean -n -d` must not propose removing `f/` or `f/child` — `f` shadows
+    // a tracked path, so its contents are not clean-able untracked content.
+    let g = h.git(&["clean", "-n", "-d"]);
+    let m = h.mkit(&["clean", "-n", "-d"]);
+    assert_parity_ordered("clean dry-run -d (file->dir)", &g, &m);
 }
 
 /// Mask the abbreviated blob ids on a `diff --git` `index` line — git's
