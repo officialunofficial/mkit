@@ -33,7 +33,7 @@ _mkit_complete() {
     # users get tab-completion for the common fast-path.
     case "${words[1]}" in
         add)
-            COMPREPLY=( $(compgen -W "-A --all -u --update -f --force --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-A --all -u --update -f --force -p --patch --help" -- "$cur") )
             ;;
         rm)
             COMPREPLY=( $(compgen -W "--cached -r --recursive -f --force --help" -- "$cur") )

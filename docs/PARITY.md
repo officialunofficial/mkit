@@ -56,7 +56,7 @@ creeping; revisit post-v1 if demand warrants.
 | Command | Git-compatible subset (in scope) | mkit current state | Status | Phase | Issue | Notes |
 |---------|----------------------------------|--------------------|--------|-------|-------|-------|
 | `init` | create repo | `.mkit/` repo | ✅ | — | — | marker differs (`.mkit/`) |
-| `add` | pathspecs, `-A`, `-u` | same | ✅ | — | — | `-p` is separate (#258) |
+| `add` | pathspecs, `-A`, `-u` | same | ✅ | — | — | `-p` interactive hunk staging shipped (#258, row below) |
 | `rm` | `--cached`, `-r`, `-f` + dirty guard | same | ✅ | — | — | guard is an mkit safety divergence |
 | `mv` | rename single file, `-f`, into-dir | same | ✅ | 2 | #250 | guarded: refuses to clobber w/o `-f` (incl. dangling symlink); rejects missing/untracked source; keeps writes inside the repo. No rename detection → `status` shows delete+add not `R`. **Directory moves (`mv dir newdir`) not yet supported** (refused with a clear error; follow-up). |
 | `status` | `--porcelain[=v1]`, `-s`, `-z`, C-style path quoting | same | ✅ | 1 | #249 | tracked changes combine into one `XY` record per path (e.g. `MM`); untracked stays its own `??` record, so a staged-delete-plus-untracked path emits both `D ` and `??` like git; quoting matches git `core.quotePath`; `-z` = raw NUL-terminated |
@@ -82,7 +82,7 @@ creeping; revisit post-v1 if demand warrants.
 | `clean` | `-n`/`-f`/`-d`/`-x`/`-X`, pathspecs | same | ✅ | 2 | #250 | refuses unless `-f` (git `clean.requireForce`); `-n` previews `Would remove …`; `-d` removes untracked dirs but keeps ignored files + protects nested repos (no `-ff`); `-x`/`-X` mutually exclusive, use the shared path-aware ignore matcher (#256); pathspecs select top-level entries / whole dirs (`.` = all under cwd; naming a file inside a removable untracked dir is a known limitation) |
 | `stash` | save/list/pop/apply/drop/clear/show | same | ✅ | — | — | |
 | `gc` | prune unreachable objects | mark-and-sweep, recovery-aware | ✅ | — | #233 | `-n`/`--grace-secs`; fail-closed; see SPEC-GC.md |
-| `add -p` | interactive hunk staging | absent | 🔨 | 4 | #258 | partial staging / synthetic index blobs |
+| `add -p` | interactive hunk staging | same | ✅ | 4 | #258 | per-hunk `y/n/q/a/d`; regular text files only (binary skipped with a message, symlink/dir refused); explicit paths required; ignored paths need `-f`; symlinked-parent escapes refused; `s` (split) / `e` (manual edit) are follow-ups |
 
 ## Plumbing commands (read-only first, mutating later)
 

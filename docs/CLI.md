@@ -25,7 +25,7 @@ no config needed.
 Working-tree commands:
 
 - `mkit init` — create a new repository in `.mkit/`.
-- `mkit add [-A|-u] [-f] <path>...` / `mkit add .` — stage files for the
+- `mkit add [-A|-u] [-f] [-p] <path>...` / `mkit add .` — stage files for the
   next commit. Multiple pathspecs may be given. `.` stages every non-ignored
   file under the current directory. `-A`/`--all` stages every change in
   the worktree including deletions of tracked files (takes no path
@@ -35,8 +35,17 @@ Working-tree commands:
   exclusive. An explicitly-named path that is ignored (by
   `.gitignore`/`.mkitignore`) is refused unless `-f`/`--force` is given
   (git parity); already-tracked paths are never subject to ignore.
-  Interactive hunk staging (`add -p`) is **not supported**; see
-  "Divergences from Git" below.
+  `-p`/`--patch` interactively presents each hunk between the staged (or
+  HEAD) blob and the worktree file and stages only the accepted ones —
+  per hunk: `y` stage, `n` skip, `a` stage this and all later hunks, `d`
+  skip this and all later hunks, `q` quit (keeping hunks already chosen).
+  It requires explicit path arguments, is incompatible with `-A`/`-u`,
+  and operates on regular text files only: a binary file is **skipped**
+  with a message (the command still succeeds), and symlinks/directories
+  are **refused**. An explicitly-named ignored path is refused unless
+  `-f`/`--force` (like plain `add`); a path that escapes the repo through
+  a symlinked parent is refused. The hunk view and prompts go to stderr;
+  `s` (split) and `e` (manual edit) are follow-ups.
 - `mkit rm [--cached] [-r|--recursive] [-f|--force] <path>...` — remove
   paths and stage the deletion for the next commit. By default this
   **deletes the worktree file(s)** and stages the removal; now-empty
@@ -683,9 +692,6 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1) and mkit emits no
   rename (`2`) records — it has no rename detection. `--branch` header
   lines are not emitted.
-- **`mkit add -p` (interactive hunk staging) is not supported.** Stage
-  whole files with pathspecs, `.`, `-A`, or `-u`. Interactive hunk
-  selection is a follow-up.
 - **`mkit clone --depth N` is parsed but not yet wired.** The flag is
   accepted by the parser but `clone` rejects it with a `--depth is not
   yet wired` usage error rather than silently producing a full clone.

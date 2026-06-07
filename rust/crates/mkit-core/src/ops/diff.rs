@@ -379,6 +379,156 @@ pub fn unified_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Origin of a line within a [`PatchHunk`] — context (unchanged), added on
+/// the new side, or removed from the old side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HunkLineKind {
+    /// Unchanged line present on both sides.
+    Context,
+    /// Line added on the new side (`+`).
+    Added,
+    /// Line removed from the old side (`-`).
+    Removed,
+}
+
+/// One line of a hunk: its origin plus the raw bytes (no `+`/`-`/space
+/// prefix) and whether the source line had a trailing newline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HunkLine {
+    /// Whether the line is context, added, or removed.
+    pub kind: HunkLineKind,
+    /// Raw line bytes, without the unified-diff prefix or trailing `\n`.
+    pub text: Vec<u8>,
+    /// `true` when the source had a `\n` after this line.
+    pub has_newline: bool,
+}
+
+/// A single hunk for interactive staging (`add -p`): the 1-based old/new
+/// line ranges (as in the `@@` header) plus the ordered context/added/
+/// removed lines. Use [`apply_hunks_subset`] to materialize a chosen subset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchHunk {
+    /// 1-based first old-side line (0 when the old side is empty).
+    pub old_start: usize,
+    /// Number of old-side lines covered (context + removed).
+    pub old_len: usize,
+    /// 1-based first new-side line (0 when the new side is empty).
+    pub new_start: usize,
+    /// Number of new-side lines covered (context + added).
+    pub new_len: usize,
+    /// Ordered lines making up the hunk body.
+    pub lines: Vec<HunkLine>,
+}
+
+/// Enumerate the hunks between two blobs as structured [`PatchHunk`]s, using
+/// the same Myers diff + git-style compaction as [`unified_hunks`]. Returns
+/// `None` when either side is **binary** (git's NUL heuristic); an empty
+/// vector means the blobs are textually identical. Unlike `unified_hunks`,
+/// which renders bytes, this exposes each hunk's lines so a caller can let
+/// the user pick a subset to stage and rebuild the partial blob with
+/// [`apply_hunks_subset`].
+#[must_use]
+pub fn enumerate_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<PatchHunk>> {
+    if is_binary(old_bytes) || is_binary(new_bytes) {
+        return None;
+    }
+    let old_lines = split_lines(old_bytes);
+    let new_lines = split_lines(new_bytes);
+    let ops = edit_script(&old_lines, &new_lines);
+    let hunks = group_hunks(&ops, PATCH_CONTEXT);
+    Some(
+        hunks
+            .iter()
+            .map(|h| to_patch_hunk(h, &old_lines, &new_lines))
+            .collect(),
+    )
+}
+
+fn to_patch_hunk(hunk: &Hunk, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> PatchHunk {
+    let lines = hunk
+        .ops
+        .iter()
+        .map(|op| {
+            let (kind, dl) = match *op {
+                DiffOp::Equal(oi, _) => (HunkLineKind::Context, &old[oi]),
+                DiffOp::Delete(oi) => (HunkLineKind::Removed, &old[oi]),
+                DiffOp::Insert(ni) => (HunkLineKind::Added, &new[ni]),
+            };
+            HunkLine {
+                kind,
+                text: dl.text.to_vec(),
+                has_newline: dl.has_newline,
+            }
+        })
+        .collect();
+    PatchHunk {
+        old_start: hunk.old_start,
+        old_len: hunk.old_len,
+        new_start: hunk.new_start,
+        new_len: hunk.new_len,
+        lines,
+    }
+}
+
+/// Rebuild a blob from `base_bytes` applying only the hunks whose index (into
+/// the slice returned by [`enumerate_hunks`]) is in `selected`. Selected
+/// hunks have their additions applied and removals dropped; unselected hunks
+/// keep the base content unchanged. `selected` order does not matter — hunks
+/// are always applied in file order — and out-of-range indices are ignored.
+///
+/// This is the staging primitive for `add -p`: pass the index/HEAD blob as
+/// the base and the accepted hunk indices to produce the partially-staged
+/// blob. Applying *all* hunks reproduces the new blob exactly; applying
+/// *none* reproduces the base.
+#[must_use]
+pub fn apply_hunks_subset(base_bytes: &[u8], hunks: &[PatchHunk], selected: &[usize]) -> Vec<u8> {
+    let old_lines = split_lines(base_bytes);
+    let sel: std::collections::HashSet<usize> = selected.iter().copied().collect();
+    let mut out: Vec<u8> = Vec::with_capacity(base_bytes.len());
+    let mut cursor = 0usize; // 0-based index into old_lines
+    for (i, h) in hunks.iter().enumerate() {
+        // 0-based start of this hunk's old-side region. A pure insertion into
+        // an empty base has old_len == 0 and old_start == 0; otherwise the
+        // hunk always carries context, so old_start is 1-based.
+        let region_start = if h.old_len == 0 {
+            h.old_start
+        } else {
+            h.old_start - 1
+        }
+        .min(old_lines.len());
+        let region_end = (region_start + h.old_len).min(old_lines.len());
+        // Untouched base lines before this hunk.
+        for dl in &old_lines[cursor..region_start] {
+            emit_raw_line(&mut out, dl.text, dl.has_newline);
+        }
+        if sel.contains(&i) {
+            // Apply: emit the new side (context + added).
+            for l in &h.lines {
+                if l.kind != HunkLineKind::Removed {
+                    emit_raw_line(&mut out, &l.text, l.has_newline);
+                }
+            }
+        } else {
+            // Keep the base region verbatim (identical to context + removed).
+            for dl in &old_lines[region_start..region_end] {
+                emit_raw_line(&mut out, dl.text, dl.has_newline);
+            }
+        }
+        cursor = region_end;
+    }
+    for dl in &old_lines[cursor..] {
+        emit_raw_line(&mut out, dl.text, dl.has_newline);
+    }
+    out
+}
+
+fn emit_raw_line(out: &mut Vec<u8>, text: &[u8], has_newline: bool) {
+    out.extend_from_slice(text);
+    if has_newline {
+        out.push(b'\n');
+    }
+}
+
 /// Added / deleted line counts between two blobs, from the same Myers edit
 /// script the unified patch uses. `None` when either side is **binary** —
 /// matching Git's heuristic of a NUL byte within the first 8000 bytes
@@ -1459,5 +1609,75 @@ mod tests {
         assert!(stagings.contains(&StatusStaging::Staged));
         assert!(stagings.contains(&StatusStaging::Unstaged));
         assert!(result.iter().all(|e| e.diff.path == "b.txt"));
+    }
+
+    // ---- enumerate_hunks / apply_hunks_subset (add -p primitives) ----
+
+    #[test]
+    fn enumerate_hunks_binary_returns_none() {
+        assert!(enumerate_hunks(b"a\0b", b"c").is_none());
+        assert!(enumerate_hunks(b"text\n", b"with\0nul").is_none());
+    }
+
+    #[test]
+    fn enumerate_hunks_identical_is_empty() {
+        assert_eq!(enumerate_hunks(b"a\nb\n", b"a\nb\n"), Some(vec![]));
+    }
+
+    // 14 lines; edits at line 2 and line 13 are >2*context apart, so they
+    // stay as two distinct hunks (changes <7 lines apart would merge).
+    const HUNK2_OLD: &[u8] = b"l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\n";
+    const HUNK2_NEW: &[u8] = b"l1\nL2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nL13\nl14\n";
+
+    #[test]
+    fn apply_all_hunks_reproduces_new_apply_none_reproduces_base() {
+        let hunks = enumerate_hunks(HUNK2_OLD, HUNK2_NEW).unwrap();
+        assert_eq!(hunks.len(), 2, "expected two distinct hunks");
+        let all: Vec<usize> = (0..hunks.len()).collect();
+        assert_eq!(
+            apply_hunks_subset(HUNK2_OLD, &hunks, &all),
+            HUNK2_NEW,
+            "apply all == new"
+        );
+        assert_eq!(
+            apply_hunks_subset(HUNK2_OLD, &hunks, &[]),
+            HUNK2_OLD,
+            "apply none == old"
+        );
+    }
+
+    #[test]
+    fn apply_single_hunk_picks_only_that_region() {
+        let hunks = enumerate_hunks(HUNK2_OLD, HUNK2_NEW).unwrap();
+        // Stage only the first hunk: line 2 → L2, line 13 stays l13.
+        let staged = apply_hunks_subset(HUNK2_OLD, &hunks, &[0]);
+        assert_eq!(
+            staged, b"l1\nL2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\n",
+            "only the first hunk applied"
+        );
+        // Stage only the second hunk: line 13 → L13, line 2 stays l2.
+        let staged = apply_hunks_subset(HUNK2_OLD, &hunks, &[1]);
+        assert_eq!(
+            staged, b"l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nL13\nl14\n",
+            "only the second hunk applied"
+        );
+    }
+
+    #[test]
+    fn apply_hunks_into_empty_base_adds_lines() {
+        let old = b"";
+        let new = b"alpha\nbeta\n";
+        let hunks = enumerate_hunks(old, new).unwrap();
+        assert_eq!(apply_hunks_subset(old, &hunks, &[0]), new);
+        assert_eq!(apply_hunks_subset(old, &hunks, &[]), old);
+    }
+
+    #[test]
+    fn apply_hunks_preserves_missing_eof_newline() {
+        let old = b"a\nb\nc";
+        let new = b"a\nB\nc"; // edit the middle line; file still lacks final \n
+        let hunks = enumerate_hunks(old, new).unwrap();
+        let staged = apply_hunks_subset(old, &hunks, &[0]);
+        assert_eq!(staged, new, "no trailing newline must be preserved");
     }
 }

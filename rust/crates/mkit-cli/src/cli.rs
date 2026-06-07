@@ -23,6 +23,7 @@ commands:
   add -A            Stage all changes incl. deletions (no path args)
   add -u            Restage only already-tracked files (no path args)
   add -f <path>     Stage an ignored path (overrides .gitignore/.mkitignore)
+  add -p <path>...  Interactively choose hunks to stage (y/n/q/a/d per hunk)
   rm [--cached] [-r] [-f] <path>...  Remove path(s) and stage the deletion
   rm --cached       Stage the removal only; keep the worktree file(s)
   mv [-f] <source>... <dest>  Move/rename tracked path(s) and stage it
