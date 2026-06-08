@@ -470,14 +470,19 @@ Branches / refs:
 ### Resolving conflicts
 
 `merge`, `cherry-pick`, and `rebase` all share one resumable-conflict
-workflow. When a 3-way merge cannot auto-resolve a path, the command:
+workflow. A path where both sides changed the **same regular file on
+disjoint lines** is auto-merged line-by-line (the union of both edits, no
+markers); a conflict is only raised when the two sides' changes **overlap**
+(touch the same/adjacent lines), or for binary files. When a 3-way merge
+cannot auto-resolve a path, the command:
 
 1. Applies the merge's **clean (non-conflicting) changes** to the index
    and worktree (so e.g. files the operation adds/removes/modifies away
    from the conflict are already staged), then materializes the
    conflicting paths into the worktree (staging the ours-side blob so
    each path is "resolvable"):
-   - **text** modify/modify and add/add → classic 2-way Git markers
+   - **text** modify/modify (with *overlapping* line changes — disjoint
+     ones auto-merge) and add/add → classic 2-way Git markers
      (`<<<<<<< ours` / `=======` / `>>>>>>> theirs`) are written into
      the file.
    - **binary**, **symlink / executable-mode**, **delete/modify**, and

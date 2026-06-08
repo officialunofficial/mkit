@@ -529,6 +529,133 @@ fn emit_raw_line(out: &mut Vec<u8>, text: &[u8], has_newline: bool) {
     }
 }
 
+/// A contiguous run of base lines that one side changed, anchored on base
+/// line coordinates: `base_len` base lines (0 for a pure insertion) are
+/// replaced by `new`. Used by the 3-way merge to detect overlap and splice.
+struct MergeRegion {
+    base_start: usize,
+    base_len: usize,
+    new: Vec<(Vec<u8>, bool)>,
+}
+
+/// Line-level 3-way merge of three blobs (diff3-style, conservative).
+///
+/// Returns `Some(merged)` when `ours` and `theirs` changed **disjoint**
+/// regions of `base` (so the merge is unambiguous), and `None` when their
+/// changes overlap or any input is binary — the caller then records a
+/// conflict. Identical `ours`/`theirs` merge trivially. Unlike a full
+/// diff3 this does not auto-resolve *identical overlapping* edits (those
+/// stay a conflict): it errs toward conflict, never toward a wrong merge.
+/// (#298)
+#[must_use]
+pub fn merge_blob_3way(base: &[u8], ours: &[u8], theirs: &[u8]) -> Option<Vec<u8>> {
+    if ours == theirs {
+        return Some(ours.to_vec());
+    }
+    if is_binary(base) || is_binary(ours) || is_binary(theirs) {
+        return None;
+    }
+    let base_lines = split_lines(base);
+    let ours_regions = changed_regions(&base_lines, &split_lines(ours));
+    let theirs_regions = changed_regions(&base_lines, &split_lines(theirs));
+    if regions_overlap(&ours_regions, &theirs_regions) {
+        return None;
+    }
+    Some(apply_merge_regions(
+        &base_lines,
+        &ours_regions,
+        &theirs_regions,
+    ))
+}
+
+/// Group the edit script `base → side` into base-anchored changed regions
+/// (no context — adjacent equal lines bound each region).
+fn changed_regions(base: &[DiffLine<'_>], side: &[DiffLine<'_>]) -> Vec<MergeRegion> {
+    let mut regions: Vec<MergeRegion> = Vec::new();
+    let mut cur: Option<MergeRegion> = None;
+    let mut base_idx = 0usize; // next unconsumed base line
+    for op in edit_script(base, side) {
+        match op {
+            DiffOp::Equal(bi, _) => {
+                if let Some(r) = cur.take() {
+                    regions.push(r);
+                }
+                base_idx = bi + 1;
+            }
+            DiffOp::Delete(bi) => {
+                cur.get_or_insert(MergeRegion {
+                    base_start: base_idx,
+                    base_len: 0,
+                    new: Vec::new(),
+                })
+                .base_len += 1;
+                base_idx = bi + 1;
+            }
+            DiffOp::Insert(si) => {
+                let line = &side[si];
+                cur.get_or_insert(MergeRegion {
+                    base_start: base_idx,
+                    base_len: 0,
+                    new: Vec::new(),
+                })
+                .new
+                .push((line.text.to_vec(), line.has_newline));
+            }
+        }
+    }
+    if let Some(r) = cur.take() {
+        regions.push(r);
+    }
+    regions
+}
+
+/// `true` if any ours-region overlaps any theirs-region on base lines.
+/// Modify spans use half-open `[start, start+len)` intersection; a pure
+/// insertion conflicts only when it lands strictly inside a modify span,
+/// or coincides with another insertion (ambiguous order) — insertions at a
+/// modify boundary are adjacent and merge cleanly.
+fn regions_overlap(ours: &[MergeRegion], theirs: &[MergeRegion]) -> bool {
+    ours.iter().any(|a| {
+        theirs.iter().any(|b| {
+            let (a_s, a_e) = (a.base_start, a.base_start + a.base_len);
+            let (b_s, b_e) = (b.base_start, b.base_start + b.base_len);
+            match (a.base_len == 0, b.base_len == 0) {
+                (true, true) => a_s == b_s,
+                (true, false) => b_s < a_s && a_s < b_e,
+                (false, true) => a_s < b_s && b_s < a_e,
+                (false, false) => a_s < b_e && b_s < a_e,
+            }
+        })
+    })
+}
+
+/// Splice non-overlapping ours/theirs regions back onto `base`. Regions are
+/// applied in base order; at a shared start a pure insertion (len 0) sorts
+/// before a modify so inserted lines precede the replaced ones.
+fn apply_merge_regions(
+    base: &[DiffLine<'_>],
+    ours: &[MergeRegion],
+    theirs: &[MergeRegion],
+) -> Vec<u8> {
+    let mut all: Vec<&MergeRegion> = ours.iter().chain(theirs.iter()).collect();
+    all.sort_by_key(|r| (r.base_start, r.base_len));
+    let mut out: Vec<u8> = Vec::new();
+    let mut cursor = 0usize;
+    for r in all {
+        for line in &base[cursor..r.base_start] {
+            emit_raw_line(&mut out, line.text, line.has_newline);
+        }
+        for (text, nl) in &r.new {
+            emit_raw_line(&mut out, text, *nl);
+        }
+        cursor = r.base_start + r.base_len;
+    }
+    for line in &base[cursor..] {
+        emit_raw_line(&mut out, line.text, line.has_newline);
+    }
+    out
+}
+
 /// Added / deleted line counts between two blobs, from the same Myers edit
 /// script the unified patch uses. `None` when either side is **binary** —
 /// matching Git's heuristic of a NUL byte within the first 8000 bytes
@@ -1679,5 +1806,64 @@ mod tests {
         let hunks = enumerate_hunks(old, new).unwrap();
         let staged = apply_hunks_subset(old, &hunks, &[0]);
         assert_eq!(staged, new, "no trailing newline must be preserved");
+    }
+
+    // ---- merge_blob_3way (#298) ----
+
+    #[test]
+    fn merge3_identical_sides_merge_trivially() {
+        let x = b"a\nb\n";
+        assert_eq!(merge_blob_3way(b"base\n", x, x), Some(x.to_vec()));
+    }
+
+    #[test]
+    fn merge3_disjoint_line_edits_auto_merge() {
+        let base = b"a\nb\nc\nd\ne\n";
+        let ours = b"A\nb\nc\nd\ne\n"; // line 1
+        let theirs = b"a\nb\nc\nd\nE\n"; // line 5
+        assert_eq!(
+            merge_blob_3way(base, ours, theirs),
+            Some(b"A\nb\nc\nd\nE\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn merge3_overlapping_line_edits_conflict() {
+        let base = b"a\nb\nc\n";
+        let ours = b"A\nb\nc\n"; // line 1 -> A
+        let theirs = b"Z\nb\nc\n"; // line 1 -> Z
+        assert_eq!(merge_blob_3way(base, ours, theirs), None);
+    }
+
+    #[test]
+    fn merge3_one_side_only_takes_that_side() {
+        // theirs == base (no change); ours changed → take ours.
+        let base = b"a\nb\nc\n";
+        let ours = b"a\nB\nc\n";
+        assert_eq!(merge_blob_3way(base, ours, base), Some(ours.to_vec()));
+    }
+
+    #[test]
+    fn merge3_disjoint_insertions_auto_merge() {
+        let base = b"a\nb\n";
+        let ours = b"a\nX\nb\n"; // insert X after a
+        let theirs = b"a\nb\nY\n"; // insert Y after b
+        assert_eq!(
+            merge_blob_3way(base, ours, theirs),
+            Some(b"a\nX\nb\nY\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn merge3_coincident_insertions_conflict() {
+        let base = b"a\nb\n";
+        let ours = b"a\nX\nb\n"; // both insert at the same gap
+        let theirs = b"a\nY\nb\n";
+        assert_eq!(merge_blob_3way(base, ours, theirs), None);
+    }
+
+    #[test]
+    fn merge3_binary_side_conflicts() {
+        assert_eq!(merge_blob_3way(b"a\nb\n", b"a\0\nb\n", b"a\nb\nc\n"), None);
     }
 }

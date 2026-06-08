@@ -225,6 +225,47 @@ fn put_tree(store: &ObjectStore, entries: Vec<TreeEntry>) -> Result<Hash, StoreE
     store.write(&bytes)
 }
 
+/// The raw bytes of a single-object `Blob`, or `None` for a `ChunkedBlob`
+/// (large file) or any non-blob — those skip the line-level merge and fall
+/// back to a conflict. Blobs that `add`/`build_tree` produce are single
+/// `Blob` objects below the chunk threshold, so this covers the source
+/// files a 3-way text merge applies to.
+fn single_blob_bytes(store: &ObjectStore, h: Hash) -> Result<Option<Vec<u8>>, StoreError> {
+    match store.read_object(&h)? {
+        Object::Blob(b) => Ok(Some(b.data)),
+        _ => Ok(None),
+    }
+}
+
+/// Attempt a line-level 3-way merge of a both-sides-modified regular-file
+/// blob (#298). Returns the hash of the merged blob when ours/theirs
+/// changed disjoint regions of base, or `None` to fall back to a
+/// modify/modify conflict (overlapping changes, a binary side, or a
+/// chunked/large blob). Genuine store I/O errors propagate.
+fn try_text_merge(
+    store: &ObjectStore,
+    base_h: Hash,
+    ours_h: Hash,
+    theirs_h: Hash,
+) -> Result<Option<Hash>, StoreError> {
+    let (Some(base), Some(ours), Some(theirs)) = (
+        single_blob_bytes(store, base_h)?,
+        single_blob_bytes(store, ours_h)?,
+        single_blob_bytes(store, theirs_h)?,
+    ) else {
+        return Ok(None);
+    };
+    match crate::ops::merge_blob_3way(&base, &ours, &theirs) {
+        Some(merged) => {
+            // Store as a single Blob — same shape (and hash) `add` produces
+            // for sub-threshold content, so the merged object dedups.
+            let bytes = serialize::serialize(&Object::Blob(crate::object::Blob { data: merged }))?;
+            Ok(Some(store.write(&bytes)?))
+        }
+        None => Ok(None),
+    }
+}
+
 fn collect_ancestors_with_depth(
     store: &ObjectStore,
     start: Hash,
@@ -469,8 +510,19 @@ fn merge_entries_recursive(
                         conflicts,
                         depth,
                     )?;
+                } else if o.mode == t.mode
+                    && matches!(o.mode, EntryMode::Blob | EntryMode::Executable)
+                    && let Some(merged_hash) =
+                        try_text_merge(store, b.object_hash, o.object_hash, t.object_hash)?
+                {
+                    // Both changed the same regular file, but on disjoint
+                    // lines — auto-merge the content (#298). Mode is shared,
+                    // so it carries over unambiguously.
+                    add_entry(merged, min_name, o.mode, merged_hash);
                 } else {
-                    // Both changed differently -> modify/modify conflict.
+                    // Both changed differently and the content can't be
+                    // line-merged (overlap / binary / mode mismatch / chunked)
+                    // -> modify/modify conflict.
                     conflicts.push(Conflict {
                         path: join_path(prefix, min_name),
                         kind: ConflictKind::ModifyModify,
@@ -1037,5 +1089,44 @@ mod tests {
         assert!(is_ancestor(&s, root, m).unwrap());
         assert!(is_ancestor(&s, right, m).unwrap());
         assert!(!is_ancestor(&s, m, right).unwrap());
+    }
+
+    #[test]
+    fn merge_both_modify_disjoint_lines_auto_merges() {
+        let (_d, s) = store();
+        let base_b = put_blob(&s, b"a\nb\nc\nd\ne\n");
+        let ours_b = put_blob(&s, b"A\nb\nc\nd\ne\n"); // line 1
+        let theirs_b = put_blob(&s, b"a\nb\nc\nd\nE\n"); // line 5
+        let base = make_tree(&s, vec![entry(b"f.txt", EntryMode::Blob, base_b)]);
+        let ours = make_tree(&s, vec![entry(b"f.txt", EntryMode::Blob, ours_b)]);
+        let theirs = make_tree(&s, vec![entry(b"f.txt", EntryMode::Blob, theirs_b)]);
+        let r = merge_trees(&s, Some(base), Some(ours), Some(theirs)).unwrap();
+        assert!(
+            !r.has_conflicts(),
+            "disjoint line edits should auto-merge (#298), got {:?}",
+            r.conflicts
+        );
+        let f = find_entry(&tree_entries(&s, r.tree_hash), b"f.txt")
+            .unwrap()
+            .object_hash;
+        let merged = match s.read_object(&f).unwrap() {
+            Object::Blob(b) => b.data,
+            other => panic!("merged f.txt not a blob: {other:?}"),
+        };
+        assert_eq!(merged, b"A\nb\nc\nd\nE\n");
+    }
+
+    #[test]
+    fn merge_both_modify_same_line_still_conflicts() {
+        let (_d, s) = store();
+        let base_b = put_blob(&s, b"a\nb\nc\n");
+        let ours_b = put_blob(&s, b"a\nOURS\nc\n"); // line 2
+        let theirs_b = put_blob(&s, b"a\nTHEIRS\nc\n"); // line 2 — overlaps
+        let base = make_tree(&s, vec![entry(b"f.txt", EntryMode::Blob, base_b)]);
+        let ours = make_tree(&s, vec![entry(b"f.txt", EntryMode::Blob, ours_b)]);
+        let theirs = make_tree(&s, vec![entry(b"f.txt", EntryMode::Blob, theirs_b)]);
+        let r = merge_trees(&s, Some(base), Some(ours), Some(theirs)).unwrap();
+        assert!(r.has_conflicts(), "same-line edits must still conflict");
+        assert_eq!(r.conflicts[0].kind, ConflictKind::ModifyModify);
     }
 }
