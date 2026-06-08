@@ -41,6 +41,19 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = 'test(=stateful_invariants)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# The Phase-2 fault-injection suites reconstruct many on-disk crash images and
+# spawn N concurrent mutators, so each spawns the binary a lot. Deterministic,
+# not hangs — give the crash-recovery and lock-contention binaries the same
+# generous per-test ceiling so a slow/loaded (especially macOS) runner can't
+# kill them under the default 60s / ci 120s envelope.
+[[profile.default.overrides]]
+filter = 'binary(crash_recovery) or binary(lock_contention)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(crash_recovery) or binary(lock_contention)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
 [profile.state-machine]
 # Nightly deep run of the stateful invariant suite
 # (tests/state_machine.rs). It drives the real `mkit` binary through
