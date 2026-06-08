@@ -252,6 +252,16 @@ fn create_annotated(
     }
     // Annotated-but-unsigned tags keep the zero signature.
 
+    // Hold the repo lock across the tag-object write + ref publish so a
+    // concurrent `gc --grace-secs 0` can't prune the just-written tag object
+    // before its ref makes it reachable (#267). The repo was validated above
+    // (store open), so a non-repo already reported cleanly — not as a lock
+    // error. Acquired here (after the editor/signing) to keep the hold tight.
+    let _lock = match super::acquire_worktree_lock(cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+
     let bytes = match serialize::serialize(&Object::Tag(tag)) {
         Ok(b) => b,
         Err(e) => return emit_err(&format!("serialize tag: {e}"), exit::DATAERR),

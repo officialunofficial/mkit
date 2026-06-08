@@ -355,6 +355,17 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // --- Save. ----------------------------------------------------
+    // Hold the repo lock across the envelope write so a concurrent
+    // `gc --grace-secs 0` can't compute its live set (which treats
+    // attestation subjects as roots) before this attestation lands and then
+    // prune the just-attested commit (#267). The repo was validated above
+    // (`mkit_dir.is_dir()`), so a non-repo reported cleanly. Held tightly,
+    // after signing (which may shell out to an external signer), around the
+    // write only.
+    let _lock = match super::acquire_worktree_lock(&cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
     let (att_id, path) = match store::save(&mkit_dir, &commit_hash, encoded.as_bytes()) {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("store: {e}"), exit::CANTCREAT),

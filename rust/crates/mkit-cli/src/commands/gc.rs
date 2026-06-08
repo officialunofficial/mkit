@@ -14,15 +14,14 @@
 //! `--dry-run` to preview, and `--grace-secs 0` to prune every
 //! unreachable object regardless of age.
 //!
-//! Concurrency: gc holds the repo lock, but some root-publishing paths
-//! (e.g. `tag`, `fetch`) write an object before publishing the ref that
-//! makes it reachable and do not yet take that lock. The grace window is
-//! therefore the concurrency-safety mechanism — like Git, where the
-//! default `gc.pruneExpire` protects in-flight objects and `prune
-//! --expire=now` is the explicit unsafe mode. `--grace-secs 0` bypasses
-//! that net, so it must only be run when no other mkit process is
-//! operating on the repo (a warning is printed). Serializing every root
-//! publisher under the repo lock is tracked as a follow-up.
+//! Concurrency: gc holds the repo lock for its whole run, and the
+//! root-publishing paths now take the same lock around their object-write +
+//! ref/attestation-publish window — `tag` (annotated/signed), `fetch` /
+//! `pull`, and `attest` (#267) — so they are serialized against gc. The
+//! grace window remains the belt-and-suspenders net (like Git's default
+//! `gc.pruneExpire`, vs `prune --expire=now`): `--grace-secs 0` bypasses it
+//! and prints a warning, but with the publishers now locked it is safe even
+//! under concurrency.
 
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
