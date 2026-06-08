@@ -11,10 +11,12 @@
 //!   * **Oracle = invariant battery** (metamorphic), not a reference model.
 //!     After every op the repo must still satisfy: content-addressing
 //!     integrity, resolvable head/tag refs, well-formed HEAD, parseable index,
-//!     reachable-set ⊆ stored-set (gc safety), valid signatures over signed
-//!     refs, operation-state coherence (a successful `--abort`/`--continue`
-//!     clears its conflict sidecar), no leaked lock files, and clean
-//!     process-exit hygiene.
+//!     gc-safety (every object in mkit's own retention live-set — refs, stash,
+//!     `ORIG_HEAD`, in-progress op state, conflict sidecars, attestations,
+//!     recovery roots, and their closure — is present), valid signatures over
+//!     signed refs, operation-state coherence (a successful `--abort`/
+//!     `--continue` leaves no in-progress marker or `mkit-conflicts` residue),
+//!     no leaked lock files, and clean process-exit hygiene.
 //!   * **Drive level = CLI subprocess** — the corruption-prone orchestration
 //!     (merge/rebase/reset/`--continue`/`--abort` + conflict sidecars + locks)
 //!     lives only in the CLI layer, so the suite spawns the binary.
@@ -40,6 +42,7 @@ use std::process::{Command, Output, Stdio};
 use mkit_core::Hash;
 use mkit_core::index::read_index;
 use mkit_core::object::Object;
+use mkit_core::ops::live_objects;
 use mkit_core::refs;
 use mkit_core::sign::{KeyPair, save_key, verify_commit, verify_remix, verify_tag};
 use mkit_core::store::ObjectStore;
@@ -395,25 +398,43 @@ fn apply(op: &Op, root: &Path, xdg: &Path, ctr: &mut u32) -> Vec<Output> {
     }
 }
 
-/// Does the on-disk in-progress marker for `verb` still exist?
-fn marker_present(mkit_dir: &Path, verb: &str) -> bool {
-    match verb {
-        "merge" => mkit_dir.join("MERGE_HEAD").exists(),
-        "cherry-pick" => mkit_dir.join("CHERRY_PICK_HEAD").exists(),
-        "revert" => mkit_dir.join("REVERT_HEAD").exists(),
-        "rebase" => {
-            mkit_dir.join("rebase-apply").exists() || mkit_dir.join("rebase-merge").exists()
-        }
-        _ => false,
+/// If `verb` left any on-disk residue (its in-progress marker, or the shared
+/// `mkit-conflicts` sidecar for the non-rebase ops), return a description of
+/// the first piece found — else `None`. Rebase keeps its sidecar *inside*
+/// `rebase-apply/`, which the directory check already covers.
+fn operation_residue(mkit_dir: &Path, verb: &str) -> Option<String> {
+    let marker = match verb {
+        "merge" => mkit_dir.join("MERGE_HEAD").exists().then_some("MERGE_HEAD"),
+        "cherry-pick" => mkit_dir
+            .join("CHERRY_PICK_HEAD")
+            .exists()
+            .then_some("CHERRY_PICK_HEAD"),
+        "revert" => mkit_dir
+            .join("REVERT_HEAD")
+            .exists()
+            .then_some("REVERT_HEAD"),
+        "rebase" => (mkit_dir.join("rebase-apply").exists()
+            || mkit_dir.join("rebase-merge").exists())
+        .then_some("rebase-apply/"),
+        _ => None,
+    };
+    if let Some(m) = marker {
+        return Some(m.to_owned());
     }
+    if verb != "rebase" && mkit_dir.join("mkit-conflicts").exists() {
+        return Some("mkit-conflicts".to_owned());
+    }
+    None
 }
 
 /// Operation-state-coherence invariant (the conflict-sidecar half of the
-/// oracle). A successful `--abort` must clear whatever was in progress; a
-/// successful non-rebase `--continue` concludes the op and must clear its
-/// marker. (Rebase `--continue` may legitimately pause at the next pick, so it
-/// is exempt.) This is exactly the class of bug — "abort returns success but
-/// forgets to delete `MERGE_HEAD`" — that pure reachability/signature checks miss.
+/// oracle). A successful `--abort` or `--continue` *concludes* the operation
+/// and must leave no residue — no in-progress marker AND no `mkit-conflicts`
+/// sidecar. This holds for rebase too: `rebase --continue`/`--abort` returns
+/// exit 0 only on full completion (a re-pause returns non-zero), so a 0 exit
+/// means the rebase state must be gone. This is exactly the class of bug —
+/// "abort returns success but forgets to delete `MERGE_HEAD`/`mkit-conflicts`"
+/// — that pure reachability/signature checks miss.
 fn check_op_state(
     op: &Op,
     pre_verb: Option<&'static str>,
@@ -421,21 +442,29 @@ fn check_op_state(
     mkit_dir: &Path,
     label: &str,
 ) -> Result<(), String> {
+    if !matches!(op, Op::Abort | Op::Continue) {
+        return Ok(());
+    }
     let last_ok = outputs.last().is_some_and(|o| o.status.code() == Some(0));
     let Some(verb) = pre_verb else {
         return Ok(());
     };
-    match op {
-        Op::Abort if last_ok && marker_present(mkit_dir, verb) => Err(format!(
-            "[{label}] `{verb} --abort` reported success but left its in-progress marker"
-        )),
-        Op::Continue if verb != "rebase" && last_ok && marker_present(mkit_dir, verb) => {
-            Err(format!(
-                "[{label}] `{verb} --continue` reported success but left its in-progress marker"
-            ))
-        }
-        _ => Ok(()),
+    let residue = if last_ok {
+        operation_residue(mkit_dir, verb)
+    } else {
+        None
+    };
+    if let Some(residue) = residue {
+        let flag = if matches!(op, Op::Abort) {
+            "--abort"
+        } else {
+            "--continue"
+        };
+        return Err(format!(
+            "[{label}] `{verb} {flag}` reported success but left residue: {residue}"
+        ));
     }
+    Ok(())
 }
 
 /// Exit codes a well-behaved `mkit` command may return — `OK` plus the
@@ -522,10 +551,12 @@ fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
         }
     }
 
-    // 5 + 6. Reachability (every object reachable from a signed root is present
-    //    and decodable) AND signature validity over that reachable set. Stash
-    //    roots (`refs/stash`, unannotated zero-sig commits) are deliberately
-    //    NOT walked, so they are exempt from the signature check.
+    // 5 + 6. Signature validity over the *signed* reachable set: every commit/
+    //    remix/tag reachable from a signed root verifies, and every object on
+    //    the way is present+decodable. Stash roots (`refs/stash`, unannotated
+    //    zero-sig commits) are deliberately NOT walked here, so they are exempt
+    //    from the signature check. (Broad presence — incl. stash — is covered by
+    //    the gc live-set check below.)
     let mut visited: HashSet<String> = HashSet::new();
     let mut work = roots;
     while let Some(h) = work.pop() {
@@ -558,12 +589,34 @@ fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
             Object::Tree(t) => {
                 work.extend(t.entries.into_iter().map(|e| e.object_hash));
             }
+            // A chunked blob's chunk objects are part of its closure; walk them
+            // so a reachable-but-missing chunk is caught (mirrors core graph
+            // reachability). The generator writes tiny files today, but this
+            // keeps the walk correct if a large file ever triggers chunking.
+            Object::ChunkedBlob(cb) => work.extend(cb.chunks),
             // Leaves: already proven present+intact by `read_object` above.
-            Object::Blob(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {}
+            Object::Blob(_) | Object::Delta(_) => {}
         }
     }
 
-    // 7. No leaked lock files: every `.mkit/*.lock` is acquired and released
+    // 7. GC-safety: every object mkit would retain must be present and intact.
+    //    `live_objects` is mkit's OWN retention definition — HEAD, refs, stash,
+    //    ORIG_HEAD, in-progress merge/cherry-pick/revert/rebase state, conflict-
+    //    sidecar blobs, attested commits, and recovery-log roots, plus the full
+    //    closure (incl. chunked-blob chunks). Using it keeps this check aligned
+    //    with the contract as it evolves, and makes the aggressive `gc
+    //    --grace-secs 0` op meaningful: a prune that drops a live object — incl.
+    //    stash-only / recovery-only / sidecar-only ones the signed-ref walk
+    //    above never visits — is caught here.
+    let live = live_objects(&store, &mkit_dir)
+        .map_err(|e| format!("[{label}] collect gc live-set: {e}"))?;
+    for h in &live {
+        store
+            .read(h)
+            .map_err(|e| format!("[{label}] live object {} missing/corrupt: {e}", to_hex(h)))?;
+    }
+
+    // 8. No leaked lock files: every `.mkit/*.lock` is acquired and released
     //    within a single command, so none must survive a returned command.
     if let Ok(rd) = fs::read_dir(&mkit_dir) {
         for ent in rd.flatten() {
