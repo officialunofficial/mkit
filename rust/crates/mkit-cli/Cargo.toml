@@ -132,6 +132,12 @@ p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std",
 # `filters` feature enables regex-based redaction so version-string
 # bumps don't churn snapshots.
 insta = { version = "1", features = ["filters"] }
+# Stateful end-to-end invariant suite (tests/state_machine.rs): proptest
+# generates random op sequences driven through the real `mkit` binary,
+# asserting a repo-invariant battery after each op. Same major as
+# mkit-core's dev-dep. Bounded by default (32 cases); the nightly job
+# raises PROPTEST_CASES under the `state-machine` nextest profile.
+proptest = "1"
 
 [features]
 default = []

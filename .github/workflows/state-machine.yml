@@ -1,0 +1,83 @@
+name: State-machine suite
+
+# Nightly deep run of the stateful end-to-end invariant suite
+# (rust/crates/mkit-cli/tests/state_machine.rs). proptest generates random
+# op sequences over mkit's local DAG/worktree command surface, drives each
+# through the real `mkit` binary, and asserts a repo-invariant battery after
+# every op — catching emergent state corruption that per-operation tests can't.
+#
+# The PR/workspace `nextest` run already executes this suite bounded to 32
+# cases (fast). This job raises the case count and runs under the dedicated
+# `state-machine` nextest profile, whose generous slow-timeout keeps the
+# many-minute deep run from being killed as a "hang". Failures are surfaced
+# (regression artifacts uploaded) but do not block; tighten
+# `continue-on-error` once the harness has soaked.
+#
+# Manual repro of a deep run:
+#   cd rust && PROPTEST_CASES=512 cargo nextest run --profile state-machine \
+#     -p mkit-cli --test state_machine
+
+on:
+  schedule:
+    # 04:30 UTC daily — just after the fuzz smoke window.
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+  # Deep run. Sequence length is fixed in-source (MAX_OPS); only case count
+  # scales, so persisted regressions still replay under the default config.
+  PROPTEST_CASES: "512"
+
+jobs:
+  state-machine:
+    name: Stateful invariants (deep)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: rust -> rust/target
+          prefix-key: "rust-state-machine"
+          cache-on-failure: false
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@d9be7d8cda89035c9c843f78bd44d4f72d8403d4  # v2
+        with:
+          tool: cargo-nextest
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deep stateful run
+        working-directory: rust
+        run: |
+          cargo nextest run --locked --profile state-machine \
+            -p mkit-cli --test state_machine 2>&1 | tee state-machine.log
+
+      - name: Upload regression + log artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: state-machine-failure
+          path: |
+            rust/state-machine.log
+            rust/crates/mkit-cli/tests/proptest-regressions/**
+          if-no-files-found: ignore
+          retention-days: 14
