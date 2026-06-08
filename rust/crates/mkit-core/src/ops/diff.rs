@@ -1828,6 +1828,19 @@ mod tests {
     }
 
     #[test]
+    fn merge3_adjacent_line_edits_auto_merge() {
+        // The motivating #298 case: line 1 changed on one side, line 2 on the
+        // other. Adjacent but non-overlapping → clean merge, no conflict.
+        let base = b"x\ny\n";
+        let ours = b"X\ny\n"; // line 1
+        let theirs = b"x\nY\n"; // line 2
+        assert_eq!(
+            merge_blob_3way(base, ours, theirs),
+            Some(b"X\nY\n".to_vec())
+        );
+    }
+
+    #[test]
     fn merge3_overlapping_line_edits_conflict() {
         let base = b"a\nb\nc\n";
         let ours = b"A\nb\nc\n"; // line 1 -> A

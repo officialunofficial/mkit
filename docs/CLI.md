@@ -472,9 +472,10 @@ Branches / refs:
 `merge`, `cherry-pick`, and `rebase` all share one resumable-conflict
 workflow. A path where both sides changed the **same regular file on
 disjoint lines** is auto-merged line-by-line (the union of both edits, no
-markers); a conflict is only raised when the two sides' changes **overlap**
-(touch the same/adjacent lines), or for binary files. When a 3-way merge
-cannot auto-resolve a path, the command:
+markers) — changes on different lines merge cleanly even when adjacent. A
+conflict is only raised when the two sides' changed regions **overlap**
+(modify the same or interleaving lines), or for binary files. When a 3-way
+merge cannot auto-resolve a path, the command:
 
 1. Applies the merge's **clean (non-conflicting) changes** to the index
    and worktree (so e.g. files the operation adds/removes/modifies away
