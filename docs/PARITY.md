@@ -38,6 +38,11 @@ creeping; revisit post-v1 if demand warrants.
 - Partial / shallow clone beyond what `clone` already exposes
 - `.git/`-format on-disk interop, SHA-1/SHA-256 objects, `git fsck`-compat
 - Shadowing the real `git` binary on `PATH` by default
+- `log --graph` ASCII commit-graph rendering (the flag is accepted as a
+  no-op for script compatibility). Full byte-parity is unachievable because
+  mkit's default `log` body already diverges from git's `commit/Author/Date`
+  (mkit `Identity` + 64-hex ids); an `--oneline --graph` renderer for the
+  linear/DAG case is an optional post-v1 follow-up, not a v1 blocker.
 
 ## Status legend
 
@@ -70,7 +75,7 @@ creeping; revisit post-v1 if demand warrants.
 | `log` | history, `-n`, `--format=json`, `--oneline`, `--abbrev-commit`, `--abbrev[=N]` | same | ✅ | 0 | #248 | `--oneline`/`--abbrev-commit` abbreviate (default 7); abbreviated id is a BLAKE3 prefix |
 | `log` | `<rev>`, `<a>..<b>`, `<a>...<b>` ranges | same | ✅ | 1 | #249, #252 | `<rev>` start (annotated tags peeled), `A..B`/`A..`/`..B` ranges, `A...B` symmetric difference (excludes the merge base's ancestors); reverse-chrono + topological order = git `--date-order` (matches git default for linear/monotonic-timestamp history) |
 | `diff` | `<a>...<b>` symmetric range | same | ✅ | 4 | #252 | diffs `merge-base(a,b)` against `b` (git semantics); single merge base (criss-cross multi-base is a documented edge) |
-| `log` | `--graph` | `--graph` is a no-op | 🔨 | 1 | #249 | real ASCII graph pending (mkit's default body also diverges) |
+| `log` | `--graph` | `--graph` is a no-op | 🚫 | 1 | #249 | **v1 non-goal** — flag accepted as a no-op; full graph parity unachievable (mkit's default `log` body diverges); optional `--oneline --graph` renderer is a post-v1 follow-up |
 | `branch` | create, list, `-v`, `-d`/`-D`/`-m` | same | ✅ | 1 | #249 | default list is `<marker> <name>` (no id, like git); `-v` adds abbreviated id + subject; `-D <missing>` errors like git (no silent no-op). Prior Phase-1 divergences reconciled. |
 | `checkout` | switch branch, restore files | same | ✅ | — | — | guarded against clobber |
 | `tag` | lightweight/`-a`/`-s`/`-m`/`-d` | same | ✅ | — | — | |
