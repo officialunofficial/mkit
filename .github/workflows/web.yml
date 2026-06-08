@@ -87,3 +87,15 @@ jobs:
       - name: Production build
         working-directory: web
         run: pnpm build
+
+      # The web demo above builds `--target web`, but the *published* npm
+      # package ships `--target bundler` + the Bun/Workers glue patch. Build
+      # that artifact shape here so a regression in the bundler output or the
+      # patcher is caught in CI rather than by consumers (#209, #223). The
+      # patcher exits non-zero if wasm-pack's glue shape changes, so this
+      # doubles as a structural assertion.
+      - name: Bundler-target wasm smoke build
+        working-directory: rust
+        run: |
+          wasm-pack build crates/mkit-wasm --release --target bundler --out-dir pkg-bundler
+          node ../scripts/patch-wasm-bundler-glue.mjs crates/mkit-wasm/pkg-bundler
