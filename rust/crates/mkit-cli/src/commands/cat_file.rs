@@ -234,7 +234,9 @@ fn pretty_print(
     Ok(())
 }
 
-fn git_mode_and_type(mode: EntryMode) -> (&'static str, &'static str) {
+/// `(octal mode, type)` for a tree entry, in git's `ls-tree`/`cat-file -p`
+/// form. Shared with `mkit show` so its tree listing matches.
+pub(super) fn git_mode_and_type(mode: EntryMode) -> (&'static str, &'static str) {
     match mode {
         EntryMode::Blob => ("100644", "blob"),
         EntryMode::Executable => ("100755", "blob"),

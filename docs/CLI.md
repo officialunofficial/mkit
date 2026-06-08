@@ -221,6 +221,19 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   that follows, so blobs are byte-exact with git while commit/tree content
   (and its size) is mkit-shaped, as with `-p`. `<object>` resolves through
   the shared revspec grammar (hash, ref, `HEAD`, `HEAD~n`/`^`).
+- `mkit show [<object>...]` — display objects (like `git show`), defaulting
+  to `HEAD`. A **commit**/**remix** prints a header (`commit <hash>`,
+  `Author:`, `Date:`, message indented four spaces — matching `mkit log`)
+  followed by the unified diff against its first parent; that diff body is
+  produced by the same code as `mkit diff`, so `show <commit>` is
+  byte-identical to `diff <parent> <commit>` (modulo abbreviated `index`
+  ids). A **tag** prints its header then the peeled target object; a **tree**
+  is listed as `<mode> <type> <hash>\t<name>` lines; a **blob** prints its raw
+  contents. Multiple objects may be given. As with `log`, the commit/tag
+  header carries mkit's signed `Identity` and 64-hex BLAKE3 ids, so those
+  header lines diverge from git's `Author: Name <email>` / 40-hex form (the
+  same documented divergence as `log`); the diff body, tree listing, and blob
+  output match git. `<object>` resolves through the revspec grammar.
 - `mkit ls-tree [-r] [-z] <tree-ish> [<path>...]` — list a tree's entries
   as `<mode> <type> <hash>\t<name>` (git octal modes
   `100644`/`100755`/`120000`/`040000`; the hash is 64-hex BLAKE3). `-r`

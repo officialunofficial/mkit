@@ -94,7 +94,7 @@ creeping; revisit post-v1 if demand warrants.
 | `ls-tree` | `-r`, `-z` | same | ✅ | 3 | #251 | `<mode> <type> <hash>\t<name>` modulo hash length; `-r` omits tree lines like git; `-z` raw NUL |
 | `show-ref` | `--heads`, `--tags` | same | ✅ | 3 | #251 | `<hash> <refname>` sorted, modulo hash length |
 | `for-each-ref` | `--format` | same | ✅ | 3 | #251 | default `<objectname> <objecttype>\t<refname>`; `%(atom)` subset: refname[:short], objectname[:short], objecttype (modulo hash length) |
-| `show` | object/commit display | partial via `cat`/`log` | 🔨 | 3 | #251 | deferred — commit+diff display diverges from git |
+| `show` | object/commit display | same | ✅ | 3 | #251 | commit/remix = header + first-parent diff (diff body byte-matches `git show`); tag peels to target; tree listing; blob contents; defaults to HEAD. Commit/tag *header* diverges (mkit `Identity` + 64-hex), same as `log` |
 | `symbolic-ref` | read | same (HEAD) | ✅ | 3 | #251 | reads HEAD only; full target or `--short`; detached → error |
 | `symbolic-ref` | write (HEAD → refs/heads/<b>) | same | ✅ | 4 | #254 | repoints HEAD without touching the worktree; target need not exist yet |
 | `update-ref` | `[-d] <ref> [<new> [<old>]]` | same | ✅ | 4 | #254 | refs/heads/* + refs/tags/* only; CAS via `<old>` (all-zero = must be absent, update mode only; `-d`'s `<old>` must be concrete); branch moves go through the history-MMR ref-write path; `-d` refuses the current branch (mkit safety divergence) |

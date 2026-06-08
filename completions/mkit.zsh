@@ -21,6 +21,7 @@ _mkit() {
         'hash:Hash a file and store it as a blob'
         'cat:Display an object by its hash'
         'cat-file:Show an object'\''s type (-t), size (-s), content (-p), or --batch'
+        'show:Display objects (commit+diff, tag, tree, blob); default HEAD'
         'tree:Snapshot working directory as a tree object'
         'ls-tree:List a tree'\''s entries (-r recurse, -z NUL)'
         'ls-files:List tracked or untracked files'

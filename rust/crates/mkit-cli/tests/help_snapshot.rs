@@ -54,6 +54,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "ls-tree",
     "ls-files",
     "rev-parse",
+    "show",
     "show-ref",
     "for-each-ref",
     "symbolic-ref",
