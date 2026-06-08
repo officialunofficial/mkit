@@ -18,7 +18,7 @@
     "typecheck": "pnpm wasm:build && tsc --noEmit"
   },
   "dependencies": {
-    "hono": "^4.12.14",
+    "hono": "^4.12.21",
     "mkit-wasm": "link:vendor/mkit-wasm",
     "react": "~19.2.5",
     "react-dom": "~19.2.5",
