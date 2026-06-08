@@ -6,12 +6,13 @@
 //! [`mkit_core::ops::cherry_pick`].
 //!
 //! With `-i`/`--interactive`, the todo list is opened in `$EDITOR`
-//! before any mutation: lines can be reordered, deleted/`drop`ped, or
-//! marked `reword` (the editor reopens for that commit's message when it
-//! is replayed). Each commit's action is persisted alongside `todo` in
-//! the rebase state, so a `reword` that pauses on conflict still reopens
-//! the editor on `--continue`. `squash`/`fixup` are deferred (#291) and
-//! rejected at parse time before HEAD is touched.
+//! before any mutation: lines can be reordered, `drop`ped (deleted),
+//! `reword`ed, or folded into the previous commit with `squash` (combine
+//! messages) / `fixup` (keep the previous message). Each commit's action
+//! is persisted alongside `todo` in the rebase state, so a reword/squash
+//! that pauses on conflict still reopens the editor on `--continue`. A
+//! squash/fixup may not be the first line. `edit` (stop to amend) is not
+//! yet supported and is rejected at parse time before HEAD is touched.
 //!
 //! On conflict the loop **pauses**: it materialises conflict material
 //! into the worktree + index (via the shared `conflict` helper) and
@@ -65,8 +66,8 @@ struct RebaseOpts {
     #[arg(long, conflicts_with_all = ["cont", "abort", "branch"])]
     skip: bool,
     /// Edit the todo list in `$EDITOR` before replaying: reorder lines,
-    /// `drop` (or delete) lines, or mark a line `reword`. `squash`/`fixup`
-    /// are not yet supported (#291).
+    /// `drop` (or delete) lines, `reword`, or fold with `squash`/`fixup`.
+    /// (`edit` is not yet supported.)
     #[arg(short = 'i', long, conflicts_with_all = ["cont", "abort", "skip"])]
     interactive: bool,
     /// Branch to replay commits onto.
@@ -298,7 +299,7 @@ fn commit_resolved_commit(
         ));
     }
     let target = state.todo[0];
-    let parent = match refs::resolve_head(mkit_dir) {
+    let head_hash = match refs::resolve_head(mkit_dir) {
         Ok(Some(h)) => h,
         _ => state.onto,
     };
@@ -307,15 +308,16 @@ fn commit_resolved_commit(
     let tree_hash = worktree::build_tree_from_index(store, &idx)
         .map_err(|e| emit_err(&format!("build tree from index: {e}"), exit::GENERAL_ERROR))?;
     let mut signing = load_rebase_signing(cwd)?;
-    // Same message policy as the no-conflict path: pick keeps the original
-    // message, reword opens the editor now that the tree is resolved.
-    let message = message_for_action(store, target, state.front_action())?;
+    // Same parent/message policy as the no-conflict path: pick/reword make a
+    // child of HEAD, squash/fixup fold into it (parent = HEAD's parent). The
+    // reword/squash editor opens now that the tree is resolved.
+    let plan = plan_step_commit(store, state.front_action(), target, head_hash)?;
     let new_hash = build_commit(
         store,
         &mut signing.signer,
         signing.author.clone(),
-        parent,
-        message,
+        plan.parent,
+        plan.message,
         tree_hash,
     )?;
     if let Err(e) = super::restore_worktree_and_index(cwd, store, tree_hash) {
@@ -493,19 +495,20 @@ fn replay(
         if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
-        // Pick keeps the original message; reword opens the editor now (no
-        // conflict here — the conflict-resume path does the same in
-        // `commit_resolved_commit`).
-        let message = match message_for_action(store, target, state.front_action()) {
-            Ok(m) => m,
+        // Compute the new commit's parent + message for this action (pick/
+        // reword make a child of HEAD; squash/fixup fold into HEAD). Any
+        // editor (reword/squash) runs here, after the tree is clean — the
+        // conflict-resume path does the same in `commit_resolved_commit`.
+        let plan = match plan_step_commit(store, state.front_action(), target, head_hash) {
+            Ok(p) => p,
             Err(c) => return c,
         };
         let new_hash = match build_commit(
             store,
             &mut signing.signer,
             signing.author.clone(),
-            head_hash,
-            message,
+            plan.parent,
+            plan.message,
             result.tree_hash,
         ) {
             Ok(h) => h,
@@ -633,34 +636,102 @@ fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, u8> {
     }
 }
 
-/// The commit message to use when replaying `target` under `action`:
-/// the original message for `Pick`, or an editor-edited one for `Reword`
-/// (seeded with the original; an empty edit keeps the original rather than
-/// aborting the rebase).
-fn message_for_action(
+/// The parent and message a replayed commit gets under `action`.
+///
+/// `pick`/`reword` create a NEW commit as a child of `head_hash`.
+/// `squash`/`fixup` **fold** the target into `head_hash`: the new commit
+/// replaces it, so its parent is HEAD's own parent and the message combines
+/// (`squash`) or is kept from HEAD (`fixup`). Both the no-conflict replay
+/// and the `--continue` resume path call this, so they cannot diverge.
+struct StepCommit {
+    parent: Hash,
+    message: Vec<u8>,
+}
+
+fn plan_step_commit(
     store: &ObjectStore,
-    target: Hash,
     action: RebaseAction,
-) -> Result<Vec<u8>, u8> {
-    let original = match store.read_object(&target) {
-        Ok(Object::Commit(c)) => c.message,
-        Ok(_) => return Err(emit_err("target is not a commit", exit::DATAERR)),
-        Err(e) => return Err(emit_err(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
-    };
+    target: Hash,
+    head_hash: Hash,
+) -> Result<StepCommit, u8> {
     match action {
-        RebaseAction::Pick => Ok(original),
+        RebaseAction::Pick => Ok(StepCommit {
+            parent: head_hash,
+            message: read_commit(store, target)?.message,
+        }),
         RebaseAction::Reword => {
-            let seed = reword_template(&original);
-            match editor::spawn_editor(&seed) {
-                Ok(s) if !s.trim().is_empty() => Ok(s.into_bytes()),
-                Ok(_) => {
-                    let mut stderr = std::io::stderr().lock();
-                    let _ = writeln!(stderr, "reword: empty message; keeping the original");
-                    Ok(original)
-                }
-                Err(e) => Err(emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR)),
-            }
+            let original = read_commit(store, target)?.message;
+            Ok(StepCommit {
+                parent: head_hash,
+                message: reworded_message(&original)?,
+            })
         }
+        RebaseAction::Squash | RebaseAction::Fixup => {
+            // Fold into HEAD: the new commit takes HEAD's place, so its
+            // parent is HEAD's parent. A squash/fixup is rejected at parse
+            // time when it would be the first applied commit, so HEAD here is
+            // always a just-built commit with exactly one parent.
+            let head_commit = read_commit(store, head_hash)?;
+            let parent = head_commit.parents.first().copied().ok_or_else(|| {
+                emit_err(
+                    "'squash'/'fixup' has no preceding commit to fold into",
+                    exit::DATAERR,
+                )
+            })?;
+            let message = if action == RebaseAction::Fixup {
+                head_commit.message
+            } else {
+                let target_msg = read_commit(store, target)?.message;
+                squashed_message(&head_commit.message, &target_msg)?
+            };
+            Ok(StepCommit { parent, message })
+        }
+    }
+}
+
+fn read_commit(store: &ObjectStore, h: Hash) -> Result<Commit, u8> {
+    match store.read_object(&h) {
+        Ok(Object::Commit(c)) => Ok(c),
+        Ok(_) => Err(emit_err("object is not a commit", exit::DATAERR)),
+        Err(e) => Err(emit_err(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
+    }
+}
+
+/// Open the editor on a reword seed; an empty result keeps the original
+/// message rather than aborting the rebase.
+fn reworded_message(original: &[u8]) -> Result<Vec<u8>, u8> {
+    let seed = reword_template(original);
+    match editor::spawn_editor(&seed) {
+        Ok(s) if !s.trim().is_empty() => Ok(s.into_bytes()),
+        Ok(_) => {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "reword: empty message; keeping the original");
+            Ok(original.to_vec())
+        }
+        Err(e) => Err(emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR)),
+    }
+}
+
+/// Combine the kept commit's message with the squashed commit's via the
+/// editor. An empty result falls back to plain concatenation (never aborts).
+fn squashed_message(head_msg: &[u8], target_msg: &[u8]) -> Result<Vec<u8>, u8> {
+    let seed = format!(
+        "{}\n\n{}\n\n\
+         # This is a combination of 2 commits; the first message is the one\n\
+         # being squashed into. Edit the combined message above. Lines\n\
+         # starting with '#' are ignored.\n",
+        String::from_utf8_lossy(head_msg),
+        String::from_utf8_lossy(target_msg),
+    );
+    match editor::spawn_editor(&seed) {
+        Ok(s) if !s.trim().is_empty() => Ok(s.into_bytes()),
+        Ok(_) => {
+            let mut combined = head_msg.to_vec();
+            combined.extend_from_slice(b"\n\n");
+            combined.extend_from_slice(target_msg);
+            Ok(combined)
+        }
+        Err(e) => Err(emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR)),
     }
 }
 
@@ -719,10 +790,12 @@ fn edit_todo(
          # Commands (one per line, in apply order — top is applied first):\n\
          #   p, pick   <commit>  = use the commit\n\
          #   r, reword <commit>  = use the commit, but edit its message\n\
+         #   s, squash <commit>  = fold into the previous commit, combining messages\n\
+         #   f, fixup  <commit>  = fold into the previous commit, discard this message\n\
          #   d, drop   <commit>  = remove the commit\n\
          #\n\
          # Reorder lines to reorder commits. Deleting a line drops that commit.\n\
-         # squash/fixup are not yet supported (#291).\n\
+         # A squash/fixup cannot be the first line. 'edit' is not yet supported.\n\
          # Removing every line resets the branch to the base.\n",
         format::short_hash(&onto, 12),
         format::short_hash(&orig_head, 12),
@@ -740,8 +813,9 @@ fn edit_todo(
 
 /// Parse the edited todo text into `(todo, actions)`. Validates verbs and
 /// resolves each abbreviated commit against `candidates`. Fails (before any
-/// mutation) on an unknown verb, an unknown/ambiguous commit, or a
-/// not-yet-supported verb (`squash`/`fixup`/`edit`).
+/// mutation) on an unknown verb, an unknown/ambiguous commit, the still-
+/// unsupported `edit` verb, or a leading `squash`/`fixup` (which has no
+/// preceding commit to fold into).
 #[allow(clippy::type_complexity)]
 fn parse_todo(candidates: &[Hash], edited: &str) -> Result<(Vec<Hash>, Vec<RebaseAction>), u8> {
     let mut todo = Vec::new();
@@ -756,17 +830,17 @@ fn parse_todo(candidates: &[Hash], edited: &str) -> Result<(Vec<Hash>, Vec<Rebas
         let action = match verb {
             "p" | "pick" => RebaseAction::Pick,
             "r" | "reword" => RebaseAction::Reword,
+            "s" | "squash" => RebaseAction::Squash,
+            "f" | "fixup" => RebaseAction::Fixup,
             "d" | "drop" => {
                 // Dropped: still validate the hash so a typo is caught, then
                 // omit the commit.
                 let _ = resolve_todo_hash(candidates, parts.next(), line)?;
                 continue;
             }
-            "s" | "squash" | "f" | "fixup" | "e" | "edit" => {
+            "e" | "edit" => {
                 return Err(emit_err(
-                    &format!(
-                        "'{verb}' is not yet supported (squash/fixup/edit: #291); use pick, reword, or drop"
-                    ),
+                    "'edit' (stop to amend) is not yet supported; use pick, reword, squash, fixup, or drop",
                     exit::USAGE,
                 ));
             }
@@ -777,6 +851,15 @@ fn parse_todo(candidates: &[Hash], edited: &str) -> Result<(Vec<Hash>, Vec<Rebas
                 ));
             }
         };
+        // A squash/fixup folds into the previous commit, so it cannot be the
+        // first applied line (git: "cannot 'squash' without a previous
+        // commit"). Reject before any mutation.
+        if todo.is_empty() && action.folds_into_previous() {
+            return Err(emit_err(
+                &format!("cannot '{verb}' as the first commit; it has nothing to fold into"),
+                exit::USAGE,
+            ));
+        }
         let h = resolve_todo_hash(candidates, parts.next(), line)?;
         todo.push(h);
         actions.push(action);

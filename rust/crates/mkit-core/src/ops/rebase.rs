@@ -73,14 +73,19 @@ pub type RebaseResult<T> = Result<T, RebaseError>;
 
 /// What to do with a commit when it is replayed during an interactive
 /// rebase. Non-interactive rebase uses [`RebaseAction::Pick`] for every
-/// commit. (`drop` is represented by omitting the commit from the todo;
-/// `squash`/`fixup` are a follow-up, see #291.)
+/// commit. (`drop` is represented by omitting the commit from the todo.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebaseAction {
     /// Replay the commit unchanged (default).
     Pick,
     /// Replay the commit, then open the editor to rewrite its message.
     Reword,
+    /// Fold the commit into the previous one, combining their messages
+    /// (the editor opens on the combined message).
+    Squash,
+    /// Fold the commit into the previous one, discarding this commit's
+    /// message (the previous message is kept).
+    Fixup,
 }
 
 impl RebaseAction {
@@ -90,7 +95,16 @@ impl RebaseAction {
         match self {
             RebaseAction::Pick => "pick",
             RebaseAction::Reword => "reword",
+            RebaseAction::Squash => "squash",
+            RebaseAction::Fixup => "fixup",
         }
+    }
+
+    /// `true` for actions that fold into the previous commit rather than
+    /// creating a new one on top of it.
+    #[must_use]
+    pub fn folds_into_previous(self) -> bool {
+        matches!(self, RebaseAction::Squash | RebaseAction::Fixup)
     }
 
     /// Parse an action from its persisted keyword.
@@ -99,6 +113,8 @@ impl RebaseAction {
         match s {
             "pick" => Some(RebaseAction::Pick),
             "reword" => Some(RebaseAction::Reword),
+            "squash" => Some(RebaseAction::Squash),
+            "fixup" => Some(RebaseAction::Fixup),
             _ => None,
         }
     }
@@ -495,6 +511,23 @@ mod tests {
         fs::remove_file(mkit.join(REBASE_DIR).join("actions")).unwrap();
         let read = read_state(&mkit).unwrap();
         assert_eq!(read.actions, vec![RebaseAction::Pick, RebaseAction::Pick]);
+    }
+
+    #[test]
+    fn action_keyword_roundtrip_and_folds() {
+        for a in [
+            RebaseAction::Pick,
+            RebaseAction::Reword,
+            RebaseAction::Squash,
+            RebaseAction::Fixup,
+        ] {
+            assert_eq!(RebaseAction::from_keyword(a.keyword()), Some(a));
+        }
+        assert!(RebaseAction::Squash.folds_into_previous());
+        assert!(RebaseAction::Fixup.folds_into_previous());
+        assert!(!RebaseAction::Pick.folds_into_previous());
+        assert!(!RebaseAction::Reword.folds_into_previous());
+        assert_eq!(RebaseAction::from_keyword("nope"), None);
     }
 
     #[test]

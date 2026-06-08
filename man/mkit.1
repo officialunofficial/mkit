@@ -606,14 +606,19 @@ the todo list opens in
 .Ev $EDITOR
 first: reorder lines to reorder commits, delete a line (or mark it
 .Cm drop )
-to drop a commit, and mark a line
+to drop a commit, mark a line
 .Cm reword
-to edit that commit's message during replay. Removing every line resets the
-branch to the base.
+to edit that commit's message during replay, or fold a commit into the
+previous one with
 .Cm squash
-and
+(combine messages) or
 .Cm fixup
-are not yet supported and are rejected before any mutation (see #291).
+(keep the previous message). A
+.Cm squash Ns / Ns Cm fixup
+cannot be the first line and is rejected before any mutation. Removing every
+line resets the branch to the base.
+.Cm edit
+(stop-to-amend) is not yet supported.
 Accepts
 .Fl Fl continue ,
 .Fl Fl skip ,
