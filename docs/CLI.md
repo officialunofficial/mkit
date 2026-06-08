@@ -706,9 +706,12 @@ ignore files (only the repo root is read), global excludes
 mkit's local commands intentionally diverge from Git in a few places.
 These are documented behaviours, not bugs, with tracked follow-ups:
 
-- **`mkit log --graph` is a no-op.** The flag is accepted for
-  compatibility so existing scripts don't break, but no ASCII commit
-  graph is drawn. A real graph renderer is a follow-up.
+- **`mkit log --graph` is a no-op (v1 non-goal).** The flag is accepted
+  for compatibility so existing scripts don't break, but no ASCII commit
+  graph is drawn. Full graph parity is unachievable because mkit's default
+  `log` body already diverges from git's `commit/Author/Date` (mkit
+  `Identity` + 64-hex ids); an `--oneline --graph` renderer for the
+  linear/DAG case is a tracked post-v1 follow-up, not a v1 blocker.
 - **`mkit status --porcelain=v2`** matches git's format except that object
   ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1) and mkit emits no
   rename (`2`) records — it has no rename detection. `--branch` header
