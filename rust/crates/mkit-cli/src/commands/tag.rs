@@ -165,6 +165,24 @@ fn create_lightweight(
         Ok(h) => h,
         Err((m, c)) => return emit_err(&m, c),
     };
+    // A lightweight tag publishes a root ref to an existing object, so it is
+    // also a gc root publisher: hold the lock and re-verify the target under
+    // it before writing the ref, so a concurrent `gc --grace-secs 0` can't
+    // prune the (possibly unreachable) target between resolve and publish
+    // (#267).
+    let _lock = match super::acquire_worktree_lock(cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+    if !store.contains(&h) {
+        return emit_err(
+            &format!(
+                "tag target {} no longer exists (pruned concurrently?); aborting",
+                format::short_hash(&h, 8)
+            ),
+            exit::GENERAL_ERROR,
+        );
+    }
     // `Missing` (issue #206) refuses to silently overwrite an existing
     // tag of the same name.
     match refs::update_tag(mkit_dir, name, refs::RefWriteCondition::Missing, &h) {
@@ -251,6 +269,28 @@ fn create_annotated(
         }
     }
     // Annotated-but-unsigned tags keep the zero signature.
+
+    // Hold the repo lock across the tag-object write + ref publish so a
+    // concurrent `gc --grace-secs 0` can't prune the just-written tag object
+    // before its ref makes it reachable (#267). The repo was validated above
+    // (store open), so a non-repo already reported cleanly — not as a lock
+    // error. Acquired here (after the editor/signing) to keep the hold tight.
+    let _lock = match super::acquire_worktree_lock(cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+    // The target was resolved before the lock; re-verify it still exists now
+    // that gc can't run, so we never publish a tag pointing at an object a
+    // concurrent `gc --grace-secs 0` pruned in the meantime (#267).
+    if !store.contains(&target) {
+        return emit_err(
+            &format!(
+                "tag target {} no longer exists (pruned concurrently?); aborting",
+                format::short_hash(&target, 8)
+            ),
+            exit::GENERAL_ERROR,
+        );
+    }
 
     let bytes = match serialize::serialize(&Object::Tag(tag)) {
         Ok(b) => b,

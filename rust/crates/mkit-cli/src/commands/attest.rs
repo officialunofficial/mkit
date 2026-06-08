@@ -355,6 +355,35 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // --- Save. ----------------------------------------------------
+    // Hold the repo lock across the envelope write so a concurrent
+    // `gc --grace-secs 0` can't compute its live set (which treats
+    // attestation subjects as roots) before this attestation lands and then
+    // prune the just-attested commit (#267). The repo was validated above
+    // (`mkit_dir.is_dir()`), so a non-repo reported cleanly. Held tightly,
+    // after signing (which may shell out to an external signer), around the
+    // write only.
+    let _lock = match super::acquire_worktree_lock(&cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+    // The commit was resolved before the lock; re-verify it still exists in
+    // the object store now that gc can't run, so we never write an
+    // attestation whose subject a concurrent `gc --grace-secs 0` pruned
+    // between resolution and this save (#267). (`obj_store` avoids shadowing
+    // the `mkit_attest::store` module used for `store::save`.)
+    let obj_store = match mkit_core::store::ObjectStore::open(&cwd) {
+        Ok(s) => s,
+        Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
+    };
+    if !obj_store.contains(&commit_hash) {
+        return emit_err(
+            &format!(
+                "attested commit {} no longer exists (pruned concurrently?); aborting",
+                hash_mod::to_hex(&commit_hash)
+            ),
+            exit::CANTCREAT,
+        );
+    }
     let (att_id, path) = match store::save(&mkit_dir, &commit_hash, encoded.as_bytes()) {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("store: {e}"), exit::CANTCREAT),
