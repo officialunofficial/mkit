@@ -67,7 +67,11 @@ jobs:
 
       - name: Deep stateful run
         working-directory: rust
+        # `set -o pipefail` so a failing nextest run is NOT masked by tee's exit
+        # status — otherwise the step would report success and the failure
+        # artifact upload below (`if: failure()`) would never fire.
         run: |
+          set -o pipefail
           cargo nextest run --locked --profile state-machine \
             -p mkit-cli --test state_machine 2>&1 | tee state-machine.log
 

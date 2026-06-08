@@ -10,9 +10,11 @@
 //! Design (see `docs`/the plan for the full rationale):
 //!   * **Oracle = invariant battery** (metamorphic), not a reference model.
 //!     After every op the repo must still satisfy: content-addressing
-//!     integrity, ref resolvability, well-formed HEAD, parseable index,
+//!     integrity, resolvable head/tag refs, well-formed HEAD, parseable index,
 //!     reachable-set ⊆ stored-set (gc safety), valid signatures over signed
-//!     refs, no leaked lock files, and clean process-exit hygiene.
+//!     refs, operation-state coherence (a successful `--abort`/`--continue`
+//!     clears its conflict sidecar), no leaked lock files, and clean
+//!     process-exit hygiene.
 //!   * **Drive level = CLI subprocess** — the corruption-prone orchestration
 //!     (merge/rebase/reset/`--continue`/`--abort` + conflict sidecars + locks)
 //!     lives only in the CLI layer, so the suite spawns the binary.
@@ -320,66 +322,119 @@ fn in_progress(mkit_dir: &Path) -> Option<&'static str> {
     }
 }
 
-/// Apply one op. Returns the last `mkit` invocation (for exit hygiene), or
-/// `None` for pure-filesystem ops and no-op continuations.
-fn apply(op: &Op, root: &Path, xdg: &Path, ctr: &mut u32) -> Option<Output> {
+/// Apply one op. Returns **every** `mkit` invocation it made (composite ops
+/// like `CheckoutNew` make two), so the caller can run exit hygiene on each.
+/// Pure-filesystem ops return an empty vec.
+fn apply(op: &Op, root: &Path, xdg: &Path, ctr: &mut u32) -> Vec<Output> {
     let mkit_dir = root.join(".mkit");
     match op {
         Op::Write(a, b) => {
             let byte = b'A' + (b % 26);
             let _ = fs::write(root.join(file_name(*a)), [byte, b'\n']);
-            None
+            vec![]
         }
         Op::Delete(a) => {
             let _ = fs::remove_file(root.join(file_name(*a)));
-            None
+            vec![]
         }
-        Op::Add(a) => Some(mkit(root, xdg, &["add", &file_name(*a)])),
-        Op::AddAll => Some(mkit(root, xdg, &["add", "-A"])),
-        Op::Rm(a) => Some(mkit(root, xdg, &["rm", "-f", &file_name(*a)])),
-        Op::Restore(a) => Some(mkit(root, xdg, &["restore", &file_name(*a)])),
+        Op::Add(a) => vec![mkit(root, xdg, &["add", &file_name(*a)])],
+        Op::AddAll => vec![mkit(root, xdg, &["add", "-A"])],
+        Op::Rm(a) => vec![mkit(root, xdg, &["rm", "-f", &file_name(*a)])],
+        Op::Restore(a) => vec![mkit(root, xdg, &["restore", &file_name(*a)])],
         Op::Commit => {
             *ctr += 1;
-            Some(mkit(root, xdg, &["commit", "-m", &format!("c{ctr}")]))
+            vec![mkit(root, xdg, &["commit", "-m", &format!("c{ctr}")])]
         }
-        Op::Branch(a) => Some(mkit(root, xdg, &["branch", &branch_name(*a)])),
-        Op::DelBranch(a) => Some(mkit(root, xdg, &["branch", "-d", &branch_name(*a)])),
-        Op::Checkout(a) => Some(mkit(root, xdg, &["checkout", &pick_branch(&mkit_dir, *a)])),
+        Op::Branch(a) => vec![mkit(root, xdg, &["branch", &branch_name(*a)])],
+        Op::DelBranch(a) => vec![mkit(root, xdg, &["branch", "-d", &branch_name(*a)])],
+        Op::Checkout(a) => vec![mkit(root, xdg, &["checkout", &pick_branch(&mkit_dir, *a)])],
         Op::CheckoutNew(a) => {
-            // mkit has no `checkout -b`: compose branch-create then switch.
+            // mkit has no `checkout -b`: compose branch-create then switch. Both
+            // invocations are returned so neither escapes exit hygiene.
             let n = branch_name(*a);
-            let _ = mkit(root, xdg, &["branch", &n]);
-            Some(mkit(root, xdg, &["checkout", &n]))
+            vec![
+                mkit(root, xdg, &["branch", &n]),
+                mkit(root, xdg, &["checkout", &n]),
+            ]
         }
-        Op::Tag(a) => Some(mkit(root, xdg, &["tag", &tag_name(*a)])),
-        Op::DelTag(a) => Some(mkit(root, xdg, &["tag", "-d", &tag_name(*a)])),
-        Op::Merge(a) => Some(mkit(root, xdg, &["merge", &pick_branch(&mkit_dir, *a)])),
-        Op::Reset(m) => Some(mkit(root, xdg, &["reset", m.flag()])),
+        Op::Tag(a) => vec![mkit(root, xdg, &["tag", &tag_name(*a)])],
+        Op::DelTag(a) => vec![mkit(root, xdg, &["tag", "-d", &tag_name(*a)])],
+        Op::Merge(a) => vec![mkit(root, xdg, &["merge", &pick_branch(&mkit_dir, *a)])],
+        Op::Reset(m) => vec![mkit(root, xdg, &["reset", m.flag()])],
         Op::CherryPick(a) => {
             let names = existing_branches(&mkit_dir);
             if names.is_empty() {
-                None
+                vec![]
             } else {
                 let b = &names[(*a as usize) % names.len()];
-                Some(mkit(root, xdg, &["cherry-pick", b]))
+                vec![mkit(root, xdg, &["cherry-pick", b])]
             }
         }
-        Op::Revert => Some(mkit(root, xdg, &["revert", "HEAD"])),
-        Op::Rebase(a) => Some(mkit(root, xdg, &["rebase", &pick_branch(&mkit_dir, *a)])),
-        Op::Continue => in_progress(&mkit_dir).map(|verb| mkit(root, xdg, &[verb, "--continue"])),
-        Op::Abort => in_progress(&mkit_dir).map(|verb| mkit(root, xdg, &[verb, "--abort"])),
-        Op::Skip => {
-            if in_progress(&mkit_dir) == Some("rebase") {
-                Some(mkit(root, xdg, &["rebase", "--skip"]))
-            } else {
-                None
-            }
+        Op::Revert => vec![mkit(root, xdg, &["revert", "HEAD"])],
+        Op::Rebase(a) => vec![mkit(root, xdg, &["rebase", &pick_branch(&mkit_dir, *a)])],
+        // Continuations dispatch to whatever op is in progress; when none is,
+        // we still fire the representative verb so the "nothing in progress ->
+        // clean error" path is exercised (and validated by exit hygiene).
+        Op::Continue => {
+            let verb = in_progress(&mkit_dir).unwrap_or("merge");
+            vec![mkit(root, xdg, &[verb, "--continue"])]
         }
-        Op::Stash => Some(mkit(root, xdg, &["stash"])),
-        Op::StashPop => Some(mkit(root, xdg, &["stash", "pop"])),
-        Op::Gc => Some(mkit(root, xdg, &["gc"])),
-        Op::Mv(a, b) => Some(mkit(root, xdg, &["mv", &file_name(*a), &file_name(*b)])),
-        Op::Clean => Some(mkit(root, xdg, &["clean", "-f", "-d"])),
+        Op::Abort => {
+            let verb = in_progress(&mkit_dir).unwrap_or("merge");
+            vec![mkit(root, xdg, &[verb, "--abort"])]
+        }
+        Op::Skip => vec![mkit(root, xdg, &["rebase", "--skip"])],
+        Op::Stash => vec![mkit(root, xdg, &["stash"])],
+        Op::StashPop => vec![mkit(root, xdg, &["stash", "pop"])],
+        // `--grace-secs 0` actually prunes unreachable objects on a fresh repo;
+        // the default 14-day window would retain everything and make the
+        // post-gc reachability invariant toothless.
+        Op::Gc => vec![mkit(root, xdg, &["gc", "--grace-secs", "0"])],
+        Op::Mv(a, b) => vec![mkit(root, xdg, &["mv", &file_name(*a), &file_name(*b)])],
+        Op::Clean => vec![mkit(root, xdg, &["clean", "-f", "-d"])],
+    }
+}
+
+/// Does the on-disk in-progress marker for `verb` still exist?
+fn marker_present(mkit_dir: &Path, verb: &str) -> bool {
+    match verb {
+        "merge" => mkit_dir.join("MERGE_HEAD").exists(),
+        "cherry-pick" => mkit_dir.join("CHERRY_PICK_HEAD").exists(),
+        "revert" => mkit_dir.join("REVERT_HEAD").exists(),
+        "rebase" => {
+            mkit_dir.join("rebase-apply").exists() || mkit_dir.join("rebase-merge").exists()
+        }
+        _ => false,
+    }
+}
+
+/// Operation-state-coherence invariant (the conflict-sidecar half of the
+/// oracle). A successful `--abort` must clear whatever was in progress; a
+/// successful non-rebase `--continue` concludes the op and must clear its
+/// marker. (Rebase `--continue` may legitimately pause at the next pick, so it
+/// is exempt.) This is exactly the class of bug — "abort returns success but
+/// forgets to delete `MERGE_HEAD`" — that pure reachability/signature checks miss.
+fn check_op_state(
+    op: &Op,
+    pre_verb: Option<&'static str>,
+    outputs: &[Output],
+    mkit_dir: &Path,
+    label: &str,
+) -> Result<(), String> {
+    let last_ok = outputs.last().is_some_and(|o| o.status.code() == Some(0));
+    let Some(verb) = pre_verb else {
+        return Ok(());
+    };
+    match op {
+        Op::Abort if last_ok && marker_present(mkit_dir, verb) => Err(format!(
+            "[{label}] `{verb} --abort` reported success but left its in-progress marker"
+        )),
+        Op::Continue if verb != "rebase" && last_ok && marker_present(mkit_dir, verb) => {
+            Err(format!(
+                "[{label}] `{verb} --continue` reported success but left its in-progress marker"
+            ))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -433,7 +488,11 @@ fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
     read_index(root).map_err(|e| format!("[{label}] index unparseable: {e}"))?;
 
     // 4. Collect *signed* roots: HEAD, every head ref, every tag ref. A listed
-    //    ref with malformed on-disk bytes (hash == None) is corruption.
+    //    ref whose on-disk bytes are malformed (hash == None) is corruption.
+    //    NOTE: `list_refs`/`list_tags` silently skip files with invalid ref
+    //    *names*; since the random ops here can only ever write valid names,
+    //    every ref is well-formed by construction. A strict name-level ref walk
+    //    only matters under corruption injection (Phase 2, #307).
     let mut roots: Vec<Hash> = Vec::new();
     if let Some(h) =
         refs::resolve_head(&mkit_dir).map_err(|e| format!("[{label}] resolve HEAD: {e}"))?
@@ -538,9 +597,13 @@ fn run_scenario(ops: &[Op]) -> Result<(), String> {
     let mut ctr = 0u32;
     for (i, op) in ops.iter().enumerate() {
         let label = format!("op{i} `{op}`");
-        if let Some(out) = apply(op, root, xdgp, &mut ctr) {
-            check_exit(&out, &label)?;
+        let mkit_dir = root.join(".mkit");
+        let pre_verb = in_progress(&mkit_dir);
+        let outputs = apply(op, root, xdgp, &mut ctr);
+        for out in &outputs {
+            check_exit(out, &label)?;
         }
+        check_op_state(op, pre_verb, &outputs, &mkit_dir, &label)?;
         check_invariants(root, &label)?;
     }
     Ok(())
@@ -620,6 +683,50 @@ fn replay_checked_in_regressions() {
 #[cfg(test)]
 mod unit {
     use super::*;
+
+    /// Fabricate a successful `Output` so tests don't depend on a real process.
+    fn ok_output() -> Output {
+        use std::os::unix::process::ExitStatusExt;
+        Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    /// The operation-state invariant must bite: if `--abort` reports success
+    /// but the in-progress marker is still on disk, `check_op_state` flags it.
+    #[test]
+    fn op_state_invariant_detects_stale_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let mkit_dir = dir.path().join(".mkit");
+        fs::create_dir_all(&mkit_dir).unwrap();
+        let merge_head = mkit_dir.join("MERGE_HEAD");
+
+        // Healthy: a successful abort left no marker → no complaint.
+        check_op_state(
+            &Op::Abort,
+            Some("merge"),
+            &[ok_output()],
+            &mkit_dir,
+            "clean",
+        )
+        .unwrap();
+
+        // Buggy: marker survived a successful abort → flagged.
+        fs::write(&merge_head, b"deadbeef").unwrap();
+        assert!(
+            check_op_state(
+                &Op::Abort,
+                Some("merge"),
+                &[ok_output()],
+                &mkit_dir,
+                "stale"
+            )
+            .is_err(),
+            "stale MERGE_HEAD after a successful abort must be flagged"
+        );
+    }
 
     #[test]
     fn op_display_roundtrips_through_parse() {
