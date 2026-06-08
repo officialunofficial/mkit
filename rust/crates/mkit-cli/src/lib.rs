@@ -75,6 +75,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "ls-tree" => commands::ls_tree::run(&rest),
         "ls-files" => commands::ls_files::run(&rest),
         "rev-parse" => commands::rev_parse::run(&rest),
+        "show" => commands::show::run(&rest),
         "show-ref" => commands::show_ref::run(&rest),
         "for-each-ref" => commands::for_each_ref::run(&rest),
         "symbolic-ref" => commands::symbolic_ref::run(&rest),

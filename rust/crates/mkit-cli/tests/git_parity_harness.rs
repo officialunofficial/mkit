@@ -1483,6 +1483,39 @@ fn assert_parity_diff(label: &str, git: &Output, mkit: &Output) {
     );
 }
 
+/// `mkit show HEAD`'s diff body (from the first `diff --git` line onward)
+/// must match `git show HEAD`'s, modulo abbreviated `index` ids. The commit
+/// header above it diverges (mkit `Identity` + 64-hex hash, same as `log`)
+/// and is intentionally not compared.
+#[test]
+fn show_head_diff_body_matches_git() {
+    if !git_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.init_both();
+    h.write_both("f.txt", b"line1\nline2\nline3\n");
+    h.commit_both(&["f.txt"], "init");
+    h.write_both("f.txt", b"line1\nCHANGED\nline3\nline4\n");
+    h.commit_both(&["f.txt"], "second");
+    let g = h.git(&["show", "HEAD"]);
+    let m = h.mkit(&["show", "HEAD"]);
+    assert!(
+        g.status.success() && m.status.success(),
+        "show failed: git={g:?} mkit={m:?}"
+    );
+    let body = |o: &Output| {
+        let s = stdout(o);
+        let from = s.find("diff --git").unwrap_or(s.len());
+        s[from..].lines().map(mask_diff_line).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        body(&g),
+        body(&m),
+        "show HEAD diff body diverged from git (modulo abbreviated ids)"
+    );
+}
+
 #[test]
 fn diff_unified_modify_matches_git() {
     if !git_available() {

@@ -242,6 +242,24 @@ header plus the content for each
 .Pq Ql <name> missing No for unknown objects .
 .Ar object
 resolves through the shared revspec grammar.
+.It Cm show Op Ar object ...
+Display objects, like
+.Xr git 1 Cm show ,
+defaulting to
+.Cm HEAD .
+A commit or remix prints a header
+.Pq Cm commit Ar hash , Cm Author , Cm Date , indented message
+followed by the unified diff against its first parent (byte-identical to
+.Cm mkit diff Ar parent Ar commit ) ;
+a tag prints its header and then the peeled target; a tree is listed as
+.Ql <mode> <type> <hash>\et<name>
+lines; a blob prints its raw contents. As with
+.Cm log ,
+the commit/tag header carries mkit's signed
+.Ar Identity
+and 64-hex BLAKE3 ids, so those lines diverge from git's
+.Ql Author: Name <email>
+/ 40-hex form; the diff body, tree listing, and blob output match git.
 .It Cm tree
 Snapshot the working directory as a tree object and print the tree hash.
 Honors

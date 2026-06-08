@@ -44,6 +44,9 @@ commands:
                     Show an object's type, size, or content
                     (-p: blob bytes, tree listing, or commit/tag summary;
                     --batch reads object names from stdin, takes no <object>)
+  show [<object>...] Display objects (default HEAD): a commit/remix with its
+                    diff vs the first parent, a tag then its target, a tree
+                    listing, or a blob's contents
   tree              Snapshot working directory as a tree object
   ls-tree [-r] [-z] <tree-ish> [<path>...]
                     List a tree's entries as `<mode> <type> <hash>\t<name>`
@@ -234,6 +237,7 @@ mod tests {
             "ls-tree",
             "ls-files",
             "rev-parse",
+            "show",
             "show-ref",
             "for-each-ref",
             "symbolic-ref",

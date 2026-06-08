@@ -623,7 +623,7 @@ fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
 
 /// Map a resolved object hash to a tree hash: commit/remix → its tree,
 /// a tree → itself.
-fn object_to_tree(store: &ObjectStore, h: &Hash) -> Result<Hash, String> {
+pub(super) fn object_to_tree(store: &ObjectStore, h: &Hash) -> Result<Hash, String> {
     match store.read_object(h) {
         Ok(Object::Commit(c)) => Ok(c.tree_hash),
         Ok(Object::Remix(r)) => Ok(r.tree_hash),
@@ -741,7 +741,10 @@ fn abbrev(h: Option<Hash>) -> String {
 /// changed entry. The `index <old>..<new>` ids are abbreviated BLAKE3
 /// prefixes (longer than git's SHA-1 prefixes for the same `core.abbrev`),
 /// the one inherent divergence; everything else matches `git diff`.
-fn emit_entry_patch(
+///
+/// Shared with `mkit show`, so a commit's diff body is byte-identical to
+/// `mkit diff <parent> <commit>`.
+pub(super) fn emit_entry_patch(
     out: &mut impl Write,
     store: &ObjectStore,
     e: &DiffEntry,
