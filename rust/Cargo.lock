@@ -2842,6 +2842,7 @@ dependencies = [
  "mkit-transport-ssh",
  "mockito",
  "p256 0.13.2",
+ "proptest",
  "rand_core 0.6.4",
  "signal-hook",
  "tempfile",

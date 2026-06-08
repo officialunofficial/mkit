@@ -26,3 +26,29 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # Emit JUnit XML alongside the human-readable output so GitHub Actions
 # can render failure annotations inline on PR diffs.
 path = "junit.xml"
+
+# The bounded PR run of the stateful suite (tests/state_machine.rs, 32 cases)
+# is ~12s locally, but it spawns the `mkit` binary per op, so a slow/loaded
+# (especially macOS) runner could drift toward the default 60s / ci 120s kill
+# envelope and spuriously fail. It is NOT a hang — give just this test a
+# generous per-test ceiling in the PR profiles. The nightly deep run uses the
+# `state-machine` profile instead.
+[[profile.default.overrides]]
+filter = 'test(=stateful_invariants)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'test(=stateful_invariants)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[profile.state-machine]
+# Nightly deep run of the stateful invariant suite
+# (tests/state_machine.rs). It drives the real `mkit` binary through
+# hundreds of randomly-generated op sequences (PROPTEST_CASES=512), so a
+# single test legitimately runs for many minutes — far past the default
+# 60s / ci 120s slow-test kill envelope. Give it a generous ceiling
+# rather than treating the long runtime as a hang. (The bounded PR run on
+# the default/ci profiles gets its own, smaller, per-test override above.)
+slow-timeout = { period = "1200s", terminate-after = 1 }
+retries = 0
+fail-fast = false
