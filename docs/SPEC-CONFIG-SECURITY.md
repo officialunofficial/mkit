@@ -1,3 +1,10 @@
+---
+spec: SPEC-CONFIG-SECURITY
+version: 1
+status: normative
+audience: config-key authors, config.rs reviewers, transport authors
+---
+
 # SPEC-CONFIG-SECURITY — repo-vs-user config trust split
 
 Status: **Normative.** Companion to `docs/THREAT-MODEL.md` §4 and

@@ -23,7 +23,7 @@ Advisories. Full policy: [SECURITY.md](SECURITY.md).
 | CLI binary | `rust/crates/mkit-cli/` |
 | Core library (objects, packs, refs, signing) | `rust/crates/mkit-core/` |
 | Attestations (in-toto v1, DSSE, signers) | `rust/crates/mkit-attest/` |
-| Transports | `rust/crates/mkit-transport-{memory,file,http,s3,ssh}/` |
+| Transports | `rust/crates/mkit-transport-{memory,file,http,s3,ssh,enc}/` |
 | External signers (TPM, SE, CTAP, file) | `contrib/signers/` |
 | On-disk + wire format specs | `docs/SPEC-*.md` |
 | Golden vectors | `rust/tests/golden/` |
@@ -120,6 +120,7 @@ rust/
     mkit-core/
     mkit-keystore/
     mkit-rpc/                 # Protobuf-defined wire protocols
+    mkit-transport-enc/       # mkit+enc:// no-OpenSSH encrypted transport
     mkit-transport-file/
     mkit-transport-http/
     mkit-transport-memory/

@@ -174,7 +174,7 @@ Workspace crates:
 | `mkit-attest` | JCS, in-toto v1 Statement, DSSE envelope, signers, verify |
 | `mkit-keystore` | platform-aware signing-key vault (software, OS keychains, systemd-creds, YubiKey, external signers) — see [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md) |
 | `mkit-rpc` | shared wire schemas + length-prefixed framing for stdio subprocess protocols (external signers) |
-| `mkit-transport-{memory,file,http,s3,ssh}` | Transport trait implementations |
+| `mkit-transport-{memory,file,http,s3,ssh,enc}` | Transport trait implementations (`enc` = the `mkit+enc://` no-OpenSSH encrypted transport) |
 | `mkit-cli` | the `mkit` binary |
 | `mkit-wasm` | wasm-bindgen surface for browsers / Cloudflare Workers, published to npm as `@makechain/mkit-wasm` |
 | `mkit-fuzz` | bounded property tests (cargo-fuzz compatible) |
@@ -182,8 +182,8 @@ Workspace crates:
 Each transport implements the same trait — `list_refs`, `read_ref`,
 `write_ref`, `pack_exists`, `download_pack`, `upload_pack` — described
 in [`docs/SPEC-TRANSPORT.md`](docs/SPEC-TRANSPORT.md). The URL scheme
-picks the transport: `mkit+ssh://`, `mkit+s3://`, `mkit+https://`,
-`mkit+file://`. There is no "smart" fallback — the scheme is part of
+picks the transport: `mkit+ssh://`, `mkit+enc://`, `mkit+s3://`,
+`mkit+https://`, `mkit+file://`. There is no "smart" fallback — the scheme is part of
 the contract. Deeper layering notes in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -304,10 +304,12 @@ with `cargo bench --workspace -- --quick` plus
 
 ## Documentation
 
-The SPEC documents below are stamped `status: draft` pending review
-polish, but the v1 wire and on-disk formats they describe are pinned
-by the test vectors under [`rust/tests/golden/`](rust/tests/golden/)
-and will remain stable through the 0.x series.
+Each SPEC carries its own `status:` header — `draft`, `stable`,
+`phase-2-shipped`, `implemented`, or `normative` — reflecting how settled
+that document is. Regardless of header, the v1 wire and on-disk formats
+they describe are pinned by the test vectors under
+[`rust/tests/golden/`](rust/tests/golden/) and remain stable through the
+0.x series.
 
 | Doc | Audience |
 |---|---|
@@ -321,12 +323,14 @@ and will remain stable through the 0.x series.
 | [`docs/SPEC-DELTA.md`](docs/SPEC-DELTA.md) | Implementers — delta encoding |
 | [`docs/SPEC-REFS.md`](docs/SPEC-REFS.md) | Implementers — ref names and CAS |
 | [`docs/SPEC-TRANSPORT.md`](docs/SPEC-TRANSPORT.md) | Implementers — 7-verb transport protocol incl. SSH OP_HELLO |
+| [`docs/SPEC-TRANSPORT-ENC.md`](docs/SPEC-TRANSPORT-ENC.md) | Implementers — `mkit+enc://` no-OpenSSH encrypted transport |
 | [`docs/SPEC-FASTCDC.md`](docs/SPEC-FASTCDC.md) | Implementers — content chunking |
 | [`docs/SPEC-SIGNING.md`](docs/SPEC-SIGNING.md) | Implementers — commit signing format |
 | [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md) | Implementers — keystore vault interface |
 | [`docs/SPEC-RPC.md`](docs/SPEC-RPC.md) | Implementers — shared stdio framing for subprocess protocols |
 | [`docs/SPEC-EXTERNAL-SIGNER.md`](docs/SPEC-EXTERNAL-SIGNER.md) | Integrators — external signer stdio protocol |
 | [`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) | Implementers + integrators — native attestation (in-toto v1 + DSSE) |
+| [`docs/SPEC-HISTORY-PROOF.md`](docs/SPEC-HISTORY-PROOF.md) | Implementers — MMR commit-chain inclusion proofs (light-client attestation) |
 | [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators — SSH transport trust model |
 | [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators + reviewers — trust boundaries and security assumptions |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release procedure overview |
