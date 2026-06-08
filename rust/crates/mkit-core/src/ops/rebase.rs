@@ -1,11 +1,14 @@
 //! Rebase state machine.
 //!
-//! Persists rebase state under `.mkit/rebase-apply/` as five files:
+//! Persists rebase state under `.mkit/rebase-apply/` as six files:
 //!
 //! - `head-name`  : symbolic name of the branch being rebased
 //! - `orig-head`  : 64-hex BLAKE3 of the tip before rebase started
 //! - `onto`       : 64-hex BLAKE3 of the rebase target
 //! - `todo`       : newline-separated list of remaining commits
+//! - `actions`    : newline-separated per-commit action parallel to `todo`
+//!   (`pick`/`reword`); absent ⇒ every commit is a `pick`, for back-compat
+//!   with rebases started before interactive support
 //! - `done`       : newline-separated list of replayed commits
 //!
 //! Trailing newlines are tolerated on read and always written.
@@ -33,6 +36,7 @@ const ORIG_HEAD_FILE: &str = "orig-head";
 const ONTO_FILE: &str = "onto";
 const TODO_FILE: &str = "todo";
 const DONE_FILE: &str = "done";
+const ACTIONS_FILE: &str = "actions";
 
 const MAX_HEAD_NAME_BYTES: u64 = 4096;
 const MAX_HASH_FILE_BYTES: u64 = 128;
@@ -67,6 +71,39 @@ pub enum RebaseError {
 /// Result alias.
 pub type RebaseResult<T> = Result<T, RebaseError>;
 
+/// What to do with a commit when it is replayed during an interactive
+/// rebase. Non-interactive rebase uses [`RebaseAction::Pick`] for every
+/// commit. (`drop` is represented by omitting the commit from the todo;
+/// `squash`/`fixup` are a follow-up, see #291.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebaseAction {
+    /// Replay the commit unchanged (default).
+    Pick,
+    /// Replay the commit, then open the editor to rewrite its message.
+    Reword,
+}
+
+impl RebaseAction {
+    /// The todo-file keyword for this action.
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            RebaseAction::Pick => "pick",
+            RebaseAction::Reword => "reword",
+        }
+    }
+
+    /// Parse an action from its persisted keyword.
+    #[must_use]
+    pub fn from_keyword(s: &str) -> Option<Self> {
+        match s {
+            "pick" => Some(RebaseAction::Pick),
+            "reword" => Some(RebaseAction::Reword),
+            _ => None,
+        }
+    }
+}
+
 /// Persisted rebase state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebaseState {
@@ -78,8 +115,31 @@ pub struct RebaseState {
     pub onto: Hash,
     /// Remaining commits to replay (oldest-first).
     pub todo: Vec<Hash>,
+    /// Per-commit action, parallel to `todo` (same length). For a
+    /// non-interactive rebase every entry is [`RebaseAction::Pick`].
+    pub actions: Vec<RebaseAction>,
     /// Commits already replayed.
     pub done: Vec<Hash>,
+}
+
+impl RebaseState {
+    /// The action for the commit at the front of `todo` (defaults to
+    /// `Pick` if the parallel actions list is somehow short).
+    #[must_use]
+    pub fn front_action(&self) -> RebaseAction {
+        self.actions.first().copied().unwrap_or(RebaseAction::Pick)
+    }
+
+    /// Drop the front `todo` commit and its parallel action together, so
+    /// the two lists stay aligned as commits are consumed.
+    pub fn consume_front(&mut self) {
+        if !self.todo.is_empty() {
+            self.todo.remove(0);
+        }
+        if !self.actions.is_empty() {
+            self.actions.remove(0);
+        }
+    }
 }
 
 /// Returns `true` when `<mkit_dir>/rebase-apply/` exists.
@@ -108,12 +168,17 @@ pub fn read_state(mkit_dir: &Path) -> RebaseResult<RebaseState> {
 
     let todo = read_hash_list(&dir.join(TODO_FILE))?;
     let done = read_hash_list(&dir.join(DONE_FILE))?;
+    // The actions file is parallel to todo. Absent (a rebase started before
+    // interactive support, or a non-interactive rebase) → every commit is a
+    // Pick. Realign to todo's length defensively.
+    let actions = read_actions(&dir.join(ACTIONS_FILE), todo.len())?;
 
     Ok(RebaseState {
         head_name,
         orig_head,
         onto,
         todo,
+        actions,
         done,
     })
 }
@@ -133,6 +198,7 @@ pub fn write_state(mkit_dir: &Path, state: &RebaseState) -> RebaseResult<()> {
     )?;
     write_with_newline(&dir.join(ONTO_FILE), hash::to_hex(&state.onto).as_bytes())?;
     write_hash_list(&dir.join(TODO_FILE), &state.todo)?;
+    write_actions(&dir.join(ACTIONS_FILE), &state.actions)?;
     write_hash_list(&dir.join(DONE_FILE), &state.done)?;
     Ok(())
 }
@@ -251,6 +317,46 @@ fn read_hash_list(path: &Path) -> RebaseResult<Vec<Hash>> {
     Ok(out)
 }
 
+/// Read the parallel-to-todo action list. A missing file yields all
+/// `Pick` (back-compat with pre-interactive state). The result is always
+/// realigned to `todo_len`: extra entries are dropped, missing ones
+/// default to `Pick`, so a malformed/short file can never desync the two
+/// lists.
+fn read_actions(path: &Path, todo_len: usize) -> RebaseResult<Vec<RebaseAction>> {
+    let raw = match read_text_capped(path, MAX_HASH_LIST_BYTES) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(vec![RebaseAction::Pick; todo_len]);
+        }
+        Err(e) => return Err(RebaseError::Io(e)),
+    };
+    let mut out = Vec::with_capacity(todo_len);
+    for line in trim_trailing(&raw).split('\n') {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let action = RebaseAction::from_keyword(line).ok_or(RebaseError::InvalidRebaseState)?;
+        out.push(action);
+    }
+    out.resize(todo_len, RebaseAction::Pick);
+    Ok(out)
+}
+
+fn write_actions(path: &Path, actions: &[RebaseAction]) -> RebaseResult<()> {
+    if actions.is_empty() {
+        write_with_newline(path, b"")?;
+        return Ok(());
+    }
+    let mut buf = String::with_capacity(actions.len() * 8);
+    for a in actions {
+        buf.push_str(a.keyword());
+        buf.push('\n');
+    }
+    fs::write(path, buf.as_bytes())?;
+    Ok(())
+}
+
 fn write_hash_list(path: &Path, hashes: &[Hash]) -> RebaseResult<()> {
     if hashes.is_empty() {
         write_with_newline(path, b"")?;
@@ -351,6 +457,7 @@ mod tests {
             orig_head: hash::hash(b"orig-head"),
             onto: hash::hash(b"onto"),
             todo: vec![hash::hash(b"t1"), hash::hash(b"t2")],
+            actions: vec![RebaseAction::Pick, RebaseAction::Reword],
             done: vec![hash::hash(b"d1")],
         };
         write_state(&mkit, &state).unwrap();
@@ -362,10 +469,49 @@ mod tests {
         assert!(dir.join("orig-head").is_file());
         assert!(dir.join("onto").is_file());
         assert!(dir.join("todo").is_file());
+        assert!(dir.join("actions").is_file());
         assert!(dir.join("done").is_file());
 
         let read = read_state(&mkit).unwrap();
         assert_eq!(read, state);
+    }
+
+    #[test]
+    fn missing_actions_file_defaults_to_all_pick() {
+        let tmp = TempDir::new().unwrap();
+        let mkit = tmp.path().join(".mkit");
+        fs::create_dir_all(&mkit).unwrap();
+        let state = RebaseState {
+            head_name: "main".to_string(),
+            orig_head: hash::hash(b"head"),
+            onto: hash::hash(b"onto"),
+            todo: vec![hash::hash(b"t1"), hash::hash(b"t2")],
+            actions: vec![RebaseAction::Pick, RebaseAction::Pick],
+            done: Vec::new(),
+        };
+        write_state(&mkit, &state).unwrap();
+        // Simulate a rebase started before interactive support: delete the
+        // actions sidecar. Reading must still yield one Pick per todo commit.
+        fs::remove_file(mkit.join(REBASE_DIR).join("actions")).unwrap();
+        let read = read_state(&mkit).unwrap();
+        assert_eq!(read.actions, vec![RebaseAction::Pick, RebaseAction::Pick]);
+    }
+
+    #[test]
+    fn consume_front_keeps_todo_and_actions_aligned() {
+        let mut state = RebaseState {
+            head_name: "main".to_string(),
+            orig_head: hash::hash(b"head"),
+            onto: hash::hash(b"onto"),
+            todo: vec![hash::hash(b"t1"), hash::hash(b"t2")],
+            actions: vec![RebaseAction::Reword, RebaseAction::Pick],
+            done: Vec::new(),
+        };
+        assert_eq!(state.front_action(), RebaseAction::Reword);
+        state.consume_front();
+        assert_eq!(state.todo, vec![hash::hash(b"t2")]);
+        assert_eq!(state.actions, vec![RebaseAction::Pick]);
+        assert_eq!(state.front_action(), RebaseAction::Pick);
     }
 
     #[test]
@@ -379,6 +525,7 @@ mod tests {
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),
             todo: Vec::new(),
+            actions: Vec::new(),
             done: Vec::new(),
         };
         write_state(&mkit, &state).unwrap();

@@ -418,11 +418,19 @@ Branches / refs:
   **Reverting a merge commit is refused** — the inverse depends on which
   parent is the mainline, and `-m`/mainline selection is not yet
   supported.
-- `mkit rebase <branch> | --continue | --abort | --skip` — replay
-  commits onto a different base. Restore steps refuse to overwrite staged
-  changes, dirty tracked files, or untracked path collisions. On conflict
-  the rebase pauses with resumable state; `--skip` drops the current
-  commit. See "Resolving conflicts" below.
+- `mkit rebase [-i|--interactive] <branch> | --continue | --abort | --skip`
+  — replay commits onto a different base. Restore steps refuse to overwrite
+  staged changes, dirty tracked files, or untracked path collisions. On
+  conflict the rebase pauses with resumable state; `--skip` drops the
+  current commit. See "Resolving conflicts" below.
+  `-i`/`--interactive` opens the todo list in `$EDITOR` before any
+  mutation. Each line is `<command> <commit> <subject>`, oldest-first
+  (top is applied first); reorder lines to reorder commits, delete a line
+  (or use `drop`/`d`) to drop a commit, and use `reword`/`r` to edit that
+  commit's message when it is replayed. Removing every line resets the
+  branch to the base. A `reword` whose replay hits a conflict still
+  reopens the editor on `--continue`. `squash`/`fixup` (and `edit`) are
+  **not yet supported** (#291) and are rejected before HEAD is touched.
 - `mkit bisect start | good | bad | reset` — binary search for a bug.
 - `mkit gc [-n|--dry-run] [--grace-secs <secs>]` — reclaim unreachable
   objects (mark-and-sweep). Under the repo lock it expires stale recovery
@@ -505,7 +513,7 @@ area — there are no unmerged index stages (SPEC-INDEX is unchanged).
 | `ORIG_HEAD`                   | HEAD before the operation, used by `--abort`         |
 | `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
 | `mkit-conflicts`              | mkit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
-| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `done`) plus a `mkit-conflicts` sidecar when paused |
+| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `mkit-conflicts` sidecar when paused. `actions` is parallel to `todo` (`pick`/`reword`, from `rebase -i`); absent ⇒ all `pick` |
 
 Remote / sync:
 

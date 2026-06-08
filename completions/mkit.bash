@@ -102,7 +102,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "-a --annotate -s --sign -m --message -d --delete --author --help" -- "$cur") )
             ;;
         rebase)
-            COMPREPLY=( $(compgen -W "--continue --abort --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-i --interactive --continue --skip --abort --help" -- "$cur") )
             ;;
         revert)
             COMPREPLY=( $(compgen -W "--continue --abort --help" -- "$cur") )

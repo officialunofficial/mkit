@@ -1,9 +1,17 @@
-//! `mkit rebase <branch> | --continue | --abort | --skip` — replay
+//! `mkit rebase [-i] <branch> | --continue | --abort | --skip` — replay
 //! commits onto a different base.
 //!
 //! The rebase state machine lives in `mkit_core::ops::rebase`. This
 //! shim loads / writes that state and drives the replay loop via
 //! [`mkit_core::ops::cherry_pick`].
+//!
+//! With `-i`/`--interactive`, the todo list is opened in `$EDITOR`
+//! before any mutation: lines can be reordered, deleted/`drop`ped, or
+//! marked `reword` (the editor reopens for that commit's message when it
+//! is replayed). Each commit's action is persisted alongside `todo` in
+//! the rebase state, so a `reword` that pauses on conflict still reopens
+//! the editor on `--continue`. `squash`/`fixup` are deferred (#291) and
+//! rejected at parse time before HEAD is touched.
 //!
 //! On conflict the loop **pauses**: it materialises conflict material
 //! into the worktree + index (via the shared `conflict` helper) and
@@ -26,8 +34,8 @@ use mkit_core::object::{Commit, Identity, Object};
 use mkit_core::ops::cherry_pick::cherry_pick;
 use mkit_core::ops::conflict_state::{self, in_progress_op_name};
 use mkit_core::ops::rebase::{
-    RebaseState, cleanup_rebase, collect_commits_to_replay, is_rebase_in_progress, read_state,
-    rebase_dir_path, write_state,
+    RebaseAction, RebaseState, cleanup_rebase, collect_commits_to_replay, is_rebase_in_progress,
+    read_state, rebase_dir_path, write_state,
 };
 use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
@@ -38,11 +46,14 @@ use clap::Parser;
 
 use crate::clap_shim;
 use crate::config;
+use crate::editor;
 use crate::exit;
 use crate::format;
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit rebase", about = "Replay commits onto a different base.")]
+// CLI flag struct: each bool is an independent clap switch.
+#[allow(clippy::struct_excessive_bools)]
 struct RebaseOpts {
     /// Continue an in-progress rebase after resolving conflicts.
     #[arg(long = "continue", conflicts_with_all = ["abort", "skip", "branch"])]
@@ -53,6 +64,11 @@ struct RebaseOpts {
     /// Skip the current commit (drop it) and continue the rebase.
     #[arg(long, conflicts_with_all = ["cont", "abort", "branch"])]
     skip: bool,
+    /// Edit the todo list in `$EDITOR` before replaying: reorder lines,
+    /// `drop` (or delete) lines, or mark a line `reword`. `squash`/`fixup`
+    /// are not yet supported (#291).
+    #[arg(short = 'i', long, conflicts_with_all = ["cont", "abort", "skip"])]
+    interactive: bool,
     /// Branch to replay commits onto.
     branch: Option<String>,
 }
@@ -84,9 +100,9 @@ pub fn run(args: &[String]) -> u8 {
     } else if opts.skip {
         resume(&cwd, &mkit_dir, &store, true)
     } else if let Some(branch) = opts.branch.as_deref() {
-        start(&cwd, &mkit_dir, &store, branch)
+        start(&cwd, &mkit_dir, &store, branch, opts.interactive)
     } else {
-        super::usage_error("usage: mkit rebase <branch> | --continue | --abort | --skip")
+        super::usage_error("usage: mkit rebase [-i] <branch> | --continue | --abort | --skip")
     }
 }
 
@@ -95,6 +111,7 @@ fn start(
     mkit_dir: &std::path::Path,
     store: &ObjectStore,
     branch: &str,
+    interactive: bool,
 ) -> u8 {
     if let Some(op) = in_progress_op_name(mkit_dir) {
         return emit_err(
@@ -119,15 +136,42 @@ fn start(
         }
         Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::GENERAL_ERROR),
     };
-    let todo = match collect_commits_to_replay(store, orig_head, onto) {
+    let candidates = match collect_commits_to_replay(store, orig_head, onto) {
         Ok(v) => v,
         Err(e) => return emit_err(&format!("collect commits: {e}"), exit::GENERAL_ERROR),
+    };
+
+    // Interactive: let the user reorder / drop / reword the todo before any
+    // mutation. Non-interactive: every commit is a plain pick.
+    let (todo, actions) = if interactive {
+        if candidates.is_empty() {
+            // Nothing to reorder/drop/reword. If HEAD is already at the
+            // target there is genuinely nothing to do; otherwise HEAD is
+            // *behind* `onto` (an ancestor of it), so fall through with an
+            // empty plan and let the finalize flow fast-forward the branch to
+            // `onto` — exactly what non-interactive `rebase` does.
+            if orig_head == onto {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "rebase: already up to date");
+                return exit::OK;
+            }
+            (Vec::new(), Vec::new())
+        } else {
+            match edit_todo(store, &candidates, orig_head, onto) {
+                Ok(plan) => plan,
+                Err(code) => return code,
+            }
+        }
+    } else {
+        let actions = vec![RebaseAction::Pick; candidates.len()];
+        (candidates, actions)
     };
     let state = RebaseState {
         head_name,
         orig_head,
         onto,
         todo,
+        actions,
         done: Vec::new(),
     };
     let signing = match load_rebase_signing(cwd) {
@@ -217,7 +261,7 @@ fn skip_paused_commit(
     if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, records, head_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    state.todo.remove(0);
+    state.consume_front();
     persist_after_consume(mkit_dir, rebase_dir, state)
 }
 
@@ -263,12 +307,15 @@ fn commit_resolved_commit(
     let tree_hash = worktree::build_tree_from_index(store, &idx)
         .map_err(|e| emit_err(&format!("build tree from index: {e}"), exit::GENERAL_ERROR))?;
     let mut signing = load_rebase_signing(cwd)?;
+    // Same message policy as the no-conflict path: pick keeps the original
+    // message, reword opens the editor now that the tree is resolved.
+    let message = message_for_action(store, target, state.front_action())?;
     let new_hash = build_commit(
         store,
         &mut signing.signer,
         signing.author.clone(),
         parent,
-        target,
+        message,
         tree_hash,
     )?;
     if let Err(e) = super::restore_worktree_and_index(cwd, store, tree_hash) {
@@ -278,7 +325,7 @@ fn commit_resolved_commit(
         return Err(emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT));
     }
     state.done.push(target);
-    state.todo.remove(0);
+    state.consume_front();
     persist_after_consume(mkit_dir, rebase_dir, state)
 }
 
@@ -446,12 +493,19 @@ fn replay(
         if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
+        // Pick keeps the original message; reword opens the editor now (no
+        // conflict here — the conflict-resume path does the same in
+        // `commit_resolved_commit`).
+        let message = match message_for_action(store, target, state.front_action()) {
+            Ok(m) => m,
+            Err(c) => return c,
+        };
         let new_hash = match build_commit(
             store,
             &mut signing.signer,
             signing.author.clone(),
             head_hash,
-            target,
+            message,
             result.tree_hash,
         ) {
             Ok(h) => h,
@@ -464,7 +518,7 @@ fn replay(
             return emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT);
         }
         state.done.push(target);
-        state.todo.remove(0);
+        state.consume_front();
         if let Err(e) = write_state(mkit_dir, &state) {
             return emit_err(&format!("persist state: {e}"), exit::CANTCREAT);
         }
@@ -542,14 +596,9 @@ fn build_commit(
     signer: &mut super::commit::CommitSigner,
     author: Identity,
     parent: Hash,
-    original: Hash,
+    message: Vec<u8>,
     tree_hash: Hash,
 ) -> Result<Hash, u8> {
-    let original_msg = match store.read_object(&original) {
-        Ok(Object::Commit(c)) => c.message.clone(),
-        Ok(_) => return Err(emit_err("original is not a commit", exit::DATAERR)),
-        Err(e) => return Err(emit_err(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
-    };
     let signer_public = signer
         .public_key()
         .map_err(|(msg, code)| emit_err(&msg, code))?;
@@ -561,7 +610,7 @@ fn build_commit(
         vec![parent],
         author,
         signer_public,
-        original_msg,
+        message,
         timestamp,
         [0u8; 64],
     );
@@ -581,6 +630,184 @@ fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, u8> {
         Ok(Object::Commit(c)) => Ok(c.tree_hash),
         Ok(_) => Err(emit_err("object is not a commit", exit::DATAERR)),
         Err(e) => Err(emit_err(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
+    }
+}
+
+/// The commit message to use when replaying `target` under `action`:
+/// the original message for `Pick`, or an editor-edited one for `Reword`
+/// (seeded with the original; an empty edit keeps the original rather than
+/// aborting the rebase).
+fn message_for_action(
+    store: &ObjectStore,
+    target: Hash,
+    action: RebaseAction,
+) -> Result<Vec<u8>, u8> {
+    let original = match store.read_object(&target) {
+        Ok(Object::Commit(c)) => c.message,
+        Ok(_) => return Err(emit_err("target is not a commit", exit::DATAERR)),
+        Err(e) => return Err(emit_err(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
+    };
+    match action {
+        RebaseAction::Pick => Ok(original),
+        RebaseAction::Reword => {
+            let seed = reword_template(&original);
+            match editor::spawn_editor(&seed) {
+                Ok(s) if !s.trim().is_empty() => Ok(s.into_bytes()),
+                Ok(_) => {
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(stderr, "reword: empty message; keeping the original");
+                    Ok(original)
+                }
+                Err(e) => Err(emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR)),
+            }
+        }
+    }
+}
+
+/// Editor seed for a reword: the original message followed by ignored
+/// `#`-comment guidance (stripped on read by `spawn_editor`).
+fn reword_template(original: &[u8]) -> String {
+    format!(
+        "{}\n\
+         # Reword: edit the commit message above. Lines starting with '#'\n\
+         # are ignored. An empty message keeps the original message.\n",
+        String::from_utf8_lossy(original)
+    )
+}
+
+/// First line of a commit's message, for the interactive todo display.
+fn commit_subject(store: &ObjectStore, h: Hash) -> String {
+    match store.read_object(&h) {
+        Ok(Object::Commit(c)) => {
+            let text = String::from_utf8_lossy(&c.message);
+            text.lines().next().unwrap_or("").trim().to_string()
+        }
+        _ => String::new(),
+    }
+}
+
+/// Render the interactive todo from a non-empty candidate list, open the
+/// editor, and parse the result into a `(todo, actions)` plan in the edited
+/// order. The returned `todo` may be empty if the user dropped every line
+/// (which resets the branch to the base). Mutating nothing, it is safe to
+/// fail here before the rebase touches HEAD. (The empty-candidate case is
+/// handled by the caller.)
+#[allow(clippy::type_complexity)]
+fn edit_todo(
+    store: &ObjectStore,
+    candidates: &[Hash],
+    orig_head: Hash,
+    onto: Hash,
+) -> Result<(Vec<Hash>, Vec<RebaseAction>), u8> {
+    use std::fmt::Write as _;
+    // Build the template: one `pick <short> <subject>` line per candidate,
+    // oldest-first (the order `collect_commits_to_replay` returns).
+    let mut template = String::new();
+    for h in candidates {
+        let _ = writeln!(
+            template,
+            "pick {} {}",
+            format::short_hash(h, 12),
+            commit_subject(store, *h)
+        );
+    }
+    let _ = write!(
+        template,
+        "\n\
+         # Rebase {}..{} onto {}.\n\
+         #\n\
+         # Commands (one per line, in apply order — top is applied first):\n\
+         #   p, pick   <commit>  = use the commit\n\
+         #   r, reword <commit>  = use the commit, but edit its message\n\
+         #   d, drop   <commit>  = remove the commit\n\
+         #\n\
+         # Reorder lines to reorder commits. Deleting a line drops that commit.\n\
+         # squash/fixup are not yet supported (#291).\n\
+         # Removing every line resets the branch to the base.\n",
+        format::short_hash(&onto, 12),
+        format::short_hash(&orig_head, 12),
+        format::short_hash(&onto, 12),
+    );
+
+    let edited = editor::spawn_editor(&template).map_err(|e| {
+        // spawn_editor strips comment lines, so the seed text never counts as
+        // "content"; an editor failure is the only real error here.
+        emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR)
+    })?;
+
+    parse_todo(candidates, &edited)
+}
+
+/// Parse the edited todo text into `(todo, actions)`. Validates verbs and
+/// resolves each abbreviated commit against `candidates`. Fails (before any
+/// mutation) on an unknown verb, an unknown/ambiguous commit, or a
+/// not-yet-supported verb (`squash`/`fixup`/`edit`).
+#[allow(clippy::type_complexity)]
+fn parse_todo(candidates: &[Hash], edited: &str) -> Result<(Vec<Hash>, Vec<RebaseAction>), u8> {
+    let mut todo = Vec::new();
+    let mut actions = Vec::new();
+    for raw in edited.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let verb = parts.next().unwrap_or("");
+        let action = match verb {
+            "p" | "pick" => RebaseAction::Pick,
+            "r" | "reword" => RebaseAction::Reword,
+            "d" | "drop" => {
+                // Dropped: still validate the hash so a typo is caught, then
+                // omit the commit.
+                let _ = resolve_todo_hash(candidates, parts.next(), line)?;
+                continue;
+            }
+            "s" | "squash" | "f" | "fixup" | "e" | "edit" => {
+                return Err(emit_err(
+                    &format!(
+                        "'{verb}' is not yet supported (squash/fixup/edit: #291); use pick, reword, or drop"
+                    ),
+                    exit::USAGE,
+                ));
+            }
+            other => {
+                return Err(emit_err(
+                    &format!("unknown rebase command '{other}'"),
+                    exit::USAGE,
+                ));
+            }
+        };
+        let h = resolve_todo_hash(candidates, parts.next(), line)?;
+        todo.push(h);
+        actions.push(action);
+    }
+    Ok((todo, actions))
+}
+
+/// Resolve an abbreviated commit token from a todo line against the original
+/// candidate set (unambiguous prefix match or full hash).
+fn resolve_todo_hash(candidates: &[Hash], token: Option<&str>, line: &str) -> Result<Hash, u8> {
+    let token = token.ok_or_else(|| {
+        emit_err(
+            &format!("missing commit on todo line: '{line}'"),
+            exit::USAGE,
+        )
+    })?;
+    let token = token.to_ascii_lowercase();
+    let matches: Vec<&Hash> = candidates
+        .iter()
+        .filter(|h| mkit_core::hash::to_hex(h).starts_with(&token))
+        .collect();
+    match matches.as_slice() {
+        [h] => Ok(**h),
+        [] => Err(emit_err(
+            &format!("todo line refers to an unknown commit: '{line}'"),
+            exit::USAGE,
+        )),
+        _ => Err(emit_err(
+            &format!("ambiguous commit '{token}' on todo line: '{line}'"),
+            exit::USAGE,
+        )),
     }
 }
 
