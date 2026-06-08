@@ -553,8 +553,10 @@ pub(super) fn resolve_author(
 ///
 /// Accepted forms:
 /// * `ed25519:<64-char hex>` — 32-byte Ed25519 public key.
-/// * `did:key:<hex>` — opaque DID-key bytes (hex-decoded, any length
-/// ≤ `IDENTITY_MAX_LEN`).
+/// * `did:key:<multibase>` — a `did:key` whose multibase payload (the part
+///   after `did:key:`, e.g. `z6Mk…`) is stored verbatim as the DID payload.
+///   It must be a non-empty printable-ASCII multibase string (validated via
+///   `Identity::is_valid`), matching the on-disk `DidKey` invariant.
 /// * `opaque:<bytes>` — raw UTF-8 bytes, stored as-is.
 fn parse_author_spec(spec: &str) -> Result<Identity, String> {
     if let Some(hex) = spec.strip_prefix("ed25519:") {
@@ -566,15 +568,23 @@ fn parse_author_spec(spec: &str) -> Result<Identity, String> {
         arr.copy_from_slice(&bytes);
         return Ok(Identity::ed25519(arr));
     }
-    if let Some(hex) = spec.strip_prefix("did:key:") {
-        let bytes = hex_decode(hex).ok_or_else(|| "did:key:<hex> invalid hex".to_string())?;
-        if bytes.is_empty() {
-            return Err("did:key:<hex> must decode to ≥ 1 byte".to_string());
-        }
-        return Ok(Identity {
+    if let Some(payload) = spec.strip_prefix("did:key:") {
+        // Store the multibase payload verbatim (the `did:key:` scheme prefix
+        // is stripped). A real did:key is base58btc (`z…`); the on-disk
+        // invariant only requires a non-empty printable-ASCII multibase
+        // string, so validate through `is_valid` rather than hex-decoding.
+        let id = Identity {
             kind: IdentityKind::DidKey,
-            bytes,
-        });
+            bytes: payload.as_bytes().to_vec(),
+        };
+        if !id.is_valid() {
+            return Err(
+                "did:key:<multibase> must be a non-empty printable-ASCII multibase string \
+                 (e.g. did:key:z6Mk…)"
+                    .to_string(),
+            );
+        }
+        return Ok(id);
     }
     if let Some(raw) = spec.strip_prefix("opaque:") {
         if raw.is_empty() {
@@ -671,10 +681,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_author_did_key_decodes() {
-        let id = parse_author_spec("did:key:deadbeef").unwrap();
+    fn parse_author_did_key_stores_multibase_payload() {
+        // The multibase payload after `did:key:` is stored verbatim as ASCII.
+        let id = parse_author_spec("did:key:z6MkExample").unwrap();
         assert_eq!(id.kind, IdentityKind::DidKey);
-        assert_eq!(id.bytes, vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(id.bytes, b"z6MkExample");
+        assert!(id.is_valid());
+    }
+
+    #[test]
+    fn parse_author_did_key_rejects_non_multibase() {
+        // Empty payload and non-printable/whitespace payloads are rejected
+        // (consistent with the on-disk DidKey invariant).
+        assert!(parse_author_spec("did:key:").is_err());
+        assert!(parse_author_spec("did:key:has space").is_err());
     }
 
     #[test]

@@ -142,9 +142,11 @@ History / commits:
   <msg>`. `--author <spec>` overrides the recorded author Identity for
   this commit (highest precedence — above `user.identity` config and the
   signing-key-derived default). The `<spec>` grammar is `ed25519:<hex>`
-  (32-byte public key), `did:key:<hex>` (opaque DID-key bytes), or
-  `opaque:<bytes>` (raw UTF-8); note this differs from the `user.identity`
-  *config* grammar (which also accepts `mid:<N>` and raw encoded hex).
+  (32-byte public key), `did:key:<multibase>` (the multibase payload after
+  `did:key:`, e.g. `did:key:z6Mk…`, stored verbatim — must be a non-empty
+  printable-ASCII multibase string), or `opaque:<bytes>` (raw UTF-8); note
+  this differs from the `user.identity` *config* grammar (which also accepts
+  `mid:<N>` and raw encoded hex).
   The signature is always produced by your signing key regardless of the
   recorded author.
   `--amend` **replaces HEAD** instead of adding a new commit: the new

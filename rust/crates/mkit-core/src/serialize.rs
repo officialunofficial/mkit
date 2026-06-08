@@ -367,7 +367,16 @@ impl<'a> Reader<'a> {
         self.need(len)?;
         let bytes = self.data[self.pos..self.pos + len].to_vec();
         self.pos += len;
-        Ok(Identity { kind, bytes })
+        let id = Identity { kind, bytes };
+        // Enforce the full structural invariant at the read boundary so a
+        // malformed object from disk/remote can't deserialize with an
+        // invalid payload (e.g. a binary `DidKey` that isn't a printable
+        // multibase string). `is_valid` is the single source of truth and
+        // the serialize side already gates on it (#223).
+        if !id.is_valid() {
+            return Err(MkitError::InvalidIdentity);
+        }
+        Ok(id)
     }
 }
 
@@ -953,6 +962,35 @@ mod tests {
             [0; 64],
         ));
         assert_eq!(serialize(&obj), Err(MkitError::InvalidIdentity));
+    }
+
+    #[test]
+    fn read_identity_rejects_non_multibase_didkey() {
+        // Wire format: [u8 kind][u16 LE len][payload]. A DidKey payload must
+        // be a printable-ASCII multibase string, so a malformed object with a
+        // binary/whitespace DidKey payload must be rejected at the read
+        // boundary, not silently deserialized (#223).
+        let id_bytes = |payload: &[u8]| {
+            let mut b = vec![0x02u8]; // IdentityKind::DidKey
+            let len = u16::try_from(payload.len()).expect("test payload fits u16");
+            b.extend_from_slice(&len.to_le_bytes());
+            b.extend_from_slice(payload);
+            b
+        };
+        // NUL, high byte, and whitespace payloads all reject.
+        for bad in [b"z\x00ab".as_slice(), b"z\xff", b"z6Mk has space"] {
+            let buf = id_bytes(bad);
+            assert_eq!(
+                Reader::new(&buf).read_identity(),
+                Err(MkitError::InvalidIdentity),
+                "should reject DidKey payload {bad:?} at the read boundary"
+            );
+        }
+        // A real did:key multibase payload round-trips.
+        let good = id_bytes(b"z6MkExample");
+        let id = Reader::new(&good).read_identity().unwrap();
+        assert_eq!(id.kind, IdentityKind::DidKey);
+        assert_eq!(id.bytes, b"z6MkExample");
     }
 
     #[test]

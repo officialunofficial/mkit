@@ -98,8 +98,11 @@ impl EntryMode {
 pub enum IdentityKind {
     /// 32-byte raw Ed25519 public key.
     Ed25519 = 0x01,
-    /// `did:key:` multibase-encoded key material (the scheme prefix is
-    /// stripped — payload typically starts with `'z'`).
+    /// `did:key:` multibase-encoded key material (the `did:key:` scheme
+    /// prefix is stripped — the payload is a multibase string, typically
+    /// base58btc starting with `'z'`). Validated as non-empty printable
+    /// ASCII so binary garbage can't masquerade as a DID (see
+    /// [`Identity::is_valid`]).
     DidKey = 0x02,
     /// Arbitrary producer-defined bytes.
     Opaque = 0x03,
@@ -143,8 +146,11 @@ impl Identity {
         }
     }
 
-    /// Structural validity check: payload len in `1..=IDENTITY_MAX_LEN`,
-    /// and for Ed25519 exactly 32 bytes.
+    /// Structural validity check: payload len in `1..=IDENTITY_MAX_LEN`;
+    /// Ed25519 is exactly 32 bytes; a `DidKey` payload must be a multibase
+    /// string, i.e. all printable ASCII (no NUL/control/whitespace/high
+    /// bytes) — so a binary blob can't be smuggled in under the DID kind.
+    /// `Opaque` is producer-defined and accepts any non-empty bytes.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         if self.bytes.is_empty() || self.bytes.len() > IDENTITY_MAX_LEN as usize {
@@ -152,7 +158,11 @@ impl Identity {
         }
         match self.kind {
             IdentityKind::Ed25519 => self.bytes.len() == 32,
-            IdentityKind::DidKey | IdentityKind::Opaque => true,
+            // A multibase string is always printable ASCII; this rejects
+            // garbage without committing to one multibase alphabet (the
+            // payload may be base58btc `z…`, base64 `m…`, etc.).
+            IdentityKind::DidKey => self.bytes.iter().all(u8::is_ascii_graphic),
+            IdentityKind::Opaque => true,
         }
     }
 }
@@ -727,6 +737,24 @@ mod tests {
             .is_valid()
         );
         assert!(Identity::ed25519([0xaa; 32]).is_valid());
+    }
+
+    #[test]
+    fn didkey_requires_printable_ascii_multibase() {
+        let didkey = |b: &[u8]| Identity {
+            kind: IdentityKind::DidKey,
+            bytes: b.to_vec(),
+        };
+        // A real did:key multibase payload (base58btc, scheme stripped).
+        assert!(didkey(b"z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").is_valid());
+        // Other multibase prefixes are graphic ASCII too — accepted.
+        assert!(didkey(b"mEiB1234").is_valid());
+        // Binary garbage masquerading as a DID is rejected.
+        assert!(!didkey(b"z\0\x01\x02").is_valid());
+        assert!(!didkey(&[0xde, 0xad, 0xbe, 0xef]).is_valid());
+        // Whitespace / control chars are not valid multibase.
+        assert!(!didkey(b"z6Mk has space").is_valid());
+        assert!(!didkey(b"z6Mk\n").is_valid());
     }
 
     #[test]
