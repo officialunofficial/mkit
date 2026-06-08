@@ -398,31 +398,29 @@ fn apply(op: &Op, root: &Path, xdg: &Path, ctr: &mut u32) -> Vec<Output> {
     }
 }
 
-/// If `verb` left any on-disk residue (its in-progress marker, or the shared
-/// `mkit-conflicts` sidecar for the non-rebase ops), return a description of
-/// the first piece found — else `None`. Rebase keeps its sidecar *inside*
+/// If `verb` left any on-disk residue after concluding, return a description of
+/// the first piece found — else `None`. Residue is the in-progress marker, the
+/// shared `mkit-conflicts` sidecar, or the op-specific message file
+/// (`MERGE_MSG`/`CHERRY_PICK_MSG`/`REVERT_MSG`) — all of which the core
+/// `clear_*_state` helpers remove. `ORIG_HEAD` is deliberately NOT checked: a
+/// `reset` legitimately leaves it. Rebase keeps its sidecar/message *inside*
 /// `rebase-apply/`, which the directory check already covers.
 fn operation_residue(mkit_dir: &Path, verb: &str) -> Option<String> {
-    let marker = match verb {
-        "merge" => mkit_dir.join("MERGE_HEAD").exists().then_some("MERGE_HEAD"),
-        "cherry-pick" => mkit_dir
-            .join("CHERRY_PICK_HEAD")
-            .exists()
-            .then_some("CHERRY_PICK_HEAD"),
-        "revert" => mkit_dir
-            .join("REVERT_HEAD")
-            .exists()
-            .then_some("REVERT_HEAD"),
-        "rebase" => (mkit_dir.join("rebase-apply").exists()
-            || mkit_dir.join("rebase-merge").exists())
-        .then_some("rebase-apply/"),
-        _ => None,
+    let (head, msg) = match verb {
+        "merge" => ("MERGE_HEAD", "MERGE_MSG"),
+        "cherry-pick" => ("CHERRY_PICK_HEAD", "CHERRY_PICK_MSG"),
+        "revert" => ("REVERT_HEAD", "REVERT_MSG"),
+        "rebase" => {
+            return (mkit_dir.join("rebase-apply").exists()
+                || mkit_dir.join("rebase-merge").exists())
+            .then(|| "rebase-apply/".to_owned());
+        }
+        _ => return None,
     };
-    if let Some(m) = marker {
-        return Some(m.to_owned());
-    }
-    if verb != "rebase" && mkit_dir.join("mkit-conflicts").exists() {
-        return Some("mkit-conflicts".to_owned());
+    for residue in [head, "mkit-conflicts", msg] {
+        if mkit_dir.join(residue).exists() {
+            return Some(residue.to_owned());
+        }
     }
     None
 }
