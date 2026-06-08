@@ -31,6 +31,13 @@ pub fn short_identity(id: &mkit_core::Identity) -> String {
             arr.copy_from_slice(&id.bytes);
             u64::from_le_bytes(arr).to_string()
         }
+        // A DidKey payload is a printable-ASCII multibase string, so show a
+        // readable prefix of it (e.g. `did:key:z6MkExam`) rather than hex.
+        mkit_core::IdentityKind::DidKey => {
+            let s = String::from_utf8_lossy(&id.bytes);
+            let prefix: String = s.chars().take(8).collect();
+            format!("did:key:{prefix}")
+        }
         kind => {
             let kind_name = match kind {
                 mkit_core::IdentityKind::Ed25519 => "ed25519",
@@ -51,11 +58,11 @@ pub fn short_identity(id: &mkit_core::Identity) -> String {
 /// Full-detail rendering of an [`mkit_core::Identity`] suitable for
 /// machine-readable output (e.g. JSONL from `mkit log --format=json`).
 ///
-/// Format mirrors the parser shorthands accepted by
-/// `mkit config user.identity` so a value emitted here round-trips:
-/// `ed25519:<full-hex>`, `did:key:<full-hex>`, `mid:<decimal-u64>`
-/// for 8-byte opaque keys, and `opaque:<full-hex>` for other opaque
-/// lengths.
+/// Format mirrors the parser shorthands accepted by `mkit config
+/// user.identity` / `--author` so a value emitted here round-trips:
+/// `ed25519:<full-hex>`, `did:key:<multibase>` (the payload verbatim,
+/// matching `--author did:key:…`), `mid:<decimal-u64>` for 8-byte opaque
+/// keys, and `opaque:<full-hex>` for other opaque lengths.
 #[must_use]
 pub fn full_identity(id: &mkit_core::Identity) -> String {
     match id.kind {
@@ -65,7 +72,11 @@ pub fn full_identity(id: &mkit_core::Identity) -> String {
             format!("mid:{}", u64::from_le_bytes(arr))
         }
         mkit_core::IdentityKind::Ed25519 => format!("ed25519:{}", to_hex(&id.bytes)),
-        mkit_core::IdentityKind::DidKey => format!("did:key:{}", to_hex(&id.bytes)),
+        // DidKey bytes are the multibase payload (printable ASCII); emit it
+        // verbatim so it round-trips through `--author did:key:<multibase>`.
+        mkit_core::IdentityKind::DidKey => {
+            format!("did:key:{}", String::from_utf8_lossy(&id.bytes))
+        }
         mkit_core::IdentityKind::Opaque => format!("opaque:{}", to_hex(&id.bytes)),
     }
 }
