@@ -578,11 +578,27 @@ re-materialises the working tree from the current patterns.
 Merge
 .Ar branch
 into HEAD. Fast-forwards when possible.
-.It Cm rebase Ar branch
+.It Cm rebase Oo Fl i Oc Ar branch
 Replay commits from HEAD onto
 .Ar branch .
+With
+.Fl i
+.Pq Fl Fl interactive
+the todo list opens in
+.Ev $EDITOR
+first: reorder lines to reorder commits, delete a line (or mark it
+.Cm drop )
+to drop a commit, and mark a line
+.Cm reword
+to edit that commit's message during replay. Removing every line resets the
+branch to the base.
+.Cm squash
+and
+.Cm fixup
+are not yet supported and are rejected before any mutation (see #291).
 Accepts
-.Fl Fl continue
+.Fl Fl continue ,
+.Fl Fl skip ,
 and
 .Fl Fl abort
 after a conflict.

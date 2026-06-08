@@ -259,7 +259,9 @@ _mkit() {
                     ;;
                 rebase)
                     _arguments \
+                        '(-i --interactive)'{-i,--interactive}'[edit the todo list before replaying]' \
                         '--continue[continue after conflict resolution]' \
+                        '--skip[skip the current commit]' \
                         '--abort[abort rebase]' \
                         '--help[show help]'
                     ;;

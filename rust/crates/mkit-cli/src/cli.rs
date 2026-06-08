@@ -160,6 +160,7 @@ commands:
                     Create a new commit undoing <commit> (forward commit;
                     conflict-aware)
   rebase <branch>    Replay commits onto a different base
+  rebase -i <branch> Interactive: reorder/drop/reword the todo first
   rebase --continue  Continue rebase after conflict resolution
   rebase --abort     Abort rebase and restore original state
   bisect start       Begin binary search for a bug

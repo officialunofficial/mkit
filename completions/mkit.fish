@@ -180,7 +180,11 @@ complete -c mkit -n "__fish_seen_subcommand_from tag" \
 complete -c mkit -n "__fish_seen_subcommand_from tag" \
     -l author -d "Override tagger identity" -r
 complete -c mkit -n "__fish_seen_subcommand_from rebase" \
+    -l interactive -s i -d "Edit the todo list before replaying"
+complete -c mkit -n "__fish_seen_subcommand_from rebase" \
     -l continue -d "Continue an in-progress rebase"
+complete -c mkit -n "__fish_seen_subcommand_from rebase" \
+    -l skip -d "Skip the current commit"
 complete -c mkit -n "__fish_seen_subcommand_from rebase" \
     -l abort -d "Abort an in-progress rebase"
 complete -c mkit -n "__fish_seen_subcommand_from revert" \

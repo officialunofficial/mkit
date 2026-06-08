@@ -94,6 +94,11 @@ fn rebase_state_persists_and_reloads_after_simulated_crash() {
         orig_head: hash::hash(b"orig"),
         onto: hash::hash(b"onto"),
         todo: vec![hash::hash(b"t1"), hash::hash(b"t2"), hash::hash(b"t3")],
+        actions: vec![
+            rebase::RebaseAction::Pick,
+            rebase::RebaseAction::Pick,
+            rebase::RebaseAction::Pick,
+        ],
         done: vec![hash::hash(b"d1")],
     };
     rebase::write_state(&mkit, &state).unwrap();
