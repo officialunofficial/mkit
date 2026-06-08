@@ -1,3 +1,10 @@
+---
+spec: SPEC-GC
+version: 1
+status: implemented
+audience: implementers of gc / recovery and reviewers of object pruning
+---
+
 # SPEC-GC — garbage-collection retention roots & recovery
 
 Status: **implemented**. The recovery model (#260) — Part 1 (retention
