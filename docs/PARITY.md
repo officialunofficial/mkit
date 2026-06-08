@@ -80,7 +80,7 @@ creeping; revisit post-v1 if demand warrants.
 | `checkout` | switch branch, restore files | same | ✅ | — | — | guarded against clobber |
 | `tag` | lightweight/`-a`/`-s`/`-m`/`-d` | same | ✅ | — | — | |
 | `merge` / `cherry-pick` / `rebase` | merge, pick, replay + conflict workflow | same | ✅ | — | — | `rebase -i` row below (#259) |
-| `rebase -i` | interactive todo list | same | ✅ | 4 | #259 | reorder / `drop` / `reword` via `$EDITOR`; `squash`/`fixup` deferred (#291, rejected before any mutation); conflict pause/resume + `--continue`/`--skip`/`--abort` carry over |
+| `rebase -i` | interactive todo list | same | ✅ | 4 | #259, #291 | reorder / `drop` / `reword` / `squash` / `fixup` via `$EDITOR` (squash combines messages, fixup keeps the prior; a leading squash/fixup is rejected); conflict pause/resume + `--continue`/`--skip`/`--abort` carry over. `edit` (stop-to-amend) not yet supported |
 | `restore` / `reset` | `--staged`/`--worktree`/`--soft`/`--mixed` | same | ✅ | — | — | |
 | `reset --hard` | reset worktree | same | ✅ | 2 | #250 | resets HEAD+index+worktree to target; removes dropped tracked files, keeps untracked (like git) except a target-colliding untracked path; refuses to discard dirty/staged or overwrite a colliding untracked path without `-f` (mkit divergence — git discards silently); guard re-checks each dropped path directly, so it also covers a tracked file matching an ignore rule (`.gitignore`/`.mkitignore`) |
 | `revert` | inverse-commit, `--no-commit`, conflict-aware | same; merge `-m` not yet supported | ✅ | 2 | #255 | forward commit (not gated on gc); reuses the conflict workflow; reverting a merge is refused pending mainline selection |
