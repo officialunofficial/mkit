@@ -513,7 +513,7 @@ area — there are no unmerged index stages (SPEC-INDEX is unchanged).
 | `ORIG_HEAD`                   | HEAD before the operation, used by `--abort`         |
 | `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
 | `mkit-conflicts`              | mkit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
-| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `done`) plus a `mkit-conflicts` sidecar when paused |
+| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `mkit-conflicts` sidecar when paused. `actions` is parallel to `todo` (`pick`/`reword`, from `rebase -i`); absent ⇒ all `pick` |
 
 Remote / sync:
 

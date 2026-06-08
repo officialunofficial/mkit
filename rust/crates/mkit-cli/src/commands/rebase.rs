@@ -144,19 +144,26 @@ fn start(
     // Interactive: let the user reorder / drop / reword the todo before any
     // mutation. Non-interactive: every commit is a plain pick.
     let (todo, actions) = if interactive {
-        match edit_todo(store, &candidates, orig_head, onto) {
-            Ok(Some(plan)) => plan,
-            Ok(None) => {
-                // Empty plan (no commits, or every line dropped): nothing to
-                // replay. Leave the branch untouched, like git's noop rebase.
+        if candidates.is_empty() {
+            // Nothing to reorder/drop/reword. If HEAD is already at the
+            // target there is genuinely nothing to do; otherwise HEAD is
+            // *behind* `onto` (an ancestor of it), so fall through with an
+            // empty plan and let the finalize flow fast-forward the branch to
+            // `onto` — exactly what non-interactive `rebase` does.
+            if orig_head == onto {
                 let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "rebase: nothing to do");
+                let _ = writeln!(stderr, "rebase: already up to date");
                 return exit::OK;
             }
-            Err(code) => return code,
+            (Vec::new(), Vec::new())
+        } else {
+            match edit_todo(store, &candidates, orig_head, onto) {
+                Ok(plan) => plan,
+                Err(code) => return code,
+            }
         }
     } else {
-        let actions = vec![mkit_core::ops::rebase::RebaseAction::Pick; candidates.len()];
+        let actions = vec![RebaseAction::Pick; candidates.len()];
         (candidates, actions)
     };
     let state = RebaseState {
@@ -679,25 +686,20 @@ fn commit_subject(store: &ObjectStore, h: Hash) -> String {
     }
 }
 
-/// Render the interactive todo, open the editor, and parse the result into
-/// a `(todo, actions)` plan in the edited order.
-///
-/// Returns `Ok(None)` when there is nothing to rebase (no candidate
-/// commits) — a noop. Returns `Ok(Some((todo, actions)))` otherwise, where
-/// `todo` may be empty if the user dropped every line (which resets the
-/// branch to the base). Mutating nothing, it is safe to fail here before
-/// the rebase touches HEAD.
+/// Render the interactive todo from a non-empty candidate list, open the
+/// editor, and parse the result into a `(todo, actions)` plan in the edited
+/// order. The returned `todo` may be empty if the user dropped every line
+/// (which resets the branch to the base). Mutating nothing, it is safe to
+/// fail here before the rebase touches HEAD. (The empty-candidate case is
+/// handled by the caller.)
 #[allow(clippy::type_complexity)]
 fn edit_todo(
     store: &ObjectStore,
     candidates: &[Hash],
     orig_head: Hash,
     onto: Hash,
-) -> Result<Option<(Vec<Hash>, Vec<RebaseAction>)>, u8> {
+) -> Result<(Vec<Hash>, Vec<RebaseAction>), u8> {
     use std::fmt::Write as _;
-    if candidates.is_empty() {
-        return Ok(None);
-    }
     // Build the template: one `pick <short> <subject>` line per candidate,
     // oldest-first (the order `collect_commits_to_replay` returns).
     let mut template = String::new();
@@ -741,10 +743,7 @@ fn edit_todo(
 /// mutation) on an unknown verb, an unknown/ambiguous commit, or a
 /// not-yet-supported verb (`squash`/`fixup`/`edit`).
 #[allow(clippy::type_complexity)]
-fn parse_todo(
-    candidates: &[Hash],
-    edited: &str,
-) -> Result<Option<(Vec<Hash>, Vec<RebaseAction>)>, u8> {
+fn parse_todo(candidates: &[Hash], edited: &str) -> Result<(Vec<Hash>, Vec<RebaseAction>), u8> {
     let mut todo = Vec::new();
     let mut actions = Vec::new();
     for raw in edited.lines() {
@@ -782,7 +781,7 @@ fn parse_todo(
         todo.push(h);
         actions.push(action);
     }
-    Ok(Some((todo, actions)))
+    Ok((todo, actions))
 }
 
 /// Resolve an abbreviated commit token from a todo line against the original

@@ -110,7 +110,10 @@ fn log_subjects(repo: &Repo) -> Vec<String> {
     String::from_utf8(out.stdout)
         .unwrap()
         .lines()
-        .map(|l| l.split_once(' ').map_or(String::new(), |(_, s)| s.to_string()))
+        .map(|l| {
+            l.split_once(' ')
+                .map_or(String::new(), |(_, s)| s.to_string())
+        })
         .collect()
 }
 
@@ -207,6 +210,40 @@ fn rebase_i_squash_is_rejected_without_mutating() {
     // No mutation: branch and HEAD unchanged, no rebase-apply dir left.
     assert_eq!(log_subjects(&repo), before);
     assert!(!repo.path.join(".mkit/rebase-apply").exists());
+}
+
+/// `rebase -i <onto>` when the current branch is *behind* `onto` (an
+/// ancestor of it) must fast-forward the branch to `onto`, like
+/// non-interactive rebase — not early-return as a noop.
+#[test]
+fn rebase_i_fast_forwards_when_behind() {
+    let td = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let repo = Repo {
+        path: td.path().to_path_buf(),
+        xdg: xdg.path().to_path_buf(),
+        _td: td,
+        _xdg: xdg,
+    };
+    ok(&repo, &["init"]);
+    ok(&repo, &["keygen"]);
+    // main = base -> A; feature branches at base (one commit behind main).
+    commit(&repo, "base.txt", "base", "base");
+    ok(&repo, &["branch", "feature"]);
+    commit(&repo, "a.txt", "A", "A"); // advances main to A
+    ok(&repo, &["checkout", "feature"]);
+    assert_eq!(log_subjects(&repo), vec!["base"]);
+
+    let (_d, script) = editor_script();
+    let out = rebase_i(&repo, "main", &script, "noop", "");
+    assert!(
+        out.status.success(),
+        "rebase -i when behind failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // feature fast-forwarded to main (base -> A).
+    assert_eq!(log_subjects(&repo), vec!["A", "base"]);
+    assert!(repo.path.join("a.txt").exists());
 }
 
 #[test]
