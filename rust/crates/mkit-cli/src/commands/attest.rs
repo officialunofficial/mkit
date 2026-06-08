@@ -366,6 +366,24 @@ pub fn run(args: &[String]) -> u8 {
         Ok(l) => l,
         Err(code) => return code,
     };
+    // The commit was resolved before the lock; re-verify it still exists in
+    // the object store now that gc can't run, so we never write an
+    // attestation whose subject a concurrent `gc --grace-secs 0` pruned
+    // between resolution and this save (#267). (`obj_store` avoids shadowing
+    // the `mkit_attest::store` module used for `store::save`.)
+    let obj_store = match mkit_core::store::ObjectStore::open(&cwd) {
+        Ok(s) => s,
+        Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
+    };
+    if !obj_store.contains(&commit_hash) {
+        return emit_err(
+            &format!(
+                "attested commit {} no longer exists (pruned concurrently?); aborting",
+                hash_mod::to_hex(&commit_hash)
+            ),
+            exit::CANTCREAT,
+        );
+    }
     let (att_id, path) = match store::save(&mkit_dir, &commit_hash, encoded.as_bytes()) {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("store: {e}"), exit::CANTCREAT),

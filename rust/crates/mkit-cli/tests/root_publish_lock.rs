@@ -80,6 +80,16 @@ fn annotated_tag_acquires_repo_lock() {
 }
 
 #[test]
+fn lightweight_tag_acquires_repo_lock() {
+    assert_blocks_on_held_lock(&["tag", "v1.0.0"]);
+}
+
+#[test]
+fn update_ref_acquires_repo_lock() {
+    assert_blocks_on_held_lock(&["update-ref", "refs/heads/newbranch", "HEAD"]);
+}
+
+#[test]
 fn attest_acquires_repo_lock() {
     assert_blocks_on_held_lock(&["attest"]);
 }

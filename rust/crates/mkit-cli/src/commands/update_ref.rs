@@ -77,6 +77,17 @@ pub fn run(args: &[String]) -> u8 {
         );
     };
 
+    // update-ref publishes a gc root (refs/heads/* or refs/tags/*) at an
+    // arbitrary object, so hold the repo lock across resolve + publish: a
+    // concurrent `gc --grace-secs 0` then can't prune a (possibly
+    // unreachable) target between resolving it and writing the ref (#267).
+    // Acquired after repo validation (store open) so a non-repo reported
+    // cleanly above; covers the delete path too for consistency.
+    let _lock = match super::acquire_worktree_lock(&cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+
     if opts.delete {
         if opts.old_value.is_some() {
             return super::usage_error("usage: mkit update-ref -d <ref> [<oldvalue>]");
@@ -91,6 +102,14 @@ pub fn run(args: &[String]) -> u8 {
         Ok(h) => h,
         Err(msg) => return emit_err(&msg, exit::DATAERR),
     };
+    // Refuse to publish a ref pointing at an object that is not present
+    // (resolved under the lock, so this also closes the resolve→publish race).
+    if !store.contains(&newhash) {
+        return emit_err(
+            &format!("object '{newspec}' does not exist in the store"),
+            exit::DATAERR,
+        );
+    }
     let condition = match opts.old_value.as_deref() {
         None => RefWriteCondition::Any,
         Some(s) if is_zero(s) => RefWriteCondition::Missing,
