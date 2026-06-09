@@ -33,23 +33,20 @@
 //! lock contention) is intentionally **out of scope here** — it needs a
 //! different technique and is tracked as the Phase-2 follow-up in issue #307.
 
-use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::Output;
 
-use mkit_core::Hash;
-use mkit_core::index::read_index;
-use mkit_core::object::Object;
-use mkit_core::ops::live_objects;
 use mkit_core::refs;
-use mkit_core::sign::{KeyPair, save_key, verify_commit, verify_remix, verify_tag};
-use mkit_core::store::ObjectStore;
-use mkit_core::to_hex;
 
 use proptest::prelude::*;
 use proptest::test_runner::{FileFailurePersistence, TestCaseError};
+
+mod common;
+use common::{
+    check_exit, check_invariants, in_progress, install_fixed_key, mkit, operation_residue,
+};
 
 /// Number of distinct worktree files the generator draws from. Small so that
 /// edits collide and real merges/conflicts arise instead of almost never.
@@ -60,9 +57,6 @@ const NAMES: usize = 4;
 /// case *count* varies (PR vs nightly) — so a regression minimized by the
 /// nightly run still replays under the default config.
 const MAX_OPS: usize = 50;
-
-/// Deterministic seed for the prewritten signing key (see module docs).
-const KEY_SEED: [u8; 32] = [0x11; 32];
 
 // ---------------------------------------------------------------------------
 // Operation alphabet
@@ -259,25 +253,8 @@ fn op_strategy() -> impl Strategy<Value = Op> {
 }
 
 // ---------------------------------------------------------------------------
-// Harness: drive the real binary
+// Op-model naming helpers
 // ---------------------------------------------------------------------------
-
-fn mkit(cwd: &Path, xdg: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_mkit"))
-        .args(args)
-        .current_dir(cwd)
-        // Fully isolate config/identity from the developer's environment.
-        .env("XDG_CONFIG_HOME", xdg)
-        .env("HOME", xdg)
-        // Never block on an interactive editor (rebase -i todo, merge/commit
-        // messages). `true` exits 0 leaving the file untouched → defaults used.
-        .env("EDITOR", "true")
-        .env("VISUAL", "true")
-        .env("GIT_EDITOR", "true")
-        .stdin(Stdio::null())
-        .output()
-        .expect("spawn mkit")
-}
 
 fn file_name(a: u8) -> String {
     format!("f{}.txt", (a as usize) % FILES)
@@ -307,21 +284,6 @@ fn pick_branch(mkit_dir: &Path, a: u8) -> String {
         "main".to_owned()
     } else {
         names[(a as usize) % names.len()].clone()
-    }
-}
-
-/// Which resumable operation, if any, is in progress (checked by sidecar).
-fn in_progress(mkit_dir: &Path) -> Option<&'static str> {
-    if mkit_dir.join("rebase-apply").exists() || mkit_dir.join("rebase-merge").exists() {
-        Some("rebase")
-    } else if mkit_dir.join("CHERRY_PICK_HEAD").exists() {
-        Some("cherry-pick")
-    } else if mkit_dir.join("REVERT_HEAD").exists() {
-        Some("revert")
-    } else if mkit_dir.join("MERGE_HEAD").exists() {
-        Some("merge")
-    } else {
-        None
     }
 }
 
@@ -398,33 +360,6 @@ fn apply(op: &Op, root: &Path, xdg: &Path, ctr: &mut u32) -> Vec<Output> {
     }
 }
 
-/// If `verb` left any on-disk residue after concluding, return a description of
-/// the first piece found — else `None`. Residue is the in-progress marker, the
-/// shared `mkit-conflicts` sidecar, or the op-specific message file
-/// (`MERGE_MSG`/`CHERRY_PICK_MSG`/`REVERT_MSG`) — all of which the core
-/// `clear_*_state` helpers remove. `ORIG_HEAD` is deliberately NOT checked: a
-/// `reset` legitimately leaves it. Rebase keeps its sidecar/message *inside*
-/// `rebase-apply/`, which the directory check already covers.
-fn operation_residue(mkit_dir: &Path, verb: &str) -> Option<String> {
-    let (head, msg) = match verb {
-        "merge" => ("MERGE_HEAD", "MERGE_MSG"),
-        "cherry-pick" => ("CHERRY_PICK_HEAD", "CHERRY_PICK_MSG"),
-        "revert" => ("REVERT_HEAD", "REVERT_MSG"),
-        "rebase" => {
-            return (mkit_dir.join("rebase-apply").exists()
-                || mkit_dir.join("rebase-merge").exists())
-            .then(|| "rebase-apply/".to_owned());
-        }
-        _ => return None,
-    };
-    for residue in [head, "mkit-conflicts", msg] {
-        if mkit_dir.join(residue).exists() {
-            return Some(residue.to_owned());
-        }
-    }
-    None
-}
-
 /// Operation-state-coherence invariant (the conflict-sidecar half of the
 /// oracle). A successful `--abort` or `--continue` *concludes* the operation
 /// and must leave no residue — no in-progress marker AND no `mkit-conflicts`
@@ -465,170 +400,6 @@ fn check_op_state(
     Ok(())
 }
 
-/// Exit codes a well-behaved `mkit` command may return — `OK` plus the
-/// documented sysexits-style errors from `mkit-cli/src/exit.rs`. Anything else
-/// (notably 101 from a Rust panic, or `None` from a signal) is a violation.
-const ALLOWED_EXIT: &[i32] = &[0, 1, 64, 65, 66, 69, 73, 75, 76, 77, 78];
-
-fn check_exit(out: &Output, label: &str) -> Result<(), String> {
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    match out.status.code() {
-        Some(c) if ALLOWED_EXIT.contains(&c) => {}
-        Some(c) => {
-            return Err(format!(
-                "[{label}] disallowed exit code {c}; stderr: {stderr}"
-            ));
-        }
-        None => return Err(format!("[{label}] killed by signal; stderr: {stderr}")),
-    }
-    for marker in ["panicked at", "thread 'main' panicked", "RUST_BACKTRACE"] {
-        if stderr.contains(marker) {
-            return Err(format!("[{label}] panic in stderr: {stderr}"));
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Invariant battery (test-local validator over mkit-core primitives)
-// ---------------------------------------------------------------------------
-
-fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
-    let mkit_dir = root.join(".mkit");
-    let store = ObjectStore::open(root).map_err(|e| format!("[{label}] open store: {e}"))?;
-
-    // 1. Content-addressing integrity: every loose object's bytes re-hash to
-    //    its path. `read` recomputes BLAKE3 and rejects on mismatch.
-    let present = store
-        .iter_object_hashes()
-        .map_err(|e| format!("[{label}] enumerate objects: {e}"))?;
-    for h in &present {
-        store
-            .read(h)
-            .map_err(|e| format!("[{label}] object {} failed integrity: {e}", to_hex(h)))?;
-    }
-
-    // 2. HEAD is well-formed (symbolic-to-branch or a 64-hex detached hash).
-    refs::read_head(&mkit_dir).map_err(|e| format!("[{label}] HEAD malformed: {e}"))?;
-
-    // 3. Index parses.
-    read_index(root).map_err(|e| format!("[{label}] index unparseable: {e}"))?;
-
-    // 4. Collect *signed* roots: HEAD, every head ref, every tag ref. A listed
-    //    ref whose on-disk bytes are malformed (hash == None) is corruption.
-    //    NOTE: `list_refs`/`list_tags` silently skip files with invalid ref
-    //    *names*; since the random ops here can only ever write valid names,
-    //    every ref is well-formed by construction. A strict name-level ref walk
-    //    only matters under corruption injection (Phase 2, #307).
-    let mut roots: Vec<Hash> = Vec::new();
-    if let Some(h) =
-        refs::resolve_head(&mkit_dir).map_err(|e| format!("[{label}] resolve HEAD: {e}"))?
-    {
-        roots.push(h);
-    }
-    for r in refs::list_refs(&mkit_dir).map_err(|e| format!("[{label}] list heads: {e}"))? {
-        match r.hash {
-            Some(h) => roots.push(h),
-            None => {
-                return Err(format!(
-                    "[{label}] head ref '{}' has malformed bytes",
-                    r.name
-                ));
-            }
-        }
-    }
-    for r in refs::list_tags(&mkit_dir).map_err(|e| format!("[{label}] list tags: {e}"))? {
-        match r.hash {
-            Some(h) => roots.push(h),
-            None => {
-                return Err(format!(
-                    "[{label}] tag ref '{}' has malformed bytes",
-                    r.name
-                ));
-            }
-        }
-    }
-
-    // 5 + 6. Signature validity over the *signed* reachable set: every commit/
-    //    remix/tag reachable from a signed root verifies, and every object on
-    //    the way is present+decodable. Stash roots (`refs/stash`, unannotated
-    //    zero-sig commits) are deliberately NOT walked here, so they are exempt
-    //    from the signature check. (Broad presence — incl. stash — is covered by
-    //    the gc live-set check below.)
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut work = roots;
-    while let Some(h) = work.pop() {
-        if !visited.insert(to_hex(&h)) {
-            continue;
-        }
-        let obj = store
-            .read_object(&h)
-            .map_err(|e| format!("[{label}] reachable object {} unreadable: {e}", to_hex(&h)))?;
-        match obj {
-            Object::Commit(c) => {
-                verify_commit(&c)
-                    .map_err(|e| format!("[{label}] commit {} bad signature: {e}", to_hex(&h)))?;
-                work.push(c.tree_hash);
-                work.extend(c.parents);
-            }
-            Object::Remix(r) => {
-                verify_remix(&r)
-                    .map_err(|e| format!("[{label}] remix {} bad signature: {e}", to_hex(&h)))?;
-                work.push(r.tree_hash);
-                work.extend(r.parents);
-                // `sources` reference upstream commits that may legitimately be
-                // absent from this repo — not part of local reachability.
-            }
-            Object::Tag(t) => {
-                verify_tag(&t)
-                    .map_err(|e| format!("[{label}] tag {} bad signature: {e}", to_hex(&h)))?;
-                work.push(t.target);
-            }
-            Object::Tree(t) => {
-                work.extend(t.entries.into_iter().map(|e| e.object_hash));
-            }
-            // A chunked blob's chunk objects are part of its closure; walk them
-            // so a reachable-but-missing chunk is caught (mirrors core graph
-            // reachability). The generator writes tiny files today, but this
-            // keeps the walk correct if a large file ever triggers chunking.
-            Object::ChunkedBlob(cb) => work.extend(cb.chunks),
-            // Leaves: already proven present+intact by `read_object` above.
-            Object::Blob(_) | Object::Delta(_) => {}
-        }
-    }
-
-    // 7. GC-safety: every object mkit would retain must be present and intact.
-    //    `live_objects` is mkit's OWN retention definition — HEAD, refs, stash,
-    //    ORIG_HEAD, in-progress merge/cherry-pick/revert/rebase state, conflict-
-    //    sidecar blobs, attested commits, and recovery-log roots, plus the full
-    //    closure (incl. chunked-blob chunks). Using it keeps this check aligned
-    //    with the contract as it evolves, and makes the aggressive `gc
-    //    --grace-secs 0` op meaningful: a prune that drops a live object — incl.
-    //    stash-only / recovery-only / sidecar-only ones the signed-ref walk
-    //    above never visits — is caught here.
-    let live = live_objects(&store, &mkit_dir)
-        .map_err(|e| format!("[{label}] collect gc live-set: {e}"))?;
-    for h in &live {
-        store
-            .read(h)
-            .map_err(|e| format!("[{label}] live object {} missing/corrupt: {e}", to_hex(h)))?;
-    }
-
-    // 8. No leaked lock files: every `.mkit/*.lock` is acquired and released
-    //    within a single command, so none must survive a returned command.
-    if let Ok(rd) = fs::read_dir(&mkit_dir) {
-        for ent in rd.flatten() {
-            let name = ent.file_name();
-            let name = name.to_string_lossy();
-            if name.ends_with(".lock") {
-                return Err(format!("[{label}] leaked lock file: .mkit/{name}"));
-            }
-        }
-    }
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Scenario driver
 // ---------------------------------------------------------------------------
@@ -657,16 +428,6 @@ fn run_scenario(ops: &[Op]) -> Result<(), String> {
         check_op_state(op, pre_verb, &outputs, &mkit_dir, &label)?;
         check_invariants(root, &label)?;
     }
-    Ok(())
-}
-
-/// Prewrite a deterministic Ed25519 signing key at the default path so commits
-/// don't depend on `keygen` randomness (faster + reproducible).
-fn install_fixed_key(root: &Path) -> Result<(), String> {
-    let keys = root.join(".mkit").join("keys");
-    fs::create_dir_all(&keys).map_err(|e| format!("mkdir keys: {e}"))?;
-    let kp = KeyPair::from_seed(KEY_SEED);
-    save_key(&keys.join("default.key"), &kp).map_err(|e| format!("save_key: {e}"))?;
     Ok(())
 }
 
