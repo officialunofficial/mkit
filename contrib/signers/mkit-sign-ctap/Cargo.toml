@@ -1,7 +1,5 @@
 [package]
 name = "mkit-sign-ctap"
-# Crate lives outside `rust/`; point at the workspace root explicitly.
-workspace = "../../../rust"
 description = "Reference external-signer binary: FIDO2/WebAuthn roaming authenticator (YubiKey / Nitrokey / SoloKey) over CTAP-HID. Speaks mkit protocol v1.1 with WebAuthn wrapping."
 keywords = ["mkit", "attestation", "signer", "webauthn", "fido2"]
 categories = ["command-line-utilities", "cryptography"]

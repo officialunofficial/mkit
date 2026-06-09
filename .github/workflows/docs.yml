@@ -55,3 +55,11 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --locked --all-features --workspace --no-deps
+
+      # The reference signers are a separate workspace (contrib/signers/) and so
+      # are no longer covered by --workspace above; gate their doc links too.
+      - name: cargo doc — contrib signers
+        working-directory: contrib/signers
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --locked --all-features --no-deps

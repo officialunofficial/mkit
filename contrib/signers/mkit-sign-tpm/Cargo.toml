@@ -1,10 +1,5 @@
 [package]
 name = "mkit-sign-tpm"
-# Crate lives outside `rust/`, so Cargo cannot auto-discover the
-# workspace root. Point at it explicitly so the `*.workspace = true`
-# inheritance below resolves against `rust/Cargo.toml`. Same trick
-# mkit-sign-file uses.
-workspace = "../../../rust"
 description = "External-signer binary: signs a DSSE PAE with a P-256 key held inside a TPM 2.0 device. Linux-native analog of mkit-sign-se."
 keywords = ["mkit", "attestation", "signer", "tpm", "tpm2"]
 categories = ["command-line-utilities", "cryptography"]

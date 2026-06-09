@@ -35,3 +35,6 @@ apps/*/.vocs/
 
 # Rust dist artifacts (wasm-pack, dist tarballs)
 /rust/dist/
+
+# Reference-signers workspace build output (separate workspace, #225)
+contrib/signers/target/
