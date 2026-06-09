@@ -47,19 +47,29 @@ jobs:
           version: '31.0'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # `--all-features` checks the feature-gated public surface too
+      # (history-mmr, sparse-checkout, pack-shards, the keystore backends) —
+      # the same API docs.rs renders. keystore's backend-yubikey needs
+      # libpcsclite to build.
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config
+
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@d9be7d8cda89035c9c843f78bd44d4f72d8403d4  # v2
         with:
           tool: cargo-semver-checks
 
-      # Scope to the crates we intend to publish (exclude the binary/CLI, the
-      # npm-only WASM crate, the Phase-2 enc transport, and dev-only members).
-      # `--baseline-rev` builds the base branch's API for comparison.
+      # The publishable LIBRARY crates — exactly the `publish = true` members.
+      # Excluded by construction (all `publish = false`): mkit-cli (the binary;
+      # its lib surface is unstable CLI internals), mkit-wasm (npm-only), and
+      # mkit-transport-enc (Phase-2). `--baseline-rev` builds the base branch's
+      # API for comparison.
       - name: cargo-semver-checks vs base branch
         working-directory: rust
         run: |
           cargo semver-checks \
             --baseline-rev "origin/${{ github.base_ref }}" \
+            --all-features \
             -p mkit-core \
             -p mkit-attest \
             -p mkit-keystore \

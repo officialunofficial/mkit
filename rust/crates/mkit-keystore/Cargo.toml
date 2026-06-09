@@ -76,5 +76,8 @@ commonware-cryptography = "=2026.4.0"
 commonware-utils = "=2026.4.0"
 
 [package.metadata.docs.rs]
-# Build docs with every feature so docs.rs renders the feature-gated API.
-all-features = true
+# NOT `all-features`: `backend-yubikey` pulls `card-backend-pcsc` → `pcsc-sys`,
+# whose build script needs system `libpcsclite` that docs.rs doesn't provide.
+# Document the Linux-buildable, no-system-library backends instead (the macOS /
+# Windows backends are target-gated and wouldn't render on docs.rs anyway).
+features = ["attest", "bls-threshold", "backend-linux-secret-service", "backend-systemd-creds"]

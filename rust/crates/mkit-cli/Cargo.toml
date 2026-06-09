@@ -4,6 +4,13 @@ description = "The mkit command-line tool: a content-addressed VCS with native a
 keywords = ["mkit", "vcs", "cli", "attestation", "content-addressed"]
 categories = ["command-line-utilities", "cryptography"]
 readme = "../../README.md"
+# Distributed as the `mkit` binary via signed release archives and
+# `cargo install --git` (see docs/INSTALL.md), not crates.io. Its library
+# surface is the CLI's internals and is NOT a stable API — matching this
+# crate's own module docs. Keeping it off crates.io also avoids publishing
+# its `enc-transport` feature, which depends on the `publish = false`
+# `mkit-transport-enc` crate.
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -176,7 +183,3 @@ pack-shards = [
 # `mkit-core::history::CommitHistory::open_at` wired into commit /
 # branch / merge / rebase / cherry-pick ref advances.
 history-mmr = ["mkit-core/history-mmr"]
-
-[package.metadata.docs.rs]
-# Build docs with every feature so docs.rs renders the feature-gated API.
-all-features = true
