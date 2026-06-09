@@ -3,7 +3,7 @@
 //! every transport implementation (memory, file, HTTP, S3, SSH).
 //!
 //! The SSH wire format is defined in `mkit-rpc`'s `ssh.proto` and
-//! lives in [`mkit_rpc::mkit::rpc::v1::ssh`]; transport-ssh consumes
+//! lives in `mkit_rpc::mkit::rpc::v1::ssh`; transport-ssh consumes
 //! the schema directly. The hand-rolled `OP_HELLO` byte format that
 //! used to live in this module has been retired.
 
@@ -90,7 +90,7 @@ pub type TransportResult<T> = Result<T, TransportError>;
 // ---------------------------------------------------------------------------
 
 /// A 32-byte pack digest used as the content-address for an uploaded
-/// pack. This is the same 32 bytes as [`Hash`] but wrapped so pack
+/// pack. This is the same 32 bytes as [`Hash`](tyalias@Hash) but wrapped so pack
 /// digests and object hashes do not silently cross purposes at API
 /// boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -115,13 +115,13 @@ impl PackKey {
         to_hex(&self.0)
     }
 
-    /// Build a [`PackKey`] from a [`Hash`] (alias for [`From`]).
+    /// Build a [`PackKey`] from a [`Hash`](tyalias@Hash) (alias for [`From`]).
     #[must_use]
     pub const fn from_hash(h: Hash) -> Self {
         Self(h)
     }
 
-    /// Convert back to a plain [`Hash`].
+    /// Convert back to a plain [`Hash`](tyalias@Hash).
     #[must_use]
     pub const fn into_hash(self) -> Hash {
         self.0
@@ -360,7 +360,7 @@ pub trait Transport: Send + Sync {
 /// drive `async fn` bodies from a sync method. Hard-coding
 /// `tokio::runtime::Handle::block_on` would bleed tokio across the
 /// workspace; hard-coding `commonware_runtime::deterministic` would
-/// mean production = tests. A pluggable [`Executor`] keeps the
+/// mean production = tests. A pluggable `Executor` keeps the
 /// runtime-choice at the consumer crate.
 pub mod async_shim {
     /// Drives an async future to completion synchronously. Pluggable so

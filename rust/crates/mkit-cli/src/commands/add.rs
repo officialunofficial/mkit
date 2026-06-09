@@ -1,6 +1,6 @@
 //! `mkit add <path>` / `mkit add .` — stage a file (or the whole
 //! worktree) into `.mkit/index`. `add -p` additionally stages individual
-//! hunks interactively (see [`run_patch`]).
+//! hunks interactively (see `run_patch`).
 
 use std::collections::HashSet;
 use std::io::{BufRead, Write};

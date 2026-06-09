@@ -153,7 +153,7 @@ fn sync_parent(dir: &Path) -> io::Result<()> {
 /// each time; a lock taken on the previous inode would migrate to an
 /// abandoned file and stop providing mutual exclusion.
 ///
-/// v1 uses blocking [`File::lock`] (formerly `lock_exclusive`); refs
+/// v1 uses blocking [`File::lock`](std::fs::File::lock) (formerly `lock_exclusive`); refs
 /// updates are user-driven and serialisation is the desired behaviour.
 /// A future v2 could expose `try_lock` for fail-fast contention
 /// handling.
@@ -214,7 +214,7 @@ impl Drop for RefLock {
 /// Local-filesystem transport. Every instance holds a root `PathBuf`
 /// and a `Mutex` protecting the `Match` CAS read-then-write sequence
 /// within a process. Cross-process atomicity is supplied separately
-/// by [`RefLock`], which takes an OS exclusive lock on
+/// by `RefLock`, which takes an OS exclusive lock on
 /// `<root>/.mkit/refs/.lock` for the duration of the CAS critical
 /// section.
 ///
@@ -995,7 +995,7 @@ mod tests {
     ///
     /// We simulate two processes by spawning two threads that each
     /// construct their own [`FileTransport`] over the **same on-disk
-    /// root**. Each [`FileTransport`] owns its own [`RefLock`] handle
+    /// root**. Each [`FileTransport`] owns its own `RefLock` handle
     /// (a fresh `File` opened at lock-acquire time). Because the OS
     /// `flock(2)` / `LockFileEx` mutual exclusion is enforced between
     /// distinct open file descriptions — not between threads — two

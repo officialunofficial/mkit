@@ -53,7 +53,7 @@ use zeroize::Zeroizing;
 ///    non-zero with a stderr message — same as before. The signer never
 ///    got far enough to send a frame.
 /// 2. Per-request errors (unsupported algorithm, malformed payload)
-///    are sent back as [`SignerFrame::Error`] frames; the binary
+///    are sent back as `SignerFrame::Error` frames; the binary
 ///    keeps running until stdin closes.
 fn main() -> ExitCode {
     match run() {
@@ -90,7 +90,7 @@ fn run() -> Result<(), SignerError> {
 ///
 /// Each iteration reads exactly one frame, dispatches on the oneof
 /// body, and writes exactly one response frame. Per-request failures
-/// are reported as [`SignerFrame::Error`] without terminating the
+/// are reported as `SignerFrame::Error` without terminating the
 /// loop; this matches the protocol's "callers MAY send multiple
 /// requests on a single connection" promise even though the file
 /// signer is most often spawned per-request by mkit.

@@ -239,11 +239,11 @@ pub enum Algorithm {
     /// BLS12-381 M-of-N threshold share (`MinSig` variant — signature
     /// in G1, public key in G2). The stored secret material is a
     /// commonware-codec wire-encoded `Share` (≈52 bytes), NOT a 32-byte
-    /// scalar — so the [`KeyImporter`] / [`KeyExporter`] paths, which
+    /// scalar — so the `KeyImporter` / `KeyExporter` paths, which
     /// are pinned at 32 bytes, refuse this variant with
     /// [`Error::UnsupportedAlgorithm`]. Software-backend storage flows
     /// through the dedicated BLS-share API on
-    /// [`crate::SoftwareKeystore`]; see [`docs/SPEC-KEYSTORE.md`] §"BLS
+    /// [`crate::SoftwareKeystore`]; see `docs/SPEC-KEYSTORE.md` §"BLS
     /// share storage".
     ///
     /// Feature-gated behind `bls-threshold` because the share producers

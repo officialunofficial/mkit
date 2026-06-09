@@ -1,7 +1,7 @@
 //! Shared revision-spec resolver (issue #227, parent #226).
 //!
 //! [`resolve_revision`] turns a user-supplied revision string into a
-//! single object [`Hash`]. It is the keystone the diff/checkout/
+//! single object [`Hash`](tyalias@mkit_core::Hash). It is the keystone the diff/checkout/
 //! cherry-pick/bisect commands build on so they all accept the same
 //! grammar instead of each one hand-rolling a `hash::from_hex` call.
 //!
@@ -64,7 +64,7 @@ pub enum RevError {
     Backend(String),
 }
 
-/// Resolve `spec` to a single object [`Hash`].
+/// Resolve `spec` to a single object [`Hash`](tyalias@mkit_core::Hash).
 ///
 /// See the module docstring for the accepted grammar.
 ///

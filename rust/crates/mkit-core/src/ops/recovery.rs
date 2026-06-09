@@ -205,7 +205,7 @@ pub fn would_expire(mkit_dir: &Path, now: u64, policy: &RetentionPolicy) -> Resu
 
 /// Drop entries that are both older than `policy.grace_secs` (relative to
 /// `now`, unix seconds) and not among the most recent `policy.keep_last`.
-/// Rewrites the log atomically (durably, via [`write_atomic`]). Returns
+/// Rewrites the log atomically (durably, via `write_atomic`). Returns
 /// the number of entries pruned.
 ///
 /// Must be called under the repo lock — see the module concurrency note;

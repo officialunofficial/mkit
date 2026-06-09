@@ -19,3 +19,7 @@ workspace = true
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it.
 mkit-core = { version = "0.1", path = "../mkit-core" }
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

@@ -4,7 +4,7 @@
 
 use mkit_core::hash::Hash;
 
-/// Render a [`Hash`] as 64 lowercase hex chars. Wrapper over
+/// Render a [`Hash`](tyalias@mkit_core::Hash) as 64 lowercase hex chars. Wrapper over
 /// `mkit_core`'s byte-level API that keeps a stable name at this layer.
 #[must_use]
 pub fn hex_hash(h: &Hash) -> String {

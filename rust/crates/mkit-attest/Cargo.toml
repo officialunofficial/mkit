@@ -101,3 +101,7 @@ hex = "0.4"
 # Tests that hand-build signing keys need dalek unconditionally, so pull
 # it in as a dev-dep separate from the feature-gated runtime dep.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

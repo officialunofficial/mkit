@@ -239,7 +239,7 @@ fn load_or_ephemeral_client_key()
 /// 3. Filter out any object the remote already has via
 ///    [`Transport::pack_exists`] (single-object packs, so the digest ==
 ///    pack key).
-/// 4. Build a pack with [`PackWriter`]; the whole-pack digest is the
+/// 4. Build a pack with `PackWriter`; the whole-pack digest is the
 ///    `PackKey` used by [`Transport::upload_pack`].
 /// 5. Publish the ref with [`Transport::write_ref`].
 pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {

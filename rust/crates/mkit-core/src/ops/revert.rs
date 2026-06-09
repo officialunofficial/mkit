@@ -1,6 +1,6 @@
 //! Single-commit revert onto a base tree — the inverse of cherry-pick.
 //!
-//! Where [`cherry_pick`](super::cherry_pick) applies `target`'s change to
+//! Where [`cherry_pick`](super::cherry_pick()) applies `target`'s change to
 //! `ours` via the 3-way merge `(base = target.parent.tree, ours, theirs =
 //! target.tree)`, revert *undoes* it by swapping `base` and `theirs`:
 //! `(base = target.tree, ours, theirs = target.parent.tree)`. The result

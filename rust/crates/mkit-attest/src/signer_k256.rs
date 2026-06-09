@@ -1,7 +1,7 @@
 //! secp256k1 / ES256K signer + verifier (COSE alg -47).
 //!
 //! Feature-gated behind `algo-secp256k1`. See `docs/SPEC-ATTESTATIONS.md`
-//! §6 for the trait contract, and this crate's [`signer_repo_key`] module
+//! §6 for the trait contract, and this crate's `signer_repo_key` module
 //! for the Ed25519 analogue.
 //!
 //! Signing semantics:

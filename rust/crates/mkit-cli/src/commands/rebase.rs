@@ -3,7 +3,7 @@
 //!
 //! The rebase state machine lives in `mkit_core::ops::rebase`. This
 //! shim loads / writes that state and drives the replay loop via
-//! [`mkit_core::ops::cherry_pick`].
+//! [`mkit_core::ops::cherry_pick()`].
 //!
 //! With `-i`/`--interactive`, the todo list is opened in `$EDITOR`
 //! before any mutation: lines can be reordered, `drop`ped (deleted),

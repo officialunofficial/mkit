@@ -4,14 +4,22 @@ description = "The mkit command-line tool: a content-addressed VCS with native a
 keywords = ["mkit", "vcs", "cli", "attestation", "content-addressed"]
 categories = ["command-line-utilities", "cryptography"]
 readme = "../../README.md"
+# Distributed as the `mkit` binary via signed release archives and
+# `cargo install --git` (see docs/INSTALL.md), not crates.io. Its library
+# surface is the CLI's internals and is NOT a stable API — matching this
+# crate's own module docs. Keeping it off crates.io also avoids publishing
+# its `enc-transport` feature, which depends on the `publish = false`
+# `mkit-transport-enc` crate.
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Publishable to crates.io as a binary crate so users can run
-# `cargo install mkit-cli`. `publish` left unset (cargo default = true).
+# The binary is named `mkit` (src/main.rs); set explicitly because it differs
+# from the crate name. Install via release archives or
+# `cargo install --git … mkit-cli` (see the `publish = false` note above).
 default-run = "mkit"
 
 # `cargo binstall mkit-cli` metadata. Points cargo-binstall at the

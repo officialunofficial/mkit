@@ -26,7 +26,7 @@
 //! clone, the original Context can be dropped without invalidating
 //! ours. So we briefly spin up a commonware tokio Runner whose only
 //! job is to hand us a `BufferPool` clone, then drop it. Everything
-//! else — the actual tokio runtime, the [`TokioContext`] used during
+//! else — the actual tokio runtime, the `TokioContext` used during
 //! dial — we own ourselves so the runtime survives the entire
 //! transport lifetime.
 //!

@@ -3,7 +3,7 @@
 //! Walks a directory, applies `.mkitignore`, hashes each file as a
 //! [`Blob`](crate::object::Blob), recurses on subdirectories, validates
 //! symlink targets against path-traversal, and writes a single root
-//! [`Tree`](crate::object::Tree) into the supplied [`ObjectStore`].
+//! [`Tree`] into the supplied [`ObjectStore`].
 //!
 //! Notes:
 //!
@@ -11,7 +11,7 @@
 //!   [`Blob`](crate::object::Blob). Files above the threshold are
 //!   chunked with [`crate::chunker::FastCdc::v1`]; each chunk is
 //!   stored as a `Blob` and the file is represented by a
-//!   [`ChunkedBlob`](crate::object::ChunkedBlob) manifest whose hash
+//!   [`ChunkedBlob`] manifest whose hash
 //!   is what lands in the parent tree.
 //! - We never follow symlinks while walking. Linux/macOS `read_link`
 //!   reports the target verbatim and we hash it as a blob.
@@ -241,7 +241,7 @@ fn build_tree_inner(
 ///
 /// A file entry (Blob/Executable) may address either a single
 /// [`Blob`](crate::object::Blob) or, for content above
-/// [`CHUNK_THRESHOLD`], a [`ChunkedBlob`](crate::object::ChunkedBlob)
+/// [`CHUNK_THRESHOLD`], a [`ChunkedBlob`]
 /// manifest — exactly the two shapes `store_file_object` (and hence
 /// `add`/`hash_file`/`build_tree`) can produce. Symlink entries must be
 /// a single `Blob`. Any other object kind under a file entry is rejected.
@@ -435,7 +435,7 @@ pub fn build_tree_from_index(
 /// Files at or below [`CHUNK_THRESHOLD`] become a single
 /// [`Blob`](crate::object::Blob). Files above the threshold are split
 /// with [`FastCdc::v1`]; each chunk is stored as a `Blob`, and the
-/// file is represented by a [`ChunkedBlob`](crate::object::ChunkedBlob)
+/// file is represented by a [`ChunkedBlob`]
 /// manifest whose hash is returned and lands in the parent tree. See
 /// `SPEC-FASTCDC.md` and `SPEC-OBJECTS.md` §7.
 ///
@@ -491,7 +491,7 @@ fn hash_file_with_metadata(
 /// - At or below [`CHUNK_THRESHOLD`]: a single
 ///   [`Blob`](crate::object::Blob).
 /// - Above the threshold: `FastCdc::v1` chunks, each stored as a `Blob`,
-///   addressed by a [`ChunkedBlob`](crate::object::ChunkedBlob) manifest.
+///   addressed by a [`ChunkedBlob`] manifest.
 ///
 /// # Errors
 /// See [`WorktreeError`].
@@ -533,7 +533,7 @@ pub fn store_file_object(store: &ObjectStore, data: &[u8]) -> WorktreeResult<Has
 /// addressed by `hash`.
 ///
 /// A plain [`Blob`](crate::object::Blob) returns its bytes directly. A
-/// [`ChunkedBlob`](crate::object::ChunkedBlob) manifest is reassembled
+/// [`ChunkedBlob`] manifest is reassembled
 /// by concatenating each referenced chunk (every chunk must itself be a
 /// `Blob`). This is the shared counterpart to [`store_file_object`] and
 /// backs `mkit cat`, `mkit diff`, conflict rendering, and blame so they
