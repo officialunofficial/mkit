@@ -17,8 +17,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Publishable to crates.io as a binary crate so users can run
-# `cargo install mkit-cli`. `publish` left unset (cargo default = true).
+# The binary is named `mkit` (src/main.rs); set explicitly because it differs
+# from the crate name. Install via release archives or
+# `cargo install --git … mkit-cli` (see the `publish = false` note above).
 default-run = "mkit"
 
 # `cargo binstall mkit-cli` metadata. Points cargo-binstall at the

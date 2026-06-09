@@ -48,9 +48,11 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # `--all-features` checks the feature-gated public surface too
-      # (history-mmr, sparse-checkout, pack-shards, the keystore backends) —
-      # the same API docs.rs renders. keystore's backend-yubikey needs
-      # libpcsclite to build.
+      # (history-mmr, sparse-checkout, pack-shards, the keystore backends).
+      # This is a SUPERSET of what docs.rs renders — it also covers
+      # mkit-keystore's `backend-yubikey`, which the keystore's docs.rs
+      # metadata omits — and that broader coverage is intentional. yubikey
+      # needs libpcsclite to build.
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config
 
