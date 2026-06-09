@@ -50,22 +50,31 @@ but `main` has advanced far past that tag. So the first crates.io release must
 be a **fresh version** — publishing current `main` *as* `0.1.0` would mismatch
 the tagged `v0.1.0` release. Let release-plz pick the new version:
 
-1. Merge this PR (adds `release-plz.yml` + `rust/release-plz.toml`). **Set the
-   two App secrets but withhold `CARGO_REGISTRY_TOKEN` for now** — so the
-   `release` job that runs on this merge cannot publish anything prematurely.
-2. Run the **`release-plz` workflow** manually (Actions → release-plz → Run).
-   The `release-plz-pr` job diffs commits since `v0.1.0`, bumps the workspace
-   version (likely `0.2.0`), regenerates `CHANGELOG.md`, and opens the Release PR.
-3. Review the proposed version + changelog. Adjust if you want a different
-   first-crates.io version (e.g. force `1.0.0`) by editing the PR.
-4. **Now add `CARGO_REGISTRY_TOKEN`.**
-5. Merge the Release PR. The `release-plz-release` job publishes the 9 libs to
-   crates.io in dependency order and tags `v0.2.0` (new — no clash with
-   `v0.1.0`). That tag triggers `release.yml` → binaries + GitHub Release + npm.
+> **Why a manual first bump?** release-plz refuses to compute a release while the
+> only baseline is the `v0.1.0` *git tag* with nothing on crates.io ("package
+> `mkit-core` not found in the registry, but the git tag v0.1.0 exists"). The
+> fix is to move the version OFF `0.1.0` once, by hand; from then on release-plz
+> tracks the published crates.io version and fully automates the rest. (Validated
+> locally: at `0.2.0` with a clean tree, `release-plz update` succeeds and plans
+> to publish exactly the 9 libs.)
 
-> Tip: validate the plan first with
-> `cd rust && release-plz update --dry-run` (install: `cargo install release-plz`).
-> Confirm **exactly one** version number moves and the publish list is the 9 libs.
+1. Merge this PR (adds `release-plz.yml` + `rust/release-plz.toml`, splits the
+   contrib signers, makes the enc dep path-only). It bumps no version, so its
+   `release` job is a clean no-op.
+2. Provision all three secrets (above).
+3. **Cut the first release with a one-time manual bump PR:** edit
+   `rust/Cargo.toml` `[workspace.package] version = "0.2.0"` (or `1.0.0` if you
+   prefer), add a `## [0.2.0]` heading to `CHANGELOG.md`, open + merge the PR.
+   (This is the only manual version bump ever; release-plz can't do this first
+   one for the reason above.)
+4. On that merge, the `release-plz-release` job publishes the 9 libs to crates.io
+   in dependency order and tags `v0.2.0` (new — no clash with `v0.1.0`). That tag
+   triggers `release.yml` → binaries + GitHub Release + npm.
+
+> Validate any time with `cd rust && release-plz update --config release-plz.toml`
+> (install: `cargo install release-plz`). It writes the proposed version +
+> changelog locally (no publish); `git checkout .` to discard. Confirm exactly
+> one version moves and the 9 libs are the publish set.
 
 ## Steady-state (every release after the first)
 1. Actions → **release-plz** → Run (the `release-plz-pr` job). It gathers
