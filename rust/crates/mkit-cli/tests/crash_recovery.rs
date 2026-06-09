@@ -91,9 +91,11 @@ fn assert_recovers(repo: &Repo, verb: &str, recovery: &str, label: &str) {
 fn sidecar_write_prefix_crashes_recover() {
     for &(verb, sidecars) in SIDECAR_OPS {
         // Crash after writing `keep` of the ordered sidecar files: keep the
-        // first `keep`, delete the rest. `keep == sidecars.len()` is the full
-        // (control) state.
-        for keep in 1..=sidecars.len() {
+        // first `keep`, delete the rest. `keep == 0` is the reachable
+        // "conflict materialised into worktree/index, but no operation marker
+        // survived" state (materialize_conflicts runs before write_*_state);
+        // `keep == sidecars.len()` is the full (control) state.
+        for keep in 0..=sidecars.len() {
             for recovery in ["status", "--abort", "--continue"] {
                 let repo = conflicted(verb);
                 for rel in &sidecars[keep..] {
@@ -122,9 +124,11 @@ fn garbled_sidecar_crashes_do_not_panic() {
 #[test]
 fn partial_rebase_state_recovers() {
     // A representative member of each rebase-apply parsing shape: a text file
-    // (`head-name`), a single-hash file (`onto`), and a hash-list file (`todo`).
-    // The remaining members (orig-head/actions/done) parse like one of these.
-    let rebase_files = ["head-name", "onto", "todo"];
+    // (`head-name`), a single-hash file (`onto`), a hash-list file (`todo`), and
+    // the conflict sidecar (`mkit-conflicts`) — distinct because it governs
+    // whether `--continue` consumes resolved material or replays. The remaining
+    // state members (orig-head/actions/done) parse like one of the first three.
+    let rebase_files = ["head-name", "onto", "todo", "mkit-conflicts"];
     // Remove or garble one rebase-apply file at a time, then drive each rebase
     // recovery flag. rebase-apply existing makes mkit see "rebase in progress",
     // so a missing/garbled member must yield a clean error, never a panic.

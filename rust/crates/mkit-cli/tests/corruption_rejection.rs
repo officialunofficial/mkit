@@ -167,7 +167,10 @@ fn branch_ref_without_trailing_newline_is_accepted() {
     let p = repo.mkit_dir().join("refs/heads/main");
     let good64 = fs::read_to_string(&p).unwrap().trim_end().to_owned();
     fs::write(&p, &good64).unwrap(); // no '\n'
-    assert_accepted(&repo, &["log"], "ref/no-trailing-newline");
+    // Drive the STRICT ref reader (`gc`/`collect_roots`), not lenient `log`:
+    // lenient porcelain can exit 0 on a ref it failed to resolve, which would
+    // mask a strict-decode regression that started rejecting newline-less refs.
+    assert_accepted(&repo, &["gc"], "ref/no-trailing-newline");
 }
 
 #[test]
