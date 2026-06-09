@@ -64,7 +64,11 @@ mkit-transport-ssh = { version = "0.1", path = "../mkit-transport-ssh" }
 # Optional: encrypted-stream transport. Off by default so the
 # baseline `mkit-cli` build doesn't pay tokio's compile cost. Turn on
 # via `--features enc-transport`. See SPEC-TRANSPORT-ENC §6.
-mkit-transport-enc = { version = "0.1", path = "../mkit-transport-enc", optional = true }
+# PATH-ONLY (no version req): both this crate and mkit-transport-enc are
+# publish = false, so a version requirement serves no crates.io purpose and
+# would otherwise break when release-plz bumps the lockstep workspace version
+# (the enc crate moves but its requirement here wouldn't be rewritten — #225).
+mkit-transport-enc = { path = "../mkit-transport-enc", optional = true }
 mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
 # commonware-cryptography's ed25519 PrivateKey is the static-key type
 # the encrypted transport handshake takes. Pulled in here behind the
