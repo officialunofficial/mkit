@@ -38,10 +38,13 @@ env:
 
 jobs:
   # crates.io publish when a Release PR merges (push to main). No-op otherwise
-  # (release_always = false). Push-only: never runs on workflow_dispatch.
+  # (release_always = false). Push-only; and gated on the `RELEASE_PLZ_ENABLED`
+  # repo variable so the whole workflow stays DORMANT until you've provisioned
+  # the secrets and flip the variable to `true` — merging this setup PR before
+  # then is a clean skip (no failed App-token mint).
   release-plz-release:
     name: release-plz release
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && vars.RELEASE_PLZ_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -84,10 +87,11 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-  # Open/update the single Release PR. MANUAL only.
+  # Open/update the single Release PR. MANUAL only, and likewise gated on
+  # RELEASE_PLZ_ENABLED so a stray dispatch before setup does nothing.
   release-plz-pr:
     name: release-plz PR
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && vars.RELEASE_PLZ_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:

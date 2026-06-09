@@ -70,9 +70,30 @@ release_always = false
 name = "mkit-core"
 version_group = "mkit"
 git_tag_enable = false
+# release-plz creates no tag, but it still uses this template to build the
+# changelog's compare links. Point them at the human-created `v{version}` tags
+# instead of release-plz's multi-crate-workspace default `mkit-core-v{version}`,
+# which wouldn't exist.
+git_tag_name = "v{{ version }}"
 git_release_enable = false
 changelog_update = true
 changelog_path = "../CHANGELOG.md"  # repo-root CHANGELOG.md (workspace is rust/).
+# A package's changelog defaults to commits under its OWN directory only. Pull
+# in the rest of the lockstep train so the single root CHANGELOG.md captures
+# every crate's changes, not just mkit-core's.
+changelog_include = [
+  "mkit-rpc",
+  "mkit-attest",
+  "mkit-keystore",
+  "mkit-transport-memory",
+  "mkit-transport-file",
+  "mkit-transport-http",
+  "mkit-transport-s3",
+  "mkit-transport-ssh",
+  "mkit-cli",
+  "mkit-wasm",
+  "mkit-transport-enc",
+]
 
 # Every other crate: shares the lockstep version_group, never tags/releases.
 [[package]]

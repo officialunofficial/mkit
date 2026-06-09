@@ -44,12 +44,16 @@ Make sure all 9 `mkit-*` names are available (or already owned by the
 `officialunofficial` crates.io org). If any is taken by someone else, resolve
 before proceeding.
 
-### 2. Secrets (repo → Settings → Secrets and variables → Actions)
+### 2. Secrets + activation variable (repo → Settings → Secrets and variables → Actions)
 | Secret | What | Notes |
 |---|---|---|
 | `CARGO_REGISTRY_TOKEN` | crates.io API token | Scopes: **publish-new** + **publish-update**. A token (not trusted publishing) is required because brand-new crates can't be published via trusted publishing the first time. |
 | `RELEASE_PLZ_APP_ID` | GitHub App id | Reuse the same App as polychrome if it's installed on this repo; else create one (perms: contents:write, pull-requests:write, workflows). |
 | `RELEASE_PLZ_APP_PRIVATE_KEY` | GitHub App private key | Minted into a short-lived token per run; never stored as a static token. |
+
+| Variable | What |
+|---|---|
+| `RELEASE_PLZ_ENABLED` | Set to `true` to **activate** the workflow. Until then both jobs are skipped, so the workflow can merge dormant and a pre-setup merge/dispatch can't fail on a missing App token. Flip it to `true` once the three secrets are in place. |
 
 ### 3. First publish (one-time, manual — read carefully)
 The first crates.io release is special and can't be fully automated, for two
@@ -67,8 +71,10 @@ reasons:
 Sequence:
 
 1. Merge this PR (release-plz config/workflow, contrib split, path-only enc dep).
-   It bumps no version, and `release_always = false`, so nothing publishes.
-2. Provision all three secrets (above) and verify the 9 names on crates.io.
+   The workflow ships **dormant** (`RELEASE_PLZ_ENABLED` unset → both jobs skip),
+   so the merge can't fail and nothing publishes.
+2. Provision the three secrets (above), verify the 9 names on crates.io, then set
+   the `RELEASE_PLZ_ENABLED` repo variable to `true` to activate the workflow.
 3. **Open a one-time bump PR that rewrites everything** — locally:
    ```sh
    cd rust
