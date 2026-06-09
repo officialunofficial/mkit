@@ -1,6 +1,6 @@
 //! BLAKE3 hashing helpers.
 //!
-//! A [`Hash`] is a fixed 32-byte digest. The canonical hex form is 64
+//! A [`Hash`](tyalias@Hash) is a fixed 32-byte digest. The canonical hex form is 64
 //! lowercase characters. Object-store paths split the digest into a
 //! first-byte directory and 62-char file-name (see `SPEC-OBJECTS.md`
 //! §10).
@@ -9,7 +9,7 @@ use core::fmt;
 
 /// Length, in bytes, of a BLAKE3 digest used throughout mkit.
 pub const HASH_LEN: usize = 32;
-/// Length of the lowercase-hex encoding of a [`Hash`].
+/// Length of the lowercase-hex encoding of a [`Hash`](tyalias@Hash).
 pub const HEX_LEN: usize = 64;
 
 /// Fixed-size BLAKE3 digest. `Copy` because it is tiny and cheap.
@@ -79,7 +79,7 @@ pub fn to_hex_bytes(bytes: &[u8]) -> String {
     out
 }
 
-/// Render a [`Hash`] as lowercase hex.
+/// Render a [`Hash`](tyalias@Hash) as lowercase hex.
 #[must_use]
 pub fn to_hex(h: &Hash) -> String {
     to_hex_bytes(h)
@@ -116,7 +116,7 @@ pub fn domain_digest(domain: &[u8], body: &[u8]) -> Hash {
     *h.finalize().as_bytes()
 }
 
-/// Parse a lowercase-or-uppercase 64-char hex string into a [`Hash`].
+/// Parse a lowercase-or-uppercase 64-char hex string into a [`Hash`](tyalias@Hash).
 /// Rejects any non-hex byte.
 pub fn from_hex(s: &str) -> Result<Hash, FromHexError> {
     let bytes = s.as_bytes();
@@ -164,7 +164,7 @@ impl fmt::Display for ObjectPath {
     }
 }
 
-/// Split a [`Hash`] into its object-store path components.
+/// Split a [`Hash`](tyalias@Hash) into its object-store path components.
 #[must_use]
 pub fn object_path(h: &Hash) -> ObjectPath {
     let hex = to_hex(h);

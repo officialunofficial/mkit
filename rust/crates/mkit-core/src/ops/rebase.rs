@@ -234,7 +234,7 @@ pub fn cleanup_rebase(mkit_dir: &Path) -> RebaseResult<()> {
 
 /// Walk first-parent chain from `head_hash` back, stopping when we reach
 /// `onto_hash` or any ancestor of it. Returns commits in oldest-first
-/// order (ready for replay). Caps the walk at [`MAX_REPLAY_DEPTH`].
+/// order (ready for replay). Caps the walk at `MAX_REPLAY_DEPTH`.
 ///
 /// # Errors
 /// - [`RebaseError::Store`] / [`RebaseError::Object`] for store failures.

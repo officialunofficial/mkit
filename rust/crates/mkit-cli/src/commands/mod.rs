@@ -349,7 +349,7 @@ pub(crate) fn index_path_descends_from(path: &str, base: &str) -> bool {
 /// Construct (lazily) and share the process-wide `TokioExecutor` used
 /// by every history-MMR-coupled ref write in the CLI.
 ///
-/// One executor per process: each [`TokioExecutor`] owns a multi-thread
+/// One executor per process: each `TokioExecutor` owns a multi-thread
 /// tokio runtime, and re-constructing it per ref-write would burn a
 /// fresh runtime for every commit. The `OnceLock` is initialised on the
 /// first call; subsequent calls reuse the same `Arc` clone.

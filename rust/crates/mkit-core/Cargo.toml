@@ -94,3 +94,7 @@ proptest = "1"
 # Snapshot testing for human-readable test fixtures. Snapshots live in
 # `src/snapshots/`; review with `cargo insta review`.
 insta = "1"
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

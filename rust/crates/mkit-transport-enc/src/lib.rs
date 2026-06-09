@@ -35,7 +35,7 @@
 //! `commonware-runtime`. Phase 1 reconciles this with a deliberately
 //! tiny shim: every verb implementation acquires the [`EncSession`]'s
 //! `Mutex`, then drives a single round-trip future to completion via a
-//! caller-provided [`Executor`]. Tests use a [`deterministic::Runner`]
+//! caller-provided [`Executor`]. Tests use a `deterministic::Runner`
 //! executor; Phase 2 (CLI integration) will swap in the
 //! `commonware-runtime` tokio runner.
 //!

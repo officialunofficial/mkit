@@ -34,7 +34,7 @@
 //! # Sync / async bridge
 //!
 //! commonware's journaled MMR is async over a `commonware-runtime`
-//! [`Context`]. The mkit-core public surface ([`CommitHistory::append`],
+//! `Context`. The mkit-core public surface ([`CommitHistory::append`],
 //! [`CommitHistory::root`], [`CommitHistory::prove`]) is synchronous
 //! by design — it is called from the synchronous `refs::update_ref`
 //! path and from CLI helpers that have no async-runtime context.
@@ -43,17 +43,17 @@
 //! hoisted in PR #167. [`CommitHistory`] is generic over an executor
 //! `X: Executor`; every sync method drives its async counterpart via
 //! `executor.block_on(...)`. The executor is held by [`Arc`] for the
-//! lifetime of the [`CommitHistory`] value so multiple [`append`] /
-//! [`prove`] calls share a single runtime.
+//! lifetime of the [`CommitHistory`] value so multiple `append` /
+//! `prove` calls share a single runtime.
 //!
 //! # Executor / Context ownership
 //!
 //! [`CommitHistory::open_at`] takes an [`Arc`]-shared executor from
-//! the caller. The commonware [`Context`] needed to drive the
+//! the caller. The commonware `Context` needed to drive the
 //! journaled MMR is bootstrapped *internally* via a one-shot
 //! [`commonware_runtime::tokio::Runner::start`] on a fresh OS thread
 //! (the standard workaround documented in transport-enc Phase 2):
-//! the runner returns a Context clone, the outer Arc<Executor> inside
+//! the runner returns a Context clone, the outer `Arc<Executor>` inside
 //! the Context keeps tokio's runtime alive, and the bootstrap thread
 //! joins immediately. Subsequent async ops are driven through the
 //! caller-supplied executor.
@@ -161,7 +161,7 @@ pub enum HistoryError {
 /// and hands them to `journaled::Mmr::init` via [`JConfig`].
 ///
 /// commonware partition names are restricted to `[A-Za-z0-9_-]+`, so
-/// branch names go through [`sanitize_branch`] — a `_xx`-hex encoding
+/// branch names go through `sanitize_branch` — a `_xx`-hex encoding
 /// of every byte outside `[A-Za-z0-9-]`. Empty branches and invalid
 /// ref names are rejected up front by [`CommitHistory::open_at`].
 pub const HISTORY_DIR: &str = "history";
@@ -344,7 +344,7 @@ impl<X: Executor + 'static> CommitHistory<X> {
 
     /// Borrow the `mkit_dir` this history was opened against. `None`
     /// for the mem-only flavour. Used by
-    /// [`crate::refs::update_ref_with_history`] to take a [`RepoLock`]
+    /// [`crate::refs::update_ref_with_history`] to take a `RepoLock`
     /// around the ref-write + MMR-append critical section.
     #[must_use]
     pub fn mkit_dir(&self) -> Option<&Path> {
@@ -591,7 +591,7 @@ fn sanitize_branch(name: &str) -> String {
     out
 }
 
-/// Bootstrap a commonware tokio [`Context`] whose `storage_directory`
+/// Bootstrap a commonware tokio `Context` whose `storage_directory`
 /// is the supplied path.
 ///
 /// The bootstrap is done on a fresh OS thread because tokio refuses to

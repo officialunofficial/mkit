@@ -44,3 +44,7 @@ pack-shards = ["mkit-core/pack-shards"]
 
 [dev-dependencies]
 mockito = "1"
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

@@ -3,7 +3,7 @@
 //!
 //! Scope:
 //! 1. Accept `-m <msg>` OR spawn `$EDITOR` on a tempfile pre-filled
-//! with [`editor::COMMIT_EDITMSG_TEMPLATE`]. An empty message
+//! with `editor::COMMIT_EDITMSG_TEMPLATE`. An empty message
 //! aborts.
 //! 2. Read `.mkit/index` and build a tree via
 //! [`worktree::build_tree_from_index`]. An empty / missing index is

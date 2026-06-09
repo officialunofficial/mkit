@@ -7,7 +7,7 @@
 //!
 //! URL shape: `mkit+s3://<endpoint>/<bucket>[/prefix]` — credentials are
 //! pulled from the `MKIT_R2_ACCESS_KEY_ID` / `MKIT_R2_SECRET_ACCESS_KEY`
-//! environment at [`connect`] time. An unset pair does not fail
+//! environment at `connect` time. An unset pair does not fail
 //! construction; the first signed call surfaces
 //! [`TransportError::AccessDenied`].
 //!
@@ -148,7 +148,7 @@ impl S3Transport {
 
     /// Construct a transport directly against an endpoint URL, for tests
     /// (mockito hands us a plain `http://127.0.0.1:PORT` base). The path
-    /// component of `endpoint` MUST be empty — only scheme+host[:port].
+    /// component of `endpoint` MUST be empty — only scheme+host\[:port\].
     pub fn with_parts(
         endpoint: impl Into<String>,
         bucket: impl Into<String>,

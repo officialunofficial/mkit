@@ -231,7 +231,7 @@ impl KeyPair {
 /// - The public key's `A` component is checked to be canonical — small-
 /// subgroup attacks are rejected.
 ///
-/// The looser default [`VerifyingKey::verify`] accepts non-canonical
+/// The looser default `VerifyingKey::verify` accepts non-canonical
 /// encodings for backwards compat with older Ed25519 implementations;
 /// mkit has no such compat constraint (golden vectors are regenerated
 /// from our own signer) so we hold the stricter line.

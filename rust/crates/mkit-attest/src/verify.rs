@@ -368,7 +368,7 @@ fn dispatch_ed25519(pk: [u8; 32], sig_bytes: &[u8], pae: &[u8]) -> Reason {
 // -- Subject helper --
 
 /// Parse the in-toto Statement payload and return the first
-/// `subject[].digest.blake3` as a [`Hash`]. Errors if the JSON is
+/// `subject[].digest.blake3` as a [`Hash`](tyalias@mkit_core::Hash). Errors if the JSON is
 /// malformed, `subject[]` is missing/empty, or the first entry is
 /// missing a blake3 digest with the expected 64-char hex shape.
 ///

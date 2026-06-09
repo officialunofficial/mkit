@@ -25,3 +25,7 @@ thiserror = "2"
 
 [dev-dependencies]
 hex = "0.4"
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

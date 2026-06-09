@@ -74,3 +74,7 @@ tempfile = "=3.27.0"
 commonware-codec = "=2026.4.0"
 commonware-cryptography = "=2026.4.0"
 commonware-utils = "=2026.4.0"
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

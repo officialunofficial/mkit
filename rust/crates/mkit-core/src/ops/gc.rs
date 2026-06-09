@@ -78,7 +78,7 @@ pub enum GcRootsError {
     /// abort rather than treat beyond-cap objects as prunable.
     #[error("object graph exceeds the reachability cap; refusing to compute a partial keep-set")]
     Truncated,
-    /// A ref directory nested deeper than [`MAX_REF_WALK_DEPTH`].
+    /// A ref directory nested deeper than `MAX_REF_WALK_DEPTH`.
     #[error("ref tree too deep at {0} (fail closed)")]
     RefTooDeep(String),
     /// `.mkit` or `.mkit/objects` is a symlink. A deletion-capable gc
@@ -90,7 +90,7 @@ pub enum GcRootsError {
 
 /// Collect the complete set of GC retention roots for the repo at
 /// `mkit_dir` (the `.mkit` directory). The returned hashes are roots,
-/// not the closure — feed them to [`reachable_closure`] (or use
+/// not the closure — feed them to `reachable_closure` (or use
 /// [`live_objects`]) to get the full keep-set.
 ///
 /// The all-zero hash is filtered out (an unset ref / `ORIG_HEAD`).

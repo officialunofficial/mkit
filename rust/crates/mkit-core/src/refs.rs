@@ -203,7 +203,7 @@ pub fn encode_ref_wire(h: &Hash) -> [u8; 65] {
     out
 }
 
-/// Decode a ref wire blob into a [`Hash`]. Tolerates a trailing
+/// Decode a ref wire blob into a [`Hash`](tyalias@Hash). Tolerates a trailing
 /// newline / `\r` / ASCII whitespace (so files round-tripped through a
 /// Windows editor still parse), but rejects uppercase hex per
 /// SPEC-REFS §1.
@@ -221,7 +221,7 @@ pub fn decode_ref_wire(data: &[u8]) -> Option<Hash> {
 }
 
 /// Strict lowercase-only hex parser. SPEC-REFS §1 forbids uppercase on
-/// read; the general [`hash::from_hex`] tolerates both cases for
+/// read; the general `hash::from_hex` tolerates both cases for
 /// programmatic callers, so we hand-roll a stricter variant here.
 fn parse_lowercase_hash(bytes: &[u8]) -> Option<Hash> {
     if bytes.len() != HEX_LEN {

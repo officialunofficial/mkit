@@ -525,7 +525,7 @@ fn map_status(status: StatusCode, on_not_found: TransportError) -> TransportErro
 /// CAS condition.
 ///
 /// - [`RefWriteCondition::Missing`] → `If-None-Match: *`
-/// - [`RefWriteCondition::Match(h)`] → `If-Match: "<md5-style quoted hex>"`
+/// - `RefWriteCondition::Match(h)` → `If-Match: "<md5-style quoted hex>"`
 /// - [`RefWriteCondition::Any`] → no conditional header
 ///
 /// Returns an empty [`HeaderMap`] for `Any` so call sites can always

@@ -104,7 +104,7 @@ pub struct SparseManifest {
 #[derive(Debug, Clone)]
 pub struct SparseProof {
     /// The raw bitmap bytes, exactly `ceil(leaf_count / 8)` bytes
-    /// padded to a chunk boundary (multiple of [`CHUNK_BYTES`]).
+    /// padded to a chunk boundary (multiple of `CHUNK_BYTES`).
     /// Verifier MUST recompute the bitmap root from these bytes and
     /// compare to `manifest.bitmap_root`.
     pub bitmap_bytes: Vec<u8>,

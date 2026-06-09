@@ -1,0 +1,49 @@
+name: Docs
+
+# Broken-link gate for the public API docs. Builds rustdoc for the whole
+# workspace with every feature and `-D warnings`, matching how docs.rs renders
+# (--no-deps, no --document-private-items). Catches dead/ambiguous intra-doc
+# links, redundant targets, and public-docs-linking-to-private-items before
+# they ship to docs.rs. Cheap, so it runs on every PR rather than waiting for
+# the review-gated Rust CI.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+
+jobs:
+  doc:
+    name: rustdoc (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: rust -> rust/target
+          prefix-key: "rust-docs"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: cargo doc (broken-link gate)
+        working-directory: rust
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --locked --all-features --workspace --no-deps
