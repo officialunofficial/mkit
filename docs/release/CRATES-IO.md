@@ -16,19 +16,26 @@ dependency-ordered set (core → rpc → attest → keystore → transports);
 release-plz computes that order automatically. release-plz reads each crate's
 `publish = false` and skips the rest.
 
-## How it works
+## How it works — two DECOUPLED channels
 
-- **`release-plz` (this repo's `release-plz.yml`)** — opens a Release PR
-  (version bump from Conventional Commits + `CHANGELOG.md` + cargo-semver-checks)
-  on manual trigger; on merge to `main` it **`cargo publish`es the 9 libs** and
-  creates **one `v{version}` git tag**.
-- **`release.yml` (unchanged)** — triggers on that `v*.*.*` tag and builds the
-  signed binaries, SBOM, GitHub Release, and npm wasm.
+release.yml's binary release is gated on an **annotated, GPG-signed tag from an
+allowlisted fingerprint** (it runs `git verify-tag`). release-plz can't create
+such a tag, so the two channels are kept separate:
 
-release-plz does **not** create the GitHub Release (`git_release_enable = false`)
-— `release.yml` owns it, so there's exactly one Release per tag. The tag is
-pushed with a **GitHub App token** (not `GITHUB_TOKEN`), which is required for
-the tag to trigger `release.yml`.
+- **crates.io (release-plz)** — `release-plz-pr` opens a Release PR (version
+  bump + **rewritten internal dep requirements** + `CHANGELOG.md` +
+  cargo-semver-checks); merging it runs `release-plz-release`, which
+  **`cargo publish`es the 9 libs** in dependency order. release-plz creates **no
+  git tag and no GitHub Release** (`git_tag_enable`/`git_release_enable = false`).
+- **Binaries (release.yml, unchanged)** — a human cuts the annotated, GPG-signed
+  `v{version}` tag via the existing release ceremony; that tag drives binaries +
+  SBOM + GitHub Release + npm wasm.
+
+So a release is: merge the Release PR (→ crates.io), then cut the signed tag
+(→ binaries). `release_always = false` means the publish job is a no-op except
+on a merged Release PR, so ordinary pushes never publish. The GitHub App token
+is used only so the Release PR can trigger CI (a `GITHUB_TOKEN`-authored PR
+can't).
 
 ## One-time setup
 
@@ -44,49 +51,66 @@ before proceeding.
 | `RELEASE_PLZ_APP_ID` | GitHub App id | Reuse the same App as polychrome if it's installed on this repo; else create one (perms: contents:write, pull-requests:write, workflows). |
 | `RELEASE_PLZ_APP_PRIVATE_KEY` | GitHub App private key | Minted into a short-lived token per run; never stored as a static token. |
 
-### 3. First publish (the important part)
-The workspace version is still **`0.1.0`** and a **`v0.1.0` tag already exists**,
-but `main` has advanced far past that tag. So the first crates.io release must
-be a **fresh version** — publishing current `main` *as* `0.1.0` would mismatch
-the tagged `v0.1.0` release. Let release-plz pick the new version:
+### 3. First publish (one-time, manual — read carefully)
+The first crates.io release is special and can't be fully automated, for two
+reasons:
+- The version is still **`0.1.0`** with a **`v0.1.0` git tag** but nothing on
+  crates.io. release-plz refuses to compute a release in that state ("package
+  `mkit-core` not found in the registry, but the git tag v0.1.0 exists"), so it
+  can't open the first Release PR. The version must move OFF `0.1.0` once.
+- The internal dependency requirements are all `version = "0.1"`
+  (`mkit-attest → mkit-core = "0.1"`, etc.). A bump that only changes the
+  workspace version would publish `mkit-core@0.2.0` and then **fail** publishing
+  `mkit-attest` (it still requires `mkit-core = "0.1"`). Those requirements must
+  be rewritten too. `release-plz update` does exactly that.
 
-> **Why a manual first bump?** release-plz refuses to compute a release while the
-> only baseline is the `v0.1.0` *git tag* with nothing on crates.io ("package
-> `mkit-core` not found in the registry, but the git tag v0.1.0 exists"). The
-> fix is to move the version OFF `0.1.0` once, by hand; from then on release-plz
-> tracks the published crates.io version and fully automates the rest. (Validated
-> locally: at `0.2.0` with a clean tree, `release-plz update` succeeds and plans
-> to publish exactly the 9 libs.)
+Sequence:
 
-1. Merge this PR (adds `release-plz.yml` + `rust/release-plz.toml`, splits the
-   contrib signers, makes the enc dep path-only). It bumps no version, so its
-   `release` job is a clean no-op.
-2. Provision all three secrets (above).
-3. **Cut the first release with a one-time manual bump PR:** edit
-   `rust/Cargo.toml` `[workspace.package] version = "0.2.0"` (or `1.0.0` if you
-   prefer), add a `## [0.2.0]` heading to `CHANGELOG.md`, open + merge the PR.
-   (This is the only manual version bump ever; release-plz can't do this first
-   one for the reason above.)
-4. On that merge, the `release-plz-release` job publishes the 9 libs to crates.io
-   in dependency order and tags `v0.2.0` (new — no clash with `v0.1.0`). That tag
-   triggers `release.yml` → binaries + GitHub Release + npm.
-
-> Validate any time with `cd rust && release-plz update --config release-plz.toml`
-> (install: `cargo install release-plz`). It writes the proposed version +
-> changelog locally (no publish); `git checkout .` to discard. Confirm exactly
-> one version moves and the 9 libs are the publish set.
+1. Merge this PR (release-plz config/workflow, contrib split, path-only enc dep).
+   It bumps no version, and `release_always = false`, so nothing publishes.
+2. Provision all three secrets (above) and verify the 9 names on crates.io.
+3. **Open a one-time bump PR that rewrites everything** — locally:
+   ```sh
+   cd rust
+   # pick the first crates.io version (0.2.0 here; use 1.0.0 if you prefer):
+   sed -i '' 's/^version = "0.1.0"/version = "0.2.0"/' Cargo.toml
+   cargo install release-plz   # if not installed
+   release-plz update --config release-plz.toml   # rewrites all internal dep
+                                                   # requirements + CHANGELOG.md
+   ```
+   Commit the result (workspace version + every `version = "0.2"` dep rewrite +
+   `CHANGELOG.md`), open + merge the PR. (This is the only manual version bump
+   ever.)
+4. **Publish the first version by hand**, in dependency order — because
+   `release_always = false` and this bump PR isn't a release-plz Release-PR
+   commit, the release job won't auto-publish it:
+   ```sh
+   cd rust
+   export CARGO_REGISTRY_TOKEN=...   # or `cargo login`
+   for c in mkit-core mkit-rpc mkit-attest mkit-keystore \
+            mkit-transport-memory mkit-transport-file mkit-transport-http \
+            mkit-transport-s3 mkit-transport-ssh; do
+     cargo publish -p "$c" --locked   # let each index before the next dependent
+   done
+   ```
+5. **Cut the signed binary release**: create the annotated, GPG-signed `v0.2.0`
+   tag via the existing release ceremony (allowlisted signer) — that drives
+   `release.yml` → binaries + SBOM + GitHub Release + npm.
 
 ## Steady-state (every release after the first)
-1. Actions → **release-plz** → Run (the `release-plz-pr` job). It gathers
-   everything merged since the last tag into one Release PR.
-2. Review + merge the Release PR.
-3. Done — crates.io publish, the `v{version}` tag, binaries, and npm all happen
-   automatically off the merge.
+Now that the crates exist on crates.io, release-plz is fully in charge of the
+crates.io channel:
+1. Actions → **release-plz** → Run (`release-plz-pr`). It opens the Release PR
+   (next version, dep-requirement rewrites, CHANGELOG, semver gate).
+2. Review + merge the Release PR → `release-plz-release` publishes the 9 libs to
+   crates.io automatically.
+3. Cut the annotated, GPG-signed `v{version}` tag (the existing ceremony) →
+   `release.yml` builds the binaries + GitHub Release + npm.
 
 ## Notes / gotchas
 - **Stale version**: bump-from-`0.1.0` only matters for the first release; after
   that release-plz tracks the published version on crates.io.
-- **semver gate**: release-plz runs cargo-semver-checks against the previous tag
+- **semver gate**: release-plz runs cargo-semver-checks against the previous release
   in the Release PR (`semver_check = true`); the standalone `semver-checks.yml`
   still runs per-PR against the base branch. Both are fine.
 - **Native deps**: `cargo publish` builds each crate with **default** features,

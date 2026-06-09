@@ -1,23 +1,21 @@
 # Release automation for the mkit workspace (issue #225).
 #
 # release-plz opens a single "Release PR" when you trigger it: it computes the
-# next lockstep version from Conventional Commits, regenerates the root
-# CHANGELOG.md (embedded git-cliff), and runs cargo-semver-checks against the
-# previous release. Merging that PR makes the release job:
-#   1. `cargo publish` the 9 publishable LIBRARY crates to crates.io, in
-#      dependency order (mkit-core → mkit-rpc → mkit-attest → mkit-keystore →
-#      the transports), and
-#   2. create one `v{version}` git tag.
-# That tag (pushed by a GitHub App token, NOT the default GITHUB_TOKEN, so it
-# can trigger other workflows) fires the existing .github/workflows/release.yml
-# (`tags: v*.*.*`), which builds the signed binaries + SBOM + GitHub Release and
-# publishes the npm wasm package — exactly as today.
+# next lockstep version from Conventional Commits, rewrites the internal
+# dependency requirements, regenerates the root CHANGELOG.md (embedded
+# git-cliff), and runs cargo-semver-checks. Merging that PR makes the release
+# job `cargo publish` the 9 publishable LIBRARY crates to crates.io in
+# dependency order (mkit-core → mkit-rpc → mkit-attest → mkit-keystore → the
+# transports).
 #
-# Division of labour:
-#   release-plz   → crates.io publish, version bump, CHANGELOG, the v* tag.
-#   release.yml   → binaries, cosign, SBOM, GitHub Release, npm wasm (UNCHANGED).
-# release-plz therefore does NOT create the GitHub Release (git_release_enable =
-# false below) — release.yml owns it, so there is exactly one Release per tag.
+# Division of labour — DECOUPLED, because release.yml's binary release is gated
+# on an annotated, GPG-signed tag from an allowlisted fingerprint:
+#   release-plz   → crates.io publish, version bump, internal-dep rewrites,
+#                   CHANGELOG. It creates NO tag and NO GitHub Release.
+#   release.yml   → binaries, cosign, SBOM, GitHub Release, npm wasm — UNCHANGED,
+#                   still driven by the human-created signed `v{version}` tag.
+# crates.io and the signed-tag binary release are separate channels; cut the
+# signed tag (the existing ceremony) after the crates.io train completes.
 #
 # Publishability is controlled per-crate via `publish = false` in each
 # Cargo.toml (mkit-cli, mkit-wasm, mkit-transport-enc, the contrib signers,
@@ -46,6 +44,13 @@ semver_check = true
 # Dependabot, not the Release PR.
 dependencies_update = false
 
+# Only publish from a release-plz Release PR merge — NOT on every push to main.
+# Without this, the release job would try to publish the current (unpublished)
+# version on any main push (e.g. merging this setup PR), which could push a
+# stale version. With it, ordinary pushes are no-ops and only a merged Release
+# PR triggers the crates.io publish.
+release_always = false
+
 # ---------------------------------------------------------------------------
 # Lockstep: every workspace crate inherits `version.workspace = true`, so they
 # all move to the SAME next version. `version_group = "mkit"` makes release-plz
@@ -53,15 +58,19 @@ dependencies_update = false
 # `release-plz update --dry-run` that exactly one version number moves).
 # ---------------------------------------------------------------------------
 
-# The anchor: the only package that tags, releases-notes-wise defers to
-# release.yml, and writes the changelog for the whole train — one `v{version}`
-# tag, one root CHANGELOG.md.
+# The anchor: writes the one root CHANGELOG.md for the whole train. It does NOT
+# create a git tag or GitHub Release — release.yml's binary release requires an
+# annotated, GPG-signed tag from an allowlisted fingerprint (it runs
+# `git verify-tag`), which release-plz's token-created tag would NOT satisfy.
+# So release-plz publishes ONLY to crates.io + writes the changelog; the signed
+# `v{version}` tag (and the binaries/SBOM/GitHub-Release/npm it drives) stays the
+# existing human release ceremony. This also avoids a tag firing those artifacts
+# mid-publish if a later crate in the train fails.
 [[package]]
 name = "mkit-core"
 version_group = "mkit"
-git_tag_enable = true
-git_tag_name = "v{{ version }}"
-git_release_enable = false          # release.yml creates the GitHub Release.
+git_tag_enable = false
+git_release_enable = false
 changelog_update = true
 changelog_path = "../CHANGELOG.md"  # repo-root CHANGELOG.md (workspace is rust/).
 

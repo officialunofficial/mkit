@@ -1,31 +1,33 @@
 # Release automation — release-plz (issue #225). Publishes the 9 library crates
-# to crates.io and cuts the version tag; the existing release.yml builds the
-# binaries / npm wasm off that tag. See rust/release-plz.toml for the model.
+# to crates.io. It does NOT create the git tag: release.yml's binary release is
+# gated on an annotated, GPG-signed tag from an allowlisted fingerprint, which a
+# token-created tag wouldn't satisfy — so the signed tag stays the existing human
+# ceremony and remains the trigger for binaries/SBOM/GitHub-Release/npm. See
+# rust/release-plz.toml for the model.
 #
 # Two jobs:
 #  - release-plz-pr (open/update the single Release PR — next lockstep version,
-#    regenerated CHANGELOG.md, cargo-semver-checks) runs ONLY on manual
-#    `workflow_dispatch`, so no Release PR churns on ordinary commits. Trigger
-#    it from the Actions tab when you want to cut a release.
-#  - release-plz-release (cargo publish to crates.io + tag `v{version}`) runs on
-#    push to main, so merging the Release PR auto-publishes and tags. It is a
-#    no-op on pushes that don't change a version.
+#    rewritten internal dep requirements, CHANGELOG, cargo-semver-checks) runs
+#    ONLY on manual `workflow_dispatch`. Trigger it when you want to cut a release.
+#  - release-plz-release (`cargo publish` to crates.io) runs ONLY on push to main.
+#    With `release_always = false` (release-plz.toml) it is a no-op unless the
+#    pushed commit is a merged release-plz Release PR — so ordinary pushes (and
+#    this setup PR's own merge) never publish.
 #
-# TOKENS (provision before enabling — see the runbook in the PR / issue #225):
+# TOKENS (provision before enabling — see docs/release/CRATES-IO.md):
 #  - CARGO_REGISTRY_TOKEN — crates.io API token (scopes: publish-new +
 #    publish-update). Required for the release job to `cargo publish`.
 #  - RELEASE_PLZ_APP_ID + RELEASE_PLZ_APP_PRIVATE_KEY — a GitHub App installation
-#    token, minted per-run. A tag created with the default GITHUB_TOKEN does NOT
-#    trigger other workflows, so release.yml would never fire on the release tag;
-#    the App token does, and also lets the Release PR trigger CI. (Same App the
-#    polychrome repo uses — reuse it if installed on this repo.)
+#    token, minted per-run. release-plz creates no tag, so the App token is here
+#    so the Release PR it opens can trigger CI (a `GITHUB_TOKEN`-authored PR does
+#    not). Same App the polychrome repo uses — reuse it if installed on this repo.
 
 name: release-plz
 
 on:
-  workflow_dispatch:        # open/update the Release PR.
+  workflow_dispatch:        # open/update the Release PR (release-plz-pr).
   push:
-    branches: [main]        # publish + tag a merged Release PR.
+    branches: [main]        # publish a merged Release PR (release-plz-release).
 
 permissions:
   contents: read
@@ -35,9 +37,11 @@ env:
   RUST_VERSION: "1.95.0"
 
 jobs:
-  # crates.io publish + tag when a Release PR merges. No-op otherwise.
+  # crates.io publish when a Release PR merges (push to main). No-op otherwise
+  # (release_always = false). Push-only: never runs on workflow_dispatch.
   release-plz-release:
     name: release-plz release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -64,14 +68,14 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Mint GitHub App token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
         id: app-token
         with:
           app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
           private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
 
       - name: Run release-plz release
-        uses: release-plz/action@v0.5
+        uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db  # v0.5.129
         with:
           command: release
           manifest_path: rust/Cargo.toml
@@ -118,14 +122,14 @@ jobs:
           tool: cargo-semver-checks
 
       - name: Mint GitHub App token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
         id: app-token
         with:
           app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
           private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
 
       - name: Run release-plz release-pr
-        uses: release-plz/action@v0.5
+        uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db  # v0.5.129
         with:
           command: release-pr
           manifest_path: rust/Cargo.toml
