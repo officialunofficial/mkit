@@ -1,0 +1,7 @@
+# Mirror rust/rust-toolchain.toml so the reference signers build on the same
+# pinned toolchain as the main workspace (this is a sibling workspace, so it
+# can't inherit rust/'s pin). CI installs 1.95.0 explicitly regardless.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

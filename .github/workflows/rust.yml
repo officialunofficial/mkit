@@ -143,6 +143,21 @@ jobs:
         working-directory: rust
         run: cargo test --locked --doc --workspace
 
+      # The reference external signers are a SEPARATE workspace
+      # (contrib/signers/) so they don't break release-plz's crates.io publish
+      # (#225). `--workspace` above no longer covers them, so build/test/lint
+      # them here. --all-features turns on tpm2 (tss-esapi, Linux/Windows-gated)
+      # and ctap-hw (ctap-hid-fido2); the native deps installed above cover the
+      # Linux build.
+      - name: Contrib signers (separate workspace)
+        working-directory: contrib/signers
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo build --locked --all-features
+          cargo nextest run --locked --all-features
+          cargo test --locked --doc --all-features
+
       - name: Rename gate
         run: bash scripts/verify-rename.sh
 
