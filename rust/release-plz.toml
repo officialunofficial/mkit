@@ -1,0 +1,123 @@
+# Release automation for the mkit workspace (issue #225).
+#
+# release-plz opens a single "Release PR" when you trigger it: it computes the
+# next lockstep version from Conventional Commits, regenerates the root
+# CHANGELOG.md (embedded git-cliff), and runs cargo-semver-checks against the
+# previous release. Merging that PR makes the release job:
+#   1. `cargo publish` the 9 publishable LIBRARY crates to crates.io, in
+#      dependency order (mkit-core → mkit-rpc → mkit-attest → mkit-keystore →
+#      the transports), and
+#   2. create one `v{version}` git tag.
+# That tag (pushed by a GitHub App token, NOT the default GITHUB_TOKEN, so it
+# can trigger other workflows) fires the existing .github/workflows/release.yml
+# (`tags: v*.*.*`), which builds the signed binaries + SBOM + GitHub Release and
+# publishes the npm wasm package — exactly as today.
+#
+# Division of labour:
+#   release-plz   → crates.io publish, version bump, CHANGELOG, the v* tag.
+#   release.yml   → binaries, cosign, SBOM, GitHub Release, npm wasm (UNCHANGED).
+# release-plz therefore does NOT create the GitHub Release (git_release_enable =
+# false below) — release.yml owns it, so there is exactly one Release per tag.
+#
+# Publishability is controlled per-crate via `publish = false` in each
+# Cargo.toml (mkit-cli, mkit-wasm, mkit-transport-enc, the contrib signers,
+# fuzz, benches). release-plz skips those automatically; only the 9 libraries
+# publish. We deliberately do NOT set a workspace-wide `publish = false` (unlike
+# the polychrome repo, which never goes to crates.io).
+
+[workspace]
+# Tagging/release/changelog happen on ONE anchor package — mkit-core, below — so
+# a release yields a single `v{version}` tag (matching release.yml's pattern)
+# and one root CHANGELOG.md. Left on per-package, release-plz would emit a
+# `<crate>-v…` tag for every crate, none matching release.yml. Disable here;
+# enable on the anchor.
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
+
+# Gate the public API: cargo-semver-checks flags a breaking change against the
+# previous tag so the Release PR proposes the right bump. (The standalone
+# semver-checks.yml still runs per-PR against the base branch; this is the
+# release-time gate.) No prior crates.io version exists on the first release, so
+# it is a no-op then and meaningful from the first publish onward.
+semver_check = true
+
+# Release PRs carry version + changelog only. Dependency bumps come from
+# Dependabot, not the Release PR.
+dependencies_update = false
+
+# ---------------------------------------------------------------------------
+# Lockstep: every workspace crate inherits `version.workspace = true`, so they
+# all move to the SAME next version. `version_group = "mkit"` makes release-plz
+# compute ONE next version for the whole set (verify with
+# `release-plz update --dry-run` that exactly one version number moves).
+# ---------------------------------------------------------------------------
+
+# The anchor: the only package that tags, releases-notes-wise defers to
+# release.yml, and writes the changelog for the whole train — one `v{version}`
+# tag, one root CHANGELOG.md.
+[[package]]
+name = "mkit-core"
+version_group = "mkit"
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = false          # release.yml creates the GitHub Release.
+changelog_update = true
+changelog_path = "../CHANGELOG.md"  # repo-root CHANGELOG.md (workspace is rust/).
+
+# Every other crate: shares the lockstep version_group, never tags/releases.
+[[package]]
+name = "mkit-attest"
+version_group = "mkit"
+[[package]]
+name = "mkit-keystore"
+version_group = "mkit"
+[[package]]
+name = "mkit-rpc"
+version_group = "mkit"
+[[package]]
+name = "mkit-transport-file"
+version_group = "mkit"
+[[package]]
+name = "mkit-transport-http"
+version_group = "mkit"
+[[package]]
+name = "mkit-transport-memory"
+version_group = "mkit"
+[[package]]
+name = "mkit-transport-s3"
+version_group = "mkit"
+[[package]]
+name = "mkit-transport-ssh"
+version_group = "mkit"
+# publish = false crates: kept in the version_group so their (unpublished)
+# versions stay in lockstep with the libraries; release-plz still skips
+# publishing them because their Cargo.toml sets publish = false.
+[[package]]
+name = "mkit-cli"
+version_group = "mkit"
+[[package]]
+name = "mkit-wasm"
+version_group = "mkit"
+[[package]]
+name = "mkit-transport-enc"
+version_group = "mkit"
+
+# Changelog grouping, aligned to the Conventional Commit types the
+# commit-lint / PR-title gate already enforces. Noise types are dropped from
+# the changelog body; breaking changes are always surfaced.
+[changelog]
+protect_breaking_commits = true
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactor" },
+  { message = "^docs?", group = "Documentation" },
+  { message = "^revert", group = "Reverts" },
+  { message = "^chore", skip = true },
+  { message = "^style", skip = true },
+  { message = "^test", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^build", skip = true },
+]

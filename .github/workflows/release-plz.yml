@@ -1,0 +1,135 @@
+# Release automation — release-plz (issue #225). Publishes the 9 library crates
+# to crates.io and cuts the version tag; the existing release.yml builds the
+# binaries / npm wasm off that tag. See rust/release-plz.toml for the model.
+#
+# Two jobs:
+#  - release-plz-pr (open/update the single Release PR — next lockstep version,
+#    regenerated CHANGELOG.md, cargo-semver-checks) runs ONLY on manual
+#    `workflow_dispatch`, so no Release PR churns on ordinary commits. Trigger
+#    it from the Actions tab when you want to cut a release.
+#  - release-plz-release (cargo publish to crates.io + tag `v{version}`) runs on
+#    push to main, so merging the Release PR auto-publishes and tags. It is a
+#    no-op on pushes that don't change a version.
+#
+# TOKENS (provision before enabling — see the runbook in the PR / issue #225):
+#  - CARGO_REGISTRY_TOKEN — crates.io API token (scopes: publish-new +
+#    publish-update). Required for the release job to `cargo publish`.
+#  - RELEASE_PLZ_APP_ID + RELEASE_PLZ_APP_PRIVATE_KEY — a GitHub App installation
+#    token, minted per-run. A tag created with the default GITHUB_TOKEN does NOT
+#    trigger other workflows, so release.yml would never fire on the release tag;
+#    the App token does, and also lets the Release PR trigger CI. (Same App the
+#    polychrome repo uses — reuse it if installed on this repo.)
+
+name: release-plz
+
+on:
+  workflow_dispatch:        # open/update the Release PR.
+  push:
+    branches: [main]        # publish + tag a merged Release PR.
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+
+jobs:
+  # crates.io publish + tag when a Release PR merges. No-op otherwise.
+  release-plz-release:
+    name: release-plz release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      # mkit-rpc compiles protobuf via buffa-build (shells out to protoc), and
+      # `cargo publish` builds each crate to verify it before upload.
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mint GitHub App token
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - name: Run release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+          manifest_path: rust/Cargo.toml
+          config: rust/release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Open/update the single Release PR. MANUAL only.
+  release-plz-pr:
+    name: release-plz PR
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # release-plz runs cargo-semver-checks (semver_check = true) to diff the
+      # public API against the previous tag and propose the right version bump.
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@d9be7d8cda89035c9c843f78bd44d4f72d8403d4  # v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: Mint GitHub App token
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - name: Run release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+          manifest_path: rust/Cargo.toml
+          config: rust/release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
