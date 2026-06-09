@@ -16,30 +16,43 @@ fn mkit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mkit")
 }
 
-/// Locate `mkit-sign-file` in the same `target/<profile>/` directory
-/// `mkit` lives in. Assumes `cargo test --workspace` (or at least a
-/// previous `cargo build -p mkit-sign-file`) has populated it; the
-/// workspace CI target does so by construction, and a direct
-/// `cargo test -p mkit-cli --test attest_roundtrip` triggers the build
-/// via the explicit `CARGO_BIN_EXE_mkit` dependency — we mirror that
-/// target dir here.
+/// Locate `mkit-sign-file` in the contrib/signers workspace's
+/// `target/debug/` directory. The reference signers live in their OWN
+/// Cargo workspace (contrib/signers/ — split out of rust/ for
+/// release-plz, see #225), so neither `cargo test --workspace` nor a
+/// `cargo build -p mkit-sign-file` against the rust/ workspace can
+/// produce the binary. CI prebuilds the signers workspace before the
+/// test step; for local runs we fall back to an on-the-fly
+/// `--manifest-path` build rather than silently skipping.
 fn mkit_sign_file_bin() -> std::path::PathBuf {
-    let mkit = std::path::PathBuf::from(mkit_bin());
-    let target_dir = mkit.parent().expect("mkit_bin has a parent");
-    let candidate = target_dir.join(if cfg!(windows) {
+    // rust/crates/mkit-cli → repo root is three levels up.
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("repo root above crates/mkit-cli");
+    let signers = repo_root.join("contrib").join("signers");
+    let candidate = signers.join("target").join("debug").join(if cfg!(windows) {
         "mkit-sign-file.exe"
     } else {
         "mkit-sign-file"
     });
     if !candidate.exists() {
-        // The CI matrix always builds the whole workspace, but an
-        // individual `cargo test -p mkit-cli` invocation might not.
-        // Fall back to an on-the-fly build rather than silently skipping.
         let status = Command::new(env!("CARGO"))
             .args(["build", "-p", "mkit-sign-file"])
+            .arg("--manifest-path")
+            .arg(signers.join("Cargo.toml"))
+            // Don't leak the outer harness's flags (e.g. cargo-llvm-cov's
+            // `-C instrument-coverage` RUSTFLAGS) into the signer build —
+            // it's a fixture binary, not coverage subject matter.
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("LLVM_PROFILE_FILE")
             .status()
             .expect("spawn cargo");
-        assert!(status.success(), "cargo build -p mkit-sign-file failed");
+        assert!(
+            status.success(),
+            "cargo build -p mkit-sign-file (contrib/signers workspace) failed"
+        );
     }
     candidate
 }
