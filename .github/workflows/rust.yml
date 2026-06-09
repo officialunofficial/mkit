@@ -129,6 +129,24 @@ jobs:
         working-directory: rust
         run: cargo build --locked --workspace
 
+      # The reference external signers are a SEPARATE workspace
+      # (contrib/signers/) so they don't break release-plz's crates.io publish
+      # (#225). `--workspace` above no longer covers them, so build/test/lint
+      # them here. --all-features turns on tpm2 (tss-esapi, Linux/Windows-gated)
+      # and ctap-hw (ctap-hid-fido2); the native deps installed above cover the
+      # Linux build. This step must run BEFORE the workspace nextest step:
+      # mkit-cli's attest_roundtrip tests drive the mkit-sign-file binary from
+      # contrib/signers/target/debug/ and only fall back to building it
+      # on-the-fly when it's missing.
+      - name: Contrib signers (separate workspace)
+        working-directory: contrib/signers
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo build --locked --all-features
+          cargo nextest run --locked --all-features
+          cargo test --locked --doc --all-features
+
       - name: Test (nextest)
         working-directory: rust
         run: cargo nextest run --locked --workspace --all-features
@@ -142,21 +160,6 @@ jobs:
       - name: Doctests
         working-directory: rust
         run: cargo test --locked --doc --workspace
-
-      # The reference external signers are a SEPARATE workspace
-      # (contrib/signers/) so they don't break release-plz's crates.io publish
-      # (#225). `--workspace` above no longer covers them, so build/test/lint
-      # them here. --all-features turns on tpm2 (tss-esapi, Linux/Windows-gated)
-      # and ctap-hw (ctap-hid-fido2); the native deps installed above cover the
-      # Linux build.
-      - name: Contrib signers (separate workspace)
-        working-directory: contrib/signers
-        run: |
-          cargo fmt --check
-          cargo clippy --locked --all-targets --all-features -- -D warnings
-          cargo build --locked --all-features
-          cargo nextest run --locked --all-features
-          cargo test --locked --doc --all-features
 
       - name: Rename gate
         run: bash scripts/verify-rename.sh

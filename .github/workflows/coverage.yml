@@ -84,6 +84,15 @@ jobs:
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
+      # mkit-cli's attest_roundtrip tests drive the mkit-sign-file reference
+      # binary from contrib/signers/target/debug/ (a separate workspace, see
+      # #225). Prebuild it so the tests don't fall back to building it
+      # on-the-fly inside the coverage run, where cargo-llvm-cov's RUSTFLAGS
+      # would leak into the fixture build.
+      - name: Prebuild contrib signer fixture (mkit-sign-file)
+        working-directory: contrib/signers
+        run: cargo build --locked -p mkit-sign-file
+
       # Coverage from the same nextest run rust.yml gates on. Doctests
       # are NOT included: `cargo llvm-cov --doc` needs nightly
       # (`-Z unstable-options --persist-doctests`), and the workspace
