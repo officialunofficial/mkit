@@ -100,13 +100,38 @@ jobs:
           git fetch --force --tags origin
           git fetch --force origin main:refs/remotes/origin/main
 
+          # Import each trusted key from a keyserver. We gate on the key
+          # actually LANDING IN THE KEYRING, not on `gpg --recv-keys`' exit
+          # code: keys.openpgp.org serves a key with NO user IDs until its
+          # owner verifies their email, and GnuPG SKIPS importing a UID-less
+          # key ("contains no user ID - skipped") while STILL exiting 0 — so a
+          # bare `recv || recv` fallback never fires and the next step dies
+          # with NO_PUBKEY. (This broke v0.2.0's first release run.)
+          #
+          # keyserver.ubuntu.com serves user IDs WITHOUT email verification, so
+          # it's tried first; keys.openpgp.org is a fallback. After each fetch
+          # we check the key is present (UID-bearing) before trusting it.
+          KEYSERVERS="hkps://keyserver.ubuntu.com hkps://keys.openpgp.org"
           for TRUSTED_FINGERPRINT in ${TRUSTED_FINGERPRINTS}; do
             if [[ ! "${TRUSTED_FINGERPRINT}" =~ ^[A-Fa-f0-9]{40}$ ]]; then
               echo "ERROR: invalid GPG fingerprint in MKIT_RELEASE_GPG_FINGERPRINTS: ${TRUSTED_FINGERPRINT}" >&2
               exit 1
             fi
-            gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "${TRUSTED_FINGERPRINT}" || \
-              gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "${TRUSTED_FINGERPRINT}"
+            IMPORTED=0
+            for KS in ${KEYSERVERS}; do
+              gpg --batch --keyserver "${KS}" --recv-keys "${TRUSTED_FINGERPRINT}" || true
+              if gpg --list-keys "${TRUSTED_FINGERPRINT}" >/dev/null 2>&1; then
+                echo "Imported ${TRUSTED_FINGERPRINT} from ${KS}"
+                IMPORTED=1
+                break
+              fi
+              echo "WARN: ${KS} did not yield a usable (UID-bearing) key for ${TRUSTED_FINGERPRINT}; trying next" >&2
+            done
+            if [ "${IMPORTED}" -ne 1 ]; then
+              echo "ERROR: could not import GPG key ${TRUSTED_FINGERPRINT} from any keyserver (${KEYSERVERS})." >&2
+              echo "       If the key lives only on keys.openpgp.org, verify its email there so it serves user IDs." >&2
+              exit 1
+            fi
           done
 
           REF="refs/tags/${TAG}"
