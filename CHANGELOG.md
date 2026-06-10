@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-10
+
 ### Added
 
 - **Annotated and signed tags** (`mkit tag -a` / `-s` / `-m`,
@@ -172,5 +174,6 @@ prior to publication.
 - Reference external signer keeps secret material in a zeroizing
   buffer until the per-algorithm signer consumes it.
 
-[Unreleased]: https://github.com/officialunofficial/mkit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/officialunofficial/mkit/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/officialunofficial/mkit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/officialunofficial/mkit/releases/tag/v0.1.0
