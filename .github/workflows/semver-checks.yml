@@ -61,11 +61,11 @@ jobs:
         with:
           tool: cargo-semver-checks
 
-      # The publishable LIBRARY crates — exactly the `publish = true` members.
-      # Excluded by construction (all `publish = false`): mkit-cli (the binary;
-      # its lib surface is unstable CLI internals), mkit-wasm (npm-only), and
-      # mkit-transport-enc (Phase-2). `--baseline-rev` builds the base branch's
-      # API for comparison.
+      # The publishable LIBRARY crates whose API we guard. Excluded: mkit-cli
+      # (the `mkit` binary — published for `cargo install`, but its lib surface
+      # is unstable CLI internals we intentionally do NOT semver-guard) and
+      # mkit-wasm (npm-only). `--baseline-rev` builds the base branch's API for
+      # comparison.
       - name: cargo-semver-checks vs base branch
         working-directory: rust
         run: |
@@ -80,4 +80,5 @@ jobs:
             -p mkit-transport-http \
             -p mkit-transport-memory \
             -p mkit-transport-s3 \
+            -p mkit-transport-enc \
             -p mkit-transport-ssh

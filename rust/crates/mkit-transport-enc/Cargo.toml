@@ -10,13 +10,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Not yet on crates.io. The transport + URL parsing + mkit-cli plumbing are
-# implemented, but a publish-readiness pass (docs.rs metadata, semver-checks,
-# API sign-off) is still pending, and we don't want to publish a security
-# primitive prematurely. Tracked (together with publishing mkit-cli, which
-# depends on this crate) in #321. Workspace member so workspace
-# `cargo test` / `cargo clippy` cover it.
-publish = false
 
 [lints]
 workspace = true
@@ -82,3 +75,10 @@ tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-t
 [[test]]
 name = "tcp_e2e"
 required-features = ["tcp"]
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+# The `tcp` feature pulls tokio/governor/rand — standard crates.io crates
+# with no system build deps — so docs.rs builds them fine. Including it
+# renders the TCP entry points (connect_tcp, serve_tcp, TokioExecutor).
+all-features = true
