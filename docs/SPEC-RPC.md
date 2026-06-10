@@ -185,6 +185,6 @@ choice is deliberate:
   prose specs (this file, SPEC-EXTERNAL-SIGNER, SPEC-TRANSPORT) are
   derivative.
 
-The buffa runtime (`buffa = "0.5"`) is used by the Rust reference
+The buffa runtime (`buffa = "0.7"`) is used by the Rust reference
 implementations. Other languages can use any compliant protobuf 3 /
 edition 2023 toolchain.

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **buffa 0.6 → 0.7.1** across all crates (mkit-rpc, mkit-attest,
+  mkit-cli, mkit-transport-ssh, mkit-transport-enc, and the
+  contrib/signers reference binaries), with the vendored mkit-rpc
+  codegen regenerated under the 0.7.1 toolchain. The wire format and
+  all existing generated APIs are unchanged; regeneration adds the new
+  `*OwnedView` wrapper types, `HasMessageView` impls, and idiomatic
+  `UpperCamelCase` enum value aliases. The declared requirement is
+  `0.7.1` (not `0.7`) because regenerated packed-view decoders call the
+  `RepeatedView::reserve` hook introduced in 0.7.1.
+
 ## [0.2.0] - 2026-06-10
 
 ### Added

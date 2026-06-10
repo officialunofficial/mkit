@@ -34,34 +34,68 @@ pub mod __buffa {
 #[doc(inline)]
 pub use self::__buffa::view::SshFrameView;
 #[doc(inline)]
+pub use self::__buffa::view::SshFrameOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::HelloView;
+#[doc(inline)]
+pub use self::__buffa::view::HelloOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::HelloResponseView;
 #[doc(inline)]
+pub use self::__buffa::view::HelloResponseOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::CloseView;
+#[doc(inline)]
+pub use self::__buffa::view::CloseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::ListRefsView;
 #[doc(inline)]
+pub use self::__buffa::view::ListRefsOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::ListRefsResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::ListRefsResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::ReadRefView;
 #[doc(inline)]
+pub use self::__buffa::view::ReadRefOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::ReadRefResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::ReadRefResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::UpdateRefView;
 #[doc(inline)]
+pub use self::__buffa::view::UpdateRefOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::UpdateRefResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::UpdateRefResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::PackExistsView;
 #[doc(inline)]
+pub use self::__buffa::view::PackExistsOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::PackExistsResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::PackExistsResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::UploadPackView;
 #[doc(inline)]
+pub use self::__buffa::view::UploadPackOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::UploadPackResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::UploadPackResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackView;
 #[doc(inline)]
+pub use self::__buffa::view::DownloadPackOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::DownloadPackHeaderView;
 #[doc(inline)]
+pub use self::__buffa::view::DownloadPackHeaderOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::PackChunkView;
+#[doc(inline)]
+pub use self::__buffa::view::PackChunkOwnedView;

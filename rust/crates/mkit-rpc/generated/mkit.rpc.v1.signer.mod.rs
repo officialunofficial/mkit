@@ -34,18 +34,36 @@ pub mod __buffa {
 #[doc(inline)]
 pub use self::__buffa::view::SignerFrameView;
 #[doc(inline)]
+pub use self::__buffa::view::SignerFrameOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::HelloView;
+#[doc(inline)]
+pub use self::__buffa::view::HelloOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::HelloResponseView;
 #[doc(inline)]
+pub use self::__buffa::view::HelloResponseOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::CapabilitiesView;
+#[doc(inline)]
+pub use self::__buffa::view::CapabilitiesOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::SignRequestView;
 #[doc(inline)]
+pub use self::__buffa::view::SignRequestOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::SignResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::SignResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::WebAuthnDataView;
 #[doc(inline)]
+pub use self::__buffa::view::WebAuthnDataOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::PinPromptView;
 #[doc(inline)]
+pub use self::__buffa::view::PinPromptOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::PinResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::PinResponseOwnedView;

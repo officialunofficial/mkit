@@ -206,3 +206,114 @@ impl ::buffa::ViewReborrow for ErrorView<'static> {
         this
     }
 }
+/** Self-contained, `'static` owned view of a `Error` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`ErrorView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`ErrorView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct ErrorOwnedView(::buffa::OwnedView<ErrorView<'static>>);
+impl ErrorOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(ErrorOwnedView(::buffa::OwnedView::decode(bytes)?))
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            ErrorOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::Error,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(ErrorOwnedView(::buffa::OwnedView::from_owned(msg)?))
+    }
+    /// Borrow the full [`ErrorView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &ErrorView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::Error {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `code`
+    #[must_use]
+    pub fn code(
+        &self,
+    ) -> ::core::option::Option<::buffa::EnumValue<super::super::ErrorCode>> {
+        self.0.reborrow().code
+    }
+    /// Human-readable message, English, suitable for direct display.
+    /// Length-capped at 1 KiB by the framing layer.
+    ///
+    /// Field 2: `message`
+    #[must_use]
+    pub fn message(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().message
+    }
+    /// Vendor-specific bytes, opaque to mkit. May carry a CTAP CBOR
+    /// status, a TPM TPM_RC code, an HSM PKCS#11 CKR_*, etc.
+    ///
+    /// Field 3: `details`
+    #[must_use]
+    pub fn details(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().details
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<ErrorView<'static>>> for ErrorOwnedView {
+    fn from(inner: ::buffa::OwnedView<ErrorView<'static>>) -> Self {
+        ErrorOwnedView(inner)
+    }
+}
+impl ::core::convert::From<ErrorOwnedView> for ::buffa::OwnedView<ErrorView<'static>> {
+    fn from(wrapper: ErrorOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<ErrorView<'static>>> for ErrorOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<ErrorView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::Error {
+    type View<'a> = ErrorView<'a>;
+    type ViewHandle = ErrorOwnedView;
+}
