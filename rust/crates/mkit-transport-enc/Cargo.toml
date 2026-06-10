@@ -21,8 +21,8 @@ workspace = true
 [dependencies]
 # Inter-workspace deps need explicit version + path so `cargo publish`
 # accepts them once `publish = true` is flipped on in Phase 2.
-mkit-core = { version = "0.1", path = "../mkit-core" }
-mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
+mkit-core = { version = "0.2", path = "../mkit-core" }
+mkit-rpc = { version = "0.2", path = "../mkit-rpc" }
 buffa = "0.6"
 thiserror = "2"
 

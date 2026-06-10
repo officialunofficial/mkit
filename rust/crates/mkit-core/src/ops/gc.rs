@@ -56,7 +56,12 @@ const MAX_REF_WALK_DEPTH: usize = 64;
 
 /// Errors from collecting the retention root set. Every underlying
 /// source error is wrapped so the collector can fail closed.
+///
+/// `#[non_exhaustive]`: new root sources (like the staging index, added
+/// in 0.2.0) come with new variants; downstream matches must keep a
+/// wildcard arm so those additions stay minor-version changes.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum GcRootsError {
     #[error("refs: {0}")]
     Refs(#[from] refs::RefError),
