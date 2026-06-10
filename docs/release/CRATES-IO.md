@@ -16,6 +16,27 @@ dependency-ordered set (core → rpc → attest → keystore → transports);
 release-plz computes that order automatically. release-plz reads each crate's
 `publish = false` and skips the rest.
 
+### Why those are off crates.io
+
+- **`mkit-cli`** — the product is the `mkit` *binary*, shipped via the signed
+  GitHub Release archives + `cargo install --git` / `cargo binstall`. Its library
+  surface is unstable CLI internals, deliberately **not** a public API (hence its
+  exclusion from `semver-checks`). It also **cannot** be published while it carries
+  the optional `enc-transport` dependency on the unpublished `mkit-transport-enc` —
+  crates.io rejects dependencies on unpublished crates, even optional ones.
+- **`mkit-wasm`** — distributed via npm (`@makechain/mkit-wasm`) with provenance,
+  published by `release.yml`'s `publish-wasm` job (gated on a public repo).
+- **`mkit-transport-enc`** — the encrypted-stream transport. It's largely
+  *implemented* (URL parsing, `mkit+enc://` dispatch, `--listen-enc`, TCP e2e
+  tests), but hasn't had a publish-readiness pass (docs.rs metadata, semver-checks,
+  API sign-off), and prematurely publishing a security primitive is undesirable.
+- **contrib signers / fuzz / benches** — reference impls + dev tooling, not a
+  library API.
+
+Publishing `mkit-cli` (so `cargo install mkit-cli` works) is **coupled** to
+publishing `mkit-transport-enc` first, so the CLI keeps encrypted transport intact
+rather than having the feature stripped. Both are tracked in **#321**.
+
 ## How it works — two DECOUPLED channels
 
 release.yml's binary release is gated on an **annotated, GPG-signed tag from an
