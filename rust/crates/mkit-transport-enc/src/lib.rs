@@ -269,10 +269,12 @@ impl<I: Stream, O: Sink, E: Executor> EncTransport<I, O, E> {
             ))),
             ..Default::default()
         };
+        // A poisoned session mutex means a prior holder panicked. As a library
+        // we surface that as an error rather than panicking the host process.
         let session = self
             .session
             .get_mut()
-            .expect("EncTransport session mutex poisoned during app_hello");
+            .map_err(|_| EncInitError::AppHelloFailed("session mutex poisoned".into()))?;
         let executor = &self.executor;
         executor.block_on(async {
             send_frame_init(&mut session.sender, &hello)

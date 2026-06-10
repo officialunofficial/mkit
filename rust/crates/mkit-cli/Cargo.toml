@@ -4,13 +4,12 @@ description = "The mkit command-line tool: a content-addressed VCS with native a
 keywords = ["mkit", "vcs", "cli", "attestation", "content-addressed"]
 categories = ["command-line-utilities", "cryptography"]
 readme = "../../README.md"
-# Distributed as the `mkit` binary via signed release archives and
-# `cargo install --git` (see docs/INSTALL.md), not crates.io. Its library
-# surface is the CLI's internals and is NOT a stable API — matching this
-# crate's own module docs. Keeping it off crates.io also avoids publishing
-# its `enc-transport` feature, which depends on the `publish = false`
-# `mkit-transport-enc` crate.
-publish = false
+# Published to crates.io so `cargo install mkit-cli` works (it installs the
+# `mkit` binary). It ALSO ships as a signed binary via the GitHub Release
+# archives and `cargo install --git` (see docs/INSTALL.md). NOTE: this crate's
+# library surface is the CLI's internals and is NOT a stable API — it is
+# deliberately excluded from cargo-semver-checks; depend on the `mkit-*`
+# library crates instead, not on `mkit_cli::…`.
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,8 +17,8 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 # The binary is named `mkit` (src/main.rs); set explicitly because it differs
-# from the crate name. Install via release archives or
-# `cargo install --git … mkit-cli` (see the `publish = false` note above).
+# from the crate name. Install via `cargo install mkit-cli`, the release
+# archives, or `cargo install --git … mkit-cli`.
 default-run = "mkit"
 
 # `cargo binstall mkit-cli` metadata. Points cargo-binstall at the
@@ -64,11 +63,9 @@ mkit-transport-ssh = { version = "0.2", path = "../mkit-transport-ssh" }
 # Optional: encrypted-stream transport. Off by default so the
 # baseline `mkit-cli` build doesn't pay tokio's compile cost. Turn on
 # via `--features enc-transport`. See SPEC-TRANSPORT-ENC §6.
-# PATH-ONLY (no version req): both this crate and mkit-transport-enc are
-# publish = false, so a version requirement serves no crates.io purpose and
-# would otherwise break when release-plz bumps the lockstep workspace version
-# (the enc crate moves but its requirement here wouldn't be rewritten — #225).
-mkit-transport-enc = { path = "../mkit-transport-enc", optional = true }
+# Version-locked to the workspace (0.2); now that mkit-transport-enc is
+# published, release-plz rewrites this requirement on each lockstep bump.
+mkit-transport-enc = { version = "0.2", path = "../mkit-transport-enc", optional = true }
 mkit-rpc = { version = "0.2", path = "../mkit-rpc" }
 # commonware-cryptography's ed25519 PrivateKey is the static-key type
 # the encrypted transport handshake takes. Pulled in here behind the
