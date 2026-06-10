@@ -68,7 +68,7 @@ before proceeding.
 ### 2. Secrets + activation variable (repo → Settings → Secrets and variables → Actions)
 | Secret | What | Notes |
 |---|---|---|
-| `CARGO_REGISTRY_TOKEN` | crates.io API token | Scopes: **publish-new** + **publish-update**. A token (not trusted publishing) is required because brand-new crates can't be published via trusted publishing the first time. |
+| `CRATES_PACKAGE_KEY` (**org-level**) | crates.io API token | Scopes: **publish-new** + **publish-update**. Exposed to cargo as the `CARGO_REGISTRY_TOKEN` env var in `release-plz.yml`. A token (not trusted publishing) is required because brand-new crates can't be published via trusted publishing the first time. The org secret must grant this repo access. Its crates.io account must be a member of the `makechain` team (the crate owner). |
 | `RELEASE_PLZ_APP_ID` | GitHub App id | Reuse the same App as polychrome if it's installed on this repo; else create one (perms: contents:write, pull-requests:write, workflows). |
 | `RELEASE_PLZ_APP_PRIVATE_KEY` | GitHub App private key | Minted into a short-lived token per run; never stored as a static token. |
 

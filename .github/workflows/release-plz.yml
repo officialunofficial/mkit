@@ -15,8 +15,10 @@
 #    this setup PR's own merge) never publish.
 #
 # TOKENS (provision before enabling — see docs/release/CRATES-IO.md):
-#  - CARGO_REGISTRY_TOKEN — crates.io API token (scopes: publish-new +
-#    publish-update). Required for the release job to `cargo publish`.
+#  - CRATES_PACKAGE_KEY — crates.io API token (scopes: publish-new +
+#    publish-update), provided as an ORG-level secret and exposed to cargo as
+#    the CARGO_REGISTRY_TOKEN env var below. Required for the release job to
+#    `cargo publish`. The org secret must grant this repo access.
 #  - RELEASE_PLZ_APP_ID + RELEASE_PLZ_APP_PRIVATE_KEY — a GitHub App installation
 #    token, minted per-run. release-plz creates no tag, so the App token is here
 #    so the Release PR it opens can trigger CI (a `GITHUB_TOKEN`-authored PR does
@@ -85,7 +87,7 @@ jobs:
           config: rust/release-plz.toml
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_PACKAGE_KEY }}
 
   # Open/update the single Release PR. MANUAL only, and likewise gated on
   # RELEASE_PLZ_ENABLED so a stray dispatch before setup does nothing.
@@ -140,4 +142,4 @@ jobs:
           config: rust/release-plz.toml
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_PACKAGE_KEY }}
