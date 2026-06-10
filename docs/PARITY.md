@@ -79,7 +79,7 @@ creeping; revisit post-v1 if demand warrants.
 | `branch` | create, list, `-v`, `-d`/`-D`/`-m` | same | ✅ | 1 | #249 | default list is `<marker> <name>` (no id, like git); `-v` adds abbreviated id + subject; `-D <missing>` errors like git (no silent no-op). Prior Phase-1 divergences reconciled. |
 | `checkout` | switch branch, restore files | same | ✅ | — | — | guarded against clobber; untracked files preserved on switch (refuses only target-tree collisions) |
 | `tag` | lightweight/`-a`/`-s`/`-m`/`-d` | same | ✅ | — | — | |
-| `merge` / `cherry-pick` / `rebase` | merge, pick, replay + conflict workflow | same | ✅ | — | — | `rebase -i` row below (#259) |
+| `merge` / `cherry-pick` / `rebase` | merge, pick, replay + conflict workflow | same | ✅ | — | — | `rebase -i` row below (#259); rebase target accepts any revspec (`HEAD~n`, hashes, tags) |
 | `rebase -i` | interactive todo list | same | ✅ | 4 | #259, #291 | reorder / `drop` / `reword` / `squash` / `fixup` via `$EDITOR` (squash combines messages, fixup keeps the prior; a leading squash/fixup is rejected); conflict pause/resume + `--continue`/`--skip`/`--abort` carry over. `edit` (stop-to-amend) not yet supported |
 | `restore` / `reset` | `--staged`/`--worktree`/`--soft`/`--mixed` | same | ✅ | — | — | |
 | `reset --hard` | reset worktree | same | ✅ | 2 | #250 | resets HEAD+index+worktree to target; removes dropped tracked files, keeps untracked (like git) except a target-colliding untracked path; refuses to discard dirty/staged or overwrite a colliding untracked path without `-f` (mkit divergence — git discards silently); guard re-checks each dropped path directly, so it also covers a tracked file matching an ignore rule (`.gitignore`/`.mkitignore`) |
