@@ -77,7 +77,7 @@ creeping; revisit post-v1 if demand warrants.
 | `diff` | `<a>...<b>` symmetric range | same | ✅ | 4 | #252 | diffs `merge-base(a,b)` against `b` (git semantics); single merge base (criss-cross multi-base is a documented edge) |
 | `log` | `--graph` | `--graph` is a no-op | 🚫 | 1 | #249 | **v1 non-goal** — flag accepted as a no-op; full graph parity unachievable (mkit's default `log` body diverges); optional `--oneline --graph` renderer is a post-v1 follow-up |
 | `branch` | create, list, `-v`, `-d`/`-D`/`-m` | same | ✅ | 1 | #249 | default list is `<marker> <name>` (no id, like git); `-v` adds abbreviated id + subject; `-D <missing>` errors like git (no silent no-op). Prior Phase-1 divergences reconciled. |
-| `checkout` | switch branch, restore files | same | ✅ | — | — | guarded against clobber |
+| `checkout` | switch branch, restore files | same | ✅ | — | — | guarded against clobber; untracked files preserved on switch (refuses only target-tree collisions) |
 | `tag` | lightweight/`-a`/`-s`/`-m`/`-d` | same | ✅ | — | — | |
 | `merge` / `cherry-pick` / `rebase` | merge, pick, replay + conflict workflow | same | ✅ | — | — | `rebase -i` row below (#259) |
 | `rebase -i` | interactive todo list | same | ✅ | 4 | #259, #291 | reorder / `drop` / `reword` / `squash` / `fixup` via `$EDITOR` (squash combines messages, fixup keeps the prior; a leading squash/fixup is rejected); conflict pause/resume + `--continue`/`--skip`/`--abort` carry over. `edit` (stop-to-amend) not yet supported |
@@ -126,7 +126,8 @@ mkit deliberately refuses Git's silent data-loss defaults. These are
   locally-modified or untracked content without an explicit `-f`/`--force`.
 - `mv` — refuses to overwrite an existing destination without `-f` (matches
   git's `mv` clobber guard).
-- `checkout` — refuses to clobber dirty/untracked files.
+- `checkout` — refuses to clobber dirty tracked files or colliding untracked
+  files; non-colliding untracked files are preserved (git semantics).
 - Repo-local config — `user.identity` and other security-sensitive keys are in
   `REPO_FORBIDDEN_KEYS` so a hostile clone cannot spoof the signed author or
   redirect signing/transport trust. Git-style `user.name`/`user.email` aliases

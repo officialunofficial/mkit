@@ -558,11 +558,78 @@ pub fn ensure_restore_safe_with_options(
     Ok(())
 }
 
-fn restore_affects_path(options: &RestoreOptions, path: &str) -> bool {
+pub(crate) fn restore_affects_path(options: &RestoreOptions, path: &str) -> bool {
     options
         .sparse_patterns
         .as_deref()
         .is_none_or(|patterns| matches_sparse(patterns, path, false))
+}
+
+/// Tracked paths present in the current index but absent from the target
+/// tree, each paired with its index entry's `(status, hash)` — for
+/// destructive worktree moves (`reset --hard`, `checkout`) these files
+/// are deleted explicitly (`restore_tree_to_worktree` with `clean =
+/// false` writes/overwrites but never deletes). The `(status, hash)`
+/// lets the caller detect local edits by content AND mode/type.
+pub(crate) fn dropped_tracked_paths(
+    cwd: &Path,
+    store: &ObjectStore,
+    target_tree: Hash,
+) -> Result<Vec<(String, EntryStatus, Hash)>, String> {
+    let idx = read_or_seed_index_from_head(cwd, store)?;
+    let index_tree =
+        worktree::build_tree_from_index(store, &idx).map_err(|e| format!("index tree: {e}"))?;
+    let mut out = Vec::new();
+    for e in diff_trees(store, Some(index_tree), Some(target_tree))
+        .map_err(|e| format!("diff index vs target: {e}"))?
+        .entries
+        .into_iter()
+        .filter(|e| e.kind == DiffKind::Removed)
+    {
+        if let Some(entry) = idx
+            .entries
+            .iter()
+            .find(|ie| ie.path == e.path && ie.status != EntryStatus::Removed)
+        {
+            out.push((e.path, entry.status, entry.object_hash));
+        }
+    }
+    Ok(out)
+}
+
+/// The first dropped path whose worktree entry differs from its indexed
+/// `(status, hash)` — a local edit to content, mode (exec bit), or symlink
+/// target. `None` if every dropped path is unmodified, missing, or a
+/// directory (no file to lose). This is a direct per-dropped-path check, so
+/// destructive moves never silently discard a local edit — independent of
+/// how the shared worktree-snapshot guard treats ignored files.
+pub(crate) fn locally_modified_dropped_path(
+    cwd: &Path,
+    store: &ObjectStore,
+    dropped: &[(String, EntryStatus, Hash)],
+) -> Result<Option<String>, String> {
+    for (path, idx_status, idx_hash) in dropped {
+        if let Some((wt_status, wt_hash)) = worktree_entry_state(cwd, store, path)?
+            && (wt_status != *idx_status || wt_hash != *idx_hash)
+        {
+            return Ok(Some(path.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// Delete a dropped tracked path from the worktree. A regular file or
+/// symlink is removed; a directory (untracked content that replaced the
+/// tracked file) is LEFT in place rather than recursively deleted, and a
+/// missing path is a no-op — so this never crashes on `IsADirectory` and
+/// never nukes untracked directories.
+pub(crate) fn remove_dropped_path(abs: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(abs) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => fs::remove_file(abs),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn is_ignored_worktree_path(

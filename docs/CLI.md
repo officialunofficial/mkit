@@ -380,7 +380,10 @@ Branches / refs:
   `<new>`, and moves HEAD when the renamed branch is checked out.
 - `mkit checkout <branch>` — switch HEAD and restore files. Refuses to
   run when staged changes, dirty tracked files, or untracked path
-  collisions would be overwritten.
+  collisions would be overwritten. Non-colliding untracked files are
+  preserved across the switch (git branch-switch semantics); tracked
+  files the target tree drops are removed, with emptied directories
+  pruned.
 - `mkit clean [-n] [-f] [-d] [-x|-X] [<path>...]` — remove untracked files
   from the worktree. **Destructive, so it refuses to delete without an
   explicit `-f`** (matching git's `clean.requireForce` default); `-n`

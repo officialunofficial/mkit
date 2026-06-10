@@ -164,7 +164,10 @@ fn checkout_refuses_untracked_collision() {
 }
 
 #[test]
-fn checkout_refuses_untracked_file_that_clean_restore_would_remove() {
+fn checkout_preserves_noncolliding_untracked_file() {
+    // Branch switching PRESERVES untracked files (git semantics): an
+    // untracked path that does not exist in the target tree must neither
+    // block the checkout nor be deleted by it.
     let td = tempfile::tempdir().unwrap();
 
     assert!(run_in(td.path(), &["init"]).status.success());
@@ -191,19 +194,26 @@ fn checkout_refuses_untracked_file_that_clean_restore_would_remove() {
     let out = run_in(td.path(), &["checkout", "feature"]);
 
     assert!(
-        !out.status.success(),
-        "untracked removal should fail: {out:?}"
+        out.status.success(),
+        "checkout with a non-colliding untracked file should succeed: {out:?}"
     );
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("restore would remove untracked path"));
     assert_eq!(
         fs::read(td.path().join("notes.txt")).unwrap(),
-        b"local notes\n"
+        b"local notes\n",
+        "untracked file must survive the branch switch"
+    );
+    assert_eq!(
+        fs::read(td.path().join("feature.txt")).unwrap(),
+        b"feature\n"
     );
 }
 
 #[test]
-fn checkout_refuses_untracked_file_on_same_tree_clean_restore() {
+fn checkout_same_tree_succeeds_with_untracked_file() {
+    // Re-checking-out the current branch with an untracked file present
+    // is a no-op for the untracked file: the checkout succeeds and the
+    // file survives (it used to be refused with "restore would remove
+    // untracked path").
     let td = tempfile::tempdir().unwrap();
 
     assert!(run_in(td.path(), &["init"]).status.success());
@@ -220,15 +230,76 @@ fn checkout_refuses_untracked_file_on_same_tree_clean_restore() {
     let out = run_in(td.path(), &["checkout", "main"]);
 
     assert!(
-        !out.status.success(),
-        "same-tree clean restore should fail: {out:?}"
+        out.status.success(),
+        "same-tree checkout with an untracked file should succeed: {out:?}"
     );
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("restore would remove untracked path"));
+    assert_eq!(
+        fs::read(td.path().join("notes.txt")).unwrap(),
+        b"local notes\n",
+        "untracked file must survive a same-tree checkout"
+    );
+    assert_eq!(
+        fs::read(td.path().join("tracked.txt")).unwrap(),
+        b"tracked\n"
+    );
+}
+
+#[test]
+fn checkout_removes_dropped_tracked_files_but_keeps_untracked() {
+    // Tracked files that exist on the current branch but not in the
+    // target tree are removed (with now-empty directories pruned), while
+    // untracked files — including one inside a directory the target
+    // drops — are preserved.
+    let td = tempfile::tempdir().unwrap();
+
+    assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
+    fs::write(td.path().join("base.txt"), b"base\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "main"])
+            .status
+            .success()
+    );
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    fs::write(td.path().join("feature.txt"), b"feature\n").unwrap();
+    fs::create_dir_all(td.path().join("sub")).unwrap();
+    fs::write(td.path().join("sub/nested.txt"), b"nested\n").unwrap();
+    fs::create_dir_all(td.path().join("gone")).unwrap();
+    fs::write(td.path().join("gone/only.txt"), b"only\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "feature"])
+            .status
+            .success()
+    );
+
+    // Untracked survivors: one at the root, one under a dir whose
+    // tracked content the target drops.
+    fs::write(td.path().join("notes.txt"), b"local notes\n").unwrap();
+    fs::write(td.path().join("sub/keep-me.txt"), b"keep\n").unwrap();
+
+    let out = run_in(td.path(), &["checkout", "main"]);
+    assert!(out.status.success(), "checkout main failed: {out:?}");
+
+    // Tracked-on-feature, absent-on-main files are gone.
+    assert!(!td.path().join("feature.txt").exists());
+    assert!(!td.path().join("sub/nested.txt").exists());
+    assert!(!td.path().join("gone/only.txt").exists());
+    // A directory emptied by the switch is pruned...
+    assert!(!td.path().join("gone").exists(), "emptied dir not pruned");
+    // ...but one still holding an untracked file survives, with the file.
+    assert_eq!(
+        fs::read(td.path().join("sub/keep-me.txt")).unwrap(),
+        b"keep\n",
+        "untracked file under a dropped dir must survive"
+    );
     assert_eq!(
         fs::read(td.path().join("notes.txt")).unwrap(),
         b"local notes\n"
     );
+    assert_eq!(fs::read(td.path().join("base.txt")).unwrap(), b"base\n");
 }
 
 #[test]
