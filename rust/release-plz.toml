@@ -121,17 +121,22 @@ version_group = "mkit"
 name = "mkit-transport-ssh"
 version_group = "mkit"
 # publish = false crates: kept in the version_group so their (unpublished)
-# versions stay in lockstep with the libraries; release-plz still skips
-# publishing them because their Cargo.toml sets publish = false.
+# versions stay in lockstep with the libraries. `publish = false` MUST be
+# restated here to match each crate's Cargo.toml — release-plz (>=0.3.159)
+# validates the config against the manifest and errors on a mismatch, since
+# a bare `[[package]]` entry otherwise defaults to `publish = true`.
 [[package]]
 name = "mkit-cli"
 version_group = "mkit"
+publish = false
 [[package]]
 name = "mkit-wasm"
 version_group = "mkit"
+publish = false
 [[package]]
 name = "mkit-transport-enc"
 version_group = "mkit"
+publish = false
 
 # Changelog grouping, aligned to the Conventional Commit types the
 # commit-lint / PR-title gate already enforces. Noise types are dropped from
