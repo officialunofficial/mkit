@@ -1,5 +1,7 @@
-//! `mkit rebase [-i] <branch> | --continue | --abort | --skip` — replay
-//! commits onto a different base.
+//! `mkit rebase [-i] <revspec> | --continue | --abort | --skip` — replay
+//! commits onto a different base. The target is resolved through the
+//! shared revspec resolver, so a branch, tag, `HEAD~n`, or full/short
+//! hash all work.
 //!
 //! The rebase state machine lives in `mkit_core::ops::rebase`. This
 //! shim loads / writes that state and drives the replay loop via
@@ -70,7 +72,8 @@ struct RebaseOpts {
     /// (`edit` is not yet supported.)
     #[arg(short = 'i', long, conflicts_with_all = ["cont", "abort", "skip"])]
     interactive: bool,
-    /// Branch to replay commits onto.
+    /// Branch, tag, or revision (e.g. `HEAD~2`, a full/short hash) to
+    /// replay commits onto. Resolved through the shared revspec resolver.
     branch: Option<String>,
 }
 
@@ -103,7 +106,7 @@ pub fn run(args: &[String]) -> u8 {
     } else if let Some(branch) = opts.branch.as_deref() {
         start(&cwd, &mkit_dir, &store, branch, opts.interactive)
     } else {
-        super::usage_error("usage: mkit rebase [-i] <branch> | --continue | --abort | --skip")
+        super::usage_error("usage: mkit rebase [-i] <revspec> | --continue | --abort | --skip")
     }
 }
 
@@ -120,10 +123,19 @@ fn start(
             exit::GENERAL_ERROR,
         );
     }
-    let onto = match refs::read_ref(mkit_dir, branch) {
-        Ok(Some(h)) => h,
-        Ok(None) => return emit_err(&format!("branch '{branch}' not found"), exit::GENERAL_ERROR),
-        Err(e) => return emit_err(&format!("read ref: {e}"), exit::GENERAL_ERROR),
+    // Resolve the rebase target through the shared revspec resolver
+    // (#227) so `rebase HEAD~2`, short/full hashes, tags, and branch
+    // names all work — the same grammar `reset`/`restore`/`cherry-pick`
+    // accept. The current branch name recorded in the rebase state
+    // (`head_name`) comes from HEAD below, not from this argument.
+    let onto = match super::revspec::resolve_revision(store, mkit_dir, branch) {
+        Ok(h) => h,
+        Err(e) => {
+            return emit_err(
+                &format!("no such commit: {branch} ({e})"),
+                exit::GENERAL_ERROR,
+            );
+        }
     };
     let orig_head = match refs::resolve_head(mkit_dir) {
         Ok(Some(h)) => h,

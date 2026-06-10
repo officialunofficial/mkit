@@ -380,7 +380,10 @@ Branches / refs:
   `<new>`, and moves HEAD when the renamed branch is checked out.
 - `mkit checkout <branch>` — switch HEAD and restore files. Refuses to
   run when staged changes, dirty tracked files, or untracked path
-  collisions would be overwritten.
+  collisions would be overwritten. Non-colliding untracked files are
+  preserved across the switch (git branch-switch semantics); tracked
+  files the target tree drops are removed, with emptied directories
+  pruned.
 - `mkit clean [-n] [-f] [-d] [-x|-X] [<path>...]` — remove untracked files
   from the worktree. **Destructive, so it refuses to delete without an
   explicit `-f`** (matching git's `clean.requireForce` default); `-n`
@@ -433,11 +436,13 @@ Branches / refs:
   **Reverting a merge commit is refused** — the inverse depends on which
   parent is the mainline, and `-m`/mainline selection is not yet
   supported.
-- `mkit rebase [-i|--interactive] <branch> | --continue | --abort | --skip`
-  — replay commits onto a different base. Restore steps refuse to overwrite
-  staged changes, dirty tracked files, or untracked path collisions. On
-  conflict the rebase pauses with resumable state; `--skip` drops the
-  current commit. See "Resolving conflicts" below.
+- `mkit rebase [-i|--interactive] <revspec> | --continue | --abort | --skip`
+  — replay commits onto a different base. The target is resolved through
+  the shared revspec resolver (branch, tag, `HEAD~n`, full/short hash).
+  Restore steps refuse to overwrite staged changes, dirty tracked files,
+  or untracked path collisions. On conflict the rebase pauses with
+  resumable state; `--skip` drops the current commit. See "Resolving
+  conflicts" below.
   `-i`/`--interactive` opens the todo list in `$EDITOR` before any
   mutation. Each line is `<command> <commit> <subject>`, oldest-first
   (top is applied first). Reorder lines to reorder commits; delete a line

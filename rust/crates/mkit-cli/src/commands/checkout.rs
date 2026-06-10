@@ -10,6 +10,7 @@ use std::io::Write;
 
 use clap::Parser;
 use mkit_core::hash::Hash;
+use mkit_core::index::EntryStatus;
 use mkit_core::object::Object;
 use mkit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree};
 use mkit_core::refs;
@@ -100,9 +101,17 @@ pub fn run(args: &[String]) -> u8 {
     // delivered subset, cache the bitmap, then materialise with the
     // restore-side sparse patterns set. Empty `opts.sparse` falls
     // through to the full-tree restore below.
+    //
+    // `clean = false` everywhere: like git, switching branches PRESERVES
+    // untracked files. Tracked paths the target drops are deleted
+    // explicitly below (same pattern as `reset --hard`), so the restore
+    // itself never sweeps the worktree.
     #[cfg(feature = "sparse-checkout")]
     let sparse_opts: RestoreOptions = if opts.sparse.is_empty() {
-        RestoreOptions::default()
+        RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        }
     } else {
         match prepare_sparse_restore(&cwd, &store, tree_hash, &opts.sparse) {
             Ok(o) => o,
@@ -110,14 +119,28 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
     #[cfg(not(feature = "sparse-checkout"))]
-    let sparse_opts: RestoreOptions = RestoreOptions::default();
+    let sparse_opts: RestoreOptions = RestoreOptions {
+        clean: false,
+        sparse_patterns: None,
+    };
 
     // Run the destructive-restore safety gate (#176) BEFORE touching
     // anything. This is read-only — it refuses the checkout if dirty
-    // tracked files or untracked collisions would be clobbered.
+    // tracked files, staged changes, or untracked-path collisions with
+    // the target tree would be clobbered. Untracked files that do NOT
+    // collide with the target are preserved (git branch-switch
+    // semantics), so they no longer block the checkout.
     if let Err(e) = super::ensure_restore_safe_with_options(&cwd, &store, tree_hash, &sparse_opts) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
+
+    // Tracked paths the target drops — removed explicitly after
+    // materialising (the `clean = false` restore never deletes). Refuses
+    // first if any of them carries local edits.
+    let dropped = match dropped_paths_guarded(&cwd, &store, tree_hash, &sparse_opts) {
+        Ok(d) => d,
+        Err(code) => return code,
+    };
 
     // Update HEAD FIRST, before mutating the worktree/index (#223). The
     // failure modes are asymmetric: if we materialised the new tree and
@@ -139,14 +162,19 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT);
     }
 
-    // Materialise the tree. `clean=true` is the default — `checkout`
-    // reshapes the worktree to the branch tip. `.mkitignore` is
-    // honoured inside the helper so locally-ignored files (editor
-    // swapfiles, build artefacts) survive the transition.
+    // Materialise the tree with `clean = false`: tracked entries are
+    // written/overwritten, untracked files are preserved. Then delete
+    // the tracked paths the target drops (computed above) and prune any
+    // directories that became empty — git removes those on a branch
+    // switch; `fs::remove_dir` only succeeds on EMPTY dirs, so a dir
+    // still holding untracked files survives.
     let report = match restore_tree_to_worktree(&store, &tree_hash, &cwd, &sparse_opts) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("restore: {e}"), exit::CANTCREAT),
     };
+    if let Err(code) = remove_dropped(&cwd, &dropped) {
+        return code;
+    }
     if let Err(e) = super::sync_index_to_tree(&cwd, &store, tree_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
@@ -173,6 +201,79 @@ fn emit_err(msg: &str, code: u8) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "error: {msg}");
     code
+}
+
+/// Tracked paths the target drops — present in the current index but
+/// absent from the target tree. The `clean = false` restore never
+/// deletes, so `run` removes them explicitly after materialising.
+/// Restricted to the sparse cone so `--sparse` keeps its old reach.
+///
+/// Direct per-dropped-path dirty check (mirrors `reset --hard`): a
+/// locally-edited tracked file the target drops must never be deleted
+/// silently, even when an ignore rule hides it from the shared guard's
+/// worktree snapshot — refuses (returning the exit code) when one is
+/// found.
+fn dropped_paths_guarded(
+    cwd: &std::path::Path,
+    store: &ObjectStore,
+    tree_hash: Hash,
+    opts: &RestoreOptions,
+) -> Result<Vec<(String, EntryStatus, Hash)>, u8> {
+    let dropped: Vec<(String, EntryStatus, Hash)> =
+        match super::dropped_tracked_paths(cwd, store, tree_hash) {
+            Ok(all) => all
+                .into_iter()
+                .filter(|(path, _, _)| super::restore_affects_path(opts, path))
+                .collect(),
+            Err(e) => return Err(emit_err(&e, exit::GENERAL_ERROR)),
+        };
+    match super::locally_modified_dropped_path(cwd, store, &dropped) {
+        Ok(Some(path)) => Err(emit_err(
+            &format!(
+                "restore would overwrite local changes; commit, stash, or reset '{path}' first"
+            ),
+            exit::GENERAL_ERROR,
+        )),
+        Ok(None) => Ok(dropped),
+        Err(e) => Err(emit_err(&e, exit::GENERAL_ERROR)),
+    }
+}
+
+/// Delete the dropped tracked paths from the worktree and prune any
+/// parent directories that became empty.
+fn remove_dropped(
+    cwd: &std::path::Path,
+    dropped: &[(String, EntryStatus, Hash)],
+) -> Result<(), u8> {
+    for (path, _, _) in dropped {
+        if let Err(e) = super::remove_dropped_path(&cwd.join(path)) {
+            return Err(emit_err(
+                &format!("restore: remove {path}: {e}"),
+                exit::CANTCREAT,
+            ));
+        }
+        prune_empty_parents(cwd, path);
+    }
+    Ok(())
+}
+
+/// After deleting the dropped tracked file at repo-relative `rel_path`,
+/// remove its parent directories bottom-up while they are empty.
+/// `fs::remove_dir` refuses non-empty directories, so a parent still
+/// holding untracked (or ignored) files is left untouched, and the walk
+/// stops at the first survivor. Errors are deliberately swallowed — a
+/// leftover empty directory is cosmetic, never data loss.
+fn prune_empty_parents(root: &std::path::Path, rel_path: &str) {
+    let mut dir = std::path::Path::new(rel_path).parent();
+    while let Some(d) = dir {
+        if d.as_os_str().is_empty() {
+            break;
+        }
+        if std::fs::remove_dir(root.join(d)).is_err() {
+            break;
+        }
+        dir = d.parent();
+    }
 }
 
 /// Drive the verifiable sparse-checkout pipeline for `tree_hash`
@@ -256,10 +357,13 @@ fn prepare_sparse_restore(
     }
 
     // Translate the CLI patterns into the restore-side pattern grammar.
+    // `clean = false`: untracked files inside the sparse cone are
+    // preserved (same branch-switch semantics as the full-tree path);
+    // tracked paths the target drops are deleted explicitly by `run`.
     let joined = patterns.join("\n");
     let parsed = parse_sparse_patterns(&joined);
     Ok(RestoreOptions {
-        clean: true,
+        clean: false,
         sparse_patterns: Some(parsed),
     })
 }

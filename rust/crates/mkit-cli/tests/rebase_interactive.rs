@@ -398,3 +398,84 @@ fn rebase_i_drop_all_resets_to_base() {
         assert!(!repo.path.join(f).exists(), "{f} should be gone");
     }
 }
+
+// ---------- revspec targets (the onto argument is resolved through the
+// shared revspec resolver, not a literal ref read) ------------------------
+
+/// Non-interactive `rebase HEAD~n` works: the positional argument
+/// accepts any revspec, not just a branch name. (Regression: this used
+/// to fail with `read ref: invalid ref name 'HEAD~3'`.)
+#[test]
+fn rebase_accepts_head_relative_revspec() {
+    let repo = setup();
+    // On feature (base -> A -> B -> C): HEAD~3 == base == main.
+    let out = run(&repo, &["rebase", "HEAD~3"]);
+    assert!(
+        out.status.success(),
+        "rebase HEAD~3 failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("rebased 3 commit(s)"),
+        "expected a 3-commit replay, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(log_subjects(&repo), vec!["C", "B", "A", "base"]);
+}
+
+/// Non-interactive `rebase <short-hash>` works.
+#[test]
+fn rebase_accepts_short_hash_revspec() {
+    let repo = setup();
+    let main_hash = fs::read_to_string(repo.path.join(".mkit/refs/heads/main")).unwrap();
+    let short = &main_hash.trim()[..12];
+    let out = run(&repo, &["rebase", short]);
+    assert!(
+        out.status.success(),
+        "rebase {short} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("rebased 3 commit(s)"),
+        "expected a 3-commit replay, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(log_subjects(&repo), vec!["C", "B", "A", "base"]);
+}
+
+/// `rebase -i HEAD~n` works (the interactive flag goes through the same
+/// resolution).
+#[test]
+fn rebase_i_accepts_head_relative_revspec() {
+    let repo = setup();
+    let (_d, script) = editor_script();
+    // HEAD~2 == A; replay B and C onto it unchanged.
+    let out = rebase_i(&repo, "HEAD~2", &script, "noop", "");
+    assert!(
+        out.status.success(),
+        "rebase -i HEAD~2 failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("rebased 2 commit(s)"),
+        "expected a 2-commit replay, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(log_subjects(&repo), vec!["C", "B", "A", "base"]);
+}
+
+/// An unknown revspec is still rejected before any mutation.
+#[test]
+fn rebase_rejects_unknown_revspec() {
+    let repo = setup();
+    let before = log_subjects(&repo);
+    let out = run(&repo, &["rebase", "nosuchref~2"]);
+    assert!(!out.status.success(), "unknown revspec should fail");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no such commit"),
+        "expected a resolver error, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(log_subjects(&repo), before);
+    assert!(!repo.path.join(".mkit/rebase-apply").exists());
+}

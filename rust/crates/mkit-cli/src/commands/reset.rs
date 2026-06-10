@@ -30,10 +30,8 @@ use mkit_core::hash::Hash;
 use mkit_core::index::EntryStatus;
 use mkit_core::object::Object;
 use mkit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree};
-use mkit_core::ops::{DiffKind, diff_trees};
 use mkit_core::refs::{self, Head, RefWriteCondition};
 use mkit_core::store::ObjectStore;
-use mkit_core::worktree;
 
 use crate::clap_shim;
 use crate::exit;
@@ -139,7 +137,7 @@ pub fn run(args: &[String]) -> u8 {
     // them ourselves; the hashes let the guard below detect local edits to
     // ignored-but-tracked files that the shared guard cannot see.
     let hard_removed: Vec<(String, EntryStatus, Hash)> = if opts.hard {
-        match dropped_tracked_paths(&cwd, &store, tree_hash) {
+        match super::dropped_tracked_paths(&cwd, &store, tree_hash) {
             Ok(p) => p,
             Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
         }
@@ -164,7 +162,7 @@ pub fn run(args: &[String]) -> u8 {
                 exit::GENERAL_ERROR,
             );
         }
-        match locally_modified_dropped_path(&cwd, &store, &hard_removed) {
+        match super::locally_modified_dropped_path(&cwd, &store, &hard_removed) {
             Ok(Some(path)) => {
                 return emit_err(
                     &format!(
@@ -219,7 +217,7 @@ pub fn run(args: &[String]) -> u8 {
             return emit_err(&format!("reset worktree: {e}"), exit::CANTCREAT);
         }
         for (path, _, _) in &hard_removed {
-            if let Err(e) = remove_dropped_path(&cwd.join(path)) {
+            if let Err(e) = super::remove_dropped_path(&cwd.join(path)) {
                 return emit_err(
                     &format!("reset worktree: remove {path}: {e}"),
                     exit::CANTCREAT,
@@ -256,73 +254,6 @@ fn move_head(mkit_dir: &std::path::Path, target: &Hash) -> Result<(), (String, u
         }
         Head::Detached(_) => refs::write_head_detached(mkit_dir, target)
             .map_err(|e| (format!("update HEAD: {e}"), exit::CANTCREAT)),
-    }
-}
-
-/// Tracked paths present in the current index but absent from the target
-/// tree, each paired with its index entry's `(status, hash)` — for
-/// `--hard` these worktree files are deleted (git removes tracked files
-/// the target drops; `restore_tree_to_worktree` with `clean = false`
-/// writes/overwrites but never deletes). The `(status, hash)` lets the
-/// caller detect local edits by content AND mode/type.
-fn dropped_tracked_paths(
-    cwd: &std::path::Path,
-    store: &ObjectStore,
-    target_tree: Hash,
-) -> Result<Vec<(String, EntryStatus, Hash)>, String> {
-    let idx = super::read_or_seed_index_from_head(cwd, store)?;
-    let index_tree =
-        worktree::build_tree_from_index(store, &idx).map_err(|e| format!("index tree: {e}"))?;
-    let mut out = Vec::new();
-    for e in diff_trees(store, Some(index_tree), Some(target_tree))
-        .map_err(|e| format!("diff index vs target: {e}"))?
-        .entries
-        .into_iter()
-        .filter(|e| e.kind == DiffKind::Removed)
-    {
-        if let Some(entry) = idx
-            .entries
-            .iter()
-            .find(|ie| ie.path == e.path && ie.status != EntryStatus::Removed)
-        {
-            out.push((e.path, entry.status, entry.object_hash));
-        }
-    }
-    Ok(out)
-}
-
-/// The first dropped path whose worktree entry differs from its indexed
-/// `(status, hash)` — a local edit to content, mode (exec bit), or symlink
-/// target. `None` if every dropped path is unmodified, missing, or a
-/// directory (no file to lose). This is a direct per-dropped-path check, so
-/// `reset --hard` never silently discards a local edit — independent of how
-/// the shared worktree-snapshot guard treats ignored files.
-fn locally_modified_dropped_path(
-    cwd: &std::path::Path,
-    store: &ObjectStore,
-    dropped: &[(String, EntryStatus, Hash)],
-) -> Result<Option<String>, String> {
-    for (path, idx_status, idx_hash) in dropped {
-        if let Some((wt_status, wt_hash)) = super::worktree_entry_state(cwd, store, path)?
-            && (wt_status != *idx_status || wt_hash != *idx_hash)
-        {
-            return Ok(Some(path.clone()));
-        }
-    }
-    Ok(None)
-}
-
-/// Delete a dropped tracked path from the worktree. A regular file or
-/// symlink is removed; a directory (untracked content that replaced the
-/// tracked file) is LEFT in place rather than recursively deleted, and a
-/// missing path is a no-op — so this never crashes on `IsADirectory` and
-/// never nukes untracked directories.
-fn remove_dropped_path(abs: &std::path::Path) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(abs) {
-        Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => std::fs::remove_file(abs),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
     }
 }
 
