@@ -67,6 +67,13 @@ cargo install --git https://github.com/officialunofficial/mkit mkit-cli
 Requires Rust 1.95 (rustup picks it up from `rust/rust-toolchain.toml`
 on first build). Drops `mkit` into `~/.cargo/bin/`.
 
+> [!WARNING]
+> Do **not** run `cargo install mkit` — the `mkit` name on crates.io
+> belongs to an unrelated project. The CLI installs as `mkit-cli` from
+> this repository (or via the release archives / `install.sh` above);
+> only the *library* crates (`mkit-core` and friends) come from
+> crates.io.
+
 ### From GitHub Releases
 
 Cosign-signed archives for macOS (arm64 + x86_64) and Linux (x86_64 +

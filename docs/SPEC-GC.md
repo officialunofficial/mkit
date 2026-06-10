@@ -37,6 +37,7 @@ all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 | Branches | `.mkit/refs/heads/*` | each branch tip |
 | Tags | `.mkit/refs/tags/*` | each tag target |
 | Remote-tracking | `.mkit/refs/remotes/<remote>/*` | each remote ref |
+| Staging index | `.mkit/index` | each entry's `object_hash` (staged-but-uncommitted content) |
 | Stash | `.mkit/stash` | each entry's `commit_hash` + `parent_hash` |
 | Reset / op backup | `.mkit/ORIG_HEAD` | the saved pre-op HEAD |
 | Merge in progress | `.mkit/MERGE_HEAD` (+`ORIG_HEAD`) | `merge_head`, `orig_head` |
