@@ -527,6 +527,13 @@ jobs:
   publish-wasm:
     name: Publish mkit-wasm to npm
     runs-on: ubuntu-latest
+    # npm provenance (`npm publish --provenance`, below) requires a PUBLIC
+    # source repository. While the repo is private/internal this job is
+    # SKIPPED (not failed) so the CLI binary release still goes green; it
+    # self-activates the next time a tag is pushed after the repo is made
+    # public. The job body keeps its own explicit public-repo guard as a
+    # defense-in-depth check.
+    if: github.event.repository.visibility == 'public'
     needs: [validate-release-tag, build, release]
     permissions:
       contents: write       # attach assets to the GitHub Release
