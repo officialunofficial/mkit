@@ -92,8 +92,11 @@ License Exception TSU). A §740.13(e) notification has been provided to BIS
 
 In scope:
 
-- The `mkit` binary and everything under `src/` that ships in a release
-  archive.
+- The `mkit` binary and the Rust workspace under `rust/crates/` —
+  including the library crates published to crates.io (`mkit-core`,
+  `mkit-rpc`, `mkit-attest`, `mkit-keystore`, the `mkit-transport-*`
+  crates).
+- The reference external signers under `contrib/signers/`.
 - Release pipeline integrity (signing, SBOM, reproducibility claims).
 - On-disk format parsers (v1 format documented in `docs/SPEC-*.md`).
 

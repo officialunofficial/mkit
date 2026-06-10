@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-attest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "blake3",
@@ -2610,7 +2610,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-benches"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake2",
  "blake3",
@@ -2631,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "buffa",
  "clap",
@@ -2664,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "commonware-codec",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-keystore"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "card-backend-pcsc",
  "chacha20poly1305",
@@ -2728,7 +2728,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-rpc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "buffa",
  "buffa-build",
@@ -2739,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-enc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "buffa",
  "commonware-codec",
@@ -2759,7 +2759,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-file"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mkit-core",
  "tempfile",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-http"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mkit-core",
  "mockito",
@@ -2780,14 +2780,14 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-memory"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mkit-core",
 ]
 
 [[package]]
 name = "mkit-transport-s3"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "hmac 0.13.0",
@@ -2802,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-ssh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "buffa",
  "hex",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bao",
  "ed25519-dalek 2.2.0",

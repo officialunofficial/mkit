@@ -10,8 +10,9 @@ authors.workspace = true
 readme = "README.md"
 keywords = ["mkit", "vcs", "wasm", "blake3", "ed25519"]
 categories = ["wasm", "cryptography"]
-# Not published to crates.io — published to npm as `mkit-wasm` from
-# .github/workflows/release.yml. wasm-pack copies the metadata above
+# Not published to crates.io — published to npm as `@makechain/mkit-wasm`
+# (release.yml rewrites the wasm-pack name to the scoped form before
+# `npm publish`). wasm-pack copies the metadata above
 # (description / keywords / repository / license / readme) into the
 # generated package.json.
 publish = false

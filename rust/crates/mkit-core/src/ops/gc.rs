@@ -34,6 +34,7 @@ use std::io;
 use std::path::Path;
 
 use crate::hash::{self, Hash};
+use crate::index;
 use crate::store::{ObjectStore, StoreError};
 
 use super::conflict_state::{self, ORIG_HEAD};
@@ -55,7 +56,12 @@ const MAX_REF_WALK_DEPTH: usize = 64;
 
 /// Errors from collecting the retention root set. Every underlying
 /// source error is wrapped so the collector can fail closed.
+///
+/// `#[non_exhaustive]`: new root sources (like the staging index, added
+/// in 0.2.0) come with new variants; downstream matches must keep a
+/// wildcard arm so those additions stay minor-version changes.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum GcRootsError {
     #[error("refs: {0}")]
     Refs(#[from] refs::RefError),
@@ -67,6 +73,8 @@ pub enum GcRootsError {
     Rebase(#[from] rebase::RebaseError),
     #[error("recovery log: {0}")]
     Recovery(#[from] recovery::RecoveryError),
+    #[error("staging index: {0}")]
+    Index(#[from] index::IndexError),
     #[error("object store: {0}")]
     Store(#[from] StoreError),
     #[error("malformed object id on disk: {0}")]
@@ -129,6 +137,16 @@ pub fn collect_roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
     for entry in stash::list(repo_root)?.entries {
         add(entry.commit_hash, &mut roots);
         add(entry.parent_hash, &mut roots);
+    }
+
+    // Staging index — blobs recorded by `mkit add` but not yet
+    // committed. They are reachable from no ref, so without this root
+    // staged work would be pruned once it ages past the grace window
+    // (or immediately under `--grace-secs 0`). `read_index` is strict
+    // (errors on corrupt/oversized index), so a damaged index aborts
+    // gc instead of silently dropping roots.
+    for entry in index::read_index(repo_root)?.entries {
+        add(entry.object_hash, &mut roots);
     }
 
     // ORIG_HEAD (written by reset and by the in-progress ops below).
@@ -575,6 +593,37 @@ mod tests {
         );
         // Sanity: kept objects accounted as live.
         assert!(s.contains(&kept) && s.contains(&kept_blob));
+    }
+
+    #[test]
+    fn run_gc_keeps_staged_but_uncommitted_blobs() {
+        let (d, s) = repo();
+        let md = mkit_dir(&d);
+        // A committed branch so the repo has a normal ref-side root.
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        // Stage a blob no commit references — what `mkit add` leaves
+        // behind: the object in the store + an index entry.
+        let staged = write_blob(&s, b"staged-only");
+        let idx = index::Index {
+            entries: vec![index::IndexEntry {
+                path: "staged.txt".into(),
+                status: index::EntryStatus::Blob,
+                object_hash: staged,
+            }],
+        };
+        index::write_index(d.path(), &idx).unwrap();
+
+        assert!(
+            collect_roots(&md).unwrap().contains(&staged),
+            "staged blob must be a retention root"
+        );
+        // grace=0 → anything unrooted is pruned immediately.
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert!(
+            s.contains(&staged),
+            "gc must never delete staged-but-uncommitted content"
+        );
     }
 
     #[test]
