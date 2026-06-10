@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (full history for the baseline rev)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           fetch-depth: 0
 
@@ -57,7 +57,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config
 
       - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@d9be7d8cda89035c9c843f78bd44d4f72d8403d4  # v2
+        uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154  # v2
         with:
           tool: cargo-semver-checks
 
