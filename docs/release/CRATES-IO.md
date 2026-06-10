@@ -1,41 +1,38 @@
 # Publishing to crates.io (release-plz) — runbook
 
-Resolves #225. mkit publishes its **9 library crates** to crates.io via
-[release-plz]; the existing `release.yml` keeps owning binaries, the GitHub
-Release, and the npm wasm package. This is the same model used in the
+Resolves #225. mkit publishes **11 crates** to crates.io via [release-plz] —
+the 9 libraries plus `mkit-transport-enc` and `mkit-cli` (so `cargo install
+mkit-cli` works); the existing `release.yml` keeps owning signed binaries, the
+GitHub Release, and the npm wasm package. This is the same model used in the
 `polychrome` repo, adapted because mkit *does* publish to crates.io.
 
 ## What publishes vs. what doesn't
 
-| Publishes to crates.io (9) | Stays off crates.io (`publish = false`) |
+| Publishes to crates.io (11) | Stays off crates.io (`publish = false`) |
 |---|---|
-| mkit-core, mkit-rpc, mkit-attest, mkit-keystore, mkit-transport-{file,http,memory,s3,ssh} | mkit-cli (binary), mkit-wasm (npm), mkit-transport-enc (Phase 2), contrib signers, fuzz, benches |
+| mkit-core, mkit-rpc, mkit-attest, mkit-keystore, mkit-transport-{file,http,memory,s3,ssh}, **mkit-transport-enc**, **mkit-cli** | mkit-wasm (npm), contrib signers, fuzz, benches |
 
-The 9 libraries depend **only on each other**, so they form a closed,
-dependency-ordered set (core → rpc → attest → keystore → transports);
-release-plz computes that order automatically. release-plz reads each crate's
-`publish = false` and skips the rest.
+The crates depend **only on each other**, forming a closed, dependency-ordered set
+(core → rpc → attest → keystore → transports → transport-enc → cli); release-plz
+computes that order automatically and skips any `publish = false` member.
 
-### Why those are off crates.io
+### Notes on the published set
 
-- **`mkit-cli`** — the product is the `mkit` *binary*, shipped via the signed
-  GitHub Release archives + `cargo install --git` / `cargo binstall`. Its library
-  surface is unstable CLI internals, deliberately **not** a public API (hence its
-  exclusion from `semver-checks`). It also **cannot** be published while it carries
-  the optional `enc-transport` dependency on the unpublished `mkit-transport-enc` —
-  crates.io rejects dependencies on unpublished crates, even optional ones.
+- **`mkit-cli`** — published so `cargo install mkit-cli` installs the `mkit`
+  binary; it ALSO ships via the signed GitHub Release archives + `cargo install
+  --git` / `cargo binstall`. Its library surface is unstable CLI internals,
+  deliberately **not** a public API — kept **out** of `semver-checks`. Depend on the
+  `mkit-*` library crates, not on `mkit_cli::…`.
+- **`mkit-transport-enc`** — the encrypted-stream transport. Published after a
+  security/polish review (#321). `mkit-cli`'s `enc-transport` feature depends on it,
+  so the two were published together (crates.io rejects deps on unpublished crates).
+
+### Why the rest stay off
+
 - **`mkit-wasm`** — distributed via npm (`@makechain/mkit-wasm`) with provenance,
   published by `release.yml`'s `publish-wasm` job (gated on a public repo).
-- **`mkit-transport-enc`** — the encrypted-stream transport. It's largely
-  *implemented* (URL parsing, `mkit+enc://` dispatch, `--listen-enc`, TCP e2e
-  tests), but hasn't had a publish-readiness pass (docs.rs metadata, semver-checks,
-  API sign-off), and prematurely publishing a security primitive is undesirable.
 - **contrib signers / fuzz / benches** — reference impls + dev tooling, not a
   library API.
-
-Publishing `mkit-cli` (so `cargo install mkit-cli` works) is **coupled** to
-publishing `mkit-transport-enc` first, so the CLI keeps encrypted transport intact
-rather than having the feature stripped. Both are tracked in **#321**.
 
 ## How it works — two DECOUPLED channels
 
