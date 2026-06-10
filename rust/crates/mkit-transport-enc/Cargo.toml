@@ -10,8 +10,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Phase 1: not yet ready for crates.io. URL parsing / CLI plumbing
-# (Phase 2) lands before we publish. Workspace member so workspace
+# Not yet on crates.io. The transport + URL parsing + mkit-cli plumbing are
+# implemented, but a publish-readiness pass (docs.rs metadata, semver-checks,
+# API sign-off) is still pending, and we don't want to publish a security
+# primitive prematurely. Tracked (together with publishing mkit-cli, which
+# depends on this crate) in #321. Workspace member so workspace
 # `cargo test` / `cargo clippy` cover it.
 publish = false
 
