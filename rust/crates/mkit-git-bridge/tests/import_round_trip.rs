@@ -458,3 +458,154 @@ impl ObjectSource for SinkSource<'_> {
             .ok_or_else(|| BridgeError::Source("missing".into()))
     }
 }
+
+/// Review-round additions: the remaining typed refusal arms.
+#[test]
+#[allow(clippy::too_many_lines)] // one block per refusal arm
+fn refusal_matrix_inbound_extras() {
+    let kp = KeyPair::from_seed(KEY_SEED);
+    let public = kp.public.0;
+    let run_one = |src: &mut MemGitSource, tip: &Sha1Id| -> Result<ImportedRef, BridgeError> {
+        let mut sink = MemSink::default();
+        let mut map = HashMap::new();
+        let mut sc = |c: &mkit_core::object::Commit| {
+            Ok(sign_commit(c, &kp)
+                .map_err(|e| BridgeError::Source(e.to_string()))?
+                .0)
+        };
+        let mut st = |t: &mkit_core::object::Tag| {
+            Ok(sign_tag(t, &kp)
+                .map_err(|e| BridgeError::Source(e.to_string()))?
+                .0)
+        };
+        let mut retain = |_: &Sha1Id, _: &[u8]| Ok(());
+        let mut imp = Importer {
+            source: src,
+            sink: &mut sink,
+            signer: ImportSigner {
+                public,
+                sign_commit: &mut sc,
+                sign_tag: &mut st,
+            },
+            map: &mut map,
+            retain_raw: &mut retain,
+            options: ImportOptions::default(),
+        };
+        imp.import_ref(tip)
+    };
+
+    // Duplicate names after mkit re-sort (file `a` + dir `a`).
+    let mut src = MemGitSource::default();
+    let blob = src.put(GitObjKind::Blob, b"x".to_vec());
+    let mut sub = Vec::new();
+    sub.extend_from_slice(b"100644 inner\0");
+    sub.extend_from_slice(&blob);
+    let sub = src.put(GitObjKind::Tree, sub);
+    let mut tree = Vec::new();
+    // git order: "a" (blob) sorts before "a/" (dir key).
+    tree.extend_from_slice(b"100644 a\0");
+    tree.extend_from_slice(&blob);
+    tree.extend_from_slice(b"40000 a\0");
+    tree.extend_from_slice(&sub);
+    let t = src.put(GitObjKind::Tree, tree);
+    let c = src.put(GitObjKind::Commit, commit_body(&t, &[], "dup\n", 5));
+    assert!(matches!(
+        run_one(&mut src, &c),
+        Err(BridgeError::Refused(Refusal::DuplicateTreeEntry { .. }))
+    ));
+
+    // Tree nesting beyond 128.
+    let mut src = MemGitSource::default();
+    let blob = src.put(GitObjKind::Blob, b"x".to_vec());
+    let mut child_id = blob;
+    let mut child_mode: &[u8] = b"100644";
+    for _ in 0..140 {
+        let mut t = Vec::new();
+        t.extend_from_slice(child_mode);
+        t.extend_from_slice(b" d\0");
+        t.extend_from_slice(&child_id);
+        child_id = src.put(GitObjKind::Tree, t);
+        child_mode = b"40000";
+    }
+    let c = src.put(GitObjKind::Commit, commit_body(&child_id, &[], "deep\n", 5));
+    assert!(matches!(
+        run_one(&mut src, &c),
+        Err(BridgeError::Refused(Refusal::TreeTooDeep { .. }))
+    ));
+
+    // Tag name outside the grammar (`+build`).
+    let mut src = MemGitSource::default();
+    let blob = src.put(GitObjKind::Blob, b"x".to_vec());
+    let mut tree = Vec::new();
+    tree.extend_from_slice(b"100644 a\0");
+    tree.extend_from_slice(&blob);
+    let t = src.put(GitObjKind::Tree, tree);
+    let c = src.put(GitObjKind::Commit, commit_body(&t, &[], "m\n", 5));
+    let tag = src.put(
+        GitObjKind::Tag,
+        format!(
+            "object {}\ntype commit\ntag v1.0+build\ntagger T <t@x> 5 +0000\n\nm\n",
+            hex(&c)
+        )
+        .into_bytes(),
+    );
+    assert!(matches!(
+        run_one(&mut src, &tag),
+        Err(BridgeError::Refused(Refusal::TagName { .. }))
+    ));
+
+    // Tag chains: depth 16 imports, depth 17 refuses.
+    let mut src = MemGitSource::default();
+    let blob = src.put(GitObjKind::Blob, b"x".to_vec());
+    let mut tree = Vec::new();
+    tree.extend_from_slice(b"100644 a\0");
+    tree.extend_from_slice(&blob);
+    let t = src.put(GitObjKind::Tree, tree);
+    let c = src.put(GitObjKind::Commit, commit_body(&t, &[], "m\n", 5));
+    let mut target = c;
+    let mut target_type = "commit";
+    let mut chain16 = None;
+    for i in 0..17 {
+        let tag = src.put(
+            GitObjKind::Tag,
+            format!(
+                "object {}\ntype {}\ntag chain{}\ntagger T <t@x> 5 +0000\n\nm\n",
+                hex(&target),
+                target_type,
+                i
+            )
+            .into_bytes(),
+        );
+        if i == 15 {
+            chain16 = Some(tag); // 16 tag objects deep (0..=15)
+        }
+        target = tag;
+        target_type = "tag";
+    }
+    assert!(
+        run_one(&mut src, &chain16.unwrap()).is_ok(),
+        "16 deep imports"
+    );
+    assert!(matches!(
+        run_one(&mut src, &target),
+        Err(BridgeError::Refused(Refusal::TagChain { .. }))
+    ));
+
+    // Author payload over 4096 bytes.
+    let mut src = MemGitSource::default();
+    let blob = src.put(GitObjKind::Blob, b"x".to_vec());
+    let mut tree = Vec::new();
+    tree.extend_from_slice(b"100644 a\0");
+    tree.extend_from_slice(&blob);
+    let t = src.put(GitObjKind::Tree, tree);
+    let long = "n".repeat(5000);
+    let body = format!(
+        "tree {}\nauthor {long} <l@x> 5 +0000\ncommitter C <c@x> 5 +0000\n\nm\n",
+        hex(&t)
+    );
+    let c = src.put(GitObjKind::Commit, body.into_bytes());
+    assert!(matches!(
+        run_one(&mut src, &c),
+        Err(BridgeError::Refused(Refusal::AuthorPayload { .. }))
+    ));
+}

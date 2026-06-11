@@ -147,8 +147,9 @@ pub fn tree_one_iteration(input: &[u8]) {
 pub fn git_commit_parse_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
     if let Ok(c) = mkit_git_bridge::gitparse::parse_commit(input) {
-        // Exercise the dependent person/identity invariants too.
-        assert!(!c.author.identity.is_empty() || c.author.identity.is_empty());
+        // Real invariant: the identity is a slice of the input, so it
+        // can never exceed the input length.
+        assert!(c.author.identity.len() <= input.len());
     }
 }
 

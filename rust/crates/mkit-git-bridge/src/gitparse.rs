@@ -136,7 +136,9 @@ fn is_tz(t: &[u8]) -> bool {
 
 fn parse_i64(t: &[u8]) -> Option<i64> {
     let s = std::str::from_utf8(t).ok()?;
-    if s.is_empty() || (s != "-" && s.strip_prefix('-').is_some_and(str::is_empty)) {
+    // Reject Rust's leading-`+` tolerance: git timestamps are bare
+    // decimals with an optional `-`.
+    if s.starts_with('+') {
         return None;
     }
     s.parse::<i64>().ok()

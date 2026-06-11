@@ -27,6 +27,10 @@ pub const CHUNK_THRESHOLD: u64 = mkit_core::worktree::CHUNK_THRESHOLD;
 /// SPEC-GIT-IMPORT §3.4: tag→tag chains beyond this depth refuse.
 pub const MAX_TAG_CHAIN: usize = 16;
 
+/// Tree nesting cap, matching mkit-core's `MAX_TREE_DEPTH` defense
+/// (the importer is the most untrusted boundary in the system).
+pub const MAX_TREE_DEPTH: usize = 128;
+
 /// This implementation's import-spec version (SPEC-GIT-IMPORT §1.2).
 pub const IMPORT_SPEC_VERSION: u32 = 1;
 
@@ -190,7 +194,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
     pub fn import_ref(&mut self, tip: &Sha1Id) -> Result<ImportedRef, BridgeError> {
         let mut new_pairs = Vec::new();
         let mut normalized = false;
-        let head = self.object(tip, 0, &mut new_pairs, &mut normalized)?;
+        let head = self.object(tip, 0, 0, &mut new_pairs, &mut normalized)?;
         Ok(ImportedRef {
             head,
             new_pairs,
@@ -210,9 +214,9 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         let mut new_pairs = Vec::new();
         let mut normalized = false;
         for id in order {
-            self.object(id, 0, &mut new_pairs, &mut normalized)?;
+            self.object(id, 0, 0, &mut new_pairs, &mut normalized)?;
         }
-        let head = self.object(tip, 0, &mut new_pairs, &mut normalized)?;
+        let head = self.object(tip, 0, 0, &mut new_pairs, &mut normalized)?;
         Ok(ImportedRef {
             head,
             new_pairs,
@@ -225,6 +229,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         &mut self,
         id: &Sha1Id,
         tag_depth: usize,
+        tree_depth: usize,
         new_pairs: &mut Vec<(Sha1Id, Hash)>,
         normalized: &mut bool,
     ) -> Result<Hash, BridgeError> {
@@ -234,7 +239,12 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         let (kind, body) = self.source.read_git(id)?;
         let h = match kind {
             GitObjKind::Blob => self.blob(&body, new_pairs)?,
-            GitObjKind::Tree => self.tree(id, &body, new_pairs, normalized)?,
+            GitObjKind::Tree => {
+                if tree_depth >= MAX_TREE_DEPTH {
+                    return Err(Refusal::TreeTooDeep { object: hash20(id) }.into());
+                }
+                self.tree(id, &body, tree_depth, new_pairs, normalized)?
+            }
             GitObjKind::Commit => self.commit(id, &body, new_pairs, normalized)?,
             GitObjKind::Tag => {
                 if tag_depth >= MAX_TAG_CHAIN {
@@ -281,6 +291,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         &mut self,
         id: &Sha1Id,
         body: &[u8],
+        depth: usize,
         new_pairs: &mut Vec<(Sha1Id, Hash)>,
         normalized: &mut bool,
     ) -> Result<Hash, BridgeError> {
@@ -323,16 +334,22 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
                 }
                 .into());
             }
-            let child = self.object(&e.id, 0, new_pairs, normalized)?;
+            let child = self.object(&e.id, 0, depth + 1, new_pairs, normalized)?;
             entries.push(TreeEntry {
                 name: e.name,
                 mode,
                 object_hash: child,
             });
         }
-        // git order → mkit byte-lex order; strict ascending (the
-        // serializer rejects duplicates, surfaced as Source).
+        // git order → mkit byte-lex order. Duplicate names are
+        // git-representable (file `a` + dir `a` sort apart under
+        // git's `name+"/"` key) but undecodable in mkit — the
+        // serializer does NOT check on write, so refuse here or the
+        // store gains a poisoned signed object.
         entries.sort_by(|a, b| a.name.cmp(&b.name));
+        if entries.windows(2).any(|w| w[0].name == w[1].name) {
+            return Err(Refusal::DuplicateTreeEntry { object: hash20(id) }.into());
+        }
         let bytes = ser(&Object::Tree(Tree { entries }))?;
         self.sink.write_object(&bytes)
     }
@@ -360,10 +377,10 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         if parsed.author.identity.is_empty() || parsed.author.identity.len() > 4096 {
             return Err(Refusal::AuthorPayload { object: hash20(id) }.into());
         }
-        let tree = self.object(&parsed.tree, 0, new_pairs, normalized)?;
+        let tree = self.object(&parsed.tree, 0, 0, new_pairs, normalized)?;
         let mut parents = Vec::with_capacity(parsed.parents.len());
         for p in &parsed.parents {
-            parents.push(self.object(p, 0, new_pairs, normalized)?);
+            parents.push(self.object(p, 0, 0, new_pairs, normalized)?);
         }
         // Raw bytes: the full git object body (commit framing is
         // recomputable from kind+len).
@@ -414,7 +431,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
                 )));
             }
         };
-        let target = self.object(&parsed.object, depth + 1, new_pairs, normalized)?;
+        let target = self.object(&parsed.object, depth + 1, 0, new_pairs, normalized)?;
         // The mkit target_type must reflect what the TRANSLATED target
         // is: a >1MiB git blob became a chunked manifest.
         let target_type = if target_type == ObjectType::Blob {

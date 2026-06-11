@@ -53,6 +53,11 @@ pub enum Refusal {
     AuthorPayload { object: Hash },
     /// Import: tag→tag chain beyond the pinned depth (16).
     TagChain { object: Hash },
+    /// Import: duplicate entry names after re-sorting to mkit order
+    /// (git-representable as file+dir of one name; undecodable here).
+    DuplicateTreeEntry { object: Hash },
+    /// Import: tree nesting beyond `MAX_TREE_DEPTH` (128).
+    TreeTooDeep { object: Hash },
 }
 
 impl fmt::Display for Refusal {
@@ -137,6 +142,18 @@ impl fmt::Display for Refusal {
             Self::TagChain { object } => write!(
                 f,
                 "git tag {} heads a tag chain deeper than 16; refusing (SPEC-GIT-IMPORT §3.4)",
+                &to_hex(object)[..40]
+            ),
+            Self::DuplicateTreeEntry { object } => write!(
+                f,
+                "git tree {} contains entries whose names collide byte-equal in mkit \
+                 order (e.g. a file and a directory of one name); refusing",
+                &to_hex(object)[..40]
+            ),
+            Self::TreeTooDeep { object } => write!(
+                f,
+                "git tree {} nests deeper than 128 levels; refusing (matches mkit's \
+                 MAX_TREE_DEPTH defense)",
                 &to_hex(object)[..40]
             ),
         }

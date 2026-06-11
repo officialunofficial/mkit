@@ -43,7 +43,9 @@ impl GitObjKind {
 ///
 /// Batch protocol (verified against git ≥ 2.30): write `<oid>\n` to
 /// stdin; read `<oid> <type> <size>\n`, exactly `<size>` body bytes,
-/// then one trailing `\n`. Unknown ids answer `<oid> missing\n`.
+/// then one trailing `\n`. Unknown ids answer `<oid> missing\n`
+/// (no body — the stream stays clean). Any OTHER read error leaves
+/// the stream desynchronized: treat it as fatal for this batch.
 #[derive(Debug)]
 pub struct CatFileBatch {
     child: Child,
@@ -130,7 +132,8 @@ impl CatFileBatch {
 
 impl Drop for CatFileBatch {
     fn drop(&mut self) {
-        // Closing stdin ends the batch loop; reap to avoid a zombie.
+        // Kill + reap to avoid a zombie (stdin close alone would
+        // also end the batch loop, but kill is prompt and unconditional).
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

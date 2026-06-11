@@ -125,23 +125,27 @@ message           ← message bytes VERBATIM (no UTF-8 constraint;
                     `encoding` header tolerated and dropped)
 timestamp         ← git COMMITTER epoch seconds
 message_hash      ← zero
-content_digest    ← BLAKE3(raw git commit bytes)  (§5; advisory)
+content_digest    ← BLAKE3(framed raw git commit bytes) (§5; advisory)
 signature         ← Ed25519 by the importer under COMMIT_DOMAIN
 ```
 
 Pinned rules:
 
 - The author Identity payload is a verbatim BYTE SLICE of the git
-  author line, pinned as: the bytes from the first byte after the
-  `author ` keyword+space through the closing `>` of the **last**
-  `<...>` group on the line, exactly as written (interior spacing,
-  doubled spaces, and missing space before `<` all preserved — no
-  recomposition, so historic malformations hash identically across
-  implementations). Lines with no `<` use the bracket-less rule: the
-  remainder after `author `, with one trailing match of the pattern
-  *space, decimal seconds, space, `+` or `-`, four digits* stripped;
-  if the pattern is absent the whole remainder is the payload.
-  Payloads that would be empty or exceed 4096 bytes refuse per-ref.
+  author line, pinned byte-exactly as: the bytes from the first byte
+  after the `author ` keyword+space through **the last `>` byte that
+  is preceded anywhere on the line by a `<`** (interior spacing,
+  doubled spaces, missing space before `<`, and stray `<`/`>` inside
+  the slice all preserved — no recomposition, so historic
+  malformations hash identically across implementations). Lines with
+  no such byte (no `<` at all, or `<` with no closing `>` anywhere
+  after it) use the bracket-less rule: the remainder after `author `,
+  with one trailing match of the pattern *space, decimal seconds,
+  space, `+` or `-`, four digits* stripped. A person line from which
+  no timestamp can be parsed (no token after the identity slice, or
+  no trailing pattern on a bracket-less line) refuses the ref —
+  commits and tags always need a timestamp. Payloads that would be
+  empty or exceed 4096 bytes refuse per-ref.
 - The committer line, both timezones, the author timestamp, `gpgsig`,
   `mergetag`, `encoding`, and any unknown headers are **not**
   represented in the mkit commit; they are recoverable from the
@@ -169,7 +173,11 @@ except in a state dir whose recorded `direction` is `fork` (§6),
 where a normalized tree could not reproduce its original sha1 and
 the affected ref MUST refuse instead.
 `160000` (gitlink/submodule) refuses per-ref with an actionable
-message. Entry names are validated by SPEC-OBJECTS §4.1
+message. Two structural refusals close gaps git can represent but
+mkit cannot decode: entry names that collide byte-equal after the
+re-sort (a file and a directory of one name) refuse per-ref, and
+trees nesting beyond 128 levels (mkit's `MAX_TREE_DEPTH` defense)
+refuse per-ref. Entry names are validated by SPEC-OBJECTS §4.1
 (deserialize-time rules — non-negotiable): names that are `.git`/
 `.mkit` case-insensitive, end in dot/space, are Windows device stems
 (`aux.c`-class), exceed 255 bytes, or contain backslash refuse the
@@ -179,8 +187,12 @@ ref.
 
 Annotated and signed git tags map to mkit tag objects **signed by the
 importer under `TAG_DOMAIN`** (same vouch semantics as commits; the
-original `tagger` line maps to the tagger Identity by the §3.2 rule;
-git tag GPG signatures ride in the retained raw bytes only). The tag
+original `tagger` line maps to the tagger Identity by the §3.2 rule
+and the mkit tag `timestamp` is the tagger epoch, negative-refused
+like commits; git tag GPG signatures ride in the retained raw bytes
+only). Historic tagger-less tags (git v0.99 era) take the PINNED
+sentinel `Identity::Opaque("(no tagger)")` and timestamp `0` — any
+other choice would fork tag hashes across implementations. The tag
 name must satisfy the mkit single-segment tag grammar
 (SPEC-GIT-BRIDGE §7.1) or the tag refuses. Lightweight tags map to
 bare refs. Tag targets follow the object mapping; tag→tag chains are
@@ -248,7 +260,10 @@ Three layers, from authoritative to advisory:
    SHOULD skip re-minting for a head whose recorded imported state is
    unchanged (mirroring SPEC-GIT-BRIDGE §11's guidance).
 2. **Retained raw bytes**: the original git commit and tag object
-   bytes, sha1-addressed, under the per-remote state dir. Small
+   bytes in their FRAMED form — `"<type> <len>\0" + body`, the sha1
+   preimage (this framing is normative for both retention and the
+   `content_digest` input; body-only would fork digests across
+   implementations) — sha1-addressed, under the per-remote state dir. Small
    (commits/tags only — trees/blobs are recoverable from the staging
    mirror and re-derivable from the mkit twins). These are what make
    the lossy field mapping (§3.2) recoverable and the translation
