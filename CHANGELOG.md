@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **git-bridge: deterministic one-way export to git mirrors**
+  (`mkit git export`, behind the default-off `git-export` feature).
+  New normative spec [`docs/SPEC-GIT-BRIDGE.md`](docs/SPEC-GIT-BRIDGE.md)
+  pins a byte-deterministic mkit→git object mapping (BLAKE3/SHA-1
+  translation with mkit-only fields — signer, signature, identity,
+  annotation slots — carried in `mkit-*` commit/tag headers), so the
+  original signed mkit objects are reconstructible bit-exactly from a
+  mirror and their Ed25519 signatures re-verify (shallow and deep
+  verification modes are specified). New `mkit-git-bridge` crate
+  implements the mapping with golden vectors under
+  `rust/tests/golden/git-bridge/`, round-trip + determinism +
+  differential-vs-real-git tests (`git hash-object` id agreement,
+  `git fsck --strict`). The exporter pushes with per-ref
+  `--force-with-lease` from rebuildable state under `.mkit/git/`,
+  skips untranslatable refs loudly (remix ancestry, git-illegal
+  names, non-canonical chunking), and the import direction is
+  explicitly out of scope. PARITY.md gains a scope amendment per its
+  own renegotiation rule. Closes the Phase 0+1 scope of the
+  git-interop exploration.
+
+### Security
+
+- **New `git-bridge/v1` attestation predicate** (SPEC-GIT-BRIDGE §11):
+  `mkit git export` mints one DSSE/in-toto attestation per exported
+  head, signed with the exporter's configured signer — subject is the
+  mkit commit (BLAKE3) + ref name; the predicate carries the
+  `gitCommit` SHA-1 as a locator (not a proof — SHA-1 is git's naming
+  function, never a security boundary here), the mirror URL, and
+  schema/spec versions. Bridge attestations are distinguishable from
+  author signatures by predicate type and keyid; they assert "this
+  exporter translated this commit", never authorship. Published on
+  the mirror under `refs/mkit/attestations`. Threat model unchanged:
+  carried signatures verify only over reconstructed mkit bytes, and
+  translated history that fails reconstruction fails closed.
+
 ### Changed
 
 - **buffa 0.6 → 0.7.1** across all crates (mkit-rpc, mkit-attest,

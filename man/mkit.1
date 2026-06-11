@@ -765,6 +765,27 @@ with the manifest written last, so racing readers see either no manifest
 (clean fall-through to the monolithic pack) or the manifest plus every
 shard. Requires building the binary with
 .Cm --features pack-shards .
+.It Cm git Cm export Oo Fl Fl remote-name Ar name Oc Oo Fl Fl ref Ar ref Oc Oo Fl Fl no-attest Oc Oo Fl Fl json Oc Ar dest
+Deterministic one-way export of branches and tags to a git mirror per
+SPEC-GIT-BRIDGE. mkit-only fields ride in
+.Ql mkit-*
+commit headers so the original signed objects are reconstructible;
+untranslatable refs are skipped per-ref with a warning. Pushes use
+per-ref
+.Fl Fl force-with-lease
+from state recorded under
+.Pa .mkit/git/<name>/ .
+Unless
+.Fl Fl no-attest ,
+each exported head gets a signed git-bridge/v1 DSSE attestation,
+published on the mirror's
+.Ql refs/mkit/attestations
+ref. There is no import direction. Requires building the binary with
+.Cm --features git-export
+and a
+.Cm git
+binary on
+.Ev PATH .
 .It Cm version
 Print the version to stdout as
 .Ql mkit <X.Y.Z> .

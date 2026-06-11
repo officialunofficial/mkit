@@ -57,6 +57,7 @@ _mkit() {
         'sparse-checkout:Manage sparse checkout patterns'
         'serve:Start SSH transport server (internal)'
         'pack-shard:Encode a stored pack into Reed-Solomon shards'
+        'git:Git-bridge subcommands (git export, feature-gated)'
         'blame:Show line-level commit attribution'
         'verify:Verify the signature on a commit'
         'attest:Produce a signed DSSE attestation for a commit'

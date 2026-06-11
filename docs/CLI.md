@@ -644,6 +644,26 @@ Remote / sync:
   so racing readers either see "no manifest" (clean fall-through to
   the monolithic pack) or "manifest + all shards". Requires building
   the binary with `--features pack-shards`.
+- `mkit git export <dest> [--remote-name <name>] [--ref <ref>]...
+  [--no-attest] [--json]` — deterministic **one-way** export of
+  branches and tags to a git mirror
+  ([`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md)). `<dest>` is a git URL or
+  a local path (a missing/empty local path is initialized bare).
+  Translation is byte-deterministic: the same history yields the same
+  git SHA-1s on every machine, and mkit-only fields (signer,
+  signature, identity, annotation slots) ride in `mkit-*` commit
+  headers so the original signed objects are reconstructible. Refs a
+  conformant bridge cannot represent (git-illegal names, remix
+  ancestry, non-canonical chunking) are skipped per-ref with a
+  warning; an export where everything was skipped exits non-zero.
+  Pushes use per-ref `--force-with-lease` from recorded state under
+  `.mkit/git/<name>/`; mkit-side history rewrites mirror as
+  force-pushes. Unless `--no-attest`, each exported head gets a
+  signed `git-bridge/v1` DSSE attestation (saved like `mkit attest`,
+  published on the mirror's `refs/mkit/attestations` ref — fetch it
+  with an explicit refspec; git clones skip it by default). The
+  import direction does not exist. Requires building the binary with
+  `--features git-export`; shells out to `git`.
 
 Config / keys / version:
 
