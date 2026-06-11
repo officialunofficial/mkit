@@ -711,7 +711,27 @@ fn render_patch(
         .map_err(|e| (format!("diff: {e}"), exit::GENERAL_ERROR))?;
     let mut buf: Vec<u8> = Vec::new();
     for e in &diff.entries {
-        super::diff::emit_entry_patch(&mut buf, store, e).map_err(|m| (m, exit::GENERAL_ERROR))?;
+        let mut one: Vec<u8> = Vec::new();
+        super::diff::emit_entry_patch(&mut one, store, e).map_err(|m| (m, exit::GENERAL_ERROR))?;
+        // `git am` cannot apply the textual "Binary files differ"
+        // notice (and we don't emit git's base85 binary literals), so
+        // a series touching binary content would fail at the
+        // MAINTAINER's end — refuse here instead.
+        if one
+            .split(|&b| b == b'\n')
+            .any(|l| l.starts_with(b"Binary files "))
+        {
+            return Err((
+                format!(
+                    "{}: binary change in commit {} — format-patch emits text \
+                     patches only; use `mkit git export` for binary content",
+                    e.path,
+                    &mkit_core::to_hex(hash)[..12]
+                ),
+                exit::DATAERR,
+            ));
+        }
+        buf.extend_from_slice(&one);
     }
     out.push_str(&String::from_utf8_lossy(&buf));
     out.push_str("-- \nmkit git format-patch\n\n");

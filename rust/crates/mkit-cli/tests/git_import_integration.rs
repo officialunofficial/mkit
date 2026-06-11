@@ -341,8 +341,10 @@ fn crash_marker_discards_map_and_recovers() {
         .unwrap();
 
     // Simulate a crashed session: marker present, map possibly stale.
+    // Recovery must discard BOTH the map and the recorded ref state —
+    // stale recorded tips would otherwise short-circuit the rebuild
+    // and leave the map empty (poisoning a later passthrough export).
     std::fs::write(state.join("importing"), b"").unwrap();
-    std::fs::remove_file(state.join("refs-import")).unwrap();
     let out = f.mkit_ok(&fork, &["git", "fetch"]);
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("rebuilding the map cache"),
@@ -353,8 +355,13 @@ fn crash_marker_discards_map_and_recovers() {
         refs::read_remote_ref(&mkit_dir, "upstream", "main")
             .unwrap()
             .unwrap(),
-        head1
+        head1,
+        "full re-translation reproduces identical hashes"
     );
+    // The map cache was actually rebuilt (non-empty), so fork-mode
+    // export after a crash still passes imported objects through.
+    let map = std::fs::read_to_string(state.join("map")).unwrap();
+    assert!(map.lines().count() > 0, "map rebuilt, not left empty");
 }
 
 /// `git` stdout (trimmed) or panic — for rev-parse style queries.
@@ -724,5 +731,109 @@ fn format_patch_output_applies_with_git_am() {
     assert!(
         subjects.contains("Extend feature file") && subjects.contains("Add feature file"),
         "{subjects}"
+    );
+}
+
+#[test]
+fn passthrough_cannot_target_another_states_import_source() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+
+    // A second, unrelated git upstream imported under another name.
+    let second = f.root.path().join("second");
+    std::fs::create_dir_all(&second).unwrap();
+    git_ok(&second, &["init", "--quiet", "--initial-branch=main", "."]);
+    std::fs::write(second.join("s.txt"), "s\n").unwrap();
+    git_ok(&second, &["add", "s.txt"]);
+    git_ok(&second, &["commit", "--quiet", "-m", "second upstream"]);
+    f.mkit_ok(
+        &fork,
+        &[
+            "git",
+            "import",
+            second.to_str().unwrap(),
+            "--remote-name",
+            "second",
+        ],
+    );
+
+    // Passthrough through state 'upstream' toward state 'second's
+    // source: 'upstream's map knows nothing of second's objects, so
+    // this is a disconnected re-translation — the guard must refuse.
+    let out = f.mkit(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "upstream",
+            second.to_str().unwrap(),
+        ],
+    );
+    assert!(!out.status.success(), "cross-state passthrough must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("recorded git-import source"), "{stderr}");
+    // And the refusal left no side effects on the dest binding.
+    assert!(!fork.join(".mkit/git/upstream/dest").exists());
+}
+
+#[test]
+fn format_patch_refuses_binary_changes() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    std::fs::write(fork.join("blob.bin"), [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
+    f.mkit_ok(&fork, &["add", "blob.bin"]);
+    f.mkit_ok(&fork, &["commit", "-m", "Add binary blob"]);
+
+    let out = f.mkit(
+        &fork,
+        &["git", "format-patch", "upstream/main..HEAD", "--stdout"],
+    );
+    assert!(!out.status.success(), "binary change must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("blob.bin") && stderr.contains("binary"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn upstream_branch_deletion_prunes_tracking_ref() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let up = f.upstream();
+    git_ok(&up, &["branch", "feature"]);
+    let fork = f.import();
+    let mkit_dir = fork.join(".mkit");
+    assert!(
+        refs::read_remote_ref(&mkit_dir, "upstream", "feature")
+            .unwrap()
+            .is_some(),
+        "feature tracked after import"
+    );
+
+    git_ok(&up, &["branch", "-D", "feature"]);
+    let out = f.mkit_ok(&fork, &["git", "fetch"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("upstream deleted") && stderr.contains("feature"),
+        "{stderr}"
+    );
+    assert!(
+        refs::read_remote_ref(&mkit_dir, "upstream", "feature")
+            .unwrap()
+            .is_none(),
+        "tracking ref pruned"
     );
 }

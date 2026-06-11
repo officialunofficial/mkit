@@ -112,13 +112,35 @@ fn canonical_local(path: &str) -> String {
     let p = strip_path(path);
     let pb = Path::new(&p);
     let abs = pb.canonicalize().unwrap_or_else(|_| {
-        if pb.is_absolute() {
+        // Lexical fallback for paths that don't exist (yet, or after
+        // the `.git` strip): absolutize against cwd and normalize
+        // `.`/`..` components, so `/a/b` + `../up` and `/a/up` agree.
+        let joined = if pb.is_absolute() {
             pb.to_path_buf()
         } else {
             std::env::current_dir().map_or_else(|_| pb.to_path_buf(), |c| c.join(pb))
-        }
+        };
+        lexical_normalize(&joined)
     });
     abs.to_string_lossy().into_owned()
+}
+
+/// Resolve `.` and `..` components lexically (no filesystem access).
+fn lexical_normalize(p: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -160,6 +182,24 @@ mod tests {
         );
         // DOS drives are paths, not scp remotes.
         assert!(!remote_identity("C:/repos/x").starts_with("ssh://"));
+    }
+
+    #[test]
+    fn relative_dotdot_paths_normalize_lexically() {
+        let td = tempfile::tempdir().unwrap();
+        // canonicalize: macOS tempdirs live behind the /var symlink,
+        // and cwd always reports the resolved spelling.
+        let a = td.path().canonicalize().unwrap().join("a");
+        std::fs::create_dir_all(a.join("b")).unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(a.join("b")).unwrap();
+        // `../up.git` doesn't exist: the `.git`-stripped fallback must
+        // still agree with the identity seen from the absolutized
+        // clone URL (`<td>/a/up.git` → `<td>/a/up`).
+        let from_rel = remote_identity("../up.git");
+        std::env::set_current_dir(&prev).unwrap();
+        let from_abs = remote_identity(&format!("{}/up.git", a.display()));
+        assert_eq!(from_rel, from_abs);
     }
 
     #[test]

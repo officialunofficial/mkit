@@ -419,13 +419,17 @@ fn translate_upstream(
 
     // Crash marker: a leftover marker means torn objects may exist
     // that the (durably-fsynced) map still vouches for — discard the
-    // map; determinism makes the rebuild exact (SPEC-GIT-IMPORT §1.2).
+    // map AND the recorded ref state together. Stale recorded tips
+    // would short-circuit unchanged refs ("nothing to translate") and
+    // leave the map empty forever; with both gone the next pass
+    // re-translates every ref from scratch, and per-key determinism
+    // reproduces the exact same hashes (SPEC-GIT-IMPORT §1.2).
     let marker = state.join(IMPORTING_MARKER);
     if marker.exists() {
         let _ = std::fs::remove_file(state.join("map"));
+        let _ = std::fs::remove_file(state.join("refs-import"));
         eprintln!("note: previous import was interrupted; rebuilding the map cache");
     }
-    std::fs::write(&marker, b"").map_err(|e| (format!("marker: {e}"), exit::CANTCREAT))?;
 
     let mut sha_map = map::load_map_inverse(state)
         .map_err(|e| (format!("load map: {e}"), exit::GENERAL_ERROR))?;
@@ -437,7 +441,18 @@ fn translate_upstream(
 
     // In-store divergence probe (SPEC-GIT-IMPORT §6.1, content side):
     // bounded walk-back digests vs existing commits under other keys.
-    divergence_probe(&store, staging, &upstream_refs, &kp.public.0)?;
+    // Only on FIRST contact (empty map = fresh import or post-crash
+    // rebuild): afterwards the pinned key + bound source already
+    // guarantee consistency, and the probe scans the whole store —
+    // too heavy for every routine fetch.
+    if sha_map.is_empty() {
+        divergence_probe(&store, staging, &upstream_refs, &kp.public.0)?;
+    }
+
+    // Written only now, after the read-only probe: the marker brackets
+    // exactly the window where torn objects can exist (store writes
+    // until the map/ref-state commit below).
+    std::fs::write(&marker, b"").map_err(|e| (format!("marker: {e}"), exit::CANTCREAT))?;
 
     let direction = map::read_direction(state)
         .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?
@@ -576,6 +591,28 @@ fn translate_upstream(
             git_id: sha1_to_id(git_id),
         });
     }
+    // Upstream deletions propagate to the tracking refs (like
+    // `git fetch --prune` for refs/remotes); local TAGS are kept,
+    // matching git's default (no --prune-tags).
+    let current: std::collections::HashSet<&str> =
+        upstream_refs.iter().map(|u| u.name.as_str()).collect();
+    for prev in &prior_state {
+        if let Some(branch) = prev.ref_name.strip_prefix("refs/heads/")
+            && !current.contains(prev.ref_name.as_str())
+        {
+            match refs::delete_remote_ref(mkit_dir, &opts.remote_name, branch) {
+                Ok(()) => eprintln!(
+                    "warning: upstream deleted {}; tracking ref {}/{branch} removed",
+                    prev.ref_name, opts.remote_name
+                ),
+                Err(mkit_core::refs::RefError::NotFound(_)) => {}
+                Err(e) => {
+                    return Err((format!("prune tracking ref {branch}: {e}"), exit::CANTCREAT));
+                }
+            }
+        }
+    }
+
     map::store_import_ref_state(state, &new_state)
         .map_err(|e| (format!("persist ref state: {e}"), exit::GENERAL_ERROR))?;
     std::fs::remove_file(&marker).map_err(|e| (format!("marker: {e}"), exit::GENERAL_ERROR))?;

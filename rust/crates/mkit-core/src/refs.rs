@@ -535,6 +535,20 @@ pub fn write_remote_ref(mkit_dir: &Path, remote: &str, branch: &str, h: &Hash) -
     cas_write(&path, &wire, branch, RefWriteCondition::Any)
 }
 
+/// Delete a remote-tracking branch ref (e.g. after the upstream
+/// deleted the branch). Errors with [`RefError::NotFound`] if absent.
+pub fn delete_remote_ref(mkit_dir: &Path, remote: &str, branch: &str) -> RefResult<()> {
+    validate_remote_and_branch(remote, branch)?;
+    let path = ref_path(mkit_dir, &remote_ref_dir(remote), branch);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(RefError::NotFound(format!("{remote}/{branch}")))
+        }
+        Err(e) => Err(RefError::Io(e)),
+    }
+}
+
 /// List all remote-tracking refs for one remote.
 pub fn list_remote_refs(mkit_dir: &Path, remote: &str) -> RefResult<Vec<Ref>> {
     if !validate_ref_name(remote) {

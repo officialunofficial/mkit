@@ -140,6 +140,32 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     let state =
         map::state_dir(&mkit_dir, &opts.remote_name).map_err(|e| (e.to_string(), exit::USAGE))?;
 
+    // ORIGIN GUARD (SPEC-GIT-BRIDGE §14.2), FIRST — before any state
+    // is stamped or the dest is initialized, so a refusal has no side
+    // effects. Export toward a recorded git-import source would pass
+    // its ls-remote-seeded lease and force-replace upstream history
+    // with a disconnected re-translation. The only supported path is
+    // passthrough export through the SAME state that imported it
+    // (whose map re-emits the upstream's own objects) — passthrough
+    // through a DIFFERENT state is just as disconnected as a plain
+    // export.
+    let dest_identity = mkit_git_bridge::remoteid::remote_identity(&opts.dest);
+    if let Some(import_state) = recorded_import_source(&mkit_dir, &dest_identity)
+        && !(opts.passthrough && import_state == opts.remote_name)
+    {
+        return Err((
+            format!(
+                "{} is a recorded git-import source (state '{import_state}'); \
+                 export toward an imported-from upstream would replace its \
+                 history with a disconnected re-translation. Passthrough export \
+                 through that state (`--passthrough --remote-name {import_state}`) \
+                 is the supported path (SPEC-GIT-BRIDGE §14.2)",
+                opts.dest
+            ),
+            exit::USAGE,
+        ));
+    }
+
     // Direction binding (SPEC-GIT-IMPORT §6): plain export owns its
     // state dir; --passthrough upgrades an IMPORT state dir to fork.
     if opts.passthrough {
@@ -191,25 +217,6 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     // recorded against one mirror are wrong for another.
     let push_dest = ensure_dest(&opts.dest)?;
 
-    // ORIGIN GUARD (SPEC-GIT-BRIDGE §14.2): plain export toward a
-    // recorded import source would pass its ls-remote-seeded lease and
-    // force-replace upstream history with a disconnected mirror.
-    let dest_identity = mkit_git_bridge::remoteid::remote_identity(&opts.dest);
-    if let Some(import_state) = recorded_import_source(&mkit_dir, &dest_identity) {
-        let my_direction = mkit_git_bridge::map::read_direction(&state).ok().flatten();
-        if my_direction != Some(mkit_git_bridge::map::Direction::Fork) {
-            return Err((
-                format!(
-                    "{} is a recorded git-import source (state '{import_state}'); \
-                     plain export toward an imported-from upstream would replace its \
-                     history with a disconnected re-translation. Fork-mode export is \
-                     the supported path (SPEC-GIT-BRIDGE §14.2)",
-                    opts.dest
-                ),
-                exit::USAGE,
-            ));
-        }
-    }
     let dest_file = state.join("dest");
     match std::fs::read_to_string(&dest_file) {
         Ok(recorded) if recorded.trim() != push_dest => {
