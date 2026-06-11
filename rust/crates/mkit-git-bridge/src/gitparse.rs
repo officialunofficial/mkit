@@ -452,9 +452,9 @@ committer A <a@x> 5 +0000\n\
 encoding ISO-8859-1\n\
 x-custom whatever\n\
 \n\
-caf\xe9\n";
+Ren\xe9\n";
         let c = parse_commit(body).unwrap();
-        assert_eq!(c.message, b"caf\xe9\n");
+        assert_eq!(c.message, b"Ren\xe9\n");
     }
 
     #[test]
