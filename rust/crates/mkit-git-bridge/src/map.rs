@@ -36,6 +36,131 @@ pub fn state_dir(mkit_dir: &Path, remote: &str) -> Result<PathBuf, BridgeError> 
 const MAP_FILE: &str = "map";
 const REFS_FILE: &str = "refs";
 
+/// Recorded direction of a state dir (SPEC-GIT-IMPORT §6): one dir
+/// serves one direction; `fork` couples an import source with
+/// passthrough export. Immutable once stamped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Import,
+    Export,
+    Fork,
+}
+
+impl Direction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Export => "export",
+            Self::Fork => "fork",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "import" => Self::Import,
+            "export" => Self::Export,
+            "fork" => Self::Fork,
+            _ => return None,
+        })
+    }
+}
+
+fn read_stamp(dir: &Path, name: &str) -> Result<Option<String>, BridgeError> {
+    match std::fs::read_to_string(dir.join(name)) {
+        Ok(v) => Ok(Some(v.trim().to_owned())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn write_stamp(dir: &Path, name: &str, value: &str) -> Result<(), BridgeError> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(name), format!("{value}\n"))?;
+    Ok(())
+}
+
+/// Read the recorded direction, if stamped.
+pub fn read_direction(dir: &Path) -> Result<Option<Direction>, BridgeError> {
+    Ok(read_stamp(dir, "direction")?
+        .as_deref()
+        .and_then(Direction::parse))
+}
+
+/// Stamp the direction, or verify it matches an existing stamp.
+/// `Export → Fork` upgrades are refused like any other mismatch (the
+/// map semantics differ); `Import → Fork` is the supported upgrade
+/// (fork = import + passthrough export over the same source).
+pub fn bind_direction(dir: &Path, want: Direction) -> Result<(), BridgeError> {
+    match read_direction(dir)? {
+        None => write_stamp(dir, "direction", want.as_str()),
+        Some(have) if have == want => Ok(()),
+        Some(Direction::Import) if want == Direction::Fork => {
+            write_stamp(dir, "direction", want.as_str())
+        }
+        Some(have) => Err(BridgeError::Source(format!(
+            "state dir is bound to direction '{}'; '{}' is not allowed here \
+             (one direction per state dir — use a different --remote-name)",
+            have.as_str(),
+            want.as_str()
+        ))),
+    }
+}
+
+/// Read the pinned importer pubkey (64 lowercase hex), if stamped.
+pub fn read_signer(dir: &Path) -> Result<Option<[u8; 32]>, BridgeError> {
+    Ok(read_stamp(dir, "signer")?
+        .as_deref()
+        .and_then(|s| crate::gitobj::bytes_from_hex(s, 32))
+        .map(|v| {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&v);
+            k
+        }))
+}
+
+/// Pin the importer key, or refuse a mismatch (SPEC-GIT-IMPORT §4).
+pub fn bind_signer(dir: &Path, key: &[u8; 32]) -> Result<(), BridgeError> {
+    match read_signer(dir)? {
+        None => write_stamp(dir, "signer", &crate::gitobj::bytes_hex(key)),
+        Some(have) if have == *key => Ok(()),
+        Some(have) => Err(BridgeError::Source(format!(
+            "this import is pinned to importer key {}…; the available key is {}…. \
+             Designated-importer model: pull this history over mkit transport from \
+             the importer, or install the pinned key (SPEC-GIT-IMPORT §4)",
+            &crate::gitobj::bytes_hex(&have)[..16],
+            &crate::gitobj::bytes_hex(key)[..16]
+        ))),
+    }
+}
+
+/// Read / pin the import-spec version (SPEC-GIT-IMPORT §1.2).
+pub fn bind_import_spec(dir: &Path, version: u32) -> Result<(), BridgeError> {
+    match read_stamp(dir, "import-spec")? {
+        None => write_stamp(dir, "import-spec", &version.to_string()),
+        Some(v) if v == version.to_string() => Ok(()),
+        Some(v) => Err(BridgeError::Source(format!(
+            "state recorded import-spec {v}, this build implements {version}; \
+             incremental pulls across mapping versions are refused — re-import \
+             under a new --remote-name (SPEC-GIT-IMPORT §1.2)"
+        ))),
+    }
+}
+
+/// Load the map inverted (sha1 → blake3) for the import direction.
+pub fn load_map_inverse(dir: &Path) -> Result<HashMap<Sha1Id, Hash>, BridgeError> {
+    Ok(load_map(dir)?
+        .into_iter()
+        .map(|(blake3, sha1)| (sha1, blake3))
+        .collect())
+}
+
+/// Append pairs given in import orientation (sha1, blake3) — the file
+/// format stays blake3-first either way.
+pub fn append_map_import(dir: &Path, pairs: &[(Sha1Id, Hash)]) -> Result<(), BridgeError> {
+    let flipped: Vec<(Hash, Sha1Id)> = pairs.iter().map(|(s, b)| (*b, *s)).collect();
+    append_map(dir, &flipped)
+}
+
 /// Load the blake3→sha1 map. Missing file = empty map. Lines that do
 /// not parse (torn tail from a crash) are ignored.
 pub fn load_map(dir: &Path) -> Result<HashMap<Hash, Sha1Id>, BridgeError> {

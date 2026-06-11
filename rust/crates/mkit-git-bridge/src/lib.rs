@@ -23,6 +23,7 @@ pub mod gitobj;
 pub mod gitparse;
 pub mod gitsrc;
 pub mod headers;
+pub mod import;
 pub mod map;
 pub mod reconstruct;
 pub mod refname;

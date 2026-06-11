@@ -12,6 +12,7 @@ use std::fmt;
 /// A deliberate, spec'd refusal to translate (actionable; per-ref
 /// granularity is the caller's job).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Refusal {
     /// Remix objects are not translated in v1 (SPEC-GIT-BRIDGE §8).
     Remix { object: Hash },
@@ -33,6 +34,25 @@ pub enum Refusal {
     /// Object prologue carries a schema version this mapping does not
     /// cover (SPEC-GIT-BRIDGE §1.2).
     SchemaVersion { object: Hash },
+    /// Import: submodule gitlink entry (SPEC-GIT-IMPORT §3.3). The
+    /// `object` is the zero-padded git tree sha1.
+    Gitlink { object: Hash, path: String },
+    /// Import: git tree-entry name mkit cannot store (SPEC-OBJECTS
+    /// §4.1 deserialize-time rules).
+    TreeEntryName { object: Hash, name: String },
+    /// Import: a git tree mode outside the pinned §3.3 table.
+    UnknownTreeMode { object: Hash, mode: String },
+    /// Import: a historic mode would normalize, but the state dir is
+    /// fork-mode (normalization breaks shared-SHA passthrough).
+    NormalizedModeInFork { object: Hash, mode: String },
+    /// Import: pre-1970 git timestamp (mkit timestamps are u64).
+    NegativeTimestamp { object: Hash, timestamp: i64 },
+    /// Import: more than 1000 parents (`MAX_PARENTS`).
+    TooManyParents { object: Hash },
+    /// Import: author/tagger identity payload empty or over 4096.
+    AuthorPayload { object: Hash },
+    /// Import: tag→tag chain beyond the pinned depth (16).
+    TagChain { object: Hash },
 }
 
 impl fmt::Display for Refusal {
@@ -74,6 +94,50 @@ impl fmt::Display for Refusal {
                 f,
                 "object {} has a schema_version other than 1; bridge v1 maps schema 1 only",
                 to_hex(object)
+            ),
+            Self::Gitlink { object, path } => write!(
+                f,
+                "git tree {} contains a submodule gitlink at {path:?}; submodules are out \
+                 of scope (vendor the submodule, or exclude this ref) — SPEC-GIT-IMPORT §3.3",
+                &to_hex(object)[..40]
+            ),
+            Self::TreeEntryName { object, name } => write!(
+                f,
+                "git tree {} entry {name:?} is not a storable mkit name (SPEC-OBJECTS §4.1); \
+                 rename it upstream or exclude this ref",
+                &to_hex(object)[..40]
+            ),
+            Self::UnknownTreeMode { object, mode } => write!(
+                f,
+                "git tree {} carries mode {mode} outside the import mapping (SPEC-GIT-IMPORT §3.3)",
+                &to_hex(object)[..40]
+            ),
+            Self::NormalizedModeInFork { object, mode } => write!(
+                f,
+                "git tree {} carries historic mode {mode}, which would normalize lossily; \
+                 this state dir is fork-mode, where normalized trees cannot reproduce their \
+                 original sha1 — refusing (SPEC-GIT-IMPORT §3.3)",
+                &to_hex(object)[..40]
+            ),
+            Self::NegativeTimestamp { object, timestamp } => write!(
+                f,
+                "git object {} has pre-1970 timestamp {timestamp}; mkit timestamps are unsigned",
+                &to_hex(object)[..40]
+            ),
+            Self::TooManyParents { object } => write!(
+                f,
+                "git commit {} has more than 1000 parents (MAX_PARENTS)",
+                &to_hex(object)[..40]
+            ),
+            Self::AuthorPayload { object } => write!(
+                f,
+                "git object {} has an author/tagger identity that is empty or over 4096 bytes",
+                &to_hex(object)[..40]
+            ),
+            Self::TagChain { object } => write!(
+                f,
+                "git tag {} heads a tag chain deeper than 16; refusing (SPEC-GIT-IMPORT §3.4)",
+                &to_hex(object)[..40]
             ),
         }
     }
