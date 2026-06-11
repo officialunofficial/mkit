@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **git-bridge: importer-signed git→mkit import, pull, and fork-mode
+  export back** (`mkit git import|fetch|pull`, `mkit git export
+  --passthrough`, `mkit git verify|status|format-patch`; behind the
+  same default-off `git-bridge` feature;
+  [#330](https://github.com/officialunofficial/mkit/pull/330)).
+  [`docs/SPEC-GIT-IMPORT.md`](docs/SPEC-GIT-IMPORT.md) pins the
+  inbound mapping: a git upstream imports as a downstream fork whose
+  every commit/tag is signed by a dedicated, per-state-dir-pinned
+  import key (per-key deterministic — same key + upstream ⇒ same
+  hashes anywhere), original authorship preserved in the author
+  identity, original git bytes retained for audit, and a
+  `git-import/v1` attestation minted per head. `mkit git pull`
+  fast-forwards or refuses with a native `mkit merge
+  upstream/<branch>` hint; force-pushes warn and rewind tracking refs
+  only; deletions prune like `git fetch --prune`. Passthrough (fork
+  mode, SPEC-GIT-BRIDGE §14) re-emits imported objects as their
+  original sha1s so an imported repo publishes as a TRUE git fork
+  (shared merge bases, PR-able), with an origin guard refusing
+  disconnected re-translations toward any recorded import source.
+  `mkit git verify [--fork-audit]` audits bridge state offline;
+  `format-patch` renders native commits as `git am`-able patches.
+  Journeys in
+  [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md);
+  hostile-upstream surface in THREAT-MODEL §3.1a. Closes the Phase 2a
+  scope of the git-interop exploration.
+
 - **git-bridge: deterministic one-way export to git mirrors**
   (`mkit git export`, behind the default-off `git-bridge` feature;
   [#330](https://github.com/officialunofficial/mkit/pull/330)).
