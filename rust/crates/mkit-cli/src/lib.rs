@@ -113,6 +113,8 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "stash" => commands::stash::run(&rest),
         "blame" => commands::blame::run(&rest),
         "serve" => commands::serve::run(&rest),
+        #[cfg(feature = "git-export")]
+        "git" => commands::git::run(&rest),
         "sparse-checkout" => commands::sparse_checkout::run(&rest),
         #[cfg(feature = "pack-shards")]
         "pack-shard" => commands::pack_shard::run(&rest),

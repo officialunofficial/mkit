@@ -2721,6 +2721,7 @@ dependencies = [
  "libc",
  "mkit-attest",
  "mkit-core",
+ "mkit-git-bridge",
  "mkit-keystore",
  "mkit-rpc",
  "mkit-transport-enc",

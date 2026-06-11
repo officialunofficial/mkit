@@ -54,6 +54,7 @@ path = "src/main.rs"
 # the registry. Track workspace.package.version.
 mkit-core = { version = "0.2", path = "../mkit-core" }
 mkit-attest = { version = "0.2", path = "../mkit-attest" }
+mkit-git-bridge = { version = "0.2", path = "../mkit-git-bridge", optional = true }
 mkit-keystore = { version = "0.2", path = "../mkit-keystore" }
 mkit-transport-memory = { version = "0.2", path = "../mkit-transport-memory" }
 mkit-transport-file = { version = "0.2", path = "../mkit-transport-file" }
@@ -160,6 +161,9 @@ bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "de
 # `mkit-transport-enc` with its `tcp` feature (tokio + governor +
 # rand). See SPEC-TRANSPORT-ENC §6 item 3.
 enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography", "dep:commonware-codec"]
+# `mkit git export` (SPEC-GIT-BRIDGE). Default-off while the bridge is
+# experimental; flip after the mapping has survived real mirrors.
+git-export = ["dep:mkit-git-bridge"]
 # Verifiable sparse-checkout (issue #158 Phase 2). Pulls the
 # `mkit-core` sparse module and the matching transport-side fetchers
 # into scope. Off by default — the upstream `commonware-storage` is

@@ -23,6 +23,8 @@ pub mod diff;
 pub mod fetch;
 pub mod for_each_ref;
 pub mod gc;
+#[cfg(feature = "git-export")]
+pub mod git;
 pub mod hash_cmd;
 pub mod init;
 pub mod key;
