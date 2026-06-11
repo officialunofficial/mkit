@@ -17,7 +17,7 @@
     {
       "binding": "SEARCH_DB",
       "database_name": "mkit-mcp-search",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID"
+      "database_id": "9c33a37c-3f56-43d0-b210-0132f2b37959"
     }
   ],
   "vars": {
