@@ -48,7 +48,9 @@ pub enum Direction {
 }
 
 impl Direction {
-    fn as_str(self) -> &'static str {
+    /// Stable on-disk / display token for this direction.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Import => "import",
             Self::Export => "export",

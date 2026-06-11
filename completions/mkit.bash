@@ -126,7 +126,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--out --force --help" -- "$cur") )
             ;;
         git)
-            COMPREPLY=( $(compgen -W "export import fetch pull --remote-name --ref --no-attest --algorithm --signer --key --json --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "export import fetch pull verify status format-patch --remote-name --ref --no-attest --algorithm --signer --key --json --passthrough --fork-audit --stdout -o --output-directory --help" -- "$cur") )
             ;;
         attest)
             COMPREPLY=( $(compgen -W "--commit --algorithm --signer --predicate-type --predicate-file --additional-signer --help" -- "$cur") )

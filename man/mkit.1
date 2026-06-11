@@ -765,7 +765,7 @@ with the manifest written last, so racing readers see either no manifest
 (clean fall-through to the monolithic pack) or the manifest plus every
 shard. Requires building the binary with
 .Cm --features pack-shards .
-.It Cm git Cm export Oo Fl Fl remote-name Ar name Oc Oo Fl Fl ref Ar ref Oc Oo Fl Fl no-attest Oc Oo Fl Fl algorithm Ar alg Oc Oo Fl Fl signer Ar kind Oc Oo Fl Fl json Oc Ar dest
+.It Cm git Cm export Oo Fl Fl remote-name Ar name Oc Oo Fl Fl ref Ar ref Oc Oo Fl Fl passthrough Oc Oo Fl Fl no-attest Oc Oo Fl Fl algorithm Ar alg Oc Oo Fl Fl signer Ar kind Oc Oo Fl Fl json Oc Ar dest
 Deterministic one-way export of branches and tags to a git mirror per
 SPEC-GIT-BRIDGE. mkit-only fields ride in
 .Ql mkit-*
@@ -791,10 +791,15 @@ each exported head gets a signed git-bridge/v1 DSSE attestation
 flags, else config defaults),
 published on the mirror's
 .Ql refs/mkit/attestations
-ref. The import direction is
+ref. With
+.Fl Fl passthrough
+(fork mode, SPEC-GIT-BRIDGE \(sc14), an imported repository publishes
+as a true git fork: imported objects re-emit their original sha1s and
+only native commits translate, so merge bases with the upstream exist
+and pull requests work. The import direction is
 .Cm mkit git import
-(SPEC-GIT-IMPORT; lands in a later phase of this series); there is no
-bidirectional sync. Requires building the binary with
+(SPEC-GIT-IMPORT); there is no bidirectional sync. Requires building
+the binary with
 .Cm --features git-bridge
 and a
 .Cm git
@@ -815,6 +820,25 @@ from the imported upstream;
 also fast-forwards the current branch (divergence refuses with a
 .Cm mkit merge
 hint).
+.It Cm git Cm verify Oo Fl Fl remote-name Ar name Oc Oo Fl Fl fork-audit Oc Oo Fl Fl ref Ar ref Oc
+Audit recorded bridge state against the local store: bridge-translated
+objects shallow-verify and must reconstruct to their mapped twin;
+imported objects must have retained raw bytes hashing to their sha1
+and a twin signed by the pinned importer key.
+.Fl Fl fork-audit
+additionally re-derives every tree and blob referenced by bridge
+commits (SPEC-GIT-BRIDGE \(sc14.3). Exits non-zero listing each
+failing object.
+.It Cm git Cm status
+Show every bridge state dir: direction, recorded endpoints, pinned
+importer key, tracking and lease ref positions, staging health.
+.It Cm git Cm format-patch Oo Fl o Ar dir Oc Oo Fl Fl stdout Oc Ar range
+Render native commits in
+.Ar range
+.Pq Ql A..B , or Ql rev for Ql rev..HEAD
+as
+.Cm git am Ns
+-able mbox patches, oldest first; merge commits are skipped.
 .It Cm version
 Print the version to stdout as
 .Ql mkit <X.Y.Z> .

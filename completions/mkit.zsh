@@ -327,8 +327,13 @@ _mkit() {
                         '--signer[attestation signer kind]:kind:(repo-key external keystore)' \
                         '--key[import signing key path]:path:_files' \
                         '--json[machine-readable output]' \
+                        '--passthrough[fork mode: re-emit imported objects as original sha1s]' \
+                        '--fork-audit[re-derive referenced content during verify]' \
+                        '--stdout[print patches to stdout]' \
+                        '-o[patch output directory]:_files -/' \
+                        '--output-directory[patch output directory]:_files -/' \
                         '--help[show help]' \
-                        '1:subcommand:(export import fetch pull)' \
+                        '1:subcommand:(export import fetch pull verify status format-patch)' \
                         '2:dest:_files -/'
                     ;;
                 attest)

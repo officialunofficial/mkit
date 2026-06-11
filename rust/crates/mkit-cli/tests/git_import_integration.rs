@@ -573,3 +573,156 @@ fn fetch_after_fork_keeps_import_tracking_clean() {
         ],
     );
 }
+
+#[test]
+fn verify_status_and_fork_audit() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+
+    // Import-direction verify: every imported object vouched.
+    let out = f.mkit_ok(&fork, &["git", "verify"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ok:") && stderr.contains("imported-vouched"),
+        "{stderr}"
+    );
+
+    // Status shows the import state.
+    let out = f.mkit_ok(&fork, &["git", "status"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("upstream  direction=import")
+            && stdout.contains("importer key:")
+            && stdout.contains("tracking refs/heads/main")
+            && stdout.contains("staging: ok"),
+        "{stdout}"
+    );
+
+    // Fork it (local commit + passthrough export), then full audit.
+    std::fs::write(fork.join("local.txt"), "l\n").unwrap();
+    f.mkit_ok(&fork, &["add", "local.txt"]);
+    f.mkit_ok(&fork, &["commit", "-m", "local work"]);
+    let up = f.upstream();
+    git_ok(
+        f.root.path(),
+        &[
+            "clone",
+            "--bare",
+            "--quiet",
+            up.to_str().unwrap(),
+            "forkgit",
+        ],
+    );
+    let forkgit = f.root.path().join("forkgit");
+    f.mkit_ok(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "upstream",
+            forkgit.to_str().unwrap(),
+        ],
+    );
+    let out = f.mkit_ok(&fork, &["git", "verify", "--fork-audit"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ok:")
+            && stderr.contains("bridge-translated")
+            && stderr.contains("content-derived"),
+        "{stderr}"
+    );
+    let out = f.mkit_ok(&fork, &["git", "status"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("direction=fork") && stdout.contains("exported refs/heads/main"),
+        "{stdout}"
+    );
+
+    // Tamper with retained raw bytes → verify must fail loudly.
+    let raw_root = fork.join(".mkit/git/upstream/raw");
+    let bucket = std::fs::read_dir(&raw_root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let victim = std::fs::read_dir(bucket.path())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    std::fs::write(victim.path(), b"blob 5\0junk\n").unwrap();
+    let out = f.mkit(&fork, &["git", "verify"]);
+    assert!(!out.status.success(), "tampered raw bytes must fail verify");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("FAIL") && stderr.contains("DIFFERENT sha1"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn format_patch_output_applies_with_git_am() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    std::fs::write(fork.join("feature.txt"), "one\n").unwrap();
+    f.mkit_ok(&fork, &["add", "feature.txt"]);
+    f.mkit_ok(&fork, &["commit", "-m", "Add feature file"]);
+    std::fs::write(fork.join("feature.txt"), "one\ntwo\n").unwrap();
+    f.mkit_ok(&fork, &["add", "feature.txt"]);
+    f.mkit_ok(
+        &fork,
+        &["commit", "-m", "Extend feature file\n\nWith a body line."],
+    );
+
+    let patches = f.root.path().join("patches");
+    let out = f.mkit_ok(
+        &fork,
+        &[
+            "git",
+            "format-patch",
+            "upstream/main..HEAD",
+            "-o",
+            patches.to_str().unwrap(),
+        ],
+    );
+    let listing = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        listing.contains("0001-Add-feature-file.patch")
+            && listing.contains("0002-Extend-feature-file.patch"),
+        "{listing}"
+    );
+
+    // The patches apply onto a plain git clone of the upstream.
+    let up = f.upstream();
+    git_ok(
+        f.root.path(),
+        &["clone", "--quiet", up.to_str().unwrap(), "contrib"],
+    );
+    let contrib = f.root.path().join("contrib");
+    let p1 = patches.join("0001-Add-feature-file.patch");
+    let p2 = patches.join("0002-Extend-feature-file.patch");
+    git_ok(
+        &contrib,
+        &["am", p1.to_str().unwrap(), p2.to_str().unwrap()],
+    );
+    assert_eq!(
+        std::fs::read_to_string(contrib.join("feature.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+    let log = git_in(&contrib, &["log", "--format=%s", "-n", "2"]);
+    let subjects = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        subjects.contains("Extend feature file") && subjects.contains("Add feature file"),
+        "{subjects}"
+    );
+}

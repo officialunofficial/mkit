@@ -239,6 +239,9 @@ complete -c mkit -n "__fish_seen_subcommand_from git" -a export -d "Export refs 
 complete -c mkit -n "__fish_seen_subcommand_from git" -a import -d "Import a git upstream as a signed fork"
 complete -c mkit -n "__fish_seen_subcommand_from git" -a fetch -d "Update tracking refs from the upstream"
 complete -c mkit -n "__fish_seen_subcommand_from git" -a pull -d "Fetch and fast-forward the current branch"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a verify -d "Audit bridge state against the local store"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a status -d "Show bridge state dirs"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a format-patch -d "Render commits as git am-able patches"
 complete -c mkit -n "__fish_seen_subcommand_from git" \
     -l key -d "Import signing key path" -r
 complete -c mkit -n "__fish_seen_subcommand_from git" \
@@ -253,6 +256,14 @@ complete -c mkit -n "__fish_seen_subcommand_from git" \
     -l signer -d "Attestation signer kind" -xa "repo-key external keystore"
 complete -c mkit -n "__fish_seen_subcommand_from git" \
     -l json -d "Machine-readable output"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l passthrough -d "Fork mode: re-emit imported objects as original sha1s"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l fork-audit -d "Re-derive referenced content during verify"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l stdout -d "Print patches to stdout"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -s o -l output-directory -d "Patch output directory" -r
 
 # Generic --help on any subcommand.
 complete -c mkit -n "__fish_seen_subcommand_from $__mkit_subcommands" \

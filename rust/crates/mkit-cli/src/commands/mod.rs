@@ -27,6 +27,8 @@ pub mod gc;
 pub mod git;
 #[cfg(feature = "git-bridge")]
 pub mod git_import;
+#[cfg(feature = "git-bridge")]
+pub mod git_tools;
 pub mod hash_cmd;
 pub mod init;
 pub mod key;

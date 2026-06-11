@@ -694,8 +694,33 @@ Remote / sync:
   them with a loud warning). `mkit git pull` additionally
   fast-forwards the current branch; divergence refuses with the
   executable hint (`mkit merge <name>/<branch>` — imported history is
-  ordinary mkit history, integrated natively). Requires building the binary with
-  `--features git-bridge` (alias: `git-export`); shells out to `git`.
+  ordinary mkit history, integrated natively).
+- `mkit git export --passthrough --remote-name <import-name> <fork-url>`
+  — **fork mode** (SPEC-GIT-BRIDGE §14): publish an imported repo as a
+  true git fork. Imported objects re-emit their ORIGINAL sha1s; only
+  native commits on top translate, so the pushed branch sits directly
+  on the upstream commits and PRs/merge-bases work. Upgrades the
+  import state to direction `fork` (sticky); plain export under that
+  name is then refused, while `git fetch`/`pull` keep working.
+- `mkit git verify [--remote-name <name>] [--fork-audit] [--ref <ref>]...`
+  — audit recorded bridge state against the local store:
+  bridge-translated objects shallow-verify (SPEC-GIT-BRIDGE §10) and
+  must reconstruct to their mapped twin; imported objects must have
+  retained raw bytes hashing to their sha1 and a twin signed by the
+  pinned importer key. `--fork-audit` (§14.3) additionally re-derives
+  every tree/blob referenced by bridge commits from its mkit twin and
+  requires the exact sha1. Exits non-zero listing each failing object.
+- `mkit git status` — one block per `.mkit/git/<name>/` state dir:
+  direction, recorded source/dest, pinned importer key, tracking refs
+  (import) and lease positions (export), staging health.
+- `mkit git format-patch <A..B> [-o <dir>] [--stdout]` — render
+  native commits as `git am`-able mbox patches (oldest first, merges
+  skipped) — the contribution path that needs no writable fork. A
+  single rev means `<rev>..HEAD`; e.g.
+  `mkit git format-patch upstream/main -o patches/`.
+
+  All `mkit git` subcommands require building the binary with
+  `--features git-bridge` (alias: `git-export`); they shell out to `git`.
 
 Config / keys / version:
 

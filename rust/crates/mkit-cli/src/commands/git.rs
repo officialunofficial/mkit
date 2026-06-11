@@ -44,6 +44,14 @@ enum Cmd {
     Fetch(super::git_import::FetchArgs),
     /// Fetch, then fast-forward the current branch from its tracking ref.
     Pull(super::git_import::FetchArgs),
+    /// Verify bridge state: shallow-verify translated objects, check
+    /// imported objects against the pinned importer key (--fork-audit
+    /// re-derives the referenced content too).
+    Verify(super::git_tools::VerifyArgs),
+    /// Show every bridge state dir: direction, endpoints, key, refs.
+    Status(super::git_tools::StatusArgs),
+    /// Render native commits as `git am`-able patches.
+    FormatPatch(super::git_tools::FormatPatchArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -100,6 +108,16 @@ pub fn run(args: &[String]) -> u8 {
         Cmd::Import(opts) => super::git_import::run_import(&opts),
         Cmd::Fetch(opts) => super::git_import::run_fetch(&opts, false),
         Cmd::Pull(opts) => super::git_import::run_fetch(&opts, true),
+        Cmd::Verify(opts) => run_simple(|| super::git_tools::verify(&opts)),
+        Cmd::Status(opts) => run_simple(|| super::git_tools::status(&opts)),
+        Cmd::FormatPatch(opts) => run_simple(|| super::git_tools::format_patch(&opts)),
+    }
+}
+
+fn run_simple(f: impl FnOnce() -> Result<(), (String, u8)>) -> u8 {
+    match f() {
+        Ok(()) => exit::OK,
+        Err((msg, code)) => emit_err(&msg, code),
     }
 }
 
