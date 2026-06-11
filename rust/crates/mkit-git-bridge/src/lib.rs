@@ -20,6 +20,8 @@ pub mod author;
 mod b64;
 pub mod error;
 pub mod gitobj;
+pub mod gitparse;
+pub mod gitsrc;
 pub mod headers;
 pub mod map;
 pub mod reconstruct;

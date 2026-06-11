@@ -2771,6 +2771,7 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "mkit-core",
+ "mkit-git-bridge",
  "mkit-keystore",
  "tempfile",
 ]
