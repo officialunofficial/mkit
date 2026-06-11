@@ -24,7 +24,7 @@ fn encode_hello_frame() -> Vec<u8> {
     use mkit_rpc::mkit::rpc::v1::ssh::{Hello, SshFrame, ssh_frame};
     let frame = SshFrame {
         body: Some(ssh_frame::Body::Hello(Box::new(Hello {
-            proto: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+            proto: Some(ProtocolVersion::ProtocolVersion1.into()),
             client_id: Some("cli/test".into()),
             ..Default::default()
         }))),

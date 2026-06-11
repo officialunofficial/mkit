@@ -5,6 +5,7 @@
 /// SignerFrame — the union of every message on the wire. Receivers
 /// dispatch on `body`.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct SignerFrame {
     pub body: ::core::option::Option<__buffa::oneof::signer_frame::Body>,
     #[doc(hidden)]
@@ -416,6 +417,7 @@ pub mod signer_frame {
 /// ----------------------------------------------------------------------------
 /// Hello + capability discovery.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct Hello {
     /// Field 1: `protocol`
     pub protocol: ::core::option::Option<::buffa::EnumValue<super::ProtocolVersion>>,
@@ -615,6 +617,7 @@ impl ::buffa::ExtensionSet for Hello {
     }
 }
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct HelloResponse {
     /// Field 1: `protocol`
     pub protocol: ::core::option::Option<::buffa::EnumValue<super::ProtocolVersion>>,
@@ -813,6 +816,7 @@ impl ::buffa::ExtensionSet for HelloResponse {
     }
 }
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct Capabilities {
     /// Algorithms this signer can produce signatures with.
     ///
@@ -1174,6 +1178,7 @@ impl ::buffa::ExtensionSet for Capabilities {
 /// ----------------------------------------------------------------------------
 /// Sign request / response.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct SignRequest {
     /// Field 1: `algorithm`
     pub algorithm: ::core::option::Option<::buffa::EnumValue<super::Algorithm>>,
@@ -1463,6 +1468,7 @@ impl ::buffa::ExtensionSet for SignRequest {
     }
 }
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct SignResponse {
     /// Field 1: `signature`
     pub signature: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
@@ -1793,6 +1799,7 @@ impl ::buffa::ExtensionSet for SignResponse {
 /// `authenticator_data || SHA-256(client_data_json)` and check the
 /// `signature` field of `SignResponse` against that.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct WebAuthnData {
     /// Raw `authenticatorData` bytes per WebAuthn §6.1. Includes the
     /// RP ID hash, flags, signature counter, and (during enrolment)
@@ -1969,6 +1976,7 @@ impl ::buffa::ExtensionSet for WebAuthnData {
 /// ----------------------------------------------------------------------------
 /// PIN / auth flow.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct PinPrompt {
     /// Human-readable reason for the prompt. The caller MAY display it.
     /// Length-capped at 256 bytes.
@@ -2166,9 +2174,12 @@ impl ::buffa::ExtensionSet for PinPrompt {
     }
 }
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct PinResponse {
     /// PIN bytes. UTF-8. The caller is responsible for not echoing this
     /// to logs. The signer MUST zeroize after consumption.
+    /// `debug_redact` makes the generated Debug impls print \[REDACTED\]
+    /// in place of the value, so a stray `{:?}` log cannot leak it.
     ///
     /// Field 1: `pin`
     pub pin: ::core::option::Option<::buffa::alloc::string::String>,
@@ -2177,7 +2188,9 @@ pub struct PinResponse {
 }
 impl ::core::fmt::Debug for PinResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("PinResponse").field("pin", &self.pin).finish()
+        f.debug_struct("PinResponse")
+            .field("pin", &::core::format_args!("[REDACTED]"))
+            .finish()
     }
 }
 impl PinResponse {

@@ -414,7 +414,7 @@ mod tests {
         let frame = SignerFrame {
             body: Some(signer_frame::Body::SignRequest(Box::new(
                 SignRequest::default()
-                    .with_algorithm(RpcAlgorithm::ALGORITHM_BLS12381_THRESHOLD)
+                    .with_algorithm(RpcAlgorithm::Bls12381Threshold)
                     .with_payload(b"DSSEv1 1 a 1 b".to_vec()),
             ))),
             ..Default::default()
@@ -425,12 +425,9 @@ mod tests {
         let Some(signer_frame::Body::SignRequest(req)) = decoded.body else {
             panic!("expected SignRequest body");
         };
-        assert_eq!(
-            req.algorithm.as_ref().map(buffa::EnumValue::to_i32),
-            Some(RpcAlgorithm::ALGORITHM_BLS12381_THRESHOLD as i32),
-        );
+        assert_eq!(req.algorithm, Some(RpcAlgorithm::Bls12381Threshold.into()),);
         // Pin the wire integer: this test fails if anyone renumbers
         // the enum.
-        assert_eq!(RpcAlgorithm::ALGORITHM_BLS12381_THRESHOLD as i32, 5);
+        assert_eq!(RpcAlgorithm::Bls12381Threshold as i32, 5);
     }
 }

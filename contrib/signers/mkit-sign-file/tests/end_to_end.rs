@@ -121,7 +121,7 @@ fn sign_one(
     let frames = vec![
         SignerFrame {
             body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+                protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
                 caller_id: Some("e2e/0.1".into()),
                 want_capabilities: Some(true),
                 ..Default::default()
@@ -131,7 +131,7 @@ fn sign_one(
         SignerFrame {
             body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
                 algorithm: Some(alg.into()),
-                key_form: Some(KeyForm::KEY_FORM_RAW_BYTES.into()),
+                key_form: Some(KeyForm::RawBytes.into()),
                 key_ref: Some(Vec::new()),
                 payload: Some(PAE.to_vec()),
                 context: Some(Vec::new()),
@@ -171,11 +171,11 @@ const PAE: &[u8] = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
 fn hello_response_advertises_three_algorithms_and_raw_keys() {
     let tmp = tempfile::tempdir().unwrap();
     let key = write_key(tmp.path(), &[0u8; 32]);
-    let (hello_resp, _) = sign_one(&key, RpcAlgorithm::ALGORITHM_ED25519);
+    let (hello_resp, _) = sign_one(&key, RpcAlgorithm::Ed25519);
 
     assert_eq!(
-        hello_resp.protocol.unwrap().to_i32(),
-        ProtocolVersion::PROTOCOL_VERSION_1 as i32
+        hello_resp.protocol,
+        Some(ProtocolVersion::ProtocolVersion1.into())
     );
     assert!(hello_resp.signer_id.unwrap().starts_with("mkit-sign-file/"));
 
@@ -183,20 +183,13 @@ fn hello_response_advertises_three_algorithms_and_raw_keys() {
         .capabilities
         .into_option()
         .expect("capabilities set");
-    let advertised: Vec<i32> = caps
-        .algorithms
-        .iter()
-        .map(buffa::EnumValue::to_i32)
-        .collect();
-    assert!(advertised.contains(&(RpcAlgorithm::ALGORITHM_ED25519 as i32)));
-    assert!(advertised.contains(&(RpcAlgorithm::ALGORITHM_SECP256K1 as i32)));
-    assert!(advertised.contains(&(RpcAlgorithm::ALGORITHM_P256 as i32)));
-    let key_forms: Vec<i32> = caps
-        .key_forms
-        .iter()
-        .map(buffa::EnumValue::to_i32)
-        .collect();
-    assert_eq!(key_forms, vec![KeyForm::KEY_FORM_RAW_BYTES as i32]);
+    assert!(caps.algorithms.contains(&RpcAlgorithm::Ed25519.into()));
+    assert!(caps.algorithms.contains(&RpcAlgorithm::Secp256k1.into()));
+    assert!(caps.algorithms.contains(&RpcAlgorithm::P256.into()));
+    assert_eq!(
+        caps.key_forms,
+        vec![buffa::EnumValue::from(KeyForm::RawBytes)]
+    );
     assert_eq!(caps.supports_pin, Some(false));
     assert_eq!(caps.supports_certificate_chain, Some(false));
     assert_eq!(caps.requires_user_presence, Some(false));
@@ -209,7 +202,7 @@ fn ed25519_roundtrip_through_subprocess() {
     let tmp = tempfile::tempdir().unwrap();
     let seed = [0x11u8; 32];
     let key = write_key(tmp.path(), &seed);
-    let (_, resp) = sign_one(&key, RpcAlgorithm::ALGORITHM_ED25519);
+    let (_, resp) = sign_one(&key, RpcAlgorithm::Ed25519);
 
     assert!(resp.key_id.as_deref().unwrap().starts_with("blake3:"));
     let sig = resp.signature.expect("signature present");
@@ -229,7 +222,7 @@ fn secp256k1_roundtrip_through_subprocess() {
     let mut seed = [0u8; 32];
     seed[31] = 1;
     let key = write_key(tmp.path(), &seed);
-    let (_, resp) = sign_one(&key, RpcAlgorithm::ALGORITHM_SECP256K1);
+    let (_, resp) = sign_one(&key, RpcAlgorithm::Secp256k1);
 
     assert!(resp.key_id.as_deref().unwrap().starts_with("secp256k1:"));
     let sig = resp.signature.expect("signature present");
@@ -250,7 +243,7 @@ fn p256_roundtrip_through_subprocess() {
         0x1f, 0x20,
     ];
     let key = write_key(tmp.path(), &seed);
-    let (_, resp) = sign_one(&key, RpcAlgorithm::ALGORITHM_P256);
+    let (_, resp) = sign_one(&key, RpcAlgorithm::P256);
 
     assert!(resp.key_id.as_deref().unwrap().starts_with("p256:"));
     let sig = resp.signature.expect("signature present");
@@ -273,7 +266,7 @@ fn two_signs_on_one_connection() {
     let frames = vec![
         SignerFrame {
             body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+                protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
                 caller_id: Some("e2e/0.1".into()),
                 want_capabilities: Some(false),
                 ..Default::default()
@@ -282,8 +275,8 @@ fn two_signs_on_one_connection() {
         },
         SignerFrame {
             body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                algorithm: Some(RpcAlgorithm::ALGORITHM_ED25519.into()),
-                key_form: Some(KeyForm::KEY_FORM_RAW_BYTES.into()),
+                algorithm: Some(RpcAlgorithm::Ed25519.into()),
+                key_form: Some(KeyForm::RawBytes.into()),
                 payload: Some(b"first".to_vec()),
                 ..Default::default()
             }))),
@@ -291,8 +284,8 @@ fn two_signs_on_one_connection() {
         },
         SignerFrame {
             body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                algorithm: Some(RpcAlgorithm::ALGORITHM_ED25519.into()),
-                key_form: Some(KeyForm::KEY_FORM_RAW_BYTES.into()),
+                algorithm: Some(RpcAlgorithm::Ed25519.into()),
+                key_form: Some(KeyForm::RawBytes.into()),
                 payload: Some(b"second".to_vec()),
                 ..Default::default()
             }))),
@@ -331,7 +324,7 @@ fn pkcs8_key_form_returns_unsupported_error() {
     let frames = vec![
         SignerFrame {
             body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+                protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
                 want_capabilities: Some(false),
                 ..Default::default()
             }))),
@@ -339,9 +332,9 @@ fn pkcs8_key_form_returns_unsupported_error() {
         },
         SignerFrame {
             body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                algorithm: Some(RpcAlgorithm::ALGORITHM_ED25519.into()),
+                algorithm: Some(RpcAlgorithm::Ed25519.into()),
                 // PKCS#8 — the file signer doesn't support it.
-                key_form: Some(KeyForm::KEY_FORM_PKCS8_DER.into()),
+                key_form: Some(KeyForm::Pkcs8Der.into()),
                 payload: Some(PAE.to_vec()),
                 ..Default::default()
             }))),
@@ -360,7 +353,7 @@ fn pkcs8_key_form_returns_unsupported_error() {
     };
     assert_eq!(
         err.code.as_ref().unwrap().to_i32(),
-        ErrorCode::ERROR_CODE_UNSUPPORTED_KEY_FORM as i32
+        ErrorCode::UnsupportedKeyForm as i32
     );
 }
 
@@ -388,7 +381,7 @@ fn rejects_key_with_world_readable_permissions() {
     // Send a normal Hello frame; the binary should never get to it.
     let frames = vec![SignerFrame {
         body: Some(signer_frame::Body::Hello(Box::new(Hello {
-            protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+            protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
             want_capabilities: Some(false),
             ..Default::default()
         }))),
@@ -408,6 +401,6 @@ fn rejects_key_with_world_readable_permissions() {
 fn accepts_key_with_owner_only_permissions() {
     let tmp = tempfile::tempdir().unwrap();
     let key = write_key(tmp.path(), &[0x22u8; 32]);
-    let (_, resp) = sign_one(&key, RpcAlgorithm::ALGORITHM_ED25519);
+    let (_, resp) = sign_one(&key, RpcAlgorithm::Ed25519);
     assert!(resp.signature.is_some());
 }

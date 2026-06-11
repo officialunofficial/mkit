@@ -14,6 +14,7 @@
 ///
 /// Wire numbers are load-bearing. Do NOT renumber; new variants append.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 #[repr(i32)]
 pub enum RefExpectation {
     REF_EXPECTATION_UNSPECIFIED = 0i32,
@@ -98,6 +99,7 @@ impl ::buffa::Enumeration for RefExpectation {
 /// ----------------------------------------------------------------------------
 /// SshFrame — the union of every control / data message on the wire.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct SshFrame {
     pub body: ::core::option::Option<__buffa::oneof::ssh_frame::Body>,
     #[doc(hidden)]
@@ -949,6 +951,7 @@ pub mod ssh_frame {
 /// ----------------------------------------------------------------------------
 /// Connection lifecycle.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct Hello {
     /// Field 1: `proto`
     pub proto: ::core::option::Option<::buffa::EnumValue<super::ProtocolVersion>>,
@@ -1112,6 +1115,7 @@ impl ::buffa::ExtensionSet for Hello {
     }
 }
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct HelloResponse {
     /// Field 1: `proto`
     pub proto: ::core::option::Option<::buffa::EnumValue<super::ProtocolVersion>>,
@@ -1273,6 +1277,7 @@ impl ::buffa::ExtensionSet for HelloResponse {
 }
 /// Advisory close. Either side MAY simply close the underlying stream.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct Close {
     /// Optional reason, advisory.
     ///
@@ -1399,6 +1404,7 @@ impl ::buffa::ExtensionSet for Close {
 /// ----------------------------------------------------------------------------
 /// Refs.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct ListRefs {
     /// Prefix filter, e.g. "refs/heads/". Empty means "all refs". Length
     /// capped at MAX_REF_NAME (4096 bytes).
@@ -1524,6 +1530,7 @@ impl ::buffa::ExtensionSet for ListRefs {
     }
 }
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct ListRefsResponse {
     /// Field 1: `refs`
     pub refs: ::buffa::alloc::vec::Vec<list_refs_response::RefEntry>,
@@ -1642,6 +1649,7 @@ pub mod list_refs_response {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Clone, PartialEq, Default)]
+    #[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
     pub struct RefEntry {
         /// Field 1: `name`
         pub name: ::core::option::Option<::buffa::alloc::string::String>,
@@ -1813,6 +1821,7 @@ pub mod list_refs_response {
     pub use super::__buffa::view::list_refs_response::RefEntryOwnedView;
 }
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct ReadRef {
     /// Field 1: `name`
     pub name: ::core::option::Option<::buffa::alloc::string::String>,
@@ -1935,6 +1944,7 @@ impl ::buffa::ExtensionSet for ReadRef {
     }
 }
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct ReadRefResponse {
     /// Empty bytes means the ref does not exist (distinguish from
     /// Error which means "lookup failed").
@@ -2063,6 +2073,7 @@ impl ::buffa::ExtensionSet for ReadRefResponse {
 /// applies; `expected_id` carries the value to match (for `MATCH`) and
 /// MUST be empty for `ANY` / `MISSING`. Atomic on the server.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct UpdateRef {
     /// Field 1: `name`
     pub name: ::core::option::Option<::buffa::alloc::string::String>,
@@ -2304,6 +2315,7 @@ impl ::buffa::ExtensionSet for UpdateRef {
 /// (ERROR_CODE_INVALID_REQUEST with details = current id) or any
 /// other failure.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct UpdateRefResponse {
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -2389,6 +2401,7 @@ impl ::buffa::ExtensionSet for UpdateRefResponse {
 /// ----------------------------------------------------------------------------
 /// Packs.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct PackExists {
     /// raw 32-byte BLAKE3 digest
     ///
@@ -2513,6 +2526,7 @@ impl ::buffa::ExtensionSet for PackExists {
     }
 }
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct PackExistsResponse {
     /// Field 1: `exists`
     pub exists: ::core::option::Option<bool>,
@@ -2632,6 +2646,7 @@ impl ::buffa::ExtensionSet for PackExistsResponse {
 /// and to verify the following PackChunk stream ends exactly at the
 /// declared byte count.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct UploadPack {
     /// Field 1: `pack_id`
     pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
@@ -2788,6 +2803,7 @@ impl ::buffa::ExtensionSet for UploadPack {
 }
 /// Empty body is success.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct UploadPackResponse {
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -2871,6 +2887,7 @@ impl ::buffa::ExtensionSet for UploadPackResponse {
     }
 }
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct DownloadPack {
     /// Field 1: `pack_id`
     pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
@@ -2994,6 +3011,7 @@ impl ::buffa::ExtensionSet for DownloadPack {
 }
 /// Server emits this once before the first PackChunk on a download.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct DownloadPackHeader {
     /// Field 1: `total_bytes`
     pub total_bytes: ::core::option::Option<u64>,
@@ -3114,6 +3132,7 @@ impl ::buffa::ExtensionSet for DownloadPackHeader {
 /// no gaps). The final chunk has `last = true`. Per-chunk data size
 /// is bounded by MAX_FRAME_BYTES (1 MiB) less envelope overhead.
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct PackChunk {
     /// Field 1: `pack_id`
     pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,

@@ -3395,14 +3395,23 @@ impl ::buffa::HasMessageView for super::super::PinPrompt {
     type View<'a> = PinPromptView<'a>;
     type ViewHandle = PinPromptOwnedView;
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct PinResponseView<'a> {
     /// PIN bytes. UTF-8. The caller is responsible for not echoing this
     /// to logs. The signer MUST zeroize after consumption.
+    /// `debug_redact` makes the generated Debug impls print \[REDACTED\]
+    /// in place of the value, so a stray `{:?}` log cannot leak it.
     ///
     /// Field 1: `pin`
     pub pin: ::core::option::Option<&'a str>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::core::fmt::Debug for PinResponseView<'a> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("PinResponseView")
+            .field("pin", &::core::format_args!("[REDACTED]"))
+            .finish()
+    }
 }
 impl<'a> PinResponseView<'a> {
     /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
@@ -3624,6 +3633,8 @@ impl PinResponseOwnedView {
     }
     /// PIN bytes. UTF-8. The caller is responsible for not echoing this
     /// to logs. The signer MUST zeroize after consumption.
+    /// `debug_redact` makes the generated Debug impls print \[REDACTED\]
+    /// in place of the value, so a stray `{:?}` log cannot leak it.
     ///
     /// Field 1: `pin`
     #[must_use]

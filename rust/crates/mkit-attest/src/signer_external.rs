@@ -223,7 +223,7 @@ impl ExternalSigner {
         let hello = SignerFrame {
             body: Some(signer_frame::Body::Hello(Box::new(
                 Hello::default()
-                    .with_protocol(ProtocolVersion::PROTOCOL_VERSION_1)
+                    .with_protocol(ProtocolVersion::ProtocolVersion1)
                     .with_caller_id(format!("mkit-attest/{}", env!("CARGO_PKG_VERSION")))
                     .with_want_capabilities(false),
             ))),
@@ -595,16 +595,16 @@ fn map_frame_error(e: FrameError) -> Error {
 
 fn rpc_algorithm_for(a: Algorithm) -> RpcAlgorithm {
     match a {
-        Algorithm::Ed25519 => RpcAlgorithm::ALGORITHM_ED25519,
-        Algorithm::Secp256k1 => RpcAlgorithm::ALGORITHM_SECP256K1,
-        Algorithm::P256 => RpcAlgorithm::ALGORITHM_P256,
+        Algorithm::Ed25519 => RpcAlgorithm::Ed25519,
+        Algorithm::Secp256k1 => RpcAlgorithm::Secp256k1,
+        Algorithm::P256 => RpcAlgorithm::P256,
         // External-signer dispatch for BLS threshold isn't wired
         // yet — the Phase-1 holder runs in-process. But the proto
         // wire integer is reserved so a future external signer can
         // claim ALGORITHM_BLS12381_THRESHOLD and the mapping
         // already exists.
         #[cfg(feature = "bls-threshold")]
-        Algorithm::Bls12381Threshold => RpcAlgorithm::ALGORITHM_BLS12381_THRESHOLD,
+        Algorithm::Bls12381Threshold => RpcAlgorithm::Bls12381Threshold,
     }
 }
 
@@ -612,7 +612,7 @@ fn rpc_key_form_for(_a: Algorithm) -> KeyForm {
     // Default to RAW_BYTES — the file signer reads from disk; hardware
     // signers will populate `key_ref` with their own opaque handle and
     // ignore the form anyway.
-    KeyForm::KEY_FORM_RAW_BYTES
+    KeyForm::RawBytes
 }
 
 #[cfg(feature = "algo-p256")]
@@ -722,13 +722,13 @@ fn validate_sign_response_with_policy(
 ) -> Result<(), Error> {
     let actual_algorithm = sr
         .algorithm
-        .as_ref()
-        .ok_or_else(|| Error::ExternalSignerBadResponse("SignResponse missing algorithm".into()))?
-        .to_i32();
-    let expected_rpc = rpc_algorithm_for(expected_algorithm) as i32;
+        .ok_or_else(|| Error::ExternalSignerBadResponse("SignResponse missing algorithm".into()))?;
+    let expected_rpc = rpc_algorithm_for(expected_algorithm);
     if actual_algorithm != expected_rpc {
         return Err(Error::ExternalSignerBadResponse(format!(
-            "SignResponse algorithm mismatch: got {actual_algorithm}, expected {expected_rpc}"
+            "SignResponse algorithm mismatch: got {}, expected {}",
+            actual_algorithm.to_i32(),
+            expected_rpc as i32
         )));
     }
 
@@ -768,13 +768,13 @@ fn validate_sign_response_inner(
 ) -> Result<(), Error> {
     let actual_algorithm = sr
         .algorithm
-        .as_ref()
-        .ok_or_else(|| Error::ExternalSignerBadResponse("SignResponse missing algorithm".into()))?
-        .to_i32();
-    let expected_rpc = rpc_algorithm_for(expected_algorithm) as i32;
+        .ok_or_else(|| Error::ExternalSignerBadResponse("SignResponse missing algorithm".into()))?;
+    let expected_rpc = rpc_algorithm_for(expected_algorithm);
     if actual_algorithm != expected_rpc {
         return Err(Error::ExternalSignerBadResponse(format!(
-            "SignResponse algorithm mismatch: got {actual_algorithm}, expected {expected_rpc}"
+            "SignResponse algorithm mismatch: got {}, expected {}",
+            actual_algorithm.to_i32(),
+            expected_rpc as i32
         )));
     }
 
@@ -1029,7 +1029,7 @@ mod tests {
         let sr = SignResponse::default()
             .with_signature(sig.clone())
             .with_public_key(pk)
-            .with_algorithm(RpcAlgorithm::ALGORITHM_ED25519)
+            .with_algorithm(RpcAlgorithm::Ed25519)
             .with_key_id(key_id.clone());
         (sr, sig, key_id)
     }
@@ -1044,7 +1044,7 @@ mod tests {
     #[test]
     fn response_validation_rejects_algorithm_mismatch() {
         let (mut sr, sig, key_id) = ed25519_response("opaque:test".to_owned());
-        sr.algorithm = Some(RpcAlgorithm::ALGORITHM_P256.into());
+        sr.algorithm = Some(RpcAlgorithm::P256.into());
 
         let err = validate_sign_response(&sr, Algorithm::Ed25519, PAE, &sig, &key_id).unwrap_err();
         assert!(err.to_string().contains("algorithm mismatch"));
@@ -1067,7 +1067,7 @@ mod tests {
         let signature = vec![0u8; 64];
         let mut sr = SignResponse::default()
             .with_signature(signature.clone())
-            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_algorithm(RpcAlgorithm::P256)
             .with_key_id(key_id.clone());
         sr.webauthn = buffa::MessageField::some(
             WebAuthnData::default()
@@ -1091,7 +1091,7 @@ mod tests {
         let mut sr = SignResponse::default()
             .with_signature(signature.clone())
             .with_public_key(signer.public_key_sec1_uncompressed())
-            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_algorithm(RpcAlgorithm::P256)
             .with_key_id(key_id.clone());
         sr.webauthn = buffa::MessageField::some(
             WebAuthnData::default()
@@ -1125,7 +1125,7 @@ mod tests {
         let mut sr = SignResponse::default()
             .with_signature(signature.clone())
             .with_public_key(signer.public_key_sec1_uncompressed())
-            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_algorithm(RpcAlgorithm::P256)
             .with_key_id(key_id.clone());
         sr.webauthn = buffa::MessageField::some(
             WebAuthnData::default()
@@ -1179,7 +1179,7 @@ mod tests {
         let sr = SignResponse::default()
             .with_signature(sig.clone())
             .with_public_key(signer.public_key_sec1())
-            .with_algorithm(RpcAlgorithm::ALGORITHM_SECP256K1)
+            .with_algorithm(RpcAlgorithm::Secp256k1)
             .with_key_id(key_id.clone());
         validate_sign_response(&sr, Algorithm::Secp256k1, PAE, &sig, &key_id)
             .expect("canonical secp256k1 key_id matches returned public key");
@@ -1188,7 +1188,7 @@ mod tests {
         let bad = SignResponse::default()
             .with_signature(sig.clone())
             .with_public_key(signer.public_key_sec1())
-            .with_algorithm(RpcAlgorithm::ALGORITHM_SECP256K1)
+            .with_algorithm(RpcAlgorithm::Secp256k1)
             .with_key_id(bad_key_id.clone());
         let err =
             validate_sign_response(&bad, Algorithm::Secp256k1, PAE, &sig, &bad_key_id).unwrap_err();
@@ -1207,7 +1207,7 @@ mod tests {
         let sr = SignResponse::default()
             .with_signature(sig.clone())
             .with_public_key(signer.public_key_sec1())
-            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_algorithm(RpcAlgorithm::P256)
             .with_key_id(key_id.clone());
         validate_sign_response(&sr, Algorithm::P256, PAE, &sig, &key_id)
             .expect("canonical P-256 key_id matches returned public key");
@@ -1216,7 +1216,7 @@ mod tests {
         let bad = SignResponse::default()
             .with_signature(sig.clone())
             .with_public_key(signer.public_key_sec1())
-            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
+            .with_algorithm(RpcAlgorithm::P256)
             .with_key_id(bad_key_id.clone());
         let err =
             validate_sign_response(&bad, Algorithm::P256, PAE, &sig, &bad_key_id).unwrap_err();
@@ -1271,7 +1271,7 @@ mod tests {
                     SignResponse::default()
                         .with_signature(sig)
                         .with_public_key(pk)
-                        .with_algorithm(RpcAlgorithm::ALGORITHM_ED25519)
+                        .with_algorithm(RpcAlgorithm::Ed25519)
                         .with_key_id("opaque:test".to_owned()),
                 ))),
                 ..Default::default()

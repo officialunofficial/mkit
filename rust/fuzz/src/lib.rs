@@ -146,6 +146,43 @@ pub fn software_key_record_one_iteration(input: &[u8]) {
     let _ = mkit_keystore::fuzz_decode_software_key_record(input);
 }
 
+/// Fuzz the mkit-rpc wire decoders. Two properties per iteration:
+///
+/// 1. **Decode never panics.** Both protocol roots (`SignerFrame`,
+///    `SshFrame`) are decoded from the raw input, through the
+///    production decode caps (`frame_decode_options`) and the bare
+///    decoder. Any input may fail to decode; none may panic.
+/// 2. **Owned roundtrip.** The input entropy drives
+///    `arbitrary::Arbitrary` to build structurally valid frames
+///    (mkit-rpc's `arbitrary` feature, from buffa
+///    `generate_arbitrary` codegen); encode → decode must reproduce
+///    the original message exactly.
+pub fn rpc_decode_one_iteration(input: &[u8]) {
+    use arbitrary::Arbitrary;
+    use buffa::Message;
+    use mkit_rpc::mkit::rpc::v1::signer::SignerFrame;
+    use mkit_rpc::mkit::rpc::v1::ssh::SshFrame;
+
+    let input = &input[..input.len().min(MAX_INPUT)];
+
+    let _ = mkit_rpc::frame_decode_options().decode_from_slice::<SignerFrame>(input);
+    let _ = mkit_rpc::frame_decode_options().decode_from_slice::<SshFrame>(input);
+    let _ = SignerFrame::decode_from_slice(input);
+    let _ = SshFrame::decode_from_slice(input);
+
+    let mut u = arbitrary::Unstructured::new(input);
+    if let Ok(frame) = SignerFrame::arbitrary(&mut u) {
+        let bytes = frame.encode_to_vec();
+        let decoded = SignerFrame::decode_from_slice(&bytes).expect("re-decode SignerFrame");
+        assert_eq!(frame, decoded, "SignerFrame owned roundtrip diverged");
+    }
+    if let Ok(frame) = SshFrame::arbitrary(&mut u) {
+        let bytes = frame.encode_to_vec();
+        let decoded = SshFrame::decode_from_slice(&bytes).expect("re-decode SshFrame");
+        assert_eq!(frame, decoded, "SshFrame owned roundtrip diverged");
+    }
+}
+
 /// Single-shot: invoke `body(input)` exactly once, with the
 /// per-iteration wall-clock cap. libfuzzer harnesses call this from
 /// their `fuzz_target!` body; the iteration counter lives one level up,
@@ -198,6 +235,11 @@ mod tests {
         run_iterated_unit(software_key_record_one_iteration).expect("guardrails held");
     }
 
+    #[test]
+    fn rpc_decode_target_runs_within_caps() {
+        run_iterated_unit(rpc_decode_one_iteration).expect("guardrails held");
+    }
+
     /// Pin a few hand-crafted inputs so the targets keep accepting them
     /// even under refactors of the parser surface.
     #[test]
@@ -246,6 +288,27 @@ mod tests {
         bad.extend_from_slice(&[1, 1, 1]);
         bad.extend_from_slice(&u32::MAX.to_le_bytes());
         software_key_record_one_iteration(&bad);
+    }
+
+    #[test]
+    fn rpc_decode_target_handles_fixed_cases() {
+        use buffa::Message;
+        use mkit_rpc::mkit::rpc::v1::signer::{SignerFrame, signer_frame};
+
+        // Empty and truncated inputs.
+        rpc_decode_one_iteration(&[]);
+        rpc_decode_one_iteration(&[0x0A]);
+        // A valid encoded frame must decode (and roundtrip) cleanly.
+        let frame = mkit_rpc::signer_error_frame(
+            mkit_rpc::mkit::rpc::v1::ErrorCode::Internal,
+            "fuzz fixed case",
+        );
+        rpc_decode_one_iteration(&frame.encode_to_vec());
+        // Field-1 tag with an absurd length prefix — classic truncation.
+        rpc_decode_one_iteration(&[0x0A, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+        // Suppress unused-import warning for the oneof module while
+        // keeping the import for future fixed cases.
+        let _: Option<signer_frame::Body> = SignerFrame::default().body;
     }
 
     fn hex_to_bytes(hex: &str) -> Vec<u8> {

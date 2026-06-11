@@ -24,6 +24,7 @@ from recurring.
 | `fuzz_targets/pack.rs`         | `pack::PackReader::unpack`  |
 | `fuzz_targets/tree.rs`         | `serialize::deserialize`    |
 | `fuzz_targets/software_key_record.rs` | `EncryptedKeyRecord::decode` |
+| `fuzz_targets/rpc_decode.rs`   | `SignerFrame` / `SshFrame` wire decode (never panics) + `Arbitrary`-driven encode/decode roundtrip |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in
@@ -80,6 +81,7 @@ cargo +nightly fuzz run delta
 cargo +nightly fuzz run pack
 cargo +nightly fuzz run tree
 cargo +nightly fuzz run software_key_record
+cargo +nightly fuzz run rpc_decode
 ```
 
 ## Guardrails (NON-NEGOTIABLE)
