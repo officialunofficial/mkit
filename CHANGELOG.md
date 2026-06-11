@@ -31,15 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proto value names replaced with the `UpperCamelCase` aliases buffa
   0.7 generates (`ErrorCode::KeyNotFound`, `RefExpectation::Any`, …).
   No behavior change; wire-value pins remain asserted numerically.
-
-### Fixed
-
-- `scripts/regen-rpc-proto.sh` could silently copy **stale** staged
-  sources back into `generated/` instead of fresh codegen output: the
-  default build mode fills its `OUT_DIR` with the same `.rs` file set,
-  and the script picked whichever was freshest. Codegen mode now drops
-  a `.mkit-rpc-codegen` marker that the script requires.
-
 - **buffa 0.6 → 0.7.1** across all crates (mkit-rpc, mkit-attest,
   mkit-cli, mkit-transport-ssh, mkit-transport-enc, and the
   contrib/signers reference binaries), with the vendored mkit-rpc
@@ -49,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UpperCamelCase` enum value aliases. The declared requirement is
   `0.7.1` (not `0.7`) because regenerated packed-view decoders call the
   `RepeatedView::reserve` hook introduced in 0.7.1.
+
+### Fixed
+
+- `scripts/regen-rpc-proto.sh` could silently copy **stale** staged
+  sources back into `generated/` instead of fresh codegen output: the
+  default build mode fills its `OUT_DIR` with the same `.rs` file set,
+  and the script picked whichever was freshest. Codegen mode now drops
+  a `.mkit-rpc-codegen` marker that the script requires.
 
 ## [0.2.0] - 2026-06-10
 
