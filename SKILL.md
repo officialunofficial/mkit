@@ -58,10 +58,11 @@ omitted, and aborts if neither is set rather than guessing.
    refuse without `-f`, and most accept `-n`/`--dry-run` to preview:
    `reset --hard`, `clean`, `restore`, `branch -D` (still refuses the *current*
    branch), `push --force` (prefer `--force-with-lease`), `gc`.
-4. **Authorship is cryptographic.** `user.identity` (an `ed25519:<hex>` /
-   `mid:<N>` value) is the authoritative signed author. `user.name` /
-   `user.email` are accepted as git-compat aliases but are **non-authoritative**
-   — they never set who signed.
+4. **Authorship is cryptographic.** The signed author defaults to your signing
+   key's public key (an `ed25519:<hex>` identity) — no config needed. `user.identity`
+   overrides it (`ed25519:<hex>` / `mid:<N>`); `user.name` / `user.email` are
+   accepted as git-compat aliases but are **non-authoritative** — they never set
+   who signed.
 
 Accepted-but-no-op / out of scope (so you don't wait on them): `log --graph` is
 accepted but does nothing; submodules, hooks, `git worktree`, `git notes`, and
@@ -69,24 +70,30 @@ accepted but does nothing; submodules, hooks, `git worktree`, `git notes`, and
 
 ## Signing keys
 
-Two key homes, pick by scope:
+**Commits and tags are always Ed25519-signed.** The commit/tag signing key is
+Ed25519 and lives at `.mkit/keys/default.key`:
 
 ```sh
-# Repo-local key file (.mkit/keys/default.key) — simplest, per-repo:
-mkit keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
+mkit keygen [--force] [--print-pubkey]   # Ed25519 -> .mkit/keys/default.key
+mkit verify <rev>                        # check the signature on a commit, remix, or signed tag
+mkit tag -s <name> -m "msg"              # signed tag (always pass -m; no -m opens an editor)
+```
 
-# OS-keystore-backed keys that persist ACROSS repos (Keychain on macOS,
-# libsecret/systemd-creds/YubiKey on Linux, Credential Manager on Windows):
+Instead of the repo-local file, an **Ed25519** key in the OS keystore can sign
+(custody that persists across repos — Keychain / libsecret / systemd-creds /
+YubiKey / Windows Credential Manager):
+
+```sh
 mkit key generate            # also: list | import | export | delete
 ```
 
-Set the authoritative author identity explicitly when needed:
+The signed author is auto-derived from the signing key (difference #4 above); set
+`user.identity` only to pin a different one.
 
-```sh
-mkit config user.identity ed25519:<pubkey-hex>
-mkit verify <rev>            # verify the signature on a commit, remix, or signed tag
-mkit tag -s <name> -m "msg"  # create an Ed25519-signed tag object
-```
+> **`keygen --algorithm secp256k1|p256` does NOT make a commit key.** It writes a
+> separate *attestation* signer key (`.mkit/keys/<alg>.key`) consumed by `attest`
+> (below). Generating one and then running `commit` fails with "no signing key" —
+> run plain `mkit keygen` for the Ed25519 commit key.
 
 ## Attestation (in-toto v1 + DSSE)
 
@@ -160,11 +167,17 @@ mkit pack-shard <hash>   # Reed-Solomon erasure-code a stored pack into shards
 
 ## Rules for agents
 
-- **Always ensure a signing key exists before committing** (`mkit keygen`, or a
-  keystore key). Commits/signed tags/attestations are not optional-sign.
+- **Run `mkit keygen` before the first commit** (or use an Ed25519 keystore key).
+  Commits/signed tags/attestations always sign; without a key they fail.
+- **Never invoke the interactive variants** — they block on `$EDITOR` or stdin
+  and will hang you: plain `commit` (always pass `-m`), annotated/signed `tag -a`/
+  `-s` (pass `-m`), `rebase -i`, and `add -p`. Use the non-interactive forms.
+- **No pager, ever.** `log`/`diff`/`show`/`blame` print straight to stdout and
+  exit — capture them directly; you don't need `--no-pager` or to pipe to `cat`.
 - **Parse machine output, not prose.** Many commands take `--format=json`
   (`log`, `branch`, `blame`, `remote`, `config`, `reflog`) and `status` takes
-  `--porcelain[=v1|v2]`. Use `-z` for NUL-terminated paths.
+  `--porcelain[=v1|v2]`. Use `-z` for NUL-terminated paths. Note several commands
+  put human prose on **stderr** and reserve **stdout** for machine output.
 - **Branch on exit codes, not stderr text** (see table) — distinguish a usage
   typo (`64`) from a retryable transient (`75`) without scraping messages.
 - **Preview destructive ops with `-n`/`--dry-run`, commit them with `-f`.**
@@ -189,12 +202,20 @@ mkit pack-shard <hash>   # Reed-Solomon erasure-code a stored pack into shards
 | `cargo install mkit` installs the wrong tool | Install `mkit-cli`; the binary is `mkit`. |
 | A pasted id won't resolve | mkit ids are 64-hex BLAKE3, not git's 40-hex SHA-1. |
 | `commit` fails complaining about signing/identity | Run `mkit keygen` (or set up a keystore key) first. |
+| "no signing key" right after `keygen --algorithm p256`/`secp256k1` | Those make *attestation* keys, not the commit key — run plain `mkit keygen` (Ed25519). |
+| `mkit` command appears to hang | You hit an interactive variant opening `$EDITOR`/a prompt — pass `-m`, or avoid `rebase -i` / `add -p`. |
 | `reset --hard` / `clean` / `restore` "refuses" | A safety guard — re-run with `-f` (use `-n` to preview). |
 | `remote add` rejects the URL | Must be `mkit+file://`, `mkit+https://`, `mkit+s3://`, or `mkit+ssh://`. |
 | `verify-attest` won't use the repo's trust-roots | Intentional — pass `--trust-roots <path>` explicitly. |
 | `commit` opens an editor / aborts with no message | Pass `-m`, or set `$EDITOR`/`$VISUAL`. |
 
 ## Going deeper
+
+If the **mkit MCP** is connected (`mcp.mkit.makechain.net`), prefer its tools for
+authoritative depth: `get_command <name>` for a subcommand's full flags,
+`get_spec <NAME>` / `list_specs` for wire & on-disk formats, `search_docs` /
+`search_code` to find behavior, and `get_file 'docs/CLI.md'` for the complete
+reference. In a checkout, the same content lives at:
 
 - Full command reference: `docs/CLI.md` and `man mkit`.
 - Git-parity scope & deliberate divergences: `docs/PARITY.md`.
