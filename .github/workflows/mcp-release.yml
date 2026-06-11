@@ -1,0 +1,130 @@
+name: MCP Release
+
+# Release-gated corpus updates: the MCP indexes a release tag's tree, so the
+# served corpus always matches the published crates — `main` content never
+# bleeds into a released version label. Versions are immutable once seeded
+# (skip-if-indexed); re-runs and GitHub's occasional duplicate tag events are
+# harmless. The escape hatch re-seeds a version FROM ITS OWN TAG (`force`),
+# e.g. after an indexer bugfix — same source, better representation.
+#
+# No `paths:` filter on purpose: paths semantics are unreliable for tag pushes
+# (no stable diff base), which is also why this is a separate workflow from
+# the PR-validation mcp.yml.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  # Manual escape hatch (mirrors release.yml's): re-run for an existing tag,
+  # or force a re-seed of an already-indexed version after an indexer fix.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)index (e.g. v0.2.0). Must be pushed to origin.'
+        required: true
+        type: string
+      force:
+        description: 'Re-seed even if this version is already indexed'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Serialize against the worker-deploy workflow and racing tags.
+concurrency:
+  group: mcp-deploy
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Seed corpus from tag + deploy Worker
+    runs-on: ubuntu-latest
+    environment: mcp
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Validate tag input shape (dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$RELEASE_TAG' is not a vX.Y.Z release tag"
+            exit 1
+          fi
+
+      # Check out the TAG, not a branch — the indexed tree IS the released
+      # source by construction.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '22'
+
+      - name: Install MCP dependencies
+        working-directory: mcp
+        run: npm ci
+
+      - name: Typecheck + test (never seed from a tree whose indexer fails)
+        working-directory: mcp
+        run: npm run ci
+
+      - name: Build corpus index from the tag's tree
+        working-directory: mcp
+        run: npm run index
+
+      # Guard: the indexer derives the version from rust/Cargo.toml. If the tag
+      # was pushed before the release-plz version-bump merged, the label would
+      # lie about the content — fail loudly instead.
+      - name: Guard — tag matches workspace version
+        working-directory: mcp
+        run: |
+          INDEXED="$(jq -r .version dist/manifest.json)"
+          if [[ "$INDEXED" != "$RELEASE_TAG" ]]; then
+            echo "::error::workspace version '$INDEXED' (rust/Cargo.toml at this tag) != tag '$RELEASE_TAG' — refusing to seed a mislabeled corpus"
+            exit 1
+          fi
+          echo "version check ok: $INDEXED"
+
+      - name: Check whether this version is already indexed
+        id: indexed
+        working-directory: mcp
+        shell: bash  # explicit: gets `-o pipefail`, so a wrangler failure fails the step
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          COUNT="$(npx wrangler d1 execute mkit-mcp-search --remote --json \
+            --command "SELECT version FROM versions WHERE version = '$RELEASE_TAG'" \
+            | jq '.[0].results | length')"
+          # Guard against a non-numeric COUNT (e.g. unexpected wrangler output):
+          # a query failure must fail the run, never masquerade as "already indexed".
+          if [[ ! "$COUNT" =~ ^[0-9]+$ ]]; then
+            echo "::error::could not determine indexed state for $RELEASE_TAG (got: '$COUNT')"
+            exit 1
+          fi
+          if [[ "$COUNT" != "0" && "$FORCE" != "true" ]]; then
+            echo "seed=false" >> "$GITHUB_OUTPUT"
+            echo "$RELEASE_TAG already indexed — corpus untouched (immutable); pass force=true to re-seed from this tag."
+          else
+            echo "seed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply D1 migrations (idempotent)
+        if: ${{ steps.indexed.outputs.seed == 'true' }}
+        working-directory: mcp
+        run: npm run db:migrate
+
+      - name: Seed corpus into remote D1
+        if: ${{ steps.indexed.outputs.seed == 'true' }}
+        working-directory: mcp
+        run: npm run db:seed
+
+      # The Worker ships with every release regardless of whether the corpus
+      # was newly seeded — tool-code improvements reach prod at least per release.
+      - name: Deploy Worker
+        working-directory: mcp
+        run: npm run deploy

@@ -40,11 +40,27 @@ interface CrateRow {
 
 const MAX_SEARCH_RESULTS = 50;
 
+// Surfaced to the agent at connection time (the MCP `initialize` result's
+// `instructions`). This is the seamless onboarding path: it tells an agent what
+// mkit is and which tool to reach for first, without it having to guess.
+const INSTRUCTIONS = `mkit is a content-addressed, cryptographically-signed version-control toolkit — a Rust workspace plus the \`mkit\` CLI (Git-like commits/refs/transports over BLAKE3 object IDs, with native in-toto/DSSE attestation). This server indexes mkit's source, SPEC docs, and CLI reference at a pinned release.
+
+Start here:
+- get_overview — what mkit is, its architecture, and the object model. Read this first for a general understanding.
+- get_cli_reference — the agent-oriented guide to driving the \`mkit\` CLI (setup, signing, attestation, transports, and exactly how it differs from git).
+
+Then, by need:
+- Driving the CLI: get_command "<name>" for one subcommand's flags/behavior; get_command with no name lists all subcommands.
+- Wire/on-disk formats & design: list_specs, then get_spec "<NAME>" (e.g. OBJECTS, SIGNING, ATTESTATIONS, TRANSPORT, PACKFILE).
+- Implementation: list_crates → list_files "<crate>" → get_file "<path>" (line ranges supported). Search with search_code (Rust source) or search_docs (prose); use mode "word" for natural-language terms, "substring" for exact strings.
+
+All content is version-pinned — omit \`version\` for the latest (list_versions shows what's indexed).`;
+
 const err = (text: string) => ({ content: [{ type: "text" as const, text }], isError: true });
 const ok = (text: string) => ({ content: [{ type: "text" as const, text }] });
 
 export class MkitMCP extends McpAgent<Env, {}, {}> {
-  server = new McpServer({ name: "mkit", version: pkg.version });
+  server = new McpServer({ name: "mkit", version: pkg.version }, { instructions: INSTRUCTIONS });
 
   async init() {
     // Thin wrapper preserving zod-schema -> handler-arg typing while casting

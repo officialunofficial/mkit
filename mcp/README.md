@@ -87,11 +87,23 @@ npm run ci     # typecheck + tests
                      # run the Worker's exact queries (needs sqlite3 w/ FTS5)
 ```
 
-## Deploy
+## Deploy model: release-gated corpus, continuous Worker
 
-Deploy is a **manual** job in `.github/workflows/mcp.yml` (the `workflow_dispatch`
-trigger with `deploy: true`); CI itself only indexes, typechecks, and tests. To
-deploy manually:
+The corpus is **version-pinned and immutable**: each indexed version matches
+the source tree of its release tag, so what the MCP serves for `v0.2.0` is
+exactly what `cargo install mkit-cli` at 0.2.0 builds against. Three workflows:
+
+| Workflow | Trigger | Does |
+|---|---|---|
+| `mcp.yml` | PR / push touching mcp or docs | Validate only (index + typecheck + test). |
+| `mcp-release.yml` | Release tag `v*.*.*` (or dispatch) | Check out the **tag**, guard tag == workspace version, **seed that version into D1 if not already indexed**, deploy the Worker. Already-indexed versions are never touched; `workflow_dispatch` with `force: true` re-seeds a version *from its own tag* (indexer-fix escape hatch). |
+| `mcp-worker-deploy.yml` | Merge to `main` touching `mcp/src/**`/config | Typecheck + test, then deploy the Worker **code** only — never seeds. Tool/`instructions` fixes reach agents without waiting for a release. |
+
+Consequence: docs/SPEC/SKILL edits on `main` appear in the MCP **at the next
+release** (by design — served docs match the released binary). The Worker code
+itself tracks `main`.
+
+Manual deploy (escape hatch / local):
 
 ```bash
 npm run index            # rebuild dist/seed.sql from the tree
@@ -109,4 +121,6 @@ npm run deploy           # wrangler deploy (custom domain mcp.mkit.makechain.net
 > `db:seed` each part — the delete-by-version + upsert makes re-seeding idempotent.
 
 Secrets needed in CI: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (D1 edit +
-Workers deploy scope).
+Workers deploy scope), stored in the GitHub **Environment `mcp`**. The
+environment's deployment-branch policy must allow `main` **and** tags matching
+`v*.*.*` — otherwise the deploy jobs are silently blocked.
