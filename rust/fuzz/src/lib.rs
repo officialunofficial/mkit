@@ -152,11 +152,14 @@ pub fn software_key_record_one_iteration(input: &[u8]) {
 ///    `SshFrame`) are decoded from the raw input, through the
 ///    production decode caps (`frame_decode_options`) and the bare
 ///    decoder. Any input may fail to decode; none may panic.
-/// 2. **Owned roundtrip.** The input entropy drives
+/// 2. **Wire roundtrip.** The input entropy drives
 ///    `arbitrary::Arbitrary` to build structurally valid frames
 ///    (mkit-rpc's `arbitrary` feature, from buffa
-///    `generate_arbitrary` codegen); encode → decode must reproduce
-///    the original message exactly.
+///    `generate_arbitrary` codegen); encode → decode → re-encode must
+///    reproduce the same wire bytes. (Value equality would not hold:
+///    an `Arbitrary` open-enum `Unknown(v)` for a known wire value `v`
+///    is canonicalized to `Known(_)` on decode, yet both encode to the
+///    same bytes.)
 pub fn rpc_decode_one_iteration(input: &[u8]) {
     use arbitrary::Arbitrary;
     use buffa::Message;
@@ -170,16 +173,23 @@ pub fn rpc_decode_one_iteration(input: &[u8]) {
     let _ = SignerFrame::decode_from_slice(input);
     let _ = SshFrame::decode_from_slice(input);
 
+    // Wire-level roundtrip, NOT value-level: `Arbitrary` can build an
+    // open-enum field as `EnumValue::Unknown(v)` for a `v` that IS a
+    // known wire value, which the decoder canonicalizes back to
+    // `Known(_)` — so `frame == decoded` legitimately diverges. The
+    // property that must hold is that re-encoding the decoded message
+    // reproduces the same bytes (both representations encode `v`
+    // identically).
     let mut u = arbitrary::Unstructured::new(input);
     if let Ok(frame) = SignerFrame::arbitrary(&mut u) {
         let bytes = frame.encode_to_vec();
         let decoded = SignerFrame::decode_from_slice(&bytes).expect("re-decode SignerFrame");
-        assert_eq!(frame, decoded, "SignerFrame owned roundtrip diverged");
+        assert_eq!(bytes, decoded.encode_to_vec(), "SignerFrame wire roundtrip diverged");
     }
     if let Ok(frame) = SshFrame::arbitrary(&mut u) {
         let bytes = frame.encode_to_vec();
         let decoded = SshFrame::decode_from_slice(&bytes).expect("re-decode SshFrame");
-        assert_eq!(frame, decoded, "SshFrame owned roundtrip diverged");
+        assert_eq!(bytes, decoded.encode_to_vec(), "SshFrame wire roundtrip diverged");
     }
 }
 
