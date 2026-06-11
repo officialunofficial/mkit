@@ -13,64 +13,22 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSy
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCrateInfo, parseCommands, parseWorkspaceVersion } from "./parse.mjs";
+import { sqlStr, fileStatements, findOversized } from "./seed.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", ".."); // mcp/scripts -> mcp -> repo root
 const distDir = resolve(here, "..", "dist");
 
+// Cloudflare D1 rejects any single SQL statement over 100 KB (applies to
+// `wrangler d1 execute --file`). fileStatements keeps each statement under this.
+const MAX_STMT_BYTES = 99_000;
+
 // --- helpers ---------------------------------------------------------------
 
-const sqlStr = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const rel = (abs) => relative(repoRoot, abs).split("\\").join("/");
 
 function read(abs) {
   return readFileSync(abs, "utf8");
-}
-
-// Cloudflare D1 rejects any single SQL statement over 100 KB (applies to
-// `wrangler d1 execute --file`). Keep each emitted statement well under that.
-const MAX_STMT_BYTES = 99_000;
-// Raw chars per chunk: 45k chars escape to <=90k bytes even if every char is a
-// quote (doubled), leaving ample room for the statement scaffolding.
-const CHUNK_RAW_CHARS = 45_000;
-
-/** Split a string into <=maxChars pieces without ever splitting a surrogate pair. */
-function chunkString(s, maxChars) {
-  const chunks = [];
-  for (let i = 0; i < s.length; ) {
-    let j = Math.min(s.length, i + maxChars);
-    // Don't cut between a high and low surrogate.
-    if (j < s.length) {
-      const code = s.charCodeAt(j);
-      if (code >= 0xdc00 && code <= 0xdfff) j -= 1;
-    }
-    chunks.push(s.slice(i, j));
-    i = j;
-  }
-  return chunks;
-}
-
-/**
- * Emit the SQL to store one file's content. Small files are a single INSERT;
- * large ones are an INSERT plus `UPDATE ... content = content || '<chunk>'`
- * appends, so no single statement exceeds D1's per-statement cap. The FTS
- * AFTER-UPDATE trigger re-syncs the index to the full content after each append.
- */
-function emitFile(out, ver, path, content) {
-  const single = `INSERT INTO files (version, path, content) VALUES (${sqlStr(ver)}, ${sqlStr(path)}, ${sqlStr(content)});`;
-  if (Buffer.byteLength(single, "utf8") <= MAX_STMT_BYTES) {
-    out.push(single);
-    return;
-  }
-  const [first, ...rest] = chunkString(content, CHUNK_RAW_CHARS);
-  out.push(
-    `INSERT INTO files (version, path, content) VALUES (${sqlStr(ver)}, ${sqlStr(path)}, ${sqlStr(first)});`,
-  );
-  for (const chunk of rest) {
-    out.push(
-      `UPDATE files SET content = content || ${sqlStr(chunk)} WHERE version = ${sqlStr(ver)} AND path = ${sqlStr(path)};`,
-    );
-  }
 }
 
 /** Recursively collect files under `dir` matching `test(path)`, skipping noise. */
@@ -123,14 +81,19 @@ const commands = existsSync(cliMdPath) ? parseCommands(read(cliMdPath)) : [];
 
 // --- emit seed.sql ---------------------------------------------------------
 
+// No `BEGIN TRANSACTION;`/`COMMIT;` wrapper: `wrangler d1 execute --file` runs
+// its own transaction and naively strips the first BEGIN/COMMIT it finds, then
+// throws if "BEGIN TRANSACTION" appears again. Since the seed embeds whole repo
+// files as string literals, our own wrapper would (a) always trip that path and
+// (b) let a doc that merely contains "COMMIT;" get silently mangled. Omitting it
+// makes the trimmer a no-op; re-seeding stays idempotent via delete-by-version.
 const out = [];
-out.push("BEGIN TRANSACTION;");
 out.push(`DELETE FROM commands WHERE version = ${sqlStr(version)};`);
 out.push(`DELETE FROM crates   WHERE version = ${sqlStr(version)};`);
 out.push(`DELETE FROM files    WHERE version = ${sqlStr(version)};`);
 out.push(`DELETE FROM versions WHERE version = ${sqlStr(version)};`);
 for (const [path, content] of files) {
-  emitFile(out, version, path, content);
+  out.push(...fileStatements(version, path, content, MAX_STMT_BYTES));
 }
 for (const c of crates) {
   out.push(
@@ -143,23 +106,31 @@ for (const c of commands) {
   );
 }
 out.push(`INSERT INTO versions (version) VALUES (${sqlStr(version)});`);
-out.push("COMMIT;");
 
-// Guard: D1 rejects any statement over 100 KB. Fail loudly here rather than at
-// deploy time so an oversized file can never silently break `db:seed`.
-const offenders = out
-  .map((stmt) => [Buffer.byteLength(stmt, "utf8"), stmt])
-  .filter(([bytes]) => bytes > MAX_STMT_BYTES);
+// Guard 1: D1 rejects any statement over 100 KB. Fail loudly here, not at deploy.
+const offenders = findOversized(out, MAX_STMT_BYTES);
 if (offenders.length > 0) {
-  const worst = offenders.sort((a, b) => b[0] - a[0])[0];
+  const [worstBytes, worstStmt] = offenders[0];
   throw new Error(
     `build-index: ${offenders.length} SQL statement(s) exceed ${MAX_STMT_BYTES} bytes ` +
-      `(D1's per-statement cap). Largest is ${worst[0]} bytes: ${worst[1].slice(0, 120)}…`,
+      `(D1's per-statement cap). Largest is ${worstBytes} bytes: ${worstStmt.slice(0, 120)}…`,
+  );
+}
+
+// Guard 2: a corpus file literally containing "BEGIN TRANSACTION" would make
+// wrangler's trimmer mangle/reject the seed. Catch it at index time with a clear
+// message rather than a baffling deploy failure.
+const seedText = out.join("\n") + "\n";
+if (seedText.includes("BEGIN TRANSACTION")) {
+  throw new Error(
+    'build-index: a corpus file contains the literal "BEGIN TRANSACTION", which ' +
+      "breaks `wrangler d1 execute --file` (its transaction trimmer). Rename/escape " +
+      "the offending occurrence or exclude that file from the index.",
   );
 }
 
 mkdirSync(distDir, { recursive: true });
-writeFileSync(join(distDir, "seed.sql"), out.join("\n") + "\n");
+writeFileSync(join(distDir, "seed.sql"), seedText);
 const manifest = {
   version,
   files: files.size,

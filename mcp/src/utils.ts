@@ -11,7 +11,9 @@
 export function sortVersionsDesc(versions: string[]): void {
   // Parse only the numeric X.Y.Z core; drop any -prerelease/+build suffix so a
   // tag like v0.3.0-rc1 doesn't yield NaN (which makes the sort unstable and
-  // "latest" nondeterministic). NaN-guard each component to 0.
+  // "latest" nondeterministic). NaN-guard each component to 0. Known limitation:
+  // a pre-release ties with its release (v0.3.0-rc1 == v0.3.0) — fine here, where
+  // indexed versions are always plain X.Y.Z workspace versions.
   const core = (v: string) =>
     v
       .replace(/^v/, "")
