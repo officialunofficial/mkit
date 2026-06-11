@@ -93,11 +93,20 @@ jobs:
       - name: Check whether this version is already indexed
         id: indexed
         working-directory: mcp
+        shell: bash  # explicit: gets `-o pipefail`, so a wrangler failure fails the step
+        env:
+          FORCE: ${{ inputs.force }}
         run: |
           COUNT="$(npx wrangler d1 execute mkit-mcp-search --remote --json \
             --command "SELECT version FROM versions WHERE version = '$RELEASE_TAG'" \
             | jq '.[0].results | length')"
-          if [[ "$COUNT" != "0" && "${{ inputs.force }}" != "true" ]]; then
+          # Guard against a non-numeric COUNT (e.g. unexpected wrangler output):
+          # a query failure must fail the run, never masquerade as "already indexed".
+          if [[ ! "$COUNT" =~ ^[0-9]+$ ]]; then
+            echo "::error::could not determine indexed state for $RELEASE_TAG (got: '$COUNT')"
+            exit 1
+          fi
+          if [[ "$COUNT" != "0" && "$FORCE" != "true" ]]; then
             echo "seed=false" >> "$GITHUB_OUTPUT"
             echo "$RELEASE_TAG already indexed — corpus untouched (immutable); pass force=true to re-seed from this tag."
           else
