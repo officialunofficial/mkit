@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **git-bridge: deterministic one-way export to git mirrors**
-  (`mkit git export`, behind the default-off `git-export` feature).
+  (`mkit git export`, behind the default-off `git-export` feature;
+  [#330](https://github.com/officialunofficial/mkit/pull/330)).
   New normative spec [`docs/SPEC-GIT-BRIDGE.md`](docs/SPEC-GIT-BRIDGE.md)
   pins a byte-deterministic mkit→git object mapping (BLAKE3/SHA-1
   translation with mkit-only fields — signer, signature, identity,
@@ -29,21 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own renegotiation rule. Closes the Phase 0+1 scope of the
   git-interop exploration.
 
-### Security
-
-- **New `git-bridge/v1` attestation predicate** (SPEC-GIT-BRIDGE §11):
-  `mkit git export` mints one DSSE/in-toto attestation per exported
-  head, signed with the exporter's configured signer — subject is the
-  mkit commit (BLAKE3) + ref name; the predicate carries the
-  `gitCommit` SHA-1 as a locator (not a proof — SHA-1 is git's naming
-  function, never a security boundary here), the mirror URL, and
-  schema/spec versions. Bridge attestations are distinguishable from
-  author signatures by predicate type and keyid; they assert "this
-  exporter translated this commit", never authorship. Published on
-  the mirror under `refs/mkit/attestations`. Threat model unchanged:
-  carried signatures verify only over reconstructed mkit bytes, and
-  translated history that fails reconstruction fails closed.
-
 ### Changed
 
 - **buffa 0.6 → 0.7.1** across all crates (mkit-rpc, mkit-attest,
@@ -55,6 +41,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UpperCamelCase` enum value aliases. The declared requirement is
   `0.7.1` (not `0.7`) because regenerated packed-view decoders call the
   `RepeatedView::reserve` hook introduced in 0.7.1.
+
+### Security
+
+- **New `git-bridge/v1` attestation predicate** (SPEC-GIT-BRIDGE §11;
+  [#330](https://github.com/officialunofficial/mkit/pull/330)):
+  `mkit git export` mints one DSSE/in-toto attestation per exported
+  head, signed with the exporter's configured signer — subject is the
+  mkit commit (BLAKE3) + ref name; the predicate carries the
+  `gitCommit` SHA-1 as a locator (not a proof — SHA-1 is git's naming
+  function, never a security boundary here), the mirror URL, and
+  schema/spec versions. Bridge attestations are distinguishable from
+  author signatures by predicate type and keyid; they assert "this
+  exporter translated this commit", never authorship. Published on
+  the mirror under `refs/mkit/attestations`. Threat model unchanged:
+  carried signatures verify only over reconstructed mkit bytes, and
+  translated history that fails reconstruction fails closed.
 
 ## [0.2.0] - 2026-06-10
 

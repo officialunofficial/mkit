@@ -4,7 +4,7 @@
 # next lockstep version from Conventional Commits, rewrites the internal
 # dependency requirements, regenerates the root CHANGELOG.md (embedded
 # git-cliff), and runs cargo-semver-checks. Merging that PR makes the release
-# job `cargo publish` the 9 publishable LIBRARY crates to crates.io in
+# job `cargo publish` the 10 publishable LIBRARY crates to crates.io in
 # dependency order (mkit-core → mkit-rpc → mkit-attest → mkit-keystore → the
 # transports).
 #
@@ -93,11 +93,15 @@ changelog_include = [
   "mkit-cli",
   "mkit-wasm",
   "mkit-transport-enc",
+  "mkit-git-bridge",
 ]
 
 # Every other crate: shares the lockstep version_group, never tags/releases.
 [[package]]
 name = "mkit-attest"
+version_group = "mkit"
+[[package]]
+name = "mkit-git-bridge"
 version_group = "mkit"
 [[package]]
 name = "mkit-keystore"

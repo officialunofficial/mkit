@@ -471,3 +471,119 @@ fn remote_name_state_is_bound_to_one_dest() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// SPEC-GIT-BRIDGE §11: the published envelope's content is what the
+/// spec pins — decode a .dsse from the mirror and check predicateType,
+/// subject, and the gitCommit locator.
+#[test]
+fn published_attestation_content_matches_spec() {
+    if !git_available() {
+        return;
+    }
+    let r = fixture();
+    let mroot = mirror_root();
+    let mirror = mroot.path().join("m");
+    r.ok(&["git", "export", mirror.to_str().unwrap()]);
+
+    let head_sha = git_ok(&mirror, &["rev-parse", "refs/heads/main"]);
+    let head_sha = head_sha.trim();
+    let mkit_head = {
+        let out = r.ok(&["rev-parse", "HEAD"]);
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+
+    let names = git_ok(
+        &mirror,
+        &["ls-tree", "--name-only", "refs/mkit/attestations"],
+    );
+    let mut matched = false;
+    for name in names.lines() {
+        let blob = git_ok(
+            &mirror,
+            &[
+                "cat-file",
+                "blob",
+                &format!("refs/mkit/attestations:{name}"),
+            ],
+        );
+        let env = mkit_attest::envelope::decode(blob.as_bytes()).expect("valid DSSE envelope");
+        assert_eq!(env.payload_type, mkit_attest::PAYLOAD_TYPE_IN_TOTO);
+        assert_eq!(env.signatures.len(), 1);
+        let payload = String::from_utf8(env.payload.clone()).unwrap();
+        assert!(
+            payload.contains(
+                "https://github.com/officialunofficial/mkit/spec/predicate/git-bridge/v1"
+            ),
+            "predicateType missing in {payload}"
+        );
+        if payload.contains("refs/heads/main") {
+            matched = true;
+            assert!(
+                payload.contains(&format!("\"gitCommit\":\"{head_sha}\"")),
+                "gitCommit locator mismatch in {payload}"
+            );
+            assert!(
+                payload.contains(&format!("\"blake3\":\"{mkit_head}\"")),
+                "subject blake3 mismatch in {payload}"
+            );
+            assert!(payload.contains("\"schemaVersion\":1"));
+            assert!(payload.contains("\"specVersion\":1"));
+        }
+    }
+    assert!(matched, "no envelope for refs/heads/main found");
+}
+
+/// SPEC-GIT-BRIDGE §12.2: the protective half of the lease — an
+/// out-of-band mirror move makes the export fail loudly and leaves
+/// the mirror untouched.
+#[test]
+fn out_of_band_mirror_move_fails_the_lease() {
+    if !git_available() {
+        return;
+    }
+    let r = fixture();
+    let mroot = mirror_root();
+    let mirror = mroot.path().join("m");
+    let dest = mirror.to_str().unwrap();
+    r.ok(&["git", "export", dest]);
+
+    // Move main out-of-band to another commit object (the synthetic
+    // attestations commit is convenient and valid).
+    let foreign = git_ok(&mirror, &["rev-parse", "refs/mkit/attestations"]);
+    git_ok(&mirror, &["update-ref", "refs/heads/main", foreign.trim()]);
+
+    r.commit_file("late.txt", b"x\n", "late");
+    let out = r.run(&["git", "export", dest]);
+    assert!(!out.status.success(), "lease must reject the stale push");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("hint:"), "stderr: {stderr}");
+    let still = git_ok(&mirror, &["rev-parse", "refs/heads/main"]);
+    assert_eq!(still.trim(), foreign.trim(), "mirror must be untouched");
+}
+
+/// --ref with a tag, and duplicate --ref values, both export cleanly.
+#[test]
+fn tag_subset_and_duplicate_refs_export() {
+    if !git_available() {
+        return;
+    }
+    let r = fixture();
+    let mroot = mirror_root();
+    let mirror = mroot.path().join("m");
+    let out = r.ok(&[
+        "git",
+        "export",
+        "--ref",
+        "refs/tags/v1",
+        "--ref",
+        "refs/tags/v1",
+        mirror.to_str().unwrap(),
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.matches("exported ").count(), 1, "{stdout}");
+    assert!(
+        mirror_refs(&mirror)
+            .iter()
+            .any(|l| l.starts_with("refs/tags/v1 "))
+    );
+}

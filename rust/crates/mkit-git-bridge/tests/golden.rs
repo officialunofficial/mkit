@@ -276,6 +276,7 @@ fn golden_vectors_match() {
         };
         pinned.insert(n, (b3, s1));
     }
+    assert_eq!(vectors.len(), 9, "SPEC-GIT-BRIDGE §13 pins nine vectors");
     assert_eq!(pinned.len(), vectors.len(), "vector count drifted");
 
     for (name, h) in &vectors {

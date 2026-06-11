@@ -502,3 +502,222 @@ fn tag_name_outside_grammar_is_refused() {
         "got {err}"
     );
 }
+
+// ─── review-round additions ─────────────────────────────────────────
+
+/// §3: plain blobs above the chunking threshold cannot round-trip and
+/// must refuse (a conformant writer would have chunked them).
+#[test]
+fn oversized_plain_blob_is_refused() {
+    let (_d, store) = store();
+    let big: Vec<u8> = (0u32..300_000).flat_map(u32::to_le_bytes).collect();
+    let h = put(&store, &Object::Blob(Blob { data: big }));
+    let mut known = HashMap::new();
+    let err = translate_closure(&store, &h, &mut known, &mut |_, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::Refused(mkit_git_bridge::Refusal::NonCanonicalChunking { .. })
+        ),
+        "got {err}"
+    );
+}
+
+/// §9: forged git trees that no mkit source could produce (illegal or
+/// duplicate entry names) must fail reconstruction, not round-trip.
+#[test]
+fn reconstruct_rejects_mkit_illegal_tree_names() {
+    let blob_id = [0x11u8; 20];
+    let resolve = |_: &[u8; 20]| Some([0x22u8; 32]);
+    let entry = |name: &[u8]| {
+        let mut e = Vec::new();
+        e.extend_from_slice(b"100644 ");
+        e.extend_from_slice(name);
+        e.push(0);
+        e.extend_from_slice(&blob_id);
+        e
+    };
+    // `.git` is git-legal but mkit-illegal (SPEC-OBJECTS §4.1).
+    let err = reconstruct::reconstruct_tree(&entry(b".git"), &resolve).unwrap_err();
+    assert!(
+        matches!(err, BridgeError::NotBridgeObject(_)),
+        "dot-git: got {err}"
+    );
+    // Duplicate names: distinct git sort keys cannot collide for
+    // blob+blob, so build blob+tree with the same name.
+    let mut dup = entry(b"same");
+    dup.extend_from_slice(b"40000 same\0");
+    dup.extend_from_slice(&[0x33u8; 20]);
+    let resolve2 = |id: &[u8; 20]| {
+        Some(if *id == blob_id {
+            [0x22u8; 32]
+        } else {
+            [0x44u8; 32]
+        })
+    };
+    let err = reconstruct::reconstruct_tree(&dup, &resolve2).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::NotBridgeObject(_) | BridgeError::Integrity(_)
+        ),
+        "duplicate: got {err}"
+    );
+}
+
+/// Helper: the translated git body of the fixture's signed head commit.
+fn signed_commit_body() -> Vec<u8> {
+    let (_d, store) = store();
+    let (child, _) = build_fixture(&store);
+    let (_known, emitted) = translate_all(&store, &child);
+    emitted
+        .iter()
+        .find(|(h, _)| h == &child)
+        .map(|(_, g)| g.body.clone())
+        .expect("head commit emitted")
+}
+
+fn as_commit(body: Vec<u8>) -> GitObject {
+    GitObject {
+        gtype: mkit_git_bridge::GitType::Commit,
+        body,
+    }
+}
+
+/// §10: tampered signatures/fields report Failed — never Unsigned,
+/// never Verified.
+#[test]
+fn shallow_verify_reports_failed_on_tamper() {
+    let body = String::from_utf8(signed_commit_body()).unwrap();
+
+    // Flip one hex digit of the signature value.
+    let sig_line_start = body.find("mkit-signature ").unwrap() + "mkit-signature ".len();
+    let mut tampered = body.clone();
+    let old = tampered.as_bytes()[sig_line_start];
+    let new = if old == b'0' { '1' } else { '0' };
+    tampered.replace_range(sig_line_start..=sig_line_start, &new.to_string());
+    assert_eq!(
+        shallow_verify(&as_commit(tampered.into_bytes())).unwrap(),
+        ShallowVerdict::Failed,
+        "tampered signature"
+    );
+
+    // Flip one hex digit of the carried mkit-tree (signed bytes change).
+    let tree_start = body.find("mkit-tree ").unwrap() + "mkit-tree ".len();
+    let mut tampered = body.clone();
+    let old = tampered.as_bytes()[tree_start];
+    let new = if old == b'0' { '1' } else { '0' };
+    tampered.replace_range(tree_start..=tree_start, &new.to_string());
+    assert_eq!(
+        shallow_verify(&as_commit(tampered.into_bytes())).unwrap(),
+        ShallowVerdict::Failed,
+        "tampered mkit-tree"
+    );
+}
+
+/// §1.2/§9: schema gating and the explicit fail-closed branches.
+#[test]
+fn reconstruct_fail_closed_branches() {
+    let body = String::from_utf8(signed_commit_body()).unwrap();
+    let cases: Vec<(&str, String)> = vec![
+        ("schema 2", body.replace("mkit-schema 1", "mkit-schema 2")),
+        ("schema missing", body.replace("mkit-schema 1\n", "")),
+        (
+            "reserved header",
+            body.replace("mkit-schema 1\n", "mkit-schema 1\nmkit-remix-source 00\n"),
+        ),
+        ("duplicate signer", {
+            let line_start = body.find("mkit-signer ").unwrap();
+            let line_end = body[line_start..].find('\n').unwrap() + line_start + 1;
+            let line = &body[line_start..line_end];
+            format!("{}{}{}", &body[..line_end], line, &body[line_end..])
+        }),
+        (
+            "continuation line",
+            body.replace("mkit-schema 1\n", "mkit-schema 1\n continuation\n"),
+        ),
+        (
+            "unknown mkit header",
+            body.replace("mkit-schema 1\n", "mkit-schema 1\nmkit-unknown x\n"),
+        ),
+    ];
+    for (label, mutated) in cases {
+        let err = reconstruct::reconstruct_commit(mutated.as_bytes()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BridgeError::NotBridgeObject(_) | BridgeError::Integrity(_)
+            ),
+            "{label}: got {err}"
+        );
+    }
+}
+
+/// §1.2 store-side: a future-schema object refuses with the typed
+/// `SchemaVersion` refusal.
+#[test]
+fn future_schema_object_is_typed_refusal() {
+    let (_d, store) = store();
+    let blob_bytes = mkit_core::serialize(&Object::Blob(Blob {
+        data: b"x".to_vec(),
+    }))
+    .unwrap();
+    let mut future = blob_bytes.clone();
+    future[5] = 0x02; // prologue schema_version
+    let h = store.write(&future).unwrap();
+    let mut known = HashMap::new();
+    let err = translate_closure(&store, &h, &mut known, &mut |_, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::Refused(mkit_git_bridge::Refusal::SchemaVersion { .. })
+        ),
+        "got {err}"
+    );
+}
+
+/// §6.2 applies to tags too.
+#[test]
+fn tag_timestamp_overflow_is_refused() {
+    let (_d, store) = store();
+    let empty_tree = put(&store, &Object::Tree(Tree { entries: vec![] }));
+    let root = signed_commit(&store, empty_tree, vec![], "r\n");
+    let tag = Tag {
+        target: root,
+        target_type: mkit_core::ObjectType::Commit,
+        name: b"v1".to_vec(),
+        tagger: Identity::opaque(b"t".to_vec()),
+        signer: [0; 32],
+        message: vec![],
+        timestamp: u64::MAX,
+        signature: [0; 64],
+    };
+    let h = put(&store, &Object::Tag(tag));
+    let mut known = HashMap::new();
+    let err = translate_closure(&store, &h, &mut known, &mut |_, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::Refused(mkit_git_bridge::Refusal::TimestampOverflow { .. })
+        ),
+        "got {err}"
+    );
+}
+
+/// Loose objects read back through the verifying reader; malformed
+/// `parse_raw` inputs are rejected.
+#[test]
+fn loose_read_verifies_and_parse_raw_rejects_junk() {
+    use mkit_git_bridge::gitobj::GitObject as GO;
+    let dir = tempfile::tempdir().unwrap();
+    let obj = mkit_git_bridge::gitobj::GitObject {
+        gtype: mkit_git_bridge::GitType::Blob,
+        body: b"abc".to_vec(),
+    };
+    let id = obj.write_loose(dir.path()).unwrap();
+    let back = GO::read_loose(dir.path(), &id).unwrap();
+    assert_eq!(back, obj);
+    assert!(GO::parse_raw(b"blob 4\0abc").is_none(), "wrong length");
+    assert!(GO::parse_raw(b"blobby 3\0abc").is_none(), "unknown type");
+    assert!(GO::parse_raw(b"blob3\0abc").is_none(), "no space");
+}

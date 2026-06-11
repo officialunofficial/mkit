@@ -40,8 +40,10 @@ const REFS_FILE: &str = "refs";
 /// not parse (torn tail from a crash) are ignored.
 pub fn load_map(dir: &Path) -> Result<HashMap<Hash, Sha1Id>, BridgeError> {
     let path = dir.join(MAP_FILE);
-    let data = match std::fs::read_to_string(&path) {
-        Ok(d) => d,
+    // §12.3: corruption (including undecodable bytes) means "rebuild",
+    // never an error — lossy decoding turns garbage into skipped lines.
+    let data = match std::fs::read(&path) {
+        Ok(d) => String::from_utf8_lossy(&d).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
         Err(e) => return Err(e.into()),
     };
@@ -94,8 +96,8 @@ pub struct RefState {
 /// Load per-ref state. Missing file = empty.
 pub fn load_ref_state(dir: &Path) -> Result<Vec<RefState>, BridgeError> {
     let path = dir.join(REFS_FILE);
-    let data = match std::fs::read_to_string(&path) {
-        Ok(d) => d,
+    let data = match std::fs::read(&path) {
+        Ok(d) => String::from_utf8_lossy(&d).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };

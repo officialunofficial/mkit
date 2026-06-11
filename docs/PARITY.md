@@ -97,7 +97,7 @@ creeping; revisit post-v1 if demand warrants.
 | `stash` | save/list/pop/apply/drop/clear/show | same | ✅ | — | — | |
 | `gc` | prune unreachable objects | mark-and-sweep, recovery-aware | ✅ | — | #233 | `-n`/`--grace-secs`; fail-closed; see SPEC-GC.md |
 | `add -p` | interactive hunk staging | same | ✅ | 4 | #258 | per-hunk `y/n/q/a/d`; regular text files only (binary skipped with a message, symlink/dir refused); explicit paths required; ignored paths need `-f`; symlinked-parent escapes refused; `s` (split) / `e` (manual edit) are follow-ups |
-| `git export` | *(no git analogue — mirror-to-git bridge)* | deterministic one-way export to a git mirror per [`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md) | 🔨 | — | — | feature-gated (`git-export`); per-ref refuse-loudly for remixes / unmappable ref names / fixed-size chunked manifests; import direction remains 🚫 |
+| `git export` | *(no git analogue — mirror-to-git bridge)* | deterministic one-way export to a git mirror per [`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md) | ✅ | — | #330 | **experimental**, feature-gated (`git-export`, default-off); per-ref refuse-loudly for remixes / unmappable ref names / non-canonical chunking; import direction remains 🚫 |
 
 ## Plumbing commands (read-only first, mutating later)
 

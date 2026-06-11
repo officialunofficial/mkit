@@ -318,6 +318,18 @@ _mkit() {
                         '--help[show help]' \
                         '1:hash:'
                     ;;
+                git)
+                    _arguments \
+                        '--remote-name[bridge state name (default mirror)]:name:' \
+                        '*--ref[full ref name to export]:ref:' \
+                        '--no-attest[skip provenance attestations]' \
+                        '--algorithm[attestation algorithm]:alg:(ed25519 secp256k1 p256)' \
+                        '--signer[attestation signer kind]:kind:(repo-key external keystore)' \
+                        '--json[machine-readable output]' \
+                        '--help[show help]' \
+                        '1:subcommand:(export)' \
+                        '2:dest:_files -/'
+                    ;;
                 attest)
                     _arguments \
                         '--commit[commit hash]:hash:' \

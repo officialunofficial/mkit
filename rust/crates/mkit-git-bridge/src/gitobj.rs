@@ -102,7 +102,9 @@ impl GitObject {
         let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
         enc.write_all(&self.raw())?;
         let compressed = enc.finish()?;
-        let tmp = dir.join(format!(".tmp-{}", sha1_hex(&id)));
+        // Unique per process so concurrent writers never share a tmp
+        // path; content addressing makes the rename race benign.
+        let tmp = dir.join(format!(".tmp-{}-{}", std::process::id(), sha1_hex(&id)));
         std::fs::write(&tmp, &compressed)?;
         match std::fs::rename(&tmp, &path) {
             Ok(()) => Ok(id),
@@ -131,14 +133,25 @@ impl GitObject {
         })
     }
 
-    /// Read and parse a loose object from a git objects dir.
+    /// Read and parse a loose object from a git objects dir,
+    /// verifying the bytes hash back to the requested id (also
+    /// rejects non-canonical headers, since [`Self::id`] re-renders
+    /// the canonical form).
     pub fn read_loose(git_dir: &Path, id: &Sha1Id) -> Result<Self, BridgeError> {
         let compressed = std::fs::read(Self::loose_path(git_dir, id))?;
         let mut dec = flate2::read::ZlibDecoder::new(&compressed[..]);
         let mut raw = Vec::new();
         std::io::Read::read_to_end(&mut dec, &mut raw)?;
-        Self::parse_raw(&raw)
-            .ok_or_else(|| BridgeError::NotBridgeObject("malformed loose object header".into()))
+        let obj = Self::parse_raw(&raw)
+            .ok_or_else(|| BridgeError::NotBridgeObject("malformed loose object header".into()))?;
+        if obj.id() != *id {
+            return Err(BridgeError::Integrity(format!(
+                "loose object {} hashes to {}",
+                sha1_hex(id),
+                sha1_hex(&obj.id())
+            )));
+        }
+        Ok(obj)
     }
 }
 

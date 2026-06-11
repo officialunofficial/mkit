@@ -35,6 +35,24 @@ pub struct Reconstructed {
 fn finish(object: Object, extras: Vec<(Hash, Vec<u8>)>) -> Result<Reconstructed, BridgeError> {
     let bytes = mkit_core::serialize(&object)
         .map_err(|e| BridgeError::Integrity(format!("reserialize: {e}")))?;
+    // §9 validity clause: the rebuilt bytes MUST deserialize under
+    // SPEC-OBJECTS. Re-translation byte-equality proves bridge shape,
+    // but only this proves the result is a legal mkit object (it
+    // catches e.g. forged git trees with `.git`/duplicate entry
+    // names, which no mkit source could have produced).
+    match mkit_core::deserialize(&bytes) {
+        Ok(round) if round == object => {}
+        Ok(_) => {
+            return Err(BridgeError::Integrity(
+                "reconstructed bytes round-trip to a different object".into(),
+            ));
+        }
+        Err(e) => {
+            return Err(BridgeError::NotBridgeObject(format!(
+                "reconstructed object is not legal under SPEC-OBJECTS: {e}"
+            )));
+        }
+    }
     let hash = mkit_core::hash::hash(&bytes);
     Ok(Reconstructed {
         hash,

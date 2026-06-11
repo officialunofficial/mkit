@@ -102,17 +102,21 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     // ── per-remote bridge state + bare staging repo ────────────────
     let state =
         map::state_dir(&mkit_dir, &opts.remote_name).map_err(|e| (e.to_string(), exit::USAGE))?;
-    let mut known =
-        map::load_map(&state).map_err(|e| (format!("load map cache: {e}"), exit::GENERAL_ERROR))?;
-    let prior_state = map::load_ref_state(&state)
-        .map_err(|e| (format!("load ref state: {e}"), exit::GENERAL_ERROR))?;
     let staging = state.join("repo.git");
     if !staging.join("objects").is_dir() {
+        // (Re)initializing staging invalidates the map cache: cached
+        // sha1s would point at objects the fresh staging repo does not
+        // have, wedging update-ref/push (§12.3: cache is disposable).
+        let _ = std::fs::remove_file(state.join("map"));
         std::fs::create_dir_all(&staging)
             .map_err(|e| (format!("create staging dir: {e}"), exit::CANTCREAT))?;
         git_in(&staging, &["init", "--bare", "--quiet", "."])
             .map_err(|e| (format!("init staging repo: {e}"), exit::CANTCREAT))?;
     }
+    let mut known =
+        map::load_map(&state).map_err(|e| (format!("load map cache: {e}"), exit::GENERAL_ERROR))?;
+    let prior_state = map::load_ref_state(&state)
+        .map_err(|e| (format!("load ref state: {e}"), exit::GENERAL_ERROR))?;
 
     // Validate/prepare the destination up front (before any signing or
     // state mutation), and bind this state dir to one dest: leases
@@ -196,7 +200,14 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
         None
     } else {
         Some(publish_attestations(
-            cwd, &mkit_dir, &store, &staging, &opts.dest, &exported, opts,
+            cwd,
+            &mkit_dir,
+            &store,
+            &staging,
+            &opts.dest,
+            &exported,
+            opts,
+            &prior_state,
         )?)
     };
 
@@ -238,8 +249,19 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
         push_args.push(format!("{name}:{name}"));
     }
     let push_arg_refs: Vec<&str> = push_args.iter().map(String::as_str).collect();
-    git_in(&staging, &push_arg_refs)
-        .map_err(|e| (format!("push to {}: {e}", opts.dest), exit::GENERAL_ERROR))?;
+    git_in(&staging, &push_arg_refs).map_err(|e| {
+        let hint = if e.contains("stale info") {
+            "\nhint: the mirror moved since the last export; if that \
+             change is yours/expected, remove .mkit/git/<name>/refs to \
+             reseed leases from the mirror and re-run"
+        } else {
+            ""
+        };
+        (
+            format!("push to {}: {e}{hint}", opts.dest),
+            exit::GENERAL_ERROR,
+        )
+    })?;
 
     // ── record the new lease expectations ──────────────────────────
     // Merge over prior state: refs not in this export keep their
@@ -311,7 +333,11 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
 fn collect_refs(mkit_dir: &Path, explicit: &[String]) -> CmdResult<Vec<(String, Hash)>> {
     if !explicit.is_empty() {
         let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for name in explicit {
+            if !seen.insert(name.as_str()) {
+                continue; // duplicate --ref would duplicate the refspec
+            }
             let short = name
                 .strip_prefix("refs/heads/")
                 .or_else(|| name.strip_prefix("refs/tags/"));
@@ -367,6 +393,7 @@ fn publish_attestations(
     dest: &str,
     exported: &[Exported],
     opts: &ExportArgs,
+    prior_state: &[map::RefState],
 ) -> CmdResult<Sha1Id> {
     // Same signer resolution as `mkit attest` (SPEC-GIT-BRIDGE §11:
     // "the exporter's configured signer"): flag, else config default.
@@ -382,8 +409,13 @@ fn publish_attestations(
         .signer
         .clone()
         .unwrap_or_else(|| cfg.attest.signer_or_fallback().to_owned());
-    let mut signer = attest_factory::build_signer(cwd, algorithm, &signer_kind, &cfg)
-        .map_err(|e| (format!("build bridge signer: {e}"), exit::GENERAL_ERROR))?;
+    let mut signer =
+        attest_factory::build_signer(cwd, algorithm, &signer_kind, &cfg).map_err(|e| {
+            (
+                format!("build bridge signer: {e}"),
+                crate::commands::attest::factory_error_code(&e),
+            )
+        })?;
 
     // Existing published entries (name → blob id) so re-exports merge.
     let mut entries: Vec<(String, Sha1Id)> = Vec::new();
@@ -394,8 +426,23 @@ fn publish_attestations(
         }
     }
 
+    // Mint only for new/moved heads: a head whose recorded state is
+    // unchanged AND whose claim is already on the published ref needs
+    // no fresh envelope. This keeps no-op re-exports no-op even with
+    // nondeterministic signers (e.g. P-256), instead of growing the
+    // tree and local store every run.
+    let already_published = |e: &Exported| -> bool {
+        old_commit.is_some()
+            && prior_state.iter().any(|s| {
+                s.ref_name == e.ref_name && s.mkit_hash == e.mkit_hash && s.git_id == e.git_id
+            })
+    };
     let mut max_ts = 0u64;
     for e in exported {
+        if already_published(e) {
+            max_ts = max_ts.max(head_timestamp(store, &e.mkit_hash));
+            continue;
+        }
         // Deterministic synthetic-commit timestamp: newest exported head.
         max_ts = max_ts.max(head_timestamp(store, &e.mkit_hash));
         let predicate = format!(
@@ -560,12 +607,18 @@ fn ensure_dest(dest: &str) -> CmdResult<String> {
         return Err((format!("invalid destination {dest:?}"), exit::USAGE));
     }
     // git's own rule: "://" means a URL, and otherwise a colon BEFORE
-    // the first slash means an scp-style remote (user@ is optional).
-    let looks_like_url = dest.contains("://")
-        || dest
-            .split('/')
-            .next()
-            .is_some_and(|first| first.contains(':'));
+    // the first slash means an scp-style remote (user@ is optional) —
+    // except a DOS drive prefix (`C:\` / `C:/`), which is a path.
+    let dos_drive = dest.len() >= 2
+        && dest.as_bytes()[0].is_ascii_alphabetic()
+        && dest.as_bytes()[1] == b':'
+        && matches!(dest.as_bytes().get(2), None | Some(b'/' | b'\\'));
+    let looks_like_url = !dos_drive
+        && (dest.contains("://")
+            || dest
+                .split('/')
+                .next()
+                .is_some_and(|first| first.contains(':')));
     if looks_like_url {
         return Ok(dest.to_owned());
     }

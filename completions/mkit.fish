@@ -234,6 +234,21 @@ complete -c mkit -n "__fish_seen_subcommand_from pack-shard" \
 complete -c mkit -n "__fish_seen_subcommand_from pack-shard" \
     -l force -d "Overwrite existing shards"
 
+# git (bridge) flags.
+complete -c mkit -n "__fish_seen_subcommand_from git" -a export -d "Export refs to a git mirror"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l remote-name -d "Bridge state name (default mirror)" -r
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l ref -d "Full ref name to export" -r
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l no-attest -d "Skip provenance attestations"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l algorithm -d "Attestation algorithm" -xa "ed25519 secp256k1 p256"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l signer -d "Attestation signer kind" -xa "repo-key external keystore"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l json -d "Machine-readable output"
+
 # Generic --help on any subcommand.
 complete -c mkit -n "__fish_seen_subcommand_from $__mkit_subcommands" \
     -l help -d "Show help for this subcommand"

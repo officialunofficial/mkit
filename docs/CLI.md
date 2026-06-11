@@ -645,10 +645,12 @@ Remote / sync:
   the monolithic pack) or "manifest + all shards". Requires building
   the binary with `--features pack-shards`.
 - `mkit git export <dest> [--remote-name <name>] [--ref <ref>]...
-  [--no-attest] [--json]` — deterministic **one-way** export of
+  [--no-attest] [--algorithm <alg>] [--signer <kind>] [--json]` — deterministic **one-way** export of
   branches and tags to a git mirror
   ([`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md)). `<dest>` is a git URL or
-  a local path (a missing/empty local path is initialized bare).
+  a local path (a missing/empty local path is initialized bare);
+  `--remote-name` defaults to `mirror`, and `--ref` takes full names
+  (`refs/heads/...` / `refs/tags/...`).
   Translation is byte-deterministic: the same history yields the same
   git SHA-1s on every machine, and mkit-only fields (signer,
   signature, identity, annotation slots) ride in `mkit-*` commit

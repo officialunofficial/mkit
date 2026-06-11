@@ -92,6 +92,12 @@ attestation binds the two id spaces together (§11).
 
 git blob body = the mkit blob's `data` bytes, verbatim.
 
+A plain blob whose `data` exceeds the 1 MiB chunking threshold MUST
+be refused: a conformant writer stores such content chunked, and §9's
+reconstruction would re-chunk it into a manifest — the round trip
+would not be bit-exact. (This is the plain-blob mirror of §4 item 2;
+non-default-threshold writers are out of v1 scope.)
+
 Reconstruction: mkit blob prologue + `u32 LE len` + bytes (§9).
 
 ---
@@ -385,7 +391,8 @@ ref head (SPEC-ATTESTATIONS encoding rules apply):
   `https://github.com/officialunofficial/mkit/spec/predicate/git-bridge/v1`
   (the SPEC-ATTESTATIONS §6.4 project-controlled URI scheme).
 - `subject[0]`: `name` = the full mkit ref name; `digest` =
-  `{"blake3": "<64hex mkit commit hash>"}`. The git-side id rides in
+  `{"blake3": "<64hex mkit hash of the ref head — a commit, or a tag
+  object for annotated-tag refs>"}`. The git-side id rides in
   the predicate, not the subject: SPEC-ATTESTATIONS's v1 Statement
   encoder is deliberately blake3-only, and the SHA-1 is a locator,
   not an identity (§2). Promoting `gitCommit` into a multi-digest
@@ -405,7 +412,9 @@ ref head (SPEC-ATTESTATIONS encoding rules apply):
 ```
 
   Field semantics: `gitCommit` locates the translated head on the
-  mirror (locator, never a proof — §2); `mirror` is the git remote
+  mirror (locator, never a proof — §2; for annotated-tag refs it is
+  the SHA-1 of the translated git *tag object* — the field name stays
+  for predicate stability); `mirror` is the git remote
   the head was exported to, as configured (a locator, not an identity
   claim); `refName` is the full mkit ref whose head is attested;
   `schemaVersion` is the mkit object `schema_version` the translated
@@ -413,7 +422,14 @@ ref head (SPEC-ATTESTATIONS encoding rules apply):
   predicate's own shape, i.e. the `git-bridge/v1` definition.
 
 The attestation is signed with the exporter's configured signer
-(SPEC-ATTESTATIONS signer plumbing, unchanged). **Distinguishability
+(SPEC-ATTESTATIONS signer plumbing, unchanged). An exporter MAY skip
+attestation minting when explicitly requested (no key material is
+consulted in that case); a mirror without bridge attestations is
+merely unattested, not invalid. Exporters SHOULD also skip re-minting
+for a head whose recorded exported state is unchanged and whose claim
+is already published — fresh envelopes for old claims add no
+information and (with nondeterministic signature schemes) would grow
+the published set on every run. **Distinguishability
 from author signatures comes from the predicate type and the DSSE
 keyid — not from a signing domain.** Verifier guidance: a
 `git-bridge/v1` attestation asserts "this exporter translated this

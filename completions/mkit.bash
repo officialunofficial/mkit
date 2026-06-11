@@ -125,6 +125,9 @@ _mkit_complete() {
         pack-shard)
             COMPREPLY=( $(compgen -W "--out --force --help" -- "$cur") )
             ;;
+        git)
+            COMPREPLY=( $(compgen -W "export --remote-name --ref --no-attest --algorithm --signer --json --help" -- "$cur") )
+            ;;
         attest)
             COMPREPLY=( $(compgen -W "--commit --algorithm --signer --predicate-type --predicate-file --additional-signer --help" -- "$cur") )
             ;;

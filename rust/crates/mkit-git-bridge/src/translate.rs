@@ -164,18 +164,20 @@ pub fn translate_tree(
         })
         .collect::<Result<_, _>>()?;
     // git sorts with directory names compared as `name + "/"`.
-    entries.sort_by(|(a, _), (b, _)| {
-        let key = |e: &mkit_core::object::TreeEntry| {
+    // Keys are materialized once (not per comparison).
+    let mut keyed: Vec<(Vec<u8>, &mkit_core::object::TreeEntry, Sha1Id)> = entries
+        .drain(..)
+        .map(|(e, id)| {
             let mut k = e.name.clone();
             if e.mode == EntryMode::Tree {
                 k.push(b'/');
             }
-            k
-        };
-        key(a).cmp(&key(b))
-    });
+            (k, e, id)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
     let mut body = Vec::new();
-    for (e, id) in entries {
+    for (_, e, id) in keyed {
         body.extend_from_slice(git_mode(e.mode));
         body.push(b' ');
         body.extend_from_slice(&e.name);
@@ -435,7 +437,19 @@ fn translate_one<S: ObjectSource>(
     resolve: &impl Fn(&Hash) -> Option<Sha1Id>,
 ) -> Result<GitObject, BridgeError> {
     match obj {
-        Object::Blob(b) => Ok(translate_blob(&b.data)),
+        Object::Blob(b) => {
+            // §3: a conformant writer stores content above the 1 MiB
+            // threshold chunked; a plain blob past it cannot survive
+            // the §9 round trip (reconstruction would re-chunk it).
+            if b.data.len() as u64 > mkit_core::worktree::CHUNK_THRESHOLD {
+                return Err(Refusal::NonCanonicalChunking {
+                    object: *hash,
+                    detail: "plain blob above the 1 MiB chunking threshold",
+                }
+                .into());
+            }
+            Ok(translate_blob(&b.data))
+        }
         Object::ChunkedBlob(m) => translate_chunked(hash, m, source),
         Object::Tree(t) => translate_tree(t, resolve),
         Object::Commit(c) => {
