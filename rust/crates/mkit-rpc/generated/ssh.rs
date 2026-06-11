@@ -29,6 +29,20 @@ pub enum RefExpectation {
     /// value on the server.
     REF_EXPECTATION_MATCH = 3i32,
 }
+impl RefExpectation {
+    ///Idiomatic alias for [`Self::REF_EXPECTATION_UNSPECIFIED`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Unspecified: Self = Self::REF_EXPECTATION_UNSPECIFIED;
+    ///Idiomatic alias for [`Self::REF_EXPECTATION_ANY`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Any: Self = Self::REF_EXPECTATION_ANY;
+    ///Idiomatic alias for [`Self::REF_EXPECTATION_MISSING`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Missing: Self = Self::REF_EXPECTATION_MISSING;
+    ///Idiomatic alias for [`Self::REF_EXPECTATION_MATCH`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Match: Self = Self::REF_EXPECTATION_MATCH;
+}
 impl ::core::default::Default for RefExpectation {
     fn default() -> Self {
         Self::REF_EXPECTATION_UNSPECIFIED
@@ -1795,6 +1809,8 @@ pub mod list_refs_response {
     }
     #[doc(inline)]
     pub use super::__buffa::view::list_refs_response::RefEntryView;
+    #[doc(inline)]
+    pub use super::__buffa::view::list_refs_response::RefEntryOwnedView;
 }
 #[derive(Clone, PartialEq, Default)]
 pub struct ReadRef {

@@ -23,3 +23,5 @@ pub mod __buffa {
 }
 #[doc(inline)]
 pub use self::__buffa::view::ErrorView;
+#[doc(inline)]
+pub use self::__buffa::view::ErrorOwnedView;

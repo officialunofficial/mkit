@@ -19,7 +19,7 @@ workspace = true
 # accepts them once `publish = true` is flipped on in Phase 2.
 mkit-core = { version = "0.2", path = "../mkit-core" }
 mkit-rpc = { version = "0.2", path = "../mkit-rpc" }
-buffa = "0.6"
+buffa = "0.7.1"
 thiserror = "2"
 
 # commonware: pinned at workspace root to the 2026.4.x train. All

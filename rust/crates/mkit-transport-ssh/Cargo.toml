@@ -20,7 +20,7 @@ workspace = true
 # path so `cargo publish` accepts it.
 mkit-core = { version = "0.2", path = "../mkit-core" }
 mkit-rpc = { version = "0.2", path = "../mkit-rpc" }
-buffa = "0.6"
+buffa = "0.7.1"
 thiserror = "2"
 
 [dev-dependencies]

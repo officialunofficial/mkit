@@ -38,7 +38,7 @@ mkit-attest = { path = "../../../rust/crates/mkit-attest" }
 # mkit-rpc owns the wire schemas (signer.proto, common.proto) and the
 # length-prefixed framing helpers used by the subprocess protocol.
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
-buffa = "0.6"
+buffa = "0.7.1"
 # CTAP-HID driver, optional behind the `ctap-hw` feature.
 ctap-hid-fido2 = { version = "=3.5.11", optional = true }
 base64 = "0.22"
@@ -53,7 +53,7 @@ dirs = "5"
 [dev-dependencies]
 mkit-attest = { path = "../../../rust/crates/mkit-attest" }
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
-buffa = "0.6"
+buffa = "0.7.1"
 # For the crypto cross-check in tests/protocol_shape.rs — generate a
 # P-256 signature in-process so we don't need hardware just to lock
 # down the wire shape.

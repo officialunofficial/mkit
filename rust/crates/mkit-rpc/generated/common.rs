@@ -34,6 +34,26 @@ pub enum Algorithm {
     /// without each maintainer's signature appearing on the wire.
     ALGORITHM_BLS12381_THRESHOLD = 5i32,
 }
+impl Algorithm {
+    ///Idiomatic alias for [`Self::ALGORITHM_UNSPECIFIED`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Unspecified: Self = Self::ALGORITHM_UNSPECIFIED;
+    ///Idiomatic alias for [`Self::ALGORITHM_ED25519`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Ed25519: Self = Self::ALGORITHM_ED25519;
+    ///Idiomatic alias for [`Self::ALGORITHM_SECP256K1`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Secp256k1: Self = Self::ALGORITHM_SECP256K1;
+    ///Idiomatic alias for [`Self::ALGORITHM_P256`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const P256: Self = Self::ALGORITHM_P256;
+    ///Idiomatic alias for [`Self::ALGORITHM_ED25519_WEBAUTHN`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Ed25519Webauthn: Self = Self::ALGORITHM_ED25519_WEBAUTHN;
+    ///Idiomatic alias for [`Self::ALGORITHM_BLS12381_THRESHOLD`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Bls12381Threshold: Self = Self::ALGORITHM_BLS12381_THRESHOLD;
+}
 impl ::core::default::Default for Algorithm {
     fn default() -> Self {
         Self::ALGORITHM_UNSPECIFIED
@@ -108,6 +128,20 @@ pub enum KeyForm {
     /// Opaque handle (TPM persistent handle, CTAP credentialId, SE label).
     /// The signer interprets the bytes; mkit treats them as opaque.
     KEY_FORM_OPAQUE_HANDLE = 3i32,
+}
+impl KeyForm {
+    ///Idiomatic alias for [`Self::KEY_FORM_UNSPECIFIED`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Unspecified: Self = Self::KEY_FORM_UNSPECIFIED;
+    ///Idiomatic alias for [`Self::KEY_FORM_RAW_BYTES`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const RawBytes: Self = Self::KEY_FORM_RAW_BYTES;
+    ///Idiomatic alias for [`Self::KEY_FORM_PKCS8_DER`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Pkcs8Der: Self = Self::KEY_FORM_PKCS8_DER;
+    ///Idiomatic alias for [`Self::KEY_FORM_OPAQUE_HANDLE`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const OpaqueHandle: Self = Self::KEY_FORM_OPAQUE_HANDLE;
 }
 impl ::core::default::Default for KeyForm {
     fn default() -> Self {
@@ -192,6 +226,38 @@ pub enum ErrorCode {
     /// Something went wrong inside the signer that we cannot map to a
     /// more specific code. Should be rare. `Error.message` MUST be set.
     ERROR_CODE_INTERNAL = 99i32,
+}
+impl ErrorCode {
+    ///Idiomatic alias for [`Self::ERROR_CODE_UNSPECIFIED`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Unspecified: Self = Self::ERROR_CODE_UNSPECIFIED;
+    ///Idiomatic alias for [`Self::ERROR_CODE_INVALID_REQUEST`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const InvalidRequest: Self = Self::ERROR_CODE_INVALID_REQUEST;
+    ///Idiomatic alias for [`Self::ERROR_CODE_UNSUPPORTED_ALGORITHM`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const UnsupportedAlgorithm: Self = Self::ERROR_CODE_UNSUPPORTED_ALGORITHM;
+    ///Idiomatic alias for [`Self::ERROR_CODE_UNSUPPORTED_KEY_FORM`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const UnsupportedKeyForm: Self = Self::ERROR_CODE_UNSUPPORTED_KEY_FORM;
+    ///Idiomatic alias for [`Self::ERROR_CODE_KEY_NOT_FOUND`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const KeyNotFound: Self = Self::ERROR_CODE_KEY_NOT_FOUND;
+    ///Idiomatic alias for [`Self::ERROR_CODE_USER_DECLINED`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const UserDeclined: Self = Self::ERROR_CODE_USER_DECLINED;
+    ///Idiomatic alias for [`Self::ERROR_CODE_AUTHENTICATION_REQUIRED`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const AuthenticationRequired: Self = Self::ERROR_CODE_AUTHENTICATION_REQUIRED;
+    ///Idiomatic alias for [`Self::ERROR_CODE_HARDWARE_ERROR`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const HardwareError: Self = Self::ERROR_CODE_HARDWARE_ERROR;
+    ///Idiomatic alias for [`Self::ERROR_CODE_TIMEOUT`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Timeout: Self = Self::ERROR_CODE_TIMEOUT;
+    ///Idiomatic alias for [`Self::ERROR_CODE_INTERNAL`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const Internal: Self = Self::ERROR_CODE_INTERNAL;
 }
 impl ::core::default::Default for ErrorCode {
     fn default() -> Self {
@@ -299,6 +365,14 @@ pub enum ProtocolVersion {
     PROTOCOL_VERSION_UNSPECIFIED = 0i32,
     /// The mkit-rpc protocol shipped in mkit v0.1.0.
     PROTOCOL_VERSION_1 = 1i32,
+}
+impl ProtocolVersion {
+    ///Idiomatic alias for [`Self::PROTOCOL_VERSION_UNSPECIFIED`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const ProtocolVersionUnspecified: Self = Self::PROTOCOL_VERSION_UNSPECIFIED;
+    ///Idiomatic alias for [`Self::PROTOCOL_VERSION_1`]; `Debug` prints the variant name.
+    #[allow(non_upper_case_globals)]
+    pub const ProtocolVersion1: Self = Self::PROTOCOL_VERSION_1;
 }
 impl ::core::default::Default for ProtocolVersion {
     fn default() -> Self {

@@ -566,6 +566,110 @@ impl ::buffa::ViewReborrow for SignerFrameView<'static> {
         this
     }
 }
+/** Self-contained, `'static` owned view of a `SignerFrame` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`SignerFrameView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`SignerFrameView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct SignerFrameOwnedView(::buffa::OwnedView<SignerFrameView<'static>>);
+impl SignerFrameOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            SignerFrameOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            SignerFrameOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::SignerFrame,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            SignerFrameOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`SignerFrameView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &SignerFrameView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::SignerFrame {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Oneof `body`.
+    #[must_use]
+    pub fn body(
+        &self,
+    ) -> ::core::option::Option<
+        &super::super::__buffa::view::oneof::signer_frame::Body<'_>,
+    > {
+        self.0.reborrow().body.as_ref()
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<SignerFrameView<'static>>>
+for SignerFrameOwnedView {
+    fn from(inner: ::buffa::OwnedView<SignerFrameView<'static>>) -> Self {
+        SignerFrameOwnedView(inner)
+    }
+}
+impl ::core::convert::From<SignerFrameOwnedView>
+for ::buffa::OwnedView<SignerFrameView<'static>> {
+    fn from(wrapper: SignerFrameOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<SignerFrameView<'static>>>
+for SignerFrameOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<SignerFrameView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::SignerFrame {
+    type View<'a> = SignerFrameView<'a>;
+    type ViewHandle = SignerFrameOwnedView;
+}
 /// ----------------------------------------------------------------------------
 /// Hello + capability discovery.
 #[derive(Clone, Debug, Default)]
@@ -775,6 +879,121 @@ impl ::buffa::ViewReborrow for HelloView<'static> {
     fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
         this
     }
+}
+/** Self-contained, `'static` owned view of a `Hello` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`HelloView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`HelloView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct HelloOwnedView(::buffa::OwnedView<HelloView<'static>>);
+impl HelloOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(HelloOwnedView(::buffa::OwnedView::decode(bytes)?))
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            HelloOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::Hello,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(HelloOwnedView(::buffa::OwnedView::from_owned(msg)?))
+    }
+    /// Borrow the full [`HelloView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &HelloView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::Hello {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `protocol`
+    #[must_use]
+    pub fn protocol(
+        &self,
+    ) -> ::core::option::Option<
+        ::buffa::EnumValue<super::super::super::ProtocolVersion>,
+    > {
+        self.0.reborrow().protocol
+    }
+    /// Free-text caller identification, e.g. "mkit/0.1.0". Advisory; the
+    /// signer MUST NOT make security decisions based on this string.
+    ///
+    /// Field 2: `caller_id`
+    #[must_use]
+    pub fn caller_id(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().caller_id
+    }
+    /// If true, the signer SHOULD respond with HelloResponse populated
+    /// and pause for a SignRequest. If false, the signer MAY skip the
+    /// capabilities payload (used in fast paths where mkit already
+    /// knows the signer's capabilities).
+    ///
+    /// Field 3: `want_capabilities`
+    #[must_use]
+    pub fn want_capabilities(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().want_capabilities
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<HelloView<'static>>> for HelloOwnedView {
+    fn from(inner: ::buffa::OwnedView<HelloView<'static>>) -> Self {
+        HelloOwnedView(inner)
+    }
+}
+impl ::core::convert::From<HelloOwnedView> for ::buffa::OwnedView<HelloView<'static>> {
+    fn from(wrapper: HelloOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<HelloView<'static>>> for HelloOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<HelloView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::Hello {
+    type View<'a> = HelloView<'a>;
+    type ViewHandle = HelloOwnedView;
 }
 #[derive(Clone, Debug, Default)]
 pub struct HelloResponseView<'a> {
@@ -1009,6 +1228,125 @@ impl ::buffa::ViewReborrow for HelloResponseView<'static> {
         this
     }
 }
+/** Self-contained, `'static` owned view of a `HelloResponse` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`HelloResponseView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`HelloResponseView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct HelloResponseOwnedView(::buffa::OwnedView<HelloResponseView<'static>>);
+impl HelloResponseOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            HelloResponseOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            HelloResponseOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::HelloResponse,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            HelloResponseOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`HelloResponseView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &HelloResponseView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::HelloResponse {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `protocol`
+    #[must_use]
+    pub fn protocol(
+        &self,
+    ) -> ::core::option::Option<
+        ::buffa::EnumValue<super::super::super::ProtocolVersion>,
+    > {
+        self.0.reborrow().protocol
+    }
+    /// Free-text signer identification, e.g. "mkit-sign-file/0.1.0".
+    /// Advisory.
+    ///
+    /// Field 2: `signer_id`
+    #[must_use]
+    pub fn signer_id(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().signer_id
+    }
+    /// Field 3: `capabilities`
+    #[must_use]
+    pub fn capabilities(
+        &self,
+    ) -> &::buffa::MessageFieldView<super::super::__buffa::view::CapabilitiesView<'_>> {
+        &self.0.reborrow().capabilities
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<HelloResponseView<'static>>>
+for HelloResponseOwnedView {
+    fn from(inner: ::buffa::OwnedView<HelloResponseView<'static>>) -> Self {
+        HelloResponseOwnedView(inner)
+    }
+}
+impl ::core::convert::From<HelloResponseOwnedView>
+for ::buffa::OwnedView<HelloResponseView<'static>> {
+    fn from(wrapper: HelloResponseOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<HelloResponseView<'static>>>
+for HelloResponseOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<HelloResponseView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::HelloResponse {
+    type View<'a> = HelloResponseView<'a>;
+    type ViewHandle = HelloResponseOwnedView;
+}
 #[derive(Clone, Debug, Default)]
 pub struct CapabilitiesView<'a> {
     /// Algorithms this signer can produce signatures with.
@@ -1135,6 +1473,7 @@ impl<'a> CapabilitiesView<'a> {
                 1u32 => {
                     if tag.wire_type() == ::buffa::encoding::WireType::LengthDelimited {
                         let payload = ::buffa::types::borrow_bytes(&mut cur)?;
+                        view.algorithms.reserve(payload.len());
                         let mut pcur: &[u8] = payload;
                         while !pcur.is_empty() {
                             view.algorithms
@@ -1162,6 +1501,7 @@ impl<'a> CapabilitiesView<'a> {
                 2u32 => {
                     if tag.wire_type() == ::buffa::encoding::WireType::LengthDelimited {
                         let payload = ::buffa::types::borrow_bytes(&mut cur)?;
+                        view.key_forms.reserve(payload.len());
                         let mut pcur: &[u8] = payload;
                         while !pcur.is_empty() {
                             view.key_forms
@@ -1359,6 +1699,152 @@ impl ::buffa::ViewReborrow for CapabilitiesView<'static> {
     fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
         this
     }
+}
+/** Self-contained, `'static` owned view of a `Capabilities` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`CapabilitiesView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`CapabilitiesView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct CapabilitiesOwnedView(::buffa::OwnedView<CapabilitiesView<'static>>);
+impl CapabilitiesOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            CapabilitiesOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            CapabilitiesOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::Capabilities,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            CapabilitiesOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`CapabilitiesView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &CapabilitiesView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::Capabilities {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Algorithms this signer can produce signatures with.
+    ///
+    /// Field 1: `algorithms`
+    #[must_use]
+    pub fn algorithms(
+        &self,
+    ) -> &::buffa::RepeatedView<'_, ::buffa::EnumValue<super::super::super::Algorithm>> {
+        &self.0.reborrow().algorithms
+    }
+    /// Key forms this signer accepts.
+    ///
+    /// Field 2: `key_forms`
+    #[must_use]
+    pub fn key_forms(
+        &self,
+    ) -> &::buffa::RepeatedView<'_, ::buffa::EnumValue<super::super::super::KeyForm>> {
+        &self.0.reborrow().key_forms
+    }
+    /// True if the signer supports a PIN prompt round-trip mid-sign.
+    /// Hardware signers (CTAP, TPM with auth value) typically set this.
+    ///
+    /// Field 3: `supports_pin`
+    #[must_use]
+    pub fn supports_pin(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().supports_pin
+    }
+    /// True if the signer can return a certificate chain alongside the
+    /// signature (e.g. a TPM attestation certificate, a WebAuthn
+    /// attestation chain, an SE manufacturer cert).
+    ///
+    /// Field 4: `supports_certificate_chain`
+    #[must_use]
+    pub fn supports_certificate_chain(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().supports_certificate_chain
+    }
+    /// Maximum payload size in bytes the signer will accept in a single
+    /// SignRequest. Zero means "use the framing default" (1 MiB).
+    ///
+    /// Field 5: `max_payload_bytes`
+    #[must_use]
+    pub fn max_payload_bytes(&self) -> ::core::option::Option<u32> {
+        self.0.reborrow().max_payload_bytes
+    }
+    /// True if the signer requires user presence (touch / PIN / biometric)
+    /// before it will sign. Advisory: callers MAY surface a UI hint.
+    ///
+    /// Field 6: `requires_user_presence`
+    #[must_use]
+    pub fn requires_user_presence(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().requires_user_presence
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<CapabilitiesView<'static>>>
+for CapabilitiesOwnedView {
+    fn from(inner: ::buffa::OwnedView<CapabilitiesView<'static>>) -> Self {
+        CapabilitiesOwnedView(inner)
+    }
+}
+impl ::core::convert::From<CapabilitiesOwnedView>
+for ::buffa::OwnedView<CapabilitiesView<'static>> {
+    fn from(wrapper: CapabilitiesOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<CapabilitiesView<'static>>>
+for CapabilitiesOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<CapabilitiesView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::Capabilities {
+    type View<'a> = CapabilitiesView<'a>;
+    type ViewHandle = CapabilitiesOwnedView;
 }
 /// ----------------------------------------------------------------------------
 /// Sign request / response.
@@ -1632,6 +2118,151 @@ impl ::buffa::ViewReborrow for SignRequestView<'static> {
     fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
         this
     }
+}
+/** Self-contained, `'static` owned view of a `SignRequest` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`SignRequestView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`SignRequestView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct SignRequestOwnedView(::buffa::OwnedView<SignRequestView<'static>>);
+impl SignRequestOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            SignRequestOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            SignRequestOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::SignRequest,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            SignRequestOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`SignRequestView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &SignRequestView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::SignRequest {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `algorithm`
+    #[must_use]
+    pub fn algorithm(
+        &self,
+    ) -> ::core::option::Option<::buffa::EnumValue<super::super::super::Algorithm>> {
+        self.0.reborrow().algorithm
+    }
+    /// Field 2: `key_form`
+    #[must_use]
+    pub fn key_form(
+        &self,
+    ) -> ::core::option::Option<::buffa::EnumValue<super::super::super::KeyForm>> {
+        self.0.reborrow().key_form
+    }
+    /// Identifies the key to sign with. Interpretation depends on
+    /// key_form:
+    ///   - KEY_FORM_RAW_BYTES / KEY_FORM_PKCS8_DER: empty (the signer
+    /// ```text
+    /// loads the key from its own configured path). A future
+    /// extension MAY allow inline key bytes; the file signer MUST
+    /// refuse them today.
+    /// ```
+    ///   - KEY_FORM_OPAQUE_HANDLE: opaque bytes interpreted by the
+    /// ```text
+    /// signer (TPM handle, CTAP credentialId, SE label).
+    /// ```
+    ///
+    /// Field 3: `key_ref`
+    #[must_use]
+    pub fn key_ref(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().key_ref
+    }
+    /// The bytes to sign. For DSSE-flavoured signing this is the PAE
+    /// (RFC 5234-style length-prefixed pre-authentication encoding) per
+    /// SPEC-ATTESTATIONS §4. The signer treats it as opaque bytes.
+    ///
+    /// Field 4: `payload`
+    #[must_use]
+    pub fn payload(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().payload
+    }
+    /// Optional context bytes (e.g. WebAuthn clientDataJSON for the
+    /// ED25519_WEBAUTHN algorithm). Advisory: signers MAY refuse if
+    /// they cannot honour it.
+    ///
+    /// Field 5: `context`
+    #[must_use]
+    pub fn context(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().context
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<SignRequestView<'static>>>
+for SignRequestOwnedView {
+    fn from(inner: ::buffa::OwnedView<SignRequestView<'static>>) -> Self {
+        SignRequestOwnedView(inner)
+    }
+}
+impl ::core::convert::From<SignRequestOwnedView>
+for ::buffa::OwnedView<SignRequestView<'static>> {
+    fn from(wrapper: SignRequestOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<SignRequestView<'static>>>
+for SignRequestOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<SignRequestView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::SignRequest {
+    type View<'a> = SignRequestView<'a>;
+    type ViewHandle = SignRequestOwnedView;
 }
 #[derive(Clone, Debug, Default)]
 pub struct SignResponseView<'a> {
@@ -1968,6 +2599,164 @@ impl ::buffa::ViewReborrow for SignResponseView<'static> {
         this
     }
 }
+/** Self-contained, `'static` owned view of a `SignResponse` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`SignResponseView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`SignResponseView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct SignResponseOwnedView(::buffa::OwnedView<SignResponseView<'static>>);
+impl SignResponseOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            SignResponseOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            SignResponseOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::SignResponse,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            SignResponseOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`SignResponseView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &SignResponseView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::SignResponse {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `signature`
+    #[must_use]
+    pub fn signature(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().signature
+    }
+    /// Public key bytes in the natural form for the algorithm:
+    ///   - ED25519:    32 bytes
+    ///   - SECP256K1:  33 bytes (compressed) or 65 bytes (uncompressed)
+    ///   - P256:       33 bytes (compressed) or 65 bytes (uncompressed)
+    ///   - ED25519_WEBAUTHN: 32 bytes (the underlying Ed25519 public key)
+    ///
+    /// Field 2: `public_key`
+    #[must_use]
+    pub fn public_key(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().public_key
+    }
+    /// Field 3: `algorithm`
+    #[must_use]
+    pub fn algorithm(
+        &self,
+    ) -> ::core::option::Option<::buffa::EnumValue<super::super::super::Algorithm>> {
+        self.0.reborrow().algorithm
+    }
+    /// Stable identifier for the signing key, used in DSSE
+    /// `signatures[].keyid`. The convention mkit's built-in signers use:
+    ///
+    ///   - Ed25519 (incl. ED25519_WEBAUTHN): "blake3:\<64-hex\>" where the
+    /// ```text
+    /// digest is BLAKE3-256 over the raw 32-byte public key (matches
+    /// `mkit-attest/src/signer_repo_key.rs`).
+    /// ```
+    ///   - secp256k1: "secp256k1:\<hex of compressed pubkey\>".
+    ///   - P-256:     "p256:\<hex of compressed pubkey\>".
+    ///
+    /// Third-party signers MAY return any identifier scheme; mkit treats
+    /// it as opaque on the consumer side.
+    ///
+    /// Field 4: `key_id`
+    #[must_use]
+    pub fn key_id(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().key_id
+    }
+    /// Optional certificate chain (DER-encoded X.509). Empty for raw-key
+    /// signers; populated for hardware signers that produce attestable
+    /// signatures.
+    ///
+    /// Field 5: `certificate_chain`
+    #[must_use]
+    pub fn certificate_chain(&self) -> &::buffa::RepeatedView<'_, &'_ [u8]> {
+        &self.0.reborrow().certificate_chain
+    }
+    /// CTAP / WebAuthn signers wrap the signature in a WebAuthn assertion
+    /// (auth_data || SHA-256(clientDataJSON) is what the authenticator
+    /// signs, NOT the raw payload). The verifier needs both pieces to
+    /// reconstruct the signed input. Unset for non-WebAuthn signers.
+    ///
+    /// Field 6: `webauthn`
+    #[must_use]
+    pub fn webauthn(
+        &self,
+    ) -> &::buffa::MessageFieldView<super::super::__buffa::view::WebAuthnDataView<'_>> {
+        &self.0.reborrow().webauthn
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<SignResponseView<'static>>>
+for SignResponseOwnedView {
+    fn from(inner: ::buffa::OwnedView<SignResponseView<'static>>) -> Self {
+        SignResponseOwnedView(inner)
+    }
+}
+impl ::core::convert::From<SignResponseOwnedView>
+for ::buffa::OwnedView<SignResponseView<'static>> {
+    fn from(wrapper: SignResponseOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<SignResponseView<'static>>>
+for SignResponseOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<SignResponseView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::SignResponse {
+    type View<'a> = SignResponseView<'a>;
+    type ViewHandle = SignResponseOwnedView;
+}
 /// Extension carrying the WebAuthn assertion bits the verifier needs.
 /// Only populated by CTAP-flavoured signers when `algorithm =
 /// ALGORITHM_ED25519_WEBAUTHN` or `algorithm = ALGORITHM_P256` *and*
@@ -2162,6 +2951,119 @@ impl ::buffa::ViewReborrow for WebAuthnDataView<'static> {
     fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
         this
     }
+}
+/** Self-contained, `'static` owned view of a `WebAuthnData` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`WebAuthnDataView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`WebAuthnDataView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct WebAuthnDataOwnedView(::buffa::OwnedView<WebAuthnDataView<'static>>);
+impl WebAuthnDataOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            WebAuthnDataOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            WebAuthnDataOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::WebAuthnData,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            WebAuthnDataOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`WebAuthnDataView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &WebAuthnDataView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::WebAuthnData {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Raw `authenticatorData` bytes per WebAuthn §6.1. Includes the
+    /// RP ID hash, flags, signature counter, and (during enrolment)
+    /// the attested credential data.
+    ///
+    /// Field 1: `authenticator_data`
+    #[must_use]
+    pub fn authenticator_data(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().authenticator_data
+    }
+    /// Raw UTF-8 `clientDataJSON` per WebAuthn §5.8.1. The verifier
+    /// re-derives this from the request payload and compares
+    /// byte-for-byte to bind the assertion to the request.
+    ///
+    /// Field 2: `client_data_json`
+    #[must_use]
+    pub fn client_data_json(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().client_data_json
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<WebAuthnDataView<'static>>>
+for WebAuthnDataOwnedView {
+    fn from(inner: ::buffa::OwnedView<WebAuthnDataView<'static>>) -> Self {
+        WebAuthnDataOwnedView(inner)
+    }
+}
+impl ::core::convert::From<WebAuthnDataOwnedView>
+for ::buffa::OwnedView<WebAuthnDataView<'static>> {
+    fn from(wrapper: WebAuthnDataOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<WebAuthnDataView<'static>>>
+for WebAuthnDataOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<WebAuthnDataView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::WebAuthnData {
+    type View<'a> = WebAuthnDataView<'a>;
+    type ViewHandle = WebAuthnDataOwnedView;
 }
 /// ----------------------------------------------------------------------------
 /// PIN / auth flow.
@@ -2372,6 +3274,127 @@ impl ::buffa::ViewReborrow for PinPromptView<'static> {
         this
     }
 }
+/** Self-contained, `'static` owned view of a `PinPrompt` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`PinPromptView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`PinPromptView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct PinPromptOwnedView(::buffa::OwnedView<PinPromptView<'static>>);
+impl PinPromptOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PinPromptOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PinPromptOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::PinPrompt,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PinPromptOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`PinPromptView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &PinPromptView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::PinPrompt {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Human-readable reason for the prompt. The caller MAY display it.
+    /// Length-capped at 256 bytes.
+    ///
+    /// Field 1: `reason`
+    #[must_use]
+    pub fn reason(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().reason
+    }
+    /// Retries remaining before the key locks (CTAP / TPM / PKCS#11
+    /// authValue counters). Zero means "do not know" — NOT zero retries
+    /// remaining.
+    ///
+    /// Field 2: `retries_remaining`
+    #[must_use]
+    pub fn retries_remaining(&self) -> ::core::option::Option<u32> {
+        self.0.reborrow().retries_remaining
+    }
+    /// True if the signer is asking for a PIN; false if it is asking
+    /// for a touch / biometric (in which case `pin` in PinResponse is
+    /// ignored).
+    ///
+    /// Field 3: `wants_pin`
+    #[must_use]
+    pub fn wants_pin(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().wants_pin
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<PinPromptView<'static>>>
+for PinPromptOwnedView {
+    fn from(inner: ::buffa::OwnedView<PinPromptView<'static>>) -> Self {
+        PinPromptOwnedView(inner)
+    }
+}
+impl ::core::convert::From<PinPromptOwnedView>
+for ::buffa::OwnedView<PinPromptView<'static>> {
+    fn from(wrapper: PinPromptOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<PinPromptView<'static>>>
+for PinPromptOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<PinPromptView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::PinPrompt {
+    type View<'a> = PinPromptView<'a>;
+    type ViewHandle = PinPromptOwnedView;
+}
 #[derive(Clone, Debug, Default)]
 pub struct PinResponseView<'a> {
     /// PIN bytes. UTF-8. The caller is responsible for not echoing this
@@ -2526,4 +3549,107 @@ impl ::buffa::ViewReborrow for PinResponseView<'static> {
     fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
         this
     }
+}
+/** Self-contained, `'static` owned view of a `PinResponse` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`PinResponseView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`PinResponseView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct PinResponseOwnedView(::buffa::OwnedView<PinResponseView<'static>>);
+impl PinResponseOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PinResponseOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PinResponseOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::PinResponse,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PinResponseOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`PinResponseView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &PinResponseView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::PinResponse {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// PIN bytes. UTF-8. The caller is responsible for not echoing this
+    /// to logs. The signer MUST zeroize after consumption.
+    ///
+    /// Field 1: `pin`
+    #[must_use]
+    pub fn pin(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().pin
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<PinResponseView<'static>>>
+for PinResponseOwnedView {
+    fn from(inner: ::buffa::OwnedView<PinResponseView<'static>>) -> Self {
+        PinResponseOwnedView(inner)
+    }
+}
+impl ::core::convert::From<PinResponseOwnedView>
+for ::buffa::OwnedView<PinResponseView<'static>> {
+    fn from(wrapper: PinResponseOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<PinResponseView<'static>>>
+for PinResponseOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<PinResponseView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::PinResponse {
+    type View<'a> = PinResponseView<'a>;
+    type ViewHandle = PinResponseOwnedView;
 }
