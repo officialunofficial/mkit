@@ -102,10 +102,13 @@ fn start(
         Ok(None) => return emit_err("no commits on current branch", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
     };
-    let theirs = match refs::read_ref(mkit_dir, branch) {
-        Ok(Some(h)) => h,
-        Ok(None) => return emit_err(&format!("branch '{branch}' not found"), exit::GENERAL_ERROR),
-        Err(e) => return emit_err(&format!("read ref: {e}"), exit::GENERAL_ERROR),
+    // Accept any revspec — branches, tags, remote-tracking refs
+    // (`<remote>/<branch>`), hashes — peeling annotated tags to the
+    // commit. Branch names keep their historical precedence because
+    // resolve_revision checks refs/heads first.
+    let theirs = match super::revspec::resolve_revision(store, mkit_dir, branch) {
+        Ok(h) => peel_tags(store, h),
+        Err(e) => return emit_err(&format!("merge target: {e}"), exit::GENERAL_ERROR),
     };
 
     if ours == theirs {
@@ -433,4 +436,17 @@ fn emit_err(msg: &str, code: u8) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "error: {msg}");
     code
+}
+
+/// Bounded annotated-tag peel (mirrors `log.rs`/`diff.rs`).
+const MAX_TAG_DEPTH: usize = 16;
+
+fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
+    for _ in 0..MAX_TAG_DEPTH {
+        match store.read_object(&h) {
+            Ok(Object::Tag(t)) => h = t.target,
+            _ => break,
+        }
+    }
+    h
 }

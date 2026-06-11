@@ -413,7 +413,7 @@ pub fn push_branch(
 /// `refs/remotes/default/<branch>`. Fresh repos with no local branch tip
 /// initialise from the current branch's remote-tracking ref, or the first
 /// advertised remote branch when the current default branch is absent.
-pub fn pull_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {
+pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
     // ONE repo lock across BOTH phases — the fetch (object write + remote
     // refs) and the fast-forward (branch ref + HEAD + worktree). Validate
@@ -422,8 +422,8 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> 
     // non-locking `fetch_objects`, not `fetch_all` (#267).
     let store = ObjectStore::open(cwd)?;
     let _lock = mkit_core::repo_lock::acquire_default(&mkit_dir, "worktree.lock")?;
-    let n = fetch_objects(&store, &mkit_dir, tx)?;
-    let remote_refs = refs::list_remote_refs(&mkit_dir, DEFAULT_REMOTE)?
+    let n = fetch_objects(&store, &mkit_dir, tx, remote)?;
+    let remote_refs = refs::list_remote_refs(&mkit_dir, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
         .collect::<Vec<_>>();
@@ -525,7 +525,7 @@ fn rollback_pull_ref(
 /// reachable from each remote ref (via [`Transport::download_pack`] on
 /// the object's own digest) and writes the ref into
 /// `refs/remotes/default/<branch>`.
-pub fn fetch_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {
+pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
     // Validate the repo BEFORE locking so a non-repo reports cleanly rather
     // than as a lock error, then hold the repo lock across the whole
@@ -534,7 +534,7 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError>
     // downloaded objects before their refs make them reachable (#267).
     let store = ObjectStore::open(cwd)?;
     let _lock = mkit_core::repo_lock::acquire_default(&mkit_dir, "worktree.lock")?;
-    fetch_objects(&store, &mkit_dir, tx)
+    fetch_objects(&store, &mkit_dir, tx, remote)
 }
 
 /// Download every remote `refs/heads/*` object closure and publish the
@@ -544,6 +544,7 @@ fn fetch_objects(
     store: &ObjectStore,
     mkit_dir: &Path,
     tx: &dyn Transport,
+    remote: &str,
 ) -> Result<usize, DispatchError> {
     let remote_refs = tx.list_refs("refs/heads/")?;
     let mut n = 0;
@@ -564,7 +565,7 @@ fn fetch_objects(
         // each object's hash as a fallback. That matches the
         // per-object transport semantics in file.rs / memory.rs.
         fetch_object_closure(store, tx, &h)?;
-        refs::write_remote_ref(mkit_dir, DEFAULT_REMOTE, &r.name, &h)?;
+        refs::write_remote_ref(mkit_dir, remote, &r.name, &h)?;
         n += 1;
     }
     Ok(n)

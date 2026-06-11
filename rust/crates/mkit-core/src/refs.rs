@@ -543,6 +543,34 @@ pub fn list_remote_refs(mkit_dir: &Path, remote: &str) -> RefResult<Vec<Ref>> {
     list_refs_under(mkit_dir, &remote_ref_dir(remote))
 }
 
+/// List the remote names that have at least one tracking ref on disk
+/// (the immediate subdirectories of `refs/remotes/`), sorted. A
+/// missing `refs/remotes/` yields an empty list. Entries whose names
+/// fail the ref grammar are skipped (consistent with how malformed
+/// ref files are skipped by [`list_refs`]).
+pub fn list_remote_names(mkit_dir: &Path) -> RefResult<Vec<String>> {
+    let dir = mkit_dir.join(REMOTES_DIR);
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(RefError::Io(e)),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(RefError::Io)?;
+        if !entry.file_type().map_err(RefError::Io)?.is_dir() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str()
+            && validate_ref_name(name)
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 // -----------------------------------------------------------------------------
 // Tags (refs/tags/<name>)
 // -----------------------------------------------------------------------------

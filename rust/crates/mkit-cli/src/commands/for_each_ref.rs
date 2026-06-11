@@ -68,6 +68,21 @@ pub fn run(args: &[String]) -> u8 {
     };
     push_rows(&store, &mut rows, &heads, "refs/heads/");
     push_rows(&store, &mut rows, &tags, "refs/tags/");
+    match refs::list_remote_names(&mkit_dir) {
+        Ok(remotes) => {
+            for remote in remotes {
+                match refs::list_remote_refs(&mkit_dir, &remote) {
+                    Ok(rs) => {
+                        push_rows(&store, &mut rows, &rs, &format!("refs/remotes/{remote}/"));
+                    }
+                    Err(e) => {
+                        return emit_err(&format!("list remote refs: {e}"), exit::GENERAL_ERROR);
+                    }
+                }
+            }
+        }
+        Err(e) => return emit_err(&format!("list remotes: {e}"), exit::GENERAL_ERROR),
+    }
     rows.sort_by(|a, b| a.refname.cmp(&b.refname));
 
     if !opts.patterns.is_empty() {

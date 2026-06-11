@@ -176,6 +176,6 @@ fn pull_roundtrip_against_mockito_http_server() {
     let dispatch_url = format!("mkit+{url}");
     let tx = remote_dispatch::open(&dispatch_url).expect("open mkit+http");
 
-    let n = remote_dispatch::pull_all(td.path(), tx.as_ref()).expect("pull");
+    let n = remote_dispatch::pull_all(td.path(), tx.as_ref(), "default").expect("pull");
     assert_eq!(n, 0, "empty remote must yield zero pulled refs");
 }

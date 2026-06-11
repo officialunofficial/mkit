@@ -153,7 +153,12 @@ pub fn run(args: &[String]) -> u8 {
                 return emit_err(&format!("remote '{name}' not found"), exit::GENERAL_ERROR);
             }
             match config::write(&cwd, &cfg) {
-                Ok(()) => exit::OK,
+                Ok(()) => {
+                    // Stale tracking refs would shadow a future remote
+                    // reusing the name; objects stay (gc owns them).
+                    remove_tracking_refs(&cwd, &name);
+                    exit::OK
+                }
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
             }
         }
@@ -183,10 +188,50 @@ pub fn run(args: &[String]) -> u8 {
                 }
             }
             match config::write(&cwd, &cfg) {
-                Ok(()) => exit::OK,
+                Ok(()) => {
+                    move_tracking_refs(&cwd, &old, &new);
+                    exit::OK
+                }
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
             }
         }
+    }
+}
+
+/// Best-effort move of `refs/remotes/<old>/` to `refs/remotes/<new>/`
+/// after a rename. Failure is reported but non-fatal: the config
+/// rename already happened, and a follow-up fetch repopulates.
+fn move_tracking_refs(cwd: &std::path::Path, old: &str, new: &str) {
+    let remotes = cwd
+        .join(mkit_core::MKIT_DIR)
+        .join(mkit_core::refs::REMOTES_DIR);
+    let (src, dst) = (remotes.join(old), remotes.join(new));
+    if src.is_dir()
+        && let Err(e) = std::fs::rename(&src, &dst)
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "warning: could not move tracking refs {old} -> {new}: {e}; \
+             run `mkit fetch {new}` to repopulate"
+        );
+    }
+}
+
+/// Best-effort removal of `refs/remotes/<name>/` after a remove.
+fn remove_tracking_refs(cwd: &std::path::Path, name: &str) {
+    let dir = cwd
+        .join(mkit_core::MKIT_DIR)
+        .join(mkit_core::refs::REMOTES_DIR)
+        .join(name);
+    if dir.is_dir()
+        && let Err(e) = std::fs::remove_dir_all(&dir)
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "warning: could not remove tracking refs for '{name}': {e}"
+        );
     }
 }
 
