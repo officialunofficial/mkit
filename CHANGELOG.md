@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **git-bridge: deterministic one-way export to git mirrors**
-  (`mkit git export`, behind the default-off `git-export` feature;
+  (`mkit git export`, behind the default-off `git-bridge` feature;
   [#330](https://github.com/officialunofficial/mkit/pull/330)).
   New normative spec [`docs/SPEC-GIT-BRIDGE.md`](docs/SPEC-GIT-BRIDGE.md)
   pins a byte-deterministic mkit→git object mapping (BLAKE3/SHA-1
@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git fsck --strict`). The exporter pushes with per-ref
   `--force-with-lease` from rebuildable state under `.mkit/git/`,
   skips untranslatable refs loudly (remix ancestry, git-illegal
-  names, non-canonical chunking), and the import direction is
-  explicitly out of scope. PARITY.md gains a scope amendment per its
+  names, non-canonical chunking); the import direction is specified
+  separately in [`docs/SPEC-GIT-IMPORT.md`](docs/SPEC-GIT-IMPORT.md). PARITY.md gains a scope amendment per its
   own renegotiation rule. Closes the Phase 0+1 scope of the
   git-interop exploration.
 

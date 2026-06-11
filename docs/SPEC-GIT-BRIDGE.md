@@ -587,11 +587,11 @@ In a state dir whose direction is `fork` (SPEC-GIT-IMPORT §6), export
 applies one per-object rule: **if the object's blake3 is in the
 import map, emit nothing and use the original git sha1** (bytes are
 served from the import staging mirror); otherwise bridge-translate,
-with child resolution consulting `import map ∪ export map` (import
-wins on overlap in fork mode; export wins in pure-bridge mode — the
-mode is recorded per state dir and immutable, because the same
-blake3 resolving to different sha1s across runs corrupts recorded
-leases).
+with child resolution consulting `import map ∪ export map`. Each
+state dir consults only its OWN maps; on overlap within a fork state
+dir the import map wins. The mode is recorded per state dir and
+immutable, because the same blake3 resolving to different sha1s
+across runs corrupts recorded leases.
 
 Consequences, all normative:
 

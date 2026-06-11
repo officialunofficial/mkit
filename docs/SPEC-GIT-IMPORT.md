@@ -76,7 +76,7 @@ key**, and a crashed import is resumed by re-running it.
   (refusals are reversible; a wrong escape is forever).
 - `refs/notes`, `refs/replace`, grafts.
 - Re-exporting imported history toward its origin except in
-  passthrough/fork mode (SPEC-GIT-BRIDGE §15; see also §7).
+  passthrough/fork mode (SPEC-GIT-BRIDGE §14; see also §8).
 
 ---
 
@@ -107,7 +107,11 @@ threshold becomes one mkit blob; above it, the pinned FastCDC
 chunker (SPEC-FASTCDC) produces chunk blobs + a `chunk_size = 0`
 manifest — exactly the writer-side rule, so imported stores are
 exportable (SPEC-GIT-BRIDGE §4 refusals never trigger on them).
-Blobs over 1 GiB (the store cap) refuse per-ref.
+SPEC-FASTCDC leaves the threshold an implementer choice; for
+importers `CHUNK_THRESHOLD = 1 MiB` is **normative** (a different
+threshold would fork hashes across implementations).
+Blobs over `worktree::MAX_FILE_BYTES` (1 GiB, the per-file cap)
+refuse per-ref.
 
 ### 3.2 Commits
 
@@ -127,12 +131,17 @@ signature         ← Ed25519 by the importer under COMMIT_DOMAIN
 
 Pinned rules:
 
-- The author Identity payload is the byte slice `<name> <<email>>`
-  from the git author line — name and email exactly as written, no
-  timestamp/timezone, separated by one space, email in angle
-  brackets. Historic bracket-less author lines map to their verbatim
-  line bytes (trimmed of the trailing timestamp/zone). Payloads that
-  would be empty or exceed 4096 bytes refuse per-ref.
+- The author Identity payload is a verbatim BYTE SLICE of the git
+  author line, pinned as: the bytes from the first byte after the
+  `author ` keyword+space through the closing `>` of the **last**
+  `<...>` group on the line, exactly as written (interior spacing,
+  doubled spaces, and missing space before `<` all preserved — no
+  recomposition, so historic malformations hash identically across
+  implementations). Lines with no `<` use the bracket-less rule: the
+  remainder after `author `, with one trailing match of the pattern
+  *space, decimal seconds, space, `+` or `-`, four digits* stripped;
+  if the pattern is absent the whole remainder is the payload.
+  Payloads that would be empty or exceed 4096 bytes refuse per-ref.
 - The committer line, both timezones, the author timestamp, `gpgsig`,
   `mergetag`, `encoding`, and any unknown headers are **not**
   represented in the mkit commit; they are recoverable from the
@@ -150,12 +159,15 @@ Pinned rules:
 ### 3.3 Trees
 
 Entries re-sort from git order (directories keyed `name + "/"`) to
-mkit byte-lex order. Modes map `100644→0x01`, `40000→0x02`,
-`120000→0x03`, `100755→0x04`. Historic non-canonical modes
-(`100664`, zero-padded forms) **normalize to `0x01`** with a
-declared-lossy warning — except in a state dir that has ever been
-used for passthrough/fork export, where normalization would break
-the shared-SHA property and the affected ref MUST refuse instead.
+mkit byte-lex order. Canonical modes map `100644→0x01`, `40000→0x02`,
+`120000→0x03`, `100755→0x04`. Historic non-canonical mode SPELLINGS
+normalize to their canonical equivalent's mkit mode, enumerated
+exhaustively: `100664→0x01`, `100640→0x01`, `100600→0x01`,
+`040000→0x02` (zero-padded directory). Any other mode string refuses
+per-ref. Normalization is declared-lossy (warned once per ref) —
+except in a state dir whose recorded `direction` is `fork` (§6),
+where a normalized tree could not reproduce its original sha1 and
+the affected ref MUST refuse instead.
 `160000` (gitlink/submodule) refuses per-ref with an actionable
 message. Entry names are validated by SPEC-OBJECTS §4.1
 (deserialize-time rules — non-negotiable): names that are `.git`/
@@ -204,7 +216,7 @@ everything was skipped.
   key (an org/bot key): teammates otherwise produce unrelated forks.
   Cross-machine discovery of "someone already imported this" is
   impossible by architecture (state and attestations do not travel
-  over mkit transport); the in-store probe (§6.3) covers the
+  over mkit transport); the in-store probe (§6.1) covers the
   same-store case, and this requirement covers the rest.
 
 ---
@@ -231,7 +243,10 @@ Three layers, from authoritative to advisory:
    ```
 
    Because parents are inside signed commit bytes, a head attestation
-   transitively pins the imported closure.
+   transitively pins the imported closure. Envelopes are stored like
+   any attestation (`.mkit/attestations/<commit>/…`). Importers
+   SHOULD skip re-minting for a head whose recorded imported state is
+   unchanged (mirroring SPEC-GIT-BRIDGE §11's guidance).
 2. **Retained raw bytes**: the original git commit and tag object
    bytes, sha1-addressed, under the per-remote state dir. Small
    (commits/tags only — trees/blobs are recoverable from the staging
@@ -257,7 +272,7 @@ non-normative except for the binding semantics below):
 - `direction`: `import`, `export`, or `fork` (passthrough-enabled).
   A state dir MUST NOT serve import and plain export simultaneously;
   mixed use is refused at open. (`fork` combines an import source
-  with passthrough export per SPEC-GIT-BRIDGE §15.)
+  with passthrough export per SPEC-GIT-BRIDGE §14.)
 - `signer`: the pinned importer pubkey (§4).
 - `import-spec-version` (§1.2).
 - The staging mirror (`repo.git`): for import it is **durable
@@ -268,16 +283,26 @@ non-normative except for the binding semantics below):
   same format and torn-tail semantics as export (SPEC-GIT-BRIDGE
   §12.3).
 
-### 6.3 In-store divergence probe
+### 6.1 In-store divergence probe
 
-Before translating, an import into a store that may already contain
-this upstream's history MUST probe: for each upstream head, if a
-commit with `content_digest == BLAKE3(upstream head's raw bytes)`
-exists in the store but was signed by a **different** key, refuse
-with guidance ("this upstream is already imported here under key
-<hex8>; pull from the designated importer over mkit transport, or
-install that key"). The probe is best-effort (content_digest is
-advisory) — it catches the realistic accident, not an adversary.
+Before translating, an import MUST run two checks:
+
+1. **State-dir identity check** (structural): if any state dir in
+   this repository records the same canonical remote identity (§8),
+   refuse unless it is the one being used — this catches re-imports
+   regardless of how far upstream has advanced.
+2. **Content probe** (best-effort): walking back from each upstream
+   head through first parents (bounded; until the first hit or the
+   walk ends), if a commit whose `content_digest ==
+   BLAKE3(candidate's raw bytes)` exists in the store but was signed
+   by a **different** key, refuse with guidance ("this upstream is
+   already imported here under key <hex8>; pull from the designated
+   importer over mkit transport, or install that key"). A linear
+   store scan is an acceptable lookup mechanism (imports are rare,
+   interactive operations); an index is permitted but not required.
+
+The probe is best-effort (content_digest is advisory) — it catches
+the realistic accident, not an adversary.
 
 ---
 
@@ -304,17 +329,23 @@ advisory) — it catches the realistic accident, not an adversary.
 All bindings, guards, and attestation `remoteUrl` fields use one
 normalization, `remote_identity(dest)`:
 
-1. scp-style `[user@]host:path` rewrites to `ssh://host/path`;
+1. scp-style `[user@]host:path` rewrites to `ssh://host/path`
+   (honesty note: a home-relative scp path and an absolute ssh:// path
+   can be different repos on a generic server; the conflation only
+   widens the guard — fail-closed). IPv6 literals keep their
+   brackets: `[::1]:path` → `ssh://[::1]/path`;
 2. scheme and host lowercase; userinfo dropped; default ports
-   (22/443/9418) stripped;
+   stripped per scheme (`ssh` 22, `https` 443, `http` 80, `git`
+   9418);
 3. exactly one trailing `/` and one trailing `.git` stripped from the
    path;
-4. local paths: symlink-resolved absolute paths.
+4. local paths AND `file://` URLs (`file:///p`, `file://localhost/p`)
+   collapse to the symlink-resolved absolute local path.
 
 Equivalence examples (all one identity):
 `git@github.com:org/repo.git` ≡ `ssh://github.com/org/repo` ≡
 `ssh://GIT@GITHUB.COM:22/org/repo/`. The **origin guard**
-(SPEC-GIT-BRIDGE §15.2) compares canonical identities: plain
+(SPEC-GIT-BRIDGE §14.2) compares canonical identities: plain
 (non-passthrough) export MUST refuse a destination whose identity
 matches any recorded import source. This is a safety net against
 accidents, not a security boundary — mirrors and redirects are

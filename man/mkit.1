@@ -791,8 +791,11 @@ each exported head gets a signed git-bridge/v1 DSSE attestation
 flags, else config defaults),
 published on the mirror's
 .Ql refs/mkit/attestations
-ref. There is no import direction. Requires building the binary with
-.Cm --features git-export
+ref. The import direction is
+.Cm mkit git import
+(SPEC-GIT-IMPORT; lands in a later phase of this series); there is no
+bidirectional sync. Requires building the binary with
+.Cm --features git-bridge
 and a
 .Cm git
 binary on

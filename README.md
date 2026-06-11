@@ -179,7 +179,7 @@ Workspace crates:
 |---|---|
 | `mkit-core` | hash, object, serialize, store, sign, chunker, delta, pack, refs, index, worktree, ignore, repo_lock, ops, protocol |
 | `mkit-attest` | JCS, in-toto v1 Statement, DSSE envelope, signers, verify |
-| `mkit-git-bridge` | deterministic mkit↔git bridge (export mirroring + importer-signed import) ([`docs/SPEC-GIT-BRIDGE.md`](docs/SPEC-GIT-BRIDGE.md)) |
+| `mkit-git-bridge` | deterministic mkit↔git bridge (export mirroring; importer-signed import spec'd, landing in-series) ([`docs/SPEC-GIT-BRIDGE.md`](docs/SPEC-GIT-BRIDGE.md)) |
 | `mkit-keystore` | platform-aware signing-key vault (software, OS keychains, systemd-creds, YubiKey, external signers) — see [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md) |
 | `mkit-rpc` | shared wire schemas + length-prefixed framing for stdio subprocess protocols (external signers) |
 | `mkit-transport-{memory,file,http,s3,ssh,enc}` | Transport trait implementations (`enc` = the `mkit+enc://` no-OpenSSH encrypted transport) |

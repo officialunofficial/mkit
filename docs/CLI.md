@@ -670,8 +670,8 @@ Remote / sync:
   never propagates (export is add/update-only), and each
   `--remote-name` state dir is bound to one destination and one
   direction. The import direction is `mkit git import`
-  ([`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md)); bidirectional sync does
-  not exist. Requires building the binary with
+  ([`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md); lands in a later phase of
+  this series); bidirectional sync does not exist. Requires building the binary with
   `--features git-bridge` (alias: `git-export`); shells out to `git`.
 
 Config / keys / version:
