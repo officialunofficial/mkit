@@ -366,3 +366,139 @@ fn differential_ids_and_fsck_against_real_git() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// ─── §4 / §6.2 / §7.1 refusal arms ──────────────────────────────────
+
+#[test]
+fn fixed_size_chunking_is_refused() {
+    let (_d, store) = store();
+    let chunk = put(
+        &store,
+        &Object::Blob(Blob {
+            data: vec![7u8; 4096],
+        }),
+    );
+    let manifest = put(
+        &store,
+        &Object::ChunkedBlob(mkit_core::object::ChunkedBlob {
+            total_size: 4096,
+            chunk_size: 4096,
+            chunks: vec![chunk],
+        }),
+    );
+    let mut known = HashMap::new();
+    let err = translate_closure(&store, &manifest, &mut known, &mut |_, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::Refused(mkit_git_bridge::Refusal::FixedSizeChunking { .. })
+        ),
+        "got {err}"
+    );
+}
+
+#[test]
+fn below_threshold_manifest_is_refused() {
+    let (_d, store) = store();
+    let chunk = put(
+        &store,
+        &Object::Blob(Blob {
+            data: vec![7u8; 4096],
+        }),
+    );
+    let manifest = put(
+        &store,
+        &Object::ChunkedBlob(mkit_core::object::ChunkedBlob {
+            total_size: 4096,
+            chunk_size: 0,
+            chunks: vec![chunk],
+        }),
+    );
+    let mut known = HashMap::new();
+    let err = translate_closure(&store, &manifest, &mut known, &mut |_, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::Refused(mkit_git_bridge::Refusal::NonCanonicalChunking { .. })
+        ),
+        "got {err}"
+    );
+}
+
+#[test]
+fn non_canonical_boundaries_are_refused() {
+    let (_d, store) = store();
+    // >1 MiB in a single chunk cannot match pinned FastCDC, whose max
+    // chunk is 256 KiB.
+    let big: Vec<u8> = (0u32..300_000).flat_map(u32::to_le_bytes).collect();
+    let chunk = put(&store, &Object::Blob(Blob { data: big.clone() }));
+    let manifest = put(
+        &store,
+        &Object::ChunkedBlob(mkit_core::object::ChunkedBlob {
+            total_size: big.len() as u64,
+            chunk_size: 0,
+            chunks: vec![chunk],
+        }),
+    );
+    let mut known = HashMap::new();
+    let err = translate_closure(&store, &manifest, &mut known, &mut |_, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::Refused(mkit_git_bridge::Refusal::NonCanonicalChunking { .. })
+        ),
+        "got {err}"
+    );
+}
+
+#[test]
+fn timestamp_overflow_is_refused() {
+    let (_d, store) = store();
+    let empty_tree = put(&store, &Object::Tree(Tree { entries: vec![] }));
+    let c = Commit::new_unannotated(
+        empty_tree,
+        vec![],
+        Identity::opaque(b"x".to_vec()),
+        [0; 32],
+        b"m".to_vec(),
+        u64::MAX,
+        [0; 64],
+    );
+    let h = put(&store, &Object::Commit(c));
+    let mut known = HashMap::new();
+    let err = translate_closure(&store, &h, &mut known, &mut |_, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::Refused(mkit_git_bridge::Refusal::TimestampOverflow { .. })
+        ),
+        "got {err}"
+    );
+}
+
+#[test]
+fn tag_name_outside_grammar_is_refused() {
+    let (_d, store) = store();
+    let empty_tree = put(&store, &Object::Tree(Tree { entries: vec![] }));
+    let root = signed_commit(&store, empty_tree, vec![], "r\n");
+    let tag = Tag {
+        target: root,
+        target_type: mkit_core::ObjectType::Commit,
+        name: b"has space".to_vec(),
+        tagger: Identity::opaque(b"t".to_vec()),
+        signer: [0; 32],
+        message: vec![],
+        timestamp: TS,
+        signature: [0; 64],
+    };
+    let h = put(&store, &Object::Tag(tag));
+    let mut known = HashMap::new();
+    let err = translate_closure(&store, &h, &mut known, &mut |_, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::Refused(mkit_git_bridge::Refusal::TagName { .. })
+        ),
+        "got {err}"
+    );
+}

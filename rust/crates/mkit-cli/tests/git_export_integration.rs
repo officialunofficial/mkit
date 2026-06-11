@@ -136,7 +136,7 @@ fn export_produces_fsck_clean_matching_mirror() {
     let size = git_ok(&mirror, &["cat-file", "-s", "refs/heads/main:big.bin"]);
     assert_eq!(size.trim(), "1200000");
 
-    // One attestation per exported head, named by git sha.
+    // One attestation entry per exported head (named by attestation id).
     let att = git_ok(
         &mirror,
         &["ls-tree", "--name-only", "refs/mkit/attestations"],
@@ -355,4 +355,119 @@ fn stateful_rounds_keep_mirror_and_repo_invariants() {
             .collect()
     };
     assert_eq!(strip(mirror_refs(&mirror)), strip(mirror_refs(&m2)));
+}
+
+#[test]
+fn subset_export_keeps_other_leases() {
+    if !git_available() {
+        return;
+    }
+    let r = fixture();
+    let mroot = mirror_root();
+    let mirror = mroot.path().join("m");
+    let dest = mirror.to_str().unwrap();
+    // Full export, then a --ref subset, then full again: the subset
+    // must not wipe recorded leases for main/v1 (regression: it did).
+    r.ok(&["git", "export", dest]);
+    r.commit_file("more.txt", b"more\n", "more");
+    r.ok(&["git", "export", "--ref", "refs/heads/side", dest]);
+    r.ok(&["git", "export", dest]);
+    fsck_strict(&mirror);
+    let subj = git_ok(&mirror, &["log", "-1", "--format=%s", "refs/heads/main"]);
+    assert_eq!(subj.trim(), "more");
+}
+
+#[test]
+fn wiped_state_reexports_against_existing_mirror() {
+    if !git_available() {
+        return;
+    }
+    let r = fixture();
+    let mroot = mirror_root();
+    let mirror = mroot.path().join("m");
+    let dest = mirror.to_str().unwrap();
+    r.ok(&["git", "export", dest]);
+    // §12.3: deleting ALL bridge state must not strand the mirror —
+    // leases reseed from ls-remote.
+    std::fs::remove_dir_all(r.mkit_dir().join("git")).unwrap();
+    r.commit_file("post-wipe.txt", b"x\n", "post wipe");
+    r.ok(&["git", "export", dest]);
+    fsck_strict(&mirror);
+    let subj = git_ok(&mirror, &["log", "-1", "--format=%s", "refs/heads/main"]);
+    assert_eq!(subj.trim(), "post wipe");
+}
+
+#[test]
+fn no_attest_skips_attestations_ref() {
+    if !git_available() {
+        return;
+    }
+    let r = fixture();
+    let mroot = mirror_root();
+    let mirror = mroot.path().join("m");
+    r.ok(&["git", "export", "--no-attest", mirror.to_str().unwrap()]);
+    assert!(
+        !mirror_refs(&mirror)
+            .iter()
+            .any(|l| l.starts_with("refs/mkit/attestations")),
+        "--no-attest must not publish the attestations ref"
+    );
+}
+
+#[test]
+fn ref_flag_error_branches() {
+    if !git_available() {
+        return;
+    }
+    let r = fixture();
+    let mroot = mirror_root();
+    let mirror = mroot.path().join("m");
+    let dest = mirror.to_str().unwrap();
+    // Bad prefix → USAGE (64).
+    let out = r.run(&["git", "export", "--ref", "main", dest]);
+    assert_eq!(out.status.code(), Some(64), "bad prefix should be USAGE");
+    // Unknown ref → DATAERR (65).
+    let out = r.run(&["git", "export", "--ref", "refs/heads/nope", dest]);
+    assert_eq!(out.status.code(), Some(65), "missing ref should be DATAERR");
+}
+
+#[test]
+fn non_empty_non_repo_dest_is_refused() {
+    if !git_available() {
+        return;
+    }
+    let r = fixture();
+    let mroot = mirror_root();
+    let dest = mroot.path().join("occupied");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("junk"), b"x").unwrap();
+    let out = r.run(&["git", "export", dest.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("neither a git repository nor empty"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn remote_name_state_is_bound_to_one_dest() {
+    if !git_available() {
+        return;
+    }
+    let r = fixture();
+    let mroot = mirror_root();
+    let m1 = mroot.path().join("m1");
+    let m2 = mroot.path().join("m2");
+    r.ok(&["git", "export", m1.to_str().unwrap()]);
+    let out = r.run(&["git", "export", m2.to_str().unwrap()]);
+    assert!(
+        !out.status.success(),
+        "same remote-name, different dest must fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--remote-name"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

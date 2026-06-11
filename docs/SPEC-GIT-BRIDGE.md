@@ -11,7 +11,7 @@ Status: **Normative** for the mkit→git export direction.
 Scope: the byte-level mapping from mkit v1 objects (SPEC-OBJECTS) to
 git objects, the carrier encoding for mkit-only fields, ref-name
 mapping, the verification model for carried signatures, mirror update
-semantics, and the dual-digest provenance attestation.
+semantics, and the `git-bridge/v1` provenance attestation.
 
 This spec covers **export only**. git→mkit import is explicitly out of
 scope for v1 (see §1.3). The translation is designed so that any two
@@ -381,15 +381,22 @@ unsigned annotated tags, SPEC-SIGNING §4a) and MUST be reported as
 At export, the bridge mints one DSSE/in-toto attestation per exported
 ref head (SPEC-ATTESTATIONS encoding rules apply):
 
-- `predicateType`: `https://mkit.makechain.net/attestation/git-bridge/v1`
+- `predicateType`:
+  `https://github.com/officialunofficial/mkit/spec/predicate/git-bridge/v1`
+  (the SPEC-ATTESTATIONS §6.4 project-controlled URI scheme).
 - `subject[0]`: `name` = the full mkit ref name; `digest` =
-  `{"blake3": "<64hex mkit commit hash>", "gitCommit": "<40hex sha1>"}`
-  (in-toto DigestSet; `gitCommit` is the standard registered name).
+  `{"blake3": "<64hex mkit commit hash>"}`. The git-side id rides in
+  the predicate, not the subject: SPEC-ATTESTATIONS's v1 Statement
+  encoder is deliberately blake3-only, and the SHA-1 is a locator,
+  not an identity (§2). Promoting `gitCommit` into a multi-digest
+  subject DigestSet is reserved for a future predicate version,
+  gated on SPEC-ATTESTATIONS growing DigestSet support.
 - predicate (all fields required; shown in JCS key order, which the
   encoded Statement uses per SPEC-ATTESTATIONS §4):
 
 ```json
 {
+  "gitCommit": "<40hex sha1 of the translated head>",
   "mirror": "<git remote URL as configured>",
   "refName": "<full mkit ref name>",
   "schemaVersion": 1,
@@ -397,12 +404,13 @@ ref head (SPEC-ATTESTATIONS encoding rules apply):
 }
 ```
 
-  Field semantics: `mirror` is the git remote the head was exported
-  to, as configured (a locator, not an identity claim); `refName` is
-  the full mkit ref whose head is attested; `schemaVersion` is the
-  mkit object `schema_version` the translated history carries (§1.2);
-  `specVersion` is the version of this predicate's own shape, i.e.
-  the `git-bridge/v1` definition.
+  Field semantics: `gitCommit` locates the translated head on the
+  mirror (locator, never a proof — §2); `mirror` is the git remote
+  the head was exported to, as configured (a locator, not an identity
+  claim); `refName` is the full mkit ref whose head is attested;
+  `schemaVersion` is the mkit object `schema_version` the translated
+  history carries (§1.2); `specVersion` is the version of this
+  predicate's own shape, i.e. the `git-bridge/v1` definition.
 
 The attestation is signed with the exporter's configured signer
 (SPEC-ATTESTATIONS signer plumbing, unchanged). **Distinguishability
@@ -418,12 +426,23 @@ one entry per published envelope, name = `<64hex attestation
 id>.dsse` (the BLAKE3 of the envelope bytes, matching the local
 store's naming — naming by git sha would collide when two refs share
 a head), content = the DSSE envelope bytes, committed by a synthetic
-commit whose author line follows §6.2 with the exporter's identity.
-Consumers locate a head's attestations by the `gitCommit` field
-inside the envelopes' predicates. Note for consumers:
-non-standard ref namespaces are not fetched by `git clone` defaults —
-document the explicit refspec
+commit whose author/committer line is the fixed string
+`mkit-git-bridge <bridge@mkit.invalid> <ts> +0000` with `<ts>` = the
+newest exported head's timestamp (deterministic; deliberately not
+the exporter's identity — the envelopes inside the tree carry the
+signed identity claims). Consumers locate a head's attestations by
+the `gitCommit` field inside the envelopes' predicates. Note for
+consumers: non-standard ref namespaces are not fetched by `git
+clone` defaults — document the explicit refspec
 (`+refs/mkit/attestations:refs/mkit/attestations`).
+
+**Multi-exporter limitation.** The attestations ref forms a linear
+synthetic-commit chain per mirror. Two *machines* exporting to the
+same mirror will contend on it: each one's chain diverges from the
+other's, and the lease (§12.2) refuses the overwrite. §12.2's
+concurrent-exporter safety claim covers translated refs (identical
+bytes by determinism); for `refs/mkit/attestations` the v1 posture
+is one exporter per mirror, enforced by the lease failing loudly.
 
 A SHA-1 collision would let two git objects claim one `gitCommit`
 digest; the binding's integrity rides on the `blake3` digest, and
@@ -457,7 +476,14 @@ internal state are never exported.
 - Exports are **incremental**: objects already present in the mirror
   (by SHA-1) are not rewritten; ref updates use git's compare-and-swap
   (`--force-with-lease=<ref>:<expected>` against the last value this
-  bridge state recorded).
+  bridge state recorded, or — when no state is recorded for a ref —
+  against the mirror's current value observed via `ls-remote`, which
+  is what keeps wiped state rebuildable, §12.3). The push is
+  `--atomic`: either every ref in the export lands or none does, so
+  recorded state can never go stale for a subset of refs.
+- Deleting an mkit branch never deletes it on the mirror (export is
+  add/update-only); a later re-created branch of the same name
+  updates the mirror ref under the observed-value lease.
 - An mkit-side history rewrite (amend/rebase/force-push) exports as a
   git force-push. Mapping-cache entries for rewritten-away commits are
   **retained**: determinism makes them permanently correct, and they
@@ -481,7 +507,13 @@ correct but are not re-derivable; their loss is harmless because
 nothing in the store references them. Implementations MUST treat
 cache absence or corruption as "rebuild", never as an error state,
 and MUST NOT export the cache or rely on its presence for
-correctness.
+correctness. Per-ref lease state is equally disposable: with no
+recorded expectation the bridge seeds the lease from the mirror's
+observed value, so deleting the whole state directory and
+re-exporting against the same mirror works. The state directory is
+bound to one destination (recorded at first export); pointing the
+same `--remote-name` at a different mirror is refused — use one
+state name per mirror.
 
 ---
 

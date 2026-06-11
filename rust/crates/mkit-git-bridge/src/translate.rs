@@ -76,6 +76,11 @@ pub fn translate_blob(data: &[u8]) -> GitObject {
 }
 
 /// §4: flatten a content-defined chunked blob.
+///
+/// Refuses (per §4) anything a conformant mkit writer cannot have
+/// produced — fixed-size chunking, at-or-below-threshold totals, or
+/// boundaries that differ from the pinned `FastCDC` output — because
+/// such manifests would not survive the §9 round trip.
 pub fn translate_chunked<S: ObjectSource>(
     hash: &Hash,
     manifest: &ChunkedBlob,
@@ -88,12 +93,24 @@ pub fn translate_chunked<S: ObjectSource>(
         }
         .into());
     }
+    if manifest.total_size <= mkit_core::worktree::CHUNK_THRESHOLD {
+        // A conformant writer stores this as a plain blob (§4 item 2).
+        return Err(Refusal::NonCanonicalChunking {
+            object: *hash,
+            detail: "total size at or below the 1 MiB chunking threshold",
+        }
+        .into());
+    }
     let total = usize::try_from(manifest.total_size)
         .map_err(|_| BridgeError::Source("manifest total_size exceeds usize".into()))?;
     let mut body = Vec::with_capacity(total);
+    let mut lengths = Vec::with_capacity(manifest.chunks.len());
     for chunk_hash in &manifest.chunks {
         match source.read_object(chunk_hash)? {
-            Object::Blob(b) => body.extend_from_slice(&b.data),
+            Object::Blob(b) => {
+                lengths.push(b.data.len());
+                body.extend_from_slice(&b.data);
+            }
             other => {
                 return Err(BridgeError::Source(format!(
                     "chunk {} is a {}, not a blob",
@@ -110,6 +127,18 @@ pub fn translate_chunked<S: ObjectSource>(
             body.len(),
             manifest.total_size
         )));
+    }
+    // §4 item 3: boundaries must equal the pinned FastCDC output, or
+    // §9's re-chunking reconstructs a different manifest.
+    let canonical: Vec<usize> = mkit_core::ChunkIterator::new(mkit_core::FastCdc::v1(), &body)
+        .map(|b| b.length)
+        .collect();
+    if canonical != lengths {
+        return Err(Refusal::NonCanonicalChunking {
+            object: *hash,
+            detail: "chunk boundaries differ from the pinned FastCDC output",
+        }
+        .into());
     }
     Ok(GitObject {
         gtype: GitType::Blob,

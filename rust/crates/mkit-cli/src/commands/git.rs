@@ -54,6 +54,14 @@ struct ExportArgs {
     /// Skip minting/publishing git-bridge provenance attestations.
     #[arg(long = "no-attest")]
     no_attest: bool,
+    /// Attestation algorithm: `ed25519`, `secp256k1`, or `p256`
+    /// (default: `attest.default_algorithm` from config, else ed25519).
+    #[arg(long, value_name = "ALG")]
+    algorithm: Option<String>,
+    /// Attestation signer kind: `repo-key`, `external`, or `keystore`
+    /// (default: the configured attest signer, like `mkit attest`).
+    #[arg(long, value_name = "KIND")]
+    signer: Option<String>,
     /// Machine-readable JSON on stdout.
     #[arg(long)]
     json: bool,
@@ -106,6 +114,31 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
             .map_err(|e| (format!("init staging repo: {e}"), exit::CANTCREAT))?;
     }
 
+    // Validate/prepare the destination up front (before any signing or
+    // state mutation), and bind this state dir to one dest: leases
+    // recorded against one mirror are wrong for another.
+    let push_dest = ensure_dest(&opts.dest)?;
+    let dest_file = state.join("dest");
+    match std::fs::read_to_string(&dest_file) {
+        Ok(recorded) if recorded.trim() != push_dest => {
+            return Err((
+                format!(
+                    "state '{}' is bound to {}; use a different --remote-name for {}",
+                    opts.remote_name,
+                    recorded.trim(),
+                    opts.dest
+                ),
+                exit::USAGE,
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(&dest_file, format!("{push_dest}\n"))
+                .map_err(|e| (format!("record dest: {e}"), exit::CANTCREAT))?;
+        }
+        Err(e) => return Err((format!("read dest binding: {e}"), exit::GENERAL_ERROR)),
+    }
+
     // ── ref selection (§12.1) ──────────────────────────────────────
     let requested = collect_refs(&mkit_dir, &opts.refs)?;
     if requested.is_empty() {
@@ -121,7 +154,6 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
             warn_skip(&mut skipped, &ref_name, &refusal.to_string());
             continue;
         }
-        let before = new_pairs.len();
         let result = translate_closure(&store, &head, &mut known, &mut |h, g| {
             let id = g.write_loose(&staging)?;
             new_pairs.push((*h, id));
@@ -139,8 +171,7 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
             }
             Err(BridgeError::Refused(r)) => {
                 // Objects already written are harmless content-addressed
-                // orphans; the pairs stay valid (determinism).
-                let _ = before;
+                // orphans; the map pairs stay valid (determinism).
                 warn_skip(&mut skipped, &ref_name, &r.to_string());
             }
             Err(e) => return Err((format!("translate {ref_name}: {e}"), exit::GENERAL_ERROR)),
@@ -161,52 +192,77 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     }
 
     // ── provenance attestations (§11) ──────────────────────────────
-    let mut attest_commit: Option<(Sha1Id, Option<Sha1Id>)> = None;
-    if !opts.no_attest {
-        let new_head =
-            publish_attestations(cwd, &mkit_dir, &store, &staging, &opts.dest, &exported)?;
-        attest_commit = new_head;
-    }
+    let attest_head: Option<Sha1Id> = if opts.no_attest {
+        None
+    } else {
+        Some(publish_attestations(
+            cwd, &mkit_dir, &store, &staging, &opts.dest, &exported, opts,
+        )?)
+    };
 
     // ── push with per-ref CAS leases (§12.2) ───────────────────────
-    let push_dest = ensure_dest(&opts.dest)?;
+    // Lease expectation per ref: recorded state, else (state lost or
+    // never recorded) the mirror's CURRENT value via ls-remote — a
+    // fresh observation is still a CAS, and it is what makes wiped
+    // bridge state rebuildable against an existing mirror (§12.3).
     let prior: HashMap<&str, &map::RefState> = prior_state
         .iter()
         .map(|s| (s.ref_name.as_str(), s))
         .collect();
-    let mut push_args: Vec<String> = vec!["push".into(), "--quiet".into()];
-    for e in &exported {
+    let mut to_push: Vec<(&str, Sha1Id)> = exported
+        .iter()
+        .map(|e| (e.ref_name.as_str(), e.git_id))
+        .collect();
+    if let Some(head) = attest_head {
+        to_push.push((ATTESTATIONS_REF, head));
+    }
+    let needs_observation = to_push.iter().any(|(name, _)| !prior.contains_key(*name));
+    let observed: HashMap<String, Sha1Id> = if needs_observation {
+        ls_remote(&staging, &push_dest)?
+    } else {
+        HashMap::new()
+    };
+    // --atomic: either every ref (incl. attestations) lands or none
+    // does, so recorded state can never go stale per-ref.
+    let mut push_args: Vec<String> = vec!["push".into(), "--quiet".into(), "--atomic".into()];
+    for (name, _) in &to_push {
         let expect = prior
-            .get(e.ref_name.as_str())
+            .get(name)
             .map(|s| sha1_hex(&s.git_id))
+            .or_else(|| observed.get(*name).map(sha1_hex))
             .unwrap_or_default();
-        push_args.push(format!("--force-with-lease={}:{expect}", e.ref_name));
+        push_args.push(format!("--force-with-lease={name}:{expect}"));
     }
-    if let Some((_, old)) = &attest_commit {
-        let expect = old.map(|o| sha1_hex(&o)).unwrap_or_default();
-        push_args.push(format!("--force-with-lease={ATTESTATIONS_REF}:{expect}"));
-    }
-    push_args.push(push_dest);
-    for e in &exported {
-        push_args.push(format!("{0}:{0}", e.ref_name));
-    }
-    if attest_commit.is_some() {
-        push_args.push(format!("{ATTESTATIONS_REF}:{ATTESTATIONS_REF}"));
+    push_args.push(push_dest.clone());
+    for (name, _) in &to_push {
+        push_args.push(format!("{name}:{name}"));
     }
     let push_arg_refs: Vec<&str> = push_args.iter().map(String::as_str).collect();
     git_in(&staging, &push_arg_refs)
         .map_err(|e| (format!("push to {}: {e}", opts.dest), exit::GENERAL_ERROR))?;
 
     // ── record the new lease expectations ──────────────────────────
-    let new_state: Vec<map::RefState> = exported
+    // Merge over prior state: refs not in this export keep their
+    // recorded leases (a --ref subset or a skip must not wipe them).
+    let mut merged: Vec<map::RefState> = prior_state
         .iter()
-        .map(|e| map::RefState {
-            ref_name: e.ref_name.clone(),
-            mkit_hash: e.mkit_hash,
-            git_id: e.git_id,
-        })
+        .filter(|s| !to_push.iter().any(|(n, _)| *n == s.ref_name))
+        .cloned()
         .collect();
-    map::store_ref_state(&state, &new_state)
+    merged.extend(exported.iter().map(|e| map::RefState {
+        ref_name: e.ref_name.clone(),
+        mkit_hash: e.mkit_hash,
+        git_id: e.git_id,
+    }));
+    if let Some(head) = attest_head {
+        merged.push(map::RefState {
+            ref_name: ATTESTATIONS_REF.to_owned(),
+            mkit_hash: mkit_core::hash::ZERO,
+            git_id: head,
+        });
+    }
+    merged.sort_by(|a, b| a.ref_name.cmp(&b.ref_name));
+    map::store_ref_state(&state, &merged)
         .map_err(|e| (format!("persist ref state: {e}"), exit::GENERAL_ERROR))?;
 
     // ── report ─────────────────────────────────────────────────────
@@ -298,9 +354,10 @@ fn collect_refs(mkit_dir: &Path, explicit: &[String]) -> CmdResult<Vec<(String, 
 /// Mint one DSSE attestation per exported head (subject = mkit hash,
 /// predicate carries the git locator), save it locally like `mkit
 /// attest` does, and publish the set on the staging repo's
-/// `refs/mkit/attestations` flat tree. Returns the new attestations
-/// commit and the previous one (for the push lease), or `None` when
-/// the tree is unchanged.
+/// `refs/mkit/attestations` flat tree. Returns the staging ref's
+/// resulting head — unchanged trees return the existing commit, so a
+/// previously failed push retries with the same refspec instead of
+/// silently dropping the attestations ref.
 #[allow(clippy::too_many_lines)] // mint loop + tree/commit assembly; splitting would scatter §11
 fn publish_attestations(
     cwd: &Path,
@@ -309,12 +366,24 @@ fn publish_attestations(
     staging: &Path,
     dest: &str,
     exported: &[Exported],
-) -> CmdResult<Option<(Sha1Id, Option<Sha1Id>)>> {
+    opts: &ExportArgs,
+) -> CmdResult<Sha1Id> {
+    // Same signer resolution as `mkit attest` (SPEC-GIT-BRIDGE §11:
+    // "the exporter's configured signer"): flag, else config default.
     let cfg = crate::config::read_or_default(cwd)
         .map_err(|e| (format!("read config: {e}"), exit::CONFIG_ERROR))?;
-    let mut signer =
-        attest_factory::build_signer(cwd, mkit_attest::Algorithm::Ed25519, "repo-key", &cfg)
-            .map_err(|e| (format!("build bridge signer: {e}"), exit::GENERAL_ERROR))?;
+    let alg_str = opts
+        .algorithm
+        .clone()
+        .unwrap_or_else(|| cfg.attest.default_algorithm_or_fallback().to_owned());
+    let algorithm =
+        attest_factory::parse_algorithm(&alg_str).map_err(|e| (format!("{e}"), exit::USAGE))?;
+    let signer_kind = opts
+        .signer
+        .clone()
+        .unwrap_or_else(|| cfg.attest.signer_or_fallback().to_owned());
+    let mut signer = attest_factory::build_signer(cwd, algorithm, &signer_kind, &cfg)
+        .map_err(|e| (format!("build bridge signer: {e}"), exit::GENERAL_ERROR))?;
 
     // Existing published entries (name → blob id) so re-exports merge.
     let mut entries: Vec<(String, Sha1Id)> = Vec::new();
@@ -396,11 +465,12 @@ fn publish_attestations(
         .write_loose(staging)
         .map_err(|e| (format!("write attestation tree: {e}"), exit::CANTCREAT))?;
 
-    // Unchanged tree ⇒ nothing to publish (keeps re-exports no-op).
+    // Unchanged tree ⇒ keep the existing commit (no new history; the
+    // caller still pushes the ref so an earlier failed push retries).
     if let Some(old) = &old_commit
         && commit_tree_id(staging, old)? == Some(tree_id)
     {
-        return Ok(None);
+        return Ok(*old);
     }
 
     let person = format!("mkit-git-bridge <bridge@mkit.invalid> {max_ts} +0000");
@@ -428,7 +498,7 @@ fn publish_attestations(
             exit::GENERAL_ERROR,
         )
     })?;
-    Ok(Some((commit_id, old_commit)))
+    Ok(commit_id)
 }
 
 fn head_timestamp(store: &ObjectStore, h: &Hash) -> u64 {
@@ -485,7 +555,17 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// absolutized because the push runs `git -C <staging>`, which would
 /// otherwise resolve them against the staging directory.
 fn ensure_dest(dest: &str) -> CmdResult<String> {
-    let looks_like_url = dest.contains("://") || (dest.contains('@') && dest.contains(':'));
+    if dest.starts_with('-') {
+        // Would be parsed as a git option in the push argv.
+        return Err((format!("invalid destination {dest:?}"), exit::USAGE));
+    }
+    // git's own rule: "://" means a URL, and otherwise a colon BEFORE
+    // the first slash means an scp-style remote (user@ is optional).
+    let looks_like_url = dest.contains("://")
+        || dest
+            .split('/')
+            .next()
+            .is_some_and(|first| first.contains(':'));
     if looks_like_url {
         return Ok(dest.to_owned());
     }
@@ -578,7 +658,24 @@ fn commit_tree_id(repo: &Path, commit: &Sha1Id) -> CmdResult<Option<Sha1Id>> {
     Ok(sha1_from_hex(hex.trim()))
 }
 
+/// Read the destination's current refs (one round-trip). Used to seed
+/// lease expectations when recorded state is missing (§12.3).
+fn ls_remote(staging: &Path, dest: &str) -> CmdResult<HashMap<String, Sha1Id>> {
+    let out = git_in(staging, &["ls-remote", "--quiet", dest, "refs/*"])
+        .map_err(|e| (format!("ls-remote {dest}: {e}"), exit::GENERAL_ERROR))?;
+    let mut refs = HashMap::new();
+    for line in out.lines() {
+        let Some((hex, name)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Some(id) = sha1_from_hex(hex.trim()) {
+            refs.insert(name.trim().to_owned(), id);
+        }
+    }
+    Ok(refs)
+}
+
 fn emit_err(msg: &str, code: u8) -> u8 {
-    eprintln!("mkit git: {msg}");
+    eprintln!("error: {msg}");
     code
 }

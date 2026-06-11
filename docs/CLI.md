@@ -661,8 +661,13 @@ Remote / sync:
   force-pushes. Unless `--no-attest`, each exported head gets a
   signed `git-bridge/v1` DSSE attestation (saved like `mkit attest`,
   published on the mirror's `refs/mkit/attestations` ref — fetch it
-  with an explicit refspec; git clones skip it by default). The
-  import direction does not exist. Requires building the binary with
+  with an explicit refspec; git clones skip it by default).
+  Attestation signing uses the same signer resolution as `mkit
+  attest` (`--algorithm`/`--signer` flags, else config defaults), so
+  a signing key must exist unless `--no-attest`. Branch deletion
+  never propagates (export is add/update-only), and each
+  `--remote-name` state dir is bound to one destination. The import
+  direction does not exist. Requires building the binary with
   `--features git-export`; shells out to `git`.
 
 Config / keys / version:
