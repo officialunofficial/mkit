@@ -815,7 +815,8 @@ by a dedicated import key, pinned per state dir.
 .It Cm git Cm fetch | Cm pull Oo Fl Fl remote-name Ar name Oc
 Update
 .Pa refs/remotes/<name>/*
-from the imported upstream;
+and imported tags from the upstream (a locally-moved tag is never
+clobbered);
 .Cm pull
 also fast-forwards the current branch (divergence refuses with a
 .Cm mkit merge

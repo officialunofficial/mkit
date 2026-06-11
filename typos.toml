@@ -11,6 +11,8 @@ extend-exclude = [
     "rust/target/**",
     # Test fixtures may contain intentional garbage / random hashes.
     "rust/crates/*/tests/fixtures/**",
+    # Golden vectors are byte-exact git objects (incl. latin1 bytes).
+    "rust/tests/golden/**",
     # Compiled / minified web assets.
     "web/dist/**",
     "web/node_modules/**",

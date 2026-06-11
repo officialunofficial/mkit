@@ -629,8 +629,11 @@ segment is not bridge-shaped). The pinned third verification mode,
 1. deep-verifies (§9) every bridge-shaped object;
 2. at each boundary parent: loads the mkit twin from the store,
    checks its importer signature against the pinned importer key
-   (SPEC-GIT-IMPORT §4) and the git-import/v1 attestation, and checks
-   the retained raw bytes hash to the claimed sha1;
+   (SPEC-GIT-IMPORT §4), and checks the retained raw bytes hash to
+   the claimed sha1; for imported ref TIPS it additionally requires a
+   recorded `git-import/v1` attestation (head-scoped — §5 of
+   SPEC-GIT-IMPORT mints per head; per-commit envelope verification
+   is `verify-attest`'s job);
 3. for imported trees/blobs referenced by bridge objects: re-derives
    the git bytes from the mkit twin (verbatim for blobs ≤ 1 MiB,
    re-sort for trees, flatten for chunked) and compares the sha1.

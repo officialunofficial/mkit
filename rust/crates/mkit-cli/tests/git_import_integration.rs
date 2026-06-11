@@ -227,8 +227,11 @@ fn import_key_is_pinned_against_other_keys() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("pinned to importer key") && stderr.contains("designated-importer")
-            || stderr.contains("Designated-importer"),
+        stderr.contains("pinned to importer key"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Designated-importer model"),
         "stderr: {stderr}"
     );
 }
@@ -835,5 +838,347 @@ fn upstream_branch_deletion_prunes_tracking_ref() {
             .unwrap()
             .is_none(),
         "tracking ref pruned"
+    );
+}
+
+#[test]
+fn sha256_upstream_refuses() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let up256 = f.root.path().join("up256");
+    std::fs::create_dir_all(&up256).unwrap();
+    let probe = git_in(
+        &up256,
+        &[
+            "init",
+            "--quiet",
+            "--object-format=sha256",
+            "--initial-branch=main",
+            ".",
+        ],
+    );
+    if !probe.status.success() {
+        return; // git too old for sha256 repos — vector not producible
+    }
+    std::fs::write(up256.join("a.txt"), "a\n").unwrap();
+    git_ok(&up256, &["add", "a.txt"]);
+    git_ok(&up256, &["commit", "--quiet", "-m", "sha256 commit"]);
+
+    let out = f.mkit(
+        f.root.path(),
+        &["git", "import", up256.to_str().unwrap(), "fork256"],
+    );
+    assert!(!out.status.success(), "sha256 upstream must refuse");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("SHA-256"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn import_spec_version_mismatch_refuses() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    std::fs::write(fork.join(".mkit/git/upstream/import-spec"), "999\n").unwrap();
+    let out = f.mkit(&fork, &["git", "fetch"]);
+    assert!(!out.status.success(), "spec mismatch must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("import-spec 999") && stderr.contains("new --remote-name"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn lightweight_tag_imports_as_bare_ref() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let up = f.upstream();
+    git_ok(&up, &["tag", "lw"]); // lightweight: points straight at the commit
+    let fork = f.import();
+    let mkit_dir = fork.join(".mkit");
+    let lw = refs::read_tag(&mkit_dir, "lw").unwrap().unwrap();
+    // Lightweight tag = bare ref at the commit twin: identical to the
+    // branch head, with no tag object in between.
+    let head = refs::read_remote_ref(&mkit_dir, "upstream", "main")
+        .unwrap()
+        .unwrap();
+    assert_eq!(lw, head, "bare ref, no synthesized tag object");
+    // The annotated fixture tag still points at a tag object instead.
+    let v1 = refs::read_tag(&mkit_dir, "v1").unwrap().unwrap();
+    assert_ne!(v1, head);
+}
+
+#[test]
+fn mixed_import_skips_refused_ref_and_keeps_the_rest() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let up = f.upstream();
+    // A branch whose tree adds a gitlink (submodule) — spec'd refusal.
+    git_ok(&up, &["checkout", "--quiet", "-b", "with-submodule"]);
+    let out = git_in(
+        &up,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            up.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    assert!(out.status.success(), "submodule add: {out:?}");
+    git_ok(&up, &["commit", "--quiet", "-m", "add submodule"]);
+    git_ok(&up, &["checkout", "--quiet", "main"]);
+
+    let out = f.mkit_ok(
+        f.root.path(),
+        &["git", "import", up.to_str().unwrap(), "fork"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("skipping refs/heads/with-submodule") && stderr.contains("submodule"),
+        "{stderr}"
+    );
+    let mkit_dir = f.fork().join(".mkit");
+    assert!(
+        refs::read_remote_ref(&mkit_dir, "upstream", "main")
+            .unwrap()
+            .is_some(),
+        "healthy ref imported despite the refusal"
+    );
+    assert!(
+        refs::read_remote_ref(&mkit_dir, "upstream", "with-submodule")
+            .unwrap()
+            .is_none(),
+        "refused ref left untracked"
+    );
+    // And the partially-translated shared history did not poison the
+    // map: verify walks the recorded refs clean.
+    f.mkit_ok(&f.fork(), &["git", "verify"]);
+}
+
+#[test]
+fn remote_rename_moves_and_remove_keeps_bridge_state() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    let up = f.upstream();
+    let mkit_dir = fork.join(".mkit");
+    // Bind the bridge state name to a configured remote of the same name.
+    f.mkit_ok(
+        &fork,
+        &[
+            "remote",
+            "add",
+            "upstream",
+            &format!("git+file://{}", up.display()),
+        ],
+    );
+    assert!(mkit_dir.join("git/upstream/source").exists());
+
+    f.mkit_ok(&fork, &["remote", "rename", "upstream", "origin-git"]);
+    assert!(
+        mkit_dir.join("git/origin-git/source").exists(),
+        "bridge state moved with the remote"
+    );
+    assert!(!mkit_dir.join("git/upstream").exists());
+
+    let out = f.mkit_ok(&fork, &["remote", "remove", "origin-git"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        mkit_dir.join("git/origin-git/source").exists(),
+        "bridge state retained on remove (audit evidence)"
+    );
+    assert!(
+        stderr.contains("git/origin-git"),
+        "remove names the retained path: {stderr}"
+    );
+}
+
+#[test]
+fn upstream_tag_deletion_keeps_local_tag() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    let up = f.upstream();
+    git_ok(&up, &["tag", "-d", "v1"]);
+    f.mkit_ok(&fork, &["git", "fetch"]);
+    assert!(
+        refs::read_tag(&fork.join(".mkit"), "v1").unwrap().is_some(),
+        "tags are kept on upstream deletion (no --prune-tags)"
+    );
+}
+
+#[test]
+fn locally_moved_tag_is_not_clobbered_by_fetch() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    let mkit_dir = fork.join(".mkit");
+    let imported_v1 = refs::read_tag(&mkit_dir, "v1").unwrap().unwrap();
+
+    // Move v1 locally to the branch head (delete + recreate).
+    f.mkit_ok(&fork, &["tag", "-d", "v1"]);
+    f.mkit_ok(&fork, &["tag", "v1", "HEAD"]);
+    let moved = refs::read_tag(&mkit_dir, "v1").unwrap().unwrap();
+    assert_ne!(moved, imported_v1);
+
+    let out = f.mkit_ok(&fork, &["git", "fetch"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not updating tag 'v1'"),
+        "warn on skipped tag: {stderr}"
+    );
+    assert_eq!(
+        refs::read_tag(&mkit_dir, "v1").unwrap().unwrap(),
+        moved,
+        "locally-moved tag survives fetch"
+    );
+}
+
+#[test]
+fn format_patch_skips_merges_with_warning() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    // Build a local merge: branch off, commit on both sides, merge.
+    f.mkit_ok(&fork, &["branch", "side"]);
+    std::fs::write(fork.join("main.txt"), "m\n").unwrap();
+    f.mkit_ok(&fork, &["add", "main.txt"]);
+    f.mkit_ok(&fork, &["commit", "-m", "Main work"]);
+    f.mkit_ok(&fork, &["checkout", "side"]);
+    std::fs::write(fork.join("side.txt"), "s\n").unwrap();
+    f.mkit_ok(&fork, &["add", "side.txt"]);
+    f.mkit_ok(&fork, &["commit", "-m", "Side work"]);
+    f.mkit_ok(&fork, &["checkout", "main"]);
+    f.mkit_ok(&fork, &["merge", "side"]);
+
+    let out = f.mkit_ok(
+        &fork,
+        &["git", "format-patch", "upstream/main..HEAD", "--stdout"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("merge commit(s) skipped"),
+        "merge-skip warning: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Main work") && stdout.contains("Side work"));
+}
+
+#[test]
+fn duplicate_import_state_for_same_upstream_refuses() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    let up = f.upstream();
+    let out = f.mkit(
+        &fork,
+        &[
+            "git",
+            "import",
+            up.to_str().unwrap(),
+            "--remote-name",
+            "dup",
+        ],
+    );
+    assert!(!out.status.success(), "duplicate state must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("already imported as state 'upstream'"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn dash_prefixed_url_refuses() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let out = f.mkit(
+        f.root.path(),
+        &["git", "import", "--upload-pack=/bin/echo", "fork"],
+    );
+    assert!(!out.status.success());
+}
+
+#[test]
+fn passthrough_refuses_non_fast_forward_push() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    std::fs::write(fork.join("local.txt"), "l\n").unwrap();
+    f.mkit_ok(&fork, &["add", "local.txt"]);
+    f.mkit_ok(&fork, &["commit", "-m", "local work"]);
+
+    // The "fork" advanced past what we imported (stand-in for an
+    // upstream that moved, or a fork pushed to from elsewhere).
+    let up = f.upstream();
+    git_ok(
+        f.root.path(),
+        &["clone", "--quiet", up.to_str().unwrap(), "forkwt"],
+    );
+    let forkwt = f.root.path().join("forkwt");
+    std::fs::write(forkwt.join("remote.txt"), "r\n").unwrap();
+    git_ok(&forkwt, &["add", "remote.txt"]);
+    git_ok(&forkwt, &["commit", "--quiet", "-m", "remote-side work"]);
+    git_ok(
+        f.root.path(),
+        &["clone", "--bare", "--quiet", "forkwt", "forkgit"],
+    );
+    let forkgit = f.root.path().join("forkgit");
+
+    let out = f.mkit(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "upstream",
+            forkgit.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !out.status.success(),
+        "non-FF passthrough must refuse, not rewind"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not integrated") || stderr.contains("has commits this repo has not"),
+        "{stderr}"
+    );
+    // The fork was not touched.
+    let tip = git_in(&forkgit, &["log", "--format=%s", "-n", "1"]);
+    assert!(
+        String::from_utf8_lossy(&tip.stdout).contains("remote-side work"),
+        "{tip:?}"
     );
 }

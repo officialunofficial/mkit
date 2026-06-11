@@ -114,6 +114,11 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
+fn gitsrc_is_ancestor(staging: &Path, old: &Sha1Id, new: &Sha1Id) -> CmdResult<bool> {
+    mkit_git_bridge::gitsrc::is_ancestor(staging, old, new)
+        .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))
+}
+
 fn run_simple(f: impl FnOnce() -> Result<(), (String, u8)>) -> u8 {
     match f() {
         Ok(()) => exit::OK,
@@ -136,9 +141,31 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     let mkit_dir = cwd.join(mkit_core::store::MKIT_DIR);
     git_version().map_err(|e| (e, exit::UNAVAILABLE))?;
 
+    // An option-shaped dest must never reach a git argv.
+    if opts.dest.starts_with('-') {
+        return Err((
+            format!("{:?} is not a valid git URL or path", opts.dest),
+            exit::USAGE,
+        ));
+    }
+
     // ── per-remote bridge state + bare staging repo ────────────────
     let state =
         map::state_dir(&mkit_dir, &opts.remote_name).map_err(|e| (e.to_string(), exit::USAGE))?;
+    // One bridge operation per state dir at a time (shared with the
+    // import side: fetch + passthrough export on a fork dir race the
+    // staging mirror and the map).
+    let _state_lock =
+        mkit_core::repo_lock::acquire_default(&mkit_dir, &format!("git-{}.lock", opts.remote_name))
+            .map_err(|e| {
+                (
+                    format!(
+                        "bridge state '{}' is busy (another mkit git operation?): {e}",
+                        opts.remote_name
+                    ),
+                    exit::TEMPFAIL,
+                )
+            })?;
 
     // ORIGIN GUARD (SPEC-GIT-BRIDGE §14.2), FIRST — before any state
     // is stamped or the dest is initialized, so a refusal has no side
@@ -178,6 +205,22 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
                 format!(
                     "--passthrough requires import state for '{}' — run \
                      `mkit git import <url>` first (SPEC-GIT-BRIDGE §14.1)",
+                    opts.remote_name
+                ),
+                exit::USAGE,
+            ));
+        }
+        // §3.3 stickiness: history imported with historic-mode
+        // normalization cannot reproduce its original sha1s — a fork
+        // built on it would fail every fork audit as false tampering.
+        if mkit_git_bridge::map::read_normalized(&state)
+            .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?
+        {
+            return Err((
+                format!(
+                    "state '{}' contains historic-mode-normalized trees; fork mode \
+                     cannot reproduce their original sha1s (SPEC-GIT-IMPORT §3.3). \
+                     Re-import under a new --remote-name to get fork-strict refusals",
                     opts.remote_name
                 ),
                 exit::USAGE,
@@ -360,6 +403,54 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     } else {
         HashMap::new()
     };
+    // Fork mode pushes to repositories mkit does NOT own (the
+    // upstream itself, or a real fork): a lease seeded from a fresh
+    // ls-remote observation passes unconditionally, so require
+    // fast-forward explicitly — the expected value must be an
+    // ancestor of what we push, and tags must not move. Plain export
+    // keeps Phase-1 semantics (the mirror is owned by this repo).
+    if opts.passthrough {
+        for (name, new_id) in &to_push {
+            if *name == ATTESTATIONS_REF {
+                continue;
+            }
+            let expect = prior
+                .get(name)
+                .map(|s| s.git_id)
+                .or_else(|| observed.get(*name).copied());
+            let Some(expect) = expect else { continue };
+            if expect == *new_id {
+                continue;
+            }
+            if name.starts_with("refs/tags/") {
+                return Err((
+                    format!(
+                        "{name} already exists on {} at a different object; fork-mode \
+                         export never moves an existing tag",
+                        opts.dest
+                    ),
+                    exit::USAGE,
+                ));
+            }
+            let ff = mkit_git_bridge::gitsrc::object_exists(&staging, &expect)
+                .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?
+                && gitsrc_is_ancestor(&staging, &expect, new_id)?;
+            if !ff {
+                return Err((
+                    format!(
+                        "{name} on {} has commits this repo has not integrated; \
+                         run `mkit git fetch` and `mkit merge {}/{}` first \
+                         (fork-mode export refuses non-fast-forward pushes)",
+                        opts.dest,
+                        opts.remote_name,
+                        name.strip_prefix("refs/heads/").unwrap_or(name)
+                    ),
+                    exit::DATAERR,
+                ));
+            }
+        }
+    }
+
     // --atomic: either every ref (incl. attestations) lands or none
     // does, so recorded state can never go stale per-ref.
     let mut push_args: Vec<String> = vec!["push".into(), "--quiet".into(), "--atomic".into()];

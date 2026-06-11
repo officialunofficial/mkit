@@ -136,6 +136,20 @@ pub fn bind_signer(dir: &Path, key: &[u8; 32]) -> Result<(), BridgeError> {
     }
 }
 
+/// Record that this state dir's imported history contains
+/// historic-mode-normalized trees (SPEC-GIT-IMPORT §3.3). Sticky: a
+/// normalized tree cannot reproduce its original sha1, so a later
+/// import→fork upgrade must refuse (§14.1 fork audit would otherwise
+/// report false tampering forever).
+pub fn mark_normalized(dir: &Path) -> Result<(), BridgeError> {
+    write_stamp(dir, "normalized", "1")
+}
+
+/// Whether [`mark_normalized`] was ever stamped.
+pub fn read_normalized(dir: &Path) -> Result<bool, BridgeError> {
+    Ok(read_stamp(dir, "normalized")?.is_some())
+}
+
 /// Read / pin the import-spec version (SPEC-GIT-IMPORT §1.2).
 pub fn bind_import_spec(dir: &Path, version: u32) -> Result<(), BridgeError> {
     match read_stamp(dir, "import-spec")? {
@@ -150,11 +164,28 @@ pub fn bind_import_spec(dir: &Path, version: u32) -> Result<(), BridgeError> {
 }
 
 /// Load the map inverted (sha1 → blake3) for the import direction.
+/// Parsed directly from the file lines: translation is many-to-one
+/// (two historic-mode spellings of a tree normalize to ONE mkit
+/// tree), so inverting the blake3-keyed [`load_map`] would drop a
+/// sha1 and force a pointless re-translation every fetch.
 pub fn load_map_inverse(dir: &Path) -> Result<HashMap<Sha1Id, Hash>, BridgeError> {
-    Ok(load_map(dir)?
-        .into_iter()
-        .map(|(blake3, sha1)| (sha1, blake3))
-        .collect())
+    let path = dir.join(MAP_FILE);
+    let data = match std::fs::read(&path) {
+        Ok(d) => String::from_utf8_lossy(&d).into_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut map = HashMap::new();
+    for line in data.lines() {
+        let Some((b3, s1)) = line.split_once(' ') else {
+            continue;
+        };
+        let (Ok(h), Some(id)) = (from_hex(b3), sha1_from_hex(s1)) else {
+            continue;
+        };
+        map.insert(id, h);
+    }
+    Ok(map)
 }
 
 /// Append pairs given in import orientation (sha1, blake3) — the file
@@ -279,9 +310,23 @@ fn store_ref_state_file(dir: &Path, file: &str, states: &[RefState]) -> Result<(
         out.push_str(&sha1_hex(&s.git_id));
         out.push('\n');
     }
-    let tmp = dir.join(".refs.tmp");
-    std::fs::write(&tmp, out.as_bytes())?;
+    // Per-target temp name: `refs` and `refs-import` rewrites must
+    // not race each other onto one temp path (fetch + export can run
+    // concurrently against a fork state dir).
+    let tmp = dir.join(format!(".{file}.tmp"));
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(out.as_bytes())?;
+        // Content fsync before rename: this file is the lease /
+        // tracking source of truth, and a durable name over torn
+        // pages would be worse than the old file.
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp, dir.join(file))?;
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
     Ok(())
 }
 

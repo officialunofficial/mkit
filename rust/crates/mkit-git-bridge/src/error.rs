@@ -47,6 +47,11 @@ pub enum Refusal {
     NormalizedModeInFork { object: Hash, mode: String },
     /// Import: pre-1970 git timestamp (mkit timestamps are u64).
     NegativeTimestamp { object: Hash, timestamp: i64 },
+    /// Import: structurally unparsable git object (SPEC-GIT-IMPORT
+    /// §3.2/§3.5 — refused per-ref, never coerced).
+    Unparsable { object: Hash, detail: String },
+    /// Import: blob over the 1 GiB per-file cap (SPEC-GIT-IMPORT §3.1).
+    BlobTooLarge { object: Hash, size: u64 },
     /// Import: more than 1000 parents (`MAX_PARENTS`).
     TooManyParents { object: Hash },
     /// Import: author/tagger identity payload empty or over 4096.
@@ -61,6 +66,7 @@ pub enum Refusal {
 }
 
 impl fmt::Display for Refusal {
+    #[allow(clippy::too_many_lines)] // one arm per refusal; flat by design
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Remix { object } => write!(
@@ -123,6 +129,16 @@ impl fmt::Display for Refusal {
                  this state dir is fork-mode, where normalized trees cannot reproduce their \
                  original sha1 — refusing (SPEC-GIT-IMPORT §3.3)",
                 &to_hex(object)[..40]
+            ),
+            Self::Unparsable { object, detail } => write!(
+                f,
+                "git object {} is structurally unparsable ({detail}); refused per SPEC-GIT-IMPORT §3.2",
+                to_hex(object)
+            ),
+            Self::BlobTooLarge { object, size } => write!(
+                f,
+                "git blob {} is {size} bytes, over the 1 GiB per-file cap (SPEC-GIT-IMPORT §3.1)",
+                to_hex(object)
             ),
             Self::NegativeTimestamp { object, timestamp } => write!(
                 f,

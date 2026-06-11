@@ -189,9 +189,31 @@ fn import_into(root: &Path, opts: &ImportArgs, require_repo: bool) -> CmdResult<
     let mkit_dir = root.join(mkit_core::MKIT_DIR);
     super::git::git_version().map_err(|e| (e, exit::UNAVAILABLE))?;
 
+    // An option-shaped "url" must never reach a git argv (argument
+    // injection: `--upload-pack=...` etc.).
+    if opts.url.starts_with('-') {
+        return Err((
+            format!("{:?} is not a valid git URL or path", opts.url),
+            exit::USAGE,
+        ));
+    }
+
     let state =
         map::state_dir(&mkit_dir, &opts.remote_name).map_err(|e| (e.to_string(), exit::USAGE))?;
-    bind_import_state(&state, &opts.url)?;
+    // One bridge operation per state dir at a time: concurrent runs
+    // would race the crash marker / map discard / bulk session.
+    let _state_lock =
+        mkit_core::repo_lock::acquire_default(&mkit_dir, &format!("git-{}.lock", opts.remote_name))
+            .map_err(|e| {
+                (
+                    format!(
+                        "bridge state '{}' is busy (another mkit git operation?): {e}",
+                        opts.remote_name
+                    ),
+                    exit::TEMPFAIL,
+                )
+            })?;
+    bind_import_state(&mkit_dir, &state, &opts.url)?;
     let kp = load_or_create_import_key(&mkit_dir, opts.key.as_deref())?;
     map::bind_signer(&state, &kp.public.0).map_err(|e| (e.to_string(), exit::CONFIG_ERROR))?;
 
@@ -452,7 +474,7 @@ fn translate_upstream(
     // Written only now, after the read-only probe: the marker brackets
     // exactly the window where torn objects can exist (store writes
     // until the map/ref-state commit below).
-    std::fs::write(&marker, b"").map_err(|e| (format!("marker: {e}"), exit::CANTCREAT))?;
+    write_durable(&marker, b"").map_err(|e| (format!("marker: {e}"), exit::CANTCREAT))?;
 
     let direction = map::read_direction(state)
         .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?
@@ -465,13 +487,25 @@ fn translate_upstream(
         store: &store,
     };
     let raw_dir = state.join("raw");
+    let mut raw_dirs: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut retain = |id: &Sha1Id, raw: &[u8]| -> Result<(), BridgeError> {
         let hex = sha1_hex(id);
         let dir = raw_dir.join(&hex[..2]);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(&hex[2..]);
+        // Temp + content-fsync + rename: a torn final file would be
+        // permanent (the exists() short-circuit is what makes re-runs
+        // cheap, so the final path must never hold partial bytes).
         if !path.exists() {
-            std::fs::write(path, raw)?;
+            let tmp = dir.join(format!(".{}.tmp", &hex[2..]));
+            {
+                use std::io::Write as _;
+                let mut f = std::fs::File::create(&tmp)?;
+                f.write_all(raw)?;
+                f.sync_all()?;
+            }
+            std::fs::rename(&tmp, &path)?;
+            raw_dirs.insert(dir);
         }
         Ok(())
     };
@@ -491,7 +525,14 @@ fn translate_upstream(
         .iter()
         .map(|s| (s.ref_name.as_str(), s))
         .collect();
-    let exclude: Vec<Sha1Id> = prior_state.iter().map(|s| s.git_id).collect();
+    // Exclusions must still exist in the mirror: after an upstream
+    // force-push plus gc, a pruned old tip would make `rev-list ^tip`
+    // abort every future fetch ("fatal: bad object").
+    let exclude: Vec<Sha1Id> = prior_state
+        .iter()
+        .map(|s| s.git_id)
+        .filter(|id| gitsrc::object_exists(staging, id).unwrap_or(false))
+        .collect();
 
     let mut imported: Vec<(String, Sha1Id, Hash)> = Vec::new();
     let mut skipped: Vec<(String, String)> = Vec::new();
@@ -537,11 +578,15 @@ fn translate_upstream(
             retain_raw: &mut retain,
             options: ImportOptions { fork_mode },
         };
-        match imp.import_commits(&order, &uref.id) {
-            Ok(outcome) => {
-                normalized |= outcome.normalized_modes;
-                all_pairs.extend_from_slice(&outcome.new_pairs);
-                imported.push((uref.name.clone(), uref.id, outcome.head));
+        // Pairs are caller-owned and persisted EVEN when the ref
+        // refuses: the sink already wrote those objects, and a later
+        // ref sharing the history memo-hits without re-emitting them.
+        let mut ref_pairs: Vec<(Sha1Id, Hash)> = Vec::new();
+        let result = imp.import_commits(&order, &uref.id, &mut ref_pairs, &mut normalized);
+        all_pairs.extend_from_slice(&ref_pairs);
+        match result {
+            Ok(head) => {
+                imported.push((uref.name.clone(), uref.id, head));
             }
             Err(BridgeError::Refused(r)) => {
                 eprintln!("warning: skipping {}: {r}", uref.name);
@@ -557,6 +602,11 @@ fn translate_upstream(
     sink.bw
         .commit()
         .map_err(|e| (format!("commit bulk writes: {e}"), exit::CANTCREAT))?;
+    for dir in &raw_dirs {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
     map::append_map_import(state, &all_pairs)
         .map_err(|e| (format!("persist map: {e}"), exit::GENERAL_ERROR))?;
 
@@ -577,13 +627,30 @@ fn translate_upstream(
             refs::write_remote_ref(mkit_dir, &opts.remote_name, branch, mkit_hash)
                 .map_err(|e| (format!("tracking ref {name}: {e}"), exit::CANTCREAT))?;
         } else if let Some(tag) = name.strip_prefix("refs/tags/") {
-            refs::update_tag(
-                mkit_dir,
-                tag,
-                mkit_core::refs::RefWriteCondition::Any,
-                mkit_hash,
-            )
-            .map_err(|e| (format!("tag ref {name}: {e}"), exit::CANTCREAT))?;
+            // Never clobber a locally-moved tag: only write when the
+            // tag is absent or still where THIS import last put it
+            // (mirrors git fetch's would-clobber refusal).
+            let existing = refs::read_tag(mkit_dir, tag)
+                .map_err(|e| (format!("tag ref {name}: {e}"), exit::GENERAL_ERROR))?;
+            let ours_before = prior_by_ref.get(name.as_str()).map(|p| p.mkit_hash);
+            match existing {
+                Some(cur) if cur != *mkit_hash && Some(cur) != ours_before => {
+                    eprintln!(
+                        "warning: not updating tag '{tag}': it was moved locally \
+                         (delete it with `mkit tag -d {tag}` to track the upstream tag)"
+                    );
+                }
+                Some(cur) if cur == *mkit_hash => {}
+                _ => {
+                    refs::update_tag(
+                        mkit_dir,
+                        tag,
+                        mkit_core::refs::RefWriteCondition::Any,
+                        mkit_hash,
+                    )
+                    .map_err(|e| (format!("tag ref {name}: {e}"), exit::CANTCREAT))?;
+                }
+            }
         }
         new_state.push(map::RefState {
             ref_name: name.clone(),
@@ -613,12 +680,23 @@ fn translate_upstream(
         }
     }
 
+    // Attestations BEFORE the ref-state persist: minting is
+    // idempotent (content-addressed envelopes), but the
+    // "claim already exists" skip keys on recorded-state equality —
+    // a crash between persist and mint would skip those heads
+    // forever on re-run.
+    mint_attestations(mkit_dir, &opts.url, &imported, &prior_by_ref, kp)?;
+
     map::store_import_ref_state(state, &new_state)
         .map_err(|e| (format!("persist ref state: {e}"), exit::GENERAL_ERROR))?;
     std::fs::remove_file(&marker).map_err(|e| (format!("marker: {e}"), exit::GENERAL_ERROR))?;
 
-    // git-import/v1 attestations for new/moved heads (skip unchanged).
-    mint_attestations(mkit_dir, &opts.url, &imported, &prior_by_ref, kp)?;
+    if normalized {
+        // Sticky: normalized trees cannot reproduce their original
+        // sha1s, so a later import→fork upgrade must refuse
+        // (SPEC-GIT-IMPORT §3.3 / SPEC-GIT-BRIDGE §14).
+        map::mark_normalized(state).map_err(|e| (e.to_string(), exit::CANTCREAT))?;
+    }
 
     Ok(Summary {
         imported,
@@ -627,6 +705,23 @@ fn translate_upstream(
         checked_out: None,
         pulled: None,
     })
+}
+
+/// `std::fs::write` + content fsync + parent-dir fsync — for tiny
+/// state files whose EXISTENCE is the signal (the crash marker).
+fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    if let Some(parent) = path.parent()
+        && let Ok(d) = std::fs::File::open(parent)
+    {
+        let _ = d.sync_all();
+    }
+    Ok(())
 }
 
 fn sha1_to_id(s: &Sha1Id) -> Sha1Id {
@@ -693,7 +788,7 @@ fn mint_attestations(
 
 /// Bind direction=import (or accept fork) + record the canonical
 /// source identity; refuse a different source for this state name.
-fn bind_import_state(state: &Path, url: &str) -> CmdResult<()> {
+fn bind_import_state(mkit_dir: &Path, state: &Path, url: &str) -> CmdResult<()> {
     map::bind_direction(state, Direction::Import)
         .or_else(|_| {
             // fork is the allowed superset (import + passthrough).
@@ -718,9 +813,25 @@ fn bind_import_state(state: &Path, url: &str) -> CmdResult<()> {
             exit::USAGE,
         )),
         Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir_all(state)
-            .and_then(|()| std::fs::write(&src_file, format!("{identity}\n")))
-            .map_err(|e| (format!("record source: {e}"), exit::CANTCREAT)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // SPEC-GIT-IMPORT §6.1 check 1: one upstream, one state
+            // dir. A second state for the same canonical source would
+            // duplicate the whole history under (possibly) another
+            // key — almost always a mistake.
+            if let Some(other) = other_state_with_source(mkit_dir, state, &identity) {
+                return Err((
+                    format!(
+                        "{url} is already imported as state '{other}'; use \
+                         `--remote-name {other}` instead of creating a duplicate \
+                         import (SPEC-GIT-IMPORT §6.1)"
+                    ),
+                    exit::USAGE,
+                ));
+            }
+            std::fs::create_dir_all(state)
+                .and_then(|()| std::fs::write(&src_file, format!("{identity}\n")))
+                .map_err(|e| (format!("record source: {e}"), exit::CANTCREAT))
+        }
         Err(e) => Err((format!("read source binding: {e}"), exit::GENERAL_ERROR)),
     }?;
     map::bind_import_spec(state, IMPORT_SPEC_VERSION).map_err(|e| (e.to_string(), exit::USAGE))
@@ -752,11 +863,44 @@ fn read_source(state: &Path) -> CmdResult<Option<String>> {
 
 /// SPEC-GIT-IMPORT §4: a dedicated import key by default, generated
 /// on first use with a loud notice.
+/// The name of another state dir already bound to `identity`, if any.
+fn other_state_with_source(mkit_dir: &Path, this_state: &Path, identity: &str) -> Option<String> {
+    let root = mkit_dir.join("git");
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        if entry.path() == this_state {
+            continue;
+        }
+        if let Ok(src) = std::fs::read_to_string(entry.path().join("source"))
+            && src.trim() == identity
+        {
+            return Some(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 fn load_or_create_import_key(mkit_dir: &Path, flag: Option<&str>) -> CmdResult<KeyPair> {
     let path = flag.map_or_else(|| mkit_dir.join(IMPORT_KEY_FILE), PathBuf::from);
     match mkit_core::sign::load_key(&path) {
-        Ok(kp) => Ok(kp),
-        Err(_) if flag.is_none() => {
+        Ok(kp) => {
+            // §4: say which key signs this import (operators juggling
+            // several imports need to see a key mixup immediately).
+            eprintln!(
+                "note: signing imported history with key {}… ({})",
+                &mkit_core::to_hex(&{
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&kp.public.0);
+                    h
+                })[..16],
+                path.display()
+            );
+            Ok(kp)
+        }
+        // Generate ONLY when the file is truly absent: any other load
+        // failure (symlink, truncation, transient IO) must surface —
+        // overwriting an existing-but-unreadable key would destroy
+        // the seed the pinned state depends on, irreversibly.
+        Err(_) if flag.is_none() && !path.exists() => {
             let kp = KeyPair::generate()
                 .map_err(|e| (format!("generate import key: {e}"), exit::GENERAL_ERROR))?;
             if let Some(parent) = path.parent() {

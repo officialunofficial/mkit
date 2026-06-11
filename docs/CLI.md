@@ -690,8 +690,9 @@ Remote / sync:
   mirrors works normally. Expect total disk ≈ 2–3× the upstream
   `.git` (staging mirror + translated store).
 - `mkit git fetch [--remote-name <name>]` — fetch new upstream
-  commits into the tracking refs only (a force-pushed upstream moves
-  them with a loud warning). `mkit git pull` additionally
+  commits into the tracking refs and imported tags (a force-pushed
+  upstream moves tracking refs with a loud warning; a tag you moved
+  locally is never clobbered — fetch warns and leaves it). `mkit git pull` additionally
   fast-forwards the current branch; divergence refuses with the
   executable hint (`mkit merge <name>/<branch>` — imported history is
   ordinary mkit history, integrated natively).

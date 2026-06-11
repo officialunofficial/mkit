@@ -86,6 +86,7 @@ pub enum StoreError {
 pub struct BulkWriter<'a> {
     store: &'a ObjectStore,
     dirs: std::collections::HashSet<PathBuf>,
+    files: std::collections::HashSet<PathBuf>,
 }
 
 impl BulkWriter<'_> {
@@ -107,13 +108,20 @@ impl BulkWriter<'_> {
         fs::create_dir_all(shard_dir)?;
         crate::atomic::write_unsynced(&final_path, bytes)?;
         self.dirs.insert(shard_dir.to_path_buf());
+        self.files.insert(final_path);
         Ok(h)
     }
 
-    /// Fsync every touched shard directory (renames become durable).
-    /// File CONTENTS remain unfsynced — the caller's idempotent re-run
-    /// is the durability story for those.
+    /// Make the session durable: fsync every written file's CONTENTS,
+    /// then every touched shard directory (renames become durable).
+    /// Contents must be synced too — a durable name pointing at
+    /// unsynced pages would let a power loss tear an object that the
+    /// caller's (fsynced) bookkeeping already vouches for, and the
+    /// idempotent-re-run story only covers crashes BEFORE commit.
     pub fn commit(self) -> StoreResult<()> {
+        for file in &self.files {
+            fs::File::open(file)?.sync_all()?;
+        }
         for dir in &self.dirs {
             crate::atomic::sync_dir(dir)?;
         }
@@ -217,7 +225,8 @@ impl ObjectStore {
 
     /// Begin a bulk-write session: objects are written temp+rename
     /// WITHOUT per-file `fsync`, and [`BulkWriter::commit`] fsyncs
-    /// every touched shard directory once at the end.
+    /// every written file and every touched shard directory once at
+    /// the end (batched, instead of per-write).
     ///
     /// Crash-safety contract (deliberately weaker than [`Self::write`],
     /// for callers whose whole operation is idempotent — e.g. the
@@ -233,6 +242,7 @@ impl ObjectStore {
         BulkWriter {
             store: self,
             dirs: std::collections::HashSet::new(),
+            files: std::collections::HashSet::new(),
         }
     }
 

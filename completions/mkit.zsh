@@ -320,7 +320,7 @@ _mkit() {
                     ;;
                 git)
                     _arguments \
-                        '--remote-name[bridge state name (default mirror)]:name:' \
+                        '--remote-name[bridge state name (export: mirror, import: upstream)]:name:' \
                         '*--ref[full ref name to export]:ref:' \
                         '--no-attest[skip provenance attestations]' \
                         '--algorithm[attestation algorithm]:alg:(ed25519 secp256k1 p256)' \
@@ -330,8 +330,8 @@ _mkit() {
                         '--passthrough[fork mode: re-emit imported objects as original sha1s]' \
                         '--fork-audit[re-derive referenced content during verify]' \
                         '--stdout[print patches to stdout]' \
-                        '-o[patch output directory]:_files -/' \
-                        '--output-directory[patch output directory]:_files -/' \
+                        '-o[patch output directory]:dir:_files -/' \
+                        '--output-directory[patch output directory]:dir:_files -/' \
                         '--help[show help]' \
                         '1:subcommand:(export import fetch pull verify status format-patch)' \
                         '2:dest:_files -/'

@@ -263,6 +263,20 @@ pub fn is_ancestor(repo: &Path, old: &Sha1Id, new: &Sha1Id) -> Result<bool, Brid
     }
 }
 
+/// Whether the repo still has `id` (`git cat-file -e`). Exit 0 =
+/// present; any nonzero = absent (gc'd, never fetched, garbage).
+pub fn object_exists(repo: &Path, id: &Sha1Id) -> Result<bool, BridgeError> {
+    let st = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["cat-file", "-e", &sha1_hex(id)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| BridgeError::Source(format!("spawn git: {e}")))?;
+    Ok(st.code() == Some(0))
+}
+
 /// SPEC-GIT-IMPORT §2: SHA-256 upstreams refuse whole-import.
 pub fn is_sha256_repo(repo: &Path) -> Result<bool, BridgeError> {
     let out = Command::new("git")

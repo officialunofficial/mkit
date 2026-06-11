@@ -48,13 +48,15 @@ $ mkit keygen                          # your own signing key
 # ... commit local work ...
 $ mkit git pull                        # upstream moved? fast-forward
 $ mkit git pull                        # diverged? it refuses:
-error: 'main' has local commits; integrate with `mkit merge upstream/main`
+error: pull would not fast-forward branch 'main'; integrate with
+`mkit merge upstream/main` (or `mkit rebase upstream/main`)
 $ mkit merge upstream/main             # ordinary native merge
 ```
 
-`mkit git fetch` only moves the `upstream/<branch>` tracking refs;
-`pull` adds a fast-forward of the current branch and **never**
-merges on its own. Imported history is ordinary mkit history, so
+`mkit git fetch` moves the `upstream/<branch>` tracking refs and
+imported tags (a tag you moved locally is never clobbered); `pull`
+adds a fast-forward of the current branch and **never** merges on
+its own. Imported history is ordinary mkit history, so
 integration is the native `mkit merge` with full conflict handling.
 
 Upstream force-pushes move the tracking refs with a loud warning

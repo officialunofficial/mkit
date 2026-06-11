@@ -416,6 +416,23 @@ pub(super) fn verify(args: &VerifyArgs) -> CmdResult<()> {
     let mut stderr = std::io::stderr().lock();
     for (ref_name, tip, origin) in &targets {
         audit.walk(tip);
+        // §14.3 step 2, head scope: an imported tip must carry its
+        // git-import/v1 attestation (full signature verification is
+        // `mkit verify-attest`'s job; the audit checks the claim
+        // EXISTS for the recorded twin).
+        if args.fork_audit
+            && audit.raw_path(tip).exists()
+            && let Some(twin) = audit.inv.get(tip).copied()
+        {
+            let attested =
+                mkit_attest::store::list(&mkit_dir, &twin).is_ok_and(|v| !v.is_empty());
+            if !attested {
+                audit.failures.push(format!(
+                    "{} imported head has no git-import/v1 attestation recorded",
+                    sha1_hex(tip)
+                ));
+            }
+        }
         let _ = writeln!(stderr, "verified {ref_name} ({origin}, {})", sha1_hex(tip));
     }
     let c = &audit.counts;

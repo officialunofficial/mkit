@@ -206,22 +206,25 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
     /// return the map entry for `tip`. More efficient than
     /// [`Self::import_ref`] for long histories (no deep recursion
     /// through parent links).
+    ///
+    /// `new_pairs` and `normalized` are CALLER-owned and keep every
+    /// pair discovered before an error: the sink writes happen
+    /// regardless, so on a per-ref refusal the caller must still
+    /// persist those pairs — a later ref sharing that history
+    /// memo-hits without re-emitting them, and dropping them here
+    /// would leave the durable map missing objects that recorded
+    /// refs reference.
     pub fn import_commits(
         &mut self,
         order: &[Sha1Id],
         tip: &Sha1Id,
-    ) -> Result<ImportedRef, BridgeError> {
-        let mut new_pairs = Vec::new();
-        let mut normalized = false;
+        new_pairs: &mut Vec<(Sha1Id, Hash)>,
+        normalized: &mut bool,
+    ) -> Result<Hash, BridgeError> {
         for id in order {
-            self.object(id, 0, 0, &mut new_pairs, &mut normalized)?;
+            self.object(id, 0, 0, new_pairs, normalized)?;
         }
-        let head = self.object(tip, 0, 0, &mut new_pairs, &mut normalized)?;
-        Ok(ImportedRef {
-            head,
-            new_pairs,
-            normalized_modes: normalized,
-        })
+        self.object(tip, 0, 0, new_pairs, normalized)
     }
 
     /// Translate one git object (memoized through the map).
@@ -238,7 +241,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         }
         let (kind, body) = self.source.read_git(id)?;
         let h = match kind {
-            GitObjKind::Blob => self.blob(&body, new_pairs)?,
+            GitObjKind::Blob => self.blob(id, &body, new_pairs)?,
             GitObjKind::Tree => {
                 if tree_depth >= MAX_TREE_DEPTH {
                     return Err(Refusal::TreeTooDeep { object: hash20(id) }.into());
@@ -261,10 +264,18 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
     /// §3.1: verbatim ≤ threshold, pinned `FastCDC` above it.
     fn blob(
         &mut self,
+        id: &Sha1Id,
         body: &[u8],
         new_pairs: &mut Vec<(Sha1Id, Hash)>,
     ) -> Result<Hash, BridgeError> {
         let _ = new_pairs; // chunk blobs are content-addressed extras, not mapped
+        if body.len() as u64 > mkit_core::worktree::MAX_FILE_BYTES {
+            return Err(Refusal::BlobTooLarge {
+                object: hash20(id),
+                size: body.len() as u64,
+            }
+            .into());
+        }
         if body.len() as u64 <= CHUNK_THRESHOLD {
             let bytes = ser(&Object::Blob(Blob {
                 data: body.to_vec(),
@@ -295,8 +306,12 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         new_pairs: &mut Vec<(Sha1Id, Hash)>,
         normalized: &mut bool,
     ) -> Result<Hash, BridgeError> {
-        let parsed =
-            gitparse::parse_tree(body).map_err(|e| BridgeError::Source(format!("tree: {e}")))?;
+        let parsed = gitparse::parse_tree(body).map_err(|e| {
+            BridgeError::from(Refusal::Unparsable {
+                object: hash20(id),
+                detail: format!("tree: {e}"),
+            })
+        })?;
         let mut entries = Vec::with_capacity(parsed.len());
         for e in parsed {
             let mode = match gitparse::map_mode(&e.mode) {
@@ -362,8 +377,12 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         new_pairs: &mut Vec<(Sha1Id, Hash)>,
         normalized: &mut bool,
     ) -> Result<Hash, BridgeError> {
-        let parsed = gitparse::parse_commit(body)
-            .map_err(|e| BridgeError::Source(format!("commit: {e}")))?;
+        let parsed = gitparse::parse_commit(body).map_err(|e| {
+            BridgeError::from(Refusal::Unparsable {
+                object: hash20(id),
+                detail: format!("commit: {e}"),
+            })
+        })?;
         if parsed.committer.timestamp < 0 {
             return Err(Refusal::NegativeTimestamp {
                 object: hash20(id),
@@ -414,8 +433,12 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         new_pairs: &mut Vec<(Sha1Id, Hash)>,
         normalized: &mut bool,
     ) -> Result<Hash, BridgeError> {
-        let parsed =
-            gitparse::parse_tag(body).map_err(|e| BridgeError::Source(format!("tag: {e}")))?;
+        let parsed = gitparse::parse_tag(body).map_err(|e| {
+            BridgeError::from(Refusal::Unparsable {
+                object: hash20(id),
+                detail: format!("tag: {e}"),
+            })
+        })?;
         if crate::refname::check_tag_name(&parsed.name).is_err() {
             return Err(Refusal::TagName { object: hash20(id) }.into());
         }

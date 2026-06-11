@@ -245,7 +245,7 @@ complete -c mkit -n "__fish_seen_subcommand_from git" -a format-patch -d "Render
 complete -c mkit -n "__fish_seen_subcommand_from git" \
     -l key -d "Import signing key path" -r
 complete -c mkit -n "__fish_seen_subcommand_from git" \
-    -l remote-name -d "Bridge state name (default mirror)" -r
+    -l remote-name -d "Bridge state name (export: mirror, import: upstream)" -r
 complete -c mkit -n "__fish_seen_subcommand_from git" \
     -l ref -d "Full ref name to export" -r
 complete -c mkit -n "__fish_seen_subcommand_from git" \
