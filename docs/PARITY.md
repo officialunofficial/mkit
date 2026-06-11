@@ -15,11 +15,12 @@ repositories; mkit's object/wire formats remain native (a BLAKE3 object store
 cannot share bytes with Git's SHA-1/SHA-256 store).
 
 **Scope amendment (git-bridge):** one deliberate, renegotiated exception to
-the paragraph above — a deterministic, one-way **export translation** to git
-mirrors (`mkit git export`, [`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md)). It does
-not share bytes between the stores (every object is translated, never
-aliased), and the import direction remains a non-goal. Safety principles are
-untouched.
+the paragraph above — the translation bridge: a deterministic **export** to
+git mirrors (`mkit git export`, [`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md)) and
+an **importer-signed import** from git remotes (`mkit git import`,
+[`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md)). Neither shares bytes between the
+stores (every object is translated, never aliased); bidirectional *sync*
+remains a permanent non-goal. Safety principles are untouched.
 
 ### Inherent, documented-only divergences (cannot change without dropping BLAKE3)
 
@@ -44,8 +45,9 @@ creeping; revisit post-v1 if demand warrants.
 - `git notes`
 - Partial / shallow clone beyond what `clone` already exposes
 - `.git/`-format on-disk interop, SHA-1/SHA-256 objects, `git fsck`-compat
-  *(exception: the one-way export bridge, see the scope amendment above —
-  translation to a mirror, never byte-sharing or import)*
+  *(exception: the translation bridge, see the scope amendment above —
+  export mirroring and importer-signed import, never byte-sharing or
+  bidirectional sync)*
 - Shadowing the real `git` binary on `PATH` by default
 - `log --graph` ASCII commit-graph rendering (the flag is accepted as a
   no-op for script compatibility). Full byte-parity is unachievable because
@@ -97,7 +99,7 @@ creeping; revisit post-v1 if demand warrants.
 | `stash` | save/list/pop/apply/drop/clear/show | same | ✅ | — | — | |
 | `gc` | prune unreachable objects | mark-and-sweep, recovery-aware | ✅ | — | #233 | `-n`/`--grace-secs`; fail-closed; see SPEC-GC.md |
 | `add -p` | interactive hunk staging | same | ✅ | 4 | #258 | per-hunk `y/n/q/a/d`; regular text files only (binary skipped with a message, symlink/dir refused); explicit paths required; ignored paths need `-f`; symlinked-parent escapes refused; `s` (split) / `e` (manual edit) are follow-ups |
-| `git export` | *(no git analogue — mirror-to-git bridge)* | deterministic one-way export to a git mirror per [`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md) | ✅ | — | #330 | **experimental**, feature-gated (`git-bridge`, default-off); per-ref refuse-loudly for remixes / unmappable ref names / non-canonical chunking; import direction remains 🚫 |
+| `git export` | *(no git analogue — mirror-to-git bridge)* | deterministic one-way export to a git mirror per [`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md) | ✅ | — | #330 | **experimental**, feature-gated (`git-bridge`, default-off); per-ref refuse-loudly for remixes / unmappable ref names / non-canonical chunking; bidirectional sync remains 🚫 |
 
 ## Plumbing commands (read-only first, mutating later)
 

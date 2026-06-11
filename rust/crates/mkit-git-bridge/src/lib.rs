@@ -1,4 +1,4 @@
-//! Deterministic one-way mkit→git export translation.
+//! Deterministic mkit↔git bridge translation core.
 //!
 //! Implements [`SPEC-GIT-BRIDGE`](../../../docs/SPEC-GIT-BRIDGE.md):
 //! every mkit v1 object maps to a git object whose bytes are a pure
@@ -6,9 +6,10 @@
 //! `mkit-*` commit/tag headers so the original object — and its
 //! Ed25519 signature — can be reconstructed and re-verified.
 //!
-//! Direction is export-only. The [`reconstruct`] module is the
-//! verification-grade inverse, **not** an import path: it is defined
-//! only on objects this crate's [`translate`] module can emit and
+//! Export ([`translate`]) is specified by SPEC-GIT-BRIDGE; import is
+//! specified by SPEC-GIT-IMPORT. The [`reconstruct`] module is the
+//! export mapping's verification-grade inverse, **not** an import
+//! path: it is defined only on objects [`translate`] can emit and
 //! fails loudly on anything else.
 //!
 //! The blake3↔sha1 mapping ([`map`]) is always a rebuildable cache —

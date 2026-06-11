@@ -13,8 +13,10 @@ git objects, the carrier encoding for mkit-only fields, ref-name
 mapping, the verification model for carried signatures, mirror update
 semantics, and the `git-bridge/v1` provenance attestation.
 
-This spec covers **export only**. git→mkit import is explicitly out of
-scope for v1 (see §1.3). The translation is designed so that any two
+This spec covers the **export direction**; the import direction is
+specified separately in [SPEC-GIT-IMPORT](SPEC-GIT-IMPORT.md) and is
+*not* this mapping's inverse (import is a signed translation, not a
+carrier round-trip). The translation is designed so that any two
 implementations translating the same mkit history produce **byte- and
 SHA-identical** git objects, with no shared state. The blake3↔sha1
 mapping is therefore always a rebuildable local cache, never a source
@@ -56,8 +58,10 @@ with a new mapping section; they do not alter the v1 mapping.
 
 ### 1.3 Non-goals (v1)
 
-- git→mkit import of any kind. The reconstruction in §9 exists for
-  *verification*, not as an import path.
+- Treating §9 reconstruction as an import path: it is defined only on
+  bridge-emitted objects and fails closed on everything else. Actual
+  import (arbitrary git history, importer-signed) is
+  [SPEC-GIT-IMPORT](SPEC-GIT-IMPORT.md).
 - SHA-256 git repositories. The bridge emits SHA-1 object ids only.
 - Remix translation (§8 reserves the carrier).
 - Translating attestations themselves (the bridge *mints* a new
@@ -66,10 +70,16 @@ with a new mapping section; they do not alter the v1 mapping.
 ### 1.4 Determinism requirement
 
 Every choice in this mapping is a pure function of the source object
-bytes. Implementations MUST NOT consult wall-clock time, locale,
-configuration, or local key material when producing translated
-objects. (The provenance attestation §11 is signed and therefore
-machine-specific; it is *not* part of the translated object graph.)
+bytes — except in **fork (passthrough) mode** (§14), where the output
+is a pure function of *(mkit store, import map)*: the import map is
+itself deterministic given the importer key and upstream bytes
+(SPEC-GIT-IMPORT §1.2), but exporters without that import state MUST
+refuse fork-mode export rather than silently produce a divergent
+pure-bridge translation. Implementations MUST NOT consult wall-clock
+time, locale, configuration, or local key material when producing
+translated objects. (The provenance attestation §11 is signed and
+therefore machine-specific; it is *not* part of the translated object
+graph.)
 
 ---
 
@@ -435,6 +445,12 @@ keyid — not from a signing domain.** Verifier guidance: a
 `git-bridge/v1` attestation asserts "this exporter translated this
 mkit commit to this git commit", never authorship of the content.
 
+git-bridge/v1 attestations are minted **only for heads this bridge
+translated** — a fork-mode head whose tip is a passthrough (original
+upstream) commit gets no translation claim (its provenance is the
+import side's git-import/v1 attestation); a fork-mode head whose tip
+is a bridge-translated local commit is attested as usual.
+
 Bridge attestations are stored like any attestation
 (`.mkit/attestations/<commit>/…`) and additionally published on the
 git mirror under the ref `refs/mkit/attestations` as a flat tree:
@@ -563,8 +579,70 @@ signatures (vector 7 reporting "unsigned").
 
 ---
 
-## 14. Version history
+## 14. Fork (passthrough) mode and the origin guard
+
+### 14.1 Passthrough rule
+
+In a state dir whose direction is `fork` (SPEC-GIT-IMPORT §6), export
+applies one per-object rule: **if the object's blake3 is in the
+import map, emit nothing and use the original git sha1** (bytes are
+served from the import staging mirror); otherwise bridge-translate,
+with child resolution consulting `import map ∪ export map` (import
+wins on overlap in fork mode; export wins in pure-bridge mode — the
+mode is recorded per state dir and immutable, because the same
+blake3 resolving to different sha1s across runs corrupts recorded
+leases).
+
+Consequences, all normative:
+
+- A bridge-translated local commit MAY carry `parent` lines naming
+  original upstream sha1s (boundary commits). No §6.1 layout variant
+  exists; the boundary is detected at verification time by "parent
+  object lacks `mkit-*` headers", never by a new header.
+- The exported branch shares SHAs with the upstream up to the import
+  boundary: it is a true git fork (merge bases exist; PRs work).
+- Local trees reuse original sha1s for any imported child object
+  (blobs, subtrees) via the same rule, so unchanged content keeps
+  upstream ids exactly as plain git would.
+- Imported chunked manifests passthrough as the ORIGINAL blob sha1 —
+  flattening never runs, so chunk-boundary exactness is structural.
+
+### 14.2 Origin guard
+
+Plain (non-fork) export MUST refuse a destination whose canonical
+remote identity (SPEC-GIT-IMPORT §8) matches any recorded import
+source in the repository, with an error naming the import state and
+the fork-mode alternative. Rationale: lease seeding from `ls-remote`
+means a plain re-translation pointed at the upstream would PASS its
+lease and force-replace upstream history with a disconnected mirror.
+Fork-mode export toward the upstream (or its forks) is the supported
+collaboration path. The guard compares canonical identities and is a
+safety net, not a security boundary (SPEC-GIT-IMPORT §8's honesty
+clause applies).
+
+### 14.3 Fork audit
+
+Fork-mode mirrors are not fully §9-reconstructible (the upstream
+segment is not bridge-shaped). The pinned third verification mode,
+**fork audit**, walks the closure from a bridge-translated head:
+
+1. deep-verifies (§9) every bridge-shaped object;
+2. at each boundary parent: loads the mkit twin from the store,
+   checks its importer signature against the pinned importer key
+   (SPEC-GIT-IMPORT §4) and the git-import/v1 attestation, and checks
+   the retained raw bytes hash to the claimed sha1;
+3. for imported trees/blobs referenced by bridge objects: re-derives
+   the git bytes from the mkit twin (verbatim for blobs ≤ 1 MiB,
+   re-sort for trees, flatten for chunked) and compares the sha1.
+
+The SHA-1 collision claim is exactly this and no more: fork audit
+detects a swapped object **for every object whose bytes it checks
+under steps 2–3**; SHA-1 remains a locator everywhere else (§2).
+
+---
+
+## 15. Version history
 
 | Version | Changes |
 |---------|---------|
-| 1 | Initial mapping: blob/chunked-blob/tree/commit/tag export, remix refused with reserved carrier, shallow/deep verification, `git-bridge/v1` attestation, ref CAS mirror semantics. |
+| 1 | Initial mapping: blob/chunked-blob/tree/commit/tag export, remix refused with reserved carrier, shallow/deep verification, `git-bridge/v1` attestation, ref CAS mirror semantics. Amended in-series (pre-merge): fork/passthrough mode + origin guard + fork audit (§14), §1.4 determinism domain restated, attestation scoping, import direction split out to SPEC-GIT-IMPORT. |

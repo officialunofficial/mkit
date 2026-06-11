@@ -1,5 +1,6 @@
-//! `mkit git export` — deterministic one-way export to a git mirror
-//! (SPEC-GIT-BRIDGE; feature-gated behind `git-export`).
+//! `mkit git` — the git bridge subcommands (feature `git-bridge`):
+//! deterministic export to git mirrors (SPEC-GIT-BRIDGE) and, as the
+//! phases land, importer-signed import (SPEC-GIT-IMPORT).
 //!
 //! Translation happens into a local bare staging repo under
 //! `.mkit/git/<remote>/repo.git`, then a single `git push` with
