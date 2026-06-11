@@ -13,7 +13,7 @@ pub const BRIDGE_EMAIL: &str = "bridge@mkit.invalid";
 
 /// Bytes that may not appear in a git author-line name slot.
 fn name_byte_ok(b: u8) -> bool {
-    !(b == 0 || b == b'\n' || b == b'\r' || b == b'<' || b == b'>' || b < 0x20)
+    !(b == b'<' || b == b'>' || b < 0x20 || b == 0x7F)
 }
 
 /// Deterministic display name for an identity (§6.2).

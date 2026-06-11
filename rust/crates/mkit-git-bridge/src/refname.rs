@@ -39,18 +39,20 @@ pub fn check_tag_name(name: &[u8]) -> Result<(), &'static str> {
     let Ok(s) = std::str::from_utf8(name) else {
         return Err("not UTF-8");
     };
+    // SPEC-OBJECTS §6a forbids '/' in tag-object names outright; the
+    // remaining charset is the mkit ref-segment grammar.
     for b in s.bytes() {
-        if !(b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-' || b == b'/') {
-            return Err("byte outside the mkit ref grammar");
+        if !(b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-') {
+            return Err("byte outside the mkit ref-segment grammar");
         }
     }
-    if s.split('/').any(str::is_empty) {
-        return Err("empty segment");
+    if s == "." || s == ".." {
+        return Err("'.' or '..' name");
     }
-    if s.split('/').any(|seg| seg == "." || seg == "..") {
-        return Err("'.' or '..' segment");
+    if s == "HEAD" {
+        return Err("'HEAD' is reserved");
     }
-    if s.split('/').any(|seg| seg.ends_with(".lock")) {
+    if s.ends_with(".lock") {
         return Err("'.lock' suffix");
     }
     check_git_legal(s).map_err(|_| "git-illegal dot placement")
@@ -90,7 +92,12 @@ mod tests {
         assert!(check_tag_name(b"v1.0.0").is_ok());
         assert!(check_tag_name(b"with space").is_err());
         assert!(check_tag_name(b".dot").is_err());
-        assert!(check_tag_name(b"ok/nested").is_ok());
+        assert!(
+            check_tag_name(b"no/slash").is_err(),
+            "SPEC-OBJECTS 6a forbids '/'"
+        );
+        assert!(check_tag_name(b"HEAD").is_err());
+        assert!(check_tag_name(b"v1.lock").is_err());
         assert!(check_tag_name("naïve".as_bytes()).is_err());
     }
 }

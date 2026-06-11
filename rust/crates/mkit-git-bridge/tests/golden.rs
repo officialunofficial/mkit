@@ -7,9 +7,9 @@
 //! - `<name>.json`     — human-readable ids
 //! - `MANIFEST.txt`    — `<name> <blake3-of-mkit.bin> <git-sha1>`
 //!
-//! The chunked-blob vector (§13.9) pins ids only (json + manifest):
-//! its ~1.2 MiB content is regenerated deterministically here instead
-//! of being committed.
+//! The chunked-blob vector (§13.9) commits its (small) mkit manifest
+//! bytes but not its ~1.2 MiB flattened git bytes — that content is
+//! regenerated deterministically here instead of being committed.
 //!
 //! Default mode is read-only assertion (the repo convention). Set
 //! `UPDATE_GOLDEN=1` to (re)write the files after a *deliberate,
@@ -22,8 +22,11 @@ use mkit_core::sign::{KeyPair, sign_commit, sign_tag};
 use mkit_core::{ChunkIterator, FastCdc, Hash};
 use mkit_git_bridge::BridgeError;
 use mkit_git_bridge::gitobj::{GitObject, sha1_hex};
+use mkit_git_bridge::reconstruct;
 use mkit_git_bridge::translate::{ObjectSource, translate_closure};
+use mkit_git_bridge::verify::{ShallowVerdict, shallow_verify};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 const KEY_SEED: [u8; 32] = [0x11; 32];
@@ -59,6 +62,9 @@ impl ObjectSource for MemSource {
 
 /// §13 fixture set, in dependency order. Returns (name, hash) pairs
 /// for the nine pinned vectors plus the source they live in.
+// One vector per spec item; splitting the builder would scatter the
+// §13 list across functions.
+#[allow(clippy::too_many_lines)]
 fn build_vectors() -> (MemSource, Vec<(&'static str, Hash)>) {
     let mut src = MemSource(HashMap::new());
     let kp = KeyPair::from_seed(KEY_SEED);
@@ -200,8 +206,9 @@ fn chunked_content() -> Vec<u8> {
     (0u32..300_000).flat_map(u32::to_le_bytes).collect()
 }
 
-/// Vectors whose (large) content is regenerated, not committed.
-const ID_ONLY: &[&str] = &["chunked_blob"];
+/// Vectors whose large flattened git bytes are regenerated, not
+/// committed (the mkit manifest bytes ARE committed).
+const GIT_BYTES_REGENERATED: &[&str] = &["chunked_blob"];
 
 fn translate_vectors(
     src: &MemSource,
@@ -220,6 +227,7 @@ fn translate_vectors(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // §13's write mode + 4 assertion groups
 fn golden_vectors_match() {
     let dir = golden_dir();
     let (src, vectors) = build_vectors();
@@ -235,8 +243,8 @@ fn golden_vectors_match() {
             let mkit_bytes = mkit_core::serialize(&src.read_object(h).unwrap()).unwrap();
             let git = &emitted[h];
             let sha1 = sha1_hex(&git.id());
-            if !ID_ONLY.contains(name) {
-                std::fs::write(dir.join(format!("{name}.mkit.bin")), &mkit_bytes).unwrap();
+            std::fs::write(dir.join(format!("{name}.mkit.bin")), &mkit_bytes).unwrap();
+            if !GIT_BYTES_REGENERATED.contains(name) {
                 std::fs::write(dir.join(format!("{name}.git.bin")), git.raw()).unwrap();
             }
             std::fs::write(
@@ -248,7 +256,7 @@ fn golden_vectors_match() {
                 ),
             )
             .unwrap();
-            manifest.push_str(&format!("{name} {} {sha1}\n", mkit_core::to_hex(h)));
+            let _ = writeln!(manifest, "{name} {} {sha1}", mkit_core::to_hex(h));
         }
         std::fs::write(dir.join("MANIFEST.txt"), manifest).unwrap();
         eprintln!("golden vectors rewritten at {}", dir.display());
@@ -275,14 +283,43 @@ fn golden_vectors_match() {
         let git = &emitted[h];
         assert_eq!(mkit_core::to_hex(h), b3, "{name}: mkit hash drifted");
         assert_eq!(sha1_hex(&git.id()), s1, "{name}: git sha1 drifted");
-        if ID_ONLY.contains(name) {
-            continue;
-        }
         let mkit_bin = std::fs::read(dir.join(format!("{name}.mkit.bin"))).unwrap();
-        let git_bin = std::fs::read(dir.join(format!("{name}.git.bin"))).unwrap();
         let obj_bytes = mkit_core::serialize(&src.read_object(h).unwrap()).unwrap();
         assert_eq!(obj_bytes, mkit_bin, "{name}: mkit bytes drifted");
-        assert_eq!(git.raw(), git_bin, "{name}: git bytes drifted");
+        if !GIT_BYTES_REGENERATED.contains(name) {
+            let git_bin = std::fs::read(dir.join(format!("{name}.git.bin"))).unwrap();
+            assert_eq!(git.raw(), git_bin, "{name}: git bytes drifted");
+        }
+    }
+
+    // §13 closing MUSTs: every vector round-trips through §9 to
+    // bit-identical mkit bytes…
+    let mut known = HashMap::new();
+    for (_, h) in &vectors {
+        translate_closure(&src, h, &mut known, &mut |_, _| Ok(())).unwrap();
+    }
+    let inverse: HashMap<[u8; 20], Hash> = known.iter().map(|(k, v)| (*v, *k)).collect();
+    for (name, h) in &vectors {
+        let git = &emitted[h];
+        let rec = reconstruct::reconstruct(git, &|id| inverse.get(id).copied())
+            .unwrap_or_else(|e| panic!("{name}: reconstruction failed: {e}"));
+        assert_eq!(rec.hash, *h, "{name}: round-trip hash mismatch");
+        let original = mkit_core::serialize(&src.read_object(h).unwrap()).unwrap();
+        assert_eq!(rec.bytes, original, "{name}: round-trip byte mismatch");
+    }
+    // …and vectors 5–8 shallow-verify (§10), vector 7 as Unsigned.
+    for (name, expected) in [
+        ("commit_root", ShallowVerdict::Verified),
+        ("commit_merge_annotated", ShallowVerdict::Verified),
+        ("tag_unsigned", ShallowVerdict::Unsigned),
+        ("tag_signed", ShallowVerdict::Verified),
+    ] {
+        let (_, h) = vectors.iter().find(|(n, _)| *n == name).unwrap();
+        assert_eq!(
+            shallow_verify(&emitted[h]).unwrap(),
+            expected,
+            "{name}: shallow verdict"
+        );
     }
 
     // The empty tree pins git's well-known id (§13.2).

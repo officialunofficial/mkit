@@ -18,6 +18,11 @@ pub enum Refusal {
     /// Fixed-size chunked-blob manifests have no exact inverse
     /// (SPEC-GIT-BRIDGE §4).
     FixedSizeChunking { object: Hash, chunk_size: u32 },
+    /// Content-defined manifest a conformant mkit writer cannot have
+    /// produced (≤ threshold total size, or boundaries that differ
+    /// from the pinned `FastCDC` output) — it would not round-trip
+    /// (SPEC-GIT-BRIDGE §4).
+    NonCanonicalChunking { object: Hash, detail: &'static str },
     /// Commit/tag timestamp exceeds `i64::MAX` (SPEC-GIT-BRIDGE §6.2).
     TimestampOverflow { object: Hash, timestamp: u64 },
     /// Tag object name contains bytes outside the mkit ref grammar
@@ -27,7 +32,7 @@ pub enum Refusal {
     RefName { name: String, reason: &'static str },
     /// Object prologue carries a schema version this mapping does not
     /// cover (SPEC-GIT-BRIDGE §1.2).
-    SchemaVersion { object: Hash, version: u8 },
+    SchemaVersion { object: Hash },
 }
 
 impl fmt::Display for Refusal {
@@ -44,6 +49,13 @@ impl fmt::Display for Refusal {
                  content-defined manifests translate (SPEC-GIT-BRIDGE §4)",
                 to_hex(object)
             ),
+            Self::NonCanonicalChunking { object, detail } => write!(
+                f,
+                "chunked blob {} cannot have been produced by a conformant \
+                 mkit writer ({detail}); refusing a non-round-trippable \
+                 translation (SPEC-GIT-BRIDGE §4)",
+                to_hex(object)
+            ),
             Self::TimestampOverflow { object, timestamp } => write!(
                 f,
                 "object {} timestamp {timestamp} exceeds the git-representable range",
@@ -58,9 +70,9 @@ impl fmt::Display for Refusal {
             Self::RefName { name, reason } => {
                 write!(f, "ref {name:?} is not a legal git ref name ({reason})")
             }
-            Self::SchemaVersion { object, version } => write!(
+            Self::SchemaVersion { object } => write!(
                 f,
-                "object {} has schema_version {version}; bridge v1 maps schema 1 only",
+                "object {} has a schema_version other than 1; bridge v1 maps schema 1 only",
                 to_hex(object)
             ),
         }

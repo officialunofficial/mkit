@@ -102,16 +102,25 @@ git blob body = the concatenation of every chunk blob's data, in
 manifest order. The concatenated length MUST equal the manifest's
 `total_size` (this is already a SPEC-OBJECTS §7 invariant).
 
-**Only content-defined manifests translate.** A manifest with
-`chunk_size != 0` (fixed-size chunking; producible under SPEC-OBJECTS
-§7 but never emitted by mkit writers) MUST be refused with an
-actionable error naming the object. Rationale: reconstruction (§9)
+**Only canonical writer output translates.** Reconstruction (§9)
 re-chunks the flattened bytes with the pinned FastCDC parameters
 (SPEC-FASTCDC: seed `MKITFCDC`, 16/64/256 KiB, threshold 1 MiB); that
-round-trips bit-exactly **iff** the source manifest was produced by
-the same pinned chunker. There is no general inverse for arbitrary
-fixed-size manifests, and silently translating them would break the
-§1.1 lossless guarantee.
+round-trips bit-exactly **iff** the source manifest is exactly what a
+conformant mkit writer produces. A bridge MUST therefore refuse, with
+an actionable error naming the object, any manifest that:
+
+1. has `chunk_size != 0` (fixed-size chunking — legal under
+   SPEC-OBJECTS §7, never emitted by mkit writers, no general
+   inverse);
+2. has `total_size` at or below the 1 MiB chunking threshold (a
+   conformant writer stores such content as a plain blob; the
+   round-trip would change the object graph); or
+3. has chunk boundaries that differ from the pinned FastCDC output
+   over the flattened bytes (verified by re-running the chunker
+   during translation).
+
+These refusals are what make the §1.1 lossless guarantee
+unconditional for everything the bridge actually emits.
 
 Reconstruction: bytes > 1 MiB re-chunk via pinned FastCDC into chunk
 blobs + a `chunk_size = 0` manifest; bytes ≤ 1 MiB reconstruct as a
@@ -220,14 +229,15 @@ normative because it is part of the hashed git bytes.
 - name, by identity kind:
   - `ed25519` (0x01): `mkit:ed25519:` + 64 lowercase hex of the key.
   - `did_key` (0x02): `did:key:` + the payload bytes verbatim
-    (payload is validated printable ASCII by SPEC-OBJECTS §9 and
-    multibase text cannot contain `<` `>`; if a payload nevertheless
-    contains a forbidden byte, fall through to the opaque rule below
-    applied to the payload).
+    (conformant readers validate the payload as printable ASCII —
+    `Identity::is_valid` in mkit-core — and multibase text cannot
+    contain `<` `>`; if a payload nevertheless contains a forbidden
+    byte, fall through to the opaque rule below applied to the
+    payload).
   - `opaque` (0x03): the payload verbatim **iff** it is valid UTF-8
-    and contains no byte in `{0x00, 0x0A, 0x0D, '<', '>'}` and no
-    other ASCII control byte; otherwise `mkit:opaque:` + unpadded
-    base64 (RFC 4648 standard alphabet) of the payload.
+    and contains no `<` (0x3C), no `>` (0x3E), and no ASCII control
+    byte (`< 0x20`, and 0x7F DEL); otherwise `mkit:opaque:` +
+    unpadded base64 (RFC 4648 standard alphabet) of the payload.
 
 The verbatim-opaque rule keeps human-readable opaque identities
 human-readable in `git log` while remaining a pure function of the
@@ -277,14 +287,15 @@ the remix policy (§8). A tag whose target is a chunked blob carries
 git `type blob` (the flattened translation); `mkit-target-type`
 preserves the distinction (`05`) for reconstruction.
 
-The git `tag` header value cannot contain `\n`. mkit tag names only
-exclude `{0x00, '/', '\\'}` (SPEC-OBJECTS §6a), so the bridge MUST
-refuse a tag whose name contains a byte outside the mkit ref-name
-grammar (SPEC-REFS §3). In practice every tag reachable from
+The git `tag` header value cannot contain `\n`. mkit tag-object
+names only exclude `{0x00, '/', '\\'}` (SPEC-OBJECTS §6a), so the
+bridge MUST refuse — for **every** translated tag object, however it
+is referenced — a name that is not a single mkit ref *segment*
+satisfying all of: the SPEC-REFS §3 segment charset
+(`[0-9A-Za-z._-]`), not `.` / `..` / `HEAD`, no `.lock` suffix, and
+the git-side dot rules of §12.1. In practice every tag reachable from
 `refs/tags/` already satisfies this (ref-write enforces the grammar);
-the check exists for tag objects referenced any other way. The name
-must additionally satisfy the git-side ref rules of §12 when the tag
-is exported under `refs/tags/<name>`.
+the check exists for tag objects referenced any other way.
 
 ---
 
@@ -374,16 +385,24 @@ ref head (SPEC-ATTESTATIONS encoding rules apply):
 - `subject[0]`: `name` = the full mkit ref name; `digest` =
   `{"blake3": "<64hex mkit commit hash>", "gitCommit": "<40hex sha1>"}`
   (in-toto DigestSet; `gitCommit` is the standard registered name).
-- predicate (all fields required):
+- predicate (all fields required; shown in JCS key order, which the
+  encoded Statement uses per SPEC-ATTESTATIONS §4):
 
 ```json
 {
-  "specVersion": 1,
   "mirror": "<git remote URL as configured>",
   "refName": "<full mkit ref name>",
-  "schemaVersion": 1
+  "schemaVersion": 1,
+  "specVersion": 1
 }
 ```
+
+  Field semantics: `mirror` is the git remote the head was exported
+  to, as configured (a locator, not an identity claim); `refName` is
+  the full mkit ref whose head is attested; `schemaVersion` is the
+  mkit object `schema_version` the translated history carries (§1.2);
+  `specVersion` is the version of this predicate's own shape, i.e.
+  the `git-bridge/v1` definition.
 
 The attestation is signed with the exporter's configured signer
 (SPEC-ATTESTATIONS signer plumbing, unchanged). **Distinguishability
@@ -451,9 +470,14 @@ The blake3↔sha1 map and per-ref last-exported state live under
 `.mkit/git/<remote>/` (layout is implementation-defined and
 explicitly non-normative). Because translation is deterministic, the
 cache is disposable: deleting it and re-deriving from the object
-store MUST yield identical mappings. Implementations MUST treat cache
-absence or corruption as "rebuild", never as an error state, and MUST
-NOT export the cache or rely on its presence for correctness.
+store MUST yield identical mappings **for every object still in the
+store**. Entries for objects that `mkit gc` has since pruned (e.g.
+rewritten-away commits past the recovery window) remain permanently
+correct but are not re-derivable; their loss is harmless because
+nothing in the store references them. Implementations MUST treat
+cache absence or corruption as "rebuild", never as an error state,
+and MUST NOT export the cache or rely on its presence for
+correctness.
 
 ---
 
@@ -461,7 +485,10 @@ NOT export the cache or rely on its presence for correctness.
 
 Pinned under `rust/tests/golden/git-bridge/` with the standard
 MANIFEST convention; each vector records the source mkit object bytes,
-the emitted git object bytes, and the git SHA-1.
+the emitted git object bytes, and the git SHA-1. Single exception:
+vector 9's flattened git bytes (~1.2 MiB) are regenerated
+deterministically by the golden test rather than committed; its mkit
+manifest bytes and both ids are pinned like every other vector.
 
 1. **Blob**: a small blob; assert git blob bytes + id.
 2. **Empty tree**: assert id `4b825dc642cb6eb9a060e54bf8d69288fbee4904`.

@@ -140,6 +140,7 @@ pub fn reconstruct_tree(
 /// §9 commit rule: self-contained (everything rides in headers).
 pub fn reconstruct_commit(body: &[u8]) -> Result<Reconstructed, BridgeError> {
     let parsed = ParsedBody::parse(body)?;
+    parsed.check_schema()?;
     let tree_id = parsed.required_git_id("tree")?;
     let parent_ids = parsed.all_git_ids("parent")?;
     let author_line = parsed.required(b"author")?;
@@ -178,6 +179,7 @@ pub fn reconstruct_commit(body: &[u8]) -> Result<Reconstructed, BridgeError> {
 /// §9 tag rule: self-contained like commits.
 pub fn reconstruct_tag(body: &[u8]) -> Result<Reconstructed, BridgeError> {
     let parsed = ParsedBody::parse(body)?;
+    parsed.check_schema()?;
     let target_id = parsed.required_git_id("object")?;
     let name = parsed.required(b"tag")?.to_vec();
     let tagger_line = parsed.required(b"tagger")?;
@@ -267,6 +269,18 @@ impl<'a> ParsedBody<'a> {
             headers.push((key, &line[sp + 1..]));
         }
         Ok(Self { headers, message })
+    }
+
+    /// §1.2: an actionable error for missing/foreign schema versions
+    /// (instead of the generic re-translation mismatch).
+    fn check_schema(&self) -> Result<(), BridgeError> {
+        match self.required_str(headers::MKIT_SCHEMA) {
+            Ok(v) if v == headers::SCHEMA_VALUE => Ok(()),
+            Ok(v) => Err(not_bridge(&format!(
+                "mkit-schema {v} is not covered by bridge mapping v1"
+            ))),
+            Err(_) => Err(not_bridge("missing mkit-schema header")),
+        }
     }
 
     fn all(&self, key: &[u8]) -> Vec<&'a [u8]> {

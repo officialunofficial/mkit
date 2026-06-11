@@ -24,8 +24,12 @@ pub trait ObjectSource {
 
 impl ObjectSource for ObjectStore {
     fn read_object(&self, h: &Hash) -> Result<Object, BridgeError> {
-        ObjectStore::read_object(self, h)
-            .map_err(|e| BridgeError::Source(format!("{}: {e}", mkit_core::to_hex(h))))
+        ObjectStore::read_object(self, h).map_err(|e| match e {
+            mkit_core::store::StoreError::Decode(
+                mkit_core::MkitError::UnsupportedObjectVersion,
+            ) => Refusal::SchemaVersion { object: *h }.into(),
+            other => BridgeError::Source(format!("{}: {other}", mkit_core::to_hex(h))),
+        })
     }
 }
 
