@@ -236,6 +236,11 @@ complete -c mkit -n "__fish_seen_subcommand_from pack-shard" \
 
 # git (bridge) flags.
 complete -c mkit -n "__fish_seen_subcommand_from git" -a export -d "Export refs to a git mirror"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a import -d "Import a git upstream as a signed fork"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a fetch -d "Update tracking refs from the upstream"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a pull -d "Fetch and fast-forward the current branch"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l key -d "Import signing key path" -r
 complete -c mkit -n "__fish_seen_subcommand_from git" \
     -l remote-name -d "Bridge state name (default mirror)" -r
 complete -c mkit -n "__fish_seen_subcommand_from git" \

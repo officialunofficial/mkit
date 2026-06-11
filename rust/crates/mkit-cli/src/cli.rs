@@ -177,6 +177,9 @@ commands:
   serve <path>       Start SSH transport server (internal)
   pack-shard <hash>  Encode a stored pack into Reed-Solomon shards (feature: pack-shards)
   git export <dest>  Export refs to a git mirror, one-way (feature: git-bridge)
+  git import <url> [<dir>]  Import a git upstream as a signed downstream fork (feature: git-bridge)
+  git fetch|pull     Update refs/remotes/<name>/* from the imported upstream;
+                    pull also fast-forwards the current branch (feature: git-bridge)
   blame [--format=json] <file>
                     Show line-level commit attribution (JSONL with --format=json)
   verify <rev>      Verify the signature on a commit, remix, or signed tag

@@ -127,6 +127,13 @@ pub fn open_trusted(
 /// [`open_trusted`]; `open` stays public for file/memory integration
 /// tests that have no ambient credentials to fence.
 pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
+    if url.starts_with("git+") {
+        return Err(DispatchError::UnsupportedScheme(format!(
+            "'{url}' is a git-bridge remote — native push/pull/fetch/clone do not \
+             speak git transports; use `mkit git export` / `mkit git import` / \
+             `mkit git pull` (feature git-bridge)"
+        )));
+    }
     if let Some(rest) = url.strip_prefix("mkit+file://") {
         // mkit+file:///abs/path -> /abs/path
         let path = Path::new(rest);

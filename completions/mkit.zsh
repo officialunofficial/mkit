@@ -325,9 +325,10 @@ _mkit() {
                         '--no-attest[skip provenance attestations]' \
                         '--algorithm[attestation algorithm]:alg:(ed25519 secp256k1 p256)' \
                         '--signer[attestation signer kind]:kind:(repo-key external keystore)' \
+                        '--key[import signing key path]:path:_files' \
                         '--json[machine-readable output]' \
                         '--help[show help]' \
-                        '1:subcommand:(export)' \
+                        '1:subcommand:(export import fetch pull)' \
                         '2:dest:_files -/'
                     ;;
                 attest)

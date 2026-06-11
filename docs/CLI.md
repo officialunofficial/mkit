@@ -669,9 +669,32 @@ Remote / sync:
   a signing key must exist unless `--no-attest`. Branch deletion
   never propagates (export is add/update-only), and each
   `--remote-name` state dir is bound to one destination and one
-  direction. The import direction is `mkit git import`
-  ([`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md); lands in a later phase of
-  this series); bidirectional sync does not exist. Requires building the binary with
+  direction; bidirectional sync does not exist.
+- `mkit git import <url> [<dir>] [--remote-name <name>] [--key <path>]
+  [--json]` — import a git upstream as an **importer-signed downstream
+  fork** ([`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md)). With `<dir>`:
+  init a fresh mkit repo, import all branches/tags, and check out the
+  upstream default branch. Without: add the upstream to the current
+  repo as `refs/remotes/<name>/*` tracking refs + tags. Every
+  translated commit/tag is signed by a DEDICATED import key
+  (`.mkit/keys/git-import.key`, generated on first use and pinned per
+  state dir — collaborative tracking requires sharing it; a different
+  key produces an unrelated fork). Original authorship rides in the
+  author identity; original git bytes are retained under
+  `.mkit/git/<name>/` with a `git-import/v1` attestation per head.
+  Unrepresentable refs skip per-ref with warnings (submodules,
+  mkit-illegal names, historic-mode trees in fork state dirs).
+  Upstream history imports once per (key, upstream); hashes are a
+  function of the import key by design. Plain `git export` toward an
+  imported-from upstream is refused (the origin guard); export to new
+  mirrors works normally. Expect total disk ≈ 2–3× the upstream
+  `.git` (staging mirror + translated store).
+- `mkit git fetch [--remote-name <name>]` — fetch new upstream
+  commits into the tracking refs only (a force-pushed upstream moves
+  them with a loud warning). `mkit git pull` additionally
+  fast-forwards the current branch; divergence refuses with the
+  executable hint (`mkit merge <name>/<branch>` — imported history is
+  ordinary mkit history, integrated natively). Requires building the binary with
   `--features git-bridge` (alias: `git-export`); shells out to `git`.
 
 Config / keys / version:

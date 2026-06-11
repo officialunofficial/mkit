@@ -27,6 +27,7 @@ pub mod import;
 pub mod map;
 pub mod reconstruct;
 pub mod refname;
+pub mod remoteid;
 pub mod translate;
 pub mod verify;
 

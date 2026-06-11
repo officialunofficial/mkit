@@ -800,6 +800,21 @@ and a
 .Cm git
 binary on
 .Ev PATH .
+.It Cm git Cm import Oo Fl Fl remote-name Ar name Oc Oo Fl Fl key Ar path Oc Oo Fl Fl json Oc Ar url Op Ar dir
+Import a git upstream as an importer-signed downstream fork per
+SPEC-GIT-IMPORT. With
+.Ar dir ,
+initialise a fresh repository and check out the upstream default
+branch; without, add tracking refs to the current repository. Signed
+by a dedicated import key, pinned per state dir.
+.It Cm git Cm fetch | Cm pull Oo Fl Fl remote-name Ar name Oc
+Update
+.Pa refs/remotes/<name>/*
+from the imported upstream;
+.Cm pull
+also fast-forwards the current branch (divergence refuses with a
+.Cm mkit merge
+hint).
 .It Cm version
 Print the version to stdout as
 .Ql mkit <X.Y.Z> .

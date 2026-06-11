@@ -38,6 +38,12 @@ const ATTESTATIONS_REF: &str = "refs/mkit/attestations";
 enum Cmd {
     /// Export refs to a git mirror (one-way, deterministic).
     Export(ExportArgs),
+    /// Import a git upstream as an importer-signed downstream fork.
+    Import(super::git_import::ImportArgs),
+    /// Fetch new upstream commits into refs/remotes/<name>/* only.
+    Fetch(super::git_import::FetchArgs),
+    /// Fetch, then fast-forward the current branch from its tracking ref.
+    Pull(super::git_import::FetchArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -74,14 +80,20 @@ pub fn run(args: &[String]) -> u8 {
         Ok(c) => c,
         Err(code) => return code,
     };
-    let Cmd::Export(opts) = cmd;
-    let cwd = match std::env::current_dir() {
-        Ok(c) => c,
-        Err(e) => return emit_err(&format!("cwd: {e}"), exit::CONFIG_ERROR),
-    };
-    match export(&cwd, &opts) {
-        Ok(code) => code,
-        Err((msg, code)) => emit_err(&msg, code),
+    match cmd {
+        Cmd::Export(opts) => {
+            let cwd = match std::env::current_dir() {
+                Ok(c) => c,
+                Err(e) => return emit_err(&format!("cwd: {e}"), exit::CONFIG_ERROR),
+            };
+            match export(&cwd, &opts) {
+                Ok(code) => code,
+                Err((msg, code)) => emit_err(&msg, code),
+            }
+        }
+        Cmd::Import(opts) => super::git_import::run_import(&opts),
+        Cmd::Fetch(opts) => super::git_import::run_fetch(&opts, false),
+        Cmd::Pull(opts) => super::git_import::run_fetch(&opts, true),
     }
 }
 
@@ -123,6 +135,26 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     // state mutation), and bind this state dir to one dest: leases
     // recorded against one mirror are wrong for another.
     let push_dest = ensure_dest(&opts.dest)?;
+
+    // ORIGIN GUARD (SPEC-GIT-BRIDGE §14.2): plain export toward a
+    // recorded import source would pass its ls-remote-seeded lease and
+    // force-replace upstream history with a disconnected mirror.
+    let dest_identity = mkit_git_bridge::remoteid::remote_identity(&opts.dest);
+    if let Some(import_state) = recorded_import_source(&mkit_dir, &dest_identity) {
+        let my_direction = mkit_git_bridge::map::read_direction(&state).ok().flatten();
+        if my_direction != Some(mkit_git_bridge::map::Direction::Fork) {
+            return Err((
+                format!(
+                    "{} is a recorded git-import source (state '{import_state}'); \
+                     plain export toward an imported-from upstream would replace its \
+                     history with a disconnected re-translation. Fork-mode export is \
+                     the supported path (SPEC-GIT-BRIDGE §14.2)",
+                    opts.dest
+                ),
+                exit::USAGE,
+            ));
+        }
+    }
     let dest_file = state.join("dest");
     match std::fs::read_to_string(&dest_file) {
         Ok(recorded) if recorded.trim() != push_dest => {
@@ -564,7 +596,7 @@ fn warn_skip(skipped: &mut Vec<(String, String)>, ref_name: &str, why: &str) {
 
 // ─── git subprocess helpers ─────────────────────────────────────────
 
-fn git_version() -> Result<(), String> {
+pub(crate) fn git_version() -> Result<(), String> {
     match Command::new("git")
         .arg("--version")
         .stdout(Stdio::null())
@@ -580,7 +612,7 @@ fn git_version() -> Result<(), String> {
     }
 }
 
-fn git_in(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git_in(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -727,6 +759,23 @@ fn ls_remote(staging: &Path, dest: &str) -> CmdResult<HashMap<String, Sha1Id>> {
         }
     }
     Ok(refs)
+}
+
+/// The state-dir name whose recorded import `source` matches the
+/// given canonical identity, if any.
+fn recorded_import_source(mkit_dir: &Path, identity: &str) -> Option<String> {
+    let git_dir = mkit_dir.join("git");
+    let entries = std::fs::read_dir(git_dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let src = entry.path().join("source");
+        if let Ok(recorded) = std::fs::read_to_string(src)
+            && recorded.trim() == identity
+        {
+            return Some(name);
+        }
+    }
+    None
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {

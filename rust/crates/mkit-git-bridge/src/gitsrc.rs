@@ -238,6 +238,31 @@ pub fn default_branch(repo: &Path) -> Result<Option<String>, BridgeError> {
     Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()))
 }
 
+/// Is `old` an ancestor of `new` in this repo? (`git merge-base
+/// --is-ancestor`: exit 0 = yes, 1 = no.)
+pub fn is_ancestor(repo: &Path, old: &Sha1Id, new: &Sha1Id) -> Result<bool, BridgeError> {
+    let st = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &sha1_hex(old),
+            &sha1_hex(new),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| BridgeError::Source(format!("spawn git: {e}")))?;
+    match st.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(BridgeError::Source(
+            "merge-base --is-ancestor failed".into(),
+        )),
+    }
+}
+
 /// SPEC-GIT-IMPORT §2: SHA-256 upstreams refuse whole-import.
 pub fn is_sha256_repo(repo: &Path) -> Result<bool, BridgeError> {
     let out = Command::new("git")
