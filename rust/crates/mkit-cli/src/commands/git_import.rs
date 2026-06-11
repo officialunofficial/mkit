@@ -201,8 +201,22 @@ fn import_into(root: &Path, opts: &ImportArgs, require_repo: bool) -> CmdResult<
     let clone_url = absolutize_clone_url(&opts.url);
     let staging = state.join("repo.git");
     if staging.join("objects").is_dir() {
-        super::git::git_in(&staging, &["fetch", "--quiet", "--prune"])
-            .map_err(|e| (format!("fetch upstream: {e}"), exit::UNAVAILABLE))?;
+        // Explicit refspecs (not the mirror's +refs/*:refs/*) so
+        // --prune is scoped to upstream namespaces: fork-mode export
+        // state living in this repo (refs/mkit-export/*, the
+        // attestation chain ref) must survive an upstream fetch.
+        super::git::git_in(
+            &staging,
+            &[
+                "fetch",
+                "--quiet",
+                "--prune",
+                "origin",
+                "+refs/heads/*:refs/heads/*",
+                "+refs/tags/*:refs/tags/*",
+            ],
+        )
+        .map_err(|e| (format!("fetch upstream: {e}"), exit::UNAVAILABLE))?;
     } else {
         super::git::git_in(
             state.as_path(),
@@ -415,7 +429,7 @@ fn translate_upstream(
 
     let mut sha_map = map::load_map_inverse(state)
         .map_err(|e| (format!("load map: {e}"), exit::GENERAL_ERROR))?;
-    let prior_state = map::load_ref_state(state)
+    let prior_state = map::load_import_ref_state(state)
         .map_err(|e| (format!("load ref state: {e}"), exit::GENERAL_ERROR))?;
 
     let upstream_refs =
@@ -562,7 +576,7 @@ fn translate_upstream(
             git_id: sha1_to_id(git_id),
         });
     }
-    map::store_ref_state(state, &new_state)
+    map::store_import_ref_state(state, &new_state)
         .map_err(|e| (format!("persist ref state: {e}"), exit::GENERAL_ERROR))?;
     std::fs::remove_file(&marker).map_err(|e| (format!("marker: {e}"), exit::GENERAL_ERROR))?;
 

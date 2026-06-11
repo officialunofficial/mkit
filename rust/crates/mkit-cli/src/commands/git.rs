@@ -69,6 +69,12 @@ struct ExportArgs {
     /// (default: the configured attest signer, like `mkit attest`).
     #[arg(long, value_name = "KIND")]
     signer: Option<String>,
+    /// Fork mode (SPEC-GIT-BRIDGE §14): re-emit imported history as
+    /// the ORIGINAL git objects (shared SHAs with the upstream) and
+    /// bridge-translate only native commits on top. Requires this
+    /// remote-name's import state; upgrades its direction to `fork`.
+    #[arg(long)]
+    passthrough: bool,
     /// Machine-readable JSON on stdout.
     #[arg(long)]
     json: bool,
@@ -115,8 +121,39 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     // ── per-remote bridge state + bare staging repo ────────────────
     let state =
         map::state_dir(&mkit_dir, &opts.remote_name).map_err(|e| (e.to_string(), exit::USAGE))?;
+
+    // Direction binding (SPEC-GIT-IMPORT §6): plain export owns its
+    // state dir; --passthrough upgrades an IMPORT state dir to fork.
+    if opts.passthrough {
+        if mkit_git_bridge::map::read_direction(&state)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            return Err((
+                format!(
+                    "--passthrough requires import state for '{}' — run \
+                     `mkit git import <url>` first (SPEC-GIT-BRIDGE §14.1)",
+                    opts.remote_name
+                ),
+                exit::USAGE,
+            ));
+        }
+        mkit_git_bridge::map::bind_direction(&state, mkit_git_bridge::map::Direction::Fork)
+            .map_err(|e| (e.to_string(), exit::USAGE))?;
+    } else {
+        mkit_git_bridge::map::bind_direction(&state, mkit_git_bridge::map::Direction::Export)
+            .map_err(|e| (e.to_string(), exit::USAGE))?;
+    }
+
     let staging = state.join("repo.git");
     if !staging.join("objects").is_dir() {
+        if opts.passthrough {
+            return Err((
+                "fork-mode staging mirror missing — re-run `mkit git import` to restore it".into(),
+                exit::CONFIG_ERROR,
+            ));
+        }
         // (Re)initializing staging invalidates the map cache: cached
         // sha1s would point at objects the fresh staging repo does not
         // have, wedging update-ref/push (§12.3: cache is disposable).
@@ -198,8 +235,19 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
         });
         match result {
             Ok(batch) => {
-                git_in(&staging, &["update-ref", &ref_name, &sha1_hex(&batch.root)])
-                    .map_err(|e| (format!("update-ref {ref_name}: {e}"), exit::GENERAL_ERROR))?;
+                // Fork mode writes under a private namespace so the
+                // import mirror's own refs (upstream state) stay
+                // untouched; the push refspec maps it back.
+                let local_ref = if opts.passthrough {
+                    format!("refs/mkit-export/{ref_name}")
+                } else {
+                    ref_name.clone()
+                };
+                git_in(
+                    &staging,
+                    &["update-ref", &local_ref, &sha1_hex(&batch.root)],
+                )
+                .map_err(|e| (format!("update-ref {ref_name}: {e}"), exit::GENERAL_ERROR))?;
                 exported.push(Exported {
                     ref_name,
                     mkit_hash: head,
@@ -229,7 +277,28 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     }
 
     // ── provenance attestations (§11) ──────────────────────────────
-    let attest_head: Option<Sha1Id> = if opts.no_attest {
+    // §11 scoping: fork-mode heads whose tip passed through (came
+    // from the import map) carry no translation claim — their
+    // provenance is git-import/v1.
+    let attestable: Vec<Exported> = exported
+        .iter()
+        .filter(|e| {
+            if !opts.passthrough {
+                return true;
+            }
+            // An imported tip's raw git bytes are retained under
+            // state/raw/ — that head passed through and its
+            // provenance is git-import/v1, not a translation claim.
+            let hex = sha1_hex(&e.git_id);
+            !state.join("raw").join(&hex[..2]).join(&hex[2..]).exists()
+        })
+        .map(|e| Exported {
+            ref_name: e.ref_name.clone(),
+            mkit_hash: e.mkit_hash,
+            git_id: e.git_id,
+        })
+        .collect();
+    let attest_head: Option<Sha1Id> = if opts.no_attest || attestable.is_empty() {
         None
     } else {
         Some(publish_attestations(
@@ -238,7 +307,7 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
             &store,
             &staging,
             &opts.dest,
-            &exported,
+            &attestable,
             opts,
             &prior_state,
         )?)
@@ -279,7 +348,11 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     }
     push_args.push(push_dest.clone());
     for (name, _) in &to_push {
-        push_args.push(format!("{name}:{name}"));
+        if opts.passthrough && *name != ATTESTATIONS_REF {
+            push_args.push(format!("refs/mkit-export/{name}:{name}"));
+        } else {
+            push_args.push(format!("{name}:{name}"));
+        }
     }
     let push_arg_refs: Vec<&str> = push_args.iter().map(String::as_str).collect();
     git_in(&staging, &push_arg_refs).map_err(|e| {

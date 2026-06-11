@@ -315,7 +315,7 @@ fn reimport_is_noop_and_fresh_state_is_deterministic() {
     std::fs::remove_file(mkit_dir.join("git/upstream/map")).unwrap();
     std::fs::remove_dir_all(mkit_dir.join("git/upstream/repo.git")).unwrap();
     // Also clear recorded ref state so everything re-translates.
-    std::fs::remove_file(mkit_dir.join("git/upstream/refs")).unwrap();
+    std::fs::remove_file(mkit_dir.join("git/upstream/refs-import")).unwrap();
     let up = f.upstream();
     f.mkit_ok(&fork, &["git", "import", up.to_str().unwrap()]);
     assert_eq!(
@@ -342,7 +342,7 @@ fn crash_marker_discards_map_and_recovers() {
 
     // Simulate a crashed session: marker present, map possibly stale.
     std::fs::write(state.join("importing"), b"").unwrap();
-    std::fs::remove_file(state.join("refs")).unwrap();
+    std::fs::remove_file(state.join("refs-import")).unwrap();
     let out = f.mkit_ok(&fork, &["git", "fetch"]);
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("rebuilding the map cache"),
@@ -354,5 +354,222 @@ fn crash_marker_discards_map_and_recovers() {
             .unwrap()
             .unwrap(),
         head1
+    );
+}
+
+/// `git` stdout (trimmed) or panic — for rev-parse style queries.
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let out = git_in(dir, args);
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+#[test]
+fn passthrough_export_creates_prable_fork() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    std::fs::write(fork.join("local.txt"), "l\n").unwrap();
+    f.mkit_ok(&fork, &["add", "local.txt"]);
+    f.mkit_ok(&fork, &["commit", "-m", "local work"]);
+
+    // A GitHub-fork stand-in: a bare clone of the upstream.
+    let up = f.upstream();
+    let forkgit = f.root.path().join("forkgit");
+    git_ok(
+        f.root.path(),
+        &[
+            "clone",
+            "--bare",
+            "--quiet",
+            up.to_str().unwrap(),
+            "forkgit",
+        ],
+    );
+
+    f.mkit_ok(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "upstream",
+            forkgit.to_str().unwrap(),
+        ],
+    );
+
+    // SHA-sharing (SPEC-GIT-BRIDGE §14.1): the fork's main sits
+    // DIRECTLY on the original upstream commits — merge-base with the
+    // upstream tip is the upstream tip, so a PR diff is just the
+    // native work.
+    let up_tip = git_stdout(&up, &["rev-parse", "HEAD"]);
+    assert_eq!(git_stdout(&forkgit, &["rev-parse", "main^"]), up_tip);
+    assert_eq!(
+        git_stdout(&forkgit, &["merge-base", "main", &up_tip]),
+        up_tip
+    );
+    // Tags pass through byte-identical.
+    assert_eq!(
+        git_stdout(&forkgit, &["rev-parse", "v1"]),
+        git_stdout(&up, &["rev-parse", "v1"])
+    );
+    // Everything pushed is well-formed git.
+    git_ok(&forkgit, &["fsck", "--strict"]);
+
+    // Attestation scoping (§11): only the bridge-translated head gets
+    // a translation claim — passthrough objects keep their
+    // git-import/v1 provenance.
+    let tree = git_stdout(&forkgit, &["ls-tree", "refs/mkit/attestations"]);
+    assert_eq!(tree.lines().count(), 1, "one translated head:\n{tree}");
+
+    // The import mirror's own ref namespaces stay untouched: the
+    // export staged under refs/mkit-export/, not refs/heads/.
+    let staging = fork.join(".mkit/git/upstream/repo.git");
+    assert_eq!(
+        git_stdout(&staging, &["rev-parse", "refs/heads/main"]),
+        up_tip
+    );
+}
+
+#[test]
+fn passthrough_requires_import_state_and_locks_direction() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    let dest = f.root.path().join("dest.git");
+
+    // No import state under that name → refused with guidance.
+    let out = f.mkit(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "nope",
+            dest.to_str().unwrap(),
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("requires import state"),
+        "{out:?}"
+    );
+
+    // Fork the real import state, then plain export under the same
+    // name: direction conflict.
+    let up = f.upstream();
+    let forkgit = f.root.path().join("forkgit");
+    git_ok(
+        f.root.path(),
+        &[
+            "clone",
+            "--bare",
+            "--quiet",
+            up.to_str().unwrap(),
+            "forkgit",
+        ],
+    );
+    f.mkit_ok(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "upstream",
+            forkgit.to_str().unwrap(),
+        ],
+    );
+    let out = f.mkit(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--remote-name",
+            "upstream",
+            forkgit.to_str().unwrap(),
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("direction"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn fetch_after_fork_keeps_import_tracking_clean() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    std::fs::write(fork.join("local.txt"), "l\n").unwrap();
+    f.mkit_ok(&fork, &["add", "local.txt"]);
+    f.mkit_ok(&fork, &["commit", "-m", "local work"]);
+    let up = f.upstream();
+    let forkgit = f.root.path().join("forkgit");
+    git_ok(
+        f.root.path(),
+        &[
+            "clone",
+            "--bare",
+            "--quiet",
+            up.to_str().unwrap(),
+            "forkgit",
+        ],
+    );
+    f.mkit_ok(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "upstream",
+            forkgit.to_str().unwrap(),
+        ],
+    );
+
+    // Upstream advances; fetch through the SAME (now fork) state dir
+    // must track it without a spurious force-push warning — the
+    // export leases and the import tracking state are separate files.
+    std::fs::write(up.join("e.txt"), "e\n").unwrap();
+    git_ok(&up, &["add", "e.txt"]);
+    git_ok(&up, &["commit", "--quiet", "-m", "upstream fifth"]);
+    let out = f.mkit_ok(&fork, &["git", "fetch"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("force-pushed"),
+        "clean FF advance misread as a force-push: {stderr}"
+    );
+    // The tracking ref moved to the new upstream tip (translated).
+    let log = f.mkit_ok(&fork, &["log", "-n", "1", "upstream/main"]);
+    assert!(
+        String::from_utf8_lossy(&log.stdout).contains("upstream fifth"),
+        "{log:?}"
+    );
+
+    // And a second passthrough export still pushes cleanly (the fork
+    // didn't move; recorded leases hold).
+    f.mkit_ok(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "upstream",
+            forkgit.to_str().unwrap(),
+        ],
     );
 }

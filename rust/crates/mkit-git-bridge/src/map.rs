@@ -35,6 +35,7 @@ pub fn state_dir(mkit_dir: &Path, remote: &str) -> Result<PathBuf, BridgeError> 
 
 const MAP_FILE: &str = "map";
 const REFS_FILE: &str = "refs";
+const IMPORT_REFS_FILE: &str = "refs-import";
 
 /// Recorded direction of a state dir (SPEC-GIT-IMPORT §6): one dir
 /// serves one direction; `fork` couples an import source with
@@ -218,9 +219,20 @@ pub struct RefState {
     pub git_id: Sha1Id,
 }
 
-/// Load per-ref state. Missing file = empty.
+/// Load per-ref EXPORT state (push leases). Missing file = empty.
 pub fn load_ref_state(dir: &Path) -> Result<Vec<RefState>, BridgeError> {
-    let path = dir.join(REFS_FILE);
+    load_ref_state_file(dir, REFS_FILE)
+}
+
+/// Load per-ref IMPORT state (last-seen upstream tips). Kept separate
+/// from the export leases: in a fork-mode state dir both directions
+/// track the same ref names against different remotes.
+pub fn load_import_ref_state(dir: &Path) -> Result<Vec<RefState>, BridgeError> {
+    load_ref_state_file(dir, IMPORT_REFS_FILE)
+}
+
+fn load_ref_state_file(dir: &Path, file: &str) -> Result<Vec<RefState>, BridgeError> {
+    let path = dir.join(file);
     let data = match std::fs::read(&path) {
         Ok(d) => String::from_utf8_lossy(&d).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -244,8 +256,17 @@ pub fn load_ref_state(dir: &Path) -> Result<Vec<RefState>, BridgeError> {
     Ok(out)
 }
 
-/// Rewrite the whole ref-state file atomically (temp + rename).
+/// Rewrite the whole export ref-state file atomically (temp + rename).
 pub fn store_ref_state(dir: &Path, states: &[RefState]) -> Result<(), BridgeError> {
+    store_ref_state_file(dir, REFS_FILE, states)
+}
+
+/// Rewrite the import ref-state file (see [`load_import_ref_state`]).
+pub fn store_import_ref_state(dir: &Path, states: &[RefState]) -> Result<(), BridgeError> {
+    store_ref_state_file(dir, IMPORT_REFS_FILE, states)
+}
+
+fn store_ref_state_file(dir: &Path, file: &str, states: &[RefState]) -> Result<(), BridgeError> {
     std::fs::create_dir_all(dir)?;
     let mut out = String::new();
     for s in states {
@@ -258,7 +279,7 @@ pub fn store_ref_state(dir: &Path, states: &[RefState]) -> Result<(), BridgeErro
     }
     let tmp = dir.join(".refs.tmp");
     std::fs::write(&tmp, out.as_bytes())?;
-    std::fs::rename(&tmp, dir.join(REFS_FILE))?;
+    std::fs::rename(&tmp, dir.join(file))?;
     Ok(())
 }
 
