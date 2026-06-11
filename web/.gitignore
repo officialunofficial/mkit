@@ -10,3 +10,5 @@ src/pages.gen.ts
 .DS_Store
 *.pem
 vendor/mkit-wasm/pkg/
+# Generated at build time from the canonical repo-root SKILL.md (scripts/copy-skill.mjs)
+public/SKILL.md
