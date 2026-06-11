@@ -89,7 +89,9 @@ npm run ci     # typecheck + tests
 
 ## Deploy
 
-Deploy is automated in CI (`.github/workflows/mcp-deploy.yml`), but manually:
+Deploy is a **manual** job in `.github/workflows/mcp.yml` (the `workflow_dispatch`
+trigger with `deploy: true`); CI itself only indexes, typechecks, and tests. To
+deploy manually:
 
 ```bash
 npm run index            # rebuild dist/seed.sql from the tree
@@ -98,10 +100,13 @@ npm run db:seed          # load the corpus into remote D1
 npm run deploy           # wrangler deploy (custom domain mcp.mkit.makechain.net)
 ```
 
-> **Large seeds:** `dist/seed.sql` is the whole workspace (~3.5 MB at 0.2.0). If
-> a future workspace outgrows D1's single-file import limit, split the seed into
-> chunks and `db:seed` each — the schema's upsert/delete-by-version makes
-> re-seeding idempotent.
+> **Seed size limits:** D1 caps a single SQL *statement* at 100 KB. `build-index`
+> automatically splits any oversized file into an `INSERT` + `UPDATE … content =
+> content || '<chunk>'` appends (the FTS trigger re-syncs after each), and hard-
+> fails if any emitted statement would still exceed the cap — so `db:seed` can't
+> silently break. Separately, `dist/seed.sql` as a whole is ~3.5 MB at 0.2.0; if a
+> future workspace outgrows D1's single-file import limit, split the file and
+> `db:seed` each part — the delete-by-version + upsert makes re-seeding idempotent.
 
 Secrets needed in CI: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (D1 edit +
 Workers deploy scope).

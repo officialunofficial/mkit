@@ -9,12 +9,21 @@
 
 /** Sort semver-ish version tags (e.g. v0.2.0) in descending order, in place. */
 export function sortVersionsDesc(versions: string[]): void {
+  // Parse only the numeric X.Y.Z core; drop any -prerelease/+build suffix so a
+  // tag like v0.3.0-rc1 doesn't yield NaN (which makes the sort unstable and
+  // "latest" nondeterministic). NaN-guard each component to 0.
+  const core = (v: string) =>
+    v
+      .replace(/^v/, "")
+      .split(/[-+]/)[0]
+      .split(".")
+      .map((n) => Number(n) || 0);
   versions.sort((a, b) => {
-    const partsA = a.replace(/^v/, "").split(".").map(Number);
-    const partsB = b.replace(/^v/, "").split(".").map(Number);
+    const partsA = core(a);
+    const partsB = core(b);
     for (let i = 0; i < 3; i++) {
-      if (partsA[i] !== partsB[i]) {
-        return partsB[i] - partsA[i];
+      if ((partsA[i] ?? 0) !== (partsB[i] ?? 0)) {
+        return (partsB[i] ?? 0) - (partsA[i] ?? 0);
       }
     }
     return 0;
@@ -171,7 +180,12 @@ export function buildFTSQuery(
       },
     };
   }
-  const escaped = trimmed.replace(/["()*:^-]/g, " ").trim();
+  // Whitelist FTS5-safe bareword characters: anything else (".", "/", "'", ",",
+  // "=", "-", quotes, parens, …) becomes a separator. Blacklisting misses
+  // punctuation that makes FTS5 throw "syntax error" — e.g. 'envelope.sign' or
+  // 'trust-roots.toml', which are realistic queries and this is search_docs's
+  // default mode.
+  const escaped = trimmed.replace(/[^\p{L}\p{N}_]+/gu, " ").trim();
   const words = escaped.split(/\s+/).filter((w) => w.length > 0);
   if (words.length === 0) return { ftsQuery: null, snippetMatcher: () => 0 };
   const ftsQuery = words.map((w) => `${w}*`).join(" ");

@@ -65,10 +65,24 @@ export function parseCommands(cliMd) {
 
   return order.map((name) => {
     const v = byName.get(name);
-    return {
-      name,
-      summary: v.summary || v.body.replace(/\s+/g, " ").slice(0, 160).trim(),
-      body: v.body.trim(),
-    };
+    return { name, summary: deriveSummary(v.summary, v.body), body: v.body.trim() };
   });
+}
+
+/**
+ * The one-line summary. Prefer the text after the em-dash on the command's
+ * first line; if the signature wraps so the em-dash lands on a continuation
+ * line (e.g. attest, diff, push), find the first em-dash anywhere in the folded
+ * body and take its sentence. Only if there's no em-dash at all do we fall back
+ * to a raw slice (which would otherwise echo the backticked command itself).
+ */
+function deriveSummary(firstLineSummary, body) {
+  if (firstLineSummary) return firstLineSummary;
+  const dash = body.indexOf("—");
+  if (dash !== -1) {
+    const after = body.slice(dash + 1).replace(/\s+/g, " ").trim();
+    const period = after.indexOf(". ");
+    return period !== -1 && period < 160 ? after.slice(0, period + 1) : after.slice(0, 160).trim();
+  }
+  return body.replace(/\s+/g, " ").slice(0, 160).trim();
 }

@@ -19,6 +19,12 @@ describe("sortVersionsDesc", () => {
     sortVersionsDesc(v);
     expect(v).toEqual(["v0.2.0", "v0.1.9", "v0.1.0"]);
   });
+  it("handles pre-release/build suffixes without NaN instability", () => {
+    const v = ["v0.2.0", "v0.3.0-rc1", "v0.10.0+build.5", "v0.1.0"];
+    sortVersionsDesc(v);
+    // 0.10.0 > 0.3.0(-rc1) > 0.2.0 > 0.1.0 on the numeric core.
+    expect(v).toEqual(["v0.10.0+build.5", "v0.3.0-rc1", "v0.2.0", "v0.1.0"]);
+  });
 });
 
 describe("getLanguage / stripCratePrefix / isValidPath", () => {
@@ -72,6 +78,13 @@ describe("buildFTSQuery", () => {
   it("builds prefix word queries", () => {
     const { ftsQuery } = buildFTSQuery("dsse sign", "word");
     expect(ftsQuery).toBe("dsse* sign*");
+  });
+  it("splits punctuation into separate bareword tokens (no FTS5 syntax errors)", () => {
+    // 'envelope.sign' and 'trust-roots.toml' must not reach FTS5 with a literal
+    // '.' / '-' (which throws). Each becomes whitespace-separated prefix tokens.
+    expect(buildFTSQuery("envelope.sign", "word").ftsQuery).toBe("envelope* sign*");
+    expect(buildFTSQuery("trust-roots.toml", "word").ftsQuery).toBe("trust* roots* toml*");
+    expect(buildFTSQuery("docs/CLI.md", "word").ftsQuery).toBe("docs* CLI* md*");
   });
 });
 

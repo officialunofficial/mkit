@@ -43,7 +43,7 @@ jobs:
 
       - name: Install MCP dependencies
         working-directory: mcp
-        run: npm ci || npm install
+        run: npm ci
 
       - name: Build corpus index (validates the indexer + parsers)
         working-directory: mcp
@@ -76,7 +76,7 @@ jobs:
 
       - name: Install MCP dependencies
         working-directory: mcp
-        run: npm ci || npm install
+        run: npm ci
 
       - name: Bake corpus from the working tree
         working-directory: mcp

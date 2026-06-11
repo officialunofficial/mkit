@@ -27,6 +27,52 @@ function read(abs) {
   return readFileSync(abs, "utf8");
 }
 
+// Cloudflare D1 rejects any single SQL statement over 100 KB (applies to
+// `wrangler d1 execute --file`). Keep each emitted statement well under that.
+const MAX_STMT_BYTES = 99_000;
+// Raw chars per chunk: 45k chars escape to <=90k bytes even if every char is a
+// quote (doubled), leaving ample room for the statement scaffolding.
+const CHUNK_RAW_CHARS = 45_000;
+
+/** Split a string into <=maxChars pieces without ever splitting a surrogate pair. */
+function chunkString(s, maxChars) {
+  const chunks = [];
+  for (let i = 0; i < s.length; ) {
+    let j = Math.min(s.length, i + maxChars);
+    // Don't cut between a high and low surrogate.
+    if (j < s.length) {
+      const code = s.charCodeAt(j);
+      if (code >= 0xdc00 && code <= 0xdfff) j -= 1;
+    }
+    chunks.push(s.slice(i, j));
+    i = j;
+  }
+  return chunks;
+}
+
+/**
+ * Emit the SQL to store one file's content. Small files are a single INSERT;
+ * large ones are an INSERT plus `UPDATE ... content = content || '<chunk>'`
+ * appends, so no single statement exceeds D1's per-statement cap. The FTS
+ * AFTER-UPDATE trigger re-syncs the index to the full content after each append.
+ */
+function emitFile(out, ver, path, content) {
+  const single = `INSERT INTO files (version, path, content) VALUES (${sqlStr(ver)}, ${sqlStr(path)}, ${sqlStr(content)});`;
+  if (Buffer.byteLength(single, "utf8") <= MAX_STMT_BYTES) {
+    out.push(single);
+    return;
+  }
+  const [first, ...rest] = chunkString(content, CHUNK_RAW_CHARS);
+  out.push(
+    `INSERT INTO files (version, path, content) VALUES (${sqlStr(ver)}, ${sqlStr(path)}, ${sqlStr(first)});`,
+  );
+  for (const chunk of rest) {
+    out.push(
+      `UPDATE files SET content = content || ${sqlStr(chunk)} WHERE version = ${sqlStr(ver)} AND path = ${sqlStr(path)};`,
+    );
+  }
+}
+
 /** Recursively collect files under `dir` matching `test(path)`, skipping noise. */
 function walk(dir, test, out = []) {
   if (!existsSync(dir)) return out;
@@ -84,9 +130,7 @@ out.push(`DELETE FROM crates   WHERE version = ${sqlStr(version)};`);
 out.push(`DELETE FROM files    WHERE version = ${sqlStr(version)};`);
 out.push(`DELETE FROM versions WHERE version = ${sqlStr(version)};`);
 for (const [path, content] of files) {
-  out.push(
-    `INSERT INTO files (version, path, content) VALUES (${sqlStr(version)}, ${sqlStr(path)}, ${sqlStr(content)});`,
-  );
+  emitFile(out, version, path, content);
 }
 for (const c of crates) {
   out.push(
@@ -100,6 +144,19 @@ for (const c of commands) {
 }
 out.push(`INSERT INTO versions (version) VALUES (${sqlStr(version)});`);
 out.push("COMMIT;");
+
+// Guard: D1 rejects any statement over 100 KB. Fail loudly here rather than at
+// deploy time so an oversized file can never silently break `db:seed`.
+const offenders = out
+  .map((stmt) => [Buffer.byteLength(stmt, "utf8"), stmt])
+  .filter(([bytes]) => bytes > MAX_STMT_BYTES);
+if (offenders.length > 0) {
+  const worst = offenders.sort((a, b) => b[0] - a[0])[0];
+  throw new Error(
+    `build-index: ${offenders.length} SQL statement(s) exceed ${MAX_STMT_BYTES} bytes ` +
+      `(D1's per-statement cap). Largest is ${worst[0]} bytes: ${worst[1].slice(0, 120)}…`,
+  );
+}
 
 mkdirSync(distDir, { recursive: true });
 writeFileSync(join(distDir, "seed.sql"), out.join("\n") + "\n");
