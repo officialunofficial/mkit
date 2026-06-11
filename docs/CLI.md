@@ -670,7 +670,7 @@ Remote / sync:
   never propagates (export is add/update-only), and each
   `--remote-name` state dir is bound to one destination. The import
   direction does not exist. Requires building the binary with
-  `--features git-export`; shells out to `git`.
+  `--features git-bridge` (alias: `git-export`); shells out to `git`.
 
 Config / keys / version:
 

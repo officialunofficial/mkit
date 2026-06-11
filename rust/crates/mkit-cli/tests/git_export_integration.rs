@@ -1,4 +1,4 @@
-//! End-to-end suite for `mkit git export` (feature `git-export`),
+//! End-to-end suite for `mkit git export` (feature `git-bridge`),
 //! driving the real binaries (`mkit` + system `git`).
 //!
 //! Covers SPEC-GIT-BRIDGE's behavioral promises at the CLI level:
@@ -10,7 +10,7 @@
 //! multi-round loop (commit/branch/tag/amend → export → invariants)
 //! complementing the default-features proptest state machine, which
 //! cannot carry feature-gated ops.
-#![cfg(feature = "git-export")]
+#![cfg(feature = "git-bridge")]
 
 mod common;
 
