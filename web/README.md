@@ -32,3 +32,12 @@ post-build patcher pins the Cloudflare compatibility date, enables the required
 compatibility flags, observability, routes, preview URLs, and `workers.dev`.
 
 Preview locally with `pnpm preview`. Source lives under `src/`.
+
+## Agent skill (`/SKILL.md`)
+
+The site also serves the project's CLI Agent Skill at
+[`mkit.makechain.net/SKILL.md`](https://mkit.makechain.net/SKILL.md) so any
+agent can fetch it directly. The canonical file is the **repo-root
+`SKILL.md`**; `pnpm skill:stage` (run automatically by `dev`/`build` via
+`scripts/copy-skill.mjs`) copies it into the gitignored `public/SKILL.md` as a
+static asset. Edit the repo-root file, never the copy.

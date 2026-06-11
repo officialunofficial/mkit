@@ -1,0 +1,95 @@
+name: MCP CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/mcp.yml'
+      - 'mcp/**'
+      - 'docs/**'
+      - 'SKILL.md'
+      - 'README.md'
+      - 'man/**'
+  pull_request:
+    paths:
+      - '.github/workflows/mcp.yml'
+      - 'mcp/**'
+      - 'docs/**'
+      - 'SKILL.md'
+      - 'README.md'
+      - 'man/**'
+  # Deploy is manual: it needs a provisioned D1 database + Cloudflare secrets.
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Bake the corpus, seed remote D1, and deploy the Worker'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Index, typecheck, and test the MCP
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '22'
+
+      - name: Install MCP dependencies
+        working-directory: mcp
+        run: npm ci
+
+      - name: Build corpus index (validates the indexer + parsers)
+        working-directory: mcp
+        run: npm run index
+
+      - name: Typecheck
+        working-directory: mcp
+        run: npm run build
+
+      - name: Test
+        working-directory: mcp
+        run: npm run test
+
+  deploy:
+    name: Bake corpus + deploy Worker
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy }}
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: mcp
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '22'
+
+      - name: Install MCP dependencies
+        working-directory: mcp
+        run: npm ci
+
+      - name: Bake corpus from the working tree
+        working-directory: mcp
+        run: npm run index
+
+      - name: Apply D1 migrations (idempotent)
+        working-directory: mcp
+        run: npm run db:migrate
+
+      - name: Seed corpus into remote D1
+        working-directory: mcp
+        run: npm run db:seed
+
+      - name: Deploy Worker
+        working-directory: mcp
+        run: npm run deploy
