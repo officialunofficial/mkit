@@ -414,9 +414,13 @@ mkit commit to this git commit", never authorship of the content.
 Bridge attestations are stored like any attestation
 (`.mkit/attestations/<commit>/…`) and additionally published on the
 git mirror under the ref `refs/mkit/attestations` as a flat tree:
-one entry per attested head, name = `<40hex sha1>.dsse`, content =
-the DSSE envelope bytes, committed by a synthetic commit whose author
-line follows §6.2 with the exporter's identity. Note for consumers:
+one entry per published envelope, name = `<64hex attestation
+id>.dsse` (the BLAKE3 of the envelope bytes, matching the local
+store's naming — naming by git sha would collide when two refs share
+a head), content = the DSSE envelope bytes, committed by a synthetic
+commit whose author line follows §6.2 with the exporter's identity.
+Consumers locate a head's attestations by the `gitCommit` field
+inside the envelopes' predicates. Note for consumers:
 non-standard ref namespaces are not fetched by `git clone` defaults —
 document the explicit refspec
 (`+refs/mkit/attestations:refs/mkit/attestations`).

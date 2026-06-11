@@ -265,14 +265,14 @@ fn collect_refs(mkit_dir: &Path, explicit: &[String]) -> CmdResult<Vec<(String, 
                     exit::USAGE,
                 ));
             };
-            let ns = if name.starts_with("refs/heads/") {
-                "heads"
+            // read_ref/read_tag take namespace-relative short names.
+            let hash = if name.starts_with("refs/heads/") {
+                refs::read_ref(mkit_dir, short)
             } else {
-                "tags"
-            };
-            let hash = refs::read_ref(mkit_dir, &format!("refs/{ns}/{short}"))
-                .map_err(|e| (format!("read {name}: {e}"), exit::GENERAL_ERROR))?
-                .ok_or_else(|| (format!("--ref {name}: not found"), exit::DATAERR))?;
+                refs::read_tag(mkit_dir, short)
+            }
+            .map_err(|e| (format!("read {name}: {e}"), exit::GENERAL_ERROR))?
+            .ok_or_else(|| (format!("--ref {name}: not found"), exit::DATAERR))?;
             out.push((name.clone(), hash));
         }
         return Ok(out);
@@ -369,7 +369,12 @@ fn publish_attestations(
         let blob_id = blob
             .write_loose(staging)
             .map_err(|e| (format!("write attestation blob: {e}"), exit::CANTCREAT))?;
-        let name = format!("{}.dsse", sha1_hex(&e.git_id));
+        // Entry name = attestation id (BLAKE3 of the envelope bytes,
+        // matching the local store's naming). Naming by git sha would
+        // collide when two refs share a head — each ref still gets
+        // its own envelope (distinct refName in the predicate).
+        let att_id = mkit_attest::attestation_id(blob.body.as_slice());
+        let name = format!("{}.dsse", mkit_core::to_hex(&att_id));
         entries.retain(|(n, _)| n != &name);
         entries.push((name, blob_id));
     }
