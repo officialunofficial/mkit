@@ -70,7 +70,9 @@ Out of the reference section.
     expect(names).toEqual(["init", "add", "attest", "diff"]);
 
     const add = cmds.find((c) => c.name === "add")!;
-    expect(add.summary).toContain("stage files");
+    // Full first sentence, INCLUDING the wrapped continuation ("...next commit.")
+    // — not truncated at the first physical line ("stage files for the next").
+    expect(add.summary).toBe("stage files for the next commit.");
     expect(add.body).toContain("mkit add ."); // alternate form merged
     expect(add.body).toContain("--all"); // nested sub-bullet folded in
   });

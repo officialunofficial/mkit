@@ -39,15 +39,12 @@ export function parseCommands(cliMd) {
     const m = line.match(/^- `mkit ([a-z][a-z-]*)/);
     if (m) {
       const name = m[1];
-      const dash = line.indexOf("—");
-      const summary = dash === -1 ? "" : line.slice(dash + 1).trim();
       cur = name;
       const prev = byName.get(name);
       if (prev) {
         prev.body += "\n" + line;
-        if (!prev.summary && summary) prev.summary = summary;
       } else {
-        byName.set(name, { summary, body: line });
+        byName.set(name, { body: line });
         order.push(name);
       }
       continue;
@@ -65,19 +62,18 @@ export function parseCommands(cliMd) {
 
   return order.map((name) => {
     const v = byName.get(name);
-    return { name, summary: deriveSummary(v.summary, v.body), body: v.body.trim() };
+    return { name, summary: deriveSummary(v.body), body: v.body.trim() };
   });
 }
 
 /**
- * The one-line summary. Prefer the text after the em-dash on the command's
- * first line; if the signature wraps so the em-dash lands on a continuation
- * line (e.g. attest, diff, push), find the first em-dash anywhere in the folded
- * body and take its sentence. Only if there's no em-dash at all do we fall back
- * to a raw slice (which would otherwise echo the backticked command itself).
+ * The one-line summary: the first sentence after the command's first em-dash,
+ * read from the whole folded body (not just the first physical line — the
+ * signature often wraps so the description, or the rest of it, lands on later
+ * lines). Falls back to a 160-char slice if the sentence is long or, lacking any
+ * em-dash, to the body itself (which would otherwise echo the backticked command).
  */
-function deriveSummary(firstLineSummary, body) {
-  if (firstLineSummary) return firstLineSummary;
+function deriveSummary(body) {
   const dash = body.indexOf("—");
   if (dash !== -1) {
     const after = body.slice(dash + 1).replace(/\s+/g, " ").trim();
