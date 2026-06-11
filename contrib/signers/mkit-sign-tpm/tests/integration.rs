@@ -78,15 +78,15 @@ fn rejects_non_p256_algorithm_via_protocol() {
     let frames = vec![
         SignerFrame {
             body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+                protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
                 ..Default::default()
             }))),
             ..Default::default()
         },
         SignerFrame {
             body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                algorithm: Some(RpcAlgorithm::ALGORITHM_ED25519.into()),
-                key_form: Some(KeyForm::KEY_FORM_OPAQUE_HANDLE.into()),
+                algorithm: Some(RpcAlgorithm::Ed25519.into()),
+                key_form: Some(KeyForm::OpaqueHandle.into()),
                 key_ref: Some(0x8101_0001u32.to_be_bytes().to_vec()),
                 payload: Some(b"x".to_vec()),
                 ..Default::default()
@@ -120,7 +120,7 @@ fn rejects_non_p256_algorithm_via_protocol() {
     };
     assert_eq!(
         err.code.as_ref().unwrap().to_i32(),
-        ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM as i32
+        ErrorCode::UnsupportedAlgorithm as i32
     );
 }
 
@@ -167,15 +167,15 @@ fn tpm_keygen_sign_delete_roundtrip() {
     let frames = vec![
         SignerFrame {
             body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+                protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
                 ..Default::default()
             }))),
             ..Default::default()
         },
         SignerFrame {
             body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                algorithm: Some(RpcAlgorithm::ALGORITHM_P256.into()),
-                key_form: Some(KeyForm::KEY_FORM_OPAQUE_HANDLE.into()),
+                algorithm: Some(RpcAlgorithm::P256.into()),
+                key_form: Some(KeyForm::OpaqueHandle.into()),
                 key_ref: Some(handle.to_be_bytes().to_vec()),
                 payload: Some(b"DSSEv1 28 application/vnd.in-toto+json 2 {}".to_vec()),
                 ..Default::default()

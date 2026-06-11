@@ -7,8 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`PinResponse.pin` is `debug_redact`** ([signer.proto]): generated
+  `Debug` impls print `[REDACTED]` in place of the PIN, so a stray
+  `{:?}` log cannot leak it. Wire format and JSON unchanged.
+- **Explicit decode caps on every frame decode.** New
+  `mkit_rpc::frame_decode_options()` applies a 16-deep recursion limit
+  and the 1 MiB `MAX_FRAME_BYTES` size cap at the protobuf decode
+  itself (buffa `DecodeOptions`), in `read_frame` and in the encrypted
+  transport's record decodes — so the bound holds even on paths where
+  the cipher layer, not the length prefix, does the framing.
+- **`rpc_decode` fuzz target**: SignerFrame / SshFrame wire decode
+  never panics on arbitrary bytes, plus an `Arbitrary`-driven owned
+  encode/decode roundtrip property (new opt-in `arbitrary` feature on
+  mkit-rpc, from buffa `generate_arbitrary` codegen).
+
 ### Changed
 
+- **Idiomatic buffa enum handling** across all crates: raw
+  `EnumValue::to_i32` / `as i32` comparisons replaced with
+  `EnumValue`'s direct `PartialEq` against enum values, and SHOUTY
+  proto value names replaced with the `UpperCamelCase` aliases buffa
+  0.7 generates (`ErrorCode::KeyNotFound`, `RefExpectation::Any`, …).
+  No behavior change; wire-value pins remain asserted numerically.
 - **buffa 0.6 → 0.7.1** across all crates (mkit-rpc, mkit-attest,
   mkit-cli, mkit-transport-ssh, mkit-transport-enc, and the
   contrib/signers reference binaries), with the vendored mkit-rpc
@@ -18,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UpperCamelCase` enum value aliases. The declared requirement is
   `0.7.1` (not `0.7`) because regenerated packed-view decoders call the
   `RepeatedView::reserve` hook introduced in 0.7.1.
+
+### Fixed
+
+- `scripts/regen-rpc-proto.sh` could silently copy **stale** staged
+  sources back into `generated/` instead of fresh codegen output: the
+  default build mode fills its `OUT_DIR` with the same `.rs` file set,
+  and the script picked whichever was freshest. Codegen mode now drops
+  a `.mkit-rpc-codegen` marker that the script requires.
 
 ## [0.2.0] - 2026-06-10
 

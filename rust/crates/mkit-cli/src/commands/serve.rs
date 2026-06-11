@@ -530,15 +530,15 @@ async fn serve_enc_session(
         return;
     };
     let proto = match frame.body {
-        Some(ssh_frame::Body::Hello(h)) => h.proto.as_ref().map_or(0, buffa::EnumValue::to_i32),
+        Some(ssh_frame::Body::Hello(h)) => h.proto.unwrap_or_default(),
         _ => return,
     };
-    if proto != ProtocolVersion::PROTOCOL_VERSION_1 as i32 {
+    if proto != ProtocolVersion::ProtocolVersion1 {
         return;
     }
     let resp = SshFrame {
         body: Some(ssh_frame::Body::HelloResponse(Box::new(HelloResponse {
-            proto: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+            proto: Some(ProtocolVersion::ProtocolVersion1.into()),
             server_id: Some(format!("mkit serve-enc/{}", crate::cli::CLI_VERSION)),
             ..Default::default()
         }))),
@@ -701,22 +701,14 @@ async fn dispatch_enc_one(
                     }
                     Ok(())
                 }
-                Err(_) => {
-                    send_err(
-                        sender,
-                        ErrorCode::ERROR_CODE_KEY_NOT_FOUND,
-                        "pack not found",
-                    )
-                    .await
-                }
+                Err(_) => send_err(sender, ErrorCode::KeyNotFound, "pack not found").await,
             }
         }
         Some(ssh_frame::Body::UploadPack(header)) => {
             let mut upload = match UploadDrain::new(&header) {
                 Ok(upload) => upload,
                 Err(e) => {
-                    return send_err(sender, ErrorCode::ERROR_CODE_INVALID_REQUEST, e.message())
-                        .await;
+                    return send_err(sender, ErrorCode::InvalidRequest, e.message()).await;
                 }
             };
             loop {
@@ -724,7 +716,7 @@ async fn dispatch_enc_one(
                 let Some(ssh_frame::Body::PackChunk(chunk)) = f.body else {
                     return send_err(
                         sender,
-                        ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                        ErrorCode::InvalidRequest,
                         "expected PackChunk after UploadPack",
                     )
                     .await;
@@ -732,12 +724,7 @@ async fn dispatch_enc_one(
                 let complete = match upload.push_chunk(&chunk) {
                     Ok(complete) => complete,
                     Err(e) => {
-                        return send_err(
-                            sender,
-                            ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                            e.message(),
-                        )
-                        .await;
+                        return send_err(sender, ErrorCode::InvalidRequest, e.message()).await;
                     }
                 };
                 if complete {
@@ -755,7 +742,7 @@ async fn dispatch_enc_one(
                     )
                     .await
                 }
-                Err(_) => send_err(sender, ErrorCode::ERROR_CODE_INTERNAL, "upload failed").await,
+                Err(_) => send_err(sender, ErrorCode::Internal, "upload failed").await,
             }
         }
         Some(ssh_frame::Body::ReadRef(req)) => {
@@ -781,7 +768,7 @@ async fn dispatch_enc_one(
                     )
                     .await
                 }
-                Err(_) => send_err(sender, ErrorCode::ERROR_CODE_INTERNAL, "read ref failed").await,
+                Err(_) => send_err(sender, ErrorCode::Internal, "read ref failed").await,
             }
         }
         Some(ssh_frame::Body::UpdateRef(req)) => {
@@ -789,12 +776,8 @@ async fn dispatch_enc_one(
             let name = req.name.unwrap_or_default();
             let new_id = req.new_id.unwrap_or_default();
             if new_id.len() != 32 {
-                return send_err(
-                    sender,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                    "new_id must be 32 bytes",
-                )
-                .await;
+                return send_err(sender, ErrorCode::InvalidRequest, "new_id must be 32 bytes")
+                    .await;
             }
             let mut new_h = [0u8; 32];
             new_h.copy_from_slice(&new_id);
@@ -802,16 +785,16 @@ async fn dispatch_enc_one(
                 .expectation
                 .as_ref()
                 .and_then(buffa::EnumValue::as_known)
-                .unwrap_or(RefExpectation::REF_EXPECTATION_UNSPECIFIED);
+                .unwrap_or(RefExpectation::Unspecified);
             let condition = match expectation {
-                RefExpectation::REF_EXPECTATION_ANY => RefWriteCondition::Any,
-                RefExpectation::REF_EXPECTATION_MISSING => RefWriteCondition::Missing,
-                RefExpectation::REF_EXPECTATION_MATCH => {
+                RefExpectation::Any => RefWriteCondition::Any,
+                RefExpectation::Missing => RefWriteCondition::Missing,
+                RefExpectation::Match => {
                     let bytes = req.expected_id.as_deref().unwrap_or(&[]);
                     if bytes.len() != 32 {
                         return send_err(
                             sender,
-                            ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                            ErrorCode::InvalidRequest,
                             "MATCH expectation requires a 32-byte expected_id",
                         )
                         .await;
@@ -820,10 +803,10 @@ async fn dispatch_enc_one(
                     e.copy_from_slice(bytes);
                     RefWriteCondition::Match(e)
                 }
-                RefExpectation::REF_EXPECTATION_UNSPECIFIED => {
+                RefExpectation::Unspecified => {
                     return send_err(
                         sender,
-                        ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                        ErrorCode::InvalidRequest,
                         "UpdateRef.expectation is required",
                     )
                     .await;
@@ -833,14 +816,7 @@ async fn dispatch_enc_one(
                 Ok(()) => {
                     send_body(sender, ssh_frame::Body::UpdateRefResponse(Box::default())).await
                 }
-                Err(_) => {
-                    send_err(
-                        sender,
-                        ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                        "update ref failed",
-                    )
-                    .await
-                }
+                Err(_) => send_err(sender, ErrorCode::InvalidRequest, "update ref failed").await,
             }
         }
         Some(ssh_frame::Body::ListRefs(req)) => {
@@ -864,19 +840,10 @@ async fn dispatch_enc_one(
                     )
                     .await
                 }
-                Err(_) => {
-                    send_err(sender, ErrorCode::ERROR_CODE_INTERNAL, "list refs failed").await
-                }
+                Err(_) => send_err(sender, ErrorCode::Internal, "list refs failed").await,
             }
         }
-        _ => {
-            send_err(
-                sender,
-                ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                "unexpected frame",
-            )
-            .await
-        }
+        _ => send_err(sender, ErrorCode::InvalidRequest, "unexpected frame").await,
     }
 }
 
@@ -912,11 +879,7 @@ pub(crate) fn serve_loop(tx: &FileTransport, r: &mut impl Read, w: &mut impl Wri
             Ok(f) => f,
             Err(FrameError::LengthTruncated) => return exit::OK,
             Err(_) => {
-                let _ = emit_error(
-                    w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                    "frame parse error",
-                );
+                let _ = emit_error(w, ErrorCode::InvalidRequest, "frame parse error");
                 return exit::PROTOCOL_ERROR;
             }
         };
@@ -925,7 +888,7 @@ pub(crate) fn serve_loop(tx: &FileTransport, r: &mut impl Read, w: &mut impl Wri
         if frame_count > MAX_FRAMES_PER_CONN {
             let _ = emit_error(
                 w,
-                ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                ErrorCode::InvalidRequest,
                 "per-connection frame budget exceeded",
             );
             return exit::PROTOCOL_ERROR;
@@ -939,7 +902,7 @@ pub(crate) fn serve_loop(tx: &FileTransport, r: &mut impl Read, w: &mut impl Wri
         if byte_count > MAX_BYTES_PER_CONN {
             let _ = emit_error(
                 w,
-                ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                ErrorCode::InvalidRequest,
                 "per-connection byte budget exceeded",
             );
             return exit::PROTOCOL_ERROR;
@@ -962,25 +925,21 @@ fn handshake(r: &mut impl Read, w: &mut impl Write) -> bool {
         Err(_) => return false,
     };
     let Some(ssh_frame::Body::Hello(hello)) = frame.body else {
-        let _ = emit_error(
-            w,
-            ErrorCode::ERROR_CODE_INVALID_REQUEST,
-            "first frame must be Hello",
-        );
+        let _ = emit_error(w, ErrorCode::InvalidRequest, "first frame must be Hello");
         return false;
     };
-    let proto = hello.proto.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    if proto != ProtocolVersion::PROTOCOL_VERSION_1 as i32 {
+    let proto = hello.proto.unwrap_or_default();
+    if proto != ProtocolVersion::ProtocolVersion1 {
         let _ = emit_error(
             w,
-            ErrorCode::ERROR_CODE_INVALID_REQUEST,
-            &format!("unsupported proto_version {proto}"),
+            ErrorCode::InvalidRequest,
+            &format!("unsupported proto_version {}", proto.to_i32()),
         );
         return false;
     }
     let resp = SshFrame {
         body: Some(ssh_frame::Body::HelloResponse(Box::new(HelloResponse {
-            proto: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+            proto: Some(ProtocolVersion::ProtocolVersion1.into()),
             server_id: Some(format!("mkit serve/{CLI_VERSION}")),
             ..Default::default()
         }))),
@@ -1052,38 +1011,34 @@ fn dispatch(
                     }
                     Ok(())
                 }
-                Err(_) => emit_error(w, ErrorCode::ERROR_CODE_KEY_NOT_FOUND, "pack not found"),
+                Err(_) => emit_error(w, ErrorCode::KeyNotFound, "pack not found"),
             }
         }
         Some(ssh_frame::Body::UploadPack(header)) => {
             let mut upload = match UploadDrain::new(&header) {
                 Ok(upload) => upload,
                 Err(e) => {
-                    return emit_error(w, ErrorCode::ERROR_CODE_INVALID_REQUEST, e.message());
+                    return emit_error(w, ErrorCode::InvalidRequest, e.message());
                 }
             };
             loop {
                 let frame: SshFrame = match read_frame(r) {
                     Ok(f) => f,
                     Err(_) => {
-                        return emit_error(
-                            w,
-                            ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                            "pack chunk read failed",
-                        );
+                        return emit_error(w, ErrorCode::InvalidRequest, "pack chunk read failed");
                     }
                 };
                 let Some(ssh_frame::Body::PackChunk(chunk)) = frame.body else {
                     return emit_error(
                         w,
-                        ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                        ErrorCode::InvalidRequest,
                         "expected PackChunk after UploadPack",
                     );
                 };
                 let complete = match upload.push_chunk(&chunk) {
                     Ok(complete) => complete,
                     Err(e) => {
-                        return emit_error(w, ErrorCode::ERROR_CODE_INVALID_REQUEST, e.message());
+                        return emit_error(w, ErrorCode::InvalidRequest, e.message());
                     }
                 };
                 if complete {
@@ -1098,7 +1053,7 @@ fn dispatch(
                         ..Default::default()
                     })),
                 ),
-                Err(_) => emit_error(w, ErrorCode::ERROR_CODE_INTERNAL, "upload failed"),
+                Err(_) => emit_error(w, ErrorCode::Internal, "upload failed"),
             }
         }
         Some(ssh_frame::Body::ReadRef(req)) => {
@@ -1118,18 +1073,14 @@ fn dispatch(
                         ..Default::default()
                     })),
                 ),
-                Err(_) => emit_error(w, ErrorCode::ERROR_CODE_INTERNAL, "read ref failed"),
+                Err(_) => emit_error(w, ErrorCode::Internal, "read ref failed"),
             }
         }
         Some(ssh_frame::Body::UpdateRef(req)) => {
             let name = req.name.unwrap_or_default();
             let new_id = req.new_id.unwrap_or_default();
             if new_id.len() != 32 {
-                return emit_error(
-                    w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                    "new_id must be 32 bytes",
-                );
+                return emit_error(w, ErrorCode::InvalidRequest, "new_id must be 32 bytes");
             }
             let mut new_h = [0u8; 32];
             new_h.copy_from_slice(&new_id);
@@ -1140,16 +1091,16 @@ fn dispatch(
                 .expectation
                 .as_ref()
                 .and_then(buffa::EnumValue::as_known)
-                .unwrap_or(RefExpectation::REF_EXPECTATION_UNSPECIFIED);
+                .unwrap_or(RefExpectation::Unspecified);
             let condition = match expectation {
-                RefExpectation::REF_EXPECTATION_ANY => RefWriteCondition::Any,
-                RefExpectation::REF_EXPECTATION_MISSING => RefWriteCondition::Missing,
-                RefExpectation::REF_EXPECTATION_MATCH => {
+                RefExpectation::Any => RefWriteCondition::Any,
+                RefExpectation::Missing => RefWriteCondition::Missing,
+                RefExpectation::Match => {
                     let bytes = req.expected_id.as_deref().unwrap_or(&[]);
                     if bytes.len() != 32 {
                         return emit_error(
                             w,
-                            ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                            ErrorCode::InvalidRequest,
                             "MATCH expectation requires a 32-byte expected_id",
                         );
                     }
@@ -1157,21 +1108,17 @@ fn dispatch(
                     e.copy_from_slice(bytes);
                     RefWriteCondition::Match(e)
                 }
-                RefExpectation::REF_EXPECTATION_UNSPECIFIED => {
+                RefExpectation::Unspecified => {
                     return emit_error(
                         w,
-                        ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                        ErrorCode::InvalidRequest,
                         "UpdateRef.expectation is required",
                     );
                 }
             };
             match tx.update_ref(&name, condition, &new_h) {
                 Ok(()) => send(w, ssh_frame::Body::UpdateRefResponse(Box::default())),
-                Err(_) => emit_error(
-                    w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                    "update ref failed",
-                ),
+                Err(_) => emit_error(w, ErrorCode::InvalidRequest, "update ref failed"),
             }
         }
         Some(ssh_frame::Body::ListRefs(req)) => {
@@ -1194,25 +1141,19 @@ fn dispatch(
                         })),
                     )
                 }
-                Err(_) => emit_error(w, ErrorCode::ERROR_CODE_INTERNAL, "list refs failed"),
+                Err(_) => emit_error(w, ErrorCode::Internal, "list refs failed"),
             }
         }
         Some(ssh_frame::Body::PackChunk(_)) => emit_error(
             w,
-            ErrorCode::ERROR_CODE_INVALID_REQUEST,
+            ErrorCode::InvalidRequest,
             "PackChunk arrived without UploadPack header",
         ),
-        Some(ssh_frame::Body::Hello(_)) => emit_error(
-            w,
-            ErrorCode::ERROR_CODE_INVALID_REQUEST,
-            "Hello after handshake",
-        ),
-        Some(_) => emit_error(
-            w,
-            ErrorCode::ERROR_CODE_INVALID_REQUEST,
-            "unexpected request frame",
-        ),
-        None => emit_error(w, ErrorCode::ERROR_CODE_INVALID_REQUEST, "empty frame"),
+        Some(ssh_frame::Body::Hello(_)) => {
+            emit_error(w, ErrorCode::InvalidRequest, "Hello after handshake")
+        }
+        Some(_) => emit_error(w, ErrorCode::InvalidRequest, "unexpected request frame"),
+        None => emit_error(w, ErrorCode::InvalidRequest, "empty frame"),
     }
 }
 
@@ -1648,7 +1589,7 @@ mod tests {
             &mut input,
             ssh_frame::Body::Hello(Box::new(
                 mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                    .with_proto(ProtocolVersion::PROTOCOL_VERSION_1),
+                    .with_proto(ProtocolVersion::ProtocolVersion1),
             )),
         );
         write_body(
@@ -1691,7 +1632,7 @@ mod tests {
             &mut input,
             ssh_frame::Body::Hello(Box::new(
                 mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                    .with_proto(ProtocolVersion::PROTOCOL_VERSION_1),
+                    .with_proto(ProtocolVersion::ProtocolVersion1),
             )),
         );
         write_body(

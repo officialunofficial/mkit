@@ -296,7 +296,7 @@ where
     assert!(matches!(req.body, Some(ssh_frame::Body::Hello(_))));
     let reply = SshFrame {
         body: Some(ssh_frame::Body::HelloResponse(Box::new(
-            HelloResponse::default().with_proto(ProtocolVersion::PROTOCOL_VERSION_1),
+            HelloResponse::default().with_proto(ProtocolVersion::ProtocolVersion1),
         ))),
         ..Default::default()
     };

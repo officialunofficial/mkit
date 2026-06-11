@@ -5,6 +5,7 @@
 /// Algorithms — every signature algorithm mkit speaks. Wire numbers are
 /// load-bearing. Do NOT renumber. New algorithms append.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 #[repr(i32)]
 pub enum Algorithm {
     ALGORITHM_UNSPECIFIED = 0i32,
@@ -117,6 +118,7 @@ impl ::buffa::Enumeration for Algorithm {
 /// How the secret is presented to the signer. Some signers operate on
 /// raw bytes; others on opaque handles to keys held inside hardware.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 #[repr(i32)]
 pub enum KeyForm {
     KEY_FORM_UNSPECIFIED = 0i32,
@@ -199,6 +201,7 @@ impl ::buffa::Enumeration for KeyForm {
 /// Errors. Every protocol response that can fail has an `Error` field;
 /// callers MUST check `code` before using any other field.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 #[repr(i32)]
 pub enum ErrorCode {
     ERROR_CODE_UNSPECIFIED = 0i32,
@@ -360,6 +363,7 @@ impl ::buffa::Enumeration for ErrorCode {
 /// revision will introduce PROTOCOL_VERSION_2 and a sibling
 /// signer2.proto / ssh2.proto rather than mutating the v1 schemas.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 #[repr(i32)]
 pub enum ProtocolVersion {
     PROTOCOL_VERSION_UNSPECIFIED = 0i32,
@@ -412,6 +416,7 @@ impl ::buffa::Enumeration for ProtocolVersion {
     }
 }
 #[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct Error {
     /// Field 1: `code`
     pub code: ::core::option::Option<::buffa::EnumValue<ErrorCode>>,

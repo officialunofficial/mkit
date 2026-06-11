@@ -54,7 +54,7 @@ where
             Err(FrameError::LengthTooLarge(n)) => {
                 let _ = write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     format!("frame length {n} exceeds 1 MiB cap"),
                 );
                 return Err(SignerError::Io("oversize frame".into()));
@@ -62,7 +62,7 @@ where
             Err(FrameError::BodyTruncated { expected, .. }) => {
                 let _ = write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     format!("frame body truncated (expected {expected} bytes)"),
                 );
                 return Err(SignerError::Io("truncated frame".into()));
@@ -70,7 +70,7 @@ where
             Err(FrameError::DecodeFailed) => {
                 let _ = write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     "frame failed to decode as SignerFrame".to_owned(),
                 );
                 return Err(SignerError::Io("decode failure".into()));
@@ -82,13 +82,13 @@ where
             Some(signer_frame::Body::Hello(_)) => {
                 let resp = SignerFrame {
                     body: Some(signer_frame::Body::HelloResponse(Box::new(HelloResponse {
-                        protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+                        protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
                         signer_id: Some(format!("mkit-sign-ctap/{}", env!("CARGO_PKG_VERSION"))),
                         capabilities: buffa::MessageField::some(Capabilities {
                             // The reference CTAP signer currently enrolls and
                             // verifies P-256 credentials only.
-                            algorithms: vec![RpcAlgorithm::ALGORITHM_P256.into()],
-                            key_forms: vec![KeyForm::KEY_FORM_OPAQUE_HANDLE.into()],
+                            algorithms: vec![RpcAlgorithm::P256.into()],
+                            key_forms: vec![KeyForm::OpaqueHandle.into()],
                             supports_pin: Some(true),
                             supports_certificate_chain: Some(false),
                             max_payload_bytes: Some(0),
@@ -112,7 +112,7 @@ where
             Some(signer_frame::Body::PinResponse(_)) => {
                 write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     "mkit-sign-ctap does not solicit PINs in-band; pass --pin instead".to_owned(),
                 )?;
             }
@@ -120,16 +120,12 @@ where
             Some(_) => {
                 write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     "unexpected frame body".to_owned(),
                 )?;
             }
             None => {
-                write_error(
-                    w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                    "empty frame body".to_owned(),
-                )?;
+                write_error(w, ErrorCode::InvalidRequest, "empty frame body".to_owned())?;
             }
         }
     }
@@ -143,10 +139,9 @@ fn handle_sign<D: CtapDevice>(
     // The reference CTAP signer only supports P-256 credentials. Reject
     // other WebAuthn algorithms until their public-key/signature formats
     // are implemented end-to-end.
-    let algorithm = req.algorithm.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    if algorithm != RpcAlgorithm::ALGORITHM_P256 as i32 {
+    if !req.algorithm.is_some_and(|a| a == RpcAlgorithm::P256) {
         return signer_error_frame(
-            ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM,
+            ErrorCode::UnsupportedAlgorithm,
             "mkit-sign-ctap only signs ALGORITHM_P256".to_owned(),
         );
     }
@@ -155,7 +150,7 @@ fn handle_sign<D: CtapDevice>(
     // releases send RAW_BYTES with an empty key_ref for argv-configured
     // external signers, so tolerate that legacy host form only when the
     // credential handle comes from --credential-id.
-    let key_form = req.key_form.as_ref().map_or(0, buffa::EnumValue::to_i32);
+    let key_form = req.key_form.unwrap_or_default();
     let has_key_ref = req
         .key_ref
         .as_ref()
@@ -166,7 +161,7 @@ fn handle_sign<D: CtapDevice>(
         .is_some_and(|credential_id| !credential_id.is_empty());
     if !ctap_key_form_allowed(key_form, has_key_ref, has_default_credential) {
         return signer_error_frame(
-            ErrorCode::ERROR_CODE_UNSUPPORTED_KEY_FORM,
+            ErrorCode::UnsupportedKeyForm,
             "mkit-sign-ctap only supports KEY_FORM_OPAQUE_HANDLE (the credential_id)".to_owned(),
         );
     }
@@ -183,7 +178,7 @@ fn handle_sign<D: CtapDevice>(
         Some(c) => c,
         None => {
             return signer_error_frame(
-                ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                ErrorCode::InvalidRequest,
                 "no credential — pass --credential-id on argv or set SignRequest.key_ref"
                     .to_owned(),
             );
@@ -195,7 +190,7 @@ fn handle_sign<D: CtapDevice>(
     let credential_id_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential_id);
     let store_path = match cred_store::default_path() {
         Ok(p) => p,
-        Err(e) => return signer_error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
+        Err(e) => return signer_error_frame(ErrorCode::Internal, e.to_string()),
     };
     let store = cred_store::Store::load(&store_path).unwrap_or_default();
     handle_sign_with_store(
@@ -208,12 +203,14 @@ fn handle_sign<D: CtapDevice>(
     )
 }
 
-fn ctap_key_form_allowed(key_form: i32, has_key_ref: bool, has_default_credential: bool) -> bool {
-    key_form == 0
-        || key_form == KeyForm::KEY_FORM_OPAQUE_HANDLE as i32
-        || (key_form == KeyForm::KEY_FORM_RAW_BYTES as i32
-            && !has_key_ref
-            && has_default_credential)
+fn ctap_key_form_allowed(
+    key_form: buffa::EnumValue<KeyForm>,
+    has_key_ref: bool,
+    has_default_credential: bool,
+) -> bool {
+    key_form == KeyForm::Unspecified
+        || key_form == KeyForm::OpaqueHandle
+        || (key_form == KeyForm::RawBytes && !has_key_ref && has_default_credential)
 }
 
 fn handle_sign_with_store<D: CtapDevice>(
@@ -224,17 +221,16 @@ fn handle_sign_with_store<D: CtapDevice>(
     credential_id: &[u8],
     credential_id_b64: &str,
 ) -> SignerFrame {
-    let algorithm = req.algorithm.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    if algorithm != RpcAlgorithm::ALGORITHM_P256 as i32 {
+    if !req.algorithm.is_some_and(|a| a == RpcAlgorithm::P256) {
         return signer_error_frame(
-            ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM,
+            ErrorCode::UnsupportedAlgorithm,
             "mkit-sign-ctap only signs ALGORITHM_P256".to_owned(),
         );
     }
 
     let Some(record) = store.find_by_credential_id(credential_id_b64) else {
         return signer_error_frame(
-            ErrorCode::ERROR_CODE_INVALID_REQUEST,
+            ErrorCode::InvalidRequest,
             format!(
                 "credential metadata for {credential_id_b64} is missing; run `mkit-sign-ctap enroll` so the signer can return a public_key"
             ),
@@ -244,7 +240,7 @@ fn handle_sign_with_store<D: CtapDevice>(
         Ok(key) if key.len() == 65 => key,
         _ => {
             return signer_error_frame(
-                ErrorCode::ERROR_CODE_INTERNAL,
+                ErrorCode::Internal,
                 format!("stored public key for credential {credential_id_b64} is invalid"),
             );
         }
@@ -270,14 +266,14 @@ fn handle_sign_with_store<D: CtapDevice>(
     ) {
         Ok(a) => a,
         Err(SignerError::Ctap(msg)) => {
-            return signer_error_frame(ErrorCode::ERROR_CODE_HARDWARE_ERROR, msg);
+            return signer_error_frame(ErrorCode::HardwareError, msg);
         }
-        Err(e) => return signer_error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
+        Err(e) => return signer_error_frame(ErrorCode::Internal, e.to_string()),
     };
 
     let sig_compact = match proto::der_to_compact_p256(&assertion.signature) {
         Ok(c) => c.to_vec(),
-        Err(e) => return signer_error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
+        Err(e) => return signer_error_frame(ErrorCode::Internal, e.to_string()),
     };
 
     let key_id = if record.keyid.is_empty() {
@@ -432,7 +428,7 @@ mod tests {
         let frames = vec![SignerFrame {
             body: Some(signer_frame::Body::Hello(Box::new(
                 Hello::default()
-                    .with_protocol(ProtocolVersion::PROTOCOL_VERSION_1)
+                    .with_protocol(ProtocolVersion::ProtocolVersion1)
                     .with_want_capabilities(true),
             ))),
             ..Default::default()
@@ -449,18 +445,14 @@ mod tests {
             other => panic!("expected HelloResponse, got {other:?}"),
         };
         let caps = resp.capabilities.into_option().expect("capabilities set");
-        let alg_set: Vec<i32> = caps
-            .algorithms
-            .iter()
-            .map(buffa::EnumValue::to_i32)
-            .collect();
-        assert_eq!(alg_set, vec![RpcAlgorithm::ALGORITHM_P256 as i32]);
-        let key_forms: Vec<i32> = caps
-            .key_forms
-            .iter()
-            .map(buffa::EnumValue::to_i32)
-            .collect();
-        assert_eq!(key_forms, vec![KeyForm::KEY_FORM_OPAQUE_HANDLE as i32]);
+        assert_eq!(
+            caps.algorithms,
+            vec![buffa::EnumValue::from(RpcAlgorithm::P256)]
+        );
+        assert_eq!(
+            caps.key_forms,
+            vec![buffa::EnumValue::from(KeyForm::OpaqueHandle)]
+        );
         assert_eq!(caps.supports_pin, Some(true));
         assert_eq!(caps.requires_user_presence, Some(true));
     }
@@ -472,8 +464,8 @@ mod tests {
         let credential_id_b64url =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"mock-cred");
         let req = SignRequest::default()
-            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
-            .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+            .with_algorithm(RpcAlgorithm::P256)
+            .with_key_form(KeyForm::OpaqueHandle)
             .with_key_ref(b"mock-cred".to_vec())
             .with_payload(b"DSSEv1 28 application/vnd.in-toto+json 2 {}".to_vec());
         let resp = handle_sign_with_store(
@@ -505,8 +497,8 @@ mod tests {
     fn sign_request_without_stored_public_key_returns_invalid_request() {
         let device = mock_device();
         let req = SignRequest::default()
-            .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
-            .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+            .with_algorithm(RpcAlgorithm::P256)
+            .with_key_form(KeyForm::OpaqueHandle)
             .with_key_ref(b"mock-cred".to_vec())
             .with_payload(b"x".to_vec());
         let resp = handle_sign_with_store(
@@ -522,10 +514,7 @@ mod tests {
             Some(signer_frame::Body::Error(e)) => e,
             other => panic!("expected Error, got {other:?}"),
         };
-        assert_eq!(
-            err.code.as_ref().unwrap().to_i32(),
-            ErrorCode::ERROR_CODE_INVALID_REQUEST as i32
-        );
+        assert_eq!(err.code, Some(ErrorCode::InvalidRequest.into()));
         assert!(
             err.message
                 .as_deref()
@@ -538,8 +527,8 @@ mod tests {
         let device = mock_device();
         let store = store_with_mock_credential();
         let req = SignRequest::default()
-            .with_algorithm(RpcAlgorithm::ALGORITHM_ED25519_WEBAUTHN)
-            .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+            .with_algorithm(RpcAlgorithm::Ed25519Webauthn)
+            .with_key_form(KeyForm::OpaqueHandle)
             .with_key_ref(b"mock-cred".to_vec())
             .with_payload(b"x".to_vec());
         let resp = handle_sign_with_store(
@@ -555,26 +544,15 @@ mod tests {
             Some(signer_frame::Body::Error(e)) => e,
             other => panic!("expected Error, got {other:?}"),
         };
-        assert_eq!(
-            err.code.as_ref().unwrap().to_i32(),
-            ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM as i32
-        );
+        assert_eq!(err.code, Some(ErrorCode::UnsupportedAlgorithm.into()));
     }
 
     #[test]
     fn raw_key_form_is_allowed_only_for_mkit_argv_default_compatibility() {
-        assert!(ctap_key_form_allowed(
-            KeyForm::KEY_FORM_RAW_BYTES as i32,
-            false,
-            true
-        ));
+        assert!(ctap_key_form_allowed(KeyForm::RawBytes.into(), false, true));
+        assert!(!ctap_key_form_allowed(KeyForm::RawBytes.into(), true, true));
         assert!(!ctap_key_form_allowed(
-            KeyForm::KEY_FORM_RAW_BYTES as i32,
-            true,
-            true
-        ));
-        assert!(!ctap_key_form_allowed(
-            KeyForm::KEY_FORM_RAW_BYTES as i32,
+            KeyForm::RawBytes.into(),
             false,
             false
         ));
@@ -585,7 +563,7 @@ mod tests {
         let frames = vec![
             SignerFrame {
                 body: Some(signer_frame::Body::Hello(Box::new(
-                    Hello::default().with_protocol(ProtocolVersion::PROTOCOL_VERSION_1),
+                    Hello::default().with_protocol(ProtocolVersion::ProtocolVersion1),
                 ))),
                 ..Default::default()
             },
@@ -593,8 +571,8 @@ mod tests {
                 body: Some(signer_frame::Body::SignRequest(Box::new(
                     // CTAP signer doesn't support raw Ed25519.
                     SignRequest::default()
-                        .with_algorithm(RpcAlgorithm::ALGORITHM_ED25519)
-                        .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+                        .with_algorithm(RpcAlgorithm::Ed25519)
+                        .with_key_form(KeyForm::OpaqueHandle)
                         .with_key_ref(b"any".to_vec())
                         .with_payload(b"x".to_vec()),
                 ))),
@@ -611,10 +589,7 @@ mod tests {
             Some(signer_frame::Body::Error(e)) => e,
             other => panic!("expected Error, got {other:?}"),
         };
-        assert_eq!(
-            err.code.as_ref().unwrap().to_i32(),
-            ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM as i32
-        );
+        assert_eq!(err.code, Some(ErrorCode::UnsupportedAlgorithm.into()));
     }
 
     #[test]
@@ -622,8 +597,8 @@ mod tests {
         let frames = vec![SignerFrame {
             body: Some(signer_frame::Body::SignRequest(Box::new(
                 SignRequest::default()
-                    .with_algorithm(RpcAlgorithm::ALGORITHM_P256)
-                    .with_key_form(KeyForm::KEY_FORM_OPAQUE_HANDLE)
+                    .with_algorithm(RpcAlgorithm::P256)
+                    .with_key_form(KeyForm::OpaqueHandle)
                     .with_key_ref(Vec::new()) // explicitly empty
                     .with_payload(b"x".to_vec()),
             ))),
@@ -639,9 +614,6 @@ mod tests {
             Some(signer_frame::Body::Error(e)) => e,
             other => panic!("expected Error, got {other:?}"),
         };
-        assert_eq!(
-            err.code.as_ref().unwrap().to_i32(),
-            ErrorCode::ERROR_CODE_INVALID_REQUEST as i32
-        );
+        assert_eq!(err.code, Some(ErrorCode::InvalidRequest.into()));
     }
 }

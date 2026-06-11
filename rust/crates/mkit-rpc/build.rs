@@ -34,17 +34,29 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PROTOC");
     println!("cargo:rerun-if-env-changed=MKIT_RPC_CODEGEN");
 
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    // Marker distinguishing real codegen output from staged copies of
+    // generated/ — both fill OUT_DIR with the same .rs file set, so
+    // scripts/regen-rpc-proto.sh needs this to find the right dir.
+    let marker = out_dir.join(".mkit-rpc-codegen");
+
     if std::env::var_os("MKIT_RPC_CODEGEN").is_some() {
         buffa_build::Config::new()
             .files(&files)
             .includes(&[&proto_dir])
             .include_file("_includes.rs")
+            // Emits `arbitrary::Arbitrary` derives gated behind the
+            // crate's opt-in `arbitrary` feature — used by the fuzz
+            // harness (rust/fuzz) for decode/roundtrip targets.
+            .generate_arbitrary(true)
             .compile()
             .expect("buffa codegen");
+        std::fs::write(&marker, b"").expect("write codegen marker");
         return;
     }
-
-    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    // A previous codegen-mode run may have used this same OUT_DIR;
+    // drop its marker so the regen script never copies staged files.
+    let _ = std::fs::remove_file(&marker);
     let vendored = PathBuf::from("generated");
     let mut staged = 0usize;
     for entry in std::fs::read_dir(&vendored).expect("read generated/") {

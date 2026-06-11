@@ -34,8 +34,11 @@ license = "MIT OR Apache-2.0"
 cargo-fuzz = true
 
 [dependencies]
+arbitrary = "1"
+buffa = "0.7.1"
 mkit-core = { path = "../crates/mkit-core" }
 mkit-keystore = { path = "../crates/mkit-keystore", features = ["fuzzing"] }
+mkit-rpc = { path = "../crates/mkit-rpc", features = ["arbitrary"] }
 tempfile = "3"
 
 # libfuzzer-sys is gated on the `libfuzzer` feature so `cargo test`
@@ -74,6 +77,14 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "software_key_record"
 path = "fuzz_targets/software_key_record.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "rpc_decode"
+path = "fuzz_targets/rpc_decode.rs"
 test = false
 doc = false
 bench = false

@@ -264,7 +264,7 @@ impl<I: Stream, O: Sink, E: Executor> EncTransport<I, O, E> {
         let hello = SshFrame {
             body: Some(ssh_frame::Body::Hello(Box::new(
                 Hello::default()
-                    .with_proto(ProtocolVersion::PROTOCOL_VERSION_1)
+                    .with_proto(ProtocolVersion::ProtocolVersion1)
                     .with_client_id(CLIENT_ID),
             ))),
             ..Default::default()
@@ -285,10 +285,11 @@ impl<I: Stream, O: Sink, E: Executor> EncTransport<I, O, E> {
                 .map_err(|e| EncInitError::AppHelloFailed(format!("read hello reply: {e}")))?;
             match resp.body {
                 Some(ssh_frame::Body::HelloResponse(h)) => {
-                    let proto = h.proto.as_ref().map_or(0, buffa::EnumValue::to_i32);
-                    if proto != ProtocolVersion::PROTOCOL_VERSION_1 as i32 {
+                    let proto = h.proto.unwrap_or_default();
+                    if proto != ProtocolVersion::ProtocolVersion1 {
                         return Err(EncInitError::AppHelloFailed(format!(
-                            "server proto_version {proto} != expected 1"
+                            "server proto_version {} != expected 1",
+                            proto.to_i32()
                         )));
                     }
                     Ok(())
@@ -546,8 +547,8 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
         match resp.body {
             Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(()),
             Some(ssh_frame::Body::Error(e)) => {
-                let code = e.code.as_ref().map_or(0, buffa::EnumValue::to_i32);
-                if code == mkit_rpc::mkit::rpc::v1::ErrorCode::ERROR_CODE_INVALID_REQUEST as i32
+                if e.code
+                    .is_some_and(|c| c == mkit_rpc::mkit::rpc::v1::ErrorCode::InvalidRequest)
                     && !matches!(condition, RefWriteCondition::Any)
                 {
                     Err(TransportError::RefConflict)
@@ -656,7 +657,12 @@ pub async fn send_frame<O: Sink>(sender: &mut Sender<O>, msg: &SshFrame) -> Tran
 pub async fn recv_frame<I: Stream>(receiver: &mut Receiver<I>) -> TransportResult<SshFrame> {
     let bufs = receiver.recv().await.map_err(stream_err)?;
     let buf = bufs.coalesce();
-    SshFrame::decode_from_slice(buf.as_ref()).map_err(|_| TransportError::ProtocolError)
+    // The cipher layer frames records but does not know the protocol's
+    // 1 MiB frame cap — `frame_decode_options` re-states it (plus the
+    // recursion limit) at the decode itself.
+    mkit_rpc::frame_decode_options()
+        .decode_from_slice(buf.as_ref())
+        .map_err(|_| TransportError::ProtocolError)
 }
 
 /// Receive one [`SshFrame`] but fail with [`TransportError::ConnectionFailed`]
@@ -700,12 +706,14 @@ async fn recv_frame_init<I: Stream>(
 ) -> Result<SshFrame, commonware_stream::encrypted::Error> {
     let bufs = receiver.recv().await?;
     let buf = bufs.coalesce();
-    SshFrame::decode_from_slice(buf.as_ref()).map_err(|_| {
-        commonware_stream::encrypted::Error::UnableToDecode(commonware_codec::Error::Invalid(
-            "SshFrame",
-            "decode failed",
-        ))
-    })
+    mkit_rpc::frame_decode_options()
+        .decode_from_slice(buf.as_ref())
+        .map_err(|_| {
+            commonware_stream::encrypted::Error::UnableToDecode(commonware_codec::Error::Invalid(
+                "SshFrame",
+                "decode failed",
+            ))
+        })
 }
 
 /// Collapse a commonware-stream error to [`TransportError::ConnectionFailed`].
@@ -819,7 +827,7 @@ mod tests {
         assert!(matches!(hello_frame.body, Some(ssh_frame::Body::Hello(_))));
         let reply = SshFrame {
             body: Some(ssh_frame::Body::HelloResponse(Box::new(
-                HelloResponse::default().with_proto(ProtocolVersion::PROTOCOL_VERSION_1),
+                HelloResponse::default().with_proto(ProtocolVersion::ProtocolVersion1),
             ))),
             ..Default::default()
         };
@@ -905,7 +913,7 @@ mod tests {
             let hello = SshFrame {
                 body: Some(ssh_frame::Body::Hello(Box::new(
                     Hello::default()
-                        .with_proto(ProtocolVersion::PROTOCOL_VERSION_1)
+                        .with_proto(ProtocolVersion::ProtocolVersion1)
                         .with_client_id(CLIENT_ID),
                 ))),
                 ..Default::default()
@@ -918,8 +926,7 @@ mod tests {
                 .expect("recv hello response");
             match hello_resp.body {
                 Some(ssh_frame::Body::HelloResponse(h)) => {
-                    let proto = h.proto.as_ref().map_or(0, buffa::EnumValue::to_i32);
-                    assert_eq!(proto, ProtocolVersion::PROTOCOL_VERSION_1 as i32);
+                    assert_eq!(h.proto, Some(ProtocolVersion::ProtocolVersion1.into()));
                 }
                 other => panic!("expected HelloResponse, got {}", body_name(&other)),
             }
