@@ -45,9 +45,9 @@ bls-threshold = [
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it; path-only deps are rejected by
 # the registry. Track the workspace.package.version.
-mkit-core = { version = "0.2", path = "../mkit-core" }
+mkit-core = { version = "0.3", path = "../mkit-core" }
 # mkit-rpc owns signer.proto + framing helpers used by ExternalSigner.
-mkit-rpc = { version = "0.2", path = "../mkit-rpc" }
+mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
 buffa = "0.7.1"
 blake3 = "1"
 base64 = "0.22"
