@@ -9,9 +9,10 @@ export default function TreePage() {
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Folders, all the way down</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
-          A folder is a list of files and other folders, each named by a BLAKE3 hash. A parent's hash is computed from
-          its children's hashes, so the structure is a Merkle tree: edit any file and every hash above it rewrites —
-          file → folder → parent folder → commit. The root hash is a fingerprint of everything below.
+          A folder is a list of files and other folders, each entry named by a BLAKE3 hash; a parent's hash is computed
+          from its children's. That makes the repo a Merkle tree — a structure where one root hash fingerprints
+          everything below it. git is built the same way; mkit just makes it visible: edit any file and watch every hash
+          above it rewrite — file → folder → parent folder → commit.
         </p>
       </header>
       <DemoBoundary>

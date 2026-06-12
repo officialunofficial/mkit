@@ -7,7 +7,7 @@
     "wasm:build": "rm -rf vendor/mkit-wasm/pkg && cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir ../../../web/vendor/mkit-wasm/pkg --release",
     "skill:stage": "node scripts/copy-skill.mjs",
     "dev": "pnpm skill:stage && waku dev",
-    "build": "pnpm skill:stage && pnpm wasm:build && CLOUDFLARE=1 waku build && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",
+    "build": "pnpm skill:stage && pnpm wasm:build && CLOUDFLARE=1 waku build && node scripts/assert-prerender.mjs && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",
     "start": "waku start",
     "deploy": "pnpm build && wrangler deploy -c dist/server/wrangler.json",
     "preview": "pnpm build && wrangler dev -c dist/server/wrangler.json",

@@ -32,12 +32,6 @@ export const Header = () => {
               sign
             </Link>
             <Link
-              to='/attest'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              attest
-            </Link>
-            <Link
               to='/tree'
               className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
             >
@@ -48,6 +42,18 @@ export const Header = () => {
               className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
             >
               streaming
+            </Link>
+            <Link
+              to='/performance'
+              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
+            >
+              performance
+            </Link>
+            <Link
+              to='/attest'
+              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
+            >
+              attest
             </Link>
           </nav>
         </div>

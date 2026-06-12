@@ -9,8 +9,10 @@ export default function SignPage() {
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Who signed this?</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
-          A private key signs a message; the matching public key verifies it. Anyone can confirm the message hasn't been
-          changed and that you signed it. Flip a single character below and the verifier rejects it.
+          A private key signs a message; the matching public key verifies it — anyone can confirm the message is
+          untouched and that you signed it. In mkit this isn't optional: every commit carries an Ed25519 signature,
+          where git treats signing as a GPG add-on. Generate a key, sign a message, then flip a single character and
+          watch the verifier reject it.
         </p>
       </header>
       <DemoBoundary>
