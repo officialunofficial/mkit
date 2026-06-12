@@ -653,17 +653,27 @@ Agent integration:
   Exposes a conservative tool surface: status / diff (unstaged, staged,
   vs target) / log / show / branch / cat-file inspection, staging
   (`add`, unstage), signed `commit`, branch create/checkout, `init`,
-  `keygen`, plus the differentiators — `verify` (signature check),
-  `attest` (produce a DSSE attestation), and `verify-attest`
-  (trust-roots-gated verification). Every tool takes an explicit
-  `repo_path`; `--repository <path>` confines all calls (symlink
-  resolved) to that root. The server runs **no network operations**
-  (push/pull/fetch/clone are not exposed), performs no history surgery
-  (merge/rebase/cherry-pick are not exposed), and **never passes
-  `-f`/`--force`** — mkit's data-loss guards stay in force, and a
-  "refuses without -f" error is surfaced to the agent verbatim. Tool
-  results carry the child command's output and its sysexits code on
-  failure. Register with an MCP client, e.g.:
+  `keygen` (ed25519 commit key, or secp256k1/p256 attestation keys),
+  plus the differentiators — `verify` (signature check), `attest`
+  (DSSE; supports `algorithm` and `repo-key`/`keystore` signer), and
+  `verify-attest` (trust-roots-gated, with an `algorithm` filter). Every
+  tool takes an explicit `repo_path`; `--repository <path>` confines all
+  calls (symlink resolved) to that root. The server runs **no network
+  operations** (push/pull/fetch/clone are not exposed), performs no
+  history surgery (merge/rebase/cherry-pick are not exposed), and
+  **never passes `-f`/`--force`** — mkit's data-loss guards stay in
+  force, and a "refuses without -f" error is surfaced to the agent
+  verbatim. Additional guardrails specific to the agent threat model:
+  a predicate file passed to `attest` must resolve **inside** the repo
+  (no reading outside files into a signed attestation), a `trust_roots`
+  path passed to `verify-attest` must resolve **outside** the repo (a
+  hostile clone's in-repo `.mkit/attest-trust-roots.toml` can never be
+  selected via the MCP — see THREAT-MODEL §"Trust-roots scope"), and the
+  external/multi-signer attestation controls are intentionally omitted
+  because they can direct subprocess execution (use the `attest` CLI for
+  that flow). `initialize` must precede tool calls. Tool results carry
+  the child command's output and its sysexits code on failure. Register
+  with an MCP client, e.g.:
 
   ```sh
   claude mcp add mkit-repo -- mkit mcp --repository /path/to/repo

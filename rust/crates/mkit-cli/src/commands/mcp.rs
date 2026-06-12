@@ -71,6 +71,8 @@ pub fn run(args: &[String]) -> u8 {
 fn serve(allowed: Option<&Path>) -> u8 {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
+    // MCP lifecycle: `initialize` must precede any tool traffic.
+    let mut initialized = false;
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -96,13 +98,19 @@ fn serve(allowed: Option<&Path>) -> u8 {
             }
         };
         for msg in messages {
-            if let Some(response) = handle_message(&msg, allowed) {
+            if let Some(response) = handle_message(&msg, allowed, &mut initialized) {
                 write_msg(&mut stdout, &response);
             }
         }
     }
     exit::OK
 }
+
+/// Protocol revisions this server interoperates with. The wire framing
+/// and tools surface are common across these; `initialize` negotiates
+/// the requested one when supported, else falls back to the latest.
+const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+const LATEST_PROTOCOL: &str = "2025-06-18";
 
 fn write_msg(stdout: &mut impl Write, msg: &Value) {
     // serde_json compact form contains no raw newlines, so one
@@ -114,8 +122,9 @@ fn write_msg(stdout: &mut impl Write, msg: &Value) {
 }
 
 /// Dispatch one JSON-RPC message. Returns `None` for notifications
-/// (nothing is written back).
-fn handle_message(msg: &Value, allowed: Option<&Path>) -> Option<Value> {
+/// (nothing is written back). `initialized` tracks the MCP lifecycle:
+/// set on `initialize`, required before any tool traffic.
+fn handle_message(msg: &Value, allowed: Option<&Path>, initialized: &mut bool) -> Option<Value> {
     let method = msg.get("method").and_then(Value::as_str)?;
     let id = msg.get("id");
     match (method, id) {
@@ -123,12 +132,17 @@ fn handle_message(msg: &Value, allowed: Option<&Path>) -> Option<Value> {
         (_, None | Some(Value::Null)) => None,
         // ---- requests ----------------------------------------------
         ("initialize", Some(id)) => {
-            // Echo the client's protocol version; we speak the stdio
-            // framing + tools surface common to all published revisions.
-            let version = msg
+            *initialized = true;
+            // Negotiate the protocol: honor the client's requested
+            // revision when we support it, else return our latest so
+            // the client can decide — never claim an arbitrary version.
+            let requested = msg
                 .pointer("/params/protocolVersion")
-                .and_then(Value::as_str)
-                .unwrap_or("2025-06-18");
+                .and_then(Value::as_str);
+            let version = match requested {
+                Some(v) if SUPPORTED_PROTOCOLS.contains(&v) => v,
+                _ => LATEST_PROTOCOL,
+            };
             Some(json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -141,6 +155,12 @@ fn handle_message(msg: &Value, allowed: Option<&Path>) -> Option<Value> {
             }))
         }
         ("ping", Some(id)) => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
+        // Tool traffic is rejected until the client has initialized.
+        ("tools/list" | "tools/call", Some(id)) if !*initialized => Some(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32002, "message": "server not initialized: send `initialize` first" }
+        })),
         ("tools/list", Some(id)) => Some(json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -334,12 +354,20 @@ const TOOLS: &[ToolSpec] = &[
             schema(
                 vec![
                     repo_prop(),
-                    ("commit", prop("Commit hash to verify (default: HEAD)")),
+                    (
+                        "commit",
+                        prop("Commit hash to verify, or \"HEAD\" / omit for the current commit"),
+                    ),
                     (
                         "trust_roots",
                         prop(
-                            "Path to a trust-roots TOML file (default: $XDG_CONFIG_HOME/mkit/trust-roots.toml)",
+                            "Path to a trust-roots TOML file OUTSIDE the repo (default: \
+                             $XDG_CONFIG_HOME/mkit/trust-roots.toml). An in-repo path is rejected.",
                         ),
+                    ),
+                    (
+                        "algorithm",
+                        json!({ "type": "string", "enum": ["ed25519", "secp256k1", "p256"], "description": "Only report signatures of this algorithm" }),
                     ),
                 ],
                 &["repo_path"],
@@ -425,13 +453,18 @@ const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "mkit_keygen",
-        description: "Generate the repo's Ed25519 commit-signing key (.mkit/keys/default.key). \
-                      Refuses to overwrite an existing key.",
+        description: "Generate a signing key. Default (ed25519) writes the commit-signing key at \
+                      .mkit/keys/default.key; secp256k1/p256 write separate ATTESTATION signer keys \
+                      (.mkit/keys/<alg>.key) for use with mkit_attest. Refuses to overwrite.",
         hints: (false, false, false),
         schema: || {
             schema(
                 vec![
                     repo_prop(),
+                    (
+                        "algorithm",
+                        json!({ "type": "string", "enum": ["ed25519", "secp256k1", "p256"], "description": "Key algorithm (default: ed25519 = the commit key)" }),
+                    ),
                     (
                         "print_pubkey",
                         json!({ "type": "boolean", "description": "Also print the public key" }),
@@ -444,16 +477,26 @@ const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "mkit_attest",
         description: "Produce a signed DSSE attestation (in-toto v1 Statement) for a commit. \
-                      Prints the att-id and stores the envelope under .mkit/attestations/.",
+                      Prints the att-id and stores the envelope under .mkit/attestations/. \
+                      (Multi-signer envelopes and external-signer argv are intentionally NOT \
+                      exposed here — they can direct subprocess execution; use the `mkit attest` \
+                      CLI for that advanced flow.)",
         hints: (false, false, false),
         schema: || {
             schema(
                 vec![
                     repo_prop(),
-                    ("commit", prop("Commit hash to attest (default: HEAD)")),
+                    (
+                        "commit",
+                        prop("Commit hash to attest, or \"HEAD\" / omit for the current commit"),
+                    ),
                     (
                         "algorithm",
-                        json!({ "type": "string", "enum": ["ed25519", "secp256k1", "p256"], "description": "Signing algorithm (default: ed25519)" }),
+                        json!({ "type": "string", "enum": ["ed25519", "secp256k1", "p256"], "description": "Signing algorithm (default: ed25519). Non-ed25519 needs the matching mkit_keygen key." }),
+                    ),
+                    (
+                        "signer",
+                        json!({ "type": "string", "enum": ["repo-key", "keystore"], "description": "Primary signer (default: repo-key). 'external' is excluded from the MCP." }),
                     ),
                     (
                         "predicate_type",
@@ -461,7 +504,9 @@ const TOOLS: &[ToolSpec] = &[
                     ),
                     (
                         "predicate_file",
-                        prop("Path to a JSON file used as the predicate body"),
+                        prop(
+                            "Path to a JSON predicate file INSIDE the repo (an outside path is rejected)",
+                        ),
                     ),
                 ],
                 &["repo_path"],
@@ -526,12 +571,80 @@ fn call_tool(name: &str, args: &Value, allowed: Option<&Path>) -> Result<CallOut
         Err(e) => return Ok(CallOutcome::err(e)),
     };
 
+    // Confine path-typed arguments relative to the repo. `--repository`
+    // only constrains repo_path; predicate/trust-roots paths reach the
+    // child CLI directly, so the MCP must hold the boundary itself.
+    if let Err(e) = confine_path_args(name, args, &repo) {
+        return Ok(CallOutcome::err(e));
+    }
+
     let command = match build_argv(name, args) {
         Ok(a) => a,
         Err(e) => return Ok(CallOutcome::err(e)),
     };
 
     Ok(run_subprocess(&repo, &command))
+}
+
+/// Enforce containment of the file-path arguments the child CLI opens
+/// itself (so `--repository` scoping can't be bypassed through them):
+///
+/// * `predicate_file` (attest) is *repo data* — it must resolve INSIDE
+///   the repo, so a prompt-injected agent can't slurp an outside file
+///   into a signed attestation.
+/// * `trust_roots` (verify-attest) is *external authority* — it must
+///   resolve OUTSIDE the repo, so a hostile clone's planted
+///   `.mkit/attest-trust-roots.toml` can never be selected via the MCP
+///   (the CLI's "explicit --trust-roots = user intent" gate assumes a
+///   user, but here the value can come from repo-controlled prompt text;
+///   see docs/THREAT-MODEL.md §"Trust-roots scope").
+fn confine_path_args(name: &str, args: &Value, repo: &Path) -> Result<(), String> {
+    match name {
+        "mkit_attest" => {
+            if let Some(f) = opt_str(args, "predicate_file") {
+                confine_path(repo, &f, Containment::Inside, "predicate_file")?;
+            }
+        }
+        "mkit_verify_attest" => {
+            if let Some(f) = opt_str(args, "trust_roots") {
+                confine_path(repo, &f, Containment::Outside, "trust_roots")?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Containment {
+    Inside,
+    Outside,
+}
+
+/// Resolve `raw` the way the child CLI will (relative to the repo cwd,
+/// or as an absolute path) and require it to be inside / outside the
+/// repo. The target must exist (the CLI reads it), so canonicalize is
+/// the source of truth for both existence and symlink resolution.
+fn confine_path(repo: &Path, raw: &str, want: Containment, what: &str) -> Result<(), String> {
+    let candidate = if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        repo.join(raw)
+    };
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|e| format!("invalid {what} '{raw}': {e}"))?;
+    let within = resolved.starts_with(repo);
+    match want {
+        Containment::Inside if !within => Err(format!(
+            "{what} '{raw}' is outside the repository; predicate files must live in the repo"
+        )),
+        Containment::Outside if within => Err(format!(
+            "{what} '{raw}' is inside the repository; trust-roots must be a user-controlled file \
+             outside the repo (hostile-clone defense — see docs/THREAT-MODEL.md)"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Resolve and (when scoped) confine `repo_path`.
@@ -574,6 +687,33 @@ fn req_str(args: &Value, key: &str) -> Result<String, String> {
 
 fn opt_str(args: &Value, key: &str) -> Option<String> {
     args.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// Push `--commit <hash>` unless the value is "HEAD" (any case) or
+/// absent — the CLI's `--commit` parses a hex hash and rejects "HEAD",
+/// but defaults to HEAD when the flag is omitted, so map the common
+/// agent shorthand onto that default.
+fn push_commit(out: &mut Vec<String>, args: &Value) -> Result<(), String> {
+    if let Some(commit) = opt_str(args, "commit")
+        && !commit.eq_ignore_ascii_case("HEAD")
+    {
+        no_dash(&commit, "commit")?;
+        out.extend(["--commit".into(), commit]);
+    }
+    Ok(())
+}
+
+/// Validate and push `--algorithm <alg>` when present.
+fn push_algorithm(out: &mut Vec<String>, args: &Value) -> Result<(), String> {
+    if let Some(alg) = opt_str(args, "algorithm") {
+        if !matches!(alg.as_str(), "ed25519" | "secp256k1" | "p256") {
+            return Err(format!(
+                "invalid algorithm '{alg}': expected ed25519, secp256k1, or p256"
+            ));
+        }
+        out.extend(["--algorithm".into(), alg]);
+    }
+    Ok(())
 }
 
 /// Map a tool invocation to a child argv. Every push of a
@@ -630,14 +770,12 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
         }
         "mkit_verify_attest" => {
             out.push("verify-attest".into());
-            if let Some(commit) = opt_str(args, "commit") {
-                no_dash(&commit, "commit")?;
-                out.extend(["--commit".into(), commit]);
-            }
+            push_commit(&mut out, args)?;
             if let Some(roots) = opt_str(args, "trust_roots") {
                 no_dash(&roots, "trust_roots")?;
                 out.extend(["--trust-roots".into(), roots]);
             }
+            push_algorithm(&mut out, args)?;
         }
         "mkit_add" => {
             out.push("add".into());
@@ -690,23 +828,23 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
         "mkit_init" => out.push("init".into()),
         "mkit_keygen" => {
             out.push("keygen".into());
+            push_algorithm(&mut out, args)?;
             if args.get("print_pubkey").and_then(Value::as_bool) == Some(true) {
                 out.push("--print-pubkey".into());
             }
         }
         "mkit_attest" => {
             out.push("attest".into());
-            if let Some(commit) = opt_str(args, "commit") {
-                no_dash(&commit, "commit")?;
-                out.extend(["--commit".into(), commit]);
-            }
-            if let Some(alg) = opt_str(args, "algorithm") {
-                if !matches!(alg.as_str(), "ed25519" | "secp256k1" | "p256") {
+            push_commit(&mut out, args)?;
+            push_algorithm(&mut out, args)?;
+            if let Some(signer) = opt_str(args, "signer") {
+                if !matches!(signer.as_str(), "repo-key" | "keystore") {
                     return Err(format!(
-                        "invalid algorithm '{alg}': expected ed25519, secp256k1, or p256"
+                        "invalid signer '{signer}': expected repo-key or keystore \
+                         (external is excluded from the MCP)"
                     ));
                 }
-                out.extend(["--algorithm".into(), alg]);
+                out.extend(["--signer".into(), signer]);
             }
             if let Some(uri) = opt_str(args, "predicate_type") {
                 no_dash(&uri, "predicate_type")?;
@@ -915,12 +1053,21 @@ mod tests {
     }
 
     #[test]
-    fn initialize_echoes_protocol_version_and_lists_tools() {
+    fn initialize_negotiates_protocol_and_lists_tools() {
+        let mut init_state = false;
+
+        // Tool traffic before initialize is rejected (-32002).
+        let early = json!({ "jsonrpc": "2.0", "id": 0, "method": "tools/list" });
+        let resp = handle_message(&early, None, &mut init_state).unwrap();
+        assert_eq!(resp.pointer("/error/code").unwrap(), -32002);
+        assert!(!init_state);
+
+        // A supported protocol is echoed back.
         let init = json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": { "protocolVersion": "2024-11-05", "capabilities": {} }
         });
-        let resp = handle_message(&init, None).unwrap();
+        let resp = handle_message(&init, None, &mut init_state).unwrap();
         assert_eq!(
             resp.pointer("/result/protocolVersion").unwrap(),
             "2024-11-05"
@@ -930,9 +1077,23 @@ mod tests {
             "mkit-repo"
         );
         assert!(resp.pointer("/result/instructions").is_some());
+        assert!(init_state);
 
+        // An UNsupported protocol falls back to our latest, never echoed.
+        let mut s2 = false;
+        let bad = json!({
+            "jsonrpc": "2.0", "id": 9, "method": "initialize",
+            "params": { "protocolVersion": "1900-01-01" }
+        });
+        let resp = handle_message(&bad, None, &mut s2).unwrap();
+        assert_eq!(
+            resp.pointer("/result/protocolVersion").unwrap(),
+            LATEST_PROTOCOL
+        );
+
+        // After initialize, tools/list works.
         let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
-        let resp = handle_message(&list, None).unwrap();
+        let resp = handle_message(&list, None, &mut init_state).unwrap();
         assert_eq!(
             resp.pointer("/result/tools")
                 .unwrap()
@@ -944,11 +1105,11 @@ mod tests {
 
         // Notifications produce no response.
         let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        assert!(handle_message(&note, None).is_none());
+        assert!(handle_message(&note, None, &mut init_state).is_none());
 
         // Unknown methods error.
         let bogus = json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/list" });
-        let resp = handle_message(&bogus, None).unwrap();
+        let resp = handle_message(&bogus, None, &mut init_state).unwrap();
         assert_eq!(resp.pointer("/error/code").unwrap(), -32601);
     }
 }

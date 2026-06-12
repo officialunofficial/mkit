@@ -362,3 +362,141 @@ fn unknown_method_and_ping() {
         Some(-32601)
     );
 }
+
+// --- Helpers for the attestation security tests -----------------------------
+
+/// Decode an even-length lowercase-hex string into bytes.
+fn hex_decode(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// The `blake3:<hex>` keyid the repo-key signer reports for `default.key`,
+/// derived from the public key the same way the CLI does.
+fn repo_keyid(pubkey_hex: &str) -> String {
+    let pk = hex_decode(pubkey_hex);
+    format!(
+        "blake3:{}",
+        mkit_core::hash::to_hex(&mkit_core::hash::hash(&pk))
+    )
+}
+
+/// Pull the `<hex>` out of a `keygen --print-pubkey` "...ed25519:<hex>..." line.
+fn pubkey_hex_from(keygen_output: &str) -> String {
+    let idx = keygen_output
+        .find("ed25519:")
+        .expect("keygen prints ed25519:<hex>");
+    keygen_output[idx + "ed25519:".len()..]
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .collect()
+}
+
+#[test]
+fn verify_attest_succeeds_with_external_trust_roots() {
+    // The most security-sensitive differentiator path, end-to-end through
+    // JSON-RPC: attest a commit, then verify it against a trust-roots file
+    // OUTSIDE the repo (the only kind the MCP accepts).
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().to_str().unwrap().to_string();
+    let mut client = McpClient::spawn(Some(root.path()));
+
+    ok(&mut client, "mkit_init", &json!({ "repo_path": repo }));
+    let keygen = ok(
+        &mut client,
+        "mkit_keygen",
+        &json!({ "repo_path": repo, "print_pubkey": true }),
+    );
+    let pubkey_hex = pubkey_hex_from(&keygen);
+
+    std::fs::write(root.path().join("a.txt"), "a\n").unwrap();
+    ok(
+        &mut client,
+        "mkit_add",
+        &json!({ "repo_path": repo, "files": ["a.txt"] }),
+    );
+    ok(
+        &mut client,
+        "mkit_commit",
+        &json!({ "repo_path": repo, "message": "c" }),
+    );
+    ok(&mut client, "mkit_attest", &json!({ "repo_path": repo }));
+
+    // Trust-roots pinned to our repo key, written OUTSIDE the repo.
+    let roots_dir = tempfile::tempdir().unwrap();
+    let roots = roots_dir.path().join("trust-roots.toml");
+    std::fs::write(
+        &roots,
+        format!(
+            "[[trust_root]]\nkeyid = \"{}\"\nkind = \"ed25519\"\npubkey_hex = \"{}\"\n",
+            repo_keyid(&pubkey_hex),
+            pubkey_hex
+        ),
+    )
+    .unwrap();
+
+    // Explicit "HEAD" must work (regression for the hex-only --commit trap).
+    let out = ok(
+        &mut client,
+        "mkit_verify_attest",
+        &json!({ "repo_path": repo, "commit": "HEAD", "trust_roots": roots.to_str().unwrap() }),
+    );
+    assert!(
+        out.to_lowercase().contains("verif") || out.contains("ok"),
+        "verify-attest: {out}"
+    );
+}
+
+#[test]
+fn verify_attest_rejects_in_repo_trust_roots() {
+    // Hostile-clone defense: a repo-local trust-roots can never be selected
+    // through the MCP, even though the CLI would honor an explicit path.
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().to_str().unwrap().to_string();
+    let mut client = McpClient::spawn(Some(root.path()));
+    ok(&mut client, "mkit_init", &json!({ "repo_path": repo }));
+    // Plant an attacker trust-roots inside the repo.
+    std::fs::write(root.path().join(".mkit/attest-trust-roots.toml"), "x").unwrap();
+
+    let text = err(
+        &mut client,
+        "mkit_verify_attest",
+        &json!({ "repo_path": repo, "trust_roots": ".mkit/attest-trust-roots.toml" }),
+    );
+    assert!(text.contains("inside the repository"), "{text}");
+}
+
+#[test]
+fn attest_rejects_predicate_file_outside_repo() {
+    // Scope escape: a scoped MCP must not read an outside file into a
+    // signed attestation, even though --repository only confines repo_path.
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().to_str().unwrap().to_string();
+    let mut client = McpClient::spawn(Some(root.path()));
+    ok(&mut client, "mkit_init", &json!({ "repo_path": repo }));
+    ok(&mut client, "mkit_keygen", &json!({ "repo_path": repo }));
+    std::fs::write(root.path().join("a.txt"), "a\n").unwrap();
+    ok(
+        &mut client,
+        "mkit_add",
+        &json!({ "repo_path": repo, "files": ["a.txt"] }),
+    );
+    ok(
+        &mut client,
+        "mkit_commit",
+        &json!({ "repo_path": repo, "message": "c" }),
+    );
+
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("outside.json");
+    std::fs::write(&secret, "{}").unwrap();
+
+    let text = err(
+        &mut client,
+        "mkit_attest",
+        &json!({ "repo_path": repo, "predicate_file": secret.to_str().unwrap() }),
+    );
+    assert!(text.contains("outside the repository"), "{text}");
+}
