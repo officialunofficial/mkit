@@ -143,6 +143,15 @@ fn rebase_preserves_original_author_despite_user_identity() {
         "user.identity must not re-attribute replayed commits"
     );
     assert_eq!(c.author.kind, IdentityKind::Ed25519);
+    // The SIGNER half of the split: the replayed commit is signed by
+    // the rebaser's repo key (and verifies under it) — a regression
+    // that kept or forged the original signature would fail here.
+    let kp = mkit_core::sign::load_key(&mkit_dir.join("keys/default.key")).unwrap();
+    assert_eq!(
+        c.signer, kp.public.0,
+        "replayed commit must be signed by the rebaser's key"
+    );
+    assert!(mkit_core::sign::verify_commit(&c).is_ok());
 }
 
 #[test]

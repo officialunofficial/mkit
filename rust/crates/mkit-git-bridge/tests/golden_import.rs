@@ -313,3 +313,153 @@ fn golden_import_vectors_match() {
     };
     assert_eq!(c.timestamp, 1_600_000_200, "committer epoch, not author");
 }
+
+/// SPEC-GIT-IMPORT §9 refusal vectors, pinned: each hostile input is
+/// built deterministically and its TYPED refusal is recorded in
+/// `REFUSALS.txt` (`<name> <git-sha1> <refusal-variant>`). Catches a
+/// regression where e.g. a gitlink tree starts importing silently.
+#[test]
+#[allow(clippy::too_many_lines)] // four vectors, one harness
+fn refusal_vectors_pinned() {
+    let kp = KeyPair::from_seed(KEY_SEED);
+    let public = kp.public.0;
+
+    let mut src = MemGitSource::default();
+    let mut vectors: Vec<(&'static str, Sha1Id)> = Vec::new();
+
+    let blob = src.put(GitObjKind::Blob, b"x\n".to_vec());
+
+    // Gitlink (submodule) tree entry.
+    let mut t = Vec::new();
+    t.extend_from_slice(b"160000 sub\0");
+    t.extend_from_slice(&blob); // any 20 bytes — gitlinks aren't followed
+    let t = src.put(GitObjKind::Tree, t);
+    let c = src.put(
+        GitObjKind::Commit,
+        format!(
+            "tree {}\nauthor A <a@x> 5 +0000\ncommitter A <a@x> 5 +0000\n\nsub\n",
+            hex(&t)
+        )
+        .into_bytes(),
+    );
+    vectors.push(("refuse_gitlink", c));
+
+    // Windows-reserved tree entry name (`aux.c`).
+    let mut t = Vec::new();
+    t.extend_from_slice(b"100644 aux.c\0");
+    t.extend_from_slice(&blob);
+    let t = src.put(GitObjKind::Tree, t);
+    let c = src.put(
+        GitObjKind::Commit,
+        format!(
+            "tree {}\nauthor A <a@x> 5 +0000\ncommitter A <a@x> 5 +0000\n\naux\n",
+            hex(&t)
+        )
+        .into_bytes(),
+    );
+    vectors.push(("refuse_tree_name", c));
+
+    // Negative committer timestamp.
+    let mut t = Vec::new();
+    t.extend_from_slice(b"100644 f\0");
+    t.extend_from_slice(&blob);
+    let t = src.put(GitObjKind::Tree, t);
+    let c = src.put(
+        GitObjKind::Commit,
+        format!(
+            "tree {}\nauthor A <a@x> -5 +0000\ncommitter A <a@x> -5 +0000\n\nold\n",
+            hex(&t)
+        )
+        .into_bytes(),
+    );
+    vectors.push(("refuse_negative_timestamp", c));
+
+    // Tag name outside the mkit grammar (`v1.0+build`).
+    let mut t = Vec::new();
+    t.extend_from_slice(b"100644 f\0");
+    t.extend_from_slice(&blob);
+    let t = src.put(GitObjKind::Tree, t);
+    let good = src.put(
+        GitObjKind::Commit,
+        format!(
+            "tree {}\nauthor A <a@x> 5 +0000\ncommitter A <a@x> 5 +0000\n\nok\n",
+            hex(&t)
+        )
+        .into_bytes(),
+    );
+    let tag = src.put(
+        GitObjKind::Tag,
+        format!(
+            "object {}\ntype commit\ntag v1.0+build\ntagger T <t@x> 5 +0000\n\nm\n",
+            hex(&good)
+        )
+        .into_bytes(),
+    );
+    vectors.push(("refuse_tag_name", tag));
+
+    // Import each tip; record the typed refusal.
+    let mut lines = String::new();
+    for (name, tip) in &vectors {
+        let mut sink = MemSink::default();
+        let mut map = HashMap::new();
+        let mut sc = |c: &mkit_core::object::Commit| {
+            Ok(sign_commit(c, &kp)
+                .map_err(|e| BridgeError::Source(e.to_string()))?
+                .0)
+        };
+        let mut st = |t: &mkit_core::object::Tag| {
+            Ok(sign_tag(t, &kp)
+                .map_err(|e| BridgeError::Source(e.to_string()))?
+                .0)
+        };
+        let mut retain = |_: &Sha1Id, _: &[u8]| Ok(());
+        let mut imp = Importer {
+            source: &mut src,
+            sink: &mut sink,
+            signer: ImportSigner {
+                public,
+                sign_commit: &mut sc,
+                sign_tag: &mut st,
+            },
+            map: &mut map,
+            retain_raw: &mut retain,
+            options: ImportOptions::default(),
+            depth_memo: DepthMemo::default(),
+        };
+        let err = imp.import_ref(tip).expect_err("hostile vector must refuse");
+        drop(imp);
+        let BridgeError::Refused(refusal) = err else {
+            panic!("{name}: expected a typed Refusal, got {err:?}");
+        };
+        // The variant name is the stable token (Display text may evolve).
+        let debug = format!("{refusal:?}");
+        let variant = debug.split([' ', '{']).next().unwrap().to_owned();
+        let _ = writeln!(lines, "{name} {} {variant}", hex(tip));
+    }
+
+    let path = golden_dir().join("REFUSALS.txt");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(
+            &path,
+            format!(
+                "# SPEC-GIT-IMPORT §9 refusal vectors. <name> <git-sha1> <refusal-variant>\n\
+                 # Regenerate with: UPDATE_GOLDEN=1 cargo test -p mkit-git-bridge --test golden_import\n{lines}"
+            ),
+        )
+        .unwrap();
+        eprintln!("refusal vectors rewritten at {}", path.display());
+        return;
+    }
+    let pinned =
+        std::fs::read_to_string(&path).expect("refusal vectors missing — run UPDATE_GOLDEN=1 once");
+    let pinned_body: String =
+        pinned
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .fold(String::new(), |mut acc, l| {
+                acc.push_str(l);
+                acc.push('\n');
+                acc
+            });
+    assert_eq!(pinned_body, lines, "typed refusals drifted from the pin");
+}

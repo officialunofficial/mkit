@@ -257,6 +257,10 @@ fn import_into(root: &Path, opts: &ImportArgs, require_repo: bool) -> CmdResult<
         && pinned != kp.public.0
     {
         // Surface the §4 designated-importer refusal before the clone.
+        // Deliberately NOT an unconditional bind_signer call: that
+        // would WRITE a fresh pin pre-clone, violating the
+        // validate-then-bind contract (the pin is recorded with the
+        // other bindings only after the clone succeeds).
         map::bind_signer(&state, &kp.public.0).map_err(|e| (e.to_string(), exit::CONFIG_ERROR))?;
     }
 

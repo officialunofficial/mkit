@@ -379,7 +379,10 @@ the imported mkit object bytes under the fixed test key, and both
 ids. Single exception: vector 9's > 1 MiB content is regenerated
 deterministically by the golden test rather than committed; its two
 ids are pinned like every other vector (same carve-out as
-SPEC-GIT-BRIDGE §13's chunked vector).
+SPEC-GIT-BRIDGE §13's chunked vector). Refusal vectors (gitlink tree,
+reserved tree-entry name, negative timestamp, out-of-grammar tag
+name) pin their TYPED refusal in `REFUSALS.txt` alongside the
+success vectors.
 
 1. **Plain commit** (author == committer, UTC) — the baseline.
 2. **Committer ≠ author with non-UTC zones** — committer-timestamp

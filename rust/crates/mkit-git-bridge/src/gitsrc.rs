@@ -18,6 +18,36 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 /// buffer arbitrarily.
 pub const MAX_OBJECT_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// Base `git` command against `repo` with the bridge's subprocess
+/// hygiene applied: `GIT_TERMINAL_PROMPT=0` (a credential prompt must
+/// fail cleanly, never hang a CI run) and user hooks neutralized via
+/// `core.hooksPath` pointed at the platform null device (a
+/// `core.hooksPath` in user config must not run arbitrary hooks
+/// against the private staging mirror). User/system gitconfig is
+/// otherwise INHERITED on purpose: credential helpers, `core.sshCommand`,
+/// and proxy settings live there and remote fetch/push need them —
+/// none of it can affect translation output (mkit generates every
+/// object byte itself).
+#[must_use]
+pub fn git_command(repo: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.arg("-C").arg(repo);
+    apply_hygiene(&mut c);
+    c
+}
+
+/// [`apply_hygiene`] for callers building their own `git` command
+/// without a `-C <repo>` (e.g. a bare `git --version` probe).
+pub fn apply_hygiene_public(c: &mut Command) {
+    apply_hygiene(c);
+}
+
+pub(crate) fn apply_hygiene(c: &mut Command) {
+    c.env("GIT_TERMINAL_PROMPT", "0");
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    c.arg("-c").arg(format!("core.hooksPath={null}"));
+}
+
 /// The git object type names `cat-file --batch` reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitObjKind {
@@ -57,9 +87,7 @@ pub struct CatFileBatch {
 impl CatFileBatch {
     /// Spawn the child against `repo` (a `.git`/bare directory).
     pub fn open(repo: &Path) -> Result<Self, BridgeError> {
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(repo)
+        let mut child = git_command(repo)
             .args(["cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -117,7 +145,15 @@ impl CatFileBatch {
             // synchronized (callers keep using this child), and refuse
             // PER-REF: one oversized object must not abort the whole
             // import (SPEC-GIT-IMPORT §3.1).
-            let mut remaining = size + 1;
+            // checked: a u64::MAX size would wrap `size + 1` to 0 in
+            // release, skip the drain entirely, and silently desync
+            // the batch stream — every later read returns wrong bytes.
+            let Some(mut remaining) = size.checked_add(1) else {
+                return Err(BridgeError::Source(format!(
+                    "object {echo} reports an absurd size ({size}); cat-file \
+                     stream untrustworthy"
+                )));
+            };
             let mut sink_buf = vec![0u8; 64 * 1024];
             while remaining > 0 {
                 let take = remaining.min(sink_buf.len() as u64);
@@ -165,9 +201,7 @@ impl Drop for CatFileBatch {
 }
 
 fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, BridgeError> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let out = git_command(repo)
         .args(args)
         .output()
         .map_err(|e| BridgeError::Source(format!("spawn git: {e}")))?;
@@ -251,9 +285,7 @@ pub fn list_refs(repo: &Path) -> Result<Vec<UpstreamRef>, BridgeError> {
 
 /// The mirror's default-branch ref (`HEAD` symref target), if any.
 pub fn default_branch(repo: &Path) -> Result<Option<String>, BridgeError> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let out = git_command(repo)
         .args(["symbolic-ref", "--quiet", "HEAD"])
         .output()
         .map_err(|e| BridgeError::Source(format!("spawn git: {e}")))?;
@@ -266,9 +298,7 @@ pub fn default_branch(repo: &Path) -> Result<Option<String>, BridgeError> {
 /// Is `old` an ancestor of `new` in this repo? (`git merge-base
 /// --is-ancestor`: exit 0 = yes, 1 = no.)
 pub fn is_ancestor(repo: &Path, old: &Sha1Id, new: &Sha1Id) -> Result<bool, BridgeError> {
-    let st = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let st = git_command(repo)
         .args([
             "merge-base",
             "--is-ancestor",
@@ -291,9 +321,7 @@ pub fn is_ancestor(repo: &Path, old: &Sha1Id, new: &Sha1Id) -> Result<bool, Brid
 /// Whether the repo still has `id` (`git cat-file -e`). Exit 0 =
 /// present; any nonzero = absent (gc'd, never fetched, garbage).
 pub fn object_exists(repo: &Path, id: &Sha1Id) -> Result<bool, BridgeError> {
-    let st = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let st = git_command(repo)
         .args(["cat-file", "-e", &sha1_hex(id)])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -304,9 +332,7 @@ pub fn object_exists(repo: &Path, id: &Sha1Id) -> Result<bool, BridgeError> {
 
 /// SPEC-GIT-IMPORT §2: SHA-256 upstreams refuse whole-import.
 pub fn is_sha256_repo(repo: &Path) -> Result<bool, BridgeError> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let out = git_command(repo)
         .args(["config", "extensions.objectformat"])
         .output()
         .map_err(|e| BridgeError::Source(format!("spawn git: {e}")))?;

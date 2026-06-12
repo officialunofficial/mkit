@@ -2,12 +2,17 @@
 //! (SPEC-GIT-BRIDGE §9).
 //!
 //! **Not an import path.** Every function here is defined only on git
-//! objects the v1 mapping can emit, and proves it by *re-translating*
-//! the reconstructed mkit object and requiring byte equality with the
-//! input — so header order, duplicate headers, unknown `mkit-*`
-//! headers, reserved headers, foreign modes (`160000`), and any other
-//! off-spec shape all fail closed with [`BridgeError::NotBridgeObject`]
-//! or [`BridgeError::Integrity`].
+//! objects the v1 mapping can emit. Two mechanisms enforce that, and
+//! it matters which catches what: a handful of parse-time rejections
+//! (the reserved `mkit-remix-source` carrier, a malformed
+//! `mkit-object-type`) surface as [`BridgeError::NotBridgeObject`];
+//! EVERYTHING ELSE — header order, duplicate or unknown `mkit-*`
+//! headers, foreign modes (`160000`), any off-spec shape — fails
+//! closed through the *re-translation equality check* (rebuild the
+//! mkit object, translate it forward, require byte equality with the
+//! input), surfacing as [`BridgeError::Integrity`]. There is NO
+//! header whitelist: the equality check IS the load-bearing guard, so
+//! do not weaken it expecting one.
 
 use crate::author;
 use crate::error::BridgeError;

@@ -884,7 +884,9 @@ fn warn_skip(skipped: &mut Vec<(String, String)>, ref_name: &str, why: &str) {
 // ─── git subprocess helpers ─────────────────────────────────────────
 
 pub(crate) fn git_version() -> Result<(), String> {
-    match Command::new("git")
+    let mut c = Command::new("git");
+    mkit_git_bridge::gitsrc::apply_hygiene_public(&mut c);
+    match c
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -900,9 +902,7 @@ pub(crate) fn git_version() -> Result<(), String> {
 }
 
 pub(crate) fn git_in(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = mkit_git_bridge::gitsrc::git_command(dir)
         .args(args)
         .output()
         .map_err(|e| format!("spawn git: {e}"))?;
@@ -944,9 +944,7 @@ fn ensure_dest(dest: &str) -> CmdResult<String> {
     }
     let path = PathBuf::from(dest);
     let needs_init = if path.exists() {
-        let is_repo = Command::new("git")
-            .arg("-C")
-            .arg(&path)
+        let is_repo = mkit_git_bridge::gitsrc::git_command(&path)
             .args(["rev-parse", "--git-dir"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -983,9 +981,7 @@ fn ensure_dest(dest: &str) -> CmdResult<String> {
 }
 
 fn read_ref_in(repo: &Path, name: &str) -> CmdResult<Option<Sha1Id>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let out = mkit_git_bridge::gitsrc::git_command(repo)
         .args(["rev-parse", "--verify", "--quiet", name])
         .output()
         .map_err(|e| (format!("spawn git: {e}"), exit::GENERAL_ERROR))?;
@@ -1018,9 +1014,7 @@ fn ls_tree(repo: &Path, commit: &Sha1Id) -> CmdResult<Vec<(String, Sha1Id)>> {
 
 fn commit_tree_id(repo: &Path, commit: &Sha1Id) -> CmdResult<Option<Sha1Id>> {
     let spec = format!("{}^{{tree}}", sha1_hex(commit));
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let out = mkit_git_bridge::gitsrc::git_command(repo)
         .args(["rev-parse", "--verify", "--quiet", &spec])
         .output()
         .map_err(|e| (format!("spawn git: {e}"), exit::GENERAL_ERROR))?;

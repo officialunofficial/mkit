@@ -4,8 +4,11 @@
 //! Everything here is a **disposable cache**: translation is
 //! deterministic, so a missing or corrupt file means "rebuild", never
 //! an error. The map file is append-only text (`<64hex> <40hex>\n`);
-//! a torn final line (crash mid-append) is detected and ignored on
-//! load. Ref state is rewritten whole via temp-file + rename.
+//! [`load_map`] skips lines that do not parse (so a partially-written
+//! file still loads), and [`map_is_intact`] reports ANY malformed or
+//! blank line so the import driver can trigger the full rebuild —
+//! surviving lines of a damaged file are not evidence the rest
+//! exists. Ref state is rewritten whole via temp-file + rename.
 
 use crate::error::BridgeError;
 use crate::gitobj::{Sha1Id, sha1_from_hex, sha1_hex};
@@ -212,10 +215,9 @@ pub fn map_is_intact(dir: &Path) -> Result<bool, BridgeError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
         Err(e) => return Err(e.into()),
     };
-    if std::str::from_utf8(&data).is_err() {
+    let Ok(text) = std::str::from_utf8(&data) else {
         return Ok(false);
-    }
-    let text = String::from_utf8_lossy(&data);
+    };
     for line in text.lines() {
         if line.is_empty() {
             // The format has no blank-line record: an internal blank
@@ -309,6 +311,11 @@ pub fn append_map(dir: &Path, pairs: &[(Hash, Sha1Id)]) -> Result<(), BridgeErro
         .open(dir.join(MAP_FILE))?;
     f.write_all(out.as_bytes())?;
     f.sync_all()?;
+    // Dir fsync so the FIRST append's file creation is as durable as
+    // the stamps' (later appends find it a no-op-cost write).
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
     Ok(())
 }
 

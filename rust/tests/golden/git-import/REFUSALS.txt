@@ -1,0 +1,6 @@
+# SPEC-GIT-IMPORT §9 refusal vectors. <name> <git-sha1> <refusal-variant>
+# Regenerate with: UPDATE_GOLDEN=1 cargo test -p mkit-git-bridge --test golden_import
+refuse_gitlink 4ad21bc41964a5dd50ed1d74411dbe77d2830014 Gitlink
+refuse_tree_name c757ca5a5e201ee74afb4cabd26134627fba22c1 TreeEntryName
+refuse_negative_timestamp 7c084e6bc74860ddc166547bf07af0bc9768d7b6 NegativeTimestamp
+refuse_tag_name 61e73be6e664a4abe1336f87905defd0063b75cf TagName

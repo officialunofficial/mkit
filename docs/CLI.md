@@ -261,10 +261,12 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   unresolvable revision; `--show-toplevel` prints the repository root (the
   directory holding `.mkit`, found by walking up from cwd).
 - `mkit show-ref [--heads] [--tags]` — list refs as `<hash> <refname>`,
-  sorted by ref name. Default shows both `refs/heads/*` and `refs/tags/*`;
-  `--heads`/`--tags` filter to one namespace.
-- `mkit for-each-ref [--format=<fmt>] [<pattern>...]` — iterate refs (heads
-  and tags), sorted by ref name (like `git for-each-ref`). The default line
+  sorted by ref name. Default shows `refs/heads/*`, `refs/tags/*`, and
+  any `refs/remotes/*` tracking refs; `--heads`/`--tags` filter to one
+  namespace.
+- `mkit for-each-ref [--format=<fmt>] [<pattern>...]` — iterate refs
+  (heads, tags, and remote-tracking refs), sorted by ref name (like
+  `git for-each-ref`). The default line
   is `<objectname> <objecttype>\t<refname>`. `--format` substitutes
   `%(atom)` tokens (`refname`, `refname:short`, `objectname`,
   `objectname:short`, `objecttype`; `%%` is a literal `%`); the object id is
