@@ -71,8 +71,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
     description: 'Same shape at 1 GiB, 3 runs each.',
     mkit: { mean: 4.4803, stddev: 0.2679 },
     git: { mean: 18.7992, stddev: 0.4621 },
-    note:
-      'mkit wins by ~4.2×. First ingest scales linearly for both tools; mkit’s wall clock is I/O + BLAKE3.',
+    note: 'mkit wins by ~4.2×. First ingest scales linearly for both tools; mkit’s wall clock is I/O + BLAKE3.',
   },
   {
     id: 'append-1m',
