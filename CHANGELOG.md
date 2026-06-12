@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **Hardened after multi-agent review** (16 findings, all resolved):
+  worktree snapshots for `status`/`diff`/safety checks moved to an
+  in-memory `EphemeralSink` (no flush cost, no garbage objects, and no
+  visible-but-unflushed object can poison content-addressed dedup —
+  `SyncPolicy::None` removed); per-file write barriers are real on
+  every platform (fdatasync/FlushFileBuffers, not just Apple's
+  F_BARRIERFSYNC) so batch durability no longer assumes ext4
+  ordered-data journaling; `durability.objects = per-object` config
+  key exposes the strict schedule; the index stat cache gained
+  ino+ctime fields (catches replace-by-rename and `touch -r`), a
+  per-entry racy window for coarse-timestamp files, and `status` heals
+  the cache from hash-time observations (never stat-after-verify) and
+  never auto-upgrades a v1 index; `stash pop` records the popped
+  commit in the recovery log before dropping its manifest entry;
+  commit/status type-validate staged blobs from the 6-byte prologue
+  instead of full read+re-hash; pack unpack no longer double-hashes
+  every object.
+
 - **Batched durability (`WriteBatch`)**: object writes from one command
   (`add`, `commit`, pack unpack, `stash`) are staged invisibly and made
   durable together at a single commit point — exactly **2 full flushes
