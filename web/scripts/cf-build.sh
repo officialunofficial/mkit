@@ -2,10 +2,12 @@
 # Build command for Cloudflare Workers Builds (set in the dashboard as
 # `bash scripts/cf-build.sh` with root directory `/web`).
 #
-# The Workers Builds image ships Node + pnpm but no Rust toolchain, and
+# The Workers Builds image ships Node + Bun but no Rust toolchain, and
 # vendor/mkit-wasm/pkg is built from source (gitignored), so this script
-# bootstraps rustup + wasm-pack before running the normal `pnpm build`
+# bootstraps rustup + wasm-pack before running the normal `bun run build`
 # chain (skill:stage -> wasm:build -> waku build -> config patchers).
+# Pin the Bun version with the BUN_VERSION=1.3.14 build variable in the
+# dashboard — the image default lags behind the version CI tests against.
 # Idempotent, and safe to run locally if you already have the tools.
 set -euo pipefail
 
@@ -42,5 +44,5 @@ if ! command -v wasm-pack >/dev/null 2>&1; then
 fi
 wasm-pack --version
 
-pnpm install --frozen-lockfile
-pnpm build
+bun install --frozen-lockfile
+bun run build
