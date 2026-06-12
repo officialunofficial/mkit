@@ -114,7 +114,10 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
     }
     let mkit_dir = repo_root.join(MKIT_DIR);
 
-    let tree_hash = worktree::build_tree(store, repo_root)?;
+    // One durability batch over the worktree snapshot + stash commit,
+    // committed before the manifest write that references them.
+    let batch = store.batch();
+    let tree_hash = worktree::build_tree(&batch, repo_root)?;
     let head_hash = refs::resolve_head(&mkit_dir)?;
 
     let timestamp_u64 = unix_seconds_now();
@@ -130,7 +133,8 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
         [0u8; 64],
     ));
     let commit_bytes = serialize::serialize(&commit)?;
-    let stash_hash = store.write(&commit_bytes)?;
+    let stash_hash = batch.write(&commit_bytes)?;
+    batch.commit()?;
 
     // Prepend the new entry.
     let mut list = read_list(repo_root)?;

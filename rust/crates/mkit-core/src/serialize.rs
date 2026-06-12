@@ -48,6 +48,27 @@ pub fn serialize(obj: &Object) -> Result<Vec<u8>, MkitError> {
     Ok(buf)
 }
 
+/// The exact byte prefix of `serialize(Object::Blob(..))` for a payload
+/// of `len` bytes: 6-byte object prologue plus the `u32` LE data
+/// length. Lets ingest write a chunk as `prologue ‖ payload` straight
+/// from the source buffer — no `Blob` allocation, no serialize copy.
+/// Equivalence with [`serialize`] is pinned by proptest and,
+/// transitively, the golden blob vectors.
+///
+/// # Errors
+///
+/// [`MkitError::OversizePayload`] if `len` exceeds the wire-format
+/// `u32` cap.
+pub fn blob_prologue(len: usize) -> Result<[u8; PROLOGUE_LEN + 4], MkitError> {
+    let len_le = checked_u32("blob.data", len)?.to_le_bytes();
+    let mut out = [0u8; PROLOGUE_LEN + 4];
+    out[0] = ObjectType::Blob as u8;
+    out[1..5].copy_from_slice(&MAGIC);
+    out[5] = SCHEMA_VERSION;
+    out[6..10].copy_from_slice(&len_le);
+    Ok(out)
+}
+
 /// Deserialize bytes into an owned [`Object`]. Validates the prologue
 /// and every per-type bound; rejects trailing data.
 pub fn deserialize(data: &[u8]) -> Result<Object, MkitError> {
@@ -598,9 +619,35 @@ fn read_delta(r: &mut Reader<'_>) -> Result<Delta, MkitError> {
 mod tests {
     use super::*;
     use crate::hash::{ZERO, hash};
+    use proptest::prelude::*;
 
     fn ed25519_id() -> Identity {
         Identity::ed25519([0xAA; 32])
+    }
+
+    proptest! {
+        /// `blob_prologue(len) ‖ payload` must be byte-identical to
+        /// `serialize(Object::Blob(payload))` — the zero-copy chunk
+        /// write path depends on this equivalence, which transitively
+        /// pins it to the golden blob vectors.
+        #[test]
+        fn blob_prologue_plus_payload_equals_serialize_blob(
+            payload in proptest::collection::vec(any::<u8>(), 0..2048)
+        ) {
+            let via_serialize = serialize(&Object::Blob(Blob {
+                data: payload.clone(),
+            })).unwrap();
+            let header = blob_prologue(payload.len()).unwrap();
+            let mut via_parts = header.to_vec();
+            via_parts.extend_from_slice(&payload);
+            prop_assert_eq!(via_parts, via_serialize);
+        }
+    }
+
+    #[test]
+    fn blob_prologue_rejects_oversize_len() {
+        assert!(blob_prologue(u32::MAX as usize + 1).is_err());
+        assert!(blob_prologue(0).is_ok());
     }
 
     #[test]

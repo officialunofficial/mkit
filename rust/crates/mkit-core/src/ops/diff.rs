@@ -1105,10 +1105,15 @@ pub fn status_diff(
     } else {
         None
     };
-    let work_tree_hash = worktree::build_tree_filtered(store, worktree_root, tracked)?;
+    // Snapshot objects are ephemeral — status must not pay durability
+    // costs. SyncPolicy::None stages with zero flushes; the commit
+    // below (before any tree read) just renames the objects visible.
+    let snapshot = store.batch_with_policy(crate::batch::SyncPolicy::None);
+    let work_tree_hash = worktree::build_tree_filtered(&snapshot, worktree_root, tracked)?;
 
     let Some(idx) = index else {
         // Legacy fallback: HEAD↔worktree, everything labeled Unstaged.
+        snapshot.commit()?;
         let diff = diff_worktree_trees(store, head_tree.copied(), Some(work_tree_hash))?;
         return Ok(diff
             .entries
@@ -1122,7 +1127,9 @@ pub fn status_diff(
 
     // Build the index tree exactly the way `mkit commit` builds it.
     // This is the authoritative "what would be committed right now."
-    let index_tree = worktree::build_tree_from_index(store, idx)?;
+    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, idx)?;
+    // The diffs below read the snapshot's objects — commit first.
+    snapshot.commit()?;
 
     let staged = diff_trees(store, head_tree.copied(), Some(index_tree))?;
     let unstaged = diff_worktree_trees(store, Some(index_tree), Some(work_tree_hash))?;
@@ -1426,6 +1433,33 @@ mod tests {
 
     fn fresh_workdir() -> TempDir {
         TempDir::new().unwrap()
+    }
+
+    #[test]
+    fn status_diff_does_not_fsync() {
+        // `status` is read-only from the user's perspective; its
+        // worktree-snapshot objects are ephemeral and must never pay
+        // durability costs (no barriers, no full flushes, no dir
+        // flushes) — renames only.
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        use std::sync::Arc;
+
+        let (_sd, mut store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("a.txt"), b"some content").unwrap();
+        std::fs::write(work.path().join("b.txt"), b"other content").unwrap();
+
+        let rec = Arc::new(RecordingSyncer::default());
+        store.set_syncer(rec.clone());
+
+        let result = status_diff(&store, None, work.path(), None).unwrap();
+        assert!(!result.is_empty(), "untracked files must surface");
+
+        let evs = rec.events();
+        assert!(
+            evs.iter().all(|e| matches!(e, Ev::Rename { .. })),
+            "status must not emit any flush events; got {evs:?}"
+        );
     }
 
     #[test]

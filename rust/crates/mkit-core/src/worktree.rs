@@ -26,7 +26,7 @@ use crate::ignore::{self, IgnoreList};
 use crate::index::{self, Index};
 use crate::object::{ChunkedBlob, EntryMode, Object, Tree, TreeEntry};
 use crate::serialize;
-use crate::store::ObjectStore;
+use crate::store::{ObjectSink, ObjectStore};
 
 /// Files larger than this go through the chunker (1 MiB).
 pub const CHUNK_THRESHOLD: u64 = 1024 * 1024;
@@ -90,8 +90,8 @@ pub fn validate_symlink_target(target: &str) -> bool {
 ///
 /// # Errors
 /// See [`WorktreeError`].
-pub fn build_tree(store: &ObjectStore, dir: &Path) -> WorktreeResult<Hash> {
-    build_tree_filtered(store, dir, None)
+pub fn build_tree<S: ObjectSink + ?Sized>(sink: &S, dir: &Path) -> WorktreeResult<Hash> {
+    build_tree_filtered(sink, dir, None)
 }
 
 /// Like [`build_tree`], but the caller supplies the authoritative tracked
@@ -102,8 +102,8 @@ pub fn build_tree(store: &ObjectStore, dir: &Path) -> WorktreeResult<Hash> {
 ///
 /// # Errors
 /// See [`WorktreeError`].
-pub fn build_tree_filtered(
-    store: &ObjectStore,
+pub fn build_tree_filtered<S: ObjectSink + ?Sized>(
+    sink: &S,
     dir: &Path,
     index: Option<&Index>,
 ) -> WorktreeResult<Hash> {
@@ -122,7 +122,7 @@ pub fn build_tree_filtered(
         loaded = index::read_index(dir).unwrap_or_default();
         &loaded
     };
-    build_tree_inner(store, dir, "", &ignores, index, false)
+    build_tree_inner(sink, dir, "", &ignores, index, false)
 }
 
 /// `rel_dir` is the path of `dir` relative to the repo root (empty at the
@@ -130,8 +130,8 @@ pub fn build_tree_filtered(
 /// rather than bare basenames. `parent_ignored` carries down whether an
 /// ancestor directory is ignored (git "everything under an excluded dir is
 /// excluded"); `index` is the tracked set used to exempt tracked content.
-fn build_tree_inner(
-    store: &ObjectStore,
+fn build_tree_inner<S: ObjectSink + ?Sized>(
+    sink: &S,
     dir: &Path,
     rel_dir: &str,
     ignores: &IgnoreList,
@@ -173,7 +173,7 @@ fn build_tree_inner(
         }
 
         if meta.file_type().is_file() {
-            let (h, opened_meta) = hash_file_with_metadata(store, &entry.path())?;
+            let (h, opened_meta) = hash_file_with_metadata(sink, &entry.path())?;
             entries.push(TreeEntry {
                 name: name_str.into_bytes(),
                 mode: entry_mode_from_file_metadata(&opened_meta),
@@ -189,7 +189,7 @@ fn build_tree_inner(
                 continue;
             }
             let h = build_tree_inner(
-                store,
+                sink,
                 &entry.path(),
                 &rel_path,
                 ignores,
@@ -210,11 +210,9 @@ fn build_tree_inner(
             if !validate_symlink_target(&target_str) {
                 return Err(WorktreeError::InvalidSymlinkTarget(target_str));
             }
-            let blob = Object::Blob(crate::object::Blob {
-                data: target_str.as_bytes().to_vec(),
-            });
-            let bytes = serialize::serialize(&blob)?;
-            let h = store.write(&bytes)?;
+            let target_bytes = target_str.as_bytes();
+            let prologue = serialize::blob_prologue(target_bytes.len())?;
+            let h = sink.put_parts(&[&prologue, target_bytes])?;
             entries.push(TreeEntry {
                 name: name_str.into_bytes(),
                 mode: EntryMode::Symlink,
@@ -228,7 +226,7 @@ fn build_tree_inner(
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let tree = Object::Tree(Tree { entries });
     let bytes = serialize::serialize(&tree)?;
-    Ok(store.write(&bytes)?)
+    Ok(sink.put(&bytes)?)
 }
 
 /// Build a tree object from an [`Index`] (the staging area).
@@ -251,9 +249,25 @@ fn build_tree_inner(
 ///   failure (the path's leaf segment is reserved or alias-prone), or
 ///   when a file entry points at a non-blob/non-chunked-blob object.
 /// - Wraps [`crate::MkitError`] surfaced by `serialize` / `store.write`.
-#[allow(clippy::items_after_statements, clippy::too_many_lines)]
 pub fn build_tree_from_index(
     store: &ObjectStore,
+    index: &crate::index::Index,
+) -> WorktreeResult<Hash> {
+    build_tree_from_index_with(store, store, index)
+}
+
+/// [`build_tree_from_index`] writing tree objects through `sink` —
+/// pass a [`WriteBatch`](crate::batch::WriteBatch) to amortise the
+/// flush cost of all materialised trees into the batch's single commit.
+/// `store` is still needed read-only to validate that staged hashes
+/// point at blob-shaped objects (a sink cannot read).
+///
+/// # Errors
+/// See [`build_tree_from_index`].
+#[allow(clippy::items_after_statements, clippy::too_many_lines)]
+pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
+    store: &ObjectStore,
+    sink: &S,
     index: &crate::index::Index,
 ) -> WorktreeResult<Hash> {
     use crate::index::EntryStatus;
@@ -385,12 +399,12 @@ pub fn build_tree_from_index(
         }
     }
 
-    fn write_node(store: &ObjectStore, node: &Node) -> WorktreeResult<Hash> {
+    fn write_node<S: ObjectSink + ?Sized>(sink: &S, node: &Node) -> WorktreeResult<Hash> {
         let mut entries: Vec<TreeEntry> = Vec::new();
 
         // Subdirectories first (alphabetical via BTreeMap).
         for (name, child) in &node.children {
-            let h = write_node(store, child)?;
+            let h = write_node(sink, child)?;
             let bytes = name.as_bytes().to_vec();
             if !crate::object::TreeEntry::validate_name(&bytes) {
                 return Err(WorktreeError::Io(io::Error::other(format!(
@@ -423,10 +437,10 @@ pub fn build_tree_from_index(
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         let tree = Object::Tree(Tree { entries });
         let bytes = serialize::serialize(&tree)?;
-        Ok(store.write(&bytes)?)
+        Ok(sink.put(&bytes)?)
     }
 
-    write_node(store, &root)
+    write_node(sink, &root)
 }
 
 /// Read a file from disk, hash it, store it, and return the
@@ -441,8 +455,8 @@ pub fn build_tree_from_index(
 ///
 /// # Errors
 /// See [`WorktreeError`].
-pub fn hash_file(store: &ObjectStore, path: &Path) -> WorktreeResult<Hash> {
-    hash_file_with_metadata(store, path).map(|(hash, _)| hash)
+pub fn hash_file<S: ObjectSink + ?Sized>(sink: &S, path: &Path) -> WorktreeResult<Hash> {
+    hash_file_with_metadata(sink, path).map(|(hash, _)| hash)
 }
 
 /// Read a regular file without following the final path component on
@@ -472,12 +486,12 @@ pub fn read_regular_file_bounded(path: &Path) -> WorktreeResult<(fs::Metadata, V
     Ok((meta, data))
 }
 
-fn hash_file_with_metadata(
-    store: &ObjectStore,
+fn hash_file_with_metadata<S: ObjectSink + ?Sized>(
+    sink: &S,
     path: &Path,
 ) -> WorktreeResult<(Hash, fs::Metadata)> {
     let (meta, data) = read_regular_file_bounded(path)?;
-    let hash = store_file_object(store, &data)?;
+    let hash = store_file_object(sink, &data)?;
     Ok((hash, meta))
 }
 
@@ -495,13 +509,13 @@ fn hash_file_with_metadata(
 ///
 /// # Errors
 /// See [`WorktreeError`].
-pub fn store_file_object(store: &ObjectStore, data: &[u8]) -> WorktreeResult<Hash> {
+pub fn store_file_object<S: ObjectSink + ?Sized>(sink: &S, data: &[u8]) -> WorktreeResult<Hash> {
     if u64::try_from(data.len()).unwrap_or(u64::MAX) <= CHUNK_THRESHOLD {
-        let blob = Object::Blob(crate::object::Blob {
-            data: data.to_vec(),
-        });
-        let bytes = serialize::serialize(&blob)?;
-        return Ok(store.write(&bytes)?);
+        // Zero-copy: the canonical Blob bytes are `prologue ‖ data`
+        // (pinned to serialize() by proptest), so the sink can hash and
+        // write straight from the source buffer.
+        let prologue = serialize::blob_prologue(data.len())?;
+        return Ok(sink.put_parts(&[&prologue, data])?);
     }
 
     // Large file: split with FastCDC v1 via the public ChunkIterator,
@@ -512,11 +526,9 @@ pub fn store_file_object(store: &ObjectStore, data: &[u8]) -> WorktreeResult<Has
     let total_size = data.len() as u64;
     let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), data)
         .map(|b| {
-            let chunk_blob = Object::Blob(crate::object::Blob {
-                data: data[b.offset..b.offset + b.length].to_vec(),
-            });
-            let chunk_bytes = serialize::serialize(&chunk_blob)?;
-            Ok::<_, WorktreeError>(store.write(&chunk_bytes)?)
+            let chunk = &data[b.offset..b.offset + b.length];
+            let prologue = serialize::blob_prologue(chunk.len())?;
+            Ok::<_, WorktreeError>(sink.put_parts(&[&prologue, chunk])?)
         })
         .collect::<Result<_, _>>()?;
 
@@ -526,7 +538,7 @@ pub fn store_file_object(store: &ObjectStore, data: &[u8]) -> WorktreeResult<Has
         chunks,
     });
     let manifest_bytes = serialize::serialize(&manifest)?;
-    Ok(store.write(&manifest_bytes)?)
+    Ok(sink.put(&manifest_bytes)?)
 }
 
 /// Reassemble the full byte content of a `Blob` or `ChunkedBlob` object
@@ -1373,5 +1385,91 @@ mod tests {
         });
         let err = build_tree_from_index(&store, &idx).unwrap_err();
         assert!(format!("{err}").contains("non-blob"));
+    }
+
+    // ---- batched / zero-copy ingest ----------------------------------
+
+    /// Same chunked input through a batch and through the plain store
+    /// must produce the identical manifest hash and identical readable
+    /// bytes — this transitively pins the zero-copy `put_parts` chunk
+    /// path to the golden `ChunkedBlob` vectors.
+    #[test]
+    fn store_file_object_via_batch_equals_via_store() {
+        // 3 MiB of varied bytes: above CHUNK_THRESHOLD, multiple chunks.
+        let data: Vec<u8> = (0..3 * 1024 * 1024u32)
+            .map(|i| u8::try_from((i.wrapping_mul(2_654_435_761)) % 251).unwrap())
+            .collect();
+
+        let (_d1, store1) = fresh_store();
+        let h_store = store_file_object(&store1, &data).unwrap();
+
+        let (_d2, store2) = fresh_store();
+        let batch = store2.batch();
+        let h_batch = store_file_object(&batch, &data).unwrap();
+        batch.commit().unwrap();
+
+        assert_eq!(h_store, h_batch, "sink choice must not change hashes");
+        assert_eq!(
+            read_blob(&store1, &h_store).unwrap(),
+            read_blob(&store2, &h_batch).unwrap(),
+        );
+
+        // Small (single-blob) shape too.
+        let small = b"under the chunk threshold";
+        let h1 = store_file_object(&store1, small).unwrap();
+        let batch2 = store2.batch();
+        let h2 = store_file_object(&batch2, small).unwrap();
+        batch2.commit().unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    /// Committing a staged index must cost exactly one full flush no
+    /// matter how many tree objects it materialises.
+    #[test]
+    fn build_tree_from_index_with_batch_single_flush() {
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        use crate::index::{EntryStatus, Index, IndexEntry};
+        use std::sync::Arc;
+
+        let (_sd, mut store) = fresh_store();
+        // Stage 20 files across nested dirs (many tree objects).
+        let mut idx = Index::default();
+        for i in 0..20 {
+            let blob = Object::Blob(crate::object::Blob {
+                data: format!("file {i}").into_bytes(),
+            });
+            let bytes = serialize::serialize(&blob).unwrap();
+            let h = store.write(&bytes).unwrap();
+            idx.entries.push(IndexEntry {
+                status: EntryStatus::Blob,
+                object_hash: h,
+                path: format!("d{}/sub/f{i}.txt", i % 5),
+            });
+        }
+
+        let rec = Arc::new(RecordingSyncer::default());
+        store.set_syncer(rec.clone());
+
+        let batch = store.batch();
+        let tree_h = build_tree_from_index_with(&store, &batch, &idx).unwrap();
+        batch.commit().unwrap();
+
+        let fulls = rec
+            .events()
+            .iter()
+            .filter(|e| matches!(e, Ev::Full(_)))
+            .count();
+        assert_eq!(fulls, 1, "tree materialisation must cost one full flush");
+        assert!(store.read_object(&tree_h).is_ok());
+
+        // Equivalence: the per-object path yields the same root hash.
+        let (_sd2, store2) = fresh_store();
+        for i in 0..20 {
+            let blob = Object::Blob(crate::object::Blob {
+                data: format!("file {i}").into_bytes(),
+            });
+            store2.write(&serialize::serialize(&blob).unwrap()).unwrap();
+        }
+        assert_eq!(tree_h, build_tree_from_index(&store2, &idx).unwrap());
     }
 }
