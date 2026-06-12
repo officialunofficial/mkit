@@ -27,6 +27,7 @@ from recurring.
 | `fuzz_targets/git_commit_parse.rs` | `mkit-git-bridge gitparse::parse_commit` (untrusted upstream bytes, SPEC-GIT-IMPORT §2) |
 | `fuzz_targets/git_tag_parse.rs` | `mkit-git-bridge gitparse::parse_tag` |
 | `fuzz_targets/git_tree_parse.rs` | `mkit-git-bridge gitparse::parse_tree` + `map_mode` |
+| `fuzz_targets/rpc_decode.rs`   | `SignerFrame` / `SshFrame` wire decode (never panics) + `Arbitrary`-driven encode/decode roundtrip |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in
@@ -83,6 +84,7 @@ cargo +nightly fuzz run delta
 cargo +nightly fuzz run pack
 cargo +nightly fuzz run tree
 cargo +nightly fuzz run software_key_record
+cargo +nightly fuzz run rpc_decode
 ```
 
 ## Guardrails (NON-NEGOTIABLE)

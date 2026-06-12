@@ -40,7 +40,7 @@ pub enum Algorithm {
     /// reserved ranges. This value is NOT stable — it will be swapped
     /// for the assigned id (in a patch release) if IANA ever registers
     /// one, so do not persist it as a long-lived identifier. The stable
-    /// wire-level identifier is `Algorithm::ALGORITHM_BLS12381_THRESHOLD
+    /// wire-level identifier is `Algorithm::Bls12381Threshold
     /// = 5` in the mkit-rpc proto.
     ///
     /// Feature-gated behind `bls-threshold` because the `Signer`

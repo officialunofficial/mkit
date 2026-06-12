@@ -221,5 +221,7 @@ message PinPrompt {
 message PinResponse {
   // PIN bytes. UTF-8. The caller is responsible for not echoing this
   // to logs. The signer MUST zeroize after consumption.
-  string pin = 1;
+  // `debug_redact` makes the generated Debug impls print [REDACTED]
+  // in place of the value, so a stray `{:?}` log cannot leak it.
+  string pin = 1 [debug_redact = true];
 }

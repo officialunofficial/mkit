@@ -19,9 +19,12 @@ GEN_DIR=rust/crates/mkit-rpc/generated
 MKIT_RPC_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p mkit-rpc
 
 out_dir=$(ls -dt rust/target/debug/build/mkit-rpc-*/out 2>/dev/null | while read -r d; do
-    # Pick the freshest OUT_DIR that actually holds codegen output (the
-    # other mkit-rpc-* dirs are fingerprint stubs without an out/).
-    if [ -f "$d/_includes.rs" ]; then echo "$d"; break; fi
+    # Pick the freshest OUT_DIR holding REAL codegen output. The
+    # default (staging) build mode also fills its OUT_DIR with the
+    # same .rs file set copied from generated/, so the presence of
+    # _includes.rs is not enough — build.rs drops .mkit-rpc-codegen
+    # only in codegen mode, and removes it again on staging runs.
+    if [ -f "$d/.mkit-rpc-codegen" ]; then echo "$d"; break; fi
 done)
 
 if [ -z "${out_dir}" ]; then

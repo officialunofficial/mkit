@@ -359,8 +359,8 @@ impl Transport for SshTransport {
                 // CAS-mismatch convention: server returns
                 // ERROR_CODE_INVALID_REQUEST with the current id in
                 // `details`. Map to RefConflict.
-                let code = e.code.as_ref().map_or(0, buffa::EnumValue::to_i32);
-                if code == mkit_rpc::mkit::rpc::v1::ErrorCode::ERROR_CODE_INVALID_REQUEST as i32
+                if e.code
+                    .is_some_and(|c| c == mkit_rpc::mkit::rpc::v1::ErrorCode::InvalidRequest)
                     && !matches!(condition, RefWriteCondition::Any)
                 {
                     Err(TransportError::RefConflict)
@@ -653,7 +653,7 @@ fn perform_client_handshake(io: &mut ChildIo) -> Result<(), SshInitError> {
     let hello = SshFrame {
         body: Some(ssh_frame::Body::Hello(Box::new(
             Hello::default()
-                .with_proto(ProtocolVersion::PROTOCOL_VERSION_1)
+                .with_proto(ProtocolVersion::ProtocolVersion1)
                 .with_client_id(CLIENT_ID),
         ))),
         ..Default::default()
@@ -684,10 +684,11 @@ fn perform_client_handshake(io: &mut ChildIo) -> Result<(), SshInitError> {
     };
     match resp.body {
         Some(ssh_frame::Body::HelloResponse(h)) => {
-            let proto = h.proto.as_ref().map_or(0, buffa::EnumValue::to_i32);
-            if proto != ProtocolVersion::PROTOCOL_VERSION_1 as i32 {
+            let proto = h.proto.unwrap_or_default();
+            if proto != ProtocolVersion::ProtocolVersion1 {
                 return Err(SshInitError::HandshakeFailed(format!(
-                    "server proto_version {proto} != expected 1"
+                    "server proto_version {} != expected 1",
+                    proto.to_i32()
                 )));
             }
             Ok(())
@@ -971,25 +972,18 @@ mod tests {
         use buffa::Message;
 
         for (cond, want) in [
-            (RefWriteCondition::Any, RefExpectation::REF_EXPECTATION_ANY),
-            (
-                RefWriteCondition::Missing,
-                RefExpectation::REF_EXPECTATION_MISSING,
-            ),
+            (RefWriteCondition::Any, RefExpectation::Any),
+            (RefWriteCondition::Missing, RefExpectation::Missing),
             (
                 RefWriteCondition::Match([0xCDu8; 32]),
-                RefExpectation::REF_EXPECTATION_MATCH,
+                RefExpectation::Match,
             ),
         ] {
             let bytes = encode_update_ref(cond).encode_to_vec();
             let decoded = UpdateRef::decode(&mut &bytes[..]).expect("decode UpdateRef");
-            let got = decoded
-                .expectation
-                .as_ref()
-                .map(buffa::EnumValue::to_i32)
-                .unwrap_or_default();
             assert_eq!(
-                got, want as i32,
+                decoded.expectation,
+                Some(want.into()),
                 "expectation field did not round-trip for {cond:?}"
             );
         }
@@ -1012,14 +1006,9 @@ mod tests {
         };
         let bytes = req.encode_to_vec();
         let decoded = UpdateRef::decode(&mut &bytes[..]).expect("decode UpdateRef");
-        let got = decoded
-            .expectation
-            .as_ref()
-            .map(buffa::EnumValue::to_i32)
-            .unwrap_or_default();
         assert_eq!(
-            got,
-            RefExpectation::REF_EXPECTATION_UNSPECIFIED as i32,
+            decoded.expectation.unwrap_or_default(),
+            RefExpectation::Unspecified,
             "missing expectation field MUST decode as UNSPECIFIED"
         );
     }

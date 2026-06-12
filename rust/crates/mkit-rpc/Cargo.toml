@@ -25,7 +25,14 @@ authors.workspace = true
 # own hand-written code in src/ stays under it.
 all = { level = "warn", priority = -1 }
 
+[features]
+# Opt-in `arbitrary::Arbitrary` derives on all generated wire types,
+# for fuzzing / property tests (used by the rust/fuzz harness). Off by
+# default so downstream consumers don't pull in `arbitrary`.
+arbitrary = ["dep:arbitrary", "buffa/arbitrary"]
+
 [dependencies]
+arbitrary = { version = "1", optional = true }
 buffa = "0.7.1"
 thiserror = "2"
 # mkit-rpc now also re-exports a small set of shared transport-side

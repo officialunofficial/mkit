@@ -89,9 +89,9 @@ pub const CHUNK_DATA_MAX: usize = 800 * 1024;
 #[must_use]
 pub fn cond_to_wire(c: RefWriteCondition) -> (Vec<u8>, RefExpectation) {
     match c {
-        RefWriteCondition::Any => (Vec::new(), RefExpectation::REF_EXPECTATION_ANY),
-        RefWriteCondition::Missing => (Vec::new(), RefExpectation::REF_EXPECTATION_MISSING),
-        RefWriteCondition::Match(h) => (h.to_vec(), RefExpectation::REF_EXPECTATION_MATCH),
+        RefWriteCondition::Any => (Vec::new(), RefExpectation::Any),
+        RefWriteCondition::Missing => (Vec::new(), RefExpectation::Missing),
+        RefWriteCondition::Match(h) => (h.to_vec(), RefExpectation::Match),
     }
 }
 
@@ -101,11 +101,10 @@ pub fn cond_to_wire(c: RefWriteCondition) -> (Vec<u8>, RefExpectation) {
 /// failure.
 #[must_use]
 pub fn rpc_error_to_transport(e: RpcError, transport: &str) -> TransportError {
-    let code = e.code.as_ref().map_or(0, buffa::EnumValue::to_i32);
     let msg = e.message.unwrap_or_default();
-    if code == ErrorCode::ERROR_CODE_KEY_NOT_FOUND as i32 {
+    if e.code.is_some_and(|c| c == ErrorCode::KeyNotFound) {
         TransportError::PackNotFound
-    } else if code == ErrorCode::ERROR_CODE_USER_DECLINED as i32 {
+    } else if e.code.is_some_and(|c| c == ErrorCode::UserDeclined) {
         TransportError::AccessDenied
     } else if msg.is_empty() {
         TransportError::RemoteError(format!("{transport} server returned an unspecified error"))
@@ -190,32 +189,26 @@ mod tests {
 
     #[test]
     fn signer_error_frame_round_trips() {
-        let frame = signer_error_frame(ErrorCode::ERROR_CODE_INVALID_REQUEST, "bad");
+        let frame = signer_error_frame(ErrorCode::InvalidRequest, "bad");
         let bytes = frame.encode_to_vec();
         let decoded = SignerFrame::decode(&mut &bytes[..]).expect("decode");
         let Some(signer_frame::Body::Error(e)) = decoded.body else {
             panic!("expected Error body");
         };
-        assert_eq!(
-            e.code.as_ref().map(buffa::EnumValue::to_i32),
-            Some(ErrorCode::ERROR_CODE_INVALID_REQUEST as i32),
-        );
+        assert_eq!(e.code, Some(ErrorCode::InvalidRequest.into()));
         assert_eq!(e.message.as_deref(), Some("bad"));
         assert_eq!(e.details.as_deref(), Some(&[][..]));
     }
 
     #[test]
     fn ssh_error_frame_round_trips() {
-        let frame = ssh_error_frame(ErrorCode::ERROR_CODE_KEY_NOT_FOUND, "missing");
+        let frame = ssh_error_frame(ErrorCode::KeyNotFound, "missing");
         let bytes = frame.encode_to_vec();
         let decoded = SshFrame::decode(&mut &bytes[..]).expect("decode");
         let Some(ssh_frame::Body::Error(e)) = decoded.body else {
             panic!("expected Error body");
         };
-        assert_eq!(
-            e.code.as_ref().map(buffa::EnumValue::to_i32),
-            Some(ErrorCode::ERROR_CODE_KEY_NOT_FOUND as i32),
-        );
+        assert_eq!(e.code, Some(ErrorCode::KeyNotFound.into()));
         assert_eq!(e.message.as_deref(), Some("missing"));
     }
 
@@ -223,14 +216,14 @@ mod tests {
     fn cond_to_wire_encodes_any() {
         let (id, exp) = cond_to_wire(RefWriteCondition::Any);
         assert!(id.is_empty());
-        assert_eq!(exp, RefExpectation::REF_EXPECTATION_ANY);
+        assert_eq!(exp, RefExpectation::Any);
     }
 
     #[test]
     fn cond_to_wire_encodes_missing() {
         let (id, exp) = cond_to_wire(RefWriteCondition::Missing);
         assert!(id.is_empty());
-        assert_eq!(exp, RefExpectation::REF_EXPECTATION_MISSING);
+        assert_eq!(exp, RefExpectation::Missing);
     }
 
     #[test]
@@ -238,20 +231,20 @@ mod tests {
         let h: Hash = [7u8; 32];
         let (id, exp) = cond_to_wire(RefWriteCondition::Match(h));
         assert_eq!(id, h.to_vec());
-        assert_eq!(exp, RefExpectation::REF_EXPECTATION_MATCH);
+        assert_eq!(exp, RefExpectation::Match);
     }
 
     #[test]
     fn rpc_error_to_transport_maps_known_codes() {
         let not_found = RpcError::default()
-            .with_code(ErrorCode::ERROR_CODE_KEY_NOT_FOUND)
+            .with_code(ErrorCode::KeyNotFound)
             .with_message("missing pack");
         assert!(matches!(
             rpc_error_to_transport(not_found, "ssh"),
             TransportError::PackNotFound
         ));
 
-        let declined = RpcError::default().with_code(ErrorCode::ERROR_CODE_USER_DECLINED);
+        let declined = RpcError::default().with_code(ErrorCode::UserDeclined);
         assert!(matches!(
             rpc_error_to_transport(declined, "ssh"),
             TransportError::AccessDenied
@@ -260,7 +253,7 @@ mod tests {
 
     #[test]
     fn rpc_error_to_transport_falls_back_with_label() {
-        let empty = RpcError::default().with_code(ErrorCode::ERROR_CODE_INVALID_REQUEST);
+        let empty = RpcError::default().with_code(ErrorCode::InvalidRequest);
         match rpc_error_to_transport(empty, "enc") {
             TransportError::RemoteError(msg) => assert!(msg.contains("enc server")),
             other => panic!("unexpected variant: {other:?}"),

@@ -92,6 +92,9 @@ name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+dependencies = [
+ "derive_arbitrary",
+]
 
 [[package]]
 name = "arrayref"
@@ -492,6 +495,7 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec95898e2ef31d6266042f21c398fa5ff8334d14d6b2ac5fb38b55448d94f595"
 dependencies = [
+ "arbitrary",
  "bytes",
  "compact_str",
  "ecow",
@@ -1010,6 +1014,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9dfdd1c2274d9aa354115b09dc9a901d6c5576818cdf70d14cae2bdb47df00ab"
 dependencies = [
+ "arbitrary",
  "castaway",
  "cfg-if",
  "itoa",
@@ -1402,6 +1407,17 @@ name = "der_derive"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59600e2c2d636fde9b65e99cc6445ac770c63d3628195ff39932b8d6d7409903"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "derive_arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2769,10 +2785,13 @@ dependencies = [
 name = "mkit-fuzz"
 version = "0.0.0"
 dependencies = [
+ "arbitrary",
+ "buffa",
  "libfuzzer-sys",
  "mkit-core",
  "mkit-git-bridge",
  "mkit-keystore",
+ "mkit-rpc",
  "tempfile",
 ]
 
@@ -2819,6 +2838,7 @@ dependencies = [
 name = "mkit-rpc"
 version = "0.2.0"
 dependencies = [
+ "arbitrary",
  "buffa",
  "buffa-build",
  "hex",
@@ -4419,6 +4439,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9676b89cd56310a87b93dec47b11af744f34d5fc9f367b829474eec0a891350d"
 dependencies = [
+ "arbitrary",
  "borsh",
  "serde",
 ]

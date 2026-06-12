@@ -111,7 +111,7 @@ fn serve<R: Read, W: Write>(
             Err(FrameError::LengthTooLarge(n)) => {
                 let _ = write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     format!("frame length {n} exceeds 1 MiB cap"),
                 );
                 return Err(SignerError::ProtocolFatal("oversize frame".into()));
@@ -119,7 +119,7 @@ fn serve<R: Read, W: Write>(
             Err(FrameError::BodyTruncated { expected, .. }) => {
                 let _ = write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     format!("frame body truncated (expected {expected} bytes)"),
                 );
                 return Err(SignerError::ProtocolFatal("truncated frame".into()));
@@ -127,7 +127,7 @@ fn serve<R: Read, W: Write>(
             Err(FrameError::DecodeFailed) => {
                 let _ = write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     "frame failed to decode as SignerFrame".to_owned(),
                 );
                 return Err(SignerError::ProtocolFatal("decode failure".into()));
@@ -142,15 +142,15 @@ fn serve<R: Read, W: Write>(
                 // complexity without a payoff.
                 let resp = SignerFrame {
                     body: Some(signer_frame::Body::HelloResponse(Box::new(HelloResponse {
-                        protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+                        protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
                         signer_id: Some(format!("mkit-sign-file/{}", env!("CARGO_PKG_VERSION"))),
                         capabilities: buffa::MessageField::some(Capabilities {
                             algorithms: vec![
-                                RpcAlgorithm::ALGORITHM_ED25519.into(),
-                                RpcAlgorithm::ALGORITHM_SECP256K1.into(),
-                                RpcAlgorithm::ALGORITHM_P256.into(),
+                                RpcAlgorithm::Ed25519.into(),
+                                RpcAlgorithm::Secp256k1.into(),
+                                RpcAlgorithm::P256.into(),
                             ],
-                            key_forms: vec![KeyForm::KEY_FORM_RAW_BYTES.into()],
+                            key_forms: vec![KeyForm::RawBytes.into()],
                             supports_pin: Some(false),
                             supports_certificate_chain: Some(false),
                             max_payload_bytes: Some(0), // 0 = use framing default
@@ -174,7 +174,7 @@ fn serve<R: Read, W: Write>(
             Some(signer_frame::Body::PinResponse(_)) => {
                 write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     "mkit-sign-file does not request a PIN".to_owned(),
                 )?;
             }
@@ -184,16 +184,12 @@ fn serve<R: Read, W: Write>(
             Some(other) => {
                 write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     format!("unexpected frame: {}", oneof_name(&other)),
                 )?;
             }
             None => {
-                write_error(
-                    w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                    "empty frame body".to_owned(),
-                )?;
+                write_error(w, ErrorCode::InvalidRequest, "empty frame body".to_owned())?;
             }
         }
     }
@@ -212,20 +208,20 @@ fn handle_sign(
         .transpose()
         .and_then(|opt| match opt {
             Some(a) => Ok(a),
-            None => map_rpc_algorithm(req.algorithm.as_ref().map_or(0, buffa::EnumValue::to_i32)),
+            None => map_rpc_algorithm(req.algorithm),
         }) {
         Ok(a) => a,
         Err(e) => {
-            return signer_error_frame(ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM, e.to_string());
+            return signer_error_frame(ErrorCode::UnsupportedAlgorithm, e.to_string());
         }
     };
 
     // The reference signer only accepts KEY_FORM_RAW_BYTES — the key
     // is a 32-byte file on disk. Reject anything else loudly.
-    let key_form = req.key_form.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    if key_form != KeyForm::KEY_FORM_RAW_BYTES as i32 && key_form != 0 {
+    let key_form = req.key_form.unwrap_or_default();
+    if key_form != KeyForm::RawBytes && key_form != KeyForm::Unspecified {
         return signer_error_frame(
-            ErrorCode::ERROR_CODE_UNSUPPORTED_KEY_FORM,
+            ErrorCode::UnsupportedKeyForm,
             "mkit-sign-file only supports KEY_FORM_RAW_BYTES".to_owned(),
         );
     }
@@ -245,18 +241,10 @@ fn handle_sign(
             let sig = match <RepoKeySigner as mkit_attest::Signer>::sign(&mut s, &pae) {
                 Ok(b) => b,
                 Err(e) => {
-                    return signer_error_frame(
-                        ErrorCode::ERROR_CODE_INTERNAL,
-                        format!("ed25519 sign: {e}"),
-                    );
+                    return signer_error_frame(ErrorCode::Internal, format!("ed25519 sign: {e}"));
                 }
             };
-            (
-                s.keyid_string(),
-                sig,
-                pubkey,
-                RpcAlgorithm::ALGORITHM_ED25519,
-            )
+            (s.keyid_string(), sig, pubkey, RpcAlgorithm::Ed25519)
         }
         Algorithm::Secp256k1 => {
             // Same rationale as the Ed25519 arm above — pass through
@@ -264,56 +252,39 @@ fn handle_sign(
             let s = match Secp256k1Signer::from_seed_zeroizing(secret) {
                 Ok(s) => s,
                 Err(e) => {
-                    return signer_error_frame(
-                        ErrorCode::ERROR_CODE_INTERNAL,
-                        format!("secp256k1 init: {e}"),
-                    );
+                    return signer_error_frame(ErrorCode::Internal, format!("secp256k1 init: {e}"));
                 }
             };
             let pubkey = s.public_key_sec1();
             let sig = match s.sign_dsse(&pae) {
                 Ok(b) => b,
                 Err(e) => {
-                    return signer_error_frame(
-                        ErrorCode::ERROR_CODE_INTERNAL,
-                        format!("secp256k1 sign: {e}"),
-                    );
+                    return signer_error_frame(ErrorCode::Internal, format!("secp256k1 sign: {e}"));
                 }
             };
-            (
-                s.keyid_string(),
-                sig,
-                pubkey,
-                RpcAlgorithm::ALGORITHM_SECP256K1,
-            )
+            (s.keyid_string(), sig, pubkey, RpcAlgorithm::Secp256k1)
         }
         Algorithm::P256 => {
             // Same rationale as Ed25519/Secp256k1.
             let s = match P256Signer::from_seed_zeroizing(secret) {
                 Ok(s) => s,
                 Err(e) => {
-                    return signer_error_frame(
-                        ErrorCode::ERROR_CODE_INTERNAL,
-                        format!("p256 init: {e}"),
-                    );
+                    return signer_error_frame(ErrorCode::Internal, format!("p256 init: {e}"));
                 }
             };
             let pubkey = s.public_key_sec1();
             let sig = match s.sign_dsse(&pae) {
                 Ok(b) => b,
                 Err(e) => {
-                    return signer_error_frame(
-                        ErrorCode::ERROR_CODE_INTERNAL,
-                        format!("p256 sign: {e}"),
-                    );
+                    return signer_error_frame(ErrorCode::Internal, format!("p256 sign: {e}"));
                 }
             };
-            (s.keyid(), sig, pubkey, RpcAlgorithm::ALGORITHM_P256)
+            (s.keyid(), sig, pubkey, RpcAlgorithm::P256)
         }
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => {
             return signer_error_frame(
-                ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM,
+                ErrorCode::UnsupportedAlgorithm,
                 "mkit-sign-file does not support BLS threshold (issue #160 Phase 3)".to_owned(),
             );
         }
@@ -349,17 +320,17 @@ fn oneof_name(b: &signer_frame::Body) -> &'static str {
     }
 }
 
-fn map_rpc_algorithm(value: i32) -> Result<Algorithm, &'static str> {
-    if value == RpcAlgorithm::ALGORITHM_ED25519 as i32 {
-        Ok(Algorithm::Ed25519)
-    } else if value == RpcAlgorithm::ALGORITHM_SECP256K1 as i32 {
-        Ok(Algorithm::Secp256k1)
-    } else if value == RpcAlgorithm::ALGORITHM_P256 as i32 {
-        Ok(Algorithm::P256)
-    } else if value == RpcAlgorithm::ALGORITHM_ED25519_WEBAUTHN as i32 {
-        Err("ed25519-webauthn requires the CTAP signer, not the file signer")
-    } else {
-        Err("unspecified or unknown algorithm")
+fn map_rpc_algorithm(
+    value: Option<buffa::EnumValue<RpcAlgorithm>>,
+) -> Result<Algorithm, &'static str> {
+    match value.and_then(|v| v.as_known()) {
+        Some(RpcAlgorithm::Ed25519) => Ok(Algorithm::Ed25519),
+        Some(RpcAlgorithm::Secp256k1) => Ok(Algorithm::Secp256k1),
+        Some(RpcAlgorithm::P256) => Ok(Algorithm::P256),
+        Some(RpcAlgorithm::Ed25519Webauthn) => {
+            Err("ed25519-webauthn requires the CTAP signer, not the file signer")
+        }
+        _ => Err("unspecified or unknown algorithm"),
     }
 }
 

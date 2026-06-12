@@ -5,6 +5,7 @@ pub mod ssh_frame {
     #[allow(unused_imports)]
     use super::*;
     #[derive(Clone, PartialEq, Debug)]
+    #[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
     pub enum Body {
         Hello(::buffa::alloc::boxed::Box<super::super::super::Hello>),
         HelloResponse(::buffa::alloc::boxed::Box<super::super::super::HelloResponse>),

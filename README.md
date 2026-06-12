@@ -29,8 +29,8 @@ one" policy unless a feature requires otherwise.
 ## Quick start
 
 ```sh
-# install (see "Installing" below for other channels)
-cargo install --git https://github.com/officialunofficial/mkit mkit-cli
+# install the CLI from crates.io (see "Installing" below for other channels)
+cargo install mkit-cli
 
 # make your first signed commit
 mkit init           # create .mkit/ in the current dir
@@ -69,10 +69,9 @@ on first build). Drops `mkit` into `~/.cargo/bin/`.
 
 > [!WARNING]
 > Do **not** run `cargo install mkit` — the `mkit` name on crates.io
-> belongs to an unrelated project. The CLI installs as `mkit-cli` from
-> this repository (or via the release archives / `install.sh` above);
-> only the *library* crates (`mkit-core` and friends) come from
-> crates.io.
+> belongs to an unrelated project. The CLI is published as **`mkit-cli`**
+> (`cargo install mkit-cli`), and is also available via the release
+> archives / `install.sh` above or `--git` from this repository.
 
 ### From GitHub Releases
 
