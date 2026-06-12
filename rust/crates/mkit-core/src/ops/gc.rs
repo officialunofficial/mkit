@@ -612,6 +612,8 @@ mod tests {
                 object_hash: staged,
                 mtime_ns: 0,
                 size: 0,
+                ino: 0,
+                ctime_ns: 0,
             }],
         };
         index::write_index(d.path(), &idx).unwrap();

@@ -172,6 +172,8 @@ fn commit_reports_invalid_index_instead_of_nothing_staged() {
         object_hash: ZERO,
         mtime_ns: 0,
         size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     idx.entries.push(IndexEntry {
         path: "same.txt".into(),
@@ -179,6 +181,8 @@ fn commit_reports_invalid_index_instead_of_nothing_staged() {
         object_hash: ZERO,
         mtime_ns: 0,
         size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     fs::write(p.join(".mkit/index"), idx.serialize()).unwrap();
 
@@ -407,6 +411,8 @@ fn commit_all_preserves_existing_executable_mode_on_non_unix() {
         object_hash: hash,
         mtime_ns: 0,
         size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     index::write_index(p, &idx).unwrap();
     ok(p, &["commit", "-m", "first"]);
@@ -448,6 +454,8 @@ fn add_one_preserves_existing_executable_mode_on_non_unix() {
         object_hash: hash,
         mtime_ns: 0,
         size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     index::write_index(p, &idx).unwrap();
 
@@ -477,6 +485,8 @@ fn commit_all_rejects_invalid_index_path_before_refreshing() {
         object_hash: ZERO,
         mtime_ns: 0,
         size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     index::write_index(p, &idx).unwrap();
 

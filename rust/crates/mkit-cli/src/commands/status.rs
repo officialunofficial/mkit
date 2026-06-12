@@ -68,7 +68,7 @@ use std::path::Path;
 use clap::{Parser, ValueEnum};
 use mkit_core::Hash;
 use mkit_core::index::{self, EntryStatus, Index};
-use mkit_core::ops::{DiffKind, StatusEntry, StatusStaging, status_diff};
+use mkit_core::ops::{DiffKind, StatusEntry, StatusStaging, status_diff_observed};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
@@ -142,17 +142,19 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("read index: {e}"), exit::GENERAL_ERROR),
     };
 
-    let entries = match status_diff(&store, head_tree.as_ref(), &cwd, idx.as_ref()) {
-        Ok(e) => e,
-        Err(e) => return emit_err(&format!("status: {e}"), exit::GENERAL_ERROR),
-    };
+    let (entries, observations) =
+        match status_diff_observed(&store, head_tree.as_ref(), &cwd, idx.as_ref()) {
+            Ok(v) => v,
+            Err(e) => return emit_err(&format!("status: {e}"), exit::GENERAL_ERROR),
+        };
 
     // Opportunistic stat-cache refresh, like `git status`: entries the
-    // racy-clean rule forced us to re-hash and that came back clean get
-    // their cache re-recorded so the NEXT status is O(stat). Purely an
+    // racy-clean rule forced us to re-hash and whose re-hash matched
+    // the staged hash get their cache re-recorded from the HASH-TIME
+    // stat (never a later one — see StatObservation). Purely an
     // optimisation — skipped on lock contention or any error.
-    if let Some(idx) = idx.as_ref() {
-        refresh_stat_cache(&cwd, idx, &entries);
+    if idx.is_some() {
+        refresh_stat_cache(&cwd, &observations);
     }
 
     if porcelain {
@@ -166,28 +168,37 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
-/// Re-record the stat cache for tracked entries that `status_diff` just
-/// verified clean by re-hashing (their cache was racy-invalidated on
-/// read, `mtime_ns == 0`). Sound because:
+/// Re-record the stat cache from the worktree walk's hash-time
+/// [`StatObservation`]s. Sound by construction:
 ///
-/// - we only touch entries with NO diff in either leg — the re-hash
-///   proved the worktree bytes equal `object_hash`;
-/// - a file modified between that hash and our `stat` lands an mtime of
-///   ~now, which the racy-clean rule re-verifies on the next read; and
+/// - each observation pairs a hash with the stat captured from the
+///   opened fd BEFORE its content was read — a modification after that
+///   stat lands a newer mtime/ctime, so the recorded pair can only
+///   under-claim, never hide an edit;
 /// - the rewrite happens under the worktree lock against a freshly
-///   re-read index, so a concurrent `add` is never clobbered. Lock
-///   contention or any error skips the refresh — it is an optimisation.
-fn refresh_stat_cache(root: &Path, idx: &index::Index, entries: &[StatusEntry]) {
-    use mkit_core::index::EntryStatus;
-
-    let needs_refresh = idx.entries.iter().any(|e| {
-        e.mtime_ns == 0 && matches!(e.status, EntryStatus::Blob | EntryStatus::Executable)
-    });
-    if !needs_refresh {
+///   re-read index, matching path AND hash, so a concurrent `add` is
+///   never clobbered;
+/// - a v1 on-disk index is left untouched: `status` is a query and must
+///   not one-way-upgrade the format under an older binary's feet (the
+///   first mutating command performs the upgrade instead).
+///
+/// Lock contention or any error skips the refresh — it is an
+/// optimisation.
+fn refresh_stat_cache(root: &Path, observations: &[mkit_core::worktree::StatObservation]) {
+    if observations.is_empty() {
         return;
     }
-    let changed: std::collections::HashSet<&str> =
-        entries.iter().map(|s| s.diff.path.as_str()).collect();
+    // Version sniff: never auto-upgrade a v1 index from a query command.
+    match std::fs::File::open(mkit_core::index::index_path(root)) {
+        Ok(mut f) => {
+            use std::io::Read as _;
+            let mut header = [0u8; 5];
+            if f.read_exact(&mut header).is_err() || header[4] != mkit_core::index::FORMAT_VERSION {
+                return;
+            }
+        }
+        Err(_) => return,
+    }
     // Try-take the worktree lock with a near-zero timeout and no error
     // output; a concurrent mutator wins and we silently skip.
     let Ok(_lock) = mkit_core::repo_lock::acquire(
@@ -200,32 +211,20 @@ fn refresh_stat_cache(root: &Path, idx: &index::Index, entries: &[StatusEntry]) 
     let Ok(mut fresh) = index::read_index(root) else {
         return;
     };
+    let by_path: std::collections::HashMap<&str, &mkit_core::worktree::StatObservation> =
+        observations.iter().map(|o| (o.path.as_str(), o)).collect();
     let mut updated = false;
     for e in &mut fresh.entries {
-        if e.mtime_ns != 0
-            || changed.contains(e.path.as_str())
-            || !matches!(e.status, EntryStatus::Blob | EntryStatus::Executable)
-        {
-            continue;
-        }
-        // Only refresh entries our verification pass actually covered:
-        // same path was present and uncached when we diffed.
-        let verified = idx
-            .find_entry(&e.path)
-            .map(|i| &idx.entries[i])
-            .is_some_and(|old| old.mtime_ns == 0 && old.object_hash == e.object_hash);
-        if !verified {
-            continue;
-        }
-        let Ok(meta) = root.join(&e.path).symlink_metadata() else {
+        let Some(obs) = by_path.get(e.path.as_str()) else {
             continue;
         };
-        if !meta.is_file() {
-            continue;
+        if e.mtime_ns == 0 && e.object_hash == obs.object_hash {
+            e.mtime_ns = obs.mtime_ns;
+            e.size = obs.size;
+            e.ino = obs.ino;
+            e.ctime_ns = obs.ctime_ns;
+            updated = true;
         }
-        e.mtime_ns = mkit_core::worktree::mtime_nanos(&meta);
-        e.size = meta.len();
-        updated = true;
     }
     if updated {
         let _ = index::write_index(root, &fresh);

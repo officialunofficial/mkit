@@ -119,17 +119,11 @@ pub fn run(args: &[String]) -> u8 {
     // no garbage objects. Reads fall through to the store.
     let snapshot = EphemeralSink::new(&store);
 
-    let (old_tree, new_tree, pathspecs) = match resolve_diff_endpoints(
-        &store,
-        &snapshot,
-        &mkit_dir,
-        &cwd,
-        opts.staged,
-        &opts.args,
-    ) {
-        Ok(v) => v,
-        Err((msg, code)) => return emit_err(&msg, code),
-    };
+    let (old_tree, new_tree, pathspecs) =
+        match resolve_diff_endpoints(&store, &snapshot, &mkit_dir, &cwd, opts.staged, &opts.args) {
+            Ok(v) => v,
+            Err((msg, code)) => return emit_err(&msg, code),
+        };
 
     let result = match diff_trees(&snapshot, old_tree, new_tree) {
         Ok(r) => r,

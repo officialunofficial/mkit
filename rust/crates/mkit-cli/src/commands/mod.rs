@@ -472,13 +472,19 @@ pub fn sync_index_to_tree(root: &Path, store: &ObjectStore, tree_hash: Hash) -> 
     // match against the old observation still proves the same bytes,
     // so commit/checkout don't wipe the O(stat) fast path.
     if let Ok(old) = mkit_core::index::read_index(root) {
+        // O(1) lookups: find_entry is a linear scan and this loop runs
+        // once per tree entry (was O(n²) per commit/checkout).
+        let by_path: std::collections::HashMap<&str, &mkit_core::index::IndexEntry> =
+            old.entries.iter().map(|o| (o.path.as_str(), o)).collect();
         for e in &mut idx.entries {
-            if let Some(i) = old.find_entry(&e.path) {
-                let o = &old.entries[i];
-                if o.object_hash == e.object_hash && o.status == e.status {
-                    e.mtime_ns = o.mtime_ns;
-                    e.size = o.size;
-                }
+            if let Some(o) = by_path.get(e.path.as_str())
+                && o.object_hash == e.object_hash
+                && o.status == e.status
+            {
+                e.mtime_ns = o.mtime_ns;
+                e.size = o.size;
+                e.ino = o.ino;
+                e.ctime_ns = o.ctime_ns;
             }
         }
     }

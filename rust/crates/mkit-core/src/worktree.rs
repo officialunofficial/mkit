@@ -78,6 +78,27 @@ pub fn validate_symlink_target(target: &str) -> bool {
     true
 }
 
+/// A hash-time stat observation: while building a tree we re-hashed
+/// `path` (its cache was absent or racy-smudged) and the result equals
+/// the staging index's hash — so the stat captured from the OPENED file
+/// descriptor *before* its content was read proves the entry clean.
+/// `status` consumes these to heal the stat cache without ever pairing
+/// a post-verification stat with a pre-verification hash (the unsound
+/// verify-then-stat order).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatObservation {
+    /// Repo-relative path, `/`-separated (index path form).
+    pub path: String,
+    /// The content hash the re-hash produced (== the index entry's).
+    pub object_hash: Hash,
+    /// Stat fields captured from the opened fd before the read, in
+    /// [`stat_cache_fields`] order.
+    pub mtime_ns: u64,
+    pub size: u64,
+    pub ino: u64,
+    pub ctime_ns: u64,
+}
+
 /// Build a tree object for `dir` and its subdirectories. Honours the
 /// `.gitignore` + `.mkitignore` ignore files loaded from `dir`.
 ///
@@ -107,6 +128,22 @@ pub fn build_tree_filtered<S: ObjectSink + ?Sized>(
     dir: &Path,
     index: Option<&Index>,
 ) -> WorktreeResult<Hash> {
+    build_tree_filtered_observed(sink, dir, index, &mut Vec::new())
+}
+
+/// [`build_tree_filtered`] that additionally reports every
+/// [`StatObservation`] (file re-hashed to a hash matching its index
+/// entry) into `observations`, so callers can heal the stat cache from
+/// hash-time stats.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn build_tree_filtered_observed<S: ObjectSink + ?Sized>(
+    sink: &S,
+    dir: &Path,
+    index: Option<&Index>,
+    observations: &mut Vec<StatObservation>,
+) -> WorktreeResult<Hash> {
     let ignores = ignore::load(dir).map_err(|e| match e {
         crate::ignore::IgnoreError::Io(io) => WorktreeError::Io(io),
         crate::ignore::IgnoreError::FileTooLarge => {
@@ -122,7 +159,20 @@ pub fn build_tree_filtered<S: ObjectSink + ?Sized>(
         loaded = index::read_index(dir).unwrap_or_default();
         &loaded
     };
-    build_tree_inner(sink, dir, "", &ignores, index, false)
+    // O(1) per-file entry lookups; `Index::find_entry` is a linear scan
+    // and the walk consults it once per regular file.
+    let by_path: std::collections::HashMap<&str, &crate::index::IndexEntry> =
+        index.entries.iter().map(|e| (e.path.as_str(), e)).collect();
+    build_tree_inner(
+        sink,
+        dir,
+        "",
+        &ignores,
+        index,
+        &by_path,
+        false,
+        observations,
+    )
 }
 
 /// `rel_dir` is the path of `dir` relative to the repo root (empty at the
@@ -130,13 +180,16 @@ pub fn build_tree_filtered<S: ObjectSink + ?Sized>(
 /// rather than bare basenames. `parent_ignored` carries down whether an
 /// ancestor directory is ignored (git "everything under an excluded dir is
 /// excluded"); `index` is the tracked set used to exempt tracked content.
+#[allow(clippy::too_many_arguments)]
 fn build_tree_inner<S: ObjectSink + ?Sized>(
     sink: &S,
     dir: &Path,
     rel_dir: &str,
     ignores: &IgnoreList,
     index: &Index,
+    by_path: &std::collections::HashMap<&str, &crate::index::IndexEntry>,
     parent_ignored: bool,
+    observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
     let mut entries: Vec<TreeEntry> = Vec::new();
 
@@ -174,28 +227,40 @@ fn build_tree_inner<S: ObjectSink + ?Sized>(
 
         if meta.file_type().is_file() {
             // Stat cache: when the staging index proves this file's
-            // content via mtime+size (+exec class), reuse the staged
-            // hash without opening the file — O(stat) instead of
+            // content via mtime+size+ino+ctime (+exec class), reuse the
+            // staged hash without opening the file — O(stat) instead of
             // O(content) for unchanged files. The object was stored at
             // `add` time, so the tree reference stays resolvable.
-            let cached = index
-                .find_entry(&rel_path)
-                .map(|i| &index.entries[i])
-                .filter(|e| stat_matches(e, &meta));
-            if let Some(e) = cached {
-                entries.push(TreeEntry {
-                    name: name_str.into_bytes(),
-                    mode: entry_mode_from_file_metadata(&meta),
-                    object_hash: e.object_hash,
-                });
+            let indexed = by_path.get(rel_path.as_str()).copied();
+            let cached = indexed.filter(|e| stat_matches(e, &meta));
+            let (object_hash, mode) = if let Some(e) = cached {
+                (e.object_hash, entry_mode_from_file_metadata(&meta))
             } else {
                 let (h, opened_meta) = hash_file_with_metadata(sink, &entry.path())?;
-                entries.push(TreeEntry {
-                    name: name_str.into_bytes(),
-                    mode: entry_mode_from_file_metadata(&opened_meta),
-                    object_hash: h,
-                });
-            }
+                // Cache miss that re-hashed back to the staged hash:
+                // report the observation (stat captured from the opened
+                // fd BEFORE the content read) so callers can heal the
+                // racy-smudged cache soundly.
+                if let Some(e) = indexed
+                    && e.object_hash == h
+                {
+                    let (mtime_ns, size, ino, ctime_ns) = stat_cache_fields(&opened_meta);
+                    observations.push(StatObservation {
+                        path: rel_path.clone(),
+                        object_hash: h,
+                        mtime_ns,
+                        size,
+                        ino,
+                        ctime_ns,
+                    });
+                }
+                (h, entry_mode_from_file_metadata(&opened_meta))
+            };
+            entries.push(TreeEntry {
+                name: name_str.into_bytes(),
+                mode,
+                object_hash,
+            });
         } else if meta.file_type().is_dir() {
             // A directory on disk at a path tracked as a *file* shadows that
             // tracked entry. git reports only the tracked-side deletion and
@@ -211,7 +276,9 @@ fn build_tree_inner<S: ObjectSink + ?Sized>(
                 &rel_path,
                 ignores,
                 index,
+                by_path,
                 entry_ignored,
+                observations,
             )?;
             entries.push(TreeEntry {
                 name: name_str.into_bytes(),
@@ -607,24 +674,64 @@ pub fn mtime_nanos(meta: &fs::Metadata) -> u64 {
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
+/// The full stat-cache observation for `meta`, in index-entry field
+/// order: `(mtime_ns, size, ino, ctime_ns)`. The single producer-side
+/// dual of [`stat_matches`] — every site that records the cache uses
+/// this so the recorded and compared field sets can never drift.
+/// `ino`/`ctime_ns` are 0 (= don't check) on platforms without them.
+#[must_use]
+pub fn stat_cache_fields(meta: &fs::Metadata) -> (u64, u64, u64, u64) {
+    #[cfg(unix)]
+    let (ino, ctime_ns) = {
+        use std::os::unix::fs::MetadataExt;
+        let ctime_ns = u64::try_from(meta.ctime())
+            .ok()
+            .and_then(|s| s.checked_mul(1_000_000_000))
+            .and_then(|ns| ns.checked_add(u64::try_from(meta.ctime_nsec()).unwrap_or(0)))
+            .unwrap_or(0);
+        (meta.ino(), ctime_ns)
+    };
+    #[cfg(not(unix))]
+    let (ino, ctime_ns) = (0u64, 0u64);
+    (mtime_nanos(meta), meta.len(), ino, ctime_ns)
+}
+
 /// True iff `meta` proves the worktree file behind `entry` is
 /// byte-identical to `entry.object_hash` without reading it: the cached
 /// mtime is nonzero (cache present, not racy-smudged) and equal, the
-/// size is equal, and the live mode's exec class matches the staged
-/// status (an exec-bit flip changes the tree entry even when content is
-/// untouched). Symlink entries never stat-match — the target re-read is
-/// cheap and `meta` semantics differ.
+/// size is equal, the inode and ctime match when recorded (catching
+/// replace-by-rename and `touch -r`-style timestamp restoration —
+/// ctime cannot be set from userspace), and the live mode's exec class
+/// matches the staged status. Symlink entries never stat-match — the
+/// target re-read is cheap and `meta` semantics differ.
 #[must_use]
 pub fn stat_matches(entry: &crate::index::IndexEntry, meta: &fs::Metadata) -> bool {
     use crate::index::EntryStatus;
     if entry.mtime_ns == 0 || !meta.is_file() {
         return false;
     }
-    if meta.len() != entry.size || mtime_nanos(meta) != entry.mtime_ns {
+    let (mtime_ns, size, ino, ctime_ns) = stat_cache_fields(meta);
+    if size != entry.size || mtime_ns != entry.mtime_ns {
+        return false;
+    }
+    // ino/ctime: compare only when both sides have a value — a v2 entry
+    // recorded on a platform without them (0) stays usable elsewhere.
+    if entry.ino != 0 && ino != 0 && ino != entry.ino {
+        return false;
+    }
+    if entry.ctime_ns != 0 && ctime_ns != 0 && ctime_ns != entry.ctime_ns {
         return false;
     }
     match entry.status {
+        // On non-unix the exec bit is not observable in the filesystem
+        // mode, so the recorded status is the source of truth — both
+        // classes stat-match (previously Executable entries could never
+        // match there, silently defeating the cache).
+        #[cfg(not(unix))]
+        EntryStatus::Blob | EntryStatus::Executable => true,
+        #[cfg(unix)]
         EntryStatus::Blob => entry_mode_from_file_metadata(meta) == EntryMode::Blob,
+        #[cfg(unix)]
         EntryStatus::Executable => entry_mode_from_file_metadata(meta) == EntryMode::Executable,
         EntryStatus::Symlink | EntryStatus::Removed | EntryStatus::Tree => false,
     }
@@ -1004,6 +1111,8 @@ mod tests {
             object_hash: blob_hash,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let h = build_tree_from_index(&store, &idx).unwrap();
         let Object::Tree(t) = store.read_object(&h).unwrap() else {
@@ -1027,6 +1136,8 @@ mod tests {
             object_hash: a,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "subdir/b.txt".into(),
@@ -1034,6 +1145,8 @@ mod tests {
             object_hash: b,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let root_hash = build_tree_from_index(&store, &idx).unwrap();
         let Object::Tree(root) = store.read_object(&root_hash).unwrap() else {
@@ -1064,6 +1177,8 @@ mod tests {
             object_hash: a,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "drop.txt".into(),
@@ -1071,6 +1186,8 @@ mod tests {
             object_hash: [0; 32],
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let h = build_tree_from_index(&store, &idx).unwrap();
         let Object::Tree(t) = store.read_object(&h).unwrap() else {
@@ -1092,6 +1209,8 @@ mod tests {
             object_hash: exec,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "link".into(),
@@ -1099,6 +1218,8 @@ mod tests {
             object_hash: link,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let h = build_tree_from_index(&store, &idx).unwrap();
         let Object::Tree(t) = store.read_object(&h).unwrap() else {
@@ -1123,6 +1244,8 @@ mod tests {
             object_hash: a,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "a.txt".into(),
@@ -1130,6 +1253,8 @@ mod tests {
             object_hash: a,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "m.txt".into(),
@@ -1137,6 +1262,8 @@ mod tests {
             object_hash: a,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let h = build_tree_from_index(&store, &idx).unwrap();
         let Object::Tree(t) = store.read_object(&h).unwrap() else {
@@ -1157,6 +1284,8 @@ mod tests {
             object_hash: h,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let err = build_tree_from_index(&store, &idx).unwrap_err();
         assert!(matches!(err, WorktreeError::Io(_)));
@@ -1173,6 +1302,8 @@ mod tests {
             object_hash: h,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let err = build_tree_from_index(&store, &idx).unwrap_err();
         assert!(matches!(err, WorktreeError::Io(_)));
@@ -1191,6 +1322,8 @@ mod tests {
             object_hash: h,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let err = build_tree_from_index(&store, &idx).unwrap_err();
         assert!(matches!(err, WorktreeError::Io(_)));
@@ -1226,6 +1359,8 @@ mod tests {
             object_hash: a,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "dir/b.txt".into(),
@@ -1233,6 +1368,8 @@ mod tests {
             object_hash: b,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "dir/c.txt".into(),
@@ -1240,6 +1377,8 @@ mod tests {
             object_hash: c,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let index_root = build_tree_from_index(&store, &idx).unwrap();
 
@@ -1260,6 +1399,8 @@ mod tests {
             object_hash: h,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let root = build_tree_from_index(&store, &idx).unwrap();
         let Object::Tree(t) = store.read_object(&root).unwrap() else {
@@ -1303,6 +1444,8 @@ mod tests {
             object_hash: h,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "a/b".into(),
@@ -1310,6 +1453,8 @@ mod tests {
             object_hash: h,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let err = build_tree_from_index(&store, &idx).unwrap_err();
         let msg = format!("{err}");
@@ -1332,6 +1477,8 @@ mod tests {
             object_hash: h,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "a".into(),
@@ -1339,6 +1486,8 @@ mod tests {
             object_hash: h,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         assert!(build_tree_from_index(&store, &idx).is_err());
     }
@@ -1355,6 +1504,8 @@ mod tests {
             object_hash: a,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "same.txt".into(),
@@ -1362,6 +1513,8 @@ mod tests {
             object_hash: b,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
 
         let err = build_tree_from_index(&store, &idx).unwrap_err();
@@ -1380,6 +1533,8 @@ mod tests {
             object_hash: [0; 32],
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "same.txt".into(),
@@ -1387,6 +1542,8 @@ mod tests {
             object_hash: h,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
 
         let err = build_tree_from_index(&store, &idx).unwrap_err();
@@ -1410,6 +1567,8 @@ mod tests {
             object_hash: [0; 32],
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let h = build_tree_from_index(&store, &idx).unwrap();
         let Object::Tree(t) = store.read_object(&h).unwrap() else {
@@ -1439,6 +1598,8 @@ mod tests {
             object_hash: [42; 32],
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
 
         let err = build_tree_from_index(&store, &idx).unwrap_err();
@@ -1458,6 +1619,8 @@ mod tests {
             object_hash: tree_hash,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
 
         let err = build_tree_from_index(&store, &idx).unwrap_err();
@@ -1506,6 +1669,8 @@ mod tests {
             object_hash: chunked_hash,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let root = build_tree_from_index(&store, &idx).unwrap();
         let Object::Tree(t) = store.read_object(&root).unwrap() else {
@@ -1534,6 +1699,8 @@ mod tests {
             object_hash: chunked_hash,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let err = build_tree_from_index(&store, &idx).unwrap_err();
         assert!(format!("{err}").contains("non-blob"));
@@ -1598,6 +1765,8 @@ mod tests {
                 path: format!("d{}/sub/f{i}.txt", i % 5),
                 mtime_ns: 0,
                 size: 0,
+                ino: 0,
+                ctime_ns: 0,
             });
         }
 
@@ -1672,6 +1841,8 @@ mod tests {
             object_hash: crate::hash::hash(b"irrelevant"),
             mtime_ns: mtime_nanos(&meta),
             size: meta.len(),
+            ino: 0,
+            ctime_ns: 0,
         };
         assert!(stat_matches(&entry, &meta));
 
@@ -1705,6 +1876,8 @@ mod tests {
             object_hash: crate::hash::hash(b"x"),
             mtime_ns: mtime_nanos(&meta),
             size: meta.len(),
+            ino: 0,
+            ctime_ns: 0,
         };
         assert!(stat_matches(&entry, &meta));
         // chmod +x without touching content, then restore the mtime so
@@ -1745,6 +1918,8 @@ mod tests {
                 object_hash: staged_hash,
                 mtime_ns: mtime_nanos(&meta),
                 size: meta.len(),
+                ino: 0,
+                ctime_ns: 0,
             }],
         };
 
@@ -1768,6 +1943,120 @@ mod tests {
         assert_eq!(plain, tree_h, "cache hit must not change tree hashes");
     }
 
+    /// Replace-by-rename with preserved mtime+size must be caught by
+    /// the inode check: the replacement file has a different ino.
+    #[cfg(unix)]
+    #[test]
+    fn stat_mismatch_on_inode_rehashes() {
+        let work = TempDir::new().unwrap();
+        let f = work.path().join("swap.txt");
+        fs::write(&f, b"original").unwrap();
+        let meta = meta_of(&f);
+        let (mtime_ns, size, ino, ctime_ns) = stat_cache_fields(&meta);
+        let entry = crate::index::IndexEntry {
+            path: "swap.txt".into(),
+            status: crate::index::EntryStatus::Blob,
+            object_hash: crate::hash::hash(b"original"),
+            mtime_ns,
+            size,
+            ino,
+            ctime_ns,
+        };
+        assert!(stat_matches(&entry, &meta));
+
+        // Same-size replacement via rename with timestamps restored —
+        // the tar -x / rsync -t / mv-of-prepared-file shape.
+        let staging = work.path().join(".swap.new");
+        fs::write(&staging, b"REPLACED").unwrap(); // same 8-byte size
+        let fh = fs::File::options().write(true).open(&staging).unwrap();
+        fh.set_times(fs::FileTimes::new().set_modified(meta.modified().unwrap()))
+            .unwrap();
+        drop(fh);
+        fs::rename(&staging, &f).unwrap();
+        let meta2 = meta_of(&f);
+        assert_eq!(meta2.len(), entry.size, "size preserved by the swap");
+        assert!(
+            !stat_matches(&entry, &meta2),
+            "a renamed-in replacement must not stat-match (ino differs)"
+        );
+    }
+
+    /// A recorded ctime that disagrees with the live one must miss —
+    /// ctime cannot be restored from userspace, so `touch -r` after an
+    /// in-place edit is caught even when mtime+size+ino all match.
+    #[test]
+    fn stat_mismatch_on_ctime_rehashes() {
+        let work = TempDir::new().unwrap();
+        let f = work.path().join("touched.txt");
+        fs::write(&f, b"content").unwrap();
+        let meta = meta_of(&f);
+        let (mtime_ns, size, ino, ctime_ns) = stat_cache_fields(&meta);
+        if ctime_ns == 0 {
+            return; // platform without ctime — check not applicable
+        }
+        let entry = crate::index::IndexEntry {
+            path: "touched.txt".into(),
+            status: crate::index::EntryStatus::Blob,
+            object_hash: crate::hash::hash(b"content"),
+            mtime_ns,
+            size,
+            ino,
+            ctime_ns: ctime_ns ^ 1,
+        };
+        assert!(
+            !stat_matches(&entry, &meta),
+            "ctime disagreement must invalidate the cache"
+        );
+    }
+
+    /// The worktree walk must report hash-time observations for entries
+    /// whose cache was absent but whose content re-hashed to the staged
+    /// hash — and the observation must carry the fd-stat, enabling the
+    /// status command to heal the cache soundly.
+    #[test]
+    fn build_tree_observed_reports_clean_rehashes() {
+        let (_sd, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        fs::write(work.path().join("clean.txt"), b"clean bytes").unwrap();
+        fs::write(work.path().join("dirty.txt"), b"new content").unwrap();
+
+        let clean_hash = store_file_object(&store, b"clean bytes").unwrap();
+        let stale_hash = crate::hash::hash(b"old content");
+        let idx = crate::index::Index {
+            entries: vec![
+                crate::index::IndexEntry {
+                    path: "clean.txt".into(),
+                    status: crate::index::EntryStatus::Blob,
+                    object_hash: clean_hash,
+                    mtime_ns: 0, // racy-smudged: forces a re-hash
+                    size: 0,
+                    ino: 0,
+                    ctime_ns: 0,
+                },
+                crate::index::IndexEntry {
+                    path: "dirty.txt".into(),
+                    status: crate::index::EntryStatus::Blob,
+                    object_hash: stale_hash,
+                    mtime_ns: 0,
+                    size: 0,
+                    ino: 0,
+                    ctime_ns: 0,
+                },
+            ],
+        };
+        let mut obs = Vec::new();
+        build_tree_filtered_observed(&store, work.path(), Some(&idx), &mut obs).unwrap();
+
+        assert_eq!(obs.len(), 1, "only the verified-clean entry is observed");
+        let o = &obs[0];
+        assert_eq!(o.path, "clean.txt");
+        assert_eq!(o.object_hash, clean_hash);
+        let meta = meta_of(&work.path().join("clean.txt"));
+        let (mtime_ns, size, _ino, _ctime) = stat_cache_fields(&meta);
+        assert_eq!(o.mtime_ns, mtime_ns, "observation carries the fd stat");
+        assert_eq!(o.size, size);
+    }
+
     /// A stat MISMATCH must fall back to re-hashing the live content.
     #[test]
     fn build_tree_rehashes_on_stat_mismatch() {
@@ -1785,6 +2074,8 @@ mod tests {
                 // size deliberately wrong → mismatch → re-hash.
                 mtime_ns: mtime_nanos(&meta),
                 size: meta.len() + 1,
+                ino: 0,
+                ctime_ns: 0,
             }],
         };
         let tree_h = build_tree_filtered(&store, work.path(), Some(&idx)).unwrap();

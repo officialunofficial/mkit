@@ -49,12 +49,17 @@ Each v2 entry:
                                      0 = no cache (always re-hash)
 [u64 LE size]                        stat cache: file size observed at the same time;
                                      meaningful only when mtime_ns != 0
+[u64 LE ino]                         stat cache: inode number; 0 = don't check.
+                                     Catches replace-by-rename swaps.
+[u64 LE ctime_ns]                    stat cache: status-change time (saturating ns);
+                                     0 = don't check. ctime cannot be set from
+                                     userspace, catching timestamp restoration.
 [u16 LE path_len]                    0 .. 4096
 [path_len bytes path]                UTF-8 relative path, forward slashes only
 ```
 
-A v1 entry (version byte `0x01`) omits the two stat-cache fields
-(35-byte minimum instead of 51). Readers MUST accept v1 streams and
+A v1 entry (version byte `0x01`) omits the four stat-cache fields
+(35-byte minimum instead of 67). Readers MUST accept v1 streams and
 zero-fill the cache (see §5); writers always emit v2.
 
 Path validation rules (enforced by writers; readers reject violations
@@ -107,23 +112,33 @@ A consumer MAY skip re-reading and re-hashing a worktree file and reuse
 1. `mtime_ns != 0` (zero is the no-cache sentinel);
 2. the live file's mtime (in saturating ns) equals `mtime_ns`;
 3. the live file's size equals `size`;
-4. the live file's mode class matches `status` (a plain blob has the
-   exec bits clear; an executable has any set). Symlink entries never
-   stat-match — targets are re-read.
+4. when both the recorded and live values are nonzero: the inode
+   equals `ino` and the ctime equals `ctime_ns`;
+5. the live file's mode class matches `status` (a plain blob has the
+   exec bits clear; an executable has any set; on platforms where the
+   exec bit is not observable, both classes match). Symlink entries
+   never stat-match — targets are re-read.
 
 **Racy-clean (normative):** a file modified within the filesystem's
 timestamp granularity of when it was hashed can carry the same
 mtime+size with different bytes. Readers MUST therefore treat as
 *uncached* any entry whose `mtime_ns` is not safely older than the
-index file's own mtime: with conservative 1-second granularity, an
-entry is racy when `entry.mtime_ns >= index_file_mtime_ns - 1s`. Racy
-entries are re-hashed on use; a later index write (whose file mtime is
-then newer) heals the cache. This is git's racy-git rule applied at
-read time, which preserves the on-disk cache instead of destroying it.
+index file's own mtime. The window is judged PER ENTRY: the tight
+window (10ms) applies only when both the index file's mtime and the
+entry's recorded mtime show sub-second precision; an entry with a
+whole-second mtime (vfat/SMB mounts, tar/touch-truncated timestamps)
+keeps the conservative 1-second window. Racy entries are re-hashed on
+use; a later index write (whose file mtime is then newer) heals the
+cache. This is git's racy-git rule applied at read time, which
+preserves the on-disk cache instead of destroying it.
 
-Producers record `mtime_ns`/`size` from the metadata of the **opened
-file descriptor** used for hashing (not a separate pre-open `stat`),
-closing the window where the path is swapped between stat and read.
+Producers record all four cache fields from the metadata of the
+**opened file descriptor** used for hashing (not a separate pre-open
+`stat`), closing the window where the path is swapped between stat and
+read. Consumers that *heal* the cache after verifying an entry clean
+(e.g. `status`) MUST likewise record the hash-time observation, never
+a stat taken after verification — verify-then-stat can pair a fresh
+stat with a stale hash.
 Commands that rebuild the index from a tree (commit's post-commit sync,
 checkout) SHOULD carry the cache over from the outgoing index for
 entries whose path, status, and `object_hash` are unchanged.
@@ -151,10 +166,13 @@ Version handling: readers MUST accept version bytes `0x01` (zero-filled
 stat cache) and `0x02`, and MUST reject any other version with
 `IndexError::UnsupportedVersion(byte)`. Writers always emit `0x02`, so
 a v1 index upgrades in place on the first index-writing command.
+Query commands (`status`) MUST NOT perform that upgrade — an
+opportunistic cache refresh skips v1 indexes so a read-only invocation
+never breaks an older binary sharing the worktree.
 
 Additionally, readers MUST reject a `count` header that cannot possibly
-fit in the remaining buffer (each entry is at minimum 51 bytes in v2 —
-1 status + 32 hash + 8 mtime_ns + 8 size + 2 path_len + 0 path — and
+fit in the remaining buffer (each entry is at minimum 67 bytes in v2 —
+1 status + 32 hash + 32 stat cache + 2 path_len + 0 path — and
 35 bytes in v1). A 9-byte buffer declaring `count = u32::MAX` is
 rejected as `IndexError::Corrupt` before the entry-allocation loop runs.
 
@@ -170,7 +188,7 @@ path.
 | Version | Changes                                                            |
 |---------|--------------------------------------------------------------------|
 | `0x01`  | Initial layout: status + hash + path.                              |
-| `0x02`  | Adds per-entry `mtime_ns` + `size` stat cache (§4). v1 read-compat. |
+| `0x02`  | Adds per-entry `mtime_ns`+`size`+`ino`+`ctime_ns` stat cache (§4). v1 read-compat. |
 
 Future versions evolving the index MUST:
 - Preserve the `"MKIX"` magic as a format-family marker.
@@ -186,9 +204,10 @@ Future versions evolving the index MUST:
    BLAKE3 of those bytes (informative — index is never hashed for
    protocol purposes).
 2. **Single v2 entry**: path = "hello.txt", status = blob,
-   `mtime_ns = 0x0102030405060708`, `size = 11`. Total length is
-   **69 bytes** (9 header + 1 status + 32 hash + 8 mtime_ns + 8 size
-   + 2 path_len + 9 path). Pinned by `v2_single_entry_pinned_bytes`.
+   `mtime_ns = 0x0102030405060708`, `size = 11`, pinned ino/ctime.
+   Total length is **85 bytes** (9 header + 1 status + 32 hash +
+   32 stat cache + 2 path_len + 9 path). Pinned by
+   `v2_single_entry_pinned_bytes`.
 3. **v1 read-compat**: the 53-byte v1 single-entry stream parses with
    `mtime_ns = 0`, `size = 0`. Pinned by
    `reads_v1_index_with_zeroed_stat_cache`.

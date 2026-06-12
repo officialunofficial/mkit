@@ -95,6 +95,14 @@ pub struct IndexEntry {
     /// Stat cache: file size in bytes observed when `object_hash` was
     /// computed. Only meaningful when `mtime_ns != 0`.
     pub size: u64,
+    /// Stat cache: inode number (0 on platforms without one, or when
+    /// uncached). Catches replace-by-rename swaps that preserve
+    /// mtime+size — the replacement file has a different inode.
+    pub ino: u64,
+    /// Stat cache: status-change time (ctime) in saturating ns. ctime
+    /// cannot be set from userspace, so it catches `touch -r`-style
+    /// timestamp restoration after an edit. 0 = don't check.
+    pub ctime_ns: u64,
 }
 
 /// In-memory staging index.
@@ -171,7 +179,7 @@ impl Index {
         let body: usize = self
             .entries
             .iter()
-            .map(|e| 1 + HASH_LEN + 8 + 8 + 2 + e.path.len())
+            .map(|e| 1 + HASH_LEN + 8 + 8 + 8 + 8 + 2 + e.path.len())
             .sum();
         let mut out = Vec::with_capacity(9 + body);
         out.extend_from_slice(&MAGIC);
@@ -183,6 +191,8 @@ impl Index {
             out.extend_from_slice(&entry.object_hash);
             out.extend_from_slice(&entry.mtime_ns.to_le_bytes());
             out.extend_from_slice(&entry.size.to_le_bytes());
+            out.extend_from_slice(&entry.ino.to_le_bytes());
+            out.extend_from_slice(&entry.ctime_ns.to_le_bytes());
             let path_len =
                 u16::try_from(entry.path.len()).expect("index entry path length fits in u16");
             out.extend_from_slice(&path_len.to_le_bytes());
@@ -256,15 +266,17 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
     if version != FORMAT_VERSION && version != FORMAT_VERSION_V1 {
         return Err(IndexError::UnsupportedVersion(version));
     }
-    // v2 entries carry an extra mtime_ns(8) + size(8) before path_len.
-    let stat_cache_len: usize = if version == FORMAT_VERSION { 16 } else { 0 };
+    // v2 entries carry mtime_ns(8) + size(8) + ino(8) + ctime_ns(8)
+    // before path_len.
+    let stat_cache_len: usize = if version == FORMAT_VERSION { 32 } else { 0 };
     // Fixed bytes per entry: status(1) + hash(32) + stat cache + path_len(2).
     let min_entry_len = 1 + HASH_LEN + stat_cache_len + 2;
     let count = u32::from_le_bytes([data[5], data[6], data[7], data[8]]) as usize;
     // Reject an attacker-supplied `count` that is impossible given the
     // remaining bytes. The minimum wire-length of an entry is 35 bytes
     // for v1 / 51 for v2 (empty path). Without this up-front check the
-    // loop would walk `count` iterations before failing — trivially
+    // loop would walk `count` iterations before failing (v1 minimum is
+    // 35 bytes, v2 is 67) — trivially
     // triggered with a 9-byte buffer declaring `count = u32::MAX`.
     // Mirrors the pattern used in `serialize.rs`. See SEC finding G11.
     if (count as u64).saturating_mul(min_entry_len as u64) > data.len() as u64 {
@@ -284,18 +296,15 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
         object_hash.copy_from_slice(&data[offset..offset + HASH_LEN]);
         offset += HASH_LEN;
         // v1 streams have no stat cache — zero-filled = "always re-hash".
-        let (mtime_ns, size) = if version == FORMAT_VERSION {
-            let mtime_ns =
-                u64::from_le_bytes(data[offset..offset + 8].try_into().expect("8 bytes sliced"));
-            let size = u64::from_le_bytes(
-                data[offset + 8..offset + 16]
-                    .try_into()
-                    .expect("8 bytes sliced"),
-            );
-            offset += 16;
-            (mtime_ns, size)
+        let (mtime_ns, size, ino, ctime_ns) = if version == FORMAT_VERSION {
+            let mut next_u64 = || {
+                let v = u64::from_le_bytes(data[offset..offset + 8].try_into().expect("8 bytes"));
+                offset += 8;
+                v
+            };
+            (next_u64(), next_u64(), next_u64(), next_u64())
         } else {
-            (0, 0)
+            (0, 0, 0, 0)
         };
         let path_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
         offset += 2;
@@ -322,6 +331,8 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
             object_hash,
             mtime_ns,
             size,
+            ino,
+            ctime_ns,
         });
     }
     if offset != data.len() {
@@ -359,20 +370,28 @@ pub fn read_index(root: &Path) -> IndexResult<Index> {
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
-    // Window sizing, like git's USE_NSEC: when the filesystem reports
-    // sub-second mtimes (the index file's own mtime has a fractional
-    // part), two writes within the same timestamp tick are ~impossible
-    // and a 10ms window suffices; otherwise assume 1s granularity.
-    let window = if index_mtime_ns % 1_000_000_000 == 0 {
-        RACY_WINDOW_NS
-    } else {
-        RACY_WINDOW_NS / 100
-    };
-    let racy_floor = index_mtime_ns.saturating_sub(window);
+    // Window sizing, like git's USE_NSEC — but judged PER ENTRY: the
+    // tight 10ms window is only safe when BOTH the index file's mtime
+    // and the entry's recorded worktree mtime show sub-second
+    // precision. A worktree file whose mtime is whole-second (vfat/
+    // SMB/NFS mounts, tar/touch -t/rsync-truncated timestamps) could
+    // be rewritten within its coarse tick without the stat changing,
+    // so such entries keep the conservative 1s window.
+    let index_ns_precise = index_mtime_ns % 1_000_000_000 != 0;
     for e in &mut idx.entries {
-        if e.mtime_ns != 0 && e.mtime_ns >= racy_floor {
+        if e.mtime_ns == 0 {
+            continue;
+        }
+        let window = if index_ns_precise && e.mtime_ns % 1_000_000_000 != 0 {
+            RACY_WINDOW_NS / 100
+        } else {
+            RACY_WINDOW_NS
+        };
+        if e.mtime_ns >= index_mtime_ns.saturating_sub(window) {
             e.mtime_ns = 0;
             e.size = 0;
+            e.ino = 0;
+            e.ctime_ns = 0;
         }
     }
     Ok(idx)
@@ -391,9 +410,10 @@ const RACY_WINDOW_NS: u64 = 1_000_000_000;
 ///
 /// Stat-cache fields are written verbatim; the racy-clean rule is
 /// applied at READ time against the index file's own mtime (see
-/// [`read_index`]), which keeps the cache intact for later commands
-/// instead of permanently destroying entries staged just before the
-/// write.
+/// [`read_index`]). Note a read-modify-write command that loads a
+/// racy-marked entry persists the zeroed cache for it — sound (zero
+/// always re-hashes) and healed by the next add/status touching the
+/// path; only the racy window's worth of entries is affected.
 pub fn write_index(root: &Path, idx: &Index) -> IndexResult<()> {
     let path = root.join(INDEX_FILE);
     write_atomic(&path, &idx.serialize(), true)?;
@@ -458,6 +478,8 @@ fn push_tree_entries(
                     // stat — zero sentinel means "re-hash to compare".
                     mtime_ns: 0,
                     size: 0,
+                    ino: 0,
+                    ctime_ns: 0,
                 });
             }
         }
@@ -532,8 +554,8 @@ mod tests {
     // ---- v2 stat cache ------------------------------------------------
 
     /// Pinned v2 vector: header(9) + status(1) + hash(32) +
-    /// `mtime_ns`(8) + `size`(8) + `path_len`(2) + "hello.txt"(9) =
-    /// 69 bytes.
+    /// `mtime_ns`(8) + `size`(8) + `ino`(8) + `ctime_ns`(8) +
+    /// `path_len`(2) + "hello.txt"(9) = 85 bytes.
     #[test]
     fn v2_single_entry_pinned_bytes() {
         let h = seed_hash("hello");
@@ -544,10 +566,12 @@ mod tests {
                 object_hash: h,
                 mtime_ns: 0x0102_0304_0506_0708,
                 size: 11,
+                ino: 0x0A0B_0C0D_0E0F_1011,
+                ctime_ns: 0x1112_1314_1516_1718,
             }],
         };
         let bytes = idx.serialize();
-        assert_eq!(bytes.len(), 69);
+        assert_eq!(bytes.len(), 85);
         let mut expected = Vec::new();
         expected.extend_from_slice(b"MKIX");
         expected.push(0x02); // version
@@ -556,6 +580,8 @@ mod tests {
         expected.extend_from_slice(&h);
         expected.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
         expected.extend_from_slice(&11u64.to_le_bytes());
+        expected.extend_from_slice(&0x0A0B_0C0D_0E0F_1011u64.to_le_bytes());
+        expected.extend_from_slice(&0x1112_1314_1516_1718u64.to_le_bytes());
         expected.extend_from_slice(&9u16.to_le_bytes());
         expected.extend_from_slice(b"hello.txt");
         assert_eq!(bytes, expected, "v2 byte layout is pinned");
@@ -588,20 +614,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v2_count_overflow_at_51_bytes_per_entry() {
+    fn rejects_v2_count_overflow_at_min_entry_bytes() {
         // 9-byte header declaring u32::MAX entries: the v2 minimum
-        // entry is 51 bytes, so this must fail fast, before looping.
+        // entry is 67 bytes, so this must fail fast, before looping.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"MKIX");
         bytes.push(0x02);
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(deserialize(&bytes), Err(IndexError::Corrupt)));
-        // One entry declared, only 40 bytes of body: still corrupt.
+        // One entry declared, only 60 bytes of body: still corrupt.
         let mut short = Vec::new();
         short.extend_from_slice(b"MKIX");
         short.push(0x02);
         short.extend_from_slice(&1u32.to_le_bytes());
-        short.extend_from_slice(&[0u8; 40]);
+        short.extend_from_slice(&[0u8; 60]);
         assert!(matches!(deserialize(&short), Err(IndexError::Corrupt)));
     }
 
@@ -639,6 +665,8 @@ mod tests {
                     object_hash: seed_hash("racy"),
                     mtime_ns: now_ns,
                     size: 4,
+                    ino: 0,
+                    ctime_ns: 0,
                 },
                 IndexEntry {
                     path: "settled.txt".to_string(),
@@ -646,6 +674,8 @@ mod tests {
                     object_hash: seed_hash("settled"),
                     mtime_ns: now_ns - 10_000_000_000, // 10s ago
                     size: 7,
+                    ino: 0,
+                    ctime_ns: 0,
                 },
             ],
         };
@@ -659,9 +689,8 @@ mod tests {
             .open(index_path(dir.path()))
             .unwrap();
         f.set_times(
-            fs::FileTimes::new().set_modified(
-                std::time::UNIX_EPOCH + std::time::Duration::from_nanos(now_ns),
-            ),
+            fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_nanos(now_ns)),
         )
         .unwrap();
         drop(f);
@@ -677,6 +706,65 @@ mod tests {
         assert_eq!(settled.size, 7);
     }
 
+    /// A whole-second entry mtime (vfat/SMB/tar-truncated timestamps)
+    /// must keep the conservative 1s racy window even when the index
+    /// file itself has nanosecond precision — the file could be
+    /// rewritten within its coarse tick without the stat changing.
+    #[test]
+    fn coarse_entry_mtime_keeps_one_second_window() {
+        let dir = TempDir::new().unwrap();
+        let base_ns: u64 = 1_700_000_000_000_000_000; // whole-second tick
+        let idx = Index {
+            entries: vec![
+                IndexEntry {
+                    path: "coarse.txt".to_string(),
+                    status: EntryStatus::Blob,
+                    object_hash: seed_hash("coarse"),
+                    // 500ms before the index mtime, WHOLE-second value:
+                    // inside the 1s window, outside the 10ms one.
+                    mtime_ns: base_ns - 1_000_000_000,
+                    size: 4,
+                    ino: 0,
+                    ctime_ns: 0,
+                },
+                IndexEntry {
+                    path: "precise.txt".to_string(),
+                    status: EntryStatus::Blob,
+                    object_hash: seed_hash("precise"),
+                    // Same age but ns-precise: the 10ms window applies
+                    // and it is safely older than the floor.
+                    mtime_ns: base_ns - 1_000_000_000 + 123,
+                    size: 7,
+                    ino: 0,
+                    ctime_ns: 0,
+                },
+            ],
+        };
+        write_index(dir.path(), &idx).unwrap();
+        // Index file mtime: ns-precise, 500ms after the coarse entry.
+        let f = fs::File::options()
+            .write(true)
+            .open(index_path(dir.path()))
+            .unwrap();
+        f.set_times(fs::FileTimes::new().set_modified(
+            std::time::UNIX_EPOCH + std::time::Duration::from_nanos(base_ns - 500_000_000 + 777),
+        ))
+        .unwrap();
+        drop(f);
+
+        let read = read_index(dir.path()).unwrap();
+        let coarse = &read.entries[read.find_entry("coarse.txt").unwrap()];
+        let precise = &read.entries[read.find_entry("precise.txt").unwrap()];
+        assert_eq!(
+            coarse.mtime_ns, 0,
+            "coarse-mtime entry within 1s of the index write must be racy"
+        );
+        assert_ne!(
+            precise.mtime_ns, 0,
+            "ns-precise entry outside the 10ms window keeps its cache"
+        );
+    }
+
     #[test]
     fn tracks_path_or_descendant_matches_self_and_ancestors() {
         let mut idx = Index::new();
@@ -686,6 +774,8 @@ mod tests {
             object_hash: seed_hash("lib"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "removed.txt".to_string(),
@@ -693,6 +783,8 @@ mod tests {
             object_hash: hash::ZERO,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         // Exact tracked path and its ancestor directory both match.
         assert!(idx.tracks_path_or_descendant("src/lib.rs"));
@@ -713,6 +805,8 @@ mod tests {
             object_hash: seed_hash("f"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "gone".to_string(),
@@ -720,6 +814,8 @@ mod tests {
             object_hash: hash::ZERO,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         // Exact tracked file matches.
         assert!(idx.has_tracked_file_at("f"));
@@ -731,6 +827,8 @@ mod tests {
             object_hash: seed_hash("inner"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         assert!(!idx.has_tracked_file_at("dir"));
         assert!(idx.has_tracked_file_at("dir/inner.txt"));
@@ -750,11 +848,13 @@ mod tests {
             object_hash: seed_hash("readme"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let bytes = idx.serialize();
-        // 9 header + 1 status + 32 hash + 8 mtime_ns + 8 size
-        // + 2 path_len + 9 path = 69.
-        assert_eq!(bytes.len(), 69);
+        // 9 header + 1 status + 32 hash + 32 stat cache
+        // + 2 path_len + 9 path = 85.
+        assert_eq!(bytes.len(), 85);
         let parsed = deserialize(&bytes).unwrap();
         assert_eq!(parsed, idx);
     }
@@ -768,6 +868,8 @@ mod tests {
             object_hash: seed_hash("a"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "b/sub".into(),
@@ -775,6 +877,8 @@ mod tests {
             object_hash: seed_hash("b"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "c.link".into(),
@@ -782,6 +886,8 @@ mod tests {
             object_hash: seed_hash("c"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "scripts/build".into(),
@@ -789,6 +895,8 @@ mod tests {
             object_hash: seed_hash("d"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "old.txt".into(),
@@ -796,6 +904,8 @@ mod tests {
             object_hash: [0u8; HASH_LEN],
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let bytes = idx.serialize();
         let parsed = deserialize(&bytes).unwrap();
@@ -853,6 +963,8 @@ mod tests {
             object_hash: seed_hash("a"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let mut bytes = idx.serialize();
         bytes.truncate(bytes.len() - 1); // drop the trailing path byte
@@ -869,6 +981,8 @@ mod tests {
             object_hash: seed_hash("a"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let mut bytes = idx.serialize();
         bytes.extend_from_slice(b"junk");
@@ -884,7 +998,7 @@ mod tests {
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.push(EntryStatus::Blob as u8);
         bytes.extend_from_slice(&[0u8; HASH_LEN]);
-        bytes.extend_from_slice(&[0u8; 16]); // mtime_ns + size
+        bytes.extend_from_slice(&[0u8; 32]); // stat cache
         let path = b"../escape";
         let path_len = u16::try_from(path.len()).unwrap();
         bytes.extend_from_slice(&path_len.to_le_bytes());
@@ -902,6 +1016,8 @@ mod tests {
             object_hash: seed_hash("a"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "same.txt".into(),
@@ -909,6 +1025,8 @@ mod tests {
             object_hash: seed_hash("b"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let err = deserialize(&idx.serialize()).unwrap_err();
         assert!(matches!(err, IndexError::DuplicatePath(path) if path == "same.txt"));
@@ -937,7 +1055,7 @@ mod tests {
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.push(0x77); // bogus status
         bytes.extend_from_slice(&[0u8; HASH_LEN]);
-        bytes.extend_from_slice(&[0u8; 16]); // mtime_ns + size
+        bytes.extend_from_slice(&[0u8; 32]); // stat cache
         bytes.extend_from_slice(&0u16.to_le_bytes());
         let err = deserialize(&bytes).unwrap_err();
         assert!(matches!(err, IndexError::BadStatus(0x77)));
@@ -954,6 +1072,8 @@ mod tests {
             object_hash: seed_hash("c"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         write_index(dir.path(), &idx).unwrap();
         let read = read_index(dir.path()).unwrap();
@@ -1003,6 +1123,8 @@ mod tests {
             object_hash: seed_hash("a"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "b".into(),
@@ -1010,6 +1132,8 @@ mod tests {
             object_hash: [0u8; HASH_LEN],
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         idx.entries.push(IndexEntry {
             path: "c".into(),
@@ -1017,6 +1141,8 @@ mod tests {
             object_hash: seed_hash("c"),
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         assert_eq!(idx.staged_count(), 2);
     }

@@ -250,6 +250,8 @@ fn index_round_trip_via_disk() {
         object_hash: hash::hash(b"r"),
         mtime_ns: 0,
         size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     idx.entries.push(IndexEntry {
         path: "old.txt".into(),
@@ -257,6 +259,8 @@ fn index_round_trip_via_disk() {
         object_hash: [0u8; 32],
         mtime_ns: 0,
         size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     index::write_index(dir.path(), &idx).unwrap();
     let read = index::read_index(dir.path()).unwrap();

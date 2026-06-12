@@ -96,6 +96,8 @@ fn status_reports_invalid_index_instead_of_falling_back_to_worktree() {
         object_hash: ZERO,
         mtime_ns: 0,
         size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     idx.entries.push(IndexEntry {
         path: "same.txt".into(),
@@ -103,6 +105,8 @@ fn status_reports_invalid_index_instead_of_falling_back_to_worktree() {
         object_hash: ZERO,
         mtime_ns: 0,
         size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     fs::write(p.join(".mkit/index"), idx.serialize()).unwrap();
 

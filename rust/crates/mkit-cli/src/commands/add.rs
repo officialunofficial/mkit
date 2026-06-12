@@ -112,7 +112,7 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
                 .map_err(|e| format!("read {}: {e}", abs.display()))?;
             let h =
                 worktree::store_file_object(&batch, &bytes).map_err(|e| format!("store: {e}"))?;
-            let stat = (worktree::mtime_nanos(&opened_meta), opened_meta.len());
+            let stat = worktree::stat_cache_fields(&opened_meta);
             (file_status_from_meta(&opened_meta, entry.status), h, stat)
         } else if meta.file_type().is_symlink() {
             let target = std::fs::read_link(&abs)
@@ -129,7 +129,7 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
             let ser = serialize::serialize(&blob).map_err(|e| format!("serialize: {e}"))?;
             let h = batch.put(&ser).map_err(|e| format!("store: {e}"))?;
             // Symlinks never stat-match (see worktree::stat_matches).
-            (EntryStatus::Symlink, h, (0, 0))
+            (EntryStatus::Symlink, h, (0, 0, 0, 0))
         } else {
             entry.status = EntryStatus::Removed;
             entry.object_hash = ZERO;
@@ -140,6 +140,8 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
         entry.object_hash = h;
         entry.mtime_ns = stat.0;
         entry.size = stat.1;
+        entry.ino = stat.2;
+        entry.ctime_ns = stat.3;
     }
 
     // Durability ordering: objects first, then the index that
@@ -360,7 +362,7 @@ fn add_one(
             .map_err(|e| emit_err(&format!("read {}: {e}", abs.display()), exit::NOINPUT))?;
         let h = worktree::store_file_object(sink, &bytes)
             .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
-        let stat = (worktree::mtime_nanos(&opened_meta), opened_meta.len());
+        let stat = worktree::stat_cache_fields(&opened_meta);
         (
             file_status_from_meta(&opened_meta, previous_status),
             h,
@@ -388,7 +390,7 @@ fn add_one(
             .put(&ser)
             .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
         // Symlinks never stat-match (see worktree::stat_matches).
-        (EntryStatus::Symlink, h, (0, 0))
+        (EntryStatus::Symlink, h, (0, 0, 0, 0))
     } else {
         return Err(emit_err(
             &format!("not a regular file: {}", abs.display()),
@@ -401,6 +403,8 @@ fn add_one(
         object_hash: h,
         mtime_ns: stat.0,
         size: stat.1,
+        ino: stat.2,
+        ctime_ns: stat.3,
     };
     remove_file_directory_conflicts(idx, &entry.path);
     if let Some(existing) = idx.find_entry(&entry.path) {
@@ -639,6 +643,8 @@ fn patch_one_file(
         object_hash: h,
         mtime_ns: 0,
         size: 0,
+        ino: 0,
+        ctime_ns: 0,
     };
     remove_file_directory_conflicts(idx, &entry.path);
     if let Some(existing) = idx.find_entry(&entry.path) {

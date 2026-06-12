@@ -250,6 +250,8 @@ fn stage_ours(idx: &mut mkit_core::index::Index, store: &ObjectStore, c: &Confli
             object_hash: h,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         },
         Some(_) => return,
         None => IndexEntry {
@@ -258,6 +260,8 @@ fn stage_ours(idx: &mut mkit_core::index::Index, store: &ObjectStore, c: &Confli
             object_hash: mkit_core::hash::ZERO,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         },
     };
     if let Some(pos) = idx.find_entry(&c.path) {

@@ -1095,6 +1095,24 @@ pub fn status_diff(
     worktree_root: &Path,
     index: Option<&Index>,
 ) -> Result<Vec<StatusEntry>, DiffError> {
+    status_diff_observed(store, head_tree, worktree_root, index).map(|(entries, _)| entries)
+}
+
+/// [`status_diff`] that additionally returns the worktree walk's
+/// [`worktree::StatObservation`]s — entries whose cache was absent or
+/// racy-smudged but whose re-hash matched the staged hash. Callers
+/// (the `status` CLI) use them to heal the stat cache from hash-time
+/// stats; pairing a *later* stat with the earlier hash is unsound.
+///
+/// # Errors
+/// See [`status_diff`].
+#[allow(clippy::type_complexity)]
+pub fn status_diff_observed(
+    store: &ObjectStore,
+    head_tree: Option<&Hash>,
+    worktree_root: &Path,
+    index: Option<&Index>,
+) -> Result<(Vec<StatusEntry>, Vec<worktree::StatObservation>), DiffError> {
     // Always snapshot the worktree — the index↔worktree leg uses it. The
     // tracked set for ignore exemption is the staging index if present, else
     // the HEAD tree's paths (seeded here) — without it a tracked file
@@ -1114,19 +1132,27 @@ pub fn status_diff(
     // make a non-durable object visible to another writer's dedup.
     // Reads fall through to the store for committed objects.
     let snapshot = crate::store::EphemeralSink::new(store);
-    let work_tree_hash = worktree::build_tree_filtered(&snapshot, worktree_root, tracked)?;
+    let mut observations = Vec::new();
+    let work_tree_hash = worktree::build_tree_filtered_observed(
+        &snapshot,
+        worktree_root,
+        tracked,
+        &mut observations,
+    )?;
 
     let Some(idx) = index else {
         // Legacy fallback: HEAD↔worktree, everything labeled Unstaged.
         let diff = diff_worktree_trees(&snapshot, head_tree.copied(), Some(work_tree_hash))?;
-        return Ok(diff
-            .entries
-            .into_iter()
-            .map(|d| StatusEntry {
-                diff: d,
-                staging: StatusStaging::Unstaged,
-            })
-            .collect());
+        return Ok((
+            diff.entries
+                .into_iter()
+                .map(|d| StatusEntry {
+                    diff: d,
+                    staging: StatusStaging::Unstaged,
+                })
+                .collect(),
+            observations,
+        ));
     };
 
     // Build the index tree exactly the way `mkit commit` builds it.
@@ -1168,7 +1194,7 @@ pub fn status_diff(
             }
         })
     });
-    Ok(out)
+    Ok((out, observations))
 }
 
 #[cfg(unix)]
@@ -1599,6 +1625,8 @@ mod tests {
             object_hash: b_hash,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         // No HEAD — first commit scenario.
         let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
@@ -1623,6 +1651,8 @@ mod tests {
             object_hash: h,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
 
         let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
@@ -1771,6 +1801,8 @@ mod tests {
             object_hash: b_v1_hash,
             mtime_ns: 0,
             size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
         assert_eq!(result.len(), 2, "expected staged + unstaged entries");
