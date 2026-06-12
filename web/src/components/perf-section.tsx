@@ -141,7 +141,7 @@ export function PerfSection() {
         </ul>
         <details className='text-xs text-[--color-muted]'>
           <summary className='cursor-pointer select-none'>Exact commands</summary>
-          <pre className='mt-2 overflow-x-auto rounded-md border border-[--color-hairline] p-3 font-mono text-[11px] leading-relaxed'>
+          <pre className='mt-2 overflow-x-auto  border border-[--color-hairline] p-3 font-mono text-[11px] leading-relaxed'>
             {methodology.commands.join('\n')}
           </pre>
         </details>

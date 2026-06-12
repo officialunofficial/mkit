@@ -3,8 +3,16 @@ import { hashColor } from '../lib/hash-color'
 
 /** Canonical input/textarea class string. `text-sm` by default; swap in `text-xs` variant for dense hex inputs. */
 export const INPUT_CLASSES =
-  'w-full rounded-md border border-[--color-hairline] bg-transparent p-2.5 font-mono text-sm outline-none transition-colors focus:border-[--color-fg]'
+  'w-full border border-[--color-hairline] bg-[--color-paper] p-2.5 font-mono text-sm outline-none transition-colors focus:border-[--color-fg]'
 export const INPUT_CLASSES_XS = INPUT_CLASSES.replace('text-sm', 'text-xs')
+
+/** Canonical button: square, mono, uppercase; fills with ink on hover. The document's only "control" idiom. */
+export const BUTTON_CLASSES =
+  'inline-flex h-10 shrink-0 cursor-pointer items-center justify-center border border-[--color-fg] bg-transparent px-4 font-mono text-xs font-medium tracking-[0.1em] uppercase transition-all duration-200 hover:bg-[--color-fg] hover:text-[--color-bg] active:translate-y-px disabled:pointer-events-none disabled:opacity-40 sm:h-9'
+
+/** Quiet companion to BUTTON_CLASSES — borderless, for reset/secondary actions. */
+export const GHOST_BUTTON_CLASSES =
+  'inline-flex h-10 shrink-0 cursor-pointer items-center justify-center px-2 font-mono text-xs font-medium tracking-[0.1em] uppercase text-[--color-muted] transition-colors duration-200 hover:text-[--color-fg] active:translate-y-px disabled:pointer-events-none disabled:opacity-30 sm:h-9'
 
 /**
  * Solid square coloured by the first byte of `hash` — same palette as the favicon. Edit anything below an object and
@@ -100,7 +108,7 @@ export function Section({
 export function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className='space-y-1.5'>
-      <div className='text-xs text-[--color-muted]'>{label}</div>
+      <div className='microlabel text-[--color-muted]'>{label}</div>
       <code className='block font-mono text-sm break-all'>{value}</code>
     </div>
   )
@@ -114,7 +122,7 @@ export function Row({ label, value }: { label: string; value: string }) {
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className='grid gap-1 py-4 sm:grid-cols-[minmax(0,14rem),1fr] sm:gap-6'>
-      <dt className='text-sm text-[--color-muted]'>{label}</dt>
+      <dt className='microlabel pt-1 text-[--color-muted]'>{label}</dt>
       <dd className='min-w-0 break-all'>{children}</dd>
     </div>
   )

@@ -3,7 +3,7 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { mulberry32 } from '../lib/grid-svg'
 import { ChunkStrip, type StripChunk } from './chunk-strip'
-import { ObjectRow } from './result-panel'
+import { BUTTON_CLASSES, GHOST_BUTTON_CLASSES, ObjectRow } from './result-panel'
 import { useMkit } from './use-mkit'
 
 // `source` lets the auto-edit loop pick the right mutator: defaults regenerate via canvas+PPM so a single grid-cell
@@ -198,7 +198,7 @@ function FileSidebar({
           const f = e.dataTransfer.files?.[0]
           if (f) void onReplace(f)
         }}
-        className={`rounded-md border border-dashed p-3 text-xs text-[--color-muted] transition-colors ${
+        className={` border border-dashed p-3 text-xs text-[--color-muted] transition-colors ${
           dragOver ? 'border-[--color-fg] text-[--color-fg]' : 'border-[--color-hairline]'
         }`}
       >
@@ -232,7 +232,7 @@ function FileSidebar({
           type='button'
           onClick={onToggleAutoEdit}
           aria-pressed={autoEdit}
-          className={`inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition-all duration-200 active:scale-[0.96] sm:h-9 ${
+          className={`inline-flex h-10 w-full cursor-pointer items-center justify-center gap-2 border px-3 font-mono text-xs font-medium tracking-[0.1em] uppercase transition-all duration-200 active:scale-[0.96] sm:h-9 ${
             autoEdit
               ? 'border-[--color-fg] bg-[--color-fg] text-[--color-bg]'
               : 'border-[--color-hairline] hover:border-[--color-fg]'
@@ -428,7 +428,7 @@ function DeltaStat({ bytesOnWire, fullSize }: { bytesOnWire: number; fullSize: n
   const savings = fullSize > 0 ? (1 - bytesOnWire / fullSize) * 100 : 0
   const positive = savings > 0
   return (
-    <div className='rounded-lg border border-[--color-hairline] bg-[--color-hairline]/40 p-4 text-center'>
+    <div className=' border border-[--color-hairline] bg-[--color-hairline]/40 p-4 text-center'>
       {positive ? (
         <>
           <div className='text-3xl font-semibold tabular-nums'>{Math.round(savings)}% saved</div>
@@ -562,19 +562,10 @@ function StreamingBaoVerify({ file }: { file: FileAsset }) {
         tamperIndex={tamperedIndex ?? undefined}
       />
       <div className='flex flex-wrap items-center gap-3'>
-        <button
-          type='button'
-          onClick={start}
-          disabled={playing}
-          className='inline-flex h-10 items-center justify-center rounded-lg border border-[--color-hairline] px-3 text-sm font-medium transition-colors hover:border-[--color-fg] active:translate-y-px disabled:opacity-40 sm:h-9'
-        >
+        <button type='button' onClick={start} disabled={playing} className={BUTTON_CLASSES}>
           {playing ? 'Streaming…' : 'Start stream'}
         </button>
-        <button
-          type='button'
-          onClick={reset}
-          className='inline-flex h-10 items-center justify-center rounded-lg px-3 text-sm text-[--color-muted] transition-opacity hover:opacity-70 active:translate-y-px sm:h-9'
-        >
+        <button type='button' onClick={reset} className={GHOST_BUTTON_CLASSES}>
           Reset
         </button>
         <label className='ml-2 flex items-center gap-2 text-xs text-[--color-muted]'>
@@ -582,7 +573,7 @@ function StreamingBaoVerify({ file }: { file: FileAsset }) {
           <select
             value={tamperedIndex ?? ''}
             onChange={(e) => setTamperedIndex(e.target.value === '' ? null : Number(e.target.value))}
-            className='rounded-md border border-[--color-hairline] bg-transparent px-2 py-1 font-mono text-xs'
+            className='border border-[--color-hairline] bg-[--color-paper] px-2 py-1 font-mono text-xs'
           >
             <option value=''>none</option>
             {baoData.chunks.map((_, i) => (

@@ -1,85 +1,65 @@
 import { Link } from 'waku'
 import { GridLogo } from './grid-logo'
 
+const ENTRIES = ['hash', 'sign', 'tree', 'streaming', 'performance', 'attest'] as const
+
 export const Header = () => {
   return (
-    // Sticky header with a translucent white ground + backdrop blur.
-    // At rest it reads as solid; when content scrolls under it the
-    // blur softens whatever's behind without obscuring it, so the
-    // transition between page body and chrome stays visible. The
-    // explicit `var(--color-bg)` call is required — Tailwind v4 won't
-    // auto-wrap a bare custom prop reference in every position, and an
-    // unset background was why the header was invisible.
+    // Letterhead: seal + wordmark on the left, the document index on
+    // the right, closed by a certificate double rule. Sticky with a
+    // translucent paper ground + blur so content scrolling beneath
+    // softens instead of cutting.
     <header
       className='sticky top-0 z-50 backdrop-blur-md backdrop-saturate-150'
-      style={{ backgroundColor: 'color-mix(in srgb, var(--color-bg) 80%, transparent)' }}
+      style={{ backgroundColor: 'color-mix(in srgb, var(--color-bg) 85%, transparent)' }}
     >
       <div className='mx-auto w-full max-w-5xl px-6'>
-        <div className='flex items-center gap-6 py-4'>
-          <Link to='/' className='flex items-center' aria-label='mkit home'>
-            <GridLogo className='size-5 rounded-[3px]' />
+        <div className='flex flex-wrap items-center justify-between gap-x-6 gap-y-2 py-4'>
+          <Link to='/' className='group flex items-center gap-3' aria-label='mkit home'>
+            {/* The seal: random grid mark on a paper backing, set at a
+                stamp's slight tilt; rights itself on hover. */}
+            <span className='inline-block border border-[--color-fg] bg-[--color-paper] p-[3px] [transform:rotate(-4deg)] transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] group-hover:[transform:rotate(0deg)]'>
+              <GridLogo className='block size-5' />
+            </span>
+            <span className='text-xl font-semibold tracking-tight'>mkit</span>
           </Link>
-          <nav className='flex items-center gap-4 text-sm'>
-            <Link
-              to='/hash'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              hash
-            </Link>
-            <Link
-              to='/sign'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              sign
-            </Link>
-            <Link
-              to='/tree'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              tree
-            </Link>
-            <Link
-              to='/streaming'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              streaming
-            </Link>
-            <Link
-              to='/performance'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              performance
-            </Link>
-            <Link
-              to='/attest'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              attest
-            </Link>
+          <nav className='flex flex-wrap items-center gap-x-5 gap-y-1'>
+            {ENTRIES.map((entry, i) => (
+              <Link
+                key={entry}
+                to={`/${entry}`}
+                className='microlabel group/item py-2 text-[--color-muted] transition-colors duration-200 hover:text-[--color-fg]'
+              >
+                <span
+                  aria-hidden
+                  className='mr-1 hidden text-[--color-subtle] transition-colors duration-200 group-hover/item:text-[--color-accent] sm:inline'
+                >
+                  {String(i + 1).padStart(2, '0')}
+                </span>
+                {entry}
+              </Link>
+            ))}
           </nav>
         </div>
-        {/* Top separator: 2px band carrying the brand gradient, wider
-            than the element so it can slide. `background-position-x`
-            reads `--mouse-x` (0..1, written by <PointerTracker/>), so
-            moving the cursor horizontally drags the colour stops
-            across the rule. The gradient is oversized (300%) so only
-            a slice of the palette is visible at any moment — mouse
-            movement reveals the rest. */}
-        <div
-          className='h-0.5 w-full'
-          style={{
-            backgroundImage: 'var(--gradient-h)',
-            backgroundSize: '300% 100%',
-            backgroundPositionX: 'calc(var(--mouse-x, 0.5) * 100%)',
-            transition: 'background-position-x 200ms cubic-bezier(0.2, 0, 0, 1)',
-          }}
-          aria-hidden
-        />
+        {/* Certificate rule with a ruler caret: the small vermillion
+            tick tracks `--mouse-x` (written by <PointerTracker/>), so
+            the letterhead quietly measures the reader's position —
+            the one playful instrument on an otherwise formal sheet. */}
+        <div className='relative'>
+          <div className='rule-double' aria-hidden />
+          <div
+            aria-hidden
+            className='absolute top-[6px] h-[5px] w-[9px] -translate-x-1/2 bg-[--color-accent]'
+            style={{
+              left: 'calc(var(--mouse-x, 0.5) * 100%)',
+              clipPath: 'polygon(50% 0, 100% 100%, 0 100%)',
+              transition: 'left 200ms cubic-bezier(0.2, 0, 0, 1)',
+            }}
+          />
+        </div>
       </div>
-      {/* Fade strip directly below the 2px rule: content scrolling
-          upward softens into the opaque nav area instead of cutting
-          at a hard edge. `pointer-events-none` keeps it from stealing
-          clicks from anything that happens to land under it. */}
+      {/* Fade strip below the rule: content scrolling upward softens
+          into the opaque letterhead instead of cutting at a hard edge. */}
       <div
         className='pointer-events-none absolute inset-x-0 top-full h-6'
         style={{

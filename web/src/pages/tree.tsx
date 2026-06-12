@@ -6,8 +6,9 @@ export default function TreePage() {
   return (
     <div className='space-y-8'>
       <title>mkit — tree</title>
-      <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>Folders, all the way down</h1>
+      <header className='space-y-3 pt-4'>
+        <p className='microlabel text-[--color-accent]'>Demo Nº 03 — tree</p>
+        <h1 className='text-5xl font-light'>Folders, all the way down</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
           A folder is a list of files and other folders, each entry named by a BLAKE3 hash; a parent's hash is computed
           from its children's. That makes the repo a Merkle tree — a structure where one root hash fingerprints
@@ -20,9 +21,9 @@ export default function TreePage() {
       </DemoBoundary>
       <Link
         to='/'
-        className='-mx-2 inline-block px-2 py-2 text-sm underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+        className='microlabel -mx-2 inline-block px-2 py-2 text-[--color-muted] transition-colors duration-200 hover:text-[--color-fg]'
       >
-        ← back
+        ← Index
       </Link>
     </div>
   )

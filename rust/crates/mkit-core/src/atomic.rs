@@ -5,6 +5,12 @@
 //! reaching into `store` so the two subsystems can be developed
 //! independently and so future changes to one don't ripple into the
 //! other. The behaviour is identical.
+//!
+//! Deliberately NOT batched: refs, the index, and recovery-log entries
+//! are the durable *pointers* the batched object store orders itself
+//! against (`crate::batch` module docs). Each one must hit stable
+//! storage in its own right before its caller returns. Do not
+//! "optimise" these writes onto the batch path.
 
 use std::fs;
 #[cfg(unix)]

@@ -72,7 +72,7 @@ export function AttestDemo() {
           {ALGOS.map((a) => (
             <label
               key={a.value}
-              className='flex cursor-pointer items-start gap-3 rounded-md border border-[--color-hairline] p-3 transition-colors hover:border-[--color-fg]'
+              className='flex cursor-pointer items-start gap-3 border border-[--color-hairline] bg-[--color-paper] p-3 transition-colors hover:border-[--color-fg]'
             >
               <input
                 type='radio'
@@ -119,12 +119,19 @@ export function AttestDemo() {
           </Field>
           <Field label='Verifies'>
             {verdict === null ? null : (
-              <span className={verdict ? 'text-green-700' : 'text-red-600'}>{verdict ? 'yes ✓' : 'no ✗'}</span>
+              // Keyed on the verdict so flipping it re-mounts the
+              // element and replays the stamp-in thunk.
+              <span
+                key={String(verdict)}
+                className={`stamp ${verdict ? 'text-[--color-verified]' : 'text-[--color-accent]'}`}
+              >
+                {verdict ? 'Verified' : 'Rejected'}
+              </span>
             )}
           </Field>
         </FieldList>
       ) : (
-        <p className='text-red-600'>{built.error}</p>
+        <p className='text-[--color-accent]'>{built.error}</p>
       )}
     </div>
   )

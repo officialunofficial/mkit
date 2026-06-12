@@ -3,7 +3,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { mulberry32, renderGridSvg } from '../lib/grid-svg'
 import { MerkleTree, type MerkleNode } from './merkle-tree'
-import { INPUT_CLASSES, ObjectRow, Section } from './result-panel'
+import { BUTTON_CLASSES, GHOST_BUTTON_CLASSES, INPUT_CLASSES, ObjectRow, Section } from './result-panel'
 import { DEMO_SEED, TEXT_ENCODER, sanitizeTreeName, useMkit } from './use-mkit'
 
 // Fixed seed so the default grid is identical on every render — no hydration mismatch, reliable baseline hash.
@@ -86,7 +86,7 @@ export function HashDemo() {
     }
   }, [tree, commit, image.name])
 
-  if ('error' in tree) return <p className='text-red-600'>{tree.error}</p>
+  if ('error' in tree) return <p className='text-[--color-accent]'>{tree.error}</p>
   if (!commit) return null
 
   const handleFile = async (file: File) => {
@@ -140,24 +140,15 @@ export function HashDemo() {
               <img src={previewUrl} alt='' className='size-full object-cover' />
             </div>
             <div className='flex items-center gap-2'>
-              <button
-                type='button'
-                onClick={() => fileRef.current?.click()}
-                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-[--color-hairline] bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-[--color-fg] active:translate-y-px sm:h-9'
-              >
+              <button type='button' onClick={() => fileRef.current?.click()} className={BUTTON_CLASSES}>
                 Replace image
               </button>
-              <button
-                type='button'
-                onClick={resetImage}
-                disabled={!customised}
-                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg px-2 text-sm text-[--color-muted] transition-opacity duration-200 hover:opacity-70 active:translate-y-px disabled:pointer-events-none disabled:opacity-30 sm:h-9'
-              >
+              <button type='button' onClick={resetImage} disabled={!customised} className={GHOST_BUTTON_CLASSES}>
                 Reset
               </button>
             </div>
             {tooLarge ? (
-              <p className='rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700'>
+              <p className=' border border-[--color-accent] bg-[--color-accent-soft] p-3 text-xs text-[--color-accent]'>
                 <span className='font-medium'>{tooLarge.name}</span> is {formatBytes(tooLarge.size)}. The `/hash` demo
                 previews files as data URLs, so it rejects files over {formatBytes(MAX_IMAGE_BYTES)} before reading
                 them. Use `/streaming` for larger files.
@@ -191,7 +182,7 @@ export function HashDemo() {
               label='commit'
               meta='signed'
               trailing={
-                <span className={`text-xs ${commit.verified ? 'text-green-700' : 'text-red-600'}`}>
+                <span className={`text-xs ${commit.verified ? 'text-[--color-verified]' : 'text-[--color-accent]'}`}>
                   {commit.verified ? 'verified ✓' : 'invalid ✗'}
                 </span>
               }

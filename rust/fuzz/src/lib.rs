@@ -184,12 +184,20 @@ pub fn rpc_decode_one_iteration(input: &[u8]) {
     if let Ok(frame) = SignerFrame::arbitrary(&mut u) {
         let bytes = frame.encode_to_vec();
         let decoded = SignerFrame::decode_from_slice(&bytes).expect("re-decode SignerFrame");
-        assert_eq!(bytes, decoded.encode_to_vec(), "SignerFrame wire roundtrip diverged");
+        assert_eq!(
+            bytes,
+            decoded.encode_to_vec(),
+            "SignerFrame wire roundtrip diverged"
+        );
     }
     if let Ok(frame) = SshFrame::arbitrary(&mut u) {
         let bytes = frame.encode_to_vec();
         let decoded = SshFrame::decode_from_slice(&bytes).expect("re-decode SshFrame");
-        assert_eq!(bytes, decoded.encode_to_vec(), "SshFrame wire roundtrip diverged");
+        assert_eq!(
+            bytes,
+            decoded.encode_to_vec(),
+            "SshFrame wire roundtrip diverged"
+        );
     }
 }
 

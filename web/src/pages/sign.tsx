@@ -6,8 +6,9 @@ export default function SignPage() {
   return (
     <div className='space-y-8'>
       <title>mkit — sign</title>
-      <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>Who signed this?</h1>
+      <header className='space-y-3 pt-4'>
+        <p className='microlabel text-[--color-accent]'>Demo Nº 02 — sign</p>
+        <h1 className='text-5xl font-light'>Who signed this?</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
           A private key signs a message; the matching public key verifies it — anyone can confirm the message is
           untouched and that you signed it. In mkit this isn't optional: every commit carries an Ed25519 signature,
@@ -20,9 +21,9 @@ export default function SignPage() {
       </DemoBoundary>
       <Link
         to='/'
-        className='-mx-2 inline-block px-2 py-2 text-sm underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+        className='microlabel -mx-2 inline-block px-2 py-2 text-[--color-muted] transition-colors duration-200 hover:text-[--color-fg]'
       >
-        ← back
+        ← Index
       </Link>
     </div>
   )

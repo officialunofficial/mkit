@@ -19,6 +19,7 @@
 // them. cargo-deny still tracks them at warn level via deny.toml.
 #![allow(clippy::multiple_crate_versions)]
 
+pub mod batch;
 pub mod chunker;
 pub mod delta;
 pub mod hash;

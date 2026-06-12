@@ -1,25 +1,32 @@
 @import 'tailwindcss';
 
-/* Design tokens lifted verbatim from searchartwith.art (OKLCH triplet of
-   1 / 0.145 / 0.922 for bg / fg / hairline). Geist Variable is the
-   sans; we skip the site's DaVinci serif deliberately. */
+/* ————————————————————————————————————————————————————————————————
+   THE NOTARY — design tokens.
+   mkit is about signed, verifiable statements, so the site dresses
+   as a certified document: archival paper, warm ink, one vermillion
+   stamp accent. Type is Fraunces (a serif with optical sizing — set
+   small it reads like book text, set huge it turns display) against
+   IBM Plex Mono for anything that is *data*: labels, hashes, folios.
+   Color beyond ink/paper/stamp comes only from content-derived hash
+   hues (HashChip, GridLogo) — the design stays content-addressed.
+   ———————————————————————————————————————————————————————————————— */
 @theme {
-  --color-bg: oklch(1 0 0);
-  --color-fg: oklch(0.145 0 0);
-  --color-muted: oklch(0.556 0 0);
-  /* `subtle` sits between `muted` and `hairline` — used for descriptive
-     copy that should read as secondary without fully fading out. */
-  --color-subtle: oklch(0.68 0 0);
-  --color-hairline: oklch(0.922 0 0);
-  --font-sans: 'Geist', 'Geist Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --color-bg: oklch(0.962 0.013 85); /* cream paper */
+  --color-paper: oklch(0.985 0.007 90); /* raised sheet — inputs, panels */
+  --color-fg: oklch(0.245 0.022 60); /* warm ink */
+  --color-muted: oklch(0.49 0.028 65);
+  --color-subtle: oklch(0.6 0.025 70);
+  --color-hairline: oklch(0.865 0.018 80);
+  --color-accent: oklch(0.52 0.185 33); /* stamp vermillion */
+  --color-accent-soft: oklch(0.93 0.04 35); /* vermillion wash — error grounds */
+  --color-verified: oklch(0.5 0.11 150); /* ledger green — passing verdicts */
 
-  /* Brand gradient lifted from the official-unofficial logo. Stops
-     are carried verbatim so the chroma matches across surfaces. Two
-     directional tokens: `-h` for horizontal rules, `-v` for text
-     clipping (which stays vertical like the logo itself). */
-  --gradient-h: linear-gradient(to right, #fa7cfa 0%, #f5ca23 30%, #00d2a8 66%, #7a3bf7 97%);
-  --gradient-v: linear-gradient(to bottom, #fa7cfa 0%, #f5ca23 30%, #00d2a8 66%, #7a3bf7 97%);
+  /* Body text is the document serif. `--font-sans` is aliased to it on
+     purpose so stray `font-sans` utilities can't fall back to a
+     system grotesque and break the voice. */
+  --font-serif: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+  --font-sans: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 @layer base {
@@ -31,23 +38,38 @@
     text-wrap: pretty;
     /* Dynamic numbers (counters, hex columns) stay layout-stable. */
     font-variant-numeric: tabular-nums;
+    /* Fraunces carries an `opsz` axis 9..144 — let the browser pick
+       the optical master per computed size (text vs display cuts). */
+    font-optical-sizing: auto;
     /* Reserve the scrollbar gutter so pages that don't scroll
-       horizontally-align with pages that do. Without this, content
-       jumps a few px when navigating from a short page to a tall one. */
+       horizontally-align with pages that do. */
     scrollbar-gutter: stable;
-    font-family: var(--font-sans);
+    font-family: var(--font-serif);
     color: var(--color-fg);
     background: var(--color-bg);
+  }
+
+  /* Paper grain: one fixed feTurbulence layer over everything,
+     multiply at very low opacity. `pointer-events: none` keeps every
+     surface (including fixed toolbars) interactive beneath it. */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    pointer-events: none;
+    opacity: 0.05;
+    mix-blend-mode: multiply;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   }
 
   h1,
   h2,
   h3 {
     text-wrap: balance;
-    /* Geist looks better a notch tighter than its 1.5 body default at
-       heading sizes. */
-    line-height: 1.15;
-    letter-spacing: -0.01em;
+    /* Fraunces display cuts want a tighter leading than body text. */
+    line-height: 1.05;
+    letter-spacing: -0.015em;
   }
 
   code,
@@ -67,14 +89,12 @@
 
   /* WebKit ignores `::-webkit-scrollbar-*` on native form controls
      unless their appearance is reset — without this, `<textarea>`
-     falls back to the OS-native chrome scrollbar. Safari, iOS WebView,
-     and Chrome all require the override. Range inputs are deliberately
-     excluded: stripping their appearance hides the track + thumb
-     entirely (browsers need explicit ::-webkit-slider-* rules to
-     re-draw them), so we keep their native chrome. */
+     falls back to the OS-native chrome scrollbar. Range inputs are
+     deliberately excluded: stripping their appearance hides the
+     track + thumb entirely. */
   textarea,
   select,
-  input:not([type='range']) {
+  input:not([type='range']):not([type='checkbox']):not([type='radio']) {
     -webkit-appearance: none;
     appearance: none;
   }
@@ -98,9 +118,8 @@
   }
 
   /* `scrollbar-gutter: stable` reserves classic-scrollbar width
-     (~15px) even when `scrollbar-width: thin` is set, so leaving it on
-     textareas would waste horizontal space inside each input. Scope
-     the gutter reservation to the page only (html, above). */
+     (~15px) even when `scrollbar-width: thin` is set — scope the
+     gutter reservation to the page only (html, above). */
   textarea,
   pre,
   [class*='overflow-'] {
@@ -125,10 +144,6 @@
   .merkle ul {
     padding-top: 18px;
   }
-  /* Vertical stub from parent's node DOWN to the children's elbow row.
-     Sits inside the children-ul's padding-top, centred horizontally —
-     `display: flex; justify-content: center` puts the ul's centre on
-     the parent's centre, so this 1px line connects them cleanly. */
   .merkle ul::before {
     content: '';
     position: absolute;
@@ -169,13 +184,6 @@
   .merkle li:last-child::after {
     border: 0 none;
   }
-  /* Vertical stub from the elbow row down to each child square. The
-     button is `position: static` so this pseudo's containing block is
-     the LI — `top: 0` puts it at the elbow row, `height: 18px` ends
-     it exactly at the LI's padding-top edge, where the button (and
-     the square inside it) starts. Because the line is anchored to the
-     LI and not the button, the button's hover/active transforms can
-     scale the inner content without dragging the connector with it. */
   .merkle li > .merkle__node::before {
     content: '';
     position: absolute;
@@ -194,16 +202,90 @@
   .merkle > li > .merkle__node::before {
     display: none;
   }
+}
 
-  /* Utility for applying the brand gradient as text fill. Used on the
-     landing hero only — kept off secondary headings so the colour still
-     reads as an accent rather than a default. */
-  .text-gradient {
-    background-image: var(--gradient-v);
-    background-clip: text;
-    -webkit-background-clip: text;
-    color: transparent;
-    /* Preserve legibility for assistive tech and out-of-context views. */
-    -webkit-text-fill-color: transparent;
+@layer components {
+  /* Mono micro-label: the document's annotation voice — folio
+     numbers, field names, overlines. Always uppercase, always
+     tracked out. */
+  .microlabel {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  /* Certificate double rule: a 2px ink line with a 1px echo 3px
+     below. Used at the top of the page (under the letterhead) and
+     above the colophon. */
+  .rule-double {
+    position: relative;
+    border-top: 2px solid var(--color-fg);
+  }
+  .rule-double::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 3px;
+    border-top: 1px solid var(--color-fg);
+  }
+
+  /* Dot leader for table-of-contents rows — the dotted run between a
+     title and its folio mark. Sits on the text baseline. */
+  .toc-leader {
+    flex: 1;
+    min-width: 2rem;
+    border-bottom: 2px dotted var(--color-hairline);
+    align-self: flex-end;
+    margin-bottom: 0.45em;
+    transition: border-color 300ms;
+  }
+
+  /* Rubber stamp for verdicts. Re-mount the element (key it on the
+     verdict) to replay the thunk. */
+  .stamp {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    padding: 0.3em 0.7em 0.25em 0.85em;
+    border: 2px solid currentColor;
+    border-radius: 3px;
+    transform: rotate(-3deg);
+    animation: stamp-in 280ms cubic-bezier(0.2, 1.4, 0.4, 1) both;
+  }
+  @keyframes stamp-in {
+    from {
+      opacity: 0;
+      transform: scale(1.9) rotate(-11deg);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1) rotate(-3deg);
+    }
+  }
+
+  /* Page-load reveal: rise + fade, staggered via `--reveal` index.
+     Applied to hero lines and TOC rows on the landing page. */
+  .reveal {
+    animation: rise 700ms cubic-bezier(0.2, 0, 0, 1) both;
+    animation-delay: calc(var(--reveal, 0) * 80ms);
+  }
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .reveal,
+    .stamp {
+      animation: none;
+    }
   }
 }

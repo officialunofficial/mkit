@@ -6,8 +6,9 @@ export default function AttestPage() {
   return (
     <div className='space-y-8'>
       <title>mkit — attest</title>
-      <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>Statements, signed</h1>
+      <header className='space-y-3 pt-4'>
+        <p className='microlabel text-[--color-accent]'>Demo Nº 06 — attest</p>
+        <h1 className='text-5xl font-light'>Statements, signed</h1>
         <p className='max-w-prose text-base text-[--color-fg]'>
           An attestation is a signed statement about a commit — &ldquo;reviewed&rdquo;, &ldquo;deployed&rdquo;,
           &ldquo;tested&rdquo; — stored in the repo as a first-class object, not a side-channel. mkit uses the standard
@@ -21,9 +22,9 @@ export default function AttestPage() {
       </DemoBoundary>
       <Link
         to='/'
-        className='-mx-2 inline-block px-2 py-2 text-sm underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+        className='microlabel -mx-2 inline-block px-2 py-2 text-[--color-muted] transition-colors duration-200 hover:text-[--color-fg]'
       >
-        ← back
+        ← Index
       </Link>
     </div>
   )

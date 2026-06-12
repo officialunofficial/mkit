@@ -10,9 +10,18 @@
 //! ```
 //!
 //! Writes are atomic: bytes are first written to a sibling temp file
-//! (`<name>.tmp.<pid>.<rand>`), `fsync`ed, then renamed into place. A
-//! crash mid-write leaves only the temp file behind and never produces a
-//! visible object that fails the read-time hash check.
+//! (`<name>.tmp.<pid>.<rand>`), made durable, then renamed into place.
+//! A crash mid-write leaves only the temp file behind and never
+//! produces a visible object that fails the read-time hash check.
+//!
+//! Durability comes in two shapes (see [`crate::batch`] for the full
+//! contract): [`ObjectStore::write`] flushes per object
+//! ([`SyncPolicy::PerObject`]), while [`ObjectStore::batch`] defers
+//! visibility and amortises durability to **one** full flush per batch
+//! — the write path used by every multi-object command (add, commit,
+//! pack unpack). In both shapes an object is never visible before its
+//! bytes are durable, so a ref or index written after the
+//! write/commit returns can never reference a non-durable object.
 //!
 //! Reads always verify integrity by recomputing BLAKE3 over the bytes
 //! and comparing against the requested hash; mismatch returns
@@ -24,10 +33,13 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::NamedTempFile;
 
+use crate::batch::{RealSyncer, Syncer};
+pub use crate::batch::{SyncPolicy, WriteBatch};
 use crate::hash::{self, Hash, object_path, to_hex};
 use crate::object::{MkitError, Object};
 use crate::serialize;
@@ -94,6 +106,10 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 pub struct ObjectStore {
     /// Absolute path to `<root>/.mkit/objects`.
     objects_root: PathBuf,
+    /// Flush/rename primitive seam. Production code always uses
+    /// [`RealSyncer`]; unit tests inject a recording double to assert
+    /// flush ordering and counts (the O(1)-flushes-per-batch contract).
+    syncer: Arc<dyn Syncer>,
 }
 
 impl ObjectStore {
@@ -105,7 +121,10 @@ impl ObjectStore {
         if !objects_root.is_dir() {
             return Err(StoreError::NotAMkitRepository);
         }
-        Ok(Self { objects_root })
+        Ok(Self {
+            objects_root,
+            syncer: Arc::new(RealSyncer),
+        })
     }
 
     /// Initialise a fresh `.mkit/` directory under `root`. Returns
@@ -117,7 +136,38 @@ impl ObjectStore {
         }
         let objects_root = mkit_root.join(OBJECTS_DIR);
         fs::create_dir_all(&objects_root)?;
-        Ok(Self { objects_root })
+        Ok(Self {
+            objects_root,
+            syncer: Arc::new(RealSyncer),
+        })
+    }
+
+    /// Replace the flush/rename primitives. Test-only seam — see the
+    /// `syncer` field. Not exposed publicly so the production sync
+    /// strategy cannot be silently weakened by downstream code.
+    #[cfg(test)]
+    pub(crate) fn set_syncer(&mut self, syncer: Arc<dyn Syncer>) {
+        self.syncer = syncer;
+    }
+
+    /// The active flush/rename primitives, shared with [`WriteBatch`].
+    pub(crate) fn syncer(&self) -> &Arc<dyn Syncer> {
+        &self.syncer
+    }
+
+    /// Start a batched write with the default [`SyncPolicy::Batch`]:
+    /// objects staged by the batch become durable and visible together
+    /// at [`WriteBatch::commit`], with O(1) full flushes per batch
+    /// instead of per object.
+    #[must_use]
+    pub fn batch(&self) -> WriteBatch<'_> {
+        self.batch_with_policy(SyncPolicy::Batch)
+    }
+
+    /// Start a batched write with an explicit [`SyncPolicy`].
+    #[must_use]
+    pub fn batch_with_policy(&self, policy: SyncPolicy) -> WriteBatch<'_> {
+        WriteBatch::new(self, policy)
     }
 
     /// Returns `true` when `root` contains a `.mkit/objects` directory.
@@ -133,7 +183,8 @@ impl ObjectStore {
     }
 
     /// Compute the on-disk path for `hash`, joined under `objects/`.
-    fn path_for(&self, h: &Hash) -> PathBuf {
+    /// `pub(crate)` so [`WriteBatch`] shares the single layout rule.
+    pub(crate) fn path_for(&self, h: &Hash) -> PathBuf {
         let p = object_path(h);
         // Both halves are ASCII hex by construction in `object_path`.
         let dir = std::str::from_utf8(&p.dir).expect("ascii hex");
@@ -170,7 +221,7 @@ impl ObjectStore {
             .parent()
             .expect("object path always has a 2-hex parent");
         fs::create_dir_all(shard_dir)?;
-        write_atomic(&final_path, bytes)?;
+        write_atomic(&final_path, bytes, &**self.syncer())?;
         Ok(h)
     }
 
@@ -288,44 +339,90 @@ impl ObjectStore {
     }
 }
 
-/// Atomically write `bytes` to `final_path`. We write to a sibling temp
-/// file in the same directory, `fsync` the file, then rename into place.
-/// On Unix, `rename(2)` is atomic with respect to concurrent readers and
-/// replaces the destination. On Windows, [`NamedTempFile::persist`] uses
-/// `MOVEFILE_REPLACE_EXISTING` semantics so the replace-existing path
-/// works there too.
+/// Create a uniquely-named sibling temp file in `parent` for the object
+/// file `file_name`. The `.{name}.tmp.{pid}.{seq}` shape is what
+/// [`ObjectStore::iter_object_hashes`] and the stale-temp tests rely on
+/// to skip non-objects.
+pub(crate) fn temp_file_in(parent: &Path, file_name: &str) -> io::Result<NamedTempFile> {
+    let pid = process::id();
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
+    NamedTempFile::with_prefix_in(tmp_name, parent)
+}
+
+/// Atomically write `bytes` to `final_path` with per-object durability
+/// ([`SyncPolicy::PerObject`]): temp file, full flush, rename into
+/// place, parent-dir flush. On Unix, `rename(2)` is atomic with respect
+/// to concurrent readers and replaces the destination. On Windows,
+/// [`NamedTempFile::persist`] uses `MOVEFILE_REPLACE_EXISTING`
+/// semantics so the replace-existing path works there too.
 ///
-/// After a successful rename we `fsync` the parent directory on Unix to
-/// flush the dirent update — without this, the rename can survive a
+/// After a successful rename we flush the parent directory on Unix to
+/// commit the dirent update — without this, the rename can survive a
 /// power loss only in the page cache and the file appears missing on
 /// reboot.
-fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
+///
+/// All flush/rename primitives go through `syncer` so unit tests can
+/// assert ordering; [`RealSyncer`] preserves the historical behaviour
+/// exactly.
+fn write_atomic(final_path: &Path, bytes: &[u8], syncer: &dyn Syncer) -> io::Result<()> {
     let parent = final_path.parent().expect("write_atomic: path has parent");
     let file_name = final_path
         .file_name()
         .expect("write_atomic: path has file name")
         .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
 
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    let mut tmp = temp_file_in(parent, &file_name)?;
     tmp.as_file_mut().write_all(bytes)?;
-    tmp.as_file_mut().sync_all()?;
+    syncer.full(tmp.as_file(), tmp.path())?;
 
     // NamedTempFile::persist uses a cross-platform atomic replace:
     // rename(2) on Unix, MoveFileExW with MOVEFILE_REPLACE_EXISTING on Windows.
-    tmp.persist(final_path).map_err(|e| e.error)?;
+    syncer.rename(tmp.into_temp_path(), final_path)?;
 
-    sync_parent_dir(parent)?;
+    syncer.dir_sync(parent)?;
     Ok(())
+}
+
+/// Write target shared by [`ObjectStore`] (per-object durability) and
+/// [`WriteBatch`] (batched durability), so ingest code can be written
+/// once against either sink.
+pub trait ObjectSink {
+    /// Store `bytes` as one object, returning its BLAKE3 hash.
+    fn put(&self, bytes: &[u8]) -> StoreResult<Hash>;
+    /// Store the concatenation of `parts` as one object without the
+    /// caller having to materialise the concatenated buffer.
+    fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash>;
+    /// True when the object is already present (or staged) in this sink.
+    fn has(&self, h: &Hash) -> bool;
+}
+
+impl ObjectSink for ObjectStore {
+    fn put(&self, bytes: &[u8]) -> StoreResult<Hash> {
+        self.write(bytes)
+    }
+
+    fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
+        // Per-object path is the legacy/rare sink; hot ingest paths use
+        // WriteBatch, whose put_parts is copy-free.
+        let total: usize = parts.iter().map(|p| p.len()).sum();
+        let mut bytes = Vec::with_capacity(total);
+        for p in parts {
+            bytes.extend_from_slice(p);
+        }
+        self.write(&bytes)
+    }
+
+    fn has(&self, h: &Hash) -> bool {
+        self.contains(h)
+    }
 }
 
 /// On Unix, fsync the directory holding the just-renamed file so the
 /// dirent update is durable. No-op on non-Unix (Windows does not expose
 /// a stable directory-fsync primitive via `std::fs`).
 #[cfg(unix)]
-fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
     match File::open(parent) {
         Ok(dir) => dir.sync_all(),
         // If the dir disappeared under us (race with external cleanup),
@@ -337,7 +434,7 @@ fn sync_parent_dir(parent: &Path) -> io::Result<()> {
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
-fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 

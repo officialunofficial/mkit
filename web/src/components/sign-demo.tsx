@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Field, FieldList, INPUT_CLASSES, INPUT_CLASSES_XS } from './result-panel'
+import { BUTTON_CLASSES, Field, FieldList, INPUT_CLASSES, INPUT_CLASSES_XS } from './result-panel'
 import { DEMO_SEED, TEXT_ENCODER, useMkit } from './use-mkit'
 
 export function SignDemo() {
@@ -50,7 +50,7 @@ export function SignDemo() {
       <FieldList>
         <Field label='Public key'>
           {'error' in keypair ? (
-            <span className='text-red-600'>{keypair.error}</span>
+            <span className='text-[--color-accent]'>{keypair.error}</span>
           ) : (
             <code className='font-mono text-sm'>{keypair.pubkey_hex}</code>
           )}
@@ -91,7 +91,14 @@ export function SignDemo() {
           <FieldList>
             <Field label='Verifies'>
               {verdict === null ? null : (
-                <span className={verdict ? 'text-green-700' : 'text-red-600'}>{verdict ? 'yes ✓' : 'no ✗'}</span>
+                // Keyed on the verdict so flipping it re-mounts the
+                // element and replays the stamp-in thunk.
+                <span
+                  key={String(verdict)}
+                  className={`stamp ${verdict ? 'text-[--color-verified]' : 'text-[--color-accent]'}`}
+                >
+                  {verdict ? 'Verified' : 'Rejected'}
+                </span>
               )}
             </Field>
           </FieldList>
@@ -111,12 +118,7 @@ function Button({
   disabled?: boolean
 }) {
   return (
-    <button
-      type='button'
-      onClick={onClick}
-      disabled={disabled}
-      className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-[--color-hairline] bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-[--color-fg] active:translate-y-px disabled:pointer-events-none disabled:opacity-50 sm:h-9'
-    >
+    <button type='button' onClick={onClick} disabled={disabled} className={BUTTON_CLASSES}>
       {children}
     </button>
   )

@@ -1,30 +1,31 @@
 export const Footer = () => {
   return (
+    // Colophon: double rule echoing the letterhead, then one line of
+    // mono microtext — sources on the left, typesetting note on the
+    // right, the way a printed certificate signs off.
     <footer>
       <div className='mx-auto w-full max-w-5xl px-6'>
-        {/* Bottom separator: 1px dashed hairline. Dashed reads quieter
-            than solid and keeps the bottom of the page deferential to
-            the 2px gradient top — the two edges rhyme without
-            matching. */}
-        <div className='border-t border-dashed border-[--color-hairline]' aria-hidden />
-        <div className='py-6 text-xs text-[--color-muted]'>
-          <a
-            href='https://github.com/officialunofficial/mkit'
-            target='_blank'
-            rel='noreferrer'
-            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-          >
-            officialunofficial/mkit
-          </a>
-          <span aria-hidden> · </span>
-          <a
-            href='https://crates.io/crates/mkit-cli'
-            target='_blank'
-            rel='noreferrer'
-            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-          >
-            mkit-cli on crates.io
-          </a>
+        <div className='rule-double' aria-hidden />
+        <div className='microlabel flex flex-col justify-between gap-2 py-8 text-[--color-muted] sm:flex-row sm:items-baseline'>
+          <div className='flex flex-wrap gap-x-5 gap-y-1'>
+            <a
+              href='https://github.com/officialunofficial/mkit'
+              target='_blank'
+              rel='noreferrer'
+              className='underline underline-offset-4 transition-colors duration-200 hover:text-[--color-fg]'
+            >
+              officialunofficial/mkit
+            </a>
+            <a
+              href='https://crates.io/crates/mkit-cli'
+              target='_blank'
+              rel='noreferrer'
+              className='underline underline-offset-4 transition-colors duration-200 hover:text-[--color-fg]'
+            >
+              mkit-cli on crates.io
+            </a>
+          </div>
+          <span className='text-[--color-subtle]'>Set in Fraunces &amp; Plex Mono · hashed with BLAKE3</span>
         </div>
       </div>
     </footer>
