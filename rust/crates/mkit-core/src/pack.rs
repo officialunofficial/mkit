@@ -351,9 +351,14 @@ impl PackReader {
             return Err(PackError::TrailingData);
         }
 
+        // Batched durability: one full flush for the whole pack instead
+        // of one per object. The caller's ref update happens after
+        // `read` returns, so the commit-before-reference ordering holds.
+        let batch = store.batch();
         for bytes in pending_writes {
-            store.write(&bytes)?;
+            batch.write(&bytes)?;
         }
+        batch.commit()?;
 
         Ok(report)
     }
@@ -429,6 +434,43 @@ mod tests {
         assert_eq!(report.raw_count, 0);
         assert_eq!(report.delta_count, 0);
         assert!(report.stored.is_empty());
+    }
+
+    #[test]
+    fn unpack_writes_objects_via_single_batch_flush() {
+        // clone/fetch receive N objects per pack; durability must cost
+        // O(1) full flushes per pack, not O(N).
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        use std::sync::Arc;
+
+        let mut w = PackWriter::new();
+        let mut blobs = Vec::new();
+        for i in 0u32..30 {
+            let blob = write_blob_via_serialize(format!("pack object {i}").as_bytes());
+            w.push_raw(hash::hash(&blob), blob.clone()).unwrap();
+            blobs.push(blob);
+        }
+        let pack = w.finish().unwrap();
+
+        let (_dir, mut store) = fresh_store();
+        let rec = Arc::new(RecordingSyncer::default());
+        store.set_syncer(rec.clone());
+
+        let report = PackReader::read(&pack, &store).unwrap();
+        assert_eq!(report.raw_count, 30);
+
+        let fulls = rec
+            .events()
+            .iter()
+            .filter(|e| matches!(e, Ev::Full(_)))
+            .count();
+        assert_eq!(
+            fulls, 1,
+            "unpacking a pack must cost exactly one full flush"
+        );
+        for blob in &blobs {
+            assert_eq!(store.read(&hash::hash(blob)).unwrap(), *blob);
+        }
     }
 
     #[test]
