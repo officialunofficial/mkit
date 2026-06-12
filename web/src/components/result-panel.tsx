@@ -3,7 +3,7 @@ import { hashColor } from '../lib/hash-color'
 
 /** Canonical input/textarea class string. `text-sm` by default; swap in `text-xs` variant for dense hex inputs. */
 export const INPUT_CLASSES =
-  'w-full rounded-md border border-[--color-hairline] bg-transparent p-2.5 font-mono text-sm outline-none transition-colors focus:border-[--color-fg]'
+  'w-full rounded-md border border-hairline bg-transparent p-2.5 font-mono text-sm outline-none transition-colors focus:border-fg'
 export const INPUT_CLASSES_XS = INPUT_CLASSES.replace('text-sm', 'text-xs')
 
 /**
@@ -59,9 +59,9 @@ export function ObjectRow({
       <div className='min-w-0 flex-1'>
         <div className='flex items-baseline gap-2'>
           <span className='truncate text-sm font-medium'>{label}</span>
-          {meta ? <span className='shrink-0 text-xs text-[--color-muted]'>{meta}</span> : null}
+          {meta ? <span className='shrink-0 text-xs text-muted'>{meta}</span> : null}
         </div>
-        <code className='block font-mono text-xs break-all text-[--color-muted]'>{hash}</code>
+        <code className='block font-mono text-xs break-all text-muted'>{hash}</code>
       </div>
       {trailing ? <div className='shrink-0'>{trailing}</div> : null}
     </div>
@@ -86,7 +86,7 @@ export function Section({
           {hash ? <HashChip hash={hash} /> : null}
           <span>{title}</span>
         </h2>
-        <p className='text-sm text-[--color-subtle]'>{description}</p>
+        <p className='text-sm text-subtle'>{description}</p>
       </header>
       <div className='space-y-4'>{children}</div>
     </section>
@@ -100,7 +100,7 @@ export function Section({
 export function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className='space-y-1.5'>
-      <div className='text-xs text-[--color-muted]'>{label}</div>
+      <div className='text-xs text-muted'>{label}</div>
       <code className='block font-mono text-sm break-all'>{value}</code>
     </div>
   )
@@ -114,7 +114,7 @@ export function Row({ label, value }: { label: string; value: string }) {
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className='grid gap-1 py-4 sm:grid-cols-[minmax(0,14rem),1fr] sm:gap-6'>
-      <dt className='text-sm text-[--color-muted]'>{label}</dt>
+      <dt className='text-sm text-muted'>{label}</dt>
       <dd className='min-w-0 break-all'>{children}</dd>
     </div>
   )
@@ -122,9 +122,5 @@ export function Field({ label, children }: { label: string; children: ReactNode 
 
 /** Dashed-rule `<dl>` wrapping a stack of `<Field>`s. Used for every results table in sign/attest. */
 export function FieldList({ children }: { children: ReactNode }) {
-  return (
-    <dl className='divide-y divide-dashed divide-[--color-hairline] border-y border-dashed border-[--color-hairline]'>
-      {children}
-    </dl>
-  )
+  return <dl className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>{children}</dl>
 }

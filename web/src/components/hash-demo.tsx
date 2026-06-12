@@ -115,18 +115,18 @@ export function HashDemo() {
     <div className='flex flex-col-reverse gap-10 lg:grid lg:grid-cols-[minmax(0,20rem)_1fr] lg:gap-12'>
       <div className='space-y-6 lg:sticky lg:top-24 lg:self-start'>
         <label className='block'>
-          <span className='mb-2 block text-sm text-[--color-muted]'>Commit message</span>
+          <span className='mb-2 block text-sm text-muted'>Commit message</span>
           <input className={INPUT_CLASSES} value={message} onChange={(e) => setMessage(e.target.value)} />
         </label>
 
         <label className='block'>
-          <span className='mb-2 block text-sm text-[--color-muted]'>README.md</span>
+          <span className='mb-2 block text-sm text-muted'>README.md</span>
           <textarea className={INPUT_CLASSES} rows={3} value={text} onChange={(e) => setText(e.target.value)} />
         </label>
 
         <div>
-          <span className='block text-sm text-[--color-muted]'>Image</span>
-          <p className='mb-3 text-xs text-[--color-muted]'>
+          <span className='block text-sm text-muted'>Image</span>
+          <p className='mb-3 text-xs text-muted'>
             {image.name} · {image.mime || 'application/octet-stream'} · {formatBytes(image.bytes.byteLength)} · demo cap{' '}
             {formatBytes(MAX_IMAGE_BYTES)}
           </p>
@@ -143,7 +143,7 @@ export function HashDemo() {
               <button
                 type='button'
                 onClick={() => fileRef.current?.click()}
-                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-[--color-hairline] bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-[--color-fg] active:translate-y-px sm:h-9'
+                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-hairline bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-fg active:translate-y-px sm:h-9'
               >
                 Replace image
               </button>
@@ -151,7 +151,7 @@ export function HashDemo() {
                 type='button'
                 onClick={resetImage}
                 disabled={!customised}
-                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg px-2 text-sm text-[--color-muted] transition-opacity duration-200 hover:opacity-70 active:translate-y-px disabled:pointer-events-none disabled:opacity-30 sm:h-9'
+                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg px-2 text-sm text-muted transition-opacity duration-200 hover:opacity-70 active:translate-y-px disabled:pointer-events-none disabled:opacity-30 sm:h-9'
               >
                 Reset
               </button>
@@ -178,14 +178,14 @@ export function HashDemo() {
         </div>
       </div>
 
-      <div className='divide-y-2 divide-[--color-hairline] border-y-2 border-[--color-hairline]'>
+      <div className='divide-y-2 divide-hairline border-y-2 border-hairline'>
         {merkle ? (
           <Section title='Merkle tree' description='Each square is the BLAKE3 of everything beneath it.'>
             <MerkleTree root={merkle} />
           </Section>
         ) : null}
         <Section title='Objects' description='Every hash in this commit. Edit any input and they all change.'>
-          <div className='divide-y divide-[--color-hairline]'>
+          <div className='divide-y divide-hairline'>
             <ObjectRow
               hash={commit.hash}
               label='commit'

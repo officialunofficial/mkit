@@ -42,7 +42,7 @@ export function SignDemo() {
   return (
     <div className='space-y-6'>
       <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>Private key</span>
+        <span className='mb-2 block text-sm text-muted'>Private key</span>
         <input className={INPUT_CLASSES_XS} value={seed} onChange={(e) => setSeed(e.target.value.trim())} />
       </label>
       <Button onClick={fresh}>Generate a new key</Button>
@@ -58,7 +58,7 @@ export function SignDemo() {
       </FieldList>
 
       <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>Message</span>
+        <span className='mb-2 block text-sm text-muted'>Message</span>
         <input
           className={INPUT_CLASSES}
           value={message}
@@ -82,7 +82,7 @@ export function SignDemo() {
           <label className='flex cursor-pointer items-center gap-2 py-2 text-sm'>
             <input
               type='checkbox'
-              className='accent-[--color-fg]'
+              className='accent-fg'
               checked={tamper}
               onChange={(e) => setTamper(e.target.checked)}
             />
@@ -115,7 +115,7 @@ function Button({
       type='button'
       onClick={onClick}
       disabled={disabled}
-      className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-[--color-hairline] bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-[--color-fg] active:translate-y-px disabled:pointer-events-none disabled:opacity-50 sm:h-9'
+      className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-hairline bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-fg active:translate-y-px disabled:pointer-events-none disabled:opacity-50 sm:h-9'
     >
       {children}
     </button>

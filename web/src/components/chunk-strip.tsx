@@ -46,14 +46,14 @@ const ChunkButton = memo(
         onClick={onClick ? () => onClick(index) : undefined}
         title={title}
         aria-label={`chunk ${index}: ${len} bytes`}
-        className={`relative h-full shrink-0 border-r border-[--color-hairline]/40 last:border-r-0 transition-opacity ${opacityClass} ${animateClass} ${ring ? 'outline outline-2 outline-[--color-fg] z-10' : ''} ${clickable ? 'cursor-pointer' : ''}`}
+        className={`relative h-full shrink-0 border-r border-hairline/40 last:border-r-0 transition-opacity ${opacityClass} ${animateClass} ${ring ? 'outline outline-2 outline-fg z-10' : ''} ${clickable ? 'cursor-pointer' : ''}`}
         style={{
           width: `max(2px, ${widthPct}%)`,
           minWidth: '2px',
           backgroundColor: hashColor(hashHex),
         }}
       >
-        {showVerifiedBar ? <span aria-hidden className='absolute inset-x-0 top-0 h-0.5 bg-[--color-fg]' /> : null}
+        {showVerifiedBar ? <span aria-hidden className='absolute inset-x-0 top-0 h-0.5 bg-fg' /> : null}
         {showFailedOverlay ? (
           <span
             aria-hidden
@@ -116,7 +116,7 @@ export function ChunkStrip({
       <div
         role='group'
         aria-label={ariaLabel}
-        className='flex h-6 w-full overflow-x-auto rounded-sm border border-[--color-hairline]'
+        className='flex h-6 w-full overflow-x-auto rounded-sm border border-hairline'
       >
         {chunks.map((c, i) => {
           const pending = pendingSet?.has(i) ?? false
@@ -143,7 +143,7 @@ export function ChunkStrip({
       {markerPct != null ? (
         <span
           aria-hidden
-          className='pointer-events-none absolute -top-1 -bottom-1 z-20 w-0.5 bg-[--color-fg]'
+          className='pointer-events-none absolute -top-1 -bottom-1 z-20 w-0.5 bg-fg'
           style={{ left: `calc(${markerPct}% - 1px)` }}
         />
       ) : null}
