@@ -175,6 +175,11 @@ commands:
                     window (default 14d); -n/--dry-run previews
   sparse-checkout    Manage sparse checkout patterns
   serve <path>       Start SSH transport server (internal)
+  mcp [--repository <path>]
+                    Start a Model Context Protocol server on stdio so LLM
+                    agents can drive this repository (status/diff/log/add/
+                    commit/branch + verify/attest); --repository confines
+                    tool calls to that path
   pack-shard <hash>  Encode a stored pack into Reed-Solomon shards (feature: pack-shards)
   blame [--format=json] <file>
                     Show line-level commit attribution (JSONL with --format=json)
@@ -266,6 +271,7 @@ mod tests {
             "bisect",
             "sparse-checkout",
             "serve",
+            "mcp",
             "pack-shard",
             "blame",
             "verify",

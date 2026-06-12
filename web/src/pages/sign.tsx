@@ -8,7 +8,7 @@ export default function SignPage() {
       <title>mkit — sign</title>
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Who signed this?</h1>
-        <p className='max-w-prose text-base text-[--color-fg]'>
+        <p className='max-w-prose text-base text-fg'>
           A private key signs a message; the matching public key verifies it — anyone can confirm the message is
           untouched and that you signed it. In mkit this isn't optional: every commit carries an Ed25519 signature,
           where git treats signing as a GPG add-on. Generate a key, sign a message, then flip a single character and

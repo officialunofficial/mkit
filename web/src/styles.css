@@ -71,10 +71,12 @@
      and Chrome all require the override. Range inputs are deliberately
      excluded: stripping their appearance hides the track + thumb
      entirely (browsers need explicit ::-webkit-slider-* rules to
-     re-draw them), so we keep their native chrome. */
+     re-draw them), so we keep their native chrome. Checkboxes and
+     radios are excluded for the same reason — appearance:none leaves
+     them invisible without bespoke replacement styling. */
   textarea,
   select,
-  input:not([type='range']) {
+  input:not([type='range']):not([type='checkbox']):not([type='radio']) {
     -webkit-appearance: none;
     appearance: none;
   }

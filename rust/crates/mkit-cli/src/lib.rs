@@ -104,6 +104,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "pull" => commands::pull::run(&rest),
         "fetch" => commands::fetch::run(&rest),
         "clone" => commands::clone::run(&rest),
+        "mcp" => commands::mcp::run(&rest),
         "merge" => commands::merge::run(&rest),
         "cherry-pick" => commands::cherry_pick::run(&rest),
         "revert" => commands::revert::run(&rest),
