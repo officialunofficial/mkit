@@ -6,13 +6,13 @@ export default function HomePage() {
       <title>mkit demo</title>
       <section className='space-y-5'>
         <h1 className='text-5xl font-semibold tracking-tight'>A content-addressed VCS.</h1>
-        <p className='max-w-prose text-lg text-[--color-fg]'>
+        <p className='max-w-prose text-lg text-fg'>
           Content-addressed means the name of a thing <em>is</em> the BLAKE3 hash of its bytes — every file, folder, and
           commit. Change one byte, get a new name. Every commit is signed with an Ed25519 key, and any claim about a
           commit — reviewed, tested, deployed — travels as a signed statement anyone can verify. Written in Rust; here
           it runs in your browser.
         </p>
-        <p className='max-w-prose text-sm text-[--color-muted]'>
+        <p className='max-w-prose text-sm text-muted'>
           mkit is git-like where it can be — add, commit, branch, push — and different where it counts: one hash
           algorithm, signatures on every commit, attestations as first-class objects. Alpha, open source:{' '}
           <a
@@ -27,7 +27,7 @@ export default function HomePage() {
         </p>
       </section>
 
-      <ul className='divide-y divide-[--color-hairline] border-y border-[--color-hairline]'>
+      <ul className='divide-y divide-hairline border-y border-hairline'>
         <Demo
           to='/hash'
           title='hash'
@@ -76,7 +76,7 @@ function Demo({ to, title, body }: { to: DemoRoute; title: string; body: string 
       >
         <div className='space-y-1'>
           <div className='text-base font-medium'>{title}</div>
-          <p className='max-w-prose text-sm text-[--color-muted]'>{body}</p>
+          <p className='max-w-prose text-sm text-muted'>{body}</p>
         </div>
         <span
           aria-hidden
