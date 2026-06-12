@@ -270,13 +270,21 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     // `mkit git status` only.
     let push_dest = ensure_dest(&opts.dest)?;
 
+    // Recompute AFTER ensure_dest: a fresh local mirror did not exist
+    // when the origin-guard identity above was taken, so its lexical
+    // fallback differs from the canonicalized spelling every later
+    // run produces — binding the early value would wedge the state on
+    // the second export. (The guard itself is unaffected: recorded
+    // import sources always exist.)
+    let bound_identity = mkit_git_bridge::remoteid::remote_identity(&opts.dest);
+
     let dest_file = state.join("dest");
     if opts.passthrough {
-        mkit_git_bridge::map::write_binding(&state, "dest", &dest_identity)
+        mkit_git_bridge::map::write_binding(&state, "dest", &bound_identity)
             .map_err(|e| (format!("record dest: {e}"), exit::CANTCREAT))?;
     } else {
         match std::fs::read_to_string(&dest_file) {
-            Ok(recorded) if recorded.trim() != dest_identity => {
+            Ok(recorded) if recorded.trim() != bound_identity => {
                 return Err((
                     format!(
                         "state '{}' is bound to {}; use a different --remote-name for {}",
@@ -289,7 +297,7 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                mkit_git_bridge::map::write_binding(&state, "dest", &dest_identity)
+                mkit_git_bridge::map::write_binding(&state, "dest", &bound_identity)
                     .map_err(|e| (format!("record dest: {e}"), exit::CANTCREAT))?;
             }
             Err(e) => return Err((format!("read dest binding: {e}"), exit::GENERAL_ERROR)),

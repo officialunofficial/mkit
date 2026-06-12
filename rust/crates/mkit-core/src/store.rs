@@ -90,8 +90,9 @@ pub struct BulkWriter<'a> {
 }
 
 impl BulkWriter<'_> {
-    /// Write one object (temp + rename, no fsync). Always rewrites —
-    /// no existence short-circuit (see the contract).
+    /// Write one object (temp + rename; fsync deferred to commit).
+    /// An existing path is byte-verified: matched objects are left in
+    /// place (but still fsynced at commit), torn ones are rewritten.
     ///
     /// # Panics
     /// Never in practice: object paths always have a 2-hex shard
@@ -108,14 +109,19 @@ impl BulkWriter<'_> {
         // native history) must NOT be replaced with an unsynced inode
         // a power loss could tear, while a torn file from a crashed
         // session fails the comparison and is healed by the rewrite.
-        if let Ok(existing) = fs::read(&final_path)
-            && existing == bytes
-        {
-            return Ok(h);
-        }
         let shard_dir = final_path
             .parent()
             .expect("object path always has a 2-hex parent");
+        if let Ok(existing) = fs::read(&final_path)
+            && existing == bytes
+        {
+            // Still fsync it at commit: the bytes may have matched out
+            // of the PAGE CACHE of a crashed session's unsynced write
+            // — byte equality is not a durability test.
+            self.dirs.insert(shard_dir.to_path_buf());
+            self.files.insert(final_path);
+            return Ok(h);
+        }
         fs::create_dir_all(shard_dir)?;
         crate::atomic::write_unsynced(&final_path, bytes)?;
         self.dirs.insert(shard_dir.to_path_buf());

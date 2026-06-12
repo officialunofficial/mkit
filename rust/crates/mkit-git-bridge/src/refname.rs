@@ -36,11 +36,11 @@ pub fn check_tag_name(name: &[u8]) -> Result<(), &'static str> {
     if name.is_empty() {
         return Err("empty");
     }
-    // SPEC-OBJECTS caps tag names at 4096 bytes; over-length names
-    // must refuse HERE (per-ref) — reaching serialization would turn
-    // one hostile tag into a whole-run abort.
-    if name.len() > 4096 {
-        return Err("over the 4096-byte cap");
+    // SPEC-OBJECTS caps tag names (TAG_NAME_MAX_LEN); over-length
+    // names must refuse HERE (per-ref) — reaching serialization would
+    // turn one hostile tag into a whole-run abort.
+    if name.len() > usize::from(mkit_core::object::TAG_NAME_MAX_LEN) {
+        return Err("over the tag-name length cap");
     }
     let Ok(s) = std::str::from_utf8(name) else {
         return Err("not UTF-8");

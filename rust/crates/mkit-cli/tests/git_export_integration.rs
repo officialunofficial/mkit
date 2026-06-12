@@ -587,3 +587,27 @@ fn tag_subset_and_duplicate_refs_export() {
             .any(|l| l.starts_with("refs/tags/v1 "))
     );
 }
+
+#[test]
+#[cfg(unix)]
+fn export_to_fresh_local_dest_rebinds_identically() {
+    // Regression: the dest-binding identity was computed BEFORE
+    // ensure_dest created a missing local mirror, so the lexical
+    // fallback differed from the canonicalized spelling of every
+    // later run and the second export refused with a self-identical
+    // "bound to X; use a different --remote-name for X" error.
+    if !git_available() {
+        return;
+    }
+    let r = fixture();
+    let mroot = mirror_root();
+    // A dest under a symlinked parent (macOS /tmp-style): missing on
+    // run 1 (lexical identity), canonicalizable on run 2.
+    let real = mroot.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = mroot.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let dest = link.join("mirror-fresh");
+    r.ok(&["git", "export", dest.to_str().unwrap()]);
+    r.ok(&["git", "export", dest.to_str().unwrap()]);
+}
