@@ -7,8 +7,23 @@ export default function HomePage() {
       <section className='space-y-5'>
         <h1 className='text-5xl font-semibold tracking-tight'>A content-addressed VCS.</h1>
         <p className='max-w-prose text-lg text-[--color-fg]'>
-          Every file is named by a BLAKE3 hash of its bytes. Every commit is signed. Every review is a portable, signed
-          claim anyone can verify. Written in Rust — here it runs in your browser.
+          Content-addressed means the name of a thing <em>is</em> the BLAKE3 hash of its bytes — every file, folder, and
+          commit. Change one byte, get a new name. Every commit is signed with an Ed25519 key, and any claim about a
+          commit — reviewed, tested, deployed — travels as a signed statement anyone can verify. Written in Rust; here
+          it runs in your browser.
+        </p>
+        <p className='max-w-prose text-sm text-[--color-muted]'>
+          mkit is git-like where it can be — add, commit, branch, push — and different where it counts: one hash
+          algorithm, signatures on every commit, attestations as first-class objects. Alpha, open source:{' '}
+          <a
+            href='https://github.com/officialunofficial/mkit'
+            target='_blank'
+            rel='noreferrer'
+            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+          >
+            officialunofficial/mkit
+          </a>{' '}
+          on GitHub, <code className='font-mono'>cargo install mkit-cli</code> to try it.
         </p>
       </section>
 
@@ -36,7 +51,12 @@ export default function HomePage() {
         <Demo
           to='/streaming'
           title='streaming'
-          body='Why git stops working on a 2 GB video — and how mkit handles it in 40 KB.'
+          body='Edit a 2 GB video and git stores it again, whole. mkit cuts it into chunks, ships only the changed ones, and verifies each chunk as it streams in.'
+        />
+        <Demo
+          to='/performance'
+          title='performance'
+          body='Hashing, committing, packing — mkit measured against git on real operations.'
         />
       </ul>
     </div>
@@ -45,7 +65,7 @@ export default function HomePage() {
 
 // `to` is narrowed to the concrete route literals Waku emits — a plain
 // `string` is too wide for Waku 1.0.0-alpha.8's typed Link.
-type DemoRoute = '/hash' | '/sign' | '/attest' | '/tree' | '/streaming'
+type DemoRoute = '/hash' | '/sign' | '/attest' | '/tree' | '/streaming' | '/performance'
 
 function Demo({ to, title, body }: { to: DemoRoute; title: string; body: string }) {
   return (

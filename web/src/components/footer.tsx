@@ -16,6 +16,15 @@ export const Footer = () => {
           >
             officialunofficial/mkit
           </a>
+          <span aria-hidden> · </span>
+          <a
+            href='https://crates.io/crates/mkit-cli'
+            target='_blank'
+            rel='noreferrer'
+            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+          >
+            mkit-cli on crates.io
+          </a>
         </div>
       </div>
     </footer>

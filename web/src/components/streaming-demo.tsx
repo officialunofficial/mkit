@@ -396,7 +396,7 @@ function StreamingDelta({ current, previous }: { current: FileAsset; previous: F
       description='Wire format that ships only the new + changed chunks against a known base.'
     >
       {!data ? (
-        <p className='text-sm text-[--color-muted]'>Replace the file above to see the delta.</p>
+        <p className='text-sm text-[--color-muted]'>Replace the file to see the delta.</p>
       ) : (
         <>
           <div className='space-y-1'>
