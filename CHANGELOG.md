@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **git-bridge: importer-signed git→mkit import, pull, and fork-mode
+  export back** (`mkit git import|fetch|pull`, `mkit git export
+  --passthrough`, `mkit git verify|status|format-patch`; behind the
+  same default-off `git-bridge` feature;
+  [#330](https://github.com/officialunofficial/mkit/pull/330)).
+  [`docs/SPEC-GIT-IMPORT.md`](docs/SPEC-GIT-IMPORT.md) pins the
+  inbound mapping: a git upstream imports as a downstream fork whose
+  every commit/tag is signed by a dedicated, per-state-dir-pinned
+  import key (per-key deterministic — same key + upstream ⇒ same
+  hashes anywhere), original authorship preserved in the author
+  identity, original git bytes retained for audit, and a
+  `git-import/v1` attestation minted per head. `mkit git pull`
+  fast-forwards or refuses with a native `mkit merge
+  upstream/<branch>` hint; force-pushes warn and rewind tracking refs
+  only; deletions prune like `git fetch --prune`. Passthrough (fork
+  mode, SPEC-GIT-BRIDGE §14) re-emits imported objects as their
+  original sha1s so an imported repo publishes as a TRUE git fork
+  (shared merge bases, PR-able), with an origin guard refusing
+  disconnected re-translations toward any recorded import source.
+  `mkit git verify [--fork-audit]` audits bridge state offline;
+  `format-patch` renders native commits as `git am`-able patches.
+  Journeys in
+  [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md);
+  hostile-upstream surface in THREAT-MODEL §3.1a. Closes the Phase 2a
+  scope of the git-interop exploration.
+
+- **git-bridge: deterministic one-way export to git mirrors**
+  (`mkit git export`, behind the default-off `git-bridge` feature;
+  [#330](https://github.com/officialunofficial/mkit/pull/330)).
+  New normative spec [`docs/SPEC-GIT-BRIDGE.md`](docs/SPEC-GIT-BRIDGE.md)
+  pins a byte-deterministic mkit→git object mapping (BLAKE3/SHA-1
+  translation with mkit-only fields — signer, signature, identity,
+  annotation slots — carried in `mkit-*` commit/tag headers), so the
+  original signed mkit objects are reconstructible bit-exactly from a
+  mirror and their Ed25519 signatures re-verify (shallow and deep
+  verification modes are specified). New `mkit-git-bridge` crate
+  implements the mapping with golden vectors under
+  `rust/tests/golden/git-bridge/`, round-trip + determinism +
+  differential-vs-real-git tests (`git hash-object` id agreement,
+  `git fsck --strict`). The exporter pushes with per-ref
+  `--force-with-lease` from rebuildable state under `.mkit/git/`,
+  skips untranslatable refs loudly (remix ancestry, git-illegal
+  names, non-canonical chunking); the import direction is specified
+  separately in [`docs/SPEC-GIT-IMPORT.md`](docs/SPEC-GIT-IMPORT.md). PARITY.md gains a scope amendment per its
+  own renegotiation rule. Closes the Phase 0+1 scope of the
+  git-interop exploration.
+
 - **`mkit mcp` — a local Model Context Protocol server in the CLI.**
   `mkit mcp [--repository <path>]` speaks newline-delimited JSON-RPC
   over stdio so LLM agents can drive local repositories through
@@ -61,6 +108,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default build mode fills its `OUT_DIR` with the same `.rs` file set,
   and the script picked whichever was freshest. Codegen mode now drops
   a `.mkit-rpc-codegen` marker that the script requires.
+
+### Security
+
+- **New `git-bridge/v1` attestation predicate** (SPEC-GIT-BRIDGE §11;
+  [#330](https://github.com/officialunofficial/mkit/pull/330)):
+  `mkit git export` mints one DSSE/in-toto attestation per exported
+  head, signed with the exporter's configured signer — subject is the
+  mkit commit (BLAKE3) + ref name; the predicate carries the
+  `gitCommit` SHA-1 as a locator (not a proof — SHA-1 is git's naming
+  function, never a security boundary here), the mirror URL, and
+  schema/spec versions. Bridge attestations are distinguishable from
+  author signatures by predicate type and keyid; they assert "this
+  exporter translated this commit", never authorship. Published on
+  the mirror under `refs/mkit/attestations`. Threat model unchanged:
+  carried signatures verify only over reconstructed mkit bytes, and
+  translated history that fails reconstruction fails closed.
 
 ## [0.2.0] - 2026-06-10
 

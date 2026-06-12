@@ -92,6 +92,55 @@ mkit does NOT defend:
 - A user who manually runs `mkit config attest.external_signer_path
   /tmp/evil` after cloning. Local choice is the user's responsibility.
 
+### 3.1a Hostile git upstream (`git-bridge` import)
+
+Attacker controls a git repository that the user imports or fetches
+with `mkit git import`/`fetch`/`pull` (feature `git-bridge`): every
+object byte, ref name, tag chain, and the transport-level ref
+advertisement.
+
+mkit defends:
+
+- Parser containment. Upstream bytes are read through a hardened
+  parser layer (`gitparse`, fuzzed: commit/tag/tree targets) behind a
+  `git cat-file --batch` subprocess; header blocks are size-capped,
+  tag chains depth-capped (16), trees depth-capped (128).
+- A refusal matrix instead of best-effort coercion. Gitlinks
+  (submodules), unknown tree modes, duplicate/illegal tree entry
+  names, negative or overflowing timestamps, oversized author
+  payloads, and mkit-illegal ref names refuse per-ref with a warning
+  — a hostile object cannot silently produce a misleading mkit twin
+  (SPEC-GIT-IMPORT §3).
+- Translation provenance. Every translated commit/tag is signed by
+  the local IMPORT key, original raw bytes are retained
+  sha1-addressed under `.mkit/git/<name>/raw/` as audit evidence, and
+  each imported head gets a `git-import/v1` attestation binding the
+  git commit id, canonical remote identity, and mkit twin.
+  `mkit git verify` re-checks all of it offline.
+- Tracking-ref containment. Fetches only move
+  `refs/remotes/<name>/*` (plus tags); upstream force-pushes rewind
+  tracking refs with a loud warning and never touch local branches.
+- Accidental-overwrite guards on the way back. The origin guard
+  refuses plain export toward any recorded import source, so a
+  hostile (or merely confused) flow cannot replace an upstream with a
+  disconnected re-translation that passes its push lease
+  (SPEC-GIT-BRIDGE §14.2).
+
+mkit does NOT defend:
+
+- The semantic content of imported history. The import signature
+  means "this is a faithful translation of those git bytes", not
+  "those bytes are good". A hostile upstream's malicious source code
+  imports faithfully.
+- SHA-1 strength beyond its locator role. Object identity inside
+  mkit is BLAKE3; sha1 is a locator for the git side. Fork-audit
+  byte-checks (re-derivation + raw-bytes hashing) detect a swapped
+  object for everything they check; sha1 collisions elsewhere are
+  out of scope (SPEC-GIT-BRIDGE §14.3).
+- A user who shares the import key with an untrusted party — the
+  designated-importer model (SPEC-GIT-IMPORT §4) makes that key the
+  root of the imported history's authenticity.
+
 ### 3.2 Local same-host attacker, different UID
 
 Attacker has a shell on the same host under a different UID.

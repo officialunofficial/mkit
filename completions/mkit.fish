@@ -17,7 +17,7 @@ complete -c mkit -f
 set -l __mkit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout clean \
     tag config merge push pull fetch stash clone remote key keygen \
-    cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard blame verify \
+    cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame verify \
     attest verify-attest version help
 
 # Subcommand list (only when no subcommand has been entered yet).
@@ -233,6 +233,37 @@ complete -c mkit -n "__fish_seen_subcommand_from pack-shard" \
     -l out -d "Output directory" -r
 complete -c mkit -n "__fish_seen_subcommand_from pack-shard" \
     -l force -d "Overwrite existing shards"
+
+# git (bridge) flags.
+complete -c mkit -n "__fish_seen_subcommand_from git" -a export -d "Export refs to a git mirror"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a import -d "Import a git upstream as a signed fork"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a fetch -d "Update tracking refs from the upstream"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a pull -d "Fetch and fast-forward the current branch"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a verify -d "Audit bridge state against the local store"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a status -d "Show bridge state dirs"
+complete -c mkit -n "__fish_seen_subcommand_from git" -a format-patch -d "Render commits as git am-able patches"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l key -d "Import signing key path" -r
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l remote-name -d "Bridge state name (export: mirror, import: upstream)" -r
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l ref -d "Full ref name to export" -r
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l no-attest -d "Skip provenance attestations"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l algorithm -d "Attestation algorithm" -xa "ed25519 secp256k1 p256"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l signer -d "Attestation signer kind" -xa "repo-key external keystore"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l json -d "Machine-readable output"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l passthrough -d "Fork mode: re-emit imported objects as original sha1s"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l fork-audit -d "Re-derive referenced content during verify"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -l stdout -d "Print patches to stdout"
+complete -c mkit -n "__fish_seen_subcommand_from git" \
+    -s o -l output-directory -d "Patch output directory" -r
 
 # Generic --help on any subcommand.
 complete -c mkit -n "__fish_seen_subcommand_from $__mkit_subcommands" \

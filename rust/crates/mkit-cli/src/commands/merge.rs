@@ -22,6 +22,7 @@
 //! HEAD/ref/index/worktree to `ORIG_HEAD` and clears all state.
 
 use std::io::Write;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -102,10 +103,13 @@ fn start(
         Ok(None) => return emit_err("no commits on current branch", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
     };
-    let theirs = match refs::read_ref(mkit_dir, branch) {
-        Ok(Some(h)) => h,
-        Ok(None) => return emit_err(&format!("branch '{branch}' not found"), exit::GENERAL_ERROR),
-        Err(e) => return emit_err(&format!("read ref: {e}"), exit::GENERAL_ERROR),
+    // Accept any revspec — branches, tags, remote-tracking refs
+    // (`<remote>/<branch>`), hashes — peeling annotated tags to the
+    // commit. Branch names keep their historical precedence because
+    // resolve_revision checks refs/heads first.
+    let theirs = match super::revspec::resolve_revision(store, mkit_dir, branch) {
+        Ok(h) => peel_tags(store, h),
+        Err(e) => return emit_err(&format!("merge target: {e}"), exit::GENERAL_ERROR),
     };
 
     if ours == theirs {
@@ -162,7 +166,13 @@ fn start(
         Err(e) => return emit_err(&format!("merge: {e}"), exit::GENERAL_ERROR),
     };
 
-    let msg = format!("Merge branch '{branch}'");
+    // git's convention distinguishes the source kind in the message.
+    let msg = if merge_source_is_remote_tracking(mkit_dir, branch) {
+        let short = branch.strip_prefix("refs/remotes/").unwrap_or(branch);
+        format!("Merge remote-tracking branch '{short}'")
+    } else {
+        format!("Merge branch '{branch}'")
+    };
 
     if result.has_conflicts() {
         // Guard: never clobber dirty tracked / untracked collisions.
@@ -433,4 +443,32 @@ fn emit_err(msg: &str, code: u8) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "error: {msg}");
     code
+}
+
+/// Bounded annotated-tag peel (mirrors `log.rs`/`diff.rs`).
+const MAX_TAG_DEPTH: usize = 16;
+
+/// Whether `spec` names a remote-tracking ref under revspec
+/// precedence (local branches and tags win over `<remote>/<branch>`).
+fn merge_source_is_remote_tracking(mkit_dir: &Path, spec: &str) -> bool {
+    let rel = spec.strip_prefix("refs/remotes/").map_or(spec, |r| r);
+    let Some((remote, branch)) = rel.split_once('/') else {
+        return false;
+    };
+    if refs::read_ref(mkit_dir, spec).is_ok_and(|r| r.is_some())
+        || refs::read_tag(mkit_dir, spec).is_ok_and(|r| r.is_some())
+    {
+        return false; // a local ref of the same spelling shadows it
+    }
+    refs::read_remote_ref(mkit_dir, remote, branch).is_ok_and(|r| r.is_some())
+}
+
+fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
+    for _ in 0..MAX_TAG_DEPTH {
+        match store.read_object(&h) {
+            Ok(Object::Tag(t)) => h = t.target,
+            _ => break,
+        }
+    }
+    h
 }

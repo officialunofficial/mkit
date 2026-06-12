@@ -261,10 +261,12 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   unresolvable revision; `--show-toplevel` prints the repository root (the
   directory holding `.mkit`, found by walking up from cwd).
 - `mkit show-ref [--heads] [--tags]` — list refs as `<hash> <refname>`,
-  sorted by ref name. Default shows both `refs/heads/*` and `refs/tags/*`;
-  `--heads`/`--tags` filter to one namespace.
-- `mkit for-each-ref [--format=<fmt>] [<pattern>...]` — iterate refs (heads
-  and tags), sorted by ref name (like `git for-each-ref`). The default line
+  sorted by ref name. Default shows `refs/heads/*`, `refs/tags/*`, and
+  any `refs/remotes/*` tracking refs; `--heads`/`--tags` filter to one
+  namespace.
+- `mkit for-each-ref [--format=<fmt>] [<pattern>...]` — iterate refs
+  (heads, tags, and remote-tracking refs), sorted by ref name (like
+  `git for-each-ref`). The default line
   is `<objectname> <objecttype>\t<refname>`. `--format` substitutes
   `%(atom)` tokens (`refname`, `refname:short`, `objectname`,
   `objectname:short`, `objecttype`; `%%` is a literal `%`); the object id is
@@ -644,6 +646,88 @@ Remote / sync:
   so racing readers either see "no manifest" (clean fall-through to
   the monolithic pack) or "manifest + all shards". Requires building
   the binary with `--features pack-shards`.
+- `mkit git export <dest> [--remote-name <name>] [--ref <ref>]...
+  [--no-attest] [--algorithm <alg>] [--signer <kind>] [--json]` — deterministic **one-way** export of
+  branches and tags to a git mirror
+  ([`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md)). `<dest>` is a git URL or
+  a local path (a missing/empty local path is initialized bare);
+  `--remote-name` defaults to `mirror`, and `--ref` takes full names
+  (`refs/heads/...` / `refs/tags/...`).
+  Translation is byte-deterministic: the same history yields the same
+  git SHA-1s on every machine, and mkit-only fields (signer,
+  signature, identity, annotation slots) ride in `mkit-*` commit
+  headers so the original signed objects are reconstructible. Refs a
+  conformant bridge cannot represent (git-illegal names, remix
+  ancestry, non-canonical chunking) are skipped per-ref with a
+  warning; an export where everything was skipped exits non-zero.
+  Pushes use per-ref `--force-with-lease` from recorded state under
+  `.mkit/git/<name>/`; mkit-side history rewrites mirror as
+  force-pushes. Unless `--no-attest`, each exported head gets a
+  signed `git-bridge/v1` DSSE attestation (saved like `mkit attest`,
+  published on the mirror's `refs/mkit/attestations` ref — fetch it
+  with an explicit refspec; git clones skip it by default).
+  Attestation signing uses the same signer resolution as `mkit
+  attest` (`--algorithm`/`--signer` flags, else config defaults), so
+  a signing key must exist unless `--no-attest`. Branch deletion
+  never propagates (export is add/update-only), and each plain-export
+  `--remote-name` state dir is bound to one destination and one
+  direction (fork-mode state dirs lease against a fresh observation
+  per push and are not destination-bound); bidirectional sync does
+  not exist.
+- `mkit git import <url> [<dir>] [--remote-name <name>] [--key <path>]
+  [--json]` — import a git upstream as an **importer-signed downstream
+  fork** ([`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md)). With `<dir>`:
+  init a fresh mkit repo, import all branches/tags, and check out the
+  upstream default branch. Without: add the upstream to the current
+  repo as `refs/remotes/<name>/*` tracking refs + tags. Every
+  translated commit/tag is signed by a DEDICATED import key
+  (`.mkit/keys/git-import.key`, generated on first use and pinned per
+  state dir — collaborative tracking requires sharing it; a different
+  key produces an unrelated fork). Original authorship rides in the
+  author identity; original git bytes are retained under
+  `.mkit/git/<name>/` with a `git-import/v1` attestation per head.
+  Unrepresentable refs skip per-ref with warnings (submodules,
+  mkit-illegal names, historic-mode trees in fork state dirs).
+  Upstream history imports once per (key, upstream); hashes are a
+  function of the import key by design. Plain `git export` toward an
+  imported-from upstream is refused (the origin guard); export to new
+  mirrors works normally. Expect total disk ≈ 2–3× the upstream
+  `.git` (staging mirror + translated store).
+- `mkit git fetch [--remote-name <name>]` — fetch new upstream
+  commits into the tracking refs and imported tags (a force-pushed
+  upstream moves tracking refs with a loud warning; a tag you moved
+  locally is never clobbered — fetch warns and leaves it). `mkit git pull` additionally
+  fast-forwards the current branch; divergence refuses with the
+  executable hint (`mkit merge <name>/<branch>` — imported history is
+  ordinary mkit history, integrated natively).
+- `mkit git export --passthrough --remote-name <import-name> <fork-url>`
+  — **fork mode** (SPEC-GIT-BRIDGE §14): publish an imported repo as a
+  true git fork. Imported objects re-emit their ORIGINAL sha1s; only
+  native commits on top translate, so the pushed branch sits directly
+  on the upstream commits and PRs/merge-bases work. Upgrades the
+  import state to direction `fork` (sticky); plain export under that
+  name is then refused, while `git fetch`/`pull` keep working.
+- `mkit git verify [--remote-name <name>] [--fork-audit] [--ref <ref>]...`
+  — audit recorded bridge state against the local store:
+  bridge-translated objects shallow-verify (SPEC-GIT-BRIDGE §10) and
+  must reconstruct to their mapped twin; imported objects must have
+  retained raw bytes hashing to their sha1 and a twin signed by the
+  pinned importer key. `--fork-audit` (§14.3) additionally re-derives
+  every tree/blob referenced by bridge commits from its mkit twin and
+  requires the exact sha1. Exits non-zero listing each failing object;
+  unsigned (all-zero-signature) objects also fail, reported as a count
+  ("unsigned", never "tampered" — SPEC-GIT-BRIDGE §10).
+- `mkit git status` — one block per `.mkit/git/<name>/` state dir:
+  direction, recorded source/dest, pinned importer key, tracking refs
+  (import) and lease positions (export), staging health.
+- `mkit git format-patch <A..B> [-o <dir>] [--stdout]` — render
+  native commits as `git am`-able mbox patches (oldest first, merges
+  skipped) — the contribution path that needs no writable fork. A
+  single rev means `<rev>..HEAD`; e.g.
+  `mkit git format-patch upstream/main -o patches/`.
+
+  All `mkit git` subcommands require building the binary with
+  `--features git-bridge` (alias: `git-export`); they shell out to `git`.
 
 Agent integration:
 

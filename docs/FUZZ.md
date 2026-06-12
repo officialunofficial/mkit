@@ -24,6 +24,9 @@ from recurring.
 | `fuzz_targets/pack.rs`         | `pack::PackReader::unpack`  |
 | `fuzz_targets/tree.rs`         | `serialize::deserialize`    |
 | `fuzz_targets/software_key_record.rs` | `EncryptedKeyRecord::decode` |
+| `fuzz_targets/git_commit_parse.rs` | `mkit-git-bridge gitparse::parse_commit` (untrusted upstream bytes, SPEC-GIT-IMPORT §2) |
+| `fuzz_targets/git_tag_parse.rs` | `mkit-git-bridge gitparse::parse_tag` |
+| `fuzz_targets/git_tree_parse.rs` | `mkit-git-bridge gitparse::parse_tree` + `map_mode` |
 | `fuzz_targets/rpc_decode.rs`   | `SignerFrame` / `SshFrame` wire decode (never panics) + `Arbitrary`-driven encode/decode roundtrip |
 
 Targets that exercise crate-private parser surfaces should expose a minimal

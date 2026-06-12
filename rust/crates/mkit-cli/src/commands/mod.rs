@@ -23,6 +23,12 @@ pub mod diff;
 pub mod fetch;
 pub mod for_each_ref;
 pub mod gc;
+#[cfg(feature = "git-bridge")]
+pub mod git;
+#[cfg(feature = "git-bridge")]
+pub mod git_import;
+#[cfg(feature = "git-bridge")]
+pub mod git_tools;
 pub mod hash_cmd;
 pub mod init;
 pub mod key;

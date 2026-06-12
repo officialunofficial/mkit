@@ -1,0 +1,9 @@
+object 46e87509a1499595d23a5eed72dc35b4b4262d8e
+type commit
+tag v1.0.1
+tagger Tagger <t@x> 1600000800 +0000
+
+signed tag
+-----BEGIN PGP SIGNATURE-----
+ABCD
+-----END PGP SIGNATURE-----

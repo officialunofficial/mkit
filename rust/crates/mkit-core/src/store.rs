@@ -80,6 +80,72 @@ pub enum StoreError {
     Decode(#[from] MkitError),
 }
 
+/// Deferred-fsync writer returned by [`ObjectStore::bulk_writer`].
+/// See that method for the crash-safety contract.
+#[derive(Debug)]
+pub struct BulkWriter<'a> {
+    store: &'a ObjectStore,
+    dirs: std::collections::HashSet<PathBuf>,
+    files: std::collections::HashSet<PathBuf>,
+}
+
+impl BulkWriter<'_> {
+    /// Write one object (temp + rename; fsync deferred to commit).
+    /// An existing path is byte-verified: matched objects are left in
+    /// place (but still fsynced at commit), torn ones are rewritten.
+    ///
+    /// # Panics
+    /// Never in practice: object paths always have a 2-hex shard
+    /// parent by construction.
+    pub fn write(&mut self, bytes: &[u8]) -> StoreResult<Hash> {
+        if bytes.len() > MAX_RAW_OBJECT_SIZE {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        let h = hash::hash(bytes);
+        let final_path = self.store.path_for(&h);
+        // VERIFY-skip an existing object: content addressing makes
+        // byte-equality the exact durability test — a good file (from
+        // a previously committed session, possibly referenced by
+        // native history) must NOT be replaced with an unsynced inode
+        // a power loss could tear, while a torn file from a crashed
+        // session fails the comparison and is healed by the rewrite.
+        let shard_dir = final_path
+            .parent()
+            .expect("object path always has a 2-hex parent");
+        if let Ok(existing) = fs::read(&final_path)
+            && existing == bytes
+        {
+            // Still fsync it at commit: the bytes may have matched out
+            // of the PAGE CACHE of a crashed session's unsynced write
+            // — byte equality is not a durability test.
+            self.dirs.insert(shard_dir.to_path_buf());
+            self.files.insert(final_path);
+            return Ok(h);
+        }
+        fs::create_dir_all(shard_dir)?;
+        crate::atomic::write_unsynced(&final_path, bytes)?;
+        self.dirs.insert(shard_dir.to_path_buf());
+        self.files.insert(final_path);
+        Ok(h)
+    }
+
+    /// Make the session durable: fsync every written file's CONTENTS,
+    /// then every touched shard directory (renames become durable).
+    /// Contents must be synced too — a durable name pointing at
+    /// unsynced pages would let a power loss tear an object that the
+    /// caller's (fsynced) bookkeeping already vouches for, and the
+    /// idempotent-re-run story only covers crashes BEFORE commit.
+    pub fn commit(self) -> StoreResult<()> {
+        for file in &self.files {
+            fs::OpenOptions::new().write(true).open(file)?.sync_all()?;
+        }
+        for dir in &self.dirs {
+            crate::atomic::sync_dir(dir)?;
+        }
+        Ok(())
+    }
+}
+
 /// Result alias used throughout this module.
 pub type StoreResult<T> = Result<T, StoreError>;
 
@@ -172,6 +238,31 @@ impl ObjectStore {
         fs::create_dir_all(shard_dir)?;
         write_atomic(&final_path, bytes)?;
         Ok(h)
+    }
+
+    /// Begin a bulk-write session: objects are written temp+rename
+    /// WITHOUT per-file `fsync`, and [`BulkWriter::commit`] fsyncs
+    /// every written file and every touched shard directory once at
+    /// the end (batched, instead of per-write).
+    ///
+    /// Crash-safety contract (deliberately weaker than [`Self::write`],
+    /// for callers whose whole operation is idempotent — e.g. the
+    /// deterministic git-import, which re-runs from a retained source
+    /// mirror): after a crash BEFORE `commit`, written objects may be
+    /// torn or missing. Existing paths are VERIFIED (byte compare)
+    /// rather than blindly rewritten or blindly trusted: a matching
+    /// file is left untouched (it may be durable and referenced by
+    /// native history — replacing it with an unsynced inode would put
+    /// it at risk), a torn one is healed by rewrite, and reads always
+    /// BLAKE3-verify. Callers MUST gate bulk sessions behind their
+    /// own crash marker and re-run on detection.
+    #[must_use]
+    pub fn bulk_writer(&self) -> BulkWriter<'_> {
+        BulkWriter {
+            store: self,
+            dirs: std::collections::HashSet::new(),
+            files: std::collections::HashSet::new(),
+        }
     }
 
     /// Read raw bytes for `h`. Verifies that BLAKE3 of the on-disk
@@ -545,5 +636,30 @@ mod tests {
                 "stale temp file must not satisfy the target hash"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod bulk_writer_tests {
+    use super::*;
+
+    #[test]
+    fn bulk_writer_round_trips_and_rewrites() {
+        let td = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(td.path()).unwrap();
+        let obj = crate::serialize::serialize(&crate::object::Object::Blob(crate::object::Blob {
+            data: b"bulk".to_vec(),
+        }))
+        .unwrap();
+        let mut bw = store.bulk_writer();
+        let h1 = bw.write(&obj).unwrap();
+        // No existence short-circuit: rewriting is fine and heals
+        // torn files on idempotent re-runs.
+        let h2 = bw.write(&obj).unwrap();
+        assert_eq!(h1, h2);
+        bw.commit().unwrap();
+        assert_eq!(store.read(&h1).unwrap(), obj);
+        // Interoperates with the normal (fsynced) writer.
+        assert_eq!(store.write(&obj).unwrap(), h1);
     }
 }

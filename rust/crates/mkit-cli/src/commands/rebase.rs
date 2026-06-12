@@ -30,7 +30,6 @@
 //! rebase state (including the sidecar).
 
 use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use mkit_core::hash::Hash;
 use mkit_core::object::{Commit, Identity, Object};
@@ -327,7 +326,8 @@ fn commit_resolved_commit(
     let new_hash = build_commit(
         store,
         &mut signing.signer,
-        signing.author.clone(),
+        plan.author,
+        plan.timestamp,
         plan.parent,
         plan.message,
         tree_hash,
@@ -518,7 +518,8 @@ fn replay(
         let new_hash = match build_commit(
             store,
             &mut signing.signer,
-            signing.author.clone(),
+            plan.author,
+            plan.timestamp,
             plan.parent,
             plan.message,
             result.tree_hash,
@@ -590,7 +591,6 @@ fn replay(
 
 struct RebaseSigning {
     signer: super::commit::CommitSigner,
-    author: Identity,
 }
 
 fn load_rebase_signing(cwd: &std::path::Path) -> Result<RebaseSigning, u8> {
@@ -598,18 +598,14 @@ fn load_rebase_signing(cwd: &std::path::Path) -> Result<RebaseSigning, u8> {
         .map_err(|e| emit_err(&format!("config: {e}"), exit::CONFIG_ERROR))?;
     let signer =
         super::commit::load_commit_signer(cwd, &cfg).map_err(|(msg, code)| emit_err(&msg, code))?;
-    let signer_public = signer
-        .public_key()
-        .map_err(|(msg, code)| emit_err(&msg, code))?;
-    let author = super::commit::resolve_author(None, &cfg.user_identity, &signer_public)
-        .map_err(|error| emit_err(&format!("author: {error}"), exit::CONFIG_ERROR))?;
-    Ok(RebaseSigning { signer, author })
+    Ok(RebaseSigning { signer })
 }
 
 fn build_commit(
     store: &ObjectStore,
     signer: &mut super::commit::CommitSigner,
     author: Identity,
+    timestamp: u64,
     parent: Hash,
     message: Vec<u8>,
     tree_hash: Hash,
@@ -617,9 +613,6 @@ fn build_commit(
     let signer_public = signer
         .public_key()
         .map_err(|(msg, code)| emit_err(&msg, code))?;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
     let mut unsigned = Commit::new_unannotated(
         tree_hash,
         vec![parent],
@@ -658,6 +651,13 @@ fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, u8> {
 struct StepCommit {
     parent: Hash,
     message: Vec<u8>,
+    /// Replayed commits keep the original authorship: pick/reword use
+    /// the target's author + timestamp; squash/fixup keep the folded-
+    /// into commit's (git's behavior — replays re-sign but never
+    /// re-attribute, and mkit's single timestamp takes author-date
+    /// semantics on replay).
+    author: Identity,
+    timestamp: u64,
 }
 
 fn plan_step_commit(
@@ -667,15 +667,22 @@ fn plan_step_commit(
     head_hash: Hash,
 ) -> Result<StepCommit, u8> {
     match action {
-        RebaseAction::Pick => Ok(StepCommit {
-            parent: head_hash,
-            message: read_commit(store, target)?.message,
-        }),
-        RebaseAction::Reword => {
-            let original = read_commit(store, target)?.message;
+        RebaseAction::Pick => {
+            let original = read_commit(store, target)?;
             Ok(StepCommit {
                 parent: head_hash,
-                message: reworded_message(&original)?,
+                message: original.message,
+                author: original.author,
+                timestamp: original.timestamp,
+            })
+        }
+        RebaseAction::Reword => {
+            let original = read_commit(store, target)?;
+            Ok(StepCommit {
+                parent: head_hash,
+                message: reworded_message(&original.message)?,
+                author: original.author,
+                timestamp: original.timestamp,
             })
         }
         RebaseAction::Squash | RebaseAction::Fixup => {
@@ -691,12 +698,17 @@ fn plan_step_commit(
                 )
             })?;
             let message = if action == RebaseAction::Fixup {
-                head_commit.message
+                head_commit.message.clone()
             } else {
                 let target_msg = read_commit(store, target)?.message;
                 squashed_message(&head_commit.message, &target_msg)?
             };
-            Ok(StepCommit { parent, message })
+            Ok(StepCommit {
+                parent,
+                message,
+                author: head_commit.author,
+                timestamp: head_commit.timestamp,
+            })
         }
     }
 }

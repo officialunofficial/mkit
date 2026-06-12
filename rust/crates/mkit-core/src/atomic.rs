@@ -20,6 +20,30 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Atomically write `bytes` to `final_path`. Creates the parent
 /// directory if `make_parents` is `true`.
+/// Temp+rename WITHOUT fsync of file or directory — bulk-import path
+/// only (see `store::BulkWriter` for the contract).
+pub(crate) fn write_unsynced(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = final_path
+        .parent()
+        .expect("atomic::write_unsynced: path has parent");
+    let file_name = final_path
+        .file_name()
+        .expect("atomic::write_unsynced: path has file name")
+        .to_string_lossy();
+    let pid = process::id();
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
+    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    tmp.as_file_mut().write_all(bytes)?;
+    tmp.persist(final_path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Fsync a directory (making completed renames durable).
+pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
+    sync_parent_dir(dir)
+}
+
 pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8], make_parents: bool) -> io::Result<()> {
     let parent = final_path
         .parent()

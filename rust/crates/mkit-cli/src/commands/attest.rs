@@ -459,7 +459,7 @@ fn build_additional_signer(
     }
 }
 
-fn factory_error_code(e: &FactoryError) -> u8 {
+pub(crate) fn factory_error_code(e: &FactoryError) -> u8 {
     match e {
         FactoryError::UnknownSignerKind(_) | FactoryError::UnknownAlgorithm(_) => exit::USAGE,
         FactoryError::MissingKeyFile { .. } | FactoryError::MissingKeystoreKey { .. } => {
