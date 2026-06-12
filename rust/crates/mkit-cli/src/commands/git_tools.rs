@@ -424,8 +424,7 @@ pub(super) fn verify(args: &VerifyArgs) -> CmdResult<()> {
             && audit.raw_path(tip).exists()
             && let Some(twin) = audit.inv.get(tip).copied()
         {
-            let attested =
-                mkit_attest::store::list(&mkit_dir, &twin).is_ok_and(|v| !v.is_empty());
+            let attested = mkit_attest::store::list(&mkit_dir, &twin).is_ok_and(|v| !v.is_empty());
             if !attested {
                 audit.failures.push(format!(
                     "{} imported head has no git-import/v1 attestation recorded",
@@ -549,6 +548,13 @@ fn range_commits(store: &ObjectStore, mkit_dir: &Path, range: &str) -> CmdResult
     };
     let exclude_tip = peel(store, resolve(&a)?);
     let include_tip = peel(store, resolve(&b)?);
+    for (spec, h) in [(&a, exclude_tip), (&b, include_tip)] {
+        if !matches!(store.read_object(&h), Ok(Object::Commit(_))) {
+            // A non-commit endpoint would silently exclude nothing
+            // and render the entire history as the series.
+            return Err((format!("{spec}: not a commit"), exit::DATAERR));
+        }
+    }
 
     // Ancestors of A drop out of the patch series.
     let mut excluded: HashSet<Hash> = HashSet::new();

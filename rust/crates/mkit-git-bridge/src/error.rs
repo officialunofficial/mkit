@@ -52,6 +52,19 @@ pub enum Refusal {
     Unparsable { object: Hash, detail: String },
     /// Import: blob over the 1 GiB per-file cap (SPEC-GIT-IMPORT §3.1).
     BlobTooLarge { object: Hash, size: u64 },
+    /// Import: git tree with more entries than mkit's decode cap —
+    /// storing it would poison a signed object the store can never
+    /// read back (SPEC-GIT-IMPORT §3.3).
+    TooManyTreeEntries { object: Hash, count: usize },
+    /// Import: a tree entry's git mode contradicts the actual kind of
+    /// the object it names (e.g. mode 100644 → a commit). git tools
+    /// barely tolerate these; mkit's object model cannot represent
+    /// them (SPEC-GIT-IMPORT §3.3).
+    TreeEntryKind { object: Hash, name: String },
+    /// Import: the translated object cannot serialize under
+    /// SPEC-OBJECTS caps (oversize payload, illegal field) — refused
+    /// per-ref rather than failing the whole run.
+    Unrepresentable { object: Hash, detail: String },
     /// Import: more than 1000 parents (`MAX_PARENTS`).
     TooManyParents { object: Hash },
     /// Import: author/tagger identity payload empty or over 4096.
@@ -133,6 +146,21 @@ impl fmt::Display for Refusal {
             Self::Unparsable { object, detail } => write!(
                 f,
                 "git object {} is structurally unparsable ({detail}); refused per SPEC-GIT-IMPORT §3.2",
+                to_hex(object)
+            ),
+            Self::TooManyTreeEntries { object, count } => write!(
+                f,
+                "git tree {} has {count} entries, over mkit's decode cap (SPEC-GIT-IMPORT §3.3)",
+                to_hex(object)
+            ),
+            Self::TreeEntryKind { object, name } => write!(
+                f,
+                "git tree {} entry {name:?} names an object of a kind its mode contradicts (SPEC-GIT-IMPORT §3.3)",
+                to_hex(object)
+            ),
+            Self::Unrepresentable { object, detail } => write!(
+                f,
+                "git object {} does not serialize under SPEC-OBJECTS ({detail}); refused per SPEC-GIT-IMPORT §3",
                 to_hex(object)
             ),
             Self::BlobTooLarge { object, size } => write!(

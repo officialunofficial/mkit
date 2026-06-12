@@ -282,8 +282,11 @@ Three layers, from authoritative to advisory:
 State lives in `.mkit/git/<remote>/` (layout implementation-defined,
 non-normative except for the binding semantics below):
 
-- `dest`/`source`: the canonical remote identity (§8), immutable
-  after first use. One state dir = one upstream.
+- `dest` (export-direction dirs)/`source`: the canonical remote
+  identity (§8), immutable after first use. One state dir = one
+  upstream. Fork-direction dirs record `dest` informationally only
+  (last push target) — fork pushes lease against a fresh observation
+  per SPEC-GIT-BRIDGE §14.1, so they are not destination-bound.
 - `direction`: `import`, `export`, or `fork` (passthrough-enabled).
   A state dir MUST NOT serve import and plain export simultaneously;
   mixed use is refused at open. (`fork` combines an import source

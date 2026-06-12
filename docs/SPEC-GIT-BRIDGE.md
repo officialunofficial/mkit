@@ -593,6 +593,21 @@ dir the import map wins. The mode is recorded per state dir and
 immutable, because the same blake3 resolving to different sha1s
 across runs corrupts recorded leases.
 
+Fork-mode pushes target repositories the exporter does NOT own (the
+upstream itself or a real fork), so their safety model differs from
+plain export, normatively:
+
+- The state dir is not dest-bound: each push records the destination
+  informationally only, and the lease expectation comes from a FRESH
+  `ls-remote` observation of that destination (an absent ref means
+  "must not exist" — recorded leases from other destinations never
+  apply).
+- An observation-seeded lease passes unconditionally, so fork-mode
+  push MUST be fast-forward-only: for every branch, the observed
+  value must be an ancestor of the pushed tip (through the staging
+  mirror), and an existing tag never moves. Anything else refuses
+  with the fetch-and-integrate remediation.
+
 Consequences, all normative:
 
 - A bridge-translated local commit MAY carry `parent` lines naming

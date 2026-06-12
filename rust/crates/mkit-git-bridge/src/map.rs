@@ -78,8 +78,26 @@ fn read_stamp(dir: &Path, name: &str) -> Result<Option<String>, BridgeError> {
 
 fn write_stamp(dir: &Path, name: &str, value: &str) -> Result<(), BridgeError> {
     std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join(name), format!("{value}\n"))?;
+    // Temp + content-fsync + rename + dir-fsync: stamps are bindings
+    // (direction, signer, source, …) — a torn or vanished stamp after
+    // power loss either wedges the state dir or silently unbinds it.
+    let tmp = dir.join(format!(".{name}.tmp"));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(format!("{value}\n").as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, dir.join(name))?;
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
     Ok(())
+}
+
+/// Durable write of a named binding file (`source`, `dest`) — same
+/// guarantees as the internal stamps.
+pub fn write_binding(dir: &Path, name: &str, value: &str) -> Result<(), BridgeError> {
+    write_stamp(dir, name, value)
 }
 
 /// Read the recorded direction, if stamped.
@@ -139,8 +157,8 @@ pub fn bind_signer(dir: &Path, key: &[u8; 32]) -> Result<(), BridgeError> {
 /// Record that this state dir's imported history contains
 /// historic-mode-normalized trees (SPEC-GIT-IMPORT §3.3). Sticky: a
 /// normalized tree cannot reproduce its original sha1, so a later
-/// import→fork upgrade must refuse (§14.1 fork audit would otherwise
-/// report false tampering forever).
+/// import→fork upgrade must refuse (SPEC-GIT-BRIDGE §14.3 fork audit
+/// would otherwise report false tampering forever).
 pub fn mark_normalized(dir: &Path) -> Result<(), BridgeError> {
     write_stamp(dir, "normalized", "1")
 }

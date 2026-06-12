@@ -113,9 +113,34 @@ impl CatFileBatch {
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| BridgeError::Source(format!("cat-file: bad size {header:?}")))?;
         if size > MAX_OBJECT_BYTES {
-            return Err(BridgeError::Source(format!(
-                "object {echo} is {size} bytes (over the {MAX_OBJECT_BYTES}-byte cap)"
-            )));
+            // Drain body + trailing newline so the batch stream stays
+            // synchronized (callers keep using this child), and refuse
+            // PER-REF: one oversized object must not abort the whole
+            // import (SPEC-GIT-IMPORT §3.1).
+            let mut remaining = size + 1;
+            let mut sink_buf = vec![0u8; 64 * 1024];
+            while remaining > 0 {
+                let take = remaining.min(sink_buf.len() as u64);
+                #[allow(clippy::cast_possible_truncation)] // take <= 64 KiB
+                let take = take as usize;
+                self.stdout
+                    .read_exact(&mut sink_buf[..take])
+                    .map_err(|e| BridgeError::Source(format!("cat-file drain: {e}")))?;
+                remaining -= take as u64;
+            }
+            let mut obj = crate::gitobj::Sha1Id::default();
+            if let Some(parsed) = sha1_from_hex(echo) {
+                obj = parsed;
+            }
+            return Err(crate::error::Refusal::BlobTooLarge {
+                object: {
+                    let mut h = [0u8; 32];
+                    h[..20].copy_from_slice(&obj);
+                    h
+                },
+                size,
+            }
+            .into());
         }
         #[allow(clippy::cast_possible_truncation)] // size checked against the cap above
         let mut body = vec![0u8; size as usize];

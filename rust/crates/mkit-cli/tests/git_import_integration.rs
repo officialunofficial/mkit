@@ -197,6 +197,10 @@ fn upstream_force_push_warns_and_rewinds_tracking_ref() {
     }
     let f = Fixture::new();
     let fork = f.import();
+    let mkit_dir = fork.join(".mkit");
+    let before = refs::read_remote_ref(&mkit_dir, "upstream", "main")
+        .unwrap()
+        .unwrap();
     let up = f.upstream();
     git_ok(&up, &["reset", "--hard", "--quiet", "HEAD~1"]);
     std::fs::write(up.join("rewritten.txt"), "r\n").unwrap();
@@ -208,6 +212,16 @@ fn upstream_force_push_warns_and_rewinds_tracking_ref() {
     assert!(
         stderr.contains("force-pushed") && stderr.contains("rewound"),
         "stderr: {stderr}"
+    );
+    // The warning must come WITH the rewind, not instead of it.
+    let after = refs::read_remote_ref(&mkit_dir, "upstream", "main")
+        .unwrap()
+        .unwrap();
+    assert_ne!(after, before, "tracking ref rewound to the new history");
+    let log = f.mkit_ok(&fork, &["log", "-n", "1", "upstream/main"]);
+    assert!(
+        String::from_utf8_lossy(&log.stdout).contains("rewritten history"),
+        "{log:?}"
     );
 }
 
@@ -1181,4 +1195,334 @@ fn passthrough_refuses_non_fast_forward_push() {
         String::from_utf8_lossy(&tip.stdout).contains("remote-side work"),
         "{tip:?}"
     );
+}
+
+#[test]
+fn divergence_probe_refuses_second_key_over_same_content() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    // Wipe ALL bridge state (bindings, key pin, map) but keep the
+    // store: only the §6.1 content probe stands between this repo and
+    // a second, divergent import of the same upstream.
+    std::fs::remove_dir_all(fork.join(".mkit/git/upstream")).unwrap();
+    let other = f.root.path().join("other.key");
+    let kp = mkit_core::sign::KeyPair::from_seed([7u8; 32]);
+    mkit_core::sign::save_key(&other, &kp).unwrap();
+
+    let up = f.upstream();
+    let out = f.mkit(
+        &fork,
+        &[
+            "git",
+            "import",
+            up.to_str().unwrap(),
+            "--key",
+            other.to_str().unwrap(),
+        ],
+    );
+    assert!(!out.status.success(), "content probe must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("already imported here under key"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn state_dir_lock_blocks_concurrent_bridge_operation() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    // Hold the per-state lock the way a concurrent process would.
+    let lock = mkit_core::repo_lock::acquire_default(&fork.join(".mkit"), "git-upstream.lock")
+        .expect("acquire test lock");
+    let out = f.mkit(&fork, &["git", "fetch"]);
+    drop(lock);
+    assert!(!out.status.success(), "locked state must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("busy"), "{stderr}");
+    // Released: the next fetch goes through.
+    f.mkit_ok(&fork, &["git", "fetch"]);
+}
+
+#[test]
+fn dash_and_empty_urls_refuse_before_reaching_git() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    // `--` hands the option-shaped string through clap to OUR guard —
+    // exactly the form scripts use with untrusted URLs.
+    let out = f.mkit(
+        f.root.path(),
+        &["git", "import", "--", "--upload-pack=/bin/echo", "fork"],
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is not a valid git URL or path"),
+        "{out:?}"
+    );
+    // The refusal fired before any target was created.
+    assert!(!f.fork().exists(), "no half-created clone target");
+
+    // Export-side twin guards (dash + empty).
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    let out = f.mkit(&fork, &["git", "export", "--", "--receive-pack=/bin/echo"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is not a valid git URL or path"),
+        "{out:?}"
+    );
+    let out = f.mkit(&fork, &["git", "export", ""]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("empty git URL"),
+        "{out:?}"
+    );
+    assert!(
+        !fork.join("HEAD").exists(),
+        "no bare-repo files scattered into the worktree"
+    );
+}
+
+#[test]
+fn import_attestation_predicate_pins_locator_and_source() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    let mkit_dir = fork.join(".mkit");
+    let head = refs::read_remote_ref(&mkit_dir, "upstream", "main")
+        .unwrap()
+        .unwrap();
+    let paths = mkit_attest::store::list(&mkit_dir, &head).unwrap();
+    assert!(
+        !paths.is_empty(),
+        "git-import/v1 attestation minted per head"
+    );
+    let env = mkit_attest::store::load(&paths[0]).unwrap();
+    let payload = String::from_utf8_lossy(&env.payload).into_owned();
+    let up_tip = git_stdout(&f.upstream(), &["rev-parse", "HEAD"]);
+    assert!(
+        payload.contains("git-import/v1")
+            && payload.contains(&up_tip)
+            && payload.contains("\"schemaVersion\":1"),
+        "{payload}"
+    );
+}
+
+#[test]
+fn fork_export_succeeds_after_upstream_advance_and_merge() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    // A BARE central upstream that both mkit and third parties push
+    // to — the §14.2-sanctioned export-to-upstream path, where the
+    // recorded lease goes stale the moment anyone else lands work.
+    let up = f.upstream();
+    git_ok(
+        f.root.path(),
+        &[
+            "clone",
+            "--bare",
+            "--quiet",
+            up.to_str().unwrap(),
+            "central",
+        ],
+    );
+    let central = f.root.path().join("central");
+    f.mkit_ok(
+        f.root.path(),
+        &[
+            "git",
+            "import",
+            central.to_str().unwrap(),
+            "fork",
+            "--remote-name",
+            "central",
+        ],
+    );
+    let fork = f.fork();
+    f.mkit_ok(&fork, &["keygen"]);
+    std::fs::write(fork.join("local.txt"), "l\n").unwrap();
+    f.mkit_ok(&fork, &["add", "local.txt"]);
+    f.mkit_ok(&fork, &["commit", "-m", "local work"]);
+    f.mkit_ok(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "central",
+            central.to_str().unwrap(),
+        ],
+    );
+
+    // Third-party work lands on central: the recorded lease is stale.
+    git_ok(
+        f.root.path(),
+        &["clone", "--quiet", central.to_str().unwrap(), "third"],
+    );
+    let third = f.root.path().join("third");
+    std::fs::write(third.join("t.txt"), "t\n").unwrap();
+    git_ok(&third, &["add", "t.txt"]);
+    git_ok(&third, &["commit", "--quiet", "-m", "third-party work"]);
+    git_ok(&third, &["push", "--quiet", "origin", "main"]);
+
+    // The prescribed remediation must work end to end: fetch,
+    // integrate natively, re-export (fresh observation = the lease).
+    f.mkit_ok(&fork, &["git", "fetch", "--remote-name", "central"]);
+    f.mkit_ok(&fork, &["merge", "central/main"]);
+    f.mkit_ok(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "central",
+            central.to_str().unwrap(),
+        ],
+    );
+    let subjects = git_stdout(&central, &["log", "--format=%s", "-n", "4", "main"]);
+    assert!(
+        subjects.contains("third-party work") && subjects.contains("local work"),
+        "{subjects}"
+    );
+}
+
+#[test]
+fn triangular_fork_can_also_export_to_its_own_upstream() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    std::fs::write(fork.join("local.txt"), "l\n").unwrap();
+    f.mkit_ok(&fork, &["add", "local.txt"]);
+    f.mkit_ok(&fork, &["commit", "-m", "local work"]);
+    let up = f.upstream();
+    git_ok(
+        f.root.path(),
+        &[
+            "clone",
+            "--bare",
+            "--quiet",
+            up.to_str().unwrap(),
+            "forkgit",
+        ],
+    );
+    let forkgit = f.root.path().join("forkgit");
+    // First passthrough goes to the personal fork…
+    f.mkit_ok(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "upstream",
+            forkgit.to_str().unwrap(),
+        ],
+    );
+    // …and the SAME state can still push to the upstream itself (the
+    // §14.2-sanctioned path; dest is not a binding in fork mode). The
+    // upstream is non-bare with main checked out, so push a side
+    // branch (what a PR-style contribution looks like anyway).
+    f.mkit_ok(&fork, &["branch", "contrib"]);
+    f.mkit_ok(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "upstream",
+            "--ref",
+            "refs/heads/contrib",
+            up.to_str().unwrap(),
+        ],
+    );
+    let subjects = git_stdout(&up, &["log", "--format=%s", "-n", "1", "contrib"]);
+    assert!(subjects.contains("local work"), "{subjects}");
+}
+
+#[test]
+fn bad_first_url_does_not_wedge_the_state_name() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let missing = f.root.path().join("nope-does-not-exist");
+    let out = f.mkit(
+        f.root.path(),
+        &["git", "import", missing.to_str().unwrap(), "fork"],
+    );
+    assert!(!out.status.success(), "clone of a missing path fails");
+    // Retry with the REAL upstream into the same target: must succeed
+    // (no source binding was recorded for the bogus URL).
+    let up = f.upstream();
+    std::fs::remove_dir_all(f.fork()).ok();
+    f.mkit_ok(
+        f.root.path(),
+        &["git", "import", up.to_str().unwrap(), "fork"],
+    );
+}
+
+#[test]
+fn oversized_tag_name_skips_per_ref() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let up = f.upstream();
+    // Hand-craft an annotated tag whose name is over the 4096-byte
+    // cap; the REF name stays short.
+    let commit = git_stdout(&up, &["rev-parse", "HEAD"]);
+    let long = "a".repeat(5000);
+    let body = format!("object {commit}\ntype commit\ntag {long}\ntagger T <t@x> 5 +0000\n\nbig\n");
+    let tmp = f.root.path().join("tagbody");
+    std::fs::write(&tmp, body).unwrap();
+    let out = git_in(
+        &up,
+        &[
+            "hash-object",
+            "-t",
+            "tag",
+            "--literally",
+            "-w",
+            tmp.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let tag_id = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    git_ok(&up, &["update-ref", "refs/tags/evil", &tag_id]);
+
+    let out = f.mkit_ok(
+        f.root.path(),
+        &["git", "import", up.to_str().unwrap(), "fork"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("skipping refs/tags/evil"),
+        "per-ref skip, not whole-run abort: {stderr}"
+    );
+    // Healthy refs imported fine.
+    let mkit_dir = f.fork().join(".mkit");
+    assert!(
+        refs::read_remote_ref(&mkit_dir, "upstream", "main")
+            .unwrap()
+            .is_some()
+    );
+    assert!(refs::read_tag(&mkit_dir, "v1").unwrap().is_some());
 }

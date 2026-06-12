@@ -16,7 +16,7 @@ use crate::gitobj::Sha1Id;
 use crate::gitparse::{self, ModeMapping};
 use crate::gitsrc::{CatFileBatch, GitObjKind};
 use mkit_core::object::{
-    Blob, ChunkedBlob, Commit, Identity, Object, ObjectType, Tag, Tree, TreeEntry,
+    Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, ObjectType, Tag, Tree, TreeEntry,
 };
 use mkit_core::{ChunkIterator, FastCdc, Hash};
 use std::collections::HashMap;
@@ -277,23 +277,32 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
             .into());
         }
         if body.len() as u64 <= CHUNK_THRESHOLD {
-            let bytes = ser(&Object::Blob(Blob {
-                data: body.to_vec(),
-            }))?;
+            let bytes = ser(
+                id,
+                &Object::Blob(Blob {
+                    data: body.to_vec(),
+                }),
+            )?;
             return self.sink.write_object(&bytes);
         }
         let mut chunks = Vec::new();
         for b in ChunkIterator::new(FastCdc::v1(), body) {
-            let chunk = ser(&Object::Blob(Blob {
-                data: body[b.offset..b.offset + b.length].to_vec(),
-            }))?;
+            let chunk = ser(
+                id,
+                &Object::Blob(Blob {
+                    data: body[b.offset..b.offset + b.length].to_vec(),
+                }),
+            )?;
             chunks.push(self.sink.write_object(&chunk)?);
         }
-        let manifest = ser(&Object::ChunkedBlob(ChunkedBlob {
-            total_size: body.len() as u64,
-            chunk_size: 0,
-            chunks,
-        }))?;
+        let manifest = ser(
+            id,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: body.len() as u64,
+                chunk_size: 0,
+                chunks,
+            }),
+        )?;
         self.sink.write_object(&manifest)
     }
 
@@ -312,6 +321,16 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
                 detail: format!("tree: {e}"),
             })
         })?;
+        // Mirror the deserializer's entry-count cap (same pattern as
+        // the parents cap on commits): anything larger would store a
+        // signed tree the repo can never read back.
+        if parsed.len() > mkit_core::serialize::MAX_TREE_ENTRIES as usize {
+            return Err(Refusal::TooManyTreeEntries {
+                object: hash20(id),
+                count: parsed.len(),
+            }
+            .into());
+        }
         let mut entries = Vec::with_capacity(parsed.len());
         for e in parsed {
             let mode = match gitparse::map_mode(&e.mode) {
@@ -350,6 +369,23 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
                 .into());
             }
             let child = self.object(&e.id, 0, depth + 1, new_pairs, normalized)?;
+            // The mode promised one kind; verify the TRANSLATED child
+            // actually is that kind (git tolerates e.g. mode 100644 →
+            // commit; mkit's model cannot). Best effort: a sink that
+            // cannot answer skips the check.
+            if let Some(kind) = self.sink.kind_of(&child) {
+                let ok = match mode {
+                    EntryMode::Tree => kind == ObjectType::Tree,
+                    _ => matches!(kind, ObjectType::Blob | ObjectType::ChunkedBlob),
+                };
+                if !ok {
+                    return Err(Refusal::TreeEntryKind {
+                        object: hash20(id),
+                        name: String::from_utf8_lossy(&e.name).into_owned(),
+                    }
+                    .into());
+                }
+            }
             entries.push(TreeEntry {
                 name: e.name,
                 mode,
@@ -365,7 +401,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         if entries.windows(2).any(|w| w[0].name == w[1].name) {
             return Err(Refusal::DuplicateTreeEntry { object: hash20(id) }.into());
         }
-        let bytes = ser(&Object::Tree(Tree { entries }))?;
+        let bytes = ser(id, &Object::Tree(Tree { entries }))?;
         self.sink.write_object(&bytes)
     }
 
@@ -420,7 +456,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
             signature: [0u8; 64],
         };
         commit.signature = (self.signer.sign_commit)(&commit)?;
-        let bytes = ser(&Object::Commit(commit))?;
+        let bytes = ser(id, &Object::Commit(commit))?;
         self.sink.write_object(&bytes)
     }
 
@@ -448,10 +484,14 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
             b"blob" => ObjectType::Blob,
             b"tag" => ObjectType::Tag,
             other => {
-                return Err(BridgeError::Source(format!(
-                    "tag target type {:?} unknown",
-                    String::from_utf8_lossy(other)
-                )));
+                return Err(Refusal::Unparsable {
+                    object: hash20(id),
+                    detail: format!(
+                        "tag target type {:?} unknown",
+                        String::from_utf8_lossy(other)
+                    ),
+                }
+                .into());
             }
         };
         let target = self.object(&parsed.object, depth + 1, 0, new_pairs, normalized)?;
@@ -500,13 +540,23 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
             signature: [0u8; 64],
         };
         tag.signature = (self.signer.sign_tag)(&tag)?;
-        let bytes = ser(&Object::Tag(tag))?;
+        let bytes = ser(id, &Object::Tag(tag))?;
         self.sink.write_object(&bytes)
     }
 }
 
-fn ser(obj: &Object) -> Result<Vec<u8>, BridgeError> {
-    mkit_core::serialize(obj).map_err(|e| BridgeError::Source(format!("serialize: {e}")))
+/// Serialize, mapping failure to a per-ref refusal: a serialize error
+/// here is always content-derived (a SPEC-OBJECTS cap the upstream
+/// object exceeds), never an environment fault — one hostile object
+/// must not abort the import of every other ref.
+fn ser(id: &Sha1Id, obj: &Object) -> Result<Vec<u8>, BridgeError> {
+    mkit_core::serialize(obj).map_err(|e| {
+        Refusal::Unrepresentable {
+            object: hash20(id),
+            detail: e.to_string(),
+        }
+        .into()
+    })
 }
 
 /// Rebuild the full `"<type> <len>\0" + body` git object bytes for

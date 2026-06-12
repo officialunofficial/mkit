@@ -101,7 +101,7 @@ creeping; revisit post-v1 if demand warrants.
 | `gc` | prune unreachable objects | mark-and-sweep, recovery-aware | ✅ | — | #233 | `-n`/`--grace-secs`; fail-closed; see SPEC-GC.md |
 | `add -p` | interactive hunk staging | same | ✅ | 4 | #258 | per-hunk `y/n/q/a/d`; regular text files only (binary skipped with a message, symlink/dir refused); explicit paths required; ignored paths need `-f`; symlinked-parent escapes refused; `s` (split) / `e` (manual edit) are follow-ups |
 | `git export` | *(no git analogue — mirror-to-git bridge)* | deterministic one-way export to a git mirror per [`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md) | ✅ | — | #330 | **experimental**, feature-gated (`git-bridge`, default-off); per-ref refuse-loudly for remixes / unmappable ref names / non-canonical chunking; bidirectional sync remains 🚫 |
-| `git import` | *(no git analogue — git-to-mkit bridge)* | importer-signed import per [`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md) | 🔨 | — | #330 | spec complete; implementation lands later in this series; feature-gated (`git-bridge`) |
+| `git import` | *(no git analogue — git-to-mkit bridge)* | importer-signed import per [`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md) | ✅ | — | #330 | `import`/`fetch`/`pull`, passthrough fork export, `verify`/`status`/`format-patch`; feature-gated (`git-bridge`) |
 
 ## Plumbing commands (read-only first, mutating later)
 

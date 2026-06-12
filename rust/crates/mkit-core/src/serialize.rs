@@ -18,7 +18,10 @@ use crate::object::{
 
 const PROLOGUE_LEN: usize = 6;
 
-const MAX_TREE_ENTRIES: u32 = 1_000_000;
+/// Decode-side cap on tree entry count; writers (and the git
+/// importer) must refuse anything larger or the store gains an
+/// undecodable signed object.
+pub const MAX_TREE_ENTRIES: u32 = 1_000_000;
 const MAX_PARENTS: u32 = 1_000;
 const MAX_REMIX_SOURCES: u32 = 10_000;
 const MAX_CHUNKS: u32 = 1_000_000;

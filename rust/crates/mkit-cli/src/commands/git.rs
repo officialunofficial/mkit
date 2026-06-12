@@ -141,7 +141,11 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     let mkit_dir = cwd.join(mkit_core::store::MKIT_DIR);
     git_version().map_err(|e| (e, exit::UNAVAILABLE))?;
 
-    // An option-shaped dest must never reach a git argv.
+    // An option-shaped dest must never reach a git argv, and an empty
+    // one would `git init --bare` the caller's working directory.
+    if opts.dest.trim().is_empty() {
+        return Err(("empty git URL or path".into(), exit::USAGE));
+    }
     if opts.dest.starts_with('-') {
         return Err((
             format!("{:?} is not a valid git URL or path", opts.dest),
@@ -256,29 +260,40 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
         .map_err(|e| (format!("load ref state: {e}"), exit::GENERAL_ERROR))?;
 
     // Validate/prepare the destination up front (before any signing or
-    // state mutation), and bind this state dir to one dest: leases
-    // recorded against one mirror are wrong for another.
+    // state mutation). PLAIN export binds this state dir to one dest
+    // by canonical identity (SPEC-GIT-IMPORT §8): recorded leases are
+    // statements about one mirror and are wrong for another. FORK
+    // mode does NOT bind — its leases come from a fresh per-push
+    // observation guarded by the explicit fast-forward check, so the
+    // triangular workflow (import upstream U, push fork F, later
+    // contribute to U) stays possible; the last dest is recorded for
+    // `mkit git status` only.
     let push_dest = ensure_dest(&opts.dest)?;
 
     let dest_file = state.join("dest");
-    match std::fs::read_to_string(&dest_file) {
-        Ok(recorded) if recorded.trim() != push_dest => {
-            return Err((
-                format!(
-                    "state '{}' is bound to {}; use a different --remote-name for {}",
-                    opts.remote_name,
-                    recorded.trim(),
-                    opts.dest
-                ),
-                exit::USAGE,
-            ));
+    if opts.passthrough {
+        mkit_git_bridge::map::write_binding(&state, "dest", &dest_identity)
+            .map_err(|e| (format!("record dest: {e}"), exit::CANTCREAT))?;
+    } else {
+        match std::fs::read_to_string(&dest_file) {
+            Ok(recorded) if recorded.trim() != dest_identity => {
+                return Err((
+                    format!(
+                        "state '{}' is bound to {}; use a different --remote-name for {}",
+                        opts.remote_name,
+                        recorded.trim(),
+                        opts.dest
+                    ),
+                    exit::USAGE,
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                mkit_git_bridge::map::write_binding(&state, "dest", &dest_identity)
+                    .map_err(|e| (format!("record dest: {e}"), exit::CANTCREAT))?;
+            }
+            Err(e) => return Err((format!("read dest binding: {e}"), exit::GENERAL_ERROR)),
         }
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::write(&dest_file, format!("{push_dest}\n"))
-                .map_err(|e| (format!("record dest: {e}"), exit::CANTCREAT))?;
-        }
-        Err(e) => return Err((format!("read dest binding: {e}"), exit::GENERAL_ERROR)),
     }
 
     // ── ref selection (§12.1) ──────────────────────────────────────
@@ -397,11 +412,36 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     if let Some(head) = attest_head {
         to_push.push((ATTESTATIONS_REF, head));
     }
-    let needs_observation = to_push.iter().any(|(name, _)| !prior.contains_key(*name));
+    // Fork mode ALWAYS observes: it pushes to a repository mkit does
+    // not own, so the remote moving between exports is the normal
+    // case — a recorded lease from our last push would go stale the
+    // moment a third-party commit lands, and `mkit git fetch` only
+    // updates the import side. The fresh observation is safe to lease
+    // against because the explicit fast-forward guard below refuses
+    // anything we have not integrated. Plain export keeps recorded
+    // leases (the mirror is owned by this repo; the lease IS the
+    // tamper check) and observes only refs it has no lease for.
+    let needs_observation =
+        opts.passthrough || to_push.iter().any(|(name, _)| !prior.contains_key(*name));
     let observed: HashMap<String, Sha1Id> = if needs_observation {
         ls_remote(&staging, &push_dest)?
     } else {
         HashMap::new()
+    };
+    // One expectation rule shared by the FF guard and the push lease.
+    // Passthrough: the observation is AUTHORITATIVE — fork mode is
+    // not dest-bound, so a lease recorded against one destination is
+    // meaningless for another (absent on the remote means "must not
+    // exist", never "fall back to what we pushed elsewhere").
+    let expectation = |name: &str| -> Option<Sha1Id> {
+        if opts.passthrough {
+            observed.get(name).copied()
+        } else {
+            prior
+                .get(name)
+                .map(|s| s.git_id)
+                .or_else(|| observed.get(name).copied())
+        }
     };
     // Fork mode pushes to repositories mkit does NOT own (the
     // upstream itself, or a real fork): a lease seeded from a fresh
@@ -414,11 +454,9 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
             if *name == ATTESTATIONS_REF {
                 continue;
             }
-            let expect = prior
-                .get(name)
-                .map(|s| s.git_id)
-                .or_else(|| observed.get(*name).copied());
-            let Some(expect) = expect else { continue };
+            let Some(expect) = expectation(name) else {
+                continue;
+            };
             if expect == *new_id {
                 continue;
             }
@@ -455,10 +493,8 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     // does, so recorded state can never go stale per-ref.
     let mut push_args: Vec<String> = vec!["push".into(), "--quiet".into(), "--atomic".into()];
     for (name, _) in &to_push {
-        let expect = prior
-            .get(name)
-            .map(|s| sha1_hex(&s.git_id))
-            .or_else(|| observed.get(*name).map(sha1_hex))
+        let expect = expectation(name)
+            .map(|id| sha1_hex(&id))
             .unwrap_or_default();
         push_args.push(format!("--force-with-lease={name}:{expect}"));
     }
