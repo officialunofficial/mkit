@@ -359,7 +359,16 @@ pub fn read_index(root: &Path) -> IndexResult<Index> {
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
-    let racy_floor = index_mtime_ns.saturating_sub(RACY_WINDOW_NS);
+    // Window sizing, like git's USE_NSEC: when the filesystem reports
+    // sub-second mtimes (the index file's own mtime has a fractional
+    // part), two writes within the same timestamp tick are ~impossible
+    // and a 10ms window suffices; otherwise assume 1s granularity.
+    let window = if index_mtime_ns % 1_000_000_000 == 0 {
+        RACY_WINDOW_NS
+    } else {
+        RACY_WINDOW_NS / 100
+    };
+    let racy_floor = index_mtime_ns.saturating_sub(window);
     for e in &mut idx.entries {
         if e.mtime_ns != 0 && e.mtime_ns >= racy_floor {
             e.mtime_ns = 0;
@@ -641,6 +650,21 @@ mod tests {
             ],
         };
         write_index(dir.path(), &idx).unwrap();
+        // Pin the index FILE's mtime to exactly the racy entry's time so
+        // the test is deterministic regardless of scheduling delays and
+        // the granularity-derived window size: an entry whose mtime
+        // equals the index mtime is racy under any window.
+        let f = fs::File::options()
+            .write(true)
+            .open(index_path(dir.path()))
+            .unwrap();
+        f.set_times(
+            fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_nanos(now_ns),
+            ),
+        )
+        .unwrap();
+        drop(f);
         let read = read_index(dir.path()).unwrap();
         let racy = &read.entries[read.find_entry("racy.txt").unwrap()];
         let settled = &read.entries[read.find_entry("settled.txt").unwrap()];

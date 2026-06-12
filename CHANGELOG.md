@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Batched durability (`WriteBatch`)**: object writes from one command
+  (`add`, `commit`, pack unpack, `stash`) are staged invisibly and made
+  durable together at a single commit point — exactly **2 full flushes
+  per command** (one over staged data, one terminal device flush)
+  instead of 2 per object, with per-file/per-dir writeback barriers
+  issued from a scoped-thread pool. Same crash invariant as before,
+  stated in SPEC-OBJECTS §10.1: an object is never visible before its
+  bytes are durable, and refs/index are only written after their
+  referents are durable. `SyncPolicy::{PerObject,Batch,None}` selects
+  the schedule; flush counts and ordering are pinned by unit tests.
+  Measured on an M4 Max (APFS): `add`+`commit` of a 100 MiB file
+  13.5s → 0.75s; 100 × 10 KiB files 1.1s → 0.18s.
+- **Index v2 stat cache**: `.mkit/index` entries now carry
+  `mtime_ns`+`size` (SPEC-INDEX v2; v1 indexes read fine and upgrade on
+  first write). `add`/`status`/`commit -a` prove unchanged files by
+  stat instead of re-reading and re-hashing content — O(stat), with
+  git's racy-clean rule applied at read time. `status` with an
+  unchanged 100 MiB file: 113ms → 13ms.
+- **Zero-copy ingest**: chunk and small-blob writes stream
+  `prologue ‖ payload` straight from the source buffer
+  (`serialize::blob_prologue`), eliminating two memcpys per chunk;
+  `status` snapshots use `SyncPolicy::None` and no longer pay any
+  durability cost; `worktree::hash_file_object` content-addresses
+  without writing, so change detection no longer mutates the store.
+- **Checkout**: restored worktree files keep tmp+rename atomicity but
+  are no longer flushed per file (the store is the source of truth and
+  checkout is re-runnable; matches git).
+
 ### Added
 
 - **`PinResponse.pin` is `debug_redact`** ([signer.proto]): generated

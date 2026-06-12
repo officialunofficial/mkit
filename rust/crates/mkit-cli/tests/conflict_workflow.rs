@@ -197,11 +197,19 @@ fn merge_abort_restores_everything() {
     assert!(!repo.mkit_dir().join("mkit-conflicts").exists());
     let head_after = refs::resolve_head(&repo.mkit_dir()).unwrap().unwrap();
     assert_eq!(head_before, head_after, "HEAD must be restored");
-    assert_eq!(
-        index_before,
-        fs::read(repo.mkit_dir().join("index")).unwrap(),
-        "index must be restored"
-    );
+    // Semantic restore: same paths, statuses, and object hashes. The
+    // v2 stat-cache fields (SPEC-INDEX §4) are advisory and may come
+    // back cold after an abort — byte identity is NOT required.
+    let before = mkit_core::index::deserialize(&index_before).unwrap();
+    let after =
+        mkit_core::index::deserialize(&fs::read(repo.mkit_dir().join("index")).unwrap()).unwrap();
+    let strip = |idx: &mkit_core::index::Index| {
+        idx.entries
+            .iter()
+            .map(|e| (e.path.clone(), e.status, e.object_hash))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(strip(&before), strip(&after), "index must be restored");
     // Worktree restored to ours (no markers).
     let content = fs::read_to_string(repo.path().join("a.txt")).unwrap();
     assert_eq!(content, "ours\n");
