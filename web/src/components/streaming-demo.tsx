@@ -198,8 +198,10 @@ function FileSidebar({
           const f = e.dataTransfer.files?.[0]
           if (f) void onReplace(f)
         }}
-        className={`rounded-md border border-dashed p-3 text-xs text-muted transition-colors ${
-          dragOver ? 'border-fg text-fg' : 'border-hairline'
+        className={`rounded-md border border-dashed p-3 text-xs transition-colors ${
+          // text-muted must live in the else branch: both .text-* classes set the same property, so
+          // stylesheet order (not className order) would decide and text-fg loses to a later text-muted.
+          dragOver ? 'border-fg text-fg' : 'border-hairline text-muted'
         }`}
       >
         Drop a file here, or

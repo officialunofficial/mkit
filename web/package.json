@@ -17,7 +17,7 @@
     "preview": "bun run build && wrangler dev -c dist/server/wrangler.json",
     "test": "bun run wasm:build && vitest run",
     "test:watch": "vitest",
-    "lint": "oxlint src",
+    "lint": "oxlint src && node scripts/check-no-bracket-vars.mjs",
     "fmt": "oxfmt src",
     "fmt:check": "oxfmt --check src",
     "typecheck": "bun run wasm:build && tsc --noEmit"
@@ -27,6 +27,7 @@
     "workerd"
   ],
   "dependencies": {
+    "agentation": "^3.0.2",
     "hono": "^4.12.25",
     "mkit-wasm": "workspace:*",
     "react": "~19.2.7",
@@ -40,7 +41,6 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
-    "agentation": "^3.0.2",
     "babel-plugin-react-compiler": "^1.0.0",
     "oxfmt": "^0.54.0",
     "oxlint": "^1.69.0",

@@ -16,7 +16,9 @@ export const Header = () => {
     >
       <div className='mx-auto w-full max-w-5xl px-6'>
         <div className='flex items-center gap-6 py-4'>
-          <Link to='/' className='flex items-center' aria-label='mkit home'>
+          {/* Negative margin + padding grows the tap target to 44px (WCAG 2.5.8 / platform guidance)
+              without shifting the 20px logo's visual position. */}
+          <Link to='/' className='-m-3 flex items-center p-3' aria-label='mkit home'>
             <GridLogo className='size-5 rounded-[3px]' />
           </Link>
           <nav className='flex items-center gap-4 text-sm'>
