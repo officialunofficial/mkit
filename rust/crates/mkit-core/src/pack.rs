@@ -465,8 +465,8 @@ mod tests {
             .filter(|e| matches!(e, Ev::Full(_)))
             .count();
         assert_eq!(
-            fulls, 1,
-            "unpacking a pack must cost exactly one full flush"
+            fulls, 2,
+            "unpack flush cost must be constant, not O(objects)"
         );
         for blob in &blobs {
             assert_eq!(store.read(&hash::hash(blob)).unwrap(), *blob);

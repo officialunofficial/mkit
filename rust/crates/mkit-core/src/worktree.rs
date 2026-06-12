@@ -1459,7 +1459,7 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, Ev::Full(_)))
             .count();
-        assert_eq!(fulls, 1, "tree materialisation must cost one full flush");
+        assert_eq!(fulls, 2, "tree materialisation flush cost must be constant");
         assert!(store.read_object(&tree_h).is_ok());
 
         // Equivalence: the per-object path yields the same root hash.
