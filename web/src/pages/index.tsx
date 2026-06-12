@@ -39,11 +39,6 @@ export default function HomePage() {
           body='Generate a key, sign a message, flip a character, watch the verifier reject it.'
         />
         <Demo
-          to='/attest'
-          title='attest'
-          body='Attach a signed statement to a commit so anyone with your public key can verify it later.'
-        />
-        <Demo
           to='/tree'
           title='tree'
           body='A Merkle tree of BLAKE3 hashes — edit any file and the hashes ripple up to the commit at the root.'
@@ -57,6 +52,11 @@ export default function HomePage() {
           to='/performance'
           title='performance'
           body='Hashing, committing, packing — mkit measured against git on real operations.'
+        />
+        <Demo
+          to='/attest'
+          title='attest'
+          body='Attach a signed statement to a commit so anyone with your public key can verify it later.'
         />
       </ul>
     </div>
