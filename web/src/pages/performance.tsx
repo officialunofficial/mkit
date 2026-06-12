@@ -7,7 +7,7 @@ export default function PerformancePage() {
       <title>mkit — performance</title>
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Measured against git</h1>
-        <p className='max-w-prose text-base text-[--color-fg]'>
+        <p className='max-w-prose text-base text-fg'>
           mkit names every object by a BLAKE3 hash and splits large files into content-defined chunks, so changing one
           megabyte of a video means storing one megabyte — git hashes with SHA-1 and stores each version of a file whole
           until a repack. That trade cuts both ways, and the numbers below show both edges: real{' '}

@@ -62,17 +62,17 @@ export function AttestDemo() {
   return (
     <div className='space-y-6'>
       <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>What you're claiming</span>
+        <span className='mb-2 block text-sm text-muted'>What you're claiming</span>
         <textarea className={INPUT_CLASSES} rows={2} value={claim} onChange={(e) => setClaim(e.target.value)} />
       </label>
 
       <div className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>Signed with</span>
+        <span className='mb-2 block text-sm text-muted'>Signed with</span>
         <div className='grid gap-2'>
           {ALGOS.map((a) => (
             <label
               key={a.value}
-              className='flex cursor-pointer items-start gap-3 rounded-md border border-[--color-hairline] p-3 transition-colors hover:border-[--color-fg]'
+              className='flex cursor-pointer items-start gap-3 rounded-md border border-hairline p-3 transition-colors hover:border-fg'
             >
               <input
                 type='radio'
@@ -80,11 +80,11 @@ export function AttestDemo() {
                 value={a.value}
                 checked={algo === a.value}
                 onChange={() => onAlgoChange(a.value)}
-                className='mt-0.5 accent-[--color-fg]'
+                className='mt-0.5 accent-fg'
               />
               <span className='flex-1 space-y-0.5 text-sm'>
                 <span className='block font-medium'>{a.label}</span>
-                <span className='block text-xs text-[--color-muted]'>{a.note}</span>
+                <span className='block text-xs text-muted'>{a.note}</span>
               </span>
             </label>
           ))}
@@ -92,16 +92,16 @@ export function AttestDemo() {
       </div>
 
       <details className='group'>
-        <summary className='cursor-pointer text-sm text-[--color-muted] select-none hover:text-[--color-fg]'>
+        <summary className='cursor-pointer text-sm text-muted select-none hover:text-fg'>
           <span className='inline-block transition-transform group-open:rotate-90'>›</span> Advanced
         </summary>
         <div className='mt-3 space-y-4'>
           <label className='block'>
-            <span className='mb-2 block text-sm text-[--color-muted]'>Commit being attested (64 hex)</span>
+            <span className='mb-2 block text-sm text-muted'>Commit being attested (64 hex)</span>
             <input className={INPUT_CLASSES_XS} value={commitHash} onChange={(e) => setCommitHash(e.target.value)} />
           </label>
           <label className='block'>
-            <span className='mb-2 block text-sm text-[--color-muted]'>Private key (32 bytes, 64 hex)</span>
+            <span className='mb-2 block text-sm text-muted'>Private key (32 bytes, 64 hex)</span>
             <input className={INPUT_CLASSES_XS} value={seed} onChange={(e) => setSeed(e.target.value)} />
           </label>
         </div>

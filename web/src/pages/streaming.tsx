@@ -8,7 +8,7 @@ export default function StreamingPage() {
       <title>mkit — streaming</title>
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Verifiable at gigabyte scale</h1>
-        <p className='max-w-prose text-base text-[--color-fg]'>
+        <p className='max-w-prose text-base text-fg'>
           Content addressing only works on big files if you can chunk, diff, and stream-verify them — git stores a fresh
           copy of a large binary on every edit. mkit cuts files at content-defined boundaries (FastCDC), records the
           chunk list in a ChunkedBlob, ships only the changed chunks as a delta, and verifies each chunk against the

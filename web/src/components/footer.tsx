@@ -6,8 +6,8 @@ export const Footer = () => {
             than solid and keeps the bottom of the page deferential to
             the 2px gradient top — the two edges rhyme without
             matching. */}
-        <div className='border-t border-dashed border-[--color-hairline]' aria-hidden />
-        <div className='py-6 text-xs text-[--color-muted]'>
+        <div className='border-t border-dashed border-hairline' aria-hidden />
+        <div className='py-6 text-xs text-muted'>
           <a
             href='https://github.com/officialunofficial/mkit'
             target='_blank'

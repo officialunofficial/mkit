@@ -1,7 +1,7 @@
 import '../styles.css'
 
 import type { ReactNode } from 'react'
-import { FaviconSwapper } from '../components/favicon-swapper'
+import { AgentationToolbar } from '../components/agentation-toolbar'
 import { Footer } from '../components/footer'
 import { Header } from '../components/header'
 import { MkitPreloader } from '../components/mkit-preloader'
@@ -29,7 +29,7 @@ export default async function RootLayout({ children }: RootLayoutProps) {
           don't re-apply `max-w-*` themselves. */}
       <PointerTracker />
       <MkitPreloader />
-      <FaviconSwapper />
+      <AgentationToolbar />
       <Header />
       {/* Slightly wider container than editorial default (48rem →
           64rem) so pages that benefit from a two-column layout have
