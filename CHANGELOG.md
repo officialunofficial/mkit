@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`mkit mcp` — a local Model Context Protocol server in the CLI.**
+  `mkit mcp [--repository <path>]` speaks newline-delimited JSON-RPC
+  over stdio so LLM agents can drive local repositories through
+  structured tool calls: the git-parity set (status, diffs, log, show,
+  branch, add, unstage, signed commit, branch create/checkout, init)
+  plus mkit's differentiators (keygen, verify, attest, verify-attest,
+  cat-file inspection). Conservative by design: no network operations,
+  no history surgery, never passes `-f`; `--repository` confines all
+  calls; attestation predicate files must resolve inside the repo,
+  trust-roots files outside it; `--signer`/`--algorithm` are always
+  pinned explicitly so user config cannot reroute agent-triggered
+  signing. See `docs/CLI.md` §"Agent integration".
+
 - **`PinResponse.pin` is `debug_redact`** ([signer.proto]): generated
   `Debug` impls print `[REDACTED]` in place of the PIN, so a stray
   `{:?}` log cannot leak it. Wire format and JSON unchanged.

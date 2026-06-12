@@ -102,7 +102,8 @@ Attach signed, verifiable claims (provenance, review, SBOM, …) to a commit:
 ```sh
 # Produce a DSSE attestation for HEAD (or --commit <hash>), optionally with a
 # predicate document and multiple co-signers (all-or-nothing — any signer
-# failure aborts; no partial envelopes are written):
+# failure aborts; no partial envelopes are written). Multi-signer is
+# shell-only — the MCP tool is single-signer by design:
 mkit attest --algorithm ed25519 \
             --additional-signer "algorithm=p256,signer=repo-key" \
             --predicate-type https://example.com/review/v1 \
@@ -164,6 +165,38 @@ starts the SSH-transport server (internal/host side).
 mkit pack-shard <hash>   # Reed-Solomon erasure-code a stored pack into shards
                          # (requires the `pack-shards` build feature)
 ```
+
+## Prefer MCP over raw shell (when available)
+
+The CLI ships a local MCP server: `mkit mcp [--repository <path>]`. If your
+harness supports MCP, register it and drive repositories through structured
+tool calls instead of shelling out — inputs are validated, no interactive
+paths exist, and destructive guards can't be overridden (the server never
+passes `-f`):
+
+```sh
+claude mcp add mkit-repo -- mkit mcp --repository /path/to/repo
+```
+
+Its 18 tools cover the everyday flow (`mkit_status`, diffs, `mkit_log`,
+`mkit_show`, `mkit_branch`, `mkit_add`, `mkit_unstage`, `mkit_commit`,
+create-branch/checkout, `mkit_init`, `mkit_keygen`, `mkit_cat_object`) plus
+the differentiators (`mkit_verify`, `mkit_attest`, `mkit_verify_attest`).
+
+**What the MCP deliberately does NOT expose — use the shell commands in this
+skill for these:** remotes (`push`/`pull`/`fetch`/`clone`), history surgery
+(`merge`/`rebase`/`cherry-pick`/`revert`), tags, destructive worktree ops
+(`reset --hard`/`clean`/`rm`), and multi-/external-signer attestation
+(`--additional-signer`, `--signer external`).
+
+Two boundaries are *stricter* via MCP than the shell: an `attest` predicate
+file must resolve **inside** the repo, and a `verify_attest` trust-roots path
+must resolve **outside** it (in-repo roots are always rejected — hostile-clone
+defense). Signing is also pinned: MCP attestations always sign ed25519 with
+the repo key unless you explicitly choose otherwise; ambient `attest.*` config
+never steers them.
+
+The shell rules below still apply whenever you do run `mkit` directly.
 
 ## Rules for agents
 
