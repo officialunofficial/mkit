@@ -611,3 +611,19 @@ fn export_to_fresh_local_dest_rebinds_identically() {
     r.ok(&["git", "export", dest.to_str().unwrap()]);
     r.ok(&["git", "export", dest.to_str().unwrap()]);
 }
+
+#[test]
+fn unreachable_remote_dest_does_not_burn_the_state_name() {
+    // A typo'd remote URL fails at push time; the fresh state dir
+    // must be removed so the corrected retry works under the SAME
+    // remote-name (mirrors the import side's validate-then-bind).
+    if !git_available() {
+        return;
+    }
+    let r = fixture();
+    let out = r.run(&["git", "export", "file:///nonexistent/nowhere/mirror"]);
+    assert!(!out.status.success(), "push to a missing file:// URL fails");
+    let mroot = mirror_root();
+    let mirror = mroot.path().join("retry-mirror");
+    r.ok(&["git", "export", mirror.to_str().unwrap()]);
+}

@@ -1,7 +1,7 @@
 [package]
 name = "mkit-git-bridge"
-description = "Deterministic one-way mkit→git export translation (SPEC-GIT-BRIDGE)"
-keywords = ["mkit", "git", "vcs", "bridge", "export"]
+description = "Deterministic mkit↔git bridge: export translation (SPEC-GIT-BRIDGE) and importer-signed import (SPEC-GIT-IMPORT)"
+keywords = ["mkit", "git", "bridge", "export", "import"]
 categories = ["development-tools"]
 readme = "../../README.md"
 version.workspace = true

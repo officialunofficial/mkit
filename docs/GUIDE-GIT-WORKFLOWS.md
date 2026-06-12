@@ -134,9 +134,11 @@ Everything per-remote lives in `.mkit/git/<name>/`: the staging
 mirror (durable), the blake3↔sha1 map (rebuildable cache), recorded
 ref state, direction/source/dest/key bindings, and retained raw git
 bytes (`raw/`, audit evidence). An interrupted import/fetch leaves a
-crash marker; the next run discards the map and ref state and
-rebuilds both — determinism makes the rebuild exact, including for
-fork-mode state.
+crash marker; the next run discards the map cache and re-translates
+every ref from scratch (recorded ref state is kept — it carries tag
+ownership and prune memory) — determinism makes the rebuild exact,
+including for fork-mode state. A missing or corrupt map without a
+marker triggers the same rebuild.
 
 `mkit remote rename` moves bridge state with the remote;
 `mkit remote remove` keeps it (raw bytes are audit evidence) and

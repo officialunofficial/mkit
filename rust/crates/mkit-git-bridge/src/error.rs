@@ -146,27 +146,27 @@ impl fmt::Display for Refusal {
             Self::Unparsable { object, detail } => write!(
                 f,
                 "git object {} is structurally unparsable ({detail}); refused per SPEC-GIT-IMPORT §3.2",
-                to_hex(object)
+                &to_hex(object)[..40]
             ),
             Self::TooManyTreeEntries { object, count } => write!(
                 f,
                 "git tree {} has {count} entries, over mkit's decode cap (SPEC-GIT-IMPORT §3.3)",
-                to_hex(object)
+                &to_hex(object)[..40]
             ),
             Self::TreeEntryKind { object, name } => write!(
                 f,
                 "git tree {} entry {name:?} names an object of a kind its mode contradicts (SPEC-GIT-IMPORT §3.3)",
-                to_hex(object)
+                &to_hex(object)[..40]
             ),
             Self::Unrepresentable { object, detail } => write!(
                 f,
                 "git object {} does not serialize under SPEC-OBJECTS ({detail}); refused per SPEC-GIT-IMPORT §3",
-                to_hex(object)
+                &to_hex(object)[..40]
             ),
             Self::BlobTooLarge { object, size } => write!(
                 f,
                 "git blob {} is {size} bytes, over the 1 GiB per-file cap (SPEC-GIT-IMPORT §3.1)",
-                to_hex(object)
+                &to_hex(object)[..40]
             ),
             Self::NegativeTimestamp { object, timestamp } => write!(
                 f,

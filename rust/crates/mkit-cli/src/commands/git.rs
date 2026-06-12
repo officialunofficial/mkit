@@ -119,6 +119,36 @@ fn gitsrc_is_ancestor(staging: &Path, old: &Sha1Id, new: &Sha1Id) -> CmdResult<b
         .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))
 }
 
+fn json_report(ok: bool, exported: &[Exported], skipped: &[(String, String)]) -> String {
+    let mut out = format!("{{\"ok\":{ok},\"exported\":[");
+    for (i, e) in exported.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"ref\":\"{}\",\"mkit\":\"{}\",\"git\":\"{}\"}}",
+            format::json_escape(&e.ref_name),
+            mkit_core::to_hex(&e.mkit_hash),
+            sha1_hex(&e.git_id)
+        );
+    }
+    out.push_str("],\"skipped\":[");
+    for (i, (r, why)) in skipped.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"ref\":\"{}\",\"reason\":\"{}\"}}",
+            format::json_escape(r),
+            format::json_escape(why)
+        );
+    }
+    out.push_str("]}");
+    out
+}
+
 fn run_simple(f: impl FnOnce() -> Result<(), (String, u8)>) -> u8 {
     match f() {
         Ok(()) => exit::OK,
@@ -233,8 +263,26 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
         mkit_git_bridge::map::bind_direction(&state, mkit_git_bridge::map::Direction::Fork)
             .map_err(|e| (e.to_string(), exit::USAGE))?;
     } else {
-        mkit_git_bridge::map::bind_direction(&state, mkit_git_bridge::map::Direction::Export)
-            .map_err(|e| (e.to_string(), exit::USAGE))?;
+        // Validate the direction early (mismatch refusals must fire
+        // before any work) but WRITE a fresh stamp only after the
+        // push succeeds — a typo'd remote dest must not burn the
+        // state name (mirrors the import side's validate-then-bind).
+        match mkit_git_bridge::map::read_direction(&state)
+            .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?
+        {
+            None | Some(mkit_git_bridge::map::Direction::Export) => {}
+            Some(other) => {
+                return Err((
+                    format!(
+                        "state dir is bound to direction '{}'; 'export' is not allowed \
+                         here (one direction per state dir — use a different \
+                         --remote-name)",
+                        other.as_str()
+                    ),
+                    exit::USAGE,
+                ));
+            }
+        }
     }
 
     let staging = state.join("repo.git");
@@ -269,6 +317,11 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     // contribute to U) stays possible; the last dest is recorded for
     // `mkit git status` only.
     let push_dest = ensure_dest(&opts.dest)?;
+    // A state dir is FRESH when nothing has ever bound it: if the
+    // remote contact below fails, the whole dir (staging, map cache)
+    // is removed so the name is not burned and a later import cannot
+    // land on mixed leftovers.
+    let fresh_state = !opts.passthrough && !state.join("dest").exists();
 
     // Recompute AFTER ensure_dest: a fresh local mirror did not exist
     // when the origin-guard identity above was taken, so its lexical
@@ -297,8 +350,7 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                mkit_git_bridge::map::write_binding(&state, "dest", &bound_identity)
-                    .map_err(|e| (format!("record dest: {e}"), exit::CANTCREAT))?;
+                // Recorded after the push succeeds (see below).
             }
             Err(e) => return Err((format!("read dest binding: {e}"), exit::GENERAL_ERROR)),
         }
@@ -358,6 +410,12 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
         .map_err(|e| (format!("persist map cache: {e}"), exit::GENERAL_ERROR))?;
 
     if exported.is_empty() {
+        if opts.json {
+            // Same shape as the success report, ok:false — a JSON
+            // consumer gets per-ref skip reasons here just like the
+            // import side does.
+            println!("{}", json_report(false, &exported, &skipped));
+        }
         return Err((
             format!(
                 "every requested ref was skipped ({} refusals)",
@@ -432,7 +490,15 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     let needs_observation =
         opts.passthrough || to_push.iter().any(|(name, _)| !prior.contains_key(*name));
     let observed: HashMap<String, Sha1Id> = if needs_observation {
-        ls_remote(&staging, &push_dest)?
+        match ls_remote(&staging, &push_dest) {
+            Ok(o) => o,
+            Err(e) => {
+                if fresh_state {
+                    let _ = std::fs::remove_dir_all(&state);
+                }
+                return Err(e);
+            }
+        }
     } else {
         HashMap::new()
     };
@@ -516,6 +582,9 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     }
     let push_arg_refs: Vec<&str> = push_args.iter().map(String::as_str).collect();
     git_in(&staging, &push_arg_refs).map_err(|e| {
+        if fresh_state {
+            let _ = std::fs::remove_dir_all(&state);
+        }
         let hint = if e.contains("stale info") {
             "\nhint: the mirror moved since the last export; if that \
              change is yours/expected, remove .mkit/git/<name>/refs to \
@@ -528,6 +597,17 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
             exit::GENERAL_ERROR,
         )
     })?;
+
+    // Push succeeded: record the fresh plain-export bindings the
+    // validation above deferred (idempotent for already-bound dirs).
+    if !opts.passthrough {
+        mkit_git_bridge::map::bind_direction(&state, mkit_git_bridge::map::Direction::Export)
+            .map_err(|e| (e.to_string(), exit::CANTCREAT))?;
+        if !dest_file.exists() {
+            mkit_git_bridge::map::write_binding(&state, "dest", &bound_identity)
+                .map_err(|e| (format!("record dest: {e}"), exit::CANTCREAT))?;
+        }
+    }
 
     // ── record the new lease expectations ──────────────────────────
     // Merge over prior state: refs not in this export keep their
@@ -555,33 +635,7 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
 
     // ── report ─────────────────────────────────────────────────────
     if opts.json {
-        let mut out = String::from("{\"ok\":true,\"exported\":[");
-        for (i, e) in exported.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            let _ = write!(
-                out,
-                "{{\"ref\":\"{}\",\"mkit\":\"{}\",\"git\":\"{}\"}}",
-                format::json_escape(&e.ref_name),
-                mkit_core::to_hex(&e.mkit_hash),
-                sha1_hex(&e.git_id)
-            );
-        }
-        out.push_str("],\"skipped\":[");
-        for (i, (r, why)) in skipped.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            let _ = write!(
-                out,
-                "{{\"ref\":\"{}\",\"reason\":\"{}\"}}",
-                format::json_escape(r),
-                format::json_escape(why)
-            );
-        }
-        out.push_str("]}");
-        println!("{out}");
+        println!("{}", json_report(true, &exported, &skipped));
     } else {
         for e in &exported {
             println!(

@@ -340,7 +340,12 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
             }
         }
         let h = 1 + max_child;
-        self.depth_memo.heights.insert(*id, h);
+        if h <= MAX_TREE_DEPTH {
+            // Over-cap values are budget-truncated, not exact — memoizing
+            // them would falsely refuse a later ref that reuses this
+            // subtree at a legal shallower depth.
+            self.depth_memo.heights.insert(*id, h);
+        }
         Ok(h)
     }
 
@@ -360,7 +365,10 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         let parsed =
             gitparse::parse_tag(&body).map_err(|e| BridgeError::Source(format!("tag: {e}")))?;
         let len = 1 + self.tag_chain_len(&parsed.object, budget - 1)?;
-        self.depth_memo.chains.insert(*id, len);
+        if len <= MAX_TAG_CHAIN {
+            // Same rule as tree heights: only exact values are memoizable.
+            self.depth_memo.chains.insert(*id, len);
+        }
         Ok(len)
     }
 

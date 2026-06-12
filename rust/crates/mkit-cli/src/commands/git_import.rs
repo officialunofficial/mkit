@@ -151,6 +151,7 @@ fn fresh_clone(opts: &ImportArgs, dir: &str) -> CmdResult<Summary> {
             exit::CANTCREAT,
         ));
     }
+    let created = !target.exists();
     std::fs::create_dir_all(&target).map_err(|e| (format!("mkdir: {e}"), exit::CANTCREAT))?;
     ObjectStore::init(&target).map_err(|e| (format!("init: {e}"), exit::CANTCREAT))?;
     refs::init(&target.join(mkit_core::MKIT_DIR))
@@ -158,10 +159,22 @@ fn fresh_clone(opts: &ImportArgs, dir: &str) -> CmdResult<Summary> {
     let mut summary = match import_into(&target, opts, false) {
         Ok(s) => s,
         Err(e) => {
-            // The target was empty/absent before this run created it:
-            // remove it so a corrected retry is not refused with
-            // "destination already exists".
-            let _ = std::fs::remove_dir_all(&target);
+            // Undo this run's work so a corrected retry is not refused
+            // with "destination already exists" — but only remove the
+            // DIRECTORY itself if this run created it (a pre-existing
+            // empty dir may carry meaning: ownership, mode, mountpoint).
+            if created {
+                let _ = std::fs::remove_dir_all(&target);
+            } else if let Ok(rd) = std::fs::read_dir(&target) {
+                for entry in rd.flatten() {
+                    let p = entry.path();
+                    let _ = if p.is_dir() {
+                        std::fs::remove_dir_all(&p)
+                    } else {
+                        std::fs::remove_file(&p)
+                    };
+                }
+            }
             return Err(e);
         }
     };
@@ -576,7 +589,16 @@ fn translate_upstream(
     // short-circuit would otherwise leave holes a later passthrough
     // export turns into re-translated history.
     let map_intact = map::map_is_intact(state).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
-    if !recovering && (!map_intact || (sha_map.is_empty() && !prior_state.is_empty())) {
+    // Tip-presence check: every recorded ref tip is appended to the
+    // map BEFORE the ref state persists, so a recorded tip with no
+    // map entry means the map tail was lost (truncation at a clean
+    // line boundary parses as intact).
+    let tips_mapped = prior_state
+        .iter()
+        .all(|st| sha_map.contains_key(&st.git_id));
+    if !recovering
+        && (!map_intact || !tips_mapped || (sha_map.is_empty() && !prior_state.is_empty()))
+    {
         recovering = true;
         let _ = std::fs::remove_file(state.join("map"));
         sha_map.clear();
@@ -1013,8 +1035,6 @@ fn read_source(state: &Path) -> CmdResult<Option<String>> {
     }
 }
 
-/// SPEC-GIT-IMPORT §4: a dedicated import key by default, generated
-/// on first use with a loud notice.
 /// The name of another state dir already bound to `identity`, if any.
 fn other_state_with_source(mkit_dir: &Path, this_state: &Path, identity: &str) -> Option<String> {
     let root = mkit_dir.join("git");
@@ -1031,6 +1051,8 @@ fn other_state_with_source(mkit_dir: &Path, this_state: &Path, identity: &str) -
     None
 }
 
+/// SPEC-GIT-IMPORT §4: a dedicated import key by default, generated
+/// on first use with a loud notice.
 fn load_or_create_import_key(mkit_dir: &Path, flag: Option<&str>) -> CmdResult<KeyPair> {
     let path = flag.map_or_else(|| mkit_dir.join(IMPORT_KEY_FILE), PathBuf::from);
     match mkit_core::sign::load_key(&path) {

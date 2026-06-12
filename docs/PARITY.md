@@ -18,8 +18,7 @@ cannot share bytes with Git's SHA-1/SHA-256 store).
 the paragraph above — the translation bridge: a deterministic **export** to
 git mirrors (`mkit git export`, [`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md)) and
 an **importer-signed import** from git remotes (`mkit git import`,
-[`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md); spec'd now, implemented later in
-this same series). Neither shares bytes between the
+[`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md)). Neither shares bytes between the
 stores (every object is translated, never aliased); bidirectional *sync*
 remains a permanent non-goal. Safety principles are untouched.
 

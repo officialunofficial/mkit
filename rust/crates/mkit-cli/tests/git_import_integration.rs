@@ -1651,3 +1651,52 @@ fn format_patch_escapes_mbox_splitting_body_lines() {
         "{log:?}"
     );
 }
+
+#[test]
+fn failed_clone_keeps_preexisting_empty_target_dir() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let target = f.root.path().join("preexisting");
+    std::fs::create_dir_all(&target).unwrap();
+    let missing = f.root.path().join("nope-missing");
+    let out = f.mkit(
+        f.root.path(),
+        &["git", "import", missing.to_str().unwrap(), "preexisting"],
+    );
+    assert!(!out.status.success());
+    assert!(
+        target.is_dir(),
+        "a directory this run did not create must survive"
+    );
+    assert_eq!(
+        std::fs::read_dir(&target).unwrap().count(),
+        0,
+        "but this run's contents are cleaned out"
+    );
+}
+
+#[test]
+fn map_tail_truncation_at_line_boundary_rebuilds() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    let state = fork.join(".mkit/git/upstream");
+    // Drop the LAST line (ref tips are appended last): the file still
+    // parses cleanly, so only the tip-presence check can catch it.
+    let map = std::fs::read_to_string(state.join("map")).unwrap();
+    let lines: Vec<&str> = map.lines().collect();
+    let mut truncated = lines[..lines.len() - 1].join("\n");
+    truncated.push('\n');
+    std::fs::write(state.join("map"), truncated).unwrap();
+    let out = f.mkit_ok(&fork, &["git", "fetch"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("rebuilding"),
+        "{out:?}"
+    );
+    let rebuilt = std::fs::read_to_string(state.join("map")).unwrap();
+    assert_eq!(rebuilt.lines().count(), lines.len(), "tail recovered");
+}

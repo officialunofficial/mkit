@@ -667,9 +667,11 @@ Remote / sync:
   Attestation signing uses the same signer resolution as `mkit
   attest` (`--algorithm`/`--signer` flags, else config defaults), so
   a signing key must exist unless `--no-attest`. Branch deletion
-  never propagates (export is add/update-only), and each
+  never propagates (export is add/update-only), and each plain-export
   `--remote-name` state dir is bound to one destination and one
-  direction; bidirectional sync does not exist.
+  direction (fork-mode state dirs lease against a fresh observation
+  per push and are not destination-bound); bidirectional sync does
+  not exist.
 - `mkit git import <url> [<dir>] [--remote-name <name>] [--key <path>]
   [--json]` — import a git upstream as an **importer-signed downstream
   fork** ([`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md)). With `<dir>`:
@@ -710,7 +712,9 @@ Remote / sync:
   retained raw bytes hashing to their sha1 and a twin signed by the
   pinned importer key. `--fork-audit` (§14.3) additionally re-derives
   every tree/blob referenced by bridge commits from its mkit twin and
-  requires the exact sha1. Exits non-zero listing each failing object.
+  requires the exact sha1. Exits non-zero listing each failing object;
+  unsigned (all-zero-signature) objects also fail, reported as a count
+  ("unsigned", never "tampered" — SPEC-GIT-BRIDGE §10).
 - `mkit git status` — one block per `.mkit/git/<name>/` state dir:
   direction, recorded source/dest, pinned importer key, tracking refs
   (import) and lease positions (export), staging health.

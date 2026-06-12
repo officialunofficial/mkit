@@ -376,7 +376,10 @@ undetectable; the push lease remains the backstop.
 Pinned under `rust/tests/golden/git-import/` with the standard
 MANIFEST convention; each vector records the source git object bytes,
 the imported mkit object bytes under the fixed test key, and both
-ids.
+ids. Single exception: vector 9's > 1 MiB content is regenerated
+deterministically by the golden test rather than committed; its two
+ids are pinned like every other vector (same carve-out as
+SPEC-GIT-BRIDGE §13's chunked vector).
 
 1. **Plain commit** (author == committer, UTC) — the baseline.
 2. **Committer ≠ author with non-UTC zones** — committer-timestamp
