@@ -365,11 +365,9 @@ pub fn read_index(root: &Path) -> IndexResult<Index> {
     // invisible to stat. Treat such entries as uncached (zero
     // sentinel) so callers re-hash them; the next index write (whose
     // file mtime is then newer) heals the cache.
-    let index_mtime_ns = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+    // Same conversion (incl. 0-sentinel + saturation semantics) as the
+    // entry mtimes it is compared against — one implementation only.
+    let index_mtime_ns = crate::worktree::mtime_nanos(&meta);
     // Window sizing, like git's USE_NSEC — but judged PER ENTRY: the
     // tight 10ms window is only safe when BOTH the index file's mtime
     // and the entry's recorded worktree mtime show sub-second
@@ -377,12 +375,12 @@ pub fn read_index(root: &Path) -> IndexResult<Index> {
     // SMB/NFS mounts, tar/touch -t/rsync-truncated timestamps) could
     // be rewritten within its coarse tick without the stat changing,
     // so such entries keep the conservative 1s window.
-    let index_ns_precise = index_mtime_ns % 1_000_000_000 != 0;
+    let index_ns_precise = !index_mtime_ns.is_multiple_of(1_000_000_000);
     for e in &mut idx.entries {
         if e.mtime_ns == 0 {
             continue;
         }
-        let window = if index_ns_precise && e.mtime_ns % 1_000_000_000 != 0 {
+        let window = if index_ns_precise && !e.mtime_ns.is_multiple_of(1_000_000_000) {
             RACY_WINDOW_NS / 100
         } else {
             RACY_WINDOW_NS

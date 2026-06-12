@@ -270,7 +270,7 @@ impl PackReader {
         }
 
         let mut report = UnpackReport::default();
-        let mut pending_writes: Vec<Arc<[u8]>> = Vec::new();
+        let mut pending_writes: Vec<(Hash, Arc<[u8]>)> = Vec::new();
         // Track raw entries we wrote in *this* pack so subsequent delta
         // entries can resolve their base from memory before falling back
         // to the on-disk store. We keep the resolved object bytes (raw
@@ -309,7 +309,7 @@ impl PackReader {
                     let stored_hash = hash::hash(payload);
                     let bytes: Arc<[u8]> = Arc::from(payload);
                     in_pack.insert(stored_hash, Arc::clone(&bytes));
-                    pending_writes.push(bytes);
+                    pending_writes.push((stored_hash, bytes));
                     report.raw_count += 1;
                     report.stored.push(stored_hash);
                 }
@@ -338,7 +338,7 @@ impl PackReader {
                     let stored_hash = hash::hash(&resolved);
                     let bytes: Arc<[u8]> = Arc::from(resolved);
                     in_pack.insert(stored_hash, Arc::clone(&bytes));
-                    pending_writes.push(bytes);
+                    pending_writes.push((stored_hash, bytes));
                     report.delta_count += 1;
                     report.stored.push(stored_hash);
                 }
@@ -355,8 +355,10 @@ impl PackReader {
         // of one per object. The caller's ref update happens after
         // `read` returns, so the commit-before-reference ordering holds.
         let batch = store.batch();
-        for bytes in pending_writes {
-            batch.write(&bytes)?;
+        for (h, bytes) in pending_writes {
+            // Every entry was BLAKE3-hashed above (trailer-verified
+            // pack, hash recorded in the report); skip the re-hash.
+            batch.write_prehashed(h, &[&bytes])?;
         }
         batch.commit()?;
 

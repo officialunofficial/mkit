@@ -190,28 +190,23 @@ impl Syncer for RealSyncer {
     }
 }
 
-/// One staged, not-yet-visible object.
-#[derive(Debug)]
-struct Staged {
-    /// Barrier-synced temp file. The file handle is closed
-    /// (`into_temp_path`) so a large batch does not exhaust the fd
-    /// limit; deletion-on-drop is retained for abort cleanup.
-    tmp: TempPath,
-    final_path: PathBuf,
-}
-
 #[derive(Debug, Default)]
 struct BatchState {
-    /// hash → staged temp, insertion-deduped.
-    staged: HashMap<Hash, Staged>,
+    /// hash → staged-but-invisible temp file, insertion-deduped. The
+    /// final path is derived from the hash at commit (`path_for`) — a
+    /// single source of truth for the layout. Handles are closed
+    /// (`TempPath`) so a large batch does not exhaust the fd limit;
+    /// deletion-on-drop is retained for abort cleanup.
+    staged: HashMap<Hash, TempPath>,
     /// Shard directories whose dirents this batch must flush at commit.
     /// Includes dedup hits: an object made visible by another process
     /// may not have a durable dirent yet, and our commit is about to
     /// reference it.
     touched_shards: HashSet<PathBuf>,
-    /// The most recently staged hash — the file that receives the
-    /// single full flush at commit.
-    last_staged: Option<Hash>,
+    /// Shard directories this batch has already `create_dir_all`'d —
+    /// at most 256 exist, so memoizing saves ~one mkdir syscall per
+    /// object on large ingests.
+    created_shards: HashSet<PathBuf>,
 }
 
 /// A set of object writes that become durable and visible together.
@@ -263,26 +258,48 @@ impl<'s> WriteBatch<'s> {
         if total > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
-        let h = hasher.finalize();
+        self.write_prehashed(hasher.finalize(), parts)
+    }
+
+    /// Stage `parts` under the caller-supplied content hash, skipping
+    /// the BLAKE3 pass. `pub(crate)` and reserved for callers that have
+    /// PROVABLY just hashed the same bytes (pack unpack hashes every
+    /// entry to build its report; re-hashing in the batch doubled the
+    /// CPU of every clone/fetch). A wrong hash here would corrupt the
+    /// content addressing — never expose this publicly.
+    pub(crate) fn write_prehashed(&self, h: Hash, parts: &[&[u8]]) -> StoreResult<Hash> {
         let final_path = self.store.path_for(&h);
         let shard_dir = final_path
             .parent()
             .expect("object path always has a 2-hex parent")
             .to_path_buf();
 
-        let mut st = self.inner.lock().expect("batch state mutex poisoned");
-        if st.staged.contains_key(&h) {
-            return Ok(h);
-        }
+        // Short lock: staged-dedup check + mkdir memoization decision.
+        // The file I/O below runs OUTSIDE the lock so concurrent
+        // writers sharing one batch don't convoy on each other's
+        // write_all calls.
+        let need_mkdir = {
+            let st = self.inner.lock().expect("batch state mutex poisoned");
+            if st.staged.contains_key(&h) {
+                return Ok(h);
+            }
+            !st.created_shards.contains(&shard_dir)
+        };
         if final_path.exists() {
             // Dedup hit: the object is visible, but if another process
             // renamed it and has not yet flushed the dirent, it may not
             // be durable. We are about to reference it, so flush its
             // shard dir at commit.
-            st.touched_shards.insert(shard_dir);
+            self.inner
+                .lock()
+                .expect("batch state mutex poisoned")
+                .touched_shards
+                .insert(shard_dir);
             return Ok(h);
         }
-        fs::create_dir_all(&shard_dir)?;
+        if need_mkdir {
+            fs::create_dir_all(&shard_dir)?;
+        }
         let file_name = final_path
             .file_name()
             .expect("object path has file name")
@@ -298,6 +315,8 @@ impl<'s> WriteBatch<'s> {
                 syncer.full(tmp.as_file(), tmp.path())?;
                 syncer.rename(tmp.into_temp_path(), &final_path)?;
                 syncer.dir_sync(&shard_dir)?;
+                let mut st = self.inner.lock().expect("batch state mutex poisoned");
+                st.created_shards.insert(shard_dir);
             }
             SyncPolicy::Batch => {
                 // No flush here: barriers for every staged file are
@@ -305,18 +324,13 @@ impl<'s> WriteBatch<'s> {
                 // per-file barriers would re-serialise the batch on
                 // device latency (measured ~4.6ms per F_BARRIERFSYNC
                 // on Apple SSDs, ~8s for a 100 MiB ingest).
-                st.staged.insert(
-                    h,
-                    Staged {
-                        // Close the fd now: a 100 MiB ingest stages
-                        // ~1600 objects, which must not exhaust the
-                        // process fd limit. Deletion-on-drop survives.
-                        tmp: tmp.into_temp_path(),
-                        final_path,
-                    },
-                );
-                st.touched_shards.insert(shard_dir);
-                st.last_staged = Some(h);
+                let mut st = self.inner.lock().expect("batch state mutex poisoned");
+                // Lost race against a concurrent writer of the same
+                // object within this batch: keep theirs, drop our tmp
+                // (content-addressed — byte-identical by construction).
+                st.staged.entry(h).or_insert_with(|| tmp.into_temp_path());
+                st.touched_shards.insert(shard_dir.clone());
+                st.created_shards.insert(shard_dir);
             }
         }
         Ok(h)
@@ -361,6 +375,7 @@ impl<'s> WriteBatch<'s> {
             // Every write was already made durable and visible.
             SyncPolicy::PerObject => Ok(()),
             SyncPolicy::Batch => {
+                let staged: Vec<(Hash, TempPath)> = st.staged.into_iter().collect();
                 // 1. Barrier every staged file, concurrently. Each
                 //    barrier initiates writeback for its file and
                 //    orders it ahead of the full flush below; issuing
@@ -368,28 +383,25 @@ impl<'s> WriteBatch<'s> {
                 //    latency (queue depth) instead of paying it
                 //    serially per file. All barriers complete (joined)
                 //    before the flush is issued.
-                let staged_files: Vec<&Staged> = st.staged.values().collect();
-                parallel_io(staged_files.len(), |i| {
-                    let f = File::open(&staged_files[i].tmp)?;
-                    syncer.barrier(&f, &staged_files[i].tmp)
+                parallel_io(staged.len(), |i| {
+                    let f = File::open(&staged[i].1)?;
+                    syncer.barrier(&f, &staged[i].1)
                 })?;
-                drop(staged_files);
-                // 2. One full flush. The barriers ordered every staged
-                //    write ahead of it, so this single flush makes the
-                //    whole batch durable (see module docs). Pure-dedup
-                //    batches (nothing staged) skip it: the objects were
-                //    made durable by whoever renamed them into
-                //    visibility.
-                if let Some(last) = st.last_staged {
-                    let staged = st.staged.get(&last).expect("last_staged is staged");
-                    let f = File::open(&staged.tmp)?;
-                    syncer.full(&f, &staged.tmp)?;
+                // 2. One full flush — any staged file serves as the
+                //    anchor; the barriers ordered every staged write
+                //    ahead of it (see module docs). Pure-dedup batches
+                //    (nothing staged) skip it: the objects were made
+                //    durable by whoever renamed them into visibility.
+                if let Some((_, tmp)) = staged.first() {
+                    let f = File::open(tmp)?;
+                    syncer.full(&f, tmp)?;
                 }
                 // 3. Renames: objects become visible only now, after
                 //    their bytes are durable — another process's dedup
-                //    can never reference a non-durable object.
-                for staged in st.staged.into_values() {
-                    syncer.rename(staged.tmp, &staged.final_path)?;
+                //    can never reference a non-durable object. Final
+                //    paths derive from the hashes (single layout rule).
+                for (h, tmp) in staged {
+                    syncer.rename(tmp, &self.store.path_for(&h))?;
                 }
                 // 4. Dirent barriers, once per touched shard dir,
                 //    concurrently (sorted first so the work list is

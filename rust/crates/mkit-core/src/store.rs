@@ -279,6 +279,33 @@ impl ObjectStore {
         Ok(bytes)
     }
 
+    /// The object's type tag, from its 6-byte prologue — without
+    /// reading or hash-verifying the body. Backs cheap shape checks
+    /// (e.g. "is this staged hash blob-like?") that previously paid a
+    /// full read+BLAKE3 of every staged blob per status/commit; the
+    /// real read path still integrity-verifies at use time.
+    ///
+    /// # Errors
+    /// [`StoreError::ObjectNotFound`] if absent; [`StoreError::Decode`]
+    /// for a short file, bad magic/version, or unknown tag.
+    pub fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        let path = self.path_for(h);
+        let mut file = File::open(&path).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
+            _ => StoreError::Io(e),
+        })?;
+        let mut prologue = [0u8; 6];
+        file.read_exact(&mut prologue)
+            .map_err(|_| StoreError::Decode(MkitError::EmptyData))?;
+        if prologue[1..5] != crate::object::MAGIC {
+            return Err(StoreError::Decode(MkitError::InvalidMagic));
+        }
+        if prologue[5] != crate::object::SCHEMA_VERSION {
+            return Err(StoreError::Decode(MkitError::UnsupportedObjectVersion));
+        }
+        crate::object::ObjectType::from_u8(prologue[0]).map_err(StoreError::Decode)
+    }
+
     /// Convenience: read raw bytes and decode into a typed [`Object`].
     pub fn read_object(&self, h: &Hash) -> StoreResult<Object> {
         let bytes = self.read(h)?;

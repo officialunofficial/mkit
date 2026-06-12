@@ -400,14 +400,18 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
         // target path). Accept both blob shapes for file entries so the
         // commit/index path agrees with the worktree-hashing path; a
         // tree/commit/etc. under a file entry is still rejected.
-        match store.read_object(&entry.object_hash)? {
-            Object::Blob(_) => {}
-            Object::ChunkedBlob(_) if mode != EntryMode::Symlink => {}
+        // Shape check via the 6-byte prologue only — a full read_object
+        // here re-read AND re-hashed every staged blob on every
+        // status/commit, dominating large repos of small files. The
+        // read path still integrity-verifies at use time.
+        match store.object_type(&entry.object_hash)? {
+            crate::object::ObjectType::Blob => {}
+            crate::object::ObjectType::ChunkedBlob if mode != EntryMode::Symlink => {}
             other => {
                 return Err(WorktreeError::Io(io::Error::other(format!(
                     "index entry '{}' points to a non-blob object (got {})",
                     entry.path,
-                    other.object_type().name()
+                    other.name()
                 ))));
             }
         }

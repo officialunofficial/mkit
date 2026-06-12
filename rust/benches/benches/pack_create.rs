@@ -6,8 +6,6 @@
 //! yet, so this benchmark anchors on the steady-state "store N blobs
 //! in a content-addressed fashion" cost. Wallclock ms, smaller wins.
 
-use std::fs;
-use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
@@ -82,7 +80,7 @@ fn bench_pack(c: &mut Criterion) {
         }
     }
 
-    write_summary("pack_create", &samples);
+    mkit_benches::write_summary("pack_create", &samples);
 }
 
 fn build_blobs(count: usize, size: usize) -> Vec<Vec<u8>> {
@@ -179,22 +177,6 @@ fn time_one<F: FnMut()>(mut f: F) -> f64 {
         f();
     }
     t0.elapsed().as_secs_f64() / f64::from(n)
-}
-
-fn write_summary(category: &str, samples: &[Sample]) {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-    let dir = Path::new(&manifest)
-        .parent()
-        .map(|p| p.join("target/bench-results"))
-        .unwrap_or_else(|| Path::new("target/bench-results").to_path_buf());
-    let _ = fs::create_dir_all(&dir);
-    let path = dir.join(format!("{category}.json"));
-    let body = serde_json::to_string_pretty(samples).expect("serialize samples");
-    if let Err(e) = fs::write(&path, body) {
-        eprintln!("warning: could not write {}: {e}", path.display());
-    } else {
-        eprintln!("wrote {}", path.display());
-    }
 }
 
 criterion_group!(benches, bench_pack);
