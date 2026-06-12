@@ -23,7 +23,7 @@ use mkit_git_bridge::error::BridgeError;
 use mkit_git_bridge::gitobj::{Sha1Id, bytes_hex, sha1_hex};
 use mkit_git_bridge::gitsrc::{self, CatFileBatch};
 use mkit_git_bridge::import::{
-    IMPORT_SPEC_VERSION, ImportOptions, ImportSigner, Importer, ObjectSink,
+    DepthMemo, IMPORT_SPEC_VERSION, ImportOptions, ImportSigner, Importer, ObjectSink,
 };
 use mkit_git_bridge::map::{self, Direction};
 use mkit_git_bridge::remoteid::remote_identity;
@@ -155,7 +155,16 @@ fn fresh_clone(opts: &ImportArgs, dir: &str) -> CmdResult<Summary> {
     ObjectStore::init(&target).map_err(|e| (format!("init: {e}"), exit::CANTCREAT))?;
     refs::init(&target.join(mkit_core::MKIT_DIR))
         .map_err(|e| (format!("refs init: {e}"), exit::CANTCREAT))?;
-    let mut summary = import_into(&target, opts, false)?;
+    let mut summary = match import_into(&target, opts, false) {
+        Ok(s) => s,
+        Err(e) => {
+            // The target was empty/absent before this run created it:
+            // remove it so a corrected retry is not refused with
+            // "destination already exists".
+            let _ = std::fs::remove_dir_all(&target);
+            return Err(e);
+        }
+    };
 
     // Check out the upstream default branch.
     let mkit_dir = target.join(mkit_core::MKIT_DIR);
@@ -550,7 +559,7 @@ fn translate_upstream(
     // bypasses its unchanged-ref short-circuit and rev-list
     // exclusions below, so the map is fully rebuilt.
     let marker = state.join(IMPORTING_MARKER);
-    let recovering = marker.exists();
+    let mut recovering = marker.exists();
     if recovering {
         let _ = std::fs::remove_file(state.join("map"));
         eprintln!("note: previous import was interrupted; rebuilding the map cache");
@@ -560,6 +569,19 @@ fn translate_upstream(
         .map_err(|e| (format!("load map: {e}"), exit::GENERAL_ERROR))?;
     let prior_state = map::load_import_ref_state(state)
         .map_err(|e| (format!("load ref state: {e}"), exit::GENERAL_ERROR))?;
+    // The map is a DISPOSABLE cache (§12.3): refs recorded with a
+    // missing OR partially-corrupt map behind them (no crash marker)
+    // must trigger the full rebuild — surviving lines of a corrupt
+    // file are not evidence the rest exists, and the unchanged-ref
+    // short-circuit would otherwise leave holes a later passthrough
+    // export turns into re-translated history.
+    let map_intact = map::map_is_intact(state).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
+    if !recovering && (!map_intact || (sha_map.is_empty() && !prior_state.is_empty())) {
+        recovering = true;
+        let _ = std::fs::remove_file(state.join("map"));
+        sha_map.clear();
+        eprintln!("note: map cache missing or corrupt; rebuilding from the staging mirror");
+    }
 
     let upstream_refs =
         gitsrc::list_refs(staging).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
@@ -693,6 +715,7 @@ fn translate_upstream(
             map: &mut sha_map,
             retain_raw: &mut retain,
             options: ImportOptions { fork_mode },
+            depth_memo: DepthMemo::default(),
         };
         // Pairs are caller-owned and persisted EVEN when the ref
         // refuses: the sink already wrote those objects, and a later
@@ -808,7 +831,14 @@ fn translate_upstream(
     // "claim already exists" skip keys on recorded-state equality —
     // a crash between persist and mint would skip those heads
     // forever on re-run.
-    mint_attestations(mkit_dir, &opts.url, &imported, &prior_by_ref, kp)?;
+    mint_attestations(
+        mkit_dir,
+        &opts.url,
+        &opts.remote_name,
+        &imported,
+        &prior_by_ref,
+        kp,
+    )?;
 
     map::store_import_ref_state(state, &new_state)
         .map_err(|e| (format!("persist ref state: {e}"), exit::GENERAL_ERROR))?;
@@ -849,6 +879,7 @@ fn sha1_to_id(s: &Sha1Id) -> Sha1Id {
 fn mint_attestations(
     mkit_dir: &Path,
     url: &str,
+    remote_name: &str,
     imported: &[(String, Sha1Id, Hash)],
     prior: &HashMap<&str, &map::RefState>,
     kp: &KeyPair,
@@ -860,15 +891,21 @@ fn mint_attestations(
         {
             continue; // unchanged head: claim already exists
         }
+        // §5: subject/refName carry the FULL MKIT ref — imported
+        // branches live under refs/remotes/<name>/, not refs/heads/.
+        let mkit_ref = name.strip_prefix("refs/heads/").map_or_else(
+            || name.clone(),
+            |branch| format!("refs/remotes/{remote_name}/{branch}"),
+        );
         let predicate = format!(
             "{{\"gitCommit\":\"{}\",\"refName\":\"{}\",\"remoteUrl\":\"{}\",\"schemaVersion\":1,\"specVersion\":1}}",
             sha1_hex(git_id),
-            format::json_escape(name),
+            format::json_escape(&mkit_ref),
             format::json_escape(&remote_url)
         );
         let stmt = statement::encode(&statement::Statement {
             subjects: vec![statement::Subject {
-                name: Some(name.clone()),
+                name: Some(mkit_ref),
                 digest_blake3_hex: mkit_core::to_hex(mkit_hash),
             }],
             predicate_type: PREDICATE_TYPE.to_owned(),

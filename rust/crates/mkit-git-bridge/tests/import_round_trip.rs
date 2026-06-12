@@ -17,7 +17,8 @@ use mkit_git_bridge::error::{BridgeError, Refusal};
 use mkit_git_bridge::gitobj::Sha1Id;
 use mkit_git_bridge::gitsrc::GitObjKind;
 use mkit_git_bridge::import::{
-    ImportOptions, ImportSigner, ImportedRef, Importer, MemGitSource, MemSink, ObjectSink,
+    DepthMemo, ImportOptions, ImportSigner, ImportedRef, Importer, MemGitSource, MemSink,
+    ObjectSink,
 };
 use mkit_git_bridge::translate::{ObjectSource, translate_closure};
 use std::collections::HashMap;
@@ -101,6 +102,7 @@ fn run_import(seed: [u8; 32]) -> Run {
         map: &mut map,
         retain_raw: &mut retain,
         options: ImportOptions::default(),
+        depth_memo: DepthMemo::default(),
     };
     let head = imp.import_ref(&head).unwrap();
     let tag_head = imp.import_ref(&tag).unwrap();
@@ -173,6 +175,7 @@ fn reimport_is_a_noop_and_content_digest_binds_raw_bytes() {
         map: &mut a.map,
         retain_raw: &mut retain,
         options: ImportOptions::default(),
+        depth_memo: DepthMemo::default(),
     };
     let again = imp.import_ref(&head).unwrap();
     assert!(again.new_pairs.is_empty(), "warm re-import emits nothing");
@@ -282,6 +285,7 @@ fn refusal_matrix_inbound() {
             map: &mut map,
             retain_raw: &mut retain,
             options: ImportOptions::default(),
+            depth_memo: DepthMemo::default(),
         };
         imp.import_ref(tip)
     };
@@ -379,6 +383,7 @@ fn refusal_matrix_inbound() {
         map: &mut map,
         retain_raw: &mut retain,
         options: ImportOptions { fork_mode: true },
+        depth_memo: DepthMemo::default(),
     };
     assert!(matches!(
         imp.import_ref(&c),
@@ -423,6 +428,7 @@ fn big_blob_chunks_with_writer_rule() {
         map: &mut map,
         retain_raw: &mut retain,
         options: ImportOptions::default(),
+        depth_memo: DepthMemo::default(),
     };
     imp.import_ref(&c).unwrap();
     drop(imp);
@@ -490,6 +496,7 @@ fn refusal_matrix_inbound_extras() {
             map: &mut map,
             retain_raw: &mut retain,
             options: ImportOptions::default(),
+            depth_memo: DepthMemo::default(),
         };
         imp.import_ref(tip)
     };
@@ -608,4 +615,148 @@ fn refusal_matrix_inbound_extras() {
         run_one(&mut src, &c),
         Err(BridgeError::Refused(Refusal::AuthorPayload { .. }))
     ));
+}
+
+/// Peer-review fixes: composition caps on map-cache hits and the
+/// declared-vs-actual tag target type check.
+#[test]
+#[allow(clippy::too_many_lines)] // three vectors, one shared harness
+fn map_hits_enforce_composition_caps_and_tag_types() {
+    let kp = KeyPair::from_seed(KEY_SEED);
+    let public = kp.public.0;
+
+    // One shared map + sink across two refs, like a real state dir.
+    let run = |src: &mut MemGitSource,
+               sink: &mut MemSink,
+               map: &mut HashMap<Sha1Id, mkit_core::Hash>,
+               tip: &Sha1Id|
+     -> Result<ImportedRef, BridgeError> {
+        let mut sc = |c: &mkit_core::object::Commit| {
+            Ok(sign_commit(c, &kp)
+                .map_err(|e| BridgeError::Source(e.to_string()))?
+                .0)
+        };
+        let mut st = |t: &mkit_core::object::Tag| {
+            Ok(sign_tag(t, &kp)
+                .map_err(|e| BridgeError::Source(e.to_string()))?
+                .0)
+        };
+        let mut retain = |_: &Sha1Id, _: &[u8]| Ok(());
+        let mut imp = Importer {
+            source: src,
+            sink,
+            signer: ImportSigner {
+                public,
+                sign_commit: &mut sc,
+                sign_tag: &mut st,
+            },
+            map,
+            retain_raw: &mut retain,
+            options: ImportOptions::default(),
+            depth_memo: DepthMemo::default(),
+        };
+        imp.import_ref(tip)
+    };
+
+    // A LEGAL 120-deep tree imported by ref 1; ref 2 wraps the
+    // already-mapped subtree 20 levels deeper. The map hit at depth
+    // 20 must measure the subtree and refuse the composition
+    // (120 + 20 > 128), not silently store a tree mkit cannot read.
+    let mut src = MemGitSource::default();
+    let mut sink = MemSink::default();
+    let mut map: HashMap<Sha1Id, mkit_core::Hash> = HashMap::new();
+    let blob = src.put(GitObjKind::Blob, b"x".to_vec());
+    let mut deep = blob;
+    let mut mode: &[u8] = b"100644";
+    for _ in 0..120 {
+        let mut t = Vec::new();
+        t.extend_from_slice(mode);
+        t.extend_from_slice(b" d\0");
+        t.extend_from_slice(&deep);
+        deep = src.put(GitObjKind::Tree, t);
+        mode = b"40000";
+    }
+    let c1 = src.put(GitObjKind::Commit, commit_body(&deep, &[], "legal\n", 5));
+    run(&mut src, &mut sink, &mut map, &c1).expect("120-deep subtree is legal");
+
+    let mut wrap = deep;
+    for _ in 0..20 {
+        let mut t = Vec::new();
+        t.extend_from_slice(b"40000 w\0");
+        t.extend_from_slice(&wrap);
+        wrap = src.put(GitObjKind::Tree, t);
+    }
+    let c2 = src.put(GitObjKind::Commit, commit_body(&wrap, &[], "wrapped\n", 6));
+    assert!(
+        matches!(
+            run(&mut src, &mut sink, &mut map, &c2),
+            Err(BridgeError::Refused(Refusal::TreeTooDeep { .. }))
+        ),
+        "composed depth past the cap must refuse on the map hit"
+    );
+
+    // Same composition rule for tag chains: 10 legal + 10 wrapping
+    // the mapped chain = 20 > 16.
+    let mut src = MemGitSource::default();
+    let mut sink = MemSink::default();
+    let mut map: HashMap<Sha1Id, mkit_core::Hash> = HashMap::new();
+    let blob = src.put(GitObjKind::Blob, b"x".to_vec());
+    let mut tree = Vec::new();
+    tree.extend_from_slice(b"100644 a\0");
+    tree.extend_from_slice(&blob);
+    let t = src.put(GitObjKind::Tree, tree);
+    let c = src.put(GitObjKind::Commit, commit_body(&t, &[], "m\n", 5));
+    let mut chain = c;
+    let mut target_type = "commit";
+    for i in 0..10 {
+        chain = src.put(
+            GitObjKind::Tag,
+            format!(
+                "object {}\ntype {target_type}\ntag t{i}\ntagger T <t@x> 5 +0000\n\nm\n",
+                hex(&chain)
+            )
+            .into_bytes(),
+        );
+        target_type = "tag";
+    }
+    run(&mut src, &mut sink, &mut map, &chain).expect("10-deep chain is legal");
+    let mut wrapped = chain;
+    for i in 10..20 {
+        wrapped = src.put(
+            GitObjKind::Tag,
+            format!(
+                "object {}\ntype tag\ntag t{i}\ntagger T <t@x> 5 +0000\n\nm\n",
+                hex(&wrapped)
+            )
+            .into_bytes(),
+        );
+    }
+    assert!(
+        matches!(
+            run(&mut src, &mut sink, &mut map, &wrapped),
+            Err(BridgeError::Refused(Refusal::TagChain { .. }))
+        ),
+        "composed chain past the cap must refuse on the map hit"
+    );
+
+    // Declared tag target type must match the actual object: `type
+    // commit` over a blob signs an inconsistent mkit tag.
+    let mut src = MemGitSource::default();
+    let mut sink = MemSink::default();
+    let mut map: HashMap<Sha1Id, mkit_core::Hash> = HashMap::new();
+    let blob = src.put(GitObjKind::Blob, b"x".to_vec());
+    let lying = src.put(
+        GitObjKind::Tag,
+        format!(
+            "object {}\ntype commit\ntag liar\ntagger T <t@x> 5 +0000\n\nm\n",
+            hex(&blob)
+        )
+        .into_bytes(),
+    );
+    match run(&mut src, &mut sink, &mut map, &lying) {
+        Err(BridgeError::Refused(Refusal::Unparsable { detail, .. })) => {
+            assert!(detail.contains("target type"), "{detail}");
+        }
+        other => panic!("expected target-type refusal, got {other:?}"),
+    }
 }

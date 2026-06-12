@@ -1316,6 +1316,8 @@ fn import_attestation_predicate_pins_locator_and_source() {
             && payload.contains("\"schemaVersion\":1"),
         "{payload}"
     );
+    // §5: refName/subject carry the FULL MKIT ref, not the upstream's.
+    assert!(payload.contains("refs/remotes/upstream/main"), "{payload}");
 }
 
 #[test]
@@ -1469,10 +1471,13 @@ fn bad_first_url_does_not_wedge_the_state_name() {
         &["git", "import", missing.to_str().unwrap(), "fork"],
     );
     assert!(!out.status.success(), "clone of a missing path fails");
+    assert!(
+        !f.fork().exists(),
+        "failed fresh clone cleans up the target it created"
+    );
     // Retry with the REAL upstream into the same target: must succeed
-    // (no source binding was recorded for the bogus URL).
+    // without any manual cleanup.
     let up = f.upstream();
-    std::fs::remove_dir_all(f.fork()).ok();
     f.mkit_ok(
         f.root.path(),
         &["git", "import", up.to_str().unwrap(), "fork"],
@@ -1525,4 +1530,124 @@ fn oversized_tag_name_skips_per_ref() {
             .is_some()
     );
     assert!(refs::read_tag(&mkit_dir, "v1").unwrap().is_some());
+}
+
+#[test]
+fn map_only_loss_rebuilds_even_with_unchanged_refs() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    let state = fork.join(".mkit/git/upstream");
+    // Delete ONLY the map — no crash marker, upstream unchanged. The
+    // disposable-cache contract says the next run rebuilds it; the
+    // unchanged-ref short-circuit must not leave it empty (a later
+    // passthrough export would re-translate imported history).
+    std::fs::remove_file(state.join("map")).unwrap();
+    let out = f.mkit_ok(&fork, &["git", "fetch"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("rebuilding"),
+        "{out:?}"
+    );
+    let map = std::fs::read_to_string(state.join("map")).unwrap();
+    assert!(map.lines().count() > 0, "map rebuilt");
+}
+
+#[test]
+fn corrupt_direction_stamp_refuses_instead_of_rebinding() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    std::fs::write(fork.join(".mkit/git/upstream/direction"), "garbage\n").unwrap();
+    let out = f.mkit(&fork, &["git", "fetch"]);
+    assert!(!out.status.success(), "corrupt binding must refuse");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("corrupt"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn partially_corrupt_map_triggers_full_rebuild() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    let state = fork.join(".mkit/git/upstream");
+    // Corrupt the middle of the map but leave valid lines: surviving
+    // lines are not evidence the rest exists — the cache must rebuild.
+    let map = std::fs::read_to_string(state.join("map")).unwrap();
+    let lines: Vec<&str> = map.lines().collect();
+    assert!(lines.len() > 2);
+    let mangled = format!(
+        "{}\nGARBAGE not-a-line\n{}\n",
+        lines[0],
+        lines[lines.len() - 1]
+    );
+    std::fs::write(state.join("map"), mangled).unwrap();
+    let out = f.mkit_ok(&fork, &["git", "fetch"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("rebuilding"),
+        "{out:?}"
+    );
+    let rebuilt = std::fs::read_to_string(state.join("map")).unwrap();
+    assert_eq!(
+        rebuilt.lines().count(),
+        lines.len(),
+        "every mapping recovered"
+    );
+}
+
+#[test]
+fn format_patch_escapes_mbox_splitting_body_lines() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    std::fs::write(fork.join("f.txt"), "x\n").unwrap();
+    f.mkit_ok(&fork, &["add", "f.txt"]);
+    f.mkit_ok(
+        &fork,
+        &[
+            "commit",
+            "-m",
+            "Tricky body\n\nFrom 1234567890abcdef1234567890abcdef12345678 Mon Sep 17 00:00:00 2001\nFrom the start this stays verbatim.",
+        ],
+    );
+    let out = f.mkit_ok(
+        &fork,
+        &["git", "format-patch", "upstream/main..HEAD", "--stdout"],
+    );
+    let mbox = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        mbox.contains(">From 1234567890abcdef"),
+        "date-shaped line escaped: {mbox}"
+    );
+    assert!(
+        mbox.contains("\nFrom the start this stays verbatim."),
+        "harmless line untouched: {mbox}"
+    );
+
+    // And the whole thing applies cleanly where git's own unescaped
+    // output would fail mailsplit.
+    let up = f.upstream();
+    git_ok(
+        f.root.path(),
+        &["clone", "--quiet", up.to_str().unwrap(), "amtest"],
+    );
+    let amtest = f.root.path().join("amtest");
+    let patch = f.root.path().join("tricky.mbox");
+    std::fs::write(&patch, mbox).unwrap();
+    git_ok(&amtest, &["am", patch.to_str().unwrap()]);
+    let log = git_in(&amtest, &["log", "-1", "--format=%B"]);
+    assert!(
+        String::from_utf8_lossy(&log.stdout).contains("Tricky body"),
+        "{log:?}"
+    );
 }

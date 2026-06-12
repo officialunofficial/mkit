@@ -442,6 +442,15 @@ pub(super) fn verify(args: &VerifyArgs) -> CmdResult<()> {
     if args.fork_audit {
         let _ = write!(summary, ", {} content-derived", c.derived);
     }
+    if audit.failures.is_empty() && c.unsigned > 0 {
+        // §10: an all-zero mkit-signature FAILS both verification
+        // modes — reported as unsigned (never "tampered"), but never
+        // as success either.
+        return Err((
+            format!("{} unsigned object(s) ({summary})", c.unsigned),
+            exit::DATAERR,
+        ));
+    }
     if audit.failures.is_empty() {
         let _ = writeln!(stderr, "ok: {summary}");
         Ok(())
@@ -717,8 +726,17 @@ fn render_patch(
         let _ = write!(out, "Subject: [PATCH] {subject}\n\n");
     }
     let body: Vec<&str> = lines.skip_while(|l| l.is_empty()).collect();
-    if !body.is_empty() {
-        out.push_str(&body.join("\n"));
+    for l in &body {
+        // git mailsplit treats a date-shaped "From <x> <ctime>" body
+        // line as a new-message separator and FAILS the apply — on
+        // git's own format-patch output too. We do one better and
+        // escape exactly that shape; `git am` applies cleanly and the
+        // line round-trips with a leading '>' (the classic mboxrd
+        // artifact), instead of a broken series.
+        if is_mbox_from_line(l) {
+            out.push('>');
+        }
+        out.push_str(l);
         out.push('\n');
     }
     out.push_str("---\n");
@@ -781,6 +799,40 @@ fn from_header(c: &Commit) -> String {
     )
 }
 
+/// The shape `git mailsplit` splits on: `From <token> … <ctime> …`
+/// where ctime is `Www Mmm [D]D HH:MM:SS YYYY`. mailsplit accepts
+/// trailing tokens after the date (verified: a `+0000` timezone
+/// suffix still splits), so the ctime window is searched ANYWHERE
+/// after the first token, not anchored at the line end. Looser lines
+/// (a plain "From the start..." sentence) do NOT split and must not
+/// be escaped.
+fn is_mbox_from_line(line: &str) -> bool {
+    const WDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let Some(rest) = line.strip_prefix("From ") else {
+        return false;
+    };
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    // At least one token (the "sender") before the date window.
+    tokens.len() >= 6
+        && tokens.windows(5).skip(1).any(|w| {
+            let [wday, mon, day, time, year] = w else {
+                return false;
+            };
+            WDAYS.contains(wday)
+                && MONS.contains(mon)
+                && (1..=2).contains(&day.len())
+                && day.bytes().all(|b| b.is_ascii_digit())
+                && time.len() == 8
+                && time.as_bytes()[2] == b':'
+                && time.as_bytes()[5] == b':'
+                && year.len() == 4
+                && year.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
 /// RFC 2822 date from a unix timestamp (UTC).
 fn rfc2822(ts: u64) -> String {
     const WDAY: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -832,6 +884,24 @@ mod tests {
         assert_eq!(rfc2822(1_700_000_000), "Tue, 14 Nov 2023 22:13:20 +0000");
         // Leap-day check: 2024-02-29 12:00:00 UTC = 1709208000
         assert_eq!(rfc2822(1_709_208_000), "Thu, 29 Feb 2024 12:00:00 +0000");
+    }
+
+    #[test]
+    fn mbox_from_line_shapes() {
+        assert!(is_mbox_from_line(
+            "From 1234567890abcdef1234567890abcdef12345678 Mon Sep 17 00:00:00 2001"
+        ));
+        assert!(is_mbox_from_line("From x Thu Jan 1 00:00:00 1970"));
+        // mailsplit also splits with trailing tokens after the date
+        // (verified against native git) — a timezone suffix must not
+        // defeat the escape.
+        assert!(is_mbox_from_line(
+            "From sender Fri Jun 12 12:00:00 2026 +0000"
+        ));
+        // The shapes mailsplit does NOT split on stay unescaped.
+        assert!(!is_mbox_from_line("From the start, this was true."));
+        assert!(!is_mbox_from_line("From: someone <a@b>"));
+        assert!(!is_mbox_from_line("From abc Mon Sep 17 00:00 2001")); // bad time
     }
 
     #[test]

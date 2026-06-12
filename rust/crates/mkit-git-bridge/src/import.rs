@@ -178,6 +178,19 @@ pub struct Importer<'a, S: GitSource, K: ObjectSink> {
     /// these sha1-addressed under the state dir (SPEC-GIT-IMPORT §5).
     pub retain_raw: &'a mut RetainRawFn<'a>,
     pub options: ImportOptions,
+    /// Per-run scratch for the §3.3/§3.4 composition checks (tree
+    /// heights / tag chain lengths measured on map-cache hits).
+    pub depth_memo: DepthMemo,
+}
+
+/// Memoized tree heights and tag-chain lengths, keyed by git id.
+/// Needed because a map hit skips recursion: a previously-imported
+/// LEGAL subtree (or tag chain) re-referenced deeper in a new parent
+/// could compose past the normative caps without it.
+#[derive(Debug, Default)]
+pub struct DepthMemo {
+    heights: HashMap<Sha1Id, usize>,
+    chains: HashMap<Sha1Id, usize>,
 }
 
 impl<S: GitSource, K: ObjectSink> std::fmt::Debug for Importer<'_, S, K> {
@@ -236,8 +249,14 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         new_pairs: &mut Vec<(Sha1Id, Hash)>,
         normalized: &mut bool,
     ) -> Result<Hash, BridgeError> {
-        if let Some(h) = self.map.get(id) {
-            return Ok(*h);
+        if let Some(h) = self.map.get(id).copied() {
+            // A hit skips recursion, so the depth caps must be
+            // enforced against the MEASURED shape of what the hit
+            // stands for — a legal 120-deep subtree wrapped 50 levels
+            // down by a later ref would otherwise compose past the
+            // §3.3 cap and store trees mkit's read paths refuse.
+            self.check_hit_budget(id, &h, tag_depth, tree_depth)?;
+            return Ok(h);
         }
         let (kind, body) = self.source.read_git(id)?;
         let h = match kind {
@@ -259,6 +278,90 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         self.map.insert(*id, h);
         new_pairs.push((*id, h));
         Ok(h)
+    }
+
+    /// Composition caps on a map-cache hit (no recursion happens, so
+    /// measure instead). Best effort by kind: a sink that cannot
+    /// answer skips (in-memory test sinks always can).
+    fn check_hit_budget(
+        &mut self,
+        id: &Sha1Id,
+        twin: &Hash,
+        tag_depth: usize,
+        tree_depth: usize,
+    ) -> Result<(), BridgeError> {
+        if tree_depth == 0 && tag_depth == 0 {
+            return Ok(());
+        }
+        match self.sink.kind_of(twin) {
+            Some(ObjectType::Tree) if tree_depth > 0 => {
+                let height = self.tree_height(id, MAX_TREE_DEPTH - tree_depth + 1)?;
+                if tree_depth + height > MAX_TREE_DEPTH {
+                    return Err(Refusal::TreeTooDeep { object: hash20(id) }.into());
+                }
+            }
+            Some(ObjectType::Tag) if tag_depth > 0 => {
+                let len = self.tag_chain_len(id, MAX_TAG_CHAIN - tag_depth + 1)?;
+                if tag_depth + len > MAX_TAG_CHAIN {
+                    return Err(Refusal::TagChain { object: hash20(id) }.into());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Height of a git tree (1 = leaf tree), measured via the source,
+    /// memoized, and capped: returns early once `budget` is exceeded
+    /// (the caller refuses anyway, so exactness past the cap is
+    /// pointless and the walk stays bounded).
+    fn tree_height(&mut self, id: &Sha1Id, budget: usize) -> Result<usize, BridgeError> {
+        if let Some(h) = self.depth_memo.heights.get(id) {
+            return Ok(*h);
+        }
+        if budget == 0 {
+            return Ok(MAX_TREE_DEPTH + 1);
+        }
+        let (kind, body) = self.source.read_git(id)?;
+        if kind != GitObjKind::Tree {
+            return Ok(0);
+        }
+        let parsed =
+            gitparse::parse_tree(&body).map_err(|e| BridgeError::Source(format!("tree: {e}")))?;
+        let mut max_child = 0usize;
+        for e in parsed {
+            if gitparse::map_mode(&e.mode) == ModeMapping::Canonical(EntryMode::Tree)
+                || gitparse::map_mode(&e.mode) == ModeMapping::Normalized(EntryMode::Tree)
+            {
+                max_child = max_child.max(self.tree_height(&e.id, budget - 1)?);
+                if max_child > MAX_TREE_DEPTH {
+                    break;
+                }
+            }
+        }
+        let h = 1 + max_child;
+        self.depth_memo.heights.insert(*id, h);
+        Ok(h)
+    }
+
+    /// Length of a git tag chain starting at `id` (1 = tag pointing
+    /// at a non-tag), measured via the source, memoized, capped.
+    fn tag_chain_len(&mut self, id: &Sha1Id, budget: usize) -> Result<usize, BridgeError> {
+        if let Some(l) = self.depth_memo.chains.get(id) {
+            return Ok(*l);
+        }
+        if budget == 0 {
+            return Ok(MAX_TAG_CHAIN + 1);
+        }
+        let (kind, body) = self.source.read_git(id)?;
+        if kind != GitObjKind::Tag {
+            return Ok(0);
+        }
+        let parsed =
+            gitparse::parse_tag(&body).map_err(|e| BridgeError::Source(format!("tag: {e}")))?;
+        let len = 1 + self.tag_chain_len(&parsed.object, budget - 1)?;
+        self.depth_memo.chains.insert(*id, len);
+        Ok(len)
     }
 
     /// §3.1: verbatim ≤ threshold, pinned `FastCDC` above it.
@@ -496,16 +599,23 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         };
         let target = self.object(&parsed.object, depth + 1, 0, new_pairs, normalized)?;
         // The mkit target_type must reflect what the TRANSLATED target
-        // is: a >1MiB git blob became a chunked manifest.
-        let target_type = if target_type == ObjectType::Blob {
-            // Chunked manifests and blobs are both `blob` on the git
-            // side; the mkit tag must record the TRANSLATED type.
-            match self.sink.kind_of(&target) {
-                Some(ObjectType::ChunkedBlob) => ObjectType::ChunkedBlob,
-                _ => ObjectType::Blob,
+        // is: a >1MiB git blob became a chunked manifest. And the
+        // DECLARED type must match the actual target — a tag claiming
+        // `type commit` over a blob would sign an inconsistent mkit
+        // tag (git tolerates the lie; mkit's model must not).
+        let actual = self.sink.kind_of(&target);
+        let target_type = match (target_type, actual) {
+            (ObjectType::Blob, Some(ObjectType::ChunkedBlob)) => ObjectType::ChunkedBlob,
+            (declared, Some(actual)) if actual != declared => {
+                return Err(Refusal::Unparsable {
+                    object: hash20(id),
+                    detail: format!(
+                        "tag declares target type {declared:?} but the target is {actual:?}"
+                    ),
+                }
+                .into());
             }
-        } else {
-            target_type
+            (declared, _) => declared,
         };
         let (tagger_identity, timestamp) = match parsed.tagger {
             Some(p) => {

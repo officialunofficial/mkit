@@ -102,9 +102,18 @@ pub fn write_binding(dir: &Path, name: &str, value: &str) -> Result<(), BridgeEr
 
 /// Read the recorded direction, if stamped.
 pub fn read_direction(dir: &Path) -> Result<Option<Direction>, BridgeError> {
-    Ok(read_stamp(dir, "direction")?
-        .as_deref()
-        .and_then(Direction::parse))
+    match read_stamp(dir, "direction")? {
+        None => Ok(None),
+        Some(v) => Direction::parse(&v).map(Some).ok_or_else(|| {
+            // A present-but-unparsable stamp must NOT read as absent:
+            // bind_direction would silently rebind a state dir whose
+            // direction the spec pins as immutable (§6).
+            BridgeError::Source(format!(
+                "direction stamp is corrupt ({v:?}); refusing to guess — \
+                 restore or remove the state dir"
+            ))
+        }),
+    }
 }
 
 /// Stamp the direction, or verify it matches an existing stamp.
@@ -129,14 +138,24 @@ pub fn bind_direction(dir: &Path, want: Direction) -> Result<(), BridgeError> {
 
 /// Read the pinned importer pubkey (64 lowercase hex), if stamped.
 pub fn read_signer(dir: &Path) -> Result<Option<[u8; 32]>, BridgeError> {
-    Ok(read_stamp(dir, "signer")?
-        .as_deref()
-        .and_then(|s| crate::gitobj::bytes_from_hex(s, 32))
-        .map(|v| {
-            let mut k = [0u8; 32];
-            k.copy_from_slice(&v);
-            k
-        }))
+    match read_stamp(dir, "signer")? {
+        None => Ok(None),
+        Some(v) => crate::gitobj::bytes_from_hex(&v, 32)
+            .map(|b| {
+                let mut k = [0u8; 32];
+                k.copy_from_slice(&b);
+                Some(k)
+            })
+            .ok_or_else(|| {
+                // Same rule as the direction stamp: corruption must
+                // not silently unpin the importer key (§4).
+                BridgeError::Source(
+                    "signer stamp is corrupt; refusing to re-pin — restore or \
+                     remove the state dir"
+                        .into(),
+                )
+            }),
+    }
 }
 
 /// Pin the importer key, or refuse a mismatch (SPEC-GIT-IMPORT §4).
@@ -179,6 +198,38 @@ pub fn bind_import_spec(dir: &Path, version: u32) -> Result<(), BridgeError> {
              under a new --remote-name (SPEC-GIT-IMPORT §1.2)"
         ))),
     }
+}
+
+/// Whether every non-empty line of the map file parses. A missing
+/// file is intact (nothing to distrust). Any malformed line —
+/// torn tail or mid-file corruption — means the cache may be
+/// MISSING entries that recorded refs rely on, so callers must
+/// rebuild rather than trust the surviving lines alone (§12.3).
+pub fn map_is_intact(dir: &Path) -> Result<bool, BridgeError> {
+    let path = dir.join(MAP_FILE);
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(e.into()),
+    };
+    if std::str::from_utf8(&data).is_err() {
+        return Ok(false);
+    }
+    let text = String::from_utf8_lossy(&data);
+    for line in text.lines() {
+        if line.is_empty() {
+            // The format has no blank-line record: an internal blank
+            // is a dropped mapping, not noise.
+            return Ok(false);
+        }
+        let Some((b3, s1)) = line.split_once(' ') else {
+            return Ok(false);
+        };
+        if from_hex(b3).is_err() || sha1_from_hex(s1).is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Load the map inverted (sha1 → blake3) for the import direction.
@@ -367,6 +418,28 @@ mod tests {
         let map = load_map(dir.path()).unwrap();
         assert_eq!(map.len(), 2);
         assert_eq!(map[&[1u8; 32]], [2u8; 20]);
+    }
+
+    #[test]
+    fn map_intact_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing file: intact (nothing to distrust).
+        assert!(map_is_intact(dir.path()).unwrap());
+        let pairs = vec![([1u8; 32], [2u8; 20]), ([3u8; 32], [4u8; 20])];
+        append_map(dir.path(), &pairs).unwrap();
+        assert!(map_is_intact(dir.path()).unwrap());
+        // Malformed line.
+        let good = std::fs::read_to_string(dir.path().join("map")).unwrap();
+        std::fs::write(dir.path().join("map"), format!("{good}GARBAGE\n")).unwrap();
+        assert!(!map_is_intact(dir.path()).unwrap());
+        // Internal blank line (a dropped record, not noise).
+        let lines: Vec<&str> = good.lines().collect();
+        std::fs::write(
+            dir.path().join("map"),
+            format!("{}\n\n{}\n", lines[0], lines[1]),
+        )
+        .unwrap();
+        assert!(!map_is_intact(dir.path()).unwrap());
     }
 
     #[test]

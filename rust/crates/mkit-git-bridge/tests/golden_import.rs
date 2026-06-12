@@ -20,7 +20,9 @@ use mkit_core::sign::{KeyPair, sign_commit, sign_tag, verify_commit, verify_tag}
 use mkit_git_bridge::BridgeError;
 use mkit_git_bridge::gitobj::{Sha1Id, sha1_hex};
 use mkit_git_bridge::gitsrc::GitObjKind;
-use mkit_git_bridge::import::{ImportOptions, ImportSigner, Importer, MemGitSource, MemSink};
+use mkit_git_bridge::import::{
+    DepthMemo, ImportOptions, ImportSigner, Importer, MemGitSource, MemSink,
+};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -194,6 +196,7 @@ fn import_all(
         map: &mut map,
         retain_raw: &mut retain,
         options: ImportOptions::default(),
+        depth_memo: DepthMemo::default(),
     };
     for (_, tip) in vectors {
         imp.import_ref(tip).unwrap();
