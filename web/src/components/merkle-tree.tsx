@@ -42,7 +42,7 @@ function Item({ node }: { node: MerkleNode }) {
         onClick={handleClick}
         title={`Jump to ${node.label} · ${node.hash.slice(0, 12)}…`}
         aria-label={`Jump to ${node.label}`}
-        className='merkle__node group bg-transparent p-0 outline-none focus-visible:ring-1 focus-visible:ring-[--color-fg] focus-visible:ring-offset-2 focus-visible:ring-offset-[--color-bg]'
+        className='merkle__node group bg-transparent p-0 outline-none focus-visible:ring-1 focus-visible:ring-fg focus-visible:ring-offset-2 focus-visible:ring-offset-bg'
       >
         {/* Inner wrapper carries the hover/active scale so the button's
             ::before connector line (positioned against the LI) stays at
@@ -53,8 +53,8 @@ function Item({ node }: { node: MerkleNode }) {
             className='inline-block'
             style={{ width: 22, height: 22, background: hashColor(node.hash) }}
           />
-          <code className='font-mono text-[10px] leading-none text-[--color-muted]'>{node.hash.slice(0, 6)}</code>
-          <span className='max-w-[8rem] truncate text-[11px] leading-none text-[--color-fg]'>{node.label}</span>
+          <code className='font-mono text-[10px] leading-none text-muted'>{node.hash.slice(0, 6)}</code>
+          <span className='max-w-[8rem] truncate text-[11px] leading-none text-fg'>{node.label}</span>
         </span>
       </button>
       {node.children?.length ? (

@@ -7,9 +7,9 @@ export default function HashPage() {
     <div className='space-y-8'>
       <title>mkit — hash</title>
       <header className='space-y-3 pt-4'>
-        <p className='microlabel text-[--color-accent]'>Demo Nº 01 — hash</p>
+        <p className='microlabel text-accent'>Demo Nº 01 — hash</p>
         <h1 className='text-5xl font-light'>What&rsquo;s in a hash?</h1>
-        <p className='max-w-prose text-base text-[--color-fg]'>
+        <p className='max-w-prose text-base text-fg'>
           Every file, folder, and commit is named by the BLAKE3 hash of its bytes — change a single character and the
           name changes too. git does the same with SHA-1; mkit uses BLAKE3, one algorithm everywhere, fast enough to
           re-hash on every keystroke. This page builds a tiny commit out of two files: edit the text or swap the image
@@ -21,7 +21,7 @@ export default function HashPage() {
       </DemoBoundary>
       <Link
         to='/'
-        className='microlabel -mx-2 inline-block px-2 py-2 text-[--color-muted] transition-colors duration-200 hover:text-[--color-fg]'
+        className='microlabel -mx-2 inline-block px-2 py-2 text-muted transition-colors duration-200 hover:text-fg'
       >
         ← Index
       </Link>

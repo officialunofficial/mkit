@@ -42,7 +42,7 @@ export function SignDemo() {
   return (
     <div className='space-y-6'>
       <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>Private key</span>
+        <span className='mb-2 block text-sm text-muted'>Private key</span>
         <input className={INPUT_CLASSES_XS} value={seed} onChange={(e) => setSeed(e.target.value.trim())} />
       </label>
       <Button onClick={fresh}>Generate a new key</Button>
@@ -50,7 +50,7 @@ export function SignDemo() {
       <FieldList>
         <Field label='Public key'>
           {'error' in keypair ? (
-            <span className='text-[--color-accent]'>{keypair.error}</span>
+            <span className='text-accent'>{keypair.error}</span>
           ) : (
             <code className='font-mono text-sm'>{keypair.pubkey_hex}</code>
           )}
@@ -58,7 +58,7 @@ export function SignDemo() {
       </FieldList>
 
       <label className='block'>
-        <span className='mb-2 block text-sm text-[--color-muted]'>Message</span>
+        <span className='mb-2 block text-sm text-muted'>Message</span>
         <input
           className={INPUT_CLASSES}
           value={message}
@@ -82,7 +82,7 @@ export function SignDemo() {
           <label className='flex cursor-pointer items-center gap-2 py-2 text-sm'>
             <input
               type='checkbox'
-              className='accent-[--color-fg]'
+              className='accent-fg'
               checked={tamper}
               onChange={(e) => setTamper(e.target.checked)}
             />
@@ -93,10 +93,7 @@ export function SignDemo() {
               {verdict === null ? null : (
                 // Keyed on the verdict so flipping it re-mounts the
                 // element and replays the stamp-in thunk.
-                <span
-                  key={String(verdict)}
-                  className={`stamp ${verdict ? 'text-[--color-verified]' : 'text-[--color-accent]'}`}
-                >
+                <span key={String(verdict)} className={`stamp ${verdict ? 'text-verified' : 'text-accent'}`}>
                   {verdict ? 'Verified' : 'Rejected'}
                 </span>
               )}

@@ -285,12 +285,12 @@ export function TreeDemo() {
     <div className='flex flex-col-reverse gap-10 lg:grid lg:grid-cols-[minmax(0,20rem)_1fr] lg:gap-12'>
       <div className='space-y-6 lg:sticky lg:top-24 lg:self-start'>
         <label className='block'>
-          <span className='mb-2 block text-sm text-[--color-muted]'>Commit message</span>
+          <span className='mb-2 block text-sm text-muted'>Commit message</span>
           <input className={INPUT_CLASSES} value={commitMessage} onChange={(e) => setCommitMessage(e.target.value)} />
         </label>
 
         <div className='block'>
-          <span className='mb-2 block text-sm text-[--color-muted]'>Files</span>
+          <span className='mb-2 block text-sm text-muted'>Files</span>
           {/* role=tree + roving tabindex + full APG keyboard map. Each
               row is a treeitem with aria-expanded for folders, aria-
               selected for the current blob, aria-level for depth. */}
@@ -298,7 +298,7 @@ export function TreeDemo() {
             ref={treeRef}
             role='tree'
             aria-label='File tree'
-            className='select-none border-y border-dashed border-[--color-hairline] py-2 outline-none'
+            className='select-none border-y border-dashed border-hairline py-2 outline-none'
             onKeyDown={onTreeKeyDown}
           >
             {rows.map((row) => {
@@ -319,10 +319,8 @@ export function TreeDemo() {
                     if (row.node.kind === 'tree') toggleExpand(row.path)
                     else setSelectedPath(row.path)
                   }}
-                  className={`group flex h-7 cursor-pointer items-center text-sm outline-none transition-colors hover:bg-[--color-hairline]/60 focus-visible:ring-1 focus-visible:ring-[--color-fg] ${
-                    isSelected
-                      ? 'bg-[--color-hairline] font-medium text-[--color-fg]'
-                      : 'text-[--color-muted] hover:text-[--color-fg]'
+                  className={`group flex h-7 cursor-pointer items-center text-sm outline-none transition-colors hover:bg-hairline/60 focus-visible:ring-1 focus-visible:ring-fg ${
+                    isSelected ? 'bg-hairline font-medium text-fg' : 'text-muted hover:text-fg'
                   }`}
                 >
                   {/* One vertical guide per ancestor depth. Each 16px
@@ -334,18 +332,18 @@ export function TreeDemo() {
                       rule. */}
                   {Array.from({ length: row.depth }).map((_, i) => (
                     <span key={i} aria-hidden className='relative h-full w-4 shrink-0'>
-                      <span className='absolute top-0 bottom-0 left-2 w-px bg-[--color-hairline]' />
+                      <span className='absolute top-0 bottom-0 left-2 w-px bg-hairline' />
                     </span>
                   ))}
                   {/* Disclosure chevron — always present so folder/file
                       rows line up; invisible on leaves. Rotates 90° on
                       expand per the VS Code pattern. */}
-                  <span aria-hidden className='flex size-4 shrink-0 items-center justify-center text-[--color-subtle]'>
+                  <span aria-hidden className='flex size-4 shrink-0 items-center justify-center text-subtle'>
                     {row.node.kind === 'tree' ? (
                       <ChevronIcon className={`transition-transform duration-150 ${isExpanded ? 'rotate-90' : ''}`} />
                     ) : null}
                   </span>
-                  <span aria-hidden className='mx-1.5 flex size-4 shrink-0 items-center text-[--color-subtle]'>
+                  <span aria-hidden className='mx-1.5 flex size-4 shrink-0 items-center text-subtle'>
                     {row.node.kind !== 'tree' ? <FileIcon /> : isExpanded ? <FolderOpenIcon /> : <FolderIcon />}
                   </span>
                   {hashByPath.has(row.path) ? (
@@ -362,7 +360,7 @@ export function TreeDemo() {
 
         {selectedBlob ? (
           <label className='block'>
-            <span className='mb-2 block text-sm text-[--color-muted]'>Editing {selectedPath}</span>
+            <span className='mb-2 block text-sm text-muted'>Editing {selectedPath}</span>
             <textarea
               className={INPUT_CLASSES}
               rows={6}
@@ -375,25 +373,23 @@ export function TreeDemo() {
 
       <div>
         {'error' in encoded ? (
-          <p className='mb-4 text-[--color-accent]'>wasm encode failed: {encoded.error}</p>
+          <p className='mb-4 text-accent'>wasm encode failed: {encoded.error}</p>
         ) : (
-          <div className='divide-y-2 divide-[--color-hairline] border-y-2 border-[--color-hairline]'>
+          <div className='divide-y-2 divide-hairline border-y-2 border-hairline'>
             {merkle ? (
               <Section title='Merkle tree' description='Each square is the BLAKE3 of everything beneath it.'>
                 <MerkleTree root={merkle} />
               </Section>
             ) : null}
             <Section title='Objects' description='Every commit, folder, and file under this commit.'>
-              <div className='divide-y divide-[--color-hairline]'>
+              <div className='divide-y divide-hairline'>
                 {commit ? (
                   <ObjectRow
                     hash={commit.hash}
                     label='commit'
                     meta='signed'
                     trailing={
-                      <span
-                        className={`text-xs ${commit.verified ? 'text-[--color-verified]' : 'text-[--color-accent]'}`}
-                      >
+                      <span className={`text-xs ${commit.verified ? 'text-verified' : 'text-accent'}`}>
                         {commit.verified ? 'verified ✓' : 'invalid ✗'}
                       </span>
                     }

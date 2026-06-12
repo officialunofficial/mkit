@@ -18,7 +18,7 @@ export const Header = () => {
           <Link to='/' className='group flex items-center gap-3' aria-label='mkit home'>
             {/* The seal: random grid mark on a paper backing, set at a
                 stamp's slight tilt; rights itself on hover. */}
-            <span className='inline-block border border-[--color-fg] bg-[--color-paper] p-[3px] [transform:rotate(-4deg)] transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] group-hover:[transform:rotate(0deg)]'>
+            <span className='inline-block border border-fg bg-paper p-[3px] [transform:rotate(-4deg)] transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] group-hover:[transform:rotate(0deg)]'>
               <GridLogo className='block size-5' />
             </span>
             <span className='text-xl font-semibold tracking-tight'>mkit</span>
@@ -28,11 +28,11 @@ export const Header = () => {
               <Link
                 key={entry}
                 to={`/${entry}`}
-                className='microlabel group/item py-2 text-[--color-muted] transition-colors duration-200 hover:text-[--color-fg]'
+                className='microlabel group/item py-2 text-muted transition-colors duration-200 hover:text-fg'
               >
                 <span
                   aria-hidden
-                  className='mr-1 hidden text-[--color-subtle] transition-colors duration-200 group-hover/item:text-[--color-accent] sm:inline'
+                  className='mr-1 hidden text-subtle transition-colors duration-200 group-hover/item:text-accent sm:inline'
                 >
                   {String(i + 1).padStart(2, '0')}
                 </span>
@@ -49,7 +49,7 @@ export const Header = () => {
           <div className='rule-double' aria-hidden />
           <div
             aria-hidden
-            className='absolute top-[6px] h-[5px] w-[9px] -translate-x-1/2 bg-[--color-accent]'
+            className='absolute top-[6px] h-[5px] w-[9px] -translate-x-1/2 bg-accent'
             style={{
               left: 'calc(var(--mouse-x, 0.5) * 100%)',
               clipPath: 'polygon(50% 0, 100% 100%, 0 100%)',

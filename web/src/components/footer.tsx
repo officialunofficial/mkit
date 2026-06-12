@@ -6,13 +6,13 @@ export const Footer = () => {
     <footer>
       <div className='mx-auto w-full max-w-5xl px-6'>
         <div className='rule-double' aria-hidden />
-        <div className='microlabel flex flex-col justify-between gap-2 py-8 text-[--color-muted] sm:flex-row sm:items-baseline'>
+        <div className='microlabel flex flex-col justify-between gap-2 py-8 text-muted sm:flex-row sm:items-baseline'>
           <div className='flex flex-wrap gap-x-5 gap-y-1'>
             <a
               href='https://github.com/officialunofficial/mkit'
               target='_blank'
               rel='noreferrer'
-              className='underline underline-offset-4 transition-colors duration-200 hover:text-[--color-fg]'
+              className='underline underline-offset-4 transition-colors duration-200 hover:text-fg'
             >
               officialunofficial/mkit
             </a>
@@ -20,12 +20,12 @@ export const Footer = () => {
               href='https://crates.io/crates/mkit-cli'
               target='_blank'
               rel='noreferrer'
-              className='underline underline-offset-4 transition-colors duration-200 hover:text-[--color-fg]'
+              className='underline underline-offset-4 transition-colors duration-200 hover:text-fg'
             >
               mkit-cli on crates.io
             </a>
           </div>
-          <span className='text-[--color-subtle]'>Set in Fraunces &amp; Plex Mono · hashed with BLAKE3</span>
+          <span className='text-subtle'>Set in Fraunces &amp; Plex Mono · hashed with BLAKE3</span>
         </div>
       </div>
     </footer>

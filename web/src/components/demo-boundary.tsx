@@ -18,5 +18,5 @@ export function DemoBoundary({ children }: { children: ReactNode }) {
 }
 
 function Fallback() {
-  return <p className='microlabel text-[--color-muted]'>Loading wasm…</p>
+  return <p className='microlabel text-muted'>Loading wasm…</p>
 }

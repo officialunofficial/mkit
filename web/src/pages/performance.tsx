@@ -6,9 +6,9 @@ export default function PerformancePage() {
     <div className='space-y-8'>
       <title>mkit — performance</title>
       <header className='space-y-3 pt-4'>
-        <p className='microlabel text-[--color-accent]'>Demo Nº 05 — performance</p>
+        <p className='microlabel text-accent'>Demo Nº 05 — performance</p>
         <h1 className='text-5xl font-light'>Measured against git</h1>
-        <p className='max-w-prose text-base text-[--color-fg]'>
+        <p className='max-w-prose text-base text-fg'>
           mkit names every object by a BLAKE3 hash and splits large files into content-defined chunks, so changing one
           megabyte of a video means storing one megabyte — git hashes with SHA-1 and stores each version of a file whole
           until a repack. That trade cuts both ways, and the numbers below show both edges: real{' '}
@@ -18,7 +18,7 @@ export default function PerformancePage() {
       <PerfSection />
       <Link
         to='/'
-        className='microlabel -mx-2 inline-block px-2 py-2 text-[--color-muted] transition-colors duration-200 hover:text-[--color-fg]'
+        className='microlabel -mx-2 inline-block px-2 py-2 text-muted transition-colors duration-200 hover:text-fg'
       >
         ← Index
       </Link>

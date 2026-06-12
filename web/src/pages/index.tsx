@@ -9,7 +9,7 @@ export default function HomePage() {
     <div className='space-y-14'>
       <title>mkit demo</title>
       <section className='space-y-6 pt-6'>
-        <p className='microlabel reveal text-[--color-accent]' style={reveal(0)}>
+        <p className='microlabel reveal text-accent' style={reveal(0)}>
           A content-addressed VCS · Rust / WASM · alpha
         </p>
         <h1 className='reveal max-w-[16ch] text-6xl font-light sm:text-7xl' style={reveal(1)}>
@@ -21,14 +21,14 @@ export default function HomePage() {
           commit — reviewed, tested, deployed — travels as a signed statement anyone can verify. Written in Rust; here
           it runs in your browser.
         </p>
-        <p className='reveal max-w-prose text-sm text-[--color-muted]' style={reveal(3)}>
+        <p className='reveal max-w-prose text-sm text-muted' style={reveal(3)}>
           mkit is git-like where it can be — add, commit, branch, push — and different where it counts: one hash
           algorithm, signatures on every commit, attestations as first-class objects. Alpha, open source:{' '}
           <a
             href='https://github.com/officialunofficial/mkit'
             target='_blank'
             rel='noreferrer'
-            className='underline underline-offset-4 transition-colors duration-200 hover:text-[--color-fg]'
+            className='underline underline-offset-4 transition-colors duration-200 hover:text-fg'
           >
             officialunofficial/mkit
           </a>{' '}
@@ -37,11 +37,11 @@ export default function HomePage() {
       </section>
 
       <section className='reveal' style={reveal(4)}>
-        <div className='microlabel flex items-baseline justify-between border-b-2 border-[--color-fg] pb-2 text-[--color-muted]'>
+        <div className='microlabel flex items-baseline justify-between border-b-2 border-fg pb-2 text-muted'>
           <span>Table of contents</span>
           <span aria-hidden>Folio</span>
         </div>
-        <ul className='divide-y divide-[--color-hairline]'>
+        <ul className='divide-y divide-hairline'>
           <Demo
             n={1}
             to='/hash'
@@ -95,21 +95,21 @@ function Demo({ n, to, title, body }: { n: number; to: DemoRoute; title: string;
         {/* TOC row: folio number, entry title, dot leader out to the
             arrow — the classic contents-page idiom. */}
         <div className='flex items-baseline gap-4'>
-          <span className='microlabel w-7 shrink-0 text-[--color-subtle] transition-colors duration-200 group-hover:text-[--color-accent]'>
+          <span className='microlabel w-7 shrink-0 text-subtle transition-colors duration-200 group-hover:text-accent'>
             {String(n).padStart(2, '0')}
           </span>
-          <span className='text-2xl tracking-tight transition-colors duration-200 group-hover:text-[--color-accent]'>
+          <span className='text-2xl tracking-tight transition-colors duration-200 group-hover:text-accent'>
             {title}
           </span>
-          <span className='toc-leader group-hover:border-[--color-accent]' aria-hidden />
+          <span className='toc-leader group-hover:border-accent' aria-hidden />
           <span
             aria-hidden
-            className='shrink-0 font-mono text-base transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] group-hover:translate-x-1 group-hover:text-[--color-accent]'
+            className='shrink-0 font-mono text-base transition-all duration-300 ease-[cubic-bezier(0.2,0,0,1)] group-hover:translate-x-1 group-hover:text-accent'
           >
             →
           </span>
         </div>
-        <p className='mt-1 max-w-prose pl-11 text-sm text-[--color-muted]'>{body}</p>
+        <p className='mt-1 max-w-prose pl-11 text-sm text-muted'>{body}</p>
       </Link>
     </li>
   )
