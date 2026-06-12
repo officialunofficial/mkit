@@ -1595,6 +1595,8 @@ mod tests {
             path: "b.txt".to_string(),
             status: EntryStatus::Blob,
             object_hash: b_hash,
+            mtime_ns: 0,
+            size: 0,
         });
         // No HEAD — first commit scenario.
         let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
@@ -1617,6 +1619,8 @@ mod tests {
             path: "run.sh".to_string(),
             status: EntryStatus::Executable,
             object_hash: h,
+            mtime_ns: 0,
+            size: 0,
         });
 
         let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
@@ -1763,6 +1767,8 @@ mod tests {
             path: "b.txt".to_string(),
             status: EntryStatus::Blob,
             object_hash: b_v1_hash,
+            mtime_ns: 0,
+            size: 0,
         });
         let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
         assert_eq!(result.len(), 2, "expected staged + unstaged entries");

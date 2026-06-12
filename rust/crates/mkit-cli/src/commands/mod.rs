@@ -450,7 +450,23 @@ pub fn record_superseded(
 /// materialize a committed tree must keep the index aligned with that
 /// snapshot.
 pub fn sync_index_to_tree(root: &Path, store: &ObjectStore, tree_hash: Hash) -> Result<(), String> {
-    let idx = mkit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
+    let mut idx =
+        mkit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
+    // Tree-derived entries carry no stat cache. Carry it over from the
+    // outgoing index wherever path AND object hash agree: a later stat
+    // match against the old observation still proves the same bytes,
+    // so commit/checkout don't wipe the O(stat) fast path.
+    if let Ok(old) = mkit_core::index::read_index(root) {
+        for e in &mut idx.entries {
+            if let Some(i) = old.find_entry(&e.path) {
+                let o = &old.entries[i];
+                if o.object_hash == e.object_hash && o.status == e.status {
+                    e.mtime_ns = o.mtime_ns;
+                    e.size = o.size;
+                }
+            }
+        }
+    }
     mkit_core::index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
 }
 

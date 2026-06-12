@@ -36,16 +36,22 @@ fn main() -> std::io::Result<()> {
         path: "README.md".to_string(),
         status: EntryStatus::Blob,
         object_hash: hash::hash(b"phase4-blob"),
+        mtime_ns: 0,
+        size: 0,
     });
     idx.entries.push(IndexEntry {
         path: "src".to_string(),
         status: EntryStatus::Tree,
         object_hash: hash::hash(b"phase4-tree"),
+        mtime_ns: 0,
+        size: 0,
     });
     idx.entries.push(IndexEntry {
         path: "scripts/build".to_string(),
         status: EntryStatus::Executable,
         object_hash: hash::hash(b"phase4-exe"),
+        mtime_ns: 0,
+        size: 0,
     });
     let idx_bytes = idx.serialize();
     write_vector(&out_dir, "index_3entries", &idx_bytes)?;

@@ -610,6 +610,8 @@ mod tests {
                 path: "staged.txt".into(),
                 status: index::EntryStatus::Blob,
                 object_hash: staged,
+                mtime_ns: 0,
+                size: 0,
             }],
         };
         index::write_index(d.path(), &idx).unwrap();

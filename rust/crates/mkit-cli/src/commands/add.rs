@@ -95,17 +95,25 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
             Err(e) => return Err(format!("metadata {}: {e}", abs.display())),
         };
 
+        // Stat cache: an unchanged tracked file (mtime+size+exec class
+        // all match what was observed at staging time) keeps its entry
+        // untouched — no read, no hash, no store. O(stat) restage.
+        if worktree::stat_matches(entry, &meta) {
+            continue;
+        }
+
         // Regular files route through `store_file_object` so large
         // (> CHUNK_THRESHOLD) content lands as a ChunkedBlob, matching
         // `worktree::{build_tree,hash_file}` and keeping commit/status/rm
         // hashes consistent (#203). Symlinks are always a single Blob of
         // their target path.
-        let (status, h) = if meta.file_type().is_file() {
+        let (status, h, stat) = if meta.file_type().is_file() {
             let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
                 .map_err(|e| format!("read {}: {e}", abs.display()))?;
             let h =
                 worktree::store_file_object(&batch, &bytes).map_err(|e| format!("store: {e}"))?;
-            (file_status_from_meta(&opened_meta, entry.status), h)
+            let stat = (worktree::mtime_nanos(&opened_meta), opened_meta.len());
+            (file_status_from_meta(&opened_meta, entry.status), h, stat)
         } else if meta.file_type().is_symlink() {
             let target = std::fs::read_link(&abs)
                 .map_err(|e| format!("read link {}: {e}", abs.display()))?;
@@ -120,7 +128,8 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
             });
             let ser = serialize::serialize(&blob).map_err(|e| format!("serialize: {e}"))?;
             let h = batch.put(&ser).map_err(|e| format!("store: {e}"))?;
-            (EntryStatus::Symlink, h)
+            // Symlinks never stat-match (see worktree::stat_matches).
+            (EntryStatus::Symlink, h, (0, 0))
         } else {
             entry.status = EntryStatus::Removed;
             entry.object_hash = ZERO;
@@ -129,6 +138,8 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
 
         entry.status = status;
         entry.object_hash = h;
+        entry.mtime_ns = stat.0;
+        entry.size = stat.1;
     }
 
     // Durability ordering: objects first, then the index that
@@ -332,16 +343,29 @@ fn add_one(
             exit::USAGE,
         ));
     }
+    // Stat cache: a tracked file whose mtime+size+exec class match the
+    // index entry is already staged byte-for-byte — skip the read, the
+    // hash, and the store write entirely.
+    if let Some(existing) = idx.find_entry(&rel_str)
+        && worktree::stat_matches(&idx.entries[existing], &meta)
+    {
+        return Ok(rel_str);
+    }
     // Regular files route through `store_file_object` so large
     // (> CHUNK_THRESHOLD) content lands as a ChunkedBlob, matching
     // `worktree::{build_tree,hash_file}` (#203). Symlinks stay a single
     // Blob of their target path.
-    let (status, h) = if meta.file_type().is_file() {
+    let (status, h, stat) = if meta.file_type().is_file() {
         let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
             .map_err(|e| emit_err(&format!("read {}: {e}", abs.display()), exit::NOINPUT))?;
         let h = worktree::store_file_object(sink, &bytes)
             .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
-        (file_status_from_meta(&opened_meta, previous_status), h)
+        let stat = (worktree::mtime_nanos(&opened_meta), opened_meta.len());
+        (
+            file_status_from_meta(&opened_meta, previous_status),
+            h,
+            stat,
+        )
     } else if meta.file_type().is_symlink() {
         let target = std::fs::read_link(&abs)
             .map_err(|e| emit_err(&format!("read link {}: {e}", abs.display()), exit::NOINPUT))?;
@@ -363,7 +387,8 @@ fn add_one(
         let h = sink
             .put(&ser)
             .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
-        (EntryStatus::Symlink, h)
+        // Symlinks never stat-match (see worktree::stat_matches).
+        (EntryStatus::Symlink, h, (0, 0))
     } else {
         return Err(emit_err(
             &format!("not a regular file: {}", abs.display()),
@@ -374,6 +399,8 @@ fn add_one(
         path: rel_str.clone(),
         status,
         object_hash: h,
+        mtime_ns: stat.0,
+        size: stat.1,
     };
     remove_file_directory_conflicts(idx, &entry.path);
     if let Some(existing) = idx.find_entry(&entry.path) {
@@ -610,6 +637,8 @@ fn patch_one_file(
         path: rel_str.clone(),
         status,
         object_hash: h,
+        mtime_ns: 0,
+        size: 0,
     };
     remove_file_directory_conflicts(idx, &entry.path);
     if let Some(existing) = idx.find_entry(&entry.path) {

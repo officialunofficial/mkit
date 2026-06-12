@@ -170,11 +170,15 @@ fn commit_reports_invalid_index_instead_of_nothing_staged() {
         path: "same.txt".into(),
         status: EntryStatus::Blob,
         object_hash: ZERO,
+        mtime_ns: 0,
+        size: 0,
     });
     idx.entries.push(IndexEntry {
         path: "same.txt".into(),
         status: EntryStatus::Blob,
         object_hash: ZERO,
+        mtime_ns: 0,
+        size: 0,
     });
     fs::write(p.join(".mkit/index"), idx.serialize()).unwrap();
 
@@ -401,6 +405,8 @@ fn commit_all_preserves_existing_executable_mode_on_non_unix() {
         path: "run.sh".into(),
         status: EntryStatus::Executable,
         object_hash: hash,
+        mtime_ns: 0,
+        size: 0,
     });
     index::write_index(p, &idx).unwrap();
     ok(p, &["commit", "-m", "first"]);
@@ -440,6 +446,8 @@ fn add_one_preserves_existing_executable_mode_on_non_unix() {
         path: "run.sh".into(),
         status: EntryStatus::Executable,
         object_hash: hash,
+        mtime_ns: 0,
+        size: 0,
     });
     index::write_index(p, &idx).unwrap();
 
@@ -467,6 +475,8 @@ fn commit_all_rejects_invalid_index_path_before_refreshing() {
         path: "../outside.txt".into(),
         status: EntryStatus::Blob,
         object_hash: ZERO,
+        mtime_ns: 0,
+        size: 0,
     });
     index::write_index(p, &idx).unwrap();
 

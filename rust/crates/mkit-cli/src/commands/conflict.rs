@@ -248,12 +248,16 @@ fn stage_ours(idx: &mut mkit_core::index::Index, store: &ObjectStore, c: &Confli
             path: c.path.clone(),
             status: c.ours_mode.map_or(EntryStatus::Blob, status_for_mode),
             object_hash: h,
+            mtime_ns: 0,
+            size: 0,
         },
         Some(_) => return,
         None => IndexEntry {
             path: c.path.clone(),
             status: EntryStatus::Removed,
             object_hash: mkit_core::hash::ZERO,
+            mtime_ns: 0,
+            size: 0,
         },
     };
     if let Some(pos) = idx.find_entry(&c.path) {
