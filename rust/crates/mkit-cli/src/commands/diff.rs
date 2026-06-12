@@ -38,7 +38,7 @@ use mkit_core::object::{EntryMode, Object};
 use mkit_core::ops::merge::find_merge_base;
 use mkit_core::ops::{DiffEntry, DiffKind, diff_line_counts, diff_trees, unified_hunks};
 use mkit_core::refs;
-use mkit_core::store::ObjectStore;
+use mkit_core::store::{EphemeralSink, ObjectSource, ObjectStore};
 use mkit_core::worktree;
 
 use super::revspec;
@@ -114,13 +114,24 @@ pub fn run(args: &[String]) -> u8 {
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
-    let (old_tree, new_tree, pathspecs) =
-        match resolve_diff_endpoints(&store, &mkit_dir, &cwd, opts.staged, &opts.args) {
-            Ok(v) => v,
-            Err((msg, code)) => return emit_err(&msg, code),
-        };
+    // Worktree/index snapshot trees are ephemeral: they live in this
+    // in-memory overlay, never in the durable store — no flush cost,
+    // no garbage objects. Reads fall through to the store.
+    let snapshot = EphemeralSink::new(&store);
 
-    let result = match diff_trees(&store, old_tree, new_tree) {
+    let (old_tree, new_tree, pathspecs) = match resolve_diff_endpoints(
+        &store,
+        &snapshot,
+        &mkit_dir,
+        &cwd,
+        opts.staged,
+        &opts.args,
+    ) {
+        Ok(v) => v,
+        Err((msg, code)) => return emit_err(&msg, code),
+    };
+
+    let result = match diff_trees(&snapshot, old_tree, new_tree) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("diff: {e}"), exit::GENERAL_ERROR),
     };
@@ -133,7 +144,7 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut stdout = std::io::stdout().lock();
     if opts.stat {
-        return match render_stat(&mut stdout, &store, selected) {
+        return match render_stat(&mut stdout, &snapshot, selected) {
             Ok(()) => exit::OK,
             Err(msg) => emit_err(&msg, exit::GENERAL_ERROR),
         };
@@ -143,7 +154,7 @@ pub fn run(args: &[String]) -> u8 {
             emit_entry_name(&mut stdout, e, opts.name_status, opts.z);
             Ok(())
         } else {
-            emit_entry_patch(&mut stdout, &store, e)
+            emit_entry_patch(&mut stdout, &snapshot, e)
         };
         if let Err(msg) = res {
             return emit_err(&msg, exit::GENERAL_ERROR);
@@ -174,9 +185,9 @@ enum StatChange {
 /// `+`/`-` graph is scaled to the terminal width when the largest change
 /// would overflow it. Width = `COLUMNS` (if a positive integer) else 80,
 /// exactly as git does even when stdout is not a tty.
-fn render_stat<'a>(
+fn render_stat<'a, S: ObjectSource + ?Sized>(
     out: &mut impl Write,
-    store: &ObjectStore,
+    store: &S,
     entries: impl Iterator<Item = &'a DiffEntry>,
 ) -> Result<(), String> {
     // Gather per-file change shapes (and the blob bytes we need to count).
@@ -440,6 +451,7 @@ type DiffEndpoints = (Option<Hash>, Option<Hash>, Vec<String>);
 ///   all positionals are pathspecs.
 fn resolve_diff_endpoints(
     store: &ObjectStore,
+    snapshot: &EphemeralSink<'_>,
     mkit_dir: &std::path::Path,
     cwd: &std::path::Path,
     staged: bool,
@@ -472,7 +484,7 @@ fn resolve_diff_endpoints(
         }
         // No leading revision: HEAD vs index, all positionals = pathspecs.
         let head = head_tree(store, mkit_dir).map_err(|e| (e, exit::GENERAL_ERROR))?;
-        let idx = index_tree(cwd, store).map_err(|e| (e, exit::GENERAL_ERROR))?;
+        let idx = index_tree(cwd, store, snapshot).map_err(|e| (e, exit::GENERAL_ERROR))?;
         return Ok((head, idx, args.to_vec()));
     }
 
@@ -534,7 +546,7 @@ fn resolve_diff_endpoints(
                 ));
             }
             let head = head_tree(store, mkit_dir).map_err(|e| (e, exit::GENERAL_ERROR))?;
-            let new = Some(worktree_tree_filtered(store, cwd)?);
+            let new = Some(worktree_tree_filtered(store, snapshot, cwd)?);
             Ok((head, new, args.to_vec()))
         }
         Some(Err(e)) => Err(e),
@@ -548,7 +560,7 @@ fn resolve_diff_endpoints(
                 Some(Ok(new)) => Ok((Some(old), Some(new), args[2..].to_vec())),
                 Some(Err(e)) => Err(e),
                 None => {
-                    let new = Some(worktree_tree_filtered(store, cwd)?);
+                    let new = Some(worktree_tree_filtered(store, snapshot, cwd)?);
                     Ok((Some(old), new, args[1..].to_vec()))
                 }
             }
@@ -564,11 +576,12 @@ fn resolve_diff_endpoints(
 /// not dropped from the snapshot and misreported as a deletion.
 fn worktree_tree_filtered(
     store: &ObjectStore,
+    snapshot: &EphemeralSink<'_>,
     cwd: &std::path::Path,
 ) -> Result<Hash, (String, u8)> {
     let idx =
         super::read_or_seed_index_from_head(cwd, store).map_err(|e| (e, exit::GENERAL_ERROR))?;
-    worktree::build_tree_filtered(store, cwd, Some(&idx))
+    worktree::build_tree_filtered(snapshot, cwd, Some(&idx))
         .map_err(|e| (format!("build tree: {e}"), exit::GENERAL_ERROR))
 }
 
@@ -698,9 +711,13 @@ fn head_tree(store: &ObjectStore, mkit_dir: &std::path::Path) -> Result<Option<H
     }
 }
 
-fn index_tree(root: &std::path::Path, store: &ObjectStore) -> Result<Option<Hash>, String> {
+fn index_tree(
+    root: &std::path::Path,
+    store: &ObjectStore,
+    snapshot: &EphemeralSink<'_>,
+) -> Result<Option<Hash>, String> {
     let idx = super::read_or_seed_index_from_head(root, store)?;
-    let tree = worktree::build_tree_from_index(store, &idx)
+    let tree = worktree::build_tree_from_index_with(store, snapshot, &idx)
         .map_err(|e| format!("build index tree: {e}"))?;
     Ok(Some(tree))
 }
@@ -744,9 +761,9 @@ fn abbrev(h: Option<Hash>) -> String {
 ///
 /// Shared with `mkit show`, so a commit's diff body is byte-identical to
 /// `mkit diff <parent> <commit>`.
-pub(super) fn emit_entry_patch(
+pub(super) fn emit_entry_patch<S: ObjectSource + ?Sized>(
     out: &mut impl Write,
-    store: &ObjectStore,
+    store: &S,
     e: &DiffEntry,
 ) -> Result<(), String> {
     // git C-style quotes special-byte paths in the header (core.quotePath),
@@ -825,7 +842,7 @@ fn quoted_side(side: char, path: &str) -> String {
 
 /// Read a blob's bytes from the store, reassembling chunked blobs via
 /// the shared core helper so diff/cat/checkout agree (#203).
-fn read_blob(store: &ObjectStore, h: &Hash) -> Result<Vec<u8>, String> {
+fn read_blob<S: ObjectSource + ?Sized>(store: &S, h: &Hash) -> Result<Vec<u8>, String> {
     worktree::read_blob(store, h).map_err(|e| format!("read object: {e}"))
 }
 

@@ -644,7 +644,10 @@ pub fn stat_matches(entry: &crate::index::IndexEntry, meta: &fs::Metadata) -> bo
 /// - [`WorktreeError::Store`] if `hash` or any chunk is missing.
 /// - [`WorktreeError::Io`] if `hash` (or a chunk) resolves to an object
 ///   that is neither a `Blob` nor a `ChunkedBlob` of `Blob`s.
-pub fn read_blob(store: &ObjectStore, hash: &Hash) -> WorktreeResult<Vec<u8>> {
+pub fn read_blob<S: crate::store::ObjectSource + ?Sized>(
+    store: &S,
+    hash: &Hash,
+) -> WorktreeResult<Vec<u8>> {
     match store.read_object(hash)? {
         Object::Blob(b) => Ok(b.data),
         Object::ChunkedBlob(manifest) => {

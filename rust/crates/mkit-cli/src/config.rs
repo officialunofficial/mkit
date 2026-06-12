@@ -136,6 +136,13 @@ pub struct Config {
     /// Per-branch upstream tracking keyed by local branch name
     /// (`branch.<branch>.remote` / `branch.<branch>.merge`). Repo-safe.
     pub branch_upstreams: std::collections::BTreeMap<String, Upstream>,
+    /// Object-store durability schedule: empty/`batch` (default) =
+    /// batched commit-time flushes; `per-object` = strict historical
+    /// full-flush-per-object schedule (SPEC-OBJECTS §10.1's stricter
+    /// conforming option). Repo-safe: the non-default value only
+    /// STRENGTHENS durability (and slows writes); it cannot weaken
+    /// anything.
+    pub durability_objects: String,
     /// Allowlisted, **inert** `core.*` git-compat keys (see
     /// [`CORE_ALLOWED_KEYS`]). Accepted and round-tripped for parity but
     /// **not honored** by mkit — they are cosmetic settings git stores
@@ -366,6 +373,19 @@ pub enum ConfigError {
 /// Validate that a key-file path (`signing_key`, `attest.*_key_path`,
 /// `ssh.*_file`) cannot escape via `..` traversal. Empty strings pass
 /// — callers fall back to the documented default.
+impl Config {
+    /// Map `durability.objects` onto the object-store sync policy.
+    /// Unknown values fall back to the batched default rather than
+    /// erroring — config load must not brick the repo.
+    #[must_use]
+    pub fn object_sync_policy(&self) -> mkit_core::store::SyncPolicy {
+        match self.durability_objects.trim() {
+            "per-object" | "per_object" => mkit_core::store::SyncPolicy::PerObject,
+            _ => mkit_core::store::SyncPolicy::Batch,
+        }
+    }
+}
+
 pub fn validate_key_path(value: &str) -> Result<(), ConfigError> {
     if value.is_empty() {
         return Ok(());
@@ -618,6 +638,7 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "key.p256_ref" => val.clone_into(&mut cfg.key.p256_ref),
         "signing_key" => val.clone_into(&mut cfg.signing_key),
         "default_branch" => val.clone_into(&mut cfg.default_branch),
+        "durability.objects" => val.clone_into(&mut cfg.durability_objects),
         "remote_endpoint" => val.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => val.clone_into(&mut cfg.remote_bucket),
         "remote_type" => val.clone_into(&mut cfg.remote_type),
@@ -757,6 +778,7 @@ pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
         ("user.name", cfg.user_name.as_str()),
         ("user.email", cfg.user_email.as_str()),
         ("default_branch", cfg.default_branch.as_str()),
+        ("durability.objects", cfg.durability_objects.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),
@@ -1170,6 +1192,33 @@ pub fn xdg_state_home() -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn durability_objects_key_selects_sync_policy() {
+        // The SPEC-OBJECTS §10.1 escape hatch must be reachable from
+        // config: `per-object` selects the strict schedule, everything
+        // else (unset, "batch", junk) falls back to the batched default.
+        let mut cfg = Config::with_defaults();
+        assert_eq!(
+            cfg.object_sync_policy(),
+            mkit_core::store::SyncPolicy::Batch
+        );
+        apply_kv(&mut cfg, "durability.objects", "per-object");
+        assert_eq!(
+            cfg.object_sync_policy(),
+            mkit_core::store::SyncPolicy::PerObject
+        );
+        // Round-trips through the repo-config writer.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), &cfg).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("durability.objects = per-object"));
+        apply_kv(&mut cfg, "durability.objects", "bogus");
+        assert_eq!(
+            cfg.object_sync_policy(),
+            mkit_core::store::SyncPolicy::Batch
+        );
+    }
 
     /// Tests drive `apply_file` directly rather than mutating
     /// `XDG_CONFIG_HOME` — the env-var dance races other tests and

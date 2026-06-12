@@ -423,11 +423,13 @@ pub fn ensure_abort_safe(
 
     let current_tree = super::current_head_tree(root, store)?;
     let idx = super::read_or_seed_index_from_head(root, store)?;
-    let index_tree = mkit_core::worktree::build_tree_from_index(store, &idx)
+    // Safety-check snapshot trees are ephemeral — in-memory overlay.
+    let snapshot = mkit_core::store::EphemeralSink::new(store);
+    let index_tree = mkit_core::worktree::build_tree_from_index_with(store, &snapshot, &idx)
         .map_err(|e| format!("check index state: {e}"))?;
 
     // Staged changes on a non-conflict path.
-    let staged = mkit_core::ops::diff::diff_trees(store, current_tree, Some(index_tree))
+    let staged = mkit_core::ops::diff::diff_trees(&snapshot, current_tree, Some(index_tree))
         .map_err(|e| format!("check staged changes: {e}"))?;
     if let Some(entry) = staged.entries.iter().find(|e| !is_conflict(&e.path)) {
         return Err(format!(
@@ -439,10 +441,11 @@ pub fn ensure_abort_safe(
     // Unstaged worktree edits on a non-conflict path. Pass the seeded index
     // as the tracked set so a tracked file matching an ignore rule isn't
     // dropped from the snapshot and misread as a deletion.
-    let worktree_tree = mkit_core::worktree::build_tree_filtered(store, root, Some(&idx))
+    let worktree_tree = mkit_core::worktree::build_tree_filtered(&snapshot, root, Some(&idx))
         .map_err(|e| format!("check worktree: {e}"))?;
-    let unstaged = mkit_core::ops::diff::diff_trees(store, Some(index_tree), Some(worktree_tree))
-        .map_err(|e| format!("check worktree: {e}"))?;
+    let unstaged =
+        mkit_core::ops::diff::diff_trees(&snapshot, Some(index_tree), Some(worktree_tree))
+            .map_err(|e| format!("check worktree: {e}"))?;
     if let Some(entry) = unstaged
         .entries
         .iter()
@@ -457,7 +460,7 @@ pub fn ensure_abort_safe(
     // Untracked path that collides with a non-conflict path the restore
     // would write.
     let target_writes: Vec<String> =
-        mkit_core::ops::diff::diff_trees(store, Some(index_tree), Some(target_tree))
+        mkit_core::ops::diff::diff_trees(&snapshot, Some(index_tree), Some(target_tree))
             .map_err(|e| format!("check restore target: {e}"))?
             .entries
             .into_iter()

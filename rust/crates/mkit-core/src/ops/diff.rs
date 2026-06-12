@@ -15,7 +15,7 @@ use std::path::Path;
 use crate::hash::Hash;
 use crate::index::{Index, IndexError};
 use crate::object::{EntryMode, Object, TreeEntry};
-use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
+use crate::store::{MAX_TREE_DEPTH, ObjectSource, ObjectStore, StoreError};
 use crate::worktree::{self, WorktreeError};
 
 /// What kind of change a [`DiffEntry`] represents.
@@ -72,16 +72,16 @@ impl DiffResult {
 ///
 /// Propagates [`StoreError`] when an expected tree object is missing or
 /// fails its read-time hash check.
-pub fn diff_trees(
-    store: &ObjectStore,
+pub fn diff_trees<S: ObjectSource + ?Sized>(
+    store: &S,
     old_hash: Option<Hash>,
     new_hash: Option<Hash>,
 ) -> Result<DiffResult, StoreError> {
     diff_trees_inner(store, old_hash, new_hash, false)
 }
 
-fn diff_trees_inner(
-    store: &ObjectStore,
+fn diff_trees_inner<S: ObjectSource + ?Sized>(
+    store: &S,
     old_hash: Option<Hash>,
     new_hash: Option<Hash>,
     ignore_regular_executable_mode: bool,
@@ -115,8 +115,8 @@ fn diff_trees_inner(
 }
 
 /// Lockstep walk of two name-sorted entry arrays.
-fn diff_entries_recursive(
-    store: &ObjectStore,
+fn diff_entries_recursive<S: ObjectSource + ?Sized>(
+    store: &S,
     old_entries: &[TreeEntry],
     new_entries: &[TreeEntry],
     prefix: &str,
@@ -212,8 +212,8 @@ fn regular_executable_pair(a: EntryMode, b: EntryMode) -> bool {
     )
 }
 
-fn add_removed_entries(
-    store: &ObjectStore,
+fn add_removed_entries<S: ObjectSource + ?Sized>(
+    store: &S,
     entry: &TreeEntry,
     prefix: &str,
     out: &mut Vec<DiffEntry>,
@@ -241,8 +241,8 @@ fn add_removed_entries(
     Ok(())
 }
 
-fn add_added_entries(
-    store: &ObjectStore,
+fn add_added_entries<S: ObjectSource + ?Sized>(
+    store: &S,
     entry: &TreeEntry,
     prefix: &str,
     out: &mut Vec<DiffEntry>,
@@ -270,14 +270,17 @@ fn add_added_entries(
     Ok(())
 }
 
-fn load_entries(store: &ObjectStore, hash: Option<Hash>) -> Result<Vec<TreeEntry>, StoreError> {
+fn load_entries<S: ObjectSource + ?Sized>(
+    store: &S,
+    hash: Option<Hash>,
+) -> Result<Vec<TreeEntry>, StoreError> {
     match hash {
         Some(h) => load_tree(store, h),
         None => Ok(Vec::new()),
     }
 }
 
-fn load_tree(store: &ObjectStore, h: Hash) -> Result<Vec<TreeEntry>, StoreError> {
+fn load_tree<S: ObjectSource + ?Sized>(store: &S, h: Hash) -> Result<Vec<TreeEntry>, StoreError> {
     match store.read_object(&h)? {
         Object::Tree(t) => Ok(t.entries),
         other => Err(StoreError::Decode(
@@ -1105,16 +1108,17 @@ pub fn status_diff(
     } else {
         None
     };
-    // Snapshot objects are ephemeral — status must not pay durability
-    // costs. SyncPolicy::None stages with zero flushes; the commit
-    // below (before any tree read) just renames the objects visible.
-    let snapshot = store.batch_with_policy(crate::batch::SyncPolicy::None);
+    // Snapshot objects are ephemeral: they live in an in-memory overlay
+    // (EphemeralSink) and never touch the durable store — status pays
+    // no durability cost, leaves no garbage in objects/, and can never
+    // make a non-durable object visible to another writer's dedup.
+    // Reads fall through to the store for committed objects.
+    let snapshot = crate::store::EphemeralSink::new(store);
     let work_tree_hash = worktree::build_tree_filtered(&snapshot, worktree_root, tracked)?;
 
     let Some(idx) = index else {
         // Legacy fallback: HEAD↔worktree, everything labeled Unstaged.
-        snapshot.commit()?;
-        let diff = diff_worktree_trees(store, head_tree.copied(), Some(work_tree_hash))?;
+        let diff = diff_worktree_trees(&snapshot, head_tree.copied(), Some(work_tree_hash))?;
         return Ok(diff
             .entries
             .into_iter()
@@ -1128,11 +1132,9 @@ pub fn status_diff(
     // Build the index tree exactly the way `mkit commit` builds it.
     // This is the authoritative "what would be committed right now."
     let index_tree = worktree::build_tree_from_index_with(store, &snapshot, idx)?;
-    // The diffs below read the snapshot's objects — commit first.
-    snapshot.commit()?;
 
-    let staged = diff_trees(store, head_tree.copied(), Some(index_tree))?;
-    let unstaged = diff_worktree_trees(store, Some(index_tree), Some(work_tree_hash))?;
+    let staged = diff_trees(&snapshot, head_tree.copied(), Some(index_tree))?;
+    let unstaged = diff_worktree_trees(&snapshot, Some(index_tree), Some(work_tree_hash))?;
 
     // Emit one entry per (path, leg). A path appearing in both legs
     // produces two entries — one `Staged` and one `Unstaged` — so the
@@ -1170,8 +1172,8 @@ pub fn status_diff(
 }
 
 #[cfg(unix)]
-fn diff_worktree_trees(
-    store: &ObjectStore,
+fn diff_worktree_trees<S: ObjectSource + ?Sized>(
+    store: &S,
     old_hash: Option<Hash>,
     new_hash: Option<Hash>,
 ) -> Result<DiffResult, StoreError> {
@@ -1179,8 +1181,8 @@ fn diff_worktree_trees(
 }
 
 #[cfg(not(unix))]
-fn diff_worktree_trees(
-    store: &ObjectStore,
+fn diff_worktree_trees<S: ObjectSource + ?Sized>(
+    store: &S,
     old_hash: Option<Hash>,
     new_hash: Option<Hash>,
 ) -> Result<DiffResult, StoreError> {

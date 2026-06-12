@@ -32,24 +32,18 @@
 //! This is git's `core.fsyncMethod=batch` design (bulk-checkin) and
 //! `SQLite`'s macOS sync strategy:
 //!
-//! * **macOS**: each staged file gets `File::sync_data` —
-//!   `fcntl(F_BARRIERFSYNC)`, a cheap writeback-with-ordering-barrier —
-//!   and `commit()` issues a single `File::sync_all`
-//!   (`fcntl(F_FULLFSYNC)`, the expensive full disk-cache flush) that
-//!   makes everything behind the barriers durable.
-//! * **Linux**: the post-rename directory fsyncs carry durability: on a
-//!   metadata-journaling filesystem in its default ordered-data mode
-//!   (ext4 `data=ordered`), fsyncing the shard directory commits the
-//!   journal transaction containing the dirents, which orders the file
-//!   data writes ahead of itself. The final `sync_all` on the last
-//!   staged file is cheap O(1) insurance.
-//! * **Windows / other**: directory flushes are no-ops (matching
-//!   [`crate::store`]'s historical `sync_parent_dir`) and the final
-//!   `sync_all` provides the flush.
+//! Every staged file gets a real per-file writeback at commit time —
+//! Apple `fcntl(F_BARRIERFSYNC)`, Linux `fdatasync`, Windows
+//! `FlushFileBuffers` — issued **concurrently** from a scoped-thread
+//! pool so the cost is device latency at queue depth, not
+//! latency×objects. The trailing constant-count full flushes
+//! (`F_FULLFSYNC` on Apple) cover ordering and the dirent updates.
+//! This holds on every filesystem; it does not depend on ext4
+//! ordered-data journaling.
 //!
-//! Workloads that need per-object durability on filesystems without
-//! ordered metadata journaling can use [`SyncPolicy::PerObject`], which
-//! reproduces the historical write-path behaviour exactly.
+//! Workloads that prefer the historical schedule can select
+//! [`SyncPolicy::PerObject`] (config key `durability.objects =
+//! per-object`), which reproduces the old write path exactly.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -74,13 +68,14 @@ pub enum SyncPolicy {
     PerObject,
     /// Stage now, make durable + visible together at
     /// [`WriteBatch::commit`]. O(1) full flushes per batch. Default.
+    ///
+    /// (There is deliberately no "no flushes" policy: a visible object
+    /// MUST be durable — SPEC-OBJECTS §10.1 — because every writer's
+    /// content-addressed dedup trusts visibility. Ephemeral snapshots
+    /// belong in [`crate::store::EphemeralSink`], which never touches
+    /// the store.)
     #[default]
     Batch,
-    /// No flushes at all — page-cache only. For ephemeral writes whose
-    /// durability is irrelevant (`status` worktree snapshots) and
-    /// tests. Renames are still atomic, so readers never observe torn
-    /// objects.
-    None,
 }
 
 /// Flush/rename primitive seam between the store and the OS.
@@ -123,23 +118,17 @@ pub(crate) trait Syncer: Send + Sync + fmt::Debug {
 pub(crate) struct RealSyncer;
 
 impl Syncer for RealSyncer {
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn barrier(&self, file: &File, _path: &Path) -> io::Result<()> {
-        // std's sync_data is fcntl(F_BARRIERFSYNC) on Apple platforms:
-        // writeback plus an ordering barrier, without the F_FULLFSYNC
-        // device-cache flush that sync_all issues.
+        // Per-file writeback on EVERY platform — Apple: fcntl
+        // F_BARRIERFSYNC (writeback + ordering barrier, no device-cache
+        // flush); Linux: fdatasync; Windows: FlushFileBuffers. This is
+        // what makes a committed batch durable on all filesystems, not
+        // just metadata-journaling ones in ordered-data mode — XFS,
+        // btrfs, ext4 data=writeback, and NTFS get the same guarantee.
+        // The cost is bounded: barriers are issued concurrently from a
+        // thread pool at commit, so wall-clock is latency/queue-depth,
+        // not latency×objects.
         file.sync_data()
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    #[allow(clippy::unnecessary_wraps)]
-    fn barrier(&self, _file: &File, _path: &Path) -> io::Result<()> {
-        // Linux: sync_data is fdatasync — a full per-file flush, which
-        // would reintroduce the O(objects) cost. Ordering is provided
-        // by the post-rename directory fsyncs instead (see module
-        // docs). Windows: no cheap barrier primitive; the final full
-        // flush covers the batch.
-        Ok(())
     }
 
     fn full(&self, file: &File, _path: &Path) -> io::Result<()> {
@@ -289,10 +278,8 @@ impl<'s> WriteBatch<'s> {
             // Dedup hit: the object is visible, but if another process
             // renamed it and has not yet flushed the dirent, it may not
             // be durable. We are about to reference it, so flush its
-            // shard dir at commit (no-op under SyncPolicy::None).
-            if self.policy == SyncPolicy::Batch {
-                st.touched_shards.insert(shard_dir);
-            }
+            // shard dir at commit.
+            st.touched_shards.insert(shard_dir);
             return Ok(h);
         }
         fs::create_dir_all(&shard_dir)?;
@@ -330,15 +317,6 @@ impl<'s> WriteBatch<'s> {
                 );
                 st.touched_shards.insert(shard_dir);
                 st.last_staged = Some(h);
-            }
-            SyncPolicy::None => {
-                st.staged.insert(
-                    h,
-                    Staged {
-                        tmp: tmp.into_temp_path(),
-                        final_path,
-                    },
-                );
             }
         }
         Ok(h)
@@ -382,12 +360,6 @@ impl<'s> WriteBatch<'s> {
         match self.policy {
             // Every write was already made durable and visible.
             SyncPolicy::PerObject => Ok(()),
-            SyncPolicy::None => {
-                for staged in st.staged.into_values() {
-                    syncer.rename(staged.tmp, &staged.final_path)?;
-                }
-                Ok(())
-            }
             SyncPolicy::Batch => {
                 // 1. Barrier every staged file, concurrently. Each
                 //    barrier initiates writeback for its file and
@@ -836,22 +808,6 @@ mod tests {
             matches!(evs.last(), Some(Ev::Full(_))),
             "the dir barrier needs a trailing device flush to be durable"
         );
-    }
-
-    #[test]
-    fn sync_policy_none_emits_no_sync_events() {
-        let (_dir, store, rec) = recording_store();
-        let batch = store.batch_with_policy(SyncPolicy::None);
-        let h = batch.write(b"ephemeral").unwrap();
-        batch.commit().unwrap();
-
-        let evs = rec.events();
-        assert!(
-            evs.iter().all(|e| matches!(e, Ev::Rename { .. })),
-            "None policy: renames only, no flushes of any kind; got {evs:?}"
-        );
-        // Still atomic + readable.
-        assert_eq!(store.read(&h).unwrap(), b"ephemeral");
     }
 
     #[test]

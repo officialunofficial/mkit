@@ -110,6 +110,11 @@ pub struct ObjectStore {
     /// [`RealSyncer`]; unit tests inject a recording double to assert
     /// flush ordering and counts (the O(1)-flushes-per-batch contract).
     syncer: Arc<dyn Syncer>,
+    /// Policy handed out by [`Self::batch`]. Defaults to
+    /// [`SyncPolicy::Batch`]; the CLI maps the repo config key
+    /// `durability.objects = per-object` onto it for deployments that
+    /// want the strict historical schedule.
+    default_policy: SyncPolicy,
 }
 
 impl ObjectStore {
@@ -124,6 +129,7 @@ impl ObjectStore {
         Ok(Self {
             objects_root,
             syncer: Arc::new(RealSyncer),
+            default_policy: SyncPolicy::Batch,
         })
     }
 
@@ -139,7 +145,16 @@ impl ObjectStore {
         Ok(Self {
             objects_root,
             syncer: Arc::new(RealSyncer),
+            default_policy: SyncPolicy::Batch,
         })
+    }
+
+    /// Select the [`SyncPolicy`] that [`Self::batch`] hands out. The
+    /// CLI wires the repo config key `durability.objects` here so
+    /// deployments on filesystems where they prefer the strict
+    /// per-object schedule can opt into it (SPEC-OBJECTS §10.1).
+    pub fn set_sync_policy(&mut self, policy: SyncPolicy) {
+        self.default_policy = policy;
     }
 
     /// Replace the flush/rename primitives. Test-only seam — see the
@@ -155,13 +170,13 @@ impl ObjectStore {
         &self.syncer
     }
 
-    /// Start a batched write with the default [`SyncPolicy::Batch`]:
-    /// objects staged by the batch become durable and visible together
-    /// at [`WriteBatch::commit`], with O(1) full flushes per batch
-    /// instead of per object.
+    /// Start a batched write with the store's configured policy
+    /// (default [`SyncPolicy::Batch`]): objects staged by the batch
+    /// become durable and visible together at [`WriteBatch::commit`],
+    /// with O(1) full flushes per batch instead of per object.
     #[must_use]
     pub fn batch(&self) -> WriteBatch<'_> {
-        self.batch_with_policy(SyncPolicy::Batch)
+        self.batch_with_policy(self.default_policy)
     }
 
     /// Start a batched write with an explicit [`SyncPolicy`].
@@ -215,6 +230,13 @@ impl ObjectStore {
         let h = hash::hash(bytes);
         let final_path = self.path_for(&h);
         if final_path.exists() {
+            // Dedup hit: the object is visible, but if another process
+            // renamed it and has not yet flushed the dirent, it may not
+            // be durable — and our caller is about to reference it.
+            // Flush its shard dir before returning (SPEC-OBJECTS §10.1
+            // dedup rule, mirroring WriteBatch's touched_shards).
+            self.syncer()
+                .dir_sync(final_path.parent().expect("object path has parent"))?;
             return Ok(h);
         }
         let shard_dir = final_path
@@ -382,6 +404,122 @@ fn write_atomic(final_path: &Path, bytes: &[u8], syncer: &dyn Syncer) -> io::Res
 
     syncer.dir_sync(parent)?;
     Ok(())
+}
+
+/// Read source shared by [`ObjectStore`] and snapshot overlays, so
+/// tree-diff code can resolve objects from either the durable store or
+/// an in-memory [`EphemeralSink`].
+pub trait ObjectSource {
+    /// Read and integrity-verify the raw bytes of `h`.
+    ///
+    /// # Errors
+    /// [`StoreError::ObjectNotFound`] / [`StoreError::HashMismatch`] /
+    /// I/O errors, as for [`ObjectStore::read`].
+    fn read(&self, h: &Hash) -> StoreResult<Vec<u8>>;
+
+    /// Read and decode `h` into a typed [`Object`].
+    ///
+    /// # Errors
+    /// As [`Self::read`], plus decode errors.
+    fn read_object(&self, h: &Hash) -> StoreResult<Object> {
+        Ok(serialize::deserialize(&self.read(h)?)?)
+    }
+}
+
+impl ObjectSource for ObjectStore {
+    fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        ObjectStore::read(self, h)
+    }
+}
+
+/// In-memory object overlay for **ephemeral worktree snapshots**
+/// (`status`, `diff`, conflict/restore safety checks).
+///
+/// Writes never touch the durable store: objects whose hash already
+/// exists on disk are deduplicated against it (the store's
+/// visible-implies-durable invariant makes that safe), everything else
+/// lives in a private map that vanishes with the sink. This is what
+/// keeps query commands from (a) paying any durability cost, (b)
+/// growing `objects/` with throwaway snapshot trees, and (c) ever
+/// making a non-durable object *visible* where another writer's dedup
+/// could durably reference it.
+///
+/// Reads fall through to the underlying store, so diff walkers can
+/// resolve a snapshot tree that references committed objects.
+#[derive(Debug)]
+pub struct EphemeralSink<'s> {
+    store: &'s ObjectStore,
+    objects: std::sync::Mutex<std::collections::HashMap<Hash, Vec<u8>>>,
+}
+
+impl<'s> EphemeralSink<'s> {
+    /// Create an empty overlay over `store`.
+    #[must_use]
+    pub fn new(store: &'s ObjectStore) -> Self {
+        Self {
+            store,
+            objects: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl ObjectSink for EphemeralSink<'_> {
+    fn put(&self, bytes: &[u8]) -> StoreResult<Hash> {
+        self.put_parts(&[bytes])
+    }
+
+    fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
+        let mut total: usize = 0;
+        let mut hasher = hash::Hasher::new();
+        for p in parts {
+            total = total
+                .checked_add(p.len())
+                .ok_or(StoreError::ObjectTooLarge)?;
+            hasher.update(p);
+        }
+        if total > MAX_RAW_OBJECT_SIZE {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        let h = hasher.finalize();
+        // Dedup against the durable store: visible store objects are
+        // durable by invariant, and skipping them keeps the overlay's
+        // memory bounded by the *changed* content, not the worktree.
+        if self.store.contains(&h) {
+            return Ok(h);
+        }
+        let mut map = self.objects.lock().expect("ephemeral sink mutex");
+        map.entry(h).or_insert_with(|| {
+            let mut buf = Vec::with_capacity(total);
+            for p in parts {
+                buf.extend_from_slice(p);
+            }
+            buf
+        });
+        Ok(h)
+    }
+
+    fn has(&self, h: &Hash) -> bool {
+        self.objects
+            .lock()
+            .expect("ephemeral sink mutex")
+            .contains_key(h)
+            || self.store.contains(h)
+    }
+}
+
+impl ObjectSource for EphemeralSink<'_> {
+    fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        if let Some(bytes) = self
+            .objects
+            .lock()
+            .expect("ephemeral sink mutex")
+            .get(h)
+            .cloned()
+        {
+            return Ok(bytes);
+        }
+        self.store.read(h)
+    }
 }
 
 /// Write target shared by [`ObjectStore`] (per-object durability) and

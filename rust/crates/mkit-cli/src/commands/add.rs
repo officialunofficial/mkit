@@ -178,7 +178,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let store = match super::open_store_configured(&cwd) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };

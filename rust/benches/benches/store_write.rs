@@ -18,6 +18,8 @@ use mkit_core::store::{ObjectStore, SyncPolicy};
 use mkit_core::worktree::store_file_object;
 
 const COUNTS: &[(usize, &str)] = &[(10, "10 x 10 KiB"), (100, "100 x 10 KiB")];
+// (No "none" series: SyncPolicy::None was removed — ephemeral snapshots
+// use store::EphemeralSink and never hit the disk store.)
 
 fn payloads(n: usize) -> Vec<Vec<u8>> {
     // Distinct, incompressible-ish payloads so every write stages a
@@ -59,7 +61,6 @@ fn bench_store_write(c: &mut Criterion) {
         for (policy, label) in [
             (SyncPolicy::PerObject, "per_object"),
             (SyncPolicy::Batch, "batch"),
-            (SyncPolicy::None, "none"),
         ] {
             // Fresh repo per measurement; criterion's iter creates a
             // new tempdir each pass so dedup never kicks in.
