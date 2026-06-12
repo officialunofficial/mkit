@@ -503,7 +503,7 @@ const TOOLS: &[ToolSpec] = &[
                     ),
                     (
                         "algorithm",
-                        json!({ "type": "string", "enum": ["ed25519", "secp256k1", "p256"], "description": "Signing algorithm (default: ed25519). Non-ed25519 needs the matching mkit_keygen key." }),
+                        json!({ "type": "string", "enum": ["ed25519", "secp256k1", "p256"], "description": "Signing algorithm (default: ed25519, always passed explicitly — user config cannot reroute the algorithm through the MCP). Non-ed25519 needs the matching mkit_keygen key." }),
                     ),
                     (
                         "signer",
@@ -856,7 +856,17 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
         "mkit_attest" => {
             out.push("attest".into());
             push_commit(&mut out, args)?;
-            push_algorithm(&mut out, args)?;
+            // ALWAYS pass --algorithm explicitly: when absent the child CLI
+            // falls back to user-scoped `attest.default_algorithm`, which
+            // config.rs documents as a security-sensitive selector — ambient
+            // config must not steer an agent-triggered signing operation.
+            let alg = opt_str(args, "algorithm").unwrap_or_else(|| "ed25519".into());
+            if !matches!(alg.as_str(), "ed25519" | "secp256k1" | "p256") {
+                return Err(format!(
+                    "invalid algorithm '{alg}': expected ed25519, secp256k1, or p256"
+                ));
+            }
+            out.extend(["--algorithm".into(), alg]);
             // ALWAYS pass --signer explicitly: when the flag is absent the
             // child CLI falls back to user-scoped `attest.signer` config,
             // which may name `external` — and the external-signer path is
@@ -1063,9 +1073,20 @@ mod tests {
         // (`attest.signer = external`) can never reroute an MCP-triggered
         // attestation into an external-signer subprocess.
         let argv = build_argv("mkit_attest", &json!({})).unwrap();
-        assert_eq!(argv, ["attest", "--signer", "repo-key"]);
+        assert_eq!(
+            argv,
+            ["attest", "--algorithm", "ed25519", "--signer", "repo-key"]
+        );
         let argv = build_argv("mkit_attest", &json!({ "signer": "keystore" })).unwrap();
-        assert_eq!(argv, ["attest", "--signer", "keystore"]);
+        assert_eq!(
+            argv,
+            ["attest", "--algorithm", "ed25519", "--signer", "keystore"]
+        );
+        let argv = build_argv("mkit_attest", &json!({ "algorithm": "p256" })).unwrap();
+        assert_eq!(
+            argv,
+            ["attest", "--algorithm", "p256", "--signer", "repo-key"]
+        );
         let err = build_argv("mkit_attest", &json!({ "signer": "external" })).unwrap_err();
         assert!(err.contains("excluded"), "{err}");
     }
