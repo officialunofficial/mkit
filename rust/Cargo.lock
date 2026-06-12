@@ -2750,6 +2750,7 @@ dependencies = [
  "p256 0.13.2",
  "proptest",
  "rand_core 0.6.4",
+ "serde_json",
  "signal-hook",
  "tempfile",
  "thiserror 2.0.18",

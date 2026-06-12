@@ -85,6 +85,10 @@ buffa = "0.7.1"
 clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage", "derive", "string"] }
 tempfile = "3"
 thiserror = "2"
+# JSON-RPC parse/emit for the `mkit mcp` stdio server. Zero new supply
+# chain: serde_json is already in this binary's normal dependency graph
+# via mkit-attest (JCS tests) and the http/s3 transports (reqwest).
+serde_json = "1"
 # Used by `mkit keygen` to generate raw 32-byte secrets for non-ed25519
 # algorithms (secp256k1 / p256). Same version mkit-core already pulls in.
 getrandom = "0.4"

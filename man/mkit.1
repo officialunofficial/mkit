@@ -755,6 +755,15 @@ or the signing key), so they are repo-safe, unlike
 Internal subcommand: act as the server end of an
 .Cm mkit+ssh://
 transport.
+.It Cm mcp Op Fl Fl repository Ar path
+Start a Model Context Protocol server on stdio so LLM agents can drive
+local repositories: status, diff, log, show, branch, add, commit,
+checkout, plus signature verification and DSSE attestation tools.
+.Fl Fl repository
+confines every tool call to the given path. The server runs no network
+operations and never overrides
+.Nm Ns 's
+data-loss guards.
 .It Cm pack-shard Oo Fl Fl out Ar dir Oc Oo Fl Fl force Oc Ar hash
 Encode a stored pack into Reed-Solomon shards plus a manifest, ready to
 publish to an HTTP or S3 origin (producer side of SPEC-PACK-SHARDS Phase

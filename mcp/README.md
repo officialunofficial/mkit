@@ -26,6 +26,14 @@ API instead of guessing or scraping GitHub.
 The first seven mirror the [Commonware MCP](https://mcp.commonware.xyz); the
 last five are mkit-specific (SPEC corpus + CLI reference).
 
+## Sibling: the local `mkit mcp` server
+
+This Worker serves mkit's **documentation and source corpus**. To let an agent
+**operate a local repository** (status, staging, signed commits, attestation,
+verification), use the local stdio MCP server built into the CLI itself —
+`mkit mcp [--repository <path>]` — documented in `docs/CLI.md` §"Agent
+integration". The two are complementary: connect both.
+
 ## Connecting
 
 ### Claude Code

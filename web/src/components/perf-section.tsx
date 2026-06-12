@@ -1,0 +1,151 @@
+import { methodology, sizeBenchmarks, timingBenchmarks } from '../lib/perf-data'
+import type { SizeBenchmark, TimingBenchmark } from '../lib/perf-data'
+
+/** `13.4628 → "13.5 s"`, `0.3108 → "311 ms"`, `0.0134 → "13.4 ms"`. Sub-second values read better in ms. */
+function fmtSeconds(s: number): string {
+  if (s >= 10) return `${s.toFixed(1)} s`
+  if (s >= 1) return `${s.toFixed(2)} s`
+  return `${(s * 1000).toFixed(s >= 0.1 ? 0 : 1)} ms`
+}
+
+/** `105036 → "102.6 MiB"`, `1148 → "1.1 MiB"`, `92 → "92 KiB"`. Sizes come from `du -k` so the base unit is KiB. */
+function fmtKiB(kib: number): string {
+  if (kib >= 1024) return `${(kib / 1024).toFixed(1)} MiB`
+  return `${kib} KiB`
+}
+
+/** Multiplier between the two means, e.g. "6.9× faster". Below 1.15× the honest label is a tie. */
+function speedupLabel(mkit: number, git: number): string {
+  const ratio = mkit > git ? mkit / git : git / mkit
+  if (ratio < 1.15) return 'about even'
+  const who = mkit > git ? 'git' : 'mkit'
+  return `${who} ${ratio.toFixed(1)}× faster`
+}
+
+/**
+ * One horizontal bar, width proportional to `value / max`. mkit bars are solid foreground; git bars are muted — the
+ * shorter bar wins (lower is better throughout). Pure CSS, no chart library: the site's hairline aesthetic carries over
+ * via the bordered track.
+ */
+function Bar({
+  label,
+  value,
+  max,
+  display,
+  solid,
+}: {
+  label: string
+  value: number
+  max: number
+  display: string
+  solid: boolean
+}) {
+  const pct = Math.max(0.75, (value / max) * 100)
+  return (
+    <div className='flex items-center gap-3'>
+      <span className='w-9 shrink-0 font-mono text-xs text-[--color-muted]'>{label}</span>
+      <div className='h-4 flex-1'>
+        <div
+          className={`h-full rounded-xs ${solid ? 'bg-[--color-fg]' : 'bg-[--color-muted]/40'}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className='w-20 shrink-0 text-right font-mono text-xs'>{display}</span>
+    </div>
+  )
+}
+
+function TimingBlock({ b }: { b: TimingBenchmark }) {
+  const max = Math.max(b.mkit.mean, b.git.mean)
+  return (
+    <div className='space-y-3 py-6'>
+      <div className='flex items-baseline justify-between gap-4'>
+        <h3 className='text-sm font-semibold'>{b.name}</h3>
+        <span className='shrink-0 text-xs text-[--color-muted]'>{speedupLabel(b.mkit.mean, b.git.mean)}</span>
+      </div>
+      <p className='max-w-prose text-sm text-[--color-subtle]'>{b.description}</p>
+      <div className='space-y-1.5'>
+        <Bar label='mkit' value={b.mkit.mean} max={max} display={fmtSeconds(b.mkit.mean)} solid />
+        <Bar label='git' value={b.git.mean} max={max} display={fmtSeconds(b.git.mean)} solid={false} />
+      </div>
+      {b.note ? <p className='max-w-prose text-xs text-[--color-muted]'>{b.note}</p> : null}
+    </div>
+  )
+}
+
+function SizeBlock({ b }: { b: SizeBenchmark }) {
+  const max = Math.max(b.mkitKiB, b.gitKiB, b.gitPackedKiB ?? 0)
+  return (
+    <div className='space-y-3 py-6'>
+      <h3 className='text-sm font-semibold'>{b.name}</h3>
+      <p className='max-w-prose text-sm text-[--color-subtle]'>{b.description}</p>
+      <div className='space-y-1.5'>
+        <Bar label='mkit' value={b.mkitKiB} max={max} display={fmtKiB(b.mkitKiB)} solid />
+        <Bar label='git' value={b.gitKiB} max={max} display={fmtKiB(b.gitKiB)} solid={false} />
+        {b.gitPackedKiB != null ? (
+          <Bar label='git*' value={b.gitPackedKiB} max={max} display={fmtKiB(b.gitPackedKiB)} solid={false} />
+        ) : null}
+      </div>
+      {b.note ? <p className='max-w-prose text-xs text-[--color-muted]'>{b.note}</p> : null}
+    </div>
+  )
+}
+
+/**
+ * Static benchmark comparison: every number was measured once on a real machine (see `perf-data.ts` for the exact
+ * commands) and baked in at build time. Bars are plain divs — lower is better everywhere, and git's wins are shown as
+ * plainly as mkit's.
+ */
+export function PerfSection() {
+  return (
+    <div className='space-y-10'>
+      <section className='space-y-1'>
+        <h2 className='text-sm font-semibold'>Time, end to end</h2>
+        <p className='max-w-prose text-sm text-[--color-subtle]'>
+          Wall-clock time for whole CLI invocations, mean of repeated runs. Lower is better.
+        </p>
+        <div className='divide-y divide-[--color-hairline] border-y border-[--color-hairline]'>
+          {timingBenchmarks.map((b) => (
+            <TimingBlock key={b.id} b={b} />
+          ))}
+        </div>
+      </section>
+
+      <section className='space-y-1'>
+        <h2 className='text-sm font-semibold'>Bytes on disk</h2>
+        <p className='max-w-prose text-sm text-[--color-subtle]'>
+          Repository directory size (<code className='font-mono text-xs'>du -k .mkit</code> vs{' '}
+          <code className='font-mono text-xs'>.git</code>) after the same operations. Lower is better. Rows marked{' '}
+          <span className='font-mono text-xs'>git*</span> are after <code className='font-mono text-xs'>git gc</code>.
+        </p>
+        <div className='divide-y divide-[--color-hairline] border-y border-[--color-hairline]'>
+          {sizeBenchmarks.map((b) => (
+            <SizeBlock key={b.id} b={b} />
+          ))}
+        </div>
+      </section>
+
+      <section className='space-y-3'>
+        <h2 className='text-sm font-semibold'>Methodology &amp; caveats</h2>
+        <dl className='space-y-1 font-mono text-xs text-[--color-muted]'>
+          <div>date: {methodology.date}</div>
+          <div>machine: {methodology.machine}</div>
+          <div>versions: {methodology.versions}</div>
+          <div>harness: {methodology.harness}</div>
+          <div>workload: {methodology.workload}</div>
+        </dl>
+        <ul className='max-w-prose list-disc space-y-1.5 pl-4 text-xs text-[--color-muted]'>
+          {methodology.caveats.map((c) => (
+            <li key={c}>{c}</li>
+          ))}
+        </ul>
+        <details className='text-xs text-[--color-muted]'>
+          <summary className='cursor-pointer select-none'>Exact commands</summary>
+          <pre className='mt-2 overflow-x-auto rounded-md border border-[--color-hairline] p-3 font-mono text-[11px] leading-relaxed'>
+            {methodology.commands.join('\n')}
+          </pre>
+        </details>
+      </section>
+    </div>
+  )
+}

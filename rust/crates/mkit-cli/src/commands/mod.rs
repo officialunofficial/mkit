@@ -36,6 +36,7 @@ pub mod keygen;
 pub mod log;
 pub mod ls_files;
 pub mod ls_tree;
+pub mod mcp;
 pub mod merge;
 pub mod mv;
 #[cfg(feature = "pack-shards")]

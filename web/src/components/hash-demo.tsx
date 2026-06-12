@@ -184,7 +184,7 @@ export function HashDemo() {
             <MerkleTree root={merkle} />
           </Section>
         ) : null}
-        <Section title='Objects' description='Every hash in this commit. Edit anything above and they all change.'>
+        <Section title='Objects' description='Every hash in this commit. Edit any input and they all change.'>
           <div className='divide-y divide-[--color-hairline]'>
             <ObjectRow
               hash={commit.hash}
