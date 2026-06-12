@@ -36,13 +36,10 @@ pub fn git_command(repo: &Path) -> Command {
     c
 }
 
-/// [`apply_hygiene`] for callers building their own `git` command
-/// without a `-C <repo>` (e.g. a bare `git --version` probe).
-pub fn apply_hygiene_public(c: &mut Command) {
-    apply_hygiene(c);
-}
-
-pub(crate) fn apply_hygiene(c: &mut Command) {
+/// Apply the subprocess hygiene (see [`git_command`]) to a caller-built
+/// `git` command without a `-C <repo>` (e.g. a bare `git --version`
+/// probe).
+pub fn apply_hygiene(c: &mut Command) {
     c.env("GIT_TERMINAL_PROMPT", "0");
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
     c.arg("-c").arg(format!("core.hooksPath={null}"));

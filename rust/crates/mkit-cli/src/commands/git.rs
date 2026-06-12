@@ -885,7 +885,7 @@ fn warn_skip(skipped: &mut Vec<(String, String)>, ref_name: &str, why: &str) {
 
 pub(crate) fn git_version() -> Result<(), String> {
     let mut c = Command::new("git");
-    mkit_git_bridge::gitsrc::apply_hygiene_public(&mut c);
+    mkit_git_bridge::gitsrc::apply_hygiene(&mut c);
     match c
         .arg("--version")
         .stdout(Stdio::null())
