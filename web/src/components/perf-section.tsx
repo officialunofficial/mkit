@@ -1,3 +1,4 @@
+import { labelColor } from '../lib/hash-color'
 import { methodology, sizeBenchmarks, timingBenchmarks } from '../lib/perf-data'
 import type { SizeBenchmark, TimingBenchmark } from '../lib/perf-data'
 
@@ -23,29 +24,33 @@ function speedupLabel(mkit: number, git: number): string {
 }
 
 /**
- * One horizontal bar, width proportional to `value / max`. mkit bars are solid foreground; git bars are muted — the
- * shorter bar wins (lower is better throughout). Pure CSS, no chart library: the site's hairline aesthetic carries over
- * via the bordered track.
+ * One horizontal bar, width proportional to `value / max`. mkit bars carry the benchmark's hash-hue (`color`); git bars
+ * are muted — the shorter bar wins (lower is better throughout). Pure CSS, no chart library: the site's hairline
+ * aesthetic carries over via the bordered track.
  */
 function Bar({
   label,
   value,
   max,
   display,
-  solid,
+  color,
 }: {
   label: string
   value: number
   max: number
   display: string
-  solid: boolean
+  /** Fill colour for the bar; omitted → muted neutral (the git baseline). */
+  color?: string
 }) {
   const pct = Math.max(0.75, (value / max) * 100)
   return (
     <div className='flex items-center gap-3'>
       <span className='w-9 shrink-0 font-mono text-xs text-muted'>{label}</span>
       <div className='h-4 flex-1'>
-        <div className={`h-full rounded-xs ${solid ? 'bg-fg' : 'bg-muted/40'}`} style={{ width: `${pct}%` }} />
+        <div
+          className={`h-full rounded-xs ${color ? '' : 'bg-muted/40'}`}
+          style={{ width: `${pct}%`, ...(color ? { backgroundColor: color } : null) }}
+        />
       </div>
       <span className='w-20 shrink-0 text-right font-mono text-xs'>{display}</span>
     </div>
@@ -62,8 +67,8 @@ function TimingBlock({ b }: { b: TimingBenchmark }) {
       </div>
       <p className='max-w-prose text-sm text-subtle'>{b.description}</p>
       <div className='space-y-1.5'>
-        <Bar label='mkit' value={b.mkit.mean} max={max} display={fmtSeconds(b.mkit.mean)} solid />
-        <Bar label='git' value={b.git.mean} max={max} display={fmtSeconds(b.git.mean)} solid={false} />
+        <Bar label='mkit' value={b.mkit.mean} max={max} display={fmtSeconds(b.mkit.mean)} color={labelColor(b.id)} />
+        <Bar label='git' value={b.git.mean} max={max} display={fmtSeconds(b.git.mean)} />
       </div>
       {b.note ? <p className='max-w-prose text-xs text-muted'>{b.note}</p> : null}
     </div>
@@ -77,10 +82,10 @@ function SizeBlock({ b }: { b: SizeBenchmark }) {
       <h3 className='text-sm font-semibold'>{b.name}</h3>
       <p className='max-w-prose text-sm text-subtle'>{b.description}</p>
       <div className='space-y-1.5'>
-        <Bar label='mkit' value={b.mkitKiB} max={max} display={fmtKiB(b.mkitKiB)} solid />
-        <Bar label='git' value={b.gitKiB} max={max} display={fmtKiB(b.gitKiB)} solid={false} />
+        <Bar label='mkit' value={b.mkitKiB} max={max} display={fmtKiB(b.mkitKiB)} color={labelColor(b.id)} />
+        <Bar label='git' value={b.gitKiB} max={max} display={fmtKiB(b.gitKiB)} />
         {b.gitPackedKiB != null ? (
-          <Bar label='git*' value={b.gitPackedKiB} max={max} display={fmtKiB(b.gitPackedKiB)} solid={false} />
+          <Bar label='git*' value={b.gitPackedKiB} max={max} display={fmtKiB(b.gitPackedKiB)} />
         ) : null}
       </div>
       {b.note ? <p className='max-w-prose text-xs text-muted'>{b.note}</p> : null}
