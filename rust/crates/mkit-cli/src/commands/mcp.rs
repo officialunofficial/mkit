@@ -80,11 +80,13 @@ fn serve(allowed: Option<&Path>) -> u8 {
             continue;
         }
         let parsed: Result<Value, _> = serde_json::from_str(&line);
-        let messages: Vec<Value> = match parsed {
+        let (messages, is_batch): (Vec<Value>, bool) = match parsed {
             // A few legacy clients batch; MCP 2025+ forbids it, but
-            // unwrapping an array costs nothing.
-            Ok(Value::Array(batch)) => batch,
-            Ok(v) => vec![v],
+            // handling an array costs nothing. Per JSON-RPC 2.0, a batch
+            // request gets ONE batch (array) response — and a batch of
+            // only notifications gets no response at all.
+            Ok(Value::Array(batch)) => (batch, true),
+            Ok(v) => (vec![v], false),
             Err(_) => {
                 write_msg(
                     &mut stdout,
@@ -97,10 +99,16 @@ fn serve(allowed: Option<&Path>) -> u8 {
                 continue;
             }
         };
-        for msg in messages {
-            if let Some(response) = handle_message(&msg, allowed, &mut initialized) {
-                write_msg(&mut stdout, &response);
+        let responses: Vec<Value> = messages
+            .iter()
+            .filter_map(|msg| handle_message(msg, allowed, &mut initialized))
+            .collect();
+        if is_batch {
+            if !responses.is_empty() {
+                write_msg(&mut stdout, &Value::Array(responses));
             }
+        } else if let Some(response) = responses.into_iter().next() {
+            write_msg(&mut stdout, &response);
         }
     }
     exit::OK
@@ -347,8 +355,9 @@ const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "mkit_verify_attest",
         description: "Verify every DSSE attestation attached to a commit against a trust-roots \
-                      registry. Defaults to the user-scoped trust-roots file; an in-repo file is \
-                      refused unless trust_roots names it explicitly (hostile-clone defense).",
+                      registry. Defaults to the user-scoped trust-roots file; a trust_roots path \
+                      inside the repository is always rejected here (hostile-clone defense — \
+                      planted in-repo roots can never be selected through the MCP).",
         hints: (true, false, true),
         schema: || {
             schema(
@@ -435,8 +444,10 @@ const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "mkit_checkout",
-        description: "Switch HEAD to a branch and restore files.",
-        hints: (false, false, false),
+        description: "Switch HEAD to a branch and restore files. Overwrites clean tracked files \
+                      and removes tracked paths absent from the target branch (dirty-worktree \
+                      changes are guarded and refuse instead).",
+        hints: (false, true, false),
         schema: || {
             schema(
                 vec![repo_prop(), ("branch_name", prop("Branch to switch to"))],
@@ -496,7 +507,7 @@ const TOOLS: &[ToolSpec] = &[
                     ),
                     (
                         "signer",
-                        json!({ "type": "string", "enum": ["repo-key", "keystore"], "description": "Primary signer (default: repo-key). 'external' is excluded from the MCP." }),
+                        json!({ "type": "string", "enum": ["repo-key", "keystore"], "description": "Primary signer (default: repo-key, always passed explicitly — user config cannot reroute to an external signer through the MCP)." }),
                     ),
                     (
                         "predicate_type",
@@ -793,9 +804,14 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             }
         }
         "mkit_unstage" => {
-            let files = args.get("files").and_then(Value::as_array);
-            match files {
-                Some(list) if !list.is_empty() => {
+            match args.get("files") {
+                // Key absent = the documented "unstage everything" form:
+                // bare `reset` (mixed) — the working tree is never touched.
+                None => out.push("reset".into()),
+                // Key present: it must be a non-empty array of strings. A
+                // malformed value (string, empty array, …) must NOT silently
+                // widen a targeted unstage into a whole-index mutation.
+                Some(Value::Array(list)) if !list.is_empty() => {
                     out.extend(["restore".into(), "--staged".into()]);
                     for f in list {
                         let f = f.as_str().ok_or("files entries must be strings")?;
@@ -803,9 +819,13 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
                         out.push(f.into());
                     }
                 }
-                // Bare `reset` = mixed reset of the whole index; the
-                // working tree is never touched.
-                _ => out.push("reset".into()),
+                Some(_) => {
+                    return Err(
+                        "files must be a non-empty array of paths; omit it entirely to \
+                         unstage everything"
+                            .into(),
+                    );
+                }
             }
         }
         "mkit_commit" => {
@@ -837,15 +857,18 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             out.push("attest".into());
             push_commit(&mut out, args)?;
             push_algorithm(&mut out, args)?;
-            if let Some(signer) = opt_str(args, "signer") {
-                if !matches!(signer.as_str(), "repo-key" | "keystore") {
-                    return Err(format!(
-                        "invalid signer '{signer}': expected repo-key or keystore \
-                         (external is excluded from the MCP)"
-                    ));
-                }
-                out.extend(["--signer".into(), signer]);
+            // ALWAYS pass --signer explicitly: when the flag is absent the
+            // child CLI falls back to user-scoped `attest.signer` config,
+            // which may name `external` — and the external-signer path is
+            // excluded from the MCP (it executes a configured subprocess).
+            let signer = opt_str(args, "signer").unwrap_or_else(|| "repo-key".into());
+            if !matches!(signer.as_str(), "repo-key" | "keystore") {
+                return Err(format!(
+                    "invalid signer '{signer}': expected repo-key or keystore \
+                     (external is excluded from the MCP)"
+                ));
             }
+            out.extend(["--signer".into(), signer]);
             if let Some(uri) = opt_str(args, "predicate_type") {
                 no_dash(&uri, "predicate_type")?;
                 out.extend(["--predicate-type".into(), uri]);
@@ -1018,6 +1041,50 @@ mod tests {
         assert_eq!(argv, ["reset"]);
         let argv = build_argv("mkit_unstage", &json!({ "files": ["a.txt"] })).unwrap();
         assert_eq!(argv, ["restore", "--staged", "a.txt"]);
+    }
+
+    #[test]
+    fn unstage_rejects_malformed_files_instead_of_widening() {
+        // A present-but-malformed `files` must error, never silently
+        // broaden a targeted unstage into a whole-index reset.
+        for bad in [
+            json!({ "files": "a.txt" }),
+            json!({ "files": [] }),
+            json!({ "files": 3 }),
+        ] {
+            let err = build_argv("mkit_unstage", &bad).unwrap_err();
+            assert!(err.contains("non-empty array"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn attest_always_pins_the_signer() {
+        // Omitted signer must still emit --signer repo-key so user config
+        // (`attest.signer = external`) can never reroute an MCP-triggered
+        // attestation into an external-signer subprocess.
+        let argv = build_argv("mkit_attest", &json!({})).unwrap();
+        assert_eq!(argv, ["attest", "--signer", "repo-key"]);
+        let argv = build_argv("mkit_attest", &json!({ "signer": "keystore" })).unwrap();
+        assert_eq!(argv, ["attest", "--signer", "keystore"]);
+        let err = build_argv("mkit_attest", &json!({ "signer": "external" })).unwrap_err();
+        assert!(err.contains("excluded"), "{err}");
+    }
+
+    #[test]
+    fn checkout_is_marked_destructive() {
+        // Checkout rewrites tracked worktree files; clients use
+        // destructiveHint to decide whether to confirm.
+        let tools = tool_descriptors();
+        let checkout = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t.get("name").unwrap() == "mkit_checkout")
+            .unwrap();
+        assert_eq!(
+            checkout.pointer("/annotations/destructiveHint").unwrap(),
+            true
+        );
     }
 
     #[test]
