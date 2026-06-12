@@ -1,4 +1,5 @@
 import { Link } from 'waku'
+import { GridLogo } from './grid-logo'
 
 export const Header = () => {
   return (
@@ -15,8 +16,8 @@ export const Header = () => {
     >
       <div className='mx-auto w-full max-w-5xl px-6'>
         <div className='flex items-center gap-6 py-4'>
-          <Link to='/' className='text-base tracking-tight'>
-            mkit <span className='text-[--color-muted]'>demo</span>
+          <Link to='/' className='flex items-center' aria-label='mkit home'>
+            <GridLogo className='size-5 rounded-[3px]' />
           </Link>
           <nav className='flex items-center gap-4 text-sm'>
             <Link
