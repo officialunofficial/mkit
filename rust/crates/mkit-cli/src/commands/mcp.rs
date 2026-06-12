@@ -1,0 +1,954 @@
+//! `mkit mcp` — a local Model Context Protocol server over stdio.
+//!
+//! Exposes a conservative subset of mkit as MCP tools so LLM agents can
+//! read, search, and manipulate local mkit repositories — the mkit
+//! analog of the reference `mcp-server-git`. Design choices follow that
+//! template where it is right and diverge where mkit is stronger:
+//!
+//! * **Local + stdio.** Newline-delimited JSON-RPC 2.0 on stdin/stdout,
+//!   processed sequentially. No async runtime: the loop is plain
+//!   blocking I/O, keeping the default build tokio-free.
+//! * **Subprocess execution.** Each tool call re-invokes this same
+//!   binary (`std::env::current_exe()`) with a structured argv — never
+//!   a shell — capturing stdout/stderr and the sysexits code. The MCP
+//!   loop owns this process's stdout for the protocol, so tools must
+//!   not print here; subprocess isolation guarantees that, and the
+//!   server version always equals the CLI version.
+//! * **Conservative surface.** Like the git template: no network ops
+//!   (push/pull/fetch/clone), no history surgery (merge/rebase/
+//!   cherry-pick/revert), no worktree destruction (reset --hard /
+//!   clean / rm). The server never passes `-f`/`--force`, so mkit's
+//!   own data-loss guards remain the backstop. Unlike the template:
+//!   first-class signing + attestation tools — the reason mkit exists.
+//! * **Scoping.** `--repository <path>` confines every `repo_path`
+//!   argument (symlink-resolved) to that root. Without the flag any
+//!   path the process can reach is allowed (client-trust mode), same
+//!   as the git template.
+//! * **Injection defense.** Path/ref-like arguments are rejected if
+//!   they begin with `-` so a value can never be parsed as a flag by
+//!   the child CLI (which has no `--` separator on `add`).
+
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
+
+use clap::Parser;
+use serde_json::{Value, json};
+
+use crate::clap_shim;
+use crate::exit;
+
+#[derive(Debug, Parser)]
+struct McpOpts {
+    /// Confine all tool calls to this repository path (and its
+    /// subdirectories). Strongly recommended for agent use.
+    #[arg(long, short = 'r', value_name = "PATH")]
+    repository: Option<PathBuf>,
+}
+
+/// Entry point for `mkit mcp`.
+#[must_use]
+pub fn run(args: &[String]) -> u8 {
+    let opts = match clap_shim::parse::<McpOpts>("mkit mcp", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    let allowed = match &opts.repository {
+        Some(p) => match p.canonicalize() {
+            Ok(c) => Some(c),
+            Err(e) => {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "error: --repository {}: {e}", p.display());
+                return exit::NOINPUT;
+            }
+        },
+        None => None,
+    };
+    serve(allowed.as_deref())
+}
+
+/// Blocking JSON-RPC loop: one message per line, responses flushed
+/// immediately. Returns when stdin reaches EOF (client disconnect).
+fn serve(allowed: Option<&Path>) -> u8 {
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout().lock();
+
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parsed: Result<Value, _> = serde_json::from_str(&line);
+        let messages: Vec<Value> = match parsed {
+            // A few legacy clients batch; MCP 2025+ forbids it, but
+            // unwrapping an array costs nothing.
+            Ok(Value::Array(batch)) => batch,
+            Ok(v) => vec![v],
+            Err(_) => {
+                write_msg(
+                    &mut stdout,
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": null,
+                        "error": { "code": -32700, "message": "parse error" }
+                    }),
+                );
+                continue;
+            }
+        };
+        for msg in messages {
+            if let Some(response) = handle_message(&msg, allowed) {
+                write_msg(&mut stdout, &response);
+            }
+        }
+    }
+    exit::OK
+}
+
+fn write_msg(stdout: &mut impl Write, msg: &Value) {
+    // serde_json compact form contains no raw newlines, so one
+    // message per line is structurally guaranteed.
+    if let Ok(s) = serde_json::to_string(msg) {
+        let _ = writeln!(stdout, "{s}");
+        let _ = stdout.flush();
+    }
+}
+
+/// Dispatch one JSON-RPC message. Returns `None` for notifications
+/// (nothing is written back).
+fn handle_message(msg: &Value, allowed: Option<&Path>) -> Option<Value> {
+    let method = msg.get("method").and_then(Value::as_str)?;
+    let id = msg.get("id");
+    match (method, id) {
+        // ---- notifications (no response) --------------------------
+        (_, None | Some(Value::Null)) => None,
+        // ---- requests ----------------------------------------------
+        ("initialize", Some(id)) => {
+            // Echo the client's protocol version; we speak the stdio
+            // framing + tools surface common to all published revisions.
+            let version = msg
+                .pointer("/params/protocolVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("2025-06-18");
+            Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": version,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "mkit-repo", "version": crate::cli::CLI_VERSION },
+                    "instructions": INSTRUCTIONS,
+                }
+            }))
+        }
+        ("ping", Some(id)) => Some(json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
+        ("tools/list", Some(id)) => Some(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "tools": tool_descriptors() }
+        })),
+        ("tools/call", Some(id)) => {
+            let name = msg
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let empty = json!({});
+            let args = msg.pointer("/params/arguments").unwrap_or(&empty);
+            match call_tool(name, args, allowed) {
+                Ok(CallOutcome { text, is_error }) => Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [ { "type": "text", "text": text } ],
+                        "isError": is_error,
+                    }
+                })),
+                Err(protocol_err) => Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32602, "message": protocol_err }
+                })),
+            }
+        }
+        (_, Some(id)) => Some(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": format!("method not found: {method}") }
+        })),
+    }
+}
+
+const INSTRUCTIONS: &str = "Operate local mkit repositories (content-addressed VCS with \
+Ed25519-signed commits and in-toto/DSSE attestation). Every tool takes a repo_path. \
+Typical flow: mkit_init -> mkit_keygen (REQUIRED before the first commit) -> mkit_add -> \
+mkit_commit -> mkit_log/mkit_show. Differentiators: mkit_verify (check a commit/tag \
+signature), mkit_attest (attach a signed DSSE attestation), mkit_verify_attest (verify \
+attestations against trust roots), mkit_cat_object (inspect content-addressed objects). \
+This server runs no network operations and never overrides mkit's data-loss guards; a \
+'refuses without -f' error means run that operation outside the MCP, deliberately. For \
+docs/specs/source of mkit itself, use the separate mkit docs MCP (mcp.mkit.makechain.net).";
+
+// ---------------------------------------------------------------------------
+// Tool table
+// ---------------------------------------------------------------------------
+
+struct ToolSpec {
+    name: &'static str,
+    description: &'static str,
+    /// (`read_only`, `destructive`, `idempotent`)
+    hints: (bool, bool, bool),
+    schema: fn() -> Value,
+}
+
+fn prop(desc: &str) -> Value {
+    json!({ "type": "string", "description": desc })
+}
+
+fn schema(props: Vec<(&str, Value)>, required: &[&str]) -> Value {
+    let mut map = serde_json::Map::new();
+    for (k, v) in props {
+        map.insert(k.to_string(), v);
+    }
+    json!({ "type": "object", "properties": Value::Object(map), "required": required })
+}
+
+fn repo_prop() -> (&'static str, Value) {
+    (
+        "repo_path",
+        prop("Path to the mkit repository (the directory containing .mkit/)"),
+    )
+}
+
+const TOOLS: &[ToolSpec] = &[
+    ToolSpec {
+        name: "mkit_status",
+        description: "Show staged and working-tree changes (porcelain v2; empty means clean).",
+        hints: (true, false, true),
+        schema: || schema(vec![repo_prop()], &["repo_path"]),
+    },
+    ToolSpec {
+        name: "mkit_diff_unstaged",
+        description: "Show changes in the working directory that are not yet staged.",
+        hints: (true, false, true),
+        schema: || schema(vec![repo_prop()], &["repo_path"]),
+    },
+    ToolSpec {
+        name: "mkit_diff_staged",
+        description: "Show changes staged for the next commit.",
+        hints: (true, false, true),
+        schema: || schema(vec![repo_prop()], &["repo_path"]),
+    },
+    ToolSpec {
+        name: "mkit_diff",
+        description: "Show the diff against a target revision (branch, tag, or 64-hex BLAKE3 id).",
+        hints: (true, false, true),
+        schema: || {
+            schema(
+                vec![repo_prop(), ("target", prop("Revision to diff against"))],
+                &["repo_path", "target"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_log",
+        description: "Show commit history as JSONL (hash, author identity, timestamp, message).",
+        hints: (true, false, true),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    (
+                        "max_count",
+                        json!({ "type": "integer", "description": "Maximum commits to show (default 10)" }),
+                    ),
+                    (
+                        "rev",
+                        prop("Optional revision (or A..B range) to start the walk from"),
+                    ),
+                ],
+                &["repo_path"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_show",
+        description: "Show an object: a commit with its diff, a tag, a tree listing, or blob contents.",
+        hints: (true, false, true),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    ("revision", prop("Revision or object id to show")),
+                ],
+                &["repo_path", "revision"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_branch",
+        description: "List branches as JSONL (current branch marked).",
+        hints: (true, false, true),
+        schema: || schema(vec![repo_prop()], &["repo_path"]),
+    },
+    ToolSpec {
+        name: "mkit_cat_object",
+        description: "Inspect a content-addressed object: its type, size, or pretty-printed content.",
+        hints: (true, false, true),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    (
+                        "object",
+                        prop("Object id (64-hex BLAKE3, prefix accepted) or revision"),
+                    ),
+                    (
+                        "mode",
+                        json!({ "type": "string", "enum": ["type", "size", "pretty"], "description": "What to show (default: pretty)" }),
+                    ),
+                ],
+                &["repo_path", "object"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_verify",
+        description: "Verify the Ed25519 signature on a commit, remix, or signed tag.",
+        hints: (true, false, true),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    ("revision", prop("Revision to verify (e.g. HEAD)")),
+                ],
+                &["repo_path", "revision"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_verify_attest",
+        description: "Verify every DSSE attestation attached to a commit against a trust-roots \
+                      registry. Defaults to the user-scoped trust-roots file; an in-repo file is \
+                      refused unless trust_roots names it explicitly (hostile-clone defense).",
+        hints: (true, false, true),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    ("commit", prop("Commit hash to verify (default: HEAD)")),
+                    (
+                        "trust_roots",
+                        prop(
+                            "Path to a trust-roots TOML file (default: $XDG_CONFIG_HOME/mkit/trust-roots.toml)",
+                        ),
+                    ),
+                ],
+                &["repo_path"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_add",
+        description: "Stage files for the next commit. Pass explicit paths (\".\" stages everything \
+                      non-ignored under the repo root).",
+        hints: (false, false, true),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    (
+                        "files",
+                        json!({ "type": "array", "items": { "type": "string" }, "description": "Paths to stage" }),
+                    ),
+                ],
+                &["repo_path", "files"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_unstage",
+        description: "Unstage changes: with files, restores those index entries from HEAD; without, \
+                      unstages everything (mixed reset). Never touches the working tree.",
+        hints: (false, true, true),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    (
+                        "files",
+                        json!({ "type": "array", "items": { "type": "string" }, "description": "Paths to unstage (omit to unstage all)" }),
+                    ),
+                ],
+                &["repo_path"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_commit",
+        description: "Create an Ed25519-signed commit from the staging index. Requires a signing \
+                      key (mkit_keygen) — commits are always signed.",
+        hints: (false, false, false),
+        schema: || {
+            schema(
+                vec![repo_prop(), ("message", prop("Commit message"))],
+                &["repo_path", "message"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_create_branch",
+        description: "Create a new branch at HEAD.",
+        hints: (false, false, false),
+        schema: || {
+            schema(
+                vec![repo_prop(), ("branch_name", prop("Name of the new branch"))],
+                &["repo_path", "branch_name"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_checkout",
+        description: "Switch HEAD to a branch and restore files.",
+        hints: (false, false, false),
+        schema: || {
+            schema(
+                vec![repo_prop(), ("branch_name", prop("Branch to switch to"))],
+                &["repo_path", "branch_name"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_init",
+        description: "Create a new mkit repository (.mkit/) in repo_path. Run mkit_keygen next — \
+                      commits require a signing key.",
+        hints: (false, false, false),
+        schema: || schema(vec![repo_prop()], &["repo_path"]),
+    },
+    ToolSpec {
+        name: "mkit_keygen",
+        description: "Generate the repo's Ed25519 commit-signing key (.mkit/keys/default.key). \
+                      Refuses to overwrite an existing key.",
+        hints: (false, false, false),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    (
+                        "print_pubkey",
+                        json!({ "type": "boolean", "description": "Also print the public key" }),
+                    ),
+                ],
+                &["repo_path"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_attest",
+        description: "Produce a signed DSSE attestation (in-toto v1 Statement) for a commit. \
+                      Prints the att-id and stores the envelope under .mkit/attestations/.",
+        hints: (false, false, false),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    ("commit", prop("Commit hash to attest (default: HEAD)")),
+                    (
+                        "algorithm",
+                        json!({ "type": "string", "enum": ["ed25519", "secp256k1", "p256"], "description": "Signing algorithm (default: ed25519)" }),
+                    ),
+                    (
+                        "predicate_type",
+                        prop("Predicate-type URI written into the Statement"),
+                    ),
+                    (
+                        "predicate_file",
+                        prop("Path to a JSON file used as the predicate body"),
+                    ),
+                ],
+                &["repo_path"],
+            )
+        },
+    },
+];
+
+fn tool_descriptors() -> Value {
+    Value::Array(
+        TOOLS
+            .iter()
+            .map(|t| {
+                let (read_only, destructive, idempotent) = t.hints;
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "inputSchema": (t.schema)(),
+                    "annotations": {
+                        "readOnlyHint": read_only,
+                        "destructiveHint": destructive,
+                        "idempotentHint": idempotent,
+                        "openWorldHint": false,
+                    },
+                })
+            })
+            .collect(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Tool execution
+// ---------------------------------------------------------------------------
+
+struct CallOutcome {
+    text: String,
+    is_error: bool,
+}
+
+impl CallOutcome {
+    fn err(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            is_error: true,
+        }
+    }
+}
+
+/// `Err(_)` is a protocol-level error (unknown tool); per-call
+/// validation and execution failures come back as `Ok` with
+/// `is_error: true` so the agent sees an explanatory message.
+fn call_tool(name: &str, args: &Value, allowed: Option<&Path>) -> Result<CallOutcome, String> {
+    if !TOOLS.iter().any(|t| t.name == name) {
+        return Err(format!("unknown tool: {name}"));
+    }
+
+    let Some(repo_raw) = args.get("repo_path").and_then(Value::as_str) else {
+        return Ok(CallOutcome::err("missing required argument: repo_path"));
+    };
+    let repo = match validate_repo_path(repo_raw, allowed) {
+        Ok(p) => p,
+        Err(e) => return Ok(CallOutcome::err(e)),
+    };
+
+    let command = match build_argv(name, args) {
+        Ok(a) => a,
+        Err(e) => return Ok(CallOutcome::err(e)),
+    };
+
+    Ok(run_subprocess(&repo, &command))
+}
+
+/// Resolve and (when scoped) confine `repo_path`.
+fn validate_repo_path(raw: &str, allowed: Option<&Path>) -> Result<PathBuf, String> {
+    let resolved = PathBuf::from(raw)
+        .canonicalize()
+        .map_err(|e| format!("invalid repo_path '{raw}': {e}"))?;
+    if let Some(root) = allowed
+        && !resolved.starts_with(root)
+    {
+        return Err(format!(
+            "repo_path '{raw}' is outside the allowed repository '{}'",
+            root.display()
+        ));
+    }
+    if !resolved.is_dir() {
+        return Err(format!("repo_path '{raw}' is not a directory"));
+    }
+    Ok(resolved)
+}
+
+/// Reject values that the child CLI could parse as a flag. mkit's
+/// `add` has no `--` separator, so this is the containment line.
+fn no_dash(value: &str, what: &str) -> Result<(), String> {
+    if value.starts_with('-') {
+        return Err(format!("invalid {what} '{value}': must not start with '-'"));
+    }
+    if value.is_empty() {
+        return Err(format!("invalid {what}: must not be empty"));
+    }
+    Ok(())
+}
+
+fn req_str(args: &Value, key: &str) -> Result<String, String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("missing required argument: {key}"))
+}
+
+fn opt_str(args: &Value, key: &str) -> Option<String> {
+    args.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// Map a tool invocation to a child argv. Every push of a
+/// user-controlled value is preceded by a `no_dash` check unless the
+/// value follows a long flag that takes it as an unambiguous operand.
+/// One arm per tool — long but flat, like the dispatcher in `lib.rs`
+/// (same precedent as `serve.rs` for the line-count allowance).
+#[allow(clippy::too_many_lines)]
+fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    match name {
+        "mkit_status" => out.extend(["status".into(), "--porcelain=v2".into()]),
+        "mkit_diff_unstaged" => out.push("diff".into()),
+        "mkit_diff_staged" => out.extend(["diff".into(), "--staged".into()]),
+        "mkit_diff" => {
+            let target = req_str(args, "target")?;
+            no_dash(&target, "target")?;
+            out.extend(["diff".into(), target]);
+        }
+        "mkit_log" => {
+            out.extend(["log".into(), "--format=json".into(), "-n".into()]);
+            let n = args.get("max_count").and_then(Value::as_u64).unwrap_or(10);
+            out.push(n.to_string());
+            if let Some(rev) = opt_str(args, "rev") {
+                no_dash(&rev, "rev")?;
+                out.push(rev);
+            }
+        }
+        "mkit_show" => {
+            let rev = req_str(args, "revision")?;
+            no_dash(&rev, "revision")?;
+            out.extend(["show".into(), rev]);
+        }
+        "mkit_branch" => out.extend(["branch".into(), "--format=json".into()]),
+        "mkit_cat_object" => {
+            let object = req_str(args, "object")?;
+            no_dash(&object, "object")?;
+            let flag = match opt_str(args, "mode").as_deref() {
+                None | Some("pretty") => "-p",
+                Some("type") => "-t",
+                Some("size") => "-s",
+                Some(other) => {
+                    return Err(format!(
+                        "invalid mode '{other}': expected type, size, or pretty"
+                    ));
+                }
+            };
+            out.extend(["cat-file".into(), flag.into(), object]);
+        }
+        "mkit_verify" => {
+            let rev = req_str(args, "revision")?;
+            no_dash(&rev, "revision")?;
+            out.extend(["verify".into(), rev]);
+        }
+        "mkit_verify_attest" => {
+            out.push("verify-attest".into());
+            if let Some(commit) = opt_str(args, "commit") {
+                no_dash(&commit, "commit")?;
+                out.extend(["--commit".into(), commit]);
+            }
+            if let Some(roots) = opt_str(args, "trust_roots") {
+                no_dash(&roots, "trust_roots")?;
+                out.extend(["--trust-roots".into(), roots]);
+            }
+        }
+        "mkit_add" => {
+            out.push("add".into());
+            let files = args
+                .get("files")
+                .and_then(Value::as_array)
+                .ok_or("missing required argument: files")?;
+            if files.is_empty() {
+                return Err("files must not be empty".into());
+            }
+            for f in files {
+                let f = f.as_str().ok_or("files entries must be strings")?;
+                no_dash(f, "file path")?;
+                out.push(f.into());
+            }
+        }
+        "mkit_unstage" => {
+            let files = args.get("files").and_then(Value::as_array);
+            match files {
+                Some(list) if !list.is_empty() => {
+                    out.extend(["restore".into(), "--staged".into()]);
+                    for f in list {
+                        let f = f.as_str().ok_or("files entries must be strings")?;
+                        no_dash(f, "file path")?;
+                        out.push(f.into());
+                    }
+                }
+                // Bare `reset` = mixed reset of the whole index; the
+                // working tree is never touched.
+                _ => out.push("reset".into()),
+            }
+        }
+        "mkit_commit" => {
+            let message = req_str(args, "message")?;
+            if message.trim().is_empty() {
+                return Err("message must not be empty".into());
+            }
+            out.extend(["commit".into(), "-m".into(), message]);
+        }
+        "mkit_create_branch" => {
+            let branch = req_str(args, "branch_name")?;
+            no_dash(&branch, "branch_name")?;
+            out.extend(["branch".into(), branch]);
+        }
+        "mkit_checkout" => {
+            let branch = req_str(args, "branch_name")?;
+            no_dash(&branch, "branch_name")?;
+            out.extend(["checkout".into(), branch]);
+        }
+        "mkit_init" => out.push("init".into()),
+        "mkit_keygen" => {
+            out.push("keygen".into());
+            if args.get("print_pubkey").and_then(Value::as_bool) == Some(true) {
+                out.push("--print-pubkey".into());
+            }
+        }
+        "mkit_attest" => {
+            out.push("attest".into());
+            if let Some(commit) = opt_str(args, "commit") {
+                no_dash(&commit, "commit")?;
+                out.extend(["--commit".into(), commit]);
+            }
+            if let Some(alg) = opt_str(args, "algorithm") {
+                if !matches!(alg.as_str(), "ed25519" | "secp256k1" | "p256") {
+                    return Err(format!(
+                        "invalid algorithm '{alg}': expected ed25519, secp256k1, or p256"
+                    ));
+                }
+                out.extend(["--algorithm".into(), alg]);
+            }
+            if let Some(uri) = opt_str(args, "predicate_type") {
+                no_dash(&uri, "predicate_type")?;
+                out.extend(["--predicate-type".into(), uri]);
+            }
+            if let Some(file) = opt_str(args, "predicate_file") {
+                no_dash(&file, "predicate_file")?;
+                out.extend(["--predicate-file".into(), file]);
+            }
+        }
+        other => return Err(format!("unknown tool: {other}")),
+    }
+    Ok(out)
+}
+
+/// Run `mkit <argv>` in `repo`, capturing everything. The child is
+/// always this same binary, so server and CLI can never skew.
+fn run_subprocess(repo: &Path, argv: &[String]) -> CallOutcome {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => return CallOutcome::err(format!("cannot locate mkit binary: {e}")),
+    };
+    let output = std::process::Command::new(exe)
+        .args(argv)
+        .current_dir(repo)
+        // Deterministic, capture-friendly child environment: no ANSI,
+        // and no editor fallback (commit always receives -m here, but
+        // belt-and-braces against any future interactive path).
+        .env("NO_COLOR", "1")
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("EDITOR")
+        .env_remove("VISUAL")
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => return CallOutcome::err(format!("failed to run mkit {}: {e}", argv.join(" "))),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let code = output.status.code().unwrap_or(-1);
+
+    if output.status.success() {
+        let mut text = stdout.trim_end().to_string();
+        if text.is_empty() {
+            // Several mkit commands put confirmation prose on stderr
+            // and reserve stdout for machine output; surface it.
+            text = stderr.trim_end().to_string();
+        }
+        if text.is_empty() {
+            text = "(ok — no output)".into();
+        }
+        CallOutcome {
+            text,
+            is_error: false,
+        }
+    } else {
+        let mut text = format!("error: mkit exited {code} ({})", sysexits_name(code));
+        if !stderr.trim().is_empty() {
+            text.push('\n');
+            text.push_str(stderr.trim_end());
+        }
+        if !stdout.trim().is_empty() {
+            text.push('\n');
+            text.push_str(stdout.trim_end());
+        }
+        CallOutcome {
+            text,
+            is_error: true,
+        }
+    }
+}
+
+/// Human label for the BSD sysexits codes documented in docs/CLI.md.
+fn sysexits_name(code: i32) -> &'static str {
+    match code {
+        0 => "ok",
+        1 => "general error",
+        64 => "usage: wrong args or unknown subcommand",
+        65 => "dataerr: malformed input",
+        66 => "noinput: missing or unreadable input",
+        69 => "unavailable: transport could not connect",
+        73 => "cantcreat: cannot create output",
+        75 => "tempfail: transient failure, retry is safe",
+        76 => "protocol error",
+        77 => "noperm: permission denied",
+        78 => "config error",
+        _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_table_is_complete_and_annotated() {
+        let tools = tool_descriptors();
+        let arr = tools.as_array().unwrap();
+        assert_eq!(arr.len(), 18, "tool count is part of the public surface");
+        for t in arr {
+            assert!(t.get("name").is_some());
+            assert!(t.get("description").is_some());
+            assert_eq!(t.pointer("/inputSchema/type").unwrap(), "object");
+            // Every tool is local-only.
+            assert_eq!(t.pointer("/annotations/openWorldHint").unwrap(), false);
+            // repo_path is universal.
+            assert!(t.pointer("/inputSchema/properties/repo_path").is_some());
+        }
+    }
+
+    #[test]
+    fn read_only_tools_are_marked() {
+        let tools = tool_descriptors();
+        for t in tools.as_array().unwrap() {
+            let name = t.get("name").unwrap().as_str().unwrap();
+            let ro = t
+                .pointer("/annotations/readOnlyHint")
+                .unwrap()
+                .as_bool()
+                .unwrap();
+            let expect_ro = matches!(
+                name,
+                "mkit_status"
+                    | "mkit_diff_unstaged"
+                    | "mkit_diff_staged"
+                    | "mkit_diff"
+                    | "mkit_log"
+                    | "mkit_show"
+                    | "mkit_branch"
+                    | "mkit_cat_object"
+                    | "mkit_verify"
+                    | "mkit_verify_attest"
+            );
+            assert_eq!(ro, expect_ro, "readOnlyHint wrong for {name}");
+        }
+    }
+
+    #[test]
+    fn argv_construction_basics() {
+        let argv = build_argv("mkit_status", &json!({})).unwrap();
+        assert_eq!(argv, ["status", "--porcelain=v2"]);
+
+        let argv = build_argv("mkit_commit", &json!({ "message": "hello world" })).unwrap();
+        assert_eq!(argv, ["commit", "-m", "hello world"]);
+
+        let argv = build_argv("mkit_add", &json!({ "files": ["a.txt", "src/b.rs"] })).unwrap();
+        assert_eq!(argv, ["add", "a.txt", "src/b.rs"]);
+    }
+
+    #[test]
+    fn flag_injection_is_rejected() {
+        for (tool, args) in [
+            ("mkit_diff", json!({ "target": "-R" })),
+            ("mkit_show", json!({ "revision": "--help" })),
+            ("mkit_add", json!({ "files": ["-A"] })),
+            ("mkit_checkout", json!({ "branch_name": "-b" })),
+            ("mkit_create_branch", json!({ "branch_name": "-D" })),
+            ("mkit_cat_object", json!({ "object": "--batch" })),
+            ("mkit_log", json!({ "rev": "--graph" })),
+            ("mkit_attest", json!({ "predicate_file": "--force" })),
+        ] {
+            let err = build_argv(tool, &args).unwrap_err();
+            assert!(err.contains("must not start with '-'"), "{tool}: {err}");
+        }
+    }
+
+    #[test]
+    fn unstage_maps_to_restore_or_reset() {
+        let argv = build_argv("mkit_unstage", &json!({})).unwrap();
+        assert_eq!(argv, ["reset"]);
+        let argv = build_argv("mkit_unstage", &json!({ "files": ["a.txt"] })).unwrap();
+        assert_eq!(argv, ["restore", "--staged", "a.txt"]);
+    }
+
+    #[test]
+    fn no_force_flag_ever_emitted() {
+        // The server must never override mkit's data-loss guards.
+        for spec in TOOLS {
+            let args = json!({
+                "repo_path": "/tmp", "target": "x", "revision": "x", "object": "x",
+                "message": "m", "branch_name": "b", "files": ["f"],
+                "commit": "c", "predicate_type": "t", "predicate_file": "p",
+            });
+            if let Ok(argv) = build_argv(spec.name, &args) {
+                assert!(
+                    !argv.iter().any(|a| a == "-f" || a == "--force"),
+                    "{} emits a force flag",
+                    spec.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scope_validation_rejects_outside_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let allowed = root.path().canonicalize().unwrap();
+
+        assert!(validate_repo_path(root.path().to_str().unwrap(), Some(&allowed)).is_ok());
+        let err = validate_repo_path(outside.path().to_str().unwrap(), Some(&allowed)).unwrap_err();
+        assert!(err.contains("outside the allowed repository"));
+        // Unscoped mode allows anything that exists.
+        assert!(validate_repo_path(outside.path().to_str().unwrap(), None).is_ok());
+    }
+
+    #[test]
+    fn initialize_echoes_protocol_version_and_lists_tools() {
+        let init = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05", "capabilities": {} }
+        });
+        let resp = handle_message(&init, None).unwrap();
+        assert_eq!(
+            resp.pointer("/result/protocolVersion").unwrap(),
+            "2024-11-05"
+        );
+        assert_eq!(
+            resp.pointer("/result/serverInfo/name").unwrap(),
+            "mkit-repo"
+        );
+        assert!(resp.pointer("/result/instructions").is_some());
+
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let resp = handle_message(&list, None).unwrap();
+        assert_eq!(
+            resp.pointer("/result/tools")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            18
+        );
+
+        // Notifications produce no response.
+        let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        assert!(handle_message(&note, None).is_none());
+
+        // Unknown methods error.
+        let bogus = json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/list" });
+        let resp = handle_message(&bogus, None).unwrap();
+        assert_eq!(resp.pointer("/error/code").unwrap(), -32601);
+    }
+}

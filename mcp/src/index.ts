@@ -54,7 +54,9 @@ Then, by need:
 - Wire/on-disk formats & design: list_specs, then get_spec "<NAME>" (e.g. OBJECTS, SIGNING, ATTESTATIONS, TRANSPORT, PACKFILE).
 - Implementation: list_crates → list_files "<crate>" → get_file "<path>" (line ranges supported). Search with search_code (Rust source) or search_docs (prose); use mode "word" for natural-language terms, "substring" for exact strings.
 
-All content is version-pinned — omit \`version\` for the latest (list_versions shows what's indexed).`;
+All content is version-pinned — omit \`version\` for the latest (list_versions shows what's indexed).
+
+To OPERATE a local mkit repository (status/add/commit/attest/verify), use the local MCP server that ships inside the CLI instead: \`mkit mcp --repository <path>\` (see get_command "mcp"). This server is documentation/source only.`;
 
 const err = (text: string) => ({ content: [{ type: "text" as const, text }], isError: true });
 const ok = (text: string) => ({ content: [{ type: "text" as const, text }] });

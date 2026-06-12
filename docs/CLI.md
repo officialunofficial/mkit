@@ -645,6 +645,30 @@ Remote / sync:
   the monolithic pack) or "manifest + all shards". Requires building
   the binary with `--features pack-shards`.
 
+Agent integration:
+
+- `mkit mcp [--repository <path>]` — start a Model Context Protocol
+  server on stdio so LLM agents (Claude, Cursor, etc.) can drive local
+  mkit repositories through structured tool calls instead of raw shell.
+  Exposes a conservative tool surface: status / diff (unstaged, staged,
+  vs target) / log / show / branch / cat-file inspection, staging
+  (`add`, unstage), signed `commit`, branch create/checkout, `init`,
+  `keygen`, plus the differentiators — `verify` (signature check),
+  `attest` (produce a DSSE attestation), and `verify-attest`
+  (trust-roots-gated verification). Every tool takes an explicit
+  `repo_path`; `--repository <path>` confines all calls (symlink
+  resolved) to that root. The server runs **no network operations**
+  (push/pull/fetch/clone are not exposed), performs no history surgery
+  (merge/rebase/cherry-pick are not exposed), and **never passes
+  `-f`/`--force`** — mkit's data-loss guards stay in force, and a
+  "refuses without -f" error is surfaced to the agent verbatim. Tool
+  results carry the child command's output and its sysexits code on
+  failure. Register with an MCP client, e.g.:
+
+  ```sh
+  claude mcp add mkit-repo -- mkit mcp --repository /path/to/repo
+  ```
+
 Config / keys / version:
 
 - `mkit keygen` — generate a new Ed25519 signing keypair.

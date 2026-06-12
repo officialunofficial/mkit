@@ -165,6 +165,21 @@ mkit pack-shard <hash>   # Reed-Solomon erasure-code a stored pack into shards
                          # (requires the `pack-shards` build feature)
 ```
 
+## Prefer MCP over raw shell (when available)
+
+The CLI ships a local MCP server: `mkit mcp [--repository <path>]`. If your
+harness supports MCP, register it and drive repositories through structured
+tool calls (`mkit_status`, `mkit_add`, `mkit_commit`, `mkit_attest`,
+`mkit_verify`, …) instead of shelling out — inputs are validated, no
+interactive paths exist, and destructive guards can't be overridden (the
+server never passes `-f`):
+
+```sh
+claude mcp add mkit-repo -- mkit mcp --repository /path/to/repo
+```
+
+The shell rules below still apply whenever you do run `mkit` directly.
+
 ## Rules for agents
 
 - **Run `mkit keygen` before the first commit** (or use an Ed25519 keystore key).
