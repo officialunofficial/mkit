@@ -1,5 +1,7 @@
-//! `mkit rebase` must use user-scoped `user.identity` for rewritten commits,
-//! matching `commit`, `merge`, and `cherry-pick` author resolution.
+//! `mkit rebase` replays preserve the ORIGINAL commit's author and
+//! timestamp (git parity: a replay re-signs but never re-attributes).
+//! `user.identity` config is not consulted during replay at all — it
+//! applies to NEW commits (`commit`, `merge`), not rewritten ones.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -56,7 +58,7 @@ fn resolve_head(root: &std::path::Path) -> String {
 }
 
 #[test]
-fn rebase_uses_config_user_identity_for_rewritten_commits() {
+fn rebase_preserves_original_author_despite_user_identity() {
     let td = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
     assert!(
@@ -112,29 +114,48 @@ fn rebase_uses_config_user_identity_for_rewritten_commits() {
             .status
             .success()
     );
+    // Capture the original authorship before the replay.
+    let mkit_dir = td.path().join(".mkit");
+    let store = ObjectStore::open(td.path()).unwrap();
+    let orig_tip = refs::read_ref(&mkit_dir, "feature").unwrap().unwrap();
+    let Object::Commit(orig) = store.read_object(&orig_tip).unwrap() else {
+        panic!("original tip is not a commit");
+    };
+
     let out = run_in_with_xdg(td.path(), xdg.path(), &["rebase", "main"]);
     assert!(out.status.success(), "rebase failed: {out:?}");
 
-    let mkit_dir = td.path().join(".mkit");
     let tip = refs::read_ref(&mkit_dir, "feature").unwrap().unwrap();
-    let store = ObjectStore::open(td.path()).unwrap();
+    assert_ne!(tip, orig_tip, "rebase must produce a new commit");
     let Object::Commit(c) = store.read_object(&tip).unwrap() else {
         panic!("tip is not a commit");
     };
 
-    assert_eq!(c.author.kind, IdentityKind::Ed25519);
+    // Replay preserves the original author + timestamp; the configured
+    // user.identity (0xBB) must NOT re-attribute the rewritten commit.
+    assert_eq!(c.author, orig.author, "replay must preserve the author");
     assert_eq!(
-        c.author.bytes, identity_pubkey,
-        "rebased commit author must match user-scoped user.identity"
+        c.timestamp, orig.timestamp,
+        "replay must preserve the original timestamp"
     );
     assert_ne!(
-        c.signer, identity_pubkey,
-        "rebase signer should remain the generated signing key"
+        c.author.bytes, identity_pubkey,
+        "user.identity must not re-attribute replayed commits"
     );
+    assert_eq!(c.author.kind, IdentityKind::Ed25519);
+    // The SIGNER half of the split: the replayed commit is signed by
+    // the rebaser's repo key (and verifies under it) — a regression
+    // that kept or forged the original signature would fail here.
+    let kp = mkit_core::sign::load_key(&mkit_dir.join("keys/default.key")).unwrap();
+    assert_eq!(
+        c.signer, kp.public.0,
+        "replayed commit must be signed by the rebaser's key"
+    );
+    assert!(mkit_core::sign::verify_commit(&c).is_ok());
 }
 
 #[test]
-fn rebase_rejects_invalid_user_identity_before_mutating_state() {
+fn rebase_ignores_invalid_user_identity_on_replay() {
     let td = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
     assert!(
@@ -188,38 +209,21 @@ fn rebase_rejects_invalid_user_identity_before_mutating_state() {
     let resolved_head_before = resolve_head(td.path());
     let index_before = fs::read(td.path().join(".mkit/index")).expect("index before");
 
+    // Replays never consult user.identity, so a malformed value cannot
+    // block (or alter) the rebase — authorship comes from the original
+    // commits.
+    let _ = (head_before, resolved_head_before, index_before);
     let out = run_in_with_xdg(td.path(), xdg.path(), &["rebase", "main"]);
-    assert!(!out.status.success(), "rebase unexpectedly succeeded");
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("author:") || stderr.contains("user.identity"),
-        "expected author/user.identity error, got: {stderr}"
+        out.status.success(),
+        "rebase must ignore user.identity entirely: {out:?}"
     );
     assert!(
         !td.path().join(".mkit/rebase-apply").exists(),
-        "invalid author must fail before writing rebase state"
-    );
-    assert_eq!(
-        fs::read_to_string(td.path().join(".mkit/HEAD")).expect("HEAD after"),
-        head_before,
-        "invalid author must not detach HEAD"
-    );
-    assert_eq!(
-        resolve_head(td.path()),
-        resolved_head_before,
-        "invalid author must not move the current branch"
-    );
-    assert_eq!(
-        fs::read(td.path().join(".mkit/index")).expect("index after"),
-        index_before,
-        "invalid author must not rewrite the index"
+        "completed rebase must clear its state"
     );
     assert!(
-        td.path().join("feature.txt").exists(),
-        "invalid author must not restore away the feature worktree"
-    );
-    assert!(
-        !td.path().join("main.txt").exists(),
-        "invalid author must fail before restoring the target worktree"
+        td.path().join("feature.txt").exists() && td.path().join("main.txt").exists(),
+        "rebased worktree must contain both branches' files"
     );
 }

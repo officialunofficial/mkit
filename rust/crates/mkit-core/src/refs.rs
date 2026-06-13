@@ -535,12 +535,54 @@ pub fn write_remote_ref(mkit_dir: &Path, remote: &str, branch: &str, h: &Hash) -
     cas_write(&path, &wire, branch, RefWriteCondition::Any)
 }
 
+/// Delete a remote-tracking branch ref (e.g. after the upstream
+/// deleted the branch). Errors with [`RefError::NotFound`] if absent.
+pub fn delete_remote_ref(mkit_dir: &Path, remote: &str, branch: &str) -> RefResult<()> {
+    validate_remote_and_branch(remote, branch)?;
+    let path = ref_path(mkit_dir, &remote_ref_dir(remote), branch);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(RefError::NotFound(format!("{remote}/{branch}")))
+        }
+        Err(e) => Err(RefError::Io(e)),
+    }
+}
+
 /// List all remote-tracking refs for one remote.
 pub fn list_remote_refs(mkit_dir: &Path, remote: &str) -> RefResult<Vec<Ref>> {
     if !validate_ref_name(remote) {
         return Err(RefError::InvalidRefName(remote.to_string()));
     }
     list_refs_under(mkit_dir, &remote_ref_dir(remote))
+}
+
+/// List the remote names that have at least one tracking ref on disk
+/// (the immediate subdirectories of `refs/remotes/`), sorted. A
+/// missing `refs/remotes/` yields an empty list. Entries whose names
+/// fail the ref grammar are skipped (consistent with how malformed
+/// ref files are skipped by [`list_refs`]).
+pub fn list_remote_names(mkit_dir: &Path) -> RefResult<Vec<String>> {
+    let dir = mkit_dir.join(REMOTES_DIR);
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(RefError::Io(e)),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(RefError::Io)?;
+        if !entry.file_type().map_err(RefError::Io)?.is_dir() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str()
+            && validate_ref_name(name)
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 // -----------------------------------------------------------------------------

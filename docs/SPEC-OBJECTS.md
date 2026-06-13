@@ -168,7 +168,7 @@ repeat parent_count:
     [32 bytes parent_hash]
 [Identity author]                         see §9
 [u32 LE message_len]
-[message_len bytes message]               UTF-8, NOT null-terminated
+[message_len bytes message]               UTF-8 by convention (see below), NOT null-terminated
 [u64 LE timestamp]                        seconds since Unix epoch
 [32 bytes signer]                         Ed25519 public key
 [32 bytes message_hash]                   may be zero (see §5.1)
@@ -181,6 +181,11 @@ Differences from mkit:
 - `timestamp: u32` → `u64`. Avoids 2106 overflow (red-team 7d / Team Lead
   7d).
 - Relative field order of `signer` and `message` is preserved.
+
+Message bytes are UTF-8 **by convention**: writers SHOULD emit UTF-8,
+but readers MUST NOT reject non-UTF-8 message bytes (matching every
+existing implementation; load-bearing for histories imported from
+systems with legacy encodings).
 
 ### 5.1 `message_hash` / `content_digest`
 

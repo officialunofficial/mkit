@@ -18,6 +18,12 @@ const ACCEPTED_SCHEMES: &[(&str, &str)] = &[
     ("mkit+s3://", "s3"),
     ("mkit+ssh://", "ssh"),
     ("mkit+memory://", "memory"),
+    // Git-bridge remotes (SPEC-GIT-BRIDGE / SPEC-GIT-IMPORT). Native
+    // push/pull/fetch/clone REFUSE these with a pointer to the
+    // `mkit git` subcommands — the transports are not interchangeable.
+    ("git+https://", "git"),
+    ("git+ssh://", "git"),
+    ("git+file://", "git"),
 ];
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -153,7 +159,13 @@ pub fn run(args: &[String]) -> u8 {
                 return emit_err(&format!("remote '{name}' not found"), exit::GENERAL_ERROR);
             }
             match config::write(&cwd, &cfg) {
-                Ok(()) => exit::OK,
+                Ok(()) => {
+                    // Stale tracking refs would shadow a future remote
+                    // reusing the name; objects stay (gc owns them).
+                    remove_tracking_refs(&cwd, &name);
+                    warn_orphaned_bridge_state(&cwd, &name);
+                    exit::OK
+                }
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
             }
         }
@@ -183,10 +195,82 @@ pub fn run(args: &[String]) -> u8 {
                 }
             }
             match config::write(&cwd, &cfg) {
-                Ok(()) => exit::OK,
+                Ok(()) => {
+                    move_tracking_refs(&cwd, &old, &new);
+                    move_bridge_state(&cwd, &old, &new);
+                    exit::OK
+                }
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
             }
         }
+    }
+}
+
+/// Best-effort move of `refs/remotes/<old>/` to `refs/remotes/<new>/`
+/// after a rename. Failure is reported but non-fatal: the config
+/// rename already happened, and a follow-up fetch repopulates.
+fn move_tracking_refs(cwd: &std::path::Path, old: &str, new: &str) {
+    let remotes = cwd
+        .join(mkit_core::MKIT_DIR)
+        .join(mkit_core::refs::REMOTES_DIR);
+    let (src, dst) = (remotes.join(old), remotes.join(new));
+    if src.is_dir()
+        && let Err(e) = std::fs::rename(&src, &dst)
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "warning: could not move tracking refs {old} -> {new}: {e}; \
+             run `mkit fetch {new}` to repopulate"
+        );
+    }
+}
+
+/// Bridge state under `.mkit/git/<name>/` follows a rename so leases,
+/// maps, and the staging mirror stay bound to the same remote name.
+fn move_bridge_state(cwd: &std::path::Path, old: &str, new: &str) {
+    let base = cwd.join(mkit_core::MKIT_DIR).join("git");
+    let (src, dst) = (base.join(old), base.join(new));
+    if src.is_dir()
+        && let Err(e) = std::fs::rename(&src, &dst)
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "warning: could not move git-bridge state {old} -> {new}: {e}"
+        );
+    }
+}
+
+/// Removing a remote leaves its bridge state in place (it holds the
+/// staging mirror + retained provenance, which are durable artifacts,
+/// not caches) — but say so.
+fn warn_orphaned_bridge_state(cwd: &std::path::Path, name: &str) {
+    let dir = cwd.join(mkit_core::MKIT_DIR).join("git").join(name);
+    if dir.is_dir() {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "note: git-bridge state for '{name}' remains at .mkit/git/{name}/ \
+             (staging mirror + provenance); delete it manually if unwanted"
+        );
+    }
+}
+
+/// Best-effort removal of `refs/remotes/<name>/` after a remove.
+fn remove_tracking_refs(cwd: &std::path::Path, name: &str) {
+    let dir = cwd
+        .join(mkit_core::MKIT_DIR)
+        .join(mkit_core::refs::REMOTES_DIR)
+        .join(name);
+    if dir.is_dir()
+        && let Err(e) = std::fs::remove_dir_all(&dir)
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "warning: could not remove tracking refs for '{name}': {e}"
+        );
     }
 }
 

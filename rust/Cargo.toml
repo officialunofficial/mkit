@@ -8,6 +8,7 @@ resolver = "3"
 members = [
     "crates/mkit-core",
     "crates/mkit-attest",
+    "crates/mkit-git-bridge",
     "crates/mkit-keystore",
     "fuzz",
     "crates/mkit-transport-memory",

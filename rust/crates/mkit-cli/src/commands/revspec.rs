@@ -124,7 +124,31 @@ fn resolve_base(store: &ObjectStore, mkit_dir: &Path, base: &str) -> Result<Hash
         };
     }
 
-    // 2. Branch (refs/heads), then tag (refs/tags). `read_ref` /
+    // 2. Explicit full ref paths: refs/heads/<b>, refs/tags/<t>,
+    //    refs/remotes/<r>/<b>. These are unambiguous and checked
+    //    before any short-form guessing.
+    if let Some(short) = base.strip_prefix("refs/heads/") {
+        if let Ok(Some(h)) = refs::read_ref(mkit_dir, short) {
+            return Ok(h);
+        }
+        return Err(RevError::Unknown(base.to_string()));
+    }
+    if let Some(short) = base.strip_prefix("refs/tags/") {
+        if let Ok(Some(h)) = refs::read_tag(mkit_dir, short) {
+            return Ok(h);
+        }
+        return Err(RevError::Unknown(base.to_string()));
+    }
+    if let Some(rest) = base.strip_prefix("refs/remotes/") {
+        if let Some((remote, branch)) = rest.split_once('/')
+            && let Ok(Some(h)) = refs::read_remote_ref(mkit_dir, remote, branch)
+        {
+            return Ok(h);
+        }
+        return Err(RevError::Unknown(base.to_string()));
+    }
+
+    // 3. Branch (refs/heads), then tag (refs/tags). `read_ref` /
     //    `read_tag` validate the name, returning `InvalidRefName` for a
     //    bad ref name — which we treat as "not a ref" and fall through
     //    to hash parsing (a bare hash is not a valid ref name anyway).
@@ -135,9 +159,16 @@ fn resolve_base(store: &ObjectStore, mkit_dir: &Path, base: &str) -> Result<Hash
         if let Ok(Some(h)) = refs::read_tag(mkit_dir, base) {
             return Ok(h);
         }
+        // 3b. Remote-tracking short form `<remote>/<branch>` (git's
+        //     resolution order also places this after heads/tags).
+        if let Some((remote, branch)) = base.split_once('/')
+            && let Ok(Some(h)) = refs::read_remote_ref(mkit_dir, remote, branch)
+        {
+            return Ok(h);
+        }
     }
 
-    // 3. Full 64-hex hash that exists in the store.
+    // 4. Full 64-hex hash that exists in the store.
     if base.len() == HEX_LEN
         && let Ok(h) = hash::from_hex(base)
     {
@@ -147,7 +178,7 @@ fn resolve_base(store: &ObjectStore, mkit_dir: &Path, base: &str) -> Result<Hash
         return Err(RevError::Unknown(base.to_string()));
     }
 
-    // 4. Short hex prefix.
+    // 5. Short hex prefix.
     if base.len() >= MIN_SHORT_HASH && base.len() < HEX_LEN && is_hex(base) {
         return resolve_short_hash(store, base);
     }

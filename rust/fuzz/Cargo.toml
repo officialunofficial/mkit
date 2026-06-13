@@ -37,6 +37,7 @@ cargo-fuzz = true
 arbitrary = "1"
 buffa = "0.7.1"
 mkit-core = { path = "../crates/mkit-core" }
+mkit-git-bridge = { path = "../crates/mkit-git-bridge" }
 mkit-keystore = { path = "../crates/mkit-keystore", features = ["fuzzing"] }
 mkit-rpc = { path = "../crates/mkit-rpc", features = ["arbitrary"] }
 tempfile = "3"
@@ -95,3 +96,27 @@ required-features = ["libfuzzer"]
 # in each file. The shim below exposes them as `#[test]`s.
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "git_commit_parse"
+path = "fuzz_targets/git_commit_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "git_tag_parse"
+path = "fuzz_targets/git_tag_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "git_tree_parse"
+path = "fuzz_targets/git_tree_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

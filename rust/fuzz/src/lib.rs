@@ -140,6 +140,35 @@ pub fn tree_one_iteration(input: &[u8]) {
     let _ = mkit_core::serialize::deserialize(input);
 }
 
+/// Apply the git-bridge import parsers against `input` — the
+/// untrusted-input boundary of `mkit git import` (SPEC-GIT-IMPORT §2).
+/// These accept arbitrary upstream bytes, so they must never panic,
+/// over-allocate, or hang on adversarial input.
+pub fn git_commit_parse_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(c) = mkit_git_bridge::gitparse::parse_commit(input) {
+        // Real invariant: the identity is a slice of the input, so it
+        // can never exceed the input length.
+        assert!(c.author.identity.len() <= input.len());
+    }
+}
+
+/// Apply the git tag parser against `input`.
+pub fn git_tag_parse_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let _ = mkit_git_bridge::gitparse::parse_tag(input);
+}
+
+/// Apply the git tree parser + mode classifier against `input`.
+pub fn git_tree_parse_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(entries) = mkit_git_bridge::gitparse::parse_tree(input) {
+        for e in entries {
+            let _ = mkit_git_bridge::gitparse::map_mode(&e.mode);
+        }
+    }
+}
+
 /// Apply the encrypted software-key record decoder against `input`.
 pub fn software_key_record_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
@@ -231,6 +260,41 @@ pub fn run_iterated_unit(body: fn(&[u8])) -> Result<(), GuardrailError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unit_git_commit_parse() {
+        run_iterated_unit(git_commit_parse_one_iteration).unwrap();
+        // Fixed structured cases: valid, truncated, continuation-heavy.
+        for case in [
+            &b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor A <a@x> 5 +0000\ncommitter A <a@x> 5 +0000\n\nm"[..],
+            b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nauthor",
+            b"gpgsig x\n a\n b\n c\n\nm",
+        ] {
+            run_one(case, git_commit_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_git_tag_parse() {
+        run_iterated_unit(git_tag_parse_one_iteration).unwrap();
+        for case in [
+            &b"object ce013625030ba8dba906f756967f9e9ca394464a\ntype commit\ntag v1\n\nm"[..],
+            b"object zz\ntype commit\ntag v1\n\nm",
+            b"\n\n",
+        ] {
+            run_one(case, git_tag_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_git_tree_parse() {
+        run_iterated_unit(git_tree_parse_one_iteration).unwrap();
+        let mut entry = b"100644 a\x00".to_vec();
+        entry.extend_from_slice(&[9u8; 20]);
+        for case in [&entry[..], b"160000 sub\x00short", b"77 x"] {
+            run_one(case, git_tree_parse_one_iteration).unwrap();
+        }
+    }
 
     /// Guardrail #1: MAX_ITER caps every PRNG run at 100.
     #[test]

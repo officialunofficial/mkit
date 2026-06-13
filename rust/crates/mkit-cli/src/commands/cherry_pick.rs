@@ -14,7 +14,6 @@
 //! `ORIG_HEAD`.
 
 use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use mkit_core::hash::Hash;
@@ -140,11 +139,17 @@ fn start(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore,
         return emit_err(&e, exit::GENERAL_ERROR);
     }
 
-    let commit_hash =
-        match create_commit(cwd, store, result.tree_hash, ours, &result.original_message) {
-            Ok(h) => h,
-            Err(code) => return code,
-        };
+    let commit_hash = match create_commit(
+        cwd,
+        store,
+        result.tree_hash,
+        ours,
+        &result.original_message,
+        target,
+    ) {
+        Ok(h) => h,
+        Err(code) => return code,
+    };
     if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
@@ -207,7 +212,14 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
         Ok(None) => state.orig_head,
         Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
     };
-    let commit_hash = match create_commit(cwd, store, tree_hash, parent, &state.message) {
+    let commit_hash = match create_commit(
+        cwd,
+        store,
+        tree_hash,
+        parent,
+        &state.message,
+        state.cherry_pick_head,
+    ) {
         Ok(h) => h,
         Err(code) => return code,
     };
@@ -311,6 +323,7 @@ fn create_commit(
     tree_hash: Hash,
     parent: Hash,
     message: &[u8],
+    picked: Hash,
 ) -> Result<Hash, u8> {
     let cfg = config::read_or_default(cwd)
         .map_err(|e| emit_err(&format!("config: {e}"), exit::CONFIG_ERROR))?;
@@ -319,11 +332,18 @@ fn create_commit(
     let signer_public = signer
         .public_key()
         .map_err(|(msg, code)| emit_err(&msg, code))?;
-    let author = super::commit::resolve_author(None, &cfg.user_identity, &signer_public)
-        .map_err(|e| emit_err(&format!("author: {e}"), exit::CONFIG_ERROR))?;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    // A replay keeps the picked commit's authorship + timestamp (the
+    // fresh signature/signer mark the replay), matching git.
+    let (author, timestamp) = match store.read_object(&picked) {
+        Ok(Object::Commit(c)) => (c.author, c.timestamp),
+        Ok(_) => return Err(emit_err("picked object is not a commit", exit::DATAERR)),
+        Err(e) => {
+            return Err(emit_err(
+                &format!("read picked commit: {e}"),
+                exit::GENERAL_ERROR,
+            ));
+        }
+    };
     let mut unsigned = Commit::new_unannotated(
         tree_hash,
         vec![parent],

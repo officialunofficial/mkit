@@ -181,6 +181,16 @@ commands:
                     commit/branch + verify/attest); --repository confines
                     tool calls to that path
   pack-shard <hash>  Encode a stored pack into Reed-Solomon shards (feature: pack-shards)
+  git export <dest>  Export refs to a git mirror, one-way; --passthrough
+                    publishes an imported repo as a true git fork (feature: git-bridge)
+  git import <url> [<dir>]  Import a git upstream as a signed downstream fork (feature: git-bridge)
+  git fetch|pull     Update refs/remotes/<name>/* and imported tags from the
+                    upstream (locally-moved tags are never clobbered);
+                    pull also fast-forwards the current branch (feature: git-bridge)
+  git verify         Verify bridge state against the local store
+                    (--fork-audit re-derives referenced content) (feature: git-bridge)
+  git status         Show bridge state dirs: direction, endpoints, key, refs (feature: git-bridge)
+  git format-patch <range>  Render native commits as `git am`-able patches (feature: git-bridge)
   blame [--format=json] <file>
                     Show line-level commit attribution (JSONL with --format=json)
   verify <rev>      Verify the signature on a commit, remix, or signed tag

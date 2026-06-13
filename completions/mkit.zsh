@@ -58,6 +58,7 @@ _mkit() {
         'serve:Start SSH transport server (internal)'
         'mcp:Start a Model Context Protocol server on stdio for LLM agents'
         'pack-shard:Encode a stored pack into Reed-Solomon shards'
+        'git:Git-bridge subcommands (git export, feature-gated)'
         'blame:Show line-level commit attribution'
         'verify:Verify the signature on a commit'
         'attest:Produce a signed DSSE attestation for a commit'
@@ -317,6 +318,24 @@ _mkit() {
                         '--force[overwrite existing shards]' \
                         '--help[show help]' \
                         '1:hash:'
+                    ;;
+                git)
+                    _arguments \
+                        '--remote-name[bridge state name (export: mirror, import: upstream)]:name:' \
+                        '*--ref[full ref name to export]:ref:' \
+                        '--no-attest[skip provenance attestations]' \
+                        '--algorithm[attestation algorithm]:alg:(ed25519 secp256k1 p256)' \
+                        '--signer[attestation signer kind]:kind:(repo-key external keystore)' \
+                        '--key[import signing key path]:path:_files' \
+                        '--json[machine-readable output]' \
+                        '--passthrough[fork mode: re-emit imported objects as original sha1s]' \
+                        '--fork-audit[re-derive referenced content during verify]' \
+                        '--stdout[print patches to stdout]' \
+                        '-o[patch output directory]:dir:_files -/' \
+                        '--output-directory[patch output directory]:dir:_files -/' \
+                        '--help[show help]' \
+                        '1:subcommand:(export import fetch pull verify status format-patch)' \
+                        '2:dest:_files -/'
                     ;;
                 attest)
                     _arguments \

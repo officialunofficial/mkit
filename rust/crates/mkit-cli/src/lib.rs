@@ -114,6 +114,18 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "stash" => commands::stash::run(&rest),
         "blame" => commands::blame::run(&rest),
         "serve" => commands::serve::run(&rest),
+        #[cfg(feature = "git-bridge")]
+        "git" => commands::git::run(&rest),
+        #[cfg(not(feature = "git-bridge"))]
+        "git" => {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "error: the git bridge is not compiled into this binary; \
+                 rebuild with `--features git-bridge` (see docs/SPEC-GIT-BRIDGE.md)"
+            );
+            exit::UNAVAILABLE
+        }
         "sparse-checkout" => commands::sparse_checkout::run(&rest),
         #[cfg(feature = "pack-shards")]
         "pack-shard" => commands::pack_shard::run(&rest),

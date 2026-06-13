@@ -38,6 +38,12 @@ pub fn short_identity(id: &mkit_core::Identity) -> String {
             let prefix: String = s.chars().take(8).collect();
             format!("did:key:{prefix}")
         }
+        // Printable opaque identities (e.g. an imported git
+        // `Name <email>` carried verbatim) render as their text — the
+        // hex fallback below is for genuinely binary payloads.
+        mkit_core::IdentityKind::Opaque if printable_text(&id.bytes).is_some() => {
+            printable_text(&id.bytes).unwrap_or_default().to_owned()
+        }
         kind => {
             let kind_name = match kind {
                 mkit_core::IdentityKind::Ed25519 => "ed25519",
@@ -53,6 +59,13 @@ pub fn short_identity(id: &mkit_core::Identity) -> String {
             format!("{kind_name}:{hex}")
         }
     }
+}
+
+/// The payload as text iff it is valid UTF-8 with no control
+/// characters (terminal-safe to print verbatim).
+fn printable_text(bytes: &[u8]) -> Option<&str> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    (!s.is_empty() && !s.chars().any(char::is_control)).then_some(s)
 }
 
 /// Full-detail rendering of an [`mkit_core::Identity`] suitable for

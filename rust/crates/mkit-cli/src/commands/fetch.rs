@@ -1,6 +1,6 @@
-//! `mkit fetch` — like `pull` but does NOT move HEAD. Downloads every
-//! object reachable from each remote ref into the local object store
-//! and updates `refs/heads/<name>`.
+//! `mkit fetch [<remote>]` — like `pull` but does NOT move HEAD.
+//! Downloads every object reachable from each remote ref and updates
+//! the `refs/remotes/<remote>/<name>` tracking refs.
 
 use std::io::Write;
 
@@ -16,13 +16,17 @@ use crate::remote_dispatch;
     name = "mkit fetch",
     about = "Download from the configured remote without merging."
 )]
-struct FetchOpts {}
+struct FetchOpts {
+    /// Named remote to fetch from (default: the flat default remote).
+    remote: Option<String>,
+}
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    if let Err(code) = clap_shim::parse::<FetchOpts>("mkit fetch", args) {
-        return code;
-    }
+    let opts = match clap_shim::parse::<FetchOpts>("mkit fetch", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -31,16 +35,18 @@ pub fn run(args: &[String]) -> u8 {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
-    let endpoint = cfg.merged.remote_endpoint.trim();
-    if endpoint.is_empty() {
+    let Some(resolved) = config::resolve_remote(&cfg, opts.remote.as_deref().unwrap_or("")) else {
         return emit_err(
-            "no remote configured — use `mkit remote add <url>`",
+            &match opts.remote.as_deref() {
+                Some(name) => format!("unknown remote '{name}'"),
+                None => "no remote configured — use `mkit remote add <url>`".to_owned(),
+            },
             exit::CONFIG_ERROR,
         );
-    }
-    let repo_chosen = cfg.repo.remote_endpoint.trim() == endpoint;
-    match remote_dispatch::open_trusted(endpoint, repo_chosen, &cfg) {
-        Ok(tx) => match remote_dispatch::fetch_all(&cwd, tx.as_ref()) {
+    };
+    let endpoint = resolved.endpoint.as_str();
+    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, &cfg) {
+        Ok(tx) => match remote_dispatch::fetch_all(&cwd, tx.as_ref(), &resolved.name) {
             Ok(n) => {
                 let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(stderr, "fetched {n} ref(s) from {endpoint}");

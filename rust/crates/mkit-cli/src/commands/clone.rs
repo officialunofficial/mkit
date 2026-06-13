@@ -102,7 +102,7 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     let pull_outcome = match remote_dispatch::open(url) {
-        Ok(tx) => remote_dispatch::pull_all(&target, tx.as_ref()),
+        Ok(tx) => remote_dispatch::pull_all(&target, tx.as_ref(), "default"),
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };
     let n = match pull_outcome {

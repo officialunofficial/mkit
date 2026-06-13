@@ -52,6 +52,28 @@ pub fn run(args: &[String]) -> u8 {
             Err(e) => return emit_err(&format!("list tags: {e}"), exit::GENERAL_ERROR),
         }
     }
+    // Remote-tracking refs are listed in the unfiltered view (like
+    // git show-ref); --heads/--tags keep their narrow meaning.
+    if !opts.heads && !opts.tags {
+        match refs::list_remote_names(&mkit_dir) {
+            Ok(remotes) => {
+                for remote in remotes {
+                    match refs::list_remote_refs(&mkit_dir, &remote) {
+                        Ok(rs) => {
+                            collect(&mut lines, &rs, &format!("refs/remotes/{remote}/"));
+                        }
+                        Err(e) => {
+                            return emit_err(
+                                &format!("list remote refs: {e}"),
+                                exit::GENERAL_ERROR,
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => return emit_err(&format!("list remotes: {e}"), exit::GENERAL_ERROR),
+        }
+    }
     lines.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut stdout = std::io::stdout().lock();

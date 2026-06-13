@@ -62,6 +62,9 @@ jobs:
           tool: cargo-semver-checks
 
       # The publishable LIBRARY crates whose API we guard. Excluded: mkit-cli
+      # TODO(post-merge): add -p mkit-git-bridge once it exists on the
+      # baseline branch (cargo-semver-checks builds the base rev, where
+      # the crate is absent until PR #330 merges).
       # (the `mkit` binary — published for `cargo install`, but its lib surface
       # is unstable CLI internals we intentionally do NOT semver-guard) and
       # mkit-wasm (npm-only). `--baseline-rev` builds the base branch's API for

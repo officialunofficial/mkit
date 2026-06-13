@@ -56,7 +56,7 @@ fn push_pull_transfers_full_object_closure_via_memory_transport() {
     assert!(pushed >= 1);
 
     // Pull remote → bob.
-    let pulled = pull_all(bob.path(), tx.as_ref()).expect("pull");
+    let pulled = pull_all(bob.path(), tx.as_ref(), "default").expect("pull");
     assert_eq!(pulled, pushed);
 
     // Alice and Bob now hold exactly the same object set reachable
@@ -109,7 +109,7 @@ fn fetch_all_does_not_move_bob_head() {
     let bob_mkit = bob.path().join(".mkit");
     let head_before = fs::read_to_string(bob_mkit.join("HEAD")).unwrap_or_default();
 
-    let n = fetch_all(bob.path(), tx.as_ref()).expect("fetch");
+    let n = fetch_all(bob.path(), tx.as_ref(), "default").expect("fetch");
     assert!(n >= 1);
 
     // HEAD unchanged by fetch.
@@ -152,7 +152,7 @@ fn fetch_all_does_not_overwrite_local_branch() {
     let bob_mkit = bob.path().join(".mkit");
     let bob_before = refs::read_ref(&bob_mkit, "main").unwrap().unwrap();
 
-    let n = fetch_all(bob.path(), tx.as_ref()).expect("fetch");
+    let n = fetch_all(bob.path(), tx.as_ref(), "default").expect("fetch");
     assert!(n >= 1);
 
     let bob_after = refs::read_ref(&bob_mkit, "main").unwrap().unwrap();
@@ -183,7 +183,7 @@ fn pull_all_fast_forwards_current_branch() {
 
     let tx: Arc<MemoryTransport> = Arc::new(MemoryTransport::new());
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
-    pull_all(bob.path(), tx.as_ref()).expect("initial pull");
+    pull_all(bob.path(), tx.as_ref(), "default").expect("initial pull");
 
     fs::write(alice.path().join("a.txt"), b"v2").unwrap();
     assert!(run_in(alice.path(), &["add", "."]).status.success());
@@ -194,7 +194,7 @@ fn pull_all_fast_forwards_current_branch() {
     );
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
 
-    pull_all(bob.path(), tx.as_ref()).expect("fast-forward pull");
+    pull_all(bob.path(), tx.as_ref(), "default").expect("fast-forward pull");
 
     let alice_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
         .unwrap()
@@ -226,7 +226,7 @@ fn pull_all_refuses_divergent_current_branch() {
 
     let tx: Arc<MemoryTransport> = Arc::new(MemoryTransport::new());
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
-    pull_all(bob.path(), tx.as_ref()).expect("initial pull");
+    pull_all(bob.path(), tx.as_ref(), "default").expect("initial pull");
 
     fs::write(alice.path().join("a.txt"), b"alice v2").unwrap();
     assert!(run_in(alice.path(), &["add", "."]).status.success());
@@ -248,7 +248,7 @@ fn pull_all_refuses_divergent_current_branch() {
         .unwrap()
         .unwrap();
 
-    let err = pull_all(bob.path(), tx.as_ref()).unwrap_err();
+    let err = pull_all(bob.path(), tx.as_ref(), "default").unwrap_err();
     assert!(matches!(err, DispatchError::NonFastForwardPull { .. }));
     assert_eq!(
         refs::read_ref(&bob.path().join(".mkit"), "main")
@@ -278,7 +278,7 @@ fn pull_all_refuses_dirty_worktree_before_fast_forward() {
 
     let tx: Arc<MemoryTransport> = Arc::new(MemoryTransport::new());
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
-    pull_all(bob.path(), tx.as_ref()).expect("initial pull");
+    pull_all(bob.path(), tx.as_ref(), "default").expect("initial pull");
 
     fs::write(alice.path().join("a.txt"), b"v2").unwrap();
     assert!(run_in(alice.path(), &["add", "."]).status.success());
@@ -294,7 +294,7 @@ fn pull_all_refuses_dirty_worktree_before_fast_forward() {
         .unwrap()
         .unwrap();
 
-    let err = pull_all(bob.path(), tx.as_ref()).unwrap_err();
+    let err = pull_all(bob.path(), tx.as_ref(), "default").unwrap_err();
     assert!(matches!(err, DispatchError::RestoreSafety(_)));
     assert_eq!(fs::read(bob.path().join("a.txt")).unwrap(), b"local dirty");
     assert_eq!(
@@ -328,7 +328,7 @@ fn pull_all_ref_update_failure_does_not_restore_worktree() {
 
     let tx: Arc<MemoryTransport> = Arc::new(MemoryTransport::new());
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
-    pull_all(bob.path(), tx.as_ref()).expect("initial pull");
+    pull_all(bob.path(), tx.as_ref(), "default").expect("initial pull");
 
     fs::write(alice.path().join("a.txt"), b"v2").unwrap();
     assert!(run_in(alice.path(), &["add", "."]).status.success());
@@ -347,7 +347,7 @@ fn pull_all_ref_update_failure_does_not_restore_worktree() {
     readonly.set_mode(0o555);
     fs::set_permissions(&heads_dir, readonly).unwrap();
 
-    let err = pull_all(bob.path(), tx.as_ref()).unwrap_err();
+    let err = pull_all(bob.path(), tx.as_ref(), "default").unwrap_err();
 
     fs::set_permissions(&heads_dir, original_perms).unwrap();
 
@@ -379,7 +379,7 @@ fn pull_all_preserves_ignored_untracked_files() {
 
     let tx: Arc<MemoryTransport> = Arc::new(MemoryTransport::new());
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
-    pull_all(bob.path(), tx.as_ref()).expect("initial pull");
+    pull_all(bob.path(), tx.as_ref(), "default").expect("initial pull");
 
     fs::write(alice.path().join("a.txt"), b"v2").unwrap();
     assert!(run_in(alice.path(), &["add", "."]).status.success());
@@ -393,7 +393,7 @@ fn pull_all_preserves_ignored_untracked_files() {
     fs::write(bob.path().join(".mkitignore"), "local.txt\n").unwrap();
     fs::write(bob.path().join("local.txt"), b"local only\n").unwrap();
 
-    pull_all(bob.path(), tx.as_ref()).expect("fast-forward pull");
+    pull_all(bob.path(), tx.as_ref(), "default").expect("fast-forward pull");
 
     assert_eq!(fs::read(bob.path().join("a.txt")).unwrap(), b"v2");
     assert_eq!(
