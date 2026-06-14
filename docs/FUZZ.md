@@ -135,8 +135,14 @@ Every target body must satisfy all six:
    aborts the remainder.**
 5. **No `loop {}` or `while true {}` without a bounded iteration
    counter.**
-6. **Seeded deterministic PRNG.** Inputs come from a splitmix64 seeded
-   with a fixed `u64` constant so any failure reproduces exactly.
+6. **Seeded deterministic PRNG.** Inputs are synthesised from a fixed
+   `u64` seed (`RNG_SEED`) so any failure reproduces exactly. Most targets
+   use a splitmix64 PRNG (`run_iterated_unit`); the `rpc_decode` pilot
+   drives the body through `minifuzz`, whose ChaCha8 sampler is seeded with
+   the same constant via `with_seed` — also deterministic — plus a
+   splitmix64 large-input sweep so the 8 KiB–64 KiB range stays covered
+   (see the [In-process minifuzz](#in-process-minifuzz-rpc_decode-pilot)
+   section).
 
 ## Known limitations
 
