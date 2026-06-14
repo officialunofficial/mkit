@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+      # TEMPORARY (revert before merge): verify the samply branch's full
+      # Build & Test matrix on CI without a maintainer approving-review.
+      - feat/samply-profiling
   # Expensive CI: on PRs this runs only once a review is approved. The
   # pull_request_review event can't filter by branch/path, so each job
   # guards on the approval state + base ref below.
