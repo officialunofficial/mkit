@@ -87,6 +87,26 @@ cargo +nightly fuzz run software_key_record
 cargo +nightly fuzz run rpc_decode
 ```
 
+## In-process minifuzz (`rpc_decode` pilot)
+
+The default in-process harness is a bespoke splitmix64 loop
+(`run_iterated_unit` in `src/lib.rs`). The `rpc_decode` target's unit
+test instead drives the shared body through
+[`minifuzz`](https://docs.rs/commonware-invariants) — the same
+in-process property-test harness upstream commonware uses for its own
+in-tree tests. It is a mutational fuzzer (smarter than uniform-random
+bytes) yet still a plain `#[test]` on stable, and on failure prints a
+`MINIFUZZ_BRANCH = 0x...` token that replays the exact case via
+`Builder::default().with_reproduce("0x...")`.
+
+`commonware-invariants` is a **dev-dependency only** (pinned to the
+commonware 2026.5.x train); the libfuzzer binaries never link it. The
+same six guardrails apply: `with_search_limit(MAX_ITER)` caps iterations,
+`with_seed(RNG_SEED)` keeps the run deterministic, and the body still
+truncates to `MAX_INPUT` and runs under the per-iteration wall-clock cap.
+This is a pilot — the other targets stay on the splitmix loop until the
+pattern proves out (`commonware-invariants` is ALPHA upstream).
+
 ## Guardrails (NON-NEGOTIABLE)
 
 Every target body must satisfy all six:

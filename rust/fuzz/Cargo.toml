@@ -47,6 +47,13 @@ tempfile = "3"
 # with `--features libfuzzer` automatically.
 libfuzzer-sys = { version = "0.4", optional = true }
 
+# `minifuzz` (commonware-invariants) drives the in-process `#[test]`
+# property runs — see the `rpc_decode` pilot in `src/lib.rs`. Dev-only:
+# the libfuzzer binaries never touch it. Pinned to the commonware
+# 2026.5.x train, same as the workspace-root commonware-* deps.
+[dev-dependencies]
+commonware-invariants = "=2026.5.0"
+
 [features]
 default = []
 libfuzzer = ["dep:libfuzzer-sys"]

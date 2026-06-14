@@ -317,9 +317,29 @@ mod tests {
         run_iterated_unit(software_key_record_one_iteration).expect("guardrails held");
     }
 
+    /// Pilot migration to `minifuzz` (commonware-invariants) — the same
+    /// in-process harness upstream commonware uses for its in-tree
+    /// property tests. Replaces the bespoke splitmix64 loop
+    /// (`run_iterated_unit`) for this one target while honouring the
+    /// FUZZ.md guardrails: `with_search_limit(MAX_ITER)` caps iterations
+    /// (#1), `with_seed(RNG_SEED)` keeps the run deterministic (#6), and
+    /// the body truncates each input to `MAX_INPUT` and applies the
+    /// per-iteration wall-clock cap (#2, #4) via `run_one`. minifuzz's
+    /// mutational sampler caps its buffer at 8 KiB, so inputs stay well
+    /// under the 64 KiB ceiling. On failure it prints a
+    /// `MINIFUZZ_BRANCH = 0x...` token; replay it with
+    /// `Builder::default().with_reproduce("0x...")`.
     #[test]
     fn rpc_decode_target_runs_within_caps() {
-        run_iterated_unit(rpc_decode_one_iteration).expect("guardrails held");
+        commonware_invariants::minifuzz::Builder::default()
+            .with_search_limit(u64::from(MAX_ITER))
+            .with_seed(RNG_SEED)
+            .test(|u| {
+                let take = u.len().min(MAX_INPUT);
+                let input = u.bytes(take)?;
+                run_one(input, rpc_decode_one_iteration).expect("guardrails held");
+                Ok(())
+            });
     }
 
     /// Pin a few hand-crafted inputs so the targets keep accepting them
