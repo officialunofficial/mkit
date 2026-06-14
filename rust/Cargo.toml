@@ -84,3 +84,15 @@ lto = "thin"
 strip = "symbols"
 panic = "abort"
 overflow-checks = true
+
+# Profiling profile for `samply` (and other sampling profilers). Mirrors
+# release codegen (inherits `codegen-units = 1` + `lto = "thin"`) so the
+# numbers stay representative, but keeps full debug info and symbols so
+# the profiler can attribute samples to inline frames and source lines —
+# `release` strips symbols, which makes its profiles unreadable. Build
+# with `cargo build --profile profiling` and record with
+# `samply record ./target/profiling/mkit ...`. See docs/PROFILING.md.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
