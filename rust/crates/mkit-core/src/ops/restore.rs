@@ -561,6 +561,15 @@ fn create_symlink(_target: &str, _link: &Path) -> io::Result<()> {
     ))
 }
 
+/// Write a restored worktree file via tmp + rename so concurrent
+/// readers never observe a torn file.
+///
+/// Deliberately NOT flushed: worktree contents are not part of the
+/// store's durability invariant (SPEC-OBJECTS §10.1) — the object
+/// store is the source of truth and checkout is re-runnable after a
+/// crash. Flushing every restored file made checkout O(files) full
+/// flushes (`F_FULLFSYNC` each on macOS) for no recoverable state; git
+/// likewise does not flush checked-out files.
 fn write_file_atomic(dir: &Path, name: &str, data: &[u8], executable: bool) -> io::Result<()> {
     let tmp_name = make_tmp_sibling_name(name);
     let tmp_path = dir.join(&tmp_name);
@@ -569,7 +578,6 @@ fn write_file_atomic(dir: &Path, name: &str, data: &[u8], executable: bool) -> i
         let _ = fs::remove_file(&tmp_path);
         let mut tmp = fs::File::create(&tmp_path)?;
         tmp.write_all(data)?;
-        tmp.sync_all()?;
         if executable {
             apply_executable_bit(&tmp_path)?;
         }

@@ -13,7 +13,7 @@ use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
 use mkit_core::object::{Blob, Object};
 use mkit_core::ops::{HunkLineKind, PatchHunk, apply_hunks_subset, enumerate_hunks};
 use mkit_core::serialize;
-use mkit_core::store::ObjectStore;
+use mkit_core::store::{ObjectSink, ObjectStore};
 use mkit_core::worktree;
 
 use crate::clap_shim;
@@ -67,6 +67,10 @@ struct AddOpts {
 pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<(), String> {
     let mut idx = super::read_or_seed_index_from_head(root, store)?;
 
+    // One durability batch for every restaged object; committed below,
+    // before the index write that references them.
+    let batch = store.batch();
+
     for entry in &mut idx.entries {
         if entry.status == EntryStatus::Removed {
             continue;
@@ -91,17 +95,25 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
             Err(e) => return Err(format!("metadata {}: {e}", abs.display())),
         };
 
+        // Stat cache: an unchanged tracked file (mtime+size+exec class
+        // all match what was observed at staging time) keeps its entry
+        // untouched — no read, no hash, no store. O(stat) restage.
+        if worktree::stat_matches(entry, &meta) {
+            continue;
+        }
+
         // Regular files route through `store_file_object` so large
         // (> CHUNK_THRESHOLD) content lands as a ChunkedBlob, matching
         // `worktree::{build_tree,hash_file}` and keeping commit/status/rm
         // hashes consistent (#203). Symlinks are always a single Blob of
         // their target path.
-        let (status, h) = if meta.file_type().is_file() {
+        let (status, h, stat) = if meta.file_type().is_file() {
             let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
                 .map_err(|e| format!("read {}: {e}", abs.display()))?;
             let h =
-                worktree::store_file_object(store, &bytes).map_err(|e| format!("store: {e}"))?;
-            (file_status_from_meta(&opened_meta, entry.status), h)
+                worktree::store_file_object(&batch, &bytes).map_err(|e| format!("store: {e}"))?;
+            let stat = worktree::stat_cache_fields(&opened_meta);
+            (file_status_from_meta(&opened_meta, entry.status), h, stat)
         } else if meta.file_type().is_symlink() {
             let target = std::fs::read_link(&abs)
                 .map_err(|e| format!("read link {}: {e}", abs.display()))?;
@@ -115,8 +127,9 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
                 data: target_str.as_bytes().to_vec(),
             });
             let ser = serialize::serialize(&blob).map_err(|e| format!("serialize: {e}"))?;
-            let h = store.write(&ser).map_err(|e| format!("store: {e}"))?;
-            (EntryStatus::Symlink, h)
+            let h = batch.put(&ser).map_err(|e| format!("store: {e}"))?;
+            // Symlinks never stat-match (see worktree::stat_matches).
+            (EntryStatus::Symlink, h, (0, 0, 0, 0))
         } else {
             entry.status = EntryStatus::Removed;
             entry.object_hash = ZERO;
@@ -125,8 +138,15 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
 
         entry.status = status;
         entry.object_hash = h;
+        entry.mtime_ns = stat.0;
+        entry.size = stat.1;
+        entry.ino = stat.2;
+        entry.ctime_ns = stat.3;
     }
 
+    // Durability ordering: objects first, then the index that
+    // references them.
+    batch.commit().map_err(|e| format!("store: {e}"))?;
     index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
 }
 
@@ -160,7 +180,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let store = match super::open_store_configured(&cwd) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
@@ -210,10 +230,15 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
 
+    // One durability batch for the whole command: every staged object
+    // costs zero full flushes until the single commit() below, which
+    // runs before the index write that references them.
+    let batch = store.batch();
+
     if opts.all {
         // Stage everything under cwd, then record deletions of tracked
         // files that vanished from the worktree.
-        if let Err(code) = add_whole_worktree(&cwd, &store, &mut idx) {
+        if let Err(code) = add_whole_worktree(&cwd, &batch, &mut idx) {
             return code;
         }
     } else if opts.paths.is_empty() {
@@ -230,7 +255,7 @@ pub fn run(args: &[String]) -> u8 {
         };
         for target in &opts.paths {
             if target == "." {
-                if let Err(code) = add_whole_worktree(&cwd, &store, &mut idx) {
+                if let Err(code) = add_whole_worktree(&cwd, &batch, &mut idx) {
                     return code;
                 }
             } else {
@@ -246,7 +271,7 @@ pub fn run(args: &[String]) -> u8 {
                 if let Err(e) = ensure_within_repo(&cwd, &abs) {
                     return emit_err(&e, exit::DATAERR);
                 }
-                match add_one(&cwd, p, &store, &mut idx, &ignores, opts.force) {
+                match add_one(&cwd, p, &batch, &mut idx, &ignores, opts.force) {
                     Ok(_) => {}
                     Err(code) => return code,
                 }
@@ -254,6 +279,10 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
 
+    // Objects become durable before the index that references them.
+    if let Err(e) = batch.commit() {
+        return emit_err(&format!("store: {e}"), exit::CANTCREAT);
+    }
     match index::write_index(&cwd, &idx) {
         Ok(()) => exit::OK,
         Err(e) => emit_err(&format!("write index: {e}"), exit::CANTCREAT),
@@ -263,7 +292,7 @@ pub fn run(args: &[String]) -> u8 {
 /// Stage every non-ignored worktree file under `root`, then mark any
 /// tracked path missing from the worktree as removed. Backs both
 /// `mkit add .` and `mkit add -A`.
-fn add_whole_worktree(root: &Path, store: &ObjectStore, idx: &mut Index) -> Result<(), u8> {
+fn add_whole_worktree(root: &Path, sink: &dyn ObjectSink, idx: &mut Index) -> Result<(), u8> {
     let ignores = match ignore::load(root) {
         Ok(i) => i,
         Err(e) => {
@@ -274,7 +303,7 @@ fn add_whole_worktree(root: &Path, store: &ObjectStore, idx: &mut Index) -> Resu
         }
     };
     let mut seen = HashSet::new();
-    add_tree(root, root, false, store, idx, &ignores, &mut seen)?;
+    add_tree(root, root, false, sink, idx, &ignores, &mut seen)?;
     mark_missing_paths_removed(root, idx, &seen);
     Ok(())
 }
@@ -282,7 +311,7 @@ fn add_whole_worktree(root: &Path, store: &ObjectStore, idx: &mut Index) -> Resu
 fn add_one(
     root: &Path,
     rel: &Path,
-    store: &ObjectStore,
+    sink: &dyn ObjectSink,
     idx: &mut Index,
     ignores: &IgnoreList,
     force: bool,
@@ -316,16 +345,29 @@ fn add_one(
             exit::USAGE,
         ));
     }
+    // Stat cache: a tracked file whose mtime+size+exec class match the
+    // index entry is already staged byte-for-byte — skip the read, the
+    // hash, and the store write entirely.
+    if let Some(existing) = idx.find_entry(&rel_str)
+        && worktree::stat_matches(&idx.entries[existing], &meta)
+    {
+        return Ok(rel_str);
+    }
     // Regular files route through `store_file_object` so large
     // (> CHUNK_THRESHOLD) content lands as a ChunkedBlob, matching
     // `worktree::{build_tree,hash_file}` (#203). Symlinks stay a single
     // Blob of their target path.
-    let (status, h) = if meta.file_type().is_file() {
+    let (status, h, stat) = if meta.file_type().is_file() {
         let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
             .map_err(|e| emit_err(&format!("read {}: {e}", abs.display()), exit::NOINPUT))?;
-        let h = worktree::store_file_object(store, &bytes)
+        let h = worktree::store_file_object(sink, &bytes)
             .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
-        (file_status_from_meta(&opened_meta, previous_status), h)
+        let stat = worktree::stat_cache_fields(&opened_meta);
+        (
+            file_status_from_meta(&opened_meta, previous_status),
+            h,
+            stat,
+        )
     } else if meta.file_type().is_symlink() {
         let target = std::fs::read_link(&abs)
             .map_err(|e| emit_err(&format!("read link {}: {e}", abs.display()), exit::NOINPUT))?;
@@ -344,10 +386,11 @@ fn add_one(
         });
         let ser = serialize::serialize(&blob)
             .map_err(|e| emit_err(&format!("serialize: {e}"), exit::DATAERR))?;
-        let h = store
-            .write(&ser)
+        let h = sink
+            .put(&ser)
             .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
-        (EntryStatus::Symlink, h)
+        // Symlinks never stat-match (see worktree::stat_matches).
+        (EntryStatus::Symlink, h, (0, 0, 0, 0))
     } else {
         return Err(emit_err(
             &format!("not a regular file: {}", abs.display()),
@@ -358,6 +401,10 @@ fn add_one(
         path: rel_str.clone(),
         status,
         object_hash: h,
+        mtime_ns: stat.0,
+        size: stat.1,
+        ino: stat.2,
+        ctime_ns: stat.3,
     };
     remove_file_directory_conflicts(idx, &entry.path);
     if let Some(existing) = idx.find_entry(&entry.path) {
@@ -380,7 +427,7 @@ fn add_tree(
     root: &Path,
     dir: &Path,
     parent_ignored: bool,
-    store: &ObjectStore,
+    sink: &dyn ObjectSink,
     idx: &mut Index,
     ignores: &IgnoreList,
     seen: &mut HashSet<String>,
@@ -410,11 +457,11 @@ fn add_tree(
             continue;
         }
         if meta.file_type().is_dir() {
-            add_tree(root, &p, entry_ignored, store, idx, ignores, seen)?;
+            add_tree(root, &p, entry_ignored, sink, idx, ignores, seen)?;
         } else if meta.file_type().is_file() || meta.file_type().is_symlink() {
             // The include decision was made above, so `force` skips a
             // redundant ignore re-check in `add_one`.
-            let rel = add_one(root, &p, store, idx, ignores, true)?;
+            let rel = add_one(root, &p, sink, idx, ignores, true)?;
             seen.insert(rel);
         }
     }
@@ -594,6 +641,10 @@ fn patch_one_file(
         path: rel_str.clone(),
         status,
         object_hash: h,
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
     };
     remove_file_directory_conflicts(idx, &entry.path);
     if let Some(existing) = idx.find_entry(&entry.path) {

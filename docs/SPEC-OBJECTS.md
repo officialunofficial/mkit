@@ -377,6 +377,32 @@ computed hash does not match the path. Objects > 1 GiB MUST be rejected.
 `.mkit/` directory: presence of `.mkit/objects` is the repository
 marker. See SPEC-INDEX for the `.mkit/index` sidecar.
 
+### 10.1 Durability
+
+Object writes MUST be atomic with respect to readers (temp file +
+rename; a crash mid-write leaves at most a temp file, never a visible
+object that fails the read-time hash check), and MUST uphold the
+ordering invariant:
+
+> An object MUST NOT become *visible* (resolvable at its final path)
+> before its bytes are *durable*, and a ref, index, or recovery-log
+> entry MUST only be written after every object it references is
+> durable.
+
+Within that invariant, implementations MAY amortise durability across a
+multi-object command (batched mode: stage objects as temp files, issue
+one full flush, then rename all and flush the touched shard
+directories — the design of git's `core.fsyncMethod=batch`). Per-object
+flushing remains a conforming, stricter schedule. Batched mode's
+directory flushes carry the dirent ordering on metadata-journaling
+filesystems in ordered-data mode; deployments on filesystems without
+that property SHOULD use per-object mode.
+
+A writer that finds an object already visible (cross-process dedup)
+MUST still flush that object's shard directory before referencing it,
+because the process that renamed it may not have flushed the dirent
+yet.
+
 ---
 
 ## 11. Trailing-byte rule

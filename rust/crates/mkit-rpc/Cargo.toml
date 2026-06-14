@@ -42,7 +42,7 @@ thiserror = "2"
 # `TransportError`, `Ref`, `RefWriteCondition`, and `validate_ref_name`
 # from mkit-core. mkit-core does NOT depend on mkit-rpc, so this is
 # acyclic.
-mkit-core = { version = "0.2", path = "../mkit-core" }
+mkit-core = { version = "0.3", path = "../mkit-core" }
 
 [build-dependencies]
 buffa-build = "0.7.1"

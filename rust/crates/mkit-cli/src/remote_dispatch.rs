@@ -269,7 +269,7 @@ pub fn push_all_with(
     force: bool,
 ) -> Result<usize, DispatchError> {
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let store = ObjectStore::open(cwd)?;
+    let store = crate::commands::open_store_configured(cwd)?;
     let refs_list = refs::list_refs(&mkit_dir)?;
     let remote = remote.unwrap_or(DEFAULT_REMOTE);
     let mut n = 0;
@@ -344,7 +344,7 @@ pub fn push_branch_tracked(
     lease: PushLease,
 ) -> Result<Hash, DispatchError> {
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let store = ObjectStore::open(cwd)?;
+    let store = crate::commands::open_store_configured(cwd)?;
     let tip = refs::read_ref(&mkit_dir, branch)?
         .ok_or_else(|| DispatchError::RemoteBranchMissing(branch.to_owned()))?;
     // Default safe push requires a TRUE fast-forward: the new tip must
@@ -427,7 +427,7 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, D
     // the repo first for a clean non-repo error, and do NOT re-acquire the
     // lock (it is a non-reentrant file lock): the fetch phase runs via the
     // non-locking `fetch_objects`, not `fetch_all` (#267).
-    let store = ObjectStore::open(cwd)?;
+    let store = crate::commands::open_store_configured(cwd)?;
     let _lock = mkit_core::repo_lock::acquire_default(&mkit_dir, "worktree.lock")?;
     let n = fetch_objects(&store, &mkit_dir, tx, remote)?;
     let remote_refs = refs::list_remote_refs(&mkit_dir, remote)?
@@ -539,7 +539,7 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, 
     // object-write + remote-ref-publish window. This serializes fetch
     // against `gc` so a concurrent `gc --grace-secs 0` can't prune freshly
     // downloaded objects before their refs make them reachable (#267).
-    let store = ObjectStore::open(cwd)?;
+    let store = crate::commands::open_store_configured(cwd)?;
     let _lock = mkit_core::repo_lock::acquire_default(&mkit_dir, "worktree.lock")?;
     fetch_objects(&store, &mkit_dir, tx, remote)
 }

@@ -114,7 +114,10 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
     }
     let mkit_dir = repo_root.join(MKIT_DIR);
 
-    let tree_hash = worktree::build_tree(store, repo_root)?;
+    // One durability batch over the worktree snapshot + stash commit,
+    // committed before the manifest write that references them.
+    let batch = store.batch();
+    let tree_hash = worktree::build_tree(&batch, repo_root)?;
     let head_hash = refs::resolve_head(&mkit_dir)?;
 
     let timestamp_u64 = unix_seconds_now();
@@ -130,7 +133,8 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
         [0u8; 64],
     ));
     let commit_bytes = serialize::serialize(&commit)?;
-    let stash_hash = store.write(&commit_bytes)?;
+    let stash_hash = batch.write(&commit_bytes)?;
+    batch.commit()?;
 
     // Prepend the new entry.
     let mut list = read_list(repo_root)?;
@@ -209,6 +213,25 @@ pub fn pop(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()>
     let Object::Commit(commit) = obj else {
         return Err(StashError::NotACommit);
     };
+    // Record the popped commit in the recovery log BEFORE removing the
+    // manifest entry: restored worktree files are not crash-durable
+    // (ops/restore writes them unflushed), and the manifest entry is
+    // the stash commit's only gc root. Without this, a power loss in
+    // the writeback window could lose both the restored bytes and the
+    // only pointer for re-running the restore. The recovery log is a
+    // durable gc root (SPEC-GC), so the commit stays reachable and
+    // recoverable until the grace window expires.
+    let ts = unix_seconds_now();
+    crate::ops::recovery::record(
+        &repo_root.join(MKIT_DIR),
+        &crate::ops::recovery::RecoveryEntry {
+            timestamp: ts,
+            op: "stash-pop".to_string(),
+            superseded: entry.commit_hash,
+            branch: String::new(),
+        },
+    )
+    .map_err(|e| StashError::Io(io::Error::other(format!("recovery log: {e}"))))?;
     restore::restore_tree(
         store,
         commit.tree_hash,
@@ -734,5 +757,27 @@ mod tests {
             deserialize_list(&bytes),
             Err(StashError::InvalidFormat)
         ));
+    }
+    /// `pop` must record the popped commit in the recovery log BEFORE
+    /// dropping the manifest entry — the only pointer keeping the stash
+    /// commit gc-reachable while the (unflushed) worktree restore is in
+    /// the writeback window.
+    #[test]
+    fn pop_records_recovery_entry_for_popped_commit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = ObjectStore::init(dir.path()).unwrap();
+        std::fs::write(dir.path().join("file.txt"), b"stash me").unwrap();
+        save(&store, dir.path(), "wip").unwrap();
+        let entry_hash = read_list(dir.path()).unwrap().entries[0].commit_hash;
+
+        pop(&store, dir.path(), 0).unwrap();
+
+        let log = crate::ops::recovery::read_all(&dir.path().join(MKIT_DIR)).unwrap();
+        assert!(
+            log.iter()
+                .any(|e| e.op == "stash-pop" && e.superseded == entry_hash),
+            "popped stash commit must be recorded as recoverable; log: {log:?}"
+        );
+        assert!(read_list(dir.path()).unwrap().entries.is_empty());
     }
 }

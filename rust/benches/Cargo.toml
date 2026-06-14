@@ -38,6 +38,10 @@ harness = false
 name = "pack_create"
 harness = false
 
+[[bench]]
+name = "store_write"
+harness = false
+
 # Issue #159 Phase 2 — sharded vs monolithic 100 MiB pack transfer
 # with simulated network jitter. Default-off (the `pack-shards`
 # feature on mkit-core pulls in the commonware dep stack, which is

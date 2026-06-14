@@ -79,6 +79,20 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+/// Open the object store for a mutating command, honoring the repo's
+/// configured durability schedule (`durability.objects`, see
+/// [`crate::config::Config::object_sync_policy`]). Falls back to the
+/// batched default when the config cannot be read — a broken config
+/// must not change write semantics silently, and Batch is the default
+/// contract.
+pub fn open_store_configured(root: &Path) -> Result<ObjectStore, mkit_core::store::StoreError> {
+    let mut store = ObjectStore::open(root)?;
+    if let Ok(cfg) = crate::config::read_or_default(root) {
+        store.set_sync_policy(cfg.object_sync_policy());
+    }
+    Ok(store)
+}
+
 /// Shared helper: emit a "not yet wired" notice and return the
 /// tempfail exit code. Commands whose backing state-machines haven't
 /// been wired into the CLI yet say so honestly rather than pretending
@@ -457,7 +471,29 @@ pub fn record_superseded(
 /// materialize a committed tree must keep the index aligned with that
 /// snapshot.
 pub fn sync_index_to_tree(root: &Path, store: &ObjectStore, tree_hash: Hash) -> Result<(), String> {
-    let idx = mkit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
+    let mut idx =
+        mkit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
+    // Tree-derived entries carry no stat cache. Carry it over from the
+    // outgoing index wherever path AND object hash agree: a later stat
+    // match against the old observation still proves the same bytes,
+    // so commit/checkout don't wipe the O(stat) fast path.
+    if let Ok(old) = mkit_core::index::read_index(root) {
+        // O(1) lookups: find_entry is a linear scan and this loop runs
+        // once per tree entry (was O(n²) per commit/checkout).
+        let by_path: std::collections::HashMap<&str, &mkit_core::index::IndexEntry> =
+            old.entries.iter().map(|o| (o.path.as_str(), o)).collect();
+        for e in &mut idx.entries {
+            if let Some(o) = by_path.get(e.path.as_str())
+                && o.object_hash == e.object_hash
+                && o.status == e.status
+            {
+                e.mtime_ns = o.mtime_ns;
+                e.size = o.size;
+                e.ino = o.ino;
+                e.ctime_ns = o.ctime_ns;
+            }
+        }
+    }
     mkit_core::index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
 }
 
@@ -490,10 +526,13 @@ pub fn ensure_restore_safe_with_options(
 ) -> Result<(), String> {
     let current_tree = current_head_tree(root, store)?;
     let idx = read_or_seed_index_from_head(root, store)?;
-    let index_tree = worktree::build_tree_from_index(store, &idx)
+    // Safety-check snapshot trees are ephemeral — in-memory overlay,
+    // no durability cost, no garbage objects in the store.
+    let snapshot = mkit_core::store::EphemeralSink::new(store);
+    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
         .map_err(|e| format!("check index state: {e}"))?;
 
-    let staged = diff_trees(store, current_tree, Some(index_tree))
+    let staged = diff_trees(&snapshot, current_tree, Some(index_tree))
         .map_err(|e| format!("check staged changes: {e}"))?;
     if let Some(entry) = staged
         .entries
@@ -506,9 +545,9 @@ pub fn ensure_restore_safe_with_options(
         ));
     }
 
-    let worktree_tree = worktree::build_tree_filtered(store, root, Some(&idx))
+    let worktree_tree = worktree::build_tree_filtered(&snapshot, root, Some(&idx))
         .map_err(|e| format!("check working tree changes: {e}"))?;
-    let unstaged = diff_trees(store, Some(index_tree), Some(worktree_tree))
+    let unstaged = diff_trees(&snapshot, Some(index_tree), Some(worktree_tree))
         .map_err(|e| format!("check working tree changes: {e}"))?;
     if let Some(entry) = unstaged
         .entries
@@ -521,7 +560,7 @@ pub fn ensure_restore_safe_with_options(
         ));
     }
 
-    let target_writes = diff_trees(store, Some(index_tree), Some(target_tree))
+    let target_writes = diff_trees(&snapshot, Some(index_tree), Some(target_tree))
         .map_err(|e| format!("check restore target: {e}"))?
         .entries
         .into_iter()
@@ -584,10 +623,11 @@ pub(crate) fn dropped_tracked_paths(
     target_tree: Hash,
 ) -> Result<Vec<(String, EntryStatus, Hash)>, String> {
     let idx = read_or_seed_index_from_head(cwd, store)?;
-    let index_tree =
-        worktree::build_tree_from_index(store, &idx).map_err(|e| format!("index tree: {e}"))?;
+    let snapshot = mkit_core::store::EphemeralSink::new(store);
+    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
+        .map_err(|e| format!("index tree: {e}"))?;
     let mut out = Vec::new();
-    for e in diff_trees(store, Some(index_tree), Some(target_tree))
+    for e in diff_trees(&snapshot, Some(index_tree), Some(target_tree))
         .map_err(|e| format!("diff index vs target: {e}"))?
         .entries
         .into_iter()

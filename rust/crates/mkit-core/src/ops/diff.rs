@@ -15,7 +15,7 @@ use std::path::Path;
 use crate::hash::Hash;
 use crate::index::{Index, IndexError};
 use crate::object::{EntryMode, Object, TreeEntry};
-use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
+use crate::store::{MAX_TREE_DEPTH, ObjectSource, ObjectStore, StoreError};
 use crate::worktree::{self, WorktreeError};
 
 /// What kind of change a [`DiffEntry`] represents.
@@ -72,16 +72,16 @@ impl DiffResult {
 ///
 /// Propagates [`StoreError`] when an expected tree object is missing or
 /// fails its read-time hash check.
-pub fn diff_trees(
-    store: &ObjectStore,
+pub fn diff_trees<S: ObjectSource + ?Sized>(
+    store: &S,
     old_hash: Option<Hash>,
     new_hash: Option<Hash>,
 ) -> Result<DiffResult, StoreError> {
     diff_trees_inner(store, old_hash, new_hash, false)
 }
 
-fn diff_trees_inner(
-    store: &ObjectStore,
+fn diff_trees_inner<S: ObjectSource + ?Sized>(
+    store: &S,
     old_hash: Option<Hash>,
     new_hash: Option<Hash>,
     ignore_regular_executable_mode: bool,
@@ -115,8 +115,8 @@ fn diff_trees_inner(
 }
 
 /// Lockstep walk of two name-sorted entry arrays.
-fn diff_entries_recursive(
-    store: &ObjectStore,
+fn diff_entries_recursive<S: ObjectSource + ?Sized>(
+    store: &S,
     old_entries: &[TreeEntry],
     new_entries: &[TreeEntry],
     prefix: &str,
@@ -212,8 +212,8 @@ fn regular_executable_pair(a: EntryMode, b: EntryMode) -> bool {
     )
 }
 
-fn add_removed_entries(
-    store: &ObjectStore,
+fn add_removed_entries<S: ObjectSource + ?Sized>(
+    store: &S,
     entry: &TreeEntry,
     prefix: &str,
     out: &mut Vec<DiffEntry>,
@@ -241,8 +241,8 @@ fn add_removed_entries(
     Ok(())
 }
 
-fn add_added_entries(
-    store: &ObjectStore,
+fn add_added_entries<S: ObjectSource + ?Sized>(
+    store: &S,
     entry: &TreeEntry,
     prefix: &str,
     out: &mut Vec<DiffEntry>,
@@ -270,14 +270,17 @@ fn add_added_entries(
     Ok(())
 }
 
-fn load_entries(store: &ObjectStore, hash: Option<Hash>) -> Result<Vec<TreeEntry>, StoreError> {
+fn load_entries<S: ObjectSource + ?Sized>(
+    store: &S,
+    hash: Option<Hash>,
+) -> Result<Vec<TreeEntry>, StoreError> {
     match hash {
         Some(h) => load_tree(store, h),
         None => Ok(Vec::new()),
     }
 }
 
-fn load_tree(store: &ObjectStore, h: Hash) -> Result<Vec<TreeEntry>, StoreError> {
+fn load_tree<S: ObjectSource + ?Sized>(store: &S, h: Hash) -> Result<Vec<TreeEntry>, StoreError> {
     match store.read_object(&h)? {
         Object::Tree(t) => Ok(t.entries),
         other => Err(StoreError::Decode(
@@ -1092,6 +1095,24 @@ pub fn status_diff(
     worktree_root: &Path,
     index: Option<&Index>,
 ) -> Result<Vec<StatusEntry>, DiffError> {
+    status_diff_observed(store, head_tree, worktree_root, index).map(|(entries, _)| entries)
+}
+
+/// [`status_diff`] that additionally returns the worktree walk's
+/// [`worktree::StatObservation`]s — entries whose cache was absent or
+/// racy-smudged but whose re-hash matched the staged hash. Callers
+/// (the `status` CLI) use them to heal the stat cache from hash-time
+/// stats; pairing a *later* stat with the earlier hash is unsound.
+///
+/// # Errors
+/// See [`status_diff`].
+#[allow(clippy::type_complexity)]
+pub fn status_diff_observed(
+    store: &ObjectStore,
+    head_tree: Option<&Hash>,
+    worktree_root: &Path,
+    index: Option<&Index>,
+) -> Result<(Vec<StatusEntry>, Vec<worktree::StatObservation>), DiffError> {
     // Always snapshot the worktree — the index↔worktree leg uses it. The
     // tracked set for ignore exemption is the staging index if present, else
     // the HEAD tree's paths (seeded here) — without it a tracked file
@@ -1105,27 +1126,42 @@ pub fn status_diff(
     } else {
         None
     };
-    let work_tree_hash = worktree::build_tree_filtered(store, worktree_root, tracked)?;
+    // Snapshot objects are ephemeral: they live in an in-memory overlay
+    // (EphemeralSink) and never touch the durable store — status pays
+    // no durability cost, leaves no garbage in objects/, and can never
+    // make a non-durable object visible to another writer's dedup.
+    // Reads fall through to the store for committed objects.
+    let snapshot = crate::store::EphemeralSink::new(store);
+    let mut observations = Vec::new();
+    let work_tree_hash = worktree::build_tree_filtered_observed(
+        &snapshot,
+        worktree_root,
+        tracked,
+        &mut observations,
+    )?;
 
     let Some(idx) = index else {
         // Legacy fallback: HEAD↔worktree, everything labeled Unstaged.
-        let diff = diff_worktree_trees(store, head_tree.copied(), Some(work_tree_hash))?;
-        return Ok(diff
-            .entries
-            .into_iter()
-            .map(|d| StatusEntry {
-                diff: d,
-                staging: StatusStaging::Unstaged,
-            })
-            .collect());
+        let diff = diff_worktree_trees(&snapshot, head_tree.copied(), Some(work_tree_hash))?;
+        return Ok((
+            diff.entries
+                .into_iter()
+                .map(|d| StatusEntry {
+                    diff: d,
+                    staging: StatusStaging::Unstaged,
+                })
+                .collect(),
+            observations,
+        ));
     };
 
     // Build the index tree exactly the way `mkit commit` builds it.
     // This is the authoritative "what would be committed right now."
-    let index_tree = worktree::build_tree_from_index(store, idx)?;
+    // Ephemeral diff snapshot (no durable publish) — cheap shape check.
+    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, idx, false)?;
 
-    let staged = diff_trees(store, head_tree.copied(), Some(index_tree))?;
-    let unstaged = diff_worktree_trees(store, Some(index_tree), Some(work_tree_hash))?;
+    let staged = diff_trees(&snapshot, head_tree.copied(), Some(index_tree))?;
+    let unstaged = diff_worktree_trees(&snapshot, Some(index_tree), Some(work_tree_hash))?;
 
     // Emit one entry per (path, leg). A path appearing in both legs
     // produces two entries — one `Staged` and one `Unstaged` — so the
@@ -1159,12 +1195,12 @@ pub fn status_diff(
             }
         })
     });
-    Ok(out)
+    Ok((out, observations))
 }
 
 #[cfg(unix)]
-fn diff_worktree_trees(
-    store: &ObjectStore,
+fn diff_worktree_trees<S: ObjectSource + ?Sized>(
+    store: &S,
     old_hash: Option<Hash>,
     new_hash: Option<Hash>,
 ) -> Result<DiffResult, StoreError> {
@@ -1172,8 +1208,8 @@ fn diff_worktree_trees(
 }
 
 #[cfg(not(unix))]
-fn diff_worktree_trees(
-    store: &ObjectStore,
+fn diff_worktree_trees<S: ObjectSource + ?Sized>(
+    store: &S,
     old_hash: Option<Hash>,
     new_hash: Option<Hash>,
 ) -> Result<DiffResult, StoreError> {
@@ -1429,6 +1465,33 @@ mod tests {
     }
 
     #[test]
+    fn status_diff_does_not_fsync() {
+        // `status` is read-only from the user's perspective; its
+        // worktree-snapshot objects are ephemeral and must never pay
+        // durability costs (no barriers, no full flushes, no dir
+        // flushes) — renames only.
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        use std::sync::Arc;
+
+        let (_sd, mut store) = fresh_store();
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("a.txt"), b"some content").unwrap();
+        std::fs::write(work.path().join("b.txt"), b"other content").unwrap();
+
+        let rec = Arc::new(RecordingSyncer::default());
+        store.set_syncer(rec.clone());
+
+        let result = status_diff(&store, None, work.path(), None).unwrap();
+        assert!(!result.is_empty(), "untracked files must surface");
+
+        let evs = rec.events();
+        assert!(
+            evs.iter().all(|e| matches!(e, Ev::Rename { .. })),
+            "status must not emit any flush events; got {evs:?}"
+        );
+    }
+
+    #[test]
     fn status_empty_worktree_no_head() {
         // Empty worktree, no HEAD → nothing to report.
         let (_sd, store) = fresh_store();
@@ -1561,6 +1624,10 @@ mod tests {
             path: "b.txt".to_string(),
             status: EntryStatus::Blob,
             object_hash: b_hash,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         // No HEAD — first commit scenario.
         let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
@@ -1583,6 +1650,10 @@ mod tests {
             path: "run.sh".to_string(),
             status: EntryStatus::Executable,
             object_hash: h,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
 
         let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
@@ -1729,6 +1800,10 @@ mod tests {
             path: "b.txt".to_string(),
             status: EntryStatus::Blob,
             object_hash: b_v1_hash,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
         });
         let result = status_diff(&store, None, work.path(), Some(&idx)).unwrap();
         assert_eq!(result.len(), 2, "expected staged + unstaged entries");

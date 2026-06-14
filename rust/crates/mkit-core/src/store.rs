@@ -10,9 +10,20 @@
 //! ```
 //!
 //! Writes are atomic: bytes are first written to a sibling temp file
-//! (`<name>.tmp.<pid>.<rand>`), `fsync`ed, then renamed into place. A
-//! crash mid-write leaves only the temp file behind and never produces a
-//! visible object that fails the read-time hash check.
+//! (`<name>.tmp.<pid>.<rand>`), made durable, then renamed into place.
+//! A crash mid-write leaves only the temp file behind and never
+//! produces a visible object that fails the read-time hash check.
+//!
+//! Durability comes in three shapes (see [`crate::batch`] for the full
+//! contract): [`ObjectStore::write`] flushes per object
+//! ([`SyncPolicy::PerObject`]); [`ObjectStore::batch`] defers visibility
+//! and amortises durability to **one** full flush per batch — the write
+//! path used by every multi-object command (add, commit, pack unpack);
+//! and [`ObjectStore::bulk_writer`] fsyncs each object's contents before
+//! the rename and batches the dir fsyncs at commit (git import). In all
+//! three an object is never visible before its bytes are durable, so a
+//! ref or index written after the write/commit returns can never
+//! reference a non-durable object.
 //!
 //! Reads always verify integrity by recomputing BLAKE3 over the bytes
 //! and comparing against the requested hash; mismatch returns
@@ -24,10 +35,13 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::NamedTempFile;
 
+use crate::batch::{RealSyncer, Syncer};
+pub use crate::batch::{SyncPolicy, WriteBatch};
 use crate::hash::{self, Hash, object_path, to_hex};
 use crate::object::{MkitError, Object};
 use crate::serialize;
@@ -90,9 +104,14 @@ pub struct BulkWriter<'a> {
 }
 
 impl BulkWriter<'_> {
-    /// Write one object (temp + rename; fsync deferred to commit).
-    /// An existing path is byte-verified: matched objects are left in
-    /// place (but still fsynced at commit), torn ones are rewritten.
+    /// Write one object durable-before-visible: contents are fsynced
+    /// before the rename publishes the object, and only the shard-dir
+    /// fsync (rename durability) is deferred to commit. This upholds the
+    /// store's global invariant (an object is never visible before its
+    /// bytes are durable), so another process's `contains()` dedup can
+    /// never reference a half-written object. An existing path is
+    /// byte-verified: matched objects are left in place (but still
+    /// fsynced at commit, see below), torn ones are rewritten.
     ///
     /// # Panics
     /// Never in practice: object paths always have a 2-hex shard
@@ -115,26 +134,27 @@ impl BulkWriter<'_> {
         if let Ok(existing) = fs::read(&final_path)
             && existing == bytes
         {
-            // Still fsync it at commit: the bytes may have matched out
-            // of the PAGE CACHE of a crashed session's unsynced write
-            // — byte equality is not a durability test.
+            // The bytes may have matched out of the PAGE CACHE of a
+            // crashed session's unsynced write — byte equality is not a
+            // durability test, so this pre-existing file still needs a
+            // content fsync at commit.
             self.dirs.insert(shard_dir.to_path_buf());
             self.files.insert(final_path);
             return Ok(h);
         }
         fs::create_dir_all(shard_dir)?;
-        crate::atomic::write_unsynced(&final_path, bytes)?;
+        // Content fsync happens BEFORE the rename, so the object is
+        // durable the instant it becomes visible. Only the rename's
+        // durability (the shard dir fsync) is deferred to commit.
+        crate::atomic::write_content_synced(&final_path, bytes)?;
         self.dirs.insert(shard_dir.to_path_buf());
-        self.files.insert(final_path);
         Ok(h)
     }
 
-    /// Make the session durable: fsync every written file's CONTENTS,
+    /// Make the session durable: fsync the CONTENTS of any pre-existing
+    /// objects this batch re-used (newly written objects were already
+    /// content-fsynced before their rename in [`write`](Self::write)),
     /// then every touched shard directory (renames become durable).
-    /// Contents must be synced too — a durable name pointing at
-    /// unsynced pages would let a power loss tear an object that the
-    /// caller's (fsynced) bookkeeping already vouches for, and the
-    /// idempotent-re-run story only covers crashes BEFORE commit.
     pub fn commit(self) -> StoreResult<()> {
         for file in &self.files {
             fs::OpenOptions::new().write(true).open(file)?.sync_all()?;
@@ -160,6 +180,15 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 pub struct ObjectStore {
     /// Absolute path to `<root>/.mkit/objects`.
     objects_root: PathBuf,
+    /// Flush/rename primitive seam. Production code always uses
+    /// [`RealSyncer`]; unit tests inject a recording double to assert
+    /// flush ordering and counts (the O(1)-flushes-per-batch contract).
+    syncer: Arc<dyn Syncer>,
+    /// Policy handed out by [`Self::batch`]. Defaults to
+    /// [`SyncPolicy::Batch`]; the CLI maps the repo config key
+    /// `durability.objects = per-object` onto it for deployments that
+    /// want the strict historical schedule.
+    default_policy: SyncPolicy,
 }
 
 impl ObjectStore {
@@ -171,7 +200,11 @@ impl ObjectStore {
         if !objects_root.is_dir() {
             return Err(StoreError::NotAMkitRepository);
         }
-        Ok(Self { objects_root })
+        Ok(Self {
+            objects_root,
+            syncer: Arc::new(RealSyncer),
+            default_policy: SyncPolicy::Batch,
+        })
     }
 
     /// Initialise a fresh `.mkit/` directory under `root`. Returns
@@ -183,7 +216,47 @@ impl ObjectStore {
         }
         let objects_root = mkit_root.join(OBJECTS_DIR);
         fs::create_dir_all(&objects_root)?;
-        Ok(Self { objects_root })
+        Ok(Self {
+            objects_root,
+            syncer: Arc::new(RealSyncer),
+            default_policy: SyncPolicy::Batch,
+        })
+    }
+
+    /// Select the [`SyncPolicy`] that [`Self::batch`] hands out. The
+    /// CLI wires the repo config key `durability.objects` here so
+    /// deployments on filesystems where they prefer the strict
+    /// per-object schedule can opt into it (SPEC-OBJECTS §10.1).
+    pub fn set_sync_policy(&mut self, policy: SyncPolicy) {
+        self.default_policy = policy;
+    }
+
+    /// Replace the flush/rename primitives. Test-only seam — see the
+    /// `syncer` field. Not exposed publicly so the production sync
+    /// strategy cannot be silently weakened by downstream code.
+    #[cfg(test)]
+    pub(crate) fn set_syncer(&mut self, syncer: Arc<dyn Syncer>) {
+        self.syncer = syncer;
+    }
+
+    /// The active flush/rename primitives, shared with [`WriteBatch`].
+    pub(crate) fn syncer(&self) -> &Arc<dyn Syncer> {
+        &self.syncer
+    }
+
+    /// Start a batched write with the store's configured policy
+    /// (default [`SyncPolicy::Batch`]): objects staged by the batch
+    /// become durable and visible together at [`WriteBatch::commit`],
+    /// with O(1) full flushes per batch instead of per object.
+    #[must_use]
+    pub fn batch(&self) -> WriteBatch<'_> {
+        self.batch_with_policy(self.default_policy)
+    }
+
+    /// Start a batched write with an explicit [`SyncPolicy`].
+    #[must_use]
+    pub fn batch_with_policy(&self, policy: SyncPolicy) -> WriteBatch<'_> {
+        WriteBatch::new(self, policy)
     }
 
     /// Returns `true` when `root` contains a `.mkit/objects` directory.
@@ -199,7 +272,8 @@ impl ObjectStore {
     }
 
     /// Compute the on-disk path for `hash`, joined under `objects/`.
-    fn path_for(&self, h: &Hash) -> PathBuf {
+    /// `pub(crate)` so [`WriteBatch`] shares the single layout rule.
+    pub(crate) fn path_for(&self, h: &Hash) -> PathBuf {
         let p = object_path(h);
         // Both halves are ASCII hex by construction in `object_path`.
         let dir = std::str::from_utf8(&p.dir).expect("ascii hex");
@@ -230,26 +304,42 @@ impl ObjectStore {
         let h = hash::hash(bytes);
         let final_path = self.path_for(&h);
         if final_path.exists() {
+            // Dedup hit: the object is visible, but if another process
+            // renamed it and has not yet flushed the dirent, it may not
+            // be durable — and our caller is about to reference it.
+            // Flush its shard dir before returning (SPEC-OBJECTS §10.1
+            // dedup rule, mirroring WriteBatch's touched_shards).
+            self.syncer()
+                .dir_sync(final_path.parent().expect("object path has parent"))?;
             return Ok(h);
         }
         let shard_dir = final_path
             .parent()
             .expect("object path always has a 2-hex parent");
         fs::create_dir_all(shard_dir)?;
-        write_atomic(&final_path, bytes)?;
+        write_atomic(&final_path, bytes, &**self.syncer())?;
         Ok(h)
     }
 
-    /// Begin a bulk-write session: objects are written temp+rename
-    /// WITHOUT per-file `fsync`, and [`BulkWriter::commit`] fsyncs
-    /// every written file and every touched shard directory once at
-    /// the end (batched, instead of per-write).
+    /// Begin a bulk-write session: each new object is written
+    /// durable-before-visible (contents fsynced, then renamed), and
+    /// [`BulkWriter::commit`] batches the directory fsyncs (rename
+    /// durability) plus a content fsync of any re-used pre-existing
+    /// objects once at the end, instead of fsyncing a dir per write.
     ///
-    /// Crash-safety contract (deliberately weaker than [`Self::write`],
-    /// for callers whose whole operation is idempotent — e.g. the
-    /// deterministic git-import, which re-runs from a retained source
-    /// mirror): after a crash BEFORE `commit`, written objects may be
-    /// torn or missing. Existing paths are VERIFIED (byte compare)
+    /// Because content is durable before the rename, the session upholds
+    /// the store's global invariant even under concurrent readers: an
+    /// object another process can `contains()`-dedup against is always
+    /// backed by durable bytes.
+    ///
+    /// Crash-safety contract (deliberately weaker than [`Self::write`]
+    /// only for the rename/dirent half, for callers whose whole
+    /// operation is idempotent — e.g. the deterministic git-import,
+    /// which re-runs from a retained source mirror): after a crash
+    /// BEFORE `commit`, a just-renamed object's dirent may be lost (the
+    /// shard dir is not yet fsynced), so objects may be missing — never
+    /// torn, since contents were fsynced first. Existing paths are
+    /// VERIFIED (byte compare)
     /// rather than blindly rewritten or blindly trusted: a matching
     /// file is left untouched (it may be durable and referenced by
     /// native history — replacing it with an unsynced inode would put
@@ -297,11 +387,60 @@ impl ObjectStore {
         Ok(bytes)
     }
 
+    /// The object's type tag, from its 6-byte prologue — without
+    /// reading or hash-verifying the body. Backs cheap shape checks
+    /// (e.g. "is this staged hash blob-like?") that previously paid a
+    /// full read+BLAKE3 of every staged blob per status/commit; the
+    /// real read path still integrity-verifies at use time.
+    ///
+    /// # Errors
+    /// [`StoreError::ObjectNotFound`] if absent; [`StoreError::Decode`]
+    /// for a short file, bad magic/version, or unknown tag.
+    pub fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        let path = self.path_for(h);
+        let mut file = File::open(&path).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
+            _ => StoreError::Io(e),
+        })?;
+        let mut prologue = [0u8; 6];
+        file.read_exact(&mut prologue)
+            .map_err(|_| StoreError::Decode(MkitError::EmptyData))?;
+        if prologue[1..5] != crate::object::MAGIC {
+            return Err(StoreError::Decode(MkitError::InvalidMagic));
+        }
+        if prologue[5] != crate::object::SCHEMA_VERSION {
+            return Err(StoreError::Decode(MkitError::UnsupportedObjectVersion));
+        }
+        crate::object::ObjectType::from_u8(prologue[0]).map_err(StoreError::Decode)
+    }
+
     /// Convenience: read raw bytes and decode into a typed [`Object`].
     pub fn read_object(&self, h: &Hash) -> StoreResult<Object> {
         let bytes = self.read(h)?;
         let obj = serialize::deserialize(&bytes)?;
         Ok(obj)
+    }
+
+    /// Hash-verifying variant of [`object_type`](Self::object_type): reads
+    /// the whole object and confirms its content hashes to `h` before
+    /// returning the declared type. This is the integrity guard for
+    /// tree-publication paths (commit, merge, rebase, …) — `object_type`
+    /// alone reads only the 6-byte prologue, so a staged object corrupted
+    /// after `add` would otherwise be published into a durable tree and
+    /// only fail at later read time. Use `object_type` on hot read-only
+    /// paths (status/diff snapshots) where nothing durable is published.
+    pub fn verify_object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        let bytes = self.read(h)?; // read() re-hashes and rejects on mismatch
+        if bytes.len() < 6 {
+            return Err(StoreError::Decode(MkitError::EmptyData));
+        }
+        if bytes[1..5] != crate::object::MAGIC {
+            return Err(StoreError::Decode(MkitError::InvalidMagic));
+        }
+        if bytes[5] != crate::object::SCHEMA_VERSION {
+            return Err(StoreError::Decode(MkitError::UnsupportedObjectVersion));
+        }
+        crate::object::ObjectType::from_u8(bytes[0]).map_err(StoreError::Decode)
     }
 
     /// Enumerate every object hash currently in the store by walking
@@ -379,44 +518,206 @@ impl ObjectStore {
     }
 }
 
-/// Atomically write `bytes` to `final_path`. We write to a sibling temp
-/// file in the same directory, `fsync` the file, then rename into place.
-/// On Unix, `rename(2)` is atomic with respect to concurrent readers and
-/// replaces the destination. On Windows, [`NamedTempFile::persist`] uses
-/// `MOVEFILE_REPLACE_EXISTING` semantics so the replace-existing path
-/// works there too.
+/// Create a uniquely-named sibling temp file in `parent` for the object
+/// file `file_name`. The `.{name}.tmp.{pid}.{seq}` shape is what
+/// [`ObjectStore::iter_object_hashes`] and the stale-temp tests rely on
+/// to skip non-objects.
+pub(crate) fn temp_file_in(parent: &Path, file_name: &str) -> io::Result<NamedTempFile> {
+    let pid = process::id();
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
+    NamedTempFile::with_prefix_in(tmp_name, parent)
+}
+
+/// Atomically write `bytes` to `final_path` with per-object durability
+/// ([`SyncPolicy::PerObject`]): temp file, full flush, rename into
+/// place, parent-dir flush. On Unix, `rename(2)` is atomic with respect
+/// to concurrent readers and replaces the destination. On Windows,
+/// [`NamedTempFile::persist`] uses `MOVEFILE_REPLACE_EXISTING`
+/// semantics so the replace-existing path works there too.
 ///
-/// After a successful rename we `fsync` the parent directory on Unix to
-/// flush the dirent update — without this, the rename can survive a
+/// After a successful rename we flush the parent directory on Unix to
+/// commit the dirent update — without this, the rename can survive a
 /// power loss only in the page cache and the file appears missing on
 /// reboot.
-fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
+///
+/// All flush/rename primitives go through `syncer` so unit tests can
+/// assert ordering; [`RealSyncer`] preserves the historical behaviour
+/// exactly.
+fn write_atomic(final_path: &Path, bytes: &[u8], syncer: &dyn Syncer) -> io::Result<()> {
     let parent = final_path.parent().expect("write_atomic: path has parent");
     let file_name = final_path
         .file_name()
         .expect("write_atomic: path has file name")
         .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
 
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    let mut tmp = temp_file_in(parent, &file_name)?;
     tmp.as_file_mut().write_all(bytes)?;
-    tmp.as_file_mut().sync_all()?;
+    syncer.full(tmp.as_file(), tmp.path())?;
 
     // NamedTempFile::persist uses a cross-platform atomic replace:
     // rename(2) on Unix, MoveFileExW with MOVEFILE_REPLACE_EXISTING on Windows.
-    tmp.persist(final_path).map_err(|e| e.error)?;
+    syncer.rename(tmp.into_temp_path(), final_path)?;
 
-    sync_parent_dir(parent)?;
+    syncer.dir_sync(parent)?;
     Ok(())
+}
+
+/// Read source shared by [`ObjectStore`] and snapshot overlays, so
+/// tree-diff code can resolve objects from either the durable store or
+/// an in-memory [`EphemeralSink`].
+pub trait ObjectSource {
+    /// Read and integrity-verify the raw bytes of `h`.
+    ///
+    /// # Errors
+    /// [`StoreError::ObjectNotFound`] / [`StoreError::HashMismatch`] /
+    /// I/O errors, as for [`ObjectStore::read`].
+    fn read(&self, h: &Hash) -> StoreResult<Vec<u8>>;
+
+    /// Read and decode `h` into a typed [`Object`].
+    ///
+    /// # Errors
+    /// As [`Self::read`], plus decode errors.
+    fn read_object(&self, h: &Hash) -> StoreResult<Object> {
+        Ok(serialize::deserialize(&self.read(h)?)?)
+    }
+}
+
+impl ObjectSource for ObjectStore {
+    fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        ObjectStore::read(self, h)
+    }
+}
+
+/// In-memory object overlay for **ephemeral worktree snapshots**
+/// (`status`, `diff`, conflict/restore safety checks).
+///
+/// Writes never touch the durable store: objects whose hash already
+/// exists on disk are deduplicated against it (the store's
+/// visible-implies-durable invariant makes that safe), everything else
+/// lives in a private map that vanishes with the sink. This is what
+/// keeps query commands from (a) paying any durability cost, (b)
+/// growing `objects/` with throwaway snapshot trees, and (c) ever
+/// making a non-durable object *visible* where another writer's dedup
+/// could durably reference it.
+///
+/// Reads fall through to the underlying store, so diff walkers can
+/// resolve a snapshot tree that references committed objects.
+#[derive(Debug)]
+pub struct EphemeralSink<'s> {
+    store: &'s ObjectStore,
+    objects: std::sync::Mutex<std::collections::HashMap<Hash, Vec<u8>>>,
+}
+
+impl<'s> EphemeralSink<'s> {
+    /// Create an empty overlay over `store`.
+    #[must_use]
+    pub fn new(store: &'s ObjectStore) -> Self {
+        Self {
+            store,
+            objects: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl ObjectSink for EphemeralSink<'_> {
+    fn put(&self, bytes: &[u8]) -> StoreResult<Hash> {
+        self.put_parts(&[bytes])
+    }
+
+    fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
+        let mut total: usize = 0;
+        let mut hasher = hash::Hasher::new();
+        for p in parts {
+            total = total
+                .checked_add(p.len())
+                .ok_or(StoreError::ObjectTooLarge)?;
+            hasher.update(p);
+        }
+        if total > MAX_RAW_OBJECT_SIZE {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        let h = hasher.finalize();
+        // Dedup against the durable store: visible store objects are
+        // durable by invariant, and skipping them keeps the overlay's
+        // memory bounded by the *changed* content, not the worktree.
+        if self.store.contains(&h) {
+            return Ok(h);
+        }
+        let mut map = self.objects.lock().expect("ephemeral sink mutex");
+        map.entry(h).or_insert_with(|| {
+            let mut buf = Vec::with_capacity(total);
+            for p in parts {
+                buf.extend_from_slice(p);
+            }
+            buf
+        });
+        Ok(h)
+    }
+
+    fn has(&self, h: &Hash) -> bool {
+        self.objects
+            .lock()
+            .expect("ephemeral sink mutex")
+            .contains_key(h)
+            || self.store.contains(h)
+    }
+}
+
+impl ObjectSource for EphemeralSink<'_> {
+    fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        if let Some(bytes) = self
+            .objects
+            .lock()
+            .expect("ephemeral sink mutex")
+            .get(h)
+            .cloned()
+        {
+            return Ok(bytes);
+        }
+        self.store.read(h)
+    }
+}
+
+/// Write target shared by [`ObjectStore`] (per-object durability) and
+/// [`WriteBatch`] (batched durability), so ingest code can be written
+/// once against either sink.
+pub trait ObjectSink {
+    /// Store `bytes` as one object, returning its BLAKE3 hash.
+    fn put(&self, bytes: &[u8]) -> StoreResult<Hash>;
+    /// Store the concatenation of `parts` as one object without the
+    /// caller having to materialise the concatenated buffer.
+    fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash>;
+    /// True when the object is already present (or staged) in this sink.
+    fn has(&self, h: &Hash) -> bool;
+}
+
+impl ObjectSink for ObjectStore {
+    fn put(&self, bytes: &[u8]) -> StoreResult<Hash> {
+        self.write(bytes)
+    }
+
+    fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
+        // Per-object path is the legacy/rare sink; hot ingest paths use
+        // WriteBatch, whose put_parts is copy-free.
+        let total: usize = parts.iter().map(|p| p.len()).sum();
+        let mut bytes = Vec::with_capacity(total);
+        for p in parts {
+            bytes.extend_from_slice(p);
+        }
+        self.write(&bytes)
+    }
+
+    fn has(&self, h: &Hash) -> bool {
+        self.contains(h)
+    }
 }
 
 /// On Unix, fsync the directory holding the just-renamed file so the
 /// dirent update is durable. No-op on non-Unix (Windows does not expose
 /// a stable directory-fsync primitive via `std::fs`).
 #[cfg(unix)]
-fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
     match File::open(parent) {
         Ok(dir) => dir.sync_all(),
         // If the dir disappeared under us (race with external cleanup),
@@ -428,7 +729,7 @@ fn sync_parent_dir(parent: &Path) -> io::Result<()> {
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
-fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 

@@ -299,6 +299,10 @@ fn apply_to_index(idx: &mut index::Index, m: &PlannedMove) {
             path: m.target_rel.clone(),
             status: m.status,
             object_hash: m.hash,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
         }),
     }
 }

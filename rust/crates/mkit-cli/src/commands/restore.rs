@@ -360,7 +360,7 @@ fn entry_matches(idx: &Index, rel: &str) -> Vec<IndexEntry> {
 /// Return `Some(reason)` when the worktree file for `path` exists but
 /// diverges from its staged (index) blob — the un-staged edit a worktree
 /// restore would silently discard. Mirrors `rm`'s dirty check.
-fn dirty_reason(root: &Path, store: &ObjectStore, idx: &Index, path: &str) -> Option<String> {
+fn dirty_reason(root: &Path, _store: &ObjectStore, idx: &Index, path: &str) -> Option<String> {
     let staged = idx
         .entries
         .iter()
@@ -370,9 +370,11 @@ fn dirty_reason(root: &Path, store: &ObjectStore, idx: &Index, path: &str) -> Op
     let work_hash = if meta.file_type().is_symlink() {
         let target = std::fs::read_link(&abs).ok()?;
         let target_str = target.to_str()?;
-        symlink_blob_hash(store, target_str)?
+        symlink_blob_hash(target_str)?
     } else if meta.file_type().is_file() {
-        worktree::hash_file(store, &abs).ok()?
+        worktree::read_regular_file_bounded(&abs)
+            .ok()
+            .and_then(|(_, data)| worktree::hash_file_object(&data).ok())?
     } else {
         // No worktree file (or a non-file): nothing to clobber.
         return None;
@@ -387,13 +389,13 @@ fn dirty_reason(root: &Path, store: &ObjectStore, idx: &Index, path: &str) -> Op
 }
 
 /// Hash a symlink target as a blob (matching `worktree`/`add` semantics).
-fn symlink_blob_hash(store: &ObjectStore, target: &str) -> Option<Hash> {
-    use mkit_core::object::Blob;
-    let blob = Object::Blob(Blob {
-        data: target.as_bytes().to_vec(),
-    });
-    let ser = mkit_core::serialize::serialize(&blob).ok()?;
-    store.write(&ser).ok()
+fn symlink_blob_hash(target: &str) -> Option<Hash> {
+    // Pure content-addressing — change detection must not write to the
+    // store. Byte layout pinned to serialize() via blob_prologue.
+    let prologue = mkit_core::serialize::blob_prologue(target.len()).ok()?;
+    let mut hasher = mkit_core::hash::Hasher::new();
+    hasher.update(&prologue).update(target.as_bytes());
+    Some(hasher.finalize())
 }
 
 /// Normalise a CLI path argument into a repo-relative index path.

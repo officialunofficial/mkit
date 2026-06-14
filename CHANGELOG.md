@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Hardened after multi-agent review** (16 findings, all resolved):
+  worktree snapshots for `status`/`diff`/safety checks moved to an
+  in-memory `EphemeralSink` (no flush cost, no garbage objects, and no
+  visible-but-unflushed object can poison content-addressed dedup —
+  `SyncPolicy::None` removed); per-file write barriers are real on
+  every platform (fdatasync/FlushFileBuffers, not just Apple's
+  F_BARRIERFSYNC) so batch durability no longer assumes ext4
+  ordered-data journaling; `durability.objects = per-object` config
+  key exposes the strict schedule; the index stat cache gained
+  ino+ctime fields (catches replace-by-rename and `touch -r`), a
+  per-entry racy window for coarse-timestamp files, and `status` heals
+  the cache from hash-time observations (never stat-after-verify) and
+  never auto-upgrades a v1 index; `stash pop` records the popped
+  commit in the recovery log before dropping its manifest entry;
+  `status`/`diff` snapshots type-validate staged blobs from the 6-byte
+  prologue instead of full read+re-hash, while commit and the other
+  tree-publishing paths hash-verify each staged object before a tree
+  references it (a corrupt staged object can never be published); pack
+  unpack no longer double-hashes every object.
+
+- **Batched durability (`WriteBatch`)**: object writes from one command
+  (`add`, `commit`, pack unpack, `stash`) are staged invisibly and made
+  durable together at a single commit point — exactly **2 full flushes
+  per command** (one over staged data, one terminal device flush)
+  instead of 2 per object, with per-file/per-dir writeback barriers
+  issued from a scoped-thread pool. Same crash invariant as before,
+  stated in SPEC-OBJECTS §10.1: an object is never visible before its
+  bytes are durable, and refs/index are only written after their
+  referents are durable. `SyncPolicy::{PerObject,Batch}` selects
+  the schedule (query snapshots use an in-memory `EphemeralSink`, not a
+  sync policy); flush counts and ordering are pinned by unit tests.
+  Measured on an M4 Max (APFS): `add`+`commit` of a 100 MiB file
+  13.5s → 0.75s; 100 × 10 KiB files 1.1s → 0.18s.
+- **Index v2 stat cache**: `.mkit/index` entries now carry
+  `mtime_ns`+`size` (SPEC-INDEX v2; v1 indexes read fine and upgrade on
+  first write). `add`/`status`/`commit -a` prove unchanged files by
+  stat instead of re-reading and re-hashing content — O(stat), with
+  git's racy-clean rule applied at read time. `status` with an
+  unchanged 100 MiB file: 113ms → 13ms.
+- **Zero-copy ingest**: chunk and small-blob writes stream
+  `prologue ‖ payload` straight from the source buffer
+  (`serialize::blob_prologue`), eliminating two memcpys per chunk;
+  `status`/`diff` snapshots use an in-memory `EphemeralSink` and no
+  longer pay any durability cost; `worktree::hash_file_object` content-addresses
+  without writing, so change detection no longer mutates the store.
+- **Checkout**: restored worktree files keep tmp+rename atomicity but
+  are no longer flushed per file (the store is the source of truth and
+  checkout is re-runnable; matches git).
+
 ### Added
 
 - **git-bridge: importer-signed git→mkit import, pull, and fork-mode

@@ -1,6 +1,7 @@
 //! Shared types between the bench harnesses and the SVG renderer.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// One benchmark sample: which library / variant produced what
 /// throughput on what input. The renderer groups these by `category`
@@ -38,5 +39,24 @@ impl Unit {
             Self::OpsPerSec => "ops/s",
             Self::Millis => "ms",
         }
+    }
+}
+
+/// Write `samples` as pretty JSON to `target/bench-results/{category}.json`
+/// (relative to the workspace root), the location `render-charts` reads.
+/// Shared by every bench suite so the output contract lives in one place.
+pub fn write_summary(category: &str, samples: &[Sample]) {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+    let dir = Path::new(&manifest).parent().map_or_else(
+        || Path::new("target/bench-results").to_path_buf(),
+        |p| p.join("target/bench-results"),
+    );
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("{category}.json"));
+    let body = serde_json::to_string_pretty(samples).expect("serialize samples");
+    if let Err(e) = std::fs::write(&path, body) {
+        eprintln!("warning: could not write {}: {e}", path.display());
+    } else {
+        eprintln!("wrote {}", path.display());
     }
 }

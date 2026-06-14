@@ -10,9 +10,6 @@
 //! `target/bench-results/hashing.json` so the renderer doesn't need
 //! to re-implement criterion's dir layout discovery.
 
-use std::fs;
-use std::path::Path;
-
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mkit_benches::{Sample, Unit};
 
@@ -127,7 +124,7 @@ fn bench_hashing(c: &mut Criterion) {
         group.finish();
     }
 
-    write_summary("hashing", &samples);
+    mkit_benches::write_summary("hashing", &samples);
 }
 
 /// Time a single closure invocation in seconds. Used to populate the
@@ -150,24 +147,6 @@ fn time_one<F: FnMut()>(mut f: F) -> f64 {
 fn throughput_mib(bytes: usize, seconds_per_iter: f64) -> f64 {
     let mib = bytes as f64 / (1024.0 * 1024.0);
     mib / seconds_per_iter
-}
-
-fn write_summary(category: &str, samples: &[Sample]) {
-    // Resolve the workspace target dir from CARGO_MANIFEST_DIR so we
-    // don't depend on the criterion harness's current working dir.
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-    let dir = Path::new(&manifest)
-        .parent()
-        .map(|p| p.join("target/bench-results"))
-        .unwrap_or_else(|| Path::new("target/bench-results").to_path_buf());
-    let _ = fs::create_dir_all(&dir);
-    let path = dir.join(format!("{category}.json"));
-    let body = serde_json::to_string_pretty(samples).expect("serialize samples");
-    if let Err(e) = fs::write(&path, body) {
-        eprintln!("warning: could not write {}: {e}", path.display());
-    } else {
-        eprintln!("wrote {}", path.display());
-    }
 }
 
 criterion_group!(benches, bench_hashing);

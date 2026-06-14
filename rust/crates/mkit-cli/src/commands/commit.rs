@@ -86,7 +86,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let store = match super::open_store_configured(&cwd) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
@@ -174,7 +174,13 @@ pub fn run(args: &[String]) -> u8 {
             exit::USAGE,
         );
     }
-    let tree_hash = match worktree::build_tree_from_index(&store, &idx) {
+    // One durability batch spans every tree object plus the commit
+    // object; committed below, BEFORE the ref advance that makes the
+    // commit reachable.
+    let batch = store.batch();
+    // Publishing a durable commit — verify staged objects before the tree
+    // references them.
+    let tree_hash = match worktree::build_tree_from_index_with(&store, &batch, &idx, true) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("build tree: {e}"), exit::GENERAL_ERROR),
     };
@@ -209,10 +215,15 @@ pub fn run(args: &[String]) -> u8 {
         Ok(b) => b,
         Err(e) => return emit_err(&format!("serialize commit: {e}"), exit::DATAERR),
     };
-    let commit_hash = match store.write(&bytes) {
+    let commit_hash = match batch.write(&bytes) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("store commit: {e}"), exit::CANTCREAT),
     };
+    // Make the tree + commit objects durable before anything (recovery
+    // log, HEAD/branch ref, index) references them.
+    if let Err(e) = batch.commit() {
+        return emit_err(&format!("store commit: {e}"), exit::CANTCREAT);
+    }
     // Amend supersedes the old HEAD. Record it BEFORE moving the branch
     // (under the worktree lock) so the superseded commit stays
     // recoverable; abort if the recovery log can't be written.
