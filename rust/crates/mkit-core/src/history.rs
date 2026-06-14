@@ -90,6 +90,29 @@ pub mod tokio_executor;
 /// Re-export of the bundled tokio-runtime executor.
 pub use tokio_executor::TokioExecutor;
 
+/// Peak-bagging policy for the commit-history MMR.
+///
+/// This is a **load-bearing cryptographic parameter**: the producer
+/// ([`CommitHistory::root`] / [`CommitHistory::prove`]) and the verifier
+/// ([`verify_inclusion`]) must fold MMR peaks into a root identically, or
+/// every inclusion proof silently fails to verify. Pinning it here — and
+/// consuming it only via [`history_hasher`] — makes that agreement
+/// un-desyncable across all call sites and both code paths.
+///
+/// `ForwardFold` is also a **back-compat** choice: it reproduces the root
+/// that the pre-2026.5 commonware default produced byte-for-byte, so MMR
+/// journals written by an older mkit build and roots already stored in the
+/// reflog stay valid across the commonware bump. Do **not** change this
+/// without an on-disk format-version bump and a migration.
+const HISTORY_BAGGING: Bagging = Bagging::ForwardFold;
+
+/// The canonical hasher for the commit-history MMR — the single source of
+/// truth for [`HISTORY_BAGGING`], so the producer and verifier sides can
+/// never drift on the bagging policy.
+fn history_hasher() -> StandardHasher<Blake3> {
+    StandardHasher::new(HISTORY_BAGGING)
+}
+
 // ---------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------
@@ -254,7 +277,7 @@ impl CommitHistory<TokioExecutor> {
     /// need a proof bundle without committing any state to disk.
     #[must_use]
     pub fn open() -> Self {
-        let hasher: StandardHasher<Blake3> = StandardHasher::new(Bagging::ForwardFold);
+        let hasher = history_hasher();
         let mmr = MemMmr::new();
         Self {
             backend: Backend::Mem { mmr },
@@ -316,9 +339,9 @@ impl<X: Executor + 'static> CommitHistory<X> {
             page_cache: CacheRef::from_pooler(&ctx, NZU16!(4096), NZUsize!(8)),
         };
 
-        let hasher: StandardHasher<Blake3> = StandardHasher::new(Bagging::ForwardFold);
+        let hasher = history_hasher();
         let mmr = {
-            let hasher_inner: StandardHasher<Blake3> = StandardHasher::new(Bagging::ForwardFold);
+            let hasher_inner = history_hasher();
             // `child` returns an owned child Context, leaving `ctx` usable for
             // the surviving CommitHistory (which keeps the bootstrap runtime
             // alive via its inner executor Arc).
@@ -420,28 +443,18 @@ impl<X: Executor + 'static> CommitHistory<X> {
     /// `Result` is always `Ok`.
     #[must_use]
     pub fn root(&self) -> Hash {
-        let mut out = [0u8; HASH_LEN];
-        match &self.backend {
-            // `root` now takes the hasher and an `inactive_peaks` count
-            // (0 for a self-contained MMR) and returns an owned `Digest`.
-            // The empty MMR has a well-defined root, so this never errors
-            // for a freshly-built or appended-to MMR.
-            Backend::Mem { mmr } => {
-                let d = mmr
-                    .root(&self.hasher, 0)
-                    .expect("0 inactive peaks is always a valid root request");
-                out.copy_from_slice(d.as_ref());
-            }
-            // `Journaled::root` is sync (reads from the in-memory cache),
-            // no executor needed.
-            Backend::Journaled(b) => {
-                let d = b
-                    .mmr
-                    .root(&self.hasher, 0)
-                    .expect("0 inactive peaks is always a valid root request");
-                out.copy_from_slice(d.as_ref());
-            }
+        // `root` takes the hasher + an `inactive_peaks` count (0 for a
+        // self-contained MMR over the full leaf set) and returns an owned
+        // `Digest`. Both backends are sync here (Journaled reads its
+        // in-memory cache); 0 inactive peaks is always a valid request,
+        // so the `Result` is always `Ok` — see the `# Panics` note above.
+        let digest = match &self.backend {
+            Backend::Mem { mmr } => mmr.root(&self.hasher, 0),
+            Backend::Journaled(b) => b.mmr.root(&self.hasher, 0),
         }
+        .expect("0 inactive peaks is always a valid root request");
+        let mut out = [0u8; HASH_LEN];
+        out.copy_from_slice(digest.as_ref());
         out
     }
 
@@ -505,7 +518,8 @@ pub fn verify_inclusion(
     let root_digest = digest_from_hash(root);
     let loc = MmrLocation::new(position.0);
 
-    let hasher: StandardHasher<Blake3> = StandardHasher::new(Bagging::ForwardFold);
+    // Same bagging policy as the producer — see [`HISTORY_BAGGING`].
+    let hasher = history_hasher();
     proof.verify_element_inclusion(&hasher, leaf.as_ref(), loc, &root_digest)
 }
 
