@@ -1157,7 +1157,8 @@ pub fn status_diff_observed(
 
     // Build the index tree exactly the way `mkit commit` builds it.
     // This is the authoritative "what would be committed right now."
-    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, idx)?;
+    // Ephemeral diff snapshot (no durable publish) — cheap shape check.
+    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, idx, false)?;
 
     let staged = diff_trees(&snapshot, head_tree.copied(), Some(index_tree))?;
     let unstaged = diff_worktree_trees(&snapshot, Some(index_tree), Some(work_tree_hash))?;

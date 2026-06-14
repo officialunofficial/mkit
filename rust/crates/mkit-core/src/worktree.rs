@@ -337,7 +337,9 @@ pub fn build_tree_from_index(
     store: &ObjectStore,
     index: &crate::index::Index,
 ) -> WorktreeResult<Hash> {
-    build_tree_from_index_with(store, store, index)
+    // The convenience wrapper publishes a durable tree (commit/merge/
+    // rebase/…), so it integrity-verifies staged objects by default.
+    build_tree_from_index_with(store, store, index, true)
 }
 
 /// [`build_tree_from_index`] writing tree objects through `sink` —
@@ -346,6 +348,14 @@ pub fn build_tree_from_index(
 /// `store` is still needed read-only to validate that staged hashes
 /// point at blob-shaped objects (a sink cannot read).
 ///
+/// `verify` selects the staged-object integrity check. With `verify =
+/// true` (every path that publishes a durable tree) each referenced
+/// object is read and re-hashed before the tree is materialised, so a
+/// corrupt staged object can never be published. With `verify = false`
+/// (ephemeral status/diff snapshots that publish nothing durable) only
+/// the 6-byte prologue is read for the blob-shape check — the read path
+/// still integrity-verifies the object whenever it is actually used.
+///
 /// # Errors
 /// See [`build_tree_from_index`].
 #[allow(clippy::items_after_statements, clippy::too_many_lines)]
@@ -353,6 +363,7 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
     store: &ObjectStore,
     sink: &S,
     index: &crate::index::Index,
+    verify: bool,
 ) -> WorktreeResult<Hash> {
     use crate::index::EntryStatus;
 
@@ -400,11 +411,18 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
         // target path). Accept both blob shapes for file entries so the
         // commit/index path agrees with the worktree-hashing path; a
         // tree/commit/etc. under a file entry is still rejected.
-        // Shape check via the 6-byte prologue only — a full read_object
-        // here re-read AND re-hashed every staged blob on every
-        // status/commit, dominating large repos of small files. The
-        // read path still integrity-verifies at use time.
-        match store.object_type(&entry.object_hash)? {
+        // Publishing paths (`verify`) read + re-hash the staged object so
+        // a tree never references a corrupt blob; the read path's hash
+        // check is the same one `add` passed, so this only catches
+        // post-`add` corruption. Ephemeral status/diff snapshots skip it
+        // — re-reading every staged blob on every status dominates large
+        // repos of small files, and they publish nothing durable.
+        let object_type = if verify {
+            store.verify_object_type(&entry.object_hash)?
+        } else {
+            store.object_type(&entry.object_hash)?
+        };
+        match object_type {
             crate::object::ObjectType::Blob => {}
             crate::object::ObjectType::ChunkedBlob if mode != EntryMode::Symlink => {}
             other => {
@@ -1778,7 +1796,7 @@ mod tests {
         store.set_syncer(rec.clone());
 
         let batch = store.batch();
-        let tree_h = build_tree_from_index_with(&store, &batch, &idx).unwrap();
+        let tree_h = build_tree_from_index_with(&store, &batch, &idx, true).unwrap();
         batch.commit().unwrap();
 
         let fulls = rec
@@ -1798,6 +1816,53 @@ mod tests {
             store2.write(&serialize::serialize(&blob).unwrap()).unwrap();
         }
         assert_eq!(tree_h, build_tree_from_index(&store2, &idx).unwrap());
+    }
+
+    /// A staged object corrupted after `add` must NOT be publishable: the
+    /// verifying path (commit and friends) rejects it, while the cheap
+    /// non-verifying path (status/diff snapshots) still accepts the shape.
+    #[test]
+    fn build_tree_from_index_verify_rejects_corrupt_staged_object() {
+        use crate::index::{EntryStatus, Index, IndexEntry};
+
+        let (_sd, store) = fresh_store();
+        let blob = Object::Blob(crate::object::Blob {
+            data: b"hello".to_vec(),
+        });
+        let h = store.write(&serialize::serialize(&blob).unwrap()).unwrap();
+        let mut idx = Index::default();
+        idx.entries.push(IndexEntry {
+            status: EntryStatus::Blob,
+            object_hash: h,
+            path: "a.txt".to_string(),
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        });
+
+        // Clean object: both paths succeed and agree.
+        assert!(build_tree_from_index_with(&store, &store, &idx, true).is_ok());
+        assert!(build_tree_from_index_with(&store, &store, &idx, false).is_ok());
+
+        // Corrupt a payload byte past the 6-byte prologue (the prologue
+        // shape stays valid, so only a re-hash can catch it).
+        let path = store.path_for(&h);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let i = bytes.len() - 1;
+        bytes[i] ^= 0xFF;
+        std::fs::write(&path, &bytes).unwrap();
+
+        // Verifying path refuses to publish the corrupt object…
+        assert!(
+            build_tree_from_index_with(&store, &store, &idx, true).is_err(),
+            "commit-path tree build must reject a corrupt staged object"
+        );
+        // …but the cheap snapshot path still passes the prologue shape check.
+        assert!(
+            build_tree_from_index_with(&store, &store, &idx, false).is_ok(),
+            "status/diff snapshot path keeps the cheap prologue-only check"
+        );
     }
 
     // ---- pure hashing + stat cache ------------------------------------

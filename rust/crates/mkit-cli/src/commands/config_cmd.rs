@@ -144,6 +144,21 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "user.name" => value.clone_into(&mut cfg.user_name),
         "user.email" => value.clone_into(&mut cfg.user_email),
         "default_branch" => value.clone_into(&mut cfg.default_branch),
+        // SPEC-OBJECTS §10.1 durability escape hatch. Validated at the
+        // set boundary (unlike the lenient config-load fallback) so a
+        // typo can't silently leave the user on the batched default when
+        // they asked for the strict per-object schedule.
+        "durability.objects" => match value.trim().to_ascii_lowercase().as_str() {
+            "" | "batch" | "per-object" | "per_object" => value.clone_into(&mut cfg.durability_objects),
+            _ => {
+                return Err(emit_err(
+                    &format!(
+                        "invalid value for durability.objects: `{value}` (expected `batch` or `per-object`)"
+                    ),
+                    exit::CONFIG_ERROR,
+                ));
+            }
+        },
         "remote_endpoint" => value.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => value.clone_into(&mut cfg.remote_bucket),
         "remote_type" => value.clone_into(&mut cfg.remote_type),
@@ -200,6 +215,7 @@ const CONFIG_KEYS: &[&str] = &[
     "attest.secp256k1_key_path",
     "attest.signer",
     "default_branch",
+    "durability.objects",
     "key.backend",
     "key.default_ref",
     "key.ed25519_ref",
@@ -227,6 +243,7 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "trusted_remote_endpoint" => Some(Cow::Borrowed(&cfg.trusted_remote_endpoint)),
         "signing_key" => Some(Cow::Borrowed(&cfg.signing_key)),
         "default_branch" => Some(Cow::Borrowed(&cfg.default_branch)),
+        "durability.objects" => Some(Cow::Borrowed(&cfg.durability_objects)),
         "remote_endpoint" => Some(Cow::Borrowed(&cfg.remote_endpoint)),
         "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
         "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),

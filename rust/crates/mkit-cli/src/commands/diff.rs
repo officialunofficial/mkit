@@ -711,7 +711,9 @@ fn index_tree(
     snapshot: &EphemeralSink<'_>,
 ) -> Result<Option<Hash>, String> {
     let idx = super::read_or_seed_index_from_head(root, store)?;
-    let tree = worktree::build_tree_from_index_with(store, snapshot, &idx)
+    // Ephemeral diff snapshot — nothing durable is published, so skip the
+    // re-hash; the read path verifies any object actually touched.
+    let tree = worktree::build_tree_from_index_with(store, snapshot, &idx, false)
         .map_err(|e| format!("build index tree: {e}"))?;
     Ok(Some(tree))
 }

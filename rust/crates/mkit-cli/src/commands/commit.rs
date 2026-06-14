@@ -178,7 +178,9 @@ pub fn run(args: &[String]) -> u8 {
     // object; committed below, BEFORE the ref advance that makes the
     // commit reachable.
     let batch = store.batch();
-    let tree_hash = match worktree::build_tree_from_index_with(&store, &batch, &idx) {
+    // Publishing a durable commit — verify staged objects before the tree
+    // references them.
+    let tree_hash = match worktree::build_tree_from_index_with(&store, &batch, &idx, true) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("build tree: {e}"), exit::GENERAL_ERROR),
     };

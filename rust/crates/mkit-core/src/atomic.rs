@@ -24,23 +24,29 @@ use tempfile::NamedTempFile;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Atomically write `bytes` to `final_path`. Creates the parent
-/// directory if `make_parents` is `true`.
-/// Temp+rename WITHOUT fsync of file or directory — bulk-import path
-/// only (see `store::BulkWriter` for the contract).
-pub(crate) fn write_unsynced(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Atomically write `bytes` to `final_path`, fsyncing the file CONTENTS
+/// before the rename but deferring the directory fsync to the caller.
+/// This is the durable-before-visible primitive for [`store::BulkWriter`]:
+/// the object's bytes are on stable storage before the rename publishes
+/// it, so a concurrent process that dedups against the now-visible object
+/// can never reference non-durable content. The rename itself becomes
+/// durable when the caller fsyncs the shard dir at commit.
+///
+/// [`store::BulkWriter`]: crate::store::BulkWriter
+pub(crate) fn write_content_synced(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = final_path
         .parent()
-        .expect("atomic::write_unsynced: path has parent");
+        .expect("atomic::write_content_synced: path has parent");
     let file_name = final_path
         .file_name()
-        .expect("atomic::write_unsynced: path has file name")
+        .expect("atomic::write_content_synced: path has file name")
         .to_string_lossy();
     let pid = process::id();
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
     let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
     tmp.as_file_mut().write_all(bytes)?;
+    tmp.as_file_mut().sync_all()?;
     tmp.persist(final_path).map_err(|e| e.error)?;
     Ok(())
 }

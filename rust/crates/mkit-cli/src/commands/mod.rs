@@ -529,7 +529,7 @@ pub fn ensure_restore_safe_with_options(
     // Safety-check snapshot trees are ephemeral — in-memory overlay,
     // no durability cost, no garbage objects in the store.
     let snapshot = mkit_core::store::EphemeralSink::new(store);
-    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &idx)
+    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
         .map_err(|e| format!("check index state: {e}"))?;
 
     let staged = diff_trees(&snapshot, current_tree, Some(index_tree))
@@ -624,7 +624,7 @@ pub(crate) fn dropped_tracked_paths(
 ) -> Result<Vec<(String, EntryStatus, Hash)>, String> {
     let idx = read_or_seed_index_from_head(cwd, store)?;
     let snapshot = mkit_core::store::EphemeralSink::new(store);
-    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &idx)
+    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
         .map_err(|e| format!("index tree: {e}"))?;
     let mut out = Vec::new();
     for e in diff_trees(&snapshot, Some(index_tree), Some(target_tree))

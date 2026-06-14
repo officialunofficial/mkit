@@ -47,7 +47,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -117,6 +117,41 @@ pub(crate) trait Syncer: Send + Sync + fmt::Debug {
 #[derive(Debug)]
 pub(crate) struct RealSyncer;
 
+impl RealSyncer {
+    /// Per-file write barrier: order this file's writeback ahead of the
+    /// batch's terminal device flush, as cheaply as the platform allows.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn file_barrier(file: &File) -> io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+        // Apple: `File::sync_data()`/`sync_all()` both map to
+        // `fcntl(F_FULLFSYNC)` — a full device-cache flush. F_BARRIERFSYNC
+        // is the cheaper primitive the module docs assume: it forces this
+        // file's writeback and orders it ahead of later writes WITHOUT a
+        // device flush. The single terminal `device_flush` (one
+        // F_FULLFSYNC) still makes the whole batch durable, so the per-
+        // file step stays a true barrier rather than N full flushes.
+        //
+        // SAFETY: `fcntl(2)` with `F_BARRIERFSYNC` takes only the fd and
+        // the command — it reads/writes no user memory, and the fd is
+        // valid for the borrow of `file`.
+        #[allow(unsafe_code)]
+        let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) };
+        if rc == -1 {
+            // Some filesystems reject the fcntl — fall back to the full
+            // flush rather than weaken durability.
+            return file.sync_data();
+        }
+        Ok(())
+    }
+
+    /// Linux: `fdatasync`. Windows: `FlushFileBuffers` (requires the
+    /// write-capable handle the commit path now opens).
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    fn file_barrier(file: &File) -> io::Result<()> {
+        file.sync_data()
+    }
+}
+
 impl Syncer for RealSyncer {
     fn barrier(&self, file: &File, _path: &Path) -> io::Result<()> {
         // Per-file writeback on EVERY platform — Apple: fcntl
@@ -128,7 +163,7 @@ impl Syncer for RealSyncer {
         // The cost is bounded: barriers are issued concurrently from a
         // thread pool at commit, so wall-clock is latency/queue-depth,
         // not latency×objects.
-        file.sync_data()
+        Self::file_barrier(file)
     }
 
     fn full(&self, file: &File, _path: &Path) -> io::Result<()> {
@@ -384,7 +419,11 @@ impl<'s> WriteBatch<'s> {
                 //    serially per file. All barriers complete (joined)
                 //    before the flush is issued.
                 parallel_io(staged.len(), |i| {
-                    let f = File::open(&staged[i].1)?;
+                    // Write-capable handle: the barrier maps to
+                    // `FlushFileBuffers` on Windows, which rejects a
+                    // read-only handle. `write(true)` opens the existing
+                    // temp without truncating it.
+                    let f = OpenOptions::new().write(true).open(&staged[i].1)?;
                     syncer.barrier(&f, &staged[i].1)
                 })?;
                 // 2. One full flush — any staged file serves as the
@@ -393,7 +432,9 @@ impl<'s> WriteBatch<'s> {
                 //    (nothing staged) skip it: the objects were made
                 //    durable by whoever renamed them into visibility.
                 if let Some((_, tmp)) = staged.first() {
-                    let f = File::open(tmp)?;
+                    // Write-capable handle for the same Windows reason as
+                    // the barrier above (`sync_all` → `FlushFileBuffers`).
+                    let f = OpenOptions::new().write(true).open(tmp)?;
                     syncer.full(&f, tmp)?;
                 }
                 // 3. Renames: objects become visible only now, after

@@ -218,7 +218,18 @@ fn refresh_stat_cache(root: &Path, observations: &[mkit_core::worktree::StatObse
         let Some(obs) = by_path.get(e.path.as_str()) else {
             continue;
         };
-        if e.mtime_ns == 0 && e.object_hash == obs.object_hash {
+        // Heal any clean-but-stale stat cache, not just the zero-mtime
+        // first-observation case: a metadata-only touch (chmod, link
+        // count, atime-bump that moved ctime) leaves nonzero-but-stale
+        // fields whose content still hashes to the cached object. Those
+        // would re-hash on EVERY future `status` until refreshed. When
+        // the hash still matches, write back whichever stat fields drifted.
+        if e.object_hash == obs.object_hash
+            && (e.mtime_ns != obs.mtime_ns
+                || e.size != obs.size
+                || e.ino != obs.ino
+                || e.ctime_ns != obs.ctime_ns)
+        {
             e.mtime_ns = obs.mtime_ns;
             e.size = obs.size;
             e.ino = obs.ino;

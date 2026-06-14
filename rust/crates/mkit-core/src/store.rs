@@ -14,14 +14,16 @@
 //! A crash mid-write leaves only the temp file behind and never
 //! produces a visible object that fails the read-time hash check.
 //!
-//! Durability comes in two shapes (see [`crate::batch`] for the full
+//! Durability comes in three shapes (see [`crate::batch`] for the full
 //! contract): [`ObjectStore::write`] flushes per object
-//! ([`SyncPolicy::PerObject`]), while [`ObjectStore::batch`] defers
-//! visibility and amortises durability to **one** full flush per batch
-//! — the write path used by every multi-object command (add, commit,
-//! pack unpack). In both shapes an object is never visible before its
-//! bytes are durable, so a ref or index written after the
-//! write/commit returns can never reference a non-durable object.
+//! ([`SyncPolicy::PerObject`]); [`ObjectStore::batch`] defers visibility
+//! and amortises durability to **one** full flush per batch — the write
+//! path used by every multi-object command (add, commit, pack unpack);
+//! and [`ObjectStore::bulk_writer`] fsyncs each object's contents before
+//! the rename and batches the dir fsyncs at commit (git import). In all
+//! three an object is never visible before its bytes are durable, so a
+//! ref or index written after the write/commit returns can never
+//! reference a non-durable object.
 //!
 //! Reads always verify integrity by recomputing BLAKE3 over the bytes
 //! and comparing against the requested hash; mismatch returns
@@ -102,9 +104,14 @@ pub struct BulkWriter<'a> {
 }
 
 impl BulkWriter<'_> {
-    /// Write one object (temp + rename; fsync deferred to commit).
-    /// An existing path is byte-verified: matched objects are left in
-    /// place (but still fsynced at commit), torn ones are rewritten.
+    /// Write one object durable-before-visible: contents are fsynced
+    /// before the rename publishes the object, and only the shard-dir
+    /// fsync (rename durability) is deferred to commit. This upholds the
+    /// store's global invariant (an object is never visible before its
+    /// bytes are durable), so another process's `contains()` dedup can
+    /// never reference a half-written object. An existing path is
+    /// byte-verified: matched objects are left in place (but still
+    /// fsynced at commit, see below), torn ones are rewritten.
     ///
     /// # Panics
     /// Never in practice: object paths always have a 2-hex shard
@@ -127,26 +134,27 @@ impl BulkWriter<'_> {
         if let Ok(existing) = fs::read(&final_path)
             && existing == bytes
         {
-            // Still fsync it at commit: the bytes may have matched out
-            // of the PAGE CACHE of a crashed session's unsynced write
-            // — byte equality is not a durability test.
+            // The bytes may have matched out of the PAGE CACHE of a
+            // crashed session's unsynced write — byte equality is not a
+            // durability test, so this pre-existing file still needs a
+            // content fsync at commit.
             self.dirs.insert(shard_dir.to_path_buf());
             self.files.insert(final_path);
             return Ok(h);
         }
         fs::create_dir_all(shard_dir)?;
-        crate::atomic::write_unsynced(&final_path, bytes)?;
+        // Content fsync happens BEFORE the rename, so the object is
+        // durable the instant it becomes visible. Only the rename's
+        // durability (the shard dir fsync) is deferred to commit.
+        crate::atomic::write_content_synced(&final_path, bytes)?;
         self.dirs.insert(shard_dir.to_path_buf());
-        self.files.insert(final_path);
         Ok(h)
     }
 
-    /// Make the session durable: fsync every written file's CONTENTS,
+    /// Make the session durable: fsync the CONTENTS of any pre-existing
+    /// objects this batch re-used (newly written objects were already
+    /// content-fsynced before their rename in [`write`](Self::write)),
     /// then every touched shard directory (renames become durable).
-    /// Contents must be synced too — a durable name pointing at
-    /// unsynced pages would let a power loss tear an object that the
-    /// caller's (fsynced) bookkeeping already vouches for, and the
-    /// idempotent-re-run story only covers crashes BEFORE commit.
     pub fn commit(self) -> StoreResult<()> {
         for file in &self.files {
             fs::OpenOptions::new().write(true).open(file)?.sync_all()?;
@@ -313,16 +321,25 @@ impl ObjectStore {
         Ok(h)
     }
 
-    /// Begin a bulk-write session: objects are written temp+rename
-    /// WITHOUT per-file `fsync`, and [`BulkWriter::commit`] fsyncs
-    /// every written file and every touched shard directory once at
-    /// the end (batched, instead of per-write).
+    /// Begin a bulk-write session: each new object is written
+    /// durable-before-visible (contents fsynced, then renamed), and
+    /// [`BulkWriter::commit`] batches the directory fsyncs (rename
+    /// durability) plus a content fsync of any re-used pre-existing
+    /// objects once at the end, instead of fsyncing a dir per write.
     ///
-    /// Crash-safety contract (deliberately weaker than [`Self::write`],
-    /// for callers whose whole operation is idempotent — e.g. the
-    /// deterministic git-import, which re-runs from a retained source
-    /// mirror): after a crash BEFORE `commit`, written objects may be
-    /// torn or missing. Existing paths are VERIFIED (byte compare)
+    /// Because content is durable before the rename, the session upholds
+    /// the store's global invariant even under concurrent readers: an
+    /// object another process can `contains()`-dedup against is always
+    /// backed by durable bytes.
+    ///
+    /// Crash-safety contract (deliberately weaker than [`Self::write`]
+    /// only for the rename/dirent half, for callers whose whole
+    /// operation is idempotent — e.g. the deterministic git-import,
+    /// which re-runs from a retained source mirror): after a crash
+    /// BEFORE `commit`, a just-renamed object's dirent may be lost (the
+    /// shard dir is not yet fsynced), so objects may be missing — never
+    /// torn, since contents were fsynced first. Existing paths are
+    /// VERIFIED (byte compare)
     /// rather than blindly rewritten or blindly trusted: a matching
     /// file is left untouched (it may be durable and referenced by
     /// native history — replacing it with an unsynced inode would put
@@ -402,6 +419,28 @@ impl ObjectStore {
         let bytes = self.read(h)?;
         let obj = serialize::deserialize(&bytes)?;
         Ok(obj)
+    }
+
+    /// Hash-verifying variant of [`object_type`](Self::object_type): reads
+    /// the whole object and confirms its content hashes to `h` before
+    /// returning the declared type. This is the integrity guard for
+    /// tree-publication paths (commit, merge, rebase, …) — `object_type`
+    /// alone reads only the 6-byte prologue, so a staged object corrupted
+    /// after `add` would otherwise be published into a durable tree and
+    /// only fail at later read time. Use `object_type` on hot read-only
+    /// paths (status/diff snapshots) where nothing durable is published.
+    pub fn verify_object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        let bytes = self.read(h)?; // read() re-hashes and rejects on mismatch
+        if bytes.len() < 6 {
+            return Err(StoreError::Decode(MkitError::EmptyData));
+        }
+        if bytes[1..5] != crate::object::MAGIC {
+            return Err(StoreError::Decode(MkitError::InvalidMagic));
+        }
+        if bytes[5] != crate::object::SCHEMA_VERSION {
+            return Err(StoreError::Decode(MkitError::UnsupportedObjectVersion));
+        }
+        crate::object::ObjectType::from_u8(bytes[0]).map_err(StoreError::Decode)
     }
 
     /// Enumerate every object hash currently in the store by walking

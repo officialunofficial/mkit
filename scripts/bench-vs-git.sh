@@ -133,8 +133,22 @@ echo "size-big-v1 git KiB: $V1" | tee -a "$OUT/sizes.txt"
 cat "$WORK/fixtures/append1m.bin" >> video100m.bin
 git add video100m.bin && git commit -q -m v2
 echo "size-big-v2 git growth KiB: $(( $(size_of .git) - V1 ))" | tee -a "$OUT/sizes.txt"
+
+# Packed GROWTH (the perf-data `gitPackedKiB` field): the bytes git's
+# .git retains AFTER `git gc`, measured the same growth way as the loose
+# row above (v2 packed total − v1 packed total). A separate clean run so
+# the intermediate `git gc` does not contaminate the loose-growth number.
+cd "$WORK" && rm -rf work && mkdir work && cd work
+git init -q && git config user.email b@b && git config user.name b
+cp "$WORK/fixtures/video100m.bin" . && git add video100m.bin && git commit -q -m v1
+git gc -q
+V1P=$(size_of .git)
+echo "size-big-v1 git packed KiB total: $V1P" | tee -a "$OUT/sizes.txt"
+cat "$WORK/fixtures/append1m.bin" >> video100m.bin
+git add video100m.bin && git commit -q -m v2
 git gc -q
 echo "size-big-v2 git packed KiB total: $(size_of .git)" | tee -a "$OUT/sizes.txt"
+echo "size-big-v2 git packed growth KiB: $(( $(size_of .git) - V1P ))" | tee -a "$OUT/sizes.txt"
 
 echo
 echo "== summary (mean seconds) =="

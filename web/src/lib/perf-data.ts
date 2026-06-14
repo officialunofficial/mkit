@@ -26,11 +26,15 @@ export type SizeBenchmark = {
   id: string
   name: string
   description: string
-  /** `du -k .mkit` in KiB. */
+  /** `du -k .mkit` in KiB — an absolute size, or growth, per the row's `description`. */
   mkitKiB: number
-  /** `du -k .git` in KiB, loose objects (the state git leaves you in until a gc/repack). */
+  /** `du -k .git` in KiB, loose objects (the state git leaves you in until a gc/repack) — same convention as `mkitKiB`. */
   gitKiB: number
-  /** `du -k .git` after `git gc`, when materially different. */
+  /**
+   * `.git` after `git gc`, same measurement convention as `gitKiB` for the row (absolute total for the size rows;
+   * growth = v2 packed total − v1 packed total for the growth row). Emitted by `bench-vs-git.sh` as `size-big-v2 git
+   * packed growth KiB`. Omitted when not materially different.
+   */
   gitPackedKiB?: number
   note?: string
 }

@@ -429,7 +429,7 @@ pub fn ensure_abort_safe(
     let idx = super::read_or_seed_index_from_head(root, store)?;
     // Safety-check snapshot trees are ephemeral — in-memory overlay.
     let snapshot = mkit_core::store::EphemeralSink::new(store);
-    let index_tree = mkit_core::worktree::build_tree_from_index_with(store, &snapshot, &idx)
+    let index_tree = mkit_core::worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
         .map_err(|e| format!("check index state: {e}"))?;
 
     // Staged changes on a non-conflict path.

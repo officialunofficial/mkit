@@ -23,9 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the cache from hash-time observations (never stat-after-verify) and
   never auto-upgrades a v1 index; `stash pop` records the popped
   commit in the recovery log before dropping its manifest entry;
-  commit/status type-validate staged blobs from the 6-byte prologue
-  instead of full read+re-hash; pack unpack no longer double-hashes
-  every object.
+  `status`/`diff` snapshots type-validate staged blobs from the 6-byte
+  prologue instead of full read+re-hash, while commit and the other
+  tree-publishing paths hash-verify each staged object before a tree
+  references it (a corrupt staged object can never be published); pack
+  unpack no longer double-hashes every object.
 
 - **Batched durability (`WriteBatch`)**: object writes from one command
   (`add`, `commit`, pack unpack, `stash`) are staged invisibly and made
@@ -35,8 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   issued from a scoped-thread pool. Same crash invariant as before,
   stated in SPEC-OBJECTS §10.1: an object is never visible before its
   bytes are durable, and refs/index are only written after their
-  referents are durable. `SyncPolicy::{PerObject,Batch,None}` selects
-  the schedule; flush counts and ordering are pinned by unit tests.
+  referents are durable. `SyncPolicy::{PerObject,Batch}` selects
+  the schedule (query snapshots use an in-memory `EphemeralSink`, not a
+  sync policy); flush counts and ordering are pinned by unit tests.
   Measured on an M4 Max (APFS): `add`+`commit` of a 100 MiB file
   13.5s → 0.75s; 100 × 10 KiB files 1.1s → 0.18s.
 - **Index v2 stat cache**: `.mkit/index` entries now carry
@@ -48,8 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Zero-copy ingest**: chunk and small-blob writes stream
   `prologue ‖ payload` straight from the source buffer
   (`serialize::blob_prologue`), eliminating two memcpys per chunk;
-  `status` snapshots use `SyncPolicy::None` and no longer pay any
-  durability cost; `worktree::hash_file_object` content-addresses
+  `status`/`diff` snapshots use an in-memory `EphemeralSink` and no
+  longer pay any durability cost; `worktree::hash_file_object` content-addresses
   without writing, so change detection no longer mutates the store.
 - **Checkout**: restored worktree files keep tmp+rename atomicity but
   are no longer flushed per file (the store is the source of truth and
