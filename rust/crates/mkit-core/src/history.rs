@@ -71,6 +71,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use commonware_cryptography::{Blake3, Hasher as CHasher};
+use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef};
 use commonware_storage::merkle::Bagging;
 use commonware_storage::merkle::mmr::{
@@ -78,7 +79,6 @@ use commonware_storage::merkle::mmr::{
     full::{Config as JConfig, Mmr as JournaledMmr},
     mem::Mmr as MemMmr,
 };
-use commonware_parallel::Sequential;
 use commonware_utils::{NZU16, NZU64, NZUsize};
 
 use crate::hash::{HASH_LEN, Hash};
@@ -639,9 +639,8 @@ fn bootstrap_commonware_context(
         // alive after the bootstrap Runner is dropped at the end of
         // `start`. The label is best-effort so any commonware metrics
         // surfaced through this Context are easy to spot in a debugger.
-        runner.start(|ctx| async move {
-            commonware_runtime::Supervisor::child(&ctx, "mkit_history")
-        })
+        runner
+            .start(|ctx| async move { commonware_runtime::Supervisor::child(&ctx, "mkit_history") })
     })
     .join()
     .map_err(|_| HistoryError::RuntimeBootstrap("bootstrap thread panicked".to_string()))
