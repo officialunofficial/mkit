@@ -149,7 +149,9 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         // typo can't silently leave the user on the batched default when
         // they asked for the strict per-object schedule.
         "durability.objects" => match value.trim().to_ascii_lowercase().as_str() {
-            "" | "batch" | "per-object" | "per_object" => value.clone_into(&mut cfg.durability_objects),
+            "" | "batch" | "per-object" | "per_object" => {
+                value.clone_into(&mut cfg.durability_objects);
+            }
             _ => {
                 return Err(emit_err(
                     &format!(
