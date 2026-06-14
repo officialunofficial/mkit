@@ -72,11 +72,17 @@ history-mmr = [
     "dep:commonware-storage",
     "dep:commonware-cryptography",
     "dep:commonware-runtime",
+    "dep:commonware-parallel",
     "dep:commonware-utils",
     "dep:tokio",
 ]
 # Issue #158 Phase 1 — verifiable sparse-checkout via AuthenticatedBitMap.
-sparse-checkout = ["dep:commonware-storage", "dep:commonware-runtime", "dep:commonware-cryptography"]
+sparse-checkout = [
+    "dep:commonware-storage",
+    "dep:commonware-runtime",
+    "dep:commonware-cryptography",
+    "dep:commonware-parallel",
+]
 # Issue #159 Phase 1 — erasure-coded pack delivery via Reed-Solomon.
 pack-shards = [
     "dep:commonware-coding",

@@ -48,8 +48,9 @@ use crate::serialize::serialize;
 use std::path::PathBuf;
 
 use commonware_cryptography::{Sha256, sha256};
-use commonware_runtime::{Metrics as _, Runner as _, deterministic};
-use commonware_storage::{MerkleizedBitMap, merkle::mmr};
+use commonware_parallel::Sequential;
+use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+use commonware_storage::{MerkleizedBitMap, merkle::Bagging, merkle::mmr};
 
 /// Bitmap chunk size in bytes (32 bytes = 256 bits = one SHA-256 digest).
 ///
@@ -277,9 +278,9 @@ fn merkleize_bits(bits: &[bool]) -> (Hash, Vec<u8>) {
     let runner = deterministic::Runner::default();
     let bits_owned = bits.to_vec();
     runner.start(move |ctx| async move {
-        let hasher = mmr::StandardHasher::<Sha256>::new();
-        let bitmap: MerkleizedBitMap<_, sha256::Digest, CHUNK_BYTES> =
-            MerkleizedBitMap::init(ctx.with_label("sparse"), "sparse", None, &hasher)
+        let hasher = mmr::StandardHasher::<Sha256>::new(Bagging::ForwardFold);
+        let bitmap: MerkleizedBitMap<_, sha256::Digest, CHUNK_BYTES, Sequential> =
+            MerkleizedBitMap::init(ctx.child("sparse"), "sparse", Sequential, &hasher)
                 .await
                 .expect("in-memory bitmap init cannot fail");
         let mut dirty = bitmap.into_dirty();

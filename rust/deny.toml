@@ -30,6 +30,17 @@ ignore = [
     # commonware migrates off paste this ignore goes. Re-justify by
     # 2026-08-21.
     { id = "RUSTSEC-2024-0436", reason = "transitive via commonware-* feature-gated deps; macro-only, no runtime exposure. Re-justify by 2026-08-21." },
+    # `tracing-subscriber 0.2.25` ANSI-escape log-injection (fixed in
+    # >=0.3.20). Pulled transitively by the commonware 2026.5.x train:
+    # commonware-runtime -> ark-ed-on-bls12-381-bandersnatch ->
+    # ark-r1cs-std -> tracing-subscriber 0.2 (the evrf/"golden" DKG curve
+    # new in 2026.5.0). It is arkworks' internal tracing, not on mkit's
+    # user-facing logging path, and the impact is minimal (terminal ANSI
+    # manipulation in logs). No fix is reachable from mkit: ark-r1cs-std
+    # 0.5.0 pins tracing-subscriber 0.2. Drops automatically once the
+    # arkworks chain (or the commonware train) moves to >=0.3.20.
+    # Re-justify by 2026-08-21.
+    { id = "RUSTSEC-2025-0055", reason = "transitive via commonware-runtime 2026.5.x -> arkworks (ark-r1cs-std 0.5.0) -> tracing-subscriber 0.2; arkworks-internal logging, not on mkit's logging path, minimal impact, no reachable fix. Re-justify by 2026-08-21." },
 ]
 
 [licenses]
