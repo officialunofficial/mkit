@@ -757,7 +757,8 @@ mod tests {
     use commonware_cryptography::Signer;
     use commonware_cryptography::ed25519::PrivateKey;
     use commonware_runtime::{
-        Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _, deterministic, mocks,
+        Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _, Supervisor as _,
+        deterministic, mocks,
     };
     use commonware_stream::encrypted::{
         Error as EncryptedError, Receiver as EncReceiver, Sender as EncSender, dial, listen,
@@ -878,7 +879,10 @@ mod tests {
             let dialer_sink = CapturingSink::new(raw_dialer_sink, captured.clone());
 
             // Server task: accept any peer, then serve one round trip.
-            let listener_handle = context.clone().spawn(move |ctx| async move {
+            // `child` yields an owned child context (Context lost its
+            // `Clone` impl in the commonware 2026.5.x train), leaving
+            // `context` itself free to move into the dialer below.
+            let listener_handle = context.child("listener").spawn(move |ctx| async move {
                 let (_peer, sender, receiver) = listen(
                     ctx,
                     |_| async { true },
@@ -1014,7 +1018,7 @@ mod tests {
 
             // The bouncer unconditionally rejects whatever public key
             // the dialer presents.
-            let listener_handle = context.clone().spawn(move |ctx| async move {
+            let listener_handle = context.child("listener").spawn(move |ctx| async move {
                 listen(
                     ctx,
                     |_| async { false },
