@@ -37,6 +37,30 @@ strip = false          # keep symbols
 Always profile this profile, **not** `--release` (unreadable) and **not**
 `dev` (unrepresentative — no optimisation).
 
+### Representative codegen vs. readable stacks
+
+There is a real tradeoff here. `inherits = "release"` keeps `lto = "thin"`
++ `codegen-units = 1`, which makes the *numbers* representative of a
+shipped binary — but that aggressive cross-crate inlining **collapses the
+call stack**, so a sampling profiler will mis-attribute self-time to the
+wrong function (e.g. allocator/format frames showing up under `blake3`, or
+a phantom `format!` hotspot that does not exist). Trust hot-*path* shape,
+not exact per-function percentages, when profiling the default profile.
+
+When you need accurate **function-level** attribution, rebuild the same
+profile with LTO off and more codegen units — distinct frames, still
+optimised:
+
+```sh
+CARGO_PROFILE_PROFILING_LTO=false \
+CARGO_PROFILE_PROFILING_CODEGEN_UNITS=16 \
+  cargo build --profile profiling -p mkit-cli
+```
+
+The two views are complementary: LTO-on for "is the total time
+representative?", LTO-off for "which function is hot?". A discrepancy
+between them is usually an inlining artifact, not a real regression.
+
 ## Profile the CLI
 
 The wrapper script builds with `--profile profiling` and records:
