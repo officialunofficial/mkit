@@ -66,10 +66,13 @@ between them is usually an inlining artifact, not a real regression.
 The wrapper script builds with `--profile profiling` and records:
 
 ```sh
-# scripts/profile.sh [-- <mkit args>]
+# scripts/profile.sh [--features <list>] [-- <mkit args>]
+scripts/profile.sh -- add .
 scripts/profile.sh -- commit -m "msg"
-scripts/profile.sh -- pack create
 ```
+
+(The CLI is dominated by `add` / `commit`; there is no top-level `pack`
+command — pack assembly is exercised via the `pack_create` bench below.)
 
 Equivalently, by hand:
 
@@ -85,22 +88,30 @@ Profiler in your browser with the recorded profile loaded.
 ## Profile a benchmark
 
 To drill into one of the criterion suites (`hashing`, `sign_verify`,
-`object_commit`, `pack_create`):
+`object_commit`, `pack_create`, `store_write`, and the feature-gated
+`pack_shard_transfer` — see `rust/benches/Cargo.toml` for the full list):
 
 ```sh
 scripts/profile.sh --bench pack_create
+# Feature-gated bench: forward the cargo feature to the build.
+scripts/profile.sh --bench pack_shard_transfer --features pack-shards
 ```
 
 By hand, build the bench binary with the profiling profile and record it
-running its measurement loop:
+running its measurement loop. Cargo emits bench executables under
+`target/<profile>/deps/` with a content hash suffix, so resolve the path
+from cargo's JSON rather than guessing it:
 
 ```sh
 cd rust
-cargo build --profile profiling -p mkit-benches --bench pack_create
-samply record ./target/profiling/<hashed-bench-binary> --bench
+cargo build --profile profiling -p mkit-benches --bench pack_create \
+  --message-format=json \
+  | python3 -c 'import sys,json; print(next(o["executable"] for l in sys.stdin if (o:=json.loads(l)).get("executable") and o.get("target",{}).get("name")=="pack_create"))'
+samply record ./target/profiling/deps/pack_create-<hash> --bench
 ```
 
-(The wrapper resolves the hashed artifact path from cargo's JSON output.)
+(The wrapper does exactly this JSON resolution, so it works under a custom
+`CARGO_TARGET_DIR` too.)
 
 ## Reading a profile
 
@@ -116,8 +127,19 @@ samply record ./target/profiling/<hashed-bench-binary> --bench
 
 - **macOS** — works out of the box.
 - **Linux** — samply uses `perf_event`. If recording fails with a
-  permission error, samply prints the exact `sysctl` to lower
-  `kernel.perf_event_paranoid` (or run under `sudo`).
+  permission error, lower the `perf_event_paranoid` knob for your session
+  (least privilege) rather than running the profiler as root:
+
+  ```sh
+  # Temporary, until reboot — samply prints this exact command on failure.
+  sudo sysctl kernel.perf_event_paranoid=1
+  ```
+
+  **Do not** `sudo scripts/profile.sh` / `sudo samply record`: that runs
+  freshly built local code and writes profile/build artifacts as root,
+  which can leave root-owned files in your worktree. Adjust the sysctl (or
+  grant `CAP_PERFMON` to the samply binary) and run the profiler as your
+  normal user.
 
 ## Why not in CI
 
