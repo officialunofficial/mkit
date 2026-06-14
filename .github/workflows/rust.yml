@@ -4,10 +4,6 @@ on:
   push:
     branches:
       - main
-      # TEMPORARY (revert before merge): run the full Build & Test matrix
-      # on this bump branch so the commonware 2026.5.0 port is verified on
-      # CI without needing a maintainer approving-review to trigger it.
-      - chore/bump-commonware-2026.5
   # Expensive CI: on PRs this runs only once a review is approved. The
   # pull_request_review event can't filter by branch/path, so each job
   # guards on the approval state + base ref below.
