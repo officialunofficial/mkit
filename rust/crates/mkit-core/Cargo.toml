@@ -68,6 +68,12 @@ default = []
 #     async journaled-MMR ops behind the sync mkit-core API.
 # Both are dragged in together because dropping either re-introduces
 # the rejected mem-only Phase 1 shape.
+# `commonware-parallel` is required (since the 2026.5.x train) to name the
+# `Sequential` fold strategy that `commonware-storage`'s MMR/bitmap now take
+# as a type parameter — it is the crate that defines `Sequential`/`Strategy`
+# (commonware-storage itself depends on it), so there is no lighter source.
+# We pin `Sequential` (single-threaded folding) deliberately; `Rayon` is never
+# used here.
 history-mmr = [
     "dep:commonware-storage",
     "dep:commonware-cryptography",

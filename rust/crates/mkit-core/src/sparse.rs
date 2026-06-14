@@ -58,6 +58,17 @@ use commonware_storage::{MerkleizedBitMap, merkle::Bagging, merkle::mmr};
 /// upstream recommendation for minimising proof size.
 const CHUNK_BYTES: usize = 32;
 
+/// Peak-bagging policy for the sparse-checkout authenticated bitmap.
+///
+/// Producer ([`build_sparse`]) and verifier ([`verify_sparse`]) both reach
+/// the bitmap root through the single [`merkleize_bits`] helper, so they
+/// cannot drift — but the policy is pinned here as the explicit contract.
+/// `ForwardFold` reproduces the pre-2026.5 commonware default root
+/// byte-for-byte, so the on-wire `bitmap_root` is unchanged across the
+/// commonware bump and [`SPARSE_WIRE_VERSION`] does not need to move.
+/// Changing this is a wire-format break — bump [`SPARSE_WIRE_VERSION`].
+const SPARSE_BAGGING: Bagging = Bagging::ForwardFold;
+
 /// Hard cap on the number of leaves in a tree we are willing to build
 /// a sparse manifest for. Matches the per-tree `entry_count` bound in
 /// SPEC-OBJECTS §4. Verifier MUST enforce the same cap so a malicious
@@ -278,7 +289,7 @@ fn merkleize_bits(bits: &[bool]) -> (Hash, Vec<u8>) {
     let runner = deterministic::Runner::default();
     let bits_owned = bits.to_vec();
     runner.start(move |ctx| async move {
-        let hasher = mmr::StandardHasher::<Sha256>::new(Bagging::ForwardFold);
+        let hasher = mmr::StandardHasher::<Sha256>::new(SPARSE_BAGGING);
         let bitmap: MerkleizedBitMap<_, sha256::Digest, CHUNK_BYTES, Sequential> =
             MerkleizedBitMap::init(ctx.child("sparse"), "sparse", Sequential, &hasher)
                 .await
