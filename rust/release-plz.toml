@@ -1,12 +1,19 @@
 # Release automation for the mkit workspace (issue #225).
 #
-# release-plz opens a single "Release PR" when you trigger it: it computes the
-# next lockstep version from Conventional Commits, rewrites the internal
-# dependency requirements, regenerates the root CHANGELOG.md (embedded
-# git-cliff), and runs cargo-semver-checks. Merging that PR makes the release
-# job `cargo publish` the 10 publishable LIBRARY crates to crates.io in
-# dependency order (mkit-core → mkit-rpc → mkit-attest → mkit-keystore → the
-# transports).
+# This workspace owns versioning by hand: the lockstep version bump and the
+# root CHANGELOG land in the feature/release-prep PR, and the signed
+# `v{version}` tag is cut manually. release-plz's job is just to publish — on
+# any push to main (`release_always = true`, below) the release job
+# `cargo publish`es every publishable LIBRARY crate whose workspace version is
+# newer than crates.io, in dependency order (mkit-core → mkit-rpc →
+# mkit-attest → mkit-keystore → the transports). It is idempotent: once a
+# version is on crates.io, later pushes publish nothing.
+#
+# The `release-plz-pr` job (workflow_dispatch) can still open a Release PR that
+# computes the next version, rewrites internal deps, regenerates the CHANGELOG,
+# and runs cargo-semver-checks — but it is OPTIONAL here and unused while the
+# workspace hand-owns versioning (it errors if the version is already bumped
+# ahead of crates.io with the tag already cut).
 #
 # Division of labour — DECOUPLED, because release.yml's binary release is gated
 # on an annotated, GPG-signed tag from an allowlisted fingerprint:
@@ -44,12 +51,25 @@ semver_check = true
 # Dependabot, not the Release PR.
 dependencies_update = false
 
-# Only publish from a release-plz Release PR merge — NOT on every push to main.
-# Without this, the release job would try to publish the current (unpublished)
-# version on any main push (e.g. merging this setup PR), which could push a
-# stale version. With it, ordinary pushes are no-ops and only a merged Release
-# PR triggers the crates.io publish.
-release_always = false
+# Publish on every push to main, not only from a release-plz-authored Release PR.
+#
+# This workspace owns versioning by hand: the version bump and the root
+# CHANGELOG land in the feature/release-prep PR, and the signed `v{version}`
+# tag is cut manually. release-plz therefore does NOT compute or own the
+# version here. With `release_always = false`, the release job only fires for a
+# release-plz-authored Release PR merge — which never happens in this flow, so
+# crates.io is never published (the job skips with "commit is not from a
+# release PR"). With it true, the `release` job publishes whatever workspace
+# version is newer than crates.io on any push to main — idempotent: once that
+# version is on crates.io, later pushes are no-ops until the next bump.
+#
+# The `release` command only `cargo publish`es; with git_tag_enable /
+# git_release_enable = false above it creates no tag and no GitHub Release, so
+# the signed-tag binary release (release.yml) stays a separate human ceremony
+# and the existing `v{version}` tag is never touched. The `release-plz-pr` job
+# (workflow_dispatch) is now optional/unused — kept only if the workspace ever
+# wants to hand versioning back to release-plz.
+release_always = true
 
 # ---------------------------------------------------------------------------
 # Lockstep: every workspace crate inherits `version.workspace = true`, so they

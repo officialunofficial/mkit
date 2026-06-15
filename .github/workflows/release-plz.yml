@@ -6,13 +6,16 @@
 # rust/release-plz.toml for the model.
 #
 # Two jobs:
-#  - release-plz-pr (open/update the single Release PR — next lockstep version,
-#    rewritten internal dep requirements, CHANGELOG, cargo-semver-checks) runs
-#    ONLY on manual `workflow_dispatch`. Trigger it when you want to cut a release.
-#  - release-plz-release (`cargo publish` to crates.io) runs ONLY on push to main.
-#    With `release_always = false` (release-plz.toml) it is a no-op unless the
-#    pushed commit is a merged release-plz Release PR — so ordinary pushes (and
-#    this setup PR's own merge) never publish.
+#  - release-plz-release (`cargo publish` to crates.io) runs on push to main.
+#    With `release_always = true` (release-plz.toml) it publishes every crate
+#    whose workspace version is newer than crates.io — so merging a PR that
+#    carries the version bump (the feature/release-prep PR) publishes the new
+#    version. Idempotent: ordinary pushes with no version change publish nothing.
+#  - release-plz-pr (open a Release PR — next lockstep version, rewritten
+#    internal dep requirements, CHANGELOG, cargo-semver-checks) runs ONLY on
+#    manual `workflow_dispatch`. OPTIONAL/unused while the workspace hand-owns
+#    versioning (it errors when the version is already bumped ahead of crates.io
+#    with the tag cut); kept for the option of handing versioning to release-plz.
 #
 # TOKENS (provision before enabling — see docs/release/CRATES-IO.md):
 #  - CRATES_PACKAGE_KEY — crates.io API token (scopes: publish-new +
@@ -29,7 +32,7 @@ name: release-plz
 on:
   workflow_dispatch:        # open/update the Release PR (release-plz-pr).
   push:
-    branches: [main]        # publish a merged Release PR (release-plz-release).
+    branches: [main]        # publish versions newer than crates.io (release-plz-release).
 
 permissions:
   contents: read
