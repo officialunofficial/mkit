@@ -49,6 +49,17 @@ pub enum Error {
     Io(String),
     /// Backend access was denied.
     AccessDenied(String),
+    /// The key record is wrapped by a different protector than the one
+    /// used to load it (a backend/protector mismatch).
+    ///
+    /// Backend identifiers are not sensitive — unlike paths and labels —
+    /// so both names are surfaced verbatim to point the user at the fix.
+    ProtectorMismatch {
+        /// Protector the record was actually wrapped with.
+        required: String,
+        /// Protector that was used to load it.
+        got: String,
+    },
     /// Serialization or encoding failed.
     Encoding(String),
     /// Internal invariant failure.
@@ -102,6 +113,10 @@ impl fmt::Display for Error {
             Self::TimedOut => f.write_str("keystore operation timed out"),
             Self::Io(_) => f.write_str("keystore I/O failure during storage operation"),
             Self::AccessDenied(_) => f.write_str("keystore access denied by backend policy"),
+            Self::ProtectorMismatch { required, got } => write!(
+                f,
+                "key record is protected by the `{required}` backend but was loaded via `{got}` — load it as `{required}:<label>` or set `key.backend = {required}`"
+            ),
             Self::Encoding(_) => f.write_str("keystore encoding failure while processing key data"),
             Self::Internal(_) => f.write_str("internal keystore invariant failure"),
         }
@@ -160,5 +175,35 @@ mod tests {
         assert!(!auth.to_string().contains("prod-signing"));
         assert!(!auth.to_string().contains("/Users/alice"));
         assert!(auth.detail().contains("prod-signing"));
+    }
+
+    #[test]
+    fn protector_mismatch_names_backends_with_remediation() {
+        let mismatch = Error::ProtectorMismatch {
+            required: "macos-keychain".into(),
+            got: "software".into(),
+        };
+        let message = mismatch.to_string();
+        // Backend identifiers are not sensitive — surface both so the
+        // user can see what protects the key and what they asked for.
+        assert!(message.contains("macos-keychain"));
+        assert!(message.contains("software"));
+        // …and point them at a concrete fix.
+        assert!(message.contains("key.backend = macos-keychain"));
+        // The literal `<label>` placeholder must not be a real label leak.
+        assert!(message.contains("<label>"));
+    }
+
+    #[test]
+    fn protector_mismatch_does_not_leak_labels_or_paths() {
+        // Even though backends are surfaced, the variant carries no
+        // label/path channel, so it cannot leak one.
+        let mismatch = Error::ProtectorMismatch {
+            required: "macos-keychain".into(),
+            got: "software".into(),
+        };
+        let message = mismatch.to_string();
+        assert!(!message.contains("prod-signing"));
+        assert!(!message.contains('/'));
     }
 }
