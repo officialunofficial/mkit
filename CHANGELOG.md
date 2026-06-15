@@ -167,16 +167,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Keystore backend/protector mismatch now names both backends + the
-  fix** ([#326](https://github.com/officialunofficial/mkit/issues/326)).
-  Loading a key with a `key.backend` that doesn't match the protector
-  actually wrapping the record previously surfaced an opaque "keystore
-  encoding failure while processing key data". A new structured
-  `Error::ProtectorMismatch { required, got }` reports e.g. "key record
-  is protected by the `macos-keychain` backend but was loaded via
-  `software` — load it as `macos-keychain:<label>` or set `key.backend
-  = macos-keychain`". Backend identifiers are surfaced (they are not
-  sensitive) while the existing path/label redaction is preserved.
+- **Keystore protector mismatch now names both protectors instead of an
+  opaque error** ([#326](https://github.com/officialunofficial/mkit/issues/326)).
+  A software key record whose data-encryption key was sealed by one
+  protector but opened with another previously surfaced a redacted,
+  unactionable message. A new structured `Error::ProtectorMismatch {
+  required, got }` reports e.g. "software key record is sealed with the
+  `macos-keychain` protector but was opened with the `software`
+  protector — its encrypted data-encryption key can only be unwrapped
+  by the protector that sealed it". Protector identifiers are surfaced
+  (they are not sensitive) while the existing path/label redaction is
+  preserved. The message names the software-record DEK protector, not a
+  signing-key backend, so it does not misdirect toward `key.backend` or
+  `<backend>:<label>` routing.
 - `scripts/regen-rpc-proto.sh` could silently copy **stale** staged
   sources back into `generated/` instead of fresh codegen output: the
   default build mode fills its `OUT_DIR` with the same `.rs` file set,

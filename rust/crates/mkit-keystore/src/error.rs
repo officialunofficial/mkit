@@ -49,15 +49,20 @@ pub enum Error {
     Io(String),
     /// Backend access was denied.
     AccessDenied(String),
-    /// The key record is wrapped by a different protector than the one
-    /// used to load it (a backend/protector mismatch).
+    /// A software key record's data-encryption key is sealed by a
+    /// different protector than the one used to open it.
     ///
-    /// Backend identifiers are not sensitive — unlike paths and labels —
-    /// so both names are surfaced verbatim to point the user at the fix.
+    /// Protector identifiers are not sensitive — unlike paths and
+    /// labels — so both are surfaced verbatim. These name the
+    /// *software-record DEK protector* (e.g. the OS keychain wrapping
+    /// the software keystore's DEK), **not** a signing-key backend, so
+    /// the message deliberately does not prescribe a `key.backend` or
+    /// `<backend>:<label>` change — those route to a different store
+    /// that does not hold this record.
     ProtectorMismatch {
-        /// Protector the record was actually wrapped with.
+        /// Protector the record was sealed with.
         required: String,
-        /// Protector that was used to load it.
+        /// Protector that was used to open it.
         got: String,
     },
     /// Serialization or encoding failed.
@@ -115,7 +120,7 @@ impl fmt::Display for Error {
             Self::AccessDenied(_) => f.write_str("keystore access denied by backend policy"),
             Self::ProtectorMismatch { required, got } => write!(
                 f,
-                "key record is protected by the `{required}` backend but was loaded via `{got}` — load it as `{required}:<label>` or set `key.backend = {required}`"
+                "software key record is sealed with the `{required}` protector but was opened with the `{got}` protector — its encrypted data-encryption key can only be unwrapped by the protector that sealed it"
             ),
             Self::Encoding(_) => f.write_str("keystore encoding failure while processing key data"),
             Self::Internal(_) => f.write_str("internal keystore invariant failure"),
@@ -178,25 +183,39 @@ mod tests {
     }
 
     #[test]
-    fn protector_mismatch_names_backends_with_remediation() {
+    fn protector_mismatch_names_both_protectors() {
         let mismatch = Error::ProtectorMismatch {
             required: "macos-keychain".into(),
             got: "software".into(),
         };
         let message = mismatch.to_string();
-        // Backend identifiers are not sensitive — surface both so the
-        // user can see what protects the key and what they asked for.
+        // Protector identifiers are not sensitive — surface both so the
+        // user can see which protector sealed the record and which one
+        // tried to open it.
         assert!(message.contains("macos-keychain"));
         assert!(message.contains("software"));
-        // …and point them at a concrete fix.
-        assert!(message.contains("key.backend = macos-keychain"));
-        // The literal `<label>` placeholder must not be a real label leak.
-        assert!(message.contains("<label>"));
+        assert!(message.contains("protector"));
+    }
+
+    #[test]
+    fn protector_mismatch_does_not_prescribe_signing_backend_routing() {
+        // `required`/`got` are software-record DEK protector ids, not
+        // signing-key backends. The message must not steer users toward
+        // `key.backend = …` (only drives `mkit key` defaults) or a
+        // `<backend>:<label>` ref, which route to a different store that
+        // does not hold this record.
+        let mismatch = Error::ProtectorMismatch {
+            required: "macos-keychain".into(),
+            got: "software".into(),
+        };
+        let message = mismatch.to_string();
+        assert!(!message.contains("key.backend"));
+        assert!(!message.contains(":<label>"));
     }
 
     #[test]
     fn protector_mismatch_does_not_leak_labels_or_paths() {
-        // Even though backends are surfaced, the variant carries no
+        // Even though protectors are surfaced, the variant carries no
         // label/path channel, so it cannot leak one.
         let mismatch = Error::ProtectorMismatch {
             required: "macos-keychain".into(),
