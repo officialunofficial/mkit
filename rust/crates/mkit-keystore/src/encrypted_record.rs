@@ -94,11 +94,10 @@ impl EncryptedKeyRecord {
 
     pub(crate) fn decrypt(&self, label: &str, protector: &dyn KeyProtector) -> Result<SecretKey> {
         if self.protector != protector.id() {
-            return Err(Error::AccessDenied(format!(
-                "record requires protector `{}`, got `{}`",
-                self.protector,
-                protector.id()
-            )));
+            return Err(Error::ProtectorMismatch {
+                required: self.protector.clone(),
+                got: protector.id().to_owned(),
+            });
         }
         let aad = record_aad(
             label,
@@ -470,11 +469,10 @@ impl BlsShareRecord {
         protector: &dyn KeyProtector,
     ) -> Result<Zeroizing<Vec<u8>>> {
         if self.protector != protector.id() {
-            return Err(Error::AccessDenied(format!(
-                "record requires protector `{}`, got `{}`",
-                self.protector,
-                protector.id()
-            )));
+            return Err(Error::ProtectorMismatch {
+                required: self.protector.clone(),
+                got: protector.id().to_owned(),
+            });
         }
         let aad = bls_record_aad(
             label,

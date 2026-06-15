@@ -5,7 +5,7 @@ All notable changes to mkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-06-15
 
 ### Performance
 
@@ -132,7 +132,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`rpc_decode` fuzz target**: SignerFrame / SshFrame wire decode
   never panics on arbitrary bytes, plus an `Arbitrary`-driven owned
   encode/decode roundtrip property (new opt-in `arbitrary` feature on
-  mkit-rpc, from buffa `generate_arbitrary` codegen).
+  mkit-rpc, from buffa `generate_arbitrary` codegen). Adopts
+  commonware-invariants minifuzz for the `rpc_decode` target.
+- **`mkit` Agent Skill + crates/docs MCP server** — a published Agent
+  Skill (`SKILL.md`) teaching agents to drive the `mkit` CLI, plus a
+  release-gated documentation MCP server indexing the source, SPEC
+  docs, and CLI reference at each pinned release
+  ([#329](https://github.com/officialunofficial/mkit/pull/329),
+  [#331](https://github.com/officialunofficial/mkit/pull/331),
+  [#337](https://github.com/officialunofficial/mkit/pull/337)).
+- **`samply` profiling support** for the benchmark/profiling workflow
+  ([#347](https://github.com/officialunofficial/mkit/pull/347)).
 
 ### Changed
 
@@ -151,9 +161,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UpperCamelCase` enum value aliases. The declared requirement is
   `0.7.1` (not `0.7`) because regenerated packed-view decoders call the
   `RepeatedView::reserve` hook introduced in 0.7.1.
+- **commonware 2026.5.0** dependency train across the workspace,
+  including the MMR / authenticated-bitmap port to the new APIs. No
+  wire-format or object change.
 
 ### Fixed
 
+- **Keystore protector mismatch now names both protectors instead of an
+  opaque error** ([#326](https://github.com/officialunofficial/mkit/issues/326)).
+  A software key record whose data-encryption key was sealed by one
+  protector but opened with another previously surfaced a redacted,
+  unactionable message. A new structured `Error::ProtectorMismatch {
+  required, got }` reports e.g. "software key record is sealed with the
+  `macos-keychain` protector but was opened with the `software`
+  protector — its encrypted data-encryption key can only be unwrapped
+  by the protector that sealed it". Protector identifiers are surfaced
+  (they are not sensitive) while the existing path/label redaction is
+  preserved. The message names the software-record DEK protector, not a
+  signing-key backend, so it does not misdirect toward `key.backend` or
+  `<backend>:<label>` routing.
 - `scripts/regen-rpc-proto.sh` could silently copy **stale** staged
   sources back into `generated/` instead of fresh codegen output: the
   default build mode fills its `OUT_DIR` with the same `.rs` file set,
@@ -175,6 +201,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the mirror under `refs/mkit/attestations`. Threat model unchanged:
   carried signatures verify only over reconstructed mkit bytes, and
   translated history that fails reconstruction fails closed.
+- **Advisory triage**: `RUSTSEC-2025-0055` (tracing-subscriber 0.2
+  ANSI-escape logging) is ignored in `deny.toml` and the audit
+  workflow — it reaches the tree only transitively via
+  `commonware-runtime → arkworks (ark-r1cs-std) → tracing-subscriber
+  0.2`, is arkworks-internal logging not on mkit's logging path, and
+  has no reachable fix. Flagged for re-justification by 2026-08-21.
 
 ## [0.2.0] - 2026-06-10
 
@@ -343,6 +375,6 @@ prior to publication.
 - Reference external signer keeps secret material in a zeroizing
   buffer until the per-algorithm signer consumes it.
 
-[Unreleased]: https://github.com/officialunofficial/mkit/compare/v0.2.0...HEAD
+[0.3.0]: https://github.com/officialunofficial/mkit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/officialunofficial/mkit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/officialunofficial/mkit/releases/tag/v0.1.0

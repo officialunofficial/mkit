@@ -49,6 +49,22 @@ pub enum Error {
     Io(String),
     /// Backend access was denied.
     AccessDenied(String),
+    /// A software key record's data-encryption key is sealed by a
+    /// different protector than the one used to open it.
+    ///
+    /// Protector identifiers are not sensitive — unlike paths and
+    /// labels — so both are surfaced verbatim. These name the
+    /// *software-record DEK protector* (e.g. the OS keychain wrapping
+    /// the software keystore's DEK), **not** a signing-key backend, so
+    /// the message deliberately does not prescribe a `key.backend` or
+    /// `<backend>:<label>` change — those route to a different store
+    /// that does not hold this record.
+    ProtectorMismatch {
+        /// Protector the record was sealed with.
+        required: String,
+        /// Protector that was used to open it.
+        got: String,
+    },
     /// Serialization or encoding failed.
     Encoding(String),
     /// Internal invariant failure.
@@ -102,6 +118,10 @@ impl fmt::Display for Error {
             Self::TimedOut => f.write_str("keystore operation timed out"),
             Self::Io(_) => f.write_str("keystore I/O failure during storage operation"),
             Self::AccessDenied(_) => f.write_str("keystore access denied by backend policy"),
+            Self::ProtectorMismatch { required, got } => write!(
+                f,
+                "software key record is sealed with the `{required}` protector but was opened with the `{got}` protector — its encrypted data-encryption key can only be unwrapped by the protector that sealed it"
+            ),
             Self::Encoding(_) => f.write_str("keystore encoding failure while processing key data"),
             Self::Internal(_) => f.write_str("internal keystore invariant failure"),
         }
@@ -160,5 +180,49 @@ mod tests {
         assert!(!auth.to_string().contains("prod-signing"));
         assert!(!auth.to_string().contains("/Users/alice"));
         assert!(auth.detail().contains("prod-signing"));
+    }
+
+    #[test]
+    fn protector_mismatch_names_both_protectors() {
+        let mismatch = Error::ProtectorMismatch {
+            required: "macos-keychain".into(),
+            got: "software".into(),
+        };
+        let message = mismatch.to_string();
+        // Protector identifiers are not sensitive — surface both so the
+        // user can see which protector sealed the record and which one
+        // tried to open it.
+        assert!(message.contains("macos-keychain"));
+        assert!(message.contains("software"));
+        assert!(message.contains("protector"));
+    }
+
+    #[test]
+    fn protector_mismatch_does_not_prescribe_signing_backend_routing() {
+        // `required`/`got` are software-record DEK protector ids, not
+        // signing-key backends. The message must not steer users toward
+        // `key.backend = …` (only drives `mkit key` defaults) or a
+        // `<backend>:<label>` ref, which route to a different store that
+        // does not hold this record.
+        let mismatch = Error::ProtectorMismatch {
+            required: "macos-keychain".into(),
+            got: "software".into(),
+        };
+        let message = mismatch.to_string();
+        assert!(!message.contains("key.backend"));
+        assert!(!message.contains(":<label>"));
+    }
+
+    #[test]
+    fn protector_mismatch_does_not_leak_labels_or_paths() {
+        // Even though protectors are surfaced, the variant carries no
+        // label/path channel, so it cannot leak one.
+        let mismatch = Error::ProtectorMismatch {
+            required: "macos-keychain".into(),
+            got: "software".into(),
+        };
+        let message = mismatch.to_string();
+        assert!(!message.contains("prod-signing"));
+        assert!(!message.contains('/'));
     }
 }

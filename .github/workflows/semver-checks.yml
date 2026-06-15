@@ -1,10 +1,13 @@
 name: Semver checks
 
 # Guards the public API of the publishable library crates against accidental
-# breaking changes. mkit is not on crates.io yet, so there is no published
-# baseline — instead we diff each PR's API against the BASE BRANCH (git rev).
-# This catches an unintended break the moment it's introduced; once we start
-# publishing, the baseline can switch to the crates.io release.
+# breaking changes. mkit publishes to crates.io, so we diff each PR's API
+# against the LAST RELEASE TAG (the released baseline), discovered with
+# `git describe`. Diffing against the base branch instead would false-positive
+# the entire post-bump development window: `main` already carries the next,
+# unreleased version, so a legitimate breaking change destined for that release
+# would be flagged as "broke vs an identical version number". The release tag is
+# a real published boundary, so 0.MINOR-bump breaks are correctly permitted.
 #
 # cargo-semver-checks understands 0.x semver (a 0.MINOR bump may break), so it
 # only fails when an API break is NOT accompanied by an appropriate version
@@ -62,18 +65,21 @@ jobs:
           tool: cargo-semver-checks
 
       # The publishable LIBRARY crates whose API we guard. Excluded: mkit-cli
-      # TODO(post-merge): add -p mkit-git-bridge once it exists on the
-      # baseline branch (cargo-semver-checks builds the base rev, where
-      # the crate is absent until PR #330 merges).
       # (the `mkit` binary — published for `cargo install`, but its lib surface
       # is unstable CLI internals we intentionally do NOT semver-guard) and
-      # mkit-wasm (npm-only). `--baseline-rev` builds the base branch's API for
-      # comparison.
-      - name: cargo-semver-checks vs base branch
+      # mkit-wasm (npm-only).
+      #
+      # mkit-git-bridge is intentionally absent: it has no released baseline
+      # yet (new in the upcoming release), so cargo-semver-checks cannot build
+      # the baseline rev for it. Add `-p mkit-git-bridge` once it has shipped
+      # in a tagged release.
+      - name: cargo-semver-checks vs last release tag
         working-directory: rust
         run: |
+          baseline="$(git describe --tags --abbrev=0 --match 'v*')"
+          echo "Baseline (last release tag): $baseline"
           cargo semver-checks \
-            --baseline-rev "origin/${{ github.base_ref }}" \
+            --baseline-rev "$baseline" \
             --all-features \
             -p mkit-core \
             -p mkit-attest \

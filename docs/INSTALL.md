@@ -93,7 +93,7 @@ default. Direct release URLs are best when you want a pinned artifact.
 **Download a pinned release for your platform:**
 
 ```sh
-VERSION=0.1.0
+VERSION=0.3.0
 TARGET=aarch64-apple-darwin
 curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/mkit-${VERSION}-${TARGET}.tar.gz"
 tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
@@ -102,7 +102,7 @@ tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 **Pin a version (recommended for CI):**
 
 ```sh
-VERSION=0.1.0
+VERSION=0.3.0
 TARGET=x86_64-unknown-linux-gnu
 TAG="v${VERSION}"
 URL="https://github.com/officialunofficial/mkit/releases/download/${TAG}/mkit-${VERSION}-${TARGET}.tar.gz"
@@ -272,7 +272,7 @@ version:
 
 ```sh
 $ mkit version
-mkit 0.1.0
+mkit 0.3.0
 ```
 
 The exact format `mkit <X.Y.Z>\n` (no extra whitespace, no banner) is
