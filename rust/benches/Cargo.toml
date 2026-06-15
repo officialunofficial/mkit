@@ -79,4 +79,4 @@ k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"]
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 rand_core = { version = "0.6", features = ["std"] }
 tempfile = "3"
-git2 = "0.20"
+git2 = "0.21"
