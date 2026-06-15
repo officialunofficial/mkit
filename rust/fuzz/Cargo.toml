@@ -1,6 +1,8 @@
-# Standalone fuzz crate — NOT a workspace member. cargo-fuzz expects a
-# leaf crate; including this in the workspace would make `cargo test`
-# pull in libfuzzer-sys (nightly-only on stable builds).
+# cargo-fuzz crate. It IS a workspace member (see the root Cargo.toml
+# `members` list), which is only safe because libfuzzer-sys is behind
+# the optional `libfuzzer` feature — the default `cargo build` / `cargo
+# test` never pulls it in (it's nightly-only on stable builds). cargo-fuzz
+# drives the libfuzzer binaries with `--features libfuzzer` itself.
 #
 # Two execution paths:
 #
@@ -46,6 +48,13 @@ tempfile = "3"
 # (stable, no nightly) doesn't pull it in. cargo-fuzz drives the build
 # with `--features libfuzzer` automatically.
 libfuzzer-sys = { version = "0.4", optional = true }
+
+# `minifuzz` (commonware-invariants) drives the in-process `#[test]`
+# property runs — see the `rpc_decode` pilot in `src/lib.rs`. Dev-only:
+# the libfuzzer binaries never touch it. Pinned to the commonware
+# 2026.5.x train, same as the workspace-root commonware-* deps.
+[dev-dependencies]
+commonware-invariants = "=2026.5.0"
 
 [features]
 default = []

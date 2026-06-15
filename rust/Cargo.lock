@@ -1030,6 +1030,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-invariants"
+version = "2026.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba9277faee9193157b9910a6f96ff13d13bd9fb94671b7b8b83780b17578d323"
+dependencies = [
+ "arbitrary",
+ "commonware-formatting",
+ "commonware-macros",
+ "rand 0.8.6",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+]
+
+[[package]]
 name = "commonware-macros"
 version = "2026.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2978,6 +2992,7 @@ version = "0.0.0"
 dependencies = [
  "arbitrary",
  "buffa",
+ "commonware-invariants",
  "libfuzzer-sys",
  "mkit-core",
  "mkit-git-bridge",
