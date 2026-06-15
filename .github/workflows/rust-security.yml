@@ -39,6 +39,13 @@ jobs:
           else
             echo "has_lock=false" >> "$GITHUB_OUTPUT"
           fi
+          # The reference external signers (contrib/signers/) are a SEPARATE
+          # Cargo workspace with their own lockfile, audited separately below.
+          if [ -f contrib/signers/Cargo.lock ]; then
+            echo "has_contrib_lock=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_contrib_lock=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install Rust toolchain
         if: steps.lock.outputs.has_lock == 'true'
@@ -71,7 +78,22 @@ jobs:
         # mkit never calls the affected RSA decrypt path.
         # RUSTSEC-2024-0436: `paste` unmaintained; macro-only, no runtime
         # exposure, pulled by commonware-* feature-gated deps.
-        run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436
+        # RUSTSEC-2025-0055: tracing-subscriber 0.2 ANSI-escape log
+        # injection; transitive via commonware-runtime 2026.5.x ->
+        # arkworks (ark-r1cs-std), arkworks-internal logging only, no
+        # reachable fix until arkworks moves to >=0.3.20.
+        run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0055
+
+      # The contrib/signers workspace is NOT covered by the rust/ audit above
+      # (separate lockfile). Since the commonware 2026.5.x bump it carries the
+      # same tracing-subscriber 0.2 chain (commonware-cryptography -> arkworks
+      # -> ark-r1cs-std), so a signer-only advisory would otherwise bypass CI.
+      # Audit it with the IDENTICAL ignore set — keep these flags in lockstep
+      # with the rust/ audit above and rust/deny.toml [advisories.ignore].
+      - name: cargo audit (contrib signers)
+        if: steps.lock.outputs.has_contrib_lock == 'true'
+        working-directory: contrib/signers
+        run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0055
 
   deny:
     name: cargo deny

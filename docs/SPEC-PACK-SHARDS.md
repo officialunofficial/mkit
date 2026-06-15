@@ -132,7 +132,7 @@ a self-consistent shard set with a different `commitment`.
 ## 4. Encoder/decoder algorithm
 
 The implementation lives in `mkit_core::pack_shard` and wraps
-[`commonware-coding`](https://docs.rs/commonware-coding) **v2026.4.0**
+[`commonware-coding`](https://docs.rs/commonware-coding) **v2026.5.0**
 (ALPHA stability — pinned exactly in `Cargo.toml`).
 
 The reference scheme is `commonware_coding::ReedSolomon<Sha256>` with

@@ -2906,10 +2906,16 @@ mod tests {
         let capabilities = SoftwareKeystore::with_root(dir.path().join("software")).capabilities();
 
         assert_eq!(capabilities.backend, BackendKind::Software);
-        assert_eq!(
-            capabilities.algorithms,
-            vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256]
-        );
+        // The encrypted software backend additionally advertises
+        // Bls12381Threshold when `bls-threshold` is enabled (see
+        // `capabilities()`); gate the expectation the same way so this
+        // holds under both feature settings.
+        #[allow(unused_mut)]
+        let mut expected_algorithms =
+            vec![Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256];
+        #[cfg(feature = "bls-threshold")]
+        expected_algorithms.push(Algorithm::Bls12381Threshold);
+        assert_eq!(capabilities.algorithms, expected_algorithms);
         assert!(capabilities.can_generate);
         assert!(capabilities.can_import);
         assert!(capabilities.can_export);

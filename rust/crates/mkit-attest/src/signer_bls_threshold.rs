@@ -13,7 +13,7 @@
 //!   the group's aggregated public key.
 //!
 //! The signer is **trusted-dealer-style** in Phase 1: a single party
-//! runs `commonware-cryptography::bls12381::dkg::deal_anonymous` and
+//! runs `commonware-cryptography::bls12381::dkg::feldman_desmedt::deal_anonymous` and
 //! hands each holder their share. Phase 2 will replace the dealer with
 //! a proper DKG ceremony; the Phase-1 signer adapter is API-stable
 //! because the dealer/DKG choice only affects how shares are produced,
@@ -101,7 +101,7 @@ impl ThresholdSigner {
     /// the cohort's public sharing.
     ///
     /// The dealer is expected to have produced `(sharing, shares)` via
-    /// [`commonware_cryptography::bls12381::dkg::deal_anonymous`]
+    /// [`commonware_cryptography::bls12381::dkg::feldman_desmedt::deal_anonymous`]
     /// (Phase 1) or a future DKG protocol (Phase 2). The dealer hands
     /// the same `sharing` to every holder, plus one `Share` per
     /// holder.
@@ -215,7 +215,7 @@ pub fn trusted_dealer<R: rand_core::CryptoRngCore>(
     rng: &mut R,
     n: core::num::NonZeroU32,
 ) -> (Sharing<V>, Vec<Share>) {
-    dkg::deal_anonymous::<V, N3f1>(rng, Mode::default(), n)
+    dkg::feldman_desmedt::deal_anonymous::<V, N3f1>(rng, Mode::default(), n)
 }
 
 /// Phase-1 threshold for `n` holders under the N3f1 fault model.

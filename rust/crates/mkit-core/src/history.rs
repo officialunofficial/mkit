@@ -12,8 +12,8 @@
 //!   short-lived computations where the proof is the only output.
 //! - **Phase 2** (this build, [`CommitHistory::open_at`]): on-disk
 //!   journaled MMR backed by
-//!   [`commonware_storage::merkle::mmr::journaled::Mmr`] pinned to
-//!   `=2026.4.0`. The on-disk layout is commonware's native two-store
+//!   [`commonware_storage::merkle::mmr::full::Mmr`] pinned to
+//!   `=2026.5.0`. The on-disk layout is commonware's native two-store
 //!   shape — a fixed-item journal of node digests plus a metadata
 //!   sidecar for pruned pinned nodes — laid out under
 //!   `<mkit_dir>/history/<sanitized_branch>/`. See
@@ -71,10 +71,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use commonware_cryptography::{Blake3, Hasher as CHasher};
-use commonware_runtime::{Metrics, Runner as _, buffer::paged::CacheRef};
+use commonware_parallel::Sequential;
+use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef};
+use commonware_storage::merkle::Bagging;
 use commonware_storage::merkle::mmr::{
     Location as MmrLocation, Proof as MmrProof, StandardHasher,
-    journaled::{Config as JConfig, Mmr as JournaledMmr},
+    full::{Config as JConfig, Mmr as JournaledMmr},
     mem::Mmr as MemMmr,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -87,6 +89,29 @@ pub mod tokio_executor;
 
 /// Re-export of the bundled tokio-runtime executor.
 pub use tokio_executor::TokioExecutor;
+
+/// Peak-bagging policy for the commit-history MMR.
+///
+/// This is a **load-bearing cryptographic parameter**: the producer
+/// ([`CommitHistory::root`] / [`CommitHistory::prove`]) and the verifier
+/// ([`verify_inclusion`]) must fold MMR peaks into a root identically, or
+/// every inclusion proof silently fails to verify. Pinning it here — and
+/// consuming it only via [`history_hasher`] — makes that agreement
+/// un-desyncable across all call sites and both code paths.
+///
+/// `ForwardFold` is also a **back-compat** choice: it reproduces the root
+/// that the pre-2026.5 commonware default produced byte-for-byte, so MMR
+/// journals written by an older mkit build and roots already stored in the
+/// reflog stay valid across the commonware bump. Do **not** change this
+/// without an on-disk format-version bump and a migration.
+const HISTORY_BAGGING: Bagging = Bagging::ForwardFold;
+
+/// The canonical hasher for the commit-history MMR — the single source of
+/// truth for [`HISTORY_BAGGING`], so the producer and verifier sides can
+/// never drift on the bagging policy.
+fn history_hasher() -> StandardHasher<Blake3> {
+    StandardHasher::new(HISTORY_BAGGING)
+}
 
 // ---------------------------------------------------------------------
 // Public types
@@ -128,7 +153,7 @@ pub enum HistoryError {
     InvalidBranch(String),
     /// On-disk journal could not be opened or recovered. commonware's
     /// own `init` performs roll-forward recovery on a half-written
-    /// trailing leaf (see [`commonware_storage::merkle::journaled`]
+    /// trailing leaf (see `commonware_storage::merkle::mmr::full`
     /// docs); this variant surfaces failures it cannot recover from.
     #[error("history journal is corrupt: {0}")]
     Corrupted(String),
@@ -216,7 +241,7 @@ struct JournaledBackend<X: Executor> {
     // surviving tokio runtime. In practice commonware's
     // `Journaled` only flushes synchronously in `sync`, but the
     // ordering is cheap insurance.
-    mmr: JournaledMmr<commonware_runtime::tokio::Context, <Blake3 as CHasher>::Digest>,
+    mmr: JournaledMmr<commonware_runtime::tokio::Context, <Blake3 as CHasher>::Digest, Sequential>,
     executor: Arc<X>,
     // Held to keep the bootstrap tokio runtime (inside the Context's
     // executor `Arc`) alive for the whole CommitHistory lifetime.
@@ -252,8 +277,8 @@ impl CommitHistory<TokioExecutor> {
     /// need a proof bundle without committing any state to disk.
     #[must_use]
     pub fn open() -> Self {
-        let hasher: StandardHasher<Blake3> = StandardHasher::new();
-        let mmr = MemMmr::new(&hasher);
+        let hasher = history_hasher();
+        let mmr = MemMmr::new();
         Self {
             backend: Backend::Mem { mmr },
             hasher,
@@ -310,17 +335,20 @@ impl<X: Executor + 'static> CommitHistory<X> {
             // that pruning later doesn't carry stale data around.
             items_per_blob: NZU64!(4096),
             write_buffer: NZUsize!(4096),
-            thread_pool: None,
+            strategy: Sequential,
             page_cache: CacheRef::from_pooler(&ctx, NZU16!(4096), NZUsize!(8)),
         };
 
-        let hasher: StandardHasher<Blake3> = StandardHasher::new();
+        let hasher = history_hasher();
         let mmr = {
-            let hasher_inner: StandardHasher<Blake3> = StandardHasher::new();
-            let ctx_for_init = ctx.clone();
+            let hasher_inner = history_hasher();
+            // `child` returns an owned child Context, leaving `ctx` usable for
+            // the surviving CommitHistory (which keeps the bootstrap runtime
+            // alive via its inner executor Arc).
+            let ctx_for_init = ctx.child("mmr_init");
             executor
                 .block_on(async move {
-                    JournaledMmr::<_, <Blake3 as CHasher>::Digest>::init(
+                    JournaledMmr::<_, <Blake3 as CHasher>::Digest, Sequential>::init(
                         ctx_for_init,
                         &hasher_inner,
                         cfg,
@@ -405,21 +433,28 @@ impl<X: Executor + 'static> CommitHistory<X> {
     ///
     /// Defined for an empty history — commonware returns a
     /// deterministic empty-MMR root (see SPEC-HISTORY-PROOF §2.3).
+    ///
+    /// # Panics
+    ///
+    /// Never panics in practice. Internally calls commonware's
+    /// `root(&hasher, 0)`, which only returns an error for a non-zero
+    /// inactive-peak count; mkit always requests `0` inactive peaks
+    /// (its proofs are self-contained over the full leaf set), so the
+    /// `Result` is always `Ok`.
     #[must_use]
     pub fn root(&self) -> Hash {
-        let mut out = [0u8; HASH_LEN];
-        match &self.backend {
-            Backend::Mem { mmr } => {
-                out.copy_from_slice(mmr.root().as_ref());
-            }
-            // `Journaled::root` is sync (reads from the in-memory cache),
-            // no executor needed. It returns an owned `Digest`, unlike
-            // `mem::Mmr::root` which returns a borrow.
-            Backend::Journaled(b) => {
-                let d = b.mmr.root();
-                out.copy_from_slice(d.as_ref());
-            }
+        // `root` takes the hasher + an `inactive_peaks` count (0 for a
+        // self-contained MMR over the full leaf set) and returns an owned
+        // `Digest`. Both backends are sync here (Journaled reads its
+        // in-memory cache); 0 inactive peaks is always a valid request,
+        // so the `Result` is always `Ok` — see the `# Panics` note above.
+        let digest = match &self.backend {
+            Backend::Mem { mmr } => mmr.root(&self.hasher, 0),
+            Backend::Journaled(b) => b.mmr.root(&self.hasher, 0),
         }
+        .expect("0 inactive peaks is always a valid root request");
+        let mut out = [0u8; HASH_LEN];
+        out.copy_from_slice(digest.as_ref());
         out
     }
 
@@ -443,11 +478,11 @@ impl<X: Executor + 'static> CommitHistory<X> {
         let loc = MmrLocation::new(position.0);
         match &self.backend {
             Backend::Mem { mmr } => mmr
-                .proof(&self.hasher, loc)
+                .proof(&self.hasher, loc, 0)
                 .map_err(|e| HistoryError::Mmr(e.to_string())),
             Backend::Journaled(b) => {
                 let hasher = self.hasher.clone();
-                let proof_fut = b.mmr.proof(&hasher, loc);
+                let proof_fut = b.mmr.proof(&hasher, loc, 0);
                 // Drive the async proof builder via the executor. The
                 // future borrows `mmr` immutably for the duration of
                 // `block_on`; the borrow ends when `block_on` returns.
@@ -483,7 +518,8 @@ pub fn verify_inclusion(
     let root_digest = digest_from_hash(root);
     let loc = MmrLocation::new(position.0);
 
-    let hasher: StandardHasher<Blake3> = StandardHasher::new();
+    // Same bagging policy as the producer — see [`HISTORY_BAGGING`].
+    let hasher = history_hasher();
     proof.verify_element_inclusion(&hasher, leaf.as_ref(), loc, &root_digest)
 }
 
@@ -610,24 +646,23 @@ fn bootstrap_commonware_context(
     std::thread::spawn(move || {
         let cfg = commonware_runtime::tokio::Config::new().with_storage_directory(dir);
         let runner = commonware_runtime::tokio::Runner::new(cfg);
-        // Return a Context clone. The Context's `executor: Arc<Executor>`
-        // keeps the inner tokio runtime alive after the bootstrap
-        // Runner is dropped at the end of `start`.
-        runner.start(|ctx| async move { ctx.clone() })
+        // Return an owned, labelled child Context. `Context::clone` and
+        // `Metrics::with_label` were both removed in 2026.5.0;
+        // `Supervisor::child` returns an owned Context that clones the
+        // inner `executor: Arc<Executor>`, which keeps the tokio runtime
+        // alive after the bootstrap Runner is dropped at the end of
+        // `start`. The label is best-effort so any commonware metrics
+        // surfaced through this Context are easy to spot in a debugger.
+        runner
+            .start(|ctx| async move { commonware_runtime::Supervisor::child(&ctx, "mkit_history") })
     })
     .join()
     .map_err(|_| HistoryError::RuntimeBootstrap("bootstrap thread panicked".to_string()))
-    .map(|ctx| {
-        // Best-effort label so any commonware metrics that surface
-        // through this Context are easy to spot in a debugger.
-        <commonware_runtime::tokio::Context as Metrics>::with_label(&ctx, "mkit_history")
-    })
 }
 
-// `BufferPooler`, `Clock`, `RStorage`, `Metrics` are implicit bounds on
+// `BufferPooler`, `Clock`, `RStorage`, `Supervisor` are implicit bounds on
 // the `Context` we use — the imports above keep them in scope so trait
-// methods (`with_label`, `network_buffer_pool`, …) resolve. Re-export
-// nothing.
+// methods (`child`, `network_buffer_pool`, …) resolve. Re-export nothing.
 #[allow(dead_code)]
 fn _trait_imports_keep_alive() {
     fn assert_send_sync<T: Send + Sync>() {}

@@ -15,11 +15,16 @@
 //!    before invoking core.
 //! 4. `PER_ITER = Duration::from_millis(100)` — wall-clock cap; abort on overrun.
 //! 5. No `loop {}` / `while true {}` — we use `for i in 0..MAX_ITER` exclusively.
-//! 6. Seeded deterministic PRNG (splitmix64) — `RNG_SEED` is a constant.
+//! 6. Seeded deterministic PRNG — `RNG_SEED` is a constant. Most targets
+//!    use splitmix64 (`run_iterated_unit`); the `rpc_decode` pilot drives
+//!    the body through commonware-invariants `minifuzz`, whose ChaCha8
+//!    sampler is seeded with the same `RNG_SEED` via `with_seed`, so it is
+//!    likewise deterministic and reproducible (see its `#[test]`).
 //!
 //! Inputs from libfuzzer come in as raw `&[u8]`; the unit-test path
-//! uses the same splitmix64 PRNG to synthesise inputs. Either way each
-//! body slices to <= 64 KiB before doing work.
+//! synthesises inputs from the seeded PRNG (splitmix64, or minifuzz's
+//! ChaCha8 sampler for `rpc_decode`). Either way each body slices to
+//! <= 64 KiB before doing work.
 
 #![forbid(unsafe_code)]
 
@@ -317,9 +322,41 @@ mod tests {
         run_iterated_unit(software_key_record_one_iteration).expect("guardrails held");
     }
 
+    /// Pilot migration to `minifuzz` (commonware-invariants) — the same
+    /// in-process harness upstream commonware uses for its in-tree
+    /// property tests. Replaces the bespoke splitmix64 loop
+    /// (`run_iterated_unit`) for this one target while honouring the
+    /// FUZZ.md guardrails: `with_search_limit(MAX_ITER)` caps iterations
+    /// (#1), `with_seed(RNG_SEED)` keeps the run deterministic (#6), and
+    /// the body truncates each input to `MAX_INPUT` and applies the
+    /// per-iteration wall-clock cap (#2, #4) via `run_one`. minifuzz's
+    /// mutational sampler caps its buffer at 8 KiB, so inputs stay well
+    /// under the 64 KiB ceiling. On failure it prints a
+    /// `MINIFUZZ_BRANCH = 0x...` token; replay it with
+    /// `Builder::default().with_reproduce("0x...")`.
     #[test]
     fn rpc_decode_target_runs_within_caps() {
-        run_iterated_unit(rpc_decode_one_iteration).expect("guardrails held");
+        commonware_invariants::minifuzz::Builder::default()
+            .with_search_limit(u64::from(MAX_ITER))
+            .with_seed(RNG_SEED)
+            .test(|u| {
+                let take = u.len().min(MAX_INPUT);
+                let input = u.bytes(take)?;
+                run_one(input, rpc_decode_one_iteration).expect("guardrails held");
+                Ok(())
+            });
+        // minifuzz's mutational sampler tops out near 8 KiB, so on its own
+        // it would not exercise the 8 KiB–64 KiB regime the old splitmix
+        // loop covered (large-frame length-prefix handling near the
+        // MAX_INPUT cap). Preserve that explicitly with a deterministic
+        // large-input sweep up to 64 KiB, seeded from the same RNG_SEED so
+        // failures still reproduce.
+        let mut prng = SplitMix::new(RNG_SEED);
+        let mut buf = vec![0u8; MAX_INPUT];
+        for len in [4096usize, 16_384, 49_152, MAX_INPUT] {
+            prng.fill(&mut buf[..len]);
+            run_one(&buf[..len], rpc_decode_one_iteration).expect("guardrails held");
+        }
     }
 
     /// Pin a few hand-crafted inputs so the targets keep accepting them

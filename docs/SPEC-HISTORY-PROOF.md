@@ -43,10 +43,10 @@ we need an authenticated data structure whose root commits to the
 canonical fit: append-only, dense leaf indices, stable positions, root
 hash compresses arbitrary history into one digest.
 
-mkit reuses [`commonware-storage`'s MMR][cw-mmr] pinned to `=2026.4.0`:
+mkit reuses [`commonware-storage`'s MMR][cw-mmr] pinned to `=2026.5.0`:
 - `merkle::mmr::mem::Mmr` for the Phase-1 mem-only flavour
   ([`CommitHistory::open`]).
-- `merkle::mmr::journaled::Mmr` for the Phase-2 persisted flavour
+- `merkle::mmr::full::Mmr` for the Phase-2 persisted flavour
   ([`CommitHistory::open_at`]). The on-disk layout is normatively
   defined in §4 below.
 
@@ -55,7 +55,7 @@ of that crate's `merkle::mmr::Proof` at the same version (see §2
 below). We accept that crate's ALPHA stability marker and explicitly
 tie our own pre-`v0.2` window to it: see §4.
 
-[cw-mmr]: https://docs.rs/commonware-storage/2026.4.0/commonware_storage/merkle/mmr/
+[cw-mmr]: https://docs.rs/commonware-storage/2026.5.0/commonware_storage/merkle/mmr/
 
 ---
 
@@ -132,6 +132,12 @@ to `Blake3(u64::to_be_bytes(0))`. This value is deterministic and
 well-defined; `mkit-core::history::CommitHistory::open().root()`
 returns it.
 
+mkit pins commonware's peak-bagging policy to `Bagging::ForwardFold`
+for both producers (`CommitHistory::root` / `CommitHistory::prove`) and
+verifiers (`verify_inclusion`). This preserves the root produced by the
+pre-2026.5 commonware default and avoids a history-root migration for
+existing `history-mmr` feature builds.
+
 ### 2.4 Position semantics
 
 A commit's `Position(n)` is its **0-based leaf index** — the value
@@ -199,11 +205,11 @@ round-trip and the bit-flip tamper case.
 
 The persisted MMR for each branch lives under `<mkit_dir>/history/`.
 mkit does **not** invent a custom format: the durable representation
-is commonware-storage's native journaled-MMR shape pinned to the
-`=2026.4.0` release train. mkit owns the directory layout that selects
+is commonware-storage's native full-MMR shape pinned to the
+`=2026.5.0` release train. mkit owns the directory layout that selects
 *which* journal to open; the byte layout *inside* each partition is
 commonware's, documented at
-<https://docs.rs/commonware-storage/2026.4.0/commonware_storage/merkle/journaled/>.
+<https://docs.rs/commonware-storage/2026.5.0/commonware_storage/merkle/mmr/full/>.
 
 ### 4.1 Directory layout
 
@@ -220,7 +226,7 @@ fixed-item-length blob files for the node-digest journal; each
 `__metadata/` directory contains commonware's metadata-store
 key/value blobs (used for pinned-node bookkeeping). mkit MUST NOT
 write into these directories itself; all mutation goes through
-`commonware-storage`'s `Journaled` API.
+`commonware-storage`'s `mmr::full::Mmr` API.
 
 ### 4.2 Branch-name sanitisation
 
@@ -264,7 +270,7 @@ On reopen via `CommitHistory::open_at`:
 
 - A trailing **torn leaf** (the journal's final blob ends mid-frame)
   is rewound to the last valid leaf-aligned size by
-  `Journaled::init`. The MMR's in-memory state is rebuilt from
+  `mmr::full::Mmr::init`. The MMR's in-memory state is rebuilt from
   the surviving leaves; the root matches a clean replay of those
   leaves.
 - A **deeper corruption** (the metadata sidecar disagrees with the
@@ -306,7 +312,7 @@ milliseconds for branches up to a few hundred thousand commits.
 | Phase   | Scope                                                                  | Lands in     |
 | ------- | ---------------------------------------------------------------------- | ------------ |
 | Phase 1 | `mem`-backed MMR, `CommitHistory::{open, append, root, prove}`, `verify_inclusion()`, §1–§3 of this spec | `feat/history-mmr-phase1` (issue #157, merged in PR #162) |
-| Phase 2 | **Shipped (this PR).** Journaled persistence via `commonware-storage::merkle::mmr::journaled::Mmr` pinned to `=2026.4.0`. `CommitHistory::open_at`, `refs::update_ref_with_history`, `rebuild_from_chain`. §4 of this spec. | `feat/history-mmr-phase2-commonware` |
+| Phase 2 | **Shipped.** Journaled persistence via `commonware-storage::merkle::mmr::full::Mmr` pinned to `=2026.5.0`, with `Bagging::ForwardFold`. `CommitHistory::open_at`, `refs::update_ref_with_history`, `rebuild_from_chain`. §4 of this spec. | `feat/history-mmr-phase2-commonware` |
 | Phase 3 | New `Commit.history_root` proto field at the v0.2 break; new signing-bytes layout + golden vectors; SPEC-OBJECTS update | v0.2         |
 | Phase 4 | `mkit-attest` `commit_in_branch` predicate bundling `(commit, position, proof)` | v0.2         |
 | Phase 5 | Promote `history-mmr` from opt-in feature to default                   | v0.3         |
@@ -321,7 +327,7 @@ Phase 2 (this PR) deliberately does *not*:
   `history-mmr` (default off) and only compiles when consumers opt in.
 
 Stability call: commonware-storage is ALPHA. We pin to an exact
-`=2026.4.0` and accept that future minor versions may change the
+`=2026.5.0` and accept that future minor versions may change the
 proof's `digests` layout *and* the on-disk partition shape described
 in §4. Because Phase 3 includes a new signing-bytes golden vector
 anyway, the wire format documented in §2 and the on-disk format

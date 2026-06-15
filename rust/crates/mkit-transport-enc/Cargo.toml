@@ -22,7 +22,7 @@ mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
 buffa = "0.7.1"
 thiserror = "2"
 
-# commonware: pinned at workspace root to the 2026.4.x train. All
+# commonware: pinned at workspace root to the 2026.5.x train. All
 # crates share the same release cadence so they're version-locked at
 # `[workspace.dependencies]` and selected here with `workspace = true`.
 commonware-stream = { workspace = true }

@@ -101,7 +101,7 @@ zeroize = "1"
 rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
 # Wire-encodes `Share` values for storage in the keystore — same
 # version mkit-attest pulls.
-commonware-codec = { version = "2026.4.0", optional = true }
+commonware-codec = { version = "2026.5.0", optional = true }
 
 # POSIX uid + O_NOFOLLOW for keygen.rs's raw-32 load/save paths
 # (secp256k1, p256). The Ed25519 path uses mkit_core::sign which has
