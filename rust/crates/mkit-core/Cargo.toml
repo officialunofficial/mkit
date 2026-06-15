@@ -98,6 +98,12 @@ pack-shards = [
     "dep:commonware-utils",
 ]
 
+# Throwaway measurement for issue #349 (MMB-P evaluation, Phase 1). Pulls
+# the commonware MMR via history-mmr; not built unless that feature is on.
+[[example]]
+name = "mmbp_proof_size"
+required-features = ["history-mmr"]
+
 [dev-dependencies]
 hex = "0.4"
 # Property-based testing: auto-shrinks counterexamples on round-trip
