@@ -2717,7 +2717,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
- "sha1 0.10.6",
+ "sha1",
  "sha2 0.10.9",
  "tempfile",
 ]
@@ -2802,7 +2802,7 @@ version = "0.3.0"
 dependencies = [
  "flate2",
  "mkit-core",
- "sha1 0.10.6",
+ "sha1",
  "tempfile",
 ]
 
@@ -4300,17 +4300,6 @@ dependencies = [
 
 [[package]]
 name = "sha1"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "sha1"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
@@ -5721,7 +5710,7 @@ checksum = "1e21aad3a769f25f3d2d0cbf30ea8b50a1d602354bd6ab687fad112821608ba6"
 dependencies = [
  "const-oid 0.10.2",
  "der 0.8.0",
- "sha1 0.11.0",
+ "sha1",
  "signature 3.0.0",
  "spki 0.8.0",
  "tls_codec",
@@ -5775,7 +5764,7 @@ dependencies = [
  "rand 0.10.1",
  "rand_core 0.10.1",
  "rsa",
- "sha1 0.11.0",
+ "sha1",
  "sha2 0.11.0",
  "signature 3.0.0",
  "subtle",
