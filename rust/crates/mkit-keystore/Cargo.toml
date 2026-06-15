@@ -71,9 +71,9 @@ tempfile = "=3.27.0"
 # BLS share storage round-trip tests need access to the codec +
 # crypto crates so they can dealer/sign/aggregate alongside the
 # keystore. Same versions as mkit-attest pins.
-commonware-codec = "=2026.4.0"
+commonware-codec = "=2026.5.0"
 commonware-cryptography = "=2026.4.0"
-commonware-utils = "=2026.4.0"
+commonware-utils = "=2026.5.0"
 
 [package.metadata.docs.rs]
 # NOT `all-features`: `backend-yubikey` pulls `card-backend-pcsc` → `pcsc-sys`,

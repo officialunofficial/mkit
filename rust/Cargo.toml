@@ -51,9 +51,9 @@ commonware-storage = { version = "=2026.4.0", default-features = false }
 commonware-cryptography = { version = "=2026.4.0", default-features = false }
 commonware-runtime = { version = "=2026.4.0" }
 commonware-coding = { version = "=2026.4.0" }
-commonware-codec = { version = "=2026.4.0", default-features = false }
-commonware-parallel = { version = "=2026.4.0", default-features = false }
-commonware-utils = { version = "=2026.4.0", default-features = false }
+commonware-codec = { version = "=2026.5.0", default-features = false }
+commonware-parallel = { version = "=2026.5.0", default-features = false }
+commonware-utils = { version = "=2026.5.0", default-features = false }
 commonware-stream = { version = "=2026.4.0" }
 
 [workspace.lints.rust]
