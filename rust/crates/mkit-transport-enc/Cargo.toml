@@ -42,7 +42,7 @@ commonware-codec = { workspace = true }
 # long-lived `Transport`). Off by default; downstream callers (the
 # mkit-cli `enc-transport` feature) opt in.
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "macros", "io-util", "time", "sync"], optional = true }
-rand = { version = "0.8", default-features = false, features = ["std", "std_rng"], optional = true }
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng"], optional = true }
 rand_core = { version = "0.6", optional = true }
 governor = { version = "0.10", default-features = false, features = ["std"], optional = true }
 
