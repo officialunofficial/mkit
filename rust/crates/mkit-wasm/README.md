@@ -90,8 +90,8 @@ TypeScript declarations shipped in the package for full signatures.
 This package is generated from the `mkit-wasm` crate inside the
 [mkit Rust workspace](https://github.com/officialunofficial/mkit/tree/main/rust/crates/mkit-wasm).
 Each npm release is built from a tagged commit of the upstream repo;
-the npm version matches the upstream `vX.Y.Z` tag, so `@makechain/mkit-wasm@0.1.0`
-on npm corresponds to `v0.1.0` on GitHub.
+the npm version matches the upstream `vX.Y.Z` tag, so `@makechain/mkit-wasm@0.3.0`
+on npm corresponds to `v0.3.0` on GitHub.
 
 The wasm bundle wraps the same Rust crates the native `mkit` CLI uses,
 so on-disk objects produced here are byte-identical to those produced

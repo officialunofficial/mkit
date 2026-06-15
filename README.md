@@ -79,7 +79,7 @@ Cosign-signed archives for macOS (arm64 + x86_64) and Linux (x86_64 +
 arm64) on every `v*.*.*` tag:
 
 ```sh
-VERSION=0.1.0
+VERSION=0.3.0
 TARGET=aarch64-apple-darwin
 curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/mkit-${VERSION}-${TARGET}.tar.gz"
 tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
