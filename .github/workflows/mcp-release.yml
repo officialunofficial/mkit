@@ -101,9 +101,18 @@ jobs:
           # Run wrangler separately so its exit code and output are visible in
           # the log (a command-substitution failure under `set -e` otherwise dies
           # before any diagnostic prints). Capture stdout; keep stderr in the log.
-          if ! RAW="$(npx --yes wrangler d1 execute mkit-mcp-search --remote --json \
-              --command "SELECT version FROM versions WHERE version = '$RELEASE_TAG'")"; then
-            echo "::error::wrangler d1 execute failed for $RELEASE_TAG (see stderr above)"
+          set +e
+          RAW="$(npx --yes wrangler d1 execute mkit-mcp-search --remote --json \
+              --command "SELECT version FROM versions WHERE version = '$RELEASE_TAG'" 2>wrangler.err)"
+          rc=$?
+          set -e
+          echo "--- wrangler stdout (rc=$rc) ---"
+          printf '%s\n' "$RAW"
+          echo "--- wrangler stderr ---"
+          cat wrangler.err || true
+          echo "------------------------------"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::wrangler d1 execute failed (rc=$rc) for $RELEASE_TAG"
             exit 1
           fi
           echo "--- wrangler --json stdout ---"
