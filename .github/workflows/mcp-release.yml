@@ -97,9 +97,13 @@ jobs:
         env:
           FORCE: ${{ inputs.force }}
         run: |
+          # wrangler's `d1 execute --json` shape drifts across versions: older
+          # builds wrap the statement result in an array (`[{ results: [...] }]`),
+          # newer ones return the object directly (`{ results: [...] }`). Accept
+          # both, defaulting a missing `results` to an empty list.
           COUNT="$(npx wrangler d1 execute mkit-mcp-search --remote --json \
             --command "SELECT version FROM versions WHERE version = '$RELEASE_TAG'" \
-            | jq '.[0].results | length')"
+            | jq '((if type == "array" then .[0] else . end).results // []) | length')"
           # Guard against a non-numeric COUNT (e.g. unexpected wrangler output):
           # a query failure must fail the run, never masquerade as "already indexed".
           if [[ ! "$COUNT" =~ ^[0-9]+$ ]]; then
