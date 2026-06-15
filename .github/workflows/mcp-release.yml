@@ -97,15 +97,26 @@ jobs:
         env:
           FORCE: ${{ inputs.force }}
         run: |
-          # wrangler's `d1 execute --json` shape drifts across versions: older
-          # builds wrap the statement result in an array (`[{ results: [...] }]`),
-          # newer ones return the object directly (`{ results: [...] }`). Accept
-          # both, defaulting a missing `results` to an empty list.
-          COUNT="$(npx wrangler d1 execute mkit-mcp-search --remote --json \
-            --command "SELECT version FROM versions WHERE version = '$RELEASE_TAG'" \
-            | jq '((if type == "array" then .[0] else . end).results // []) | length')"
-          # Guard against a non-numeric COUNT (e.g. unexpected wrangler output):
-          # a query failure must fail the run, never masquerade as "already indexed".
+          set -o pipefail
+          # Run wrangler separately so its exit code and output are visible in
+          # the log (a command-substitution failure under `set -e` otherwise dies
+          # before any diagnostic prints). Capture stdout; keep stderr in the log.
+          if ! RAW="$(npx --yes wrangler d1 execute mkit-mcp-search --remote --json \
+              --command "SELECT version FROM versions WHERE version = '$RELEASE_TAG'")"; then
+            echo "::error::wrangler d1 execute failed for $RELEASE_TAG (see stderr above)"
+            exit 1
+          fi
+          echo "--- wrangler --json stdout ---"
+          printf '%s\n' "$RAW"
+          echo "------------------------------"
+          # wrangler's `d1 execute --json` shape drifts across versions (array-
+          # wrapped `[{results:[...]}]` vs bare object `{results:[...]}`, and it
+          # may print a leading banner). Recursively collect any `results` arrays
+          # and count rows — tolerant of all of these.
+          COUNT="$(printf '%s' "$RAW" | jq -s '[.. | objects | .results? // empty] | add // [] | length')"
+          echo "indexed-row count for $RELEASE_TAG: '$COUNT'"
+          # A non-numeric COUNT means the query/parse failed — fail the run, never
+          # masquerade as "already indexed".
           if [[ ! "$COUNT" =~ ^[0-9]+$ ]]; then
             echo "::error::could not determine indexed state for $RELEASE_TAG (got: '$COUNT')"
             exit 1
