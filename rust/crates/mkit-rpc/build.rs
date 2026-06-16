@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
-//
 // Stages the buffa-generated Rust modules for the .proto schemas in
 // proto/ into $OUT_DIR.
 //
