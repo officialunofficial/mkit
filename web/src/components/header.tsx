@@ -58,6 +58,12 @@ export const Header = () => {
             >
               attest
             </Link>
+            <Link
+              to='/parity'
+              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
+            >
+              parity
+            </Link>
           </nav>
         </div>
         {/* Top separator: 2px band carrying the brand gradient, wider

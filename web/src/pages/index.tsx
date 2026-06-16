@@ -1,30 +1,50 @@
 import { Link } from 'waku'
+import { CopyButton } from '../components/copy-button'
 
 export default function HomePage() {
   return (
     <div className='space-y-10'>
       <title>mkit demo</title>
       <section className='space-y-5'>
-        <h1 className='text-5xl font-semibold tracking-tight'>A content-addressed VCS.</h1>
+        <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs itself.</h1>
         <p className='max-w-prose text-lg text-fg'>
-          Content-addressed means the name of a thing <em>is</em> the BLAKE3 hash of its bytes — every file, folder, and
-          commit. Change one byte, get a new name. Every commit is signed with an Ed25519 key, and any claim about a
-          commit — reviewed, tested, deployed — travels as a signed statement anyone can verify. Written in Rust; here
-          it runs in your browser.
+          Every commit is signed with an Ed25519 key, so the history carries its own proof of who changed what. mkit
+          names by content, too: every file, folder, and commit <em>is</em> the BLAKE3 hash of its bytes. Change one
+          byte, get a new name. Any claim about a commit rides along as a signed statement anyone can verify: reviewed,
+          tested, deployed. It&rsquo;s written in Rust, so it runs just about anywhere. Right now, that&rsquo;s your
+          browser.
         </p>
-        <p className='max-w-prose text-sm text-muted'>
-          mkit is git-like where it can be — add, commit, branch, push — and different where it counts: one hash
-          algorithm, signatures on every commit, attestations as first-class objects. Alpha, open source:{' '}
-          <a
-            href='https://github.com/officialunofficial/mkit'
-            target='_blank'
-            rel='noreferrer'
-            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-          >
-            officialunofficial/mkit
-          </a>{' '}
-          on GitHub, <code className='font-mono'>cargo install mkit-cli</code> to try it.
-        </p>
+        <div className='max-w-prose space-y-3'>
+          <p className='text-sm text-muted'>
+            mkit is git-like{' '}
+            <Link
+              to='/parity'
+              className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+            >
+              where it can be
+            </Link>
+            , and different where it counts: one hash algorithm, signatures on every commit, and attestations as
+            first-class objects.
+          </p>
+          <p className='text-sm text-muted'>
+            open source (alpha):{' '}
+            <a
+              href='https://github.com/officialunofficial/mkit'
+              target='_blank'
+              rel='noreferrer'
+              className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+            >
+              officialunofficial/mkit
+            </a>{' '}
+            on GitHub.
+          </p>
+          <div className='inline-flex items-center gap-3 rounded-md border border-hairline bg-muted/10 px-3 py-2'>
+            <code className='font-mono text-sm'>
+              <span className='select-none text-muted'>$ </span>cargo install mkit-cli
+            </code>
+            <CopyButton text='cargo install mkit-cli' />
+          </div>
+        </div>
       </section>
 
       <ul className='divide-y divide-hairline border-y border-hairline'>
@@ -58,6 +78,11 @@ export default function HomePage() {
           title='attest'
           body='Attach a signed statement to a commit so anyone with your public key can verify it later.'
         />
+        <Demo
+          to='/parity'
+          title='parity'
+          body='Which git commands mkit matches, where it diverges on purpose, and why it will never share bytes with a .git repo.'
+        />
       </ul>
     </div>
   )
@@ -65,7 +90,7 @@ export default function HomePage() {
 
 // `to` is narrowed to the concrete route literals Waku emits — a plain
 // `string` is too wide for Waku 1.0.0-alpha.8's typed Link.
-type DemoRoute = '/hash' | '/sign' | '/attest' | '/tree' | '/streaming' | '/performance'
+type DemoRoute = '/hash' | '/sign' | '/attest' | '/tree' | '/streaming' | '/performance' | '/parity'
 
 function Demo({ to, title, body }: { to: DemoRoute; title: string; body: string }) {
   return (
