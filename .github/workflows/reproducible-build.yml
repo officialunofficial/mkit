@@ -4,7 +4,7 @@ name: Reproducible Build Smoke Test
 # A non-zero diff indicates a non-deterministic input (embedded timestamp,
 # random seed, absolute path, non-sorted directory read, etc.) slipped in.
 #
-# See docs/release/REPRODUCIBILITY.md for the full set of inputs that
+# See docs/RELEASE.md for the full set of inputs that
 # determine a mkit binary, and for the standalone steps that a user can
 # run to reproduce a published release binary from source.
 #

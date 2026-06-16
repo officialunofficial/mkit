@@ -133,7 +133,7 @@ cosign verify-blob \
 ```
 
 Full reproducibility, signing, and supply-chain notes live under
-[`docs/release/`](release/).
+[`docs/RELEASE.md`](RELEASE.md).
 
 ## WASM / npm
 

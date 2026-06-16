@@ -7,7 +7,7 @@ name: Supply chain
 #   3. SBOM refresh weekly so main always has a current CycloneDX SBOM
 #      uploaded as an artifact.
 #
-# Policy lives in docs/release/SUPPLY-CHAIN.md.
+# Policy lives in docs/RELEASE.md.
 #
 # Supply-chain audit pass:
 #   - dependency-review: opt-in via `ENABLE_DEPENDENCY_REVIEW=1` so

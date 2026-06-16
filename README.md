@@ -340,8 +340,7 @@ they describe are pinned by the test vectors under
 | [`docs/SPEC-HISTORY-PROOF.md`](docs/SPEC-HISTORY-PROOF.md) | Implementers — MMR commit-chain inclusion proofs (light-client attestation) |
 | [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators — SSH transport trust model |
 | [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators + reviewers — trust boundaries and security assumptions |
-| [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release procedure overview |
-| [`docs/release/`](docs/release/) | Maintainers — release checklist, signing, reproducibility, supply chain |
+| [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release runbook: checklist, signing, reproducibility, supply chain, crates.io |
 | [`docs/FUZZ.md`](docs/FUZZ.md) | Contributors — fuzz harness conventions |
 | [`docs/STYLE-GUIDE.md`](docs/STYLE-GUIDE.md) | Contributors — writing style for docs and commits |
 

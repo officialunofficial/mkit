@@ -187,7 +187,7 @@ Workspace integration:
 Allowed dependencies:
 
 - Pure-Rust crypto dependencies already used by the workspace may be reused.
-- New direct dependencies must satisfy `docs/release/SUPPLY-CHAIN.md` and
+- New direct dependencies must satisfy `docs/RELEASE.md` and
   `rust/deny.toml`.
 - OS-specific dependencies must be optional and feature-gated.
 

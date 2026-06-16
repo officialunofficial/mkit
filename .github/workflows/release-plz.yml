@@ -16,7 +16,7 @@
 #    versioning (it errors when the version is already bumped ahead of crates.io
 #    with the tag cut); kept for the option of handing versioning to release-plz.
 #
-# TOKENS (provision before enabling — see docs/release/CRATES-IO.md):
+# TOKENS (provision before enabling — see docs/RELEASE.md):
 #  - CRATES_PACKAGE_KEY — crates.io API token (scopes: publish-new +
 #    publish-update), provided as an ORG-level secret and exposed to cargo as
 #    the CARGO_REGISTRY_TOKEN env var below. Required for the release job to
