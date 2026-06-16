@@ -78,7 +78,7 @@ Run top to bottom. Do not skip steps.
 - [ ] `CHANGELOG.md` has an entry for this version; move items from
       `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD`.
 - [ ] Version bumped wherever it is hard-coded (README install snippets,
-      `contrib/homebrew/mkit.rb`, `contrib/scoop/mkit.json`).
+      `contrib/homebrew/mkit.rb`).
 - [ ] [Signing and verification](#signing-and-verification) and
       [Reproducibility](#reproducibility) still accurate for this release.
 - [ ] `MKIT_RELEASE_GPG_FINGERPRINTS` repo/org Actions variable contains the

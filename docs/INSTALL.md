@@ -21,7 +21,7 @@ verify the result.
 | CLI on a dev machine                  | Release archive or `cargo install --git` | `curl -sSfL …/install.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-<VERSION>-<target>.tar.gz && tar -xzf mkit-<VERSION>-<target>.tar.gz` |
 | Browser / Cloudflare Worker           | npm                                  | `bun add @makechain/mkit-wasm`                                                                                  |
-| Library inside another Rust crate     | Path or git dependency (crates.io is planned) | `mkit-core = { git = "https://github.com/officialunofficial/mkit" }`                                 |
+| Library inside another Rust crate     | crates.io (or git dependency)        | `mkit-core = "0.3"`                                                                                  |
 
 Pick the leftmost channel that satisfies your constraints — release
 archives are the lowest-overhead path for end users, source builds the
@@ -29,8 +29,9 @@ right answer for contributors and air-gapped CI.
 
 ## From source
 
-Currently the canonical channel: the workspace is on GitHub and Cargo
-can fetch + build it directly.
+Source builds are the right path for contributors and air-gapped CI. For
+everyday CLI use, `cargo install mkit-cli` from crates.io (see
+[`README.md`](../README.md)) is the shortest route.
 
 **Toolchain.** Rust 1.95, edition 2024, pinned by
 [`rust/rust-toolchain.toml`](../rust/rust-toolchain.toml). `rustup` will
@@ -39,7 +40,8 @@ auto-install on the first build.
 **Install the CLI:**
 
 ```sh
-cargo install --git https://github.com/officialunofficial/mkit mkit-cli
+cargo install mkit-cli                                                   # from crates.io
+cargo install --git https://github.com/officialunofficial/mkit mkit-cli  # from git HEAD
 ```
 
 Drops `mkit` into `~/.cargo/bin/`. Make sure that directory is on your
@@ -61,9 +63,13 @@ cargo test --workspace       # all crates, all tests
 |--------------------------------------|------------------------------------------------------------|
 | `mkit-core`                          | object model, store, chunker, packs, refs, transports, ops |
 | `mkit-attest`                        | DSSE + in-toto v1, multi-algo signers                      |
+| `mkit-keystore`                      | key vault interface + backends                             |
+| `mkit-git-bridge`                    | git import/export bridge                                   |
+| `mkit-rpc`                           | shared stdio framing for subprocess protocols              |
 | `mkit-cli`                           | the `mkit` binary                                          |
 | `mkit-transport-{memory,file,http,s3,ssh}` | one crate per transport scheme                       |
-| `mkit-wasm`                          | wasm-bindgen surface for browsers / Workers                |
+| `mkit-transport-enc`                 | mkit+enc:// encrypted transport                            |
+| `mkit-wasm`                          | wasm-bindgen surface for browsers / Workers (npm-only, not on crates.io) |
 
 ## From GitHub Releases
 

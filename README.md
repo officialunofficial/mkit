@@ -186,7 +186,7 @@ Workspace crates:
 | `mkit-transport-{memory,file,http,s3,ssh,enc}` | Transport trait implementations (`enc` = the `mkit+enc://` no-OpenSSH encrypted transport) |
 | `mkit-cli` | the `mkit` binary |
 | `mkit-wasm` | wasm-bindgen surface for browsers / Cloudflare Workers, published to npm as `@makechain/mkit-wasm` |
-| `mkit-fuzz` | bounded property tests (cargo-fuzz compatible) |
+| `mkit-fuzz` (at `rust/fuzz/`, not `rust/crates/`) | bounded property tests (cargo-fuzz compatible) |
 
 Each transport implements the same trait — `list_refs`, `read_ref`,
 `write_ref`, `pack_exists`, `download_pack`, `upload_pack` — described

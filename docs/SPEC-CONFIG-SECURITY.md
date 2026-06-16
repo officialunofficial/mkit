@@ -269,8 +269,6 @@ When you add a key to `Config`:
 - `rust/crates/mkit-cli/tests/repo_config_forbidden_keys.rs` — per-key
   CLI regression suite.
 - `docs/THREAT-MODEL.md` §4 — wider trust-boundary discussion.
-- `docs/advisories/GHSA-001-per-repo-config.md` — the original
-  advisory that motivated the read-site fence.
 - `docs/SPEC-KEYSTORE.md` §8.2 — the keystore-side requirement that
   every keystore selector be repo-forbidden.
 - Issue #97 — the credential-exfiltration follow-up that motivated

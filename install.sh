@@ -8,7 +8,7 @@
 #
 # Usage:
 #   curl -sSfL https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh | sh
-#   curl -sSfL https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh | sh -s -- --version v0.1.0
+#   curl -sSfL https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh | sh -s -- --version v0.3.0
 #
 # Trust model:
 #   * cosign keyless verification is REQUIRED by default. The script
@@ -32,7 +32,7 @@
 #     compare against this file and warn loudly on a silent downgrade.
 #
 # Environment overrides:
-#   MKIT_VERSION             explicit tag (e.g. v0.1.0). Default: 'latest'.
+#   MKIT_VERSION             explicit tag (e.g. v0.3.0). Default: 'latest'.
 #   MKIT_INSTALL_DIR         install prefix. Default: ~/.local/bin.
 #   MKIT_STATE_DIR           state dir for installed-tag bookkeeping.
 #                            Default: ~/.local/state/mkit.
@@ -48,7 +48,7 @@
 #
 # For private-repo installs, use `gh release download` instead — it
 # handles auth natively:
-#   gh release download v0.1.0 --repo officialunofficial/mkit \
+#   gh release download v0.3.0 --repo officialunofficial/mkit \
 #     --pattern 'mkit-*-<target>.tar.gz' --dir .
 #
 # POSIX sh — runs under dash/ash/bash/zsh without bashisms.
@@ -76,7 +76,7 @@ Usage:
   sh install.sh [--version <tag>] [--prefix <dir>] [--insecure-skip-cosign]
 
 Flags:
-  --version <tag>           Pin to a specific release tag (e.g. v0.1.0).
+  --version <tag>           Pin to a specific release tag (e.g. v0.3.0).
                             RECOMMENDED for production / reproducible installs.
   --prefix <dir>            Install prefix. Default: ~/.local/bin.
   --insecure-skip-cosign    Skip cosign signature verification. DANGEROUS — use
