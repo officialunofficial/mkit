@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
-//
 // Length-prefixed protobuf framing for signer + SSH protocols.
 
 use buffa::{DecodeOptions, Message};

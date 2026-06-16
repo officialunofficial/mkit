@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
-//
 // Regression guard for RUSTSEC-2023-0071.
 //
 // The yubikey 0.9.0-pre.0 crate transitively pulls in an RSA crate

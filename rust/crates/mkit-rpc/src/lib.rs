@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
-
 //! Versioned wire protocols for mkit cross-system speech.
 //!
 //! mkit-rpc owns the schemas mkit uses to talk to processes outside

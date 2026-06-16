@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
-
 //! Small frame-construction helpers shared by signer subprocesses and
 //! transports (SSH + encrypted-stream). These are pure builders — no
 //! I/O — so callers can still choose how / whether to write them. Use
