@@ -100,4 +100,4 @@ jobs:
       # so re-runs after a partial publish need `--exclude` for what landed.
       - name: Publish workspace to crates.io
         working-directory: rust
-        run: cargo publish --workspace
+        run: cargo publish --workspace --locked

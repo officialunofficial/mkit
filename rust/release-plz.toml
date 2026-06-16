@@ -23,9 +23,10 @@
 # nothing here runs automatically.
 #
 # Publishability is controlled per-crate via `publish = false` in each
-# Cargo.toml (mkit-cli, mkit-wasm, mkit-transport-enc, the contrib signers,
-# fuzz, benches). release-plz skips those automatically; only the 10 libraries
-# publish. We deliberately do NOT set a workspace-wide `publish = false` (unlike
+# Cargo.toml (mkit-wasm, the contrib signers, fuzz, benches). release-plz skips
+# those automatically; the remaining library and CLI crates (including mkit-cli
+# and mkit-transport-enc) publish. We deliberately do NOT set a workspace-wide
+# `publish = false` (unlike
 # the polychrome repo, which never goes to crates.io).
 
 [workspace]

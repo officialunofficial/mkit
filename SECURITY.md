@@ -29,8 +29,8 @@ Only the latest minor line receives security fixes.
 
 | Version | Supported                            |
 | ------- | ------------------------------------ |
-| 0.1.x   | Yes (current)                        |
-| < 0.1   | No                                   |
+| 0.3.x   | Yes (current)                        |
+| < 0.3   | No                                   |
 
 Pre-1.0 releases may ship breaking format changes alongside security
 fixes. Read the CHANGELOG before upgrading.
@@ -94,8 +94,8 @@ In scope:
 
 - The `mkit` binary and the Rust workspace under `rust/crates/` —
   including the library crates published to crates.io (`mkit-core`,
-  `mkit-rpc`, `mkit-attest`, `mkit-keystore`, the `mkit-transport-*`
-  crates).
+  `mkit-rpc`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, the
+  `mkit-transport-*` crates).
 - The reference external signers under `contrib/signers/`.
 - Release pipeline integrity (signing, SBOM, reproducibility claims).
 - On-disk format parsers (v1 format documented in `docs/SPEC-*.md`).

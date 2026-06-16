@@ -64,7 +64,7 @@ mkit-transport-ssh = { version = "0.3", path = "../mkit-transport-ssh" }
 # Optional: encrypted-stream transport. Off by default so the
 # baseline `mkit-cli` build doesn't pay tokio's compile cost. Turn on
 # via `--features enc-transport`. See SPEC-TRANSPORT-ENC §6.
-# Version-locked to the workspace (0.2); now that mkit-transport-enc is
+# Version-locked to the workspace (0.3); now that mkit-transport-enc is
 # published, release-plz rewrites this requirement on each lockstep bump.
 mkit-transport-enc = { version = "0.3", path = "../mkit-transport-enc", optional = true }
 mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
