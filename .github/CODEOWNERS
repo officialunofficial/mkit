@@ -1,24 +1,24 @@
 # CODEOWNERS — see https://docs.github.com/articles/about-codeowners
 # Maintainers listed in MAINTAINERS.md and the officialunofficial GitHub org.
 #
-# NOTE: The teams referenced below (@officialunofficial/mkit-maintainers,
-# @officialunofficial/mkit-crypto) must be provisioned under the
-# officialunofficial GitHub organisation before this file will route
-# reviews effectively. Until those teams exist with members, CODEOWNERS
-# rules silently no-op for required-review purposes.
+# Owners route to @officialunofficial/makechain, an existing provisioned
+# team, so required-review routing resolves to real reviewers. If/when
+# dedicated teams (@officialunofficial/mkit-maintainers,
+# @officialunofficial/mkit-crypto) are provisioned with members, swap the
+# assignments below for those teams.
 
-*                                @officialunofficial/mkit-maintainers
+*                                @officialunofficial/makechain
 
-# Security-sensitive surfaces require crypto-team review
-/rust/crates/mkit-attest/        @officialunofficial/mkit-crypto
-/rust/crates/mkit-keystore/      @officialunofficial/mkit-crypto
-/rust/crates/mkit-rpc/           @officialunofficial/mkit-crypto
+# Security-sensitive surfaces require crypto-aware review
+/rust/crates/mkit-attest/        @officialunofficial/makechain
+/rust/crates/mkit-keystore/      @officialunofficial/makechain
+/rust/crates/mkit-rpc/           @officialunofficial/makechain
 
 # CI + release tooling
-/.github/                        @officialunofficial/mkit-maintainers
-/install.sh                      @officialunofficial/mkit-maintainers
-/scripts/                        @officialunofficial/mkit-maintainers
+/.github/                        @officialunofficial/makechain
+/install.sh                      @officialunofficial/makechain
+/scripts/                        @officialunofficial/makechain
 
 # On-disk + wire formats — changes need spec sign-off
-/docs/SPEC-*.md                  @officialunofficial/mkit-maintainers
-/rust/tests/golden/              @officialunofficial/mkit-maintainers
+/docs/SPEC-*.md                  @officialunofficial/makechain
+/rust/tests/golden/              @officialunofficial/makechain

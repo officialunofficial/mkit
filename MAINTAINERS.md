@@ -1,9 +1,9 @@
 # Maintainers
 
-**TBD.** mkit does not yet publish a formal maintainer roster.
-
-Until a roster is published here, treat the following as the source
-of truth:
+mkit review routing is owned by the
+[@officialunofficial/makechain](https://github.com/orgs/officialunofficial/teams/makechain)
+team. Its members are the concrete fallback owners for required-review
+routing; see the per-path assignments below.
 
 - **Who reviews what** — see [`.github/CODEOWNERS`](.github/CODEOWNERS).
 - **Security disclosures** — see [`SECURITY.md`](SECURITY.md).
