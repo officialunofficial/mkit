@@ -1,0 +1,147 @@
+# Release automation — release-plz (issue #225). RETIRED for publishing:
+# crates.io publishing is now tag-driven via `.github/workflows/crates-publish.yml`
+# (`cargo publish --workspace`), because release-plz's Release-PR/tag model fought
+# this workspace's hand-owned versioning. See rust/release-plz.toml for the full
+# rationale. This workflow is kept only as an OPTIONAL path back to release-plz-
+# managed versioning; nothing here runs automatically.
+#
+# Two jobs:
+#  - release-plz-release (`cargo publish` to crates.io) runs on push to main but
+#    is INERT: `release_always = false` (release-plz.toml) makes it skip unless
+#    the pushed commit is a merged release-plz Release PR, which this flow never
+#    produces. crates-publish.yml does the real publishing.
+#  - release-plz-pr (open a Release PR — next lockstep version, rewritten
+#    internal dep requirements, CHANGELOG, cargo-semver-checks) runs ONLY on
+#    manual `workflow_dispatch`. OPTIONAL/unused while the workspace hand-owns
+#    versioning (it errors when the version is already bumped ahead of crates.io
+#    with the tag cut); kept for the option of handing versioning to release-plz.
+#
+# TOKENS (provision before enabling — see docs/RELEASE.md):
+#  - CRATES_PACKAGE_KEY — crates.io API token (scopes: publish-new +
+#    publish-update), provided as an ORG-level secret and exposed to cargo as
+#    the CARGO_REGISTRY_TOKEN env var below. Required for the release job to
+#    `cargo publish`. The org secret must grant this repo access.
+#  - RELEASE_PLZ_APP_ID + RELEASE_PLZ_APP_PRIVATE_KEY — a GitHub App installation
+#    token, minted per-run. release-plz creates no tag, so the App token is here
+#    so the Release PR it opens can trigger CI (a `GITHUB_TOKEN`-authored PR does
+#    not). Same App the polychrome repo uses — reuse it if installed on this repo.
+
+name: release-plz
+
+on:
+  workflow_dispatch:        # open/update the Release PR (release-plz-pr).
+  push:
+    branches: [main]        # release-plz-release (INERT: release_always = false).
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+
+jobs:
+  # crates.io publish when a Release PR merges (push to main). No-op otherwise
+  # (release_always = false). Push-only; and gated on the `RELEASE_PLZ_ENABLED`
+  # repo variable so the whole workflow stays DORMANT until you've provisioned
+  # the secrets and flip the variable to `true` — merging this setup PR before
+  # then is a clean skip (no failed App-token mint).
+  release-plz-release:
+    name: release-plz release
+    if: github.event_name == 'push' && vars.RELEASE_PLZ_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      # mkit-rpc compiles protobuf via buffa-build (shells out to protoc), and
+      # `cargo publish` builds each crate to verify it before upload.
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mint GitHub App token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - name: Run release-plz release
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7  # v0.5.130
+        with:
+          command: release
+          manifest_path: rust/Cargo.toml
+          config: rust/release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_PACKAGE_KEY }}
+
+  # Open/update the single Release PR. MANUAL only, and likewise gated on
+  # RELEASE_PLZ_ENABLED so a stray dispatch before setup does nothing.
+  release-plz-pr:
+    name: release-plz PR
+    if: github.event_name == 'workflow_dispatch' && vars.RELEASE_PLZ_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # release-plz runs cargo-semver-checks (semver_check = true) to diff the
+      # public API against the previous tag and propose the right version bump.
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912  # v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: Mint GitHub App token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - name: Run release-plz release-pr
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7  # v0.5.130
+        with:
+          command: release-pr
+          manifest_path: rust/Cargo.toml
+          config: rust/release-plz.toml
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_PACKAGE_KEY }}

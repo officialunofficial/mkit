@@ -7,15 +7,17 @@
 //!
 //! URL shape: `mkit+s3://<endpoint>/<bucket>[/prefix]` — credentials are
 //! pulled from the `MKIT_R2_ACCESS_KEY_ID` / `MKIT_R2_SECRET_ACCESS_KEY`
-//! environment at [`connect`] time. An unset pair does not fail
+//! environment at `connect` time. An unset pair does not fail
 //! construction; the first signed call surfaces
 //! [`TransportError::AccessDenied`].
 //!
-//! Retry policy mirrors SPEC-TRANSPORT §8 via
+//! Retry policy mirrors SPEC-TRANSPORT §7 via
 //! [`mkit_core::protocol::BackoffIterator`]: 5xx and HTTP 429 retry up to
 //! 5 attempts; `412 Precondition Failed` NEVER retries so CAS writes
 //! can't silently turn into duplicate PUTs.
 
+// This crate contains zero `unsafe` — enforce that it stays that way.
+#![forbid(unsafe_code)]
 // Narrative-heavy module docs fight `doc_markdown`; the
 // `duration_suboptimal_units` lint insists on `from_mins(1)` for our 60s
 // HTTP timeout which obscures intent (we mean seconds, not minutes).
@@ -38,12 +40,12 @@ use reqwest::blocking::{Client, Response};
 
 use crate::sigv4::{Credentials, SignedRequest, sign_request};
 
-/// Per SPEC-TRANSPORT §5, a single PUT is capped at 5 GiB; anything
+/// Per SPEC-TRANSPORT §6.4, a single PUT is capped at 5 GiB; anything
 /// larger requires multipart upload (deferred).
 pub const S3_SINGLE_PUT_MAX: u64 = 5 * 1024 * 1024 * 1024;
 
-/// Body-size cap for a pack download (4 GiB).
-const PACK_BODY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
+// Body-size cap for a pack download. Canonical value lives in mkit-core.
+use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
 /// Body-size cap for a ref body (64 hex + newline + slack).
 const REF_BODY_LIMIT: usize = 256;
 /// Cap for list XML / small responses (16 MiB).
@@ -146,7 +148,8 @@ impl S3Transport {
 
     /// Construct a transport directly against an endpoint URL, for tests
     /// (mockito hands us a plain `http://127.0.0.1:PORT` base). The path
-    /// component of `endpoint` MUST be empty — only scheme+host[:port].
+    /// component of `endpoint` MUST be empty — only scheme+host\[:port\].
+    #[doc(hidden)]
     pub fn with_parts(
         endpoint: impl Into<String>,
         bucket: impl Into<String>,
@@ -160,7 +163,7 @@ impl S3Transport {
         Ok(Self {
             endpoint: endpoint.into(),
             bucket: bucket.into(),
-            prefix,
+            prefix: normalize_s3_prefix(prefix)?,
             creds,
             client,
             clock: default_clock,
@@ -196,20 +199,69 @@ impl S3Transport {
         format!("packs/{}", to_hex(digest))
     }
 
-    /// Build the S3 path `/<bucket>/<key>` that the signer will sign
-    /// and the client will request.
+    /// Build the S3 object key for the shard manifest of a pack:
+    /// `packs/<64-char hex digest>/shards.manifest`. Mirrors the HTTP
+    /// transport's URL shape.
+    #[must_use]
+    pub fn shard_manifest_object_key(digest: &Hash) -> String {
+        format!("packs/{}/shards.manifest", to_hex(digest))
+    }
+
+    /// Build the S3 object key for one shard of a pack:
+    /// `packs/<64-char hex digest>/shards/<index>`. Mirrors the HTTP
+    /// transport's URL shape.
+    #[must_use]
+    pub fn shard_object_key(digest: &Hash, index: u16) -> String {
+        format!("packs/{}/shards/{}", to_hex(digest), index)
+    }
+
+    /// Build the repository namespace key. Without a URL prefix this is
+    /// the canonical repository-relative key; with a prefix it is
+    /// `<prefix>/<canonical-key>`.
+    fn effective_key(&self, key: &str) -> String {
+        match self.prefix.as_deref() {
+            Some(prefix) if key.is_empty() => format!("{prefix}/"),
+            Some(prefix) => format!("{prefix}/{key}"),
+            None => key.to_owned(),
+        }
+    }
+
+    /// Build the S3 path `/<bucket>/<effective-key>` that the signer will
+    /// sign and the client will request.
     fn build_path(&self, key: &str) -> String {
         if key.is_empty() {
             return format!("/{}", self.bucket);
         }
-        format!("/{}/{}", self.bucket, key)
+        format!("/{}/{}", self.bucket, self.effective_key(key))
+    }
+
+    /// Build a ListObjectsV2 prefix under the URL namespace. Listing is
+    /// sent to bucket root (`key = ""`) and scoped only through this query.
+    fn effective_list_prefix(&self, prefix: &str) -> String {
+        match self.prefix.as_deref() {
+            Some(namespace) if prefix.is_empty() => format!("{namespace}/"),
+            Some(namespace) => format!("{namespace}/{prefix}"),
+            None => prefix.to_owned(),
+        }
+    }
+
+    fn strip_effective_prefix<'a>(&self, key: &'a str) -> Option<&'a str> {
+        let Some(namespace) = self.prefix.as_deref() else {
+            return Some(key);
+        };
+        key.strip_prefix(namespace)?.strip_prefix('/')
     }
 
     /// Build the canonical query string for `ListObjectsV2` scoped to a
     /// prefix. `prefix` MAY be empty to list every key.
+    ///
+    /// The query is URI-encoded and key-sorted via
+    /// [`sigv4::canonical_query_string`] so the bytes signed match what
+    /// real AWS S3 re-derives server-side (a raw `/` in the prefix would
+    /// otherwise yield `403 SignatureDoesNotMatch`; R2 is lenient).
     #[must_use]
     pub fn build_list_query(prefix: &str) -> String {
-        format!("list-type=2&prefix={prefix}")
+        sigv4::canonical_query_string(&[("list-type", "2"), ("prefix", prefix)])
     }
 
     // -- HTTP core --
@@ -331,7 +383,11 @@ fn extract_response(
         // unbounded, so we cap manually.
         let all = resp.bytes().map_err(|_| TransportError::ConnectionFailed)?;
         if all.len() > limit {
-            return Err(TransportError::ServerError { status: 507 });
+            // Non-retryable: re-fetching the same oversized object would
+            // just exceed the cap again. (Previously mapped to a 507,
+            // which `is_retryable` treats as a retryable 5xx, so the
+            // backoff loop would have retried the doomed fetch.)
+            return Err(TransportError::PayloadTooLarge(all.len()));
         }
         all.to_vec()
     } else {
@@ -380,7 +436,7 @@ fn parse_s3_url(url: &str) -> Result<ParsedS3Url, TransportError> {
     if host.is_empty() {
         return Err(TransportError::InvalidRef("mkit+s3 URL empty host".into()));
     }
-    let (bucket, prefix) = match tail.split_once('/') {
+    let (bucket, raw_prefix) = match tail.split_once('/') {
         Some((b, p)) if !p.is_empty() => (b, Some(p.to_owned())),
         Some((b, _)) => (b, None),
         None => (tail, None),
@@ -393,8 +449,41 @@ fn parse_s3_url(url: &str) -> Result<ParsedS3Url, TransportError> {
     Ok(ParsedS3Url {
         host: host.to_owned(),
         bucket: bucket.to_owned(),
-        prefix,
+        prefix: normalize_s3_prefix(raw_prefix)?,
     })
+}
+
+fn normalize_s3_prefix(prefix: Option<String>) -> Result<Option<String>, TransportError> {
+    let Some(prefix) = prefix else {
+        return Ok(None);
+    };
+    if prefix.is_empty()
+        || prefix.starts_with('/')
+        || prefix.ends_with('/')
+        || prefix.contains("//")
+        || prefix.contains('\\')
+    {
+        return Err(TransportError::InvalidRef(format!(
+            "invalid S3 prefix: {prefix}"
+        )));
+    }
+    for segment in prefix.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(TransportError::InvalidRef(format!(
+                "invalid S3 prefix: {prefix}"
+            )));
+        }
+        if !segment.bytes().all(is_safe_s3_prefix_byte) {
+            return Err(TransportError::InvalidRef(format!(
+                "invalid S3 prefix: {prefix}"
+            )));
+        }
+    }
+    Ok(Some(prefix))
+}
+
+fn is_safe_s3_prefix_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')
 }
 
 // ---------------------------------------------------------------------------
@@ -423,7 +512,7 @@ fn quoted_md5(wire: &[u8]) -> String {
 
 impl Transport for S3Transport {
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        if bytes.len() as u64 > S3_SINGLE_PUT_MAX || bytes.len() > PACK_BODY_LIMIT {
+        if bytes.len() as u64 > S3_SINGLE_PUT_MAX || bytes.len() as u64 > PACK_BODY_LIMIT {
             return Err(TransportError::ServerError { status: 413 });
         }
         let object_key = Self::pack_object_key(key.as_bytes());
@@ -443,6 +532,16 @@ impl Transport for S3Transport {
     }
 
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        // Shard-aware path: when the pack-shards feature is on, try
+        // the manifest first. `Ok(None)` means the manifest is
+        // missing (producer never sharded this pack), so we fall
+        // through to the monolithic GET below. Any other error
+        // propagates as-is.
+        #[cfg(feature = "pack-shards")]
+        if let Some(bytes) = self.download_pack_via_shards(key)? {
+            return Ok(bytes);
+        }
+
         let object_key = Self::pack_object_key(key.as_bytes());
         let resp = self.http_request(
             &Method::GET,
@@ -450,7 +549,7 @@ impl Transport for S3Transport {
             "",
             None,
             &[],
-            Some(PACK_BODY_LIMIT),
+            Some(PACK_BODY_LIMIT_USIZE),
         )?;
         match resp.status {
             200 => Ok(resp.body),
@@ -525,7 +624,8 @@ impl Transport for S3Transport {
         if !validate_ref_prefix(prefix) {
             return Err(TransportError::InvalidRef(prefix.to_owned()));
         }
-        let query = Self::build_list_query(prefix);
+        let query_prefix = self.effective_list_prefix(prefix);
+        let query = Self::build_list_query(&query_prefix);
         let resp = self.http_request(
             &Method::GET,
             "",
@@ -542,22 +642,25 @@ impl Transport for S3Transport {
         let keys = parse_list_xml(&resp.body);
         let mut out: Vec<Ref> = Vec::new();
         for key in keys {
-            if !validate_ref_name(&key) {
+            let Some(repo_key) = self.strip_effective_prefix(&key) else {
+                continue;
+            };
+            if !validate_ref_name(repo_key) {
                 continue;
             }
             // Resolve each key to its hash via a second GET.
             let ref_resp =
-                self.http_request(&Method::GET, &key, "", None, &[], Some(REF_BODY_LIMIT))?;
+                self.http_request(&Method::GET, repo_key, "", None, &[], Some(REF_BODY_LIMIT))?;
             if ref_resp.status != 200 {
                 continue;
             }
             let Ok(h) = parse_ref_body(&ref_resp.body) else {
                 continue;
             };
-            let suffix = if key.len() > prefix.len() && key.starts_with(prefix) {
-                &key[prefix.len()..]
+            let suffix = if repo_key.len() > prefix.len() && repo_key.starts_with(prefix) {
+                &repo_key[prefix.len()..]
             } else {
-                key.as_str()
+                repo_key
             };
             if !validate_ref_name(suffix) {
                 continue;
@@ -608,6 +711,315 @@ pub fn parse_list_xml(xml: &[u8]) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Sparse-checkout fetch (issue #158, Phase 2). Feature-gated behind
+// `sparse-checkout`.
+//
+// Wire contract additions (SPEC-TRANSPORT §6.6):
+//
+// - Object key: `sparse/<tree-hash-hex>/<filter-hash-hex>`. A server
+//   that wants to offer sparse delivery pre-builds the manifest under
+//   that key. Clients GET it; the response body IS the
+//   `application/x-mkit-sparse` envelope.
+// - The `?sparse=<filter-hash-hex>` query is a no-op on S3 (the
+//   content-addressed key already encodes it) — we accept it for URL
+//   parity with the HTTP transport but ignore it.
+// - 404 → no precomputed sparse for that (tree, filter) pair. Maps to
+//   `PackNotFound` so retries are terminated.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "sparse-checkout")]
+mod sparse_fetch {
+    use super::{
+        Hash, Method, PACK_BODY_LIMIT_USIZE, S3Transport, TransportError, TransportResult, to_hex,
+    };
+    use mkit_core::sparse::{
+        SPARSE_WIRE_MAX_BYTES, SparseResponse, decode_sparse_response, hash_filter,
+    };
+    use std::path::PathBuf;
+
+    impl S3Transport {
+        /// Build the S3 object key for a sparse delivery:
+        /// `sparse/<tree-hex>/<filter-hex>`.
+        #[must_use]
+        pub fn sparse_object_key(tree_hash: &Hash, filter_hash: &Hash) -> String {
+            format!("sparse/{}/{}", to_hex(tree_hash), to_hex(filter_hash))
+        }
+
+        /// Fetch the precomputed sparse delivery for `(tree_hash,
+        /// filter)`. The S3 transport does NOT compute manifests; it
+        /// assumes a server has pre-built them under the canonical
+        /// key.
+        ///
+        /// As with the HTTP transport, this function does NOT verify
+        /// the manifest — the caller MUST run
+        /// [`mkit_core::sparse::verify_sparse`] on the result before
+        /// trusting any delivered entries.
+        ///
+        /// # Errors
+        ///
+        /// - [`TransportError::PackNotFound`] — no precomputed sparse
+        ///   for the addressed `(tree, filter)` pair.
+        /// - [`TransportError::AccessDenied`] — credentials rejected.
+        /// - [`TransportError::InvalidResponse`] — wire envelope
+        ///   decode failed.
+        /// - [`TransportError::PayloadTooLarge`] — response body
+        ///   exceeded `SPARSE_WIRE_MAX_BYTES`.
+        pub fn fetch_sparse_tree(
+            &self,
+            tree_hash: &Hash,
+            filter: &[PathBuf],
+        ) -> TransportResult<SparseResponse> {
+            let filter_hash = hash_filter(filter);
+            let key = Self::sparse_object_key(tree_hash, &filter_hash);
+            // Cap body size at the wire-format max — far smaller than
+            // the pack-body limit. PACK_BODY_LIMIT_USIZE is the
+            // existing transport-side ceiling, used here for parity
+            // when SPARSE_WIRE_MAX_BYTES would otherwise allow a
+            // non-pack body larger than any pack we'd accept.
+            let cap = SPARSE_WIRE_MAX_BYTES.min(PACK_BODY_LIMIT_USIZE);
+            let resp = self.http_request_pub(&Method::GET, &key, "", None, &[], Some(cap))?;
+            match resp.status_pub() {
+                200 => decode_sparse_response(resp.body_pub())
+                    .map_err(|_| TransportError::InvalidResponse),
+                404 => Err(TransportError::PackNotFound),
+                403 | 401 => Err(TransportError::AccessDenied),
+                s => Err(TransportError::ServerError { status: s }),
+            }
+        }
+    }
+}
+
+// Crate-private bridge so the sparse-fetch module can poke through
+// `http_request` without the transport file losing its tightly-scoped
+// `pub(crate)` surface.
+#[cfg(feature = "sparse-checkout")]
+impl S3Transport {
+    pub(crate) fn http_request_pub(
+        &self,
+        method: &Method,
+        key: &str,
+        query: &str,
+        payload: Option<&[u8]>,
+        extra_headers: &[(&'static str, String)],
+        body_limit: Option<usize>,
+    ) -> TransportResult<HttpResponse> {
+        self.http_request(method, key, query, payload, extra_headers, body_limit)
+    }
+}
+
+#[cfg(feature = "sparse-checkout")]
+impl HttpResponse {
+    pub(crate) fn status_pub(&self) -> u16 {
+        self.status
+    }
+    pub(crate) fn body_pub(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pack-Shards client (feature-gated)
+// ---------------------------------------------------------------------------
+
+/// Per-request timeout for a single shard GET.
+///
+/// Bounds a stalled straggler so a detached worker can never pin a
+/// thread for the process lifetime. See the HTTP transport's
+/// `SHARD_REQUEST_TIMEOUT` for the matching rationale.
+#[cfg(feature = "pack-shards")]
+const SHARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Fetch a single shard, retrying transient failures through the
+/// supplied backoff ladder.
+///
+/// Retries ONLY on `ConnectionFailed` / 429 / 5xx (per `is_retryable`).
+/// `AccessDenied` (401/403), `PackNotFound` (404), and `PayloadTooLarge`
+/// are terminal and return immediately. The shard object key is built
+/// from the EFFECTIVE PREFIX inside [`fetch_one_shard`], preserving
+/// #180's namespace isolation across retries.
+#[cfg(feature = "pack-shards")]
+#[allow(clippy::too_many_arguments)]
+fn fetch_one_shard_with_retry(
+    client: &Client,
+    endpoint: &str,
+    bucket: &str,
+    prefix: Option<&str>,
+    creds: &Credentials,
+    digest: &Hash,
+    index: u16,
+    clock: fn() -> i64,
+    backoff: fn() -> BackoffIterator,
+    sleeper: fn(Duration),
+) -> TransportResult<Vec<u8>> {
+    let mut ladder = backoff();
+    loop {
+        let ts = clock();
+        let err = match fetch_one_shard(client, endpoint, bucket, prefix, creds, digest, index, ts)
+        {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => e,
+        };
+        if is_retryable(&err)
+            && let Some(delay) = ladder.next()
+        {
+            sleeper(delay);
+            continue;
+        }
+        return Err(err);
+    }
+}
+
+#[cfg(feature = "pack-shards")]
+fn fetch_one_shard(
+    client: &Client,
+    endpoint: &str,
+    bucket: &str,
+    prefix: Option<&str>,
+    creds: &Credentials,
+    digest: &Hash,
+    index: u16,
+    ts: i64,
+) -> TransportResult<Vec<u8>> {
+    let canonical_key = S3Transport::shard_object_key(digest, index);
+    let object_key = prefix.map_or_else(
+        || canonical_key.clone(),
+        |namespace| format!("{namespace}/{canonical_key}"),
+    );
+    let path = if bucket.is_empty() {
+        format!("/{object_key}")
+    } else {
+        format!("/{bucket}/{object_key}")
+    };
+    let signed = sign_request(creds, "GET", &path, "", &[], endpoint, ts);
+    let url = format!("{endpoint}{path}");
+    let resp = client
+        .request(Method::GET, &url)
+        .timeout(SHARD_REQUEST_TIMEOUT)
+        .header("Authorization", signed.authorization)
+        .header("x-amz-date", signed.x_amz_date)
+        .header("x-amz-content-sha256", signed.x_amz_content_sha256)
+        .send()
+        .map_err(|_| TransportError::ConnectionFailed)?;
+    let status = resp.status().as_u16();
+    match status {
+        200 => {
+            let bytes = resp.bytes().map_err(|_| TransportError::ConnectionFailed)?;
+            if bytes.len() > PACK_BODY_LIMIT_USIZE {
+                return Err(TransportError::PayloadTooLarge(bytes.len()));
+            }
+            Ok(bytes.to_vec())
+        }
+        404 => Err(TransportError::PackNotFound),
+        401 | 403 => Err(TransportError::AccessDenied),
+        s => Err(TransportError::ServerError { status: s }),
+    }
+}
+
+#[cfg(feature = "pack-shards")]
+impl S3Transport {
+    fn download_pack_via_shards(&self, key: &PackKey) -> TransportResult<Option<Vec<u8>>> {
+        use mkit_core::pack_shard::{
+            MANIFEST_MAX_BYTES, Shard, decode_manifest, decode_pack_from_shards,
+        };
+        use std::sync::mpsc;
+
+        let manifest_key = Self::shard_manifest_object_key(key.as_bytes());
+        let manifest_resp = self.http_request(
+            &Method::GET,
+            &manifest_key,
+            "",
+            None,
+            &[],
+            Some(MANIFEST_MAX_BYTES),
+        )?;
+        match manifest_resp.status {
+            200 => {}
+            // 404 is the only legitimate "no shards published" signal —
+            // the producer never wrote a manifest, so the client must
+            // fall through to the monolithic GET. Every other status,
+            // including a malformed-body 200, propagates so the caller
+            // sees the bug rather than silently downgrading. This
+            // mirrors HTTP's `download_pack_via_shards` posture — see
+            // `mkit-transport-http`'s comment on `X-Pack-Shards`.
+            404 => return Ok(None),
+            403 | 401 => return Err(TransportError::AccessDenied),
+            s => return Err(TransportError::ServerError { status: s }),
+        }
+        let manifest =
+            decode_manifest(&manifest_resp.body).map_err(|_| TransportError::InvalidResponse)?;
+
+        let total = manifest.config.total_shards();
+        let minimum = manifest.config.minimum_shards.get();
+        let max_failures = manifest.config.extra_shards.get();
+
+        if total > 256 {
+            return Err(TransportError::InvalidResponse);
+        }
+        let total_u16: u16 = u16::try_from(total).unwrap_or(u16::MAX);
+
+        let (tx, rx) = mpsc::channel::<(u16, TransportResult<Vec<u8>>)>();
+        let digest: Hash = *key.as_bytes();
+        // Workers are *detached* (never joined): once quorum or the
+        // failure threshold is reached the collection loop stops waiting
+        // so a slow straggler cannot block the download. Each shard GET
+        // carries SHARD_REQUEST_TIMEOUT so detached workers terminate.
+        let clock = self.clock;
+        let backoff = self.backoff;
+        let sleeper = self.sleeper;
+        for i in 0..total_u16 {
+            let tx = tx.clone();
+            let endpoint = self.endpoint.clone();
+            let bucket = self.bucket.clone();
+            let prefix = self.prefix.clone();
+            let creds = self.creds.clone();
+            let client = self.client.clone();
+            std::thread::spawn(move || {
+                let result = fetch_one_shard_with_retry(
+                    &client,
+                    &endpoint,
+                    &bucket,
+                    prefix.as_deref(),
+                    &creds,
+                    &digest,
+                    i,
+                    clock,
+                    backoff,
+                    sleeper,
+                );
+                let _ = tx.send((i, result));
+            });
+        }
+        drop(tx);
+
+        let mut shards: Vec<Shard> = Vec::with_capacity(minimum as usize);
+        let mut failures: u16 = 0;
+        for (index, res) in &rx {
+            if let Ok(bytes) = res {
+                shards.push(Shard { index, bytes });
+                if shards.len() >= minimum as usize {
+                    break;
+                }
+            } else {
+                failures += 1;
+                if failures > max_failures {
+                    break;
+                }
+            }
+        }
+        // Detached workers are not joined; stragglers are bounded by
+        // SHARD_REQUEST_TIMEOUT.
+
+        if shards.len() < minimum as usize {
+            return Err(TransportError::PackNotFound);
+        }
+
+        let pack = decode_pack_from_shards(&shards, &manifest)
+            .map_err(|_| TransportError::InvalidResponse)?;
+        Ok(Some(pack))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -625,9 +1037,11 @@ mod tests {
 
     #[test]
     fn list_query_format() {
+        // `/` MUST be percent-encoded as `%2F` and keys sorted, so the
+        // signed query matches what real AWS S3 re-derives server-side.
         assert_eq!(
             S3Transport::build_list_query("refs/heads/"),
-            "list-type=2&prefix=refs/heads/"
+            "list-type=2&prefix=refs%2Fheads%2F"
         );
         assert_eq!(S3Transport::build_list_query(""), "list-type=2&prefix=");
     }
@@ -644,6 +1058,30 @@ mod tests {
     fn url_parse_ok_with_prefix() {
         let p = parse_s3_url("mkit+s3://host.example/bucket/project-a").unwrap();
         assert_eq!(p.prefix.as_deref(), Some("project-a"));
+    }
+
+    #[test]
+    fn url_parse_ok_with_nested_safe_prefix() {
+        let p = parse_s3_url("mkit+s3://host.example/bucket/team_1/project.a-2").unwrap();
+        assert_eq!(p.prefix.as_deref(), Some("team_1/project.a-2"));
+    }
+
+    #[test]
+    fn url_parse_rejects_prefix_url_metacharacters() {
+        for prefix in [
+            "project?x=1",
+            "project#frag",
+            "project&x=1",
+            "project x",
+            "project%2Fother",
+            "project+other",
+        ] {
+            let url = format!("mkit+s3://host.example/bucket/{prefix}");
+            assert!(
+                matches!(parse_s3_url(&url), Err(TransportError::InvalidRef(_))),
+                "prefix should be rejected: {prefix}"
+            );
+        }
     }
 
     #[test]

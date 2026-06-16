@@ -1,0 +1,83 @@
+[package]
+name = "mkit-keystore"
+description = "Signing-key keystore abstraction for mkit"
+keywords = ["mkit", "keystore", "signing", "cryptography"]
+categories = ["cryptography", "authentication"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+attest = ["dep:mkit-attest"]
+# When `mkit-attest/bls-threshold` is also on (e.g. `--all-features`),
+# keystore needs to handle the BLS Algorithm variant in its conversion
+# impls. Phase 1 only handles its presence as a typed pass-through —
+# the actual BLS keystore backend is Phase 2 of issue #160.
+bls-threshold = ["attest", "mkit-attest/bls-threshold"]
+backend-linux-secret-service = ["linux-secret-service"]
+backend-macos-keychain = ["macos-keychain"]
+backend-systemd-creds = ["systemd-creds"]
+backend-windows-credential = ["windows-credential"]
+backend-yubikey = ["dep:card-backend-pcsc", "dep:der", "dep:openpgp-card", "dep:yubikey", "p256/pkcs8"]
+fuzzing = []
+linux-secret-service = [
+  "dep:keyring-core",
+  "dep:zbus-secret-service-keyring-store",
+  "zbus-secret-service-keyring-store/rt-async-io-crypto-rust",
+]
+macos-keychain = ["dep:security-framework"]
+systemd-creds = []
+windows-credential = ["dep:keyring-core", "dep:windows-native-keyring-store"]
+
+[dependencies]
+mkit-core = { version = "0.3", path = "../mkit-core" }
+mkit-attest = { version = "0.3", path = "../mkit-attest", optional = true }
+card-backend-pcsc = { version = "0.5.1", optional = true }
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
+der = { version = "0.8.0", optional = true }
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
+getrandom = "0.4.2"
+keyring-core = { version = "1.0.0", optional = true }
+k256 = { version = "0.13.4", default-features = false, features = ["ecdsa", "std"] }
+openpgp-card = { version = "0.6.1", optional = true }
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }
+sha2 = { version = "0.10.9", default-features = false }
+thiserror = "2.0.18"
+zeroize = "1.8.2"
+yubikey = { version = "0.9.0-pre.0", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3.7.0", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "1.0.0", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.186"
+
+[target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = { version = "1.0.0", optional = true }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+# BLS share storage round-trip tests need access to the codec +
+# crypto crates so they can dealer/sign/aggregate alongside the
+# keystore. Same versions as mkit-attest pins.
+commonware-codec = "=2026.5.0"
+commonware-cryptography = "=2026.5.0"
+commonware-utils = "=2026.5.0"
+
+[package.metadata.docs.rs]
+# NOT `all-features`: `backend-yubikey` pulls `card-backend-pcsc` → `pcsc-sys`,
+# whose build script needs system `libpcsclite` that docs.rs doesn't provide.
+# Document the Linux-buildable, no-system-library backends instead (the macOS /
+# Windows backends are target-gated and wouldn't render on docs.rs anyway).
+features = ["attest", "bls-threshold", "backend-linux-secret-service", "backend-systemd-creds"]

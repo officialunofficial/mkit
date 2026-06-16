@@ -11,10 +11,8 @@ use std::io::{Read, Write};
 use mkit_rpc::mkit::rpc::v1::signer::{
     Capabilities, HelloResponse, SignResponse, SignerFrame, signer_frame,
 };
-use mkit_rpc::mkit::rpc::v1::{
-    Algorithm as RpcAlgorithm, Error as RpcError, ErrorCode, KeyForm, ProtocolVersion,
-};
-use mkit_rpc::{FrameError, read_frame, write_frame};
+use mkit_rpc::mkit::rpc::v1::{Algorithm as RpcAlgorithm, ErrorCode, KeyForm, ProtocolVersion};
+use mkit_rpc::{FrameError, read_frame, signer_error_frame, write_frame};
 
 use crate::SignerError;
 
@@ -64,7 +62,7 @@ where
             Err(FrameError::LengthTooLarge(n)) => {
                 let _ = write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     format!("frame length {n} exceeds 1 MiB"),
                 );
                 return Err(SignerError::Io("oversize frame".into()));
@@ -72,7 +70,7 @@ where
             Err(FrameError::BodyTruncated { expected, .. }) => {
                 let _ = write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     format!("frame body truncated (expected {expected} bytes)"),
                 );
                 return Err(SignerError::Io("truncated frame".into()));
@@ -80,7 +78,7 @@ where
             Err(FrameError::DecodeFailed) => {
                 let _ = write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     "frame failed to decode as SignerFrame".to_owned(),
                 );
                 return Err(SignerError::Io("decode failure".into()));
@@ -92,11 +90,11 @@ where
             Some(signer_frame::Body::Hello(_)) => {
                 let resp = SignerFrame {
                     body: Some(signer_frame::Body::HelloResponse(Box::new(HelloResponse {
-                        protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
+                        protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
                         signer_id: Some(format!("mkit-sign-tpm/{}", env!("CARGO_PKG_VERSION"))),
                         capabilities: buffa::MessageField::some(Capabilities {
-                            algorithms: vec![RpcAlgorithm::ALGORITHM_P256.into()],
-                            key_forms: vec![KeyForm::KEY_FORM_OPAQUE_HANDLE.into()],
+                            algorithms: vec![RpcAlgorithm::P256.into()],
+                            key_forms: vec![KeyForm::OpaqueHandle.into()],
                             supports_pin: Some(false),
                             supports_certificate_chain: Some(false),
                             max_payload_bytes: Some(0),
@@ -118,7 +116,7 @@ where
             Some(signer_frame::Body::PinResponse(_)) => {
                 write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     "mkit-sign-tpm does not request PINs".to_owned(),
                 )?;
             }
@@ -126,16 +124,12 @@ where
             Some(_) => {
                 write_error(
                     w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
+                    ErrorCode::InvalidRequest,
                     "unexpected frame body".to_owned(),
                 )?;
             }
             None => {
-                write_error(
-                    w,
-                    ErrorCode::ERROR_CODE_INVALID_REQUEST,
-                    "empty frame body".to_owned(),
-                )?;
+                write_error(w, ErrorCode::InvalidRequest, "empty frame body".to_owned())?;
             }
         }
     }
@@ -146,18 +140,17 @@ fn handle_sign<T: TpmSigner>(
     handle_default: Option<u32>,
     signer: &T,
 ) -> SignerFrame {
-    let algorithm = req.algorithm.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    if algorithm != RpcAlgorithm::ALGORITHM_P256 as i32 {
-        return error_frame(
-            ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM,
+    if !req.algorithm.is_some_and(|a| a == RpcAlgorithm::P256) {
+        return signer_error_frame(
+            ErrorCode::UnsupportedAlgorithm,
             "mkit-sign-tpm signs ALGORITHM_P256 only".to_owned(),
         );
     }
 
-    let key_form = req.key_form.as_ref().map_or(0, buffa::EnumValue::to_i32);
-    if key_form != KeyForm::KEY_FORM_OPAQUE_HANDLE as i32 && key_form != 0 {
-        return error_frame(
-            ErrorCode::ERROR_CODE_UNSUPPORTED_KEY_FORM,
+    let key_form = req.key_form.unwrap_or_default();
+    if key_form != KeyForm::OpaqueHandle && key_form != KeyForm::Unspecified {
+        return signer_error_frame(
+            ErrorCode::UnsupportedKeyForm,
             "mkit-sign-tpm only supports KEY_FORM_OPAQUE_HANDLE (the persistent handle)".to_owned(),
         );
     }
@@ -170,8 +163,8 @@ fn handle_sign<T: TpmSigner>(
         Some(b) if b.len() == 4 => Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]])),
         Some(b) if b.is_empty() => None,
         Some(_) => {
-            return error_frame(
-                ErrorCode::ERROR_CODE_INVALID_REQUEST,
+            return signer_error_frame(
+                ErrorCode::InvalidRequest,
                 "key_ref must be a 4-byte big-endian u32 persistent handle".to_owned(),
             );
         }
@@ -180,8 +173,8 @@ fn handle_sign<T: TpmSigner>(
     .or(handle_default);
 
     let Some(handle) = handle else {
-        return error_frame(
-            ErrorCode::ERROR_CODE_INVALID_REQUEST,
+        return signer_error_frame(
+            ErrorCode::InvalidRequest,
             "no persistent handle — pass --handle on argv or set SignRequest.key_ref to the 4-byte BE handle".to_owned(),
         );
     };
@@ -190,20 +183,20 @@ fn handle_sign<T: TpmSigner>(
     let (pubkey, sig) = match signer.sign(handle, &pae) {
         Ok(out) => out,
         Err(SignerError::Tpm(msg)) => {
-            return error_frame(ErrorCode::ERROR_CODE_HARDWARE_ERROR, msg);
+            return signer_error_frame(ErrorCode::HardwareError, msg);
         }
-        Err(e) => return error_frame(ErrorCode::ERROR_CODE_INTERNAL, e.to_string()),
+        Err(e) => return signer_error_frame(ErrorCode::Internal, e.to_string()),
     };
 
     if pubkey.len() != 33 {
-        return error_frame(
-            ErrorCode::ERROR_CODE_INTERNAL,
+        return signer_error_frame(
+            ErrorCode::Internal,
             format!("signer returned pubkey {} bytes, want 33", pubkey.len()),
         );
     }
     if sig.len() != 64 {
-        return error_frame(
-            ErrorCode::ERROR_CODE_INTERNAL,
+        return signer_error_frame(
+            ErrorCode::Internal,
             format!("signer returned signature {} bytes, want 64", sig.len()),
         );
     }
@@ -211,33 +204,20 @@ fn handle_sign<T: TpmSigner>(
     let key_id = format!("p256:{}", crate::to_hex(&pubkey));
 
     SignerFrame {
-        body: Some(signer_frame::Body::SignResponse(Box::new(SignResponse {
-            signature: Some(sig),
-            public_key: Some(pubkey),
-            algorithm: Some(RpcAlgorithm::ALGORITHM_P256.into()),
-            key_id: Some(key_id),
-            certificate_chain: Vec::new(),
-            ..Default::default()
-        }))),
+        body: Some(signer_frame::Body::SignResponse(Box::new(
+            SignResponse::default()
+                .with_signature(sig)
+                .with_public_key(pubkey)
+                .with_algorithm(RpcAlgorithm::P256)
+                .with_key_id(key_id),
+        ))),
         ..Default::default()
     }
 }
 
 fn write_error<W: Write>(w: &mut W, code: ErrorCode, message: String) -> Result<(), SignerError> {
-    let frame = error_frame(code, message);
+    let frame = signer_error_frame(code, message);
     write_frame(w, &frame).map_err(|e| SignerError::Io(format!("write error frame: {e}")))
-}
-
-fn error_frame(code: ErrorCode, message: String) -> SignerFrame {
-    SignerFrame {
-        body: Some(signer_frame::Body::Error(Box::new(RpcError {
-            code: Some(code.into()),
-            message: Some(message),
-            details: Some(Vec::new()),
-            ..Default::default()
-        }))),
-        ..Default::default()
-    }
 }
 
 #[cfg(test)]
@@ -291,11 +271,11 @@ mod tests {
     #[test]
     fn hello_response_advertises_p256_only() {
         let frames = vec![SignerFrame {
-            body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-                want_capabilities: Some(true),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::Hello(Box::new(
+                Hello::default()
+                    .with_protocol(ProtocolVersion::ProtocolVersion1)
+                    .with_want_capabilities(true),
+            ))),
             ..Default::default()
         }];
         let mut input = Cursor::new(encode(&frames));
@@ -310,11 +290,8 @@ mod tests {
         };
         let caps = resp.capabilities.into_option().expect("capabilities");
         assert_eq!(
-            caps.algorithms
-                .iter()
-                .map(buffa::EnumValue::to_i32)
-                .collect::<Vec<_>>(),
-            vec![RpcAlgorithm::ALGORITHM_P256 as i32]
+            caps.algorithms,
+            vec![buffa::EnumValue::from(RpcAlgorithm::P256)]
         );
     }
 
@@ -325,20 +302,19 @@ mod tests {
 
         let frames = vec![
             SignerFrame {
-                body: Some(signer_frame::Body::Hello(Box::new(Hello {
-                    protocol: Some(ProtocolVersion::PROTOCOL_VERSION_1.into()),
-                    ..Default::default()
-                }))),
+                body: Some(signer_frame::Body::Hello(Box::new(
+                    Hello::default().with_protocol(ProtocolVersion::ProtocolVersion1),
+                ))),
                 ..Default::default()
             },
             SignerFrame {
-                body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                    algorithm: Some(RpcAlgorithm::ALGORITHM_P256.into()),
-                    key_form: Some(KeyForm::KEY_FORM_OPAQUE_HANDLE.into()),
-                    key_ref: Some(handle.to_be_bytes().to_vec()),
-                    payload: Some(pae.to_vec()),
-                    ..Default::default()
-                }))),
+                body: Some(signer_frame::Body::SignRequest(Box::new(
+                    SignRequest::default()
+                        .with_algorithm(RpcAlgorithm::P256)
+                        .with_key_form(KeyForm::OpaqueHandle)
+                        .with_key_ref(handle.to_be_bytes().to_vec())
+                        .with_payload(pae.to_vec()),
+                ))),
                 ..Default::default()
             },
         ];
@@ -362,13 +338,13 @@ mod tests {
     fn sign_request_uses_handle_default_when_key_ref_empty() {
         let pae = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
         let frames = vec![SignerFrame {
-            body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                algorithm: Some(RpcAlgorithm::ALGORITHM_P256.into()),
-                key_form: Some(KeyForm::KEY_FORM_OPAQUE_HANDLE.into()),
-                key_ref: Some(Vec::new()),
-                payload: Some(pae.to_vec()),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::SignRequest(Box::new(
+                SignRequest::default()
+                    .with_algorithm(RpcAlgorithm::P256)
+                    .with_key_form(KeyForm::OpaqueHandle)
+                    .with_key_ref(Vec::new())
+                    .with_payload(pae.to_vec()),
+            ))),
             ..Default::default()
         }];
         let mut input = Cursor::new(encode(&frames));
@@ -386,13 +362,13 @@ mod tests {
     #[test]
     fn unsupported_algorithm_returns_error() {
         let frames = vec![SignerFrame {
-            body: Some(signer_frame::Body::SignRequest(Box::new(SignRequest {
-                algorithm: Some(RpcAlgorithm::ALGORITHM_ED25519.into()),
-                key_form: Some(KeyForm::KEY_FORM_OPAQUE_HANDLE.into()),
-                key_ref: Some(b"\x81\x01\x00\x01".to_vec()),
-                payload: Some(b"x".to_vec()),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::SignRequest(Box::new(
+                SignRequest::default()
+                    .with_algorithm(RpcAlgorithm::Ed25519)
+                    .with_key_form(KeyForm::OpaqueHandle)
+                    .with_key_ref(b"\x81\x01\x00\x01".to_vec())
+                    .with_payload(b"x".to_vec()),
+            ))),
             ..Default::default()
         }];
         let mut input = Cursor::new(encode(&frames));
@@ -406,7 +382,7 @@ mod tests {
         };
         assert_eq!(
             err.code.as_ref().unwrap().to_i32(),
-            ErrorCode::ERROR_CODE_UNSUPPORTED_ALGORITHM as i32
+            ErrorCode::UnsupportedAlgorithm as i32
         );
     }
 }

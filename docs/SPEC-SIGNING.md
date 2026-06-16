@@ -20,22 +20,31 @@ bytes) and R-17 (cross-domain signature confusion).
 
 - **Hash:** BLAKE3 default mode (no keyed hashing, no derive-key at the
   signing layer). Output: 32 bytes.
-- **Signature:** Ed25519 per RFC 8032. Public key 32 bytes, seed 32
-  bytes, signature 64 bytes.
+- **Signature:** Ed25519 per RFC 8032 only. mkit-core does NOT support
+  any other signature algorithm; multi-algorithm signing (if any) lives
+  in `mkit-attest` / SPEC-ATTESTATIONS and is out of scope here.
+  Public key 32 bytes, seed 32 bytes, signature 64 bytes.
 - Signers sign the BLAKE3 digest (32 bytes) rather than the raw signing
-  bytes. This is Ed25519 "PureEdDSA over a pre-hashed message".
+  bytes. This is Ed25519 "PureEdDSA over a pre-hashed message". We do
+  NOT use Ed25519ph.
+- Verification uses `VerifyingKey::verify_strict` (ZIP-215 / RFC 8032
+  strict). Non-canonical `R`, high-`s`, or non-canonical public-key
+  encodings are rejected. This is stricter than the default
+  `verify`; mkit has no legacy-compat constraint so we hold the
+  tighter line.
 - No batched verification. Each verify is independent.
 
 ---
 
 ## 2. Domain separation
 
-mkit defines two distinct signing domains. They MUST produce disjoint
+mkit defines three distinct signing domains. They MUST produce disjoint
 signable byte strings for any possible input.
 
 ```
 COMMIT_DOMAIN   = "mkit.commit\x00"       (12 bytes)
 REMIX_DOMAIN    = "mkit.remix\x00"        (11 bytes)
+TAG_DOMAIN      = "mkit.tag\x00"          (9 bytes)
 ```
 
 The terminal `\x00` is part of the domain string. It is there to ensure
@@ -44,30 +53,28 @@ length-extension-resistance in BLAKE3 is not strictly required, since
 BLAKE3 is not susceptible, but the null makes the prefix property
 obvious to static analysis).
 
-`COMMIT_DOMAIN` covers commits and `REMIX_DOMAIN` covers remixes.
+`COMMIT_DOMAIN` covers commits, `REMIX_DOMAIN` covers remixes, and
+`TAG_DOMAIN` covers annotated/signed tag objects (§4a, issue #230). The
+tag domain is **deliberately distinct** from the commit/remix domains so
+a tag signature can never be replayed as a commit/remix signature, or
+vice versa.
 
-### 2.1 Preferred derivation
+### 2.1 Signing-hash derivation
 
-Implementations SHOULD use BLAKE3 `derive_key(context, signing_bytes)`
-where the standard library exposes it. The context string is the domain
-string **without the trailing `\x00`**:
-
-- context = `"mkit.commit"` → 32-byte digest over `signing_bytes`.
-- context = `"mkit.remix"`.
-
-### 2.2 Byte-prepend fallback
-
-Where `derive_key` is unavailable, implementations MUST use byte-prepend:
+Implementations MUST compute the signing digest with a 16-bit little-endian
+domain length prefix, followed by the full domain string and canonical signing
+bytes:
 
 ```
-digest = BLAKE3(domain || signing_bytes)
+digest = BLAKE3(u16_le(domain.len) || domain || signing_bytes)
 ```
 
 Where `domain` is the full domain string *including* the trailing
 `\x00`. This is the shape we commit to on the wire and in test vectors.
 
-Both paths MUST produce identical digests for the same input. The
-reference implementation uses byte-prepend.
+The length prefix makes the `(domain, signing_bytes)` boundary explicit. A
+verifier MUST NOT use BLAKE3 `derive_key`, bare `BLAKE3(domain ||
+signing_bytes)`, or any other domain construction for v1 signatures.
 
 ---
 
@@ -117,7 +124,7 @@ struct fields excluded from signing bytes.
 The **signing hash** is then:
 
 ```
-signing_hash = BLAKE3("mkit.commit\x00" || signing_bytes)
+signing_hash = BLAKE3(u16_le(12) || "mkit.commit\x00" || signing_bytes)
 ```
 
 And the commit's `signature` field is `Ed25519.sign(signer_seed,
@@ -143,28 +150,66 @@ signing_bytes = PROLOGUE                   // object_type=0x04
 Excluded: `signature`.
 
 ```
-signing_hash = BLAKE3("mkit.remix\x00" || signing_bytes)
+signing_hash = BLAKE3(u16_le(11) || "mkit.remix\x00" || signing_bytes)
 ```
+
+---
+
+## 4a. Tag signing bytes
+
+For a tag T (SPEC-OBJECTS §6a):
+
+```
+signing_bytes = PROLOGUE                   // object_type=0x07
+              || target                    // 32 bytes, hash of tagged object
+              || target_type               // 1 byte ObjectType
+              || u32 LE(name_len) || name_bytes
+              || Identity(tagger)
+              || u32 LE(message_len) || message_bytes
+              || u64 LE(timestamp)
+              || signer_pubkey
+```
+
+Excluded: `signature` (a signature cannot cover itself). Every other tag
+field is covered, so flipping the `target`, `target_type`, `name`,
+`tagger`, `message`, `timestamp`, or `signer` invalidates the signature.
+
+```
+signing_hash = BLAKE3(u16_le(9) || "mkit.tag\x00" || signing_bytes)
+```
+
+The tag's `signature` field is `Ed25519.sign(signer_seed, signing_hash)`.
+
+An **annotated, unsigned** tag (`mkit tag -a`) carries an all-zero
+`signature` (`0x00`×64). It is a valid object but not a valid signature:
+`verify_tag` over an all-zero signature fails the strict Ed25519 check.
+A **signed** tag (`mkit tag -s`) carries a real signature that
+`mkit verify <tag>` accepts.
 
 ---
 
 ## 5. Cross-domain collision proof sketch
 
-Commit signing input always begins with the 12-byte domain string
-`"mkit.commit\x00"`; remix signing input begins with the 11-byte string
-`"mkit.remix\x00"`.
+Commit signing input always begins with `u16_le(12)` followed by the 12-byte
+domain string `"mkit.commit\x00"`; remix signing input begins with
+`u16_le(11)` followed by the 11-byte string `"mkit.remix\x00"`; tag
+signing input begins with `u16_le(9)` followed by the 9-byte string
+`"mkit.tag\x00"`.
 
-- `"mkit.commit\x00"` and `"mkit.remix\x00"` share 5 bytes and differ at
-  byte 5 (`c` 0x63 vs `r` 0x72).
+- All three domain *lengths* (12 / 11 / 9) differ, so the 2-byte LE
+  length prefix alone already distinguishes them before any domain byte
+  is read.
+- The domain strings differ at byte 5 (`c` 0x63 / `r` 0x72 / `\0` 0x00),
+  giving a second, independent separator.
 
-Because the first differing byte occurs strictly before any possible
-user-controlled content (domains are compile-time constants), no user
-input can make one domain's hash input equal another's. BLAKE3 is
-collision-resistant, so distinct inputs have (cryptographically)
+Because the domain length and the first differing domain byte occur strictly
+before any possible user-controlled content (domains are compile-time
+constants), no user input can make one domain's hash input equal another's.
+BLAKE3 is collision-resistant, so distinct inputs have cryptographically
 distinct digests.
 
-Therefore, a signature over a commit-domain digest cannot be replayed as
-a signature over a remix-domain digest, nor vice versa.
+Therefore, a signature over any one of the commit / remix / tag domain
+digests cannot be replayed as a signature over either of the other two.
 
 This is the defence against R-17. The previous scheme used only the
 ObjectType tag byte (0x03/0x04) as separator — one byte of domain — and
@@ -181,7 +226,7 @@ Given a commit C retrieved from the store:
 2. Re-build signing bytes per §3. (It's the caller's responsibility to
    retrieve the exact `signer` field from C; the verifier does not
    accept a public key from elsewhere.)
-3. Compute `signing_hash = BLAKE3("mkit.commit\x00" || signing_bytes)`.
+3. Compute `signing_hash = BLAKE3(u16_le(12) || "mkit.commit\x00" || signing_bytes)`.
 4. Parse `signer` as an Ed25519 public key. Invalid point → verify fails.
 5. `Ed25519.verify(signer, signing_hash, C.signature)`. Any failure →
    verify fails.
@@ -198,20 +243,60 @@ invariant.
 ## 7. Key file format
 
 ```
-Path:         .mkit/keys/default.key
-Contents:     raw 32 bytes (Ed25519 SEED — NOT expanded secret key)
-Permissions:  0600 (mandatory on POSIX)
+Path:           caller-provided; the convention is .mkit/keys/default.key
+Contents:       raw 32 bytes (Ed25519 SEED — NOT expanded secret key)
+File mode:      0600 (mandatory on POSIX)
+Parent-dir mode: 0700 (mandatory on POSIX)
 ```
 
 The seed is passed to the Ed25519 deterministic key-pair constructor
 to recover `(public_key, secret_key)` on load. No PEM, no DER, no
 password wrapping in v1.
 
-Writers MUST `chmod 0600` the file immediately after creation and MUST
-fail keygen if they cannot set that mode on POSIX.
+### 7.1 Write contract
 
-On non-POSIX hosts this rule is advisory; implementations SHOULD use
-the host's equivalent access restriction.
+Writers MUST use the following crash-atomic sequence on POSIX:
+
+1. Ensure the parent directory exists at mode 0700. Refuse if any
+   ancestor (up to three levels) is a symlink → `KeyPathIsSymlink`.
+2. Open a sibling temp file (`.<file>.tmp.<pid>`) with
+   `O_CREAT | O_EXCL | O_NOFOLLOW` and mode 0600. `O_EXCL` defeats a
+   pre-created symlink at the tmp name.
+3. Write the 32-byte seed, `fsync` the file.
+4. `rename(2)` the tmp file to the final path. Atomic on the same
+   filesystem; replaces any existing key.
+5. `fsync` the parent directory so the rename itself is durable.
+
+A `save_raw_32_create_new` variant exists for keygen flows that MUST
+NOT clobber an existing key; it returns `Ok(false)` if the destination
+already exists.
+
+### 7.2 Load contract
+
+Loaders MUST enforce on POSIX:
+
+- Open with `O_NOFOLLOW`. ELOOP → `KeyPathIsSymlink(path)`.
+- Reject if any of the three ancestor directories is a symlink →
+  `KeyPathIsSymlink(dir)`.
+- `fstat` the open file descriptor (not the path — closes a TOCTOU
+  rename(2) window).
+- File mode `& 0o077 != 0` → `InsecureKeyPermissions{actual}`.
+- File owner uid ≠ process euid → `InsecureKeyOwner{actual, euid}`.
+- Immediate parent directory mode `& 0o077 != 0` →
+  `InsecureKeyDir{actual}`.
+- File length ≠ 32 bytes (short or long) → `InvalidKeyLength{actual}`.
+
+Any I/O failure surfaces as `KeyIo(String)`. Public-key bytes that do
+not decode to a valid Edwards point → `InvalidPublicKey`. RNG failure
+during `KeyPair::generate()` → `RngFailure`. Signature verification
+failure → `SignatureInvalid` (the underlying Ed25519 layer does not
+distinguish among bad-signature, wrong-key, tampered-input, or wrong-
+domain).
+
+On non-POSIX hosts the symlink, owner, and mode checks degrade to
+no-ops; implementations SHOULD use the host's equivalent access
+restriction (e.g. keep keys under `%USERPROFILE%` so default Windows
+ACLs apply).
 
 ---
 
@@ -242,9 +327,7 @@ ergonomics, not a security property.
 
 ---
 
-## 9. Test vectors (implementer MUST produce)
-
-TO BE FIXED IN IMPLEMENTATION:
+## 9. Test vectors
 
 1. **Deterministic commit signing bytes**: fixed-input commit with
    `Identity{kind=0x01, len=32, payload=[0xAA;32]}`, zero
@@ -264,6 +347,13 @@ TO BE FIXED IN IMPLEMENTATION:
    fixed author, fixed message, fixed timestamp. Record hash.
 7. **Key file roundtrip**: generate keypair, write seed, re-load,
    sign-then-verify a commit. Round-trip stable.
+8. **Tag signing bytes + hash + signature**: annotated tag with
+   `target_type=0x03`, fixed ed25519 tagger, non-empty message, fixed
+   timestamp; record `tag_signing_bytes`, `signing_hash`, and (signing
+   with seed `[0x07;32]`) the 64-byte signature. Pinned under
+   `rust/tests/golden/phase9/`.
+9. **Tag cross-domain negative**: a tag-domain signature MUST NOT verify
+   under `"mkit.commit\x00"` or `"mkit.remix\x00"`, and vice versa.
 
 ---
 

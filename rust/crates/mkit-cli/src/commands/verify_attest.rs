@@ -14,18 +14,25 @@
 //! pubkey_hex = "..."
 //! ```
 //!
-//! * `kind` is one of `ed25519`, `secp256k1`, `p256-sec1`. Anything
-//!   else is ignored with a warning.
-//! * `pubkey_hex` is the raw public key bytes in lowercase hex.
+//! * `kind` is one of `ed25519`, `secp256k1`, `p256-sec1`,
+//!   `bls12381-thr`. Anything else is ignored.
+//! * `algorithm` is accepted as an alias for `kind` (per the
+//!   Phase 2 spec wording in `docs/SPEC-RELEASE-THRESHOLD.md`);
+//!   either field name works.
+//! * `pubkey_hex` is the raw public key bytes in lowercase hex. For
+//!   `bls12381-thr`, the bytes are the 96-byte G2 compressed
+//!   aggregated cohort public key (the `MinSig` variant).
 //!
-//! Exit code is 0 iff every listed attestation has `any_verified = true`,
-//! nonzero otherwise.
+//! Exit code is 0 iff every listed attestation is bound to the requested
+//! commit and has `any_verified = true`, nonzero otherwise.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use mkit_attest::{Algorithm, Registry, TrustRoot, store, verify_envelope};
+use mkit_attest::envelope;
+use mkit_attest::verify::{extract_primary_commit_hash, verify};
+use mkit_attest::{Algorithm, Registry, TrustRoot, store};
 use mkit_core::hash::Hash;
 use mkit_core::{hash as hash_mod, refs};
 
@@ -142,7 +149,42 @@ pub fn run(args: &[String]) -> u8 {
             }
         };
         let att_id = mkit_attest::attestation_id(&bytes);
-        let result = match verify_envelope(&bytes, &registry) {
+        let env = match envelope::decode(&bytes) {
+            Ok(env) => env,
+            Err(e) => {
+                let _ = writeln!(
+                    report,
+                    "  {}: malformed envelope: {e}",
+                    hash_mod::to_hex(&att_id)
+                );
+                all_ok = false;
+                continue;
+            }
+        };
+        let subject_hash = match extract_primary_commit_hash(&env.payload) {
+            Ok(subject_hash) => subject_hash,
+            Err(e) => {
+                let _ = writeln!(
+                    report,
+                    "  {}: subject error: {e}",
+                    hash_mod::to_hex(&att_id)
+                );
+                all_ok = false;
+                continue;
+            }
+        };
+        if subject_hash != commit_hash {
+            let _ = writeln!(
+                report,
+                "  {}: subject mismatch: statement names {}, requested {}",
+                hash_mod::to_hex(&att_id),
+                hash_mod::to_hex(&subject_hash),
+                hash_mod::to_hex(&commit_hash)
+            );
+            all_ok = false;
+            continue;
+        }
+        let result = match verify(&env, &registry) {
             Ok(r) => r,
             Err(e) => {
                 let _ = writeln!(
@@ -320,7 +362,10 @@ fn load_trust_roots(path: &Path) -> Result<Registry, (String, u8)> {
         let val = v.trim().trim_matches('"').to_owned();
         match key {
             "keyid" => keyid = val,
-            "kind" => kind = val,
+            // `algorithm` is an alias for `kind` to match the wording
+            // in `docs/SPEC-RELEASE-THRESHOLD.md` §6. Either field
+            // name parses to the same arm.
+            "kind" | "algorithm" => kind = val,
             "pubkey_hex" => pubkey_hex = val,
             _ => {} // tolerate unknown keys
         }
@@ -338,6 +383,21 @@ fn flush_trust_root(reg: &mut Registry, keyid: &str, kind: &str, pubkey_hex: &st
     let Some(pk_bytes) = hex_decode(pubkey_hex) else {
         return;
     };
+    // #223: cross-check the keyid against the declared pubkey so a
+    // trust-roots file that lists keyid `secp256k1:<A>` next to
+    // `pubkey_hex = <B>` (a copy-paste mix-up that would silently trust
+    // the wrong key) is rejected rather than loaded. Skip the entry on a
+    // mismatch — `verify-attest` then reports the keyid as
+    // `UnknownKeyid` instead of verifying against the wrong pubkey.
+    if !keyid_matches_pubkey(keyid, &pk_bytes) {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "note: trust-root '{}' dropped — keyid does not match its pubkey_hex",
+            short_keyid(keyid)
+        );
+        return;
+    }
     match kind {
         "ed25519" if pk_bytes.len() == 32 => {
             let mut arr = [0u8; 32];
@@ -352,9 +412,49 @@ fn flush_trust_root(reg: &mut Registry, keyid: &str, kind: &str, pubkey_hex: &st
         "secp256k1" | "secp256k1-sec1" => {
             reg.add(keyid.to_owned(), TrustRoot::Secp256k1PubKeySec1(pk_bytes));
         }
+        // BLS12-381 threshold cohort public key — see
+        // `docs/SPEC-RELEASE-THRESHOLD.md` §6. The `bls12381-thr`
+        // prefix matches the canonical algorithm tag returned by
+        // `mkit_attest::Algorithm::prefix`. Pinned to the 96-byte
+        // MinSig G2 compressed encoding; anything else is dropped.
+        #[cfg(feature = "bls-threshold")]
+        "bls12381-thr" if pk_bytes.len() == mkit_attest::BLS_THRESHOLD_PUBLIC_KEY_SIZE => {
+            reg.add(
+                keyid.to_owned(),
+                TrustRoot::Bls12381ThresholdPubKey(pk_bytes),
+            );
+        }
         _ => {
             // Unknown kind — skip.
         }
+    }
+}
+
+/// Cross-check (#223) that the keyid is consistent with the declared
+/// public key bytes. The canonical keyid shape is `<prefix>:<body>`:
+///
+/// - `blake3:<hex>` — body is `blake3(pubkey)`; verify the digest.
+/// - `ed25519` / `secp256k1` / `p256` / `bls12381-thr:<hex>` — body is
+///   the raw lowercase-hex pubkey; verify it equals `pubkey_hex`.
+/// - Anything else (unknown prefix, no `:` separator) is left to the
+///   downstream `kind`-based loader and not cross-checked here — return
+///   `true` so forward-compatible keyids are not dropped.
+fn keyid_matches_pubkey(keyid: &str, pubkey: &[u8]) -> bool {
+    let Some((prefix, body)) = keyid.split_once(':') else {
+        return true;
+    };
+    let body = body.to_ascii_lowercase();
+    match prefix {
+        "blake3" => {
+            let digest = mkit_core::hash::hash(pubkey);
+            body == mkit_core::hash::to_hex(&digest)
+        }
+        "ed25519" | "secp256k1" | "p256" | "bls12381-thr" => {
+            body == mkit_core::hash::to_hex_bytes(pubkey)
+        }
+        // Unknown / opaque (e.g. `sigstore:`) keyids carry no embedded
+        // pubkey to compare against.
+        _ => true,
     }
 }
 
@@ -439,36 +539,43 @@ mod tests {
     fn load_trust_roots_parses_ed25519_block() {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("tr.toml");
+        // Canonical ed25519 keyid embeds the raw pubkey hex as its body.
         let hex = "aa".repeat(32);
+        let keyid = format!("ed25519:{hex}");
         fs::write(
             &path,
             format!(
-                "[[trust_root]]\nkeyid = \"ed25519:abc\"\nkind = \"ed25519\"\npubkey_hex = \"{hex}\"\n"
+                "[[trust_root]]\nkeyid = \"{keyid}\"\nkind = \"ed25519\"\npubkey_hex = \"{hex}\"\n"
             ),
         )
         .unwrap();
         let reg = load_trust_roots(&path).unwrap();
-        assert!(reg.lookup("ed25519:abc").is_some());
+        assert!(reg.lookup(&keyid).is_some());
     }
 
     #[test]
     fn load_trust_roots_tolerates_comments_and_blank_lines() {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("tr.toml");
-        let hex = "bb".repeat(32);
+        // `blake3:` keyid embeds blake3(pubkey); compute it so the
+        // keyid↔pubkey cross-check passes.
+        let pk = [0xbbu8; 32];
+        let hex = mkit_core::hash::to_hex_bytes(&pk);
+        let digest = mkit_core::hash::to_hex(&mkit_core::hash::hash(&pk));
+        let keyid = format!("blake3:{digest}");
         fs::write(
             &path,
             format!(
                 "# leading comment\n\n\
                  [[trust_root]]\n# mid-comment\n\
-                 keyid = \"blake3:xyz\"\n\
+                 keyid = \"{keyid}\"\n\
                  kind = \"ed25519\"\n\
                  pubkey_hex = \"{hex}\"\n\n\n"
             ),
         )
         .unwrap();
         let reg = load_trust_roots(&path).unwrap();
-        assert!(reg.lookup("blake3:xyz").is_some());
+        assert!(reg.lookup(&keyid).is_some());
     }
 
     #[test]
@@ -477,17 +584,130 @@ mod tests {
         let path = td.path().join("tr.toml");
         let hex_a = "aa".repeat(32);
         let hex_b = "cc".repeat(32);
+        let keyid_a = format!("ed25519:{hex_a}");
+        let keyid_b = format!("ed25519:{hex_b}");
         fs::write(
             &path,
             format!(
-                "[[trust_root]]\nkeyid = \"ed25519:a\"\nkind = \"ed25519\"\npubkey_hex = \"{hex_a}\"\n\
-                 [[trust_root]]\nkeyid = \"ed25519:b\"\nkind = \"ed25519\"\npubkey_hex = \"{hex_b}\"\n"
+                "[[trust_root]]\nkeyid = \"{keyid_a}\"\nkind = \"ed25519\"\npubkey_hex = \"{hex_a}\"\n\
+                 [[trust_root]]\nkeyid = \"{keyid_b}\"\nkind = \"ed25519\"\npubkey_hex = \"{hex_b}\"\n"
             ),
         )
         .unwrap();
         let reg = load_trust_roots(&path).unwrap();
-        assert!(reg.lookup("ed25519:a").is_some());
-        assert!(reg.lookup("ed25519:b").is_some());
+        assert!(reg.lookup(&keyid_a).is_some());
+        assert!(reg.lookup(&keyid_b).is_some());
+    }
+
+    #[test]
+    fn load_trust_roots_drops_keyid_pubkey_mismatch() {
+        // #223: keyid embeds pubkey `aa..`, but pubkey_hex says `bb..`.
+        // The entry must be dropped, not silently trusted.
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("tr.toml");
+        let keyid_hex = "aa".repeat(32);
+        let wrong_pubkey = "bb".repeat(32);
+        let keyid = format!("ed25519:{keyid_hex}");
+        fs::write(
+            &path,
+            format!(
+                "[[trust_root]]\nkeyid = \"{keyid}\"\nkind = \"ed25519\"\npubkey_hex = \"{wrong_pubkey}\"\n"
+            ),
+        )
+        .unwrap();
+        let reg = load_trust_roots(&path).unwrap();
+        assert!(reg.lookup(&keyid).is_none());
+    }
+
+    #[test]
+    fn keyid_matches_pubkey_canonical_and_blake3() {
+        let pk = [0x11u8; 32];
+        let hex = mkit_core::hash::to_hex_bytes(&pk);
+        assert!(keyid_matches_pubkey(&format!("ed25519:{hex}"), &pk));
+        assert!(keyid_matches_pubkey(&format!("secp256k1:{hex}"), &pk));
+        let digest = mkit_core::hash::to_hex(&mkit_core::hash::hash(&pk));
+        assert!(keyid_matches_pubkey(&format!("blake3:{digest}"), &pk));
+        // Opaque / unknown prefixes are not cross-checked.
+        assert!(keyid_matches_pubkey("sigstore:https://x", &pk));
+        // Mismatched body is rejected.
+        assert!(!keyid_matches_pubkey("ed25519:dead", &pk));
+    }
+
+    /// `[[trust_root]]` blocks with `kind = "bls12381-thr"` (or the
+    /// `algorithm = "bls12381-thr"` alias) load into the registry as
+    /// `TrustRoot::Bls12381ThresholdPubKey` and verify-dispatch picks
+    /// them up. Pinned to the 96-byte `MinSig` G2 compressed length —
+    /// anything shorter is silently dropped (per the parser's
+    /// tolerate-and-skip policy).
+    #[cfg(feature = "bls-threshold")]
+    #[test]
+    fn load_trust_roots_parses_bls_threshold_block() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("tr.toml");
+        // 96 bytes of dummy hex — exact length matches MinSig G2
+        // compressed encoding.
+        let hex = "ab".repeat(96);
+        fs::write(
+            &path,
+            format!(
+                "[[trust_root]]\n\
+                 keyid = \"bls12381-thr:{hex}\"\n\
+                 kind = \"bls12381-thr\"\n\
+                 pubkey_hex = \"{hex}\"\n"
+            ),
+        )
+        .unwrap();
+        let reg = load_trust_roots(&path).unwrap();
+        let lookup = format!("bls12381-thr:{hex}");
+        assert!(reg.lookup(&lookup).is_some());
+    }
+
+    /// Spec wording in `docs/SPEC-RELEASE-THRESHOLD.md` says
+    /// `algorithm = "bls12381-thr"`; the parser accepts that as an
+    /// alias for `kind` to keep both forms compatible.
+    #[cfg(feature = "bls-threshold")]
+    #[test]
+    fn load_trust_roots_accepts_algorithm_alias() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("tr.toml");
+        let hex = "cd".repeat(96);
+        fs::write(
+            &path,
+            format!(
+                "[[trust_root]]\n\
+                 keyid = \"bls12381-thr:{hex}\"\n\
+                 algorithm = \"bls12381-thr\"\n\
+                 pubkey_hex = \"{hex}\"\n"
+            ),
+        )
+        .unwrap();
+        let reg = load_trust_roots(&path).unwrap();
+        assert!(reg.lookup(&format!("bls12381-thr:{hex}")).is_some());
+    }
+
+    /// Wrong-length BLS public key (e.g. someone mistakenly pasted a
+    /// G1 sig or a truncated key) is silently dropped — the
+    /// `verify-attest` run will then surface the keyid as
+    /// `UnknownKeyid` rather than panic on a malformed registry.
+    #[cfg(feature = "bls-threshold")]
+    #[test]
+    fn load_trust_roots_skips_wrong_length_bls_pubkey() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("tr.toml");
+        let short = "ee".repeat(32); // 32 bytes, not 96
+        let keyid = "bls12381-thr:abc";
+        fs::write(
+            &path,
+            format!(
+                "[[trust_root]]\n\
+                 keyid = \"{keyid}\"\n\
+                 kind = \"bls12381-thr\"\n\
+                 pubkey_hex = \"{short}\"\n"
+            ),
+        )
+        .unwrap();
+        let reg = load_trust_roots(&path).unwrap();
+        assert!(reg.lookup(keyid).is_none());
     }
 
     #[test]

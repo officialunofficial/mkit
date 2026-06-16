@@ -30,9 +30,14 @@ struct CloneOpts {
     /// Shallow clone depth (not yet wired).
     #[arg(long, value_name = "N")]
     depth: Option<u32>,
-    /// Sparse-checkout pattern (not yet wired).
-    #[arg(long, value_name = "PATTERN")]
-    sparse: Option<String>,
+    /// One or more sparse-checkout patterns (issue #158 Phase 2).
+    /// Pulls the full ref set + reachable pack, then runs the
+    /// verifiable sparse pipeline on the new working tree's HEAD,
+    /// caching the bitmap and materialising only the matching files.
+    /// Repeat the flag to add more patterns.
+    #[cfg(feature = "sparse-checkout")]
+    #[arg(long = "sparse", value_name = "PATTERN", num_args = 1..)]
+    sparse: Vec<String>,
     /// Remote URL (e.g. `mkit+file:///abs/path`).
     url: String,
     /// Destination directory. Defaults to the final URL segment.
@@ -48,10 +53,21 @@ pub fn run(args: &[String]) -> u8 {
     if opts.depth.is_some() {
         return super::usage_error("mkit clone: --depth is not yet wired");
     }
-    if opts.sparse.is_some() {
-        return super::usage_error("mkit clone: --sparse is not yet wired");
-    }
+    // `--sparse` no longer rejects — the patterns are persisted to
+    // `.mkit/sparse-checkout` after the pack pull lands, and the next
+    // `mkit checkout` honours them. Phase 2 sparse fetch over the
+    // wire is wired through `mkit checkout --sparse` itself.
     let url = opts.url.as_str();
+    // Reject control characters (newline et al.) before the URL is
+    // persisted to `.mkit/config` via `config::write` (which emits values
+    // raw) — a newline would inject extra `key = value` lines into the
+    // config (config injection). Mirrors the `mkit remote add` check.
+    if config::validate_value(url).is_err() {
+        return emit_err(
+            &format!("invalid remote URL '{url}': contains control characters"),
+            exit::PROTOCOL_ERROR,
+        );
+    }
     let target: PathBuf = match opts.dir.as_deref() {
         Some(d) => PathBuf::from(d),
         None => PathBuf::from(derive_dir_from_url(url)),
@@ -85,24 +101,111 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&format!("write config: {e}"), exit::CANTCREAT);
     }
 
-    match remote_dispatch::open(url) {
-        Ok(tx) => match remote_dispatch::pull_all(&target, tx.as_ref()) {
-            Ok(n) => {
-                let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(
-                    stderr,
-                    "cloned {n} ref(s) from {url} into {}",
-                    target.display()
-                );
-                exit::OK
-            }
-            Err(remote_dispatch::DispatchError::Interrupted) => {
-                emit_err("clone: interrupted", exit::TEMPFAIL)
-            }
-            Err(e) => emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),
-        },
-        Err(e) => emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
+    let pull_outcome = match remote_dispatch::open(url) {
+        Ok(tx) => remote_dispatch::pull_all(&target, tx.as_ref(), "default"),
+        Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
+    };
+    let n = match pull_outcome {
+        Ok(n) => n,
+        Err(remote_dispatch::DispatchError::Interrupted) => {
+            return emit_err("clone: interrupted", exit::TEMPFAIL);
+        }
+        Err(e) => return emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),
+    };
+
+    // If `--sparse` was supplied, persist the patterns to
+    // `.mkit/sparse-checkout` so the next checkout honours them, and
+    // run a verifiable sparse checkout against HEAD right now.
+    #[cfg(feature = "sparse-checkout")]
+    if !opts.sparse.is_empty()
+        && let Err((msg, code)) = apply_sparse_after_clone(&target, &opts.sparse)
+    {
+        return emit_err(&msg, code);
     }
+
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "cloned {n} ref(s) from {url} into {}",
+        target.display()
+    );
+    exit::OK
+}
+
+/// Persist the supplied sparse patterns to `.mkit/sparse-checkout` and
+/// drive a verifiable sparse re-materialise against the freshly-cloned
+/// HEAD. Mirrors the inline sparse path used by `mkit checkout
+/// --sparse`, but the entry point is "we just landed a full clone".
+#[cfg(feature = "sparse-checkout")]
+fn apply_sparse_after_clone(
+    target: &std::path::Path,
+    patterns: &[String],
+) -> Result<(), (String, u8)> {
+    use mkit_core::object::Object as CoreObject;
+    use mkit_core::ops::restore::{
+        RestoreOptions, parse_sparse_patterns, restore_tree_to_worktree, write_sparse_checkout,
+    };
+    use mkit_core::sparse::{build_sparse, verify_sparse};
+    use mkit_core::store::ObjectStore;
+    use std::path::PathBuf as StdPathBuf;
+
+    // Persist patterns to .mkit/sparse-checkout for follow-up commands.
+    let pat_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+    write_sparse_checkout(target, &pat_refs)
+        .map_err(|e| (format!("write sparse-checkout: {e}"), exit::CANTCREAT))?;
+
+    // Open store, resolve HEAD → tree.
+    let store =
+        ObjectStore::open(target).map_err(|e| (format!("open store: {e}"), exit::GENERAL_ERROR))?;
+    let mkit_dir = target.join(mkit_core::MKIT_DIR);
+    let head = match mkit_core::refs::resolve_head(&mkit_dir) {
+        Ok(Some(h)) => h,
+        Ok(None) => return Ok(()), // fresh, no HEAD → nothing to materialise
+        Err(e) => return Err((format!("resolve HEAD: {e}"), exit::GENERAL_ERROR)),
+    };
+    let tree_hash = match store.read_object(&head) {
+        Ok(CoreObject::Commit(c)) => c.tree_hash,
+        Ok(CoreObject::Remix(r)) => r.tree_hash,
+        Ok(_) => return Err(("HEAD is not a commit".into(), exit::DATAERR)),
+        Err(e) => return Err((format!("read HEAD: {e}"), exit::GENERAL_ERROR)),
+    };
+
+    let tree = match store.read_object(&tree_hash) {
+        Ok(CoreObject::Tree(t)) => t,
+        Ok(_) => return Err(("HEAD tree not a tree".into(), exit::DATAERR)),
+        Err(e) => return Err((format!("read tree: {e}"), exit::GENERAL_ERROR)),
+    };
+
+    // Build + verify against the same filter the manifest binds to.
+    let mut filter: Vec<StdPathBuf> = Vec::with_capacity(patterns.len());
+    for raw in patterns {
+        let trimmed = raw.trim_start_matches('/').trim_end_matches('/');
+        if trimmed.is_empty() || trimmed.starts_with('!') {
+            continue;
+        }
+        filter.push(StdPathBuf::from(trimmed));
+    }
+    let (delivered, manifest, proof) = build_sparse(&tree, &filter)
+        .map_err(|e| (format!("sparse build: {e}"), exit::GENERAL_ERROR))?;
+    if !verify_sparse(&manifest, &delivered, &filter, &proof) {
+        return Err((
+            "sparse build produced a manifest that fails verify".into(),
+            exit::GENERAL_ERROR,
+        ));
+    }
+    if let Err(e) = crate::sparse_cache::store(target, &manifest.tree_hash, &manifest, &proof) {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "warning: sparse cache write failed: {e}");
+    }
+
+    let joined = patterns.join("\n");
+    let restore_opts = RestoreOptions {
+        clean: true,
+        sparse_patterns: Some(parse_sparse_patterns(&joined)),
+    };
+    restore_tree_to_worktree(&store, &tree_hash, target, &restore_opts)
+        .map_err(|e| (format!("restore: {e}"), exit::CANTCREAT))?;
+    Ok(())
 }
 
 fn derive_dir_from_url(url: &str) -> String {

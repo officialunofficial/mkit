@@ -1,0 +1,13 @@
+#!/bin/sh
+# mkit-git — opt-in shim that runs `mkit` in place of `git`.
+#
+# This is NOT installed by default and never shadows the real `git`. Install
+# it yourself only if you want git muscle memory (or an AI agent that emits
+# `git <cmd>`) to drive mkit instead — see contrib/git-shim/README.md.
+#
+# It is a pure forwarder: `git <args>` becomes `mkit <args>`. mkit implements
+# a git-compatible CLI surface (see docs/PARITY.md); an unsupported command
+# exits with mkit's usage error rather than falling through to real git.
+#
+# Override the resolved binary with MKIT_BIN if mkit is not on PATH.
+exec "${MKIT_BIN:-mkit}" "$@"

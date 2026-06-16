@@ -1,0 +1,33 @@
+{
+  "name": "mkit-mcp",
+  "version": "0.0.1",
+  "description": "Model Context Protocol server for the mkit toolkit — crate source, SPEC docs, and CLI reference at mcp.mkit.makechain.net.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "index": "node scripts/build-index.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cf-typegen": "wrangler types",
+    "db:create": "wrangler d1 create mkit-mcp-search",
+    "db:migrate": "wrangler d1 migrations apply mkit-mcp-search --remote",
+    "db:migrate:local": "wrangler d1 migrations apply mkit-mcp-search --local",
+    "db:seed": "wrangler d1 execute mkit-mcp-search --remote --file=dist/seed.sql",
+    "db:seed:local": "wrangler d1 execute mkit-mcp-search --local --file=dist/seed.sql",
+    "ci": "npm run build && npm run test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.28.0",
+    "agents": "^0.8.7",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250620.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.3",
+    "wrangler": "^4.19.1"
+  }
+}

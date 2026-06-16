@@ -44,16 +44,33 @@ Hash value: 32 bytes of BLAKE3. Writer computes
 
 ## 2. Ref namespace
 
-Refs live under two namespaces:
+Refs live under three namespaces:
 
 ```
-refs/heads/<name>    branch refs
-refs/tags/<name>     tag refs
+refs/heads/<name>                  branch refs
+refs/tags/<name>                   tag refs
+refs/remotes/<remote>/<name>       remote-tracking branch refs
 ```
 
-On local disk (`.mkit/refs/heads/<name>`, `.mkit/refs/tags/<name>`).
-On transports, the same path shape is used relative to the transport's
-root.
+On local disk (`.mkit/refs/heads/<name>`, `.mkit/refs/tags/<name>`,
+`.mkit/refs/remotes/<remote>/<name>`). On transports, branch and tag refs
+use the same path shape relative to the transport's root.
+
+`refs/remotes/<remote>/<name>` is local-only remote-tracking state. The
+single-remote CLI stores fetched branch tips under
+`refs/remotes/default/<name>` and never writes fetched tips directly to
+`refs/heads/<name>`. `mkit pull` may then fast-forward the current local
+branch from the matching remote-tracking ref.
+
+Named remotes (`mkit remote add <name> <url>`) store their tracking refs
+under `refs/remotes/<name>/<branch>`. `mkit push` uses the local
+remote-tracking ref as its **CAS lease**: a default (current-branch)
+push writes the remote `refs/heads/<branch>` with a `Match(tracked)`
+condition (or `Missing` for a first push), so a remote that has moved
+past the tip we last saw rejects the update as non-fast-forward. On a
+successful push, mkit advances the local `refs/remotes/<remote>/<branch>`
+to the pushed tip. `--force-with-lease` keeps this lease; `--force`
+drops to an unconditional write.
 
 `HEAD` is a special file at `.mkit/HEAD` containing either:
 
@@ -111,6 +128,15 @@ or canonicalise.
 
 ## 4. Prefix semantics for `listRefs`
 
+This section is normative for **transport** implementations of
+`listRefs(prefix)`. The local `mkit-core` API (see `refs.rs`) exposes
+the simpler `list_refs(mkit_dir)` / `list_tags(mkit_dir)` which return
+every ref under `refs/heads/` or `refs/tags/` respectively — the
+prefix has been pre-applied implicitly by the function choice. The
+algorithm below is what a transport server / a future
+`list_refs_with_prefix` core API MUST implement to remain cross-
+transport compatible.
+
 `listRefs(prefix) -> [{name, hash}]` walks the ref namespace and
 returns all refs whose full name begins with `prefix`. The `name` in
 each returned tuple has `prefix` stripped, plus any trailing `/` on the
@@ -164,8 +190,11 @@ empty slice, not null.
 ### 4.2 Prefix validation
 
 The prefix itself must be empty or pass the same grammar as a ref name
-(§3), possibly with a single trailing `/`. Reject invalid prefixes with
-`InvalidRef`.
+(§3), possibly with a single trailing `/`. Transports MUST reject
+invalid prefixes (the core helper `validate_ref_prefix` returns a
+boolean; transports wrap the false case as their domain-specific
+`InvalidRef` error, e.g. `RefError::InvalidRefName` on the file
+backend).
 
 ---
 
@@ -237,20 +266,71 @@ Clients requiring CAS MUST use `.match` explicitly.
 ## 6. Ref storage (local disk)
 
 ```
-.mkit/refs/heads/<name>     65 bytes wire
-.mkit/refs/tags/<name>      65 bytes wire
+.mkit/refs/heads/<name>     65 bytes wire (HEADS_DIR = "refs/heads")
+.mkit/refs/tags/<name>      65 bytes wire (TAGS_DIR  = "refs/tags")
 .mkit/HEAD                  symbolic ("ref: refs/heads/<name>\n") or detached (64-hex + '\n')
-.mkit/shallow               one 65-byte wire per line (no hash in this case — just hex+newline)
+.mkit/shallow               concatenation of N × 65-byte ref-wire blobs (one hash per line)
 ```
 
+`HEAD` content size is capped at 4 KiB; a single ref file at 128 bytes;
+the shallow file at 1 MiB. Reads exceeding these bounds yield
+`RefError::InvalidHead` / `RefError::InvalidRef` respectively.
+
 Writers MUST use atomic write-then-rename on local disk to avoid torn
-reads.
+reads. The temp-name pattern is `.<file>.tmp.<pid>.<seq>`, identical
+to SPEC-INDEX §4.
+
+`HEAD` reads tolerate trailing `\r`, space, and tab so a Windows-
+edited file does not brick a repo; ref-file reads tolerate the same
+trailing whitespace plus the optional `\r` before the terminating
+`\n`. Fresh writes always emit the strict 65-byte form.
+
+Listing `.mkit/refs/heads/` is recursive (nested directories like
+`feature/x/y` are supported), with a hard depth cap of 32 levels to
+defeat adversarial nesting. Files that fail `validate_ref_name` or
+whose bytes do not decode to a valid ref wire are silently skipped
+from listings.
+
+### 6.1 Operation-state files (merge / cherry-pick / rebase)
+
+Resumable history operations persist their state under `.mkit/` using
+Git-compatible names plus one documented mkit sidecar. These are not
+refs (they are not listed by `listRefs` and are not part of the ref
+namespace); they are operation scratch state consumed by
+`--continue` / `--abort` / `--skip`.
+
+```
+.mkit/MERGE_HEAD           64-hex + '\n'  — other parent of an in-progress merge
+.mkit/CHERRY_PICK_HEAD     64-hex + '\n'  — commit being applied by a cherry-pick
+.mkit/ORIG_HEAD            64-hex + '\n'  — HEAD before the operation (for --abort)
+.mkit/MERGE_MSG            raw bytes      — pending merge commit message
+.mkit/CHERRY_PICK_MSG      raw bytes      — pending cherry-pick commit message
+.mkit/mkit-conflicts       sidecar (below)
+.mkit/rebase-apply/        rebase state dir; holds a mkit-conflicts sidecar when paused
+```
+
+Presence of `MERGE_HEAD` ⇒ a merge is in progress; `CHERRY_PICK_HEAD` ⇒
+a cherry-pick; `rebase-apply/` ⇒ a rebase. Starting any of the three
+while one is already in progress is refused.
+
+The `mkit-conflicts` sidecar is line-oriented, one line per conflicting
+path, tab-separated, with the path last (so it may not contain a tab):
+
+```
+<kind>\t<base_hex|->\t<ours_hex|->\t<theirs_hex|->\t<path>\n
+```
+
+where `<kind>` ∈ {`modify`, `addadd`, `deletemodify`}, a missing side is
+encoded as a single `-`, and `<path>` is validated with the same rules
+as a staged index path (SPEC-INDEX §2). Hash files tolerate trailing
+whitespace on read. The whole sidecar is capped at 1 MiB. This sidecar
+does **not** change the `.mkit/index` format: the index remains a
+single-stage **resolved** staging area (no unmerged stages); conflict
+base/ours/theirs material lives only in this sidecar.
 
 ---
 
-## 7. Test vectors (implementer MUST produce)
-
-TO BE FIXED IN IMPLEMENTATION:
+## 7. Test vectors
 
 1. **Wire encode/decode**: hash = BLAKE3("test-ref") → 64 hex + `\n`.
    Record the 65-byte wire.

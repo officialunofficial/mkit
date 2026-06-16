@@ -6,6 +6,7 @@ use clap::Parser;
 use mkit_core::hash::from_hex;
 use mkit_core::object::Object;
 use mkit_core::store::ObjectStore;
+use mkit_core::worktree;
 
 use crate::clap_shim;
 use crate::exit;
@@ -46,6 +47,15 @@ pub fn run(args: &[String]) -> u8 {
         Object::Blob(b) => {
             let _ = stdout.write_all(&b.data);
         }
+        // A ChunkedBlob is the canonical representation for files above
+        // the chunking threshold (#203). Reassemble its chunks and
+        // stream the full content, matching `mkit cat` on a plain Blob.
+        Object::ChunkedBlob(_) => match worktree::read_blob(&store, &h) {
+            Ok(data) => {
+                let _ = stdout.write_all(&data);
+            }
+            Err(e) => return emit_err(&format!("reassemble chunked blob: {e}"), exit::NOINPUT),
+        },
         Object::Tree(t) => {
             for e in t.entries {
                 let _ = writeln!(
@@ -66,6 +76,18 @@ pub fn run(args: &[String]) -> u8 {
             let _ = writeln!(stdout, "timestamp {}", c.timestamp);
             let _ = writeln!(stdout);
             let _ = stdout.write_all(&c.message);
+            let _ = writeln!(stdout);
+        }
+        Object::Tag(t) => {
+            let _ = writeln!(stdout, "object {}", format::hex_hash(&t.target));
+            let _ = writeln!(stdout, "type {}", t.target_type.name());
+            let _ = writeln!(stdout, "tag {}", String::from_utf8_lossy(&t.name));
+            let _ = writeln!(stdout, "tagger {}", format::short_identity(&t.tagger));
+            let _ = writeln!(stdout, "timestamp {}", t.timestamp);
+            let signed = t.signature != [0u8; 64];
+            let _ = writeln!(stdout, "signed {signed}");
+            let _ = writeln!(stdout);
+            let _ = stdout.write_all(&t.message);
             let _ = writeln!(stdout);
         }
         other => {

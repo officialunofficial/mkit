@@ -19,12 +19,22 @@
 // them. cargo-deny still tracks them at warn level via deny.toml.
 #![allow(clippy::multiple_crate_versions)]
 
+pub mod batch;
 pub mod chunker;
 pub mod delta;
 pub mod hash;
 pub mod object;
 pub mod ops;
 pub mod pack;
+// Erasure-coded pack delivery (Reed-Solomon). Feature-gated because
+// the dep stack (`commonware-coding` + `commonware-cryptography` +
+// `commonware-parallel` + `commonware-storage`) is large and only
+// needed by the shard-aware transports — see
+// `docs/SPEC-PACK-SHARDS.md`. Sibling of `pack`, not nested: the
+// on-disk pack format stays untouched; shards are a wire-level
+// encoding *of* a pack.
+#[cfg(feature = "pack-shards")]
+pub mod pack_shard;
 pub mod serialize;
 pub mod sign;
 pub mod store;
@@ -40,18 +50,47 @@ pub mod worktree;
 // Phase 7a — transport trait surface (vtable + SSH framing + retry policy).
 pub mod protocol;
 
-pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher};
+// Phase 1 of issue #157 — append-only MMR over the commit chain for
+// O(log n) inclusion proofs. Feature-gated so the `commonware-storage`
+// dep tree only materialises for downstream callers that opt in.
+// Persisted (journaled) MMR + commit-field integration are Phase 2/3
+// — see docs/SPEC-HISTORY-PROOF.md.
+#[cfg(feature = "history-mmr")]
+pub mod history;
+
+// Verifiable sparse-checkout (issue #158, Phase 2). Feature-gated
+// because the upstream `commonware-storage::AuthenticatedBitMap` is
+// ALPHA-tier and pulls in `commonware-runtime` /
+// `commonware-cryptography`. Off by default.
+#[cfg(feature = "sparse-checkout")]
+pub mod sparse;
+
+#[cfg(feature = "sparse-checkout")]
+pub use sparse::{
+    MAX_FILTER_PATHS as SPARSE_MAX_FILTER_PATHS, MAX_LEAVES as SPARSE_MAX_LEAVES, SPARSE_CACHE_DIR,
+    SPARSE_CACHE_MAGIC, SPARSE_CACHE_VERSION, SPARSE_WIRE_MAGIC, SPARSE_WIRE_MAX_BYTES,
+    SPARSE_WIRE_VERSION, SparseError, SparseManifest, SparseProof, SparseResponse, SparseWireError,
+    build_sparse, decode_sparse_cache, decode_sparse_response, encode_sparse_cache,
+    encode_sparse_response, hash_filter, verify_sparse,
+};
+
+pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher, to_hex, to_hex_bytes};
 pub use object::{
     Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind, MAGIC,
-    MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, Tree, TreeEntry,
+    MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, TAG_NAME_MAX_LEN, Tag, Tree,
+    TreeEntry,
 };
 pub use serialize::{deserialize, serialize};
 pub use sign::{
-    COMMIT_DOMAIN, KeyPair, PublicKey, REMIX_DOMAIN, SecretSeed, Signature, commit_signing_bytes,
-    commit_signing_hash, remix_signing_bytes, remix_signing_hash, sign_commit, sign_remix, verify,
-    verify_commit, verify_remix,
+    COMMIT_DOMAIN, KeyPair, PublicKey, REMIX_DOMAIN, SecretSeed, Signature, TAG_DOMAIN,
+    commit_signing_bytes, commit_signing_hash, remix_signing_bytes, remix_signing_hash,
+    sign_commit, sign_remix, sign_tag, tag_signing_bytes, tag_signing_hash, verify, verify_commit,
+    verify_remix, verify_tag,
 };
-pub use store::{MAX_RAW_OBJECT_SIZE, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError, StoreResult};
+pub use store::{
+    MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError,
+    StoreResult,
+};
 
 // Phase 3 — content-defined chunker (FastCDC v1).
 pub use chunker::{
@@ -83,7 +122,8 @@ pub use refs::{
 };
 pub use repo_lock::{DEFAULT_TIMEOUT as LOCK_DEFAULT_TIMEOUT, LockError, LockResult, RepoLock};
 pub use worktree::{
-    CHUNK_THRESHOLD, MAX_FILE_BYTES, WorktreeError, WorktreeResult, validate_symlink_target,
+    CHUNK_THRESHOLD, MAX_FILE_BYTES, WorktreeError, WorktreeResult, read_blob, store_file_object,
+    validate_symlink_target,
 };
 
 // Cross-transport types. The SSH-specific wire bytes live in

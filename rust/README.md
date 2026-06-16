@@ -21,9 +21,17 @@ rust/
 │   ├── mkit-transport-http/
 │   ├── mkit-transport-s3/
 │   ├── mkit-transport-ssh/
+│   ├── mkit-transport-enc/     # mkit+enc:// no-OpenSSH encrypted transport
 │   ├── mkit-attest/            # jcs, statement, envelope, signers, verify
+│   ├── mkit-keystore/          # signing-key vault interface + backends
+│   ├── mkit-git-bridge/        # git import/export bridge
+│   ├── mkit-rpc/               # protobuf wire schemas + stdio framing
+│   ├── mkit-wasm/              # wasm-bindgen surface for browsers / Workers
 │   └── mkit-cli/               # bin "mkit"
-└── fuzz/                       # cargo-fuzz targets (delta, pack, tree)
+└── fuzz/                       # 8 cargo-fuzz targets (delta, pack, tree,
+                                #   software_key_record, rpc_decode,
+                                #   git_commit_parse, git_tag_parse,
+                                #   git_tree_parse)
 ```
 
 ## Gates

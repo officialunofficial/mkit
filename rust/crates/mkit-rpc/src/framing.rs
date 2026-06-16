@@ -1,10 +1,31 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
-//
 // Length-prefixed protobuf framing for signer + SSH protocols.
 
-use buffa::Message;
+use buffa::{DecodeOptions, Message};
 
 use crate::MAX_FRAME_BYTES;
+
+/// Recursion limit applied when decoding frame bodies. The deepest
+/// message in signer.proto / ssh.proto nests four levels (frame →
+/// oneof body → response → repeated entry); 16 leaves generous
+/// headroom for schema evolution while staying far below buffa's
+/// default of 100.
+pub const FRAME_RECURSION_LIMIT: u32 = 16;
+
+/// Decode options for a single frame body: recursion capped at
+/// [`FRAME_RECURSION_LIMIT`] and size capped at [`MAX_FRAME_BYTES`].
+///
+/// [`read_frame`] already bounds the input buffer to
+/// [`MAX_FRAME_BYTES`] before decoding; stating the cap here as well
+/// keeps the bound attached to the decode itself, so paths that
+/// receive frame bodies through other channels (e.g. the encrypted
+/// transport, where the cipher layer does the framing) enforce the
+/// same limits.
+#[must_use]
+pub fn frame_decode_options() -> DecodeOptions {
+    DecodeOptions::new()
+        .with_recursion_limit(FRAME_RECURSION_LIMIT)
+        .with_max_message_size(MAX_FRAME_BYTES as usize)
+}
 
 /// Errors emitted by the framing layer. Wire-protocol errors (a frame
 /// longer than [`MAX_FRAME_BYTES`], a truncated read) are distinct
@@ -79,19 +100,28 @@ where
         return Err(FrameError::LengthTooLarge(len));
     }
 
+    // Read the body with a manual fill loop (rather than `read_exact`) so
+    // a short read reports the TRUE number of bytes received in
+    // `BodyTruncated.actual` instead of a hardcoded 0.
     let mut body = vec![0u8; len as usize];
-    r.read_exact(&mut body).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            FrameError::BodyTruncated {
-                expected: len,
-                actual: 0,
+    let mut filled = 0usize;
+    while filled < body.len() {
+        match r.read(&mut body[filled..]) {
+            Ok(0) => {
+                return Err(FrameError::BodyTruncated {
+                    expected: len,
+                    actual: filled,
+                });
             }
-        } else {
-            FrameError::Io(e)
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(FrameError::Io(e)),
         }
-    })?;
+    }
 
-    M::decode_from_slice(&body).map_err(|_| FrameError::DecodeFailed)
+    frame_decode_options()
+        .decode_from_slice(&body)
+        .map_err(|_| FrameError::DecodeFailed)
 }
 
 #[cfg(test)]
@@ -103,19 +133,19 @@ mod tests {
 
     fn err_frame(code: ErrorCode, msg: &str) -> SignerFrame {
         SignerFrame {
-            body: Some(signer_frame::Body::Error(Box::new(Error {
-                code: Some(code.into()),
-                message: Some(msg.into()),
-                details: Some(Vec::new()),
-                ..Default::default()
-            }))),
+            body: Some(signer_frame::Body::Error(Box::new(
+                Error::default()
+                    .with_code(code)
+                    .with_message(msg)
+                    .with_details(Vec::new()),
+            ))),
             ..Default::default()
         }
     }
 
     #[test]
     fn roundtrip_signer_error_frame() {
-        let in_msg = err_frame(ErrorCode::ERROR_CODE_USER_DECLINED, "user said no");
+        let in_msg = err_frame(ErrorCode::UserDeclined, "user said no");
         let mut buf = Vec::new();
         write_frame(&mut buf, &in_msg).expect("write");
 
@@ -147,6 +177,49 @@ mod tests {
         match read_frame::<_, SignerFrame>(&mut cur) {
             Err(FrameError::LengthTruncated) => {}
             other => panic!("expected LengthTruncated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_options_reject_oversized_body_even_without_framing() {
+        use crate::mkit::rpc::v1::signer::SignRequest;
+
+        // A frame whose encoding exceeds MAX_FRAME_BYTES. read_frame
+        // never sees one (the length prefix is checked first), but
+        // decode paths that receive bodies through other channels —
+        // e.g. the encrypted transport, where the cipher layer does
+        // the framing — rely on frame_decode_options for the bound.
+        // The bare decoder accepts it; the capped decoder must not.
+        let frame = SignerFrame {
+            body: Some(signer_frame::Body::SignRequest(Box::new(
+                SignRequest::default().with_payload(vec![0u8; MAX_FRAME_BYTES as usize + 1]),
+            ))),
+            ..Default::default()
+        };
+        let bytes = frame.encode_to_vec();
+        assert!(SignerFrame::decode_from_slice(&bytes).is_ok());
+        assert!(
+            frame_decode_options()
+                .decode_from_slice::<SignerFrame>(&bytes)
+                .is_err(),
+            "decode cap must reject a body over MAX_FRAME_BYTES"
+        );
+    }
+
+    #[test]
+    fn body_truncated_reports_true_actual_count() {
+        // Advertise a 10-byte body but supply only 3 bytes. The error
+        // must report the actual count (3), not a hardcoded 0.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&10u32.to_le_bytes());
+        buf.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // 3 body bytes only
+        let mut cur = Cursor::new(buf);
+        match read_frame::<_, SignerFrame>(&mut cur) {
+            Err(FrameError::BodyTruncated { expected, actual }) => {
+                assert_eq!(expected, 10);
+                assert_eq!(actual, 3, "actual byte count must reflect bytes read");
+            }
+            other => panic!("expected BodyTruncated, got {other:?}"),
         }
     }
 }

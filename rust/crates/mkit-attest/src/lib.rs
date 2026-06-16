@@ -37,6 +37,8 @@ pub mod algorithm;
 pub mod envelope;
 pub mod jcs;
 pub mod signer;
+#[cfg(feature = "bls-threshold")]
+pub mod signer_bls_threshold;
 pub mod signer_external;
 #[cfg(feature = "algo-secp256k1")]
 pub mod signer_k256;
@@ -57,6 +59,13 @@ pub mod webauthn;
 pub use algorithm::Algorithm;
 pub use envelope::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, attestation_id, pae_of};
 pub use signer::Signer;
+#[cfg(feature = "bls-threshold")]
+pub use signer_bls_threshold::{
+    KEYID_PREFIX as BLS_THRESHOLD_KEYID_PREFIX, NAMESPACE as BLS_THRESHOLD_NAMESPACE,
+    PUBLIC_KEY_SIZE as BLS_THRESHOLD_PUBLIC_KEY_SIZE, ThresholdSigner,
+    aggregate as bls_threshold_aggregate, threshold_for as bls_threshold_for,
+    trusted_dealer as bls_threshold_trusted_dealer, verify as bls_threshold_verify,
+};
 pub use signer_external::ExternalSigner;
 #[cfg(feature = "algo-ed25519")]
 pub use signer_repo_key::{KEYID_PREFIX, RepoKeySigner};
@@ -66,7 +75,10 @@ pub use verify::{
     Reason, Registry, SignatureResult, TrustRoot, VerifyResult, verify_envelope, verify_signature,
 };
 #[cfg(feature = "algo-p256")]
-pub use webauthn::{WebAuthnWrapping, build_client_data_json, verify_webauthn_wrapping};
+pub use webauthn::{
+    WebAuthnPolicy, WebAuthnWrapping, build_client_data_json, verify_webauthn_wrapping,
+    verify_webauthn_wrapping_with_policy,
+};
 
 /// Errors surfaced by the mkit-attest crate.
 ///
@@ -126,6 +138,14 @@ pub enum Error {
     ExternalSignerOutputTooLarge,
     #[error("external signer binary path must be absolute: {0}")]
     ExternalSignerRelativePath(String),
+    /// The signer conversation exceeded the configured deadline at the
+    /// named phase. The child has been killed and reaped before this is
+    /// returned. The `&'static str` is the phase name:
+    /// `"spawn"`, `"request-write"`, `"response-read"`, `"stderr-drain"`,
+    /// or `"child-exit"` — so callers can distinguish a hung touch-prompt
+    /// (`response-read`) from a wedged-after-output child (`child-exit`).
+    #[error("external signer timed out during {0} phase")]
+    ExternalSignerTimeout(&'static str),
     #[error("sigstore signer is not yet implemented")]
     SigstoreNotImplemented,
 
@@ -182,4 +202,45 @@ pub enum Error {
         "WebAuthn signature did not verify against the reconstructed authenticatorData || SHA256(clientDataJSON)"
     )]
     WebAuthnSignatureFailed,
+    // -- WebAuthn ceremony-policy failures (feature `algo-p256`) --
+    //
+    // These are policy verdicts layered ON TOP of the cryptographic
+    // wrapping check (above). They only fire when a non-permissive
+    // `WebAuthnPolicy` knob is configured; the permissive default never
+    // emits them. Distinct variants so a relying party can tell "wrong
+    // origin" from "authenticator did not assert user verification".
+    #[error("WebAuthn authenticatorData rpIdHash does not match the policy's expected RP ID")]
+    WebAuthnRpIdMismatch,
+    #[error("WebAuthn clientDataJSON origin is not in the policy's allow-list")]
+    WebAuthnOriginNotAllowed,
+    #[error("WebAuthn assertion did not set the User Present (UP) flag, but policy requires it")]
+    WebAuthnUserPresenceRequired,
+    #[error("WebAuthn assertion did not set the User Verified (UV) flag, but policy requires it")]
+    WebAuthnUserVerificationRequired,
+    #[error("WebAuthn clientDataJSON crossOrigin is true, but policy disallows cross-origin")]
+    WebAuthnCrossOriginNotAllowed,
+    #[error(
+        "WebAuthn assertion signCount is lower than the previously-seen counter (possible cloned authenticator)"
+    )]
+    WebAuthnCounterRollback,
+
+    // -- BLS12-381 threshold (feature `bls-threshold`) --
+    //
+    // Flat variants matching the established style. The aggregator
+    // path can fail in three independent ways (decode a partial,
+    // recover the threshold signature, verify the aggregate); we
+    // surface each with its own variant so a future release-party
+    // CLI can render the right diagnostic.
+    #[error("BLS12-381 threshold partial signature is not a valid wire encoding")]
+    BlsThresholdPartialDecode,
+    #[error(
+        "BLS12-381 threshold recovery failed: fewer than `threshold` distinct partials supplied"
+    )]
+    BlsThresholdInsufficientPartials,
+    #[error("BLS12-381 threshold aggregate public key is malformed (bad G1 compressed encoding)")]
+    BlsThresholdPublicKeyDecode,
+    #[error("BLS12-381 threshold signature is malformed (wrong length or bad G2 encoding)")]
+    BlsThresholdSignatureDecode,
+    #[error("BLS12-381 threshold signature did not verify against the aggregated public key")]
+    BlsThresholdVerifyFailed,
 }

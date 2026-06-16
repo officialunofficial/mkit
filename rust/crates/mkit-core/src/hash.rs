@@ -1,6 +1,6 @@
 //! BLAKE3 hashing helpers.
 //!
-//! A [`Hash`] is a fixed 32-byte digest. The canonical hex form is 64
+//! A [`Hash`](tyalias@Hash) is a fixed 32-byte digest. The canonical hex form is 64
 //! lowercase characters. Object-store paths split the digest into a
 //! first-byte directory and 62-char file-name (see `SPEC-OBJECTS.md`
 //! §10).
@@ -9,7 +9,7 @@ use core::fmt;
 
 /// Length, in bytes, of a BLAKE3 digest used throughout mkit.
 pub const HASH_LEN: usize = 32;
-/// Length of the lowercase-hex encoding of a [`Hash`].
+/// Length of the lowercase-hex encoding of a [`Hash`](tyalias@Hash).
 pub const HEX_LEN: usize = 64;
 
 /// Fixed-size BLAKE3 digest. `Copy` because it is tiny and cheap.
@@ -65,12 +65,13 @@ pub enum FromHexError {
     InvalidChar,
 }
 
-/// Render a [`Hash`] as lowercase hex.
+/// Render a byte slice as lowercase hex. `format!`-with-`{:02x}`
+/// allocates per byte; the hand-roll here is the workspace's canonical
+/// hex encoder. Use this everywhere a byte slice needs hex rendering.
 #[must_use]
-pub fn to_hex(h: &Hash) -> String {
-    let mut out = String::with_capacity(HEX_LEN);
-    for b in h {
-        // `format!` with "{:02x}" allocates per-byte; hand-roll for speed.
+pub fn to_hex_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         out.push(HEX[(b >> 4) as usize] as char);
         out.push(HEX[(b & 0x0f) as usize] as char);
@@ -78,7 +79,44 @@ pub fn to_hex(h: &Hash) -> String {
     out
 }
 
-/// Parse a lowercase-or-uppercase 64-char hex string into a [`Hash`].
+/// Render a [`Hash`](tyalias@Hash) as lowercase hex.
+#[must_use]
+pub fn to_hex(h: &Hash) -> String {
+    to_hex_bytes(h)
+}
+
+/// Domain-separated BLAKE3 digest.
+///
+/// Computes `BLAKE3(len_le16(domain) || domain || body)` — the
+/// canonical mkit recipe for binding a hash output to a domain string.
+/// The 2-byte little-endian length prefix is what stops the
+/// `(domain, body)` pair from being ambiguous; without it,
+/// `("ab", "cX")` and `("abc", "X")` would hash to the same input.
+///
+/// Domain strings are short ASCII constants in this codebase (e.g.
+/// `b"mkit-commit-v1"`); the `u16` cap is comfortable.
+///
+/// Used by `sign` (commit / remix signatures), `sparse` (tree hash
+/// binding the manifest to its source tree), and any future module
+/// that needs a domain-separated hash.
+///
+/// # Panics
+///
+/// Panics if `domain.len()` exceeds `u16::MAX`. Domain strings are
+/// fixed constants in this crate; callers MUST verify the length at
+/// construction time. The check is `debug_assert!` plus a `try_from`
+/// because exceeding 65 535 bytes would be a programmer error.
+#[must_use]
+pub fn domain_digest(domain: &[u8], body: &[u8]) -> Hash {
+    let mut h = blake3::Hasher::new();
+    let domain_len = u16::try_from(domain.len()).expect("domain <= u16::MAX");
+    h.update(&domain_len.to_le_bytes());
+    h.update(domain);
+    h.update(body);
+    *h.finalize().as_bytes()
+}
+
+/// Parse a lowercase-or-uppercase 64-char hex string into a [`Hash`](tyalias@Hash).
 /// Rejects any non-hex byte.
 pub fn from_hex(s: &str) -> Result<Hash, FromHexError> {
     let bytes = s.as_bytes();
@@ -126,7 +164,7 @@ impl fmt::Display for ObjectPath {
     }
 }
 
-/// Split a [`Hash`] into its object-store path components.
+/// Split a [`Hash`](tyalias@Hash) into its object-store path components.
 #[must_use]
 pub fn object_path(h: &Hash) -> ObjectPath {
     let hex = to_hex(h);
@@ -149,6 +187,19 @@ mod tests {
             to_hex(&h),
             "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f"
         );
+    }
+
+    #[test]
+    fn to_hex_bytes_matches_to_hex_for_32_byte_slice() {
+        let h = hash(b"any");
+        assert_eq!(to_hex_bytes(h.as_slice()), to_hex(&h));
+    }
+
+    #[test]
+    fn to_hex_bytes_handles_arbitrary_length() {
+        assert_eq!(to_hex_bytes(b""), "");
+        assert_eq!(to_hex_bytes(&[0x00, 0xff]), "00ff");
+        assert_eq!(to_hex_bytes(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
     }
 
     #[test]

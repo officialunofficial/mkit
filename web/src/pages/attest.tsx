@@ -8,9 +8,12 @@ export default function AttestPage() {
       <title>mkit — attest</title>
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Statements, signed</h1>
-        <p className='max-w-prose text-base text-[--color-fg]'>
-          Attach a signed statement — &ldquo;reviewed&rdquo;, &ldquo;deployed&rdquo;, &ldquo;tested&rdquo; — to any
-          commit. Anyone holding your public key can verify it later, on any tool that reads the same envelope.
+        <p className='max-w-prose text-base text-fg'>
+          An attestation is a signed statement about a commit — &ldquo;reviewed&rdquo;, &ldquo;deployed&rdquo;,
+          &ldquo;tested&rdquo; — stored in the repo as a first-class object, not a side-channel. mkit uses the standard
+          formats (an in-toto Statement inside a DSSE signing envelope), so anyone holding your public key can verify it
+          later — with mkit, cosign, or any compliant verifier. Type a claim, pick a signing algorithm, and watch the
+          envelope rebuild and verify.
         </p>
       </header>
       <DemoBoundary>

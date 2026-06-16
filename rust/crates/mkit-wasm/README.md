@@ -16,21 +16,45 @@ pnpm add @makechain/mkit-wasm
 
 The published package is built with `wasm-pack --target bundler`. It works out of the box with esbuild, Wrangler, Vite, webpack, and Rollup. For direct `<script type="module">` usage without a bundler, build the crate yourself with `--target web`.
 
-## Usage (Cloudflare Workers / bundler)
+## Usage
+
+The package is built `--target bundler`, so it **auto-initializes on import**
+— there is no default `init` export and nothing to `await`. Just import the
+functions you need:
 
 ```ts
-import init, {
+import {
   blake3_hex,
   commit_verify,
   attest_build,
   attest_verify,
 } from "@makechain/mkit-wasm";
 
-await init();
-
 const id = blake3_hex(new TextEncoder().encode("hello"));
 console.log(id); // 64-char lowercase hex
 ```
+
+This works out of the box with esbuild, Vite, webpack, Rollup, and Wrangler
+(Cloudflare Workers).
+
+### Explicit init (Bun / some Workers setups)
+
+A few bundlers don't auto-instantiate the wasm at import time, leaving every
+export throwing `__wbindgen_add_to_stack_pointer is not a function`. For those,
+the package also exports `mkit_wasm_init(module)`: compile a
+`WebAssembly.Module` yourself and inject it once before the first call.
+
+```ts
+import { mkit_wasm_init, blake3_hex } from "@makechain/mkit-wasm";
+// `wasmModule` is a WebAssembly.Module you compiled/imported for your runtime.
+mkit_wasm_init(wasmModule);
+
+const id = blake3_hex(new TextEncoder().encode("hello"));
+```
+
+For direct `<script type="module">` use without a bundler, build the crate
+yourself with `wasm-pack --target web` (that variant exports the classic
+`await init()` default).
 
 ## Exported functions
 
@@ -66,8 +90,8 @@ TypeScript declarations shipped in the package for full signatures.
 This package is generated from the `mkit-wasm` crate inside the
 [mkit Rust workspace](https://github.com/officialunofficial/mkit/tree/main/rust/crates/mkit-wasm).
 Each npm release is built from a tagged commit of the upstream repo;
-the npm version matches the upstream `vX.Y.Z` tag, so `@makechain/mkit-wasm@0.1.0`
-on npm corresponds to `v0.1.0` on GitHub.
+the npm version matches the upstream `vX.Y.Z` tag, so `@makechain/mkit-wasm@0.3.0`
+on npm corresponds to `v0.3.0` on GitHub.
 
 The wasm bundle wraps the same Rust crates the native `mkit` CLI uses,
 so on-disk objects produced here are byte-identical to those produced

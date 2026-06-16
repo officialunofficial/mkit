@@ -10,8 +10,9 @@ authors.workspace = true
 readme = "README.md"
 keywords = ["mkit", "vcs", "wasm", "blake3", "ed25519"]
 categories = ["wasm", "cryptography"]
-# Not published to crates.io — published to npm as `mkit-wasm` from
-# .github/workflows/release.yml. wasm-pack copies the metadata above
+# Not published to crates.io — published to npm as `@makechain/mkit-wasm`
+# (release.yml rewrites the wasm-pack name to the scoped form before
+# `npm publish`). wasm-pack copies the metadata above
 # (description / keywords / repository / license / readme) into the
 # generated package.json.
 publish = false
@@ -47,6 +48,11 @@ bao = "0.13"
 # mkit-core::sign + mkit-attest already pull in (default-features off,
 # `std` on) — keeps the dep graph at a single dalek version.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+# `Zeroizing<[u8; 32]>` wrappers carry the scrub-on-drop contract for
+# every Rust-side temporary holding a JS-passed seed. The seed can't be
+# scrubbed on the JS side (we can't reach into the ArrayBuffer), but
+# every Rust-side copy must zero on drop — see `attest_keypair`.
+zeroize = { version = "1", default-features = false }
 
 # Activate the browser randomness backends for every getrandom in the
 # dep graph when compiling for `wasm32-unknown-unknown`. Two major
@@ -62,3 +68,10 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # dalek is a regular dependency above (see `[dependencies]`); tests
 # (`tests/ed25519.rs`) reach the same crate without a separate
 # `[dev-dependencies]` entry, which would risk a duplicate dep version.
+
+[features]
+default = []
+# Exhaustiveness: mirrors mkit-attest's bls-threshold so the wasm
+# bindings compile under `--all-features`. WASM never produces BLS
+# signatures.
+bls-threshold = ["mkit-attest/bls-threshold"]

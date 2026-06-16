@@ -3,40 +3,50 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.3.14",
+  "workspaces": [
+    "vendor/mkit-wasm"
+  ],
   "scripts": {
-    "wasm:build": "cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir pkg --release",
-    "dev": "waku dev",
-    "build": "CLOUDFLARE=1 waku build && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",
+    "wasm:build": "rm -rf vendor/mkit-wasm/pkg && cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir ../../../web/vendor/mkit-wasm/pkg --release",
+    "skill:stage": "node scripts/copy-skill.mjs",
+    "dev": "bun run skill:stage && waku dev",
+    "build": "bun run skill:stage && bun run wasm:build && CLOUDFLARE=1 waku build && node scripts/assert-prerender.mjs && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",
     "start": "waku start",
-    "deploy": "pnpm build && wrangler deploy -c dist/server/wrangler.json",
-    "preview": "pnpm build && wrangler dev -c dist/server/wrangler.json",
-    "test": "vitest run",
+    "deploy": "bun run build && wrangler deploy -c dist/server/wrangler.json",
+    "preview": "bun run build && wrangler dev -c dist/server/wrangler.json",
+    "test": "bun run wasm:build && vitest run",
     "test:watch": "vitest",
-    "lint": "oxlint src",
+    "lint": "oxlint src && node scripts/check-no-bracket-vars.mjs",
     "fmt": "oxfmt src",
     "fmt:check": "oxfmt --check src",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "bun run wasm:build && tsc --noEmit"
   },
+  "trustedDependencies": [
+    "esbuild",
+    "workerd"
+  ],
   "dependencies": {
-    "hono": "^4.12.14",
-    "mkit-wasm": "file:../rust/crates/mkit-wasm/pkg",
-    "react": "~19.2.5",
-    "react-dom": "~19.2.5",
-    "react-server-dom-webpack": "~19.2.5",
-    "waku": "1.0.0-alpha.8"
+    "agentation": "^3.0.2",
+    "hono": "^4.12.25",
+    "mkit-wasm": "workspace:*",
+    "react": "~19.2.7",
+    "react-dom": "~19.2.7",
+    "react-server-dom-webpack": "~19.2.7",
+    "waku": "1.0.0-beta.3"
   },
   "devDependencies": {
     "@rolldown/plugin-babel": "^0.2.3",
-    "@tailwindcss/vite": "4.2.2",
-    "@types/react": "^19.2.14",
+    "@tailwindcss/vite": "4.3.1",
+    "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.1",
+    "@vitejs/plugin-react": "^6.0.2",
     "babel-plugin-react-compiler": "^1.0.0",
-    "oxfmt": "^0.46.0",
-    "oxlint": "^1.61.0",
-    "tailwindcss": "^4.2.2",
+    "oxfmt": "^0.54.0",
+    "oxlint": "^1.69.0",
+    "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.5",
-    "wrangler": "^4.83.0"
+    "vitest": "^4.1.8",
+    "wrangler": "^4.99.0"
   }
 }

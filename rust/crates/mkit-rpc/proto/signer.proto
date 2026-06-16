@@ -156,9 +156,16 @@ message SignResponse {
   Algorithm algorithm = 3;
 
   // Stable identifier for the signing key, used in DSSE
-  // `signatures[].keyid`. By convention: the BLAKE3-256 digest of
-  // the SubjectPublicKeyInfo DER, hex-encoded. Signers MAY return a
-  // different identifier scheme; mkit treats it as opaque.
+  // `signatures[].keyid`. The convention mkit's built-in signers use:
+  //
+  //   - Ed25519 (incl. ED25519_WEBAUTHN): "blake3:<64-hex>" where the
+  //     digest is BLAKE3-256 over the raw 32-byte public key (matches
+  //     `mkit-attest/src/signer_repo_key.rs`).
+  //   - secp256k1: "secp256k1:<hex of compressed pubkey>".
+  //   - P-256:     "p256:<hex of compressed pubkey>".
+  //
+  // Third-party signers MAY return any identifier scheme; mkit treats
+  // it as opaque on the consumer side.
   string key_id = 4;
 
   // Optional certificate chain (DER-encoded X.509). Empty for raw-key
@@ -214,5 +221,7 @@ message PinPrompt {
 message PinResponse {
   // PIN bytes. UTF-8. The caller is responsible for not echoing this
   // to logs. The signer MUST zeroize after consumption.
-  string pin = 1;
+  // `debug_redact` makes the generated Debug impls print [REDACTED]
+  // in place of the value, so a stray `{:?}` log cannot leak it.
+  string pin = 1 [debug_redact = true];
 }

@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! mkit attest [--commit <hash>] [--algorithm ed25519|secp256k1|p256]
-//!             [--signer repo-key|external]
+//!             [--signer repo-key|external|keystore]
 //!             [--predicate-type <URI>] [--predicate-file <path>]
 //!             [--external-signer-arg <V>]...
 //!             [--additional-signer "<spec>"]...
@@ -18,7 +18,8 @@
 //! * `--commit` — HEAD.
 //! * `--algorithm` — `attest.default_algorithm` in config, else `ed25519`.
 //! * `--signer` — `attest.signer` in config, else `repo-key`.
-//! * `--predicate-type` — `https://mkit.io/predicate/empty/v1`.
+//! * `--predicate-type` —
+//!   `https://github.com/officialunofficial/mkit/spec/predicate/empty/v1`.
 //! * `--predicate-file` — omitted ⇒ `{}`.
 //!
 //! Multi-signature envelopes are produced by passing one or more
@@ -57,7 +58,20 @@ use crate::config::Config;
 use crate::exit;
 
 /// Default predicate type URI — placeholder; real callers pass their own.
-const DEFAULT_PREDICATE_TYPE: &str = "https://mkit.io/predicate/empty/v1";
+///
+/// Uses the GitHub-anchored URI scheme defined in
+/// `docs/SPEC-ATTESTATIONS.md` §6.4
+/// (`https://github.com/officialunofficial/mkit/spec/predicate/<name>/v<n>`)
+/// so the only predicate URI mkit ships out-of-the-box points at a
+/// location the project actually controls.
+const DEFAULT_PREDICATE_TYPE: &str =
+    "https://github.com/officialunofficial/mkit/spec/predicate/empty/v1";
+
+/// Hard cap on a `--predicate-file` body (#223). A DSSE predicate is a
+/// small JSON object; refusing anything past 1 MiB stops a runaway or
+/// hostile file from being slurped whole into memory before the JSON
+/// parse even runs.
+const MAX_PREDICATE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -276,9 +290,9 @@ pub fn run(args: &[String]) -> u8 {
 
     // --- Build predicate bytes. ------------------------------------
     let predicate_bytes: Vec<u8> = match parsed.predicate_file.as_deref() {
-        Some(p) => match std::fs::read(p) {
+        Some(p) => match read_predicate_file(p) {
             Ok(b) => b,
-            Err(e) => return emit_err(&format!("predicate file '{p}': {e}"), exit::NOINPUT),
+            Err((msg, code)) => return emit_err(&msg, code),
         },
         None => b"{}".to_vec(),
     };
@@ -341,6 +355,35 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // --- Save. ----------------------------------------------------
+    // Hold the repo lock across the envelope write so a concurrent
+    // `gc --grace-secs 0` can't compute its live set (which treats
+    // attestation subjects as roots) before this attestation lands and then
+    // prune the just-attested commit (#267). The repo was validated above
+    // (`mkit_dir.is_dir()`), so a non-repo reported cleanly. Held tightly,
+    // after signing (which may shell out to an external signer), around the
+    // write only.
+    let _lock = match super::acquire_worktree_lock(&cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+    // The commit was resolved before the lock; re-verify it still exists in
+    // the object store now that gc can't run, so we never write an
+    // attestation whose subject a concurrent `gc --grace-secs 0` pruned
+    // between resolution and this save (#267). (`obj_store` avoids shadowing
+    // the `mkit_attest::store` module used for `store::save`.)
+    let obj_store = match mkit_core::store::ObjectStore::open(&cwd) {
+        Ok(s) => s,
+        Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
+    };
+    if !obj_store.contains(&commit_hash) {
+        return emit_err(
+            &format!(
+                "attested commit {} no longer exists (pruned concurrently?); aborting",
+                hash_mod::to_hex(&commit_hash)
+            ),
+            exit::CANTCREAT,
+        );
+    }
     let (att_id, path) = match store::save(&mkit_dir, &commit_hash, encoded.as_bytes()) {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("store: {e}"), exit::CANTCREAT),
@@ -388,6 +431,12 @@ fn build_additional_signer(
                     Algorithm::Ed25519 => p.clone_into(&mut cfg.signing_key),
                     Algorithm::Secp256k1 => p.clone_into(&mut cfg.attest.secp256k1_key_path),
                     Algorithm::P256 => p.clone_into(&mut cfg.attest.p256_key_path),
+                    #[cfg(feature = "bls-threshold")]
+                    Algorithm::Bls12381Threshold => {
+                        return Err(FactoryError::UnknownAlgorithm(
+                            "bls12381-thr key path not configurable in Phase 1".to_owned(),
+                        ));
+                    }
                 }
             }
             attest_factory::build_signer(root, spec.algorithm, "repo-key", &cfg)
@@ -410,12 +459,43 @@ fn build_additional_signer(
     }
 }
 
-fn factory_error_code(e: &FactoryError) -> u8 {
+pub(crate) fn factory_error_code(e: &FactoryError) -> u8 {
     match e {
         FactoryError::UnknownSignerKind(_) | FactoryError::UnknownAlgorithm(_) => exit::USAGE,
-        FactoryError::MissingKeyFile { .. } => exit::NOINPUT,
+        FactoryError::MissingKeyFile { .. } | FactoryError::MissingKeystoreKey { .. } => {
+            exit::NOINPUT
+        }
         _ => exit::CONFIG_ERROR,
     }
+}
+
+/// Read a `--predicate-file` with a size cap (#223). Stats the file
+/// first so an oversized predicate is rejected before any large read,
+/// then reads with a bounded `take` as defence-in-depth against a file
+/// that grows between the stat and the read.
+fn read_predicate_file(path: &str) -> Result<Vec<u8>, (String, u8)> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| (format!("predicate file '{path}': {e}"), exit::NOINPUT))?;
+    if meta.len() > MAX_PREDICATE_BYTES {
+        return Err((
+            format!("predicate file '{path}' exceeds {MAX_PREDICATE_BYTES}-byte cap"),
+            exit::DATAERR,
+        ));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|e| (format!("predicate file '{path}': {e}"), exit::NOINPUT))?;
+    let mut data = Vec::new();
+    file.take(MAX_PREDICATE_BYTES + 1)
+        .read_to_end(&mut data)
+        .map_err(|e| (format!("predicate file '{path}': {e}"), exit::NOINPUT))?;
+    if data.len() as u64 > MAX_PREDICATE_BYTES {
+        return Err((
+            format!("predicate file '{path}' exceeds {MAX_PREDICATE_BYTES}-byte cap"),
+            exit::DATAERR,
+        ));
+    }
+    Ok(data)
 }
 
 /// Parse `--commit` value or fall back to HEAD.

@@ -16,30 +16,43 @@ fn mkit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mkit")
 }
 
-/// Locate `mkit-sign-file` in the same `target/<profile>/` directory
-/// `mkit` lives in. Assumes `cargo test --workspace` (or at least a
-/// previous `cargo build -p mkit-sign-file`) has populated it; the
-/// workspace CI target does so by construction, and a direct
-/// `cargo test -p mkit-cli --test attest_roundtrip` triggers the build
-/// via the explicit `CARGO_BIN_EXE_mkit` dependency — we mirror that
-/// target dir here.
+/// Locate `mkit-sign-file` in the contrib/signers workspace's
+/// `target/debug/` directory. The reference signers live in their OWN
+/// Cargo workspace (contrib/signers/ — split out of rust/ for
+/// release-plz, see #225), so neither `cargo test --workspace` nor a
+/// `cargo build -p mkit-sign-file` against the rust/ workspace can
+/// produce the binary. CI prebuilds the signers workspace before the
+/// test step; for local runs we fall back to an on-the-fly
+/// `--manifest-path` build rather than silently skipping.
 fn mkit_sign_file_bin() -> std::path::PathBuf {
-    let mkit = std::path::PathBuf::from(mkit_bin());
-    let target_dir = mkit.parent().expect("mkit_bin has a parent");
-    let candidate = target_dir.join(if cfg!(windows) {
+    // rust/crates/mkit-cli → repo root is three levels up.
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("repo root above crates/mkit-cli");
+    let signers = repo_root.join("contrib").join("signers");
+    let candidate = signers.join("target").join("debug").join(if cfg!(windows) {
         "mkit-sign-file.exe"
     } else {
         "mkit-sign-file"
     });
     if !candidate.exists() {
-        // The CI matrix always builds the whole workspace, but an
-        // individual `cargo test -p mkit-cli` invocation might not.
-        // Fall back to an on-the-fly build rather than silently skipping.
         let status = Command::new(env!("CARGO"))
             .args(["build", "-p", "mkit-sign-file"])
+            .arg("--manifest-path")
+            .arg(signers.join("Cargo.toml"))
+            // Don't leak the outer harness's flags (e.g. cargo-llvm-cov's
+            // `-C instrument-coverage` RUSTFLAGS) into the signer build —
+            // it's a fixture binary, not coverage subject matter.
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("LLVM_PROFILE_FILE")
             .status()
             .expect("spawn cargo");
-        assert!(status.success(), "cargo build -p mkit-sign-file failed");
+        assert!(
+            status.success(),
+            "cargo build -p mkit-sign-file (contrib/signers workspace) failed"
+        );
     }
     candidate
 }
@@ -125,6 +138,63 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
+fn head_commit_hex(cwd: &Path) -> String {
+    fs::read_to_string(cwd.join(".mkit/refs/heads/main"))
+        .expect("read main ref")
+        .trim()
+        .to_owned()
+}
+
+fn head_commit_hash(cwd: &Path) -> mkit_core::hash::Hash {
+    mkit_core::hash::from_hex(&head_commit_hex(cwd)).expect("HEAD commit hash is valid hex")
+}
+
+fn commit_file(cwd: &Path, path: &str, body: &[u8], message: &str) {
+    fs::write(cwd.join(path), body).unwrap();
+    assert!(run_in(cwd, &["add", path]).status.success());
+    let out = run_in(cwd, &["commit", "-m", message]);
+    assert!(
+        out.status.success(),
+        "commit failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn repo_key_public_key(cwd: &Path) -> Vec<u8> {
+    let secret_bytes = fs::read(cwd.join(".mkit/keys/default.key")).unwrap();
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&secret_bytes);
+    ed25519_pubkey(&secret)
+}
+
+fn write_repo_key_trust_roots(cwd: &Path) {
+    let pk = repo_key_public_key(cwd);
+    let toml = format!(
+        "[[trust_root]]\n\
+         keyid = \"{}\"\n\
+         kind = \"ed25519\"\n\
+         pubkey_hex = \"{}\"\n",
+        blake3_keyid(&pk),
+        hex_lower(&pk)
+    );
+    fs::write(cwd.join(".mkit/attest-trust-roots.toml"), toml).unwrap();
+}
+
+fn save_test_envelope_payload(cwd: &Path, payload: &[u8]) {
+    let env = mkit_attest::Envelope {
+        payload_type: mkit_attest::PAYLOAD_TYPE_IN_TOTO.to_owned(),
+        payload: payload.to_vec(),
+        signatures: vec![mkit_attest::Sig {
+            keyid: "opaque:test".to_owned(),
+            sig: vec![0u8; 64],
+        }],
+    };
+    let bytes = env.encode().expect("test envelope encodes");
+    mkit_attest::store::save(&cwd.join(".mkit"), &head_commit_hash(cwd), bytes.as_bytes())
+        .expect("save test envelope");
+}
+
 // -- Per-algorithm helpers. The CLI will load raw 32-byte key files,
 // but the test itself must know the public key to embed in the
 // trust-roots TOML.
@@ -133,6 +203,143 @@ fn ed25519_pubkey(secret: &[u8; 32]) -> Vec<u8> {
     use ed25519_dalek::SigningKey;
     let sk = SigningKey::from_bytes(secret);
     sk.verifying_key().to_bytes().to_vec()
+}
+
+#[test]
+fn verify_attest_rejects_envelope_replayed_under_another_commit() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path();
+    init_repo_with_commit(root);
+    let commit_a = head_commit_hex(root);
+
+    let attest = run_in(
+        root,
+        &["attest", "--algorithm", "ed25519", "--signer", "repo-key"],
+    );
+    assert!(
+        attest.status.success(),
+        "attest failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&attest.stdout),
+        String::from_utf8_lossy(&attest.stderr)
+    );
+    write_repo_key_trust_roots(root);
+
+    let verify_a = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--commit",
+            &commit_a,
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
+    assert!(
+        verify_a.status.success(),
+        "verify A failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&verify_a.stdout),
+        String::from_utf8_lossy(&verify_a.stderr)
+    );
+
+    commit_file(root, "README.md", b"hello again\n", "second");
+    let commit_b = head_commit_hex(root);
+
+    let src_dir = root.join(".mkit/attestations").join(&commit_a);
+    let dst_dir = root.join(".mkit/attestations").join(&commit_b);
+    fs::create_dir_all(&dst_dir).unwrap();
+    for entry in fs::read_dir(&src_dir).unwrap() {
+        let entry = entry.unwrap();
+        fs::copy(entry.path(), dst_dir.join(entry.file_name())).unwrap();
+    }
+
+    let verify_b = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--commit",
+            &commit_b,
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
+    assert!(!verify_b.status.success(), "replayed attestation verified");
+    let stderr = String::from_utf8(verify_b.stderr).unwrap();
+    assert!(
+        stderr.contains("subject mismatch"),
+        "expected subject mismatch, got: {stderr}"
+    );
+}
+
+#[test]
+fn verify_attest_rejects_malformed_statement_payload() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path();
+    init_repo_with_commit(root);
+    write_repo_key_trust_roots(root);
+
+    save_test_envelope_payload(root, b"not valid json");
+
+    let out = run_in(
+        root,
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
+    assert!(!out.status.success(), "malformed statement verified");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("subject error") || stderr.contains("malformed in-toto"),
+        "expected subject error, got: {stderr}"
+    );
+}
+
+#[test]
+fn verify_attest_rejects_statement_subject_errors() {
+    let invalid_hex = "g".repeat(64);
+    let cases = vec![
+        (
+            br#"{"_type":"https://in-toto.io/Statement/v1","predicate":{}}"#.to_vec(),
+            "Statement has no subject entries",
+        ),
+        (
+            br#"{"subject":[{"name":"commit","digest":{"sha256":"00"}}]}"#.to_vec(),
+            "Statement subject has no `blake3` digest",
+        ),
+        (
+            br#"{"subject":[{"name":"commit","digest":{"blake3":"abc"}}]}"#.to_vec(),
+            "Statement subject digest is not 64 hex characters",
+        ),
+        (
+            format!(r#"{{"subject":[{{"name":"commit","digest":{{"blake3":"{invalid_hex}"}}}}]}}"#)
+                .into_bytes(),
+            "Statement subject digest is not lowercase hex",
+        ),
+    ];
+
+    for (payload, expected) in cases {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        init_repo_with_commit(root);
+        write_repo_key_trust_roots(root);
+        save_test_envelope_payload(root, &payload);
+
+        let out = run_in(
+            root,
+            &[
+                "verify-attest",
+                "--trust-roots",
+                ".mkit/attest-trust-roots.toml",
+            ],
+        );
+        assert!(!out.status.success(), "invalid subject payload verified");
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(
+            stderr.contains("subject error") && stderr.contains(expected),
+            "expected subject error containing {expected:?}, got: {stderr}"
+        );
+    }
 }
 
 #[test]

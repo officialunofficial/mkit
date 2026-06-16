@@ -158,6 +158,48 @@ fn commit_with_empty_index_is_an_error() {
 }
 
 #[test]
+fn commit_reports_invalid_index_instead_of_nothing_staged() {
+    use mkit_core::hash::ZERO;
+    use mkit_core::index::{EntryStatus, Index, IndexEntry};
+
+    let td = init_repo();
+    let p = td.path();
+
+    let mut idx = Index::new();
+    idx.entries.push(IndexEntry {
+        path: "same.txt".into(),
+        status: EntryStatus::Blob,
+        object_hash: ZERO,
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
+    });
+    idx.entries.push(IndexEntry {
+        path: "same.txt".into(),
+        status: EntryStatus::Blob,
+        object_hash: ZERO,
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
+    });
+    fs::write(p.join(".mkit/index"), idx.serialize()).unwrap();
+
+    let out = run(p, &["commit", "-m", "should fail"]);
+    assert!(!out.status.success(), "commit must reject invalid index");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("read index") && stderr.contains("duplicate index path"),
+        "commit should surface the index integrity error, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("nothing staged"),
+        "invalid index must not be reported as an empty index: {stderr}"
+    );
+}
+
+#[test]
 fn add_dot_then_commit_reproduces_full_worktree_snapshot() {
     let td = init_repo();
     let p = td.path();
@@ -181,6 +223,54 @@ fn add_dot_then_commit_reproduces_full_worktree_snapshot() {
     assert!(body.contains("a.txt"));
     assert!(body.contains("b.txt"));
     assert!(body.contains("sub"));
+}
+
+#[cfg(unix)]
+#[test]
+fn add_one_preserves_executable_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let td = init_repo();
+    let p = td.path();
+    let script = p.join("run.sh");
+
+    fs::write(&script, b"#!/bin/sh\n").unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    fs::set_permissions(&script, perms).unwrap();
+
+    ok(p, &["add", "run.sh"]);
+    ok(p, &["commit", "-m", "add executable"]);
+
+    let line = head_tree_line(p, "run.sh");
+    assert!(
+        line.starts_with("04 "),
+        "run.sh should be executable: {line}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn add_dot_preserves_executable_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let td = init_repo();
+    let p = td.path();
+    let script = p.join("run.sh");
+
+    fs::write(&script, b"#!/bin/sh\n").unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    fs::set_permissions(&script, perms).unwrap();
+
+    ok(p, &["add", "."]);
+    ok(p, &["commit", "-m", "snapshot executable"]);
+
+    let line = head_tree_line(p, "run.sh");
+    assert!(
+        line.starts_with("04 "),
+        "run.sh should be executable: {line}"
+    );
 }
 
 #[test]
@@ -319,6 +409,10 @@ fn commit_all_preserves_existing_executable_mode_on_non_unix() {
         path: "run.sh".into(),
         status: EntryStatus::Executable,
         object_hash: hash,
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     index::write_index(p, &idx).unwrap();
     ok(p, &["commit", "-m", "first"]);
@@ -330,6 +424,49 @@ fn commit_all_preserves_existing_executable_mode_on_non_unix() {
     assert!(
         line.starts_with("04 "),
         "non-Unix commit -a should preserve executable mode: {line}"
+    );
+    assert_eq!(head_blob_body(p, "run.sh"), "v2");
+}
+
+#[cfg(not(unix))]
+#[test]
+fn add_one_preserves_existing_executable_mode_on_non_unix() {
+    use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
+    use mkit_core::object::{Blob, Object};
+    use mkit_core::serialize;
+    use mkit_core::store::ObjectStore;
+
+    let td = init_repo();
+    let p = td.path();
+    let script = p.join("run.sh");
+
+    fs::write(&script, b"v1").unwrap();
+    let store = ObjectStore::open(p).unwrap();
+    let blob = Object::Blob(Blob {
+        data: b"v1".to_vec(),
+    });
+    let bytes = serialize::serialize(&blob).unwrap();
+    let hash = store.write(&bytes).unwrap();
+    let mut idx = Index::new();
+    idx.entries.push(IndexEntry {
+        path: "run.sh".into(),
+        status: EntryStatus::Executable,
+        object_hash: hash,
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
+    });
+    index::write_index(p, &idx).unwrap();
+
+    fs::write(&script, b"v2").unwrap();
+    ok(p, &["add", "run.sh"]);
+    ok(p, &["commit", "-m", "update executable"]);
+
+    let line = head_tree_line(p, "run.sh");
+    assert!(
+        line.starts_with("04 "),
+        "non-Unix add should preserve executable mode: {line}"
     );
     assert_eq!(head_blob_body(p, "run.sh"), "v2");
 }
@@ -346,6 +483,10 @@ fn commit_all_rejects_invalid_index_path_before_refreshing() {
         path: "../outside.txt".into(),
         status: EntryStatus::Blob,
         object_hash: ZERO,
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     index::write_index(p, &idx).unwrap();
 
@@ -728,7 +869,8 @@ fn rm_directory_stages_tracked_descendants() {
     ok(p, &["add", "."]);
     ok(p, &["commit", "-m", "first"]);
 
-    ok(p, &["rm", "sub"]);
+    // Removing a directory now requires -r (Git-parity, #188).
+    ok(p, &["rm", "-r", "sub"]);
     ok(p, &["commit", "-m", "drop sub"]);
 
     let body = head_tree_body(p);

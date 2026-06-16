@@ -5,6 +5,12 @@
 //! reaching into `store` so the two subsystems can be developed
 //! independently and so future changes to one don't ripple into the
 //! other. The behaviour is identical.
+//!
+//! Deliberately NOT batched: refs, the index, and recovery-log entries
+//! are the durable *pointers* the batched object store orders itself
+//! against (`crate::batch` module docs). Each one must hit stable
+//! storage in its own right before its caller returns. Do not
+//! "optimise" these writes onto the batch path.
 
 use std::fs;
 #[cfg(unix)]
@@ -18,8 +24,38 @@ use tempfile::NamedTempFile;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Atomically write `bytes` to `final_path`. Creates the parent
-/// directory if `make_parents` is `true`.
+/// Atomically write `bytes` to `final_path`, fsyncing the file CONTENTS
+/// before the rename but deferring the directory fsync to the caller.
+/// This is the durable-before-visible primitive for [`store::BulkWriter`]:
+/// the object's bytes are on stable storage before the rename publishes
+/// it, so a concurrent process that dedups against the now-visible object
+/// can never reference non-durable content. The rename itself becomes
+/// durable when the caller fsyncs the shard dir at commit.
+///
+/// [`store::BulkWriter`]: crate::store::BulkWriter
+pub(crate) fn write_content_synced(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = final_path
+        .parent()
+        .expect("atomic::write_content_synced: path has parent");
+    let file_name = final_path
+        .file_name()
+        .expect("atomic::write_content_synced: path has file name")
+        .to_string_lossy();
+    let pid = process::id();
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
+    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    tmp.as_file_mut().write_all(bytes)?;
+    tmp.as_file_mut().sync_all()?;
+    tmp.persist(final_path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Fsync a directory (making completed renames durable).
+pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
+    sync_parent_dir(dir)
+}
+
 pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8], make_parents: bool) -> io::Result<()> {
     let parent = final_path
         .parent()
@@ -101,7 +137,7 @@ pub(crate) fn write_create_new(
 }
 
 #[cfg(unix)]
-fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
     match File::open(parent) {
         Ok(dir) => dir.sync_all(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -110,6 +146,7 @@ fn sync_parent_dir(parent: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
     Ok(())
 }

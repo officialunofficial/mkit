@@ -20,6 +20,24 @@ workspace = true
 
 [dependencies]
 blake3 = "1"
+# commonware-* (pinned at workspace root to the 2026.5.x train) —
+# all optional, gated by the feature flags below so default builds
+# never pay the dep cost. `std` features enabled because the
+# AuthenticatedBitMap path needs it and history-mmr accepts std as a
+# benign superset.
+commonware-storage = { workspace = true, features = ["std"], optional = true }
+commonware-cryptography = { workspace = true, features = ["std"], optional = true }
+commonware-runtime = { workspace = true, optional = true }
+commonware-coding = { workspace = true, optional = true }
+commonware-codec = { workspace = true, optional = true, features = ["std"] }
+commonware-parallel = { workspace = true, optional = true, features = ["std"] }
+commonware-utils = { workspace = true, optional = true, features = ["std"] }
+# tokio is opt-in via `history-mmr`: the journaled MMR persistence path
+# bridges sync mkit APIs to commonware-storage's async surface, and
+# bootstrapping a `commonware-runtime::tokio::Context` requires a tokio
+# runtime owned by mkit-core. Default builds (and the `sparse-checkout`
+# / `pack-shards` paths, which stay async-internal) don't pull tokio.
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "fs", "sync", "io-util", "time"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 getrandom = "0.4"
 # `subtle` is a constant-time-equality primitive used by the Ed25519
@@ -36,5 +54,59 @@ zeroize = { version = "1", features = ["derive"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[features]
+default = []
+# Issue #157 — append-only MMR over the commit chain.
+#
+# Phase 1 (mem-only `CommitHistory::open`) needs only the in-process
+# MMR primitive from `commonware-storage` and the BLAKE3 hasher from
+# `commonware-cryptography`. Phase 2 (this build, on-disk journaled
+# MMR via `CommitHistory::open_at`) additionally needs:
+#   - `commonware-runtime` for the `Storage + Clock + Metrics` Context
+#     that backs the journaled MMR's blob/metadata stores; and
+#   - `tokio` for the long-lived multi-thread runtime that drives the
+#     async journaled-MMR ops behind the sync mkit-core API.
+# Both are dragged in together because dropping either re-introduces
+# the rejected mem-only Phase 1 shape.
+# `commonware-parallel` is required (since the 2026.5.x train) to name the
+# `Sequential` fold strategy that `commonware-storage`'s MMR/bitmap now take
+# as a type parameter — it is the crate that defines `Sequential`/`Strategy`
+# (commonware-storage itself depends on it), so there is no lighter source.
+# We pin `Sequential` (single-threaded folding) deliberately; `Rayon` is never
+# used here.
+history-mmr = [
+    "dep:commonware-storage",
+    "dep:commonware-cryptography",
+    "dep:commonware-runtime",
+    "dep:commonware-parallel",
+    "dep:commonware-utils",
+    "dep:tokio",
+]
+# Issue #158 Phase 1 — verifiable sparse-checkout via AuthenticatedBitMap.
+sparse-checkout = [
+    "dep:commonware-storage",
+    "dep:commonware-runtime",
+    "dep:commonware-cryptography",
+    "dep:commonware-parallel",
+]
+# Issue #159 Phase 1 — erasure-coded pack delivery via Reed-Solomon.
+pack-shards = [
+    "dep:commonware-coding",
+    "dep:commonware-codec",
+    "dep:commonware-cryptography",
+    "dep:commonware-parallel",
+    "dep:commonware-utils",
+]
+
 [dev-dependencies]
 hex = "0.4"
+# Property-based testing: auto-shrinks counterexamples on round-trip
+# / invariant assertions. See issue #164.
+proptest = "1"
+# Snapshot testing for human-readable test fixtures. Snapshots live in
+# `src/snapshots/`; review with `cargo insta review`.
+insta = "1"
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

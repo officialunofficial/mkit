@@ -8,41 +8,53 @@ resolver = "3"
 members = [
     "crates/mkit-core",
     "crates/mkit-attest",
+    "crates/mkit-git-bridge",
+    "crates/mkit-keystore",
     "fuzz",
     "crates/mkit-transport-memory",
     "crates/mkit-transport-file",
     "crates/mkit-transport-http",
     "crates/mkit-transport-s3",
     "crates/mkit-transport-ssh",
+    "crates/mkit-transport-enc",
     "crates/mkit-cli",
     "crates/mkit-rpc",
     "crates/mkit-wasm",
     "benches",
-    # Reference external-signer binary — lives under contrib/ (outside
-    # `rust/`) because it is a third-party-integration reference, not a
-    # core crate. Kept a workspace member so it builds / tests with
-    # `cargo test --workspace` and shares the workspace's lint config
-    # and dependency pins. See docs/SPEC-EXTERNAL-SIGNER.md.
-    "../contrib/signers/mkit-sign-file",
-    # Protocol v1.1 FIDO2/WebAuthn reference signer. Workspace member
-    # for the same reasons as mkit-sign-file — share lint config, dep
-    # pins, and let `cargo test --workspace` cover its protocol-shape
-    # tests. Hardware-gated e2e lives in `tests/e2e.sh`.
-    "../contrib/signers/mkit-sign-ctap",
-    # TPM 2.0 P-256 signer — pure-Rust analog of mkit-sign-se for
-    # Linux/Windows hosts with a TPM. The `tss-esapi` dep is behind the
-    # `tpm2` feature (default off) so workspace builds on macOS / CI
-    # without libtss2-dev still succeed. See docs/SPEC-EXTERNAL-SIGNER.md.
-    "../contrib/signers/mkit-sign-tpm",
+    # The reference external-signer binaries (mkit-sign-{file,ctap,tpm}) are a
+    # SEPARATE workspace under contrib/signers/ — see contrib/signers/Cargo.toml.
+    # They were members here, but out-of-tree members (`../contrib/...`) break
+    # release-plz's crates.io publishing (#225), and they're publish=false
+    # reference impls anyway. CI builds/tests them via their own steps.
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/officialunofficial/mkit"
-authors = ["mkit contributors"]
+authors = ["Official Unofficial, Inc."]
+
+# commonware-* is shipped as a single 2026.5.x release train; pinning
+# the version here keeps every consumer (mkit-core, mkit-attest,
+# mkit-transport-enc) in lockstep. Per-feature `default-features` /
+# `features` flags are set at the consumer site because they vary by
+# crate. Bump in a single commit when the train rolls.
+[workspace.dependencies]
+# default-features = false here matches the strictest consumer
+# (mkit-attest / mkit-core). Consumers that want the default feature
+# set can NOT re-enable it via `workspace = true` — they would need a
+# direct path/version dep instead. The commonware crates only have a
+# `std` default that we always pass explicitly anyway, so this is safe.
+commonware-storage = { version = "=2026.5.0", default-features = false }
+commonware-cryptography = { version = "=2026.5.0", default-features = false }
+commonware-runtime = { version = "=2026.5.0" }
+commonware-coding = { version = "=2026.5.0" }
+commonware-codec = { version = "=2026.5.0", default-features = false }
+commonware-parallel = { version = "=2026.5.0", default-features = false }
+commonware-utils = { version = "=2026.5.0", default-features = false }
+commonware-stream = { version = "=2026.5.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -72,3 +84,15 @@ lto = "thin"
 strip = "symbols"
 panic = "abort"
 overflow-checks = true
+
+# Profiling profile for `samply` (and other sampling profilers). Mirrors
+# release codegen (inherits `codegen-units = 1` + `lto = "thin"`) so the
+# numbers stay representative, but keeps full debug info and symbols so
+# the profiler can attribute samples to inline frames and source lines —
+# `release` strips symbols, which makes its profiles unreadable. Build
+# with `cargo build --profile profiling` and record with
+# `samply record ./target/profiling/mkit ...`. See docs/PROFILING.md.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

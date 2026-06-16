@@ -13,15 +13,15 @@ name: Release
 # macOS binaries are intentionally NOT codesigned or notarized — we do not
 # hold an Apple Developer ID. Trust is established via cosign keyless
 # signatures, which are verified by `install.sh` and documented in
-# docs/release/SIGNING.md. Users who launch the binary by double-clicking
+# docs/RELEASE.md. Users who launch the binary by double-clicking
 # in Finder will hit Gatekeeper; running from a terminal works.
 #
 # Cache safety: every Swatinem/rust-cache invocation here uses a release-
 # specific `prefix-key`, partitioned away from the keys that PR-event
 # workflows write to. This prevents a malicious PR from poisoning a cache
 # that this workflow (which carries `secrets.MKIT_NPM_TOKEN` and
-# `id-token: write`) would later deserialize. See the Phase-10
-# cache-poisoning audit note.
+# `id-token: write`) would later deserialize. See the cache-poisoning
+# supply-chain audit pass.
 #
 # No secrets are needed for cosign keyless — OIDC token comes from GitHub.
 
@@ -32,7 +32,8 @@ on:
   # Manual escape hatch. GitHub occasionally de-dupes tag-push events when
   # a prior workflow for a nearby tag is still active or recently cancelled.
   # workflow_dispatch lets us force a release build against an existing tag
-  # from the Actions UI.
+  # from the Actions UI. The workflow must be run from that tag ref, not from
+  # a branch, so cosign's OIDC certificate identity remains tag-scoped.
   workflow_dispatch:
     inputs:
       tag:
@@ -41,18 +42,158 @@ on:
         type: string
 
 permissions:
-  contents: write       # create the GitHub Release + upload assets
-  id-token: write       # cosign keyless OIDC
-  attestations: write   # supply-chain attestations
+  contents: read
 
 env:
   RUST_VERSION: "1.95.0"
   BINARY_NAME: mkit
 
 jobs:
+  validate-release-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      ref: ${{ steps.validate.outputs.ref }}
+      tag_object: ${{ steps.validate.outputs.tag_object }}
+      commit: ${{ steps.validate.outputs.commit }}
+      version: ${{ steps.validate.outputs.version }}
+    steps:
+      - name: Checkout release refs
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag trust and ancestry
+        id: validate
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          TRUSTED_FINGERPRINTS: ${{ vars.MKIT_RELEASE_GPG_FINGERPRINTS }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${DISPATCH_TAG}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if [ -z "${TAG}" ]; then
+            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
+            exit 1
+          fi
+
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "ERROR: release tag must match vMAJOR.MINOR.PATCH with optional prerelease suffix: ${TAG}" >&2
+            exit 1
+          fi
+
+          if [ -z "${TRUSTED_FINGERPRINTS}" ]; then
+            echo "ERROR: MKIT_RELEASE_GPG_FINGERPRINTS repo/org variable is required" >&2
+            exit 1
+          fi
+          TRUSTED_FINGERPRINTS="$(printf '%s' "${TRUSTED_FINGERPRINTS}" | tr '[:lower:]' '[:upper:]')"
+
+          git fetch --force --tags origin
+          git fetch --force origin main:refs/remotes/origin/main
+
+          # Import each trusted key from a keyserver. We gate on the key
+          # actually LANDING IN THE KEYRING, not on `gpg --recv-keys`' exit
+          # code: keys.openpgp.org serves a key with NO user IDs until its
+          # owner verifies their email, and GnuPG SKIPS importing a UID-less
+          # key ("contains no user ID - skipped") while STILL exiting 0 — so a
+          # bare `recv || recv` fallback never fires and the next step dies
+          # with NO_PUBKEY. (This broke v0.2.0's first release run.)
+          #
+          # keyserver.ubuntu.com serves user IDs WITHOUT email verification, so
+          # it's tried first; keys.openpgp.org is a fallback. After each fetch
+          # we check the key is present (UID-bearing) before trusting it.
+          KEYSERVERS="hkps://keyserver.ubuntu.com hkps://keys.openpgp.org"
+          for TRUSTED_FINGERPRINT in ${TRUSTED_FINGERPRINTS}; do
+            if [[ ! "${TRUSTED_FINGERPRINT}" =~ ^[A-Fa-f0-9]{40}$ ]]; then
+              echo "ERROR: invalid GPG fingerprint in MKIT_RELEASE_GPG_FINGERPRINTS: ${TRUSTED_FINGERPRINT}" >&2
+              exit 1
+            fi
+            IMPORTED=0
+            for KS in ${KEYSERVERS}; do
+              gpg --batch --keyserver "${KS}" --recv-keys "${TRUSTED_FINGERPRINT}" || true
+              if gpg --list-keys "${TRUSTED_FINGERPRINT}" >/dev/null 2>&1; then
+                echo "Imported ${TRUSTED_FINGERPRINT} from ${KS}"
+                IMPORTED=1
+                break
+              fi
+              echo "WARN: ${KS} did not yield a usable (UID-bearing) key for ${TRUSTED_FINGERPRINT}; trying next" >&2
+            done
+            if [ "${IMPORTED}" -ne 1 ]; then
+              echo "ERROR: could not import GPG key ${TRUSTED_FINGERPRINT} from any keyserver (${KEYSERVERS})." >&2
+              echo "       If the key lives only on keys.openpgp.org, verify its email there so it serves user IDs." >&2
+              exit 1
+            fi
+          done
+
+          REF="refs/tags/${TAG}"
+          if ! git show-ref --verify --quiet "${REF}"; then
+            echo "ERROR: tag ${TAG} does not exist" >&2
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" != "${REF}" ]; then
+            echo "ERROR: manual releases must run from ${REF}, not ${GITHUB_REF}" >&2
+            echo "Select the release tag in the Actions UI's 'Use workflow from' picker and keep the tag input identical." >&2
+            exit 1
+          fi
+
+          if [ "$(git cat-file -t "${REF}")" != "tag" ]; then
+            echo "ERROR: ${TAG} must be an annotated signed tag, not a lightweight tag" >&2
+            exit 1
+          fi
+
+          VERIFY_LOG="$(mktemp)"
+          if ! git verify-tag --raw -v "${REF}" >"${VERIFY_LOG}" 2>&1; then
+            cat "${VERIFY_LOG}" >&2
+            echo "ERROR: ${TAG} does not have a valid GPG signature" >&2
+            exit 1
+          fi
+
+          FINGERPRINT="$(awk '/^\[GNUPG:\] VALIDSIG / { print $3; exit }' "${VERIFY_LOG}" | tr '[:lower:]' '[:upper:]')"
+          if [ -z "${FINGERPRINT}" ]; then
+            cat "${VERIFY_LOG}" >&2
+            echo "ERROR: could not extract tag signing fingerprint for ${TAG}" >&2
+            exit 1
+          fi
+
+          case " ${TRUSTED_FINGERPRINTS} " in
+            *" ${FINGERPRINT} "*) ;;
+            *)
+              echo "ERROR: tag signer ${FINGERPRINT} is not allowlisted in MKIT_RELEASE_GPG_FINGERPRINTS" >&2
+              exit 1
+              ;;
+          esac
+
+          TAG_OBJECT="$(git rev-parse "${REF}^{tag}")"
+          TAG_COMMIT="$(git rev-parse "${REF}^{commit}")"
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
+            echo "ERROR: ${TAG} target commit ${TAG_COMMIT} is not reachable from origin/main" >&2
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "tag_object=${TAG_OBJECT}" >> "$GITHUB_OUTPUT"
+          echo "commit=${TAG_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    needs: validate-release-tag
+    permissions:
+      contents: read
+      id-token: write       # cosign keyless OIDC
     strategy:
       fail-fast: false
       matrix:
@@ -77,27 +218,21 @@ jobs:
         id: meta
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          if [ -z "${TAG}" ]; then
-            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
-            exit 1
-          fi
-          REF="refs/tags/${TAG}"
-          VERSION="${TAG#v}"
+          TAG="${{ needs.validate-release-tag.outputs.tag }}"
+          REF="${{ needs.validate-release-tag.outputs.ref }}"
+          COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
+          VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "archive=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}.${{ matrix.archive_ext }}" >> "$GITHUB_OUTPUT"
           echo "stage=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
-          ref: ${{ steps.meta.outputs.ref }}
+          ref: ${{ steps.meta.outputs.commit }}
           fetch-depth: 0
 
       - name: Install Rust ${{ env.RUST_VERSION }} + target
@@ -155,7 +290,11 @@ jobs:
           cp LICENSE-MIT LICENSE-APACHE README.md "${STAGE}/"
           # Optional artifacts — included when present.
           [ -f CHANGELOG.md ] && cp CHANGELOG.md "${STAGE}/" || true
-          [ -d share/man/man1 ] && cp -R share/man "${STAGE}/" || true
+          mkdir -p "${STAGE}/share/man/man1" "${STAGE}/share/completions"
+          cp man/mkit.1 "${STAGE}/share/man/man1/mkit.1"
+          cp completions/mkit.bash "${STAGE}/share/completions/mkit.bash"
+          cp completions/mkit.zsh "${STAGE}/share/completions/_mkit"
+          cp completions/mkit.fish "${STAGE}/share/completions/mkit.fish"
 
       - name: Compute per-archive SHA256SUMS
         shell: bash
@@ -225,31 +364,27 @@ jobs:
   sbom:
     name: Generate SBOM
     runs-on: ubuntu-latest
-    needs: build
+    needs: [validate-release-tag, build]
+    permissions:
+      contents: read
     steps:
       - name: Resolve release metadata
         id: meta
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          if [ -z "${TAG}" ]; then
-            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
-            exit 1
-          fi
-          REF="refs/tags/${TAG}"
-          VERSION="${TAG#v}"
+          TAG="${{ needs.validate-release-tag.outputs.tag }}"
+          REF="${{ needs.validate-release-tag.outputs.ref }}"
+          COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
+          VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
-          ref: ${{ steps.meta.outputs.ref }}
+          ref: ${{ steps.meta.outputs.commit }}
           fetch-depth: 0
 
       - name: Generate CycloneDX SBOM
@@ -272,32 +407,47 @@ jobs:
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [build, sbom]
+    needs: [validate-release-tag, build, sbom]
+    permissions:
+      contents: write       # create the GitHub Release + upload assets
+      id-token: write       # cosign keyless OIDC
     steps:
       - name: Resolve version
         id: meta
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          if [ -z "${TAG}" ]; then
-            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
-            exit 1
-          fi
-          REF="refs/tags/${TAG}"
-          VERSION="${TAG#v}"
+          TAG="${{ needs.validate-release-tag.outputs.tag }}"
+          REF="${{ needs.validate-release-tag.outputs.ref }}"
+          TAG_OBJECT="${{ needs.validate-release-tag.outputs.tag_object }}"
+          COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
+          VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "tag_object=${TAG_OBJECT}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
-          ref: ${{ steps.meta.outputs.ref }}
+          ref: ${{ steps.meta.outputs.commit }}
           fetch-depth: 0
+
+      - name: Verify tag still points at validated object
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          REF="${{ steps.meta.outputs.ref }}"
+          EXPECTED_TAG_OBJECT="${{ steps.meta.outputs.tag_object }}"
+          EXPECTED_COMMIT="${{ steps.meta.outputs.commit }}"
+          git fetch --force origin "${REF}:${REF}"
+          ACTUAL_TAG_OBJECT="$(git rev-parse "${REF}^{tag}")"
+          ACTUAL_COMMIT="$(git rev-parse "${REF}^{commit}")"
+          if [ "${ACTUAL_TAG_OBJECT}" != "${EXPECTED_TAG_OBJECT}" ] || [ "${ACTUAL_COMMIT}" != "${EXPECTED_COMMIT}" ]; then
+            echo "ERROR: tag ${TAG} moved after validation" >&2
+            exit 1
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
@@ -365,7 +515,7 @@ jobs:
 
             Every archive is signed with **cosign keyless** via GitHub OIDC; the
             signing certificate embeds the workflow identity and a Rekor
-            transparency log entry is public. See `docs/release/SIGNING.md`
+            transparency log entry is public. See `docs/RELEASE.md`
             in the repo for full verification steps.
 
             The verifier regex below is anchored: it pins the exact workflow
@@ -395,14 +545,21 @@ jobs:
             ### npm package
 
             The WASM bindings are also published to npm as
-            [`mkit-wasm`](https://www.npmjs.com/package/mkit-wasm) at the
+            [`@makechain/mkit-wasm`](https://www.npmjs.com/package/@makechain/mkit-wasm) at the
             same version, with Sigstore-backed provenance attached to this
             workflow run.
 
   publish-wasm:
     name: Publish mkit-wasm to npm
     runs-on: ubuntu-latest
-    needs: [build, release]
+    # npm provenance (`npm publish --provenance`, below) requires a PUBLIC
+    # source repository. While the repo is private/internal this job is
+    # SKIPPED (not failed) so the CLI binary release still goes green; it
+    # self-activates the next time a tag is pushed after the repo is made
+    # public. The job body keeps its own explicit public-repo guard as a
+    # defense-in-depth check.
+    if: github.event.repository.visibility == 'public'
+    needs: [validate-release-tag, build, release]
     permissions:
       contents: write       # attach assets to the GitHub Release
       id-token: write       # npm provenance via OIDC
@@ -411,25 +568,19 @@ jobs:
         id: meta
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          if [ -z "${TAG}" ]; then
-            echo "ERROR: no tag resolved (event=${{ github.event_name }})" >&2
-            exit 1
-          fi
-          REF="refs/tags/${TAG}"
-          VERSION="${TAG#v}"
+          TAG="${{ needs.validate-release-tag.outputs.tag }}"
+          REF="${{ needs.validate-release-tag.outputs.ref }}"
+          COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
+          VERSION="${{ needs.validate-release-tag.outputs.version }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
-          ref: ${{ steps.meta.outputs.ref }}
+          ref: ${{ steps.meta.outputs.commit }}
           fetch-depth: 0
 
       - name: Install Rust ${{ env.RUST_VERSION }} + wasm32 target
@@ -493,15 +644,30 @@ jobs:
           npm version --no-git-tag-version --allow-same-version "$VERSION"
           jq '{name, version, license, repository}' package.json
 
+      - name: Ensure NPM_TOKEN present
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.MKIT_NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::MKIT_NPM_TOKEN secret is not configured. Set it in repo or org secrets before tagging a release." >&2
+            exit 1
+          fi
+
+      - name: Require public repository for npm provenance
+        env:
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          if [ "${REPOSITORY_VISIBILITY}" != "public" ]; then
+            echo "::error::npm provenance requires a public GitHub repository; refusing to publish without provenance." >&2
+            exit 1
+          fi
+
       - name: Publish to npm
         working-directory: rust/crates/mkit-wasm/pkg
         env:
           NODE_AUTH_TOKEN: ${{ secrets.MKIT_NPM_TOKEN }}
-        # `--provenance` requires the source GitHub repo to be public;
-        # this repo is currently `internal`, so npm rejects the
-        # provenance bundle with E422. Re-add `--provenance` once the
-        # repo is flipped to public (see docs/RELEASE.md TODO).
-        run: npm publish --access public
+        # provenance: requires public repo, GitHub OIDC, and this job's id-token: write permission.
+        run: npm publish --access public --provenance
 
       - name: Stage WASM bundle for GitHub Release
         shell: bash

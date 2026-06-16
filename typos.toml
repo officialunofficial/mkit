@@ -11,6 +11,8 @@ extend-exclude = [
     "rust/target/**",
     # Test fixtures may contain intentional garbage / random hashes.
     "rust/crates/*/tests/fixtures/**",
+    # Golden vectors are byte-exact git objects (incl. latin1 bytes).
+    "rust/tests/golden/**",
     # Compiled / minified web assets.
     "web/dist/**",
     "web/node_modules/**",
@@ -46,6 +48,10 @@ INSER = "INSER"
 # Storage). Used in web/scripts/patch-worker-config.mjs.
 als = "als"
 
+# Vendor name; "HashiCorp" appears in SPEC-KEYSTORE.md disambiguation
+# ("not HashiCorp Vault"). Default dictionary wants Hashi → Hash.
+Hashi = "Hashi"
+
 # Hyphenated prefix: "mis-resolve" / "mis-designed" appear in docs
 # and scripts; typos parses them as standalone "mis".
 mis = "mis"
@@ -56,6 +62,10 @@ fo = "fo"
 # Variant spelling: mkit uses "unparseable" throughout. Both forms
 # are accepted by major dictionaries.
 unparseable = "unparseable"
+
+# `thr` is the keyid prefix for BLS12-381 threshold signatures
+# (`bls12381-thr:<hex>`). Default dictionary thinks it's a typo for "the".
+thr = "thr"
 
 [type.rust.extend-words]
 # `crate` is the obvious one but typos already knows it. Add any

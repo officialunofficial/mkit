@@ -660,7 +660,7 @@ Be precise when describing cryptographic primitives.
 Use `///` for item-level doc comments and `//!` for
 module/crate-level ones. Format docstrings to fit the column
 width of the file at hand; for most mkit Rust sources that is
-100 columns. The `rustfmt` configuration in `rust/rustfmt.toml`
+100 columns. The `rustfmt` configuration in `rustfmt.toml`
 governs the formatter; rustdoc itself does not reflow text.
 
 Write descriptions in the third-person declarative, not the

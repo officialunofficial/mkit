@@ -3,11 +3,11 @@
 //! every transport implementation (memory, file, HTTP, S3, SSH).
 //!
 //! The SSH wire format is defined in `mkit-rpc`'s `ssh.proto` and
-//! lives in [`mkit_rpc::mkit::rpc::v1::ssh`]; transport-ssh consumes
+//! lives in `mkit_rpc::mkit::rpc::v1::ssh`; transport-ssh consumes
 //! the schema directly. The hand-rolled `OP_HELLO` byte format that
 //! used to live in this module has been retired.
 
-// SPEC-TRANSPORT §8 calls out the exponential ladder in seconds
+// SPEC-TRANSPORT §7 calls out the exponential ladder in seconds
 // (1, 2, 4, …, 300). Expressing those values with `Duration::from_secs`
 // is deliberate — switching to `from_mins` loses the one-to-one match
 // with the spec text.
@@ -43,7 +43,7 @@ pub enum TransportError {
     #[error("remote error: {0}")]
     RemoteError(String),
     /// `update_ref` CAS precondition was not satisfied. Per
-    /// SPEC-TRANSPORT §8, callers MUST treat this as
+    /// SPEC-TRANSPORT §7, callers MUST treat this as
     /// "possibly-success on retry" for `.missing` / `.match` and
     /// confirm with `read_ref`.
     #[error("ref CAS precondition failed")]
@@ -90,7 +90,7 @@ pub type TransportResult<T> = Result<T, TransportError>;
 // ---------------------------------------------------------------------------
 
 /// A 32-byte pack digest used as the content-address for an uploaded
-/// pack. This is the same 32 bytes as [`Hash`] but wrapped so pack
+/// pack. This is the same 32 bytes as [`Hash`](tyalias@Hash) but wrapped so pack
 /// digests and object hashes do not silently cross purposes at API
 /// boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -115,13 +115,13 @@ impl PackKey {
         to_hex(&self.0)
     }
 
-    /// Build a [`PackKey`] from a [`Hash`] (alias for [`From`]).
+    /// Build a [`PackKey`] from a [`Hash`](tyalias@Hash) (alias for [`From`]).
     #[must_use]
     pub const fn from_hash(h: Hash) -> Self {
         Self(h)
     }
 
-    /// Convert back to a plain [`Hash`].
+    /// Convert back to a plain [`Hash`](tyalias@Hash).
     #[must_use]
     pub const fn into_hash(self) -> Hash {
         self.0
@@ -162,7 +162,7 @@ pub fn pack_key_from_hex(s: &str) -> Result<PackKey, FromHexError> {
 
 /// Return `true` if a transport should retry after seeing `err`.
 ///
-/// Retryable per SPEC-TRANSPORT §8:
+/// Retryable per SPEC-TRANSPORT §7:
 /// - [`TransportError::ConnectionFailed`]
 /// - [`TransportError::ServerError`] with a 5xx status OR HTTP 429.
 ///
@@ -187,7 +187,7 @@ pub fn is_retryable(err: &TransportError) -> bool {
 
 /// Max attempts for the default backoff ladder.
 ///
-/// SPEC-TRANSPORT §8: `attempt = 1; while attempt ≤ 5`.
+/// SPEC-TRANSPORT §7: `attempt = 1; while attempt ≤ 5`.
 pub const BACKOFF_MAX_ATTEMPTS: u32 = 5;
 
 /// Initial sleep between attempts.
@@ -196,11 +196,30 @@ pub const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 /// Upper bound on any individual sleep.
 pub const BACKOFF_CAP: Duration = Duration::from_secs(300);
 
+/// Per-pack body size ceiling enforced by every transport that ingests
+/// pack bytes (HTTP `Content-Length`, S3 `GetObject`, SSH
+/// `DownloadPackHeader.total_bytes`). On 64-bit targets, 4 GiB matches
+/// the pack-format addressable range; pointer-width-limited targets cap
+/// at their maximum addressable buffer size instead of failing to compile.
+#[cfg(target_pointer_width = "64")]
+pub const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+#[cfg(not(target_pointer_width = "64"))]
+pub const PACK_BODY_LIMIT: u64 = usize::MAX as u64;
+
+/// `usize`-typed mirror of [`PACK_BODY_LIMIT`] for `Vec`-shaped buffer
+/// caps. The assertion below prevents silent truncation on any target.
+#[allow(clippy::cast_possible_truncation)]
+pub const PACK_BODY_LIMIT_USIZE: usize = PACK_BODY_LIMIT as usize;
+const _: () = assert!(
+    (PACK_BODY_LIMIT_USIZE as u64) == PACK_BODY_LIMIT,
+    "PACK_BODY_LIMIT does not fit in usize on this target",
+);
+
 /// Exponential-backoff iterator used by all transports.
 ///
 /// Yields `[1s, 2s, 4s, 8s, 16s]` (5 attempts) for the default ladder,
 /// doubling each step and capping at 300s. This is the ladder mandated
-/// by SPEC-TRANSPORT §8 for `ConnectionFailed`, 5xx, and HTTP 429.
+/// by SPEC-TRANSPORT §7 for `ConnectionFailed`, 5xx, and HTTP 429.
 ///
 /// The iterator is self-contained — it holds no reference to a clock,
 /// so it can be constructed in tests and exhaustively enumerated.
@@ -270,7 +289,7 @@ impl Iterator for BackoffIterator {
 /// `RwLock` internally. This keeps the trait object-safe.
 ///
 /// All implementations MUST honour the retry policy in
-/// SPEC-TRANSPORT §8 internally OR document that the caller is
+/// SPEC-TRANSPORT §7 internally OR document that the caller is
 /// responsible — the abstract trait takes no position. The
 /// [`is_retryable`] and [`BackoffIterator`] helpers are provided for
 /// implementations that embed the policy.
@@ -304,7 +323,7 @@ pub trait Transport: Send + Sync {
     /// On `.missing` / `.match` CAS failure, returns
     /// [`TransportError::RefConflict`]. Callers retrying after a
     /// timeout MUST follow up with [`Self::read_ref`] to confirm
-    /// whether the first attempt actually landed (SPEC-TRANSPORT §8).
+    /// whether the first attempt actually landed (SPEC-TRANSPORT §7).
     fn update_ref(
         &self,
         name: &str,
@@ -319,6 +338,50 @@ pub trait Transport: Send + Sync {
     /// have `prefix` stripped per SPEC-REFS §4. An empty prefix lists
     /// every ref.
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>>;
+}
+
+// ---------------------------------------------------------------------------
+// async_shim — sync/async bridge for transports that wrap an async cipher
+// ---------------------------------------------------------------------------
+
+/// Sync-over-async shim for transports whose underlying cipher / I/O is
+/// async (e.g. `commonware-stream::encrypted`) but whose
+/// [`Transport`] trait surface is intentionally sync.
+///
+/// Lives in `mkit-core` (the trait crate) because it is generic
+/// infrastructure — multiple transports and Phase 2 sparse-checkout
+/// will reuse the same plug-in point. It does **not** depend on
+/// `tokio`, `commonware-runtime`, or any concrete executor; callers
+/// pick the runner.
+///
+/// # Why a trait
+///
+/// `mkit-transport-enc` and (in Phase 2) `mkit-core::sparse` need to
+/// drive `async fn` bodies from a sync method. Hard-coding
+/// `tokio::runtime::Handle::block_on` would bleed tokio across the
+/// workspace; hard-coding `commonware_runtime::deterministic` would
+/// mean production = tests. A pluggable `Executor` keeps the
+/// runtime-choice at the consumer crate.
+pub mod async_shim {
+    /// Drives an async future to completion synchronously. Pluggable so
+    /// callers can choose between `tokio`, `commonware-runtime`'s
+    /// deterministic runner (tests), or the planned production tokio
+    /// runner without `mkit-core` having to compile-time depend on a
+    /// specific runtime crate.
+    ///
+    /// Implementations MUST be re-entrancy-safe in the sense expected
+    /// by the chosen runtime — calling `block_on` from inside an
+    /// already-running task on the same runtime will typically panic
+    /// or deadlock. The shim's contract is "synchronous external API
+    /// wraps async internals", not "arbitrary async-from-sync
+    /// recursion".
+    pub trait Executor: Send + Sync {
+        /// Block the current thread until `fut` resolves.
+        fn block_on<F, T>(&self, fut: F) -> T
+        where
+            F: core::future::Future<Output = T> + Send,
+            T: Send;
+    }
 }
 
 // ---------------------------------------------------------------------------

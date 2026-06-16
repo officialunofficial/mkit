@@ -18,69 +18,189 @@ usage: mkit <command> [args]
 
 commands:
   init              Create a new mkit repository
-  add <path>        Stage a file for the next commit
-  add .             Stage all files (respects .mkitignore)
-  rm <path>         Mark a file for removal in the next commit
+  add [-A|-u] [-f] <path>...  Stage files for the next commit
+  add .             Stage all files under cwd (respects .gitignore/.mkitignore)
+  add -A            Stage all changes incl. deletions (no path args)
+  add -u            Restage only already-tracked files (no path args)
+  add -f <path>     Stage an ignored path (overrides .gitignore/.mkitignore)
+  add -p <path>...  Interactively choose hunks to stage (y/n/q/a/d per hunk)
+  rm [--cached] [-r] [-f] <path>...  Remove path(s) and stage the deletion
+  rm --cached       Stage the removal only; keep the worktree file(s)
+  mv [-f] <source>... <dest>  Move/rename tracked path(s) and stage it
+                    (into <dest> when it is an existing directory; -f
+                    overwrites an existing destination)
+  restore [--staged] [--worktree] [--source <rev>] [-f] <path>...
+                    Discard worktree changes for path(s) (restore from the
+                    index), or --staged to unstage (restore the index entry
+                    from HEAD); -f overrides the un-staged-edit guard
+  reset [--soft|--mixed|--hard] [-f] [<commit>]
+                    Move HEAD/branch (--soft) or HEAD + reset the index to
+                    the commit's tree (--mixed, default); worktree untouched.
+                    --hard also resets the worktree (keeps untracked files);
+                    refuses to discard dirty/staged content without -f
   hash <file>       Hash a file and store it as a blob
   cat <hash>        Display an object by its hash
+  cat-file (-t|-s|-p) <object> | cat-file --batch
+                    Show an object's type, size, or content
+                    (-p: blob bytes, tree listing, or commit/tag summary;
+                    --batch reads object names from stdin, takes no <object>)
+  show [<object>...] Display objects (default HEAD): a commit/remix with its
+                    diff vs the first parent, a tag then its target, a tree
+                    listing, or a blob's contents
   tree              Snapshot working directory as a tree object
-  commit [-a] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
-  log [--oneline] [--format=json] [--graph] [-n N]
-                    Show commit history (--format=json emits JSONL)
-  status [--porcelain]
-                    Show staged and working tree changes
-                    (--porcelain emits machine-readable XY lines on stdout)
-  diff              Show changes (HEAD vs workdir, or two trees)
-  branch [--format=json]
-                    List branches (* marks current; JSONL with --format=json)
+  ls-tree [-r] [-z] <tree-ish> [<path>...]
+                    List a tree's entries as `<mode> <type> <hash>\t<name>`
+                    (-r recurses; -z NUL-terminates with raw paths)
+  ls-files [-s] [-z] [--others] [--ignored] [--exclude-standard]
+                    List tracked files (-s adds stage info; --others lists
+                    untracked; --exclude-standard drops ignored)
+  rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]
+                    Resolve revisions to object ids (--short abbreviates,
+                    --abbrev-ref HEAD prints the branch, --show-toplevel
+                    prints the repo root)
+  show-ref [--heads] [--tags]  List refs as `<hash> <refname>`
+  for-each-ref [--format=<fmt>] [<pattern>...]
+                    Iterate refs, optionally with a %(atom) format string
+  symbolic-ref [--short] <name> [<ref>]
+                    Read a symbolic ref, or (with <ref>) repoint it
+                    (e.g. symbolic-ref HEAD refs/heads/main)
+  update-ref [-d] <ref> [<newvalue> [<oldvalue>]]
+                    Create/update/delete refs/heads/* or refs/tags/*
+                    (<oldvalue> compare-and-swap; all-zero = must be absent,
+                    update mode only; -d's <oldvalue> must be concrete)
+  commit [-a] [--amend] [-m <msg>] Create a signed commit (opens $EDITOR if -m omitted)
+  commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
+                    move the branch. Reuses HEAD's message if -m omitted.
+                    The superseded commit becomes unreachable until `gc` ships.
+  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]
+                    Show commit history (default prints the full message
+                    body + a UTC date; --oneline/--abbrev-commit abbreviate
+                    the commit id, --abbrev[=N] sets the length (default 7);
+                    --format=json emits JSONL with the raw timestamp;
+                    --graph is accepted but currently a no-op). Optional
+                    <rev> starts the walk there; <A>..<B> shows commits in B
+                    not in A; <A>...<B> the symmetric difference (empty
+                    side = HEAD)
+  reflog [<ref>] [--format=json] [-n N]
+                    Show a branch's recorded movement history (read-only).
+                    Lists the branch's first-parent chain (newest first,
+                    addressed <ref>@{N}); defaults to HEAD's branch. With
+                    --features history-mmr, cross-checks each entry against
+                    the journaled ref-history MMR. Not a full Git reflog:
+                    @{N} indexes the reachable chain, so superseded commits
+                    (after amend/reset) are not listed.
+  status [--porcelain[=v1|v2]] [-s|--short] [-z]
+                    Show staged and working tree changes (--porcelain, or
+                    its -s/--short alias, emits machine-readable XY lines;
+                    --porcelain=v2 emits git's richer per-path format with
+                    modes + object ids; special-byte paths are C-style
+                    quoted; -z NUL-terminates records with raw paths)
+  diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
+                    Show changes as a unified patch (HEAD vs workdir,
+                    --staged for HEAD vs index, a single revision vs the
+                    worktree, two revisions, an A..B range, or an A...B
+                    symmetric range = merge-base(a,b) vs b; revisions
+                    are refs, commits, or short hashes). --name-only lists
+                    changed paths; --name-status prefixes each with an
+                    A/D/M (T = mode change) letter; --stat shows per-file
+                    change counts + a +/- graph and a summary line; -z
+                    NUL-terminates name-only/-status records with raw paths
+                    (else special-byte paths are C-style quoted)
+  branch [-v|--verbose] [--format=json]
+                    List branches (* marks current; no commit id by
+                    default, like git; -v adds the abbreviated id +
+                    subject; JSONL with --format=json)
   branch <name>     Create a branch at HEAD
-  branch -d <name>  Delete a branch
+  branch -d <name>  Delete a branch (safe; refuses the current branch)
+  branch -D <name>  Force-delete a branch (errors on an absent branch,
+                    like git; still refuses the current branch)
+  branch -m [<old>] <new>  Rename a branch (current branch if <old> omitted)
   checkout <branch> Switch HEAD to a branch and restore files
-  tag               List, create, or delete tags
+  clean [-n] [-f] [-d] [-x|-X] [<path>...]
+                    Remove untracked files (refuses without -f; -n
+                    previews). -d also removes untracked dirs; -x includes
+                    ignored files, -X removes only ignored
+  tag [<name>] [<commit>]  List tags, or create a lightweight tag
+  tag -a <name> [-m <msg>] [<commit>]  Create an annotated tag object
+  tag -s <name> [-m <msg>] [<commit>]  Create a signed (Ed25519) tag object
+  tag -d <name>     Delete a tag
   config [--format=json]  Show all configuration values (JSON with --format=json)
   config <key> [--format=json]  Show one value
   config <key> <value>  Set a configuration value
   config user.identity <value>  Set author Identity
                         (ed25519:<hex>, mid:<N>, or raw [kind][len][bytes] hex)
+  config user.name|user.email <value>  Git-compatibility aliases; stored and
+                        round-tripped but NON-authoritative — they never set
+                        the signed author (use user.identity for that)
   config trusted_remote_endpoint <url>  Trust an HTTP/S3 remote for ambient env credentials
   config ssh.strict_host_key_checking <yes|no|accept-new>  Override SSH host policy
   config ssh.user_known_hosts_file <path>  Custom SSH known_hosts file
   config ssh.identity_file <path>  SSH private key file
   merge <branch>    Merge a branch into HEAD
-  push [--dry-run]  Push refs and packs to the configured remote
+  push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]
+                    Push current branch to its upstream (--all mirrors every branch)
   pull              Pull changes from remote
   fetch             Download from remote without merging
   stash             Stash working dir changes (save WIP)
   stash save -m <msg>  Stash with a message
   stash list        List stash entries
   stash pop [N]     Apply and remove stash entry N (default 0)
+  stash apply [N]   Apply stash entry N without removing it (default 0)
   stash drop [N]    Remove stash entry N without applying
+  stash clear       Remove all stash entries
   stash show [N]    Show diff of stash entry N
   clone [--depth N] [--sparse ...] <url>  Clone a repository
   remote [--format=json]  Show remote configuration (JSON with --format=json)
-  remote add <url>  Add remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
-  remote set <url>  Alias for 'remote add'
+  remote add [<name>] <url>  Add a remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
+  remote set [<name>] <url>  Alias for 'remote add'
+  remote remove <name>  Remove a named remote (`default` clears the flat remote)
+  remote rename <old> <new>  Rename a named remote
+  key generate|list|import|export|delete  Manage user-scoped keystore keys
   keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
                     Generate a new signing key (defaults to Ed25519)
   cherry-pick <hash> Apply a commit to the current branch
+  revert <commit> | --continue | --abort
+                    Create a new commit undoing <commit> (forward commit;
+                    conflict-aware)
   rebase <branch>    Replay commits onto a different base
+  rebase -i <branch> Interactive: reorder/drop/reword/squash/fixup the todo
   rebase --continue  Continue rebase after conflict resolution
   rebase --abort     Abort rebase and restore original state
   bisect start       Begin binary search for a bug
   bisect good [hash] Mark a commit as good
   bisect bad [hash]  Mark a commit as bad
   bisect reset       End bisect and restore original state
+  gc [-n] [--grace-secs SECS]
+                    Reclaim unreachable objects older than the grace
+                    window (default 14d); -n/--dry-run previews
   sparse-checkout    Manage sparse checkout patterns
   serve <path>       Start SSH transport server (internal)
+  mcp [--repository <path>]
+                    Start a Model Context Protocol server on stdio so LLM
+                    agents can drive this repository (status/diff/log/add/
+                    commit/branch + verify/attest); --repository confines
+                    tool calls to that path
+  pack-shard <hash>  Encode a stored pack into Reed-Solomon shards (feature: pack-shards)
+  git export <dest>  Export refs to a git mirror, one-way; --passthrough
+                    publishes an imported repo as a true git fork (feature: git-bridge)
+  git import <url> [<dir>]  Import a git upstream as a signed downstream fork (feature: git-bridge)
+  git fetch|pull     Update refs/remotes/<name>/* and imported tags from the
+                    upstream (locally-moved tags are never clobbered);
+                    pull also fast-forwards the current branch (feature: git-bridge)
+  git verify         Verify bridge state against the local store
+                    (--fork-audit re-derives referenced content) (feature: git-bridge)
+  git status         Show bridge state dirs: direction, endpoints, key, refs (feature: git-bridge)
+  git format-patch <range>  Render native commits as `git am`-able patches (feature: git-bridge)
   blame [--format=json] <file>
                     Show line-level commit attribution (JSONL with --format=json)
-  verify <hash>     Verify the signature on a commit or remix
+  verify <rev>      Verify the signature on a commit, remix, or signed tag
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
          [--additional-signer \"algorithm=<alg>,signer=<kind>[,path=<p>]\"]...
                     Produce a signed DSSE attestation for a commit
   verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>]
                     Verify every attestation attached to a commit
-  version           Print version
+  version           Print version. Also available as the top-level
+                    `--version` / `-V` flags; all emit `mkit <X.Y.Z>`.
 ";
 
 /// Strip lines beginning with `#` (after any leading whitespace) and
@@ -122,15 +242,29 @@ mod tests {
             "init",
             "add",
             "rm",
+            "mv",
+            "restore",
+            "reset",
             "hash",
             "cat",
+            "cat-file",
             "tree",
+            "ls-tree",
+            "ls-files",
+            "rev-parse",
+            "show",
+            "show-ref",
+            "for-each-ref",
+            "symbolic-ref",
+            "update-ref",
             "commit",
             "log",
+            "reflog",
             "status",
             "diff",
             "branch",
             "checkout",
+            "clean",
             "tag",
             "config",
             "merge",
@@ -140,12 +274,15 @@ mod tests {
             "stash",
             "clone",
             "remote",
+            "key",
             "keygen",
             "cherry-pick",
             "rebase",
             "bisect",
             "sparse-checkout",
             "serve",
+            "mcp",
+            "pack-shard",
             "blame",
             "verify",
             "version",

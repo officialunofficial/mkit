@@ -4,15 +4,22 @@ on:
   push:
     branches:
       - main
-      - rewrite/rust
-      - "rewrite/rust/**"
-  pull_request:
-    branches:
-      - main
-      - rewrite/rust
+  # Expensive CI: on PRs this runs only once a review is approved. The
+  # pull_request_review event can't filter by branch/path, so each job
+  # guards on the approval state + base ref below.
+  pull_request_review:
+    types: [submitted]
 
 permissions:
   contents: read
+
+# One run per PR (or per branch on push); newer events cancel older ones.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Cancel superseded approval runs; pushes to main are never cancelled.
+  # (On pull_request_review github.ref is the default branch, so we can't key
+  # the guard off github.ref — gate on the event name instead.)
+  cancel-in-progress: ${{ github.event_name == 'pull_request_review' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,6 +30,11 @@ env:
 jobs:
   build-and-test:
     name: Build & Test (${{ matrix.os }})
+    # Run on main pushes; on PRs only after an approving review.
+    if: >-
+      github.event_name != 'pull_request_review' ||
+      (github.event.review.state == 'approved' &&
+       github.event.pull_request.base.ref == 'main')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -30,7 +42,30 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          # On approval (pull_request_review) the default ref is the base
+          # branch — check out the PR head so we test the PR's code. On
+          # push, github.sha is already the right commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # Phase-2 commonware adoption pulled in tokio + axum + criterion +
+      # reed-solomon, doubling the post-nextest `target/` footprint past
+      # what the ubuntu-latest runner ships with (~14 GiB free of 75 GiB).
+      # Free the Android SDK / .NET / Haskell tree before the build so the
+      # doctest step has room. ~14 GiB recovered; the action is a no-op on
+      # macOS (only runs when `if` matches).
+      - name: Free disk space (Linux only)
+        if: runner.os == 'Linux'
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
 
       - name: Install Rust ${{ env.RUST_VERSION }}
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
@@ -42,19 +77,20 @@ jobs:
       # per-workflow + per-runner so a malicious PR cannot poison a key
       # that a privileged workflow (release.yml, which carries
       # secrets.MKIT_NPM_TOKEN + id-token: write) later reads. See
-      # docs/release/SUPPLY-CHAIN.md.
+      # docs/RELEASE.md.
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           workspaces: rust -> rust/target
           prefix-key: "rust-ci-${{ matrix.os }}"
           cache-on-failure: false
+          cache-bin: false
 
       # cargo-nextest: faster + structured test runner. Replaces
       # `cargo test`. Pinned via taiki-e/install-action which fetches a
       # cosign-signed prebuilt binary from the cargo-nextest release.
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@fa0dd4cd0a40696e6f9766370614a5ce482e6aa8  # v2
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912  # v2
         with:
           tool: cargo-nextest
 
@@ -74,11 +110,12 @@ jobs:
       # via target_os, so we only install on Linux:
       #   libtss2-dev   → mkit-sign-tpm's `tpm2` feature (tss-esapi)
       #   libudev-dev   → mkit-sign-ctap (via hidapi → libudev)
+      #   libpcsclite-dev → mkit-keystore `backend-yubikey` PC/SC support
       #   swtpm         → integration tests against a software TPM
       #                   when -F tpm-mssim is enabled
       - name: Install native signer deps (Linux only)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev swtpm
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config swtpm
 
       - name: Check formatting
         working-directory: rust
@@ -92,9 +129,33 @@ jobs:
         working-directory: rust
         run: cargo build --locked --workspace
 
+      # The reference external signers are a SEPARATE workspace
+      # (contrib/signers/) so they don't break release-plz's crates.io publish
+      # (#225). `--workspace` above no longer covers them, so build/test/lint
+      # them here. --all-features turns on tpm2 (tss-esapi, Linux/Windows-gated)
+      # and ctap-hw (ctap-hid-fido2); the native deps installed above cover the
+      # Linux build. This step must run BEFORE the workspace nextest step:
+      # mkit-cli's attest_roundtrip tests drive the mkit-sign-file binary from
+      # contrib/signers/target/debug/ and only fall back to building it
+      # on-the-fly when it's missing.
+      # No doctest pass here: the signers are bin-only crates and
+      # `cargo test --doc` hard-errors with "no library targets found"
+      # when a workspace has no lib targets (doctests only exist in libs).
+      - name: Contrib signers (separate workspace)
+        working-directory: contrib/signers
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo build --locked --all-features
+          cargo nextest run --locked --all-features
+
       - name: Test (nextest)
         working-directory: rust
         run: cargo nextest run --locked --workspace --all-features
+
+      - name: Fuzz unit tests
+        working-directory: rust
+        run: cargo test --manifest-path fuzz/Cargo.toml
 
       # Doctests are not run by `cargo nextest`. Run them separately so
       # docstring examples still get exercised.
@@ -119,6 +180,99 @@ jobs:
             exit 1
           fi
 
+      # Phase 2 of issue #156: build the CLI with the dedicated
+      # `enc-transport` cargo feature and run the encrypted-transport
+      # e2e test. The above `--all-features` test pass already covers
+      # this in aggregate; the dedicated invocation pins the feature
+      # gate so a future refactor can't silently break the
+      # opt-in-only build path.
+      - name: Encrypted-transport feature build (Phase 2)
+        working-directory: rust
+        run: |
+          cargo build --locked -p mkit-cli --features enc-transport
+          cargo test --locked -p mkit-transport-enc --features tcp --no-fail-fast
+
+  keystore-backends:
+    name: Keystore backends (${{ matrix.name }})
+    if: >-
+      github.event_name != 'pull_request_review' ||
+      (github.event.review.state == 'approved' &&
+       github.event.pull_request.base.ref == 'main')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-keychain-yubikey
+            os: macos-latest
+            features: backend-macos-keychain backend-yubikey
+          - name: windows-credential
+            os: windows-latest
+            features: backend-windows-credential
+          - name: linux-secret-systemd-yubikey
+            os: ubuntu-latest
+            features: backend-linux-secret-service backend-systemd-creds backend-yubikey
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          # On approval (pull_request_review) the default ref is the base
+          # branch — check out the PR head so we test the PR's code. On
+          # push, github.sha is already the right commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: rust -> rust/target
+          prefix-key: "rust-keystore-${{ matrix.name }}"
+          cache-on-failure: false
+          cache-bin: false
+
+      - name: Install Linux keystore native deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring libpcsclite-dev pkg-config
+
+      - name: Test keystore backend feature set
+        working-directory: rust
+        shell: bash
+        env:
+          MKIT_RUN_NATIVE_KEYSTORE_TESTS: "1"
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            dbus-run-session -- bash -lc '
+              set -euo pipefail
+              eval "$(printf "mkit-ci\n" | gnome-keyring-daemon --unlock --components=secrets)"
+              cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
+              cargo test --locked -p mkit-keystore --features "${{ matrix.features }}" \
+                backend_linux_secret_service::tests::live_backend_create_open_list_export_delete_roundtrip -- --exact --ignored
+            '
+            sudo env \
+              "PATH=$PATH" \
+              "CARGO_HOME=$CARGO_HOME" \
+              "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+              "CARGO_TARGET_DIR=$RUNNER_TEMP/mkit-systemd-creds-target" \
+              "MKIT_RUN_NATIVE_KEYSTORE_TESTS=1" \
+              "MKIT_RUN_SYSTEMD_CREDS_TESTS=1" \
+            cargo test --locked -p mkit-keystore --features "backend-systemd-creds" \
+                backend_systemd_creds::tests::live_backend_create_open_list_export_delete_roundtrip -- --exact --ignored
+          else
+            cargo test --locked -p mkit-keystore --features "${{ matrix.features }}"
+            cargo test --locked -p mkit-keystore --features "${{ matrix.features }}" -- --ignored
+          fi
+
+      - name: Clippy keystore backend feature set
+        working-directory: rust
+        shell: bash
+        run: cargo clippy --locked -p mkit-keystore --features "${{ matrix.features }}" --all-targets -- -D warnings
+
 
   # Minimum-supported Rust version gate. Reads `rust-version` from
   # rust/Cargo.toml so the source of truth stays in one place; if a dep
@@ -126,10 +280,19 @@ jobs:
   # before users on the pinned MSRV are affected.
   msrv:
     name: MSRV check
+    if: >-
+      github.event_name != 'pull_request_review' ||
+      (github.event.review.state == 'approved' &&
+       github.event.pull_request.base.ref == 'main')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          # On approval (pull_request_review) the default ref is the base
+          # branch — check out the PR head so we test the PR's code. On
+          # push, github.sha is already the right commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Resolve MSRV from rust/Cargo.toml
         id: msrv
@@ -164,10 +327,10 @@ jobs:
           workspaces: rust -> rust/target
           prefix-key: "rust-msrv-${{ steps.msrv.outputs.msrv }}"
           cache-on-failure: false
+          cache-bin: false
 
       - name: cargo check (workspace, locked)
         working-directory: rust
         env:
           CARGO_INCREMENTAL: 0
         run: cargo check --workspace --locked --all-targets
-

@@ -28,15 +28,27 @@ default = ["algo-ed25519", "algo-secp256k1", "algo-p256"]
 algo-ed25519 = ["dep:ed25519-dalek"]
 algo-secp256k1 = ["dep:k256", "dep:sha2"]
 algo-p256 = ["dep:p256", "dep:sha2"]
+# BLS12-381 M-of-N threshold signing — for the release-party flow.
+# OFF by default: commonware-cryptography pulls blst (a sizeable
+# precompiled BLS library) and a portion of the commonware monorepo's
+# dep tree. We don't want every default `cargo add mkit-attest` to
+# pay for that — release-party tooling explicitly opts in.
+bls-threshold = [
+    "dep:commonware-cryptography",
+    "dep:commonware-codec",
+    "dep:commonware-parallel",
+    "dep:commonware-utils",
+    "dep:rand_core",
+]
 
 [dependencies]
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it; path-only deps are rejected by
 # the registry. Track the workspace.package.version.
-mkit-core = { version = "0.1", path = "../mkit-core" }
+mkit-core = { version = "0.3", path = "../mkit-core" }
 # mkit-rpc owns signer.proto + framing helpers used by ExternalSigner.
-mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
-buffa = "0.5"
+mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
+buffa = "0.7.1"
 blake3 = "1"
 base64 = "0.22"
 thiserror = "2"
@@ -67,9 +79,29 @@ p256 = { version = "0.13", optional = true, default-features = false, features =
 # ES256K / ES256 both sign SHA256(pae); pull in a standalone sha2 so the
 # signers don't rely on k256/p256 re-exports bleeding across features.
 sha2 = { version = "0.10", optional = true, default-features = false }
+# BLS12-381 threshold signing (feature `bls-threshold`). Pulls blst via
+# commonware-cryptography's default `std` feature. The whole dep tree is
+# default-off; opt-in carries the cost. `commonware-codec` is the
+# `Encode`/`Decode` companion crate used to ship partial signatures on
+# the wire between holders and aggregator. Version pin lives at
+# `[workspace.dependencies]` in `rust/Cargo.toml`.
+commonware-cryptography = { workspace = true, optional = true, features = ["std"] }
+commonware-codec = { workspace = true, optional = true, features = ["std"] }
+# `Sequential` (parallel strategy) for recovery + `Faults`/`N3f1` for
+# threshold computation. Same workspace train as commonware-cryptography.
+commonware-parallel = { workspace = true, optional = true, features = ["std"] }
+commonware-utils = { workspace = true, optional = true, features = ["std"] }
+# `CryptoRngCore` for the trusted-dealer helper. Pulled by
+# commonware-cryptography anyway; explicit here so the call site can
+# accept any RNG without re-exporting commonware's prelude.
+rand_core = { version = "0.6", optional = true, default-features = false }
 
 [dev-dependencies]
 hex = "0.4"
 # Tests that hand-build signing keys need dalek unconditionally, so pull
 # it in as a dev-dep separate from the feature-gated runtime dep.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

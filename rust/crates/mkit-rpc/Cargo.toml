@@ -25,12 +25,31 @@ authors.workspace = true
 # own hand-written code in src/ stays under it.
 all = { level = "warn", priority = -1 }
 
+[features]
+# Opt-in `arbitrary::Arbitrary` derives on all generated wire types,
+# for fuzzing / property tests (used by the rust/fuzz harness). Off by
+# default so downstream consumers don't pull in `arbitrary`.
+arbitrary = ["dep:arbitrary", "buffa/arbitrary"]
+
 [dependencies]
-buffa = "0.5"
+arbitrary = { version = "1", optional = true }
+buffa = "0.7.1"
 thiserror = "2"
+# mkit-rpc now also re-exports a small set of shared transport-side
+# frame helpers (cond_to_wire, rpc_error_to_transport, ref_entry_to_ref,
+# unexpected_frame, body_name, MAX_REF_NAME, CHUNK_DATA_MAX) — used by
+# both mkit-transport-ssh and mkit-transport-enc. Those helpers need
+# `TransportError`, `Ref`, `RefWriteCondition`, and `validate_ref_name`
+# from mkit-core. mkit-core does NOT depend on mkit-rpc, so this is
+# acyclic.
+mkit-core = { version = "0.3", path = "../mkit-core" }
 
 [build-dependencies]
-buffa-build = "0.5"
+buffa-build = "0.7.1"
 
 [dev-dependencies]
 hex = "0.4"
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

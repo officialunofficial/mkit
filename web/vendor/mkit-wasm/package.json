@@ -1,0 +1,20 @@
+{
+  "name": "mkit-wasm",
+  "version": "0.0.0-local",
+  "private": true,
+  "type": "module",
+  "module": "./pkg/mkit_wasm.js",
+  "types": "./pkg/mkit_wasm.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./pkg/mkit_wasm.d.ts",
+      "import": "./pkg/mkit_wasm.js",
+      "default": "./pkg/mkit_wasm.js"
+    },
+    "./mkit_wasm_bg.wasm": "./pkg/mkit_wasm_bg.wasm"
+  },
+  "files": [
+    "pkg"
+  ]
+}

@@ -75,12 +75,17 @@ fn manifest_blake3_digests_match_bin_files() {
 
 #[test]
 fn golden_index_empty_round_trips() {
+    // The phase-4 golden is a v1 stream: it must still PARSE (read
+    // compat is the v1→v2 migration path, SPEC-INDEX §"versioning"),
+    // and re-serialisation upgrades it to the current v2 layout.
     let bytes = read_golden("index_empty.bin");
     assert_eq!(bytes.len(), 9);
     assert_eq!(&bytes[..4], b"MKIX");
     let idx = index::deserialize(&bytes).unwrap();
     assert!(idx.entries.is_empty());
-    assert_eq!(idx.serialize(), bytes);
+    let upgraded = idx.serialize();
+    assert_eq!(upgraded[4], index::FORMAT_VERSION, "writer emits v2");
+    assert_eq!(index::deserialize(&upgraded).unwrap(), idx);
 }
 
 #[test]
@@ -96,7 +101,12 @@ fn golden_index_3entries_round_trips() {
     assert_eq!(by_path["README.md"], EntryStatus::Blob);
     assert_eq!(by_path["src"], EntryStatus::Tree);
     assert_eq!(by_path["scripts/build"], EntryStatus::Executable);
-    assert_eq!(idx.serialize(), bytes);
+    // v1 entries parse with an empty stat cache and upgrade to v2 on
+    // write, preserving every entry.
+    assert!(idx.entries.iter().all(|e| e.mtime_ns == 0 && e.size == 0));
+    let upgraded = idx.serialize();
+    assert_eq!(upgraded[4], index::FORMAT_VERSION, "writer emits v2");
+    assert_eq!(index::deserialize(&upgraded).unwrap(), idx);
 }
 
 #[test]
@@ -238,11 +248,19 @@ fn index_round_trip_via_disk() {
         path: "README.md".into(),
         status: EntryStatus::Blob,
         object_hash: hash::hash(b"r"),
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     idx.entries.push(IndexEntry {
         path: "old.txt".into(),
         status: EntryStatus::Removed,
         object_hash: [0u8; 32],
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
     });
     index::write_index(dir.path(), &idx).unwrap();
     let read = index::read_index(dir.path()).unwrap();

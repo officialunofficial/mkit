@@ -1,13 +1,15 @@
-# Standalone fuzz crate — NOT a workspace member. cargo-fuzz expects a
-# leaf crate; including this in the workspace would make `cargo test`
-# pull in libfuzzer-sys (nightly-only on stable builds).
+# cargo-fuzz crate. It IS a workspace member (see the root Cargo.toml
+# `members` list), which is only safe because libfuzzer-sys is behind
+# the optional `libfuzzer` feature — the default `cargo build` / `cargo
+# test` never pulls it in (it's nightly-only on stable builds). cargo-fuzz
+# drives the libfuzzer binaries with `--features libfuzzer` itself.
 #
 # Two execution paths:
 #
 # * `cd rust/fuzz && cargo +nightly fuzz run delta` — libfuzzer-sys
 #   harness; the iteration counter inside each target body still
 #   enforces the FUZZ.md guardrails.
-# * `cargo test --manifest-path rust/fuzz/Cargo.toml` — plain unit-test
+# * `cd rust && cargo test --manifest-path fuzz/Cargo.toml` — plain unit-test
 #   harness over the same target bodies, so CI catches regressions
 #   even without nightly.
 #
@@ -34,13 +36,25 @@ license = "MIT OR Apache-2.0"
 cargo-fuzz = true
 
 [dependencies]
+arbitrary = "1"
+buffa = "0.7.1"
 mkit-core = { path = "../crates/mkit-core" }
+mkit-git-bridge = { path = "../crates/mkit-git-bridge" }
+mkit-keystore = { path = "../crates/mkit-keystore", features = ["fuzzing"] }
+mkit-rpc = { path = "../crates/mkit-rpc", features = ["arbitrary"] }
 tempfile = "3"
 
 # libfuzzer-sys is gated on the `libfuzzer` feature so `cargo test`
 # (stable, no nightly) doesn't pull it in. cargo-fuzz drives the build
 # with `--features libfuzzer` automatically.
 libfuzzer-sys = { version = "0.4", optional = true }
+
+# `minifuzz` (commonware-invariants) drives the in-process `#[test]`
+# property runs — see the `rpc_decode` pilot in `src/lib.rs`. Dev-only:
+# the libfuzzer binaries never touch it. Pinned to the commonware
+# 2026.5.x train, same as the workspace-root commonware-* deps.
+[dev-dependencies]
+commonware-invariants = "=2026.5.0"
 
 [features]
 default = []
@@ -70,8 +84,48 @@ doc = false
 bench = false
 required-features = ["libfuzzer"]
 
+[[bin]]
+name = "software_key_record"
+path = "fuzz_targets/software_key_record.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "rpc_decode"
+path = "fuzz_targets/rpc_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
 # When run as plain unit tests (no `--features libfuzzer`), the targets
 # expose their guardrail-enforcing bodies via `pub fn run_unit_tests()`
 # in each file. The shim below exposes them as `#[test]`s.
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "git_commit_parse"
+path = "fuzz_targets/git_commit_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "git_tag_parse"
+path = "fuzz_targets/git_tag_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "git_tree_parse"
+path = "fuzz_targets/git_tree_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

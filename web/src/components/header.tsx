@@ -1,4 +1,5 @@
 import { Link } from 'waku'
+import { GridLogo } from './grid-logo'
 
 export const Header = () => {
   return (
@@ -15,8 +16,10 @@ export const Header = () => {
     >
       <div className='mx-auto w-full max-w-5xl px-6'>
         <div className='flex items-center gap-6 py-4'>
-          <Link to='/' className='text-base tracking-tight'>
-            mkit <span className='text-[--color-muted]'>demo</span>
+          {/* Negative margin + padding grows the tap target to 44px (WCAG 2.5.8 / platform guidance)
+              without shifting the 20px logo's visual position. */}
+          <Link to='/' className='-m-3 flex items-center p-3' aria-label='mkit home'>
+            <GridLogo className='size-5 rounded-[3px]' />
           </Link>
           <nav className='flex items-center gap-4 text-sm'>
             <Link
@@ -32,12 +35,6 @@ export const Header = () => {
               sign
             </Link>
             <Link
-              to='/attest'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              attest
-            </Link>
-            <Link
               to='/tree'
               className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
             >
@@ -48,6 +45,18 @@ export const Header = () => {
               className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
             >
               streaming
+            </Link>
+            <Link
+              to='/performance'
+              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
+            >
+              performance
+            </Link>
+            <Link
+              to='/attest'
+              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
+            >
+              attest
             </Link>
           </nav>
         </div>

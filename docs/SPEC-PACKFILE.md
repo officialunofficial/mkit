@@ -1,7 +1,7 @@
 ---
 spec: SPEC-PACKFILE
 version: 1
-status: draft
+status: stable
 audience: implementers of compatible packfile readers and writers; transport implementers
 ---
 
@@ -98,10 +98,18 @@ SPEC-OBJECTS prologue). The reconstructed bytes are then hashed to
 produce the object's storage path — the same way a `raw` entry is
 stored.
 
-Delta encoding is the **v1 default** for blobs above 64 bytes when a
-suitable base is available. Writers SHOULD prefer delta entries for
-blob pairs whose delta is < 50% of the target size. Writers MAY emit
-all-`raw` packs for simplicity; readers MUST handle both mixes.
+Readers MUST validate every `raw` payload and every reconstructed delta
+target as a canonical SPEC-OBJECTS object before storing it. Payloads
+that fail object deserialization, or deserialize as pack-only
+`Object::Delta`, are rejected and MUST NOT be written to the object
+store.
+
+Writers MAY emit all-`raw` packs for simplicity; readers MUST handle
+both mixes. mkit v1's `PackWriter` API is policy-free — it accepts
+whatever entries the caller pushes and does not itself decide raw
+vs. delta. Any "prefer delta when delta is < N% of target" heuristic
+lives in callers above the writer (none ship in v1). A future revision
+MAY pin such a heuristic normatively; today it is informative.
 
 ---
 
@@ -155,6 +163,10 @@ deliberate simplification. Consequences:
 
 Future v2 may add a trailing index, but v1 does not.
 
+Readers MUST reject any bytes between the end of the declared entry list
+and the 32-byte trailer. A pack with trailing data is malformed even if
+the trailer hashes those extra bytes correctly.
+
 ---
 
 ## 7. Transport key layout
@@ -193,8 +205,12 @@ Readers MUST:
 
 Step 3 MUST happen before any entry is stored to the destination.
 
-(Note: the current mkit impl does not write/verify a trailer. W4 will
-add it; this SPEC pins the layout so the implementation doesn't drift.)
+Implementation note: the mkit-core `PackWriter::finish` writes the
+trailer over `header + entries`, and `PackReader::read` verifies it
+before touching the store (`pack.rs::PackReader::read` step 4, which
+runs after the magic+version checks but before any entry framing is
+parsed). The check ordering means a corrupt trailer surfaces as
+`PackfileCorrupted` even when later entry framing is also malformed.
 
 ---
 
@@ -215,26 +231,46 @@ mkit v1 is the first version. The format rule going forward is:
 
 ---
 
-## 10. Test vectors (implementer MUST produce)
+## 10. Test vectors
 
-TO BE FIXED IN IMPLEMENTATION:
+The conformance vectors below are exercised in
+`rust/crates/mkit-core/tests/golden_pack.rs` and the unit tests in
+`rust/crates/mkit-core/src/pack.rs::tests`. They are inline byte pins
+rather than on-disk goldens, so any framing drift fails the test suite
+immediately. Reader-error vectors map to `PackError` variants on the
+Rust API surface; the spec-level names below stay protocol-neutral.
 
-1. **Empty pack**: header + `entry_count=0` + trailer. Expected length
-   = 12 + 32 = 44 bytes. Record the trailer BLAKE3 digest hex.
-2. **Single-raw pack** containing the empty blob from SPEC-OBJECTS §13
-   vector 1. Record full byte layout and trailer digest.
-3. **Two-entry pack with delta**: raw base blob + delta entry that
-   reconstructs a second blob. Unpacker produces two object-store
-   entries.
-4. **Pack with MKIT magic** → verifier rejects with `InvalidMagic`.
-5. **Pack with version = 99** → verifier rejects with
-   `UnsupportedPackVersion`, not `InvalidMagic`.
-6. **Bit-flipped trailer** → `PackfileCorrupted`.
-7. **Delta entry referring to unknown base** → `DeltaBaseMissing`.
+1. **Empty pack**: header + `entry_count=0` + trailer. Length
+   = 12 + 32 = 44 bytes. Pinned by `empty_pack_pin_bytes` and
+   `empty_pack_is_44_bytes`.
+2. **Single-raw pack**: a `Blob{ data: b"hi" }` round-trips through
+   `PackWriter` + `PackReader`; pinned by `pack_basic_pin_bytes_roundtrip`.
+3. **Two-entry pack with delta**: raw base blob + delta entry resolving
+   in the same pack. Covered by `raw_then_delta_resolves_in_pack`.
+4. **Pack with non-`MKIT` magic** → reader returns `InvalidMagic`
+   (`rejects_invalid_magic`).
+5. **Pack with version = 99** → reader returns `UnsupportedVersion(99)`
+   (`rejects_unknown_version`). The Rust API spells the error
+   `UnsupportedVersion`; the SPEC-level name `UnsupportedPackVersion`
+   refers to the same condition.
+6. **Bit-flipped trailer** → `PackfileCorrupted`
+   (`rejects_bit_flipped_trailer`).
+7. **Delta entry referring to unknown base** → `DeltaBaseMissing`
+   (`delta_base_missing_is_loud`). Also covers the "resolve base
+   from the destination object store" path (`delta_resolves_against_pre_existing_store_object`).
 8. **Pack exceeding 4 GiB payload sum** → `PackfileTooLarge` emitted
-   during parse, before any entry is stored.
+   during parse, before any entry is stored. Enforced by
+   `PackWriter::check_caps_for` and re-checked in `PackReader::read`
+   while walking entries.
 9. **Entry with `payload_len` pointing past trailer** → `UnexpectedEof`
-   (or equivalent) before trailer verification.
+   (`entry_payload_past_trailer_rejected`).
+10. **Reserved entry type 0x01** → `InvalidEntryType(0x01)`
+    (`rejects_reserved_entry_type_0x01`).
+11. **`entry_count` over the 10M cap** → `TooManyObjects`
+    (`entry_count_over_cap_rejected`).
+12. **Pack key**: `pack_key(pack_bytes)` equals `BLAKE3(pack_bytes)`
+    over the whole pack including the trailer
+    (`pack_key_is_blake3_of_pack_bytes`).
 
 ---
 

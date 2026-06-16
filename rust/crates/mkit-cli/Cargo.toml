@@ -4,21 +4,28 @@ description = "The mkit command-line tool: a content-addressed VCS with native a
 keywords = ["mkit", "vcs", "cli", "attestation", "content-addressed"]
 categories = ["command-line-utilities", "cryptography"]
 readme = "../../README.md"
+# Published to crates.io so `cargo install mkit-cli` works (it installs the
+# `mkit` binary). It ALSO ships as a signed binary via the GitHub Release
+# archives and `cargo install --git` (see docs/INSTALL.md). NOTE: this crate's
+# library surface is the CLI's internals and is NOT a stable API — it is
+# deliberately excluded from cargo-semver-checks; depend on the `mkit-*`
+# library crates instead, not on `mkit_cli::…`.
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Publishable to crates.io as a binary crate so users can run
-# `cargo install mkit-cli`. `publish` left unset (cargo default = true).
+# The binary is named `mkit` (src/main.rs); set explicitly because it differs
+# from the crate name. Install via `cargo install mkit-cli`, the release
+# archives, or `cargo install --git … mkit-cli`.
 default-run = "mkit"
 
 # `cargo binstall mkit-cli` metadata. Points cargo-binstall at the
 # GitHub Release archive layout so users can install the prebuilt
-# binary without building from source — even though this crate is
-# not on crates.io, cargo-binstall can be told to fetch the manifest
-# directly from the repo:
+# binary without building from source. The crate is published to
+# crates.io, so plain `cargo binstall mkit-cli` resolves this manifest;
+# the `--git` form below works too when targeting an unpublished revision:
 #
 #     cargo binstall --git https://github.com/officialunofficial/mkit mkit-cli
 #
@@ -45,15 +52,29 @@ path = "src/main.rs"
 # Inter-workspace deps need explicit `version = ...` alongside the
 # path so `cargo publish` accepts them; path-only deps are rejected by
 # the registry. Track workspace.package.version.
-mkit-core = { version = "0.1", path = "../mkit-core" }
-mkit-attest = { version = "0.1", path = "../mkit-attest" }
-mkit-transport-memory = { version = "0.1", path = "../mkit-transport-memory" }
-mkit-transport-file = { version = "0.1", path = "../mkit-transport-file" }
-mkit-transport-http = { version = "0.1", path = "../mkit-transport-http" }
-mkit-transport-s3 = { version = "0.1", path = "../mkit-transport-s3" }
-mkit-transport-ssh = { version = "0.1", path = "../mkit-transport-ssh" }
-mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
-buffa = "0.5"
+mkit-core = { version = "0.3", path = "../mkit-core" }
+mkit-attest = { version = "0.3", path = "../mkit-attest" }
+mkit-git-bridge = { version = "0.3", path = "../mkit-git-bridge", optional = true }
+mkit-keystore = { version = "0.3", path = "../mkit-keystore" }
+mkit-transport-memory = { version = "0.3", path = "../mkit-transport-memory" }
+mkit-transport-file = { version = "0.3", path = "../mkit-transport-file" }
+mkit-transport-http = { version = "0.3", path = "../mkit-transport-http" }
+mkit-transport-s3 = { version = "0.3", path = "../mkit-transport-s3" }
+mkit-transport-ssh = { version = "0.3", path = "../mkit-transport-ssh" }
+# Optional: encrypted-stream transport. Off by default so the
+# baseline `mkit-cli` build doesn't pay tokio's compile cost. Turn on
+# via `--features enc-transport`. See SPEC-TRANSPORT-ENC §6.
+# Version-locked to the workspace (0.3); now that mkit-transport-enc is
+# published, release-plz rewrites this requirement on each lockstep bump.
+mkit-transport-enc = { version = "0.3", path = "../mkit-transport-enc", optional = true }
+mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
+# commonware-cryptography's ed25519 PrivateKey is the static-key type
+# the encrypted transport handshake takes. Pulled in here behind the
+# `enc-transport` feature so the keystore-driven key-loading path in
+# remote_dispatch can build a key from raw bytes without touching
+# `mkit-transport-enc`'s internals.
+commonware-cryptography = { workspace = true, features = ["std"], optional = true }
+buffa = "0.7.1"
 
 # `wrap_help` is intentionally disabled so help-text output stays
 # deterministic across terminal widths. `derive` is enabled so the
@@ -64,12 +85,23 @@ buffa = "0.5"
 clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage", "derive", "string"] }
 tempfile = "3"
 thiserror = "2"
+# JSON-RPC parse/emit for the `mkit mcp` stdio server. Zero new supply
+# chain: serde_json is already in this binary's normal dependency graph
+# via mkit-attest (JCS tests) and the http/s3 transports (reqwest).
+serde_json = "1"
 # Used by `mkit keygen` to generate raw 32-byte secrets for non-ed25519
 # algorithms (secp256k1 / p256). Same version mkit-core already pulls in.
 getrandom = "0.4"
 # Wraps the raw 32-byte secrets keygen pulls out of the RNG until they
 # land inside the algorithm signer (which has its own scrubbing).
 zeroize = "1"
+# Used by `mkit key generate --algorithm bls12381-thr` to feed the
+# trusted-dealer ceremony with `OsRng`. Gated on `bls-threshold` so
+# the default build doesn't pull rand_core.
+rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
+# Wire-encodes `Share` values for storage in the keystore — same
+# version mkit-attest pulls.
+commonware-codec = { version = "2026.5.0", optional = true }
 
 # POSIX uid + O_NOFOLLOW for keygen.rs's raw-32 load/save paths
 # (secp256k1, p256). The Ed25519 path uses mkit_core::sign which has
@@ -82,7 +114,16 @@ zeroize = "1"
 # `#![deny(unsafe_code)]` — see signal.rs.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-signal-hook = { version = "0.3", default-features = false }
+signal-hook = { version = "0.4", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mkit-keystore = { version = "0.3", path = "../mkit-keystore", features = ["backend-macos-keychain"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mkit-keystore = { version = "0.3", path = "../mkit-keystore", features = ["backend-linux-secret-service", "backend-systemd-creds"] }
+
+[target.'cfg(windows)'.dependencies]
+mkit-keystore = { version = "0.3", path = "../mkit-keystore", features = ["backend-windows-credential"] }
 
 [build-dependencies]
 # build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by
@@ -101,3 +142,57 @@ mockito = "1"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+# Snapshot testing for CLI golden-output fixtures. See issue #164.
+# `filters` feature enables regex-based redaction so version-string
+# bumps don't churn snapshots.
+insta = { version = "1", features = ["filters"] }
+# Stateful end-to-end invariant suite (tests/state_machine.rs): proptest
+# generates random op sequences driven through the real `mkit` binary,
+# asserting a repo-invariant battery after each op. Same major as
+# mkit-core's dev-dep. Bounded by default (32 cases); the nightly job
+# raises PROPTEST_CASES under the `state-machine` nextest profile.
+proptest = "1"
+
+[features]
+default = []
+# Compile-time exhaustiveness mirror of mkit-attest's bls-threshold —
+# pulls the BLS Algorithm variant into scope so the CLI's match arms
+# cover it (returning UNAVAILABLE per-site). Phase 3 of issue #160
+# will replace the inert arms with a real release-party signer.
+bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "dep:rand_core", "dep:commonware-codec"]
+# Enables the `mkit+enc://` dispatch path in `remote_dispatch::open`
+# and the `mkit serve --listen-enc <addr>` listener flag. Pulls in
+# `mkit-transport-enc` with its `tcp` feature (tokio + governor +
+# rand). See SPEC-TRANSPORT-ENC §6 item 3.
+enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography", "dep:commonware-codec"]
+# The git bridge (`mkit git ...`, SPEC-GIT-BRIDGE / SPEC-GIT-IMPORT).
+# Default-off while experimental; flip after the mapping has survived
+# real mirrors. `git-export` is a back-compat alias from the bridge's
+# export-only era.
+git-bridge = ["dep:mkit-git-bridge"]
+git-export = ["git-bridge"]
+# Verifiable sparse-checkout (issue #158 Phase 2). Pulls the
+# `mkit-core` sparse module and the matching transport-side fetchers
+# into scope. Off by default — the upstream `commonware-storage` is
+# ALPHA-tier.
+sparse-checkout = [
+    "mkit-core/sparse-checkout",
+    "mkit-transport-http/sparse-checkout",
+    "mkit-transport-s3/sparse-checkout",
+]
+# Issue #159 Phase 2 — `mkit pack-shard <hash>` producer subcommand
+# and shard-aware HTTP / S3 downloads. Default-off because the
+# commonware dep stack is large.
+pack-shards = [
+    "mkit-core/pack-shards",
+    "mkit-transport-http/pack-shards",
+    "mkit-transport-s3/pack-shards",
+]
+# Issue #157 Phase 2 — record every ref-write in an append-only,
+# branch-scoped Merkle Mountain Range journal under
+# `<mkit_dir>/history/<sanitized_branch>/`. Off by default because
+# the commonware journaled-MMR stack pulls in tokio + commonware-
+# runtime; opt in via `--features history-mmr` on builds that need
+# `mkit-core::history::CommitHistory::open_at` wired into commit /
+# branch / merge / rebase / cherry-pick ref advances.
+history-mmr = ["mkit-core/history-mmr"]

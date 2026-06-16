@@ -80,6 +80,75 @@ fn status_clean_working_tree() {
     );
 }
 
+#[test]
+fn status_reports_invalid_index_instead_of_falling_back_to_worktree() {
+    use mkit_core::hash::ZERO;
+    use mkit_core::index::{EntryStatus, Index, IndexEntry};
+
+    let td = tempfile::tempdir().unwrap();
+    let p = td.path();
+    assert!(run_in(p, &["init"]).status.success());
+
+    let mut idx = Index::new();
+    idx.entries.push(IndexEntry {
+        path: "same.txt".into(),
+        status: EntryStatus::Blob,
+        object_hash: ZERO,
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
+    });
+    idx.entries.push(IndexEntry {
+        path: "same.txt".into(),
+        status: EntryStatus::Blob,
+        object_hash: ZERO,
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
+    });
+    fs::write(p.join(".mkit/index"), idx.serialize()).unwrap();
+
+    let out = run_in(p, &["status", "--porcelain"]);
+    assert!(!out.status.success(), "status must reject invalid index");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("read index") && stderr.contains("duplicate index path"),
+        "status should surface the index integrity error, got: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn status_clean_for_committed_executable_that_remains_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let td = tempfile::tempdir().unwrap();
+    let p = td.path();
+    assert!(run_in(p, &["init"]).status.success());
+    assert!(run_in(p, &["keygen"]).status.success());
+
+    let script = p.join("run.sh");
+    fs::write(&script, b"#!/bin/sh\n").unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    fs::set_permissions(&script, perms).unwrap();
+
+    assert!(run_in(p, &["add", "run.sh"]).status.success());
+    assert!(
+        run_in(p, &["commit", "-m", "add executable"])
+            .status
+            .success()
+    );
+
+    let (stdout, _stderr) = status_porcelain(p);
+    assert!(
+        stdout.is_empty(),
+        "executable mode should remain clean after commit, got: {stdout:?}"
+    );
+}
+
 // -----------------------------------------------------------------------
 // 2. Untracked file appears as `??`.
 // -----------------------------------------------------------------------
@@ -205,14 +274,17 @@ fn staged_change_remains_visible_after_worktree_revert() {
     fs::write(p.join("a.txt"), b"v1").unwrap();
 
     // Status MUST surface the staged delta — the index still has v2.
+    // Per git porcelain, this is one combined record `MM a.txt`: X=M is
+    // the staged (index-vs-HEAD) change, Y=M is the worktree-vs-index
+    // change (the revert). The staged side stays visible in column X.
     let (stdout, _) = status_porcelain(p);
     assert!(
         !stdout.is_empty(),
         "status hid a staged change behind a worktree revert"
     );
     assert!(
-        has_entry(&stdout, "M ", "a.txt"),
-        "expected staged `M ` for a.txt; got: {stdout:?}"
+        has_entry(&stdout, "MM", "a.txt"),
+        "expected combined `MM` (staged M in X) for a.txt; got: {stdout:?}"
     );
 }
 
@@ -233,6 +305,39 @@ fn missing_index_with_clean_head_is_reported_clean() {
 // empty when porcelain isn't requested. This pins the contract that
 // `mkit status > /tmp/out` produces an empty file in clean state.
 // -----------------------------------------------------------------------
+
+// -----------------------------------------------------------------------
+// `-s` / `--short` is an alias for `--porcelain`: identical stdout.
+// -----------------------------------------------------------------------
+
+#[test]
+fn short_flag_matches_porcelain() {
+    let td = init_with_commit(&[("a.txt", b"v1")]);
+    // Create an unstaged edit + an untracked file so output is non-empty.
+    fs::write(td.path().join("a.txt"), b"v2").unwrap();
+    fs::write(td.path().join("new.txt"), b"x").unwrap();
+
+    let porc = run_in(td.path(), &["status", "--porcelain"]);
+    let short_s = run_in(td.path(), &["status", "-s"]);
+    let short_long = run_in(td.path(), &["status", "--short"]);
+    assert!(porc.status.success() && short_s.status.success() && short_long.status.success());
+
+    let porc_out = String::from_utf8(porc.stdout).unwrap();
+    assert_eq!(
+        String::from_utf8(short_s.stdout).unwrap(),
+        porc_out,
+        "`-s` stdout must match `--porcelain`"
+    );
+    assert_eq!(
+        String::from_utf8(short_long.stdout).unwrap(),
+        porc_out,
+        "`--short` stdout must match `--porcelain`"
+    );
+    assert!(
+        has_entry(&porc_out, " M", "a.txt") && has_entry(&porc_out, "??", "new.txt"),
+        "expected non-empty short/porcelain output, got: {porc_out:?}"
+    );
+}
 
 #[test]
 fn default_mode_writes_prose_to_stderr_not_stdout() {

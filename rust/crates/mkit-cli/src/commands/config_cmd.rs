@@ -5,6 +5,7 @@
 //! user-scoped `$XDG_CONFIG_HOME/mkit/config` and are written there
 //! when set via this command. Unknown keys are rejected.
 
+use std::borrow::Cow;
 use std::io::Write;
 
 use clap::{Parser, ValueEnum};
@@ -40,15 +41,19 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mut cfg = match config::read_or_default(&cwd) {
-        Ok(c) => c,
+    // Read both layers: the merged view drives `show`, but a write must
+    // persist ONLY the repo layer — serializing the merged config would
+    // copy user-scoped values (e.g. a private `user.email`) into
+    // `.mkit/config`, which travels with clones.
+    let layered = match config::read_layered(&cwd) {
+        Ok(l) => l,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
     let json = matches!(opts.format, ConfigFormat::Json);
 
     match opts.args.len() {
-        0 => return show_all(&cfg, json),
-        1 => return show_one(&cfg, &opts.args[0], json),
+        0 => return show_all(&layered.merged, json),
+        1 => return show_one(&layered.merged, &opts.args[0], json),
         2 => {}
         _ => {
             return super::usage_error(&format!(
@@ -80,10 +85,14 @@ pub fn run(args: &[String]) -> u8 {
     if REPO_FORBIDDEN_KEYS.contains(&key) {
         return write_user_scoped(key, &normalized_value);
     }
-    if let Err(code) = apply(&mut cfg, key, &normalized_value) {
+    // Apply to the repo layer only and persist that — never the merged
+    // config — so user-scoped values are not materialized into the repo
+    // file (see the scope note above).
+    let mut repo_cfg = layered.repo;
+    if let Err(code) = apply(&mut repo_cfg, key, &normalized_value) {
         return code;
     }
-    match config::write(&cwd, &cfg) {
+    match config::write(&cwd, &repo_cfg) {
         Ok(()) => exit::OK,
         Err(e) => emit_err(&format!("write config: {e}"), exit::CANTCREAT),
     }
@@ -128,7 +137,30 @@ fn write_user_scoped(key: &str, value: &str) -> u8 {
 /// and routed to user-scoped storage before this is called.
 fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
     match key {
+        // Git-compatibility aliases. Accepted and round-tripped, but
+        // **non-authoritative**: they never feed the signed commit author
+        // (that is `user.identity` / the signing key), so they are
+        // repo-safe and not in `REPO_FORBIDDEN_KEYS`.
+        "user.name" => value.clone_into(&mut cfg.user_name),
+        "user.email" => value.clone_into(&mut cfg.user_email),
         "default_branch" => value.clone_into(&mut cfg.default_branch),
+        // SPEC-OBJECTS §10.1 durability escape hatch. Validated at the
+        // set boundary (unlike the lenient config-load fallback) so a
+        // typo can't silently leave the user on the batched default when
+        // they asked for the strict per-object schedule.
+        "durability.objects" => match value.trim().to_ascii_lowercase().as_str() {
+            "" | "batch" | "per-object" | "per_object" => {
+                value.clone_into(&mut cfg.durability_objects);
+            }
+            _ => {
+                return Err(emit_err(
+                    &format!(
+                        "invalid value for durability.objects: `{value}` (expected `batch` or `per-object`)"
+                    ),
+                    exit::CONFIG_ERROR,
+                ));
+            }
+        },
         "remote_endpoint" => value.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => value.clone_into(&mut cfg.remote_bucket),
         "remote_type" => value.clone_into(&mut cfg.remote_type),
@@ -137,6 +169,31 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
                 "config key `author_mid` has been removed; use `user.identity` (mid:<N>)",
                 exit::CONFIG_ERROR,
             ));
+        }
+        // Inert git-compat `core.*` keys (section matched case-insensitively):
+        // store the allowlisted ones, and refuse the dangerous ones (they
+        // would change what mkit executes if honored). Anything else under
+        // `core.` is an unknown key.
+        k if config::is_core_section(k) => {
+            let name = k
+                .split_once('.')
+                .map_or("", |(_, n)| n)
+                .to_ascii_lowercase();
+            if let Some(suffix) = config::core_allowed_suffix(k) {
+                cfg.core.insert(suffix, value.to_string());
+            } else if config::CORE_DENIED_KEYS.contains(&name.as_str()) {
+                return Err(emit_err(
+                    &format!(
+                        "config key `{key}` is not honored by mkit and is rejected for safety"
+                    ),
+                    exit::CONFIG_ERROR,
+                ));
+            } else {
+                return Err(emit_err(
+                    &format!("unknown config key: {key}"),
+                    exit::CONFIG_ERROR,
+                ));
+            }
         }
         _ => {
             return Err(emit_err(
@@ -152,30 +209,80 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
 /// paired with its value. Keys are emitted in alphabetical order so
 /// the output is deterministic and easy to snapshot-test.
 const CONFIG_KEYS: &[&str] = &[
+    "attest.default_algorithm",
+    "attest.external_signer_args",
+    "attest.external_signer_path",
+    "attest.external_signer_timeout_secs",
+    "attest.p256_key_path",
+    "attest.secp256k1_key_path",
+    "attest.signer",
     "default_branch",
+    "durability.objects",
+    "key.backend",
+    "key.default_ref",
+    "key.ed25519_ref",
+    "key.p256_ref",
+    "key.secp256k1_ref",
     "remote_bucket",
     "remote_endpoint",
     "remote_type",
+    "signer",
     "signing_key",
     "ssh.identity_file",
     "ssh.strict_host_key_checking",
     "ssh.user_known_hosts_file",
     "trusted_remote_endpoint",
+    "user.email",
     "user.identity",
+    "user.name",
 ];
 
-fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<&'a str> {
+fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
     match key {
-        "user.identity" => Some(&cfg.user_identity),
-        "trusted_remote_endpoint" => Some(&cfg.trusted_remote_endpoint),
-        "signing_key" => Some(&cfg.signing_key),
-        "default_branch" => Some(&cfg.default_branch),
-        "remote_endpoint" => Some(&cfg.remote_endpoint),
-        "remote_bucket" => Some(&cfg.remote_bucket),
-        "remote_type" => Some(&cfg.remote_type),
-        "ssh.strict_host_key_checking" => Some(&cfg.ssh_strict_host_key_checking),
-        "ssh.user_known_hosts_file" => Some(&cfg.ssh_user_known_hosts_file),
-        "ssh.identity_file" => Some(&cfg.ssh_identity_file),
+        "user.identity" => Some(Cow::Borrowed(&cfg.user_identity)),
+        "user.name" => Some(Cow::Borrowed(&cfg.user_name)),
+        "user.email" => Some(Cow::Borrowed(&cfg.user_email)),
+        "trusted_remote_endpoint" => Some(Cow::Borrowed(&cfg.trusted_remote_endpoint)),
+        "signing_key" => Some(Cow::Borrowed(&cfg.signing_key)),
+        "default_branch" => Some(Cow::Borrowed(&cfg.default_branch)),
+        "durability.objects" => Some(Cow::Borrowed(&cfg.durability_objects)),
+        "remote_endpoint" => Some(Cow::Borrowed(&cfg.remote_endpoint)),
+        "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
+        "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),
+        "ssh.strict_host_key_checking" => Some(Cow::Borrowed(&cfg.ssh_strict_host_key_checking)),
+        "ssh.user_known_hosts_file" => Some(Cow::Borrowed(&cfg.ssh_user_known_hosts_file)),
+        "ssh.identity_file" => Some(Cow::Borrowed(&cfg.ssh_identity_file)),
+        "signer" => Some(Cow::Borrowed(&cfg.signer)),
+        "key.backend" => Some(Cow::Borrowed(cfg.key.backend_or_fallback())),
+        "key.default_ref" => Some(Cow::Borrowed(cfg.key.default_ref_or_fallback())),
+        "key.ed25519_ref" => Some(Cow::Borrowed(cfg.key.ed25519_ref_or_fallback())),
+        "key.secp256k1_ref" => Some(Cow::Borrowed(cfg.key.secp256k1_ref_or_fallback())),
+        "key.p256_ref" => Some(Cow::Borrowed(cfg.key.p256_ref_or_fallback())),
+        "attest.default_algorithm" => {
+            Some(Cow::Borrowed(cfg.attest.default_algorithm_or_fallback()))
+        }
+        "attest.external_signer_args" => {
+            Some(Cow::Owned(cfg.attest.external_signer_args.join("|")))
+        }
+        "attest.external_signer_path" => Some(Cow::Borrowed(&cfg.attest.external_signer_path)),
+        "attest.external_signer_timeout_secs" => Some(Cow::Owned(
+            cfg.attest
+                .external_signer_timeout_secs
+                .map_or_else(String::new, |s| s.to_string()),
+        )),
+        "attest.secp256k1_key_path" => {
+            Some(Cow::Borrowed(cfg.attest.secp256k1_key_path_or_default()))
+        }
+        "attest.p256_key_path" => Some(Cow::Borrowed(cfg.attest.p256_key_path_or_default())),
+        "attest.signer" => Some(Cow::Borrowed(cfg.attest.signer_or_fallback())),
+        // Inert git-compat `core.*` keys (section matched case-insensitively):
+        // an allowlisted key returns its stored value (empty if unset, like
+        // the other keys); anything else under `core.` is unknown.
+        k if config::is_core_section(k) => config::core_allowed_suffix(k).map(|suffix| {
+            cfg.core
+                .get(&suffix)
+                .map_or(Cow::Borrowed(""), |v| Cow::Owned(v.clone()))
+        }),
         _ => None,
     }
 }
@@ -190,11 +297,20 @@ fn show_all(cfg: &Config, json: bool) -> u8 {
             if i > 0 {
                 let _ = stdout.write_all(b",");
             }
-            let v = lookup(cfg, key).unwrap_or("");
+            let v = lookup(cfg, key).unwrap_or(Cow::Borrowed(""));
             let _ = write!(
                 stdout,
                 "\"{}\":\"{}\"",
                 format::json_escape(key),
+                format::json_escape(&v)
+            );
+        }
+        // Dynamic, set-only `core.*` git-compat keys.
+        for (k, v) in &cfg.core {
+            let _ = write!(
+                stdout,
+                ",\"core.{}\":\"{}\"",
+                format::json_escape(k),
                 format::json_escape(v)
             );
         }
@@ -202,8 +318,11 @@ fn show_all(cfg: &Config, json: bool) -> u8 {
         return exit::OK;
     }
     for key in CONFIG_KEYS {
-        let v = lookup(cfg, key).unwrap_or("");
+        let v = lookup(cfg, key).unwrap_or(Cow::Borrowed(""));
         let _ = writeln!(stdout, "{key} = {v}");
+    }
+    for (k, v) in &cfg.core {
+        let _ = writeln!(stdout, "core.{k} = {v}");
     }
     exit::OK
 }
@@ -218,7 +337,7 @@ fn show_one(cfg: &Config, key: &str, json: bool) -> u8 {
             stdout,
             "{{\"{}\":\"{}\"}}",
             format::json_escape(key),
-            format::json_escape(v)
+            format::json_escape(&v)
         );
     } else {
         let _ = writeln!(stdout, "{v}");

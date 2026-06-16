@@ -36,6 +36,13 @@ enum StashCmd {
         #[arg(default_value_t = 0)]
         index: usize,
     },
+    /// Apply a stash entry WITHOUT removing it (default: entry 0).
+    Apply {
+        #[arg(default_value_t = 0)]
+        index: usize,
+    },
+    /// Remove ALL stash entries.
+    Clear,
     /// Remove a stash entry without applying it (default: entry 0).
     Drop {
         #[arg(default_value_t = 0)]
@@ -58,7 +65,7 @@ pub fn run(args: &[String]) -> u8 {
     let needs_default = args.first().is_none_or(|a| {
         !matches!(
             a.as_str(),
-            "save" | "list" | "pop" | "drop" | "show" | "-h" | "--help"
+            "save" | "list" | "pop" | "apply" | "drop" | "clear" | "show" | "-h" | "--help"
         )
     });
     let rewritten: Vec<String> = if needs_default {
@@ -77,13 +84,40 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let store = match super::open_store_configured(&cwd) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
 
-    match opts.sub {
-        StashCmd::Save(save) => match stash::save(&store, &cwd, &save.message) {
+    // Commands that mutate the worktree/index/manifest must serialise
+    // against other worktree commands: `save`/`pop`/`apply`/`drop`/`clear`.
+    // (`apply` writes the worktree; `clear` rewrites the manifest.)
+    // `list` and `show` are read-only and run unlocked.
+    let lock = match opts.sub {
+        StashCmd::Save(_)
+        | StashCmd::Pop { .. }
+        | StashCmd::Apply { .. }
+        | StashCmd::Drop { .. }
+        | StashCmd::Clear => match super::acquire_worktree_lock(&cwd) {
+            Ok(l) => Some(l),
+            Err(code) => return code,
+        },
+        StashCmd::List | StashCmd::Show { .. } => None,
+    };
+
+    // `lock` is held until this binding drops at the end of `run`, so the
+    // worktree stays serialised across the whole `dispatch` call.
+    let code = dispatch(opts.sub, &store, &cwd);
+    drop(lock);
+    code
+}
+
+/// Run a parsed stash subcommand. Split out of [`run`] so the worktree
+/// lock acquisition / mode dispatch stays small enough for clippy's
+/// `too_many_lines`.
+fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
+    match sub {
+        StashCmd::Save(save) => match stash::save(store, cwd, &save.message) {
             Ok(()) => {
                 let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(stderr, "stashed: {}", save.message);
@@ -91,7 +125,7 @@ pub fn run(args: &[String]) -> u8 {
             }
             Err(e) => emit_err(&format!("stash save: {e}"), exit::GENERAL_ERROR),
         },
-        StashCmd::List => match stash::list(&cwd) {
+        StashCmd::List => match stash::list(cwd) {
             Ok(list) => {
                 if list.entries.is_empty() {
                     let mut stderr = std::io::stderr().lock();
@@ -111,15 +145,21 @@ pub fn run(args: &[String]) -> u8 {
             }
             Err(e) => emit_err(&format!("stash list: {e}"), exit::GENERAL_ERROR),
         },
-        StashCmd::Pop { index } => match stash::pop(&store, &cwd, index) {
+        // `pop` removes the entry after a successful restore; `apply`
+        // leaves it in place. Both run the same #205/#176 destructive-
+        // restore guard so they never clobber uncommitted edits on
+        // unrelated paths.
+        StashCmd::Pop { index } => restore_entry(store, cwd, index, true),
+        StashCmd::Apply { index } => restore_entry(store, cwd, index, false),
+        StashCmd::Clear => match stash::clear(cwd) {
             Ok(()) => {
                 let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "popped stash@{{{index}}}");
+                let _ = writeln!(stderr, "cleared all stash entries");
                 exit::OK
             }
-            Err(e) => emit_err(&format!("stash pop: {e}"), exit::GENERAL_ERROR),
+            Err(e) => emit_err(&format!("stash clear: {e}"), exit::GENERAL_ERROR),
         },
-        StashCmd::Drop { index } => match stash::drop(&cwd, index) {
+        StashCmd::Drop { index } => match stash::drop(cwd, index) {
             Ok(()) => {
                 let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(stderr, "dropped stash@{{{index}}}");
@@ -127,7 +167,7 @@ pub fn run(args: &[String]) -> u8 {
             }
             Err(e) => emit_err(&format!("stash drop: {e}"), exit::GENERAL_ERROR),
         },
-        StashCmd::Show { index } => match stash::render_stash_show(&store, &cwd, index) {
+        StashCmd::Show { index } => match stash::render_stash_show(store, cwd, index) {
             Ok(output) => {
                 let mut stdout = std::io::stdout().lock();
                 let _ = stdout.write_all(output.as_bytes());
@@ -135,6 +175,35 @@ pub fn run(args: &[String]) -> u8 {
             }
             Err(e) => emit_err(&format!("stash show: {e}"), exit::GENERAL_ERROR),
         },
+    }
+}
+
+/// Restore stash entry `index` into the worktree. `drop_entry` chooses
+/// between `pop` (removes the entry after a clean restore) and `apply`
+/// (leaves it on the stack). Both run the #205/#176 destructive-restore
+/// guard up-front so a refusal leaves the stash and worktree untouched.
+fn restore_entry(store: &ObjectStore, cwd: &std::path::Path, index: usize, drop_entry: bool) -> u8 {
+    let verb = if drop_entry { "pop" } else { "apply" };
+    let tree_hash = match stash::entry_tree_hash(store, cwd, index) {
+        Ok(h) => h,
+        Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+    };
+    if let Err(e) = super::ensure_restore_safe(cwd, store, tree_hash) {
+        return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
+    }
+    let result = if drop_entry {
+        stash::pop(store, cwd, index)
+    } else {
+        stash::apply(store, cwd, index)
+    };
+    match result {
+        Ok(()) => {
+            let past = if drop_entry { "popped" } else { "applied" };
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "{past} stash@{{{index}}}");
+            exit::OK
+        }
+        Err(e) => emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
     }
 }
 

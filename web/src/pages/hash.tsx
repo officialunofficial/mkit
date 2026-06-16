@@ -8,9 +8,11 @@ export default function HashPage() {
       <title>mkit — hash</title>
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>What&rsquo;s in a hash?</h1>
-        <p className='max-w-prose text-base text-[--color-fg]'>
-          Every file, every folder, every commit is named by a BLAKE3 hash of its bytes — change a single character and
-          the hash changes too. This page builds a tiny commit out of two files and shows every hash along the way.
+        <p className='max-w-prose text-base text-fg'>
+          Every file, folder, and commit is named by the BLAKE3 hash of its bytes — change a single character and the
+          name changes too. git does the same with SHA-1; mkit uses BLAKE3, one algorithm everywhere, fast enough to
+          re-hash on every keystroke. This page builds a tiny commit out of two files: edit the text or swap the image
+          and watch every hash along the way rewrite.
         </p>
       </header>
       <DemoBoundary>

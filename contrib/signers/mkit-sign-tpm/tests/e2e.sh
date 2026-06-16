@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# e2e.sh — end-to-end smoke test for mkit-sign-tpm.
+# e2e.sh — end-to-end smoke test for mkit-sign-tpm on the v1 protobuf
+# `SignerFrame` wire (SPEC-EXTERNAL-SIGNER / SPEC-RPC).
 #
 # Exercises the full flow with no dependency on a built `mkit` binary:
 #
@@ -7,12 +8,22 @@
 #      is present, exit 0 with a skip message — macOS and TPM-less CI
 #      shouldn't fail on this.
 #   2. `cargo build --release -p mkit-sign-tpm --features tpm2`.
-#   3. `mkit-sign-tpm keygen --handle 0x81010001` — captures the pubkey.
-#   4. Pipe a known PAE into `mkit-sign-tpm sign --handle 0x81010001`.
-#   5. Verify the signature with `openssl` so we prove the wire format
-#      matches SPEC-EXTERNAL-SIGNER §4 without mkit in the loop.
-#   6. Reject path: pipe `{"algorithm":"ed25519"}` and assert exit 2.
-#   7. `mkit-sign-tpm delete --handle 0x81010001`.
+#   3. `mkit-sign-tpm keygen --handle <H>` — captures the p256 keyid.
+#   4. Build a `SignerFrame{Hello}` + `SignerFrame{SignRequest}` byte
+#      stream with a small Python helper (the wire is binary protobuf,
+#      not shell-pasteable). The SignRequest carries
+#      `algorithm = ALGORITHM_P256`, `key_form = KEY_FORM_OPAQUE_HANDLE`,
+#      and `key_ref` = the 4-byte big-endian persistent handle.
+#   5. Pipe it into `mkit-sign-tpm sign --handle <H>`, parse the stdout
+#      frames, extract the signature + public key, and verify with
+#      `openssl` so we prove the wire format matches the spec without
+#      mkit in the loop.
+#   6. Reject path: send a SignRequest with `algorithm = ALGORITHM_ED25519`
+#      and assert the response is an `Error` frame with
+#      `ERROR_CODE_UNSUPPORTED_ALGORITHM`. The signer keeps running on
+#      per-request errors (matches mkit-sign-file / mkit-sign-se), so it
+#      exits cleanly with status 0 when stdin closes.
+#   7. `mkit-sign-tpm delete --handle <H>`.
 
 set -euo pipefail
 
@@ -75,35 +86,206 @@ if [ "${#PUBHEX}" != 66 ]; then
   echo "e2e: keyid hex length ${#PUBHEX} != 66"; exit 1
 fi
 
-# -- 3. sign --------------------------------------------------------
+# -- 3. Build the request frame stream ------------------------------
+#
+# Hand-roll minimal protobuf encoding for the two frames we need
+# (Hello + SignRequest). We deliberately do NOT bring in `protoc` or
+# any Python protobuf runtime — keeps the script dependency-free and
+# tests the wire bytes exactly. The schema is in
+# `rust/crates/mkit-rpc/proto/{common,signer}.proto`.
 
 PAE='DSSEv1 28 application/vnd.in-toto+json 2 {}'
 printf '%s' "$PAE" > "$TMPDIR_LOCAL/pae.bin"
-PAE_B64=$(base64 -w0 < "$TMPDIR_LOCAL/pae.bin" 2>/dev/null || base64 < "$TMPDIR_LOCAL/pae.bin" | tr -d '\n')
 
-REQ="{\"pae_base64\":\"$PAE_B64\",\"algorithm\":\"p256\"}"
-echo "e2e: request: $REQ"
-RESP=$(printf '%s\n' "$REQ" | "$BIN" sign --handle "$HANDLE")
-echo "e2e: response: $RESP"
+python3 - "$HANDLE" "$TMPDIR_LOCAL/pae.bin" "$TMPDIR_LOCAL/req.bin" \
+  "$TMPDIR_LOCAL/bad_req.bin" <<'PY'
+import struct
+import sys
 
-RESP_KEYID=$(printf '%s' "$RESP" | sed -E 's/.*"keyid":"([^"]+)".*/\1/')
-RESP_SIGB64=$(printf '%s' "$RESP" | sed -E 's/.*"sig_base64":"([^"]+)".*/\1/')
+handle = int(sys.argv[1], 0)
+with open(sys.argv[2], "rb") as f:
+    pae = f.read()
+out_path = sys.argv[3]
+bad_path = sys.argv[4]
 
-if [ "$RESP_KEYID" != "$KEYID" ]; then
-  echo "e2e: response keyid '$RESP_KEYID' != keygen keyid '$KEYID'"; exit 1
-fi
+# --- Minimal protobuf primitive encoders. We only need:
+#   - varint
+#   - tag = (field_number << 3) | wire_type  (wire_type: 0 varint, 2 len-delim)
+#   - length-delimited (string / bytes / message)
 
-printf '%s' "$RESP_SIGB64" | base64 -d > "$TMPDIR_LOCAL/sig.raw"
-SIGLEN=$(wc -c < "$TMPDIR_LOCAL/sig.raw" | tr -d ' ')
-if [ "$SIGLEN" != 64 ]; then
-  echo "e2e: raw signature length $SIGLEN != 64"; exit 1
-fi
+def varint(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
 
-# -- 4. Verify via openssl -----------------------------------------
+def tagfn(field: int, wire: int) -> bytes:
+    return varint((field << 3) | wire)
 
-python3 - <<PY
-sig = open("$TMPDIR_LOCAL/sig.raw","rb").read()
-assert len(sig) == 64, len(sig)
+def lenprefix(b: bytes) -> bytes:
+    return varint(len(b)) + b
+
+def enc_string(field: int, s: str) -> bytes:
+    return tagfn(field, 2) + lenprefix(s.encode("utf-8"))
+
+def enc_bytes(field: int, b: bytes) -> bytes:
+    return tagfn(field, 2) + lenprefix(b)
+
+def enc_varint(field: int, n: int) -> bytes:
+    return tagfn(field, 0) + varint(n)
+
+def enc_msg(field: int, body: bytes) -> bytes:
+    return tagfn(field, 2) + lenprefix(body)
+
+# Algorithm + KeyForm + ProtocolVersion enum values (from common.proto):
+ALGO_ED25519 = 1
+ALGO_P256 = 3
+KF_OPAQUE_HANDLE = 3
+PV_V1 = 1
+
+# TPM persistent handle as a 4-byte big-endian u32 (SPEC-EXTERNAL-SIGNER
+# §8.3: `key_ref` is the 4-byte BE handle).
+key_ref = struct.pack(">I", handle)
+
+# Hello message (Hello in signer.proto, fields 1..3):
+#   1: ProtocolVersion protocol  (varint)
+#   2: string caller_id          (len-delim)
+#   3: bool want_capabilities    (varint, 0/1)
+hello_body = (
+    enc_varint(1, PV_V1)
+    + enc_string(2, "e2e/0.1")
+    + enc_varint(3, 1)
+)
+
+# SignerFrame oneof body: Hello is field 1, SignRequest is field 3.
+hello_frame = enc_msg(1, hello_body)
+
+def sign_request_body(algorithm: int) -> bytes:
+    #   1: Algorithm algorithm  (varint)
+    #   2: KeyForm key_form     (varint)
+    #   3: bytes key_ref        (len-delim) — 4-byte BE handle
+    #   4: bytes payload        (len-delim)
+    return (
+        enc_varint(1, algorithm)
+        + enc_varint(2, KF_OPAQUE_HANDLE)
+        + enc_bytes(3, key_ref)
+        + enc_bytes(4, pae)
+    )
+
+sign_request_frame = enc_msg(3, sign_request_body(ALGO_P256))
+bad_request_frame = enc_msg(3, sign_request_body(ALGO_ED25519))
+
+# Wire framing: 4-byte little-endian length prefix + body.
+def frame(body: bytes) -> bytes:
+    return struct.pack("<I", len(body)) + body
+
+with open(out_path, "wb") as f:
+    f.write(frame(hello_frame) + frame(sign_request_frame))
+with open(bad_path, "wb") as f:
+    f.write(frame(hello_frame) + frame(bad_request_frame))
+PY
+
+# -- 4. Run the signer and parse responses --------------------------
+
+echo "e2e: signing"
+"$BIN" sign --handle "$HANDLE" < "$TMPDIR_LOCAL/req.bin" > "$TMPDIR_LOCAL/resp.bin"
+
+# Parse out the two response frames. Frame[0] = HelloResponse,
+# Frame[1] = SignResponse. We extract the `signature` and `public_key`
+# fields from the SignResponse so openssl can verify them.
+python3 - "$TMPDIR_LOCAL/resp.bin" "$KEYID" \
+  "$TMPDIR_LOCAL/sig.raw" "$TMPDIR_LOCAL/pubkey.raw" <<'PY'
+import struct
+import sys
+
+resp_path, expected_keyid, sig_out, pub_out = sys.argv[1:]
+with open(resp_path, "rb") as f:
+    raw = f.read()
+
+frames = []
+i = 0
+while i + 4 <= len(raw):
+    n = struct.unpack_from("<I", raw, i)[0]
+    i += 4
+    assert i + n <= len(raw), "truncated body"
+    frames.append(raw[i:i+n])
+    i += n
+assert i == len(raw), "trailing bytes"
+assert len(frames) == 2, f"want 2 response frames, got {len(frames)}"
+
+def parse_varint(buf, pos):
+    out = 0
+    shift = 0
+    while True:
+        b = buf[pos]
+        pos += 1
+        out |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return out, pos
+        shift += 7
+
+def parse_fields(buf):
+    out = {}
+    pos = 0
+    while pos < len(buf):
+        tag, pos = parse_varint(buf, pos)
+        field = tag >> 3
+        wire = tag & 7
+        if wire == 0:
+            v, pos = parse_varint(buf, pos)
+            out[field] = v
+        elif wire == 2:
+            ln, pos = parse_varint(buf, pos)
+            out[field] = buf[pos:pos+ln]
+            pos += ln
+        else:
+            raise SystemExit(f"unsupported wire type {wire} for field {field}")
+    return out
+
+# SignerFrame.body oneof: HelloResponse=2, SignResponse=4, Error=7.
+sf0 = parse_fields(frames[0])
+assert 2 in sf0, f"frame[0] should contain HelloResponse (field 2); got {list(sf0)}"
+
+sf1 = parse_fields(frames[1])
+if 7 in sf1:
+    err = parse_fields(sf1[7])
+    raise SystemExit(f"signer returned Error: {err}")
+assert 4 in sf1, f"frame[1] should contain SignResponse (field 4); got {list(sf1)}"
+
+sign_resp = parse_fields(sf1[4])
+# Fields: signature=1, public_key=2, algorithm=3, key_id=4, certificate_chain=5
+sig = sign_resp[1]
+pub = sign_resp[2]
+keyid = sign_resp[4].decode("utf-8")
+
+assert keyid == expected_keyid, f"keyid {keyid!r} != expected {expected_keyid!r}"
+assert len(sig) == 64, f"signature should be 64 bytes, got {len(sig)}"
+assert len(pub) == 33, f"public_key should be 33 bytes, got {len(pub)}"
+
+with open(sig_out, "wb") as f:
+    f.write(sig)
+with open(pub_out, "wb") as f:
+    f.write(pub)
+PY
+
+# -- 5. Verify the signature via openssl ----------------------------
+#
+# openssl wants a DER-encoded (r, s) signature and a PEM public key.
+
+python3 - "$TMPDIR_LOCAL/sig.raw" "$TMPDIR_LOCAL/sig.der" \
+  "$TMPDIR_LOCAL/pubkey.raw" "$TMPDIR_LOCAL/pubkey.pem" <<'PY'
+import base64
+import sys
+
+sig_raw, sig_der, pub_raw, pub_pem = sys.argv[1:]
+with open(sig_raw, "rb") as f:
+    sig = f.read()
+assert len(sig) == 64
 r = sig[:32]
 s = sig[32:]
 def der_int(b):
@@ -113,20 +295,21 @@ def der_int(b):
         b = b"\x00" + b
     return bytes([0x02, len(b)]) + b
 body = der_int(r) + der_int(s)
-der  = bytes([0x30, len(body)]) + body
-open("$TMPDIR_LOCAL/sig.der","wb").write(der)
-PY
+der = bytes([0x30, len(body)]) + body
+with open(sig_der, "wb") as f:
+    f.write(der)
 
-python3 - <<PY
-import base64
-pub = bytes.fromhex("$PUBHEX")
+with open(pub_raw, "rb") as f:
+    pub = f.read()
 assert len(pub) == 33 and pub[0] in (0x02, 0x03)
-# SPKI prefix for id-ecPublicKey + prime256v1, BIT STRING with the
-# 33-byte SEC1-compressed key.
-spki_prefix = bytes.fromhex("3039301306072a8648ce3d020106082a8648ce3d030107032200")
+# SPKI prefix for id-ecPublicKey + prime256v1.
+spki_prefix = bytes.fromhex(
+    "3039301306072a8648ce3d020106082a8648ce3d030107032200"
+)
 spki = spki_prefix + pub
 pem = b"-----BEGIN PUBLIC KEY-----\n" + base64.encodebytes(spki) + b"-----END PUBLIC KEY-----\n"
-open("$TMPDIR_LOCAL/pubkey.pem","wb").write(pem)
+with open(pub_pem, "wb") as f:
+    f.write(pem)
 PY
 
 echo "e2e: verifying signature with openssl"
@@ -137,25 +320,65 @@ if ! openssl dgst -sha256 \
   echo "e2e: openssl verify FAILED"; exit 1
 fi
 
-# -- 5. Reject wrong algorithm -------------------------------------
+# -- 6. Reject path: ed25519 must come back as ERROR_CODE_UNSUPPORTED_ALGORITHM ----
 
-echo "e2e: rejecting non-p256 request"
-BAD_REQ="{\"pae_base64\":\"$PAE_B64\",\"algorithm\":\"ed25519\"}"
-set +e
-printf '%s\n' "$BAD_REQ" | "$BIN" sign --handle "$HANDLE" \
-  >"$TMPDIR_LOCAL/stdout" 2>"$TMPDIR_LOCAL/stderr"
-rc=$?
-set -e
-if [ "$rc" != 2 ]; then
-  echo "e2e: expected exit 2 for bad algorithm, got $rc"
-  cat "$TMPDIR_LOCAL/stderr" >&2
-  exit 1
-fi
-if [ -s "$TMPDIR_LOCAL/stdout" ]; then
-  echo "e2e: stdout should be empty on error, got $(cat "$TMPDIR_LOCAL/stdout")"; exit 1
-fi
-if ! grep -q -i "p256\|p-256" "$TMPDIR_LOCAL/stderr"; then
-  echo "e2e: stderr missing expected p256 reject message: $(cat "$TMPDIR_LOCAL/stderr")"; exit 1
-fi
+echo "e2e: rejecting non-p256 SignRequest"
+"$BIN" sign --handle "$HANDLE" < "$TMPDIR_LOCAL/bad_req.bin" > "$TMPDIR_LOCAL/bad_resp.bin"
+
+python3 - "$TMPDIR_LOCAL/bad_resp.bin" <<'PY'
+import struct
+import sys
+with open(sys.argv[1], "rb") as f:
+    raw = f.read()
+
+frames = []
+i = 0
+while i + 4 <= len(raw):
+    n = struct.unpack_from("<I", raw, i)[0]
+    i += 4
+    frames.append(raw[i:i+n])
+    i += n
+assert len(frames) == 2, f"want 2 frames, got {len(frames)}"
+
+def parse_varint(buf, pos):
+    out = 0
+    shift = 0
+    while True:
+        b = buf[pos]
+        pos += 1
+        out |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return out, pos
+        shift += 7
+
+def parse_fields(buf):
+    out = {}
+    pos = 0
+    while pos < len(buf):
+        tag, pos = parse_varint(buf, pos)
+        field = tag >> 3
+        wire = tag & 7
+        if wire == 0:
+            v, pos = parse_varint(buf, pos)
+            out[field] = v
+        elif wire == 2:
+            ln, pos = parse_varint(buf, pos)
+            out[field] = buf[pos:pos+ln]
+            pos += ln
+        else:
+            raise SystemExit(f"unsupported wire type {wire}")
+    return out
+
+# Second frame's SignerFrame.body should be Error (field 7).
+sf1 = parse_fields(frames[1])
+assert 7 in sf1, f"frame[1] should be Error (field 7); got {list(sf1)}"
+err = parse_fields(sf1[7])
+# Error.code is field 1 (varint). UNSUPPORTED_ALGORITHM = 2.
+code = err.get(1, 0)
+assert code == 2, f"want ERROR_CODE_UNSUPPORTED_ALGORITHM=2, got {code}"
+print(f"e2e: rejected with ERROR_CODE_UNSUPPORTED_ALGORITHM (msg={err.get(2, b'').decode('utf-8', 'replace')!r})")
+PY
+
+# -- 7. Done --------------------------------------------------------
 
 echo "e2e: all checks passed"

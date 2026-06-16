@@ -1,0 +1,103 @@
+name: Publish crates.io
+
+# Tag-driven crates.io publish. The signed `v{version}` tag is the single,
+# deliberate release trigger — same as release.yml's binaries and
+# mcp-release.yml's docs corpus. On a tag, `cargo publish --workspace` pushes
+# every publishable library crate to crates.io in dependency order, waiting for
+# each to index before the next. mkit-wasm (publish = false, npm-only) is
+# skipped automatically.
+#
+# Why tag-driven, not release-plz: this workspace owns versioning by hand (the
+# version bump + root CHANGELOG land in the release-prep PR). release-plz's
+# Release-PR model therefore never fires, and once the signed tag exists
+# release-plz treats the version as already released (the tag is its "published"
+# marker) and skips it — which is exactly what broke the 0.3.0 crates.io publish.
+# `cargo publish` ignores tags entirely, so it has no such conflict and needs no
+# pre/post ordering against the tag. release-plz is left inert
+# (`release_always = false` in rust/release-plz.toml).
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  # Escape hatch: re-publish from an existing tag after a transient
+  # crates.io/index failure. NOTE: cargo errors on an already-published crate,
+  # so a re-run after a PARTIAL publish must `--exclude` the crates that landed
+  # (edit the publish step, or publish the remainder manually).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish from (e.g. v0.3.0). Must be pushed to origin.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Never let two publishes race.
+concurrency:
+  group: crates-publish
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+
+jobs:
+  publish:
+    name: cargo publish --workspace
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      # crates.io API token (publish-new + publish-update). Org-level secret;
+      # the org policy must grant this repo access.
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_PACKAGE_KEY }}
+    steps:
+      - name: Validate tag input shape (dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$RELEASE_TAG' is not a vX.Y.Z release tag"
+            exit 1
+          fi
+
+      # Publish the TAG's tree, not a branch — what's released matches the tag.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Native deps for the publish-time verification build (keystore backends:
+      # tpm / yubikey / secret-service). Mirrors semver-checks.yml's set.
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config
+
+      - name: Guard — tag matches workspace version
+        working-directory: rust
+        run: |
+          WS_VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "mkit-core") | .version')"
+          if [[ "v$WS_VERSION" != "$RELEASE_TAG" ]]; then
+            echo "::error::workspace version 'v$WS_VERSION' (rust/Cargo.toml at this tag) != tag '$RELEASE_TAG' — refusing to publish a mislabeled release"
+            exit 1
+          fi
+          echo "version check ok: v$WS_VERSION"
+
+      # Publishes every member without `publish = false` in dependency order,
+      # waiting for each to appear on the index. Tags are irrelevant to cargo,
+      # so the existing signed `v{version}` tag causes no conflict. Idempotent
+      # only for a clean release: cargo errors on an already-published version,
+      # so re-runs after a partial publish need `--exclude` for what landed.
+      - name: Publish workspace to crates.io
+        working-directory: rust
+        run: cargo publish --workspace --locked

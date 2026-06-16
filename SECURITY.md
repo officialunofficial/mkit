@@ -29,8 +29,8 @@ Only the latest minor line receives security fixes.
 
 | Version | Supported                            |
 | ------- | ------------------------------------ |
-| 0.1.x   | Yes (current)                        |
-| < 0.1   | No                                   |
+| 0.3.x   | Yes (current)                        |
+| < 0.3   | No                                   |
 
 Pre-1.0 releases may ship breaking format changes alongside security
 fixes. Read the CHANGELOG before upgrading.
@@ -75,12 +75,28 @@ channel, which we believe is sufficient for the current scope. If you have
 a strong need for end-to-end encryption beyond TLS, mention this in the
 initial advisory and we'll arrange an out-of-band channel.
 
+## Bug bounty
+
+We do not currently offer a paid bug bounty. Researchers will be
+credited in the published advisory and in `CHANGELOG.md`.
+
+## Export control
+
+This project contains cryptographic software (BLAKE3, Ed25519, secp256k1,
+P-256, AES, rustls/TLS). Source code distribution is covered under the
+publicly-available open-source exemption (US EAR §740.13(e); ECCN 5D002.c.1;
+License Exception TSU). A §740.13(e) notification has been provided to BIS
+(crypt@bis.doc.gov) and ENC (enc@bis.doc.gov) at the time of public launch.
+
 ## Scope
 
 In scope:
 
-- The `mkit` binary and everything under `src/` that ships in a release
-  archive.
+- The `mkit` binary and the Rust workspace under `rust/crates/` —
+  including the library crates published to crates.io (`mkit-core`,
+  `mkit-rpc`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, the
+  `mkit-transport-*` crates).
+- The reference external signers under `contrib/signers/`.
 - Release pipeline integrity (signing, SBOM, reproducibility claims).
 - On-disk format parsers (v1 format documented in `docs/SPEC-*.md`).
 

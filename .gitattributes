@@ -30,4 +30,3 @@ tests/           export-ignore
 web/             export-ignore
 scripts/         export-ignore
 contrib/         export-ignore
-docs/release/    export-ignore

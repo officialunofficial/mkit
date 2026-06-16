@@ -12,10 +12,12 @@ type FileAsset = { name: string; bytes: Uint8Array; source: 'default' | 'upload'
 
 const DEFAULT_NAME = 'grid.ppm'
 const DEFAULT_SEED = 0xc0de_cafe
-// Demo-only hard cap. At 64 KB avg FastCDC chunks, 16 MB → ~256 chunks — still readable on the strip and fast through
-// the wasm. Above this we'd freeze the tab building thousands of DOM nodes (and risk OOM in wasm32 well before a
-// gigabyte). Real mkit has no such limit; see issue tracker for the un-cap plan.
-const MAX_FILE_BYTES = 16 * 1024 * 1024
+// Demo-only hard cap. At 64 KB avg FastCDC chunks, 128 MiB → ~2,048 chunks — the strip stays readable (each chip is
+// still visible at typical viewport widths) and the wasm passes finish in a few seconds on a modest laptop. Above this
+// we'd risk OOM in wasm32 (the linear memory ceiling is 4 GiB and our passes hold multiple copies — input, chunker
+// state, Bao outboard) and start freezing the tab while building tens of thousands of DOM nodes. Real mkit has no
+// such limit; the cap only applies to this interactive page.
+const MAX_FILE_BYTES = 128 * 1024 * 1024
 // Auto-edit cadence. 500 ms is the visible target — the user perceives a continuously changing chunker. The
 // `tickRunning` guard naturally throttles to whatever rate the wasm pass actually completes at on the host machine,
 // so a slow device falls back to "as fast as possible" instead of stacking ticks.
@@ -114,7 +116,7 @@ export function StreamingDemo() {
   }, [autoEdit])
 
   if (!currentFile) {
-    return <p className='text-sm text-[--color-muted]'>Generating default file…</p>
+    return <p className='text-sm text-muted'>Generating default file…</p>
   }
 
   return (
@@ -166,11 +168,11 @@ function FileSidebar({
       <div className='flex items-start gap-3'>
         <FilePreview asset={current} />
         <div className='min-w-0 flex-1'>
-          <span className='block text-sm text-[--color-muted]'>Current file</span>
+          <span className='block text-sm text-muted'>Current file</span>
           <p className='mt-1 text-sm font-medium break-all'>{current.name}</p>
-          <p className='text-xs text-[--color-muted]'>{formatBytes(current.bytes.byteLength)}</p>
+          <p className='text-xs text-muted'>{formatBytes(current.bytes.byteLength)}</p>
           {previous ? (
-            <p className='mt-1 text-xs text-[--color-muted]'>
+            <p className='mt-1 text-xs text-muted'>
               (prev: {previous.name}, {formatBytes(previous.bytes.byteLength)})
             </p>
           ) : null}
@@ -196,8 +198,10 @@ function FileSidebar({
           const f = e.dataTransfer.files?.[0]
           if (f) void onReplace(f)
         }}
-        className={`rounded-md border border-dashed p-3 text-xs text-[--color-muted] transition-colors ${
-          dragOver ? 'border-[--color-fg] text-[--color-fg]' : 'border-[--color-hairline]'
+        className={`rounded-md border border-dashed p-3 text-xs transition-colors ${
+          // text-muted must live in the else branch: both .text-* classes set the same property, so
+          // stylesheet order (not className order) would decide and text-fg loses to a later text-muted.
+          dragOver ? 'border-fg text-fg' : 'border-hairline text-muted'
         }`}
       >
         Drop a file here, or
@@ -220,29 +224,24 @@ function FileSidebar({
           e.target.value = ''
         }}
       />
-      <p className='text-xs text-[--color-muted]'>
+      <p className='text-xs text-muted'>
         Replace the file to see the delta section come alive — the prior version is captured automatically. Demo cap:{' '}
         {formatBytes(MAX_FILE_BYTES)}.
       </p>
 
-      <div className='space-y-2 border-t border-[--color-hairline] pt-4'>
+      <div className='space-y-2 border-t border-hairline pt-4'>
         <button
           type='button'
           onClick={onToggleAutoEdit}
           aria-pressed={autoEdit}
           className={`inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition-all duration-200 active:scale-[0.96] sm:h-9 ${
-            autoEdit
-              ? 'border-[--color-fg] bg-[--color-fg] text-[--color-bg]'
-              : 'border-[--color-hairline] hover:border-[--color-fg]'
+            autoEdit ? 'border-fg bg-fg text-bg' : 'border-hairline hover:border-fg'
           }`}
         >
-          <span
-            aria-hidden
-            className={`size-1.5 rounded-full ${autoEdit ? 'animate-pulse bg-[--color-bg]' : 'bg-[--color-muted]'}`}
-          />
+          <span aria-hidden className={`size-1.5 rounded-full ${autoEdit ? 'animate-pulse bg-bg' : 'bg-muted'}`} />
           {autoEdit ? 'Auto-editing' : 'Auto-edit'}
         </button>
-        <p className='text-xs text-[--color-muted]'>
+        <p className='text-xs text-muted'>
           {current.source === 'default'
             ? 'Drifts one grid cell per tick — watch FastCDC keep most chunks stable while the edited region’s chunk re-hashes.'
             : 'Flips 1–3 random bytes per tick (skipping any image header) so you can see how the chunker reacts to small edits.'}
@@ -282,7 +281,7 @@ function StreamingChunker({ file }: { file: FileAsset }) {
       title='Chunker (FastCDC)'
       description='Content-defined boundaries — chunks shift, but only locally, when bytes change.'
     >
-      <p className='text-sm text-[--color-muted]'>
+      <p className='text-sm text-muted'>
         {result.count} chunks · avg {formatBytes(result.avg)} ({formatBytes(result.min)}–{formatBytes(result.max)})
       </p>
       <ChunkStrip
@@ -293,7 +292,7 @@ function StreamingChunker({ file }: { file: FileAsset }) {
         markerByte={deferredByte}
       />
       <div className='space-y-2'>
-        <label className='block text-xs text-[--color-muted]'>
+        <label className='block text-xs text-muted'>
           Tamper byte: {tamperByte.toLocaleString()} of {(file.bytes.byteLength - 1).toLocaleString()}
         </label>
         <input
@@ -306,7 +305,7 @@ function StreamingChunker({ file }: { file: FileAsset }) {
           className='w-full'
           aria-label='Tamper byte offset'
         />
-        <p className='text-xs text-[--color-muted]'>
+        <p className='text-xs text-muted'>
           Edit byte {tamperByte.toLocaleString()} — only chunk {highlightIndex !== null ? highlightIndex : '–'} would
           change. FastCDC's rolling hash keeps the rest stable.
         </p>
@@ -334,7 +333,7 @@ function StreamingChunkedBlob({ file }: { file: FileAsset }) {
       title='ChunkedBlob'
       description='Manifest object: the root hash commits to the list of chunk hashes.'
     >
-      <div className='divide-y divide-[--color-hairline] border-y border-[--color-hairline]'>
+      <div className='divide-y divide-hairline border-y border-hairline'>
         <ObjectRow hash={blob.rootHash} label='ChunkedBlob root' meta={formatBytes(blob.bytesLen)} />
         {blob.chunks.map((c, i) => (
           <ObjectRow
@@ -394,11 +393,11 @@ function StreamingDelta({ current, previous }: { current: FileAsset; previous: F
       description='Wire format that ships only the new + changed chunks against a known base.'
     >
       {!data ? (
-        <p className='text-sm text-[--color-muted]'>Replace the file above to see the delta.</p>
+        <p className='text-sm text-muted'>Replace the file to see the delta.</p>
       ) : (
         <>
           <div className='space-y-1'>
-            <p className='text-xs text-[--color-muted]'>Previous</p>
+            <p className='text-xs text-muted'>Previous</p>
             <ChunkStrip
               chunks={data.prevChunks}
               totalLen={previous!.bytes.byteLength}
@@ -407,7 +406,7 @@ function StreamingDelta({ current, previous }: { current: FileAsset; previous: F
             />
           </div>
           <div className='space-y-1'>
-            <p className='text-xs text-[--color-muted]'>Current</p>
+            <p className='text-xs text-muted'>Current</p>
             <ChunkStrip
               chunks={data.currChunks}
               totalLen={current.bytes.byteLength}
@@ -426,18 +425,18 @@ function DeltaStat({ bytesOnWire, fullSize }: { bytesOnWire: number; fullSize: n
   const savings = fullSize > 0 ? (1 - bytesOnWire / fullSize) * 100 : 0
   const positive = savings > 0
   return (
-    <div className='rounded-lg border border-[--color-hairline] bg-[--color-hairline]/40 p-4 text-center'>
+    <div className='rounded-lg border border-hairline bg-hairline/40 p-4 text-center'>
       {positive ? (
         <>
           <div className='text-3xl font-semibold tabular-nums'>{Math.round(savings)}% saved</div>
-          <div className='text-sm text-[--color-muted]'>
+          <div className='text-sm text-muted'>
             {formatBytes(bytesOnWire)} sent · {formatBytes(fullSize)} for a full re-upload
           </div>
         </>
       ) : (
         <>
           <div className='text-base font-medium'>No shared chunks — full upload wins</div>
-          <div className='mt-1 text-sm text-[--color-muted]'>
+          <div className='mt-1 text-sm text-muted'>
             Delta is {formatBytes(bytesOnWire)} vs {formatBytes(fullSize)} full. Two files with no overlapping content
             (e.g. unrelated images) ship the whole payload either way. Edit the same file to see savings.
           </div>
@@ -546,7 +545,7 @@ function StreamingBaoVerify({ file }: { file: FileAsset }) {
       title='Bao streaming verify'
       description='Each chunk verifies against the root as it lands — no need to wait for the full file.'
     >
-      <p className='text-xs text-[--color-muted] font-mono break-all'>
+      <p className='text-xs text-muted font-mono break-all'>
         Bao root: {baoData.hashHex.slice(0, 16)}… · outboard {formatBytes(baoData.outboard.length)} for a{' '}
         {formatBytes(baoData.bytesLen)} file
       </p>
@@ -564,23 +563,23 @@ function StreamingBaoVerify({ file }: { file: FileAsset }) {
           type='button'
           onClick={start}
           disabled={playing}
-          className='inline-flex h-10 items-center justify-center rounded-lg border border-[--color-hairline] px-3 text-sm font-medium transition-colors hover:border-[--color-fg] active:translate-y-px disabled:opacity-40 sm:h-9'
+          className='inline-flex h-10 items-center justify-center rounded-lg border border-hairline px-3 text-sm font-medium transition-colors hover:border-fg active:translate-y-px disabled:opacity-40 sm:h-9'
         >
           {playing ? 'Streaming…' : 'Start stream'}
         </button>
         <button
           type='button'
           onClick={reset}
-          className='inline-flex h-10 items-center justify-center rounded-lg px-3 text-sm text-[--color-muted] transition-opacity hover:opacity-70 active:translate-y-px sm:h-9'
+          className='inline-flex h-10 items-center justify-center rounded-lg px-3 text-sm text-muted transition-opacity hover:opacity-70 active:translate-y-px sm:h-9'
         >
           Reset
         </button>
-        <label className='ml-2 flex items-center gap-2 text-xs text-[--color-muted]'>
+        <label className='ml-2 flex items-center gap-2 text-xs text-muted'>
           <span>Tamper chunk</span>
           <select
             value={tamperedIndex ?? ''}
             onChange={(e) => setTamperedIndex(e.target.value === '' ? null : Number(e.target.value))}
-            className='rounded-md border border-[--color-hairline] bg-transparent px-2 py-1 font-mono text-xs'
+            className='rounded-md border border-hairline bg-transparent px-2 py-1 font-mono text-xs'
           >
             <option value=''>none</option>
             {baoData.chunks.map((_, i) => (
@@ -596,7 +595,7 @@ function StreamingBaoVerify({ file }: { file: FileAsset }) {
           </span>
         ) : null}
       </div>
-      <p className='text-xs text-[--color-muted]'>
+      <p className='text-xs text-muted'>
         Verified {streamState.verified.size} · failed {streamState.failed.size} · {baoData.chunks.length} total
       </p>
     </Section>
@@ -620,7 +619,7 @@ function Section({
     <section id={id} className='space-y-4 scroll-mt-24'>
       <header className='space-y-1'>
         <h2 className='text-sm font-semibold'>{title}</h2>
-        <p className='text-sm text-[--color-subtle]'>{description}</p>
+        <p className='text-sm text-subtle'>{description}</p>
       </header>
       {children}
     </section>

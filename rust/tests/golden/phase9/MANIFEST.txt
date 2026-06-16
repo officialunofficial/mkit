@@ -1,0 +1,14 @@
+# Phase 9 golden vectors (deterministic) — annotated / signed tags (#230)
+# Object: SPEC-OBJECTS §6a. Signing: SPEC-SIGNING §4a, domain "mkit.tag\0".
+# Format: <name> <blake3-hex>
+#
+# Bin digests are BLAKE3 of the serialised fixture file. The two
+# "_signing_hash"/"_signature" entries pin signing-layer values, not
+# file digests:
+#   tag_annotated_signing_hash = BLAKE3(u16_le(9) || "mkit.tag\0" || signing_bytes)
+#   tag_signed_signature       = Ed25519 signature (seed [0x07;32]) over that hash
+tag_annotated a2ef146c953f9eea246f6eb48a2106a3791f8644cd483932e3b8f89814f61023
+tag_signed e9ff9757b3aa43994bad18a19ca2c190d8a71134eaaa058eb8ac3dc90483298c
+tag_annotated_signing_bytes 17c63f598c5c7e6833f9ba5bae14519f1b0801f595849906d46a9320050472a5
+tag_annotated_signing_hash 1dceaa3d668f348f2b369c83d9ffeddef5d08c711dfce95aa6cee6dfb6b1ff53
+tag_signed_signature 08552fb884c13d323d72182a13f8c13c6a166c78c91322ac114b6fd93a4dbdca10e90ba3d42153c9a45ae203702b190b70c902c77b80cb24de83d90d04dbcc06

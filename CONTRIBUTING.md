@@ -23,7 +23,7 @@ Advisories. Full policy: [SECURITY.md](SECURITY.md).
 | CLI binary | `rust/crates/mkit-cli/` |
 | Core library (objects, packs, refs, signing) | `rust/crates/mkit-core/` |
 | Attestations (in-toto v1, DSSE, signers) | `rust/crates/mkit-attest/` |
-| Transports | `rust/crates/mkit-transport-{memory,file,http,s3,ssh}/` |
+| Transports | `rust/crates/mkit-transport-{memory,file,http,s3,ssh,enc}/` |
 | External signers (TPM, SE, CTAP, file) | `contrib/signers/` |
 | On-disk + wire format specs | `docs/SPEC-*.md` |
 | Golden vectors | `rust/tests/golden/` |
@@ -37,20 +37,59 @@ Requires **Rust 1.95** (auto-installed by rustup from
 ```sh
 cd rust
 cargo build --workspace
-cargo test --workspace
+cargo t                                      # alias for `cargo nextest run`
 cargo fmt --check                            # CI-enforced
 cargo clippy --all-targets -- -D warnings    # CI-enforced
 ```
+
+`cargo t` shells out to `cargo nextest run` via the workspace
+`.cargo/config.toml` alias — nextest is up to 3× faster than the
+in-process `cargo test` on the mkit workspace because each test runs
+in its own process. Install with `cargo install cargo-nextest --locked`
+if `cargo t` errors with "no such subcommand".
 
 Useful extras:
 
 ```sh
 cargo install cargo-deny cargo-audit cargo-nextest    # supply-chain + faster tests
+cargo install cargo-mutants                           # mutation testing (see Test-first below)
 cargo deny check                                      # licenses, sources, advisories
 cargo audit                                           # RUSTSEC advisories
-cargo nextest run --workspace                         # what CI runs (faster + structured)
 ../scripts/verify-rename.sh                           # rename-gate (CI-enforced)
 ```
+
+## Test-first discipline
+
+Every bug fix PR MUST include a regression test that fails on the
+fix's parent commit. The pattern that's worked across the recent
+history:
+
+1. Reproduce the bug as a failing test (`cargo t` shows it red).
+2. Apply the fix.
+3. Re-run; test goes green.
+4. Commit test + fix together so the test's failing state is preserved
+   in the diff context of the fix.
+
+Reviewers check this by running `git checkout <PR-parent> && cargo t
+<new-test-name>` — if the new test passes at the parent, the test
+doesn't actually demonstrate the bug.
+
+For new features (not bug fixes), tests aren't required to fail at any
+specific commit, but they MUST cover the documented behaviour. Three
+test classes earn their keep:
+
+- **Example tests** (`#[test]`) — pin specific inputs/outputs; cite
+  golden vectors where they exist.
+- **Property tests** (`proptest!`) — encode round-trip invariants. The
+  `serialize.rs` blob/commit round-trip and `chunker.rs` determinism
+  property tests are the canonical examples.
+- **Snapshot tests** (`insta::assert_snapshot!`) — pin human-readable
+  output (CLI, JSON envelopes, formatted text). Update with
+  `cargo insta review` after deliberate output changes.
+
+CI runs `cargo-mutants` nightly against `mkit-core` and `mkit-attest`;
+the mutation score is posted to issue #161. Aim to add tests that
+move the score up over time rather than down.
 
 Optional but recommended for repeated local rebuilds:
 
@@ -68,28 +107,40 @@ incremental rebuilds.
 
 The Cargo workspace root is `rust/Cargo.toml`. Most crates live under
 `rust/crates/`. Three reference signers live outside the `rust/`
-tree under `contrib/signers/` because they are integration references
-rather than core crates; they are still workspace members and
-participate in `cargo {test,clippy,build} --workspace`.
+tree under `contrib/signers/`, which is its own separate Cargo
+workspace (`contrib/signers/Cargo.toml`) — they are deliberately NOT
+members of the `rust/` workspace and do NOT participate in
+`cargo {test,clippy,build} --workspace` from `rust/`. Build and test
+them on their own, e.g. `cargo test` from `contrib/signers/`. The
+split exists because out-of-tree workspace members break release-plz
+publishing (#225), as noted in `rust/Cargo.toml`.
 
 ```
 rust/
   Cargo.toml                  # [workspace] root
   crates/
-    mkit-core/
     mkit-attest/
     mkit-cli/
-    mkit-rpc/                 # buffa-defined wire protocols
-    mkit-transport-{memory,file,http,s3,ssh}/
+    mkit-core/
+    mkit-keystore/
+    mkit-rpc/                 # Protobuf-defined wire protocols
+    mkit-transport-enc/       # mkit+enc:// no-OpenSSH encrypted transport
+    mkit-transport-file/
+    mkit-transport-http/
+    mkit-transport-memory/
+    mkit-transport-s3/
+    mkit-transport-ssh/
     mkit-wasm/
 contrib/signers/
-  mkit-sign-file/             # workspace = "../../../rust"
-  mkit-sign-ctap/             # workspace = "../../../rust"
-  mkit-sign-tpm/              # workspace = "../../../rust"
+  Cargo.toml                  # separate [workspace] root (NOT rust/)
+  mkit-sign-file/             # member of contrib/signers/ workspace
+  mkit-sign-ctap/             # member of contrib/signers/ workspace
+  mkit-sign-tpm/              # member of contrib/signers/ workspace
 ```
 
-Run `cargo` commands from `rust/` so the workspace root resolves:
-`(cd rust && cargo nextest run --workspace)`.
+Run `cargo --workspace` commands from `rust/` for the core crates:
+`(cd rust && cargo nextest run --workspace)`. The signers are built
+and tested separately from `contrib/signers/`.
 
 ## Commit conventions
 
@@ -100,7 +151,7 @@ the scopes you'll see in `git log`. Common scopes: `core`, `attest`,
 Examples from the repo:
 
 ```
-fix(metadata): bump inter-crate version pins 0.1 → 0.2 to match workspace
+fix(core): correct off-by-one in pack index reader
 ci(release): publish mkit-wasm to npm on every v*.*.* tag
 docs(install): refresh README install section + add docs/INSTALL.md
 ```
@@ -138,7 +189,7 @@ Every PR is held to:
   inputs.
 - `// TODO: …` markers without an associated GitHub issue.
 - Changes to the release pipeline (`.github/workflows/release.yml`,
-  `docs/release/`) without a follow-up dry-run.
+  `docs/RELEASE.md`) without a follow-up dry-run.
 
 ## Filing issues
 
@@ -159,15 +210,25 @@ Before requesting review:
 
 - [ ] `cargo fmt --check` clean
 - [ ] `cargo clippy --all-targets -- -D warnings` clean
-- [ ] `cargo test --workspace` passes
+- [ ] `cargo t` (or `cargo nextest run --workspace`) passes
 - [ ] `scripts/verify-rename.sh` passes
 - [ ] CHANGELOG entry under "Unreleased" if user-visible
 - [ ] Spec + golden vector updated if format changed
 - [ ] No new dependencies added without justification in the PR body
+- [ ] If this PR fixes a bug, a regression test demonstrating it lives
+      in this diff (see "Test-first discipline" above)
 
-## License
+## License of contributions
 
-By contributing, you agree that your contributions will be dual-licensed
-under MIT OR Apache-2.0, matching the rest of the repository. There is
-no CLA; submitting a PR is taken as your assertion that you have the
-right to license the contribution under those terms.
+mkit follows the Rust-ecosystem convention of **inbound = outbound**:
+unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this repository, as defined in the Apache
+License 2.0, shall be dual-licensed as `MIT OR Apache-2.0` (without any
+additional terms or conditions), matching the project's outbound license.
+
+Do not include third-party code unless it is already licensed under
+MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, or another permissive
+license compatible with our dual-license — and preserve attribution.
+
+We do not require a Developer Certificate of Origin (DCO) sign-off or a
+Contributor License Agreement (CLA).

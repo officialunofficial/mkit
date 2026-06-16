@@ -3,7 +3,7 @@
 //!
 //! Scope:
 //! 1. Accept `-m <msg>` OR spawn `$EDITOR` on a tempfile pre-filled
-//! with [`editor::COMMIT_EDITMSG_TEMPLATE`]. An empty message
+//! with `editor::COMMIT_EDITMSG_TEMPLATE`. An empty message
 //! aborts.
 //! 2. Read `.mkit/index` and build a tree via
 //! [`worktree::build_tree_from_index`]. An empty / missing index is
@@ -24,17 +24,18 @@
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use clap::Parser;
 use mkit_core::index;
-use mkit_core::object::{Commit, Identity, IdentityKind, Object};
+use mkit_core::object::{Commit, Identity, IdentityKind, Object, Tag};
 use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
 use mkit_core::sign::{self, KeyPair};
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
-
-use clap::Parser;
+use mkit_keystore::{KeyRef, KeySelector, open_backend};
 
 use crate::clap_shim;
+use crate::config::Config;
 use crate::editor::{COMMIT_EDITMSG_TEMPLATE, spawn_editor};
 use crate::exit;
 use crate::format;
@@ -55,6 +56,19 @@ struct CommitOptions {
     /// (mirrors `git commit -a`).
     #[arg(short = 'a', long)]
     all: bool,
+    /// Replace the current commit (HEAD) instead of adding a new one.
+    ///
+    /// The new commit re-uses HEAD's parent(s) as its own parent(s)
+    /// (so it supersedes HEAD rather than building on it), takes its
+    /// tree from the staging index, and is re-signed. The branch is
+    /// moved to the new commit; the superseded commit becomes
+    /// unreachable. If `-m` is omitted, the previous commit's message
+    /// is reused (no `$EDITOR` is launched).
+    ///
+    /// NOTE: the superseded commit is not deleted — it stays on disk as
+    /// an unreachable object until `mkit gc` ships (see issue #233).
+    #[arg(long)]
+    amend: bool,
 }
 
 #[must_use]
@@ -72,38 +86,68 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let store = match super::open_store_configured(&cwd) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let _lock = match super::acquire_worktree_lock(&cwd) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
 
     let cfg = match crate::config::read_or_default(&cwd) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
 
+    // ---- When amending, load the commit being replaced. ------------
+    // `--amend` re-creates HEAD: the new commit inherits HEAD's parents
+    // (so it supersedes HEAD rather than stacking on it) and, when no
+    // `-m` is given, reuses HEAD's message verbatim.
+    let amend_target = if opts.amend {
+        match resolve_amend_target(&mkit_dir, &store) {
+            Ok(commit) => Some(commit),
+            Err((m, c)) => return emit_err(&m, c),
+        }
+    } else {
+        None
+    };
+
     // ---- Resolve / prompt for message. -----------------------------
+    // `--amend` without `-m` reuses the superseded commit's message and
+    // never launches `$EDITOR`.
     let msg = match opts.message {
         Some(m) => m,
-        None => match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
-            Ok(m) if !m.is_empty() => m,
-            Ok(_) => {
-                return emit_err("empty commit message — aborting", exit::USAGE);
-            }
-            Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
+        None => match &amend_target {
+            Some(prev) => String::from_utf8_lossy(&prev.message).into_owned(),
+            None => match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
+                Ok(m) if !m.is_empty() => m,
+                Ok(_) => {
+                    return emit_err("empty commit message — aborting", exit::USAGE);
+                }
+                Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
+            },
         },
     };
 
-    // ---- Load signing key. -----------------------------------------
-    let kp = match load_signing_key(&cwd, &cfg.signing_key) {
-        Ok(kp) => kp,
+    // ---- Load signer. ----------------------------------------------
+    let mut signer = match load_commit_signer(&cwd, &cfg) {
+        Ok(signer) => signer,
+        Err((msg, code)) => return emit_err(&msg, code),
+    };
+    let signer_public = match signer.public_key() {
+        Ok(public) => public,
         Err((msg, code)) => return emit_err(&msg, code),
     };
 
     // ---- Resolve author. -------------------------------------------
     // Precedence: --author flag → config.user_identity → pubkey-derived.
-    let author = match resolve_author(opts.author_spec.as_deref(), &cfg.user_identity, &kp) {
+    let author = match resolve_author(
+        opts.author_spec.as_deref(),
+        &cfg.user_identity,
+        &signer_public,
+    ) {
         Ok(id) => id,
         Err(e) => return emit_err(&format!("author: {e}"), exit::CONFIG_ERROR),
     };
@@ -120,11 +164,9 @@ pub fn run(args: &[String]) -> u8 {
     // changeset (the user is committing deletions) and produces an
     // empty-tree commit, so we DON'T gate on `staged_count()` (which
     // excludes Removed entries by design).
-    let Ok(idx) = index::read_index(&cwd) else {
-        return emit_err(
-            "nothing staged: run `mkit add <path>` (or `mkit add .`) before commit",
-            exit::USAGE,
-        );
+    let idx = match index::read_index(&cwd) {
+        Ok(idx) => idx,
+        Err(e) => return emit_err(&format!("read index: {e}"), exit::GENERAL_ERROR),
     };
     if idx.entries.is_empty() {
         return emit_err(
@@ -132,13 +174,25 @@ pub fn run(args: &[String]) -> u8 {
             exit::USAGE,
         );
     }
-    let tree_hash = match worktree::build_tree_from_index(&store, &idx) {
+    // One durability batch spans every tree object plus the commit
+    // object; committed below, BEFORE the ref advance that makes the
+    // commit reachable.
+    let batch = store.batch();
+    // Publishing a durable commit — verify staged objects before the tree
+    // references them.
+    let tree_hash = match worktree::build_tree_from_index_with(&store, &batch, &idx, true) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("build tree: {e}"), exit::GENERAL_ERROR),
     };
-    let parents = match refs::resolve_head(&mkit_dir) {
-        Ok(Some(h)) => vec![h],
-        _ => vec![],
+    // Parent selection. A normal commit builds on HEAD. An `--amend`
+    // replaces HEAD, so it adopts HEAD's *parents* — the superseded
+    // commit drops out of the chain entirely.
+    let parents = match &amend_target {
+        Some(prev) => prev.parents.clone(),
+        None => match refs::resolve_head(&mkit_dir) {
+            Ok(Some(h)) => vec![h],
+            _ => vec![],
+        },
     };
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -147,24 +201,45 @@ pub fn run(args: &[String]) -> u8 {
         tree_hash,
         parents,
         author,
-        kp.public.0,
+        signer_public,
         msg.as_bytes().to_vec(),
         timestamp,
         [0u8; 64],
     );
-    let sig = match sign::sign_commit(&unsigned, &kp) {
+    let sig = match signer.sign_commit(&unsigned) {
         Ok(s) => s,
-        Err(e) => return emit_err(&format!("sign: {e}"), exit::GENERAL_ERROR),
+        Err((msg, code)) => return emit_err(&msg, code),
     };
-    unsigned.signature = sig.0;
+    unsigned.signature = sig;
     let bytes = match serialize::serialize(&Object::Commit(unsigned)) {
         Ok(b) => b,
         Err(e) => return emit_err(&format!("serialize commit: {e}"), exit::DATAERR),
     };
-    let commit_hash = match store.write(&bytes) {
+    let commit_hash = match batch.write(&bytes) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("store commit: {e}"), exit::CANTCREAT),
     };
+    // Make the tree + commit objects durable before anything (recovery
+    // log, HEAD/branch ref, index) references them.
+    if let Err(e) = batch.commit() {
+        return emit_err(&format!("store commit: {e}"), exit::CANTCREAT);
+    }
+    // Amend supersedes the old HEAD. Record it BEFORE moving the branch
+    // (under the worktree lock) so the superseded commit stays
+    // recoverable; abort if the recovery log can't be written.
+    if amend_target.is_some() {
+        match refs::resolve_head(&mkit_dir) {
+            Ok(Some(old_head)) => {
+                let branch = super::head_branch_name(&mkit_dir);
+                if let Err((m, c)) = super::record_superseded(&mkit_dir, "amend", &branch, old_head)
+                {
+                    return emit_err(&m, c);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
+        }
+    }
     if let Err((m, c)) = advance_head(&mkit_dir, &commit_hash) {
         return emit_err(&m, c);
     }
@@ -172,9 +247,14 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&e, exit::CANTCREAT);
     }
     let mut stderr = std::io::stderr().lock();
+    let verb = if amend_target.is_some() {
+        "amended"
+    } else {
+        "committed"
+    };
     let _ = writeln!(
         stderr,
-        "committed {} ({})",
+        "{verb} {} ({})",
         format::short_hash(&commit_hash, 8),
         msg.lines().next().unwrap_or("")
     );
@@ -270,16 +350,191 @@ fn load_signing_key(
     sign::load_key(&key_path).map_err(|e| (format!("load key: {e}"), exit::NOPERM))
 }
 
+pub(super) enum CommitSigner {
+    Legacy(KeyPair),
+    Keystore(Box<dyn mkit_keystore::KeySigner>),
+}
+
+impl CommitSigner {
+    pub(super) fn public_key(&self) -> Result<[u8; 32], (String, u8)> {
+        match self {
+            Self::Legacy(kp) => Ok(kp.public.0),
+            Self::Keystore(signer) => {
+                let public = signer
+                    .public_key()
+                    .map_err(|error| (format!("keystore public key: {error}"), exit::DATAERR))?;
+                public.as_bytes().try_into().map_err(|_| {
+                    (
+                        format!(
+                            "keystore Ed25519 public key must be 32 bytes, got {}",
+                            public.len()
+                        ),
+                        exit::DATAERR,
+                    )
+                })
+            }
+        }
+    }
+
+    /// Sign a [`Tag`] under the distinct tag domain. Mirrors
+    /// [`Self::sign_commit`]: legacy keypairs sign directly, keystore
+    /// signers sign the pre-computed tag signing hash.
+    pub(super) fn sign_tag(&mut self, tag: &Tag) -> Result<[u8; 64], (String, u8)> {
+        match self {
+            Self::Legacy(kp) => sign::sign_tag(tag, kp)
+                .map(|signature| signature.0)
+                .map_err(|error| (format!("sign: {error}"), exit::GENERAL_ERROR)),
+            Self::Keystore(signer) => {
+                let digest = sign::tag_signing_hash(tag)
+                    .map_err(|error| (format!("tag signing hash: {error}"), exit::DATAERR))?;
+                let signature = signer
+                    .sign(&digest)
+                    .map_err(|error| (format!("keystore sign: {error}"), exit::DATAERR))?;
+                signature.try_into().map_err(|signature: Vec<u8>| {
+                    (
+                        format!(
+                            "keystore Ed25519 signature must be 64 bytes, got {}",
+                            signature.len()
+                        ),
+                        exit::DATAERR,
+                    )
+                })
+            }
+        }
+    }
+
+    pub(super) fn sign_commit(&mut self, commit: &Commit) -> Result<[u8; 64], (String, u8)> {
+        match self {
+            Self::Legacy(kp) => sign::sign_commit(commit, kp)
+                .map(|signature| signature.0)
+                .map_err(|error| (format!("sign: {error}"), exit::GENERAL_ERROR)),
+            Self::Keystore(signer) => {
+                let digest = sign::commit_signing_hash(commit)
+                    .map_err(|error| (format!("commit signing hash: {error}"), exit::DATAERR))?;
+                let signature = signer
+                    .sign(&digest)
+                    .map_err(|error| (format!("keystore sign: {error}"), exit::DATAERR))?;
+                signature.try_into().map_err(|signature: Vec<u8>| {
+                    (
+                        format!(
+                            "keystore Ed25519 signature must be 64 bytes, got {}",
+                            signature.len()
+                        ),
+                        exit::DATAERR,
+                    )
+                })
+            }
+        }
+    }
+}
+
+pub(super) fn load_commit_signer(
+    cwd: &std::path::Path,
+    cfg: &Config,
+) -> Result<CommitSigner, (String, u8)> {
+    match cfg.signer.as_str() {
+        "" | "legacy" => load_signing_key(cwd, &cfg.signing_key).map(CommitSigner::Legacy),
+        "keystore" => load_keystore_commit_signer(cfg),
+        other => Err((
+            format!("unknown signer `{other}` — expected `legacy` or `keystore`"),
+            exit::CONFIG_ERROR,
+        )),
+    }
+}
+
+fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8)> {
+    let key_ref = cfg
+        .key
+        .ed25519_ref_or_fallback()
+        .parse::<KeyRef>()
+        .map_err(|error| (format!("key.ed25519_ref: {error}"), exit::CONFIG_ERROR))?;
+    let store = open_backend(key_ref.backend())
+        .map_err(|error| (format!("keystore backend: {error}"), exit::UNAVAILABLE))?;
+    let selector = KeySelector::new(
+        key_ref.label().to_owned(),
+        Some(mkit_keystore::Algorithm::Ed25519),
+    )
+    .map_err(|error| (format!("key.ed25519_ref: {error}"), exit::CONFIG_ERROR))?;
+    let opener = store.opener().ok_or_else(|| {
+        (
+            format!(
+                "keystore backend `{}` does not support opening keys",
+                key_ref.backend()
+            ),
+            exit::DATAERR,
+        )
+    })?;
+    let signer = opener.open(&selector).map_err(|error| match error {
+        mkit_keystore::Error::KeyNotFound(_) => (
+            format!(
+                "missing keystore signing key for algorithm ed25519 — run `mkit key generate --backend {} --algorithm ed25519 --label <label>` first, or set `signer = legacy` and use `mkit keygen`: {error}",
+                key_ref.backend()
+            ),
+            exit::NOINPUT,
+        ),
+        other => (
+            format!("keystore signing key for algorithm ed25519: {other}"),
+            exit::DATAERR,
+        ),
+    })?;
+    Ok(CommitSigner::Keystore(signer))
+}
+
+/// Resolve the commit that `--amend` will replace.
+///
+/// Returns the decoded HEAD [`Commit`]. The new amended commit reuses
+/// this commit's parents and (absent `-m`) its message. Errors when
+/// HEAD has no commit yet (nothing to amend) or when HEAD does not
+/// resolve to a `Commit` object.
+fn resolve_amend_target(
+    mkit_dir: &std::path::Path,
+    store: &ObjectStore,
+) -> Result<Commit, (String, u8)> {
+    let head = refs::resolve_head(mkit_dir)
+        .map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?
+        .ok_or_else(|| {
+            (
+                "nothing to amend: HEAD has no commit yet".to_owned(),
+                exit::USAGE,
+            )
+        })?;
+    match store.read_object(&head) {
+        Ok(Object::Commit(c)) => Ok(c),
+        Ok(_) => Err((
+            format!(
+                "cannot amend: HEAD {} is not a commit",
+                format::hex_hash(&head)
+            ),
+            exit::DATAERR,
+        )),
+        Err(e) => Err((
+            format!("read HEAD commit {}: {e}", format::hex_hash(&head)),
+            exit::DATAERR,
+        )),
+    }
+}
+
 /// Advance the branch pointed to by HEAD (or HEAD itself, if detached)
 /// to `commit_hash`.
+///
+/// Routes through [`super::write_ref_recording_history`] so a build
+/// with `--features history-mmr` records every advance in the branch's
+/// journaled MMR under the repo's `refs-history.lock`. Detached HEAD
+/// advances bypass the journal: per-branch history is keyed on a
+/// branch name and a detached HEAD has none.
 fn advance_head(
     mkit_dir: &std::path::Path,
     commit_hash: &mkit_core::hash::Hash,
 ) -> Result<(), (String, u8)> {
-    let head = refs::read_head(mkit_dir).unwrap_or(Head::Branch("main".to_string()));
+    let head = refs::read_head(mkit_dir).map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?;
     match head {
-        Head::Branch(name) => refs::write_ref(mkit_dir, &name, commit_hash)
-            .map_err(|e| (format!("write ref: {e}"), exit::CANTCREAT)),
+        Head::Branch(name) => super::write_ref_recording_history(
+            mkit_dir,
+            &name,
+            refs::RefWriteCondition::Any,
+            commit_hash,
+        )
+        .map_err(|e| (format!("write ref: {e}"), exit::CANTCREAT)),
         Head::Detached(_) => refs::write_head_detached(mkit_dir, commit_hash)
             .map_err(|e| (format!("update HEAD: {e}"), exit::CANTCREAT)),
     }
@@ -294,7 +549,7 @@ fn advance_head(
 pub(super) fn resolve_author(
     author_flag: Option<&str>,
     cfg_user_identity: &str,
-    kp: &KeyPair,
+    signer_public: &[u8; 32],
 ) -> Result<Identity, String> {
     if let Some(spec) = author_flag {
         return parse_author_spec(spec);
@@ -302,15 +557,17 @@ pub(super) fn resolve_author(
     if !cfg_user_identity.is_empty() {
         return decode_user_identity_hex(cfg_user_identity);
     }
-    Ok(Identity::ed25519(kp.public.0))
+    Ok(Identity::ed25519(*signer_public))
 }
 
 /// Parse a `--author` flag value.
 ///
 /// Accepted forms:
 /// * `ed25519:<64-char hex>` — 32-byte Ed25519 public key.
-/// * `did:key:<hex>` — opaque DID-key bytes (hex-decoded, any length
-/// ≤ `IDENTITY_MAX_LEN`).
+/// * `did:key:<multibase>` — a `did:key` whose multibase payload (the part
+///   after `did:key:`, e.g. `z6Mk…`) is stored verbatim as the DID payload.
+///   It must be a non-empty printable-ASCII multibase string (validated via
+///   `Identity::is_valid`), matching the on-disk `DidKey` invariant.
 /// * `opaque:<bytes>` — raw UTF-8 bytes, stored as-is.
 fn parse_author_spec(spec: &str) -> Result<Identity, String> {
     if let Some(hex) = spec.strip_prefix("ed25519:") {
@@ -322,15 +579,23 @@ fn parse_author_spec(spec: &str) -> Result<Identity, String> {
         arr.copy_from_slice(&bytes);
         return Ok(Identity::ed25519(arr));
     }
-    if let Some(hex) = spec.strip_prefix("did:key:") {
-        let bytes = hex_decode(hex).ok_or_else(|| "did:key:<hex> invalid hex".to_string())?;
-        if bytes.is_empty() {
-            return Err("did:key:<hex> must decode to ≥ 1 byte".to_string());
-        }
-        return Ok(Identity {
+    if let Some(payload) = spec.strip_prefix("did:key:") {
+        // Store the multibase payload verbatim (the `did:key:` scheme prefix
+        // is stripped). A real did:key is base58btc (`z…`); the on-disk
+        // invariant only requires a non-empty printable-ASCII multibase
+        // string, so validate through `is_valid` rather than hex-decoding.
+        let id = Identity {
             kind: IdentityKind::DidKey,
-            bytes,
-        });
+            bytes: payload.as_bytes().to_vec(),
+        };
+        if !id.is_valid() {
+            return Err(
+                "did:key:<multibase> must be a non-empty printable-ASCII multibase string \
+                 (e.g. did:key:z6Mk…)"
+                    .to_string(),
+            );
+        }
+        return Ok(id);
     }
     if let Some(raw) = spec.strip_prefix("opaque:") {
         if raw.is_empty() {
@@ -408,6 +673,7 @@ fn emit_err(msg: &str, code: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkit_keystore::Keystore;
 
     #[test]
     fn parse_author_ed25519_roundtrips() {
@@ -426,10 +692,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_author_did_key_decodes() {
-        let id = parse_author_spec("did:key:deadbeef").unwrap();
+    fn parse_author_did_key_stores_multibase_payload() {
+        // The multibase payload after `did:key:` is stored verbatim as ASCII.
+        let id = parse_author_spec("did:key:z6MkExample").unwrap();
         assert_eq!(id.kind, IdentityKind::DidKey);
-        assert_eq!(id.bytes, vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(id.bytes, b"z6MkExample");
+        assert!(id.is_valid());
+    }
+
+    #[test]
+    fn parse_author_did_key_rejects_non_multibase() {
+        // Empty payload and non-printable/whitespace payloads are rejected
+        // (consistent with the on-disk DidKey invariant).
+        assert!(parse_author_spec("did:key:").is_err());
+        assert!(parse_author_spec("did:key:has space").is_err());
     }
 
     #[test]
@@ -473,7 +749,7 @@ mod tests {
             s.push_str(&"33".repeat(32));
             s
         };
-        let id = resolve_author(Some(&spec), &cfg_hex, &kp).unwrap();
+        let id = resolve_author(Some(&spec), &cfg_hex, &kp.public.0).unwrap();
         assert!(id.bytes.iter().all(|&b| b == 0x22));
     }
 
@@ -482,7 +758,7 @@ mod tests {
         let kp = KeyPair::generate().unwrap();
         let mut cfg_hex = String::from("012000");
         cfg_hex.push_str(&"44".repeat(32));
-        let id = resolve_author(None, &cfg_hex, &kp).unwrap();
+        let id = resolve_author(None, &cfg_hex, &kp.public.0).unwrap();
         assert_eq!(id.kind, IdentityKind::Ed25519);
         assert!(id.bytes.iter().all(|&b| b == 0x44));
     }
@@ -490,8 +766,44 @@ mod tests {
     #[test]
     fn resolve_author_falls_back_to_pubkey() {
         let kp = KeyPair::generate().unwrap();
-        let id = resolve_author(None, "", &kp).unwrap();
+        let id = resolve_author(None, "", &kp.public.0).unwrap();
         assert_eq!(id.kind, IdentityKind::Ed25519);
         assert_eq!(id.bytes, kp.public.0.to_vec());
+    }
+
+    #[test]
+    fn keystore_commit_signature_matches_legacy_keypair_signature() {
+        let seed = [0x5a; 32];
+        let kp = KeyPair::from_seed(seed);
+        let store_root = tempfile::tempdir().unwrap();
+        let store = mkit_keystore::SoftwareRawKeystore::with_root(store_root.path().join("keys"));
+        store
+            .importer()
+            .unwrap()
+            .import(
+                &mkit_keystore::KeyLabel::new("committer").unwrap(),
+                mkit_keystore::SecretKey::new(mkit_keystore::Algorithm::Ed25519, seed),
+                mkit_keystore::KeyAttrs::default(),
+                mkit_keystore::ImportOptions::default(),
+            )
+            .unwrap();
+        let selector =
+            mkit_keystore::KeySelector::new("committer", Some(mkit_keystore::Algorithm::Ed25519))
+                .unwrap();
+        let mut signer = CommitSigner::Keystore(store.opener().unwrap().open(&selector).unwrap());
+        let signer_public = signer.public_key().unwrap();
+        let commit = Commit::new_unannotated(
+            [1; 32],
+            vec![[2; 32]],
+            Identity::ed25519(signer_public),
+            signer_public,
+            b"same commit".to_vec(),
+            123,
+            [0; 64],
+        );
+
+        let keystore_sig = signer.sign_commit(&commit).unwrap();
+        let legacy_sig = sign::sign_commit(&commit, &kp).unwrap().0;
+        assert_eq!(keystore_sig, legacy_sig);
     }
 }

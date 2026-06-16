@@ -1,7 +1,7 @@
 ---
 spec: SPEC-DELTA
 version: 1
-status: draft
+status: stable
 audience: implementers of compatible packfile readers and writers
 ---
 
@@ -44,16 +44,27 @@ The `stream_version` byte is required: readers use it to reject any
 future format they don't recognise.
 
 Readers MUST reject `stream_version != 0x01` with
-`UnsupportedDeltaVersion`.
+`UnsupportedDeltaVersion`. The Rust API surfaces this as
+`MkitError::UnsupportedObjectVersion`; the SPEC-level name refers to
+the same condition.
 
 `base_len` and `result_len` enable readers to validate the stream
 before executing. Writers MUST populate both fields correctly; readers
 MUST verify:
 
+- `base_len` equals the actual length of the supplied base buffer
+  (the v1 reader rejects mismatches before executing any opcode).
 - Every `COPY(offset, length)` satisfies `offset + length <= base_len`.
+- The running emitted-byte count NEVER exceeds `result_len` (the v1
+  reader enforces this per-opcode, not only at end-of-stream).
 - The sum of all emitted bytes equals `result_len` at end-of-stream.
 
-Mismatches yield `DeltaCorrupt`.
+Mismatches yield `DeltaCorrupt`. The Rust implementation collapses
+"COPY past base", "reserved bits set", "zero opcode", "zero-length
+COPY", "result_len overrun", and "result_len underrun at EOF" into
+the single error `MkitError::TrailingData`; matching on the variant
+discriminates only "truncated input" (`UnexpectedEof`) from
+"structurally corrupt" (`TrailingData`).
 
 ---
 
@@ -113,14 +124,16 @@ fn apply(base: &[u8], stream: &[u8]) -> Vec<u8>:
         op = stream[pos]; pos += 1
         if op & 0x80 != 0:                      # COPY
             if op & 0x7F != 0: fail DeltaCorrupt  # reserved bits
-            if pos + 6 > len(stream): fail DeltaCorrupt
+            if pos + 6 > len(stream): fail UnexpectedEof
             offset = le_u32(stream[pos..pos+4]); pos += 4
             length = le_u16(stream[pos..pos+2]); pos += 2
             if length == 0: fail DeltaCorrupt
             if offset + length > len(base): fail DeltaCorrupt
+            if len(out) + length > result_len: fail DeltaCorrupt
             out.extend(base[offset..offset+length])
         elif op > 0:                            # INSERT
-            if pos + op > len(stream): fail DeltaCorrupt
+            if pos + op > len(stream): fail UnexpectedEof
+            if len(out) + op > result_len: fail DeltaCorrupt
             out.extend(stream[pos..pos+op])
             pos += op
         else:
@@ -128,6 +141,16 @@ fn apply(base: &[u8], stream: &[u8]) -> Vec<u8>:
     if len(out) != result_len: fail DeltaCorrupt
     return out
 ```
+
+Implementation note: the reference decoder also caps its initial
+`Vec::with_capacity` against attacker-controlled length fields. The
+hint is `min(result_len, stream.len() * 256)`; crucially `base.len()`
+does NOT scale the allocation, because a tiny crafted stream pointing
+at a huge base would otherwise trip a multi-gigabyte reservation
+(see `mkit-core` `delta::compute_cap_hint` and finding G5). This is
+implementation guidance, not a wire-format requirement; conformant
+decoders are free to size their output buffer however they like
+provided behaviour matches the pseudo-code above.
 
 ---
 
@@ -178,29 +201,55 @@ reconstructed bytes equal the target.
 
 ---
 
-## 8. Test vectors (implementer MUST produce)
+## 8. Test vectors
 
-TO BE FIXED IN IMPLEMENTATION:
+The vectors below are exercised in
+`rust/crates/mkit-core/tests/golden_pack.rs` and the unit tests in
+`rust/crates/mkit-core/src/delta.rs::tests`. The pinned vectors (2, 3)
+are inline byte arrays so any framing drift trips immediately.
 
-1. **Identity delta**: base = 64 byte string of "0123456789abcdef" × 4;
-   target = same bytes. Stream must reconstruct verbatim. Record stream
-   bytes.
-2. **Pure INSERT**: base = "aaa"; target = "zzz". Stream begins with
-   byte `0x03` (length 3) followed by `"zzz"`. No COPY opcodes.
-3. **Pure COPY**: base = 128-byte pattern; target = base[0..64]. Stream
-   is one COPY(0, 64). Total = 9 + 7 = 16 bytes.
-4. **Mixed**: base = source-code-like text, target = near-duplicate
-   with a small insert in the middle. Expected: delta smaller than
-   target.
-5. **Reject 0x00 opcode**: stream `"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"` → `DeltaCorrupt`.
-6. **Reject COPY past base_len**: COPY(0x1000, 0x10) over a 16-byte base
-   → `DeltaCorrupt`.
-7. **Reject stream_version 0x02** → `UnsupportedDeltaVersion`.
-8. **Reject result_len mismatch**: stream whose INSERTs sum to 100 but
-   header says `result_len = 99` → `DeltaCorrupt` at end-of-stream.
-9. **Fuzz harness**: `apply(base, arbitrary_bytes)` MUST NOT panic,
-   MUST NOT read out of bounds, MUST either succeed or return a
-   well-defined error (see red-team R-18).
+1. **Identity delta**: base = 64-byte string of "0123456789abcdef" × 4;
+   target = same bytes. Stream round-trips through `decode`
+   (`identity_roundtrip`).
+2. **Pure INSERT**: base = `"aaa"`, target = `"zzz"`. The 13-byte stream
+   `[0x01, 0x03,0x00,0x00,0x00, 0x03,0x00,0x00,0x00, 0x03, 'z','z','z']`
+   is pinned by `delta_basic_pin_bytes_and_roundtrip`.
+3. **Pure COPY**: base = 16-byte pattern `0..15`, target = base; stream
+   = `[ver=1][base_len=16 LE][result_len=16 LE][0x80][0,0,0,0][16,0]`
+   (16 bytes total). Pinned by `delta_pure_copy_pin_bytes`.
+4. **Mixed near-duplicate**: same-text base + small trailing edit;
+   delta MUST be smaller than the target
+   (`near_duplicate_yields_smaller_delta`).
+5. **Reject 0x00 opcode** → `DeltaCorrupt` / `MkitError::TrailingData`
+   (`rejects_zero_opcode`).
+6. **Reject COPY past base_len** → `DeltaCorrupt`
+   (`rejects_copy_past_base_end`).
+7. **Reject stream_version 0x02** → `UnsupportedDeltaVersion` /
+   `MkitError::UnsupportedObjectVersion` (`rejects_unknown_version`).
+8. **Reject result_len mismatch** (INSERT sums > declared result_len)
+   → `DeltaCorrupt` (`rejects_result_len_mismatch_at_end`). The v1
+   reader fails this as soon as `out.len() + length > result_len`, not
+   only at end-of-stream.
+9. **Reject base_len mismatch** (stream says 16, base supplied is 8) →
+   `DeltaCorrupt` (`rejects_base_len_mismatch`).
+10. **Reject COPY with reserved low bits** (opcode `0x81`) →
+    `DeltaCorrupt` (`rejects_copy_with_reserved_low_bits`).
+11. **Reject COPY with `length == 0`** → `DeltaCorrupt`
+    (`rejects_copy_with_zero_length`).
+12. **Truncated header / COPY / INSERT** → `UnexpectedEof`
+    (`rejects_truncated_header`, `rejects_truncated_copy`,
+    `rejects_truncated_insert`).
+13. **`encode` rejects > u32 lengths** → `DeltaLengthOverflow`
+    (`check_length_bounds_rejects_over_u32`). This avoids silently
+    saturating to `u32::MAX` and producing a stream that `decode`
+    would reject far from the call site (finding H8).
+14. **G5 regression**: tiny stream + huge base must not trigger a
+    multi-GiB capacity reservation
+    (`rejects_huge_result_len_without_preallocating`,
+    `cap_hint_does_not_scale_with_base_len`).
+15. **Fuzz harness**: `apply(base, arbitrary_bytes)` MUST NOT panic,
+    MUST NOT read out of bounds, MUST either succeed or return a
+    well-defined error (see red-team R-18).
 
 ---
 

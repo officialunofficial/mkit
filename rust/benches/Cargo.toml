@@ -38,6 +38,28 @@ harness = false
 name = "pack_create"
 harness = false
 
+[[bench]]
+name = "store_write"
+harness = false
+
+# Issue #159 Phase 2 — sharded vs monolithic 100 MiB pack transfer
+# with simulated network jitter. Default-off (the `pack-shards`
+# feature on mkit-core pulls in the commonware dep stack, which is
+# heavy). Run with:
+#
+#     cargo bench -p mkit-benches --features pack-shards \
+#                 --bench pack_shard_transfer
+#
+# Not gated on in CI — exists for future regression tracking.
+[[bench]]
+name = "pack_shard_transfer"
+harness = false
+required-features = ["pack-shards"]
+
+[features]
+default = []
+pack-shards = ["mkit-core/pack-shards"]
+
 [dependencies]
 mkit-core = { path = "../crates/mkit-core" }
 mkit-attest = { path = "../crates/mkit-attest" }
@@ -49,7 +71,7 @@ criterion = { version = "0.5", default-features = false, features = ["plotters",
 mkit-core = { path = "../crates/mkit-core" }
 mkit-attest = { path = "../crates/mkit-attest" }
 blake3 = "1"
-sha1 = "0.10"
+sha1 = "0.11"
 sha2 = "0.10"
 blake2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
@@ -57,4 +79,4 @@ k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"]
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 rand_core = { version = "0.6", features = ["std"] }
 tempfile = "3"
-git2 = "0.20"
+git2 = "0.21"

@@ -5,7 +5,43 @@
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # Transitive through yubikey 0.9.0-pre.0 for certificate parsing; mkit does
+    # not expose RSA private-key decryption, and no fixed yubikey release exists.
+    #
+    # TODO(2026-08-21): re-justify this ignore or drop it. cargo-deny v0.19's
+    # advisories schema does not yet support a native `expires` field on
+    # ignore entries (unexpected-keys error on `expires`), so we encode the
+    # 90-day expiry in this TODO comment plus a reminder block in
+    # .github/workflows/rust-security.yml. When cargo-deny adds `expires`
+    # natively, replace this with the structured form.
+    #
+    # The regression test in rust/crates/mkit-keystore/tests/no_rsa_decrypt.rs
+    # asserts the yubikey RSA decrypt entrypoint stays unreferenced workspace-
+    # wide; if that test is removed, this ignore MUST go too.
+    { id = "RUSTSEC-2023-0071", reason = "transitive via yubikey 0.9.0-pre.0 cert parsing; mkit never calls the affected RSA decrypt path (see mkit-keystore/tests/no_rsa_decrypt.rs). Re-justify by 2026-08-21." },
+    # `paste` (macro crate) marked unmaintained 2024-10-07. Pulled
+    # transitively by commonware-* (via blst/aws-lc-sys macro
+    # expansion) when the optional `history-mmr` / `sparse-checkout`
+    # / `pack-shards` / `bls-threshold` features are enabled. No
+    # runtime exposure: paste expands at compile time, produces no
+    # binary code we own. The dependency comes in via the commonware
+    # crates (https://github.com/commonwarexyz/monorepo) — once
+    # commonware migrates off paste this ignore goes. Re-justify by
+    # 2026-08-21.
+    { id = "RUSTSEC-2024-0436", reason = "transitive via commonware-* feature-gated deps; macro-only, no runtime exposure. Re-justify by 2026-08-21." },
+    # `tracing-subscriber 0.2.25` ANSI-escape log-injection (fixed in
+    # >=0.3.20). Pulled transitively by the commonware 2026.5.x train:
+    # commonware-runtime -> ark-ed-on-bls12-381-bandersnatch ->
+    # ark-r1cs-std -> tracing-subscriber 0.2 (the evrf/"golden" DKG curve
+    # new in 2026.5.0). It is arkworks' internal tracing, not on mkit's
+    # user-facing logging path, and the impact is minimal (terminal ANSI
+    # manipulation in logs). No fix is reachable from mkit: ark-r1cs-std
+    # 0.5.0 pins tracing-subscriber 0.2. Drops automatically once the
+    # arkworks chain (or the commonware train) moves to >=0.3.20.
+    # Re-justify by 2026-08-21.
+    { id = "RUSTSEC-2025-0055", reason = "transitive via commonware-runtime 2026.5.x -> arkworks (ark-r1cs-std 0.5.0) -> tracing-subscriber 0.2; arkworks-internal logging, not on mkit's logging path, minimal impact, no reachable fix. Re-justify by 2026-08-21." },
+]
 
 [licenses]
 version = 2
@@ -41,9 +77,12 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# Workspace crates depend on each other via `path = "..."` without a
-# version pin, which cargo-deny treats as a wildcard. This is the normal
-# shape for a Rust workspace that never publishes; whitelist it.
+# The publish=false crates (mkit-cli, mkit-wasm, mkit-transport-enc,
+# benches, fuzz) depend on workspace siblings via bare `path = "..."`
+# without a version pin, which cargo-deny treats as a wildcard. The nine
+# crates published to crates.io carry `version + path` internal deps
+# (publishing requires it); the bare-path form is fine for the crates
+# that never leave the workspace. Whitelist it.
 allow-wildcard-paths = true
 
 [sources]

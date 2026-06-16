@@ -1,0 +1,84 @@
+[package]
+name = "mkit-transport-enc"
+description = "Encrypted-stream transport for mkit, layering mkit-rpc SshFrame on top of commonware-stream::encrypted (ChaCha20-Poly1305, X25519+ed25519 handshake)"
+keywords = ["mkit", "vcs", "transport", "encryption", "commonware"]
+categories = ["network-programming", "cryptography"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Inter-workspace deps need explicit version + path so `cargo publish`
+# accepts them; this crate publishes (publish defaults to true).
+mkit-core = { version = "0.3", path = "../mkit-core" }
+mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
+buffa = "0.7.1"
+thiserror = "2"
+
+# commonware: pinned at workspace root to the 2026.5.x train. All
+# crates share the same release cadence so they're version-locked at
+# `[workspace.dependencies]` and selected here with `workspace = true`.
+commonware-stream = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-cryptography = { workspace = true, features = ["std"] }
+commonware-codec = { workspace = true }
+
+# --- TCP / tokio glue (Phase 2, gated behind `tcp`) -------------------------
+#
+# The `tcp` feature plugs `connect_tcp` / `serve_tcp` in on top of the
+# Phase 1 `from_session` constructor. It pulls a real tokio runtime,
+# OS random, and a `governor`-compatible system clock so we can
+# construct the `BufferPooler + CryptoRngCore + Clock` context that
+# `commonware_stream::encrypted::dial` expects without depending on
+# commonware's full tokio runtime entry point (which consumes the
+# runtime when its driver future returns — not compatible with a
+# long-lived `Transport`). Off by default; downstream callers (the
+# mkit-cli `enc-transport` feature) opt in.
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "macros", "io-util", "time", "sync"], optional = true }
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"], optional = true }
+rand_core = { version = "0.6", optional = true }
+governor = { version = "0.10", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = []
+# Real-TCP entry points: `EncTransport::connect_tcp`, `serve_tcp`, and
+# the `TokioExecutor` async/sync shim. Off by default so workspace
+# builds without tokio when the in-process scaffold is all callers
+# need (Phase 1 transport-trait shape work, deterministic-runtime
+# tests). Turn on from `mkit-cli` via its `enc-transport` feature.
+tcp = ["dep:tokio", "dep:rand", "dep:rand_core", "dep:governor"]
+
+[dev-dependencies]
+# Deterministic runner for the in-process round-trip test. The test
+# uses `commonware_runtime::deterministic::Runner` so we don't depend
+# on real wall-clock time or a multi-threaded executor.
+commonware-utils = { workspace = true }
+hex = "0.4"
+# E2E tcp tests need the real tokio runtime. Repeated here because
+# cargo gates dev-dep features independently from the regular-dep
+# features above; tokio is also re-listed so the test build pulls it
+# in even when the top-level `tcp` feature isn't explicitly enabled
+# from the test invocation (the integration test enables it via
+# `[[test]] required-features` below).
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "macros", "io-util", "time", "sync"] }
+
+# E2E test gated behind `tcp` — `cargo test -p mkit-transport-enc`
+# without that feature still works (Phase 1 deterministic tests run).
+# With `--features tcp` the e2e test is compiled and exercised.
+[[test]]
+name = "tcp_e2e"
+required-features = ["tcp"]
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+# The `tcp` feature pulls tokio/governor/rand — standard crates.io crates
+# with no system build deps — so docs.rs builds them fine. Including it
+# renders the TCP entry points (connect_tcp, serve_tcp, TokioExecutor).
+all-features = true

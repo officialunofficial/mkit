@@ -1,0 +1,44 @@
+# Reference external-signer binaries (mkit-sign-{file,ctap,tpm}) — their OWN
+# Cargo workspace, separate from the main `rust/` workspace.
+#
+# They used to be `../contrib/...` members of rust/Cargo.toml so `cargo test
+# --workspace` covered them and they shared its lint/dep config. But declaring
+# members OUTSIDE the workspace manifest's directory breaks release-plz (it
+# cannot compute their path relative to `rust/`), which blocks crates.io
+# publishing (#225). These crates are `publish = false` reference impls, so they
+# don't belong on the publish train anyway — give them a sibling workspace here.
+#
+# They still path-depend into `rust/crates/*` (path deps work across workspace
+# boundaries) and are built/tested by their own CI steps (see rust.yml). The
+# package metadata + lints below mirror rust/Cargo.toml so the `*.workspace =
+# true` inheritance in each signer keeps resolving.
+
+[workspace]
+resolver = "3"
+members = [
+    "mkit-sign-file",
+    "mkit-sign-ctap",
+    "mkit-sign-tpm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/officialunofficial/mkit"
+authors = ["Official Unofficial, Inc."]
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+doc_lazy_continuation = "allow"
+module_inception = "allow"
+multiple_crate_versions = "allow"

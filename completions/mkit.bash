@@ -14,8 +14,9 @@ _mkit_complete() {
     local cur prev words cword
     _init_completion || return 0
 
-    local subcommands="init add rm hash cat tree commit log status diff branch checkout tag config merge push pull fetch stash clone remote keygen cherry-pick rebase bisect sparse-checkout serve blame verify version help"
-    local top_flags="--help -h --version"
+    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame verify attest verify-attest version help"
+    # Top-level flags. --version/-V are aliases of the `version` subcommand.
+    local top_flags="--help -h --version -V"
 
     # First non-flag word is the subcommand.
     if [[ $cword -eq 1 ]]; then
@@ -31,11 +32,62 @@ _mkit_complete() {
     # surface the --help / --version / well-documented flags so shell
     # users get tab-completion for the common fast-path.
     case "${words[1]}" in
+        add)
+            COMPREPLY=( $(compgen -W "-A --all -u --update -f --force -p --patch --help" -- "$cur") )
+            ;;
+        rm)
+            COMPREPLY=( $(compgen -W "--cached -r --recursive -f --force --help" -- "$cur") )
+            ;;
+        mv)
+            COMPREPLY=( $(compgen -W "-f --force --help" -- "$cur") )
+            ;;
+        restore)
+            COMPREPLY=( $(compgen -W "--staged --worktree --source -f --force --help" -- "$cur") )
+            ;;
+        reset)
+            COMPREPLY=( $(compgen -W "--soft --mixed --hard -f --force --help" -- "$cur") )
+            ;;
+        clean)
+            COMPREPLY=( $(compgen -W "-n --dry-run -f --force -d -x -X --help" -- "$cur") )
+            ;;
+        diff)
+            COMPREPLY=( $(compgen -W "--staged --cached --name-only --name-status --stat -z --help" -- "$cur") )
+            ;;
+        cat-file)
+            COMPREPLY=( $(compgen -W "-t -s -p --batch --help" -- "$cur") )
+            ;;
+        ls-tree)
+            COMPREPLY=( $(compgen -W "-r -z --help" -- "$cur") )
+            ;;
+        ls-files)
+            COMPREPLY=( $(compgen -W "-s --stage -z --others --ignored --exclude-standard --help" -- "$cur") )
+            ;;
+        rev-parse)
+            COMPREPLY=( $(compgen -W "--verify --short --abbrev-ref --show-toplevel --help" -- "$cur") )
+            ;;
+        show-ref)
+            COMPREPLY=( $(compgen -W "--heads --tags --help" -- "$cur") )
+            ;;
+        for-each-ref)
+            COMPREPLY=( $(compgen -W "--format --help" -- "$cur") )
+            ;;
+        symbolic-ref)
+            COMPREPLY=( $(compgen -W "--short --help" -- "$cur") )
+            ;;
+        update-ref)
+            COMPREPLY=( $(compgen -W "-d --delete --help" -- "$cur") )
+            ;;
+        status)
+            COMPREPLY=( $(compgen -W "--porcelain -s --short -z --help" -- "$cur") )
+            ;;
         commit)
-            COMPREPLY=( $(compgen -W "-a --all -m --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-a --all --amend -m --help" -- "$cur") )
             ;;
         log)
-            COMPREPLY=( $(compgen -W "--oneline --graph -n --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --graph -n --help" -- "$cur") )
+            ;;
+        reflog)
+            COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )
             ;;
         push)
             COMPREPLY=( $(compgen -W "--dry-run --help" -- "$cur") )
@@ -44,19 +96,43 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--depth --sparse --help" -- "$cur") )
             ;;
         branch)
-            COMPREPLY=( $(compgen -W "-d --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-v --verbose -d -D -m --format --help" -- "$cur") )
+            ;;
+        tag)
+            COMPREPLY=( $(compgen -W "-a --annotate -s --sign -m --message -d --delete --author --help" -- "$cur") )
             ;;
         rebase)
+            COMPREPLY=( $(compgen -W "-i --interactive --continue --skip --abort --help" -- "$cur") )
+            ;;
+        revert)
             COMPREPLY=( $(compgen -W "--continue --abort --help" -- "$cur") )
             ;;
         bisect)
             COMPREPLY=( $(compgen -W "start good bad reset" -- "$cur") )
             ;;
+        gc)
+            COMPREPLY=( $(compgen -W "-n --dry-run --grace-secs --help" -- "$cur") )
+            ;;
         stash)
-            COMPREPLY=( $(compgen -W "save list pop drop show" -- "$cur") )
+            COMPREPLY=( $(compgen -W "save list pop apply drop clear show" -- "$cur") )
             ;;
         remote)
-            COMPREPLY=( $(compgen -W "add set" -- "$cur") )
+            COMPREPLY=( $(compgen -W "add set remove rename" -- "$cur") )
+            ;;
+        key)
+            COMPREPLY=( $(compgen -W "generate list import export delete --help" -- "$cur") )
+            ;;
+        pack-shard)
+            COMPREPLY=( $(compgen -W "--out --force --help" -- "$cur") )
+            ;;
+        git)
+            COMPREPLY=( $(compgen -W "export import fetch pull verify status format-patch --remote-name --ref --no-attest --algorithm --signer --key --json --passthrough --fork-audit --stdout -o --output-directory --help" -- "$cur") )
+            ;;
+        attest)
+            COMPREPLY=( $(compgen -W "--commit --algorithm --signer --predicate-type --predicate-file --additional-signer --help" -- "$cur") )
+            ;;
+        verify-attest)
+            COMPREPLY=( $(compgen -W "--commit --trust-roots --algorithm --help" -- "$cur") )
             ;;
         *)
             COMPREPLY=( $(compgen -W "--help" -- "$cur") )

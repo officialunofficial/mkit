@@ -12,12 +12,16 @@
 use crate::hash::{HASH_LEN, Hash};
 use crate::object::{
     Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind, MAGIC,
-    MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, Tree, TreeEntry,
+    MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, TAG_NAME_MAX_LEN, Tag, Tree,
+    TreeEntry,
 };
 
 const PROLOGUE_LEN: usize = 6;
 
-const MAX_TREE_ENTRIES: u32 = 1_000_000;
+/// Decode-side cap on tree entry count; writers (and the git
+/// importer) must refuse anything larger or the store gains an
+/// undecodable signed object.
+pub const MAX_TREE_ENTRIES: u32 = 1_000_000;
 const MAX_PARENTS: u32 = 1_000;
 const MAX_REMIX_SOURCES: u32 = 10_000;
 const MAX_CHUNKS: u32 = 1_000_000;
@@ -42,8 +46,30 @@ pub fn serialize(obj: &Object) -> Result<Vec<u8>, MkitError> {
         Object::Remix(r) => write_remix(&mut buf, r)?,
         Object::ChunkedBlob(cb) => write_chunked_blob(&mut buf, cb)?,
         Object::Delta(d) => write_delta(&mut buf, d)?,
+        Object::Tag(t) => write_tag(&mut buf, t)?,
     }
     Ok(buf)
+}
+
+/// The exact byte prefix of `serialize(Object::Blob(..))` for a payload
+/// of `len` bytes: 6-byte object prologue plus the `u32` LE data
+/// length. Lets ingest write a chunk as `prologue ‖ payload` straight
+/// from the source buffer — no `Blob` allocation, no serialize copy.
+/// Equivalence with [`serialize`] is pinned by proptest and,
+/// transitively, the golden blob vectors.
+///
+/// # Errors
+///
+/// [`MkitError::OversizePayload`] if `len` exceeds the wire-format
+/// `u32` cap.
+pub fn blob_prologue(len: usize) -> Result<[u8; PROLOGUE_LEN + 4], MkitError> {
+    let len_le = checked_u32("blob.data", len)?.to_le_bytes();
+    let mut out = [0u8; PROLOGUE_LEN + 4];
+    out[0] = ObjectType::Blob as u8;
+    out[1..5].copy_from_slice(&MAGIC);
+    out[5] = SCHEMA_VERSION;
+    out[6..10].copy_from_slice(&len_le);
+    Ok(out)
 }
 
 /// Deserialize bytes into an owned [`Object`]. Validates the prologue
@@ -67,6 +93,7 @@ pub fn deserialize(data: &[u8]) -> Result<Object, MkitError> {
         ObjectType::Remix => Object::Remix(read_remix(&mut r)?),
         ObjectType::ChunkedBlob => Object::ChunkedBlob(read_chunked_blob(&mut r)?),
         ObjectType::Delta => Object::Delta(read_delta(&mut r)?),
+        ObjectType::Tag => Object::Tag(read_tag(&mut r)?),
     };
     if r.remaining() != 0 {
         return Err(MkitError::TrailingData);
@@ -169,6 +196,31 @@ fn write_remix(buf: &mut Vec<u8>, r: &Remix) -> Result<(), MkitError> {
     Ok(())
 }
 
+/// Reject pack-only / non-storable target types. A tag MUST point at a
+/// type that can live in the object store (`Delta` is pack-only).
+fn check_tag_target_type(t: ObjectType) -> Result<(), MkitError> {
+    if matches!(t, ObjectType::Delta) {
+        return Err(MkitError::TagTargetTypeInvalid(t as u8));
+    }
+    Ok(())
+}
+
+fn write_tag(buf: &mut Vec<u8>, t: &Tag) -> Result<(), MkitError> {
+    if !t.name_is_valid() {
+        return Err(MkitError::TagNameInvalid);
+    }
+    check_tag_target_type(t.target_type)?;
+    buf.extend_from_slice(&t.target);
+    buf.push(t.target_type as u8);
+    write_lp_bytes(buf, "tag.name", &t.name)?;
+    write_identity(buf, &t.tagger)?;
+    write_lp_bytes(buf, "tag.message", &t.message)?;
+    write_u64_le(buf, t.timestamp);
+    buf.extend_from_slice(&t.signer);
+    buf.extend_from_slice(&t.signature);
+    Ok(())
+}
+
 fn write_chunked_blob(buf: &mut Vec<u8>, cb: &ChunkedBlob) -> Result<(), MkitError> {
     write_u64_le(buf, cb.total_size);
     write_u32_le(buf, cb.chunk_size);
@@ -225,6 +277,19 @@ fn estimated_body_len(obj: &Object) -> usize {
         }
         Object::ChunkedBlob(cb) => 8 + 4 + 4 + cb.chunks.len() * 32,
         Object::Delta(d) => 32 + 4 + 4 + d.instructions.len(),
+        Object::Tag(t) => {
+            32 + 1
+                + 4
+                + t.name.len()
+                + 1
+                + 2
+                + t.tagger.bytes.len()
+                + 4
+                + t.message.len()
+                + 8
+                + 32
+                + 64
+        }
     }
 }
 
@@ -326,7 +391,16 @@ impl<'a> Reader<'a> {
         self.need(len)?;
         let bytes = self.data[self.pos..self.pos + len].to_vec();
         self.pos += len;
-        Ok(Identity { kind, bytes })
+        let id = Identity { kind, bytes };
+        // Enforce the full structural invariant at the read boundary so a
+        // malformed object from disk/remote can't deserialize with an
+        // invalid payload (e.g. a binary `DidKey` that isn't a printable
+        // multibase string). `is_valid` is the single source of truth and
+        // the serialize side already gates on it (#223).
+        if !id.is_valid() {
+            return Err(MkitError::InvalidIdentity);
+        }
+        Ok(id)
     }
 }
 
@@ -381,6 +455,12 @@ fn read_commit(r: &mut Reader<'_>) -> Result<Commit, MkitError> {
     if parent_count > MAX_PARENTS {
         return Err(MkitError::TooManyParents);
     }
+    // Cheap upper bound: each parent is HASH_LEN bytes on the wire. If
+    // the remaining buffer can't even hold the parent hashes, the
+    // header is lying and we must not pre-allocate for it.
+    if (parent_count as usize).saturating_mul(HASH_LEN) > r.remaining() {
+        return Err(MkitError::UnexpectedEof);
+    }
     let mut parents = Vec::with_capacity(parent_count as usize);
     for _ in 0..parent_count {
         parents.push(r.read_hash()?);
@@ -411,6 +491,10 @@ fn read_remix(r: &mut Reader<'_>) -> Result<Remix, MkitError> {
     if parent_count > MAX_PARENTS {
         return Err(MkitError::TooManyParents);
     }
+    // Cheap upper bound: each parent is HASH_LEN bytes on the wire.
+    if (parent_count as usize).saturating_mul(HASH_LEN) > r.remaining() {
+        return Err(MkitError::UnexpectedEof);
+    }
     let mut parents = Vec::with_capacity(parent_count as usize);
     for _ in 0..parent_count {
         parents.push(r.read_hash()?);
@@ -418,6 +502,11 @@ fn read_remix(r: &mut Reader<'_>) -> Result<Remix, MkitError> {
     let source_count = r.read_u32()?;
     if source_count > MAX_REMIX_SOURCES {
         return Err(MkitError::TooManySources);
+    }
+    // Each source is two hashes (upstream_id + commit_hash) = 2 *
+    // HASH_LEN bytes. Reject impossible counts before allocating.
+    if (source_count as usize).saturating_mul(2 * HASH_LEN) > r.remaining() {
+        return Err(MkitError::UnexpectedEof);
     }
     let mut sources = Vec::with_capacity(source_count as usize);
     for _ in 0..source_count {
@@ -453,6 +542,39 @@ fn read_remix(r: &mut Reader<'_>) -> Result<Remix, MkitError> {
         parents,
         sources,
         author,
+        signer,
+        message,
+        timestamp,
+        signature,
+    })
+}
+
+fn read_tag(r: &mut Reader<'_>) -> Result<Tag, MkitError> {
+    let target = r.read_hash()?;
+    let target_type = ObjectType::from_u8(r.read_u8()?)?;
+    check_tag_target_type(target_type)?;
+    // `name` is length-prefixed; bound it by TAG_NAME_MAX_LEN before we
+    // copy so a bogus header can't force a large allocation.
+    let name_len = r.read_u32()? as usize;
+    if name_len == 0 || name_len > TAG_NAME_MAX_LEN as usize {
+        return Err(MkitError::TagNameInvalid);
+    }
+    r.need(name_len)?;
+    let name = r.data[r.pos..r.pos + name_len].to_vec();
+    r.pos += name_len;
+    if name.iter().any(|&b| matches!(b, 0 | b'/' | b'\\')) {
+        return Err(MkitError::TagNameInvalid);
+    }
+    let tagger = r.read_identity()?;
+    let message = r.read_lp_bytes()?;
+    let timestamp = r.read_u64()?;
+    let signer = r.read_fixed::<32>()?;
+    let signature = r.read_fixed::<64>()?;
+    Ok(Tag {
+        target,
+        target_type,
+        name,
+        tagger,
         signer,
         message,
         timestamp,
@@ -500,9 +622,35 @@ fn read_delta(r: &mut Reader<'_>) -> Result<Delta, MkitError> {
 mod tests {
     use super::*;
     use crate::hash::{ZERO, hash};
+    use proptest::prelude::*;
 
     fn ed25519_id() -> Identity {
         Identity::ed25519([0xAA; 32])
+    }
+
+    proptest! {
+        /// `blob_prologue(len) ‖ payload` must be byte-identical to
+        /// `serialize(Object::Blob(payload))` — the zero-copy chunk
+        /// write path depends on this equivalence, which transitively
+        /// pins it to the golden blob vectors.
+        #[test]
+        fn blob_prologue_plus_payload_equals_serialize_blob(
+            payload in proptest::collection::vec(any::<u8>(), 0..2048)
+        ) {
+            let via_serialize = serialize(&Object::Blob(Blob {
+                data: payload.clone(),
+            })).unwrap();
+            let header = blob_prologue(payload.len()).unwrap();
+            let mut via_parts = header.to_vec();
+            via_parts.extend_from_slice(&payload);
+            prop_assert_eq!(via_parts, via_serialize);
+        }
+    }
+
+    #[test]
+    fn blob_prologue_rejects_oversize_len() {
+        assert!(blob_prologue(u32::MAX as usize + 1).is_err());
+        assert!(blob_prologue(0).is_ok());
     }
 
     #[test]
@@ -646,6 +794,66 @@ mod tests {
             chunks: vec![hash(b"x"), hash(b"y")],
         });
         assert_eq!(deserialize(&serialize(&obj).unwrap()).unwrap(), obj);
+    }
+
+    fn sample_tag() -> Tag {
+        Tag {
+            target: hash(b"target-commit"),
+            target_type: ObjectType::Commit,
+            name: b"v1.0.0".to_vec(),
+            tagger: ed25519_id(),
+            signer: [0xAA; 32],
+            message: b"release 1.0.0".to_vec(),
+            timestamp: 1_711_300_000,
+            signature: [0xCC; 64],
+        }
+    }
+
+    #[test]
+    fn tag_roundtrip() {
+        let obj = Object::Tag(sample_tag());
+        let bytes = serialize(&obj).unwrap();
+        assert_eq!(bytes[0], 0x07, "tag object_type tag");
+        assert_eq!(&bytes[1..5], b"MKT1");
+        assert_eq!(bytes[5], 0x01);
+        assert_eq!(deserialize(&bytes).unwrap(), obj);
+    }
+
+    #[test]
+    fn tag_empty_message_roundtrip() {
+        let mut t = sample_tag();
+        t.message = vec![];
+        let obj = Object::Tag(t);
+        assert_eq!(deserialize(&serialize(&obj).unwrap()).unwrap(), obj);
+    }
+
+    #[test]
+    fn tag_rejects_empty_name() {
+        let mut t = sample_tag();
+        t.name = vec![];
+        assert_eq!(serialize(&Object::Tag(t)), Err(MkitError::TagNameInvalid));
+    }
+
+    #[test]
+    fn tag_rejects_delta_target_type() {
+        let mut t = sample_tag();
+        t.target_type = ObjectType::Delta;
+        assert_eq!(
+            serialize(&Object::Tag(t)),
+            Err(MkitError::TagTargetTypeInvalid(ObjectType::Delta as u8))
+        );
+    }
+
+    #[test]
+    fn tag_decode_rejects_forbidden_name_byte() {
+        // Hand-craft a tag whose name embeds a `/`. The writer would
+        // reject it, so build the wire bytes directly.
+        let mut buf = vec![0x07, b'M', b'K', b'T', b'1', 0x01];
+        buf.extend_from_slice(&[0u8; 32]); // target
+        buf.push(ObjectType::Commit as u8); // target_type
+        buf.extend_from_slice(&3u32.to_le_bytes()); // name_len
+        buf.extend_from_slice(b"a/b");
+        assert_eq!(deserialize(&buf), Err(MkitError::TagNameInvalid));
     }
 
     // ---- Negative tests ----
@@ -807,6 +1015,35 @@ mod tests {
     }
 
     #[test]
+    fn read_identity_rejects_non_multibase_didkey() {
+        // Wire format: [u8 kind][u16 LE len][payload]. A DidKey payload must
+        // be a printable-ASCII multibase string, so a malformed object with a
+        // binary/whitespace DidKey payload must be rejected at the read
+        // boundary, not silently deserialized (#223).
+        let id_bytes = |payload: &[u8]| {
+            let mut b = vec![0x02u8]; // IdentityKind::DidKey
+            let len = u16::try_from(payload.len()).expect("test payload fits u16");
+            b.extend_from_slice(&len.to_le_bytes());
+            b.extend_from_slice(payload);
+            b
+        };
+        // NUL, high byte, and whitespace payloads all reject.
+        for bad in [b"z\x00ab".as_slice(), b"z\xff", b"z6Mk has space"] {
+            let buf = id_bytes(bad);
+            assert_eq!(
+                Reader::new(&buf).read_identity(),
+                Err(MkitError::InvalidIdentity),
+                "should reject DidKey payload {bad:?} at the read boundary"
+            );
+        }
+        // A real did:key multibase payload round-trips.
+        let good = id_bytes(b"z6MkExample");
+        let id = Reader::new(&good).read_identity().unwrap();
+        assert_eq!(id.kind, IdentityKind::DidKey);
+        assert_eq!(id.bytes, b"z6MkExample");
+    }
+
+    #[test]
     fn serialize_rejects_invalid_identity_in_remix() {
         // Ed25519 with non-32-byte payload.
         let bad_id = Identity {
@@ -826,6 +1063,37 @@ mod tests {
         assert_eq!(serialize(&obj), Err(MkitError::InvalidIdentity));
     }
 
+    /// `read_commit` claims `parent_count = MAX_PARENTS` (`1_000`) but
+    /// the remaining buffer is too small to ever hold that many
+    /// 32-byte parent hashes. The pre-allocation guard must reject the
+    /// header before the parent vec is sized from attacker input.
+    #[test]
+    fn rejects_truncated_commit_parents() {
+        let mut buf = vec![0x03, b'M', b'K', b'T', b'1', 0x01];
+        buf.extend_from_slice(&[0u8; 32]); // tree_hash
+        // Within MAX_PARENTS (1_000) so the existing TooManyParents
+        // guard doesn't fire — we want to confirm the capacity-vs-
+        // remaining check rejects too. 1_000 parents = 32_000 bytes,
+        // but only a single 32-byte hash follows.
+        buf.extend_from_slice(&1_000u32.to_le_bytes()); // parent_count
+        buf.extend_from_slice(&[0xAA; 32]); // only one parent worth
+        assert_eq!(deserialize(&buf), Err(MkitError::UnexpectedEof));
+    }
+
+    /// `read_remix` claims `source_count = MAX_REMIX_SOURCES` (`10_000`)
+    /// but the remaining buffer cannot accommodate even one source
+    /// (which is 64 bytes — two hashes). Reject without allocating.
+    #[test]
+    fn rejects_truncated_remix_sources() {
+        let mut buf = vec![0x04, b'M', b'K', b'T', b'1', 0x01];
+        buf.extend_from_slice(&[0u8; 32]); // tree_hash
+        buf.extend_from_slice(&0u32.to_le_bytes()); // parent_count
+        // 10_000 sources × 64 bytes = 640_000 bytes required, but the
+        // buffer is empty after this point.
+        buf.extend_from_slice(&10_000u32.to_le_bytes()); // source_count
+        assert_eq!(deserialize(&buf), Err(MkitError::UnexpectedEof));
+    }
+
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn checked_u32_rejects_oversize() {
@@ -843,5 +1111,55 @@ mod tests {
                 len: n,
             }
         );
+    }
+
+    // -- Property tests -------------------------------------------------
+    //
+    // Round-trip invariants exercised against arbitrary inputs via
+    // `proptest`. The example tests above cover specific vectors and
+    // the goldens pin wire bytes; the properties below catch the
+    // boundary cases the examples miss (empty payloads, max-length
+    // strings, non-ASCII bytes, etc.).
+    proptest::proptest! {
+        /// Any blob round-trips byte-for-byte through serialize/deserialize.
+        #[test]
+        fn proptest_blob_roundtrip(data in proptest::collection::vec(proptest::num::u8::ANY, 0..4096)) {
+            let obj = Object::Blob(Blob { data });
+            let bytes = serialize(&obj).expect("blob serialises");
+            let parsed = deserialize(&bytes).expect("blob deserialises");
+            proptest::prop_assert_eq!(obj, parsed);
+        }
+
+        /// Any commit (single parent, fixed identity) round-trips
+        /// byte-for-byte. Covers arbitrary tree hashes, arbitrary parent
+        /// hashes, arbitrary message bytes including non-UTF-8 sequences
+        /// (commit messages are bytes per SPEC-OBJECTS §5). Signer + sig
+        /// arrays are constructed from a u8 seed (proptest only ships
+        /// `uniform32` natively; 64-byte signatures get a tiled seed).
+        #[test]
+        fn proptest_commit_roundtrip(
+            tree in proptest::array::uniform32(proptest::num::u8::ANY),
+            parent in proptest::array::uniform32(proptest::num::u8::ANY),
+            signer in proptest::array::uniform32(proptest::num::u8::ANY),
+            msg in proptest::collection::vec(proptest::num::u8::ANY, 0..2048),
+            sig_seed in proptest::num::u8::ANY,
+            ts in 0u64..u64::from(u32::MAX),
+        ) {
+            let mut sig = [0u8; 64];
+            sig.fill(sig_seed);
+            let commit = Commit::new_unannotated(
+                tree,
+                vec![parent],
+                ed25519_id(),
+                signer,
+                msg,
+                ts,
+                sig,
+            );
+            let obj = Object::Commit(commit);
+            let bytes = serialize(&obj).expect("commit serialises");
+            let parsed = deserialize(&bytes).expect("commit deserialises");
+            proptest::prop_assert_eq!(obj, parsed);
+        }
     }
 }

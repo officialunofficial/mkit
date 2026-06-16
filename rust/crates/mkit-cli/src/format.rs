@@ -4,7 +4,7 @@
 
 use mkit_core::hash::Hash;
 
-/// Render a [`Hash`] as 64 lowercase hex chars. Wrapper over
+/// Render a [`Hash`](tyalias@mkit_core::Hash) as 64 lowercase hex chars. Wrapper over
 /// `mkit_core`'s byte-level API that keeps a stable name at this layer.
 #[must_use]
 pub fn hex_hash(h: &Hash) -> String {
@@ -31,6 +31,19 @@ pub fn short_identity(id: &mkit_core::Identity) -> String {
             arr.copy_from_slice(&id.bytes);
             u64::from_le_bytes(arr).to_string()
         }
+        // A DidKey payload is a printable-ASCII multibase string, so show a
+        // readable prefix of it (e.g. `did:key:z6MkExam`) rather than hex.
+        mkit_core::IdentityKind::DidKey => {
+            let s = String::from_utf8_lossy(&id.bytes);
+            let prefix: String = s.chars().take(8).collect();
+            format!("did:key:{prefix}")
+        }
+        // Printable opaque identities (e.g. an imported git
+        // `Name <email>` carried verbatim) render as their text — the
+        // hex fallback below is for genuinely binary payloads.
+        mkit_core::IdentityKind::Opaque if printable_text(&id.bytes).is_some() => {
+            printable_text(&id.bytes).unwrap_or_default().to_owned()
+        }
         kind => {
             let kind_name = match kind {
                 mkit_core::IdentityKind::Ed25519 => "ed25519",
@@ -48,14 +61,21 @@ pub fn short_identity(id: &mkit_core::Identity) -> String {
     }
 }
 
+/// The payload as text iff it is valid UTF-8 with no control
+/// characters (terminal-safe to print verbatim).
+fn printable_text(bytes: &[u8]) -> Option<&str> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    (!s.is_empty() && !s.chars().any(char::is_control)).then_some(s)
+}
+
 /// Full-detail rendering of an [`mkit_core::Identity`] suitable for
 /// machine-readable output (e.g. JSONL from `mkit log --format=json`).
 ///
-/// Format mirrors the parser shorthands accepted by
-/// `mkit config user.identity` so a value emitted here round-trips:
-/// `ed25519:<full-hex>`, `did:key:<full-hex>`, `mid:<decimal-u64>`
-/// for 8-byte opaque keys, and `opaque:<full-hex>` for other opaque
-/// lengths.
+/// Format mirrors the parser shorthands accepted by `mkit config
+/// user.identity` / `--author` so a value emitted here round-trips:
+/// `ed25519:<full-hex>`, `did:key:<multibase>` (the payload verbatim,
+/// matching `--author did:key:…`), `mid:<decimal-u64>` for 8-byte opaque
+/// keys, and `opaque:<full-hex>` for other opaque lengths.
 #[must_use]
 pub fn full_identity(id: &mkit_core::Identity) -> String {
     match id.kind {
@@ -65,7 +85,11 @@ pub fn full_identity(id: &mkit_core::Identity) -> String {
             format!("mid:{}", u64::from_le_bytes(arr))
         }
         mkit_core::IdentityKind::Ed25519 => format!("ed25519:{}", to_hex(&id.bytes)),
-        mkit_core::IdentityKind::DidKey => format!("did:key:{}", to_hex(&id.bytes)),
+        // DidKey bytes are the multibase payload (printable ASCII); emit it
+        // verbatim so it round-trips through `--author did:key:<multibase>`.
+        mkit_core::IdentityKind::DidKey => {
+            format!("did:key:{}", String::from_utf8_lossy(&id.bytes))
+        }
         mkit_core::IdentityKind::Opaque => format!("opaque:{}", to_hex(&id.bytes)),
     }
 }
@@ -95,6 +119,39 @@ pub fn json_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// Render a Unix timestamp (seconds since the epoch, UTC) as a stable,
+/// human-readable string: `YYYY-MM-DD HH:MM:SS +0000`.
+///
+/// The format is fixed UTC (`+0000`) and intentionally locale- and
+/// timezone-independent so log output is reproducible across machines.
+/// Machine-readable callers (e.g. `mkit log --format=json`) keep the
+/// raw integer instead — only the default human log uses this.
+///
+/// Implemented with Howard Hinnant's civil-from-days algorithm to avoid
+/// pulling in a date/time crate. Valid for the entire `u64` range.
+#[must_use]
+pub fn human_date_utc(secs: u64) -> String {
+    let days = i64::try_from(secs / 86_400).unwrap_or(i64::MAX);
+    let rem = secs % 86_400;
+    let hour = rem / 3_600;
+    let minute = (rem % 3_600) / 60;
+    let second = rem % 60;
+
+    // Civil date from a day count relative to 1970-01-01 (Hinnant).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if month <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} +0000")
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -141,6 +198,23 @@ mod tests {
         assert_eq!(json_escape("\x01"), "\\u0001");
         // \x7f stays unescaped (only chars < 0x20 are special).
         assert_eq!(json_escape("\x7f"), "\x7f");
+    }
+
+    #[test]
+    fn human_date_utc_epoch() {
+        assert_eq!(human_date_utc(0), "1970-01-01 00:00:00 +0000");
+    }
+
+    #[test]
+    fn human_date_utc_known_instant() {
+        // 1700000000 = 2023-11-14 22:13:20 UTC.
+        assert_eq!(human_date_utc(1_700_000_000), "2023-11-14 22:13:20 +0000");
+    }
+
+    #[test]
+    fn human_date_utc_leap_day() {
+        // 1582934400 = 2020-02-29 00:00:00 UTC (leap day).
+        assert_eq!(human_date_utc(1_582_934_400), "2020-02-29 00:00:00 +0000");
     }
 
     #[test]

@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mkit-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-31",
+  "compatibility_flags": ["nodejs_compat"],
+  // Durable Object backs the MCP agent's session/SSE transport.
+  "durable_objects": {
+    "bindings": [{ "name": "MCP", "class_name": "MkitMCP" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MkitMCP"] }],
+  // D1 holds the baked corpus (crate source, SPEC docs, READMEs, CLI reference,
+  // SKILL.md) + FTS indexes. Populated at deploy time by scripts/build-index.mjs
+  // (baked from the source tree, not cron-fetched at runtime). Run `npm run db:create`
+  // once and paste the returned id here.
+  "d1_databases": [
+    {
+      "binding": "SEARCH_DB",
+      "database_name": "mkit-mcp-search",
+      "database_id": "9c33a37c-3f56-43d0-b210-0132f2b37959"
+    }
+  ],
+  "vars": {
+    "REPO_URL": "https://github.com/officialunofficial/mkit"
+  },
+  // Custom domain on the makechain.net zone (mirrors web/ at mkit.makechain.net).
+  // Wrangler auto-creates the proxied DNS record + cert on deploy.
+  "routes": [{ "pattern": "mcp.mkit.makechain.net", "custom_domain": true }],
+  "observability": { "enabled": true }
+}

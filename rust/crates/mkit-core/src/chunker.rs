@@ -3,7 +3,7 @@
 //! Spec reference: `docs/SPEC-FASTCDC.md`. Frozen v1 parameters:
 //!
 //! * Gear seed: ASCII `"MKITFCDC"` interpreted as a big-endian `u64`
-//!   (`0x4D4B49_5446_4344_43`). Splitmix64-derived 256-entry table.
+//!   (`0x4D4B_4954_4643_4443`). Splitmix64-derived 256-entry table.
 //! * `MIN_SIZE = 16 KiB`, `AVG_SIZE = 64 KiB`, `MAX_SIZE = 256 KiB`.
 //! * `MASK_S = 0x0001_FFFF` (strict, used while `i < AVG_SIZE`).
 //! * `MASK   = 0x0000_FFFF` (informative; not used directly — we only
@@ -432,18 +432,55 @@ mod tests {
         assert_eq!(from_helper, from_iter);
     }
 
+    /// Pinned v1 gear-table digest, harvested once from the splitmix64
+    /// derivation seeded with "MKITFCDC". Drift = a v2 break.
+    const EXPECTED_GEAR_DIGEST_HEX: &str =
+        "7b238963a8bb10c4dea1bf678aa07d8c3ce94284209c440ca971ff3a97ee5ad4";
+
     #[test]
     fn gear_table_digest_is_stable() {
-        // SPEC-FASTCDC §8 vector 1 spirit: any change to the seed or
-        // splitmix derivation moves this digest. Pin the current value;
-        // CI flags drift loud and early.
-        let d = gear_table_digest();
-        let hex = crate::hash::to_hex(&d);
-        // This is the digest produced by the v1 splitmix derivation
-        // from seed "MKITFCDC" — recompute on first run if it ever
-        // legitimately changes (it should not until v2).
-        assert_eq!(hex.len(), 64);
-        // The actual hex value is asserted against the harvested
-        // golden vector in `tests/golden_pack.rs::gear_table_digest_matches`.
+        // SPEC-FASTCDC §8 vector 1: any change to the seed or splitmix
+        // derivation moves this digest. CI flags drift loud and early.
+        let hex = crate::hash::to_hex(&gear_table_digest());
+        assert_eq!(
+            hex, EXPECTED_GEAR_DIGEST_HEX,
+            "gear table digest changed; refuse to drift silently"
+        );
+    }
+
+    // -- Property tests -------------------------------------------------
+    //
+    // Determinism + cap invariants exercised against arbitrary inputs
+    // via `proptest`. The example tests above cover specific PRNG seeds;
+    // the properties below catch the boundary cases the examples miss
+    // (very-short data, repeating patterns, etc.).
+    proptest::proptest! {
+        /// FastCDC is deterministic: two passes over the same bytes
+        /// produce the same chunk boundaries. This is the core SPEC-
+        /// FASTCDC §2 contract that makes `chunked_blob` content-
+        /// addressable.
+        #[test]
+        fn proptest_determinism(data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024)) {
+            let cdc = FastCdc::v1();
+            let pass1: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            let pass2: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            proptest::prop_assert_eq!(pass1, pass2);
+        }
+
+        /// Boundaries cover the input exactly: sum of lengths equals
+        /// input length; offsets are non-overlapping and monotonic.
+        #[test]
+        fn proptest_boundaries_partition_input(
+            data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024),
+        ) {
+            let cdc = FastCdc::v1();
+            let boundaries: Vec<_> = ChunkIterator::new(cdc, &data).collect();
+            let mut expected_offset = 0usize;
+            for b in &boundaries {
+                proptest::prop_assert_eq!(b.offset, expected_offset);
+                expected_offset += b.length;
+            }
+            proptest::prop_assert_eq!(expected_offset, data.len());
+        }
     }
 }

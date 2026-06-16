@@ -1,7 +1,5 @@
-//! `mkit pull` — fetch refs from the configured remote and update
-//! local ref pointers. No merge yet. The binary only dispatches when
-//! the URL is `mkit+memory://` or `mkit+file://`; the remaining schemes
-//! are follow-ups.
+//! `mkit pull [<remote>]` — fetch refs from the configured remote
+//! (named, or the flat default) and fast-forward the current branch.
 
 use std::io::Write;
 
@@ -14,13 +12,17 @@ use crate::remote_dispatch;
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit pull", about = "Pull changes from the configured remote.")]
-struct PullOpts {}
+struct PullOpts {
+    /// Named remote to pull from (default: the flat default remote).
+    remote: Option<String>,
+}
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    if let Err(code) = clap_shim::parse::<PullOpts>("mkit pull", args) {
-        return code;
-    }
+    let opts = match clap_shim::parse::<PullOpts>("mkit pull", args) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -29,18 +31,18 @@ pub fn run(args: &[String]) -> u8 {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
-    let endpoint = cfg.merged.remote_endpoint.trim();
-    if endpoint.is_empty() {
+    let Some(resolved) = config::resolve_remote(&cfg, opts.remote.as_deref().unwrap_or("")) else {
         return emit_err(
-            "no remote configured — use `mkit remote add <url>`",
+            &match opts.remote.as_deref() {
+                Some(name) => format!("unknown remote '{name}'"),
+                None => "no remote configured — use `mkit remote add <url>`".to_owned(),
+            },
             exit::CONFIG_ERROR,
         );
-    }
-    if let Err(msg) = config::enforce_trusted_remote_endpoint(&cfg) {
-        return emit_err(&msg, exit::CONFIG_ERROR);
-    }
-    match remote_dispatch::open(endpoint) {
-        Ok(tx) => match remote_dispatch::pull_all(&cwd, tx.as_ref()) {
+    };
+    let endpoint = resolved.endpoint.as_str();
+    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, &cfg) {
+        Ok(tx) => match remote_dispatch::pull_all(&cwd, tx.as_ref(), &resolved.name) {
             Ok(n) => {
                 let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(stderr, "pulled {n} ref(s) from {endpoint}");
@@ -51,6 +53,9 @@ pub fn run(args: &[String]) -> u8 {
             }
             Err(e) => emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),
         },
+        Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
+            emit_err(&msg, exit::CONFIG_ERROR)
+        }
         Err(e) => emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     }
 }

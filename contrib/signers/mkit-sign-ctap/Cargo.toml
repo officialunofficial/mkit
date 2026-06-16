@@ -1,7 +1,5 @@
 [package]
 name = "mkit-sign-ctap"
-# Crate lives outside `rust/`; point at the workspace root explicitly.
-workspace = "../../../rust"
 description = "Reference external-signer binary: FIDO2/WebAuthn roaming authenticator (YubiKey / Nitrokey / SoloKey) over CTAP-HID. Speaks mkit protocol v1.1 with WebAuthn wrapping."
 keywords = ["mkit", "attestation", "signer", "webauthn", "fido2"]
 categories = ["command-line-utilities", "cryptography"]
@@ -23,13 +21,16 @@ name = "mkit-sign-ctap"
 path = "src/main.rs"
 
 [features]
-# `ctap-hw` (default) pulls in the `ctap-hid-fido2` driver and lets
-# the binary talk to a real authenticator. Disable when building in
-# environments without `hidapi` / `libudev` (e.g. some CI containers,
-# `wasm32-unknown-unknown`); the resulting binary still compiles and
-# unit-tests run with the in-process mock device, but `enroll` /
-# `sign` / `list-credentials` against real hardware are unavailable.
-default = ["ctap-hw"]
+# `ctap-hw` pulls in the `ctap-hid-fido2` driver and lets the binary
+# talk to a real authenticator. It is OFF by default — symmetric with
+# `mkit-sign-tpm`'s `tpm2` feature — because the driver needs native
+# `hidapi` / `libudev` (Linux: `libudev-dev` / `systemd-devel`) that
+# bare CI containers, macOS-without-extras, and `wasm32-unknown-unknown`
+# don't have. Without it the binary still compiles and unit tests run
+# against the in-process mock device; build with `--features ctap-hw`
+# to enable `enroll` / `sign` / `list-credentials` against real
+# hardware (requires the libudev development package on Linux).
+default = []
 ctap-hw = ["dep:ctap-hid-fido2"]
 
 [dependencies]
@@ -37,9 +38,9 @@ mkit-attest = { path = "../../../rust/crates/mkit-attest" }
 # mkit-rpc owns the wire schemas (signer.proto, common.proto) and the
 # length-prefixed framing helpers used by the subprocess protocol.
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
-buffa = "0.5"
+buffa = "0.7.1"
 # CTAP-HID driver, optional behind the `ctap-hw` feature.
-ctap-hid-fido2 = { version = "3.5", optional = true }
+ctap-hid-fido2 = { version = "=3.5.11", optional = true }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -52,7 +53,7 @@ dirs = "5"
 [dev-dependencies]
 mkit-attest = { path = "../../../rust/crates/mkit-attest" }
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
-buffa = "0.5"
+buffa = "0.7.1"
 # For the crypto cross-check in tests/protocol_shape.rs — generate a
 # P-256 signature in-process so we don't need hardware just to lock
 # down the wire shape.

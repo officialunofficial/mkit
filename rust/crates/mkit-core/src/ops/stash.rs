@@ -114,7 +114,10 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
     }
     let mkit_dir = repo_root.join(MKIT_DIR);
 
-    let tree_hash = worktree::build_tree(store, repo_root)?;
+    // One durability batch over the worktree snapshot + stash commit,
+    // committed before the manifest write that references them.
+    let batch = store.batch();
+    let tree_hash = worktree::build_tree(&batch, repo_root)?;
     let head_hash = refs::resolve_head(&mkit_dir)?;
 
     let timestamp_u64 = unix_seconds_now();
@@ -130,7 +133,8 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
         [0u8; 64],
     ));
     let commit_bytes = serialize::serialize(&commit)?;
-    let stash_hash = store.write(&commit_bytes)?;
+    let stash_hash = batch.write(&commit_bytes)?;
+    batch.commit()?;
 
     // Prepend the new entry.
     let mut list = read_list(repo_root)?;
@@ -166,8 +170,36 @@ pub fn list(repo_root: &Path) -> StashResult<StashList> {
     read_list(repo_root)
 }
 
+/// Resolve the tree hash recorded by stash entry `idx` (newest = 0)
+/// without mutating anything. Callers use this to run a restore-safety
+/// pre-flight (the #176 guard) over the stash tree before [`pop`].
+///
+/// # Errors
+/// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
+/// - [`StashError::NotACommit`] if the stored object is not a Commit.
+pub fn entry_tree_hash(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<Hash> {
+    let list = read_list(repo_root)?;
+    if idx >= list.entries.len() {
+        return Err(StashError::IndexOutOfRange(idx));
+    }
+    let obj = store.read_object(&list.entries[idx].commit_hash)?;
+    let Object::Commit(commit) = obj else {
+        return Err(StashError::NotACommit);
+    };
+    Ok(commit.tree_hash)
+}
+
 /// Pop a stash: restore its tree into the worktree and remove the
 /// entry. Index 0 = newest.
+///
+/// # Safety against data loss
+/// This restores **unconditionally** — it does not itself run the #176
+/// destructive-restore guard, because that guard lives in the CLI layer
+/// (`commands::ensure_restore_safe`). Callers that expose `pop` to users
+/// **must** run [`entry_tree_hash`] + the guard first so uncommitted
+/// edits on unrelated paths are never clobbered. The stash entry is
+/// dropped only after a successful restore (restore failure short-
+/// circuits via `?`, leaving the entry in place for a retry).
 ///
 /// # Errors
 /// - [`StashError::IndexOutOfRange`] if `index` is past the end.
@@ -181,6 +213,25 @@ pub fn pop(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()>
     let Object::Commit(commit) = obj else {
         return Err(StashError::NotACommit);
     };
+    // Record the popped commit in the recovery log BEFORE removing the
+    // manifest entry: restored worktree files are not crash-durable
+    // (ops/restore writes them unflushed), and the manifest entry is
+    // the stash commit's only gc root. Without this, a power loss in
+    // the writeback window could lose both the restored bytes and the
+    // only pointer for re-running the restore. The recovery log is a
+    // durable gc root (SPEC-GC), so the commit stays reachable and
+    // recoverable until the grace window expires.
+    let ts = unix_seconds_now();
+    crate::ops::recovery::record(
+        &repo_root.join(MKIT_DIR),
+        &crate::ops::recovery::RecoveryEntry {
+            timestamp: ts,
+            op: "stash-pop".to_string(),
+            superseded: entry.commit_hash,
+            branch: String::new(),
+        },
+    )
+    .map_err(|e| StashError::Io(io::Error::other(format!("recovery log: {e}"))))?;
     restore::restore_tree(
         store,
         commit.tree_hash,
@@ -190,6 +241,49 @@ pub fn pop(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()>
     list.entries.remove(idx);
     write_list(repo_root, &list)?;
     Ok(())
+}
+
+/// Apply a stash entry's tree to the worktree **without** removing the
+/// entry. Index 0 = newest. This is the non-destructive complement to
+/// [`pop`]: it leaves the stash stack untouched so the same entry can be
+/// re-applied or popped later.
+///
+/// # Safety against data loss
+/// Like [`pop`], this restores **unconditionally** — it does not run the
+/// #176 destructive-restore guard itself. Callers exposing `apply` to
+/// users **must** run [`entry_tree_hash`] + `ensure_restore_safe` first,
+/// exactly as `pop` does, so uncommitted edits on unrelated paths are
+/// never clobbered.
+///
+/// # Errors
+/// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
+/// - [`StashError::NotACommit`] if the stored object is not a Commit.
+pub fn apply(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()> {
+    let list = read_list(repo_root)?;
+    if idx >= list.entries.len() {
+        return Err(StashError::IndexOutOfRange(idx));
+    }
+    let entry = &list.entries[idx];
+    let obj = store.read_object(&entry.commit_hash)?;
+    let Object::Commit(commit) = obj else {
+        return Err(StashError::NotACommit);
+    };
+    restore::restore_tree(
+        store,
+        commit.tree_hash,
+        repo_root,
+        &RestoreOptions::default(),
+    )?;
+    Ok(())
+}
+
+/// Drop **all** stash entries, leaving an empty stack. Idempotent — a
+/// missing or already-empty manifest is not an error.
+///
+/// # Errors
+/// - [`StashError::Io`] if the manifest cannot be written.
+pub fn clear(repo_root: &Path) -> StashResult<()> {
+    write_list(repo_root, &StashList::default())
 }
 
 /// Render `stash show [<stash>]` output: header + unified-diff-style listing.
@@ -556,6 +650,53 @@ mod tests {
     }
 
     #[test]
+    fn apply_restores_tree_and_keeps_entry() {
+        let (tmp, store) = fresh_store();
+        build_stash_fixture(&store, tmp.path());
+        assert_eq!(read_list(tmp.path()).unwrap().entries.len(), 1);
+
+        apply(&store, tmp.path(), 0).unwrap();
+
+        // The stash tree was materialised into the worktree.
+        assert_eq!(
+            fs::read(tmp.path().join("existing.txt")).unwrap(),
+            b"modified content"
+        );
+        assert_eq!(
+            fs::read(tmp.path().join("new.txt")).unwrap(),
+            b"brand new file"
+        );
+        // ...and the entry is still on the stack (apply, not pop).
+        assert_eq!(
+            read_list(tmp.path()).unwrap().entries.len(),
+            1,
+            "apply must not drop the entry"
+        );
+    }
+
+    #[test]
+    fn apply_out_of_range_returns_error() {
+        let (tmp, _store) = fresh_store();
+        let store = ObjectStore::open(tmp.path()).unwrap();
+        let err = apply(&store, tmp.path(), 0).unwrap_err();
+        assert!(matches!(err, StashError::IndexOutOfRange(0)));
+    }
+
+    #[test]
+    fn clear_empties_the_stack() {
+        let (tmp, store) = fresh_store();
+        build_stash_fixture(&store, tmp.path());
+        assert_eq!(read_list(tmp.path()).unwrap().entries.len(), 1);
+
+        clear(tmp.path()).unwrap();
+        assert!(read_list(tmp.path()).unwrap().entries.is_empty());
+
+        // Idempotent: clearing an already-empty stack is fine.
+        clear(tmp.path()).unwrap();
+        assert!(read_list(tmp.path()).unwrap().entries.is_empty());
+    }
+
+    #[test]
     fn show_diff_out_of_range_returns_error() {
         let (tmp, _store) = fresh_store();
         let store = ObjectStore::open(tmp.path()).unwrap();
@@ -616,5 +757,27 @@ mod tests {
             deserialize_list(&bytes),
             Err(StashError::InvalidFormat)
         ));
+    }
+    /// `pop` must record the popped commit in the recovery log BEFORE
+    /// dropping the manifest entry — the only pointer keeping the stash
+    /// commit gc-reachable while the (unflushed) worktree restore is in
+    /// the writeback window.
+    #[test]
+    fn pop_records_recovery_entry_for_popped_commit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = ObjectStore::init(dir.path()).unwrap();
+        std::fs::write(dir.path().join("file.txt"), b"stash me").unwrap();
+        save(&store, dir.path(), "wip").unwrap();
+        let entry_hash = read_list(dir.path()).unwrap().entries[0].commit_hash;
+
+        pop(&store, dir.path(), 0).unwrap();
+
+        let log = crate::ops::recovery::read_all(&dir.path().join(MKIT_DIR)).unwrap();
+        assert!(
+            log.iter()
+                .any(|e| e.op == "stash-pop" && e.superseded == entry_hash),
+            "popped stash commit must be recorded as recoverable; log: {log:?}"
+        );
+        assert!(read_list(dir.path()).unwrap().entries.is_empty());
     }
 }

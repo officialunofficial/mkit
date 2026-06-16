@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
-
 //! Versioned wire protocols for mkit cross-system speech.
 //!
 //! mkit-rpc owns the schemas mkit uses to talk to processes outside
@@ -34,6 +32,9 @@
 //! `signer2.proto` / `ssh2.proto` files rather than mutating v1.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// This crate (including the generated protobuf modules) contains zero
+// `unsafe` — enforce that it stays that way.
+#![forbid(unsafe_code)]
 
 // Generated protobuf modules. `_includes.rs` is emitted by
 // buffa-build; it sets up the module tree for common.proto,
@@ -47,10 +48,17 @@ pub const MAX_FRAME_BYTES: u32 = 1024 * 1024;
 
 /// The protocol version mkit v0.1.x speaks. Aliased here so callers
 /// don't need to chase the generated module path.
-pub const PROTOCOL_VERSION: i32 = crate::mkit::rpc::v1::ProtocolVersion::PROTOCOL_VERSION_1 as i32;
+pub const PROTOCOL_VERSION: i32 = crate::mkit::rpc::v1::ProtocolVersion::ProtocolVersion1 as i32;
 
 mod framing;
-pub use framing::{FrameError, read_frame, write_frame};
+mod helpers;
+pub use framing::{
+    FRAME_RECURSION_LIMIT, FrameError, frame_decode_options, read_frame, write_frame,
+};
+pub use helpers::{
+    CHUNK_DATA_MAX, MAX_REF_NAME, body_name, cond_to_wire, ref_entry_to_ref,
+    rpc_error_to_transport, signer_error_frame, ssh_error_frame, unexpected_frame,
+};
 
 #[cfg(test)]
 mod tests {
@@ -68,5 +76,18 @@ mod tests {
     #[test]
     fn max_frame_bytes_is_one_mib() {
         assert_eq!(MAX_FRAME_BYTES, 1024 * 1024);
+    }
+
+    #[test]
+    fn pin_response_debug_redacts_pin() {
+        // signer.proto marks `pin` with [debug_redact = true]; a stray
+        // `{:?}` log of a PinResponse must never echo the PIN.
+        let pr = crate::mkit::rpc::v1::signer::PinResponse {
+            pin: Some("123456".into()),
+            ..Default::default()
+        };
+        let dbg = format!("{pr:?}");
+        assert!(dbg.contains("[REDACTED]"), "Debug must redact pin: {dbg}");
+        assert!(!dbg.contains("123456"), "PIN leaked into Debug: {dbg}");
     }
 }

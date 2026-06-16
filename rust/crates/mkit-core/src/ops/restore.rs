@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
 use crate::object::{self, EntryMode, Object, TreeEntry};
-use crate::store::ObjectStore;
+use crate::store::{MAX_TREE_DEPTH, ObjectStore};
 use crate::worktree;
 
 const SPARSE_FILE: &str = ".mkit/sparse-checkout";
@@ -57,6 +57,8 @@ pub enum RestoreError {
     NotADirectory(PathBuf),
     #[error("path component is not valid UTF-8")]
     InvalidUtf8,
+    #[error("tree nesting exceeds {} levels", MAX_TREE_DEPTH)]
+    TreeTooDeep,
     #[error(transparent)]
     Object(#[from] object::MkitError),
     #[error(transparent)]
@@ -255,16 +257,16 @@ pub struct RestoreReport {
     pub symlinks_written: u32,
     /// Number of directories created (or that already existed as dirs).
     pub directories_created: u32,
-    /// Number of tree entries skipped because they matched `.mkitignore`.
-    pub skipped_by_ignore: u32,
 }
 
 /// Materialise `tree_hash` into `root` as a working tree.
 ///
 /// Thin wrapper around [`restore_tree`] that additionally:
-/// 1. Loads `<root>/.mkitignore` and skips any matched entries — the
-///    checkout path MUST NOT overwrite files the user deliberately
-///    ignored (editor swapfiles, local-only build artefacts, …).
+/// 1. Loads `<root>/.gitignore` + `<root>/.mkitignore`. Ignore rules do NOT
+///    gate which tree entries are materialised — tracked content is always
+///    written (git parity) — they only protect *untracked* worktree files
+///    (editor swapfiles, local-only build artefacts, …) from the
+///    `clean=true` sweep.
 /// 2. Returns a [`RestoreReport`] with counts the `mkit checkout` UX
 ///    prints for the user.
 ///
@@ -292,10 +294,11 @@ pub fn restore_tree_to_worktree(
     };
     fs::create_dir_all(root)?;
     let mut report = RestoreReport::default();
-    restore_tree_to_worktree_inner(store, *tree, root, opts, "", &ignore_list, &mut report)?;
+    restore_tree_to_worktree_inner(store, *tree, root, opts, "", &ignore_list, &mut report, 0)?;
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn restore_tree_to_worktree_inner(
     store: &ObjectStore,
     tree_hash: Hash,
@@ -304,7 +307,11 @@ fn restore_tree_to_worktree_inner(
     path_prefix: &str,
     ignore: &IgnoreList,
     report: &mut RestoreReport,
+    depth: usize,
 ) -> RestoreResult<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
     let obj = store.read_object(&tree_hash)?;
     let Object::Tree(tree) = obj else {
         return Err(RestoreError::NotATree);
@@ -330,12 +337,11 @@ fn restore_tree_to_worktree_inner(
         } else {
             format!("{path_prefix}/{name}")
         };
-        let is_dir = entry.mode == EntryMode::Tree;
-        // `is_ignored` matches against a basename per `crate::ignore`.
-        if ignore.is_ignored(name, is_dir) {
-            report.skipped_by_ignore += 1;
-            continue;
-        }
+        // NOTE: ignore rules do NOT gate materialization. Tree entries are
+        // tracked content and must always be written (git parity — skipping
+        // them would desync the index from the worktree). Ignore rules only
+        // protect *untracked* worktree files during the clean sweep below /
+        // in `clean_directory_with_ignore`.
         match entry.mode {
             EntryMode::Blob | EntryMode::Executable => {
                 if let Some(patterns) = options.sparse_patterns.as_deref()
@@ -373,6 +379,7 @@ fn restore_tree_to_worktree_inner(
                     &full_path,
                     ignore,
                     report,
+                    depth + 1,
                 )?;
             }
             EntryMode::Symlink => {
@@ -554,6 +561,15 @@ fn create_symlink(_target: &str, _link: &Path) -> io::Result<()> {
     ))
 }
 
+/// Write a restored worktree file via tmp + rename so concurrent
+/// readers never observe a torn file.
+///
+/// Deliberately NOT flushed: worktree contents are not part of the
+/// store's durability invariant (SPEC-OBJECTS §10.1) — the object
+/// store is the source of truth and checkout is re-runnable after a
+/// crash. Flushing every restored file made checkout O(files) full
+/// flushes (`F_FULLFSYNC` each on macOS) for no recoverable state; git
+/// likewise does not flush checked-out files.
 fn write_file_atomic(dir: &Path, name: &str, data: &[u8], executable: bool) -> io::Result<()> {
     let tmp_name = make_tmp_sibling_name(name);
     let tmp_path = dir.join(&tmp_name);
@@ -562,7 +578,6 @@ fn write_file_atomic(dir: &Path, name: &str, data: &[u8], executable: bool) -> i
         let _ = fs::remove_file(&tmp_path);
         let mut tmp = fs::File::create(&tmp_path)?;
         tmp.write_all(data)?;
-        tmp.sync_all()?;
         if executable {
             apply_executable_bit(&tmp_path)?;
         }
@@ -581,6 +596,7 @@ fn apply_executable_bit(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn apply_executable_bit(_path: &Path) -> io::Result<()> {
     Ok(())
 }
@@ -654,6 +670,9 @@ fn clean_directory(
         // smuggle a `.MKIT` or `.Git` entry past the sweep (Git CVE-
         // 2021-21300 family).
         if name_str.eq_ignore_ascii_case(".mkit") || name_str.eq_ignore_ascii_case(".git") {
+            continue;
+        }
+        if name_str == ".mkitignore" {
             continue;
         }
         let mut found = false;
@@ -730,6 +749,9 @@ fn clean_directory_with_ignore(
         if name_str.eq_ignore_ascii_case(".mkit") || name_str.eq_ignore_ascii_case(".git") {
             continue;
         }
+        if name_str == ".mkitignore" || name_str == ".gitignore" {
+            continue;
+        }
         let mut found = false;
         for te in tree_entries {
             if te.name.as_slice() == name_str.as_bytes() {
@@ -742,16 +764,19 @@ fn clean_directory_with_ignore(
         }
         let meta = entry.metadata()?;
         let is_dir = meta.is_dir();
-        // Respect `.mkitignore` — don't touch locally-ignored files.
-        if ignore.is_ignored(&name_str, is_dir) {
+        let full_path = if path_prefix.is_empty() {
+            name_str.clone()
+        } else {
+            format!("{path_prefix}/{name_str}")
+        };
+        // Respect ignore rules — don't touch locally-ignored files. Use
+        // ancestor-aware matching so an untracked file *under* an ignored
+        // directory is preserved too (the safety gate exempts it, so the
+        // sweep must not delete it).
+        if ignore.is_ignored_with_ancestors(&full_path, is_dir) {
             continue;
         }
         if let Some(patterns) = sparse_patterns {
-            let full_path = if path_prefix.is_empty() {
-                name_str.clone()
-            } else {
-                format!("{path_prefix}/{name_str}")
-            };
             let allow = matches_sparse(patterns, &full_path, is_dir)
                 || (is_dir && could_match_descendant(patterns, &full_path));
             if !allow {
@@ -1328,13 +1353,15 @@ mod tests {
     }
 
     #[test]
-    fn worktree_restore_respects_mkitignore() {
+    fn worktree_restore_writes_tracked_entries_and_keeps_untracked_ignored() {
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();
-        // Pre-seed an ignore file + a locally-present-but-ignored file
-        // that must NOT be deleted.
-        fs::write(target.path().join(".mkitignore"), "secret.txt\n").unwrap();
-        fs::write(target.path().join("secret.txt"), b"local-only").unwrap();
+        // Pre-seed an ignore file, an UNTRACKED ignored file (must survive the
+        // clean sweep), and a tracked path that happens to match the ignore
+        // pattern but IS in the target tree (must be written — git parity).
+        fs::write(target.path().join(".mkitignore"), "*.tmp\nsecret.txt\n").unwrap();
+        fs::write(target.path().join("scratch.tmp"), b"local-only").unwrap();
+        fs::write(target.path().join("secret.txt"), b"OLD-LOCAL").unwrap();
         let secret_blob = put_blob(&store, b"COMMITTED-SECRET");
         let ok_blob = put_blob(&store, b"ok");
         let root = put_tree_with(
@@ -1352,19 +1379,62 @@ mod tests {
                 },
             ],
         );
-        // With `clean=true` (default) the checkout sweep must still
-        // leave the ignored file alone: the ignore check covers both
-        // tree-entry restoration AND the cleanup sweep.
         let report =
             restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default())
                 .unwrap();
-        assert_eq!(report.files_written, 1);
-        assert_eq!(report.skipped_by_ignore, 1);
+        // Both tracked entries materialise — ignore rules never gate writes.
+        assert_eq!(report.files_written, 2);
         assert_eq!(
             fs::read(target.path().join("secret.txt")).unwrap(),
-            b"local-only"
+            b"COMMITTED-SECRET",
+            "a tracked tree entry is written even if it matches an ignore rule"
         );
         assert_eq!(fs::read(target.path().join("ok.txt")).unwrap(), b"ok");
+        // The UNTRACKED ignored file is preserved by the clean sweep.
+        assert_eq!(
+            fs::read(target.path().join("scratch.tmp")).unwrap(),
+            b"local-only",
+            "an untracked ignored file must survive the clean sweep"
+        );
+    }
+
+    #[test]
+    fn worktree_restore_clean_keeps_untracked_under_ignored_dir() {
+        // The clean sweep must not delete an untracked file that lives *under*
+        // an ignored directory, even when that directory is part of the
+        // target tree (so it gets recursed into).
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        fs::write(target.path().join(".mkitignore"), "dist/\n").unwrap();
+        fs::create_dir(target.path().join("dist")).unwrap();
+        fs::write(target.path().join("dist/local.tmp"), b"local").unwrap();
+        // Target tree: dist/ (tree) holding a tracked app.js.
+        let app_blob = put_blob(&store, b"APP");
+        let dist_tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"app.js".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: app_blob,
+            }],
+        );
+        let root = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"dist".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: dist_tree,
+            }],
+        );
+        restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default()).unwrap();
+        // Tracked content materialised...
+        assert_eq!(fs::read(target.path().join("dist/app.js")).unwrap(), b"APP");
+        // ...and the untracked file under the ignored dir is preserved.
+        assert_eq!(
+            fs::read(target.path().join("dist/local.tmp")).unwrap(),
+            b"local",
+            "an untracked file under an ignored dir must survive the clean sweep"
+        );
     }
 
     #[cfg(unix)]

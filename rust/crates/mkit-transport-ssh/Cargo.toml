@@ -18,10 +18,14 @@ workspace = true
 [dependencies]
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it.
-mkit-core = { version = "0.1", path = "../mkit-core" }
-mkit-rpc = { version = "0.1", path = "../mkit-rpc" }
-buffa = "0.5"
+mkit-core = { version = "0.3", path = "../mkit-core" }
+mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
+buffa = "0.7.1"
 thiserror = "2"
 
 [dev-dependencies]
 hex = "0.4"
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

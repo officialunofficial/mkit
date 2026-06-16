@@ -1,0 +1,61 @@
+# Codecov config. https://docs.codecov.com/docs/codecovyml-reference
+#
+# mkit policy:
+# - Coverage trend is informational, not a merge gate. We don't want a
+#   well-tested PR blocked because some path stayed at the same %.
+# - Target is the project's own moving baseline (no fixed %), with a
+#   small tolerance so trivial doc/refactor PRs don't trip the patch
+#   threshold.
+# - Generated code, fuzz harnesses, and benchmarks are excluded from
+#   the denominator — they're either not real surface or already
+#   exercised by their own dedicated runs.
+
+codecov:
+  notify:
+    # Wait for the rust.yml CI to finish before commenting so the PR
+    # gets one coverage comment, not one per matrix job. Empty list
+    # means "wait for all expected coverage uploads."
+    after_n_builds: 1
+    wait_for_ci: true
+  require_ci_to_pass: false  # we report regardless; CI gate is rust.yml
+
+coverage:
+  precision: 1
+  round: nearest
+  range: "60...90"   # red → green gradient on the badge
+  status:
+    project:
+      default:
+        target: auto         # follow the moving baseline on main
+        threshold: 1%        # tolerate ±1% project-wide on each PR
+        if_ci_failed: success
+        only_pulls: false
+    patch:
+      default:
+        target: 80%          # new code should ship at ≥80% coverage
+        # Feature-flagged transport + crypto glue (enc-transport,
+        # pack-shards, sparse-checkout, history-mmr, bls-threshold) is
+        # hard to unit-test exhaustively — real TCP, runtime bootstrap,
+        # CLI dispatch wrappers. 10% absorbs the unavoidable
+        # uncovered glue without giving up the 80%-aspirational target.
+        threshold: 10%       # tolerate up to 10pp below target
+        if_ci_failed: success
+
+# Files / paths excluded from the coverage denominator. None of these
+# are "production code we have a regression-test obligation for."
+ignore:
+  - "rust/benches/**"
+  - "rust/fuzz/**"
+  - "rust/tests/golden/**"          # frozen test vectors, not code
+  - "rust/target/**"
+  - "**/build.rs"                   # pure codegen drivers
+  - "**/tests/**"                   # the tests themselves
+  - "contrib/signers/mkit-sign-se/**"  # Swift; not Rust-tooled
+  - "rust/crates/*/src/**/__generated/**"  # buffa-emitted code
+
+comment:
+  layout: "header, diff, files, footer"
+  behavior: default
+  require_changes: true   # only comment if the PR moves coverage
+  require_base: false
+  require_head: true

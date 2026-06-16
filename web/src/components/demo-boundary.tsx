@@ -18,5 +18,5 @@ export function DemoBoundary({ children }: { children: ReactNode }) {
 }
 
 function Fallback() {
-  return <p className='text-sm text-[--color-muted]'>Loading wasm…</p>
+  return <p className='text-sm text-muted'>Loading wasm…</p>
 }

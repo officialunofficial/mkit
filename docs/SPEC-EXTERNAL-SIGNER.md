@@ -67,15 +67,50 @@ does NOT pass:
 - The algorithm on argv (it goes inside `SignRequest`).
 - Any environment variables it didn't already inherit.
 
-The signer's stdin and stdout are pipes; stderr is inherited and is
-free-form for human-readable diagnostics.
+The signer's stdin and stdout are pipes. **stderr is also a pipe** that
+mkit drains concurrently for the lifetime of the conversation (it is
+NOT inherited): a dedicated reader thread discards stderr to EOF,
+capturing only a bounded diagnostic prefix (1 MiB) for error reporting.
+This concurrent drain is mandatory — without it a signer that writes a
+large diagnostic to stderr before emitting its stdout response would
+deadlock (the signer blocks on a full stderr pipe; mkit blocks reading
+stdout). Signers MAY write free-form human-readable diagnostics to
+stderr at any time without fear of blocking.
+
+### 2.1 Timeout & liveness
+
+mkit bounds the entire signer conversation with a single wall-clock
+deadline covering every phase: **spawn → request-write → response-read →
+stderr-drain → child-exit**. On expiry mkit KILLS and REAPS the child
+(no zombie, no orphaned hardware session) and returns a typed,
+phase-named timeout error so the operator can tell a hung touch-prompt
+(`response-read`) from a signer that produced a valid response but never
+exited (`child-exit`).
+
+The default deadline is **120 seconds**, chosen to be generous:
+hardware-backed signers routinely block on a physical touch, a PIN
+entry, or a biometric prompt before emitting any output. Operators who
+drive only fast software signers MAY tighten it via the user-scoped
+config key `attest.external_signer_timeout_secs` (an unsigned integer
+number of seconds; `0` means "deadline already passed" — a hard
+fail-fast). Like `attest.external_signer_path`, this key is **user-scoped
+only** and is rejected from per-repo `.mkit/config`: a hostile repo must
+not be able to set a multi-hour hang or a `0`-second denial-of-service.
+
+Signers SHOULD therefore make progress promptly once any required human
+gesture completes, and MUST NOT assume an unbounded wait.
 
 ---
 
 ## 3. Wire framing
 
-Length-prefixed buffa `SignerFrame` messages on stdin (mkit → signer)
-and stdout (signer → mkit). Per [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing).
+Length-prefixed protobuf-encoded `SignerFrame` messages on stdin
+(mkit → signer) and stdout (signer → mkit). The Rust reference
+signers use the `buffa` runtime; any protobuf 3 / edition 2023
+toolchain emitting the same wire bytes is conformant. See
+[SPEC-RPC §1](SPEC-RPC.md#1-wire-framing) for the 4-byte LE length
+prefix, endianness, and the `MAX_FRAME_BYTES = 1 MiB` cap (frames
+exceeding the cap are a connection-fatal error).
 
 Schema: [`rust/crates/mkit-rpc/proto/signer.proto`](../rust/crates/mkit-rpc/proto/signer.proto).
 
@@ -131,18 +166,78 @@ advertised capabilities before sending a `SignRequest`.
 |---|---|
 | `algorithm` | The algorithm to sign under. MUST be one the signer advertised. |
 | `key_form` | The form the key is provided in. |
-| `key_ref` | Identifies which key. Empty for raw-bytes signers (key path is configured at signer startup). Non-empty for opaque-handle signers (CTAP credentialId, TPM 4-byte BE persistent handle). |
+| `key_ref` | Identifies which key. Empty for raw-bytes signers (key path is configured at signer startup). For opaque-handle signers (CTAP credentialId, TPM 4-byte BE persistent handle): the wire value is preferred, but signers MAY fall back to a per-process default supplied on argv (`mkit-sign-tpm --handle 0x81010001`, `mkit-sign-ctap --credential-id <b64url>`) when `key_ref` is empty. An ill-formed `key_ref` (wrong length, undecodable) MUST be rejected with `ERROR_CODE_INVALID_REQUEST` rather than silently falling through to the argv default. |
 | `payload` | Raw bytes to sign. For DSSE, this is the PAE per [SPEC-ATTESTATIONS](SPEC-ATTESTATIONS.md) §4. |
-| `context` | Optional context. CTAP signers receive the WebAuthn `clientDataJSON` here. |
+| `context` | Optional context. CTAP signers ignore the wire field today and build the WebAuthn `clientDataJSON` themselves from the payload and configured origin; this field is reserved for a future signer that needs caller-supplied context. |
 
 | `SignResponse` field | Meaning |
 |---|---|
 | `signature` | Compact signature. 64 bytes for Ed25519 / k256 / p256. |
-| `public_key` | Public key bytes. 32 for Ed25519, 33 SEC1-compressed (or 65 uncompressed) for k256/p256. REQUIRED. |
+| `public_key` | Public key bytes. 32 for Ed25519, 33 SEC1-compressed (or 65 uncompressed) for k256/p256. REQUIRED. CTAP/WebAuthn signers MUST fail closed if local credential metadata is missing; callers should enroll the credential first so the signer can return the public key that mkit verifies against the WebAuthn assertion. |
 | `algorithm` | Echoes the algorithm used. |
-| `key_id` | DSSE `signatures[].keyid`. Convention: `blake3:<hex>` (Ed25519), `secp256k1:<hex>`, `p256:<hex>`, `webauthn:<base64url-cred-id>`. |
-| `certificate_chain[]` | DER-encoded X.509 chain when applicable. Empty for raw-key signers. |
-| `webauthn` | `{ authenticator_data, client_data_json }` for CTAP signers. |
+| `key_id` | DSSE `signatures[].keyid`. Conventions used by the reference signers: `blake3:<hex>` for Ed25519 (BLAKE3-256 over the raw 32-byte public key), `secp256k1:<hex(compressed-pubkey)>`, `p256:<hex(compressed-pubkey)>`, `webauthn:<base64url-cred-id>`. Other schemes are tolerated; mkit treats `key_id` as opaque. |
+| `certificate_chain[]` | DER-encoded X.509 chain when applicable. Empty for raw-key signers and for both reference hardware signers today (no signer ships an attestation chain in v1). |
+| `webauthn` | `{ authenticator_data, client_data_json }` for CTAP signers — required when `algorithm = ALGORITHM_ED25519_WEBAUTHN` or when the signer is FIDO2-flavoured P-256, so the verifier can reconstruct `authenticator_data ‖ SHA-256(client_data_json)` and check `signature` against that. Unset for non-WebAuthn signers. |
+
+Callers MUST treat `SignResponse` as untrusted. For non-WebAuthn
+responses, mkit rejects the response unless `algorithm` echoes the
+requested algorithm, `public_key` is present, and `signature` verifies
+against `public_key` and the requested `payload`. If `key_id` uses one
+of the reference canonical prefixes (`blake3:`, `ed25519:`,
+`secp256k1:`, `p256:`), mkit recomputes the expected identifier from
+`public_key` and rejects mismatches. Unknown `key_id` prefixes remain
+opaque and are accepted so third-party signer namespaces keep working.
+WebAuthn responses are validated by the WebAuthn verifier using the
+`webauthn` extension rather than this raw-payload check.
+
+### 6.1 WebAuthn verifier policy
+
+When a `SignResponse` carries the `webauthn` extension, mkit verifies
+the assertion with a **two-layer** check:
+
+1. **Cryptographic wrapping (always enforced).** `type == "webauthn.get"`,
+   `clientDataJSON.challenge == base64url-nopad(PAE)` (this is the
+   binding that ties the ceremony to the mkit payload),
+   `authenticatorData` is at least 37 bytes, and the signature verifies
+   against `authenticatorData ‖ SHA-256(clientDataJSON)` under the
+   returned P-256 public key. The `public_key` MUST be a valid SEC1
+   P-256 point. This is what the low-level helper
+   `verify_webauthn_wrapping` does.
+
+2. **Ceremony policy (configurable, layered on top).** An independent
+   set of knobs, each defaulting **permissive / hardware-friendly**:
+
+   | Knob | Default | Checks |
+   |---|---|---|
+   | expected RP ID | off | `authenticatorData[0..32]` (rpIdHash) `== SHA-256(rp_id)` |
+   | allowed origins | off (any) | `clientDataJSON.origin` is in the allow-list |
+   | require user presence (UP) | off | `authenticatorData` flag bit 0 set |
+   | require user verification (UV) | off | `authenticatorData` flag bit 2 set |
+   | allow cross-origin | true | reject `clientDataJSON.crossOrigin == true` when false |
+   | previous sign counter | off | `authenticatorData[33..37]` (BE u32) `>=` previous; rollback rejected |
+
+   UP, UV, and the counter are **independent** knobs on purpose: a
+   strict UV requirement would lock out UP-only roaming authenticators,
+   and a strict counter would reject the many authenticators that always
+   report `signCount == 0`. The permissive default accepts UP-only and
+   `signCount == 0`.
+
+All policy inputs derive from the existing `authenticator_data` and
+`client_data_json` fields — **there is no proto change**. RP-ID hash,
+flags, and signCount live inside `authenticator_data`; origin and
+crossOrigin live inside `client_data_json`.
+
+**Wiring decision.** `verify_webauthn_wrapping` has no `verify-attest`
+consumer today — it is invoked only by the external signer's
+self-consistency check. mkit therefore exposes a policy-aware
+`verify_webauthn_wrapping_with_policy(pae, wrapping, pubkey, sig, &policy)`
+and keeps the bare `verify_webauthn_wrapping` as a thin, permissive
+delegate documented as **cryptographic-only**. The external signer
+routes its WebAuthn self-consistency check through the policy-aware
+variant with the signer's configured `WebAuthnPolicy` (default
+permissive). This is a ceremony-policy layer only: **trust-root binding**
+(which public key is authorised to attest) stays in DSSE envelope
+verification, not in this helper.
 
 ---
 
@@ -159,6 +254,13 @@ Error code semantics: see [SPEC-RPC §3.3](SPEC-RPC.md#33-errorcode).
 ---
 
 ## 8. Reference signers
+
+Four reference signers ship in `contrib/signers/` and exercise the
+full v1 wire surface: three in Rust (`mkit-sign-file`, `mkit-sign-tpm`,
+`mkit-sign-ctap`) and one in Swift (`mkit-sign-se`, using
+`swift-protobuf`). All loop on stdin, processing successive
+`Hello` / `SignRequest` pairs until the caller closes the stream; a
+clean EOF on the length prefix is treated as a graceful shutdown.
 
 ### 8.1 mkit-sign-file
 
@@ -191,15 +293,24 @@ $ mkit-sign-ctap sign  --credential-id <base64url> [--pin <pin>]
 ```
 
 ```
-algorithms = [P256, ED25519_WEBAUTHN]
+algorithms = [P256]
 key_forms  = [OPAQUE_HANDLE]            # the credential_id
 supports_pin = true
 supports_certificate_chain = false
 requires_user_presence = true
 ```
 
-`SignResponse.webauthn` is populated with `authenticator_data` +
-`client_data_json` so the verifier reconstructs the signed input.
+The reference CTAP signer currently supports P-256 credentials only.
+`SignResponse.public_key` is required, and `SignResponse.webauthn` is
+populated with `authenticator_data` + `client_data_json` so the verifier
+reconstructs the signed input. A CTAP signer that has a credential ID but
+no local public-key metadata MUST return an error rather than an empty
+`public_key`.
+
+For compatibility with mkit's current external-signer host path, the
+reference CTAP signer accepts `KEY_FORM_RAW_BYTES` only when `key_ref` is
+empty and the credential handle is supplied by argv `--credential-id`.
+Explicit credential handles should use `KEY_FORM_OPAQUE_HANDLE`.
 
 ### 8.3 mkit-sign-tpm
 
@@ -241,14 +352,15 @@ not leak through to the protocol layer.
 
 ## 10. Security model
 
-The signer process is in mkit's TCB. mkit does NOT verify what the
-signer signed beyond requiring that the returned `signature`
-verifies against the returned `public_key` over the requested
-`payload`. A compromised signer can:
+The signer process is in mkit's TCB. mkit verifies that the returned
+`signature` matches the returned `public_key` over the requested
+`payload`, and rejects `key_id` mismatches for known canonical
+prefixes. A compromised signer can still:
 
 - Sign arbitrary blobs of mkit's choosing.
-- Lie about which `key_id` produced the signature, leading the
-  verifier to attribute the signature to a different key.
+- Lie about which opaque or non-canonical `key_id` namespace produced
+  the signature, leading the verifier to attribute the signature to a
+  different key if that namespace is trusted out-of-band.
 - Fail closed (error frames) but not fail open.
 
 Mitigations the host SHOULD take:

@@ -25,6 +25,8 @@ pub mod exit;
 pub mod format;
 pub mod remote_dispatch;
 pub mod signal;
+#[cfg(feature = "sparse-checkout")]
+pub mod sparse_cache;
 pub mod term;
 
 use std::io::Write;
@@ -52,28 +54,46 @@ pub fn dispatch(argv: &[String]) -> u8 {
             let _ = stdout.write_all(cli::HELP_TEXT.as_bytes());
             exit::OK
         }
-        "version" => {
+        "version" | "--version" | "-V" => {
             let mut stdout = std::io::stdout().lock();
             // Byte-exact `"mkit <X.Y.Z>\n"` — pinned by the snapshot
             // test in tests/version_snapshot.rs AND by Homebrew /
             // Scoop shell asserts. Any refactor that widens this must
-            // update docs/CLI.md and ship a 1.0 major bump.
+            // update docs/CLI.md and ship a 1.0 major bump. The
+            // top-level `--version`/`-V` flags are aliases of the
+            // `version` subcommand (git-parity, #248) and emit the same
+            // canonical string.
             let _ = writeln!(stdout, "mkit {}", cli::CLI_VERSION);
             exit::OK
         }
         "init" => commands::init::run(&rest),
+        "key" => commands::key::run(&rest),
         "keygen" => commands::keygen::run(&rest),
         "hash" => commands::hash_cmd::run(&rest),
         "cat" => commands::cat::run(&rest),
+        "cat-file" => commands::cat_file::run(&rest),
+        "ls-tree" => commands::ls_tree::run(&rest),
+        "ls-files" => commands::ls_files::run(&rest),
+        "rev-parse" => commands::rev_parse::run(&rest),
+        "show" => commands::show::run(&rest),
+        "show-ref" => commands::show_ref::run(&rest),
+        "for-each-ref" => commands::for_each_ref::run(&rest),
+        "symbolic-ref" => commands::symbolic_ref::run(&rest),
+        "update-ref" => commands::update_ref::run(&rest),
         "tree" => commands::tree::run(&rest),
         "add" => commands::add::run(&rest),
         "rm" => commands::rm::run(&rest),
+        "mv" => commands::mv::run(&rest),
+        "restore" => commands::restore::run(&rest),
+        "reset" => commands::reset::run(&rest),
         "status" => commands::status::run(&rest),
         "commit" => commands::commit::run(&rest),
         "log" => commands::log::run(&rest),
+        "reflog" => commands::reflog::run(&rest),
         "branch" => commands::branch::run(&rest),
         "tag" => commands::tag::run(&rest),
         "checkout" => commands::checkout::run(&rest),
+        "clean" => commands::clean::run(&rest),
         "diff" => commands::diff::run(&rest),
         "verify" => commands::verify::run(&rest),
         "attest" => commands::attest::run(&rest),
@@ -84,14 +104,31 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "pull" => commands::pull::run(&rest),
         "fetch" => commands::fetch::run(&rest),
         "clone" => commands::clone::run(&rest),
+        "mcp" => commands::mcp::run(&rest),
         "merge" => commands::merge::run(&rest),
         "cherry-pick" => commands::cherry_pick::run(&rest),
+        "revert" => commands::revert::run(&rest),
         "rebase" => commands::rebase::run(&rest),
         "bisect" => commands::bisect::run(&rest),
+        "gc" => commands::gc::run(&rest),
         "stash" => commands::stash::run(&rest),
         "blame" => commands::blame::run(&rest),
         "serve" => commands::serve::run(&rest),
+        #[cfg(feature = "git-bridge")]
+        "git" => commands::git::run(&rest),
+        #[cfg(not(feature = "git-bridge"))]
+        "git" => {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "error: the git bridge is not compiled into this binary; \
+                 rebuild with `--features git-bridge` (see docs/SPEC-GIT-BRIDGE.md)"
+            );
+            exit::UNAVAILABLE
+        }
         "sparse-checkout" => commands::sparse_checkout::run(&rest),
+        #[cfg(feature = "pack-shards")]
+        "pack-shard" => commands::pack_shard::run(&rest),
         other => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(

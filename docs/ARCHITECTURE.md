@@ -16,11 +16,15 @@ responsibility boundaries — there is no "common" or "utils" crate.
 |--------------------------------|---------------------------------------|------------------------------------------------------------------------|
 | `mkit-core`                    | `rust/crates/mkit-core/`              | Object store, packs, refs, index, worktree, ignore, repo lock, ops, signing, protocol framing |
 | `mkit-attest`                  | `rust/crates/mkit-attest/`            | JCS canonical JSON, in-toto v1 Statement, DSSE envelope, signers, verifiers |
+| `mkit-keystore`                | `rust/crates/mkit-keystore/`          | Key vault interface and backends (`SPEC-KEYSTORE.md`)                  |
+| `mkit-git-bridge`              | `rust/crates/mkit-git-bridge/`        | Git import/export bridge incl. fork mode (`SPEC-GIT-BRIDGE.md`)        |
+| `mkit-rpc`                     | `rust/crates/mkit-rpc/`               | Shared stdio framing for subprocess protocols (`SPEC-RPC.md`)          |
 | `mkit-transport-memory`        | `rust/crates/mkit-transport-memory/`  | In-process transport, used by tests                                    |
 | `mkit-transport-file`          | `rust/crates/mkit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
 | `mkit-transport-http`          | `rust/crates/mkit-transport-http/`    | reqwest + rustls transport with bearer auth and `If-Match` CAS         |
 | `mkit-transport-s3`            | `rust/crates/mkit-transport-s3/`      | Hand-rolled SigV4 transport (R2 + S3-compatible)                       |
 | `mkit-transport-ssh`           | `rust/crates/mkit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
+| `mkit-transport-enc`           | `rust/crates/mkit-transport-enc/`     | `mkit+enc://` no-OpenSSH encrypted transport (`SPEC-TRANSPORT-ENC.md`) |
 | `mkit-cli`                     | `rust/crates/mkit-cli/`               | The `mkit` binary; thin glue over the library crates                   |
 | `mkit-wasm`                    | `rust/crates/mkit-wasm/`              | WASM bindings for browsers and Cloudflare Workers                      |
 | `mkit-fuzz`                    | `rust/fuzz/`                          | cargo-fuzz harnesses (`docs/FUZZ.md`)                                  |
