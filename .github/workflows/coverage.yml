@@ -132,16 +132,32 @@ jobs:
           path: ${{ runner.temp }}/coverage.lcov
           retention-days: 14
 
+  # Codecov upload is split into its own job so CODECOV_TOKEN is NEVER present
+  # in the job above, which checks out and EXECUTES untrusted PR-head code on
+  # the privileged `pull_request_review` event. This job runs only the
+  # base-branch workflow file plus pinned actions — it downloads the lcov
+  # artifact and never builds or runs PR source, so the token cannot be
+  # exfiltrated by a malicious fork PR.
+  codecov-upload:
+    name: Upload coverage to Codecov
+    needs: llvm-cov
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download lcov artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        with:
+          name: coverage-lcov
+          path: coverage
+
       # Codecov receives the lcov for badge / trend / PR-diff overlay.
-      # Token is REQUIRED for internal/private repos; tokenless mode
-      # is public-repo-only. The action uploads under
-      # codecov.io/gh/officialunofficial/mkit. Failures are non-fatal:
-      # CI green doesn't depend on Codecov's availability.
+      # The action uploads under codecov.io/gh/officialunofficial/mkit.
+      # Failures are non-fatal: CI green doesn't depend on Codecov's
+      # availability.
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ${{ runner.temp }}/coverage.lcov
+          files: coverage/coverage.lcov
           flags: rust
           name: cargo-llvm-cov
           fail_ci_if_error: false

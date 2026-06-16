@@ -107,9 +107,13 @@ incremental rebuilds.
 
 The Cargo workspace root is `rust/Cargo.toml`. Most crates live under
 `rust/crates/`. Three reference signers live outside the `rust/`
-tree under `contrib/signers/` because they are integration references
-rather than core crates; they are still workspace members and
-participate in `cargo {test,clippy,build} --workspace`.
+tree under `contrib/signers/`, which is its own separate Cargo
+workspace (`contrib/signers/Cargo.toml`) — they are deliberately NOT
+members of the `rust/` workspace and do NOT participate in
+`cargo {test,clippy,build} --workspace` from `rust/`. Build and test
+them on their own, e.g. `cargo test` from `contrib/signers/`. The
+split exists because out-of-tree workspace members break release-plz
+publishing (#225), as noted in `rust/Cargo.toml`.
 
 ```
 rust/
@@ -128,13 +132,15 @@ rust/
     mkit-transport-ssh/
     mkit-wasm/
 contrib/signers/
-  mkit-sign-file/             # workspace = "../../../rust"
-  mkit-sign-ctap/             # workspace = "../../../rust"
-  mkit-sign-tpm/              # workspace = "../../../rust"
+  Cargo.toml                  # separate [workspace] root (NOT rust/)
+  mkit-sign-file/             # member of contrib/signers/ workspace
+  mkit-sign-ctap/             # member of contrib/signers/ workspace
+  mkit-sign-tpm/              # member of contrib/signers/ workspace
 ```
 
-Run `cargo` commands from `rust/` so the workspace root resolves:
-`(cd rust && cargo nextest run --workspace)`.
+Run `cargo --workspace` commands from `rust/` for the core crates:
+`(cd rust && cargo nextest run --workspace)`. The signers are built
+and tested separately from `contrib/signers/`.
 
 ## Commit conventions
 

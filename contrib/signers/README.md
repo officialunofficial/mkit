@@ -72,14 +72,15 @@ there is no unwrap, no passphrase, no audit log. Use it to:
 ### Build
 
 ```console
-$ cd rust
+$ cd contrib/signers
 $ cargo build --release -p mkit-sign-file
 $ ls target/release/mkit-sign-file
 target/release/mkit-sign-file
 ```
 
-The binary is a workspace member, so `cargo test --workspace` from
-`rust/` runs its end-to-end test alongside the rest of the tree.
+The signers are their own Cargo workspace (`contrib/signers/Cargo.toml`),
+so run `cargo test` from `contrib/signers/` to exercise the end-to-end test —
+it is NOT covered by `cargo test --workspace` in `rust/`.
 
 ### Usage
 
@@ -134,7 +135,7 @@ Nitrokey, SoloKey) via the `ctap-hid-fido2` crate. Populates the
 ### Build
 
 ```console
-$ cd rust
+$ cd contrib/signers
 $ cargo build --release -p mkit-sign-ctap
 $ ls target/release/mkit-sign-ctap
 target/release/mkit-sign-ctap

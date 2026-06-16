@@ -16,7 +16,7 @@ mkit is a young, alpha-stage project published by Official Unofficial, Inc.
 
 - No SLA on community channels — mkit is volunteer-maintained.
 - Maintainers triage issues weekly; security reports take priority.
-- For commercial support arrangements, contact Official Unofficial, Inc. directly via the contact on <https://officialunofficial.com> (or replace with the actual contact if known).
+- For commercial support arrangements, contact Official Unofficial, Inc. directly via <https://officialunofficial.com>.
 
 ## Before filing
 

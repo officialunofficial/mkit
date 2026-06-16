@@ -71,6 +71,8 @@ Then run this signer; it picks up `TCTI` from the environment.
 ## Build
 
 ```console
+$ cd contrib/signers
+# All cargo commands below run inside the contrib/signers/ workspace.
 # Default build — pure-Rust helpers only, no tss-esapi link.
 # Useful on macOS / CI where libtss2-dev isn't installed.
 $ cargo build -p mkit-sign-tpm --release
@@ -79,13 +81,14 @@ $ cargo build -p mkit-sign-tpm --release
 $ cargo build -p mkit-sign-tpm --release --features tpm2
 ```
 
-The crate is a workspace member of `rust/`, so `cargo test --workspace`
-runs the unit tests alongside the rest of the tree.
+The crate belongs to the `contrib/signers/` Cargo workspace, so run
+`cargo test -p mkit-sign-tpm` from `contrib/signers/`; it is NOT part of
+`cargo test --workspace` in `rust/`.
 
 ## Install
 
 ```console
-$ sudo cp rust/target/release/mkit-sign-tpm /usr/local/bin/
+$ sudo cp contrib/signers/target/release/mkit-sign-tpm /usr/local/bin/
 ```
 
 ---
@@ -262,6 +265,7 @@ argv default.
 ## Testing
 
 ```console
+# Run from contrib/signers/.
 # Unit tests — pure-Rust helpers, no TPM required.
 $ cargo test -p mkit-sign-tpm
 

@@ -157,11 +157,12 @@ Reference implementations (all in this repository):
   `mkit serve` SSH server (consumes `ssh.proto`).
 
 The Swift `contrib/signers/mkit-sign-se/` (Apple Secure Enclave)
-binary still ships with the pre-v1 line-JSON protocol and is NOT
-mkit-rpc-conformant today. Porting it to v1 is tracked separately;
-wiring it through the `external` signer selector defined in
-[`SPEC-EXTERNAL-SIGNER`](SPEC-EXTERNAL-SIGNER.md) will fail at the
-first frame until the port lands.
+binary is a conforming v1 reference signer: it speaks the
+length-prefixed protobuf wire (its `Package.swift` depends on
+swift-protobuf, with generated `common.pb.swift` / `signer.pb.swift`),
+and is listed alongside the other reference signers in
+[`SPEC-EXTERNAL-SIGNER`](SPEC-EXTERNAL-SIGNER.md) §8. It wires through
+the `external` signer selector like any other mkit-rpc signer.
 
 ---
 

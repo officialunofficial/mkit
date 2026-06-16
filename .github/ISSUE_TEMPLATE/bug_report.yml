@@ -14,7 +14,7 @@ body:
     attributes:
       label: mkit version
       description: Output of `mkit version`.
-      placeholder: "mkit 0.1.0"
+      placeholder: "mkit 0.3.0"
     validations:
       required: true
   - type: input

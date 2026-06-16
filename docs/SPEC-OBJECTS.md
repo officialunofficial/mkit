@@ -48,13 +48,13 @@ Every stored object begins with:
 
 ```
 offset  size  field              value
-0       1     object_type        one of 0x01..0x06 (see §1)
+0       1     object_type        one of 0x01..0x07 (see §1)
 1       4     magic              ASCII "MKT1" = 0x4D 0x4B 0x54 0x31
 5       1     schema_version     0x01
 6       …     body               type-specific (see §3-§8)
 ```
 
-The prologue applies to **all six object types**. Rationale:
+The prologue applies to **all seven object types**. Rationale:
 
 1. Without a version byte, any field addition silently shifts every
    hash.

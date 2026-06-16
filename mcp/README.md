@@ -64,12 +64,11 @@ Cloudflare Worker using the [Agents SDK](https://developers.cloudflare.com/agent
 `McpAgent` + `@modelcontextprotocol/sdk`, backed by **D1** (FTS5: trigram for
 substring search, unicode61 for word search).
 
-The mkit repo is **private** while its crates are public, so — unlike
-Commonware, which cron-fetches its public GitHub — this server **bakes the
-corpus into D1 at deploy time** from the source tree (`scripts/build-index.mjs`,
-run in CI, which has repo access). The Worker then serves everything from D1
-with **no runtime credentials**. The corpus is version-pinned to the workspace
-version (`rust/Cargo.toml`), so multiple releases can coexist.
+This server **bakes the corpus into D1 at deploy time** from the source tree
+(`scripts/build-index.mjs`, run in CI) rather than cron-fetching a live repo at
+runtime. The Worker then serves everything from D1 with **no runtime
+credentials**. The corpus is version-pinned to the workspace version
+(`rust/Cargo.toml`), so multiple releases can coexist.
 
 ## Development
 

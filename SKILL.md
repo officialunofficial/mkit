@@ -30,8 +30,8 @@ not git.
 cargo install mkit-cli
 #   ^ NOTE: install `mkit-cli`, NOT `mkit` — `mkit` on crates.io is a
 #     different, unrelated crate. Do not run `cargo install mkit`.
-#   (Signed release archives exist too, but the source repo is private, so
-#    crates.io is the channel that works without repo access.)
+#   (Signed release archives are also published on GitHub Releases; crates.io
+#    is simply the most convenient install channel.)
 
 mkit --version          # must print exactly: mkit <X.Y.Z>
 
