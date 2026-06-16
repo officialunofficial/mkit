@@ -39,8 +39,8 @@ Official Unofficial, Inc.).
 
 ## Releases
 
-Release process is documented in [docs/RELEASE.md](docs/RELEASE.md) and the
-per-release checklist under `docs/release/`. Release artifacts are signed
+Release process — including the per-release checklist — is documented in
+[docs/RELEASE.md](docs/RELEASE.md). Release artifacts are signed
 with cosign keyless OIDC; verification instructions live in
 [docs/INSTALL.md](docs/INSTALL.md).
 

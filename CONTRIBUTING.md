@@ -183,7 +183,7 @@ Every PR is held to:
   inputs.
 - `// TODO: …` markers without an associated GitHub issue.
 - Changes to the release pipeline (`.github/workflows/release.yml`,
-  `docs/release/`) without a follow-up dry-run.
+  `docs/RELEASE.md`) without a follow-up dry-run.
 
 ## Filing issues
 

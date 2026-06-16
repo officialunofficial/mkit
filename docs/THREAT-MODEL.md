@@ -224,9 +224,9 @@ produces release artefacts.
 
 mkit defends:
 
-- Reproducibility of the binary build (`docs/release/REPRODUCIBILITY.md`).
+- Reproducibility of the binary build (`docs/RELEASE.md`).
 - Provenance via cosign keyless signatures and CycloneDX SBOM
-  (`docs/release/SUPPLY-CHAIN.md`).
+  (`docs/RELEASE.md`).
 - Pinning third-party actions by SHA so a compromised tag cannot
   silently swap an action's code.
 

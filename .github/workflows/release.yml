@@ -13,7 +13,7 @@ name: Release
 # macOS binaries are intentionally NOT codesigned or notarized — we do not
 # hold an Apple Developer ID. Trust is established via cosign keyless
 # signatures, which are verified by `install.sh` and documented in
-# docs/release/SIGNING.md. Users who launch the binary by double-clicking
+# docs/RELEASE.md. Users who launch the binary by double-clicking
 # in Finder will hit Gatekeeper; running from a terminal works.
 #
 # Cache safety: every Swatinem/rust-cache invocation here uses a release-
@@ -515,7 +515,7 @@ jobs:
 
             Every archive is signed with **cosign keyless** via GitHub OIDC; the
             signing certificate embeds the workflow identity and a Rekor
-            transparency log entry is public. See `docs/release/SIGNING.md`
+            transparency log entry is public. See `docs/RELEASE.md`
             in the repo for full verification steps.
 
             The verifier regex below is anchored: it pins the exact workflow

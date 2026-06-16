@@ -77,7 +77,7 @@ jobs:
       # per-workflow + per-runner so a malicious PR cannot poison a key
       # that a privileged workflow (release.yml, which carries
       # secrets.MKIT_NPM_TOKEN + id-token: write) later reads. See
-      # docs/release/SUPPLY-CHAIN.md.
+      # docs/RELEASE.md.
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
