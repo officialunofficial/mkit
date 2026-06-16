@@ -1,8 +1,9 @@
 name: MCP CI
 
 # Validation only. Deploys live elsewhere:
-#   - corpus seed + Worker deploy on release tags  -> mcp-release.yml
-#   - Worker-code deploy on merge to main          -> mcp-worker-deploy.yml
+#   - Worker-code deploy on merge to main  -> Cloudflare Workers Builds (CF
+#     dashboard git integration; same model as the web app)
+#   - release-gated corpus seed on tags    -> mcp-release.yml
 
 on:
   push:

@@ -98,17 +98,19 @@ npm run ci     # typecheck + tests
 
 The corpus is **version-pinned and immutable**: each indexed version matches
 the source tree of its release tag, so what the MCP serves for `v0.2.0` is
-exactly what `cargo install mkit-cli` at 0.2.0 builds against. Three workflows:
+exactly what `cargo install mkit-cli` at 0.2.0 builds against. The Worker
+**code** and the served **corpus** deploy on separate paths — two GitHub
+Actions workflows plus Cloudflare Workers Builds:
 
-| Workflow | Trigger | Does |
+| Path | Trigger | Does |
 |---|---|---|
 | `mcp.yml` | PR / push touching mcp or docs | Validate only (index + typecheck + test). |
-| `mcp-release.yml` | Release tag `v*.*.*` (or dispatch) | Check out the **tag**, guard tag == workspace version, **seed that version into D1 if not already indexed**, deploy the Worker. Already-indexed versions are never touched; `workflow_dispatch` with `force: true` re-seeds a version *from its own tag* (indexer-fix escape hatch). |
-| `mcp-worker-deploy.yml` | Merge to `main` touching `mcp/src/**`/config | Typecheck + test, then deploy the Worker **code** only — never seeds. Tool/`instructions` fixes reach agents without waiting for a release. |
+| Cloudflare **Workers Builds** (CF dashboard git integration) | Merge to `main` | Build + deploy the Worker **code** only — never seeds. Tool/`instructions` fixes reach agents without waiting for a release. Same model the web app uses; configured in the Cloudflare dashboard, not in this repo. |
+| `mcp-release.yml` | Release tag `v*.*.*` (or dispatch) | Check out the **tag**, guard tag == workspace version, **seed that version into D1 if not already indexed**. Already-indexed versions are never touched; `workflow_dispatch` with `force: true` re-seeds a version *from its own tag* (indexer-fix escape hatch). Does **not** deploy the Worker — Workers Builds already shipped the code from `main`. |
 
 Consequence: docs/SPEC/SKILL edits on `main` appear in the MCP **at the next
 release** (by design — served docs match the released binary). The Worker code
-itself tracks `main`.
+itself tracks `main` via Workers Builds.
 
 Manual deploy (escape hatch / local):
 
@@ -127,7 +129,8 @@ npm run deploy           # wrangler deploy (custom domain mcp.mkit.makechain.net
 > future workspace outgrows D1's single-file import limit, split the file and
 > `db:seed` each part — the delete-by-version + upsert makes re-seeding idempotent.
 
-Secrets needed in CI: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (D1 edit +
-Workers deploy scope), stored in the GitHub **Environment `mcp`**. The
-environment's deployment-branch policy must allow `main` **and** tags matching
-`v*.*.*` — otherwise the deploy jobs are silently blocked.
+Secrets needed in CI: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (D1 edit
+scope for the corpus seed), stored in the GitHub **Environment `mcp`**. The
+environment's deployment-branch policy must allow tags matching `v*.*.*` —
+otherwise `mcp-release.yml` is silently blocked. (Worker-code deploys go through
+Cloudflare Workers Builds, which uses CF-side credentials, not these secrets.)
