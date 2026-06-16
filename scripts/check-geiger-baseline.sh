@@ -28,6 +28,7 @@ ceiling_for() {
     case "$1" in
         mkit-cli)             echo 23 ;;
         mkit-core)            echo 1  ;;
+        mkit-keystore)        echo 0  ;;
         mkit-attest)          echo 0  ;;
         mkit-rpc)             echo 0  ;;
         mkit-transport-file)  echo 0  ;;
@@ -43,7 +44,7 @@ ceiling_for() {
 # to flag the case where a crate disappears entirely (deletion,
 # unreachable from mkit-cli).
 EXPECTED_CRATES=(
-    mkit-cli mkit-core mkit-attest mkit-rpc
+    mkit-cli mkit-core mkit-keystore mkit-attest mkit-rpc
     mkit-transport-file mkit-transport-http mkit-transport-memory
     mkit-transport-s3 mkit-transport-ssh
 )

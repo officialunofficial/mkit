@@ -90,14 +90,6 @@ jobs:
           fi
           echo "version check ok: $INDEXED"
 
-      # TEMP DIAGNOSTIC: surface which Cloudflare account + token scopes the
-      # injected CLOUDFLARE_API_TOKEN resolves to, to pin down a D1 7403 (wrong
-      # account vs missing D1 scope). Account IDs may be masked if they match a
-      # secret; the permission/scope list is what matters. Remove once resolved.
-      - name: Diagnose Cloudflare auth (account + token scopes)
-        working-directory: mcp
-        run: npx --yes wrangler whoami || true
-
       - name: Check whether this version is already indexed
         id: indexed
         working-directory: mcp

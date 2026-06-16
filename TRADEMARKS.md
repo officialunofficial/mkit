@@ -53,5 +53,5 @@ be a parallel publication of the same artifact, not a replacement.
 
 For questions about mark usage, dual-licensing for marks, or to request
 permission for a use not covered above, contact Official Unofficial, Inc.
-via the addresses listed in [SECURITY.md](./SECURITY.md) or open an
-issue on the upstream repository.
+by opening an issue on the upstream repository, or use the private
+reporting channel described in [SECURITY.md](./SECURITY.md).

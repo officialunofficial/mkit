@@ -21,7 +21,7 @@ from recurring.
 | Target file                    | Target function             |
 | ------------------------------ | --------------------------- |
 | `fuzz_targets/delta.rs`        | `delta::decode`             |
-| `fuzz_targets/pack.rs`         | `pack::PackReader::unpack`  |
+| `fuzz_targets/pack.rs`         | `pack::PackReader::read`    |
 | `fuzz_targets/tree.rs`         | `serialize::deserialize`    |
 | `fuzz_targets/software_key_record.rs` | `EncryptedKeyRecord::decode` |
 | `fuzz_targets/git_commit_parse.rs` | `mkit-git-bridge gitparse::parse_commit` (untrusted upstream bytes, SPEC-GIT-IMPORT §2) |

@@ -149,6 +149,7 @@ impl S3Transport {
     /// Construct a transport directly against an endpoint URL, for tests
     /// (mockito hands us a plain `http://127.0.0.1:PORT` base). The path
     /// component of `endpoint` MUST be empty — only scheme+host\[:port\].
+    #[doc(hidden)]
     pub fn with_parts(
         endpoint: impl Into<String>,
         bucket: impl Into<String>,
