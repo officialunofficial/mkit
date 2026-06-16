@@ -31,14 +31,14 @@ on:
 permissions:
   contents: read
 
-# Serialize against the worker-deploy workflow and racing tags.
+# Serialize racing tags / re-seed dispatches against each other.
 concurrency:
   group: mcp-deploy
   cancel-in-progress: false
 
 jobs:
   release:
-    name: Seed corpus from tag + deploy Worker
+    name: Seed corpus from tag
     runs-on: ubuntu-latest
     environment: mcp
     env:
@@ -146,9 +146,3 @@ jobs:
         if: ${{ steps.indexed.outputs.seed == 'true' }}
         working-directory: mcp
         run: npm run db:seed
-
-      # The Worker ships with every release regardless of whether the corpus
-      # was newly seeded — tool-code improvements reach prod at least per release.
-      - name: Deploy Worker
-        working-directory: mcp
-        run: npm run deploy

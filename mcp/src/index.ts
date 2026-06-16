@@ -4,8 +4,8 @@
  * A Model Context Protocol server that exposes the mkit toolkit — workspace
  * crate source, the docs/SPEC-* corpus, and the CLI reference — to AI
  * assistants. The corpus is baked into D1 at deploy time by
- * scripts/build-index.mjs (the mkit repo is private; published crates are not),
- * so this Worker serves everything from D1 with no runtime credentials.
+ * scripts/build-index.mjs, so this Worker serves everything from D1 with
+ * no runtime credentials.
  *
  * Tools (7 mirror the Commonware MCP, 5 are mkit-specific):
  *   get_overview, list_crates, get_crate_readme, list_files, get_file,

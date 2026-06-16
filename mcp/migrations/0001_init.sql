@@ -1,6 +1,6 @@
 -- mkit MCP search/corpus schema.
 --
--- All content is baked at deploy time from the (private) mkit working tree by
+-- All content is baked at deploy time from the mkit working tree by
 -- scripts/build-index.mjs and applied via `wrangler d1 execute --file`. Content
 -- is stored here (not fetched at runtime), so the public Worker never needs
 -- repo credentials. Rows are keyed by version so multiple releases coexist;

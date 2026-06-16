@@ -11,7 +11,7 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MkitMCP"] }],
   // D1 holds the baked corpus (crate source, SPEC docs, READMEs, CLI reference,
   // SKILL.md) + FTS indexes. Populated at deploy time by scripts/build-index.mjs
-  // — NOT cron-fetched, because the mkit repo is private. Run `npm run db:create`
+  // (baked from the source tree, not cron-fetched at runtime). Run `npm run db:create`
   // once and paste the returned id here.
   "d1_databases": [
     {

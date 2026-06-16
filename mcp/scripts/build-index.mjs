@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 // Deploy-time corpus indexer for the mkit MCP.
 //
-// Walks the (private) mkit working tree and emits dist/seed.sql — a single
-// transactional SQL file applied to D1 via `wrangler d1 execute --file`. This
-// is the inversion of Commonware's cron-fetch-from-public-GitHub model: because
-// the mkit repo is private, the corpus is baked at deploy from the source tree
-// (CI has access) and served publicly from D1 with no runtime credentials.
+// Walks the mkit working tree and emits dist/seed.sql — a single
+// transactional SQL file applied to D1 via `wrangler d1 execute --file`. The
+// corpus is baked at deploy time from the source tree (rather than cron-fetched
+// at runtime) and served publicly from D1 with no runtime credentials.
 //
 // Pure Node, no dependencies — safe to run in CI before `wrangler deploy`.
 
