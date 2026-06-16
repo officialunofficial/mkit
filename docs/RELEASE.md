@@ -265,7 +265,7 @@ Plus one top-level set for the aggregate:
 Install cosign: <https://docs.sigstore.dev/cosign/installation/>. Then:
 
 ```sh
-VERSION=0.1.0
+VERSION=0.3.0
 TARGET=aarch64-apple-darwin
 ARCHIVE="mkit-${VERSION}-${TARGET}.tar.gz"
 

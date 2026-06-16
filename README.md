@@ -2,6 +2,8 @@
 
 ![status: alpha](https://img.shields.io/badge/status-alpha-orange)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![crates.io](https://img.shields.io/crates/v/mkit-cli.svg)](https://crates.io/crates/mkit-cli)
+[![docs.rs](https://img.shields.io/docsrs/mkit-core)](https://docs.rs/mkit-core)
 [![codecov](https://codecov.io/gh/officialunofficial/mkit/branch/main/graph/badge.svg)](https://codecov.io/gh/officialunofficial/mkit)
 
 A content-addressed version control toolkit written in Rust.
@@ -323,14 +325,20 @@ they describe are pinned by the test vectors under
 | [`docs/INSTALL.md`](docs/INSTALL.md) | End users — install channels, verification, hardware signers |
 | [`docs/CLI.md`](docs/CLI.md) | End users — subcommands, env vars, exit codes |
 | [`docs/keystore.md`](docs/keystore.md) | End users — keystore overview, picking a backend |
+| [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md) | End users — migrate from git, track a git upstream, push work back |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Contributors — module layering and design notes |
+| [`docs/PARITY.md`](docs/PARITY.md) | Contributors — mkit ↔ git parity matrix and v1 scope gate |
+| [`docs/PROFILING.md`](docs/PROFILING.md) | Contributors — benchmarking and profiling workflow |
 | [`docs/SPEC-INDEX.md`](docs/SPEC-INDEX.md) | Implementers — staging-index format |
 | [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) | Implementers — object on-disk format |
+| [`docs/SPEC-GC.md`](docs/SPEC-GC.md) | Implementers — garbage-collection retention roots & recovery |
 | [`docs/SPEC-PACKFILE.md`](docs/SPEC-PACKFILE.md) | Implementers — packfile wire format |
 | [`docs/SPEC-DELTA.md`](docs/SPEC-DELTA.md) | Implementers — delta encoding |
+| [`docs/SPEC-PACK-SHARDS.md`](docs/SPEC-PACK-SHARDS.md) | Implementers — erasure-coded pack delivery |
 | [`docs/SPEC-REFS.md`](docs/SPEC-REFS.md) | Implementers — ref names and CAS |
 | [`docs/SPEC-TRANSPORT.md`](docs/SPEC-TRANSPORT.md) | Implementers — 7-verb transport protocol incl. SSH OP_HELLO |
 | [`docs/SPEC-TRANSPORT-ENC.md`](docs/SPEC-TRANSPORT-ENC.md) | Implementers — `mkit+enc://` no-OpenSSH encrypted transport |
+| [`docs/SPEC-SPARSE-CHECKOUT.md`](docs/SPEC-SPARSE-CHECKOUT.md) | Implementers — verifiable server-side sparse delivery |
 | [`docs/SPEC-FASTCDC.md`](docs/SPEC-FASTCDC.md) | Implementers — content chunking |
 | [`docs/SPEC-SIGNING.md`](docs/SPEC-SIGNING.md) | Implementers — commit signing format |
 | [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md) | Implementers — keystore vault interface |
@@ -338,7 +346,11 @@ they describe are pinned by the test vectors under
 | [`docs/SPEC-EXTERNAL-SIGNER.md`](docs/SPEC-EXTERNAL-SIGNER.md) | Integrators — external signer stdio protocol |
 | [`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) | Implementers + integrators — native attestation (in-toto v1 + DSSE) |
 | [`docs/SPEC-HISTORY-PROOF.md`](docs/SPEC-HISTORY-PROOF.md) | Implementers — MMR commit-chain inclusion proofs (light-client attestation) |
+| [`docs/SPEC-GIT-IMPORT.md`](docs/SPEC-GIT-IMPORT.md) | Implementers — importer-signed git→mkit translation |
+| [`docs/SPEC-GIT-BRIDGE.md`](docs/SPEC-GIT-BRIDGE.md) | Implementers — deterministic mkit→git translation |
+| [`docs/SPEC-RELEASE-THRESHOLD.md`](docs/SPEC-RELEASE-THRESHOLD.md) | Implementers — BLS12-381 threshold signatures for releases |
 | [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators — SSH transport trust model |
+| [`docs/SPEC-CONFIG-SECURITY.md`](docs/SPEC-CONFIG-SECURITY.md) | Operators + implementers — repo-vs-user config trust split |
 | [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators + reviewers — trust boundaries and security assumptions |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release runbook: checklist, signing, reproducibility, supply chain, crates.io |
 | [`docs/FUZZ.md`](docs/FUZZ.md) | Contributors — fuzz harness conventions |

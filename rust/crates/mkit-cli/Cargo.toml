@@ -23,9 +23,9 @@ default-run = "mkit"
 
 # `cargo binstall mkit-cli` metadata. Points cargo-binstall at the
 # GitHub Release archive layout so users can install the prebuilt
-# binary without building from source — even though this crate is
-# not on crates.io, cargo-binstall can be told to fetch the manifest
-# directly from the repo:
+# binary without building from source. The crate is published to
+# crates.io, so plain `cargo binstall mkit-cli` resolves this manifest;
+# the `--git` form below works too when targeting an unpublished revision:
 #
 #     cargo binstall --git https://github.com/officialunofficial/mkit mkit-cli
 #
