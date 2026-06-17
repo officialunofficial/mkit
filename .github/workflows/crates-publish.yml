@@ -78,7 +78,8 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Native deps for the publish-time verification build (keystore backends:
-      # tpm / yubikey / secret-service). Mirrors semver-checks.yml's set.
+      # tpm / yubikey / secret-service) and the semver gate below. yubikey needs
+      # libpcsclite; tpm needs libtss2.
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config
 
@@ -92,6 +93,47 @@ jobs:
             exit 1
           fi
           echo "version check ok: v$WS_VERSION"
+
+      # The SOLE automated semver gate. cargo-semver-checks diffs each
+      # publishable LIBRARY crate's public API against the version currently
+      # live on crates.io (the implicit baseline) and fails the publish if the
+      # version about to be released is too small a bump for the API change
+      # (e.g. an API break shipped under a mere patch bump). It understands 0.x
+      # semver, so a 0.MINOR bump may break; it only fails on an UNDER-bump.
+      #
+      # Why here and not a per-PR workflow: this workspace defers the version
+      # bump to the release-prep PR, so `main`'s version stays equal to the last
+      # release tag for the whole dev cycle. A per-PR check (the removed
+      # semver-checks.yml) therefore diffed 0.3.0 vs the v0.3.0 baseline — no
+      # version delta — and false-failed every PR the moment any intended break
+      # landed on main. At the tag the version IS bumped (it matches the tag,
+      # asserted by the guard above), so the comparison is finally valid, and
+      # this only runs on the tag — never mid-cycle.
+      #
+      # No-ops for any crate not yet on crates.io (a brand-new crate's first
+      # publish has no baseline). Excludes mkit-cli (unstable CLI-internal lib
+      # surface, intentionally unguarded) and mkit-wasm (npm-only, publish=false).
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912  # v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: Semver gate — public API vs crates.io
+        working-directory: rust
+        run: |
+          cargo semver-checks \
+            --all-features \
+            -p mkit-core \
+            -p mkit-attest \
+            -p mkit-keystore \
+            -p mkit-rpc \
+            -p mkit-transport-file \
+            -p mkit-transport-http \
+            -p mkit-transport-memory \
+            -p mkit-transport-s3 \
+            -p mkit-transport-enc \
+            -p mkit-transport-ssh \
+            -p mkit-git-bridge
 
       # Publishes every member without `publish = false` in dependency order,
       # waiting for each to appear on the index. Tags are irrelevant to cargo,
