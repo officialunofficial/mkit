@@ -282,6 +282,37 @@ fn stash_accepts_stash_at_brace_syntax() {
 }
 
 #[test]
+fn branch_list_filters_by_glob_pattern() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"base\n", "base");
+    repo.ok(&["branch", "feature/login"]);
+    repo.ok(&["branch", "feature/signup"]);
+    repo.ok(&["branch", "release"]);
+
+    // `*` spans `/`, so `feature/*` matches the path-like names only.
+    let feat = stdout(&repo.ok(&["branch", "--list", "feature/*"]));
+    assert!(feat.contains("feature/login") && feat.contains("feature/signup"));
+    assert!(!feat.contains("release"), "release leaked: {feat}");
+    assert!(!feat.contains("main"), "main leaked: {feat}");
+
+    // Exact name — the `git branch --list <name>` existence-test idiom.
+    let one = stdout(&repo.ok(&["branch", "--list", "release"]));
+    assert!(one.contains("release"));
+    assert!(!one.contains("feature"), "pattern over-matched: {one}");
+
+    // Bare `--list` still lists everything.
+    let all = stdout(&repo.ok(&["branch", "--list"]));
+    assert!(all.contains("main") && all.contains("release") && all.contains("feature/login"));
+
+    // A pattern combines with an ancestry filter (AND). `--contains` takes a
+    // required value (HEAD), leaving the glob as a positional pattern; every
+    // branch contains HEAD here, so only the glob narrows the result.
+    let combo = stdout(&repo.ok(&["branch", "--contains", "HEAD", "feature/log*"]));
+    assert!(combo.contains("feature/login"));
+    assert!(!combo.contains("feature/signup") && !combo.contains("release"));
+}
+
+#[test]
 fn config_file_keys_are_case_insensitive() {
     // A hand-edited config file with a mixed-case key must resolve like its
     // canonical lowercase form (git semantics) — not just keys set via the

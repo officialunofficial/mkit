@@ -123,11 +123,12 @@ commands:
   branch -D <name>  Force-delete a branch (errors on an absent branch,
                     like git; still refuses the current branch)
   branch -m [<old>] <new>  Rename a branch (current branch if <old> omitted)
-  branch [--list] [--contains <c>] [--no-contains <c>] [--merged [<c>]] [--no-merged [<c>]]
-                    Filter the listing by ancestry (like git): --contains keeps
-                    branches whose tip has <c> as an ancestor; --merged keeps
-                    those merged into <c> (default HEAD); the --no-* forms
-                    invert. --list is an explicit list selector (no-op)
+  branch [--list] [--contains <c>] [--no-contains <c>] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]
+                    Filter the listing (like git): <pattern> are shell globs on
+                    branch names (enabled by --list or any filter; `*`/`?`/`[…]`,
+                    `*` spans `/`); --contains keeps branches whose tip has <c>
+                    as an ancestor; --merged keeps those merged into <c>
+                    (default HEAD); the --no-* forms invert
   checkout <branch> Switch HEAD to a branch and restore files
   clean [-n] [-f] [-d] [-x|-X] [<path>...]
                     Remove untracked files (refuses without -f; -n
