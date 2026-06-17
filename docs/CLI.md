@@ -133,7 +133,13 @@ Working-tree commands:
   changes. `apply` restores an entry without removing it; `clear` drops
   every entry. `pop`/`apply`/`drop`/`show` select an entry by index
   (default `0`), accepting either a bare `N` or the `stash@{N}` form
-  printed by `stash list`.
+  printed by `stash list`. `pop`/`apply` accept `--index`, which also
+  restores the **staged** state recorded when the stash was created (like
+  `git stash pop --index`), not just the worktree changes. `save` records
+  that staged snapshot as the stash commit's second parent (git-style
+  `[HEAD, index]`) — no on-disk manifest change, and it stays gc-reachable
+  through the stash commit. Stashes created before this feature carry no
+  index snapshot, so `--index` is a no-op for them (with a note).
 - `mkit sparse-checkout` — manage sparse checkout patterns.
 
 History / commits:

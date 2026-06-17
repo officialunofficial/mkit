@@ -782,7 +782,7 @@ write an object before publishing its ref), so
 must be run only when no other mkit process is operating on the repo (gc prints
 a warning). Fails closed: a corrupt root or unreadable ref aborts with nothing
 removed.
-.It Cm stash Oo Cm save Fl m Ar msg | Cm list | Cm pop Op Ar ref | Cm apply Op Ar ref | Cm drop Op Ar ref | Cm clear | Cm show Op Ar ref Oc
+.It Cm stash Oo Cm save Fl m Ar msg | Cm list | Cm pop Oo Fl Fl index Oc Op Ar ref | Cm apply Oo Fl Fl index Oc Op Ar ref | Cm drop Op Ar ref | Cm clear | Cm show Op Ar ref Oc
 Save or restore a snapshot of working-tree changes.
 .Cm pop
 applies an entry and removes it;
@@ -790,6 +790,19 @@ applies an entry and removes it;
 applies an entry but leaves it on the stack. Both run the
 destructive-restore guard so uncommitted edits on unrelated paths are
 never clobbered.
+.Fl Fl index
+on
+.Cm pop Ns / Ns Cm apply
+also restores the staged state recorded when the stash was created (like
+.Xr git 1
+.Cm stash pop Fl Fl index ) ,
+not just the worktree changes.
+.Cm save
+records that staged snapshot as the stash commit's second parent, so it
+needs no on-disk format change; stashes created before this feature carry
+no index snapshot and
+.Fl Fl index
+is a no-op for them.
 .Cm clear
 removes every stash entry.
 .Cm pop , Cm apply , Cm drop ,

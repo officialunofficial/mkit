@@ -33,11 +33,19 @@ enum StashCmd {
     List,
     /// Apply and remove a stash entry (default: entry 0).
     Pop {
+        /// Also restore the staged state recorded by the stash (like
+        /// `git stash pop --index`), not just the worktree changes.
+        #[arg(long = "index")]
+        restore_index: bool,
         #[arg(default_value = "0")]
         index: String,
     },
     /// Apply a stash entry WITHOUT removing it (default: entry 0).
     Apply {
+        /// Also restore the staged state recorded by the stash (like
+        /// `git stash apply --index`), not just the worktree changes.
+        #[arg(long = "index")]
+        restore_index: bool,
         #[arg(default_value = "0")]
         index: String,
     },
@@ -161,12 +169,18 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
         // leaves it in place. Both run the same #205/#176 destructive-
         // restore guard so they never clobber uncommitted edits on
         // unrelated paths.
-        StashCmd::Pop { index } => match parse_stash_index(&index) {
-            Ok(i) => restore_entry(store, cwd, i, true),
+        StashCmd::Pop {
+            index,
+            restore_index,
+        } => match parse_stash_index(&index) {
+            Ok(i) => restore_entry(store, cwd, i, true, restore_index),
             Err(e) => emit_err(&e, exit::USAGE),
         },
-        StashCmd::Apply { index } => match parse_stash_index(&index) {
-            Ok(i) => restore_entry(store, cwd, i, false),
+        StashCmd::Apply {
+            index,
+            restore_index,
+        } => match parse_stash_index(&index) {
+            Ok(i) => restore_entry(store, cwd, i, false, restore_index),
             Err(e) => emit_err(&e, exit::USAGE),
         },
         StashCmd::Clear => match stash::clear(cwd) {
@@ -206,11 +220,29 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
 /// between `pop` (removes the entry after a clean restore) and `apply`
 /// (leaves it on the stack). Both run the #205/#176 destructive-restore
 /// guard up-front so a refusal leaves the stash and worktree untouched.
-fn restore_entry(store: &ObjectStore, cwd: &std::path::Path, index: usize, drop_entry: bool) -> u8 {
+fn restore_entry(
+    store: &ObjectStore,
+    cwd: &std::path::Path,
+    index: usize,
+    drop_entry: bool,
+    restore_index: bool,
+) -> u8 {
     let verb = if drop_entry { "pop" } else { "apply" };
     let tree_hash = match stash::entry_tree_hash(store, cwd, index) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+    };
+    // Resolve the staged-index snapshot BEFORE mutating: `pop` removes the
+    // manifest entry, so the lookup must happen first. `None` means the
+    // entry predates the feature (or was saved with no HEAD) — `--index`
+    // is then a no-op, which we surface.
+    let index_tree = if restore_index {
+        match stash::entry_index_tree(store, cwd, index) {
+            Ok(t) => t,
+            Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+        }
+    } else {
+        None
     };
     if let Err(e) = super::ensure_restore_safe(cwd, store, tree_hash) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
@@ -222,6 +254,24 @@ fn restore_entry(store: &ObjectStore, cwd: &std::path::Path, index: usize, drop_
     };
     match result {
         Ok(()) => {
+            // `--index`: re-stage the recorded index tree on top of the
+            // restored worktree, matching `git stash pop/apply --index`.
+            if restore_index {
+                if let Some(it) = index_tree {
+                    if let Err(e) = super::sync_index_to_tree(cwd, store, it) {
+                        return emit_err(
+                            &format!("stash {verb}: restore index: {e}"),
+                            exit::GENERAL_ERROR,
+                        );
+                    }
+                } else {
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(
+                        stderr,
+                        "note: this stash has no recorded index state; --index had no effect"
+                    );
+                }
+            }
             let past = if drop_entry { "popped" } else { "applied" };
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "{past} stash@{{{index}}}");

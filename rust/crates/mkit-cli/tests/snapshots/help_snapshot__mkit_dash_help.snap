@@ -149,8 +149,10 @@ commands:
   stash             Stash working dir changes (save WIP; -m for a message)
   stash save -m <msg>  Stash with a message
   stash list        List stash entries (printed as stash@{N})
-  stash pop [<n>|stash@{n}]    Apply and remove a stash entry (default 0)
-  stash apply [<n>|stash@{n}]  Apply a stash entry without removing it (default 0)
+  stash pop [--index] [<n>|stash@{n}]    Apply and remove a stash entry (default
+                    0; --index also restores the staged state, like git)
+  stash apply [--index] [<n>|stash@{n}]  Apply a stash entry, keeping it (default
+                    0; --index also restores the staged state)
   stash drop [<n>|stash@{n}]   Remove a stash entry without applying
   stash clear       Remove all stash entries
   stash show [<n>|stash@{n}]   Show the diff of a stash entry (default 0)

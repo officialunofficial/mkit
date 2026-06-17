@@ -114,15 +114,41 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
     }
     let mkit_dir = repo_root.join(MKIT_DIR);
 
-    // One durability batch over the worktree snapshot + stash commit,
-    // committed before the manifest write that references them.
+    // One durability batch over the worktree snapshot, the staged-index
+    // snapshot, and both commits — committed before the manifest write
+    // that references them.
     let batch = store.batch();
     let tree_hash = worktree::build_tree(&batch, repo_root)?;
     let head_hash = refs::resolve_head(&mkit_dir)?;
 
     let timestamp_u64 = unix_seconds_now();
-    let parents = head_hash.into_iter().collect::<Vec<_>>();
     let zero_pk = [0u8; 32];
+
+    // Capture the staged index as its own commit and record it as the
+    // stash commit's SECOND parent (git-style `[HEAD, I]`), so
+    // `stash pop/apply --index` can restore the staged state later. It is
+    // reachable from the stash commit, so `gc` retains it (graph closure
+    // follows every parent). Older single-parent entries simply carry no
+    // index snapshot, and `--index` is a no-op for them.
+    let staged = index::read_index(repo_root).unwrap_or_else(|_| Index::new());
+    let index_tree = worktree::build_tree_from_index_with(store, &batch, &staged, true)?;
+    let index_parents = head_hash.into_iter().collect::<Vec<_>>();
+    let index_commit = Object::Commit(Commit::new_unannotated(
+        index_tree,
+        index_parents,
+        Identity::ed25519(zero_pk),
+        [0u8; 32],
+        b"index".to_vec(),
+        timestamp_u64,
+        [0u8; 64],
+    ));
+    let index_commit_hash = batch.write(&serialize::serialize(&index_commit)?)?;
+
+    // Worktree commit: parents are `[HEAD, index_commit]` (HEAD omitted
+    // when there is none), so the index snapshot is always the last parent
+    // when a HEAD exists.
+    let mut parents = head_hash.into_iter().collect::<Vec<_>>();
+    parents.push(index_commit_hash);
     let commit = Object::Commit(Commit::new_unannotated(
         tree_hash,
         parents,
@@ -187,6 +213,41 @@ pub fn entry_tree_hash(store: &ObjectStore, repo_root: &Path, idx: usize) -> Sta
         return Err(StashError::NotACommit);
     };
     Ok(commit.tree_hash)
+}
+
+/// The staged-index tree recorded by stash entry `idx`, if any.
+///
+/// New stashes record the staged state as the stash commit's second
+/// parent (see [`save`]); this resolves that parent's tree so
+/// `stash pop/apply --index` can restore the index. Returns `Ok(None)`
+/// for entries that carry no index snapshot (those created before the
+/// feature, or saved with no HEAD), where `--index` is a no-op.
+///
+/// # Errors
+/// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
+/// - [`StashError::NotACommit`] if a stored object is not a Commit.
+pub fn entry_index_tree(
+    store: &ObjectStore,
+    repo_root: &Path,
+    idx: usize,
+) -> StashResult<Option<Hash>> {
+    let list = read_list(repo_root)?;
+    if idx >= list.entries.len() {
+        return Err(StashError::IndexOutOfRange(idx));
+    }
+    let Object::Commit(stash_commit) = store.read_object(&list.entries[idx].commit_hash)? else {
+        return Err(StashError::NotACommit);
+    };
+    // The index snapshot is the last parent only when a HEAD parent also
+    // exists (i.e. `parents == [HEAD, index]`). A lone parent is the
+    // historical `[HEAD]` form with no index snapshot.
+    let Some(index_commit) = stash_commit.parents.get(1) else {
+        return Ok(None);
+    };
+    let Object::Commit(index_commit) = store.read_object(index_commit)? else {
+        return Err(StashError::NotACommit);
+    };
+    Ok(Some(index_commit.tree_hash))
 }
 
 /// Pop a stash: restore its tree into the worktree and remove the
@@ -671,6 +732,94 @@ mod tests {
             read_list(tmp.path()).unwrap().entries.len(),
             1,
             "apply must not drop the entry"
+        );
+    }
+
+    #[test]
+    fn entry_index_tree_resolves_second_parent() {
+        let (tmp, store) = fresh_store();
+        // HEAD commit, a staged-index commit, and a worktree stash commit
+        // whose parents are `[HEAD, index_commit]` (the new save layout).
+        let head_tree = put_tree_entries(
+            &store,
+            vec![TreeEntry {
+                name: b"a.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob_data(&store, b"head"),
+            }],
+        );
+        let head = put_commit_obj(&store, head_tree, vec![], 1000);
+        let index_tree = put_tree_entries(
+            &store,
+            vec![TreeEntry {
+                name: b"a.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob_data(&store, b"staged"),
+            }],
+        );
+        let index_commit = put_commit_obj(&store, index_tree, vec![head], 1001);
+        let wt_tree = put_tree_entries(
+            &store,
+            vec![TreeEntry {
+                name: b"a.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob_data(&store, b"worktree"),
+            }],
+        );
+        let stash = put_commit_obj(&store, wt_tree, vec![head, index_commit], 1002);
+        write_list(
+            tmp.path(),
+            &StashList {
+                entries: vec![StashEntry {
+                    commit_hash: stash,
+                    parent_hash: head,
+                    timestamp: 1002,
+                    message: "wip".to_string(),
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            entry_index_tree(&store, tmp.path(), 0).unwrap(),
+            Some(index_tree),
+            "second parent's tree is the staged-index snapshot"
+        );
+    }
+
+    #[test]
+    fn entry_index_tree_none_for_single_parent_entry() {
+        // Historical single-parent (`[HEAD]`) entries carry no index
+        // snapshot, so `--index` is a no-op for them.
+        let (tmp, store) = fresh_store();
+        build_stash_fixture(&store, tmp.path());
+        assert_eq!(entry_index_tree(&store, tmp.path(), 0).unwrap(), None);
+    }
+
+    #[test]
+    fn save_records_an_index_snapshot_parent() {
+        // A real `save` (with a HEAD commit) must record a second parent so
+        // `--index` has something to restore.
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = ObjectStore::init(dir.path()).unwrap();
+        // Seed a HEAD commit so save has a parent.
+        let tree = put_tree_entries(
+            &store,
+            vec![TreeEntry {
+                name: b"f.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob_data(&store, b"v1"),
+            }],
+        );
+        let head = put_commit_obj(&store, tree, vec![], 5);
+        let mkit_dir = dir.path().join(MKIT_DIR);
+        refs::write_head_branch(&mkit_dir, "main").unwrap();
+        refs::write_ref(&mkit_dir, "main", &head).unwrap();
+        std::fs::write(dir.path().join("f.txt"), b"v2").unwrap();
+        save(&store, dir.path(), "wip").unwrap();
+        // The stash commit has a second parent (the index snapshot).
+        assert!(
+            entry_index_tree(&store, dir.path(), 0).unwrap().is_some(),
+            "save must record an index-snapshot parent"
         );
     }
 

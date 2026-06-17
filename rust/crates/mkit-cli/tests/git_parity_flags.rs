@@ -282,6 +282,50 @@ fn stash_accepts_stash_at_brace_syntax() {
 }
 
 #[test]
+fn stash_pop_index_restores_staged_state() {
+    // Stage v2 but leave v3 in the worktree, so staged != worktree.
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"v1\n", "c0");
+    repo.write("a.txt", b"v2\n");
+    repo.ok(&["add", "a.txt"]);
+    repo.write("a.txt", b"v3\n");
+    repo.ok(&["stash"]);
+    // Worktree was reset to HEAD.
+    assert_eq!(std::fs::read(repo.path().join("a.txt")).unwrap(), b"v1\n");
+
+    repo.ok(&["stash", "pop", "--index"]);
+    // Worktree restored to v3...
+    assert_eq!(std::fs::read(repo.path().join("a.txt")).unwrap(), b"v3\n");
+    // ...and the staged state (v1 -> v2) is back in the index.
+    let staged = stdout(&repo.ok(&["diff", "--staged"]));
+    assert!(
+        staged.contains("+v2") && staged.contains("-v1"),
+        "--index should restore the staged state: {staged}"
+    );
+}
+
+#[test]
+fn stash_pop_without_index_leaves_index_unstaged() {
+    // Without --index, only the worktree is restored — the staged snapshot
+    // is not re-applied (mkit's existing default behavior).
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"v1\n", "c0");
+    repo.write("a.txt", b"v2\n");
+    repo.ok(&["add", "a.txt"]);
+    repo.write("a.txt", b"v3\n");
+    repo.ok(&["stash"]);
+
+    repo.ok(&["stash", "pop"]);
+    assert_eq!(std::fs::read(repo.path().join("a.txt")).unwrap(), b"v3\n");
+    // The v1 -> v2 staging is NOT restored to the index.
+    let staged = stdout(&repo.ok(&["diff", "--staged"]));
+    assert!(
+        !staged.contains("+v2"),
+        "staged state must not be restored without --index: {staged}"
+    );
+}
+
+#[test]
 fn branch_list_filters_by_glob_pattern() {
     let repo = Repo::new();
     repo.commit_file("a.txt", b"base\n", "base");
