@@ -70,8 +70,8 @@ function Category({ cat }: { cat: ParityCategory }) {
 
 function NoteBlock({ label, body }: { label: string; body: string }) {
   return (
-    <div className='py-1.5'>
-      <span className='text-xs font-medium text-fg'>{label}.</span> <span className='text-xs text-subtle'>{body}</span>
+    <div className='py-1.5 text-xs'>
+      <span className='font-medium text-fg'>{label}.</span> <span className='text-subtle'>{body}</span>
     </div>
   )
 }
