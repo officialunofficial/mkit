@@ -1,8 +1,8 @@
 # mkit-og
 
 Open Graph image service for [mkit.sh](https://mkit.sh), served from
-`og.mkit.sh`. A Cloudflare Worker that renders 1200×630 social-card PNGs on the
-fly with [`workers-og`](https://github.com/kvnang/workers-og) (Satori + resvg),
+`og.mkit.sh`. A Cloudflare Worker that renders 1200×630 social-card PNG
+images on the fly with [`workers-og`](https://github.com/kvnang/workers-og) (Satori + resvg),
 matching the dark mkit theme: the colourful BLAKE3-grid mark, the `mkit`
 wordmark, and a title/description in Geist.
 
