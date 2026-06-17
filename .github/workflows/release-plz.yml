@@ -26,7 +26,7 @@
 #    so the Release PR it opens can trigger CI (a `GITHUB_TOKEN`-authored PR does
 #    not). Same App the polychrome repo uses — reuse it if installed on this repo.
 
-name: release-plz
+name: "Release: release-plz (manual)"
 
 on:
   workflow_dispatch:        # open/update the Release PR (release-plz-pr).

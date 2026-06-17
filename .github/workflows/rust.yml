@@ -1,9 +1,17 @@
-name: Rust CI
+name: "CI: Rust"
 
 on:
   push:
     branches:
       - main
+    # Skip the full matrix on main pushes that can't affect the Rust build
+    # (docs-only, MCP-only, web-only commits). The pull_request_review trigger
+    # below is unaffected — it can't be path-filtered and stays approval-gated.
+    paths:
+      - '.github/workflows/rust.yml'
+      - '.github/actions/setup-rust/**'
+      - 'rust/**'
+      - 'contrib/signers/**'
   # Expensive CI: on PRs this runs only once a review is approved. The
   # pull_request_review event can't filter by branch/path, so each job
   # guards on the approval state + base ref below.
@@ -67,24 +75,16 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      - name: Install Rust ${{ env.RUST_VERSION }}
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      # Toolchain (rustfmt + clippy) + protoc + lockfile-keyed cargo cache.
+      # cache-prefix is partitioned per-workflow + per-runner so a malicious PR
+      # cannot poison a key a privileged workflow (release.yml) later reads —
+      # see .github/actions/setup-rust and docs/RELEASE.md.
+      - name: Set up Rust, protoc, and cache
+        uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
-
-      # Registry + lockfile-keyed target cache. Cache key partitioned
-      # per-workflow + per-runner so a malicious PR cannot poison a key
-      # that a privileged workflow (release.yml, which carries
-      # secrets.MKIT_NPM_TOKEN + id-token: write) later reads. See
-      # docs/RELEASE.md.
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-        with:
-          workspaces: rust -> rust/target
-          prefix-key: "rust-ci-${{ matrix.os }}"
-          cache-on-failure: false
-          cache-bin: false
+          cache-prefix: "rust-ci-${{ matrix.os }}"
 
       # cargo-nextest: faster + structured test runner. Replaces
       # `cargo test`. Pinned via taiki-e/install-action which fetches a
@@ -93,17 +93,6 @@ jobs:
         uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595  # v2
         with:
           tool: cargo-nextest
-
-      # protoc is a build-time requirement of mkit-rpc (via buffa-build
-      # which shells out to `protoc`). The .proto schemas use Edition
-      # 2023, which needs protoc ≥ 25; apt's protobuf-compiler on
-      # ubuntu-latest is too old. arduino/setup-protoc fetches an
-      # upstream release binary and works on every runner.
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
-        with:
-          version: '31.0'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Native packages needed by optional signers when --all-features
       # turns them on across the workspace. macOS gates these deps out
@@ -163,8 +152,10 @@ jobs:
         working-directory: rust
         run: cargo test --locked --doc --workspace
 
-      - name: Rename gate
-        run: bash scripts/verify-rename.sh
+      # The repo-wide rename gate moved to its own workflow (rename-gate.yml):
+      # its scan covers paths beyond this matrix's Rust-only push:main filter,
+      # so coupling it here would skip it on main pushes that touch only those
+      # other paths. See that workflow's header.
 
       - name: Version contract
         working-directory: rust
@@ -221,19 +212,14 @@ jobs:
           # push, github.sha is already the right commit.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - name: Install Rust ${{ env.RUST_VERSION }}
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      # Keystore backends never compile mkit-rpc, so protoc is skipped here.
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-        with:
-          workspaces: rust -> rust/target
-          prefix-key: "rust-keystore-${{ matrix.name }}"
-          cache-on-failure: false
-          cache-bin: false
+          cache-prefix: "rust-keystore-${{ matrix.name }}"
+          protoc: "false"
 
       - name: Install Linux keystore native deps
         if: runner.os == 'Linux'
@@ -308,26 +294,14 @@ jobs:
           echo "msrv=${MSRV}" >> "$GITHUB_OUTPUT"
           echo "MSRV resolved to ${MSRV}"
 
-      - name: Install Rust ${{ steps.msrv.outputs.msrv }}
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - name: Set up Rust, protoc, and cache
+        uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ steps.msrv.outputs.msrv }}
+          cache-prefix: "rust-msrv-${{ steps.msrv.outputs.msrv }}"
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
-        with:
-          version: '31.0'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install native deps
         run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-        with:
-          workspaces: rust -> rust/target
-          prefix-key: "rust-msrv-${{ steps.msrv.outputs.msrv }}"
-          cache-on-failure: false
-          cache-bin: false
 
       - name: cargo check (workspace, locked)
         working-directory: rust

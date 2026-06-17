@@ -3,7 +3,7 @@
 # or any step that executes code from the PR — that would create a privilege
 # escalation path. Keep this workflow strictly to metadata checks on PR fields.
 
-name: PR Title
+name: "Meta: PR Title"
 
 on:
   pull_request_target:

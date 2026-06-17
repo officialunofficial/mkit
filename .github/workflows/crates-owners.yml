@@ -1,4 +1,4 @@
-name: crates-owners
+name: "Release: Crate Owners"
 
 # Ensure crates.io ownership of the published mkit crates.
 #

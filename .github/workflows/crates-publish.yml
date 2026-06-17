@@ -1,4 +1,4 @@
-name: Publish crates.io
+name: "Release: crates.io"
 
 # Tag-driven crates.io publish. The signed `v{version}` tag is the single,
 # deliberate release trigger — same as release.yml's binaries and

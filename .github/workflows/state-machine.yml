@@ -1,4 +1,4 @@
-name: State-machine suite
+name: "Nightly: State Machine"
 
 # Nightly deep run of the stateful end-to-end invariant suite
 # (rust/crates/mkit-cli/tests/state_machine.rs). proptest generates random

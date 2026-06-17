@@ -11,7 +11,7 @@
 # the highest invariant density. Expand to mkit-keystore / mkit-cli
 # / mkit-rpc once the baseline is stable.
 
-name: Mutation score
+name: "Nightly: Mutation Score"
 
 on:
   schedule:

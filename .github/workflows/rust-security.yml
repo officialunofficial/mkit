@@ -1,4 +1,4 @@
-name: Rust Security
+name: "Security: Rust"
 
 # REMINDER: rust/deny.toml ignores RUSTSEC-2023-0071 (yubikey transitive
 # RSA decrypt timing leak). cargo-deny v0.19 does not yet support a
@@ -14,9 +14,13 @@ on:
   pull_request:
     branches:
       - main
-  push:
-    branches:
-      - main
+  # No `push: main`: dependencies only change via PRs (audited above on the PR)
+  # and the Monday schedule catches newly-published advisories against the
+  # current tree. Auditing every main push was pure duplication.
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
