@@ -130,7 +130,6 @@ export const categories: ParityCategory[] = [
   },
   {
     name: 'Remotes and git interop',
-    blurb: 'The commands are here. Wire interoperability with a real .git repo is not — and never will be.',
     items: [
       {
         cmd: 'remote',

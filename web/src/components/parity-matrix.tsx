@@ -39,16 +39,35 @@ function statusLabel(s: ParityStatus): string {
   }
 }
 
+/** Small asterisk glyph used as the bullet for the non-goals list. Three strokes crossing at the center. */
+function AsteriskBullet() {
+  return (
+    <svg
+      width='8'
+      height='8'
+      viewBox='0 0 10 10'
+      fill='none'
+      stroke='currentColor'
+      strokeWidth='1.4'
+      strokeLinecap='round'
+      aria-hidden
+      className='shrink-0'
+    >
+      <path d='M5 1 L5 9 M1.54 3 L8.46 7 M8.46 3 L1.54 7' />
+    </svg>
+  )
+}
+
 /** One dense row: glyph at the left, command and note flowing together as a single line that wraps cleanly. */
 function Row({ cmd, status, note }: { cmd: string; status: ParityStatus; note: string }) {
   return (
-    <div className='flex items-start gap-2 py-1'>
+    <div className='flex items-start gap-2 py-1.5'>
       <span className='flex h-4 shrink-0 items-center'>
         <StatusIcon status={status} />
       </span>
       <span className='sr-only'>{statusLabel(status)}: </span>
-      <p className='text-xs leading-snug'>
-        <code className='font-mono text-fg'>{cmd}</code> <span className='text-muted'>{note}</span>
+      <p className='text-[11px] leading-snug'>
+        <code className='font-mono text-fg'>{cmd}</code> <span className='text-[11px] text-muted'>{note}</span>
       </p>
     </div>
   )
@@ -83,7 +102,7 @@ function NoteBlock({ label, body }: { label: string; body: string }) {
  */
 export function ParityMatrix() {
   return (
-    <div className='space-y-8'>
+    <div className='space-y-12'>
       <div className='flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-muted'>
         {legend.map((l) => (
           <span key={l.status} className='inline-flex items-center gap-1.5'>
@@ -100,9 +119,9 @@ export function ParityMatrix() {
         ))}
       </div>
 
-      <div className='grid gap-x-10 gap-y-6 pt-8 lg:grid-cols-2'>
+      <div className='grid gap-x-10 gap-y-6 border-t border-hairline border-dashed pt-12 lg:grid-cols-2'>
         <section className='space-y-1'>
-          <h2 className='text-sm font-semibold'>Different on purpose, and permanent</h2>
+          <h2 className='font-semibold'>Different on purpose, and permanent</h2>
           <p className='max-w-prose text-xs text-subtle'>
             These fall out of choosing BLAKE3 over SHA-1. They cannot change without dropping content addressing.
           </p>
@@ -114,7 +133,7 @@ export function ParityMatrix() {
         </section>
 
         <section className='space-y-1'>
-          <h2 className='text-sm font-semibold'>Safer than git on purpose</h2>
+          <h2 className='font-semibold'>Safer than git on purpose</h2>
           <p className='max-w-prose text-xs text-subtle'>
             Where mkit refuses git&rsquo;s silent-data-loss defaults. Features, not gaps.
           </p>
@@ -126,12 +145,15 @@ export function ParityMatrix() {
         </section>
       </div>
 
-      <section className='space-y-2'>
-        <h2 className='text-sm font-semibold'>Out of scope for v1</h2>
+      <section className='space-y-2 '>
+        <h2 className='font-semibold'>Out of scope for v1</h2>
         <ul className='columns-2 gap-x-8 text-xs text-muted sm:columns-3 lg:columns-4'>
           {nonGoals.map((g) => (
-            <li key={g} className='break-inside-avoid py-0.5'>
-              {g}
+            <li key={g} className='flex break-inside-avoid items-start gap-2 py-0.5'>
+              <span className='flex h-4 shrink-0 items-center'>
+                <AsteriskBullet />
+              </span>
+              <span>{g}</span>
             </li>
           ))}
         </ul>
