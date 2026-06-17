@@ -29,6 +29,10 @@ jobs:
           # squash-merge strategy in this repo turns the PR title into
           # the commit subject, so this is the gate for commit-message
           # quality on main.
+          #
+          # `deps` is the type Dependabot emits (see .github/dependabot.yml,
+          # which sets prefixes like `deps(rust)` / `deps(mcp)`); without it
+          # every Dependabot PR fails this gate.
           types: |
             feat
             fix
@@ -43,6 +47,7 @@ jobs:
             test
             release
             security
+            deps
           requireScope: false
           subjectPattern: ^[a-z].+$
           subjectPatternError: |
