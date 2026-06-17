@@ -413,17 +413,17 @@ Branches / refs:
 - `mkit branch -m [<old>] <new>` — rename a branch (the current branch
   when `<old>` is omitted). CAS-guarded: refuses to clobber an existing
   `<new>`, and moves HEAD when the renamed branch is checked out.
-- `mkit branch [--list] [--contains <c>] [--no-contains <c>] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]`
+- `mkit branch [--list] [--contains [<c>]] [--no-contains [<c>]] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]`
   — filter the listing (like `git branch`). `<pattern>` arguments are
   shell globs matched against branch names (`*`, `?`, `[…]`; `*` spans
   `/`, so `feature/*` works — git's non-pathname `wildmatch`); a branch is
   kept if it matches any pattern. Patterns are only treated as filters in
   list mode — with `--list` or any ancestry filter present — so
-  `mkit branch <name>` still creates a branch. `--contains <c>` keeps only
-  branches whose tip has `<c>` as an ancestor; `--no-contains <c>` inverts
+  `mkit branch <name>` still creates a branch. `--contains [<c>]` keeps only
+  branches whose tip has `<c>` as an ancestor; `--no-contains [<c>]` inverts
   it. `--merged [<c>]` keeps only branches already merged into `<c>` (i.e.
-  whose tip is an ancestor of it), defaulting to `HEAD` when `<c>` is
-  omitted; `--no-merged [<c>]` inverts it (also defaulting to `HEAD`).
+  whose tip is an ancestor of it); `--no-merged [<c>]` inverts it. All four
+  ancestry commit args **default to `HEAD`** when omitted (like git).
   Patterns and ancestry filters combine (a branch must satisfy all of
   them). `--list` is an explicit list selector — listing is already the
   default when no create/delete/rename flag is given, but `--list` also
