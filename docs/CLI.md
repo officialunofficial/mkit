@@ -76,8 +76,14 @@ Working-tree commands:
     a batch never leaves the worktree half-moved. As an mkit safety
     divergence, a destination that escapes the repository through a
     symlinked parent directory is refused (git would silently follow it).
-    Moving a tracked **directory** (`mv dir newdir`) is not yet supported
-    and is refused with a clear error (single-file moves only for now).
+  - **Directory sources** are supported: `mv dir newdir` renames the
+    directory, and `mv dir existing-dir/` moves it *into* the target
+    (becoming `existing-dir/dir`). The directory is renamed in a single
+    filesystem operation, so untracked files inside it travel with it
+    (exactly like `git mv`), and every tracked file beneath it is restaged
+    at its new path (each a delete + add, per the no-rename-detection note
+    above). The clobber, repo-escape, and validate-before-move guards all
+    apply, and moving a directory into itself is refused.
 - `mkit status [--porcelain[=v1|v2]] [-s|--short] [-z]` — show staged and
   unstaged changes. Default-mode prose (banner + section headers + per-file
   lines) goes to **stderr**; stdout is reserved for machine output.

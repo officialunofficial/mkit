@@ -128,24 +128,58 @@ fn mv_missing_source_is_refused() {
 }
 
 #[test]
-fn mv_directory_source_is_refused_clearly() {
+fn mv_directory_renames_tracked_subtree() {
+    let (td, xdg) = repo(&[("dir/file.txt", b"x\n"), ("dir/sub/n.txt", b"n\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    // An untracked file inside the directory must travel with it (git mv
+    // renames the whole directory on disk).
+    fs::write(root.join("dir/untracked.txt"), b"u\n").unwrap();
+
+    let out = run_in(root, x, &["mv", "dir", "newdir"]);
+    assert!(out.status.success(), "directory rename must succeed: {out:?}");
+
+    // The whole subtree moved, including the nested and untracked files.
+    assert!(!root.join("dir").exists(), "source directory must be gone");
+    assert!(root.join("newdir/file.txt").exists());
+    assert!(root.join("newdir/sub/n.txt").exists());
+    assert!(
+        root.join("newdir/untracked.txt").exists(),
+        "untracked file should be carried along, like git mv"
+    );
+
+    // Each tracked file is staged as a delete at the old path + add at the
+    // new one (mkit has no rename detection).
+    let status = run_in(root, x, &["status", "--porcelain"]);
+    let s = String::from_utf8_lossy(&status.stdout);
+    assert!(s.contains("D  dir/file.txt"), "missing delete: {s}");
+    assert!(s.contains("A  newdir/file.txt"), "missing add: {s}");
+    assert!(s.contains("D  dir/sub/n.txt") && s.contains("A  newdir/sub/n.txt"), "{s}");
+}
+
+#[test]
+fn mv_directory_into_existing_dir_nests_under_it() {
     let (td, xdg) = repo(&[("dir/file.txt", b"x\n")]);
     let (root, x) = (td.path(), xdg.path());
-    // Directory moves are not yet supported — must fail with a clear
-    // message, not silently or with a confusing error.
-    let out = run_in(root, x, &["mv", "dir", "newdir"]);
+    fs::create_dir_all(root.join("target")).unwrap();
+
+    let out = run_in(root, x, &["mv", "dir", "target"]);
+    assert!(out.status.success(), "move into existing dir: {out:?}");
+    // git moves `dir` INTO `target`, becoming `target/dir/...`.
+    assert!(root.join("target/dir/file.txt").exists());
+    assert!(!root.join("dir").exists());
+}
+
+#[test]
+fn mv_directory_into_itself_is_refused() {
+    let (td, xdg) = repo(&[("dir/file.txt", b"x\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    let out = run_in(root, x, &["mv", "dir", "dir/inner"]);
+    assert!(!out.status.success(), "moving a dir into itself must fail");
     assert!(
-        !out.status.success(),
-        "mv of a directory must be refused: {out:?}"
+        String::from_utf8_lossy(&out.stderr).contains("into itself"),
+        "expected an into-itself message: {out:?}"
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("directories"),
-        "expected a directory-not-supported message, got: {stderr:?}"
-    );
-    // Nothing moved.
-    assert!(root.join("dir/file.txt").exists());
-    assert!(!root.join("newdir").exists());
+    assert!(root.join("dir/file.txt").exists(), "nothing should have moved");
 }
 
 #[test]

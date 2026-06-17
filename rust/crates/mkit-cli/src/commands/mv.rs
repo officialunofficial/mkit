@@ -18,9 +18,13 @@
 //! deletion plus an addition rather than git's `R` — a documented
 //! divergence; the staged result (`mkit commit`) is equivalent.
 //!
-//! Scope: moves a single tracked file per source. Moving a tracked
-//! **directory** (`mv dir newdir`) is not yet supported and is refused
-//! with a clear error (follow-up).
+//! Directory sources (`mv dir newdir`, or `mv dir existing-dir/`) are also
+//! supported: the directory is renamed on disk in one filesystem operation
+//! — so untracked files inside it come along, exactly like `git mv` — and
+//! every tracked file beneath it is restaged at its new path (each as a
+//! delete + add, per the no-rename-detection note above). The same up-front
+//! validation, clobber guard (`-f`), and repo-escape guard apply, plus a
+//! refusal to move a directory into itself.
 //!
 //! Safety divergences:
 //! - refuses to overwrite an existing destination without `-f` (matching
@@ -69,7 +73,46 @@ struct PlannedMove {
     hash: Hash,
 }
 
+/// One tracked file carried by a directory move: its current index path and
+/// the path it lands at, with the blob/mode reused (content is unchanged).
+struct DirFileMove {
+    src_rel: String,
+    target_rel: String,
+    status: EntryStatus,
+    hash: Hash,
+}
+
+/// A validated, ready-to-execute directory move. The worktree directory is
+/// renamed in one `fs::rename` (so untracked files travel with it), and each
+/// tracked file beneath it is restaged via [`DirFileMove`].
+struct PlannedDirMove {
+    src_dir_rel: String,
+    src_dir_abs: PathBuf,
+    dest_dir_rel: String,
+    dest_dir_abs: PathBuf,
+    files: Vec<DirFileMove>,
+}
+
+/// A planned move of either kind. Single-file moves keep their original
+/// path exactly; directory moves are the new case.
+enum Planned {
+    File(PlannedMove),
+    Dir(PlannedDirMove),
+}
+
+impl Planned {
+    /// Every final destination path this move stages, for the
+    /// collision check across the whole batch.
+    fn target_paths(&self) -> Vec<&str> {
+        match self {
+            Self::File(m) => vec![m.target_rel.as_str()],
+            Self::Dir(m) => m.files.iter().map(|f| f.target_rel.as_str()).collect(),
+        }
+    }
+}
+
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_shim::parse::<MvOpts>("mkit mv", args) {
         Ok(o) => o,
@@ -122,30 +165,62 @@ pub fn run(args: &[String]) -> u8 {
     }
     let into_dir = sources.len() > 1 || dest_abs.is_dir();
 
-    // Phase 1 — validate and plan every move before touching anything.
-    let mut plan: Vec<PlannedMove> = Vec::new();
+    // Phase 1 — validate and plan every move before touching anything. A
+    // source that is an exact tracked entry is a file move; one that is the
+    // prefix of tracked entries is a directory move; anything else is not
+    // under version control.
+    let mut plan: Vec<Planned> = Vec::new();
     for source in sources {
-        match plan_move(
-            &cwd,
-            &root_canon,
-            &idx,
-            source,
-            &dest_rel,
-            into_dir,
-            opts.force,
-        ) {
-            Ok(m) => plan.push(m),
+        let src_rel = match super::index_path_for_arg(&cwd, Path::new(source)) {
+            Ok(p) => p,
+            Err(e) => return emit_err(&e, exit::USAGE),
+        };
+        let is_file = idx
+            .entries
+            .iter()
+            .any(|e| e.path == src_rel && e.status != EntryStatus::Removed);
+        let dir_prefix = format!("{src_rel}/");
+        let is_dir = idx
+            .entries
+            .iter()
+            .any(|e| e.status != EntryStatus::Removed && e.path.starts_with(&dir_prefix));
+
+        let planned = if is_file {
+            plan_move(&cwd, &root_canon, &idx, source, &dest_rel, into_dir, opts.force)
+                .map(Planned::File)
+        } else if is_dir {
+            plan_dir_move(
+                &cwd,
+                &root_canon,
+                &idx,
+                source,
+                &src_rel,
+                &dest_rel,
+                into_dir,
+                opts.force,
+            )
+            .map(Planned::Dir)
+        } else {
+            Err(emit_err(
+                &format!("not under version control: {source}"),
+                exit::GENERAL_ERROR,
+            ))
+        };
+        match planned {
+            Ok(p) => plan.push(p),
             Err(code) => return code,
         }
     }
-    // Reject a batch that would move two sources onto the same path.
-    for i in 0..plan.len() {
-        for j in (i + 1)..plan.len() {
-            if plan[i].target_rel == plan[j].target_rel {
+    // Reject a batch where two staged destinations collide (across both
+    // file and directory moves).
+    let all_targets: Vec<&str> = plan.iter().flat_map(Planned::target_paths).collect();
+    for i in 0..all_targets.len() {
+        for j in (i + 1)..all_targets.len() {
+            if all_targets[i] == all_targets[j] {
                 return emit_err(
                     &format!(
                         "multiple sources map to the same destination: {}",
-                        plan[i].target_rel
+                        all_targets[i]
                     ),
                     exit::USAGE,
                 );
@@ -155,14 +230,21 @@ pub fn run(args: &[String]) -> u8 {
 
     // Phase 2 — execute. On a filesystem error mid-batch, persist the
     // index for the moves already done so it stays consistent with disk.
-    for (done, m) in plan.iter().enumerate() {
-        if let Err(code) = execute_move(m, opts.force) {
+    for (done, p) in plan.iter().enumerate() {
+        let exec = match p {
+            Planned::File(m) => execute_move(m, opts.force),
+            Planned::Dir(m) => execute_dir_move(m, opts.force),
+        };
+        if let Err(code) = exec {
             if done > 0 {
                 let _ = index::write_index(&cwd, &idx);
             }
             return code;
         }
-        apply_to_index(&mut idx, m);
+        match p {
+            Planned::File(m) => apply_to_index(&mut idx, m),
+            Planned::Dir(m) => apply_dir_to_index(&mut idx, m),
+        }
     }
 
     match index::write_index(&cwd, &idx) {
@@ -304,6 +386,155 @@ fn apply_to_index(idx: &mut index::Index, m: &PlannedMove) {
             ino: 0,
             ctime_ns: 0,
         }),
+    }
+}
+
+/// Validate a directory `source` and plan its move. Performs no filesystem
+/// or index mutation. `src_rel` is the source's repo-relative path (already
+/// resolved by the caller).
+#[allow(clippy::too_many_arguments)]
+fn plan_dir_move(
+    cwd: &Path,
+    root_canon: &Path,
+    idx: &index::Index,
+    source: &str,
+    src_rel: &str,
+    dest_rel: &str,
+    into_dir: bool,
+    force: bool,
+) -> Result<PlannedDirMove, u8> {
+    let src_dir_abs = cwd.join(src_rel);
+    if !src_dir_abs.is_dir() {
+        return Err(emit_err(
+            &format!("bad source: {source}"),
+            exit::GENERAL_ERROR,
+        ));
+    }
+
+    // Where the directory lands: a plain rename to `dest_rel`, or — when the
+    // destination is an existing directory (or there are multiple sources) —
+    // *into* it as `dest_rel/<basename>`, matching git.
+    let dest_dir_rel = if into_dir {
+        let base = src_rel.rsplit('/').next().unwrap_or(src_rel);
+        format!("{dest_rel}/{base}")
+    } else {
+        dest_rel.to_string()
+    };
+    if dest_dir_rel == src_rel {
+        return Err(emit_err(
+            &format!("source and destination are the same: {source}"),
+            exit::USAGE,
+        ));
+    }
+    // Refuse moving a directory into itself or a descendant (the on-disk
+    // rename would otherwise be nonsensical / lose data).
+    if dest_dir_rel == src_rel || dest_dir_rel.starts_with(&format!("{src_rel}/")) {
+        return Err(emit_err(
+            &format!("cannot move '{source}' into itself"),
+            exit::USAGE,
+        ));
+    }
+
+    let dest_dir_abs = cwd.join(&dest_dir_rel);
+    // Safety: keep writes inside the repo.
+    if !target_within_repo(root_canon, &dest_dir_abs) {
+        return Err(emit_err(
+            &format!("destination escapes the repository: {dest_dir_rel}"),
+            exit::GENERAL_ERROR,
+        ));
+    }
+    // Safety: never clobber an existing destination without -f.
+    if path_present(&dest_dir_abs) && !force {
+        return Err(emit_err(
+            &format!("destination exists (use -f to overwrite): {dest_dir_rel}"),
+            exit::GENERAL_ERROR,
+        ));
+    }
+
+    // Restage every tracked file beneath the directory at its new path.
+    let prefix = format!("{src_rel}/");
+    let mut files = Vec::new();
+    for e in &idx.entries {
+        if e.status != EntryStatus::Removed && e.path.starts_with(&prefix) {
+            let sub = &e.path[prefix.len()..];
+            files.push(DirFileMove {
+                src_rel: e.path.clone(),
+                target_rel: format!("{dest_dir_rel}/{sub}"),
+                status: e.status,
+                hash: e.object_hash,
+            });
+        }
+    }
+    if files.is_empty() {
+        // The caller only routes here when at least one tracked entry has the
+        // `src_rel/` prefix, so this is defensive.
+        return Err(emit_err(
+            &format!("not under version control: {source}"),
+            exit::GENERAL_ERROR,
+        ));
+    }
+
+    Ok(PlannedDirMove {
+        src_dir_rel: src_rel.to_string(),
+        src_dir_abs,
+        dest_dir_rel,
+        dest_dir_abs,
+        files,
+    })
+}
+
+/// Rename the worktree directory for one planned directory move. A single
+/// `fs::rename` moves the whole subtree (tracked and untracked alike),
+/// matching `git mv`. Under `-f` an existing destination is removed first.
+fn execute_dir_move(m: &PlannedDirMove, force: bool) -> Result<(), u8> {
+    if let Some(parent) = m.dest_dir_abs.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            emit_err(
+                &format!("create {}: {e}", parent.display()),
+                exit::CANTCREAT,
+            )
+        })?;
+    }
+    if force && path_present(&m.dest_dir_abs) {
+        let _ = remove_path(&m.dest_dir_abs);
+    }
+    std::fs::rename(&m.src_dir_abs, &m.dest_dir_abs).map_err(|e| {
+        emit_err(
+            &format!("move {} -> {}: {e}", m.src_dir_rel, m.dest_dir_rel),
+            exit::GENERAL_ERROR,
+        )
+    })
+}
+
+/// Apply a completed directory move to the index: each source file is staged
+/// as removed and its destination staged with the reused blob/mode. Only
+/// flips statuses and appends — never removes from the vec — so any
+/// `src_idx` captured by a sibling file move stays valid.
+fn apply_dir_to_index(idx: &mut index::Index, m: &PlannedDirMove) {
+    for f in &m.files {
+        if let Some(i) = idx
+            .entries
+            .iter()
+            .position(|e| e.path == f.src_rel && e.status != EntryStatus::Removed)
+        {
+            idx.entries[i].status = EntryStatus::Removed;
+            idx.entries[i].object_hash = ZERO;
+        }
+        match idx.entries.iter().position(|e| e.path == f.target_rel) {
+            Some(j) => {
+                idx.entries[j].status = f.status;
+                idx.entries[j].object_hash = f.hash;
+            }
+            None => idx.entries.push(IndexEntry {
+                path: f.target_rel.clone(),
+                status: f.status,
+                object_hash: f.hash,
+                mtime_ns: 0,
+                size: 0,
+                ino: 0,
+                ctime_ns: 0,
+            }),
+        }
     }
 }
 
