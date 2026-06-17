@@ -1,4 +1,4 @@
-name: "Meta: rename gate"
+name: "Meta: Rename Gate"
 
 # Asserts the public build surface carries no pre-rename upstream-project
 # tokens (the exact strings live in scripts/verify-rename.sh's FORBIDDEN array,
