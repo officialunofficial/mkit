@@ -52,7 +52,12 @@ struct CommitOptions {
     message: Option<String>,
     /// Read the commit message from `<file>` (like `git commit -F`). Use
     /// `-` to read from stdin. Mutually exclusive with `-m`.
-    #[arg(short = 'F', long = "file", value_name = "FILE", conflicts_with = "message")]
+    #[arg(
+        short = 'F',
+        long = "file",
+        value_name = "FILE",
+        conflicts_with = "message"
+    )]
     file: Option<String>,
     /// Override the author Identity for this commit.
     #[arg(long = "author", value_name = "SPEC")]

@@ -105,7 +105,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--continue --abort --no-commit -m --message --help" -- "$cur") )
             ;;
         cherry-pick)
-            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit -m --message --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit -m --mainline --help" -- "$cur") )
             ;;
         tag)
             COMPREPLY=( $(compgen -W "-a --annotate -s --sign -m --message -d --delete --author --help" -- "$cur") )

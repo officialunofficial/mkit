@@ -589,7 +589,13 @@ fn apply_file_inner(
         let Some((k, v)) = line.split_once('=') else {
             continue;
         };
-        let key = k.trim();
+        // Git matches config section + variable names case-insensitively,
+        // so a hand-edited `User.Name` / `Core.AutoCRLF` must resolve like
+        // its canonical lowercase form. Lowercase BEFORE the forbidden-key
+        // check so a case-variant (`User.Identity`) can't slip a
+        // security-sensitive key into the per-repo layer.
+        let key = k.trim().to_ascii_lowercase();
+        let key = key.as_str();
         let val = v.trim();
         if scope == ConfigScope::Repo && REPO_FORBIDDEN_KEYS.contains(&key) {
             if warn_on_forbidden {

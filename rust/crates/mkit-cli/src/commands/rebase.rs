@@ -466,7 +466,9 @@ fn replay(
             Ok(t) => t,
             Err(c) => return c,
         };
-        let result = match cherry_pick(store, target, ours_tree) {
+        // Rebase replays the branch's own (non-merge) commits, so no
+        // mainline selection applies.
+        let result = match cherry_pick(store, target, ours_tree, None) {
             Ok(r) => r,
             Err(e) => return emit_err(&format!("cherry-pick: {e}"), exit::GENERAL_ERROR),
         };

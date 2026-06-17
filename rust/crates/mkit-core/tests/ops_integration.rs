@@ -187,7 +187,7 @@ fn cherry_pick_target_then_diff_picks_only_target_changes() {
     let _add_c = put_commit(&s, add_c_tree, &[add_b], "add c");
 
     // Pick add_b onto base_tree.
-    let r = cherry_pick(&s, add_b, base_tree).unwrap();
+    let r = cherry_pick(&s, add_b, base_tree, None).unwrap();
     assert!(!r.has_conflicts());
     assert_eq!(r.original_message, b"add b");
 
@@ -210,7 +210,7 @@ fn cherry_pick_modify_modify_conflict_carries_message() {
 
     let ours_tree = put_tree(&s, vec![entry(b"a.txt", EntryMode::Blob, v2)]);
 
-    let r = cherry_pick(&s, target, ours_tree).unwrap();
+    let r = cherry_pick(&s, target, ours_tree, None).unwrap();
     assert!(r.has_conflicts());
     assert_eq!(r.conflicts.len(), 1);
     assert_eq!(r.conflicts[0].kind, ConflictKind::ModifyModify);
@@ -262,8 +262,8 @@ fn merge_and_cherry_pick_are_byte_deterministic() {
 
     // Cherry-pick determinism: same target, same ours -> same result tree.
     let target_commit = put_commit(&s, ours, &[put_commit(&s, base, &[], "base")], "modify");
-    let r1 = cherry_pick(&s, target_commit, v_to_tree(&s, v2)).unwrap();
-    let r2 = cherry_pick(&s, target_commit, v_to_tree(&s, v2)).unwrap();
+    let r1 = cherry_pick(&s, target_commit, v_to_tree(&s, v2), None).unwrap();
+    let r2 = cherry_pick(&s, target_commit, v_to_tree(&s, v2), None).unwrap();
     assert_eq!(r1.tree_hash, r2.tree_hash);
     assert_eq!(r1.original_message, r2.original_message);
 }

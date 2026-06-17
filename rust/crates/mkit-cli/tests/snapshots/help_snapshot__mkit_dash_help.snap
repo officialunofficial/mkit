@@ -162,9 +162,10 @@ commands:
   key generate|list|import|export|delete  Manage user-scoped keystore keys
   keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
                     Generate a new signing key (defaults to Ed25519)
-  cherry-pick [-n] [-m <msg>] <hash> | --continue | --abort
+  cherry-pick [-n] [-m <parent-number>] <hash> | --continue | --abort
                     Apply a commit to the current branch (-n stages the change
-                    without committing; -m overrides the message)
+                    without committing; -m/--mainline selects the mainline
+                    parent when replaying a merge commit, like git)
   revert [-n] <commit> | --continue | --abort
                     Create a new commit undoing <commit> (forward commit;
                     conflict-aware; -n stages the revert without committing)

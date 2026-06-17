@@ -300,7 +300,7 @@ _mkit() {
                         '--continue[continue after conflict resolution]' \
                         '--abort[abort the cherry-pick]' \
                         '(-n --no-commit)'{-n,--no-commit}'[apply the change without creating a commit]' \
-                        '(-m --message)'{-m,--message}'[override the commit message]:message:' \
+                        '(-m --mainline)'{-m,--mainline}'[select the mainline parent of a merge commit]:parent-number:' \
                         '--help[show help]' \
                         '1:commit:'
                     ;;

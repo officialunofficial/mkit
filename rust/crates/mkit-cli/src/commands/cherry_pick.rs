@@ -18,7 +18,7 @@ use std::io::Write;
 use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::object::{Commit, Object};
-use mkit_core::ops::cherry_pick::cherry_pick;
+use mkit_core::ops::cherry_pick::{CherryPickError, cherry_pick};
 use mkit_core::ops::conflict_state::{
     self, CherryPickState, in_progress_op_name, is_cherry_pick_in_progress,
 };
@@ -46,10 +46,11 @@ struct CherryPickOpts {
     /// the result has the current branch as its single parent.
     #[arg(short = 'n', long = "no-commit", conflicts_with_all = ["cont", "abort"])]
     no_commit: bool,
-    /// Override the commit message (default: the picked commit's message).
-    /// Like `git cherry-pick` followed by an edited message.
-    #[arg(short = 'm', long = "message", conflicts_with_all = ["cont", "abort"])]
-    message: Option<String>,
+    /// Select the mainline parent (1-based) when replaying a merge commit,
+    /// like `git cherry-pick -m`. Required for a merge (mkit refuses to
+    /// guess which side is the mainline) and rejected for a non-merge.
+    #[arg(short = 'm', long = "mainline", value_name = "PARENT-NUMBER", conflicts_with_all = ["cont", "abort"])]
+    mainline: Option<usize>,
     /// Commit to replay: a ref, full/short hash, or `HEAD~n` revspec.
     commit: Option<String>,
 }
@@ -79,14 +80,7 @@ pub fn run(args: &[String]) -> u8 {
     } else if opts.cont {
         cont(&cwd, &mkit_dir, &store)
     } else if let Some(hex) = opts.commit.as_deref() {
-        start(
-            &cwd,
-            &mkit_dir,
-            &store,
-            hex,
-            opts.no_commit,
-            opts.message.as_deref(),
-        )
+        start(&cwd, &mkit_dir, &store, hex, opts.no_commit, opts.mainline)
     } else {
         super::usage_error("usage: mkit cherry-pick <commit> | --continue | --abort")
     }
@@ -99,7 +93,7 @@ fn start(
     store: &ObjectStore,
     hex: &str,
     no_commit: bool,
-    message: Option<&str>,
+    mainline: Option<usize>,
 ) -> u8 {
     if let Some(op) = in_progress_op_name(mkit_dir) {
         return emit_err(
@@ -123,16 +117,17 @@ fn start(
         Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::GENERAL_ERROR),
     };
 
-    let result = match cherry_pick(store, target, ours_tree) {
+    let result = match cherry_pick(store, target, ours_tree, mainline) {
         Ok(r) => r,
+        // Mainline-selection misuse is a usage error (bad invocation),
+        // distinct from a runtime store/merge failure.
+        Err(
+            e @ (CherryPickError::MergeNeedsMainline
+            | CherryPickError::MainlineForNonMerge
+            | CherryPickError::BadMainline { .. }),
+        ) => return emit_err(&format!("cherry-pick: {e}"), exit::USAGE),
         Err(e) => return emit_err(&format!("cherry-pick: {e}"), exit::GENERAL_ERROR),
     };
-
-    // `-m` overrides the picked commit's message; otherwise keep the
-    // original (matching git). The chosen message is carried into the
-    // conflict state too, so `--continue` commits with the same text.
-    let chosen_message =
-        message.map_or_else(|| result.original_message.clone(), |m| m.as_bytes().to_vec());
 
     if result.has_conflicts() {
         if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
@@ -150,7 +145,7 @@ fn start(
         let state = CherryPickState {
             cherry_pick_head: target,
             orig_head: ours,
-            message: chosen_message.clone(),
+            message: result.original_message.clone(),
         };
         if let Err(e) = conflict_state::write_cherry_pick_state(mkit_dir, &state, &records) {
             return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
@@ -184,8 +179,14 @@ fn start(
         return exit::OK;
     }
 
-    let commit_hash = match create_commit(cwd, store, result.tree_hash, ours, &chosen_message, target)
-    {
+    let commit_hash = match create_commit(
+        cwd,
+        store,
+        result.tree_hash,
+        ours,
+        &result.original_message,
+        target,
+    ) {
         Ok(h) => h,
         Err(code) => return code,
     };

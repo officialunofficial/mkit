@@ -23,6 +23,11 @@ fn parent_count(repo: &Repo, rev: &str) -> usize {
         .count()
 }
 
+/// Resolve a revision to its full object id.
+fn rev(repo: &Repo, r: &str) -> String {
+    stdout(&repo.ok(&["rev-parse", r])).trim().to_string()
+}
+
 /// A base commit, then `feature` (adds `b.txt`) and `main` (adds `c.txt`)
 /// touch *different* files, so a merge is clean (no conflict). Leaves the
 /// repo checked out on `main`.
@@ -147,21 +152,60 @@ fn cherry_pick_no_commit_stages_without_committing() {
 }
 
 #[test]
-fn cherry_pick_dash_m_overrides_message() {
+fn cherry_pick_m_is_mainline_selection_not_a_message() {
+    // git's `cherry-pick -m` is `--mainline <parent-number>`, NOT a message
+    // override. Verify the git semantics: required for a merge, rejected for
+    // a non-merge, and that a valid mainline picks that parent's diff.
     let repo = Repo::new();
-    repo.commit_file("a.txt", b"base\n", "base");
+    repo.commit_file("a.txt", b"base\n", "c0");
     repo.ok(&["branch", "feature"]);
     repo.ok(&["checkout", "feature"]);
-    repo.commit_file("d.txt", b"x\n", "original subject");
-    let pick = stdout(&repo.ok(&["rev-parse", "HEAD"]));
-    let pick = pick.trim();
+    repo.commit_file("b.txt", b"feat\n", "fb");
     repo.ok(&["checkout", "main"]);
-    repo.ok(&["cherry-pick", "-m", "renamed subject", pick]);
-    let log = stdout(&repo.ok(&["log", "--oneline"]));
+    repo.commit_file("c.txt", b"main\n", "mc");
+    let mc = rev(&repo, "HEAD");
+
+    // Build a real merge commit M on `feature` (parents: fb, mc).
+    repo.ok(&["checkout", "feature"]);
+    repo.ok(&["merge", "main", "-m", "merge main into feature"]);
+    assert_eq!(parent_count(&repo, "HEAD"), 2, "M must be a merge");
+    let m = rev(&repo, "HEAD");
+
+    repo.ok(&["checkout", "main"]);
+
+    // `-m` on a NON-merge commit is rejected (git: "not a merge").
+    let out = repo.run(&["cherry-pick", "-m", "1", &mc]);
+    assert!(!out.status.success(), "-m on a non-merge must fail");
     assert!(
-        log.lines().next().unwrap_or("").contains("renamed subject"),
-        "cherry-pick -m message not used: {log}"
+        String::from_utf8_lossy(&out.stderr).contains("not a merge"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+
+    // Cherry-picking the MERGE without `-m` is refused (git: needs mainline).
+    let out = repo.run(&["cherry-pick", &m]);
+    assert!(!out.status.success(), "merge pick without -m must fail");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("mainline"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // `-m 2` selects parent 2 (mc) as the base: M's diff vs mc adds b.txt,
+    // which `main` lacks → a clean pick. (A string like "msg" would be a
+    // value-parse error, proving `-m` is numeric mainline selection.)
+    assert!(!repo.path().join("b.txt").exists());
+    let out = repo.run(&["cherry-pick", "-m", "2", &m]);
+    assert!(
+        out.status.success(),
+        "cherry-pick -m 2 <merge> should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(repo.path().join("b.txt").exists(), "mainline 2 should add b.txt");
+
+    // A non-numeric `-m` is a clean value error, not a silent message.
+    let out = repo.run(&["cherry-pick", "-m", "notanumber", &m]);
+    assert!(!out.status.success(), "non-numeric -m must be a usage error");
 }
 
 #[test]
@@ -235,4 +279,17 @@ fn stash_accepts_stash_at_brace_syntax() {
     // A malformed reference is a clean usage error, not a panic.
     let bad = repo.run(&["stash", "show", "stash@{nope}"]);
     assert!(!bad.status.success());
+}
+
+#[test]
+fn config_file_keys_are_case_insensitive() {
+    // A hand-edited config file with a mixed-case key must resolve like its
+    // canonical lowercase form (git semantics) — not just keys set via the
+    // `config` command.
+    let repo = Repo::new();
+    let cfg_path = repo.mkit_dir().join("config");
+    let mut body = std::fs::read_to_string(&cfg_path).unwrap_or_default();
+    body.push_str("\nUser.Name = Zoe\n");
+    std::fs::write(&cfg_path, body).unwrap();
+    assert_eq!(stdout(&repo.ok(&["config", "user.name"])).trim(), "Zoe");
 }

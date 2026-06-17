@@ -230,7 +230,7 @@ complete -c mkit -n "__fish_seen_subcommand_from cherry-pick" \
 complete -c mkit -n "__fish_seen_subcommand_from cherry-pick" \
     -l no-commit -s n -d "Apply the change without creating a commit"
 complete -c mkit -n "__fish_seen_subcommand_from cherry-pick" \
-    -l message -s m -d "Override the commit message" -r
+    -l mainline -s m -d "Select the mainline parent (1-based) of a merge commit" -r
 complete -c mkit -n "__fish_seen_subcommand_from show" \
     -l stat -d "Show a diffstat instead of the full patch"
 complete -c mkit -n "__fish_seen_subcommand_from keygen" \

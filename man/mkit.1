@@ -719,7 +719,7 @@ renames a named remote and repoints any branch upstream tracking it.
 Removing or renaming a remote never touches the user-scoped
 .Ar trusted_remote_endpoint ,
 which is keyed by exact URL rather than remote name.
-.It Cm cherry-pick Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar msg Oc Ar hash | Fl Fl continue | Fl Fl abort
+.It Cm cherry-pick Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar parent-number Oc Ar hash | Fl Fl continue | Fl Fl abort
 Apply a single commit from elsewhere onto HEAD.
 .Fl n
 or
@@ -728,8 +728,16 @@ stages the picked change in the index and worktree without creating a
 commit.
 .Fl m
 or
-.Fl Fl message
-overrides the commit message. On conflict, resolve and
+.Fl Fl mainline Ar parent-number
+selects which parent of a merge commit is the mainline (git semantics):
+it is required when replaying a merge commit and rejected for a non-merge.
+This differs from
+.Xr git 1 Ns 's
+.Cm commit Fl m :
+git's
+.Cm cherry-pick Fl m
+is mainline selection, not a message override.
+On conflict, resolve and
 .Cm add
 the paths, then
 .Fl Fl continue ,

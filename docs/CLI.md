@@ -457,15 +457,19 @@ Branches / refs:
   leaves you to finish with `mkit commit` (which records a two-parent
   merge commit) or `mkit merge --continue`. A fast-forward creates no
   commit, so `--no-commit` does not affect it.
-- `mkit cherry-pick [-n|--no-commit] [-m <msg>] <hash> | --continue | --abort`
+- `mkit cherry-pick [-n|--no-commit] [-m|--mainline <parent-number>] <hash> | --continue | --abort`
   — apply a commit to
   the current branch. Refuses to overwrite staged changes, dirty tracked
   files, or untracked path collisions. On conflict, records resumable
   state; see "Resolving conflicts" below. `-n`/`--no-commit` applies the
   picked change to the index + worktree without creating a commit (run
   `mkit commit` when ready; the result has the current branch as its
-  single parent), and `-m`/`--message` overrides the commit message
-  (default: the picked commit's message).
+  single parent). `-m`/`--mainline <parent-number>` selects which parent
+  of a **merge** commit is the mainline (git semantics): it is required
+  when replaying a merge (mkit refuses to guess which side to diff
+  against) and rejected for a non-merge commit. Note this differs from
+  `git commit -m` — git's `cherry-pick -m` is mainline selection, not a
+  message override.
 - `mkit revert <commit> | --continue | --abort` `[-n|--no-commit]` —
   create a new commit that undoes `<commit>` (the inverse of cherry-pick:
   it applies the reverse of the target's diff). The commit message is
