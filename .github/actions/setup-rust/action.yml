@@ -1,0 +1,67 @@
+name: Set up Rust
+description: >-
+  Install the Rust toolchain, (optionally) protoc, and a lockfile-keyed cargo
+  cache. Consolidates the toolchain + protoc + cache trio that the CI workflows
+  (rust.yml, coverage.yml, docs.yml) otherwise duplicate, so the pinned action
+  SHAs and the protoc version live in exactly one place.
+
+inputs:
+  toolchain:
+    description: Rust toolchain to install (e.g. "1.95.0", or an MSRV resolved at runtime).
+    required: true
+  components:
+    description: Comma/space-separated rustup components (e.g. "rustfmt, clippy").
+    required: false
+    default: ""
+  targets:
+    description: Additional rustup targets (e.g. "wasm32-unknown-unknown").
+    required: false
+    default: ""
+  cache-prefix:
+    description: >-
+      Swatinem/rust-cache prefix-key. MUST be unique per workflow + per runner:
+      partitioning the key this way stops a malicious PR from poisoning a cache
+      that a privileged workflow (e.g. release.yml, which carries publish tokens
+      and id-token: write) would later read. See docs/RELEASE.md.
+    required: true
+  protoc:
+    description: >-
+      Install protoc. Required by any job that builds mkit-rpc (buffa-build
+      shells out to protoc; the .proto schemas use Edition 2023, needing
+      protoc >= 25, newer than apt's protobuf-compiler). Set "false" for jobs
+      that never compile mkit-rpc (e.g. the keystore-only matrix).
+    required: false
+    default: "true"
+  protoc-version:
+    description: protoc release to install when protoc is enabled.
+    required: false
+    default: "31.0"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust ${{ inputs.toolchain }}
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    # arduino/setup-protoc fetches an upstream release binary (works on every
+    # runner). github.token raises the GitHub API rate limit for the download;
+    # composite actions can't read secrets, but github.token is the job's
+    # GITHUB_TOKEN and is available here.
+    - name: Install protoc
+      if: ${{ inputs.protoc == 'true' }}
+      uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+      with:
+        version: ${{ inputs.protoc-version }}
+        repo-token: ${{ github.token }}
+
+    - name: Cache cargo registry and target
+      uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      with:
+        workspaces: rust -> rust/target
+        prefix-key: ${{ inputs.cache-prefix }}
+        cache-on-failure: false
+        cache-bin: false

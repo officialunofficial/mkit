@@ -142,6 +142,39 @@ Run `cargo --workspace` commands from `rust/` for the core crates:
 `(cd rust && cargo nextest run --workspace)`. The signers are built
 and tested separately from `contrib/signers/`.
 
+## Continuous integration
+
+Workflows live in `.github/workflows/`. Their display names are prefixed by
+purpose so the Actions tab self-groups: `CI:` (build/test/lint/coverage/docs),
+`Security:`, `Quality:`, `Nightly:` (scheduled deep checks), `Release:`, and
+`Meta:` (workflow lint, PR-title, typos).
+
+| Workflow | Triggers | Notes |
+|----------|----------|-------|
+| `CI: Rust` | push `main`¹, approved-PR² | Build, test, clippy, fmt, MSRV, keystore backends |
+| `CI: Coverage` | push `main`¹, approved-PR² | `cargo-llvm-cov` → Codecov |
+| `CI: Docs` | every PR | rustdoc broken-link gate (`-D warnings`) |
+| `CI: Web` / `CI: MCP` | push/PR, path-filtered | only when `web/**` / `mcp/**` change |
+| `Quality: Reproducible Build` | approved-PR², weekly | two-pass determinism check |
+| `Quality: cargo-geiger` | push `main`, PR | unsafe-code ceiling |
+| `Security: Rust` | PR, Mon 06:00, dispatch | `cargo audit` + `cargo deny` (no longer on every main push) |
+| `Security: Supply Chain` | PR, Sun, dispatch | dependency review, OSSF Scorecard, SBOM |
+| `Nightly: *` | ~04:00 daily, dispatch | fuzz, mutation score, state-machine suite |
+| `Release: *` | signed `v*` tag (or dispatch) | crates.io publish, binaries, MCP corpus seed |
+
+¹ Path-filtered: a docs/MCP/web-only push to `main` no longer triggers the full
+Rust matrix or coverage.
+
+² **Why didn't CI run on my PR?** The expensive Rust jobs trigger on
+`pull_request_review` and only start **after a maintainer submits an approving
+review** — they intentionally don't burn runner minutes on every push to an
+open PR. `CI: Docs`, `CI: Web`, `CI: MCP`, and the `Meta:` checks run on every
+push as usual.
+
+The toolchain + protoc + cargo-cache setup shared by the Rust CI workflows is
+the `.github/actions/setup-rust` composite action — bump the pinned action SHAs
+or the protoc version there, in one place, rather than per workflow.
+
 ## Commit conventions
 
 We use [Conventional Commits](https://www.conventionalcommits.org/) with

@@ -1,4 +1,4 @@
-name: Typos
+name: "Meta: Typos"
 
 on:
   push:

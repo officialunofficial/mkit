@@ -1,4 +1,4 @@
-name: Web CI
+name: "CI: Web"
 
 on:
   push:
@@ -29,6 +29,12 @@ on:
 
 permissions:
   contents: read
+
+# One run per PR; newer pushes cancel superseded runs. Pushes to main are
+# never cancelled (key the guard off the event name, not github.ref).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   web:
