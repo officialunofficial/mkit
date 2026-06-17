@@ -304,6 +304,39 @@ pub fn pop(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()>
     Ok(())
 }
 
+/// Finalize a pop whose worktree (and, for `--index`, staged index) the
+/// caller has already restored: record the popped commit in the recovery
+/// log, then remove the manifest entry. Index 0 = newest.
+///
+/// Split out of [`pop`] so `pop --index` can restore the staged index
+/// (a separate, fallible step in the CLI) **before** dropping the entry —
+/// a failure there then leaves the stash in place for a normal retry,
+/// rather than dropping it with the index half-restored.
+///
+/// # Errors
+/// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
+pub fn pop_finalize(repo_root: &Path, idx: usize) -> StashResult<()> {
+    let mut list = read_list(repo_root)?;
+    if idx >= list.entries.len() {
+        return Err(StashError::IndexOutOfRange(idx));
+    }
+    let entry = list.entries[idx].clone();
+    let ts = unix_seconds_now();
+    crate::ops::recovery::record(
+        &repo_root.join(MKIT_DIR),
+        &crate::ops::recovery::RecoveryEntry {
+            timestamp: ts,
+            op: "stash-pop".to_string(),
+            superseded: entry.commit_hash,
+            branch: String::new(),
+        },
+    )
+    .map_err(|e| StashError::Io(io::Error::other(format!("recovery log: {e}"))))?;
+    list.entries.remove(idx);
+    write_list(repo_root, &list)?;
+    Ok(())
+}
+
 /// Apply a stash entry's tree to the worktree **without** removing the
 /// entry. Index 0 = newest. This is the non-destructive complement to
 /// [`pop`]: it leaves the stash stack untouched so the same entry can be

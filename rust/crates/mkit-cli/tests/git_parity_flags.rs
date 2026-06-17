@@ -357,6 +357,22 @@ fn branch_list_filters_by_glob_pattern() {
 }
 
 #[test]
+fn config_preserves_remote_subsection_case_across_reload() {
+    // `remote.<name>` subsection names are case-sensitive in git; reloading
+    // the config file must not lowercase them, or a named remote added with
+    // a capitalized name would be lost.
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"x\n", "c0");
+    repo.ok(&["remote", "add", "Origin", "mkit+file:///tmp/xyz"]);
+    // A fresh `mkit remote` process re-parses .mkit/config.
+    let listed = stdout(&repo.ok(&["remote"]));
+    assert!(
+        listed.contains("Origin"),
+        "remote subsection name was lowercased on reload: {listed}"
+    );
+}
+
+#[test]
 fn config_file_keys_are_case_insensitive() {
     // A hand-edited config file with a mixed-case key must resolve like its
     // canonical lowercase form (git semantics) — not just keys set via the

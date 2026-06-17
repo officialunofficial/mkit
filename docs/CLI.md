@@ -846,10 +846,14 @@ Config / keys / version:
 - `mkit config [--format=json]` — show all configuration values.
   `--format=json` emits a flat JSON object with every known key.
 - `mkit config <key> [--format=json]` — show one value.
-- `mkit config <key> <value>` — set a configuration value. Config keys
-  are matched **case-insensitively** and canonicalize to lowercase, like
-  git — so `user.Name`, `USER.EMAIL`, etc. resolve to the same key as
-  their lowercase form.
+- `mkit config <key> <value>` — set a configuration value. Config
+  **section** and **variable** names are matched **case-insensitively**
+  (canonicalized to lowercase), like git — so `user.Name`, `USER.EMAIL`,
+  etc. resolve to the same key as their lowercase form, in both this
+  command and the config-file parser. **Subsection** names — the middle
+  segment of `remote.<name>.url` or `branch.<branch>.remote` — stay
+  **case-sensitive** (git semantics), so a remote added as `Origin` is not
+  silently folded to `origin`.
   - `user.name` / `user.email` — git-compatibility aliases. They are
     accepted and round-trip like `git config user.name`, but are
     **non-authoritative**: mkit's commit author is cryptographic

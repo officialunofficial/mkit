@@ -232,53 +232,65 @@ fn restore_entry(
         Ok(h) => h,
         Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
     };
-    // Resolve the staged-index snapshot BEFORE mutating: `pop` removes the
-    // manifest entry, so the lookup must happen first. `None` means the
-    // entry predates the feature (or was saved with no HEAD) — `--index`
-    // is then a no-op, which we surface.
-    let index_tree = if restore_index {
-        match stash::entry_index_tree(store, cwd, index) {
-            Ok(t) => t,
-            Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
-        }
-    } else {
-        None
-    };
     if let Err(e) = super::ensure_restore_safe(cwd, store, tree_hash) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }
-    let result = if drop_entry {
-        stash::pop(store, cwd, index)
-    } else {
-        stash::apply(store, cwd, index)
-    };
-    match result {
-        Ok(()) => {
-            // `--index`: re-stage the recorded index tree on top of the
-            // restored worktree, matching `git stash pop/apply --index`.
-            if restore_index {
-                if let Some(it) = index_tree {
-                    if let Err(e) = super::sync_index_to_tree(cwd, store, it) {
-                        return emit_err(
-                            &format!("stash {verb}: restore index: {e}"),
-                            exit::GENERAL_ERROR,
-                        );
-                    }
-                } else {
-                    let mut stderr = std::io::stderr().lock();
-                    let _ = writeln!(
-                        stderr,
-                        "note: this stash has no recorded index state; --index had no effect"
-                    );
-                }
+
+    // Without `--index`, keep the original behavior: `pop` restores the
+    // worktree, records recovery, and drops the entry; `apply` restores and
+    // keeps it.
+    if !restore_index {
+        let result = if drop_entry {
+            stash::pop(store, cwd, index)
+        } else {
+            stash::apply(store, cwd, index)
+        };
+        return match result {
+            Ok(()) => {
+                let past = if drop_entry { "popped" } else { "applied" };
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "{past} stash@{{{index}}}");
+                exit::OK
             }
-            let past = if drop_entry { "popped" } else { "applied" };
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(stderr, "{past} stash@{{{index}}}");
-            exit::OK
-        }
-        Err(e) => emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+            Err(e) => emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+        };
     }
+
+    // `--index`: restore the worktree (keeping the entry), then re-stage the
+    // recorded index, and only THEN drop the entry (for `pop`). Sequencing
+    // the entry removal last means a failure in the index rewrite leaves the
+    // stash in place for a normal retry, rather than dropping it with the
+    // index half-restored.
+    let index_tree = match stash::entry_index_tree(store, cwd, index) {
+        Ok(t) => t,
+        Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+    };
+    if let Err(e) = stash::apply(store, cwd, index) {
+        return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
+    }
+    if let Some(it) = index_tree {
+        if let Err(e) = super::sync_index_to_tree(cwd, store, it) {
+            return emit_err(
+                &format!("stash {verb}: restore index: {e}"),
+                exit::GENERAL_ERROR,
+            );
+        }
+    } else {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "note: this stash has no recorded index state; --index had no effect"
+        );
+    }
+    if drop_entry
+        && let Err(e) = stash::pop_finalize(cwd, index)
+    {
+        return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
+    }
+    let past = if drop_entry { "popped" } else { "applied" };
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "{past} stash@{{{index}}}");
+    exit::OK
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {
