@@ -38,16 +38,27 @@ export default function HomePage() {
             </a>{' '}
             on GitHub.
           </p>
-          <div className='inline-flex items-center gap-3 rounded-md border border-hairline bg-muted/10 px-3 py-2'>
-            <code className='font-mono text-sm'>
-              <span className='select-none text-muted'>$ </span>cargo install mkit-cli
-            </code>
-            <CopyButton text='cargo install mkit-cli' />
+          <div className='flex flex-col items-start gap-2'>
+            <div className='inline-flex items-center gap-3 rounded-md border border-hairline bg-muted/10 px-3 py-2'>
+              <code className='font-mono text-sm'>
+                <span className='select-none text-muted'>$ </span>cargo install mkit-cli
+              </code>
+              <CopyButton text='cargo install mkit-cli' />
+            </div>
+            {/* Connect an agent to mkit's hosted docs + source MCP — the
+                canonical "Connecting" command from mcp/README.md. */}
+            <div className='inline-flex max-w-full items-center gap-3 overflow-x-auto rounded-md border border-hairline bg-muted/10 px-3 py-2'>
+              <code className='whitespace-nowrap font-mono text-sm'>
+                <span className='select-none text-muted'>$ </span>claude mcp add --transport http mkit
+                https://mcp.mkit.sh
+              </code>
+              <CopyButton text='claude mcp add --transport http mkit https://mcp.mkit.sh' />
+            </div>
           </div>
         </div>
       </section>
 
-      <ul className='divide-y divide-hairline border-y border-hairline'>
+      <ul className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4'>
         <Demo
           to='/hash'
           title='hash'
@@ -92,22 +103,96 @@ export default function HomePage() {
 // `string` is too wide for Waku 1.0.0-alpha.8's typed Link.
 type DemoRoute = '/hash' | '/sign' | '/attest' | '/tree' | '/streaming' | '/performance' | '/parity'
 
+// Soft per-tile mesh gradients: layered low-alpha radial blooms over the
+// white card so text stays legible while each tile reads distinct.
+const MESH: Record<DemoRoute, string> = {
+  '/hash':
+    'radial-gradient(at 18% 22%, rgba(99,102,241,0.10), transparent 55%), radial-gradient(at 82% 12%, rgba(56,189,248,0.08), transparent 55%)',
+  '/sign':
+    'radial-gradient(at 20% 18%, rgba(244,114,182,0.09), transparent 55%), radial-gradient(at 85% 80%, rgba(251,191,36,0.08), transparent 55%)',
+  '/tree':
+    'radial-gradient(at 15% 25%, rgba(45,212,191,0.10), transparent 55%), radial-gradient(at 80% 15%, rgba(132,204,22,0.08), transparent 55%)',
+  '/streaming':
+    'radial-gradient(at 22% 20%, rgba(56,189,248,0.09), transparent 55%), radial-gradient(at 78% 82%, rgba(167,139,250,0.08), transparent 55%)',
+  '/performance':
+    'radial-gradient(at 18% 18%, rgba(251,146,60,0.09), transparent 55%), radial-gradient(at 82% 80%, rgba(248,113,113,0.08), transparent 55%)',
+  '/attest':
+    'radial-gradient(at 20% 22%, rgba(52,211,153,0.09), transparent 55%), radial-gradient(at 80% 14%, rgba(45,212,191,0.08), transparent 55%)',
+  '/parity':
+    'radial-gradient(at 16% 20%, rgba(167,139,250,0.09), transparent 55%), radial-gradient(at 84% 80%, rgba(96,165,250,0.08), transparent 55%)',
+}
+
+// Per-tile accent colour (solid hue echoing each tile's mesh) for the header shape.
+const SHAPE_COLOR: Record<DemoRoute, string> = {
+  '/hash': 'rgb(99,102,241)',
+  '/sign': 'rgb(244,114,182)',
+  '/tree': 'rgb(20,184,166)',
+  '/streaming': 'rgb(56,189,248)',
+  '/performance': 'rgb(249,115,22)',
+  '/attest': 'rgb(16,185,129)',
+  '/parity': 'rgb(139,92,246)',
+}
+
+// A small distinct geometric mark per tile, drawn in the tile's accent colour.
+function TileShape({ to }: { to: DemoRoute }) {
+  const common = {
+    width: 16,
+    height: 16,
+    viewBox: '0 0 16 16',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.5,
+  } as const
+  const shape = (() => {
+    switch (to) {
+      case '/hash':
+        return <rect x='3' y='3' width='10' height='10' rx='2' />
+      case '/sign':
+        return <path d='M8 3 L13 13 L3 13 Z' strokeLinejoin='round' />
+      case '/tree':
+        return <circle cx='8' cy='8' r='5' />
+      case '/streaming':
+        return <path d='M8 2 L14 8 L8 14 L2 8 Z' strokeLinejoin='round' />
+      case '/performance':
+        return <path d='M3 13 V9 M8 13 V4 M13 13 V7' strokeLinecap='round' />
+      case '/attest':
+        return <path d='M8 2 L13.2 5 V11 L8 14 L2.8 11 V5 Z' strokeLinejoin='round' />
+      case '/parity':
+        return (
+          <>
+            <circle cx='6' cy='8' r='4' />
+            <circle cx='10' cy='8' r='4' />
+          </>
+        )
+    }
+  })()
+  return (
+    <svg {...common} aria-hidden style={{ color: SHAPE_COLOR[to] }} className='shrink-0'>
+      {shape}
+    </svg>
+  )
+}
+
 function Demo({ to, title, body }: { to: DemoRoute; title: string; body: string }) {
   return (
     <li>
       <Link
         to={to}
-        className='group flex items-start justify-between gap-6 py-5 transition-opacity duration-300 hover:opacity-70'
+        style={{ backgroundImage: MESH[to] }}
+        className='group flex aspect-square flex-col justify-between gap-4 overflow-hidden rounded-md border border-hairline p-5 transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] hover:scale-95'
       >
         <div className='space-y-1'>
-          <div className='text-base font-medium'>{title}</div>
-          <p className='max-w-prose text-sm text-muted'>{body}</p>
+          <div className='flex items-center gap-2 text-base font-medium'>
+            <TileShape to={to} />
+            {title}
+          </div>
+          <p className='text-sm text-muted'>{body}</p>
         </div>
         <span
           aria-hidden
-          className='mt-0.5 shrink-0 text-base transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] group-hover:translate-x-1'
+          className='shrink-0 self-end text-base transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] group-hover:-translate-y-1 group-hover:translate-x-1'
         >
-          →
+          ↗
         </span>
       </Link>
     </li>
