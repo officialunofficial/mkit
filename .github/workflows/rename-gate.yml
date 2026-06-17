@@ -1,0 +1,46 @@
+name: "Meta: rename gate"
+
+# Asserts the public build surface carries no pre-rename "zmit" tokens. This
+# was previously a step inside CI:Rust, but that workflow's push:main trigger
+# is path-filtered to the Rust build (rust/contrib-signers/scripts), whereas
+# the scan must cover a WIDER set of paths (man/, completions/, README, etc.).
+# Coupling the gate to the Rust matrix would silently skip it on main pushes
+# that touch only those other paths. So it lives here with its own filter that
+# mirrors scripts/verify-rename.sh's SCAN_PATHS — keep the two in lockstep.
+#
+# Cheap (a grep scan, no toolchain), so unlike the review-gated CI:Rust it runs
+# on every PR rather than waiting for an approving review.
+
+on:
+  push:
+    branches: [main]
+    paths: &scan
+      - 'rust/**'
+      - 'contrib/**'
+      - 'completions/**'
+      - 'man/**'
+      - '.github/**'
+      - 'README.md'
+      - 'SECURITY.md'
+      - 'scripts/verify-rename.sh'
+  pull_request:
+    paths: *scan
+
+permissions:
+  contents: read
+
+# Cancel superseded PR runs; pushes to main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rename-gate:
+    name: Assert no pre-rename tokens
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+
+      - name: Rename gate
+        run: bash scripts/verify-rename.sh

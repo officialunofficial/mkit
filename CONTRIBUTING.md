@@ -161,6 +161,7 @@ purpose so the Actions tab self-groups: `CI:` (build/test/lint/coverage/docs),
 | `Security: Supply Chain` | PR, Sun, dispatch | dependency review, OSSF Scorecard, SBOM |
 | `Nightly: *` | ~04:00 daily, dispatch | fuzz, mutation score, state-machine suite |
 | `Release: *` | signed `v*` tag (or dispatch) | crates.io publish, binaries, MCP corpus seed |
+| `Meta: *` | push/PR, path-filtered | actionlint, PR-title, typos, rename gate (`scripts/verify-rename.sh`) |
 
 ¹ Path-filtered: a docs/MCP/web-only push to `main` no longer triggers the full
 Rust matrix or coverage.
