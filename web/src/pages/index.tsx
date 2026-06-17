@@ -1,9 +1,15 @@
 import { Link } from 'waku'
+import { Seo } from '../components/seo'
 
 export default function HomePage() {
   return (
     <div className='space-y-10'>
-      <title>mkit demo</title>
+      <Seo
+        title='mkit — a content-addressed VCS in Rust'
+        description='A content-addressed VCS in Rust. Every file, folder, and commit is named by its BLAKE3 hash, every commit is signed, and attestations are first-class objects.'
+        path='/'
+        card='A content-addressed VCS.'
+      />
       <section className='space-y-5'>
         <h1 className='text-5xl font-semibold tracking-tight'>A content-addressed VCS.</h1>
         <p className='max-w-prose text-lg text-fg'>

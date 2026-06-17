@@ -1,10 +1,16 @@
 import { Link } from 'waku'
 import { PerfSection } from '../components/perf-section'
+import { Seo } from '../components/seo'
 
 export default function PerformancePage() {
   return (
     <div className='space-y-8'>
-      <title>mkit — performance</title>
+      <Seo
+        title='mkit — performance'
+        description='mkit names every object by a BLAKE3 hash and splits large files into content-defined chunks. Benchmarked head to head against git.'
+        path='/performance'
+        card='Measured against git'
+      />
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Measured against git</h1>
         <p className='max-w-prose text-base text-fg'>
