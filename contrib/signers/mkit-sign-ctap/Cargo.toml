@@ -48,7 +48,7 @@ thiserror = "2"
 # Key store for the enrolled credential_id + pubkey mapping. Plain JSON
 # under $HOME/.mkit-sign-ctap/credentials.json; no keyring dep — the
 # authenticator holds the private key, the store is just metadata.
-dirs = "5"
+dirs = "6"
 
 [dev-dependencies]
 mkit-attest = { path = "../../../rust/crates/mkit-attest" }
