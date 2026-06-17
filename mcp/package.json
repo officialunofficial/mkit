@@ -1,7 +1,7 @@
 {
   "name": "mkit-mcp",
   "version": "0.0.1",
-  "description": "Model Context Protocol server for the mkit toolkit — crate source, SPEC docs, and CLI reference at mcp.mkit.makechain.net.",
+  "description": "Model Context Protocol server for the mkit toolkit — crate source, SPEC docs, and CLI reference at mcp.mkit.sh.",
   "type": "module",
   "private": true,
   "scripts": {

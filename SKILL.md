@@ -244,7 +244,7 @@ The shell rules below still apply whenever you do run `mkit` directly.
 
 ## Going deeper
 
-If the **mkit MCP** is connected (`mcp.mkit.makechain.net`), prefer its tools for
+If the **mkit MCP** is connected (`mcp.mkit.sh`), prefer its tools for
 authoritative depth: `get_command <name>` for a subcommand's full flags,
 `get_spec <NAME>` / `list_specs` for wire & on-disk formats, `search_docs` /
 `search_code` to find behavior, and `get_file 'docs/CLI.md'` for the complete
