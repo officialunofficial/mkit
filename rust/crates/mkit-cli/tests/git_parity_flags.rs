@@ -384,3 +384,72 @@ fn config_file_keys_are_case_insensitive() {
     std::fs::write(&cfg_path, body).unwrap();
     assert_eq!(stdout(&repo.ok(&["config", "user.name"])).trim(), "Zoe");
 }
+
+#[test]
+fn cherry_pick_n_on_conflict_leaves_no_resumable_commit() {
+    // `-n` must never lead to a commit. On a conflict it records NO
+    // sequencer state (so there is no `--continue` path that would commit),
+    // and HEAD does not move — the user resolves and commits themselves.
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"base\n", "c0");
+    repo.ok(&["branch", "feature"]);
+    repo.ok(&["checkout", "feature"]);
+    repo.commit_file("a.txt", b"theirs\n", "feat");
+    let pick = rev(&repo, "HEAD");
+    repo.ok(&["checkout", "main"]);
+    repo.commit_file("a.txt", b"ours\n", "main2");
+    let head_before = rev(&repo, "HEAD");
+
+    let out = repo.run(&["cherry-pick", "-n", &pick]);
+    assert!(!out.status.success(), "a conflicting pick should fail");
+    assert_eq!(rev(&repo, "HEAD"), head_before, "-n must not move HEAD");
+
+    // No CHERRY_PICK_HEAD was written, so there is nothing to --continue
+    // (which would otherwise create the commit -n promised to suppress).
+    let cont = repo.run(&["cherry-pick", "--continue"]);
+    assert!(!cont.status.success());
+    assert!(
+        String::from_utf8_lossy(&cont.stderr).contains("no cherry-pick in progress"),
+        "a -n conflict must leave no resumable state: {}",
+        String::from_utf8_lossy(&cont.stderr)
+    );
+}
+
+#[test]
+fn merge_no_commit_finish_uses_orig_base_as_first_parent() {
+    // The finishing commit must record the merge's recorded base
+    // (`ORIG_HEAD`) as parent[0] and `MERGE_HEAD` as parent[1] — matching
+    // `merge --continue`, regardless of the live HEAD.
+    let repo = Repo::new();
+    clean_diverge(&repo); // on `main`; main added c.txt, feature added b.txt
+    let main_before = rev(&repo, "HEAD");
+    let feature = rev(&repo, "feature");
+
+    repo.ok(&["merge", "--no-commit", "feature"]);
+    repo.ok(&["commit", "-m", "merge feature"]);
+
+    let body = stdout(&repo.ok(&["cat-file", "-p", "HEAD"]));
+    let parents: Vec<&str> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("parent "))
+        .collect();
+    assert_eq!(parents.len(), 2, "merge commit must have two parents: {body}");
+    assert_eq!(parents[0], main_before, "parent[0] must be the merge base");
+    assert_eq!(parents[1], feature, "parent[1] must be MERGE_HEAD (feature)");
+}
+
+#[test]
+fn branch_contains_defaults_to_head() {
+    // Bare `--contains` / `--no-contains` default to HEAD, like git.
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"base\n", "c0");
+    repo.ok(&["branch", "feature"]); // feature stays at base
+    repo.commit_file("a.txt", b"more\n", "c1"); // main (HEAD) advances
+
+    // `--contains` (no arg) == `--contains HEAD`: only main contains HEAD.
+    let contains = stdout(&repo.ok(&["branch", "--contains"]));
+    assert!(contains.contains("main") && !contains.contains("feature"), "{contains}");
+    // `--no-contains` (no arg): branches NOT containing HEAD → feature only.
+    let no_contains = stdout(&repo.ok(&["branch", "--no-contains"]));
+    assert!(no_contains.contains("feature") && !no_contains.contains("main"), "{no_contains}");
+}

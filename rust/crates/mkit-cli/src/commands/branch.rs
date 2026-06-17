@@ -65,12 +65,12 @@ struct BranchOpts {
     /// `--list` additionally enables positional `<pattern>` glob filtering.
     #[arg(long)]
     list: bool,
-    /// List only branches whose tip has `<commit>` as an ancestor (like
-    /// `git branch --contains`).
-    #[arg(long, value_name = "COMMIT")]
+    /// List only branches whose tip has `<commit>` as an ancestor (default
+    /// HEAD when omitted, like `git branch --contains`).
+    #[arg(long, value_name = "COMMIT", num_args = 0..=1, default_missing_value = "HEAD")]
     contains: Option<String>,
-    /// List only branches whose tip does NOT contain `<commit>`.
-    #[arg(long = "no-contains", value_name = "COMMIT")]
+    /// List only branches whose tip does NOT contain `<commit>` (default HEAD).
+    #[arg(long = "no-contains", value_name = "COMMIT", num_args = 0..=1, default_missing_value = "HEAD")]
     no_contains: Option<String>,
     /// List only branches already merged into `<commit>` (default HEAD) —
     /// the branch tip is an ancestor of it (like `git branch --merged`).

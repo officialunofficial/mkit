@@ -81,7 +81,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--porcelain v1 v2 -s --short -z --help" -- "$cur") )
             ;;
         commit)
-            COMPREPLY=( $(compgen -W "-a --all --amend -m -F --file --author --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-a --all --amend -m --message -F --file --author --help" -- "$cur") )
             ;;
         log)
             COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --graph -n --help" -- "$cur") )

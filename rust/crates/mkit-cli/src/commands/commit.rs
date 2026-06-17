@@ -261,11 +261,12 @@ pub fn run(args: &[String]) -> u8 {
     let parents = if let Some(prev) = &amend_target {
         prev.parents.clone()
     } else if let Some(state) = &merge_state {
-        // Two-parent merge commit: current HEAD (first parent) + MERGE_HEAD.
-        match refs::resolve_head(&mkit_dir) {
-            Ok(Some(h)) => vec![h, state.merge_head],
-            _ => vec![state.merge_head],
-        }
+        // Two-parent merge commit. Use the merge's recorded base
+        // (`ORIG_HEAD`) as the first parent — NOT the live HEAD — so the
+        // result matches `mkit merge --continue` even if HEAD moved (e.g. a
+        // `reset` between `merge --no-commit` and `commit`), and so we never
+        // depend on a HEAD read that could silently drop a parent.
+        vec![state.orig_head, state.merge_head]
     } else {
         match refs::resolve_head(&mkit_dir) {
             Ok(Some(h)) => vec![h],

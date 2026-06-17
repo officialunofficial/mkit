@@ -142,6 +142,21 @@ fn start(
             Ok(r) => r,
             Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
         };
+        // `-n` must never produce a commit. The `--continue` resume path
+        // always commits, so for `--no-commit` we record NO sequencer state
+        // (like git, which writes no CHERRY_PICK_HEAD under `-n`): the
+        // conflict material is left staged for the user to resolve, `mkit
+        // add`, and `mkit commit` when ready.
+        if no_commit {
+            let _ = records;
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "cherry-pick conflict (no commit, per -n); resolve the files above, \
+                 `mkit add` them, then `mkit commit` when ready"
+            );
+            return exit::GENERAL_ERROR;
+        }
         let state = CherryPickState {
             cherry_pick_head: target,
             orig_head: ours,

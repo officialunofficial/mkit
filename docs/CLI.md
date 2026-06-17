@@ -279,9 +279,11 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
 - `mkit rev-parse [--verify] [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]`
   — resolve revisions to object ids. Bare `<rev>...` prints each resolved
   64-hex id; `--short[=N]` abbreviates (default 7, a BLAKE3 prefix);
-  `--abbrev-ref HEAD` prints the current branch; `--verify` errors on an
-  unresolvable revision; `--show-toplevel` prints the repository root (the
-  directory holding `.mkit`, found by walking up from cwd).
+  `--abbrev-ref HEAD` prints the current branch; `--verify` is accepted for
+  git-script compatibility but is a **no-op** — mkit always errors on an
+  unresolvable revision, with or without it; `--show-toplevel` prints the
+  repository root (the directory holding `.mkit`, found by walking up from
+  cwd).
 - `mkit show-ref [--heads] [--tags]` — list refs as `<hash> <refname>`,
   sorted by ref name. Default shows `refs/heads/*`, `refs/tags/*`, and
   any `refs/remotes/*` tracking refs; `--heads`/`--tags` filter to one

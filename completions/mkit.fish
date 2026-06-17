@@ -138,7 +138,7 @@ complete -c mkit -n "__fish_seen_subcommand_from commit" \
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -l amend -d "Replace HEAD instead of adding a new commit"
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
-    -s m -d "Commit message" -r
+    -l message -s m -d "Commit message" -r
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -l file -s F -d "Read the commit message from a file (- for stdin)" -r
 complete -c mkit -n "__fish_seen_subcommand_from commit" \

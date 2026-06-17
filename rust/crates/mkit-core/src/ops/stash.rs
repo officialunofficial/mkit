@@ -130,7 +130,12 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
     // reachable from the stash commit, so `gc` retains it (graph closure
     // follows every parent). Older single-parent entries simply carry no
     // index snapshot, and `--index` is a no-op for them.
-    let staged = index::read_index(repo_root).unwrap_or_else(|_| Index::new());
+    // A missing or empty index already reads as `Ok(Index::new())`, so this
+    // only surfaces a genuine error (corrupt/locked/oversized index) rather
+    // than silently snapshotting an empty tree — which a later
+    // `pop --index` would otherwise interpret as "stage every path's
+    // deletion".
+    let staged = index::read_index(repo_root)?;
     let index_tree = worktree::build_tree_from_index_with(store, &batch, &staged, true)?;
     let index_parents = head_hash.into_iter().collect::<Vec<_>>();
     let index_commit = Object::Commit(Commit::new_unannotated(
