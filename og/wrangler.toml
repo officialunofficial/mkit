@@ -1,4 +1,7 @@
 name = "mkit-og"
+# Official Unofficial, Inc. — the account that owns the mkit.sh zone (same one
+# mkit-mcp deploys to), so the og.mkit.sh custom domain provisions.
+account_id = "0bc82bff4439c556f9dc1b054d2de6d7"
 main = "src/index.ts"
 compatibility_date = "2026-02-25"
 
