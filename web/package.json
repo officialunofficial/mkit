@@ -42,7 +42,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
     "babel-plugin-react-compiler": "^1.0.0",
-    "oxfmt": "^0.54.0",
+    "oxfmt": "^0.55.0",
     "oxlint": "^1.69.0",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
