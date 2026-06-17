@@ -148,13 +148,12 @@ Working-tree commands:
   `git stash pop --index`), not just the worktree changes. `save` records
   that staged snapshot as the stash commit's second parent (git-style
   `[HEAD, index]`) — no on-disk manifest change, and it stays gc-reachable
-  through the stash commit. Stashes created before this feature carry no
-  index snapshot, so `--index` is a no-op for them (with a note). Known
-  limitation: the snapshot is a tree, which cannot represent removed paths,
-  so a purely *staged deletion* (`mkit rm`-staged then stashed) comes back
-  from `--index` as an unstaged deletion — the worktree deletion is kept,
-  only the staged status is lost; staged content (the common case) restores
-  faithfully.
+  through the stash commit. The snapshot is the **serialized index** (a blob
+  in the index commit's wrapper tree, paired with a content subtree that
+  keeps staged blobs gc-reachable), so `--index` restores the index exactly,
+  **including staged deletions** (`mkit rm`-staged) — which a tree could not
+  encode. Stashes created before this feature carry no index snapshot, so
+  `--index` is a no-op for them (with a note).
 - `mkit sparse-checkout` — manage sparse checkout patterns.
 
 History / commits:

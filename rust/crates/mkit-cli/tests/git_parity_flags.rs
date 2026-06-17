@@ -305,6 +305,30 @@ fn stash_pop_index_restores_staged_state() {
 }
 
 #[test]
+fn stash_pop_index_preserves_staged_deletion() {
+    // The index snapshot is the serialized index, not a tree, so a purely
+    // STAGED deletion (`mkit rm`) survives `pop --index` as a staged deletion
+    // (a tree round-trip would silently drop it).
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c0");
+    repo.write("b.txt", b"b\n");
+    repo.ok(&["add", "b.txt"]);
+    repo.ok(&["commit", "-m", "add b"]);
+
+    repo.ok(&["rm", "b.txt"]); // stage a deletion
+    repo.ok(&["stash"]);
+    assert!(repo.path().join("b.txt").exists(), "save reset the worktree");
+
+    repo.ok(&["stash", "pop", "--index"]);
+    assert!(!repo.path().join("b.txt").exists(), "worktree deletion restored");
+    let status = stdout(&repo.ok(&["status", "--porcelain"]));
+    assert!(
+        status.contains("D  b.txt"),
+        "the staged deletion must survive --index (not become unstaged): {status}"
+    );
+}
+
+#[test]
 fn stash_pop_without_index_leaves_index_unstaged() {
     // Without --index, only the worktree is restored — the staged snapshot
     // is not re-applied (mkit's existing default behavior).

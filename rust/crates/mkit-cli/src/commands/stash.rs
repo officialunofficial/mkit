@@ -261,15 +261,17 @@ fn restore_entry(
     // the entry removal last means a failure in the index rewrite leaves the
     // stash in place for a normal retry, rather than dropping it with the
     // index half-restored.
-    let index_tree = match stash::entry_index_tree(store, cwd, index) {
-        Ok(t) => t,
+    let snapshot_index = match stash::entry_index(store, cwd, index) {
+        Ok(i) => i,
         Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
     };
     if let Err(e) = stash::apply(store, cwd, index) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }
-    if let Some(it) = index_tree {
-        if let Err(e) = super::sync_index_to_tree(cwd, store, it) {
+    if let Some(restored) = snapshot_index {
+        // Write the exact recorded index — preserving staged deletions, which
+        // a tree round-trip would drop.
+        if let Err(e) = mkit_core::index::write_index(cwd, &restored) {
             return emit_err(
                 &format!("stash {verb}: restore index: {e}"),
                 exit::GENERAL_ERROR,
