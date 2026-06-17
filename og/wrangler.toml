@@ -1,0 +1,12 @@
+name = "mkit-og"
+main = "src/index.ts"
+compatibility_date = "2026-02-25"
+
+[observability]
+enabled = true
+
+# Custom domain on the mkit.sh zone (mirrors mcp.mkit.sh in mcp/wrangler.jsonc).
+# Wrangler auto-creates the proxied DNS record + cert on deploy.
+[[routes]]
+pattern = "og.mkit.sh"
+custom_domain = true
