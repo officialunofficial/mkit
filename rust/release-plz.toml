@@ -40,10 +40,15 @@ git_release_enable = false
 changelog_update = false
 
 # Gate the public API: cargo-semver-checks flags a breaking change against the
-# previous tag so the Release PR proposes the right bump. (The standalone
-# semver-checks.yml still runs per-PR against the base branch; this is the
-# release-time gate.) No prior crates.io version exists on the first release, so
-# it is a no-op then and meaningful from the first publish onward.
+# previous tag so the Release PR proposes the right bump. This is the SOLE
+# semver gate, and it runs at release-PR time — the one moment the version is
+# actually bumped, so the diff (next version vs previous tag) is semantically
+# valid. (A standalone per-PR semver-checks.yml workflow used to exist but was
+# removed: this workspace hand-versions, so `main`'s version stays equal to the
+# last release tag for the whole dev cycle, making the per-PR check false-fail
+# on every PR the moment any intended break landed on main.) No prior crates.io
+# version exists on the first release, so it is a no-op then and meaningful from
+# the first publish onward.
 semver_check = true
 
 # Release PRs carry version + changelog only. Dependency bumps come from
