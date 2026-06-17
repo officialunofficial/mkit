@@ -49,6 +49,16 @@ struct MergeOpts {
     /// Abort the in-progress merge and restore the original HEAD.
     #[arg(long, conflicts_with_all = ["cont", "branch"])]
     abort: bool,
+    /// Perform the merge but stop before creating the merge commit (like
+    /// `git merge --no-commit`): stage the merged tree and record
+    /// `MERGE_HEAD`. Finish with `mkit commit` (a two-parent merge commit)
+    /// or `mkit merge --continue`. Fast-forward updates create no commit,
+    /// so `--no-commit` does not affect them.
+    #[arg(long = "no-commit", conflicts_with_all = ["cont", "abort"])]
+    no_commit: bool,
+    /// Override the merge commit message (default `Merge branch '<name>'`).
+    #[arg(short = 'm', long = "message", conflicts_with_all = ["cont", "abort"])]
+    message: Option<String>,
     /// Branch to merge into HEAD.
     branch: Option<String>,
 }
@@ -78,7 +88,14 @@ pub fn run(args: &[String]) -> u8 {
     } else if opts.cont {
         cont(&cwd, &mkit_dir, &store)
     } else if let Some(branch) = opts.branch.as_deref() {
-        start(&cwd, &mkit_dir, &store, branch)
+        start(
+            &cwd,
+            &mkit_dir,
+            &store,
+            branch,
+            opts.no_commit,
+            opts.message.as_deref(),
+        )
     } else {
         super::usage_error("usage: mkit merge <branch> | --continue | --abort")
     }
@@ -90,6 +107,8 @@ fn start(
     mkit_dir: &std::path::Path,
     store: &ObjectStore,
     branch: &str,
+    no_commit: bool,
+    message: Option<&str>,
 ) -> u8 {
     if let Some(op) = in_progress_op_name(mkit_dir) {
         return emit_err(
@@ -166,12 +185,15 @@ fn start(
         Err(e) => return emit_err(&format!("merge: {e}"), exit::GENERAL_ERROR),
     };
 
-    // git's convention distinguishes the source kind in the message.
-    let msg = if merge_source_is_remote_tracking(mkit_dir, branch) {
-        let short = branch.strip_prefix("refs/remotes/").unwrap_or(branch);
-        format!("Merge remote-tracking branch '{short}'")
-    } else {
-        format!("Merge branch '{branch}'")
+    // git's convention distinguishes the source kind in the message; `-m`
+    // overrides it outright.
+    let msg = match message {
+        Some(m) => m.to_string(),
+        None if merge_source_is_remote_tracking(mkit_dir, branch) => {
+            let short = branch.strip_prefix("refs/remotes/").unwrap_or(branch);
+            format!("Merge remote-tracking branch '{short}'")
+        }
+        None => format!("Merge branch '{branch}'"),
     };
 
     if result.has_conflicts() {
@@ -207,6 +229,31 @@ fn start(
 
     if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
+    }
+
+    // `--no-commit`: stage the merged tree and record `MERGE_HEAD` with no
+    // conflicts, then stop. The next `mkit commit` records a two-parent
+    // merge commit (it consumes `MERGE_HEAD`); `mkit merge --continue`
+    // does the same.
+    if no_commit {
+        if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
+        let state = MergeState {
+            merge_head: theirs,
+            orig_head: ours,
+            message: msg.into_bytes(),
+        };
+        if let Err(e) = conflict_state::write_merge_state(mkit_dir, &state, &[]) {
+            return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
+        }
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "automatic merge went well; stopped before committing as requested\n\
+             commit the result with `mkit commit` (or `mkit merge --continue`)"
+        );
+        return exit::OK;
     }
 
     // Clean merge — build a merge commit with two parents.

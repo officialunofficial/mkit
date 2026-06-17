@@ -53,7 +53,7 @@ pub fn run(args: &[String]) -> u8 {
 
     match opts.args.len() {
         0 => return show_all(&layered.merged, json),
-        1 => return show_one(&layered.merged, &opts.args[0], json),
+        1 => return show_one(&layered.merged, &opts.args[0].to_ascii_lowercase(), json),
         2 => {}
         _ => {
             return super::usage_error(&format!(
@@ -62,7 +62,13 @@ pub fn run(args: &[String]) -> u8 {
             ));
         }
     }
-    let key = opts.args[0].as_str();
+    // Git treats config section + variable names case-insensitively
+    // (`User.Name` == `user.name`). Normalize to lowercase before every
+    // downstream check — crucially BEFORE `REPO_FORBIDDEN_KEYS`, so a
+    // case-variant like `User.Identity` can never bypass the spoof guard
+    // and land in the repo layer.
+    let key_lower = opts.args[0].to_ascii_lowercase();
+    let key = key_lower.as_str();
     let value = opts.args[1].as_str();
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);

@@ -74,7 +74,8 @@ accepted but does nothing; submodules, hooks, `git worktree`, `git notes`, and
 Ed25519 and lives at `.mkit/keys/default.key`:
 
 ```sh
-mkit keygen [--force] [--print-pubkey]   # Ed25519 -> .mkit/keys/default.key
+mkit keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
+                                         # Ed25519 -> .mkit/keys/default.key
 mkit verify <rev>                        # check the signature on a commit, remix, or signed tag
 mkit tag -s <name> -m "msg"              # signed tag (always pass -m; no -m opens an editor)
 ```

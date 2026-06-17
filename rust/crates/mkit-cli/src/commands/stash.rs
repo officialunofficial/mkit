@@ -33,26 +33,38 @@ enum StashCmd {
     List,
     /// Apply and remove a stash entry (default: entry 0).
     Pop {
-        #[arg(default_value_t = 0)]
-        index: usize,
+        #[arg(default_value = "0")]
+        index: String,
     },
     /// Apply a stash entry WITHOUT removing it (default: entry 0).
     Apply {
-        #[arg(default_value_t = 0)]
-        index: usize,
+        #[arg(default_value = "0")]
+        index: String,
     },
     /// Remove ALL stash entries.
     Clear,
     /// Remove a stash entry without applying it (default: entry 0).
     Drop {
-        #[arg(default_value_t = 0)]
-        index: usize,
+        #[arg(default_value = "0")]
+        index: String,
     },
     /// Show the diff of a stash entry (default: entry 0).
     Show {
-        #[arg(default_value_t = 0)]
-        index: usize,
+        #[arg(default_value = "0")]
+        index: String,
     },
+}
+
+/// Parse a stash entry reference. Accepts a bare index (`2`) or git's
+/// `stash@{N}` revision syntax (`stash@{2}`) — the same spelling `stash
+/// list` prints, so users can copy it back verbatim.
+fn parse_stash_index(spec: &str) -> Result<usize, String> {
+    let core = spec
+        .strip_prefix("stash@{")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .unwrap_or(spec);
+    core.parse::<usize>()
+        .map_err(|_| format!("invalid stash reference '{spec}' (expected N or stash@{{N}})"))
 }
 
 #[must_use]
@@ -149,8 +161,14 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
         // leaves it in place. Both run the same #205/#176 destructive-
         // restore guard so they never clobber uncommitted edits on
         // unrelated paths.
-        StashCmd::Pop { index } => restore_entry(store, cwd, index, true),
-        StashCmd::Apply { index } => restore_entry(store, cwd, index, false),
+        StashCmd::Pop { index } => match parse_stash_index(&index) {
+            Ok(i) => restore_entry(store, cwd, i, true),
+            Err(e) => emit_err(&e, exit::USAGE),
+        },
+        StashCmd::Apply { index } => match parse_stash_index(&index) {
+            Ok(i) => restore_entry(store, cwd, i, false),
+            Err(e) => emit_err(&e, exit::USAGE),
+        },
         StashCmd::Clear => match stash::clear(cwd) {
             Ok(()) => {
                 let mut stderr = std::io::stderr().lock();
@@ -159,21 +177,27 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
             }
             Err(e) => emit_err(&format!("stash clear: {e}"), exit::GENERAL_ERROR),
         },
-        StashCmd::Drop { index } => match stash::drop(cwd, index) {
-            Ok(()) => {
-                let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "dropped stash@{{{index}}}");
-                exit::OK
-            }
-            Err(e) => emit_err(&format!("stash drop: {e}"), exit::GENERAL_ERROR),
+        StashCmd::Drop { index } => match parse_stash_index(&index) {
+            Ok(i) => match stash::drop(cwd, i) {
+                Ok(()) => {
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(stderr, "dropped stash@{{{i}}}");
+                    exit::OK
+                }
+                Err(e) => emit_err(&format!("stash drop: {e}"), exit::GENERAL_ERROR),
+            },
+            Err(e) => emit_err(&e, exit::USAGE),
         },
-        StashCmd::Show { index } => match stash::render_stash_show(store, cwd, index) {
-            Ok(output) => {
-                let mut stdout = std::io::stdout().lock();
-                let _ = stdout.write_all(output.as_bytes());
-                exit::OK
-            }
-            Err(e) => emit_err(&format!("stash show: {e}"), exit::GENERAL_ERROR),
+        StashCmd::Show { index } => match parse_stash_index(&index) {
+            Ok(i) => match stash::render_stash_show(store, cwd, i) {
+                Ok(output) => {
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = stdout.write_all(output.as_bytes());
+                    exit::OK
+                }
+                Err(e) => emit_err(&format!("stash show: {e}"), exit::GENERAL_ERROR),
+            },
+            Err(e) => emit_err(&e, exit::USAGE),
         },
     }
 }
@@ -211,4 +235,29 @@ fn emit_err(msg: &str, code: u8) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "error: {msg}");
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_stash_index;
+
+    #[test]
+    fn parses_bare_index() {
+        assert_eq!(parse_stash_index("0").unwrap(), 0);
+        assert_eq!(parse_stash_index("3").unwrap(), 3);
+    }
+
+    #[test]
+    fn parses_stash_at_brace_syntax() {
+        assert_eq!(parse_stash_index("stash@{0}").unwrap(), 0);
+        assert_eq!(parse_stash_index("stash@{12}").unwrap(), 12);
+    }
+
+    #[test]
+    fn rejects_malformed_references() {
+        assert!(parse_stash_index("stash@{}").is_err());
+        assert!(parse_stash_index("stash@{x}").is_err());
+        assert!(parse_stash_index("-1").is_err());
+        assert!(parse_stash_index("stash@{1").is_err());
+    }
 }

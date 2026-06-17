@@ -74,6 +74,13 @@ struct DiffOpts {
     #[arg(long, conflicts_with_all = ["name_only", "name_status"])]
     stat: bool,
 
+    /// Diff against the merge base of the revisions, like `git diff
+    /// --merge-base`. With one revision: `merge-base(<rev>, HEAD)` vs the
+    /// worktree. With two: `merge-base(<a>, <b>)` vs `<b>`. (Equivalent to
+    /// the `<a>...<b>` symmetric range, but spelled as a flag.)
+    #[arg(long = "merge-base", conflicts_with = "staged")]
+    merge_base: bool,
+
     /// NUL-terminate `--name-only` / `--name-status` records and emit raw
     /// (unquoted) paths — like `git diff -z`. In `--name-status`, the
     /// status letter and path are each NUL-terminated. Only valid with
@@ -119,11 +126,18 @@ pub fn run(args: &[String]) -> u8 {
     // no garbage objects. Reads fall through to the store.
     let snapshot = EphemeralSink::new(&store);
 
-    let (old_tree, new_tree, pathspecs) =
-        match resolve_diff_endpoints(&store, &snapshot, &mkit_dir, &cwd, opts.staged, &opts.args) {
-            Ok(v) => v,
-            Err((msg, code)) => return emit_err(&msg, code),
-        };
+    let (old_tree, new_tree, pathspecs) = match resolve_diff_endpoints(
+        &store,
+        &snapshot,
+        &mkit_dir,
+        &cwd,
+        opts.staged,
+        opts.merge_base,
+        &opts.args,
+    ) {
+        Ok(v) => v,
+        Err((msg, code)) => return emit_err(&msg, code),
+    };
 
     let result = match diff_trees(&snapshot, old_tree, new_tree) {
         Ok(r) => r,
@@ -179,7 +193,7 @@ enum StatChange {
 /// `+`/`-` graph is scaled to the terminal width when the largest change
 /// would overflow it. Width = `COLUMNS` (if a positive integer) else 80,
 /// exactly as git does even when stdout is not a tty.
-fn render_stat<'a, S: ObjectSource + ?Sized>(
+pub(super) fn render_stat<'a, S: ObjectSource + ?Sized>(
     out: &mut impl Write,
     store: &S,
     entries: impl Iterator<Item = &'a DiffEntry>,
@@ -443,14 +457,95 @@ type DiffEndpoints = (Option<Hash>, Option<Hash>, Vec<String>);
 ///   only in the no-positional case, handled above).
 /// - no leading revision — default HEAD-vs-worktree / HEAD-vs-index,
 ///   all positionals are pathspecs.
+/// `--merge-base` endpoint resolution. One revision: `merge-base(rev,
+/// HEAD)` vs the worktree; two revisions: `merge-base(a, b)` vs `b`.
+/// Trailing positionals are pathspecs. Annotated tags are peeled to their
+/// commit before the merge-base walk, like git.
+fn resolve_merge_base_endpoints(
+    store: &ObjectStore,
+    snapshot: &EphemeralSink<'_>,
+    mkit_dir: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+) -> Result<DiffEndpoints, (String, u8)> {
+    let first = args.first().ok_or_else(|| {
+        (
+            "`--merge-base` requires at least one revision".to_string(),
+            exit::USAGE,
+        )
+    })?;
+    let a = peel_tags(
+        store,
+        revspec::resolve_revision(store, mkit_dir, first)
+            .map_err(|e| (format!("bad revision '{first}': {e}"), exit::DATAERR))?,
+    );
+
+    // A second positional that resolves to a revision selects the
+    // two-revision form. One that only *looks* like a revision but fails to
+    // resolve is a hard error (#207); anything else is a pathspec, leaving
+    // the single-revision (vs worktree) form.
+    if let Some(second) = args.get(1) {
+        match revspec::resolve_revision(store, mkit_dir, second) {
+            Ok(h) => {
+                let b = peel_tags(store, h);
+                let base = merge_base_of(store, a, b)?;
+                let old = object_to_tree(store, &base).map_err(|e| (e, exit::GENERAL_ERROR))?;
+                let new = object_to_tree(store, &b).map_err(|e| (e, exit::GENERAL_ERROR))?;
+                return Ok((Some(old), Some(new), args[2..].to_vec()));
+            }
+            Err(revspec::RevError::Unknown(_)) if !looks_like_rev_request(second) => {
+                // Not a revision → a pathspec; fall through to single-rev.
+            }
+            Err(e) => return Err((format!("bad revision '{second}': {e}"), exit::DATAERR)),
+        }
+    }
+
+    // Single revision: merge-base(rev, HEAD) vs the worktree.
+    let head = refs::resolve_head(mkit_dir)
+        .map_err(|e| (format!("resolve HEAD: {e}"), exit::GENERAL_ERROR))?
+        .ok_or_else(|| {
+            (
+                "HEAD has no commit to take a merge base with".to_string(),
+                exit::GENERAL_ERROR,
+            )
+        })?;
+    let head = peel_tags(store, head);
+    let base = merge_base_of(store, a, head)?;
+    let old = object_to_tree(store, &base).map_err(|e| (e, exit::GENERAL_ERROR))?;
+    let new = worktree_tree_filtered(store, snapshot, cwd)?;
+    Ok((Some(old), Some(new), args[1..].to_vec()))
+}
+
+/// Resolve the single merge base of `a` and `b`, mapping "no base" to a
+/// clear error (matches git's `--merge-base` failure on unrelated histories).
+fn merge_base_of(store: &ObjectStore, a: Hash, b: Hash) -> Result<Hash, (String, u8)> {
+    find_merge_base(store, a, b)
+        .map_err(|e| (format!("merge base: {e}"), exit::GENERAL_ERROR))?
+        .ok_or_else(|| {
+            (
+                "no merge base between the given revisions".to_string(),
+                exit::DATAERR,
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn resolve_diff_endpoints(
     store: &ObjectStore,
     snapshot: &EphemeralSink<'_>,
     mkit_dir: &std::path::Path,
     cwd: &std::path::Path,
     staged: bool,
+    merge_base: bool,
     args: &[String],
 ) -> Result<DiffEndpoints, (String, u8)> {
+    // `--merge-base <a> [<b>] [paths…]` — diff the merge base of the given
+    // revision(s) rather than the revisions themselves. Resolved before
+    // any other form (clap already rejects `--merge-base --staged`).
+    if merge_base {
+        return resolve_merge_base_endpoints(store, snapshot, mkit_dir, cwd, args);
+    }
+
     // #223: `--staged` with explicit revisions is contradictory —
     // `--staged` already pins HEAD vs the index. Pathspecs are fine, but
     // a leading argument that *looks* like a revision is not, and must

@@ -93,14 +93,18 @@ Working-tree commands:
   porcelain) NUL-terminates records and emits **raw, unquoted** paths —
   the round-trip-safe form for paths containing newlines or other special
   bytes. Empty stdout means clean.
-- `mkit diff [--staged|--cached] [--name-only|--name-status|--stat] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
+- `mkit diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
   — show changes as a unified patch. With no arguments, compares the HEAD
   tree to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
   the HEAD tree to the staged index tree — the change `mkit commit`
   would record. A single revision compares that revision against the
   worktree; two revisions (or an `<a>..<b>` range) diff the two
   resolved trees directly; a symmetric `<a>...<b>` range diffs the
-  **merge base** of `a` and `b` against `b` (git semantics). Revisions may be refs, commit hashes, short
+  **merge base** of `a` and `b` against `b` (git semantics). `--merge-base`
+  is the flag spelling of that symmetric range: with two revisions it
+  diffs `merge-base(a, b)` against `b`, and with one revision it diffs
+  `merge-base(<rev>, HEAD)` against the worktree (like `git diff
+  --merge-base`). Revisions may be refs, commit hashes, short
   hashes, or `HEAD~n` (a raw 64-hex tree hash also works, since it
   resolves to itself). Any remaining positional arguments are pathspecs
   that limit the output to entries at or below them. The default output is a
@@ -127,15 +131,21 @@ Working-tree commands:
   `--name-status`.
 - `mkit stash [save|list|pop|apply|drop|clear|show]` — save/restore WIP
   changes. `apply` restores an entry without removing it; `clear` drops
-  every entry.
+  every entry. `pop`/`apply`/`drop`/`show` select an entry by index
+  (default `0`), accepting either a bare `N` or the `stash@{N}` form
+  printed by `stash list`.
 - `mkit sparse-checkout` — manage sparse checkout patterns.
 
 History / commits:
 
-- `mkit commit [-a|--all] [--amend] [--author <spec>] -m <msg>` — create
+- `mkit commit [-a|--all] [--amend] [--author <spec>] [-m <msg> | -F <file>]`
+  — create
   a signed commit from the staging index. The index is built by `mkit
   add` / `mkit rm`; `commit` with an empty index is an error. Use `mkit
-  add .` to snapshot the whole worktree before committing. `-a` / `--all`
+  add .` to snapshot the whole worktree before committing. `-m` supplies
+  the message inline; `-F`/`--file` reads it from `<file>` (like `git
+  commit -F`), with `-` meaning standard input — `-m` and `-F` are
+  mutually exclusive, and omitting both launches `$EDITOR`. `-a` / `--all`
   follows Git's tracked-only shortcut: it stages modified tracked files
   and tracked deletions before committing, but does not add untracked
   files. `mkit commit -am <msg>` is accepted as shorthand for `-a -m
@@ -156,6 +166,9 @@ History / commits:
   commit's message is reused (no editor is launched). The superseded
   commit is recorded in the recovery log so it stays recoverable, and is
   reclaimed by `mkit gc` once it falls out of the retention window.
+  After `mkit merge --no-commit` (or a merge you have just resolved),
+  `commit` notices the recorded `MERGE_HEAD` and records a **two-parent
+  merge commit** rather than an ordinary single-parent one.
 - `mkit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]` — show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
@@ -223,13 +236,16 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   that follows, so blobs are byte-exact with git while commit/tree content
   (and its size) is mkit-shaped, as with `-p`. `<object>` resolves through
   the shared revspec grammar (hash, ref, `HEAD`, `HEAD~n`/`^`).
-- `mkit show [<object>...]` — display objects (like `git show`), defaulting
+- `mkit show [--stat] [<object>...]` — display objects (like `git show`),
+  defaulting
   to `HEAD`. A **commit**/**remix** prints a header (`commit <hash>`,
   `Author:`, `Date:`, message indented four spaces — matching `mkit log`)
   followed by the unified diff against its first parent; that diff body is
   produced by the same code as `mkit diff`, so `show <commit>` is
   byte-identical to `diff <parent> <commit>` (modulo abbreviated `index`
-  ids). A **tag** prints its header then the peeled target object; a **tree**
+  ids). `--stat` shows a diffstat instead of the full patch for
+  commit/remix objects (like `git show --stat`); non-commit objects are
+  shown as usual. A **tag** prints its header then the peeled target object; a **tree**
   is listed as `<mode> <type> <hash>\t<name>` lines; a **blob** prints its raw
   contents. Multiple objects may be given. As with `log`, the commit/tag
   header carries mkit's signed `Identity` and 64-hex BLAKE3 ids, so those
@@ -320,7 +336,10 @@ Attestations:
   - `--additional-signer "<spec>"` — repeatable; adds a second (or
     third, …) signature to the envelope. `<spec>` is a
     comma-separated `key=value` list: `algorithm=<alg>,signer=<kind>
-    [,path=<file-or-binary>][,args=<a>|<b>|<c>]`. Signers run in the
+    [,path=<file-or-binary>][,args=<a>|<b>|<c>]`. Here `signer=`
+    accepts only `repo-key` or `external` (**not** `keystore`) — unlike
+    the top-level `--signer`, which also takes `keystore`. Signers run in
+    the
     order given; the resulting `{keyid, sig}` tuples appear in that
     same order in the envelope. Any signer failure aborts the
     attestation — no partial envelopes are written.
@@ -380,6 +399,15 @@ Branches / refs:
 - `mkit branch -m [<old>] <new>` — rename a branch (the current branch
   when `<old>` is omitted). CAS-guarded: refuses to clobber an existing
   `<new>`, and moves HEAD when the renamed branch is checked out.
+- `mkit branch [--list] [--contains <c>] [--no-contains <c>] [--merged [<c>]] [--no-merged [<c>]]`
+  — filter the listing by ancestry (like `git branch`). `--contains <c>`
+  keeps only branches whose tip has `<c>` as an ancestor; `--no-contains
+  <c>` inverts it. `--merged [<c>]` keeps only branches already merged
+  into `<c>` (i.e. whose tip is an ancestor of it), defaulting to `HEAD`
+  when `<c>` is omitted; `--no-merged [<c>]` inverts it (also defaulting
+  to `HEAD`). `--list` is an explicit list selector — a no-op, since
+  listing is already the default when no create/delete/rename flag is
+  given.
 - `mkit checkout <branch>` — switch HEAD and restore files. Refuses to
   run when staged changes, dirty tracked files, or untracked path
   collisions would be overwritten. Non-colliding untracked files are
@@ -417,15 +445,27 @@ Branches / refs:
   - `mkit tag -d <name>` — delete a tag.
   - `--author <spec>` overrides the tagger identity (same grammar as
     `commit --author`).
-- `mkit merge <branch> | --continue | --abort` — three-way merge into
+- `mkit merge [--no-commit] [-m <msg>] <branch> | --continue | --abort` —
+  three-way merge into
   HEAD. Fast-forwards and clean merges refuse to overwrite staged
   changes, dirty tracked files, or untracked path collisions. On
   conflict, the conflicting paths are materialized for resolution and a
   resumable state is recorded; see "Resolving conflicts" below.
-- `mkit cherry-pick <hash> | --continue | --abort` — apply a commit to
+  `-m`/`--message` overrides the merge commit message (default `Merge
+  branch '<name>'`). `--no-commit` performs the merge and **stops before
+  committing**: it stages the merged tree and records `MERGE_HEAD`, then
+  leaves you to finish with `mkit commit` (which records a two-parent
+  merge commit) or `mkit merge --continue`. A fast-forward creates no
+  commit, so `--no-commit` does not affect it.
+- `mkit cherry-pick [-n|--no-commit] [-m <msg>] <hash> | --continue | --abort`
+  — apply a commit to
   the current branch. Refuses to overwrite staged changes, dirty tracked
   files, or untracked path collisions. On conflict, records resumable
-  state; see "Resolving conflicts" below.
+  state; see "Resolving conflicts" below. `-n`/`--no-commit` applies the
+  picked change to the index + worktree without creating a commit (run
+  `mkit commit` when ready; the result has the current branch as its
+  single parent), and `-m`/`--message` overrides the commit message
+  (default: the picked commit's message).
 - `mkit revert <commit> | --continue | --abort` `[-n|--no-commit]` —
   create a new commit that undoes `<commit>` (the inverse of cherry-pick:
   it applies the reverse of the target's diff). The commit message is
@@ -568,7 +608,10 @@ Remote / sync:
   repository into `<dir>` (defaults to the final URL path segment).
   `--sparse <pattern>...` persists the patterns and materialises only the
   matching files via the verifiable sparse-checkout pipeline (requires a
-  build with `--features sparse-checkout`). **`--depth N` is parsed but
+  build with `--features sparse-checkout`). Note this is an
+  **enhancement over git**: mkit's `--sparse` takes one or more PATTERN
+  arguments, whereas git's `clone --sparse` is a boolean flag (it cones
+  to the top-level files and you add patterns afterward). **`--depth N` is parsed but
   not yet wired**: passing it fails with a clear `--depth is not yet
   wired` usage error rather than silently producing a full clone; see
   "Divergences from Git".
@@ -647,7 +690,8 @@ Remote / sync:
   the monolithic pack) or "manifest + all shards". Requires building
   the binary with `--features pack-shards`.
 - `mkit git export <dest> [--remote-name <name>] [--ref <ref>]...
-  [--no-attest] [--algorithm <alg>] [--signer <kind>] [--json]` — deterministic **one-way** export of
+  [--no-attest] [--algorithm <alg>] [--signer <kind>] [--passthrough] [--json]`
+  — deterministic **one-way** export of
   branches and tags to a git mirror
   ([`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md)). `<dest>` is a git URL or
   a local path (a missing/empty local path is initialized bare);
@@ -693,10 +737,14 @@ Remote / sync:
   imported-from upstream is refused (the origin guard); export to new
   mirrors works normally. Expect total disk ≈ 2–3× the upstream
   `.git` (staging mirror + translated store).
-- `mkit git fetch [--remote-name <name>]` — fetch new upstream
+- `mkit git fetch [--remote-name <name>] [--key <path>] [--json]` — fetch
+  new upstream
   commits into the tracking refs and imported tags (a force-pushed
   upstream moves tracking refs with a loud warning; a tag you moved
-  locally is never clobbered — fetch warns and leaves it). `mkit git pull` additionally
+  locally is never clobbered — fetch warns and leaves it). `--key` points
+  at the import signing key (default: the pinned key file), and `--json`
+  emits machine-readable JSON on stdout. `mkit git pull [--remote-name
+  <name>] [--key <path>] [--json]` additionally
   fast-forwards the current branch; divergence refuses with the
   executable hint (`mkit merge <name>/<branch>` — imported history is
   ordinary mkit history, integrated natively).
@@ -781,7 +829,10 @@ Config / keys / version:
 - `mkit config [--format=json]` — show all configuration values.
   `--format=json` emits a flat JSON object with every known key.
 - `mkit config <key> [--format=json]` — show one value.
-- `mkit config <key> <value>` — set a configuration value.
+- `mkit config <key> <value>` — set a configuration value. Config keys
+  are matched **case-insensitively** and canonicalize to lowercase, like
+  git — so `user.Name`, `USER.EMAIL`, etc. resolve to the same key as
+  their lowercase form.
   - `user.name` / `user.email` — git-compatibility aliases. They are
     accepted and round-trip like `git config user.name`, but are
     **non-authoritative**: mkit's commit author is cryptographic

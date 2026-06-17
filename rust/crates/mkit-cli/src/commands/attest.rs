@@ -86,7 +86,7 @@ struct Args {
     /// Algorithm: `ed25519`, `secp256k1`, or `p256`.
     #[arg(long, value_name = "ALG")]
     algorithm: Option<String>,
-    /// Signer kind: `repo-key` (default) or `external`.
+    /// Signer kind: `repo-key` (default), `external`, or `keystore`.
     #[arg(long, value_name = "KIND")]
     signer: Option<String>,
     /// Predicate type URI.
