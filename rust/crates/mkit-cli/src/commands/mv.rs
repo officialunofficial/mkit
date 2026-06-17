@@ -109,6 +109,14 @@ impl Planned {
             Self::Dir(m) => m.files.iter().map(|f| f.target_rel.as_str()).collect(),
         }
     }
+
+    /// The repo-relative source path this move consumes.
+    fn source_rel(&self) -> &str {
+        match self {
+            Self::File(m) => &m.src_rel,
+            Self::Dir(m) => &m.src_dir_rel,
+        }
+    }
 }
 
 #[must_use]
@@ -211,6 +219,26 @@ pub fn run(args: &[String]) -> u8 {
             Err(code) => return code,
         }
     }
+    // Reject overlapping sources (e.g. `mv dir dir/file <dest>`): moving one
+    // invalidates the other, which would otherwise leave a partial result on
+    // disk and in the index. Git rejects this up front too.
+    for i in 0..plan.len() {
+        for j in 0..plan.len() {
+            if i == j {
+                continue;
+            }
+            let (a, b) = (plan[i].source_rel(), plan[j].source_rel());
+            if a == b {
+                return emit_err(&format!("duplicate source: {a}"), exit::USAGE);
+            }
+            if b.starts_with(&format!("{a}/")) {
+                return emit_err(
+                    &format!("overlapping sources: '{b}' is inside '{a}'"),
+                    exit::USAGE,
+                );
+            }
+        }
+    }
     // Reject a batch where two staged destinations collide (across both
     // file and directory moves).
     let all_targets: Vec<&str> = plan.iter().flat_map(Planned::target_paths).collect();
@@ -233,7 +261,7 @@ pub fn run(args: &[String]) -> u8 {
     for (done, p) in plan.iter().enumerate() {
         let exec = match p {
             Planned::File(m) => execute_move(m, opts.force),
-            Planned::Dir(m) => execute_dir_move(m, opts.force),
+            Planned::Dir(m) => execute_dir_move(m),
         };
         if let Err(code) = exec {
             if done > 0 {
@@ -443,13 +471,21 @@ fn plan_dir_move(
             exit::GENERAL_ERROR,
         ));
     }
-    // Safety: never clobber an existing destination without -f.
-    if path_present(&dest_dir_abs) && !force {
+    // Safety: a directory move never overwrites an existing destination —
+    // even with -f. Recursively removing the destination would silently
+    // delete its tracked files (leaving them dangling in the index) and any
+    // untracked files under it. Git likewise refuses to clobber a directory
+    // with `mv`, so this is a refusal, not a force-overridable guard.
+    if path_present(&dest_dir_abs) {
         return Err(emit_err(
-            &format!("destination exists (use -f to overwrite): {dest_dir_rel}"),
+            &format!(
+                "destination already exists: {dest_dir_rel} \
+                 (refusing to overwrite it — -f does not clobber a directory)"
+            ),
             exit::GENERAL_ERROR,
         ));
     }
+    let _ = force;
 
     // Restage every tracked file beneath the directory at its new path.
     let prefix = format!("{src_rel}/");
@@ -485,8 +521,9 @@ fn plan_dir_move(
 
 /// Rename the worktree directory for one planned directory move. A single
 /// `fs::rename` moves the whole subtree (tracked and untracked alike),
-/// matching `git mv`. Under `-f` an existing destination is removed first.
-fn execute_dir_move(m: &PlannedDirMove, force: bool) -> Result<(), u8> {
+/// matching `git mv`. The destination is guaranteed absent (plan-time
+/// guard), so this never removes an existing path.
+fn execute_dir_move(m: &PlannedDirMove) -> Result<(), u8> {
     if let Some(parent) = m.dest_dir_abs.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             emit_err(
@@ -494,9 +531,6 @@ fn execute_dir_move(m: &PlannedDirMove, force: bool) -> Result<(), u8> {
                 exit::CANTCREAT,
             )
         })?;
-    }
-    if force && path_present(&m.dest_dir_abs) {
-        let _ = remove_path(&m.dest_dir_abs);
     }
     std::fs::rename(&m.src_dir_abs, &m.dest_dir_abs).map_err(|e| {
         emit_err(

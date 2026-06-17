@@ -82,8 +82,12 @@ Working-tree commands:
     filesystem operation, so untracked files inside it travel with it
     (exactly like `git mv`), and every tracked file beneath it is restaged
     at its new path (each a delete + add, per the no-rename-detection note
-    above). The clobber, repo-escape, and validate-before-move guards all
-    apply, and moving a directory into itself is refused.
+    above). The repo-escape and validate-before-move guards all apply.
+    A directory move **refuses a pre-existing destination even with `-f`**
+    (recursively removing it would strand its tracked files in the index and
+    delete untracked ones — git won't clobber a directory with `mv` either),
+    rejects **overlapping sources** up front (`mv dir dir/file <dest>`), and
+    refuses moving a directory into itself.
 - `mkit status [--porcelain[=v1|v2]] [-s|--short] [-z]` — show staged and
   unstaged changes. Default-mode prose (banner + section headers + per-file
   lines) goes to **stderr**; stdout is reserved for machine output.
@@ -145,7 +149,12 @@ Working-tree commands:
   that staged snapshot as the stash commit's second parent (git-style
   `[HEAD, index]`) — no on-disk manifest change, and it stays gc-reachable
   through the stash commit. Stashes created before this feature carry no
-  index snapshot, so `--index` is a no-op for them (with a note).
+  index snapshot, so `--index` is a no-op for them (with a note). Known
+  limitation: the snapshot is a tree, which cannot represent removed paths,
+  so a purely *staged deletion* (`mkit rm`-staged then stashed) comes back
+  from `--index` as an unstaged deletion — the worktree deletion is kept,
+  only the staged status is lost; staged content (the common case) restores
+  faithfully.
 - `mkit sparse-checkout` — manage sparse checkout patterns.
 
 History / commits:
@@ -482,10 +491,13 @@ Branches / refs:
   — apply a commit to
   the current branch. Refuses to overwrite staged changes, dirty tracked
   files, or untracked path collisions. On conflict, records resumable
-  state; see "Resolving conflicts" below. `-n`/`--no-commit` applies the
-  picked change to the index + worktree without creating a commit (run
+  state; see "Resolving conflicts" below. `-n`/`--no-commit` applies a
+  **clean** pick to the index + worktree without creating a commit (run
   `mkit commit` when ready; the result has the current branch as its
-  single parent). `-m`/`--mainline <parent-number>` selects which parent
+  single parent). A `-n` pick that **conflicts** is refused before anything
+  is written — mkit cannot represent a staged-but-unresolved conflict, and a
+  later `mkit commit` only guards merges, so re-run without `-n` to use the
+  resumable `--continue` flow. `-m`/`--mainline <parent-number>` selects which parent
   of a **merge** commit is the mainline (git semantics): it is required
   when replaying a merge (mkit refuses to guess which side to diff
   against) and rejected for a non-merge commit. Note this differs from

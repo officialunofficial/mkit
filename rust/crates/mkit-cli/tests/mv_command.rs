@@ -183,6 +183,56 @@ fn mv_directory_into_itself_is_refused() {
 }
 
 #[test]
+fn mv_directory_refuses_existing_destination_even_with_force() {
+    // `mv -f src dst` where `dst/src` already exists (into-dir collision):
+    // -f must NOT recursively delete the existing `dst/src` — that would
+    // strand its tracked files in the index and destroy untracked files. A
+    // pre-existing destination directory is refused, even with -f.
+    let (td, xdg) = repo(&[("src/a.txt", b"a\n"), ("dst/src/old.txt", b"o\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join("dst/src/untracked.txt"), b"u\n").unwrap();
+
+    let out = run_in(root, x, &["mv", "-f", "src", "dst"]);
+    assert!(
+        !out.status.success(),
+        "mv -f onto an existing dst/src must be refused: {out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("already exists"),
+        "expected an already-exists message: {out:?}"
+    );
+    // Nothing was destroyed: both the source and the pre-existing destination
+    // (tracked AND untracked) are intact.
+    assert!(root.join("src/a.txt").exists(), "source must be intact");
+    assert!(root.join("dst/src/old.txt").exists(), "dst tracked file intact");
+    assert!(
+        root.join("dst/src/untracked.txt").exists(),
+        "dst untracked file must not be destroyed"
+    );
+}
+
+#[test]
+fn mv_overlapping_sources_are_refused_up_front() {
+    // `mv dir dir/file <dest>` — moving `dir` first would invalidate
+    // `dir/file`; git rejects this up front, so must mkit (no partial move).
+    let (td, xdg) = repo(&[("dir/file.txt", b"x\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir_all(root.join("dst")).unwrap();
+    let out = run_in(root, x, &["mv", "dir", "dir/file.txt", "dst"]);
+    assert!(
+        !out.status.success(),
+        "overlapping sources must be refused: {out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("overlapping"),
+        "expected an overlapping-sources message: {out:?}"
+    );
+    // Validation happens before any move, so nothing was touched.
+    assert!(root.join("dir/file.txt").exists(), "no partial move");
+    assert!(!root.join("dst/dir").exists());
+}
+
+#[test]
 fn mv_multi_source_is_atomic_on_a_bad_source() {
     // The KEY guard: a later bad source must not leave earlier files moved.
     let (td, xdg) = repo(&[("a.txt", b"a\n"), ("dst/keep.txt", b"k\n")]);

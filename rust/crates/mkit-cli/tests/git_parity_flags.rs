@@ -386,10 +386,11 @@ fn config_file_keys_are_case_insensitive() {
 }
 
 #[test]
-fn cherry_pick_n_on_conflict_leaves_no_resumable_commit() {
-    // `-n` must never lead to a commit. On a conflict it records NO
-    // sequencer state (so there is no `--continue` path that would commit),
-    // and HEAD does not move — the user resolves and commits themselves.
+fn cherry_pick_n_on_conflict_is_refused_cleanly() {
+    // `-n` on a conflicting pick is refused BEFORE anything is written:
+    // HEAD doesn't move, no sequencer state is left, and — crucially — no
+    // conflict markers are materialized (which `mkit commit` couldn't guard
+    // and the user could otherwise commit).
     let repo = Repo::new();
     repo.commit_file("a.txt", b"base\n", "c0");
     repo.ok(&["branch", "feature"]);
@@ -401,18 +402,52 @@ fn cherry_pick_n_on_conflict_leaves_no_resumable_commit() {
     let head_before = rev(&repo, "HEAD");
 
     let out = repo.run(&["cherry-pick", "-n", &pick]);
-    assert!(!out.status.success(), "a conflicting pick should fail");
+    assert!(!out.status.success(), "a conflicting -n pick must be refused");
     assert_eq!(rev(&repo, "HEAD"), head_before, "-n must not move HEAD");
 
-    // No CHERRY_PICK_HEAD was written, so there is nothing to --continue
-    // (which would otherwise create the commit -n promised to suppress).
+    // The worktree was left untouched — no `<<<<<<<` markers to accidentally
+    // `mkit add` + commit.
+    let body = std::fs::read(repo.path().join("a.txt")).unwrap();
+    assert_eq!(body, b"ours\n", "worktree must be untouched on a refused -n pick");
+    assert!(
+        !String::from_utf8_lossy(&body).contains("<<<<<<<"),
+        "no conflict markers should be materialized"
+    );
+
+    // Nothing is in progress.
     let cont = repo.run(&["cherry-pick", "--continue"]);
     assert!(!cont.status.success());
     assert!(
         String::from_utf8_lossy(&cont.stderr).contains("no cherry-pick in progress"),
-        "a -n conflict must leave no resumable state: {}",
+        "a refused -n pick must leave no resumable state: {}",
         String::from_utf8_lossy(&cont.stderr)
     );
+}
+
+#[test]
+fn merge_no_commit_empty_result_can_still_commit() {
+    // A merge whose result is an empty tree (both sides deleted everything)
+    // must still be committable as a two-parent merge — the empty-index gate
+    // is skipped while a merge is in progress.
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"base\n", "c0");
+    repo.ok(&["branch", "feature"]);
+    repo.ok(&["checkout", "feature"]);
+    repo.ok(&["rm", "a.txt"]);
+    repo.ok(&["commit", "-m", "feature deletes a"]);
+    repo.ok(&["checkout", "main"]);
+    repo.ok(&["rm", "a.txt"]);
+    repo.ok(&["commit", "-m", "main deletes a"]);
+
+    // Both sides deleted a.txt → clean merge to an empty tree.
+    repo.ok(&["merge", "--no-commit", "feature"]);
+    let out = repo.run(&["commit", "-m", "empty merge"]);
+    assert!(
+        out.status.success(),
+        "empty-result merge must be committable: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(parent_count(&repo, "HEAD"), 2, "must be a two-parent merge");
 }
 
 #[test]

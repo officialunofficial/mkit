@@ -239,7 +239,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(idx) => idx,
         Err(e) => return emit_err(&format!("read index: {e}"), exit::GENERAL_ERROR),
     };
-    if idx.entries.is_empty() {
+    // A merge being concluded may legitimately produce an empty tree (both
+    // sides deleted everything), so the empty-index gate is skipped while a
+    // merge is in progress — the two-parent merge commit is still meaningful.
+    if idx.entries.is_empty() && merge_state.is_none() {
         return emit_err(
             "nothing staged: index is empty; run `mkit add <path>` (or `mkit add .`) before commit",
             exit::USAGE,

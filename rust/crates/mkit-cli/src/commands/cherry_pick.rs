@@ -130,6 +130,24 @@ fn start(
     };
 
     if result.has_conflicts() {
+        // `-n` must never leave a committable conflict. mkit cannot represent
+        // a "staged but unresolved" conflict the way git's index can, and
+        // recording markers with no sequencer state would let a later
+        // `mkit commit` (which only guards merges) commit unresolved `<<<<<<<`
+        // markers. So we refuse the conflicting `-n` pick BEFORE touching the
+        // worktree — nothing is written. Re-run without `-n` (resumable via
+        // `--continue`/`--abort`) or resolve manually.
+        if no_commit {
+            return emit_err(
+                &format!(
+                    "cherry-pick -n of {} conflicts; mkit cannot stage an unresolved \
+                     conflict without committing — re-run without -n, then resolve and \
+                     `mkit cherry-pick --continue`",
+                    format::short_hash(&target, 8)
+                ),
+                exit::GENERAL_ERROR,
+            );
+        }
         if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
@@ -142,21 +160,6 @@ fn start(
             Ok(r) => r,
             Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
         };
-        // `-n` must never produce a commit. The `--continue` resume path
-        // always commits, so for `--no-commit` we record NO sequencer state
-        // (like git, which writes no CHERRY_PICK_HEAD under `-n`): the
-        // conflict material is left staged for the user to resolve, `mkit
-        // add`, and `mkit commit` when ready.
-        if no_commit {
-            let _ = records;
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(
-                stderr,
-                "cherry-pick conflict (no commit, per -n); resolve the files above, \
-                 `mkit add` them, then `mkit commit` when ready"
-            );
-            return exit::GENERAL_ERROR;
-        }
         let state = CherryPickState {
             cherry_pick_head: target,
             orig_head: ours,

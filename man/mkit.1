@@ -148,8 +148,13 @@ The directory is renamed in one filesystem operation, so untracked files
 within it travel along (like
 .Xr git 1 Ns 's
 .Cm mv ) ,
-and each tracked file beneath it is restaged at its new path. Moving a
-directory into itself is refused.
+and each tracked file beneath it is restaged at its new path. A directory
+move refuses a pre-existing destination even with
+.Fl f
+(recursively removing it would strand tracked files and destroy untracked
+ones), rejects overlapping sources
+.Pq Cm mv Ar dir Ar dir/file Ar dest ,
+and refuses moving a directory into itself.
 .It Cm restore Oo Fl Fl staged Oc Oo Fl Fl worktree Oc Oo Fl Fl source Ar rev Oc Oo Fl f | Fl Fl force Oc Ar path ...
 Restore path(s) in the worktree and/or unstage them. With no flag (or
 .Fl Fl worktree ) ,
