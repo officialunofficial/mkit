@@ -214,12 +214,12 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
                             Some(h) => {
                                 let _ = writeln!(
                                     stderr,
-                                    "Dropped stash@{{{i}}} ({})",
+                                    "Dropped refs/stash@{{{i}}} ({})",
                                     format::short_hash(&h, format::SUMMARY_ABBREV)
                                 );
                             }
                             None => {
-                                let _ = writeln!(stderr, "Dropped stash@{{{i}}}");
+                                let _ = writeln!(stderr, "Dropped refs/stash@{{{i}}}");
                             }
                         }
                         exit::OK
@@ -255,6 +255,16 @@ fn restore_entry(
     restore_index: bool,
 ) -> u8 {
     let verb = if drop_entry { "pop" } else { "apply" };
+    // Empty stash → git's `No stash entries found.` (exit 1).
+    let entries = stash::list(cwd).map(|l| l.entries).unwrap_or_default();
+    if entries.is_empty() {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "No stash entries found.");
+        return exit::GENERAL_ERROR;
+    }
+    let entry_short = entries
+        .get(index)
+        .map(|e| format::short_hash(&e.commit_hash, format::SUMMARY_ABBREV));
     let tree_hash = match stash::entry_tree_hash(store, cwd, index) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
@@ -274,9 +284,7 @@ fn restore_entry(
         };
         return match result {
             Ok(()) => {
-                let past = if drop_entry { "popped" } else { "applied" };
-                let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "{past} stash@{{{index}}}");
+                report_restore(drop_entry, index, entry_short.as_deref());
                 exit::OK
             }
             Err(e) => emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
@@ -316,10 +324,26 @@ fn restore_entry(
     {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }
-    let past = if drop_entry { "popped" } else { "applied" };
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "{past} stash@{{{index}}}");
+    report_restore(drop_entry, index, entry_short.as_deref());
     exit::OK
+}
+
+/// git-shaped post-restore line: `pop` reports `Dropped refs/stash@{N}
+/// (<id>)` (the entry was removed); `apply` reports it stays on the stack.
+fn report_restore(drop_entry: bool, index: usize, entry_short: Option<&str>) {
+    let mut stderr = std::io::stderr().lock();
+    if drop_entry {
+        match entry_short {
+            Some(id) => {
+                let _ = writeln!(stderr, "Dropped refs/stash@{{{index}}} ({id})");
+            }
+            None => {
+                let _ = writeln!(stderr, "Dropped refs/stash@{{{index}}}");
+            }
+        }
+    } else {
+        let _ = writeln!(stderr, "Applied stash@{{{index}}} (kept on the stack)");
+    }
 }
 
 /// `(short-hash, subject)` of the current HEAD commit, for git's auto

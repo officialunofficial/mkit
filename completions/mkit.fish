@@ -339,3 +339,6 @@ complete -c mkit -n "__fish_seen_subcommand_from remote" -s v -l verbose -d "Lis
 complete -c mkit -n "__fish_seen_subcommand_from remote" -a "get-url set-url" -d "Read/change a remote URL"
 complete -c mkit -n "__fish_seen_subcommand_from diff" -l color -d "Colorize patch (always|auto|never)" -xa "always auto never"
 complete -c mkit -n "__fish_seen_subcommand_from diff" -l no-color -d "Disable colorized output"
+complete -c mkit -n "__fish_seen_subcommand_from reset" -s q -l quiet -d "Suppress the HEAD-is-now-at summary"
+complete -c mkit -n "__fish_seen_subcommand_from revert" -l no-edit -d "Accepted no-op (auto-generates message)"
+complete -c mkit -n "__fish_seen_subcommand_from commit" -l no-edit -d "Keep the existing message on amend"

@@ -45,7 +45,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--staged --worktree --source -f --force --help" -- "$cur") )
             ;;
         reset)
-            COMPREPLY=( $(compgen -W "--soft --mixed --hard -f --force --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--soft --mixed --hard -f --force -q --quiet --help" -- "$cur") )
             ;;
         clean)
             COMPREPLY=( $(compgen -W "-n --dry-run -f --force -d -x -X --help" -- "$cur") )
@@ -114,7 +114,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "-i --interactive --continue --skip --abort --help" -- "$cur") )
             ;;
         revert)
-            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit --no-edit --help" -- "$cur") )
             ;;
         bisect)
             COMPREPLY=( $(compgen -W "start good bad reset" -- "$cur") )

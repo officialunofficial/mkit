@@ -174,9 +174,14 @@ fn start(
             return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
+        // git-shaped per-path conflict lines (additive), then mkit's
+        // resumable-flow hint.
+        for rec in &records {
+            let _ = writeln!(stderr, "CONFLICT (content): Merge conflict in {}", rec.path);
+        }
         let _ = writeln!(
             stderr,
-            "cherry-pick conflict; resolve the files above, `mkit add` them, then run \
+            "hint: resolve the files above, `mkit add` them, then run \
              `mkit cherry-pick --continue` (or `mkit cherry-pick --abort`)"
         );
         return exit::GENERAL_ERROR;

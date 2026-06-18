@@ -225,3 +225,34 @@ mkit reserves stdout for porcelain/data so `mkit status` stays empty-on-clean
 in a pipeline. git puts some of these on stdout; mkit keeps its stderr
 convention (documented in `docs/CLI.md`). Object ids stay 64-hex BLAKE3
 prefixes (the inherent hash-length divergence).
+
+### Deferred flags (tracked follow-ups, not silently dropped)
+
+These commonly-typed flags are recognized as in-scope for full parity but are
+**not yet implemented**; they are larger feature additions best done as their
+own change, and are listed here so the gap is explicit:
+
+- `log -p` / `--stat` / `--decorate` / `--author` / `--grep` / `--since` /
+  `--until` / `--no-merges` / `--first-parent` / `--all` — needs the log
+  renderer + walk extensions.
+- `diff -w` / `-b` / `-U<n>` — whitespace and context-line control.
+- `branch -r` / `-a` / `-u` / `--unset-upstream` — remote-tracking listing and
+  upstream config.
+- `add -n` / `--dry-run` — needs the path-selection pass without the index
+  write (a no-op flag would incorrectly stage, so it is deferred rather than
+  faked).
+- `reset --mixed` "Unstaged changes after reset:" file list — needs a
+  worktree-vs-target-tree diff; `--hard`'s `HEAD is now at …` ships, `--mixed`
+  is otherwise silent.
+- color for `status` / `log` / `branch` (see above).
+
+### Behavior kept by decision (documented divergences)
+
+- **Empty commit** — when the index is populated but identical to HEAD (no
+  change to record), `mkit commit` silently creates an empty commit, whereas
+  git refuses without `--allow-empty`. (A *truly empty* index — nothing ever
+  staged — still errors, like git.) Left unchanged this PR to avoid surprising
+  existing mkit workflows; revisit with `--allow-empty`.
+- **Default remote name `default`** — mkit's flat default remote is `default`,
+  not git's `origin` (tracking refs live under `refs/remotes/default/`).
+  Renaming is a load-bearing migration, deferred.

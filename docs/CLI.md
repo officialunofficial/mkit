@@ -218,6 +218,12 @@ History / commits:
   After `mkit merge --no-commit` (or a merge you have just resolved),
   `commit` notices the recorded `MERGE_HEAD` and records a **two-parent
   merge commit** rather than an ordinary single-parent one.
+  On success `commit` prints git's summary on stderr: `[<branch> <hash>]
+  <subject>` (with `(root-commit)` for the first commit, `detached HEAD`
+  when detached) followed by a diffstat and `create/delete mode` lines;
+  `-q`/`--quiet` suppresses it. `-S`/`--gpg-sign[=<keyid>]` and
+  `--no-verify` are accepted **no-ops** (mkit always signs and has no
+  hooks); `--no-edit` matches mkit's default amend behavior.
 - `mkit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]` — show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
@@ -458,6 +464,8 @@ Branches / refs:
 - `mkit branch -m [<old>] <new>` — rename a branch (the current branch
   when `<old>` is omitted). CAS-guarded: refuses to clobber an existing
   `<new>`, and moves HEAD when the renamed branch is checked out.
+- `mkit branch --show-current` — print the checked-out branch name (empty
+  output on a detached HEAD), like `git branch --show-current`.
 - `mkit branch [--list] [--contains [<c>]] [--no-contains [<c>]] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]`
   — filter the listing (like `git branch`). `<pattern>` arguments are
   shell globs matched against branch names (`*`, `?`, `[…]`; `*` spans
@@ -509,6 +517,8 @@ Branches / refs:
   matcher (see "Ignore files" below).
 - `mkit tag` — list, create, or delete tags.
   - `mkit tag` (no args) — list tags; annotated/signed tags are marked.
+  - `mkit tag -l [<pattern>]` — list tags, optionally filtered by a shell
+    glob (e.g. `mkit tag -l 'v*'`), reusing `branch`'s `wildmatch` engine.
   - `mkit tag <name> [<commit>]` — create a lightweight tag (a ref
     pointing straight at `<commit>`, default HEAD).
   - `mkit tag -a <name> [-m <msg>] [<commit>]` — create an annotated tag
@@ -720,10 +730,14 @@ Remote / sync:
   ref as the lease. `--all` mirrors every `refs/heads/*` (also CAS-safe).
   `--force` overwrites the remote branch unconditionally (skips CAS);
   `--force-with-lease` overwrites only if the remote hasn't moved past
-  our last-seen tip (the two are mutually exclusive). `--dry-run`
+  our last-seen tip (the two are mutually exclusive); `-f` is an alias of
+  `--force`. `-u`/`--set-upstream` records the pushed remote as the
+  branch's upstream even if one was already set. `--dry-run`
   resolves the push plan without contacting the remote. Every endpoint
   flows through the per-endpoint credential-trust gate, which is keyed on
-  the resolved endpoint URL, never the remote name.
+  the resolved endpoint URL, never the remote name. On success `push`
+  prints git's `To <url>` + ref-update summary (or `Everything
+  up-to-date`).
 - `mkit serve <path>` — internal SSH transport server. Speaks the
   mkit-rpc SSH framing on stdin/stdout by default.
 - `mkit serve <path> --listen-enc <addr>` — bind a TCP socket on

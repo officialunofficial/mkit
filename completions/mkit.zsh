@@ -122,6 +122,7 @@ _mkit() {
                         '(--soft --mixed --hard)--mixed[move HEAD and reset the index (default)]' \
                         '(--soft --mixed --hard)--hard[also reset the worktree (keeps untracked)]' \
                         '(-f --force)'{-f,--force}'[with --hard, discard dirty/staged content]' \
+                        '(-q --quiet)'{-q,--quiet}'[suppress the HEAD-is-now-at summary]' \
                         '--help[show help]' \
                         '*:commit:'
                     ;;
@@ -320,6 +321,7 @@ _mkit() {
                         '--continue[continue after conflict resolution]' \
                         '--abort[abort revert]' \
                         '(-n --no-commit)'{-n,--no-commit}'[stage the reverted tree without creating a commit]' \
+                        '--no-edit[accepted no-op (mkit auto-generates the message)]' \
                         '--help[show help]'
                     ;;
                 merge)

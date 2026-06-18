@@ -64,6 +64,10 @@ struct ResetOpts {
     #[arg(short = 'f', long)]
     force: bool,
 
+    /// Suppress the `HEAD is now at …` summary (git `-q`).
+    #[arg(short = 'q', long)]
+    quiet: bool,
+
     /// Commit to reset to (branch, tag, HEAD, full/short hash, `HEAD~n`,
     /// `^`). Defaults to `HEAD`.
     target: Option<String>,
@@ -229,7 +233,7 @@ pub fn run(args: &[String]) -> u8 {
     // git-shaped report: `--hard` prints `HEAD is now at <hash> <subject>`;
     // `--soft`/`--mixed` are silent (git's `--mixed` "Unstaged changes
     // after reset:" list is an optional follow-up).
-    if opts.hard {
+    if opts.hard && !opts.quiet {
         let subject = match store.read_object(&target) {
             Ok(Object::Commit(c)) => String::from_utf8_lossy(&c.message)
                 .lines()

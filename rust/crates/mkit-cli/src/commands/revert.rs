@@ -35,6 +35,7 @@ use crate::format;
     name = "mkit revert",
     about = "Create a new commit that undoes a previous commit."
 )]
+#[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct RevertOpts {
     /// Continue an in-progress revert after resolving conflicts.
     #[arg(long = "continue", conflicts_with_all = ["abort", "commit"])]
@@ -47,6 +48,10 @@ struct RevertOpts {
     /// if the revert conflicts, resolve it with `--continue` / `--abort`.
     #[arg(short = 'n', long = "no-commit", conflicts_with_all = ["cont", "abort"])]
     no_commit: bool,
+    /// Accepted for git compatibility; mkit auto-generates the revert
+    /// message, so `--no-edit` is the default behavior (no-op).
+    #[arg(long = "no-edit")]
+    no_edit: bool,
     /// Commit to revert: a ref, full/short hash, or `HEAD~n` revspec.
     commit: Option<String>,
 }
@@ -57,6 +62,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    let _ = opts.no_edit; // accepted no-op (mkit auto-generates the message)
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),

@@ -1356,3 +1356,57 @@ fn diff_color_always_and_never() {
         "--no-color must be plain"
     );
 }
+
+// ---------- review fixes: reset -q / stash empty / rebase up-to-date --------
+
+#[test]
+fn reset_quiet_suppresses_summary() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    repo.commit_file("b.txt", b"b\n", "c2");
+    let out = repo.ok(&["reset", "-q", "--hard", "HEAD~1"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).trim().is_empty(),
+        "reset -q must be silent: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Non-quiet --hard does print.
+    repo.commit_file("c.txt", b"c\n", "c3");
+    let loud = repo.ok(&["reset", "--hard", "HEAD~1"]);
+    assert!(String::from_utf8_lossy(&loud.stderr).contains("HEAD is now at"));
+}
+
+#[test]
+fn stash_pop_on_empty_reports_and_exits_nonzero() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    let out = repo.run(&["stash", "pop"]);
+    assert!(!out.status.success(), "empty stash pop must exit nonzero");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("No stash entries found."),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn rebase_noninteractive_up_to_date_message() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    assert!(repo.ok(&["branch", "feature"]).status.success());
+    let out = repo.ok(&["rebase", "feature"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is up to date"),
+        "rebase up-to-date: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn revert_accepts_no_edit() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    let out = repo.ok(&["revert", "--no-edit", "HEAD"]);
+    assert!(out.status.success(), "revert --no-edit failed: {out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Revert \""));
+}

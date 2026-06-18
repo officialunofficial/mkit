@@ -7,6 +7,9 @@
 .Nd decentralized, content-addressed version control with cryptographic attribution
 .Sh SYNOPSIS
 .Nm
+.Op Fl C Ar path
+.Op Fl c Ar key Ns = Ns Ar value
+.Op Fl Fl no-pager
 .Ar command
 .Op Ar args ...
 .Sh DESCRIPTION
@@ -35,6 +38,32 @@ provides cross-repo defaults; repo-local values in
 win over it for ordinary keys, but security-sensitive keys
 .Pq Cm signing_key , Cm user.identity , Cm signer , Cm key.* , Cm attest.* , Cm ssh.* , No and Cm trusted_remote_endpoint
 are user-scoped only and are ignored if set repo-locally.
+.Sh GLOBAL OPTIONS
+Parsed before
+.Ar command
+(so they apply to repository discovery), like git:
+.Bl -tag -width Ds
+.It Fl C Ar path
+Run as if
+.Nm
+were started in
+.Ar path .
+Repeatable; relative paths resolve against the prior
+.Fl C .
+.It Fl c Ar key Ns = Ns Ar value
+Set a config value for this invocation only. It is applied to the
+effective config (never written to disk) and flows through the same
+enforcement as a per-repo config file: security-sensitive keys are
+refused and dangerous
+.Cm core.*
+keys are dropped, so
+.Fl c
+cannot spoof the signed author or redirect trust.
+.It Fl Fl no-pager , Fl P , Fl Fl paginate
+Accepted no-ops:
+.Nm
+never paginates.
+.El
 .Sh COMMANDS
 The full list of subcommands is printed by
 .Nm mkit Fl Fl help .

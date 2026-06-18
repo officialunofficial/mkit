@@ -21,7 +21,7 @@ commands:
                     Discard worktree changes for path(s) (restore from the
                     index), or --staged to unstage (restore the index entry
                     from HEAD); -f overrides the un-staged-edit guard
-  reset [--soft|--mixed|--hard] [-f] [<commit>]
+  reset [--soft|--mixed|--hard] [-f] [-q] [<commit>]
                     Move HEAD/branch (--soft) or HEAD + reset the index to
                     the commit's tree (--mixed, default); worktree untouched.
                     --hard also resets the worktree (keeps untracked files);
@@ -63,7 +63,7 @@ commands:
                     (<oldvalue> compare-and-swap; all-zero = must be absent,
                     update mode only; -d's <oldvalue> must be concrete)
   commit [-a] [-q] [--amend] [-m <msg> | -F <file>] [--author <spec>]
-                    (-q suppresses the summary; -S/--gpg-sign and --no-verify
+                    (-q suppresses the summary; -S/--gpg-sign, --no-verify, --no-edit
                     are accepted no-ops — mkit always signs and has no hooks)
   commit [-a] [--amend] [-m <msg> | -F <file>] [--author <spec>]
                     Create a signed commit (opens $EDITOR if -m/-F omitted).
@@ -189,7 +189,7 @@ commands:
                     Apply a commit to the current branch (-n stages the change
                     without committing; -m/--mainline selects the mainline
                     parent when replaying a merge commit, like git)
-  revert [-n] <commit> | --continue | --abort
+  revert [-n] [--no-edit] <commit> | --continue | --abort
                     Create a new commit undoing <commit> (forward commit;
                     conflict-aware; -n stages the revert without committing)
   rebase <branch>    Replay commits onto a different base
