@@ -10,8 +10,9 @@
   "scripts": {
     "wasm:build": "rm -rf vendor/mkit-wasm/pkg && cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir ../../../web/vendor/mkit-wasm/pkg --release",
     "skill:stage": "node scripts/copy-skill.mjs",
-    "dev": "bun run skill:stage && waku dev",
-    "build": "bun run skill:stage && bun run wasm:build && CLOUDFLARE=1 waku build && node scripts/assert-prerender.mjs && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",
+    "installer:stage": "node scripts/copy-install.mjs",
+    "dev": "bun run skill:stage && bun run installer:stage && waku dev",
+    "build": "bun run skill:stage && bun run installer:stage && bun run wasm:build && CLOUDFLARE=1 waku build && node scripts/assert-prerender.mjs && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",
     "start": "waku start",
     "deploy": "bun run build && wrangler deploy -c dist/server/wrangler.json",
     "preview": "bun run build && wrangler dev -c dist/server/wrangler.json",
