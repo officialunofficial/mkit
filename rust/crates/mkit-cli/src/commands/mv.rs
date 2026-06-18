@@ -612,6 +612,19 @@ fn plan_dir_move(
             exit::GENERAL_ERROR,
         ));
     }
+    // Safety: refuse a destination reached through a symlinked ancestor, even
+    // when the link resolves INSIDE the repo (symmetric with the file-move
+    // guard in `plan_move`). `fs::rename` follows the link and moves the
+    // subtree to the real location while the index is staged at the literal
+    // lexical `dest_dir_rel` — an immediate worktree/index divergence.
+    // `target_within_repo` only proves containment; it accepts an in-repo
+    // symlink target.
+    if has_symlinked_ancestor(cwd, &dest_dir_rel) {
+        return Err(emit_err(
+            &format!("destination path traverses a symlink: {dest_dir_rel}"),
+            exit::GENERAL_ERROR,
+        ));
+    }
     // Safety: a directory move never overwrites an existing destination —
     // even with -f. Recursively removing the destination would silently
     // delete its tracked files (leaving them dangling in the index) and any

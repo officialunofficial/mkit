@@ -564,3 +564,22 @@ fn mv_refuses_two_directory_sources_to_same_destination_root() {
         "nothing should have moved"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn mv_dir_refuses_destination_through_in_repo_symlinked_parent() {
+    // Directory-source variant of the file-source guard: `link -> real` is an
+    // in-repo symlink; `mv dir link/dir` would rename the subtree to real/dir
+    // while staging the lexical path link/dir — a worktree/index divergence.
+    let (td, xdg) = repo(&[("dir/a.txt", b"a\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(root.join("real")).unwrap();
+    std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+    let out = run_in(root, x, &["mv", "dir", "link/dir"]);
+    assert!(!out.status.success(), "must refuse: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("traverses a symlink"),
+        "expected a symlink-traversal message: {out:?}"
+    );
+    assert!(!root.join("real/dir").exists(), "nothing written through the symlink");
+}

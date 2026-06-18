@@ -78,7 +78,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "-d --delete --help" -- "$cur") )
             ;;
         status)
-            COMPREPLY=( $(compgen -W "--porcelain v1 v2 -s --short -z --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--porcelain -s --short -z --help" -- "$cur") )
             ;;
         commit)
             COMPREPLY=( $(compgen -W "-a --all --amend -m --message -F --file --author --help" -- "$cur") )

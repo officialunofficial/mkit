@@ -1126,3 +1126,44 @@ fn diff_merge_base_root_pathspec_matches_everything() {
         );
     }
 }
+
+#[test]
+fn merge_abort_atomic_when_conflict_path_replaced_by_nonempty_dir() {
+    // delete/modify conflict on flat file `p` (ours deleted it, theirs modified
+    // it → `p` is a recorded conflict path absent from the pre-op tree). The
+    // user replaces `p` with a NON-EMPTY untracked directory before aborting.
+    // Abort must refuse BEFORE any mutation (all-or-nothing), preserving the
+    // user's content and leaving the merge retryable.
+    let repo = Repo::new();
+    repo.write("a.txt", b"base\n");
+    repo.write("p", b"pcontent\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "c0"]);
+    repo.ok(&["branch", "feature"]);
+    repo.write("a.txt", b"ours\n");
+    repo.ok(&["rm", "p"]);
+    repo.ok(&["add", "a.txt"]);
+    repo.ok(&["commit", "-m", "ours"]);
+    repo.ok(&["checkout", "feature"]);
+    repo.write("a.txt", b"theirs\n");
+    repo.write("p", b"pmod\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "theirs"]);
+    repo.ok(&["checkout", "main"]);
+    let head0 = rev(&repo, "HEAD");
+
+    repo.run(&["merge", "feature"]); // a.txt conflict + p delete/modify
+    std::fs::remove_file(repo.path().join("p")).ok();
+    std::fs::create_dir(repo.path().join("p")).unwrap();
+    repo.write("p/keep", b"my work\n");
+
+    let out = repo.run(&["merge", "--abort"]);
+    assert!(!out.status.success(), "abort must fail closed before mutating");
+    assert_eq!(
+        std::fs::read(repo.path().join("p/keep")).unwrap(),
+        b"my work\n",
+        "the untracked directory content must be preserved"
+    );
+    assert_eq!(rev(&repo, "HEAD"), head0, "HEAD untouched — merge still in progress");
+    assert!(repo.mkit_dir().join("MERGE_HEAD").exists(), "merge state preserved (retryable)");
+}

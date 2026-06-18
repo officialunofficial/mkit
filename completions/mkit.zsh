@@ -254,8 +254,8 @@ _mkit() {
                         '-D[force-delete branch]:branch:' \
                         '-m[rename branch]:branch:' \
                         '--list[list branches (explicit selector)]' \
-                        '--contains[only branches whose tip contains COMMIT]:commit:' \
-                        '--no-contains[only branches whose tip does NOT contain COMMIT]:commit:' \
+                        '--contains[only branches whose tip contains COMMIT]::commit:' \
+                        '--no-contains[only branches whose tip does NOT contain COMMIT]::commit:' \
                         '--merged[only branches merged into COMMIT (default HEAD)]::commit:' \
                         '--no-merged[only branches NOT merged into COMMIT (default HEAD)]::commit:' \
                         '--format[output format]:format:(default json)' \

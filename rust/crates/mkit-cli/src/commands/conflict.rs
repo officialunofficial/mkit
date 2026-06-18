@@ -626,6 +626,31 @@ pub fn reset_conflict_paths(
         }
     }
 
+    // Pre-flight (no mutation): reject the abort up front if resetting any
+    // operation-added path (absent from target, not a kept pre-op directory)
+    // would require removing a NON-EMPTY untracked directory the user created
+    // there. The mutation loop below also fails closed on this, but checking
+    // first keeps abort all-or-nothing — otherwise earlier-sorted paths would
+    // already be reset, leaving the index out of sync with the worktree until
+    // the user retries.
+    for path in &paths {
+        if target_map.contains_key(path.as_str()) {
+            continue; // restored from target content, not removed
+        }
+        let dir_prefix = format!("{path}/");
+        if target_map.keys().any(|k| k.starts_with(dir_prefix.as_str())) {
+            continue; // a pre-op directory left in place
+        }
+        let abs = root.join(path);
+        if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir())
+            && fs::read_dir(&abs).is_ok_and(|mut it| it.next().is_some())
+        {
+            return Err(format!(
+                "abort would discard the untracked directory '{path}'; move or remove it first"
+            ));
+        }
+    }
+
     let mut idx = super::read_or_seed_index_from_head(root, store)?;
 
     for path in &paths {
