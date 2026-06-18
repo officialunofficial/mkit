@@ -342,7 +342,9 @@ const MAX_LOG_COMMITS: usize = 1_000_000;
 /// an in-degree + max-heap revwalk so equal-timestamp linear history keeps its
 /// natural child→parent order. Matches git's *default* order for linear and
 /// monotonic-timestamp history.
-fn ordered_commits(
+/// Topologically-ordered (reverse-chronological) commit walk from `tips`,
+/// excluding `excluded` and their ancestors. Shared with `rev-list`.
+pub(super) fn ordered_commits(
     store: &ObjectStore,
     tips: &[Hash],
     excluded: &HashSet<Hash>,

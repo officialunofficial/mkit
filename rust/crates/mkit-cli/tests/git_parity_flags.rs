@@ -1262,3 +1262,80 @@ fn global_dash_c_drops_denied_core_key() {
         "denied core.* via -c must not be readable back: {out:?}"
     );
 }
+
+// ---------- new commands & flags (switch / merge-base / rev-list / …) ------
+
+#[test]
+fn switch_creates_and_switches() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    let out = repo.ok(&["switch", "-c", "feature"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Switched to a new branch 'feature'"),
+        "switch -c output: {out:?}"
+    );
+    assert_eq!(
+        stdout(&repo.ok(&["branch", "--show-current"])).trim(),
+        "feature"
+    );
+    let back = repo.ok(&["switch", "main"]);
+    assert!(String::from_utf8_lossy(&back.stderr).contains("Switched to branch 'main'"));
+}
+
+#[test]
+fn checkout_dash_b_creates_new_branch() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    let out = repo.ok(&["checkout", "-b", "topic"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Switched to a new branch 'topic'"));
+}
+
+#[test]
+fn rev_list_count_and_listing() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    repo.commit_file("b.txt", b"b\n", "c2");
+    assert_eq!(stdout(&repo.ok(&["rev-list", "--count", "HEAD"])).trim(), "2");
+    let listing = stdout(&repo.ok(&["rev-list", "HEAD"]));
+    assert_eq!(listing.lines().count(), 2);
+}
+
+#[test]
+fn merge_base_and_is_ancestor() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "base");
+    let base = rev(&repo, "HEAD");
+    assert!(repo.ok(&["branch", "feature"]).status.success());
+    repo.commit_file("b.txt", b"b\n", "main2");
+    let mb = stdout(&repo.ok(&["merge-base", "main", "feature"]));
+    assert_eq!(mb.trim(), base);
+    // feature (== base) is an ancestor of main.
+    assert!(repo.run(&["merge-base", "--is-ancestor", "feature", "main"]).status.success());
+    // main is NOT an ancestor of feature → exit 1.
+    assert!(!repo.run(&["merge-base", "--is-ancestor", "main", "feature"]).status.success());
+}
+
+#[test]
+fn tag_list_glob_filters() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    repo.ok(&["tag", "v1.0"]);
+    repo.ok(&["tag", "v2.0"]);
+    repo.ok(&["tag", "nightly"]);
+    let out = stdout(&repo.ok(&["tag", "-l", "v*"]));
+    assert!(out.contains("v1.0") && out.contains("v2.0"));
+    assert!(!out.contains("nightly"), "glob must exclude non-matches: {out}");
+}
+
+#[test]
+fn diff_exit_code_reports_difference() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    // Clean tree → exit 0.
+    assert!(repo.run(&["diff", "--exit-code"]).status.success());
+    // Dirty tree → exit 1, and --quiet suppresses output.
+    repo.write("a.txt", b"changed\n");
+    let out = repo.run(&["diff", "--quiet"]);
+    assert!(!out.status.success(), "dirty --quiet must exit non-zero");
+    assert!(out.stdout.is_empty(), "--quiet must print nothing");
+}

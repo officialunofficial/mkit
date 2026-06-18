@@ -36,6 +36,10 @@ struct TagOpts {
     /// Delete the named tag instead of creating one.
     #[arg(short = 'd', long)]
     delete: bool,
+    /// List tags, optionally filtered by a shell glob pattern
+    /// (`mkit tag -l 'v*'`).
+    #[arg(short = 'l', long = "list")]
+    list: bool,
     /// Create an unsigned annotated tag object.
     #[arg(short = 'a', long)]
     annotate: bool,
@@ -69,6 +73,12 @@ pub fn run(args: &[String]) -> u8 {
     // -s implies -a (a signed tag is an annotated tag with a signature).
     let annotated = opts.annotate || opts.sign;
 
+    // `-l`/`--list` forces list mode, with the positional treated as a
+    // glob filter (like `git tag -l '<pattern>'`).
+    if opts.list {
+        return list(&mkit_dir, opts.name.as_deref());
+    }
+
     match (opts.delete, opts.name.as_deref()) {
         (true, Some(name)) => {
             let was = refs::read_tag(&mkit_dir, name).ok().flatten();
@@ -97,7 +107,7 @@ pub fn run(args: &[String]) -> u8 {
             if annotated || opts.message.is_some() {
                 return super::usage_error("usage: mkit tag -a|-s <name> [-m <msg>] [<commit>]");
             }
-            list(&mkit_dir)
+            list(&mkit_dir, None)
         }
         (false, Some(name)) => {
             if annotated {
@@ -114,11 +124,14 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
-fn list(mkit_dir: &std::path::Path) -> u8 {
-    let tags = match refs::list_tags(mkit_dir) {
+fn list(mkit_dir: &std::path::Path, pattern: Option<&str>) -> u8 {
+    let mut tags = match refs::list_tags(mkit_dir) {
         Ok(t) => t,
         Err(e) => return emit_err(&format!("list tags: {e}"), exit::GENERAL_ERROR),
     };
+    if let Some(pat) = pattern {
+        tags.retain(|t| super::branch::glob_match(pat, &t.name));
+    }
     // Open the store from the repo root (parent of `.mkit`) so we can
     // peek at annotated-tag objects. Listing still works if this fails.
     let store = mkit_dir

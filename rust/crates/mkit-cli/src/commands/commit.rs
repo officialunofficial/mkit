@@ -79,6 +79,29 @@ struct CommitOptions {
     /// an unreachable object until `mkit gc` ships (see issue #233).
     #[arg(long)]
     amend: bool,
+    /// Suppress the commit summary line (git `-q`).
+    #[arg(short = 'q', long = "quiet")]
+    quiet: bool,
+    /// Accepted for git compatibility; mkit ALWAYS signs commits with its
+    /// own key, so `-S`/`--gpg-sign[=<keyid>]` is a no-op (the optional
+    /// `<keyid>` is ignored).
+    #[arg(
+        short = 'S',
+        long = "gpg-sign",
+        value_name = "KEYID",
+        num_args = 0..=1,
+        default_missing_value = ""
+    )]
+    gpg_sign: Option<String>,
+    /// Accepted for git compatibility; mkit has no hooks, so `--no-verify`
+    /// is a no-op.
+    #[arg(long = "no-verify")]
+    no_verify: bool,
+    /// With `--amend`, keep the existing message. mkit already reuses
+    /// HEAD's message when `-m` is omitted, so this is effectively the
+    /// default; accepted for compatibility.
+    #[arg(long = "no-edit")]
+    no_edit: bool,
 }
 
 #[must_use]
@@ -91,6 +114,9 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    // Accepted-for-compatibility no-ops: mkit always signs (`-S`) and has
+    // no hooks (`--no-verify`); `--no-edit` matches mkit's default amend.
+    let _ = (&opts.gpg_sign, opts.no_verify, opts.no_edit);
 
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
@@ -381,17 +407,19 @@ pub fn run(args: &[String]) -> u8 {
         Some(b) => super::summary::HeadRef::Branch(b),
         None => super::summary::HeadRef::Detached,
     };
-    let mut stderr = std::io::stderr().lock();
-    super::summary::print_commit_summary(
-        &mut stderr,
-        &store,
-        &head_ref,
-        &commit_hash,
-        msg.lines().next().unwrap_or(""),
-        is_root,
-        old_tree,
-        Some(tree_hash),
-    );
+    if !opts.quiet {
+        let mut stderr = std::io::stderr().lock();
+        super::summary::print_commit_summary(
+            &mut stderr,
+            &store,
+            &head_ref,
+            &commit_hash,
+            msg.lines().next().unwrap_or(""),
+            is_root,
+            old_tree,
+            Some(tree_hash),
+        );
+    }
     exit::OK
 }
 

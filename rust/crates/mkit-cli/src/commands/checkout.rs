@@ -43,8 +43,17 @@ struct CheckoutOpts {
     #[cfg(feature = "sparse-checkout")]
     #[arg(long = "sparse", value_name = "PATTERN", num_args = 1..)]
     sparse: Vec<String>,
-    /// Branch name, tag, or 64-char commit hash.
-    target: String,
+    /// Create a new branch at the start-point and switch to it
+    /// (`git checkout -b <new>`). Refuses to clobber an existing branch.
+    #[arg(short = 'b', value_name = "NEW", conflicts_with = "create_force")]
+    create: Option<String>,
+    /// Create-or-reset a branch at the start-point and switch to it
+    /// (`git checkout -B <new>`).
+    #[arg(short = 'B', value_name = "NEW")]
+    create_force: Option<String>,
+    /// Branch name, tag, or 64-char commit hash. With `-b`/`-B` this is
+    /// the optional start-point (defaults to HEAD).
+    target: Option<String>,
 }
 
 #[must_use]
@@ -53,7 +62,6 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
-    let name = &opts.target;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -67,6 +75,47 @@ pub fn run(args: &[String]) -> u8 {
         Ok(l) => l,
         Err(code) => return code,
     };
+
+    // `-b`/`-B`: create (or reset, for `-B`) a branch at the start-point
+    // (the optional positional, default HEAD), then fall through to switch
+    // to it. The new branch makes the success line `Switched to a new
+    // branch '<name>'`, like git.
+    let created = opts.create.is_some() || opts.create_force.is_some();
+    let name_owned: String = if created {
+        let new = opts
+            .create
+            .as_deref()
+            .or(opts.create_force.as_deref())
+            .unwrap_or_default();
+        let start = opts.target.as_deref().unwrap_or("HEAD");
+        let start_hash = match super::revspec::resolve_revision(&store, &mkit_dir, start) {
+            Ok(h) => h,
+            Err(e) => {
+                return emit_err(&format!("invalid start point '{start}': {e}"), exit::GENERAL_ERROR);
+            }
+        };
+        let cond = if opts.create_force.is_some() {
+            refs::RefWriteCondition::Any
+        } else {
+            refs::RefWriteCondition::Missing
+        };
+        match super::write_ref_recording_history(&mkit_dir, new, cond, &start_hash) {
+            Ok(()) => {}
+            Err(refs::RefError::Conflict(_)) => {
+                return emit_err(&format!("branch '{new}' already exists"), exit::CANTCREAT);
+            }
+            Err(e) => return emit_err(&format!("create branch {new}: {e}"), exit::CANTCREAT),
+        }
+        new.to_string()
+    } else {
+        match opts.target.as_deref() {
+            Some(t) => t.to_string(),
+            None => {
+                return super::usage_error("usage: mkit checkout [-b|-B <new>] <branch|tag|commit>");
+            }
+        }
+    };
+    let name = name_owned.as_str();
 
     // Remember whether we were already on the requested branch so the
     // final report can say `Already on '<name>'` for a no-op switch —
@@ -193,7 +242,9 @@ pub fn run(args: &[String]) -> u8 {
     let _ = &report;
     let mut stderr = std::io::stderr().lock();
     if is_branch {
-        if already_on {
+        if created {
+            let _ = writeln!(stderr, "Switched to a new branch '{name}'");
+        } else if already_on {
             let _ = writeln!(stderr, "Already on '{name}'");
         } else {
             let _ = writeln!(stderr, "Switched to branch '{name}'");

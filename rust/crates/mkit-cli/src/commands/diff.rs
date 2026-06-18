@@ -88,6 +88,16 @@ struct DiffOpts {
     #[arg(short = 'z')]
     z: bool,
 
+    /// Exit with 1 when there are differences, 0 when there are none (the
+    /// patch is still printed) — like `git diff --exit-code`. The CI
+    /// idiom for "fail if the tree changed".
+    #[arg(long = "exit-code")]
+    exit_code: bool,
+
+    /// Like `--exit-code` but print nothing (`git diff --quiet`).
+    #[arg(long)]
+    quiet: bool,
+
     /// Optional revisions (refs, full/short hashes, `HEAD~n`, or an
     /// `A..B` range) followed by optional pathspecs to limit the
     /// output. With no revisions, diffs HEAD vs worktree (or HEAD vs
@@ -145,15 +155,28 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     let normalized: Vec<String> = pathspecs.iter().map(|p| normalize_pathspec(p)).collect();
-    let selected = result
+    let selected: Vec<&mkit_core::ops::DiffEntry> = result
         .entries
         .iter()
-        .filter(|e| normalized.is_empty() || path_matches_any(&e.path, &normalized));
+        .filter(|e| normalized.is_empty() || path_matches_any(&e.path, &normalized))
+        .collect();
+
+    // `--exit-code`/`--quiet` report difference via the exit status (1 =
+    // changed, 0 = clean). `--quiet` additionally suppresses output.
+    let report_exit = opts.exit_code || opts.quiet;
+    let diff_status = if report_exit && !selected.is_empty() {
+        exit::GENERAL_ERROR
+    } else {
+        exit::OK
+    };
+    if opts.quiet {
+        return diff_status;
+    }
 
     let mut stdout = std::io::stdout().lock();
     if opts.stat {
-        return match render_stat(&mut stdout, &snapshot, selected) {
-            Ok(()) => exit::OK,
+        return match render_stat(&mut stdout, &snapshot, selected.into_iter()) {
+            Ok(()) => diff_status,
             Err(msg) => emit_err(&msg, exit::GENERAL_ERROR),
         };
     }
@@ -168,7 +191,7 @@ pub fn run(args: &[String]) -> u8 {
             return emit_err(&msg, exit::GENERAL_ERROR);
         }
     }
-    exit::OK
+    diff_status
 }
 
 /// One row of `--stat` output: a display name plus its change shape.

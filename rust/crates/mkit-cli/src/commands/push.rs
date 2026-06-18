@@ -33,8 +33,12 @@ struct PushOpts {
     #[arg(long)]
     all: bool,
     /// Overwrite the remote branch unconditionally (skip CAS).
-    #[arg(long)]
+    #[arg(short = 'f', long)]
     force: bool,
+    /// Record the pushed remote as this branch's upstream, even if one is
+    /// already set (`git push -u` / `--set-upstream`).
+    #[arg(short = 'u', long = "set-upstream")]
+    set_upstream: bool,
     /// Overwrite only if the remote hasn't moved past our last-seen tip.
     #[arg(long)]
     force_with_lease: bool,
@@ -161,7 +165,7 @@ fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushO
             // time (Git-like first-push convenience). Only persisted
             // when not already set, and never for a detached/forced
             // overwrite of an unrelated branch.
-            record_upstream_if_unset(cwd, cfg, &branch, &resolved.name, &remote_branch);
+            record_upstream(cwd, cfg, &branch, &resolved.name, &remote_branch, opts.set_upstream);
             // git-style ref-update summary block: `To <url>` then one
             // `<old>..<new>` / `* [new branch]` / `+ …(forced)` line.
             let forced = !remote_dispatch::is_fast_forward(cwd, old_tracked, new_tip)
@@ -269,18 +273,22 @@ fn lease_for(opts: &PushOpts) -> PushLease {
 /// Persist `branch.<b>.{remote,merge}` after a successful first push, so
 /// a subsequent bare `mkit push` resolves the upstream. Best-effort: a
 /// write failure is non-fatal (the push already succeeded).
-fn record_upstream_if_unset(
+fn record_upstream(
     cwd: &std::path::Path,
     cfg: &config::LayeredConfig,
     branch: &str,
     remote: &str,
     remote_branch: &str,
+    force: bool,
 ) {
-    if cfg
-        .merged
-        .branch_upstreams
-        .get(branch)
-        .is_some_and(|u| !u.remote.is_empty())
+    // Without `-u`, only record on the FIRST push (git-like convenience);
+    // `-u`/`--set-upstream` re-points the upstream even if already set.
+    if !force
+        && cfg
+            .merged
+            .branch_upstreams
+            .get(branch)
+            .is_some_and(|u| !u.remote.is_empty())
     {
         return;
     }

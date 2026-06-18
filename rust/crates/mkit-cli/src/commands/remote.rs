@@ -69,6 +69,13 @@ enum RemoteCmd {
     /// rewrites any `branch.<b>.remote` upstream pointing at `<old>`.
     #[command(alias = "mv")]
     Rename { old: String, new: String },
+    /// Print a remote's URL (`mkit remote get-url <name>`; use `default`
+    /// for the flat default remote).
+    #[command(name = "get-url")]
+    GetUrl { name: String },
+    /// Change a remote's URL (`mkit remote set-url <name> <url>`).
+    #[command(name = "set-url")]
+    SetUrl { name: String, url: String },
 }
 
 #[must_use]
@@ -208,6 +215,55 @@ pub fn run(args: &[String]) -> u8 {
                     move_bridge_state(&cwd, &old, &new);
                     exit::OK
                 }
+                Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
+            }
+        }
+        Some(RemoteCmd::GetUrl { name }) => {
+            // Read-only — reflect the merged view (a default endpoint may be
+            // user-scoped).
+            let url = if name == config::DEFAULT_REMOTE_NAME {
+                (!layered.merged.remote_endpoint.is_empty())
+                    .then(|| layered.merged.remote_endpoint.clone())
+            } else {
+                layered.merged.remotes.get(&name).map(|e| e.url.clone())
+            };
+            match url {
+                Some(u) => {
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = writeln!(stdout, "{u}");
+                    exit::OK
+                }
+                None => emit_err(&format!("remote '{name}' not found"), exit::GENERAL_ERROR),
+            }
+        }
+        Some(RemoteCmd::SetUrl { name, url }) => {
+            if config::validate_value(&url).is_err() {
+                return emit_err(
+                    &format!("invalid remote URL '{url}': contains control characters"),
+                    exit::PROTOCOL_ERROR,
+                );
+            }
+            let Some(scheme) = validate_url(&url) else {
+                return emit_err(
+                    &format!("invalid remote URL '{url}': must start with 'mkit+<scheme>://'"),
+                    exit::PROTOCOL_ERROR,
+                );
+            };
+            if name == config::DEFAULT_REMOTE_NAME {
+                if cfg.remote_endpoint.is_empty() {
+                    return emit_err("no default remote configured", exit::GENERAL_ERROR);
+                }
+                cfg.remote_endpoint = url;
+                scheme.clone_into(&mut cfg.remote_type);
+            } else {
+                let Some(entry) = cfg.remotes.get_mut(&name) else {
+                    return emit_err(&format!("remote '{name}' not found"), exit::GENERAL_ERROR);
+                };
+                entry.url = url;
+                entry.remote_type = scheme.to_owned();
+            }
+            match config::write(&cwd, &cfg) {
+                Ok(()) => exit::OK,
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
             }
         }
