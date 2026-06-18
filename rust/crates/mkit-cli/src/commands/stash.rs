@@ -137,29 +137,38 @@ pub fn run(args: &[String]) -> u8 {
 /// `too_many_lines`.
 fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
     match sub {
-        StashCmd::Save(save) => match stash::save(store, cwd, &save.message) {
-            Ok(()) => {
-                let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "stashed: {}", save.message);
-                exit::OK
+        StashCmd::Save(save) => {
+            // git stores the descriptor in the stash message itself, so a
+            // no-message save records the auto `WIP on <branch>: <hash>
+            // <subject>` line and `stash list` shows it verbatim. An
+            // explicit message records `On <branch>: <message>`.
+            let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+            let branch = super::head_branch_name(&mkit_dir);
+            let effective = if save.message.is_empty() {
+                match head_descriptor(store, &mkit_dir) {
+                    Some((short, subject)) => format!("WIP on {branch}: {short} {subject}"),
+                    None => format!("WIP on {branch}"),
+                }
+            } else {
+                format!("On {branch}: {}", save.message)
+            };
+            match stash::save(store, cwd, &effective) {
+                Ok(()) => {
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(stderr, "Saved working directory and index state {effective}");
+                    exit::OK
+                }
+                Err(e) => emit_err(&format!("stash save: {e}"), exit::GENERAL_ERROR),
             }
-            Err(e) => emit_err(&format!("stash save: {e}"), exit::GENERAL_ERROR),
-        },
+        }
         StashCmd::List => match stash::list(cwd) {
             Ok(list) => {
-                if list.entries.is_empty() {
-                    let mut stderr = std::io::stderr().lock();
-                    let _ = writeln!(stderr, "(no stash entries)");
-                    return exit::OK;
-                }
+                // git prints nothing for an empty stash; one
+                // `stash@{N}: <message>` line per entry otherwise (no hash
+                // column, matching git).
                 let mut stdout = std::io::stdout().lock();
                 for (i, e) in list.entries.iter().enumerate() {
-                    let _ = writeln!(
-                        stdout,
-                        "stash@{{{i}}}: {} {}",
-                        format::short_hash(&e.commit_hash, 8),
-                        e.message
-                    );
+                    let _ = writeln!(stdout, "stash@{{{i}}}: {}", e.message);
                 }
                 exit::OK
             }
@@ -192,14 +201,32 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
             Err(e) => emit_err(&format!("stash clear: {e}"), exit::GENERAL_ERROR),
         },
         StashCmd::Drop { index } => match parse_stash_index(&index) {
-            Ok(i) => match stash::drop(cwd, i) {
-                Ok(()) => {
-                    let mut stderr = std::io::stderr().lock();
-                    let _ = writeln!(stderr, "dropped stash@{{{i}}}");
-                    exit::OK
+            Ok(i) => {
+                // Capture the entry id before removal for git's
+                // `Dropped stash@{N} (<id>)` confirmation.
+                let was = stash::list(cwd)
+                    .ok()
+                    .and_then(|l| l.entries.get(i).map(|e| e.commit_hash));
+                match stash::drop(cwd, i) {
+                    Ok(()) => {
+                        let mut stderr = std::io::stderr().lock();
+                        match was {
+                            Some(h) => {
+                                let _ = writeln!(
+                                    stderr,
+                                    "Dropped stash@{{{i}}} ({})",
+                                    format::short_hash(&h, format::SUMMARY_ABBREV)
+                                );
+                            }
+                            None => {
+                                let _ = writeln!(stderr, "Dropped stash@{{{i}}}");
+                            }
+                        }
+                        exit::OK
+                    }
+                    Err(e) => emit_err(&format!("stash drop: {e}"), exit::GENERAL_ERROR),
                 }
-                Err(e) => emit_err(&format!("stash drop: {e}"), exit::GENERAL_ERROR),
-            },
+            }
             Err(e) => emit_err(&e, exit::USAGE),
         },
         StashCmd::Show { index } => match parse_stash_index(&index) {
@@ -293,6 +320,21 @@ fn restore_entry(
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "{past} stash@{{{index}}}");
     exit::OK
+}
+
+/// `(short-hash, subject)` of the current HEAD commit, for git's auto
+/// stash message. `None` when HEAD is unborn or unreadable.
+fn head_descriptor(store: &ObjectStore, mkit_dir: &std::path::Path) -> Option<(String, String)> {
+    let head = mkit_core::refs::resolve_head(mkit_dir).ok().flatten()?;
+    let subject = match store.read_object(&head).ok()? {
+        mkit_core::object::Object::Commit(c) => String::from_utf8_lossy(&c.message)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_owned(),
+        _ => String::new(),
+    };
+    Some((format::short_hash(&head, format::SUMMARY_ABBREV), subject))
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {

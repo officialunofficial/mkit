@@ -226,19 +226,25 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
 
-    let mut stderr = std::io::stderr().lock();
-    let mode = if opts.hard {
-        "hard"
-    } else if reset_index {
-        "mixed"
-    } else {
-        "soft"
-    };
-    let _ = writeln!(
-        stderr,
-        "reset ({mode}) to {}",
-        format::short_hash(&target, 8)
-    );
+    // git-shaped report: `--hard` prints `HEAD is now at <hash> <subject>`;
+    // `--soft`/`--mixed` are silent (git's `--mixed` "Unstaged changes
+    // after reset:" list is an optional follow-up).
+    if opts.hard {
+        let subject = match store.read_object(&target) {
+            Ok(Object::Commit(c)) => String::from_utf8_lossy(&c.message)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_owned(),
+            _ => String::new(),
+        };
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "HEAD is now at {} {subject}",
+            format::short_hash(&target, format::SUMMARY_ABBREV),
+        );
+    }
     exit::OK
 }
 

@@ -227,13 +227,30 @@ fn start(
     if let Err(e) = advance_head(mkit_dir, &commit_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
+    // git-shaped summary: `[<branch> <hash>] <subject>` + diffstat.
+    let subject = String::from_utf8_lossy(&result.original_message)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_owned();
+    let branch_name = match refs::read_head(mkit_dir) {
+        Ok(Head::Branch(b)) => Some(b),
+        _ => None,
+    };
+    let head_ref = match &branch_name {
+        Some(b) => super::summary::HeadRef::Branch(b),
+        None => super::summary::HeadRef::Detached,
+    };
     let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "cherry-picked {} onto {} as {}",
-        format::short_hash(&target, 8),
-        format::short_hash(&ours, 8),
-        format::short_hash(&commit_hash, 8),
+    super::summary::print_commit_summary(
+        &mut stderr,
+        store,
+        &head_ref,
+        &commit_hash,
+        &subject,
+        false,
+        Some(ours_tree),
+        Some(result.tree_hash),
     );
     exit::OK
 }

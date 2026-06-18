@@ -70,10 +70,28 @@ pub fn run(args: &[String]) -> u8 {
     let annotated = opts.annotate || opts.sign;
 
     match (opts.delete, opts.name.as_deref()) {
-        (true, Some(name)) => match refs::delete_tag(&mkit_dir, name) {
-            Ok(()) => exit::OK,
-            Err(e) => emit_err(&format!("delete tag {name}: {e}"), exit::GENERAL_ERROR),
-        },
+        (true, Some(name)) => {
+            let was = refs::read_tag(&mkit_dir, name).ok().flatten();
+            match refs::delete_tag(&mkit_dir, name) {
+                Ok(()) => {
+                    let mut stderr = std::io::stderr().lock();
+                    match was {
+                        Some(h) => {
+                            let _ = writeln!(
+                                stderr,
+                                "Deleted tag '{name}' (was {})",
+                                format::short_hash(&h, format::SUMMARY_ABBREV)
+                            );
+                        }
+                        None => {
+                            let _ = writeln!(stderr, "Deleted tag '{name}'");
+                        }
+                    }
+                    exit::OK
+                }
+                Err(e) => emit_err(&format!("delete tag {name}: {e}"), exit::GENERAL_ERROR),
+            }
+        }
         (true, None) => super::usage_error("usage: mkit tag -d <name>"),
         (false, None) => {
             if annotated || opts.message.is_some() {

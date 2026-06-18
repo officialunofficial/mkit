@@ -58,6 +58,7 @@ pub mod show_ref;
 pub mod sparse_checkout;
 pub mod stash;
 pub mod status;
+pub mod summary;
 pub mod symbolic_ref;
 pub mod tag;
 pub mod tree;

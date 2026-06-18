@@ -176,8 +176,26 @@ fn delete(mkit_dir: &std::path::Path, names: &[String], force: bool) -> u8 {
         let flag = if force { "-D" } else { "-d" };
         return super::usage_error(&format!("usage: mkit branch {flag} <name>"));
     };
+    // Capture the tip before deletion for git's `Deleted branch <name>
+    // (was <hash>).` confirmation.
+    let was = refs::read_ref(mkit_dir, name).ok().flatten();
     match refs::delete_ref_safe(mkit_dir, name) {
-        Ok(()) => exit::OK,
+        Ok(()) => {
+            let mut stderr = std::io::stderr().lock();
+            match was {
+                Some(h) => {
+                    let _ = writeln!(
+                        stderr,
+                        "Deleted branch {name} (was {}).",
+                        format::short_hash(&h, format::SUMMARY_ABBREV)
+                    );
+                }
+                None => {
+                    let _ = writeln!(stderr, "Deleted branch {name}.");
+                }
+            }
+            exit::OK
+        }
         Err(refs::RefError::NotFound(_)) => {
             emit_err(&format!("branch '{name}' not found"), exit::GENERAL_ERROR)
         }

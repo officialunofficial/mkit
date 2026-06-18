@@ -301,6 +301,11 @@ pub fn run(args: &[String]) -> u8 {
             _ => vec![],
         }
     };
+    // Capture parent shape before `parents` is moved into the commit, for
+    // the git-shaped summary (root = no parents, merge = >=2 parents).
+    let is_root = parents.is_empty();
+    let is_merge = parents.len() >= 2;
+    let first_parent = parents.first().copied();
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -360,21 +365,44 @@ pub fn run(args: &[String]) -> u8 {
     {
         return emit_err(&format!("clear merge state: {e}"), exit::GENERAL_ERROR);
     }
-    let mut stderr = std::io::stderr().lock();
-    let verb = if amend_target.is_some() {
-        "amended"
-    } else if merge_state.is_some() {
-        "merge committed"
+    // git-shaped post-commit summary: `[<branch> <hash>] <subject>` plus
+    // a diffstat and create/delete-mode trailers. Merge commits (>=2
+    // parents) show no diffstat, like git.
+    let old_tree = if is_merge {
+        Some(tree_hash) // suppress the diffstat (empty diff) for merges
     } else {
-        "committed"
+        first_parent.and_then(|p| commit_tree(&store, &p))
     };
-    let _ = writeln!(
-        stderr,
-        "{verb} {} ({})",
-        format::short_hash(&commit_hash, 8),
-        msg.lines().next().unwrap_or("")
+    let branch_name = match refs::read_head(&mkit_dir) {
+        Ok(Head::Branch(b)) => Some(b),
+        _ => None,
+    };
+    let head_ref = match &branch_name {
+        Some(b) => super::summary::HeadRef::Branch(b),
+        None => super::summary::HeadRef::Detached,
+    };
+    let mut stderr = std::io::stderr().lock();
+    super::summary::print_commit_summary(
+        &mut stderr,
+        &store,
+        &head_ref,
+        &commit_hash,
+        msg.lines().next().unwrap_or(""),
+        is_root,
+        old_tree,
+        Some(tree_hash),
     );
     exit::OK
+}
+
+/// Resolve a commit/remix hash to its tree hash (None on any error or a
+/// non-commit object) — used to bound the post-commit diffstat.
+fn commit_tree(store: &ObjectStore, commit: &mkit_core::hash::Hash) -> Option<mkit_core::hash::Hash> {
+    match store.read_object(commit).ok()? {
+        Object::Commit(c) => Some(c.tree_hash),
+        Object::Remix(r) => Some(r.tree_hash),
+        _ => None,
+    }
 }
 
 /// Pre-process `args` to canonicalize the legacy `-am<msg>` /

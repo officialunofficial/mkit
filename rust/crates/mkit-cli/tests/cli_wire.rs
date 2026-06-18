@@ -131,8 +131,9 @@ fn merge_fast_forwards_when_current_is_ancestor() {
     assert!(out.status.success(), "merge failed: {out:?}");
     // Confirmation prose now lives on stderr.
     let stderr = String::from_utf8(out.stderr).unwrap();
+    let lower = stderr.to_lowercase();
     assert!(
-        stderr.contains("fast-forward") || stderr.contains("already up to date"),
+        lower.contains("fast-forward") || lower.contains("up to date"),
         "unexpected merge output: {stderr}"
     );
     // main should have moved off c1.
@@ -215,8 +216,9 @@ fn rebase_onto_same_head_is_noop() {
     assert!(out.status.success(), "rebase failed: {out:?}");
     // Confirmation prose lives on stderr.
     let stderr = String::from_utf8(out.stderr).unwrap();
+    let lower = stderr.to_lowercase();
     assert!(
-        stderr.contains("rebased 0") || stderr.contains("rebased"),
+        lower.contains("rebased") || lower.contains("up to date"),
         "unexpected rebase output: {stderr}"
     );
 }
@@ -284,8 +286,12 @@ fn stash_list_on_empty_repo_prints_none_marker() {
         stdout.is_empty(),
         "empty stash list must produce empty stdout: {stdout:?}"
     );
+    // git prints nothing at all for an empty stash list — match that.
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("no stash"));
+    assert!(
+        stderr.is_empty(),
+        "empty stash list must be silent (git-shaped): {stderr:?}"
+    );
 }
 
 #[test]

@@ -43,7 +43,10 @@ fn merge_fast_forwards_from_tracking_ref() {
     // Short form `<remote>/<branch>` resolves and fast-forwards.
     let out = r.ok(&["merge", "up/main"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("fast-forward"), "stderr: {stderr}");
+    assert!(
+        stderr.to_lowercase().contains("fast-forward"),
+        "stderr: {stderr}"
+    );
     assert_eq!(
         refs::read_ref(&r.mkit_dir(), "main").unwrap().unwrap(),
         ahead

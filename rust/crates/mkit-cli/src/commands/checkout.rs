@@ -68,6 +68,15 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
 
+    // Remember whether we were already on the requested branch so the
+    // final report can say `Already on '<name>'` for a no-op switch —
+    // WITHOUT short-circuiting the safety gate (a dirty same-branch
+    // checkout must still refuse, like mkit always has).
+    let already_on = matches!(
+        refs::read_head(&mkit_dir),
+        Ok(mkit_core::refs::Head::Branch(ref cur)) if cur == name
+    );
+
     // Resolve <name> through the shared revspec resolver (branch / tag /
     // HEAD / full+short hash / `~n`/`^` navigation).
     let commit_hash: Hash = match super::revspec::resolve_revision(&store, &mkit_dir, name) {
@@ -179,22 +188,39 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&e, exit::CANTCREAT);
     }
 
+    // git-shaped switch confirmation (drop mkit's non-git restored-count
+    // line). `report` is no longer printed; keep the binding consumed.
+    let _ = &report;
     let mut stderr = std::io::stderr().lock();
     if is_branch {
-        let _ = writeln!(stderr, "switched to branch {name}");
+        if already_on {
+            let _ = writeln!(stderr, "Already on '{name}'");
+        } else {
+            let _ = writeln!(stderr, "Switched to branch '{name}'");
+        }
     } else {
         let _ = writeln!(
             stderr,
-            "switched to detached {}",
-            format::short_hash(&commit_hash, 8)
+            "HEAD is now at {} {}",
+            format::short_hash(&commit_hash, format::SUMMARY_ABBREV),
+            commit_subject(&store, &commit_hash),
         );
     }
-    let _ = writeln!(
-        stderr,
-        "  {} file(s), {} dir(s), {} symlink(s) restored",
-        report.files_written, report.directories_created, report.symlinks_written,
-    );
     exit::OK
+}
+
+/// First line of a commit/remix message, for the detached-HEAD report
+/// (empty string on any read failure).
+fn commit_subject(store: &ObjectStore, commit: &Hash) -> String {
+    let msg = match store.read_object(commit) {
+        Ok(Object::Commit(c)) => c.message,
+        _ => return String::new(),
+    };
+    String::from_utf8_lossy(&msg)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_owned()
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {

@@ -164,7 +164,7 @@ fn start(
             // `onto` — exactly what non-interactive `rebase` does.
             if orig_head == onto {
                 let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "rebase: already up to date");
+                let _ = writeln!(stderr, "Current branch {head_name} is up to date.");
                 return exit::OK;
             }
             (Vec::new(), Vec::new())
@@ -634,9 +634,8 @@ fn replay(
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
         stderr,
-        "rebased {} commit(s) onto {}",
-        state.done.len(),
-        format::short_hash(&state.onto, 8)
+        "Successfully rebased and updated refs/heads/{}.",
+        state.head_name
     );
     exit::OK
 }

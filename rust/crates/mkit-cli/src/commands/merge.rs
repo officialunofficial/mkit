@@ -133,7 +133,7 @@ fn start(
 
     if ours == theirs {
         let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "already up to date");
+        let _ = writeln!(stderr, "Already up to date.");
         return exit::OK;
     }
 
@@ -159,8 +159,18 @@ fn start(
         if let Err(e) = advance_head(mkit_dir, &theirs) {
             return emit_err(&e, exit::CANTCREAT);
         }
+        // git-shaped fast-forward report: `Updating <old>..<new>` +
+        // `Fast-forward` + the diffstat.
         let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "fast-forward {}", format::short_hash(&theirs, 8));
+        let _ = writeln!(
+            stderr,
+            "Updating {}..{}",
+            format::short_hash(&ours, format::SUMMARY_ABBREV),
+            format::short_hash(&theirs, format::SUMMARY_ABBREV),
+        );
+        let _ = writeln!(stderr, "Fast-forward");
+        drop(stderr);
+        print_merge_stat(store, ours, theirs);
         return exit::OK;
     }
 
@@ -224,9 +234,18 @@ fn start(
             return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
+        // git-shaped conflict lines, additive — followed by mkit's own
+        // resumable-flow hint.
+        for rec in &records {
+            let _ = writeln!(stderr, "CONFLICT (content): Merge conflict in {}", rec.path);
+        }
         let _ = writeln!(
             stderr,
-            "merge conflict; resolve the files above, `mkit add` them, then run \
+            "Automatic merge failed; fix conflicts and then commit the result."
+        );
+        let _ = writeln!(
+            stderr,
+            "hint: resolve the files above, `mkit add` them, then run \
              `mkit merge --continue` (or `mkit merge --abort`)"
         );
         return exit::GENERAL_ERROR;
@@ -288,14 +307,30 @@ fn start(
     if let Err(e) = advance_head(mkit_dir, &commit_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "merge {} into HEAD ({})",
-        format::short_hash(&theirs, 8),
-        format::short_hash(&commit_hash, 8)
-    );
+    // git-shaped true-merge report: `Merge made by the 'ort' strategy.` +
+    // the diffstat (ours → merged tree).
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "Merge made by the 'ort' strategy.");
+    }
+    print_merge_stat_trees(store, Some(ours_tree), Some(result.tree_hash));
     exit::OK
+}
+
+/// Best-effort `Fast-forward` / merge diffstat between two commits' trees,
+/// reusing `diff`'s renderer. Failures are silent (the headline already
+/// printed).
+fn print_merge_stat(store: &ObjectStore, old: Hash, new: Hash) {
+    let old_tree = load_tree_hash(store, old).ok();
+    let new_tree = load_tree_hash(store, new).ok();
+    print_merge_stat_trees(store, old_tree, new_tree);
+}
+
+fn print_merge_stat_trees(store: &ObjectStore, old_tree: Option<Hash>, new_tree: Option<Hash>) {
+    if let Ok(result) = mkit_core::ops::diff_trees(store, old_tree, new_tree) {
+        let mut stderr = std::io::stderr().lock();
+        let _ = super::diff::render_stat(&mut stderr, store, result.entries.iter());
+    }
 }
 
 fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
