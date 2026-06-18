@@ -38,6 +38,10 @@ struct RemoteOpts {
     /// Output format for the show form. JSON object with `--format=json`.
     #[arg(long, value_enum, default_value = "default")]
     format: RemoteFormat,
+    /// Verbose: list each remote's URL and direction (`<name>\t<url>
+    /// (fetch)` / `(push)`), like `git remote -v`.
+    #[arg(short = 'v', long)]
+    verbose: bool,
     #[command(subcommand)]
     sub: Option<RemoteCmd>,
 }
@@ -87,7 +91,11 @@ pub fn run(args: &[String]) -> u8 {
     // private `user.email`) is never materialized into the clone-traveling
     // `.mkit/config` by `config::write`.
     if opts.sub.is_none() {
-        return show(&layered.merged, matches!(opts.format, RemoteFormat::Json));
+        return show(
+            &layered.merged,
+            matches!(opts.format, RemoteFormat::Json),
+            opts.verbose,
+        );
     }
     let mut cfg = layered.repo;
 
@@ -309,7 +317,7 @@ fn validate_url(url: &str) -> Option<&'static str> {
     None
 }
 
-fn show(cfg: &Config, json: bool) -> u8 {
+fn show(cfg: &Config, json: bool, verbose: bool) -> u8 {
     let has_default = !cfg.remote_endpoint.is_empty();
     if !has_default && cfg.remotes.is_empty() {
         // Empty listing → empty stdout in both modes. The default
@@ -362,24 +370,28 @@ fn show(cfg: &Config, json: bool) -> u8 {
         }
         return exit::OK;
     }
-    // Default (human) form. Keep the legacy two-line output when only
-    // the flat default remote is configured.
-    if has_default && cfg.remotes.is_empty() {
-        let _ = writeln!(stdout, "remote_endpoint = {}", cfg.remote_endpoint);
-        let _ = writeln!(stdout, "remote_type = {}", cfg.remote_type);
+    // Default (human) form, git-shaped:
+    //   `mkit remote`      → one remote NAME per line
+    //   `mkit remote -v`   → `<name>\t<url> (fetch)` and `(push)` per remote
+    // The flat default remote shows under the reserved name `default`.
+    if verbose {
+        if has_default {
+            let url = &cfg.remote_endpoint;
+            let name = config::DEFAULT_REMOTE_NAME;
+            let _ = writeln!(stdout, "{name}\t{url} (fetch)");
+            let _ = writeln!(stdout, "{name}\t{url} (push)");
+        }
+        for (name, entry) in &cfg.remotes {
+            let _ = writeln!(stdout, "{name}\t{} (fetch)", entry.url);
+            let _ = writeln!(stdout, "{name}\t{} (push)", entry.url);
+        }
         return exit::OK;
     }
     if has_default {
-        let _ = writeln!(
-            stdout,
-            "{}\t{} ({})",
-            config::DEFAULT_REMOTE_NAME,
-            cfg.remote_endpoint,
-            cfg.remote_type
-        );
+        let _ = writeln!(stdout, "{}", config::DEFAULT_REMOTE_NAME);
     }
-    for (name, entry) in &cfg.remotes {
-        let _ = writeln!(stdout, "{name}\t{} ({})", entry.url, entry.remote_type);
+    for name in cfg.remotes.keys() {
+        let _ = writeln!(stdout, "{name}");
     }
     exit::OK
 }

@@ -113,6 +113,22 @@ fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushO
         );
     };
 
+    // Snapshot the local tip and the last-seen remote-tracking ref so we
+    // can render git's ref-update summary block and detect a no-op push.
+    let local_tip = mkit_core::refs::read_ref(&mkit_dir, &branch)
+        .ok()
+        .flatten();
+    let old_tracked = mkit_core::refs::read_remote_ref(&mkit_dir, &resolved.name, &remote_branch)
+        .ok()
+        .flatten();
+    // Nothing to do when the remote-tracking ref already matches the local
+    // tip (and we're not forcing). Matches git's `Everything up-to-date`.
+    if !opts.force && local_tip.is_some() && local_tip == old_tracked {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "Everything up-to-date");
+        return exit::OK;
+    }
+
     let lease = lease_for(opts);
     if opts.dry_run {
         let mut stderr = std::io::stderr().lock();
@@ -140,27 +156,47 @@ fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushO
         &remote_branch,
         lease,
     ) {
-        Ok(_) => {
+        Ok(new_tip) => {
             // Remember the upstream so a bare `mkit push` works next
             // time (Git-like first-push convenience). Only persisted
             // when not already set, and never for a detached/forced
             // overwrite of an unrelated branch.
             record_upstream_if_unset(cwd, cfg, &branch, &resolved.name, &remote_branch);
+            // git-style ref-update summary block: `To <url>` then one
+            // `<old>..<new>` / `* [new branch]` / `+ …(forced)` line.
+            let forced = !remote_dispatch::is_fast_forward(cwd, old_tracked, new_tip)
+                .unwrap_or(false);
             let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "To {}", resolved.endpoint);
             let _ = writeln!(
                 stderr,
-                "pushed {branch} -> {}:{remote_branch} ({})",
-                resolved.name, resolved.endpoint
+                "{}",
+                crate::format::ref_update_line(
+                    old_tracked.as_ref(),
+                    &new_tip,
+                    &branch,
+                    &remote_branch,
+                    forced,
+                )
             );
             exit::OK
         }
-        Err(remote_dispatch::DispatchError::NonFastForwardPush { branch }) => emit_err(
-            &format!(
-                "updates were rejected for '{branch}' (non-fast-forward); \
-                 `mkit fetch` and merge/rebase first, or re-run with --force-with-lease / --force"
-            ),
-            exit::GENERAL_ERROR,
-        ),
+        Err(remote_dispatch::DispatchError::NonFastForwardPush { branch }) => {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "To {}", resolved.endpoint);
+            let _ = writeln!(
+                stderr,
+                "{}",
+                crate::format::ref_rejected_line(&branch, &branch)
+            );
+            emit_err(
+                &format!(
+                    "updates were rejected for '{branch}' (non-fast-forward); \
+                     `mkit fetch` and merge/rebase first, or re-run with --force-with-lease / --force"
+                ),
+                exit::GENERAL_ERROR,
+            )
+        }
         Err(remote_dispatch::DispatchError::Interrupted) => {
             emit_err("push: interrupted", exit::TEMPFAIL)
         }
