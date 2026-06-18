@@ -380,11 +380,25 @@ fn plan_move(
             exit::GENERAL_ERROR,
         ));
     }
+    // Safety: refuse a destination reached through a symlinked ancestor, even
+    // when the link resolves INSIDE the repo. `fs::rename` follows the link
+    // and writes to the real location while the index is staged at the literal
+    // lexical `target_rel` — an immediate worktree/index divergence.
+    // `target_within_repo` only proves containment; it accepts an in-repo
+    // symlink, so this guard (symmetric with the source check) is still needed.
+    if has_symlinked_ancestor(cwd, &target_rel) {
+        return Err(emit_err(
+            &format!("destination path traverses a symlink: {target_rel}"),
+            exit::GENERAL_ERROR,
+        ));
+    }
     // Safety: never clobber an existing destination without -f. Use a
     // symlink-aware check so a dangling symlink still counts as "exists".
-    // Skip entirely for a case-only rename (the "destination" IS the source on
-    // a case-insensitive filesystem) so `mv Foo foo` is a plain rename.
-    if path_present(&target_abs) && !same_file(&src_abs, &target_abs) {
+    // Skip entirely ONLY for a genuine case-only rename (the "destination" IS
+    // the source on a case-insensitive filesystem) so `mv Foo foo` is a plain
+    // rename. An untracked symlink pointing AT the source must NOT bypass this.
+    if path_present(&target_abs) && !is_case_only_rename(&src_rel, &target_rel, &src_abs, &target_abs)
+    {
         // A file source can never replace a DIRECTORY destination — even with
         // -f. `-f` removes the destination first, and removing a directory
         // would recursively delete its (tracked + untracked) contents and
@@ -456,10 +470,14 @@ fn execute_move(m: &PlannedMove, force: bool) -> Result<(), u8> {
             )
         })?;
     }
-    // Never clear the destination when it IS the source (a case-only rename on
-    // a case-insensitive filesystem, e.g. `Foo` -> `foo`): removing it would
-    // delete the source and the rename would then fail with both gone.
-    if force && path_present(&m.target_abs) && !same_file(&m.src_abs, &m.target_abs) {
+    // Never clear the destination when it IS the source (a genuine case-only
+    // rename on a case-insensitive filesystem, e.g. `Foo` -> `foo`): removing
+    // it would delete the source and the rename would then fail with both
+    // gone. A symlink merely pointing at the source is NOT a case-only rename.
+    if force
+        && path_present(&m.target_abs)
+        && !is_case_only_rename(&m.src_rel, &m.target_rel, &m.src_abs, &m.target_abs)
+    {
         let _ = remove_path(&m.target_abs);
     }
     std::fs::rename(&m.src_abs, &m.target_abs).map_err(|e| {
@@ -723,6 +741,19 @@ fn same_file(a: &Path, b: &Path) -> bool {
         (Ok(ca), Ok(cb)) => ca == cb,
         _ => false,
     }
+}
+
+/// Is this move a genuine CASE-ONLY rename (`Foo` -> `foo`) on a
+/// case-insensitive filesystem? Such a move's destination resolves to the
+/// source itself, so the clobber guard / force-remove must be skipped. We
+/// require the repo-relative paths to be case-insensitively equal (but not
+/// identical) AND to resolve to the same object — so an untracked symlink that
+/// merely points at the source (a distinct name) is NOT mistaken for one and
+/// still trips the destination-exists guard, matching git.
+fn is_case_only_rename(src_rel: &str, target_rel: &str, src_abs: &Path, target_abs: &Path) -> bool {
+    src_rel != target_rel
+        && src_rel.eq_ignore_ascii_case(target_rel)
+        && same_file(src_abs, target_abs)
 }
 
 /// Does any ANCESTOR component of repo-relative `rel` (under `root`) resolve

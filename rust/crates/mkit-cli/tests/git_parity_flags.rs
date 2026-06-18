@@ -915,3 +915,87 @@ fn diff_merge_base_accepts_dot_slash_tracked_deleted_pathspec() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn merge_file_vs_directory_conflict_is_atomic_and_abortable() {
+    // OURS has directory `p/`, THEIRS has file `p` — a file-vs-directory
+    // conflict. The merge must pause ATOMICALLY (MERGE_HEAD written, so an
+    // --abort path exists) rather than failing mid-materialize, and --abort
+    // must restore cleanly.
+    let repo = Repo::new();
+    repo.commit_file("seed.txt", b"base\n", "c0");
+    repo.ok(&["branch", "feature"]);
+    repo.write("p/inner.txt", b"inner\n"); // ours: p is a directory
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "ours dir p/"]);
+    let head0 = rev(&repo, "HEAD");
+    repo.ok(&["checkout", "feature"]);
+    repo.write("p", b"file p\n"); // theirs: p is a file
+    repo.ok(&["add", "p"]);
+    repo.ok(&["commit", "-m", "theirs file p"]);
+    repo.ok(&["checkout", "main"]);
+
+    let out = repo.run(&["merge", "feature"]);
+    assert!(!out.status.success(), "the D/F conflict should pause");
+    assert!(
+        repo.mkit_dir().join("MERGE_HEAD").exists(),
+        "MERGE_HEAD must be written — the pause must be atomic with an --abort path"
+    );
+
+    repo.ok(&["merge", "--abort"]);
+    assert_eq!(rev(&repo, "HEAD"), head0, "HEAD restored");
+    assert_eq!(
+        std::fs::read(repo.path().join("p/inner.txt")).unwrap(),
+        b"inner\n",
+        "ours directory restored"
+    );
+    assert!(stdout(&repo.ok(&["status", "--porcelain"])).trim().is_empty());
+}
+
+/// base has x.txt + y.txt; feature deletes x.txt, main deletes y.txt, so a
+/// merge's 3-way result is the EMPTY tree. Leaves the repo on `main`.
+fn complementary_deletes(repo: &Repo) {
+    repo.write("x.txt", b"x\n");
+    repo.write("y.txt", b"y\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "c0"]);
+    repo.ok(&["branch", "feature"]);
+    repo.ok(&["checkout", "feature"]);
+    repo.ok(&["rm", "x.txt"]);
+    repo.ok(&["commit", "-m", "rm x"]);
+    repo.ok(&["checkout", "main"]);
+    repo.ok(&["rm", "y.txt"]);
+    repo.ok(&["commit", "-m", "rm y"]);
+}
+
+#[test]
+fn merge_continue_after_empty_no_commit_records_deletions() {
+    // An empty-result `merge --no-commit` leaves a tombstoned (non-empty)
+    // index; `--continue` must build the EMPTY merge tree (both deletions),
+    // not re-seed the old tree from HEAD.
+    let repo = Repo::new();
+    complementary_deletes(&repo);
+    repo.ok(&["merge", "--no-commit", "feature"]);
+    repo.ok(&["merge", "--continue"]);
+    assert!(
+        stdout(&repo.ok(&["status", "--porcelain"])).trim().is_empty(),
+        "tree must be clean after --continue"
+    );
+    assert!(!repo.path().join("x.txt").exists() && !repo.path().join("y.txt").exists());
+    assert_eq!(parent_count(&repo, "HEAD"), 2, "two-parent merge commit");
+}
+
+#[test]
+fn merge_abort_after_empty_no_commit_restores_head() {
+    // The mirror of the above for abort: the empty result must not make abort
+    // misread the deletions as local changes.
+    let repo = Repo::new();
+    complementary_deletes(&repo);
+    let head0 = rev(&repo, "HEAD");
+    repo.ok(&["merge", "--no-commit", "feature"]);
+    repo.ok(&["merge", "--abort"]);
+    assert_eq!(rev(&repo, "HEAD"), head0, "HEAD restored to pre-merge");
+    // main still had x.txt (it only deleted y.txt) → restored.
+    assert!(repo.path().join("x.txt").exists(), "main's x.txt restored");
+    assert!(stdout(&repo.ok(&["status", "--porcelain"])).trim().is_empty());
+}

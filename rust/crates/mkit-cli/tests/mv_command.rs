@@ -506,3 +506,40 @@ fn mv_dir_refuses_child_through_a_symlinked_ancestor() {
     );
     assert!(external.path().join("file").exists(), "external content untouched");
 }
+
+#[cfg(unix)]
+#[test]
+fn mv_refuses_symlink_destination_pointing_at_source() {
+    // An untracked symlink `b -> a` is still an existing destination; mv must
+    // refuse it without -f (it is NOT a case-only rename). same_file alone
+    // would have wrongly bypassed the guard.
+    let (td, xdg) = repo(&[("a", b"data\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    std::os::unix::fs::symlink("a", root.join("b")).unwrap();
+    let out = run_in(root, x, &["mv", "a", "b"]);
+    assert!(!out.status.success(), "must refuse a symlink destination: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("destination exists"),
+        "expected a destination-exists message: {out:?}"
+    );
+    assert_eq!(fs::read(root.join("a")).unwrap(), b"data\n", "source untouched");
+}
+
+#[cfg(unix)]
+#[test]
+fn mv_refuses_destination_through_in_repo_symlinked_parent() {
+    // `link -> real` is an in-repo symlink; `mv src link/src` would write
+    // through it to real/src while staging the lexical path link/src — a
+    // worktree/index divergence. Refuse it (symmetric with the source guard).
+    let (td, xdg) = repo(&[("src", b"s\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(root.join("real")).unwrap();
+    std::os::unix::fs::symlink("real", root.join("link")).unwrap();
+    let out = run_in(root, x, &["mv", "src", "link/src"]);
+    assert!(!out.status.success(), "must refuse: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("traverses a symlink"),
+        "expected a symlink-traversal message: {out:?}"
+    );
+    assert!(!root.join("real/src").exists(), "nothing written through the symlink");
+}

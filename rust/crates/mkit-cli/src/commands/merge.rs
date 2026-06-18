@@ -244,6 +244,16 @@ fn start(
         if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
+        // A tree can't encode deletions, so staging the result tree drops
+        // them. Re-stage Removed tombstones (like cherry-pick/revert -n) so an
+        // all-deletions merge leaves a non-empty index: otherwise `commit`'s
+        // index reads as empty and `merge --continue`/`merge --abort` (which
+        // seed an empty index from HEAD) would build/judge against the OLD
+        // tree, dropping the deletions.
+        if let Err(e) = super::stage_removed_tombstones(cwd, store, Some(ours_tree), result.tree_hash)
+        {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
         let state = MergeState {
             merge_head: theirs,
             orig_head: ours,

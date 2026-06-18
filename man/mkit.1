@@ -32,7 +32,9 @@ A user-level config at
 .Pa $XDG_CONFIG_HOME/mkit/config
 provides cross-repo defaults; repo-local values in
 .Pa .mkit/config
-always win.
+win over it for ordinary keys, but security-sensitive keys
+.Pq Cm signing_key , Cm user.identity , Cm signer , Cm key.* , Cm attest.* , Cm ssh.* , No and Cm trusted_remote_endpoint
+are user-scoped only and are ignored if set repo-locally.
 .Sh COMMANDS
 The full list of subcommands is printed by
 .Nm mkit Fl Fl help .
@@ -1097,7 +1099,10 @@ respectively. See
 Repo-local state dir (analogous to
 .Pa .git/ ).
 .It Pa .mkit/config
-Repo-local config; overrides any user-level value.
+Repo-local config; overrides user-level values for ordinary keys. Security-
+sensitive keys
+.Pq Cm signing_key , Cm user.identity , Cm signer , Cm key.* , Cm attest.* , Cm ssh.* , No and Cm trusted_remote_endpoint
+are user-scoped only and ignored here.
 .It Pa .mkit/keys/default.key
 Repo-local Ed25519 signing key.
 .It Pa .mkit/index

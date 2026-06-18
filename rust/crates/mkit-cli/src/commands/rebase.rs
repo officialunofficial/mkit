@@ -478,6 +478,23 @@ fn replay(
         // so a later non-conflict pause (e.g. interactive `edit`) doesn't let
         // `--abort`/`--skip` read a stale operation result.
         conflict_state::clear_result_tree(&rebase_dir);
+        // Runtime leading-fold guard: a squash/fixup must fold into a commit
+        // that this rebase has already applied. The parse-time guard only runs
+        // when the todo is edited; `--skip`ping a conflicted leading pick can
+        // leave a squash/fixup as the first APPLIED step. `state.done` is
+        // empty iff nothing has been applied yet, so this fails closed BEFORE
+        // any mutation (HEAD still at its current step), preserving --abort.
+        if state.front_action().folds_into_previous() && state.done.is_empty() {
+            let verb = if state.front_action() == RebaseAction::Fixup {
+                "fixup"
+            } else {
+                "squash"
+            };
+            return emit_err(
+                &format!("cannot '{verb}' as the first commit; it has nothing to fold into"),
+                exit::USAGE,
+            );
+        }
         let target = state.todo[0];
         let head_hash = match refs::resolve_head(mkit_dir) {
             Ok(Some(h)) => h,

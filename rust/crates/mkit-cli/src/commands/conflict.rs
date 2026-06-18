@@ -309,6 +309,18 @@ fn materialize_conflict_side(store: &ObjectStore, abs: &Path, c: &Conflict) -> R
     let Some((h, mode)) = pick else {
         return Ok(());
     };
+    // File-vs-directory conflict: the merged result tree already materialized
+    // the directory side at `abs` (restore_worktree_and_index ran first), so
+    // the path is a real directory. We cannot write the surviving blob over a
+    // directory — `fs::remove_file` no-ops on it and the write fails, aborting
+    // materialization AFTER the worktree was mutated but BEFORE MERGE_HEAD is
+    // written, leaving no `--abort` path. Keep the directory (ours-wins, like
+    // `stage_ours` does for a tree side) and record the conflict for manual
+    // resolution. Use symlink_metadata so a symlink-to-a-directory still gets
+    // a normal blob write below.
+    if std::fs::symlink_metadata(abs).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
+    }
     match mode {
         Some(EntryMode::Symlink) => write_symlink_to_worktree(store, abs, h),
         Some(EntryMode::Executable) => write_blob_to_worktree(store, abs, h, true),
@@ -612,9 +624,27 @@ pub fn reset_conflict_paths(
                 idx.entries.push(entry);
             }
         } else {
-            // Path did not exist pre-op: remove the worktree file and
-            // drop it from the index.
-            if let Err(e) = fs::remove_file(&abs)
+            // `path` is absent from the target tree as a FILE. But it may be a
+            // DIRECTORY there (a file-vs-directory conflict records the path
+            // `p` while the target carries `p/<children>`): in that case the
+            // pre-op directory already sits in the worktree — leave it and let
+            // the final restore align its contents; only drop any stale index
+            // entry literally at `p`.
+            let dir_prefix = format!("{path}/");
+            if target_map.keys().any(|k| k.starts_with(dir_prefix.as_str())) {
+                if let Some(pos) = idx.find_entry(path) {
+                    idx.entries.remove(pos);
+                }
+                continue;
+            }
+            // Otherwise the path did not exist pre-op (the operation added it):
+            // remove it (dir-aware) and drop it from the index.
+            let removed = if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
+                fs::remove_dir_all(&abs)
+            } else {
+                fs::remove_file(&abs)
+            };
+            if let Err(e) = removed
                 && e.kind() != std::io::ErrorKind::NotFound
             {
                 return Err(format!("remove {}: {e}", abs.display()));

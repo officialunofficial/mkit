@@ -296,6 +296,12 @@ pub fn entry_index(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashRe
     let Object::Commit(stash_commit) = store.read_object(&list.entries[idx].commit_hash)? else {
         return Err(StashError::NotACommit);
     };
+    // A 2+-parent stash is ALWAYS current-format `[HEAD, index]`, so its last
+    // parent must be a valid index-wrapper commit; anything else is corruption
+    // and must fail closed (not silently drop the only staged-state copy). A
+    // 1-parent stash is ambiguous — legacy `[HEAD]` (no index) or unborn
+    // `[index]` — so a non-wrapper there still degrades to Ok(None).
+    let multi_parent = stash_commit.parents.len() >= 2;
     // The index snapshot, when present, is always the LAST parent:
     //   [HEAD, index]  (normal)           -> parents[1]
     //   [index]        (unborn, no HEAD)  -> parents[0]
@@ -313,12 +319,20 @@ pub fn entry_index(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashRe
     // might (astronomically rarely) carry a top-level `i` of its own — that
     // case has no recoverable index and returns None.
     let Object::Tree(wrapper) = store.read_object(&index_commit.tree_hash)? else {
-        return Ok(None);
+        return if multi_parent {
+            Err(StashError::InvalidFormat)
+        } else {
+            Ok(None)
+        };
     };
     let has_index_blob = wrapper.entries.iter().any(|e| e.name == b"i");
     let has_content_tree = wrapper.entries.iter().any(|e| e.name == b"t");
     if !(has_index_blob && has_content_tree) {
-        return Ok(None);
+        return if multi_parent {
+            Err(StashError::InvalidFormat)
+        } else {
+            Ok(None)
+        };
     }
     // From here we KNOW this is a current-format snapshot, so a malformed blob
     // is corruption: fail closed and preserve the only staged-state copy,
@@ -931,6 +945,47 @@ mod tests {
         let (tmp, store) = fresh_store();
         build_stash_fixture(&store, tmp.path());
         assert!(entry_index(&store, tmp.path(), 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn entry_index_fails_closed_on_corrupt_multiparent_wrapper() {
+        // A 2-parent stash `[HEAD, index]` is always current-format, so its
+        // last parent MUST be a valid `i`/`t` wrapper. A non-wrapper tree
+        // there is corruption — `entry_index` must FAIL CLOSED (InvalidFormat)
+        // rather than silently return None, which would let `pop --index` drop
+        // the only staged-state copy.
+        let (tmp, store) = fresh_store();
+        let root = tmp.path();
+        let head_tree = put_tree_entries(&store, vec![]);
+        let head_commit = put_commit_obj(&store, head_tree, vec![], 1);
+        // A bogus "index" commit whose tree lacks the i/t wrapper markers.
+        let bogus_tree = put_tree_entries(
+            &store,
+            vec![TreeEntry {
+                name: b"not_a_wrapper".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob_data(&store, b"junk"),
+            }],
+        );
+        let bogus_index_commit = put_commit_obj(&store, bogus_tree, vec![head_commit], 2);
+        let stash_commit =
+            put_commit_obj(&store, head_tree, vec![head_commit, bogus_index_commit], 3);
+        write_list(
+            root,
+            &StashList {
+                entries: vec![StashEntry {
+                    commit_hash: stash_commit,
+                    parent_hash: head_commit,
+                    timestamp: 3,
+                    message: "WIP".to_string(),
+                }],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(entry_index(&store, root, 0), Err(StashError::InvalidFormat)),
+            "a corrupt multi-parent wrapper must fail closed"
+        );
     }
 
     #[test]
