@@ -242,6 +242,8 @@ pub fn run(args: &[String]) -> u8 {
     // A merge being concluded may legitimately produce an empty tree (both
     // sides deleted everything), so the empty-index gate is skipped while a
     // merge is in progress — the two-parent merge commit is still meaningful.
+    // (A merge that made NO net change vs HEAD is caught below, after the tree
+    // is built, matching git's "nothing to commit".)
     if idx.entries.is_empty() && merge_state.is_none() {
         return emit_err(
             "nothing staged: index is empty; run `mkit add <path>` (or `mkit add .`) before commit",
@@ -258,6 +260,29 @@ pub fn run(args: &[String]) -> u8 {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("build tree: {e}"), exit::GENERAL_ERROR),
     };
+    // Refuse a no-op merge commit produced by discarding the staged merge
+    // (e.g. `reset` between `merge --no-commit` and `commit`), matching git's
+    // "nothing to commit". The staged tree equaling `ORIG_HEAD` is necessary
+    // but NOT sufficient — a legitimate merge of divergent branches can
+    // produce HEAD's tree (e.g. both sides deleted the same file). So only
+    // refuse when the recorded merge RESULT differs from HEAD yet the staged
+    // tree matches it: that means the merge changed something the user then
+    // reverted. (Absent result tree → don't refuse, preserving old behavior.)
+    if let Some(state) = &merge_state
+        && let Ok(Object::Commit(orig)) = store.read_object(&state.orig_head)
+        && orig.tree_hash == tree_hash
+        && conflict_state::read_result_tree(&mkit_dir)
+            .ok()
+            .flatten()
+            .is_some_and(|result| result != orig.tree_hash)
+    {
+        return emit_err(
+            "nothing to commit: the staged merge was discarded (its result \
+             differs from HEAD but the index matches HEAD); re-stage it or run \
+             `mkit merge --abort`",
+            exit::USAGE,
+        );
+    }
     // Parent selection. A normal commit builds on HEAD. An `--amend`
     // replaces HEAD, so it adopts HEAD's *parents* — the superseded
     // commit drops out of the chain entirely.

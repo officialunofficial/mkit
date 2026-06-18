@@ -593,6 +593,7 @@ pub fn ensure_abort_safe(
 ///
 /// # Errors
 /// Propagates store / filesystem failures.
+#[allow(clippy::too_many_lines)] // a pre-flight pass + the mutation pass, kept together
 pub fn reset_conflict_paths(
     root: &Path,
     store: &ObjectStore,
@@ -626,22 +627,48 @@ pub fn reset_conflict_paths(
         }
     }
 
-    // Pre-flight (no mutation): reject the abort up front if resetting any
-    // operation-added path (absent from target, not a kept pre-op directory)
-    // would require removing a NON-EMPTY untracked directory the user created
-    // there. The mutation loop below also fails closed on this, but checking
-    // first keeps abort all-or-nothing — otherwise earlier-sorted paths would
-    // already be reset, leaving the index out of sync with the worktree until
-    // the user retries.
+    // Pre-flight (no mutation): reject the abort up front for any path whose
+    // reset would fail mid-loop, so abort stays all-or-nothing regardless of
+    // which target the caller resets toward. (Rebase vets `ensure_abort_safe`
+    // against `orig_tree` but resets `reset_conflict_paths` toward
+    // `head_tree`; a path present in `head_tree` but outside `orig_tree`'s
+    // change set would otherwise escape every pre-check and only fail in the
+    // mutation loop, after earlier-sorted paths were already reset.) This
+    // covers every way the loop below can error: writing a file where a
+    // directory now sits, writing under an ancestor that is now a file, and
+    // removing an op-added path the user replaced with a non-empty directory.
     for path in &paths {
+        let abs = root.join(path);
         if target_map.contains_key(path.as_str()) {
-            continue; // restored from target content, not removed
+            // The loop will WRITE target content here.
+            if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
+                return Err(format!(
+                    "abort would replace directory '{path}' with a file; move or remove it first"
+                ));
+            }
+            let mut prefix = String::new();
+            for comp in path.split('/') {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(comp);
+                if prefix == *path {
+                    break; // the leaf is handled by the is_dir check above
+                }
+                if fs::symlink_metadata(root.join(&prefix)).is_ok_and(|m| !m.is_dir()) {
+                    return Err(format!(
+                        "abort would restore '{path}' but '{prefix}' is a file; \
+                         move or remove it first"
+                    ));
+                }
+            }
+            continue;
         }
         let dir_prefix = format!("{path}/");
         if target_map.keys().any(|k| k.starts_with(dir_prefix.as_str())) {
             continue; // a pre-op directory left in place
         }
-        let abs = root.join(path);
+        // The loop will REMOVE this op-added path; refuse a non-empty dir.
         if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir())
             && fs::read_dir(&abs).is_ok_and(|mut it| it.next().is_some())
         {

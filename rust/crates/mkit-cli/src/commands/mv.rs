@@ -595,9 +595,10 @@ fn plan_dir_move(
             exit::USAGE,
         ));
     }
-    // Refuse moving a directory into itself or a descendant (the on-disk
-    // rename would otherwise be nonsensical / lose data).
-    if dest_dir_rel == src_rel || dest_dir_rel.starts_with(&format!("{src_rel}/")) {
+    // Refuse moving a directory into a descendant of itself (the on-disk
+    // rename would otherwise be nonsensical / lose data). The exact
+    // same-path case is already handled above with a clearer message.
+    if dest_dir_rel.starts_with(&format!("{src_rel}/")) {
         return Err(emit_err(
             &format!("cannot move '{source}' into itself"),
             exit::USAGE,

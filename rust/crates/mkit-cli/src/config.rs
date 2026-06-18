@@ -714,17 +714,25 @@ pub fn core_allowed_suffix(key: &str) -> Option<String> {
 /// `splitn(3, '.')`, so the canonical form round-trips through it.
 #[must_use]
 pub fn normalize_config_key(key: &str) -> String {
-    let parts: Vec<&str> = key.splitn(3, '.').collect();
-    match parts.as_slice() {
-        [section, subsection, variable] => format!(
-            "{}.{subsection}.{}",
-            section.to_ascii_lowercase(),
-            variable.to_ascii_lowercase()
-        ),
-        [section, variable] => {
-            format!("{}.{}", section.to_ascii_lowercase(), variable.to_ascii_lowercase())
-        }
-        _ => key.to_ascii_lowercase(),
+    // git's key model: the FIRST `.` separates the section, the LAST `.`
+    // separates the variable, and everything between is the (case-sensitive)
+    // subsection — which may itself contain dots (`remote.a.b.url` →
+    // subsection `a.b`, variable `url`). Section + variable are lowercased;
+    // the subsection is preserved verbatim.
+    match key.split_once('.') {
+        Some((section, rest)) => match rest.rsplit_once('.') {
+            Some((subsection, variable)) => format!(
+                "{}.{subsection}.{}",
+                section.to_ascii_lowercase(),
+                variable.to_ascii_lowercase()
+            ),
+            None => format!(
+                "{}.{}",
+                section.to_ascii_lowercase(),
+                rest.to_ascii_lowercase()
+            ),
+        },
+        None => key.to_ascii_lowercase(),
     }
 }
 
@@ -1246,6 +1254,15 @@ mod tests {
         assert_eq!(
             normalize_config_key("branch.Release.remote"),
             "branch.Release.remote"
+        );
+        // 4+ segments: FIRST dot is the section, LAST dot is the variable;
+        // everything between is a (case-preserved) subsection that may itself
+        // contain dots — matching git (not `splitn(3)`, which would lump
+        // `URL.X` into the variable).
+        assert_eq!(normalize_config_key("Remote.A.B.URL"), "remote.A.B.url");
+        assert_eq!(
+            normalize_config_key("HTTP.https://Ex.com/.SSLVerify"),
+            "http.https://Ex.com/.sslverify"
         );
         // No dot: lowercased.
         assert_eq!(normalize_config_key("Foo"), "foo");

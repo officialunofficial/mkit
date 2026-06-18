@@ -1167,3 +1167,32 @@ fn merge_abort_atomic_when_conflict_path_replaced_by_nonempty_dir() {
     assert_eq!(rev(&repo, "HEAD"), head0, "HEAD untouched — merge still in progress");
     assert!(repo.mkit_dir().join("MERGE_HEAD").exists(), "merge state preserved (retryable)");
 }
+
+#[test]
+fn merge_commit_refused_when_staged_merge_was_reset_away() {
+    // `merge --no-commit` then `reset` (→ HEAD) then `commit`: the staged merge
+    // was discarded, so the index matches HEAD while the recorded merge result
+    // differs. mkit must error "nothing to commit" rather than fabricate a
+    // no-op two-parent commit (matching git).
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"base\n", "c0");
+    repo.ok(&["branch", "feature"]);
+    repo.ok(&["checkout", "feature"]);
+    repo.commit_file("b.txt", b"feat\n", "feat");
+    repo.ok(&["checkout", "main"]);
+    repo.commit_file("c.txt", b"main\n", "m2");
+
+    repo.ok(&["merge", "--no-commit", "feature"]);
+    repo.ok(&["reset"]); // discard the staged merge (index → HEAD)
+    let out = repo.run(&["commit", "-m", "noop merge"]);
+    assert!(!out.status.success(), "a reset-away merge must not commit");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("nothing to commit"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        repo.mkit_dir().join("MERGE_HEAD").exists(),
+        "the merge must remain in progress (abortable)"
+    );
+}
