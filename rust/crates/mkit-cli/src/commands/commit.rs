@@ -46,6 +46,7 @@ use crate::format;
     name = "mkit commit",
     about = "Create a signed commit from the staging index."
 )]
+#[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct CommitOptions {
     /// Commit message. If omitted, `$EDITOR` is launched.
     #[arg(short, long)]

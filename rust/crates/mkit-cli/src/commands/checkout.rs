@@ -57,6 +57,7 @@ struct CheckoutOpts {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // linear flow: create-branch + switch + report
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_shim::parse::<CheckoutOpts>("mkit checkout", args) {
         Ok(o) => o,

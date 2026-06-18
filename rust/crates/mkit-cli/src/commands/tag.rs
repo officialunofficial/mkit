@@ -32,6 +32,7 @@ const TAG_EDITMSG_TEMPLATE: &str =
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit tag", about = "List, create, or delete tags.")]
+#[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct TagOpts {
     /// Delete the named tag instead of creating one.
     #[arg(short = 'd', long)]

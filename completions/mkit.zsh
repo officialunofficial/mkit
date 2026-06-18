@@ -26,6 +26,8 @@ _mkit() {
         'ls-tree:List a tree'\''s entries (-r recurse, -z NUL)'
         'ls-files:List tracked or untracked files'
         'rev-parse:Resolve revisions to object ids'
+        'rev-list:List commit ids reachable from a revision'
+        'merge-base:Find a common ancestor of two commits'
         'show-ref:List refs as <hash> <refname> (--heads/--tags)'
         'for-each-ref:Iterate refs with an optional --format'
         'symbolic-ref:Read or write a symbolic ref (e.g. HEAD)'
@@ -37,6 +39,7 @@ _mkit() {
         'diff:Show changes'
         'branch:List, create, rename, or delete branches'
         'checkout:Switch HEAD to a branch and restore files'
+        'switch:Switch branches (git switch)'
         'clean:Remove untracked files (-n preview, -f delete, -d dirs, -x/-X ignored)'
         'tag:List/create/delete tags (-a/-s/-m for annotated/signed)'
         'config:Show or set configuration values'
@@ -139,9 +142,33 @@ _mkit() {
                         '(--name-only --name-status --stat)--name-status[list status letter + path]' \
                         '(--name-only --name-status --stat)--stat[diffstat: counts + graph + summary]' \
                         '--merge-base[diff against the merge base of the revisions]' \
+                        '(--exit-code --quiet)--exit-code[exit 1 when there are differences]' \
+                        '(--exit-code --quiet)--quiet[like --exit-code but print nothing]' \
                         '-z[NUL-terminate name-only/name-status records, raw paths]' \
                         '--help[show help]' \
                         '*:file:_files'
+                    ;;
+                switch)
+                    _arguments \
+                        '(-c -C)-c[create a new branch and switch to it]:new:' \
+                        '(-c -C)-C[create-or-reset a branch and switch to it]:new:' \
+                        '--help[show help]'
+                    ;;
+                checkout)
+                    _arguments \
+                        '(-b -B)-b[create a branch and switch to it]:new:' \
+                        '(-b -B)-B[create-or-reset a branch and switch to it]:new:' \
+                        '--help[show help]'
+                    ;;
+                merge-base)
+                    _arguments \
+                        '--is-ancestor[test ancestry: exit 0/1, no output]' \
+                        '--help[show help]'
+                    ;;
+                rev-list)
+                    _arguments \
+                        '--count[print the number of commits]' \
+                        '--help[show help]'
                     ;;
                 cat-file)
                     _arguments \
@@ -215,6 +242,10 @@ _mkit() {
                         '(-m --message)-m[commit message]:message:' \
                         '(-F --file)'{-F,--file}'[read the commit message from a file (- for stdin)]:file:_files' \
                         '--author[override the author identity]:spec:' \
+                        '(-q --quiet)'{-q,--quiet}'[suppress the commit summary]' \
+                        '(-S --gpg-sign)'{-S,--gpg-sign}'[accepted no-op (mkit always signs)]' \
+                        '--no-verify[accepted no-op (mkit has no hooks)]' \
+                        '--no-edit[keep the existing message on amend]' \
                         '--help[show help]'
                     ;;
                 log)
@@ -237,6 +268,8 @@ _mkit() {
                 push)
                     _arguments \
                         '--all[mirror every local branch]' \
+                        '(-f --force --force-with-lease)-f[overwrite the remote branch unconditionally]' \
+                        '(-u --set-upstream)'{-u,--set-upstream}'[record the pushed remote as upstream]' \
                         '(--force --force-with-lease)--force[overwrite the remote branch unconditionally (skip CAS)]' \
                         '(--force --force-with-lease)--force-with-lease[overwrite only if the remote has not moved]' \
                         '--dry-run[show what would be pushed]' \
@@ -258,6 +291,7 @@ _mkit() {
                         '--no-contains[only branches whose tip does NOT contain COMMIT]::commit:' \
                         '--merged[only branches merged into COMMIT (default HEAD)]::commit:' \
                         '--no-merged[only branches NOT merged into COMMIT (default HEAD)]::commit:' \
+                        '--show-current[print the current branch name]' \
                         '--format[output format]:format:(default json)' \
                         '--help[show help]'
                     ;;
@@ -267,6 +301,7 @@ _mkit() {
                         '(-s --sign)'{-s,--sign}'[create a signed (Ed25519) tag object]' \
                         '(-m --message)'{-m,--message}'[tag message]:message:' \
                         '(-d --delete)'{-d,--delete}'[delete a tag]' \
+                        '(-l --list)'{-l,--list}'[list tags, optional glob pattern]' \
                         '--author[override tagger identity]:spec:' \
                         '--help[show help]'
                     ;;
@@ -344,7 +379,9 @@ _mkit() {
                         'add[add a remote]' \
                         'set[alias for add]' \
                         'remove[remove a named remote]' \
-                        'rename[rename a named remote]'
+                        'rename[rename a named remote]' \
+                        'get-url[print a remote URL]' \
+                        'set-url[change a remote URL]'
                     ;;
                 key)
                     _values 'key subcommand' \

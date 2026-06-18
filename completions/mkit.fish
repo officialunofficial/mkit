@@ -15,7 +15,7 @@
 complete -c mkit -f
 
 set -l __mkit_subcommands \
-    init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout clean \
+    init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout switch clean \
     tag config merge push pull fetch stash clone remote key keygen \
     cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame verify \
     attest verify-attest version help
@@ -316,3 +316,24 @@ complete -c mkit -n "__fish_seen_subcommand_from git" \
 # Generic --help on any subcommand.
 complete -c mkit -n "__fish_seen_subcommand_from $__mkit_subcommands" \
     -l help -d "Show help for this subcommand"
+
+# --- git-UX-parity additions -------------------------------------------------
+# New commands.
+complete -c mkit -n "__fish_seen_subcommand_from switch" -s c -d "Create a new branch and switch to it" -r
+complete -c mkit -n "__fish_seen_subcommand_from switch" -s C -d "Create-or-reset a branch and switch to it" -r
+complete -c mkit -n "__fish_seen_subcommand_from checkout" -s b -d "Create a branch and switch to it" -r
+complete -c mkit -n "__fish_seen_subcommand_from checkout" -s B -d "Create-or-reset a branch and switch to it" -r
+complete -c mkit -n "__fish_seen_subcommand_from merge-base" -l is-ancestor -d "Test ancestry: exit 0/1, no output"
+complete -c mkit -n "__fish_seen_subcommand_from rev-list" -l count -d "Print the number of commits"
+# New flags on existing commands.
+complete -c mkit -n "__fish_seen_subcommand_from diff" -l exit-code -d "Exit 1 when there are differences"
+complete -c mkit -n "__fish_seen_subcommand_from diff" -l quiet -d "Like --exit-code but print nothing"
+complete -c mkit -n "__fish_seen_subcommand_from branch" -l show-current -d "Print the current branch name"
+complete -c mkit -n "__fish_seen_subcommand_from tag" -s l -l list -d "List tags, optional glob pattern"
+complete -c mkit -n "__fish_seen_subcommand_from commit" -s q -l quiet -d "Suppress the commit summary"
+complete -c mkit -n "__fish_seen_subcommand_from commit" -s S -l gpg-sign -d "Accepted no-op (mkit always signs)"
+complete -c mkit -n "__fish_seen_subcommand_from commit" -l no-verify -d "Accepted no-op (no hooks)"
+complete -c mkit -n "__fish_seen_subcommand_from push" -s f -d "Overwrite the remote branch (skip CAS)"
+complete -c mkit -n "__fish_seen_subcommand_from push" -s u -l set-upstream -d "Record the pushed remote as upstream"
+complete -c mkit -n "__fish_seen_subcommand_from remote" -s v -l verbose -d "List remotes with URLs and direction"
+complete -c mkit -n "__fish_seen_subcommand_from remote" -a "get-url set-url" -d "Read/change a remote URL"

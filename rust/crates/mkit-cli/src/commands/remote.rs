@@ -260,7 +260,7 @@ pub fn run(args: &[String]) -> u8 {
                     return emit_err(&format!("remote '{name}' not found"), exit::GENERAL_ERROR);
                 };
                 entry.url = url;
-                entry.remote_type = scheme.to_owned();
+                scheme.clone_into(&mut entry.remote_type);
             }
             match config::write(&cwd, &cfg) {
                 Ok(()) => exit::OK,

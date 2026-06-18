@@ -76,6 +76,7 @@ pub fn run(args: &[String]) -> u8 {
 }
 
 /// Default push: current branch → its upstream, CAS-protected.
+#[allow(clippy::too_many_lines)] // linear flow: resolve + no-op + push + report
 fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
     let branch = match mkit_core::refs::read_head(&mkit_dir) {

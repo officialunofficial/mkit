@@ -82,6 +82,7 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
+#[allow(clippy::too_many_lines)] // linear flow: apply + commit + report
 fn start(
     cwd: &std::path::Path,
     mkit_dir: &std::path::Path,

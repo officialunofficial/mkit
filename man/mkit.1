@@ -326,6 +326,21 @@ abbreviates (default 7, a BLAKE3 prefix);
 prints the current branch;
 .Fl Fl show-toplevel
 prints the repository root.
+.It Cm rev-list Oo Fl Fl count Oc Ar rev
+List the commit ids reachable from
+.Ar rev
+in reverse-chronological order, one per line;
+.Fl Fl count
+prints the number instead.
+.It Cm merge-base Oo Fl Fl is-ancestor Oc Ar a Ar b
+Print the best common ancestor of two commits
+.Pq exit 1, no output, when none .
+.Fl Fl is-ancestor
+tests whether
+.Ar a
+is an ancestor of
+.Ar b ,
+exiting 0 or 1 with no output.
 .It Cm show-ref Oo Fl Fl heads Oc Op Fl Fl tags
 List refs as
 .Ql <hash> <refname> ,
@@ -627,6 +642,28 @@ to
 is an explicit list selector.
 .It Cm checkout Ar branch
 Switch HEAD to a branch and restore files from its tree.
+Prints
+.Sy Switched to branch Ar n
+or
+.Sy Already on Ar n
+for a no-op switch.
+.It Cm checkout Oo Fl b | Fl B Oc Ar new Op Ar start
+Create
+.Pq Fl b , or create-or-reset Fl B
+a branch at
+.Ar start
+.Pq default HEAD
+and switch to it.
+.It Cm switch Ar branch
+Switch branches (git
+.Cm switch ) .
+A thin front-end over
+.Cm checkout
+with the same clobber guard and output.
+.It Cm switch Oo Fl c | Fl C Oc Ar new Op Ar start
+Create
+.Pq Fl c , or create-or-reset Fl C
+a branch and switch to it.
 .It Cm tag Oo Fl a | Fl s Oc Oo Fl m Ar msg Oc Oo Fl Fl author Ar spec Oc Oo Ar name Oc Op Ar commit
 List, create, or delete tags. With no arguments, prints the list of
 tags, marking each annotated or signed tag. With a

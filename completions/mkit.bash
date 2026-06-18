@@ -14,7 +14,7 @@ _mkit_complete() {
     local cur prev words cword
     _init_completion || return 0
 
-    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame verify attest verify-attest version help"
+    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame verify attest verify-attest version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.
     local top_flags="--help -h --version -V"
 
@@ -51,7 +51,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "-n --dry-run -f --force -d -x -X --help" -- "$cur") )
             ;;
         diff)
-            COMPREPLY=( $(compgen -W "--staged --cached --name-only --name-status --stat --merge-base -z --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--staged --cached --name-only --name-status --stat --merge-base --exit-code --quiet -z --help" -- "$cur") )
             ;;
         cat-file)
             COMPREPLY=( $(compgen -W "-t -s -p --batch --help" -- "$cur") )
@@ -81,7 +81,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--porcelain -s --short -z --help" -- "$cur") )
             ;;
         commit)
-            COMPREPLY=( $(compgen -W "-a --all --amend -m --message -F --file --author --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-a --all --amend -m --message -F --file --author -q --quiet -S --gpg-sign --no-verify --no-edit --help" -- "$cur") )
             ;;
         log)
             COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --graph -n --help" -- "$cur") )
@@ -90,13 +90,13 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )
             ;;
         push)
-            COMPREPLY=( $(compgen -W "--all --force --force-with-lease --dry-run --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--all -f --force --force-with-lease -u --set-upstream --dry-run --help" -- "$cur") )
             ;;
         clone)
             COMPREPLY=( $(compgen -W "--sparse --help" -- "$cur") )
             ;;
         branch)
-            COMPREPLY=( $(compgen -W "-v --verbose -d -D -m --list --contains --no-contains --merged --no-merged --format --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-v --verbose -d -D -m --list --contains --no-contains --merged --no-merged --show-current --format --help" -- "$cur") )
             ;;
         show)
             COMPREPLY=( $(compgen -W "--stat --help" -- "$cur") )
@@ -108,7 +108,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit -m --mainline --help" -- "$cur") )
             ;;
         tag)
-            COMPREPLY=( $(compgen -W "-a --annotate -s --sign -m --message -d --delete --author --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-a --annotate -s --sign -m --message -d --delete -l --list --author --help" -- "$cur") )
             ;;
         rebase)
             COMPREPLY=( $(compgen -W "-i --interactive --continue --skip --abort --help" -- "$cur") )
@@ -126,7 +126,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "save list pop apply drop clear show" -- "$cur") )
             ;;
         remote)
-            COMPREPLY=( $(compgen -W "add set remove rename" -- "$cur") )
+            COMPREPLY=( $(compgen -W "add set remove rename get-url set-url -v --verbose --help" -- "$cur") )
             ;;
         key)
             COMPREPLY=( $(compgen -W "generate list import export delete --help" -- "$cur") )
@@ -145,6 +145,18 @@ _mkit_complete() {
             ;;
         verify-attest)
             COMPREPLY=( $(compgen -W "--commit --trust-roots --algorithm --help" -- "$cur") )
+            ;;
+        switch)
+            COMPREPLY=( $(compgen -W "-c -C --help" -- "$cur") )
+            ;;
+        checkout)
+            COMPREPLY=( $(compgen -W "-b -B --help" -- "$cur") )
+            ;;
+        merge-base)
+            COMPREPLY=( $(compgen -W "--is-ancestor --help" -- "$cur") )
+            ;;
+        rev-list)
+            COMPREPLY=( $(compgen -W "--count --help" -- "$cur") )
             ;;
         *)
             COMPREPLY=( $(compgen -W "--help" -- "$cur") )

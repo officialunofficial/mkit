@@ -20,6 +20,28 @@ Commits are signed with your Ed25519 key and stored locally. Your author
 Identity is automatically derived from your signing key's public key —
 no config needed.
 
+## Global flags
+
+These are parsed **before** the subcommand (so they apply to repo
+discovery too), like git:
+
+- `mkit -C <path> <command>` — run as if `mkit` were started in `<path>`.
+  Repeatable; relative paths resolve against the prior `-C` (git semantics).
+- `mkit -c <key>=<value> <command>` — set a config value for this one
+  invocation. It is applied to the **effective** config only (never written
+  to disk) and flows through the same enforcement as a per-repo config
+  file: security-sensitive keys (`user.identity`, signing/transport trust —
+  the `REPO_FORBIDDEN_KEYS` set) are **refused** with a warning, and
+  dangerous `core.*` keys are dropped. So `-c` cannot spoof the signed
+  author or redirect trust; use it for inert/allowlisted keys (e.g.
+  `-c user.email=ci@example.com`).
+- `mkit --no-pager` / `-P` / `--paginate` — accepted **no-ops**. mkit never
+  paginates (better for agents and scripts); the flags exist so defensive
+  invocations like `mkit --no-pager log` don't error.
+
+`--git-dir`, `--work-tree`, and `--exec-path` are **non-goals** — mkit uses
+the `.mkit/` marker and has no split work-tree / exec-path model.
+
 ## Subcommand reference
 
 Working-tree commands:
@@ -298,6 +320,14 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   unresolvable revision, with or without it; `--show-toplevel` prints the
   repository root (the directory holding `.mkit`, found by walking up from
   cwd).
+- `mkit rev-list [--count] <rev>` — list the commit ids reachable from
+  `<rev>` in reverse-chronological (topological) order, one 64-hex id per
+  line; `--count` prints the number instead. Reuses `log`'s walk so the
+  order matches. (Range/filter forms are a follow-up.)
+- `mkit merge-base [--is-ancestor] <a> <b>` — print the best common
+  ancestor of two commits (64-hex; exit 1 with no output when there is
+  none). `--is-ancestor` tests whether `<a>` is an ancestor of `<b>`,
+  exiting 0 (yes) or 1 (no) with no output. Reuses the merge engine.
 - `mkit show-ref [--heads] [--tags]` — list refs as `<hash> <refname>`,
   sorted by ref name. Default shows `refs/heads/*`, `refs/tags/*`, and
   any `refs/remotes/*` tracking refs; `--heads`/`--tags` filter to one
@@ -442,7 +472,17 @@ Branches / refs:
   collisions would be overwritten. Non-colliding untracked files are
   preserved across the switch (git branch-switch semantics); tracked
   files the target tree drops are removed, with emptied directories
-  pruned.
+  pruned. Prints `Switched to branch '<n>'`, or `Already on '<n>'` for a
+  no-op switch (which still runs the dirty-worktree guard).
+- `mkit checkout -b|-B <new> [<start>]` — create a branch at the
+  start-point (default HEAD) and switch to it; `-b` refuses to clobber an
+  existing branch, `-B` create-or-resets. Prints `Switched to a new branch
+  '<new>'`.
+- `mkit switch <branch>` / `mkit switch -c|-C <new> [<start>]` — git's
+  modern branch-switch UX; a thin front-end over `checkout` with the same
+  clobber guard and output. `-c` creates (refuses to clobber), `-C`
+  create-or-resets, then switches. (`switch -`/`@{-1}` is a follow-up:
+  mkit does not yet track a previous branch.)
 - `mkit clean [-n] [-f] [-d] [-x|-X] [<path>...]` — remove untracked files
   from the worktree. **Destructive, so it refuses to delete without an
   explicit `-f`** (matching git's `clean.requireForce` default); `-n`
@@ -624,9 +664,11 @@ area — there are no unmerged index stages (SPEC-INDEX is unchanged).
 
 Remote / sync:
 
-- `mkit remote [--format=json]` — show the configured remotes.
-  `--format=json` emits the remote configuration as JSON; an unset
-  remote produces empty stdout.
+- `mkit remote [-v|--verbose] [--format=json]` — list the configured
+  remotes. Bare `remote` prints **one remote name per line** (git-shaped);
+  `-v`/`--verbose` adds the URL and direction
+  (`<name>\t<url> (fetch)` / `(push)`). `--format=json` emits the remote
+  configuration as JSON; an unset remote produces empty stdout.
 - `mkit remote add [<name>] <url>` — add a remote. With a `<name>`,
   registers a named remote (`remote.<name>.url`); without one, sets the
   flat default `remote_endpoint`. The URL MUST start with
@@ -640,6 +682,9 @@ Remote / sync:
   touches the user-scoped `trusted_remote_endpoint`, which is keyed by
   exact URL rather than remote name (so the #97 credential-trust gate is
   preserved).
+- `mkit remote get-url <name>` — print a remote's URL (use `default` for
+  the flat default remote). `mkit remote set-url <name> <url>` — change an
+  existing remote's URL (validated like `remote add`).
 - `mkit clone [--depth N] [--sparse ...] <url> [<dir>]` — clone a
   repository into `<dir>` (defaults to the final URL path segment).
   `--sparse <pattern>...` persists the patterns and materialises only the
@@ -931,6 +976,23 @@ ignore files (only the repo root is read), global excludes
 mkit's local commands intentionally diverge from Git in a few places.
 These are documented behaviours, not bugs, with tracked follow-ups:
 
+- **Human output goes to stderr; stdout is reserved for porcelain/data.**
+  mkit's command summaries (`commit`/`merge`/`push`/`status` …) are
+  shaped like git's but are written to **stderr**, so `mkit status` and
+  friends stay empty-on-clean in a pipeline and stdout carries only
+  machine output (`--porcelain`, `rev-parse`, `rev-list`, …). git puts
+  some of these on stdout; mkit keeps its stderr convention.
+- **Object ids in human output are 64-hex BLAKE3 prefixes**, not git's
+  40-hex SHA-1 — the inherent hash-length divergence. Output otherwise
+  matches git's shape (e.g. `To <url>` + `<old>..<new>  main -> main`,
+  `[main <hash>] <subject>` + diffstat, `Fast-forward`).
+- **The git object-count / delta-compression progress lines**
+  (`Enumerating/Counting/Compressing/Writing objects`,
+  `Total N (delta D)`) are **not** emitted: mkit's transport is
+  one-object-per-pack and computes no deltas, so those numbers would be
+  fabricated. A tracked follow-up may add an honest object count.
+- **`mkit remote`** lists remote **names only** (git-shaped); use
+  `mkit remote -v` for `<name>\t<url> (fetch)`/`(push)`.
 - **`mkit log --graph` is a no-op (v1 non-goal).** The flag is accepted
   for compatibility so existing scripts don't break, but no ASCII commit
   graph is drawn. Full graph parity is unachievable because mkit's default

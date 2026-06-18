@@ -208,7 +208,9 @@ fn named_remote_fetch_and_pull_use_their_namespace() {
     consumer.ok(&["remote", "add", "origin", &url]);
     let out = consumer.ok(&["fetch", "origin"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("fetched"), "fetch: {stderr}");
+    // git-shaped: `From <url>` + a per-ref summary line for the new branch.
+    assert!(stderr.contains("From "), "fetch: {stderr}");
+    assert!(stderr.contains("origin/main"), "fetch summary: {stderr}");
     assert!(
         refs::read_remote_ref(&consumer.mkit_dir(), "origin", "main")
             .unwrap()
