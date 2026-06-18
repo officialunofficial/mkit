@@ -632,3 +632,107 @@ fn cherry_pick_n_of_a_deletion_stages_the_removal() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Build a commit on `feature` that conflicts on `a.txt` and cleanly adds
+/// `b.txt`, then diverge `main` on `a.txt`. Leaves the repo on `main` with
+/// `feature` ready to conflict-merge/pick.
+fn conflict_plus_clean(repo: &Repo) -> String {
+    repo.commit_file("a.txt", b"base\n", "c0");
+    repo.ok(&["branch", "feature"]);
+    repo.ok(&["checkout", "feature"]);
+    repo.write("a.txt", b"theirs\n");
+    repo.write("b.txt", b"clean add from feature\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "feat"]);
+    let tip = rev(repo, "HEAD");
+    repo.ok(&["checkout", "main"]);
+    repo.write("a.txt", b"ours\n");
+    repo.ok(&["add", "a.txt"]);
+    repo.ok(&["commit", "-m", "main2"]);
+    tip
+}
+
+#[test]
+fn merge_abort_discards_operation_authored_clean_paths() {
+    // A conflicted merge that also cleanly adds b.txt: `--abort` must discard
+    // b.txt (it is operation-authored, not user work) and succeed.
+    let repo = Repo::new();
+    conflict_plus_clean(&repo);
+    let head0 = rev(&repo, "HEAD");
+    let out = repo.run(&["merge", "feature"]);
+    assert!(!out.status.success(), "merge should pause on the a.txt conflict");
+    assert!(repo.path().join("b.txt").exists(), "the clean add was materialized");
+
+    repo.ok(&["merge", "--abort"]);
+    assert!(!repo.path().join("b.txt").exists(), "abort discarded the clean op-authored file");
+    assert_eq!(rev(&repo, "HEAD"), head0, "HEAD restored");
+    assert!(stdout(&repo.ok(&["status", "--porcelain"])).trim().is_empty());
+}
+
+#[test]
+fn merge_abort_still_protects_unrelated_staged_work() {
+    let repo = Repo::new();
+    conflict_plus_clean(&repo);
+    repo.run(&["merge", "feature"]);
+    repo.write("unrelated.txt", b"my own work\n");
+    repo.ok(&["add", "unrelated.txt"]);
+    let out = repo.run(&["merge", "--abort"]);
+    assert!(!out.status.success(), "abort must refuse to discard unrelated staged work");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unrelated.txt"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cherry_pick_continue_preserves_unstaged_clean_path_edits() {
+    // After resolving the a.txt conflict, an UNSTAGED edit to the cleanly
+    // applied b.txt must survive `--continue` (which used to overwrite the
+    // worktree from the committed tree).
+    let repo = Repo::new();
+    let pick = conflict_plus_clean(&repo);
+    let out = repo.run(&["cherry-pick", &pick]);
+    assert!(!out.status.success(), "cherry-pick should pause on a.txt");
+    repo.write("a.txt", b"resolved\n");
+    repo.ok(&["add", "a.txt"]);
+    repo.write("b.txt", b"my unstaged edit\n"); // clean path, not re-staged
+    repo.ok(&["cherry-pick", "--continue"]);
+    assert_eq!(
+        std::fs::read(repo.path().join("b.txt")).unwrap(),
+        b"my unstaged edit\n",
+        "the unstaged edit on the clean path must survive --continue"
+    );
+}
+
+#[test]
+fn diff_merge_base_accepts_tracked_but_deleted_pathspec() {
+    // A tracked file deleted from the worktree is still a valid pathspec for
+    // the second positional, even though it has no `/` and is absent on disk.
+    let repo = Repo::new();
+    clean_diverge(&repo); // tracked a.txt (and c.txt) on main; feature exists
+    std::fs::remove_file(repo.path().join("a.txt")).unwrap(); // still in the index
+    let out = repo.run(&["diff", "--merge-base", "feature", "a.txt", "--name-only"]);
+    assert!(
+        out.status.success(),
+        "tracked-but-deleted pathspec must be accepted, not rejected as a bad rev: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn stash_index_round_trip_in_an_unborn_repo() {
+    // No commits yet: stash a staged file, then `pop --index` must restore it
+    // as STAGED (not untracked) — the index snapshot is the sole stash parent.
+    let repo = Repo::new();
+    repo.write("s.txt", b"staged\n");
+    repo.ok(&["add", "s.txt"]);
+    repo.ok(&["stash"]);
+    assert!(!repo.path().join("s.txt").exists(), "stash removed the staged file");
+    repo.ok(&["stash", "pop", "--index"]);
+    let status = stdout(&repo.ok(&["status", "--porcelain"]));
+    assert!(
+        status.contains("A  s.txt"),
+        "the file must come back STAGED, not untracked: {status}"
+    );
+}

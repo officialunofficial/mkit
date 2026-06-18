@@ -495,10 +495,10 @@ fn resolve_merge_base_endpoints(
             }
             // A 2nd positional that fails to resolve is treated as a pathspec
             // ONLY when it is clearly path-shaped (names an existing worktree
-            // path, or contains `/`). Otherwise it is an ambiguous bad
-            // revision — a typo'd `<b>` — which we surface, rather than
-            // silently falling back to the single-rev form and emitting an
-            // empty diff (matching git's "ambiguous argument" behavior).
+            // path, a tracked path, or contains `/`). Otherwise it is an
+            // ambiguous bad revision — a typo'd `<b>` — which we surface,
+            // rather than silently falling back to the single-rev form and
+            // emitting an empty diff (matching git's "ambiguous argument").
             Err(e)
                 if matches!(e, revspec::RevError::Unknown(_))
                     && looks_like_pathspec(cwd, second) => {}
@@ -794,11 +794,21 @@ fn looks_like_rev_request(s: &str) -> bool {
 }
 
 /// Is `arg` clearly a pathspec rather than a (typo'd) revision? True when it
-/// names an existing worktree path or contains a `/` separator. Used by
-/// `--merge-base` to keep a bad second revision from silently degrading into
-/// an empty-output pathspec filter.
+/// contains a `/`, names an existing worktree path, OR matches a tracked
+/// index path (a file/dir tracked but deleted from the worktree is still a
+/// valid pathspec, as in git). Used by `--merge-base` to keep a bad second
+/// revision from silently degrading into an empty-output pathspec filter.
 fn looks_like_pathspec(cwd: &std::path::Path, arg: &str) -> bool {
-    arg.contains('/') || cwd.join(arg).symlink_metadata().is_ok()
+    if arg.contains('/') || cwd.join(arg).symlink_metadata().is_ok() {
+        return true;
+    }
+    let Ok(idx) = mkit_core::index::read_index(cwd) else {
+        return false;
+    };
+    let prefix = format!("{arg}/");
+    idx.entries
+        .iter()
+        .any(|e| e.path == arg || e.path.starts_with(&prefix))
 }
 
 fn head_tree(store: &ObjectStore, mkit_dir: &std::path::Path) -> Result<Option<Hash>, String> {

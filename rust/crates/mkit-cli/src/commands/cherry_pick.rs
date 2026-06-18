@@ -168,6 +168,11 @@ fn start(
         if let Err(e) = conflict_state::write_cherry_pick_state(mkit_dir, &state, &records) {
             return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
         }
+        // Record the result tree so `--abort` treats the operation's clean
+        // hunks (not just conflict paths) as discardable.
+        if let Err(e) = conflict_state::write_result_tree(mkit_dir, &result.tree_hash) {
+            return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
+        }
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
@@ -289,7 +294,11 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
         Ok(h) => h,
         Err(code) => return code,
     };
-    if let Err(e) = super::restore_worktree_and_index(cwd, store, tree_hash) {
+    // Sync the index to the committed tree WITHOUT rewriting the worktree:
+    // the tree was built from the index, so the worktree already holds the
+    // resolved content; restoring it would clobber any unstaged edits the
+    // user made (e.g. on a cleanly-merged path) before `--continue`.
+    if let Err(e) = super::sync_index_to_tree(cwd, store, tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
     if let Err(e) = advance_head(mkit_dir, &commit_hash) {
@@ -346,14 +355,19 @@ fn restore_to(
     records: &[mkit_core::ops::conflict_state::ConflictRecord],
 ) -> Result<(), u8> {
     let target_tree = load_tree_hash(store, target)?;
+    // The operation's result tree lets the guards treat its clean hunks (not
+    // just conflict paths) as discardable.
+    let op_result = conflict_state::read_result_tree(mkit_dir).ok().flatten();
     // Pre-flight: refuse before any mutation when the abort would clobber
-    // genuine user work on a non-conflict path (the reset below discards
+    // genuine user work on a non-discardable path (the reset below discards
     // the user's in-progress conflict resolution, so it must not run if
     // the abort is going to fail).
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree) {
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, records, target_tree) {
+    if let Err(e) =
+        super::conflict::reset_conflict_paths(cwd, store, records, target_tree, op_result)
+    {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     if let Err(e) = super::ensure_restore_safe(cwd, store, target_tree) {

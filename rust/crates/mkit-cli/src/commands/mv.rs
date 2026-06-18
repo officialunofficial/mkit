@@ -353,6 +353,14 @@ fn plan_move(
             exit::GENERAL_ERROR,
         ));
     }
+    // Safety: refuse a source reached through a symlinked ancestor — it could
+    // point outside the repo (see `has_symlinked_ancestor`).
+    if has_symlinked_ancestor(cwd, &src_rel) {
+        return Err(emit_err(
+            &format!("bad source: {source} (path traverses a symlink)"),
+            exit::GENERAL_ERROR,
+        ));
+    }
     // Safety: keep writes inside the repo — refuse a destination whose real
     // parent (resolving symlinks) escapes the repository root.
     if !target_within_repo(root_canon, &target_abs) {
@@ -380,6 +388,22 @@ fn plan_move(
                 exit::GENERAL_ERROR,
             ));
         }
+    }
+    // A tracked file at an ANCESTOR of the destination would leave the index
+    // with both `<ancestor>` (a file) and `<ancestor>/…/target` — a file/dir
+    // conflict. This is missed by the on-disk checks when that ancestor was
+    // deleted from the worktree (e.g. tracked file `dst`, removed from disk,
+    // a directory `dst/` recreated, then `mv src dst`).
+    if let Some(anc) = idx.entries.iter().find(|e| {
+        e.status != EntryStatus::Removed && target_rel.starts_with(&format!("{}/", e.path))
+    }) {
+        return Err(emit_err(
+            &format!(
+                "destination nests under tracked file '{}'; move or remove it first",
+                anc.path
+            ),
+            exit::GENERAL_ERROR,
+        ));
     }
 
     Ok(PlannedMove {
@@ -464,6 +488,15 @@ fn plan_dir_move(
             exit::GENERAL_ERROR,
         ));
     }
+    // Safety: also refuse if an ANCESTOR component is a symlink — the leaf
+    // check above only proves the final component is a real directory, but a
+    // symlinked ancestor could place that directory outside the repo.
+    if has_symlinked_ancestor(cwd, src_rel) {
+        return Err(emit_err(
+            &format!("bad source: {source} (path traverses a symlink)"),
+            exit::GENERAL_ERROR,
+        ));
+    }
 
     // Where the directory lands: a plain rename to `dest_rel`, or — when the
     // destination is an existing directory (or there are multiple sources) —
@@ -519,10 +552,12 @@ fn plan_dir_move(
     let dest_prefix = format!("{dest_dir_rel}/");
     if idx.entries.iter().any(|e| {
         e.status != EntryStatus::Removed
-            && (e.path == dest_dir_rel || e.path.starts_with(&dest_prefix))
+            && (e.path == dest_dir_rel                         // dest tracked as a file
+                || e.path.starts_with(&dest_prefix)            // dest subtree tracked
+                || dest_dir_rel.starts_with(&format!("{}/", e.path))) // tracked ANCESTOR file
     }) {
         return Err(emit_err(
-            &format!("destination is already tracked: {dest_dir_rel}"),
+            &format!("destination conflicts with a tracked path: {dest_dir_rel}"),
             exit::GENERAL_ERROR,
         ));
     }
@@ -617,6 +652,25 @@ fn apply_dir_to_index(idx: &mut index::Index, m: &PlannedDirMove) {
 /// [`Path::exists`], which follows the link and reports `false`).
 fn path_present(p: &Path) -> bool {
     p.symlink_metadata().is_ok()
+}
+
+/// Does any ANCESTOR component of repo-relative `rel` (under `root`) resolve
+/// through a symlink? `Path::symlink_metadata` only declines to follow the
+/// *final* component, so a tracked path like `link/dir/file` whose `link`
+/// component is replaced by a symlink to an external directory would let `mv`
+/// operate on content outside the repo. The leaf is excluded — a file move
+/// may legitimately move a tracked symlink, and directory sources validate
+/// the leaf separately.
+fn has_symlinked_ancestor(root: &Path, rel: &str) -> bool {
+    let comps: Vec<&str> = rel.split('/').filter(|c| !c.is_empty()).collect();
+    let mut p = root.to_path_buf();
+    for comp in comps.iter().take(comps.len().saturating_sub(1)) {
+        p.push(comp);
+        if std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Remove a file or symlink at `p` (used to clear a destination under -f).

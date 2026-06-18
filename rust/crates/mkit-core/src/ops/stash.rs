@@ -206,11 +206,29 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
     list.entries.insert(0, new_entry);
     write_list(repo_root, &list)?;
 
-    // Restore the worktree to HEAD's tree (if any).
-    if let Some(hh) = head_hash {
-        let head_obj = store.read_object(&hh)?;
-        if let Object::Commit(c) = head_obj {
-            restore::restore_tree(store, c.tree_hash, repo_root, &RestoreOptions::default())?;
+    // Restore the worktree to HEAD's tree (if any). In an UNBORN repo there
+    // is no HEAD to restore to, so remove the staged (tracked) files we just
+    // stashed — leaving untracked files alone — instead of leaving them
+    // behind as untracked, which would make a later `pop` refuse to overwrite
+    // them.
+    match head_hash {
+        Some(hh) => {
+            let head_obj = store.read_object(&hh)?;
+            if let Object::Commit(c) = head_obj {
+                restore::restore_tree(store, c.tree_hash, repo_root, &RestoreOptions::default())?;
+            }
+        }
+        None => {
+            for e in &staged.entries {
+                if e.status != index::EntryStatus::Removed {
+                    let abs = repo_root.join(&e.path);
+                    if let Err(err) = std::fs::remove_file(&abs)
+                        && err.kind() != std::io::ErrorKind::NotFound
+                    {
+                        return Err(StashError::Io(err));
+                    }
+                }
+            }
         }
     }
 
@@ -271,18 +289,20 @@ pub fn entry_index(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashRe
     let Object::Commit(stash_commit) = store.read_object(&list.entries[idx].commit_hash)? else {
         return Err(StashError::NotACommit);
     };
-    // The index snapshot is the last parent only when a HEAD parent also
-    // exists (i.e. `parents == [HEAD, index]`). A lone parent is the
-    // historical `[HEAD]` form with no index snapshot.
-    let Some(index_commit) = stash_commit.parents.get(1) else {
+    // The index snapshot, when present, is always the LAST parent:
+    //   [HEAD, index]  (normal)           -> parents[1]
+    //   [index]        (unborn, no HEAD)  -> parents[0]
+    //   [HEAD]         (legacy, no index) -> parents[0] is HEAD; its tree is a
+    //                                        normal root (no `i` wrapper) -> None
+    let Some(index_commit) = stash_commit.parents.last() else {
         return Ok(None);
     };
     let Object::Commit(index_commit) = store.read_object(index_commit)? else {
         return Err(StashError::NotACommit);
     };
     // The index commit's tree is the wrapper; the `i` entry is the serialized
-    // index blob. Anything else (e.g. an earlier in-development layout) has no
-    // recoverable index → no-op.
+    // index blob. Anything else (a HEAD root tree, or an earlier layout) has
+    // no recoverable index → no-op.
     let Object::Tree(wrapper) = store.read_object(&index_commit.tree_hash)? else {
         return Ok(None);
     };
@@ -292,7 +312,11 @@ pub fn entry_index(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashRe
     let Object::Blob(blob) = store.read_object(&blob_entry.object_hash)? else {
         return Ok(None);
     };
-    Ok(Some(index::deserialize(&blob.data)?))
+    // A real HEAD root tree could (rarely) carry a top-level `i` file; only
+    // treat it as an index snapshot if its bytes actually deserialize as one
+    // (the index format is magic-tagged), otherwise there is no index to
+    // restore.
+    Ok(index::deserialize(&blob.data).ok())
 }
 
 /// Pop a stash: restore its tree into the worktree and remove the

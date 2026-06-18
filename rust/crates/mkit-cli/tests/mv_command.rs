@@ -344,8 +344,8 @@ fn mv_dir_refuses_destination_tracked_but_deleted_from_disk() {
     let out = run_in(root, x, &["mv", "src", "dst"]);
     assert!(!out.status.success(), "must refuse: {out:?}");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("already tracked"),
-        "expected an already-tracked message: {out:?}"
+        String::from_utf8_lossy(&out.stderr).contains("tracked"),
+        "expected a tracked-path conflict message: {out:?}"
     );
 }
 
@@ -364,5 +364,44 @@ fn mv_refuses_symlinked_directory_source() {
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("not a directory"),
         "expected a not-a-directory message: {out:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn mv_refuses_source_through_a_symlinked_ancestor() {
+    // A tracked `link/dir/file` whose `link` ANCESTOR is replaced by a
+    // symlink to an external directory must not be moved — that would operate
+    // on content outside the repo. `symlink_metadata` only declines the final
+    // component, so the ancestor walk is what catches this.
+    let (td, xdg) = repo(&[("link/dir/file.txt", b"x\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    let external = tempfile::tempdir().unwrap();
+    fs::write(external.path().join("file.txt"), b"external\n").unwrap();
+    fs::remove_dir_all(root.join("link")).unwrap();
+    std::os::unix::fs::symlink(external.path(), root.join("link")).unwrap();
+
+    let out = run_in(root, x, &["mv", "link/dir", "newdir"]);
+    assert!(!out.status.success(), "must refuse a symlinked-ancestor source: {out:?}");
+    assert!(
+        external.path().join("file.txt").exists(),
+        "external content must be untouched"
+    );
+}
+
+#[test]
+fn mv_dir_refuses_destination_nested_under_a_tracked_ancestor_file() {
+    // `dst` is a tracked FILE, deleted from disk and recreated as a directory.
+    // `mv src dst` would stage `dst/src/...` while the index still tracks the
+    // file `dst` — a file/dir conflict. Refuse it.
+    let (td, xdg) = repo(&[("src/a.txt", b"a\n"), ("dst", b"file\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::remove_file(root.join("dst")).unwrap(); // still tracked as a file
+    fs::create_dir(root.join("dst")).unwrap(); // recreated as a directory on disk
+    let out = run_in(root, x, &["mv", "src", "dst"]);
+    assert!(!out.status.success(), "must refuse: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("tracked"),
+        "expected a tracked-path conflict message: {out:?}"
     );
 }

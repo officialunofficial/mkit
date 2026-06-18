@@ -419,11 +419,9 @@ pub fn ensure_abort_safe(
     store: &ObjectStore,
     records: &[ConflictRecord],
     target_tree: Hash,
+    op_result_tree: Option<Hash>,
 ) -> Result<(), String> {
     use std::collections::HashSet;
-
-    let conflict_paths: HashSet<&str> = records.iter().map(|r| r.path.as_str()).collect();
-    let is_conflict = |p: &str| conflict_paths.contains(p);
 
     let current_tree = super::current_head_tree(root, store)?;
     let idx = super::read_or_seed_index_from_head(root, store)?;
@@ -432,10 +430,27 @@ pub fn ensure_abort_safe(
     let index_tree = mkit_core::worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
         .map_err(|e| format!("check index state: {e}"))?;
 
+    // Paths the aborting operation itself authored are discardable, not user
+    // work: the recorded conflict paths PLUS every path the operation changed
+    // vs the pre-op HEAD (its clean hunks — e.g. a file the merge added
+    // without conflict). With the result tree we derive the latter; without
+    // it (legacy state) we fall back to the conflict records alone.
+    let conflict_paths: HashSet<String> = records.iter().map(|r| r.path.clone()).collect();
+    let mut discardable = conflict_paths;
+    if let Some(result_tree) = op_result_tree {
+        let authored =
+            mkit_core::ops::diff::diff_trees(&snapshot, current_tree, Some(result_tree))
+                .map_err(|e| format!("check operation changes: {e}"))?;
+        for e in authored.entries {
+            discardable.insert(e.path);
+        }
+    }
+    let is_discardable = |p: &str| discardable.contains(p);
+
     // Staged changes on a non-conflict path.
     let staged = mkit_core::ops::diff::diff_trees(&snapshot, current_tree, Some(index_tree))
         .map_err(|e| format!("check staged changes: {e}"))?;
-    if let Some(entry) = staged.entries.iter().find(|e| !is_conflict(&e.path)) {
+    if let Some(entry) = staged.entries.iter().find(|e| !is_discardable(&e.path)) {
         return Err(format!(
             "abort would overwrite staged changes; commit, stash, or reset '{}' first",
             entry.path
@@ -453,7 +468,7 @@ pub fn ensure_abort_safe(
     if let Some(entry) = unstaged
         .entries
         .iter()
-        .find(|e| e.kind != mkit_core::ops::diff::DiffKind::Added && !is_conflict(&e.path))
+        .find(|e| e.kind != mkit_core::ops::diff::DiffKind::Added && !is_discardable(&e.path))
     {
         return Err(format!(
             "abort would overwrite local changes; commit, stash, or reset '{}' first",
@@ -469,13 +484,13 @@ pub fn ensure_abort_safe(
             .entries
             .into_iter()
             .filter(|e| e.kind != mkit_core::ops::diff::DiffKind::Removed)
-            .filter(|e| !is_conflict(&e.path))
+            .filter(|e| !is_discardable(&e.path))
             .map(|e| e.path)
             .collect();
     if !target_writes.is_empty() {
         for entry in &unstaged.entries {
             if entry.kind == mkit_core::ops::diff::DiffKind::Added
-                && !is_conflict(&entry.path)
+                && !is_discardable(&entry.path)
                 && target_writes.iter().any(|t| t == &entry.path)
             {
                 return Err(format!(
@@ -506,8 +521,9 @@ pub fn reset_conflict_paths(
     store: &ObjectStore,
     records: &[ConflictRecord],
     target_tree: Hash,
+    op_result_tree: Option<Hash>,
 ) -> Result<(), String> {
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
 
     // Flatten the target tree into path → (mode, hash).
     let target_idx =
@@ -518,11 +534,26 @@ pub fn reset_conflict_paths(
         .map(|e| (e.path.as_str(), e))
         .collect();
 
+    // Reset every path the operation authored: the recorded conflict paths
+    // PLUS the operation's clean hunks (paths it changed vs the pre-op HEAD).
+    // The reset is purely target-content driven, so it generalizes from
+    // conflict records to any operation-authored path.
+    let mut paths: BTreeSet<String> = records.iter().map(|r| r.path.clone()).collect();
+    if let Some(result_tree) = op_result_tree {
+        let snapshot = mkit_core::store::EphemeralSink::new(store);
+        let authored =
+            mkit_core::ops::diff::diff_trees(&snapshot, Some(target_tree), Some(result_tree))
+                .map_err(|e| format!("check operation changes: {e}"))?;
+        for e in authored.entries {
+            paths.insert(e.path);
+        }
+    }
+
     let mut idx = super::read_or_seed_index_from_head(root, store)?;
 
-    for r in records {
-        let abs = root.join(&r.path);
-        if let Some(target_entry) = target_map.get(r.path.as_str()) {
+    for path in &paths {
+        let abs = root.join(path);
+        if let Some(target_entry) = target_map.get(path.as_str()) {
             // Restore the path's pre-op content + index entry, honouring
             // the recorded symlink/exec mode (#214).
             match target_entry.status {
@@ -535,7 +566,7 @@ pub fn reset_conflict_paths(
                 _ => write_blob_to_worktree(store, &abs, target_entry.object_hash, false)?,
             }
             let entry = (*target_entry).clone();
-            if let Some(pos) = idx.find_entry(&r.path) {
+            if let Some(pos) = idx.find_entry(path) {
                 idx.entries[pos] = entry;
             } else {
                 idx.entries.push(entry);
@@ -548,7 +579,7 @@ pub fn reset_conflict_paths(
             {
                 return Err(format!("remove {}: {e}", abs.display()));
             }
-            if let Some(pos) = idx.find_entry(&r.path) {
+            if let Some(pos) = idx.find_entry(path) {
                 idx.entries.remove(pos);
             }
         }

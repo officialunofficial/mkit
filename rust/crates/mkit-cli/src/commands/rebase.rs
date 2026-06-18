@@ -270,7 +270,10 @@ fn skip_paused_commit(
         _ => state.onto,
     };
     let head_tree = load_tree_hash(store, head_hash)?;
-    if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, records, head_tree) {
+    // Also discard the skipped step's clean hunks (not just conflict paths).
+    let op_result = conflict_state::read_result_tree(rebase_dir).ok().flatten();
+    if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, records, head_tree, op_result)
+    {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     state.consume_front();
@@ -332,7 +335,11 @@ fn commit_resolved_commit(
         plan.message,
         tree_hash,
     )?;
-    if let Err(e) = super::restore_worktree_and_index(cwd, store, tree_hash) {
+    // Sync the index to the committed tree WITHOUT rewriting the worktree:
+    // the tree was built from the index, so the worktree already holds the
+    // resolved content; restoring it would clobber unstaged edits made on a
+    // cleanly-replayed path before `--continue`.
+    if let Err(e) = super::sync_index_to_tree(cwd, store, tree_hash) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     if let Err(e) = refs::write_head_detached(mkit_dir, &new_hash) {
@@ -383,16 +390,18 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
     };
+    // The paused step's result tree lets the guards treat its clean hunks
+    // (not just conflict paths) as discardable.
+    let op_result = conflict_state::read_result_tree(&rebase_dir).ok().flatten();
     // Pre-flight: refuse before any mutation when the abort would clobber
-    // genuine user work on a non-conflict path. The conflict-path reset
-    // below is destructive, so it must not run if the abort is going to
-    // be refused by the guarded restore. The final restore target is
-    // `orig_tree`, so the safety of non-conflict paths is judged against
-    // it.
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, &records, orig_tree) {
+    // genuine user work on a non-discardable path. The reset below is
+    // destructive, so it must not run if the abort is going to be refused by
+    // the guarded restore. The final restore target is `orig_tree`, so the
+    // safety of non-discardable paths is judged against it.
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, &records, orig_tree, op_result) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
-    if !records.is_empty() {
+    if !records.is_empty() || op_result.is_some() {
         let head_hash = match refs::resolve_head(mkit_dir) {
             Ok(Some(h)) => h,
             _ => state.onto,
@@ -401,7 +410,9 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
             Ok(t) => t,
             Err(c) => return c,
         };
-        if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, &records, head_tree) {
+        if let Err(e) =
+            super::conflict::reset_conflict_paths(cwd, store, &records, head_tree, op_result)
+        {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
     }
@@ -457,6 +468,10 @@ fn replay(
     let rebase_dir = rebase_dir_path(mkit_dir);
 
     while !state.todo.is_empty() {
+        // Clear any result tree left by a prior (now-resolved) conflict step
+        // so a later non-conflict pause (e.g. interactive `edit`) doesn't let
+        // `--abort`/`--skip` read a stale operation result.
+        conflict_state::clear_result_tree(&rebase_dir);
         let target = state.todo[0];
         let head_hash = match refs::resolve_head(mkit_dir) {
             Ok(Some(h)) => h,
@@ -498,6 +513,11 @@ fn replay(
                 Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
             };
             if let Err(e) = conflict_state::write_conflicts(&rebase_dir, &records) {
+                return emit_err(&format!("write conflicts: {e}"), exit::CANTCREAT);
+            }
+            // Record the result tree so `--abort` treats this step's clean
+            // hunks (not just conflict paths) as discardable.
+            if let Err(e) = conflict_state::write_result_tree(&rebase_dir, &result.tree_hash) {
                 return emit_err(&format!("write conflicts: {e}"), exit::CANTCREAT);
             }
             let mut stderr = std::io::stderr().lock();

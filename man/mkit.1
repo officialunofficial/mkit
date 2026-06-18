@@ -882,11 +882,24 @@ Manager on Windows). Unlike
 .Cm keygen
 (which writes to a repo-local file), these keys persist across repos.
 .It Cm keygen Oo Fl Fl algorithm Cm ed25519 | Cm secp256k1 | Cm p256 Oc Oo Fl Fl force Oc Op Fl Fl print-pubkey
-Generate a fresh keypair in
-.Pa .mkit/keys/default.key .
+Generate a fresh keypair.
 .Fl Fl algorithm
 selects the key type
 .Pq default Cm ed25519 ;
+the destination depends on it:
+.Cm ed25519
+writes the signing key to
+.Pa .mkit/keys/default.key ,
+while
+.Cm secp256k1
+and
+.Cm p256
+write attestation keys to
+.Pa .mkit/keys/secp256k1.key
+and
+.Pa .mkit/keys/p256.key
+respectively (each overridable via
+.Cm attest. Ns Ar algo Ns Cm _key_path ) .
 .Fl Fl force
 overwrites an existing key file at the target path; and
 .Fl Fl print-pubkey
