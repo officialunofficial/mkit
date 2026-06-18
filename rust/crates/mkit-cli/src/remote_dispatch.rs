@@ -24,12 +24,12 @@ use std::sync::Arc;
 use mkit_core::hash::Hash;
 use mkit_core::object::Object;
 use mkit_core::ops::merge::is_ancestor;
-use mkit_core::ops::reachable_objects;
 use mkit_core::ops::restore;
-use mkit_core::pack::{PackError, PackReader};
+use mkit_core::pack::{self, PackError, PackReader, PackWriter};
 use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
+use mkit_core::transfer::{self, PackListError};
 use mkit_transport_file::FileTransport;
 use mkit_transport_http::HttpTransport;
 use mkit_transport_s3::S3Transport;
@@ -66,6 +66,8 @@ pub enum DispatchError {
     Store(#[from] StoreError),
     #[error("pack: {0}")]
     Pack(#[from] PackError),
+    #[error("packlist: {0}")]
+    PackList(#[from] PackListError),
     #[error("ssh init: {0}")]
     SshInit(#[from] SshInitError),
     #[error("pull requires HEAD to point at a branch")]
@@ -236,19 +238,10 @@ fn load_or_ephemeral_client_key()
     PrivateKey::decode(secret.as_ref()).map_err(|e| map_err(e.to_string()))
 }
 
-/// Push every ref under `refs/heads/` to the remote, assembling a pack
-/// of every object reachable from the branch tip that the remote does
-/// not already hold. Returns the count of refs pushed.
-///
-/// Per-ref flow:
-/// 1. Resolve the local branch tip.
-/// 2. Walk reachable objects (`ops::reachable_objects`).
-/// 3. Filter out any object the remote already has via
-///    [`Transport::pack_exists`] (single-object packs, so the digest ==
-///    pack key).
-/// 4. Build a pack with `PackWriter`; the whole-pack digest is the
-///    `PackKey` used by [`Transport::upload_pack`].
-/// 5. Publish the ref with [`Transport::write_ref`].
+/// Push every ref under `refs/heads/` to the remote. Returns the count of
+/// refs pushed. Each branch is published with [`push_branch`], which sends
+/// one delta-compressed pack of the objects the remote lacks, advertises it
+/// via the `refs/mkit/packmap/<branch>` ref, then moves the branch ref.
 pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {
     push_all_with(cwd, tx, None, false)
 }
@@ -369,8 +362,41 @@ pub fn push_branch_tracked(
     Ok(tip)
 }
 
-/// Push one branch: upload every object reachable from `tip` that the
-/// remote lacks, then CAS-write `refs/heads/<branch>` under `condition`.
+/// Ref under which a branch's transfer packlist key is advertised. The
+/// value is the BLAKE3 of the packlist blob (stored as a pack object); the
+/// fetch side reads it to discover every pack needed to reconstruct the
+/// branch. Lives in the `refs/mkit/` metadata namespace so it never
+/// collides with real heads/tags. See [`mkit_core::transfer`].
+fn packmap_ref(branch: &str) -> String {
+    format!("refs/mkit/packmap/{branch}")
+}
+
+/// Download and decode a packlist blob by its key. A pruned / missing
+/// packlist degrades to an empty list (the push then re-establishes one)
+/// rather than failing.
+fn download_packlist(tx: &dyn Transport, key: Hash) -> Result<Vec<Hash>, DispatchError> {
+    match tx.download_pack(&PackKey::from_hash(key)) {
+        Ok(bytes) => Ok(transfer::decode_packlist(&bytes)?),
+        Err(TransportError::PackNotFound) => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Push one branch: upload a single delta-compressed pack carrying every
+/// object reachable from `tip` that the remote lacks, advertise it via the
+/// `refs/mkit/packmap/<branch>` metadata ref, then CAS-write
+/// `refs/heads/<branch>` under `condition`.
+///
+/// Objects already present at the remote's current tip are never re-sent
+/// (identical-object dedup), and changed `FastCDC` chunks are delta-encoded
+/// against the prior version the remote already holds when that saves
+/// bytes (see [`mkit_core::transfer::plan_pack`]). The pack is keyed by its
+/// own BLAKE3 digest (SPEC-PACKFILE §7) — required because the digest-
+/// checking storage server rejects a delta stored under the reconstructed
+/// object's hash.
+///
+/// The packlist is advertised *before* the branch ref moves, so any fetcher
+/// that observes the new tip always finds the packs that reconstruct it.
 ///
 /// On a CAS failure ([`TransportError::RefConflict`]) this returns
 /// [`DispatchError::NonFastForwardPush`] so callers can render an
@@ -383,29 +409,60 @@ pub fn push_branch(
     tip: Hash,
     condition: refs::RefWriteCondition,
 ) -> Result<(), DispatchError> {
-    // Walk the reachable set and figure out what the remote lacks.
-    // The current contract with the memory / file transports is one
-    // object per pack, keyed by the object's own digest. This keeps
-    // fetch simple (ask the remote for each hash as it walks the
-    // object graph) and means `pack_exists` is a per-object HEAD
-    // check against the same key we'd upload under.
-    let reachable = reachable_objects(store, &tip)?;
-    for obj in &reachable {
+    // Diff against the remote's CURRENT tip so we send only what it lacks
+    // and can delta against bases it already holds. Planning is an
+    // optimization; the head CAS below remains authoritative.
+    let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
+    let plan = transfer::plan_pack(store, tip, remote_tip)?;
+
+    let packmap_name = packmap_ref(branch);
+    // Read the prior packlist pointer before mutating anything so we can
+    // append to it and CAS the packmap ref.
+    let prior_pl_key = tx.read_ref(&packmap_name).unwrap_or(None);
+
+    if !plan.is_empty() {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
         }
-        let key = PackKey::from_hash(*obj);
-        if tx.pack_exists(&key)? {
-            continue;
+
+        // Build the pack from the deterministic plan: raws first (non-blobs
+        // before blobs), then deltas (their bases are external — resolved
+        // from the fetcher's store via earlier packs — so no in-pack
+        // ordering is required, SPEC-PACKFILE §4).
+        let mut w = PackWriter::new();
+        for h in &plan.raw {
+            let bytes = store.read(h)?;
+            w.push_raw(*h, bytes)?;
         }
-        let bytes = store.read(obj)?;
-        tx.upload_pack(&bytes, &key)?;
+        for d in &plan.deltas {
+            w.push_delta(&d.base, &d.stream)?;
+        }
+        let pack = w.finish()?;
+        let pack_key = pack::pack_key(&pack);
+        tx.upload_pack(&pack, &PackKey::from_hash(pack_key))?;
+
+        // Cumulative packlist: reset to just this pack on a full-closure
+        // (self-contained) push, otherwise append to the prior list so a
+        // fresh clone downloads the whole history of packs in order.
+        let mut new_list = match prior_pl_key {
+            Some(k) if !plan.self_contained => download_packlist(tx, k)?,
+            _ => Vec::new(),
+        };
+        new_list.push(pack_key);
+        let pl_bytes = transfer::encode_packlist(&new_list)?;
+        let pl_key = pack::pack_key(&pl_bytes);
+        tx.upload_pack(&pl_bytes, &PackKey::from_hash(pl_key))?;
+
+        // Advertise before moving the branch. CAS off the prior pointer so a
+        // concurrent winner's packmap is not clobbered; a lost race here is
+        // recovered by the fetch completeness pass, so it is best-effort.
+        let pm_cond = match prior_pl_key {
+            Some(k) => refs::RefWriteCondition::Match(k),
+            None => refs::RefWriteCondition::Missing,
+        };
+        let _ = tx.update_ref(&packmap_name, pm_cond, &pl_key);
     }
-    // Multi-object pack-level transfer (one pack per ref) is more
-    // efficient but requires the transport contract to advertise
-    // pack keys alongside refs — deferred. Per-object addressing
-    // keeps fetch simple and matches what file.rs / memory.rs
-    // already implement.
+
     let full_name = format!("refs/heads/{branch}");
     match tx.update_ref(&full_name, condition, &tip) {
         Ok(()) => Ok(()),
@@ -560,22 +617,86 @@ fn fetch_objects(
             return Err(DispatchError::Interrupted);
         }
         let Some(h) = r.hash else { continue };
-        // Download the pack the remote uploaded for this ref. The
-        // per-object fallback below handles the case where the pack
-        // was never assembled (a push whose reachable set was empty
-        // because the remote already had everything).
-        //
-        // The push path uploads one pack keyed by its own digest; the
-        // memory / file transports `list_refs` only returns the ref,
-        // not the pack digest. So we walk commit→tree→blobs on the
-        // *local* side after downloading, re-using `download_pack` on
-        // each object's hash as a fallback. That matches the
-        // per-object transport semantics in file.rs / memory.rs.
+        // 1. If the remote advertises a packlist for this branch (the
+        //    delta-aware push path), download and unpack every listed pack
+        //    in dependency order — bases resolve from the store as earlier
+        //    packs are applied. `read_ref` errors (e.g. an old server that
+        //    rejects the `refs/mkit/` namespace) degrade to "no packlist".
+        if let Some(pl_key) = tx.read_ref(&packmap_ref(&r.name)).unwrap_or(None) {
+            fetch_packlist(store, tx, pl_key)?;
+        }
+        // 2. Completeness pass: walk the closure and per-object download
+        //    anything still missing. For a packlist remote this finds
+        //    everything already present (a no-op); for a legacy per-object
+        //    remote it is the whole download path.
         fetch_object_closure(store, tx, &h)?;
         refs::write_remote_ref(mkit_dir, remote, &r.name, &h)?;
         n += 1;
     }
     Ok(n)
+}
+
+/// Maximum per-pack delta-base fallbacks during unpack. Bounds the retry
+/// loop so a cyclic or genuinely-absent base fails loudly instead of
+/// spinning. Real packlists never hit this (bases arrive in earlier
+/// packs); it only bridges a pack whose base was uploaded by an older,
+/// per-object push.
+const MAX_BASE_FALLBACK: u32 = 256;
+
+/// Download the packlist `pl_key` points at and unpack each listed pack in
+/// order. A missing packlist or pack is tolerated — the caller's
+/// completeness pass recovers anything left undelivered.
+fn fetch_packlist(
+    store: &ObjectStore,
+    tx: &dyn Transport,
+    pl_key: Hash,
+) -> Result<(), DispatchError> {
+    let bytes = match tx.download_pack(&PackKey::from_hash(pl_key)) {
+        Ok(b) => b,
+        Err(TransportError::PackNotFound) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let list = transfer::decode_packlist(&bytes)?;
+    for pk in list {
+        if crate::signal::is_shutdown() {
+            return Err(DispatchError::Interrupted);
+        }
+        let pack = match tx.download_pack(&PackKey::from_hash(pk)) {
+            Ok(b) => b,
+            Err(TransportError::PackNotFound) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        unpack_with_base_fallback(store, tx, &pack)?;
+    }
+    Ok(())
+}
+
+/// Unpack a pack, fetching any missing delta base per-object and retrying.
+/// `PackReader` commits nothing until the whole pack resolves, so a retry
+/// after fetching the base re-applies the pack cleanly.
+fn unpack_with_base_fallback(
+    store: &ObjectStore,
+    tx: &dyn Transport,
+    pack: &[u8],
+) -> Result<(), DispatchError> {
+    let mut attempts = 0;
+    loop {
+        match PackReader::read(pack, store) {
+            Ok(_) => return Ok(()),
+            Err(PackError::DeltaBaseMissing(hex)) if attempts < MAX_BASE_FALLBACK => {
+                attempts += 1;
+                let base = mkit_core::hash::from_hex(&hex)
+                    .map_err(|_| DispatchError::Transport(TransportError::InvalidResponse))?;
+                // Try to fetch the base directly (legacy per-object remote).
+                fetch_object_closure(store, tx, &base)?;
+                if !store.contains(&base) {
+                    // Couldn't resolve it anywhere — surface the original error.
+                    return Err(PackError::DeltaBaseMissing(hex).into());
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 }
 
 fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, DispatchError> {
