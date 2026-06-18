@@ -710,7 +710,7 @@ pub fn core_allowed_suffix(key: &str) -> Option<String> {
 /// `branch.<branch>.remote` — is **case-sensitive** and preserved verbatim.
 ///
 /// Two-segment keys (`user.name`, `core.autocrlf`, …) have no subsection,
-/// so both halves are lowercased. The split mirrors [`apply_section_kv`]'s
+/// so both halves are lowercased. The split mirrors `apply_section_kv`'s
 /// `splitn(3, '.')`, so the canonical form round-trips through it.
 #[must_use]
 pub fn normalize_config_key(key: &str) -> String {

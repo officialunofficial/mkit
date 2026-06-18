@@ -557,7 +557,7 @@ fn diff_merge_base_typo_second_rev_errors() {
     // filter that emits an empty diff.
     let repo = Repo::new();
     clean_diverge(&repo); // `feature` and `main` exist
-    let out = repo.run(&["diff", "--merge-base", "feature", "mian", "--name-only"]);
+    let out = repo.run(&["diff", "--merge-base", "feature", "nosuchrev", "--name-only"]);
     assert!(
         !out.status.success(),
         "an unresolvable 2nd revision must fail, not exit 0: {}",
