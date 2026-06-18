@@ -536,6 +536,10 @@ pub fn read_or_default(root: &Path) -> Result<Config, ConfigError> {
     let mut cfg = Config::with_defaults();
     apply_file(&mut cfg, &user_config_path(), ConfigScope::User)?;
     apply_file(&mut cfg, &root.join(CONFIG_FILE), ConfigScope::Repo)?;
+    // `-c <key>=<val>` one-shot overrides apply to BOTH the layered and the
+    // flat read path, so `mkit -c … <any-command>` is honored uniformly
+    // (commit/merge/etc. read through here). Same forbidden-key enforcement.
+    apply_cli_overrides(&mut cfg);
     Ok(cfg)
 }
 
@@ -596,6 +600,16 @@ fn apply_cli_overrides(cfg: &mut Config) {
                 stderr,
                 "warning: ignoring `-c {key}=…` (security-sensitive keys cannot be set via -c; \
                  set it in your user config — see docs/THREAT-MODEL.md)"
+            );
+            continue;
+        }
+        // Reject control characters in the value (defense in depth — same
+        // check `mkit config` applies before persisting).
+        if validate_value(val.trim()).is_err() {
+            let mut stderr = io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "warning: ignoring `-c {key}=…` (value contains control characters)"
             );
             continue;
         }

@@ -131,7 +131,7 @@ creeping; revisit post-v1 if demand warrants.
 | abbreviated hashes | short prefix resolution + display | resolve + `log --abbrev[=N]`/`--oneline` | ✅ | 0 | #248 | display side shipped; `rev-parse --short` is Phase 3 |
 | `--version` / `-V` | top-level flag | `mkit --version`/`-V` alias `version` | ✅ | 0 | #248 | emits `mkit <X.Y.Z>` (not git's `git version …`) |
 | global `-C <path>` | run as if started in `<path>` | same | ✅ | — | — | parsed before the subcommand (so it applies to repo discovery); repeatable, relative-resolving, like git |
-| global `-c <key>=<val>` | one-shot config override | same | ✅ | — | — | applied at the config-loader choke point to the effective view only (never persisted); flows through the SAME enforcement as a per-repo file — `REPO_FORBIDDEN_KEYS` refused, dangerous `core.*` dropped, so `-c` cannot spoof the signed author or redirect trust |
+| global `-c <key>=<val>` | one-shot config override | same | ✅ | — | — | applied to the effective config on **both** read paths (`read_or_default` + `read_layered`), so every command honors it; to the in-memory view only (never persisted). Flows through the SAME enforcement as a per-repo file — `REPO_FORBIDDEN_KEYS` refused, dangerous `core.*` dropped, control-char values rejected — so `-c` cannot spoof the signed author or redirect trust |
 | global `--no-pager`/`-P`/`--paginate` | pager control | accepted no-op | ✅ | — | — | mkit never paginates (better for agents; intentional); flags accepted so defensive scripts don't error |
 | global `--git-dir`/`--work-tree`/`--exec-path` | — | — | 🚫 | — | — | non-goal (mkit uses `.mkit/`; no split work-tree/exec-path model) |
 | `.git/` repo detection | — | — | 🚫 | — | #254 | non-goal in core; opt-in alias shim only |

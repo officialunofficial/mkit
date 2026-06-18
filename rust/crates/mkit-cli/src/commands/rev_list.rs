@@ -42,7 +42,9 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
     let tip = match super::revspec::resolve_revision(&store, &mkit_dir, &opts.rev) {
-        Ok(h) => h,
+        // Peel annotated/signed tags to the commit they point at, like
+        // `log`/`diff`/`branch` (resolve_revision returns the tag object).
+        Ok(h) => super::log::peel_tags(&store, h),
         Err(e) => {
             return emit_err(&format!("bad revision '{}': {e}", opts.rev), exit::GENERAL_ERROR);
         }

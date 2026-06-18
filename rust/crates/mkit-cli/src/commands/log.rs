@@ -296,8 +296,9 @@ const MAX_TAG_DEPTH: usize = 16;
 
 /// Follow `Object::Tag` targets to the first non-tag object, so an
 /// annotated/signed tag resolves to the commit it points at. A non-tag (or
-/// unreadable) object stops the peel and is returned as-is.
-fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
+/// unreadable) object stops the peel and is returned as-is. Shared with
+/// `rev-list` / `merge-base`.
+pub(super) fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
     for _ in 0..MAX_TAG_DEPTH {
         match store.read_object(&h) {
             Ok(Object::Tag(t)) => h = t.target,

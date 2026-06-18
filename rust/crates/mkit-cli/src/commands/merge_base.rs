@@ -43,12 +43,14 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
+    // Peel annotated/signed tags to the commit they point at, like the
+    // sibling history commands (resolve_revision returns the tag object).
     let a = match super::revspec::resolve_revision(&store, &mkit_dir, &opts.a) {
-        Ok(h) => h,
+        Ok(h) => super::log::peel_tags(&store, h),
         Err(e) => return emit_err(&format!("bad revision '{}': {e}", opts.a), exit::GENERAL_ERROR),
     };
     let b = match super::revspec::resolve_revision(&store, &mkit_dir, &opts.b) {
-        Ok(h) => h,
+        Ok(h) => super::log::peel_tags(&store, h),
         Err(e) => return emit_err(&format!("bad revision '{}': {e}", opts.b), exit::GENERAL_ERROR),
     };
 

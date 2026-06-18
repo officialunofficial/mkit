@@ -101,7 +101,7 @@ struct DiffOpts {
     /// Colorize the patch: `always`, `auto` (default, tty-only), or
     /// `never` (like `git diff --color[=<when>]`). Honors `NO_COLOR` /
     /// `CLICOLOR_FORCE` under `auto`.
-    #[arg(long = "color", value_name = "WHEN", num_args = 0..=1, default_missing_value = "always", conflicts_with = "no_color")]
+    #[arg(long = "color", value_name = "WHEN", num_args = 0..=1, require_equals = true, default_missing_value = "always", conflicts_with = "no_color")]
     color: Option<String>,
 
     /// Disable colorized output (`git diff --no-color`).

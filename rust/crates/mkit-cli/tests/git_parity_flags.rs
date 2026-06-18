@@ -1410,3 +1410,56 @@ fn revert_accepts_no_edit() {
     assert!(out.status.success(), "revert --no-edit failed: {out:?}");
     assert!(String::from_utf8_lossy(&out.stderr).contains("Revert \""));
 }
+
+// ---------- peer-review fixes: tag peeling, -c reach, diff --color <rev> -----
+
+#[test]
+fn merge_base_and_rev_list_peel_annotated_tags() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    repo.ok(&["tag", "-a", "v1", "-m", "annotated"]);
+    repo.commit_file("b.txt", b"b\n", "c2");
+    // The annotated tag must peel to its commit (an ancestor of HEAD), not be
+    // treated as a tag object.
+    assert!(
+        repo.run(&["merge-base", "--is-ancestor", "v1", "HEAD"])
+            .status
+            .success(),
+        "merge-base --is-ancestor must peel the annotated tag (expected exit 0)"
+    );
+    // rev-list must not error on an annotated tag.
+    assert_eq!(stdout(&repo.ok(&["rev-list", "--count", "v1"])).trim(), "1");
+    // merge-base (non-ancestor form) also peels.
+    assert!(!stdout(&repo.ok(&["merge-base", "v1", "HEAD"])).trim().is_empty());
+}
+
+#[test]
+fn diff_color_with_revision_arg_is_not_greedy() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    repo.write("a.txt", b"changed\n");
+    // `--color <rev>` must treat <rev> as the revision (require_equals), not
+    // swallow it as the color value.
+    let out = repo.run(&["diff", "--color", "HEAD"]);
+    assert!(
+        out.status.success(),
+        "diff --color <rev> must not bind the rev as the color value: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn dash_c_enforced_on_read_or_default_path() {
+    // commit reads config via read_or_default; `-c` overrides must reach it
+    // AND keep the forbidden-key guard there (refused with a warning).
+    let repo = Repo::new();
+    repo.write("a.txt", b"a\n");
+    repo.ok(&["add", "a.txt"]);
+    let out = repo.run(&["-c", "user.identity=mid:99999", "commit", "-m", "c1"]);
+    assert!(out.status.success(), "commit failed: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("ignoring `-c user.identity"),
+        "-c must be enforced on the commit (read_or_default) path: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

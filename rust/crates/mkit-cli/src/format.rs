@@ -224,6 +224,34 @@ mod tests {
     }
 
     #[test]
+    fn ref_update_line_shapes_match_git() {
+        let old = hash::hash(b"old");
+        let new = hash::hash(b"new");
+        let o7 = short_hash(&old, SUMMARY_ABBREV);
+        let n7 = short_hash(&new, SUMMARY_ABBREV);
+        // new branch (no old)
+        assert_eq!(
+            ref_update_line(None, &new, "main", "main", false),
+            " * [new branch]      main -> main"
+        );
+        // fast-forward: `   <old>..<new>  src -> dst`
+        assert_eq!(
+            ref_update_line(Some(&old), &new, "main", "main", false),
+            format!("   {o7}..{n7}  main -> main")
+        );
+        // forced: `+ <old>...<new> src -> dst (forced update)`
+        assert_eq!(
+            ref_update_line(Some(&old), &new, "main", "main", true),
+            format!(" + {o7}...{n7} main -> main (forced update)")
+        );
+        // rejected
+        assert_eq!(
+            ref_rejected_line("main", "main"),
+            " ! [rejected]        main -> main (non-fast-forward)"
+        );
+    }
+
+    #[test]
     fn json_escape_basic() {
         assert_eq!(json_escape("hello"), "hello");
         assert_eq!(json_escape("a\"b"), "a\\\"b");

@@ -63,13 +63,12 @@ commands:
                     (<oldvalue> compare-and-swap; all-zero = must be absent,
                     update mode only; -d's <oldvalue> must be concrete)
   commit [-a] [-q] [--amend] [-m <msg> | -F <file>] [--author <spec>]
-                    (-q suppresses the summary; -S/--gpg-sign, --no-verify, --no-edit
-                    are accepted no-ops — mkit always signs and has no hooks)
-  commit [-a] [--amend] [-m <msg> | -F <file>] [--author <spec>]
                     Create a signed commit (opens $EDITOR if -m/-F omitted).
                     -F reads the message from <file> (`-` = stdin); --author
                     overrides the commit author. After `merge --no-commit`
-                    (or a resolved merge) this records a two-parent merge commit
+                    (or a resolved merge) this records a two-parent merge commit.
+                    -q suppresses the summary; -S/--gpg-sign, --no-verify,
+                    --no-edit are accepted no-ops (mkit always signs, no hooks)
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable until `gc` ships.
