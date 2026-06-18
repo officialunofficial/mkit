@@ -743,17 +743,20 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Is this move a genuine CASE-ONLY rename (`Foo` -> `foo`) on a
-/// case-insensitive filesystem? Such a move's destination resolves to the
-/// source itself, so the clobber guard / force-remove must be skipped. We
-/// require the repo-relative paths to be case-insensitively equal (but not
-/// identical) AND to resolve to the same object — so an untracked symlink that
-/// merely points at the source (a distinct name) is NOT mistaken for one and
-/// still trips the destination-exists guard, matching git.
+/// Is this move a genuine CASE-ONLY rename (`Foo` -> `foo`, including non-ASCII
+/// folds like `Ä` -> `ä`) on a case-insensitive filesystem? Such a move's
+/// destination resolves to the source itself, so the clobber guard /
+/// force-remove must be skipped. We require distinct lexical paths that resolve
+/// to the SAME object where the destination is a REGULAR FILE (the source
+/// under a different case spelling). The regular-file requirement is what
+/// excludes an untracked SYMLINK pointing at the source: it also resolves to
+/// the source via `same_file`, but it is a distinct name the user must `-f` to
+/// overwrite (matching git). A hardlink has a distinct canonical path, so
+/// `same_file` already excludes it.
 fn is_case_only_rename(src_rel: &str, target_rel: &str, src_abs: &Path, target_abs: &Path) -> bool {
     src_rel != target_rel
-        && src_rel.eq_ignore_ascii_case(target_rel)
         && same_file(src_abs, target_abs)
+        && std::fs::symlink_metadata(target_abs).is_ok_and(|m| !m.file_type().is_symlink())
 }
 
 /// Does any ANCESTOR component of repo-relative `rel` (under `root`) resolve

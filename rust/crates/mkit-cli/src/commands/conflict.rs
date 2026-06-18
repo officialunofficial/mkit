@@ -638,13 +638,20 @@ pub fn reset_conflict_paths(
                 continue;
             }
             // Otherwise the path did not exist pre-op (the operation added it):
-            // remove it (dir-aware) and drop it from the index.
-            let removed = if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
-                fs::remove_dir_all(&abs)
-            } else {
-                fs::remove_file(&abs)
-            };
-            if let Err(e) = removed
+            // remove it and drop it from the index. If the user has since
+            // replaced it with a DIRECTORY, remove it only when EMPTY
+            // (`remove_dir`) — a non-empty directory holds untracked user
+            // content that abort must NOT silently destroy, so we fail closed.
+            if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
+                if let Err(e) = fs::remove_dir(&abs)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(format!(
+                        "abort would discard the untracked directory '{path}'; \
+                         move or remove it first"
+                    ));
+                }
+            } else if let Err(e) = fs::remove_file(&abs)
                 && e.kind() != std::io::ErrorKind::NotFound
             {
                 return Err(format!("remove {}: {e}", abs.display()));

@@ -999,3 +999,43 @@ fn merge_abort_after_empty_no_commit_restores_head() {
     assert!(repo.path().join("x.txt").exists(), "main's x.txt restored");
     assert!(stdout(&repo.ok(&["status", "--porcelain"])).trim().is_empty());
 }
+
+#[test]
+fn merge_abort_fails_closed_on_untracked_dir_at_conflict_path() {
+    // ours deletes file `p` (and edits a.txt); theirs modifies both — a
+    // delete/modify conflict on `p` plus a conflict on a.txt. The user
+    // replaces `p` with an untracked DIRECTORY before aborting; abort must
+    // FAIL CLOSED (not remove_dir_all the directory) to preserve the work.
+    let repo = Repo::new();
+    repo.write("a.txt", b"base\n");
+    repo.write("p", b"file p\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "c0"]);
+    repo.ok(&["branch", "feature"]);
+    repo.ok(&["rm", "p"]);
+    repo.write("a.txt", b"ours\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "ours"]);
+    repo.ok(&["checkout", "feature"]);
+    repo.write("p", b"theirs\n");
+    repo.write("a.txt", b"theirs\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "theirs"]);
+    repo.ok(&["checkout", "main"]);
+
+    repo.run(&["merge", "feature"]); // conflict; `p` materialized as a file
+    std::fs::remove_file(repo.path().join("p")).ok();
+    std::fs::create_dir(repo.path().join("p")).unwrap();
+    repo.write("p/keep", b"my untracked work\n");
+
+    let out = repo.run(&["merge", "--abort"]);
+    assert!(
+        !out.status.success(),
+        "abort must fail closed, not destroy the untracked directory"
+    );
+    assert!(
+        repo.path().join("p/keep").exists(),
+        "untracked content must be preserved: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
