@@ -18,7 +18,7 @@ verify the result.
 
 | Use case                              | Channel                              | Command                                                                                              |
 |---------------------------------------|--------------------------------------|------------------------------------------------------------------------------------------------------|
-| CLI on a dev machine                  | Release archive or `cargo install --git` | `curl -sSfL …/install.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
+| CLI on a dev machine                  | Release archive or `cargo install --git` | `curl mkit.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-<VERSION>-<target>.tar.gz && tar -xzf mkit-<VERSION>-<target>.tar.gz` |
 | Browser / Cloudflare Worker           | npm                                  | `bun add @makechain/mkit-wasm`                                                                                  |
 | Library inside another Rust crate     | crates.io (or git dependency)        | `mkit-core = "0.3"`                                                                                  |
@@ -92,9 +92,21 @@ Targets shipped today:
 - `x86_64-unknown-linux-gnu` (Linux x86_64)
 - `aarch64-unknown-linux-gnu` (Linux arm64)
 
-If you want "latest", use `install.sh`; it resolves the current tag,
-fetches the matching archive for your platform, and verifies cosign by
-default. Direct release URLs are best when you want a pinned artifact.
+If you want "latest", use the hosted installer — `curl mkit.sh | sh` (or
+the explicit `curl -sSfL https://mkit.sh/install.sh | sh`). It resolves
+the current tag, fetches the matching archive for your platform, and
+verifies cosign by default. Direct release URLs are best when you want a
+pinned artifact.
+
+> [!NOTE]
+> Like any `curl | sh`, the *installer script* is trusted on download —
+> cosign verifies the downloaded **binary**, not the script itself. The
+> script is served over HTTPS from `mkit.sh`; `https://mkit.sh/install.sh`
+> and the byte-identical
+> [`raw.githubusercontent.com/.../main/install.sh`](https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh)
+> are the same file. If you'd rather not trust the hosted script, read it
+> first (`curl -sSfL https://mkit.sh/install.sh | less`) or skip it and use
+> the pinned release + cosign steps below.
 
 **Download a pinned release for your platform:**
 
