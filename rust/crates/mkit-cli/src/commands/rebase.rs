@@ -466,9 +466,16 @@ fn replay(
             Ok(t) => t,
             Err(c) => return c,
         };
-        // Rebase replays the branch's own (non-merge) commits, so no
-        // mainline selection applies.
-        let result = match cherry_pick(store, target, ours_tree, None) {
+        // A replayed range can include MERGE commits (the first-parent walk
+        // keeps them). Core cherry-pick refuses a merge without a mainline,
+        // so replay merges against their first parent (`-m 1` semantics) —
+        // the historical behavior — instead of failing mid-rebase with the
+        // ref already moved.
+        let mainline = match store.read_object(&target) {
+            Ok(Object::Commit(c)) if c.parents.len() >= 2 => Some(1),
+            _ => None,
+        };
+        let result = match cherry_pick(store, target, ours_tree, mainline) {
             Ok(r) => r,
             Err(e) => return emit_err(&format!("cherry-pick: {e}"), exit::GENERAL_ERROR),
         };

@@ -1051,6 +1051,10 @@ where
 /// appends), and writes back. Caller is responsible for validating
 /// `value` (control bytes, key-path traversal).
 pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
+    // Normalize so the written line and the case-insensitive match below use
+    // git's canonical form, regardless of how the caller spelled the key.
+    let key = normalize_config_key(key);
+    let key = key.as_str();
     let path = user_config_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1065,8 +1069,12 @@ pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
             out.push('\n');
             continue;
         }
+        // Match existing lines case-insensitively (like reads), so a
+        // mixed-case duplicate of the same key is updated/normalized rather
+        // than left behind to shadow the canonical line. `key` is already
+        // normalized by the caller.
         if let Some((k, _)) = line.split_once('=')
-            && k.trim() == key
+            && normalize_config_key(k.trim()) == key
         {
             out.push_str(key);
             out.push_str(" = ");

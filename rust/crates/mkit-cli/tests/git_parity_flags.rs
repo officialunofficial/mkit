@@ -512,3 +512,60 @@ fn branch_contains_defaults_to_head() {
     let no_contains = stdout(&repo.ok(&["branch", "--no-contains"]));
     assert!(no_contains.contains("feature") && !no_contains.contains("main"), "{no_contains}");
 }
+
+#[test]
+fn rebase_replays_a_branch_containing_a_merge_commit() {
+    // Regression: core cherry-pick rejects a merge without a mainline, so a
+    // rebase whose range includes a merge commit must replay it (first-parent)
+    // rather than failing mid-rebase.
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"base\n", "c0");
+    repo.ok(&["branch", "topic"]);
+    repo.ok(&["checkout", "topic"]);
+    repo.commit_file("t.txt", b"t\n", "A");
+    // `side` branches at A, then BOTH diverge so the merge is a real 3-way
+    // merge (not a fast-forward).
+    repo.ok(&["branch", "side"]);
+    repo.ok(&["checkout", "side"]);
+    repo.commit_file("s.txt", b"s\n", "S");
+    repo.ok(&["checkout", "topic"]);
+    repo.commit_file("t1.txt", b"t1\n", "A2"); // topic diverges from side
+    repo.ok(&["merge", "side"]); // 3-way merge → merge commit M on topic
+    assert_eq!(parent_count(&repo, "HEAD"), 2, "topic tip should be a merge");
+    repo.commit_file("t2.txt", b"t2\n", "B");
+    // Advance main, then rebase topic onto it.
+    repo.ok(&["checkout", "main"]);
+    repo.commit_file("m.txt", b"m\n", "c1");
+    repo.ok(&["checkout", "topic"]);
+
+    let out = repo.run(&["rebase", "main"]);
+    assert!(
+        out.status.success(),
+        "rebase of a branch containing a merge must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // All files land: base a.txt, the new base's m.txt, topic's t.txt/t1.txt,
+    // s.txt (the merge replayed via its first parent adds it), and t2.txt.
+    for f in ["a.txt", "m.txt", "t.txt", "t1.txt", "s.txt", "t2.txt"] {
+        assert!(repo.path().join(f).exists(), "missing {f} after rebase");
+    }
+}
+
+#[test]
+fn diff_merge_base_typo_second_rev_errors() {
+    // A typo'd second revision must error, not silently degrade to a pathspec
+    // filter that emits an empty diff.
+    let repo = Repo::new();
+    clean_diverge(&repo); // `feature` and `main` exist
+    let out = repo.run(&["diff", "--merge-base", "feature", "mian", "--name-only"]);
+    assert!(
+        !out.status.success(),
+        "an unresolvable 2nd revision must fail, not exit 0: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("bad revision"),
+        "expected a bad-revision error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

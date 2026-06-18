@@ -868,8 +868,13 @@ the full list
 from config rather than appending to it.
 .It Cm verify-attest Oo Fl Fl commit Ar hash Oc Op Fl Fl trust-roots Ar path Op Fl Fl algorithm Ar filter
 Verify every attestation attached to the given commit. Returns success
-only if every envelope verifies; an algorithm filter restricts the
-check to a single algorithm.
+only if every attached envelope verifies.
+.Fl Fl algorithm
+filters which signature lines are
+.Em displayed
+to the named algorithm; it does NOT change the pass/fail criterion — every
+envelope must still verify regardless of the filter, so it cannot be used to
+require that a specific algorithm signed.
 .It Cm key Cm generate | Cm list | Cm import | Cm export | Cm delete
 Manage user-scoped keystore keys backed by the platform keystore
 (Keychain on macOS, libsecret/systemd-creds/YubiKey on Linux, Credential

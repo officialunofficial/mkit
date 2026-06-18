@@ -239,17 +239,26 @@ pub fn run(args: &[String]) -> u8 {
             }
         }
     }
-    // Reject a batch where two staged destinations collide (across both
-    // file and directory moves).
+    // Reject a batch where two staged destinations collide (across both file
+    // and directory moves) — either the SAME path, or one nested UNDER the
+    // other (e.g. a file at `dst/x` and a directory at `dst/x/...`), which
+    // would create a file/directory conflict on disk and in the index.
     let all_targets: Vec<&str> = plan.iter().flat_map(Planned::target_paths).collect();
     for i in 0..all_targets.len() {
-        for j in (i + 1)..all_targets.len() {
-            if all_targets[i] == all_targets[j] {
+        for j in 0..all_targets.len() {
+            if i == j {
+                continue;
+            }
+            let (a, b) = (all_targets[i], all_targets[j]);
+            if a == b {
                 return emit_err(
-                    &format!(
-                        "multiple sources map to the same destination: {}",
-                        all_targets[i]
-                    ),
+                    &format!("multiple sources map to the same destination: {a}"),
+                    exit::USAGE,
+                );
+            }
+            if b.starts_with(&format!("{a}/")) {
+                return emit_err(
+                    &format!("conflicting destinations: '{a}' and '{b}' (one is inside the other)"),
                     exit::USAGE,
                 );
             }
@@ -354,11 +363,23 @@ fn plan_move(
     }
     // Safety: never clobber an existing destination without -f. Use a
     // symlink-aware check so a dangling symlink still counts as "exists".
-    if path_present(&target_abs) && !force {
-        return Err(emit_err(
-            &format!("destination exists (use -f to overwrite): {target_rel}"),
-            exit::GENERAL_ERROR,
-        ));
+    if path_present(&target_abs) {
+        // A file source can never replace a DIRECTORY destination — even with
+        // -f. `-f` removes the destination first, and removing a directory
+        // would recursively delete its (tracked + untracked) contents and
+        // leave the index in a file/dir conflict. Git refuses this too.
+        if std::fs::symlink_metadata(&target_abs).is_ok_and(|m| m.is_dir()) {
+            return Err(emit_err(
+                &format!("destination is a directory: {target_rel} (mv cannot replace a directory with a file)"),
+                exit::GENERAL_ERROR,
+            ));
+        }
+        if !force {
+            return Err(emit_err(
+                &format!("destination exists (use -f to overwrite): {target_rel}"),
+                exit::GENERAL_ERROR,
+            ));
+        }
     }
 
     Ok(PlannedMove {
@@ -432,9 +453,14 @@ fn plan_dir_move(
     force: bool,
 ) -> Result<PlannedDirMove, u8> {
     let src_dir_abs = cwd.join(src_rel);
-    if !src_dir_abs.is_dir() {
+    // The worktree path must be a REAL directory. `Path::is_dir()` follows
+    // symlinks, so a tracked directory replaced by a symlink-to-a-directory
+    // would otherwise be "moved" as a symlink — and its tracked contents
+    // restaged under a path that escapes the repo. Require the on-disk type
+    // (not the link target) to be a directory.
+    if !std::fs::symlink_metadata(&src_dir_abs).is_ok_and(|m| m.is_dir()) {
         return Err(emit_err(
-            &format!("bad source: {source}"),
+            &format!("bad source: {source} (not a directory, or a symlink standing in for one)"),
             exit::GENERAL_ERROR,
         ));
     }
@@ -482,6 +508,21 @@ fn plan_dir_move(
                 "destination already exists: {dest_dir_rel} \
                  (refusing to overwrite it — -f does not clobber a directory)"
             ),
+            exit::GENERAL_ERROR,
+        ));
+    }
+    // Also refuse when the destination collides with a tracked INDEX path
+    // even though it is absent on disk (e.g. a tracked file deleted from the
+    // worktree, or an already-tracked subtree). Otherwise the move would
+    // leave the index with both `<dest>` (a file) and `<dest>/<child>`
+    // entries — a path conflict that breaks `status`/`commit`.
+    let dest_prefix = format!("{dest_dir_rel}/");
+    if idx.entries.iter().any(|e| {
+        e.status != EntryStatus::Removed
+            && (e.path == dest_dir_rel || e.path.starts_with(&dest_prefix))
+    }) {
+        return Err(emit_err(
+            &format!("destination is already tracked: {dest_dir_rel}"),
             exit::GENERAL_ERROR,
         ));
     }

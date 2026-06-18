@@ -296,3 +296,73 @@ fn mv_refuses_destination_escaping_repo_via_symlinked_dir() {
         "nothing should be written outside the repository"
     );
 }
+
+#[test]
+fn mv_file_refuses_directory_destination_even_with_force() {
+    // A file source whose into-dir target is an existing DIRECTORY must be
+    // refused even with -f (removing it would recursively delete tracked +
+    // untracked contents and leave a file/dir index conflict).
+    let (td, xdg) = repo(&[("src", b"file\n"), ("dst/src/old.txt", b"o\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join("dst/src/u.txt"), b"u\n").unwrap();
+    // `mv src dst` → into-dir → target is `dst/src`, which already exists as
+    // a directory.
+    let out = run_in(root, x, &["mv", "-f", "src", "dst"]);
+    assert!(!out.status.success(), "must refuse: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("directory"),
+        "expected a directory message: {out:?}"
+    );
+    assert!(root.join("src").exists(), "source intact");
+    assert!(root.join("dst/src/old.txt").exists(), "tracked dest intact");
+    assert!(root.join("dst/src/u.txt").exists(), "untracked dest intact");
+}
+
+#[test]
+fn mv_refuses_ancestor_destination_collision() {
+    // Targets `dst/x` (file) and `dst/x/file.txt` (dir) nest into each other.
+    let (td, xdg) = repo(&[("a/x", b"f\n"), ("b/x/file.txt", b"g\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir_all(root.join("dst")).unwrap();
+    let out = run_in(root, x, &["mv", "a/x", "b/x", "dst"]);
+    assert!(!out.status.success(), "must refuse colliding targets: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("conflicting destinations"),
+        "expected a conflicting-destinations message: {out:?}"
+    );
+    // No partial move.
+    assert!(root.join("a/x").exists() && root.join("b/x/file.txt").exists());
+}
+
+#[test]
+fn mv_dir_refuses_destination_tracked_but_deleted_from_disk() {
+    // `dst` is a tracked FILE deleted from disk; moving a dir to `dst` would
+    // create both `dst` (file) and `dst/<child>` index entries.
+    let (td, xdg) = repo(&[("src/a.txt", b"a\n"), ("dst", b"d\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::remove_file(root.join("dst")).unwrap(); // still tracked in the index
+    let out = run_in(root, x, &["mv", "src", "dst"]);
+    assert!(!out.status.success(), "must refuse: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("already tracked"),
+        "expected an already-tracked message: {out:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn mv_refuses_symlinked_directory_source() {
+    // A tracked directory replaced by a symlink-to-a-directory must not be
+    // "moved" as a directory (which would bypass repo-containment).
+    let (td, xdg) = repo(&[("dir/file.txt", b"x\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    let external = tempfile::tempdir().unwrap();
+    fs::remove_dir_all(root.join("dir")).unwrap();
+    std::os::unix::fs::symlink(external.path(), root.join("dir")).unwrap();
+    let out = run_in(root, x, &["mv", "dir", "newdir"]);
+    assert!(!out.status.success(), "symlink dir source must be refused: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not a directory"),
+        "expected a not-a-directory message: {out:?}"
+    );
+}

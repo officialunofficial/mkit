@@ -329,7 +329,12 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
         Ok(h) => h,
         Err(code) => return code,
     };
-    if let Err(e) = super::restore_worktree_and_index(cwd, store, tree_hash) {
+    // Sync the index to the committed tree WITHOUT rewriting the worktree.
+    // The tree was built from the index, so the worktree already holds the
+    // resolved content; restoring it would clobber any unstaged edits the
+    // user made after staging — `git commit` (and `mkit commit`) leave the
+    // worktree untouched here.
+    if let Err(e) = super::sync_index_to_tree(cwd, store, tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
     if let Err(e) = advance_head(mkit_dir, &commit_hash) {
