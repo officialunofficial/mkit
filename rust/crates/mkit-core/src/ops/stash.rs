@@ -227,6 +227,16 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
                     {
                         return Err(StashError::Io(err));
                     }
+                    // Remove now-empty parent directories up to the repo root,
+                    // so a later `pop` can recreate the path without tripping
+                    // the "would overwrite untracked directory" guard.
+                    let mut parent = abs.parent();
+                    while let Some(dir) = parent {
+                        if dir == repo_root || std::fs::remove_dir(dir).is_err() {
+                            break;
+                        }
+                        parent = dir.parent();
+                    }
                 }
             }
         }

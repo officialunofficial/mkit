@@ -429,25 +429,48 @@ pub fn ensure_abort_safe(
     let snapshot = mkit_core::store::EphemeralSink::new(store);
     let index_tree = mkit_core::worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
         .map_err(|e| format!("check index state: {e}"))?;
+    // Pass the seeded index as the tracked set so a tracked file matching an
+    // ignore rule isn't dropped from the snapshot and misread as a deletion.
+    let worktree_tree = mkit_core::worktree::build_tree_filtered(&snapshot, root, Some(&idx))
+        .map_err(|e| format!("check worktree: {e}"))?;
 
-    // Paths the aborting operation itself authored are discardable, not user
-    // work: the recorded conflict paths PLUS every path the operation changed
-    // vs the pre-op HEAD (its clean hunks — e.g. a file the merge added
-    // without conflict). With the result tree we derive the latter; without
-    // it (legacy state) we fall back to the conflict records alone.
+    // Discardable = the operation's OWN work that the user has not touched:
+    //   * recorded conflict paths (abort always throws away resolutions);
+    //   * operation-authored clean hunks whose current index AND worktree
+    //     content still match the operation result.
+    // A clean path the user has since edited (staged or in the worktree) is
+    // THEIR work — keep it non-discardable so the checks below refuse to
+    // destroy it. Without a result tree (legacy state) we fall back to the
+    // conflict records alone.
     let conflict_paths: HashSet<String> = records.iter().map(|r| r.path.clone()).collect();
-    let mut discardable = conflict_paths;
+    let mut discardable = conflict_paths.clone();
     if let Some(result_tree) = op_result_tree {
-        let authored =
-            mkit_core::ops::diff::diff_trees(&snapshot, current_tree, Some(result_tree))
-                .map_err(|e| format!("check operation changes: {e}"))?;
+        let authored = mkit_core::ops::diff::diff_trees(&snapshot, current_tree, Some(result_tree))
+            .map_err(|e| format!("check operation changes: {e}"))?;
+        // Paths whose current index or worktree diverges from the operation
+        // result — i.e. the user changed them after the operation paused.
+        let mut modified: HashSet<String> = HashSet::new();
+        for e in mkit_core::ops::diff::diff_trees(&snapshot, Some(result_tree), Some(index_tree))
+            .map_err(|e| format!("check operation changes: {e}"))?
+            .entries
+        {
+            modified.insert(e.path);
+        }
+        for e in mkit_core::ops::diff::diff_trees(&snapshot, Some(result_tree), Some(worktree_tree))
+            .map_err(|e| format!("check operation changes: {e}"))?
+            .entries
+        {
+            modified.insert(e.path);
+        }
         for e in authored.entries {
-            discardable.insert(e.path);
+            if conflict_paths.contains(&e.path) || !modified.contains(&e.path) {
+                discardable.insert(e.path);
+            }
         }
     }
     let is_discardable = |p: &str| discardable.contains(p);
 
-    // Staged changes on a non-conflict path.
+    // Staged changes on a non-discardable path.
     let staged = mkit_core::ops::diff::diff_trees(&snapshot, current_tree, Some(index_tree))
         .map_err(|e| format!("check staged changes: {e}"))?;
     if let Some(entry) = staged.entries.iter().find(|e| !is_discardable(&e.path)) {
@@ -457,11 +480,7 @@ pub fn ensure_abort_safe(
         ));
     }
 
-    // Unstaged worktree edits on a non-conflict path. Pass the seeded index
-    // as the tracked set so a tracked file matching an ignore rule isn't
-    // dropped from the snapshot and misread as a deletion.
-    let worktree_tree = mkit_core::worktree::build_tree_filtered(&snapshot, root, Some(&idx))
-        .map_err(|e| format!("check worktree: {e}"))?;
+    // Unstaged worktree edits on a non-discardable path.
     let unstaged =
         mkit_core::ops::diff::diff_trees(&snapshot, Some(index_tree), Some(worktree_tree))
             .map_err(|e| format!("check worktree: {e}"))?;

@@ -252,6 +252,11 @@ fn start(
         if let Err(e) = conflict_state::write_merge_state(mkit_dir, &state, &[]) {
             return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
         }
+        // Record the merge result tree so `--abort` can tell the staged merge
+        // (discardable) from genuine user work staged on top of it.
+        if let Err(e) = conflict_state::write_result_tree(mkit_dir, &result.tree_hash) {
+            return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
+        }
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
@@ -392,49 +397,28 @@ fn restore_to(
     records: &[mkit_core::ops::conflict_state::ConflictRecord],
 ) -> Result<(), u8> {
     let target_tree = load_tree_hash(store, target)?;
-    if records.is_empty() {
-        // Clean (no-conflict) merge abort — e.g. after `merge --no-commit`.
-        // The whole staged state IS the merge result, which abort discards;
-        // the records-based guard can't tell it from user work, so instead
-        // protect only genuine UNSTAGED worktree edits made on top of the
-        // merge (worktree differs from the staged index).
-        let snapshot = mkit_core::store::EphemeralSink::new(store);
-        let idx = super::read_or_seed_index_from_head(cwd, store)
-            .map_err(|e| emit_err(&e, exit::GENERAL_ERROR))?;
-        let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
-            .map_err(|e| emit_err(&format!("check index: {e}"), exit::GENERAL_ERROR))?;
-        let worktree_tree = worktree::build_tree_filtered(&snapshot, cwd, Some(&idx))
-            .map_err(|e| emit_err(&format!("check worktree: {e}"), exit::GENERAL_ERROR))?;
-        if index_tree != worktree_tree {
-            return Err(emit_err(
-                "abort would discard unstaged worktree edits made after the merge; \
-                 commit, stash, or reset them first",
-                exit::GENERAL_ERROR,
-            ));
-        }
-    } else {
-        // Conflict abort. The operation's result tree lets the guards treat
-        // its clean hunks (not just conflict paths) as discardable.
-        let op_result = conflict_state::read_result_tree(mkit_dir).ok().flatten();
-        // Pre-flight: refuse *before* any mutation when restoring would
-        // clobber genuine user work on a non-discardable path (the reset
-        // below discards the in-progress resolution).
-        if let Err(e) =
-            super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result)
-        {
-            return Err(emit_err(&e, exit::GENERAL_ERROR));
-        }
-        // Discard the operation material on the discardable paths so the
-        // guarded restore doesn't see it as user "local changes" (it still
-        // protects unrelated dirty/untracked work).
-        if let Err(e) =
-            super::conflict::reset_conflict_paths(cwd, store, records, target_tree, op_result)
-        {
-            return Err(emit_err(&e, exit::GENERAL_ERROR));
-        }
-        if let Err(e) = super::ensure_restore_safe(cwd, store, target_tree) {
-            return Err(emit_err(&e, exit::GENERAL_ERROR));
-        }
+    // The operation's result tree — written for BOTH conflict merges and a
+    // clean `merge --no-commit` — lets the guards treat the merge's own,
+    // user-untouched output as discardable while protecting genuine work the
+    // user staged or edited on top of it (a conflict resolution, an unrelated
+    // `mkit add`, or an edit to a cleanly-merged file).
+    let op_result = conflict_state::read_result_tree(mkit_dir).ok().flatten();
+    // Pre-flight: refuse *before* any mutation when restoring would clobber
+    // genuine user work on a non-discardable path (the reset below discards
+    // the operation material).
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result) {
+        return Err(emit_err(&e, exit::GENERAL_ERROR));
+    }
+    // Discard the operation material on the discardable paths so the guarded
+    // restore doesn't see it as user "local changes" (it still protects
+    // unrelated dirty/untracked work).
+    if let Err(e) =
+        super::conflict::reset_conflict_paths(cwd, store, records, target_tree, op_result)
+    {
+        return Err(emit_err(&e, exit::GENERAL_ERROR));
+    }
+    if let Err(e) = super::ensure_restore_safe(cwd, store, target_tree) {
+        return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     if let Err(e) = super::restore_worktree_and_index(cwd, store, target_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));

@@ -37,7 +37,7 @@ mkit --version          # must print exactly: mkit <X.Y.Z>
 
 # Start a repo and make your first signed commit:
 mkit init               # creates .mkit/ in the current directory
-mkit keygen             # generate an Ed25519 signing key (.mkit/keys/default.key)
+mkit keygen             # generate an Ed25519 signing key (signing_key path; default .mkit/keys/default.key)
 echo hello > hi.txt
 mkit add hi.txt
 mkit commit -m "first commit"   # commits are ALWAYS Ed25519-signed

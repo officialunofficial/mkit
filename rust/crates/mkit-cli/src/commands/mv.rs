@@ -292,6 +292,7 @@ pub fn run(args: &[String]) -> u8 {
 
 /// Validate one `source` and return the planned move, or the exit code to
 /// propagate. Performs no filesystem or index mutation.
+#[allow(clippy::too_many_lines)] // a flat sequence of independent safety guards
 fn plan_move(
     cwd: &Path,
     root_canon: &Path,
@@ -353,6 +354,16 @@ fn plan_move(
             exit::GENERAL_ERROR,
         ));
     }
+    // Safety: a file source tracked in the index must still be a file/symlink
+    // on disk. If it was replaced by a directory, this "file move" would
+    // rename the directory while staging the destination with the OLD file
+    // blob — a worktree/index divergence. Git refuses this too.
+    if std::fs::symlink_metadata(&src_abs).is_ok_and(|m| m.is_dir()) {
+        return Err(emit_err(
+            &format!("bad source: {source} (tracked as a file but is now a directory)"),
+            exit::GENERAL_ERROR,
+        ));
+    }
     // Safety: refuse a source reached through a symlinked ancestor — it could
     // point outside the repo (see `has_symlinked_ancestor`).
     if has_symlinked_ancestor(cwd, &src_rel) {
@@ -371,7 +382,9 @@ fn plan_move(
     }
     // Safety: never clobber an existing destination without -f. Use a
     // symlink-aware check so a dangling symlink still counts as "exists".
-    if path_present(&target_abs) {
+    // Skip entirely for a case-only rename (the "destination" IS the source on
+    // a case-insensitive filesystem) so `mv Foo foo` is a plain rename.
+    if path_present(&target_abs) && !same_file(&src_abs, &target_abs) {
         // A file source can never replace a DIRECTORY destination — even with
         // -f. `-f` removes the destination first, and removing a directory
         // would recursively delete its (tracked + untracked) contents and
@@ -388,6 +401,20 @@ fn plan_move(
                 exit::GENERAL_ERROR,
             ));
         }
+    }
+    // A tracked file BENEATH the destination (e.g. tracked `dst/child` with
+    // `dst` deleted from disk, then `mv src dst`) would leave both `dst` (a
+    // file) and `dst/child` in the index — a file/dir conflict.
+    if let Some(desc) = idx.entries.iter().find(|e| {
+        e.status != EntryStatus::Removed && e.path.starts_with(&format!("{target_rel}/"))
+    }) {
+        return Err(emit_err(
+            &format!(
+                "destination has tracked descendants (e.g. '{}'); a file cannot replace it",
+                desc.path
+            ),
+            exit::GENERAL_ERROR,
+        ));
     }
     // A tracked file at an ANCESTOR of the destination would leave the index
     // with both `<ancestor>` (a file) and `<ancestor>/…/target` — a file/dir
@@ -429,7 +456,10 @@ fn execute_move(m: &PlannedMove, force: bool) -> Result<(), u8> {
             )
         })?;
     }
-    if force && path_present(&m.target_abs) {
+    // Never clear the destination when it IS the source (a case-only rename on
+    // a case-insensitive filesystem, e.g. `Foo` -> `foo`): removing it would
+    // delete the source and the rename would then fail with both gone.
+    if force && path_present(&m.target_abs) && !same_file(&m.src_abs, &m.target_abs) {
         let _ = remove_path(&m.target_abs);
     }
     std::fs::rename(&m.src_abs, &m.target_abs).map_err(|e| {
@@ -568,6 +598,16 @@ fn plan_dir_move(
     let mut files = Vec::new();
     for e in &idx.entries {
         if e.status != EntryStatus::Removed && e.path.starts_with(&prefix) {
+            // The tracked child must still exist in the worktree. Otherwise the
+            // directory rename moves nothing for it, yet we'd restage its old
+            // blob at the destination — resurrecting a file that was deleted
+            // from disk. Git refuses a move whose source is gone.
+            if !path_present(&cwd.join(&e.path)) {
+                return Err(emit_err(
+                    &format!("bad source: {} (tracked file missing from the worktree)", e.path),
+                    exit::GENERAL_ERROR,
+                ));
+            }
             let sub = &e.path[prefix.len()..];
             files.push(DirFileMove {
                 src_rel: e.path.clone(),
@@ -652,6 +692,17 @@ fn apply_dir_to_index(idx: &mut index::Index, m: &PlannedDirMove) {
 /// [`Path::exists`], which follows the link and reports `false`).
 fn path_present(p: &Path) -> bool {
     p.symlink_metadata().is_ok()
+}
+
+/// Do `a` and `b` resolve to the same filesystem object? Used to detect a
+/// case-only rename on a case-insensitive filesystem (`Foo` vs `foo`), where
+/// the move destination IS the source — so it must not be cleared. Both paths
+/// must exist; a failed canonicalization is treated as "different".
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
 }
 
 /// Does any ANCESTOR component of repo-relative `rel` (under `root`) resolve

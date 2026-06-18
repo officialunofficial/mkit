@@ -597,11 +597,16 @@ fn merge_abort_refuses_unstaged_edits_after_no_commit() {
     repo.ok(&["merge", "--no-commit", "feature"]);
     repo.write("b.txt", b"hand-edited after the merge\n"); // unstaged edit
     let out = repo.run(&["merge", "--abort"]);
-    assert!(!out.status.success(), "abort must refuse to discard unstaged edits");
+    assert!(!out.status.success(), "abort must refuse to discard the edit");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("unstaged worktree edits"),
-        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr).contains("b.txt"),
+        "the refusal must name the protected path: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    // The edit itself must survive the refused abort.
+    assert_eq!(
+        std::fs::read(repo.path().join("b.txt")).unwrap(),
+        b"hand-edited after the merge\n"
     );
 }
 
@@ -734,5 +739,80 @@ fn stash_index_round_trip_in_an_unborn_repo() {
     assert!(
         status.contains("A  s.txt"),
         "the file must come back STAGED, not untracked: {status}"
+    );
+}
+
+#[test]
+fn merge_abort_preserves_edits_to_operation_authored_clean_paths() {
+    // A conflicted merge cleanly adds b.txt; the user then EDITS b.txt. Abort
+    // must NOT discard that edit (it is the user's work, not the operation's).
+    let repo = Repo::new();
+    conflict_plus_clean(&repo);
+    repo.run(&["merge", "feature"]); // pauses on the a.txt conflict
+    repo.write("b.txt", b"my edit to the clean file\n");
+    let out = repo.run(&["merge", "--abort"]);
+    assert!(!out.status.success(), "abort must refuse to discard the edit to b.txt");
+    assert_eq!(
+        std::fs::read(repo.path().join("b.txt")).unwrap(),
+        b"my edit to the clean file\n",
+        "the edit to the cleanly-merged file must survive"
+    );
+}
+
+#[test]
+fn merge_abort_after_no_commit_protects_staged_unrelated_work() {
+    // After a clean `merge --no-commit`, work the user STAGES on top (not just
+    // unstaged edits) must be protected by abort.
+    let repo = Repo::new();
+    clean_diverge(&repo);
+    repo.ok(&["merge", "--no-commit", "feature"]);
+    repo.write("unrelated.txt", b"my own staged work\n");
+    repo.ok(&["add", "unrelated.txt"]);
+    let out = repo.run(&["merge", "--abort"]);
+    assert!(!out.status.success(), "abort must protect staged unrelated work");
+    assert!(repo.path().join("unrelated.txt").exists(), "the staged file must survive");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unrelated.txt"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn stash_index_round_trip_in_unborn_repo_with_nested_path() {
+    // Unborn repo, staged nested path: stash must remove the file AND its now
+    // empty parent dir, and `pop --index` must restore it staged.
+    let repo = Repo::new();
+    repo.write("dir/s.txt", b"staged\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["stash"]);
+    assert!(
+        !repo.path().join("dir").exists(),
+        "stash should remove the now-empty parent directory"
+    );
+    repo.ok(&["stash", "pop", "--index"]);
+    let status = stdout(&repo.ok(&["status", "--porcelain"]));
+    assert!(
+        status.contains("A  dir/s.txt"),
+        "the nested file must come back STAGED: {status}"
+    );
+}
+
+#[test]
+fn diff_merge_base_typo_branch_with_slash_errors() {
+    // A `/`-containing second arg that is a typo'd branch (not a path) must
+    // surface as a bad revision, not silently degrade into a pathspec filter.
+    let repo = Repo::new();
+    clean_diverge(&repo);
+    let out = repo.run(&["diff", "--merge-base", "main", "feature/typo", "--name-only"]);
+    assert!(
+        !out.status.success(),
+        "a /-containing typo'd branch must be a bad revision: stdout={:?}",
+        stdout(&out)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("bad revision"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }

@@ -888,18 +888,18 @@ selects the key type
 .Pq default Cm ed25519 ;
 the destination depends on it:
 .Cm ed25519
-writes the signing key to
-.Pa .mkit/keys/default.key ,
+writes the signing key to the
+.Cm signing_key
+path
+.Pq default Pa .mkit/keys/default.key ,
 while
 .Cm secp256k1
 and
 .Cm p256
-write attestation keys to
-.Pa .mkit/keys/secp256k1.key
-and
-.Pa .mkit/keys/p256.key
-respectively (each overridable via
-.Cm attest. Ns Ar algo Ns Cm _key_path ) .
+write attestation keys to the
+.Cm attest. Ns Ar algo Ns Cm _key_path
+paths
+.Pq default Pa .mkit/keys/secp256k1.key No / Pa .mkit/keys/p256.key .
 .Fl Fl force
 overwrites an existing key file at the target path; and
 .Fl Fl print-pubkey

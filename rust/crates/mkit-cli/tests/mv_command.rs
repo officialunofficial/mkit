@@ -405,3 +405,66 @@ fn mv_dir_refuses_destination_nested_under_a_tracked_ancestor_file() {
         "expected a tracked-path conflict message: {out:?}"
     );
 }
+
+#[test]
+fn mv_case_only_rename_preserves_the_file() {
+    // `mv -f Foo foo` must not delete the source. On a case-insensitive FS the
+    // destination IS the source; on a case-sensitive FS it is a plain rename.
+    // Either way the content survives and the new name exists.
+    let (td, xdg) = repo(&[("Foo", b"data\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    let out = run_in(root, x, &["mv", "-f", "Foo", "foo"]);
+    assert!(out.status.success(), "case-only rename should succeed: {out:?}");
+    assert_eq!(
+        fs::read(root.join("foo")).unwrap(),
+        b"data\n",
+        "content must be preserved at the new name"
+    );
+}
+
+#[test]
+fn mv_file_refuses_destination_with_tracked_descendants() {
+    // `dst/child` is tracked; `dst` deleted from disk. `mv src dst` (a file
+    // move) would leave both `dst` (file) and `dst/child` in the index.
+    let (td, xdg) = repo(&[("src", b"s\n"), ("dst/child", b"c\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::remove_dir_all(root.join("dst")).unwrap(); // dst/child still tracked
+    let out = run_in(root, x, &["mv", "src", "dst"]);
+    assert!(!out.status.success(), "must refuse: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("tracked descendants"),
+        "expected a tracked-descendants message: {out:?}"
+    );
+}
+
+#[test]
+fn mv_dir_refuses_when_a_tracked_child_is_missing_from_the_worktree() {
+    // `src/missing.txt` is tracked but deleted from disk; moving the directory
+    // must not resurrect its old blob at the destination.
+    let (td, xdg) = repo(&[("src/a.txt", b"a\n"), ("src/missing.txt", b"m\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::remove_file(root.join("src/missing.txt")).unwrap();
+    let out = run_in(root, x, &["mv", "src", "dst"]);
+    assert!(!out.status.success(), "must refuse: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("missing from the worktree"),
+        "expected a missing-source message: {out:?}"
+    );
+}
+
+#[test]
+fn mv_file_refuses_source_replaced_by_a_directory() {
+    // Tracked file `src` replaced on disk by a directory: a "file move" would
+    // rename the directory but stage the destination with the old file blob.
+    let (td, xdg) = repo(&[("src", b"x\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::remove_file(root.join("src")).unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(root.join("src/inner"), b"y\n").unwrap();
+    let out = run_in(root, x, &["mv", "src", "dst"]);
+    assert!(!out.status.success(), "must refuse: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("now a directory"),
+        "expected a tracked-as-file-but-now-directory message: {out:?}"
+    );
+}

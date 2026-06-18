@@ -794,12 +794,13 @@ fn looks_like_rev_request(s: &str) -> bool {
 }
 
 /// Is `arg` clearly a pathspec rather than a (typo'd) revision? True when it
-/// contains a `/`, names an existing worktree path, OR matches a tracked
-/// index path (a file/dir tracked but deleted from the worktree is still a
-/// valid pathspec, as in git). Used by `--merge-base` to keep a bad second
-/// revision from silently degrading into an empty-output pathspec filter.
+/// names an existing worktree path OR matches a tracked index path (a file/dir
+/// tracked but deleted from the worktree is still a valid pathspec, as in
+/// git). A bare `/` is NOT enough — branch names routinely contain `/` (e.g.
+/// `feature/x`), so a typo'd branch like `feature/typo` must surface as a bad
+/// revision rather than silently degrade into an empty-output pathspec filter.
 fn looks_like_pathspec(cwd: &std::path::Path, arg: &str) -> bool {
-    if arg.contains('/') || cwd.join(arg).symlink_metadata().is_ok() {
+    if cwd.join(arg).symlink_metadata().is_ok() {
         return true;
     }
     let Ok(idx) = mkit_core::index::read_index(cwd) else {
