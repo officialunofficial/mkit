@@ -1055,12 +1055,22 @@ form \(em an intentional, packaging-pinned divergence.
 .El
 .Sh ENVIRONMENT
 .Bl -tag -width "CLICOLOR_FORCE"
-.It Ev EDITOR , Ev VISUAL
-Editor used by
+.It Ev GIT_EDITOR , Ev EDITOR , Ev VISUAL
+Editor opened by
 .Cm mkit commit
-when no
+when neither
 .Fl m
-is supplied. If neither is set, the commit aborts with a clear error.
+nor
+.Fl F
+is supplied, tried in that order. If none is set it falls back to
+.Xr vi 1
+(Unix) or
+.Ic notepad
+(Windows), matching git. In a headless or non-interactive context, pass
+.Fl m
+or
+.Fl F
+so the commit never blocks on an editor.
 .It Ev NO_COLOR
 If set to any value (including empty),
 .Nm

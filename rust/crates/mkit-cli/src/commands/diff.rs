@@ -803,13 +803,17 @@ fn looks_like_pathspec(cwd: &std::path::Path, arg: &str) -> bool {
     if cwd.join(arg).symlink_metadata().is_ok() {
         return true;
     }
+    // Normalize the spec the same way the path filter will (e.g. `./a.txt` ->
+    // `a.txt`) before matching the index, so a tracked-but-deleted file passed
+    // as `./a.txt` isn't misread as a bad revision.
+    let spec = normalize_pathspec(arg);
     let Ok(idx) = mkit_core::index::read_index(cwd) else {
         return false;
     };
-    let prefix = format!("{arg}/");
+    let prefix = format!("{spec}/");
     idx.entries
         .iter()
-        .any(|e| e.path == arg || e.path.starts_with(&prefix))
+        .any(|e| e.path == spec || e.path.starts_with(&prefix))
 }
 
 fn head_tree(store: &ObjectStore, mkit_dir: &std::path::Path) -> Result<Option<Hash>, String> {

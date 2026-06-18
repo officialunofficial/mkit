@@ -468,3 +468,41 @@ fn mv_file_refuses_source_replaced_by_a_directory() {
         "expected a tracked-as-file-but-now-directory message: {out:?}"
     );
 }
+
+#[test]
+fn mv_dir_refuses_child_replaced_by_a_directory() {
+    // A tracked child `src/file` replaced on disk by a directory must be
+    // refused — moving the parent would restage the stale blob at the dest.
+    let (td, xdg) = repo(&[("src/file", b"x\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::remove_file(root.join("src/file")).unwrap();
+    fs::create_dir(root.join("src/file")).unwrap();
+    fs::write(root.join("src/file/inner"), b"y\n").unwrap();
+    let out = run_in(root, x, &["mv", "src", "dst"]);
+    assert!(!out.status.success(), "must refuse: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("now a directory"),
+        "expected a type-changed-child message: {out:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn mv_dir_refuses_child_through_a_symlinked_ancestor() {
+    // A tracked `src/link/file` whose `link` ancestor (inside the moved tree)
+    // is a symlink to an external dir must be refused — the single directory
+    // rename would otherwise carry the symlink and escape the repo.
+    let (td, xdg) = repo(&[("src/link/file", b"f\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    let external = tempfile::tempdir().unwrap();
+    fs::write(external.path().join("file"), b"external\n").unwrap();
+    fs::remove_dir_all(root.join("src/link")).unwrap();
+    std::os::unix::fs::symlink(external.path(), root.join("src/link")).unwrap();
+    let out = run_in(root, x, &["mv", "src", "dst"]);
+    assert!(!out.status.success(), "must refuse: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("traverses a symlink"),
+        "expected a symlink-traversal message: {out:?}"
+    );
+    assert!(external.path().join("file").exists(), "external content untouched");
+}

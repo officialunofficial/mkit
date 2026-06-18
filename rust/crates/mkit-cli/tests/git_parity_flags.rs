@@ -816,3 +816,102 @@ fn diff_merge_base_typo_branch_with_slash_errors() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn rebase_skip_preserves_edits_to_operation_authored_clean_paths() {
+    // The replayed commit conflicts on a.txt and cleanly adds b.txt; the user
+    // edits b.txt during the pause. `rebase --skip` must refuse rather than
+    // discard the edit.
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"base\n", "c0");
+    repo.ok(&["branch", "topic"]);
+    repo.ok(&["checkout", "topic"]);
+    repo.write("a.txt", b"topic\n");
+    repo.write("b.txt", b"clean\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "topic work"]);
+    repo.ok(&["checkout", "main"]);
+    repo.commit_file("a.txt", b"main\n", "main work");
+    repo.ok(&["checkout", "topic"]);
+
+    let out = repo.run(&["rebase", "main"]);
+    assert!(!out.status.success(), "rebase should pause on the a.txt conflict");
+    repo.write("b.txt", b"my edit during rebase\n");
+    let skip = repo.run(&["rebase", "--skip"]);
+    assert!(!skip.status.success(), "skip must refuse to discard the edit to b.txt");
+    assert_eq!(
+        std::fs::read(repo.path().join("b.txt")).unwrap(),
+        b"my edit during rebase\n"
+    );
+    repo.run(&["rebase", "--abort"]);
+}
+
+#[test]
+fn merge_abort_refuses_restoring_a_deleted_file_over_a_user_directory() {
+    // The merge conflicts on a.txt and cleanly deletes file `d`; the user then
+    // creates a directory `d/` (with untracked content). Abort must refuse
+    // BEFORE any mutation — restoring the file `d` over the directory would
+    // fail mid-operation and destroy the untracked content.
+    let repo = Repo::new();
+    repo.write("a.txt", b"base\n");
+    repo.write("d", b"file d\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "c0"]);
+    repo.ok(&["branch", "feature"]);
+    repo.ok(&["checkout", "feature"]);
+    repo.write("a.txt", b"theirs\n");
+    repo.ok(&["rm", "d"]);
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "feat"]);
+    repo.ok(&["checkout", "main"]);
+    repo.write("a.txt", b"ours\n");
+    repo.ok(&["add", "a.txt"]);
+    repo.ok(&["commit", "-m", "m2"]);
+
+    repo.run(&["merge", "feature"]); // conflict on a.txt, cleanly deletes d
+    std::fs::create_dir(repo.path().join("d")).unwrap();
+    repo.write("d/keep", b"my untracked work\n");
+
+    let out = repo.run(&["merge", "--abort"]);
+    assert!(!out.status.success(), "abort must refuse the file-over-directory restore");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("replace directory"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(repo.path().join("d/keep").exists(), "untracked content must survive");
+}
+
+#[test]
+fn stash_in_unborn_repo_clears_and_restores_untracked_too() {
+    // Unborn repo: stash captures + clears BOTH staged and untracked content
+    // (so a later pop has a clean slate), and `pop --index` restores both.
+    let repo = Repo::new();
+    repo.write("s.txt", b"staged\n");
+    repo.write("u.txt", b"untracked\n");
+    repo.ok(&["add", "s.txt"]);
+    repo.ok(&["stash"]);
+    assert!(
+        !repo.path().join("s.txt").exists() && !repo.path().join("u.txt").exists(),
+        "stash should leave a clean slate"
+    );
+    repo.ok(&["stash", "pop", "--index"]);
+    let status = stdout(&repo.ok(&["status", "--porcelain"]));
+    assert!(status.contains("A  s.txt"), "staged file restored staged: {status}");
+    assert!(status.contains("?? u.txt"), "untracked file restored untracked: {status}");
+}
+
+#[test]
+fn diff_merge_base_accepts_dot_slash_tracked_deleted_pathspec() {
+    // `./a.txt` (a tracked file deleted from the worktree) must be accepted as
+    // a pathspec after normalization, not rejected as a bad revision.
+    let repo = Repo::new();
+    clean_diverge(&repo);
+    std::fs::remove_file(repo.path().join("a.txt")).unwrap();
+    let out = repo.run(&["diff", "--merge-base", "feature", "./a.txt", "--name-only"]);
+    assert!(
+        out.status.success(),
+        "./a.txt (tracked, deleted) must normalize to a pathspec: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

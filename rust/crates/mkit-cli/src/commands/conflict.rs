@@ -519,6 +519,27 @@ pub fn ensure_abort_safe(
             }
         }
     }
+
+    // Restoring `target_tree` writes a file at every path it adds/changes
+    // relative to the current index — INCLUDING discardable paths (e.g. a
+    // file the operation cleanly deleted). Refuse if any such path is now a
+    // DIRECTORY in the worktree (e.g. the user created `d/keep` after the
+    // operation deleted file `d`): the restore would fail part-way and
+    // removing the directory would destroy the user's untracked content.
+    // Checked here, before any mutation, so abort stays all-or-nothing.
+    for entry in &mkit_core::ops::diff::diff_trees(&snapshot, Some(index_tree), Some(target_tree))
+        .map_err(|e| format!("check restore target: {e}"))?
+        .entries
+    {
+        if entry.kind != mkit_core::ops::diff::DiffKind::Removed
+            && std::fs::symlink_metadata(root.join(&entry.path)).is_ok_and(|m| m.is_dir())
+        {
+            return Err(format!(
+                "abort would replace directory '{}' with a file; move or remove it first",
+                entry.path
+            ));
+        }
+    }
     Ok(())
 }
 

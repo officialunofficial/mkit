@@ -272,6 +272,12 @@ fn skip_paused_commit(
     let head_tree = load_tree_hash(store, head_hash)?;
     // Also discard the skipped step's clean hunks (not just conflict paths).
     let op_result = conflict_state::read_result_tree(rebase_dir).ok().flatten();
+    // Pre-flight before any mutation: refuse if discarding the step would
+    // destroy genuine user work — an edit to a cleanly-applied path, or
+    // unrelated staged/worktree changes — exactly as `--abort` does.
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, head_tree, op_result) {
+        return Err(emit_err(&e, exit::GENERAL_ERROR));
+    }
     if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, records, head_tree, op_result)
     {
         return Err(emit_err(&e, exit::GENERAL_ERROR));

@@ -496,6 +496,7 @@ fn apply_to_index(idx: &mut index::Index, m: &PlannedMove) {
 /// or index mutation. `src_rel` is the source's repo-relative path (already
 /// resolved by the caller).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // a flat sequence of independent safety guards
 fn plan_dir_move(
     cwd: &Path,
     root_canon: &Path,
@@ -598,13 +599,32 @@ fn plan_dir_move(
     let mut files = Vec::new();
     for e in &idx.entries {
         if e.status != EntryStatus::Removed && e.path.starts_with(&prefix) {
+            let child_abs = cwd.join(&e.path);
             // The tracked child must still exist in the worktree. Otherwise the
             // directory rename moves nothing for it, yet we'd restage its old
             // blob at the destination — resurrecting a file that was deleted
             // from disk. Git refuses a move whose source is gone.
-            if !path_present(&cwd.join(&e.path)) {
+            let Ok(meta) = std::fs::symlink_metadata(&child_abs) else {
                 return Err(emit_err(
                     &format!("bad source: {} (tracked file missing from the worktree)", e.path),
+                    exit::GENERAL_ERROR,
+                ));
+            };
+            // …and it must still be a file/symlink, not a directory: a child
+            // replaced by a directory would restage the stale blob at the
+            // destination while the worktree keeps the directory.
+            if meta.is_dir() {
+                return Err(emit_err(
+                    &format!("bad source: {} (tracked as a file but is now a directory)", e.path),
+                    exit::GENERAL_ERROR,
+                ));
+            }
+            // …and its path must not be reached through a symlinked ancestor
+            // inside the moved subtree (which the single directory rename would
+            // carry along, leaving a symlink that escapes the repo).
+            if has_symlinked_ancestor(cwd, &e.path) {
+                return Err(emit_err(
+                    &format!("bad source: {} (path traverses a symlink)", e.path),
                     exit::GENERAL_ERROR,
                 ));
             }

@@ -206,38 +206,35 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
     list.entries.insert(0, new_entry);
     write_list(repo_root, &list)?;
 
-    // Restore the worktree to HEAD's tree (if any). In an UNBORN repo there
-    // is no HEAD to restore to, so remove the staged (tracked) files we just
-    // stashed — leaving untracked files alone — instead of leaving them
-    // behind as untracked, which would make a later `pop` refuse to overwrite
-    // them.
-    match head_hash {
-        Some(hh) => {
-            let head_obj = store.read_object(&hh)?;
-            if let Object::Commit(c) = head_obj {
-                restore::restore_tree(store, c.tree_hash, repo_root, &RestoreOptions::default())?;
-            }
+    // Restore the worktree to HEAD's tree. In an UNBORN repo there is no HEAD,
+    // so clear EVERY path captured in the worktree snapshot (tracked AND
+    // untracked) — mirroring the HEAD case, where `restore_tree` removes
+    // everything not in HEAD. Removing only the staged entries would leave
+    // untracked files that the snapshot also captured, and a later
+    // `pop`/`pop --index` would then refuse to overwrite them.
+    if let Some(hh) = head_hash {
+        let head_obj = store.read_object(&hh)?;
+        if let Object::Commit(c) = head_obj {
+            restore::restore_tree(store, c.tree_hash, repo_root, &RestoreOptions::default())?;
         }
-        None => {
-            for e in &staged.entries {
-                if e.status != index::EntryStatus::Removed {
-                    let abs = repo_root.join(&e.path);
-                    if let Err(err) = std::fs::remove_file(&abs)
-                        && err.kind() != std::io::ErrorKind::NotFound
-                    {
-                        return Err(StashError::Io(err));
-                    }
-                    // Remove now-empty parent directories up to the repo root,
-                    // so a later `pop` can recreate the path without tripping
-                    // the "would overwrite untracked directory" guard.
-                    let mut parent = abs.parent();
-                    while let Some(dir) = parent {
-                        if dir == repo_root || std::fs::remove_dir(dir).is_err() {
-                            break;
-                        }
-                        parent = dir.parent();
-                    }
+    } else {
+        let snapshot = index::from_tree(store, tree_hash)?;
+        for e in &snapshot.entries {
+            let abs = repo_root.join(&e.path);
+            if let Err(err) = std::fs::remove_file(&abs)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(StashError::Io(err));
+            }
+            // Remove now-empty parent directories up to the repo root, so a
+            // later `pop` can recreate the path without tripping the "would
+            // overwrite untracked directory" guard.
+            let mut parent = abs.parent();
+            while let Some(dir) = parent {
+                if dir == repo_root || std::fs::remove_dir(dir).is_err() {
+                    break;
                 }
+                parent = dir.parent();
             }
         }
     }
@@ -310,23 +307,32 @@ pub fn entry_index(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashRe
     let Object::Commit(index_commit) = store.read_object(index_commit)? else {
         return Err(StashError::NotACommit);
     };
-    // The index commit's tree is the wrapper; the `i` entry is the serialized
-    // index blob. Anything else (a HEAD root tree, or an earlier layout) has
-    // no recoverable index → no-op.
+    // The current-format index snapshot is a WRAPPER tree carrying BOTH the
+    // serialized index blob (`i`) and the staged content tree (`t`). Requiring
+    // both markers distinguishes it from a legacy `[HEAD]` root tree that
+    // might (astronomically rarely) carry a top-level `i` of its own — that
+    // case has no recoverable index and returns None.
     let Object::Tree(wrapper) = store.read_object(&index_commit.tree_hash)? else {
         return Ok(None);
     };
-    let Some(blob_entry) = wrapper.entries.iter().find(|e| e.name == b"i") else {
+    let has_index_blob = wrapper.entries.iter().any(|e| e.name == b"i");
+    let has_content_tree = wrapper.entries.iter().any(|e| e.name == b"t");
+    if !(has_index_blob && has_content_tree) {
         return Ok(None);
-    };
+    }
+    // From here we KNOW this is a current-format snapshot, so a malformed blob
+    // is corruption: fail closed and preserve the only staged-state copy,
+    // rather than silently dropping it (which `pop --index` would then treat
+    // as "no index" and discard).
+    let blob_entry = wrapper
+        .entries
+        .iter()
+        .find(|e| e.name == b"i")
+        .ok_or(StashError::InvalidFormat)?;
     let Object::Blob(blob) = store.read_object(&blob_entry.object_hash)? else {
-        return Ok(None);
+        return Err(StashError::InvalidFormat);
     };
-    // A real HEAD root tree could (rarely) carry a top-level `i` file; only
-    // treat it as an index snapshot if its bytes actually deserialize as one
-    // (the index format is magic-tagged), otherwise there is no index to
-    // restore.
-    Ok(index::deserialize(&blob.data).ok())
+    Ok(Some(index::deserialize(&blob.data)?))
 }
 
 /// Pop a stash: restore its tree into the worktree and remove the

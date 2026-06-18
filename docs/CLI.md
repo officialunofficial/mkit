@@ -978,19 +978,25 @@ unreachable objects once they fall outside the grace window. See
 
 ## Config keys
 
-Stored in `.mkit/config` as `key = value` lines.
+Stored in `.mkit/config` as `key = value` lines — **except** security-sensitive
+keys, which are **user-scoped only** and ignored if set in a repo's
+`.mkit/config` (a hostile repo must not be able to redirect signing or trust).
+Those keys — `user.identity`, `signing_key`, `signer`, `key.*`, `attest.*`,
+`ssh.*`, and `trusted_remote_endpoint` — live in the user config
+(`$XDG_CONFIG_HOME/mkit/config`); set them with `mkit config <key> <value>`,
+which routes them to the user scope automatically.
 
 | Key | Value | Default | Notes |
 |-----|-------|---------|-------|
-| `user.identity` | hex Identity | unset | See below |
-| `signing_key` | path | `.mkit/keys/default.key` | Ed25519 seed file |
+| `user.identity` | hex Identity | unset | **User-scoped only**; see below |
+| `signing_key` | path | `.mkit/keys/default.key` | Ed25519 seed file; **user-scoped only** |
 | `default_branch` | name | `main` | Branch for `mkit init` |
 | `remote_endpoint` | URL / path | empty | Set via `mkit remote add` |
 | `remote_bucket` | name | empty | For s3 remotes |
 | `remote_type` | `file` / `http` / `s3` / `ssh` / `memory` | auto | |
-| `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | |
-| `ssh.user_known_hosts_file` | path | inherit | |
-| `ssh.identity_file` | path | inherit | |
+| `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
+| `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
+| `ssh.identity_file` | path | inherit | User-scoped only |
 | `signer` | `legacy` / `keystore` | `legacy` | User-scoped commit signing source |
 | `key.backend` | backend name | `software` | User-scoped default for `mkit key` |
 | `key.default_ref` | `<backend>:<label>` | `software:default` | User-scoped fallback key ref |
@@ -1093,9 +1099,11 @@ parsing stderr.
 
 ### Environment variables
 
-- **`EDITOR`** (fallback: `VISUAL`) — used by `mkit commit` when `-m`
-  is not supplied. If neither is set, the commit aborts with a clear
-  error rather than silently running `vi`.
+- **`GIT_EDITOR` / `EDITOR` / `VISUAL`** — the editor `mkit commit`
+  opens when neither `-m` nor `-F` is supplied, tried in that order. If
+  none is set it falls back to `vi` (Unix) / `notepad` (Windows),
+  matching git. In a headless or non-interactive context (CI, an agent),
+  always pass `-m`/`-F` so the commit never blocks on an editor.
 - **`NO_COLOR`** — if set (any value, including empty) ANSI color on
   stdout is suppressed. See <https://no-color.org>.
 - **`CLICOLOR_FORCE=1`** — force ANSI color even when stdout is piped.

@@ -44,8 +44,10 @@ mkit commit -m "first commit"   # commits are ALWAYS Ed25519-signed
 ```
 
 A signing key is mandatory: `commit`/`tag -s`/`attest` need one. If you skip
-`keygen`, commits fail. `commit` opens `$EDITOR` (then `$VISUAL`) when `-m` is
-omitted, and aborts if neither is set rather than guessing.
+`keygen`, commits fail. `commit` opens an editor (`$GIT_EDITOR`, then
+`$EDITOR`, then `$VISUAL`, falling back to `vi`/`notepad`) when `-m`/`-F` is
+omitted — so in a headless or agent context, ALWAYS pass `-m` or `-F` so it
+never blocks on an editor.
 
 ## Mental model: like git, with four differences that matter
 
