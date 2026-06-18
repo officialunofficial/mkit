@@ -119,12 +119,14 @@ export function AttestDemo() {
           </Field>
           <Field label='Verifies'>
             {verdict === null ? null : (
-              <span className={verdict ? 'text-green-700' : 'text-red-600'}>{verdict ? 'yes ✓' : 'no ✗'}</span>
+              <span className={verdict ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>
+                {verdict ? 'yes ✓' : 'no ✗'}
+              </span>
             )}
           </Field>
         </FieldList>
       ) : (
-        <p className='text-red-600'>{built.error}</p>
+        <p className='text-red-600 dark:text-red-400'>{built.error}</p>
       )}
     </div>
   )

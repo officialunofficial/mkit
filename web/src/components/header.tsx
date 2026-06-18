@@ -1,5 +1,6 @@
 import { Link } from 'waku'
 import { GridLogo } from './grid-logo'
+import { ThemeToggle } from './theme-toggle'
 
 export const Header = () => {
   return (
@@ -58,7 +59,16 @@ export const Header = () => {
             >
               attest
             </Link>
+            <Link
+              to='/parity'
+              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
+            >
+              parity
+            </Link>
           </nav>
+          <div className='ml-auto'>
+            <ThemeToggle />
+          </div>
         </div>
         {/* Top separator: 2px band carrying the brand gradient, wider
             than the element so it can slide. `background-position-x`

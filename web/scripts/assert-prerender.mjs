@@ -3,7 +3,7 @@
 // nothing. waku's SSG step swallows route-registration problems (e.g. the
 // fsRouter glob-key mismatch introduced by the 1.0.0-beta.2 bump, #305) and
 // happily reports success while emitting zero pages — which is exactly how a
-// blank mkit.makechain.net shipped. Run after `waku build` in the build chain.
+// blank mkit.sh shipped. Run after `waku build` in the build chain.
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'

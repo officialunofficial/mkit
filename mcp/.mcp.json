@@ -2,7 +2,7 @@
   "mcpServers": {
     "mkit": {
       "type": "http",
-      "url": "https://mcp.mkit.makechain.net"
+      "url": "https://mcp.mkit.sh"
     }
   }
 }
