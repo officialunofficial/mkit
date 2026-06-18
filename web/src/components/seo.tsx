@@ -23,7 +23,11 @@ type SeoProps = {
 
 export function Seo({ title, description, path, card }: SeoProps) {
   const url = `${SITE_URL}${path}`
-  const image = `${OG_URL}/?title=${encodeURIComponent(card ?? title)}&description=${encodeURIComponent(description)}`
+  // The OG worker's `variant` selects the per-route mesh gradient; its keys are
+  // the route names (`/` → `home`), so derive it straight from the path.
+  const variant = path === '/' ? 'home' : path.replace(/^\//, '')
+  const params = new URLSearchParams({ variant, title: card ?? title, description })
+  const image = `${OG_URL}/?${params.toString()}`
 
   return (
     <>
