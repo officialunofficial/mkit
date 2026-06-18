@@ -1196,3 +1196,69 @@ fn merge_commit_refused_when_staged_merge_was_reset_away() {
         "the merge must remain in progress (abortable)"
     );
 }
+
+// ---------- global flags: -C / -c (git parity) ----------------------------
+
+/// `mkit -C <path> <cmd>` runs the command as if launched in `<path>`.
+#[test]
+fn global_dash_c_changes_directory() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "first");
+    // Run from the repo's PARENT, pointing back in with `-C`.
+    let parent = repo.path().parent().expect("tempdir has a parent");
+    let out = common::mkit(
+        parent,
+        repo.xdg(),
+        &[
+            "-C",
+            repo.path().to_str().unwrap(),
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ],
+    );
+    assert!(out.status.success(), "-C rev-parse failed: {out:?}");
+    assert_eq!(stdout(&out).trim(), "main");
+}
+
+/// `-c <key>=<val>` overrides an inert/allowlisted key for one invocation.
+#[test]
+fn global_dash_c_override_applies_inert_key() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "first");
+    let out = repo.ok(&["-c", "user.email=ci@example.com", "config", "user.email"]);
+    assert_eq!(stdout(&out).trim(), "ci@example.com");
+}
+
+/// `-c` MUST NOT be able to smuggle a security-sensitive key
+/// (`REPO_FORBIDDEN_KEYS`) — it is refused with a warning, exactly like a
+/// hostile per-repo config file. (Peer-review requirement.)
+#[test]
+fn global_dash_c_refuses_forbidden_key() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "first");
+    let out = repo.run(&["-c", "user.identity=mid:999999", "config", "user.identity"]);
+    let printed = stdout(&out);
+    assert!(
+        !printed.contains("999999"),
+        "-c must not override the signed identity: {printed}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ignoring `-c user.identity"),
+        "expected a refusal warning, got: {stderr}"
+    );
+}
+
+/// `-c core.<denied>` (e.g. `core.pager`) is dropped like any dangerous
+/// `core.*` key, so it never takes effect.
+#[test]
+fn global_dash_c_drops_denied_core_key() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "first");
+    let out = repo.run(&["-c", "core.pager=less", "config", "core.pager"]);
+    assert!(
+        !out.status.success(),
+        "denied core.* via -c must not be readable back: {out:?}"
+    );
+}
