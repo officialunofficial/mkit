@@ -15,14 +15,17 @@
 
 // Match only command-line HTTP fetchers at the START of the UA string. Browsers
 // send `Mozilla/...`; crawlers send their own product tokens — both fall
-// through to the homepage, so SEO and normal navigation are untouched.
-const CLI_FETCHER_UA = /^(curl|wget|fetch|libcurl|httpie)\b/i
+// through to the homepage, so SEO and normal navigation are untouched. This
+// allowlist is intentionally conservative (false positives would serve a shell
+// script to a browser); the explicit `/install.sh` path is the guaranteed,
+// UA-independent way to fetch the installer for any other client.
+const CLI_FETCHER_UA = /^(curl|wget|fetch|libcurl|httpie|aria2)\b/i
 
 type AssetsEnv = { ASSETS: { fetch: (req: Request | URL | string) => Promise<Response> } }
 
 /**
- * If `req` is a command-line fetcher asking for the site root, return the install script with shell-friendly headers.
- * Otherwise return `null` so the caller delegates to the normal page router.
+ * If `req` is a command-line fetcher asking for the site root, return the install script. Otherwise return `null` so
+ * the caller delegates to the normal page router.
  */
 export async function tryServeInstaller(req: Request, env: AssetsEnv): Promise<Response | null> {
   if (req.method !== 'GET' && req.method !== 'HEAD') return null
@@ -34,16 +37,33 @@ export async function tryServeInstaller(req: Request, env: AssetsEnv): Promise<R
   if (!CLI_FETCHER_UA.test(ua)) return null
 
   // Reuse the already-staged static asset so there is a single source of truth.
-  const asset = await env.ASSETS.fetch(new URL('/install.sh', url))
+  // Any failure here (unbound ASSETS, fetch error, non-200) must NOT take `/`
+  // down for browsers — `run_worker_first: ["/"]` routes every homepage request
+  // through this middleware, so a throw would 500 the site. Fall through (null)
+  // and let the normal homepage render instead.
+  let asset: Response
+  try {
+    asset = await env.ASSETS.fetch(new URL('/install.sh', url))
+  } catch {
+    return null
+  }
   if (!asset.ok) return null
 
-  const res = new Response(asset.body, asset)
-  res.headers.set('Content-Type', 'text/x-shellscript; charset=utf-8')
-  // `/` now varies by User-Agent (script for curl, HTML for browsers). Without
-  // this, a shared cache could serve the script to a browser or vice versa.
-  res.headers.set('Vary', 'User-Agent')
-  res.headers.set('Cache-Control', 'public, max-age=600')
-  return res
+  // Build the response from scratch instead of `new Response(asset.body, asset)`
+  // so the asset's ETag / Content-Length / Content-Encoding don't leak through
+  // and mismatch once we relabel the Content-Type.
+  //
+  // `no-store` — NOT `public` + `Vary: User-Agent`. This URL returns the script
+  // to CLI fetchers and HTML to browsers, but Cloudflare and many proxies ignore
+  // `Vary: User-Agent`, so a shared cache could hand the script to a browser or
+  // the homepage to `curl … | sh`. The only safe answer is to never cache `/`.
+  return new Response(asset.body, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/x-shellscript; charset=utf-8',
+      'Cache-Control': 'no-store',
+    },
+  })
 }
 
 // Hono context shape we rely on — kept minimal so we don't couple to a Hono

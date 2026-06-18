@@ -8,7 +8,11 @@ function makeEnv() {
   const fetch = vi.fn(async (input: Request | URL | string) => {
     const url = new URL(typeof input === 'string' ? input : input.toString())
     if (url.pathname === '/install.sh') {
-      return new Response(SCRIPT, { headers: { 'Content-Type': 'application/octet-stream' } })
+      // Include headers the static-asset layer would set (ETag/Content-Type) so
+      // tests prove tryServeInstaller does not let them leak into its response.
+      return new Response(SCRIPT, {
+        headers: { 'Content-Type': 'application/octet-stream', ETag: '"abc123"' },
+      })
     }
     return new Response('not found', { status: 404 })
   })
@@ -25,8 +29,12 @@ describe('tryServeInstaller', () => {
     expect(res).not.toBeNull()
     expect(res!.status).toBe(200)
     expect(res!.headers.get('Content-Type')).toBe('text/x-shellscript; charset=utf-8')
-    expect(res!.headers.get('Vary')).toBe('User-Agent')
-    expect(res!.headers.get('Cache-Control')).toContain('max-age=600')
+    // `/` must never be cached: shared caches ignore Vary: User-Agent and would
+    // cross the script and the homepage between CLI fetchers and browsers.
+    expect(res!.headers.get('Cache-Control')).toBe('no-store')
+    expect(res!.headers.get('Vary')).toBeNull()
+    // Inherited asset headers must not leak through after the Content-Type relabel.
+    expect(res!.headers.get('ETag')).toBeNull()
     await expect(res!.text()).resolves.toBe(SCRIPT)
   })
 
@@ -58,5 +66,23 @@ describe('tryServeInstaller', () => {
   it('falls through when no User-Agent is present', async () => {
     const bare = new Request('https://mkit.sh/', { method: 'GET' })
     expect(await tryServeInstaller(bare, makeEnv())).toBeNull()
+  })
+
+  it('falls through (null) when ASSETS.fetch throws — never 500s the homepage', async () => {
+    const env = {
+      ASSETS: {
+        fetch: vi.fn(async () => {
+          throw new Error('ASSETS binding unavailable')
+        }),
+      },
+    }
+    await expect(tryServeInstaller(req('/', 'curl/8.4.0'), env)).resolves.toBeNull()
+  })
+
+  it('falls through (null) when the install.sh asset is missing (non-200)', async () => {
+    const env = {
+      ASSETS: { fetch: vi.fn(async () => new Response('nope', { status: 404 })) },
+    }
+    expect(await tryServeInstaller(req('/', 'curl/8.4.0'), env)).toBeNull()
   })
 })
