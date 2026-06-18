@@ -39,6 +39,16 @@ export default function HomePage() {
             on GitHub.
           </p>
           <div className='flex flex-col items-start gap-2'>
+            {/* Primary install: the hosted one-liner. Bare `mkit.sh` sniffs the
+                curl User-Agent and serves the signed installer (see
+                src/install-route.ts); it detects your platform, verifies the
+                cosign signature, and drops `mkit` into ~/.local/bin. */}
+            <div className='inline-flex items-center gap-3 rounded-md border border-hairline bg-muted/10 px-3 py-2'>
+              <code className='font-mono text-sm'>
+                <span className='select-none text-muted'>$ </span>curl mkit.sh | sh
+              </code>
+              <CopyButton text='curl mkit.sh | sh' />
+            </div>
             <div className='inline-flex items-center gap-3 rounded-md border border-hairline bg-muted/10 px-3 py-2'>
               <code className='font-mono text-sm'>
                 <span className='select-none text-muted'>$ </span>cargo install mkit-cli
