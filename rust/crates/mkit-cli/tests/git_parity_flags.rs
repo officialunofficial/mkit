@@ -569,3 +569,66 @@ fn diff_merge_base_typo_second_rev_errors() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn merge_abort_after_clean_no_commit_succeeds() {
+    // `merge --no-commit` then `merge --abort` must discard the staged merge
+    // and restore HEAD (it used to fail, mistaking the merge result for user
+    // work because the records list was empty).
+    let repo = Repo::new();
+    clean_diverge(&repo); // on `main`; feature adds b.txt, main adds c.txt
+    let head_before = rev(&repo, "HEAD");
+
+    repo.ok(&["merge", "--no-commit", "feature"]);
+    assert!(repo.path().join("b.txt").exists(), "merge staged b.txt");
+
+    repo.ok(&["merge", "--abort"]);
+    assert!(!repo.path().join("b.txt").exists(), "abort discarded the merge");
+    assert_eq!(rev(&repo, "HEAD"), head_before, "HEAD restored");
+    assert!(stdout(&repo.ok(&["status", "--porcelain"])).trim().is_empty());
+}
+
+#[test]
+fn merge_abort_refuses_unstaged_edits_after_no_commit() {
+    // But abort must still protect genuine UNSTAGED edits made on top of the
+    // staged merge.
+    let repo = Repo::new();
+    clean_diverge(&repo);
+    repo.ok(&["merge", "--no-commit", "feature"]);
+    repo.write("b.txt", b"hand-edited after the merge\n"); // unstaged edit
+    let out = repo.run(&["merge", "--abort"]);
+    assert!(!out.status.success(), "abort must refuse to discard unstaged edits");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unstaged worktree edits"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cherry_pick_n_of_a_deletion_stages_the_removal() {
+    // A deletion-only pick under -n must leave the deletion STAGED (not an
+    // empty index), so the deletion survives and `mkit commit` records it.
+    let repo = Repo::new();
+    repo.commit_file("only.txt", b"x\n", "c0");
+    repo.ok(&["branch", "del"]);
+    repo.ok(&["checkout", "del"]);
+    repo.ok(&["rm", "only.txt"]);
+    repo.ok(&["commit", "-m", "delete only.txt"]);
+    let del = rev(&repo, "HEAD");
+    repo.ok(&["checkout", "main"]);
+
+    repo.ok(&["cherry-pick", "-n", &del]);
+    let status = stdout(&repo.ok(&["status", "--porcelain"]));
+    assert!(
+        status.contains("D  only.txt"),
+        "the deletion must be staged: {status}"
+    );
+    // And it commits (no "nothing staged").
+    let out = repo.run(&["commit", "-m", "applied deletion"]);
+    assert!(
+        out.status.success(),
+        "commit of a staged deletion must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -155,6 +155,14 @@ fn start(
         if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
+        // Restoring from a tree drops staged DELETIONS; re-stage them as
+        // tombstones so a revert that removes files stays staged and
+        // `mkit commit` records it.
+        if let Err(e) =
+            super::stage_removed_tombstones(cwd, store, Some(ours_tree), result.tree_hash)
+        {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
