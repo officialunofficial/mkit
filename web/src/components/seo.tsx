@@ -3,9 +3,9 @@
 // <head> from anywhere in the tree, so pages render <Seo> inline at the top.
 //
 // og:image points at og.mkit.sh (the OG image worker in ../../og), which renders
-// a 1200×630 social card on the fly from the title/description query params —
-// `card` overrides the big headline drawn on the image when it should differ
-// from the unfurl title.
+// a flat, title-only 1200×630 social card on the fly from the `title` query param.
+// `card` overrides the headline drawn on the image when it should differ from the
+// unfurl title; the description rides along only in the meta tags, not the image.
 
 const SITE_URL = 'https://mkit.sh'
 const OG_URL = 'https://og.mkit.sh'
@@ -23,11 +23,7 @@ type SeoProps = {
 
 export function Seo({ title, description, path, card }: SeoProps) {
   const url = `${SITE_URL}${path}`
-  // The OG worker's `variant` selects the per-route mesh gradient; its keys are
-  // the route names (`/` → `home`), so derive it straight from the path.
-  const variant = path === '/' ? 'home' : path.replace(/^\//, '')
-  const params = new URLSearchParams({ variant, title: card ?? title, description })
-  const image = `${OG_URL}/?${params.toString()}`
+  const image = `${OG_URL}/?${new URLSearchParams({ title: card ?? title }).toString()}`
 
   return (
     <>
