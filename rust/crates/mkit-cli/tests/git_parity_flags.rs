@@ -1339,3 +1339,20 @@ fn diff_exit_code_reports_difference() {
     assert!(!out.status.success(), "dirty --quiet must exit non-zero");
     assert!(out.stdout.is_empty(), "--quiet must print nothing");
 }
+
+#[test]
+fn diff_color_always_and_never() {
+    let repo = Repo::new();
+    repo.commit_file("f.txt", b"a\nb\nc\n", "c1");
+    repo.write("f.txt", b"a\nB\nc\n");
+    // --color=always emits ANSI even when piped.
+    let colored = stdout(&repo.ok(&["diff", "--color=always"]));
+    assert!(colored.contains('\u{1b}'), "expected ANSI codes: {colored:?}");
+    assert!(colored.contains("\u{1b}[32m"), "expected green additions");
+    // Default (piped, auto) and --no-color emit none.
+    assert!(!stdout(&repo.ok(&["diff"])).contains('\u{1b}'), "piped diff must be plain");
+    assert!(
+        !stdout(&repo.ok(&["diff", "--no-color"])).contains('\u{1b}'),
+        "--no-color must be plain"
+    );
+}

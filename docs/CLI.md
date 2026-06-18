@@ -161,6 +161,13 @@ Working-tree commands:
   paths (in `--name-status -z` the status letter and path are each their
   own NUL-terminated field). `-z` is only valid with `--name-only` /
   `--name-status`.
+  `--exit-code` exits 1 when there are differences (0 when none), still
+  printing the patch; `--quiet` is the same but prints nothing — the CI
+  idiom for "fail if the tree changed". `--color[=always|auto|never]`
+  colorizes the patch (git's palette: bold metadata, cyan hunk headers,
+  green additions, red deletions); the default `auto` colorizes only on a
+  tty (honoring `NO_COLOR`/`CLICOLOR_FORCE`), and `--no-color` forces it
+  off. (Color for `status`/`log`/`branch` is a tracked follow-up.)
 - `mkit stash [save|list|pop|apply|drop|clear|show]` — save/restore WIP
   changes. `apply` restores an entry without removing it; `clear` drops
   every entry. `pop`/`apply`/`drop`/`show` select an entry by index

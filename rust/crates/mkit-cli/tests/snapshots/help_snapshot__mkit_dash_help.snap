@@ -96,7 +96,7 @@ commands:
                     --porcelain=v2 emits git's richer per-path format with
                     modes + object ids; special-byte paths are C-style
                     quoted; -z NUL-terminates records with raw paths)
-  diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [--exit-code|--quiet] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
+  diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [--exit-code|--quiet] [--color[=WHEN]|--no-color] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
                     --staged for HEAD vs index, a single revision vs the
                     worktree, two revisions, an A..B range, or an A...B

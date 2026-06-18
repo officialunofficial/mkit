@@ -144,6 +144,8 @@ _mkit() {
                         '--merge-base[diff against the merge base of the revisions]' \
                         '(--exit-code --quiet)--exit-code[exit 1 when there are differences]' \
                         '(--exit-code --quiet)--quiet[like --exit-code but print nothing]' \
+                        '(--color --no-color)--color[colorize patch: always|auto|never]::when:(always auto never)' \
+                        '(--color --no-color)--no-color[disable colorized output]' \
                         '-z[NUL-terminate name-only/name-status records, raw paths]' \
                         '--help[show help]' \
                         '*:file:_files'

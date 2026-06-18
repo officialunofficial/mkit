@@ -98,6 +98,16 @@ struct DiffOpts {
     #[arg(long)]
     quiet: bool,
 
+    /// Colorize the patch: `always`, `auto` (default, tty-only), or
+    /// `never` (like `git diff --color[=<when>]`). Honors `NO_COLOR` /
+    /// `CLICOLOR_FORCE` under `auto`.
+    #[arg(long = "color", value_name = "WHEN", num_args = 0..=1, default_missing_value = "always", conflicts_with = "no_color")]
+    color: Option<String>,
+
+    /// Disable colorized output (`git diff --no-color`).
+    #[arg(long = "no-color")]
+    no_color: bool,
+
     /// Optional revisions (refs, full/short hashes, `HEAD~n`, or an
     /// `A..B` range) followed by optional pathspecs to limit the
     /// output. With no revisions, diffs HEAD vs worktree (or HEAD vs
@@ -121,6 +131,10 @@ pub fn run(args: &[String]) -> u8 {
             exit::USAGE,
         );
     }
+    let Some(color_choice) = crate::term::ColorChoice::parse(opts.color.as_deref()) else {
+        return emit_err("--color expects always, auto, or never", exit::USAGE);
+    };
+    let use_color = !opts.no_color && color_choice.resolve(std::io::IsTerminal::is_terminal(&std::io::stdout()));
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -184,6 +198,16 @@ pub fn run(args: &[String]) -> u8 {
         let res = if opts.name_only || opts.name_status {
             emit_entry_name(&mut stdout, e, opts.name_status, opts.z);
             Ok(())
+        } else if use_color {
+            // Render the entry to a buffer, then colorize line-by-line so
+            // the byte-exact patch machinery stays color-agnostic.
+            let mut buf: Vec<u8> = Vec::new();
+            match emit_entry_patch(&mut buf, &snapshot, e) {
+                Ok(()) => stdout
+                    .write_all(colorize_patch(&String::from_utf8_lossy(&buf)).as_bytes())
+                    .map_err(|err| format!("write: {err}")),
+                Err(msg) => Err(msg),
+            }
         } else {
             emit_entry_patch(&mut stdout, &snapshot, e)
         };
@@ -192,6 +216,49 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
     diff_status
+}
+
+/// ANSI-colorize a unified-diff patch line-by-line, matching git's default
+/// palette: metadata bold, hunk headers cyan, additions green, deletions
+/// red. Context lines are left uncolored.
+fn colorize_patch(text: &str) -> String {
+    const RESET: &str = "\x1b[0m";
+    let mut out = String::with_capacity(text.len() + 64);
+    for line in text.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let nl = if line.ends_with('\n') { "\n" } else { "" };
+        let code = if body.starts_with("@@") {
+            Some("\x1b[36m") // hunk header: cyan
+        } else if body.starts_with("diff ")
+            || body.starts_with("index ")
+            || body.starts_with("new file")
+            || body.starts_with("deleted file")
+            || body.starts_with("old mode")
+            || body.starts_with("new mode")
+            || body.starts_with("rename ")
+            || body.starts_with("similarity ")
+            || body.starts_with("--- ")
+            || body.starts_with("+++ ")
+        {
+            Some("\x1b[1m") // metadata: bold
+        } else if body.starts_with('+') {
+            Some("\x1b[32m") // addition: green
+        } else if body.starts_with('-') {
+            Some("\x1b[31m") // deletion: red
+        } else {
+            None
+        };
+        match code {
+            Some(c) => {
+                out.push_str(c);
+                out.push_str(body);
+                out.push_str(RESET);
+                out.push_str(nl);
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
 }
 
 /// One row of `--stat` output: a display name plus its change shape.

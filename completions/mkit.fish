@@ -337,3 +337,5 @@ complete -c mkit -n "__fish_seen_subcommand_from push" -s f -d "Overwrite the re
 complete -c mkit -n "__fish_seen_subcommand_from push" -s u -l set-upstream -d "Record the pushed remote as upstream"
 complete -c mkit -n "__fish_seen_subcommand_from remote" -s v -l verbose -d "List remotes with URLs and direction"
 complete -c mkit -n "__fish_seen_subcommand_from remote" -a "get-url set-url" -d "Read/change a remote URL"
+complete -c mkit -n "__fish_seen_subcommand_from diff" -l color -d "Colorize patch (always|auto|never)" -xa "always auto never"
+complete -c mkit -n "__fish_seen_subcommand_from diff" -l no-color -d "Disable colorized output"

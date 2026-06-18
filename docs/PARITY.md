@@ -214,6 +214,11 @@ people and agents who learned git's surface aren't surprised:
 - **status** (long format) — `On branch`, `No commits yet`, word labels
   (`new file:`/`modified:`/`deleted:`/`typechange:`), a separate `Untracked
   files:` section, and `(use "mkit …")` hints.
+- **color** — `diff --color[=always|auto|never]` / `--no-color` colorizes the
+  patch with git's palette (bold meta, cyan hunk, green/red lines); default
+  `auto` (tty-only, honoring `NO_COLOR`/`CLICOLOR_FORCE`). Color for
+  `status`/`log`/`branch` is a tracked **follow-up** (the `term::ColorChoice`
+  gating is in place).
 
 **Channel divergence (intentional):** all of the above goes to **stderr** —
 mkit reserves stdout for porcelain/data so `mkit status` stays empty-on-clean
