@@ -1,8 +1,15 @@
-name: Coverage
+name: "CI: Coverage"
 
 on:
   push:
     branches: [main]
+    # Coverage only reflects the Rust workspace + contrib signers; skip it on
+    # main pushes that can't change them (docs/MCP/web-only commits).
+    paths:
+      - '.github/workflows/coverage.yml'
+      - '.github/actions/setup-rust/**'
+      - 'rust/**'
+      - 'contrib/signers/**'
   # Expensive CI: on PRs, run only once a review is approved (gated below).
   pull_request_review:
     types: [submitted]
@@ -53,19 +60,14 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      - name: Install Rust ${{ env.RUST_VERSION }}
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      # Toolchain (llvm-tools-preview) + protoc + cache. cache-prefix is
+      # partitioned so this key can't poison a privileged workflow's cache.
+      - name: Set up Rust, protoc, and cache
+        uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: llvm-tools-preview
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-        with:
-          workspaces: rust -> rust/target
-          prefix-key: coverage-${{ runner.os }}
-          cache-on-failure: false
-          cache-bin: false
+          cache-prefix: coverage-${{ runner.os }}
 
       # Same native deps as rust.yml — the workspace's --all-features
       # path pulls in the TPM / CTAP signers on Linux, and coverage
@@ -73,14 +75,8 @@ jobs:
       - name: Install native signer deps
         run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config swtpm
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
-        with:
-          version: '31.0'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Install cargo-llvm-cov + cargo-nextest
-        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912  # v2
+        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595  # v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
 

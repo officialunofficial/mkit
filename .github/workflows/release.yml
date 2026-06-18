@@ -1,4 +1,4 @@
-name: Release
+name: "Release: Artifacts"
 
 # Triggered by pushing a semver tag (v0.1.0, v1.2.3, etc.).
 #

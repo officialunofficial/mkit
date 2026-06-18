@@ -191,7 +191,8 @@ Notes on the published set:
 - **`mkit-cli`** — published so `cargo install mkit-cli` installs the `mkit`
   binary; it also ships via the signed GitHub Release archives and `cargo
   install --git`. Its library surface is unstable CLI internals, deliberately
-  **not** a public API — kept out of `semver-checks`. Depend on the `mkit-*`
+  **not** a public API — kept out of the pre-publish semver gate (the
+  `cargo semver-checks` step in `crates-publish.yml`). Depend on the `mkit-*`
   library crates, not on `mkit_cli::…`.
 - **The crates.io `mkit` name** belongs to an unrelated project; the CLI is
   published as **`mkit-cli`**. Do not run `cargo install mkit`.

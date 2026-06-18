@@ -1,4 +1,4 @@
-name: Supply chain
+name: "Security: Supply Chain"
 
 # Guards:
 #   1. Dependency review on every PR (fails on new deps or license changes
