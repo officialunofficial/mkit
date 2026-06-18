@@ -21,9 +21,8 @@ const CLI_FETCHER_UA = /^(curl|wget|fetch|libcurl|httpie)\b/i
 type AssetsEnv = { ASSETS: { fetch: (req: Request | URL | string) => Promise<Response> } }
 
 /**
- * If `req` is a command-line fetcher asking for the site root, return the
- * install script with shell-friendly headers. Otherwise return `null` so the
- * caller delegates to the normal page router.
+ * If `req` is a command-line fetcher asking for the site root, return the install script with shell-friendly headers.
+ * Otherwise return `null` so the caller delegates to the normal page router.
  */
 export async function tryServeInstaller(req: Request, env: AssetsEnv): Promise<Response | null> {
   if (req.method !== 'GET' && req.method !== 'HEAD') return null
@@ -54,16 +53,13 @@ type InstallerContext = { req: { raw: Request }; env: AssetsEnv }
 /**
  * Cloudflare-adapter middleware factory for the installer sniff.
  *
- * IMPORTANT: this must be wired via the adapter's `middlewareFns` option, not a
- * top-level `fetch` override. Waku's Cloudflare adapter invokes the deployed
- * Worker through its internal Hono app (`defaultExport.fetch` → `fetchFn`);
- * `middlewareFns` run inside that app, before the RSC page router. A `fetch`
- * wrapper on the exported object is only reached by build-time SSG, so it never
- * sees production requests.
+ * IMPORTANT: this must be wired via the adapter's `middlewareFns` option, not a top-level `fetch` override. Waku's
+ * Cloudflare adapter invokes the deployed Worker through its internal Hono app (`defaultExport.fetch` → `fetchFn`);
+ * `middlewareFns` run inside that app, before the RSC page router. A `fetch` wrapper on the exported object is only
+ * reached by build-time SSG, so it never sees production requests.
  *
- * Pair with `assets.run_worker_first: ["/"]` in wrangler config so the Worker
- * actually receives `GET /` instead of Cloudflare serving the prerendered
- * homepage asset first.
+ * Pair with `assets.run_worker_first: ["/"]` in wrangler config so the Worker actually receives `GET /` instead of
+ * Cloudflare serving the prerendered homepage asset first.
  */
 export function installerMiddleware() {
   return async (c: InstallerContext, next: () => Promise<void>): Promise<Response | void> => {
