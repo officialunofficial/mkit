@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # bench-vs-git.sh — the hyperfine suite behind web/src/lib/perf-data.ts
-# (mkit.makechain.net/performance). Reproduces every timing row plus the
+# (mkit.sh/performance). Reproduces every timing row plus the
 # repository-size table, exporting hyperfine JSON per benchmark.
 #
 # Usage:

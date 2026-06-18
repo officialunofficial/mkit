@@ -23,8 +23,8 @@
   "vars": {
     "REPO_URL": "https://github.com/officialunofficial/mkit"
   },
-  // Custom domain on the makechain.net zone (mirrors web/ at mkit.makechain.net).
+  // Custom domain on the mkit.sh zone (mirrors web/ at mkit.sh).
   // Wrangler auto-creates the proxied DNS record + cert on deploy.
-  "routes": [{ "pattern": "mcp.mkit.makechain.net", "custom_domain": true }],
+  "routes": [{ "pattern": "mcp.mkit.sh", "custom_domain": true }],
   "observability": { "enabled": true }
 }

@@ -1,7 +1,7 @@
 # mkit MCP
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) server for the
-**mkit** toolkit, deployed at **https://mcp.mkit.makechain.net**. It gives AI
+**mkit** toolkit, deployed at **https://mcp.mkit.sh**. It gives AI
 assistants a version-pinned, searchable index of mkit's crate source, the
 `docs/SPEC-*` corpus, and the CLI reference — so they build against the real
 API instead of guessing or scraping GitHub.
@@ -39,7 +39,7 @@ integration". The two are complementary: connect both.
 ### Claude Code
 
 ```bash
-claude mcp add --transport http mkit https://mcp.mkit.makechain.net
+claude mcp add --transport http mkit https://mcp.mkit.sh
 ```
 
 Or add to `.mcp.json` in your project (see [`.mcp.json`](./.mcp.json)):
@@ -47,7 +47,7 @@ Or add to `.mcp.json` in your project (see [`.mcp.json`](./.mcp.json)):
 ```json
 {
   "mcpServers": {
-    "mkit": { "type": "http", "url": "https://mcp.mkit.makechain.net" }
+    "mkit": { "type": "http", "url": "https://mcp.mkit.sh" }
   }
 }
 ```
@@ -55,7 +55,7 @@ Or add to `.mcp.json` in your project (see [`.mcp.json`](./.mcp.json)):
 ### Cursor
 
 ```json
-{ "mcpServers": { "mkit": { "url": "https://mcp.mkit.makechain.net" } } }
+{ "mcpServers": { "mkit": { "url": "https://mcp.mkit.sh" } } }
 ```
 
 ## Architecture
@@ -118,7 +118,7 @@ Manual deploy (escape hatch / local):
 npm run index            # rebuild dist/seed.sql from the tree
 npm run db:migrate       # apply migrations to remote D1 (idempotent)
 npm run db:seed          # load the corpus into remote D1
-npm run deploy           # wrangler deploy (custom domain mcp.mkit.makechain.net)
+npm run deploy           # wrangler deploy (custom domain mcp.mkit.sh)
 ```
 
 > **Seed size limits:** D1 caps a single SQL *statement* at 100 KB. `build-index`
