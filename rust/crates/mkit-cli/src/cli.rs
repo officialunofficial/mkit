@@ -169,7 +169,7 @@ commands:
   stash drop [<n>|stash@{n}]   Remove a stash entry without applying
   stash clear       Remove all stash entries
   stash show [<n>|stash@{n}]   Show the diff of a stash entry (default 0)
-  clone [--depth N] [--sparse ...] <url>  Clone a repository
+  clone [--sparse ...] <url>  Clone a repository
   remote [--format=json]  Show remote configuration (JSON with --format=json)
   remote add [<name>] <url>  Add a remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
   remote set [<name>] <url>  Alias for 'remote add'

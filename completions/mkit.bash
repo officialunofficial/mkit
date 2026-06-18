@@ -93,7 +93,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--all --force --force-with-lease --dry-run --help" -- "$cur") )
             ;;
         clone)
-            COMPREPLY=( $(compgen -W "--depth --sparse --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--sparse --help" -- "$cur") )
             ;;
         branch)
             COMPREPLY=( $(compgen -W "-v --verbose -d -D -m --list --contains --no-contains --merged --no-merged --format --help" -- "$cur") )

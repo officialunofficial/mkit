@@ -289,7 +289,16 @@ fn resolve_filter(
             Some(s) => {
                 let h = revspec::resolve_revision(store, mkit_dir, s)
                     .map_err(|e| format!("bad revision '{s}': {e}"))?;
-                Ok(Some(peel_tags(store, h)))
+                let h = peel_tags(store, h);
+                // The ancestry filters compare COMMITS; a tree/blob id would
+                // otherwise be treated as a parentless leaf and silently
+                // mis-filter (e.g. `--no-contains <tree>` keeps every branch
+                // and exits 0). Require a commit, like log/merge/cherry-pick.
+                match store.read_object(&h) {
+                    Ok(mkit_core::object::Object::Commit(_)) => Ok(Some(h)),
+                    Ok(_) => Err(format!("not a commit: '{s}'")),
+                    Err(e) => Err(format!("read '{s}': {e}")),
+                }
             }
         }
     };

@@ -168,8 +168,6 @@ complete -c mkit -n "__fish_seen_subcommand_from push" \
 complete -c mkit -n "__fish_seen_subcommand_from push" \
     -l dry-run -d "Show what would be pushed"
 complete -c mkit -n "__fish_seen_subcommand_from clone" \
-    -l depth -d "Shallow clone depth" -r
-complete -c mkit -n "__fish_seen_subcommand_from clone" \
     -l sparse -d "Sparse checkout"
 complete -c mkit -n "__fish_seen_subcommand_from branch" \
     -s v -l verbose -d "Show abbreviated id + subject"

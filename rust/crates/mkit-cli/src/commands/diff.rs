@@ -843,17 +843,22 @@ fn index_tree(
 }
 
 /// Normalize a pathspec to the index/diff path form: strip a leading
-/// `./`, collapse `\\` to `/`, drop a trailing `/`.
+/// `./`, collapse `\\` to `/`, drop a trailing `/`. The repo root in any
+/// spelling (`.`, `./`, `/`, or empty) normalizes to the empty string, which
+/// [`path_matches_any`] treats as "match everything" (matching git, where
+/// `diff -- .` is the whole-tree diff).
 fn normalize_pathspec(spec: &str) -> String {
     let s = spec.replace('\\', "/");
     let s = s.strip_prefix("./").unwrap_or(&s);
-    s.strip_suffix('/').unwrap_or(s).to_string()
+    let s = s.strip_suffix('/').unwrap_or(s);
+    if s == "." { String::new() } else { s.to_string() }
 }
 
 fn path_matches_any(path: &str, specs: &[String]) -> bool {
     specs
         .iter()
-        .any(|spec| super::index_path_matches_or_descends(path, spec))
+        // An empty spec is the repo root (`.`/`./`) → matches every path.
+        .any(|spec| spec.is_empty() || super::index_path_matches_or_descends(path, spec))
 }
 
 /// Abbreviated all-zero blob id git prints for an absent side of `index`.

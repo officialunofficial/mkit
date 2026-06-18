@@ -244,7 +244,6 @@ _mkit() {
                     ;;
                 clone)
                     _arguments \
-                        '--depth[truncate history to N commits]:depth:' \
                         '--sparse[sparse-checkout pattern]:pattern:' \
                         '--help[show help]'
                     ;;

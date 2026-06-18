@@ -296,48 +296,43 @@ pub fn entry_index(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashRe
     let Object::Commit(stash_commit) = store.read_object(&list.entries[idx].commit_hash)? else {
         return Err(StashError::NotACommit);
     };
-    // A 2+-parent stash is ALWAYS current-format `[HEAD, index]`, so its last
-    // parent must be a valid index-wrapper commit; anything else is corruption
-    // and must fail closed (not silently drop the only staged-state copy). A
-    // 1-parent stash is ambiguous — legacy `[HEAD]` (no index) or unborn
-    // `[index]` — so a non-wrapper there still degrades to Ok(None).
-    let multi_parent = stash_commit.parents.len() >= 2;
     // The index snapshot, when present, is always the LAST parent:
     //   [HEAD, index]  (normal)           -> parents[1]
     //   [index]        (unborn, no HEAD)  -> parents[0]
-    //   [HEAD]         (legacy, no index) -> parents[0] is HEAD; its tree is a
-    //                                        normal root (no `i` wrapper) -> None
+    //   [HEAD]         (legacy, no index) -> parents[0] IS the HEAD commit
     let Some(index_commit) = stash_commit.parents.last() else {
         return Ok(None);
     };
+    // Disambiguate via the manifest's `parent_hash` (= HEAD at save time, or
+    // ZERO when unborn) — NOT by sniffing the tree shape. The last parent
+    // equals `parent_hash` EXACTLY for a legacy single-parent `[HEAD]` stash
+    // (parent_hash=HEAD, last=HEAD): that carries no index snapshot, so return
+    // None without inspecting the HEAD root tree (a legacy HEAD whose root
+    // happens to contain top-level `i`/`t` files must NOT be misread as a
+    // wrapper). For every other shape — `[HEAD, index]` (last=index≠HEAD) and
+    // unborn `[index]` (last=index≠ZERO) — an index wrapper IS expected, so a
+    // non-Tree / missing-marker / bad-blob is CORRUPTION and must fail closed
+    // (never silently drop the only staged-state copy).
+    let parent_hash = list.entries[idx].parent_hash;
+    if *index_commit == parent_hash {
+        return Ok(None);
+    }
     let Object::Commit(index_commit) = store.read_object(index_commit)? else {
         return Err(StashError::NotACommit);
     };
     // The current-format index snapshot is a WRAPPER tree carrying BOTH the
-    // serialized index blob (`i`) and the staged content tree (`t`). Requiring
-    // both markers distinguishes it from a legacy `[HEAD]` root tree that
-    // might (astronomically rarely) carry a top-level `i` of its own — that
-    // case has no recoverable index and returns None.
+    // serialized index blob (`i`) and the staged content tree (`t`).
     let Object::Tree(wrapper) = store.read_object(&index_commit.tree_hash)? else {
-        return if multi_parent {
-            Err(StashError::InvalidFormat)
-        } else {
-            Ok(None)
-        };
+        return Err(StashError::InvalidFormat);
     };
     let has_index_blob = wrapper.entries.iter().any(|e| e.name == b"i");
     let has_content_tree = wrapper.entries.iter().any(|e| e.name == b"t");
     if !(has_index_blob && has_content_tree) {
-        return if multi_parent {
-            Err(StashError::InvalidFormat)
-        } else {
-            Ok(None)
-        };
+        return Err(StashError::InvalidFormat);
     }
-    // From here we KNOW this is a current-format snapshot, so a malformed blob
-    // is corruption: fail closed and preserve the only staged-state copy,
-    // rather than silently dropping it (which `pop --index` would then treat
-    // as "no index" and discard).
+    // A malformed blob is likewise corruption: fail closed and preserve the
+    // only staged-state copy, rather than silently dropping it (which
+    // `pop --index` would then treat as "no index" and discard).
     let blob_entry = wrapper
         .entries
         .iter()
@@ -985,6 +980,84 @@ mod tests {
         assert!(
             matches!(entry_index(&store, root, 0), Err(StashError::InvalidFormat)),
             "a corrupt multi-parent wrapper must fail closed"
+        );
+    }
+
+    #[test]
+    fn entry_index_fails_closed_on_corrupt_unborn_wrapper() {
+        // A single-parent UNBORN `[index]` stash (parent_hash == ZERO) whose
+        // wrapper is corrupt must ALSO fail closed — disambiguated by
+        // parent_hash, not parent count.
+        let (tmp, store) = fresh_store();
+        let root = tmp.path();
+        let bogus_tree = put_tree_entries(
+            &store,
+            vec![TreeEntry {
+                name: b"junk".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob_data(&store, b"x"),
+            }],
+        );
+        let index_commit = put_commit_obj(&store, bogus_tree, vec![], 1);
+        let stash_commit = put_commit_obj(&store, bogus_tree, vec![index_commit], 2);
+        write_list(
+            root,
+            &StashList {
+                entries: vec![StashEntry {
+                    commit_hash: stash_commit,
+                    parent_hash: ZERO, // unborn: no HEAD
+                    timestamp: 2,
+                    message: "WIP".to_string(),
+                }],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(entry_index(&store, root, 0), Err(StashError::InvalidFormat)),
+            "a corrupt unborn [index] wrapper must fail closed"
+        );
+    }
+
+    #[test]
+    fn entry_index_legacy_head_with_coincidental_markers_reads_as_none() {
+        // A LEGACY single-parent `[HEAD]` stash (parent_hash == sole parent)
+        // whose HEAD root tree HAPPENS to carry top-level `i`+`t` files must be
+        // treated as no-index (parent_hash short-circuit), NOT misread as a
+        // wrapper.
+        let (tmp, store) = fresh_store();
+        let root = tmp.path();
+        let head_tree = put_tree_entries(
+            &store,
+            vec![
+                TreeEntry {
+                    name: b"i".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: put_blob_data(&store, b"not an index"),
+                },
+                TreeEntry {
+                    name: b"t".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: put_blob_data(&store, b"whatever"),
+                },
+            ],
+        );
+        let head_commit = put_commit_obj(&store, head_tree, vec![], 1);
+        let stash_commit = put_commit_obj(&store, head_tree, vec![head_commit], 2);
+        write_list(
+            root,
+            &StashList {
+                entries: vec![StashEntry {
+                    commit_hash: stash_commit,
+                    parent_hash: head_commit, // legacy: parent_hash == sole parent
+                    timestamp: 2,
+                    message: "legacy".to_string(),
+                }],
+            },
+        )
+        .unwrap();
+        assert!(
+            entry_index(&store, root, 0).unwrap().is_none(),
+            "legacy [HEAD] must read as no-index regardless of tree shape"
         );
     }
 

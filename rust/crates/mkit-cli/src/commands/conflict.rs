@@ -426,6 +426,7 @@ fn write_bytes(abs: &Path, data: &[u8]) -> Result<(), String> {
 /// # Errors
 /// Returns a message describing the blocking path when the abort would
 /// be unsafe, or propagates store / filesystem failures.
+#[allow(clippy::too_many_lines)] // a sequence of independent pre-mutation safety checks
 pub fn ensure_abort_safe(
     root: &Path,
     store: &ObjectStore,
@@ -543,13 +544,37 @@ pub fn ensure_abort_safe(
         .map_err(|e| format!("check restore target: {e}"))?
         .entries
     {
-        if entry.kind != mkit_core::ops::diff::DiffKind::Removed
-            && std::fs::symlink_metadata(root.join(&entry.path)).is_ok_and(|m| m.is_dir())
-        {
+        if entry.kind == mkit_core::ops::diff::DiffKind::Removed {
+            continue;
+        }
+        // The restore writes a file at `entry.path`. Refuse if the path itself
+        // is now a DIRECTORY (e.g. the user created `d/keep` after the
+        // operation deleted file `d`)...
+        if std::fs::symlink_metadata(root.join(&entry.path)).is_ok_and(|m| m.is_dir()) {
             return Err(format!(
                 "abort would replace directory '{}' with a file; move or remove it first",
                 entry.path
             ));
+        }
+        // ...or if any ANCESTOR component is now a non-directory file (e.g.
+        // target has `p/file`; the user replaced the deleted directory `p`
+        // with a file `p`). `create_dir_all` would fail mid-restore, breaking
+        // abort atomicity. Checked here, before any mutation.
+        let mut prefix = String::new();
+        for comp in entry.path.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(comp);
+            if prefix == entry.path {
+                break; // the leaf is handled by the is_dir check above
+            }
+            if std::fs::symlink_metadata(root.join(&prefix)).is_ok_and(|m| !m.is_dir()) {
+                return Err(format!(
+                    "abort would restore '{}' but '{prefix}' is a file; move or remove it first",
+                    entry.path
+                ));
+            }
         }
     }
     Ok(())
@@ -778,6 +803,13 @@ pub fn first_unresolved_marker(
 ) -> Result<Option<String>, String> {
     for r in records {
         let abs = root.join(&r.path);
+        // A file-vs-directory conflict kept the ours-DIRECTORY at the record
+        // path (the round-9 D/F pause). A directory holds no conflict markers,
+        // so skip it rather than letting `fs::read` fail "Is a directory" —
+        // which would make `--continue` permanently impossible for that pause.
+        if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
         let data = match fs::read(&abs) {
             Ok(d) => d,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,

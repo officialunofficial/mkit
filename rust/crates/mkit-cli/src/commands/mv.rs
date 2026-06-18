@@ -110,6 +110,17 @@ impl Planned {
         }
     }
 
+    /// The directory landing ROOT for a directory move (`dst/dir`), or `None`
+    /// for a file move. `target_paths` only exposes per-file landings, so two
+    /// directory moves onto the SAME root are invisible there — they're caught
+    /// by a dedicated pre-flight using this.
+    fn dest_dir_root(&self) -> Option<&str> {
+        match self {
+            Self::Dir(m) => Some(m.dest_dir_rel.as_str()),
+            Self::File(_) => None,
+        }
+    }
+
     /// The repo-relative source path this move consumes.
     fn source_rel(&self) -> &str {
         match self {
@@ -259,6 +270,28 @@ pub fn run(args: &[String]) -> u8 {
             if b.starts_with(&format!("{a}/")) {
                 return emit_err(
                     &format!("conflicting destinations: '{a}' and '{b}' (one is inside the other)"),
+                    exit::USAGE,
+                );
+            }
+        }
+    }
+    // Two DIRECTORY moves must not land at the same (or a nested) destination
+    // root: `target_paths` only exposes per-file landings (`dst/dir/a` vs
+    // `dst/dir/b` — non-colliding), so the check above misses two directories
+    // renamed onto the same `dest_dir_rel` (e.g. `mv x/dir y/dir dst` → both →
+    // `dst/dir`). `execute_dir_move` does a bare `fs::rename` onto the
+    // now-existing dest, failing mid-batch and leaving a partial result —
+    // violating the all-or-nothing invariant. Reject it up front.
+    let dir_roots: Vec<&str> = plan.iter().filter_map(Planned::dest_dir_root).collect();
+    for i in 0..dir_roots.len() {
+        for j in (i + 1)..dir_roots.len() {
+            let (a, b) = (dir_roots[i], dir_roots[j]);
+            if a == b
+                || b.starts_with(&format!("{a}/"))
+                || a.starts_with(&format!("{b}/"))
+            {
+                return emit_err(
+                    &format!("multiple directory sources map to the same destination: {a}"),
                     exit::USAGE,
                 );
             }

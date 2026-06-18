@@ -543,3 +543,24 @@ fn mv_refuses_destination_through_in_repo_symlinked_parent() {
     );
     assert!(!root.join("real/src").exists(), "nothing written through the symlink");
 }
+
+#[test]
+fn mv_refuses_two_directory_sources_to_same_destination_root() {
+    // `mv x/dir y/dir dst` lands both at dst/dir — the per-file collision
+    // check misses it (dst/dir/a vs dst/dir/b don't collide), but the bare
+    // fs::rename of the second onto the now-existing dest would fail mid-batch.
+    // Reject up front (no partial move).
+    let (td, xdg) = repo(&[("x/dir/a", b"a\n"), ("y/dir/b", b"b\n")]);
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir_all(root.join("dst")).unwrap();
+    let out = run_in(root, x, &["mv", "x/dir", "y/dir", "dst"]);
+    assert!(!out.status.success(), "must refuse: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("same destination"),
+        "expected a same-destination message: {out:?}"
+    );
+    assert!(
+        root.join("x/dir/a").exists() && root.join("y/dir/b").exists(),
+        "nothing should have moved"
+    );
+}

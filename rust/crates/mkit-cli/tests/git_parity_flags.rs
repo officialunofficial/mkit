@@ -1039,3 +1039,90 @@ fn merge_abort_fails_closed_on_untracked_dir_at_conflict_path() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn merge_continue_after_file_vs_directory_conflict() {
+    // OURS dir p/, THEIRS file p — the D/F pause keeps the ours-directory;
+    // `--continue` must succeed (not dead-end reading the directory as a file).
+    let repo = Repo::new();
+    repo.commit_file("seed.txt", b"base\n", "c0");
+    repo.ok(&["branch", "feature"]);
+    repo.write("p/inner.txt", b"inner\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "ours dir p/"]);
+    repo.ok(&["checkout", "feature"]);
+    repo.write("p", b"file p\n");
+    repo.ok(&["add", "p"]);
+    repo.ok(&["commit", "-m", "theirs file p"]);
+    repo.ok(&["checkout", "main"]);
+
+    repo.run(&["merge", "feature"]); // D/F conflict, keep dir p
+    repo.ok(&["merge", "--continue"]);
+    assert_eq!(parent_count(&repo, "HEAD"), 2, "two-parent merge commit");
+    assert!(repo.path().join("p/inner.txt").exists(), "ours directory kept");
+}
+
+#[test]
+fn merge_abort_fails_closed_when_restore_ancestor_is_now_a_file() {
+    // ours keeps p/file; theirs cleanly deletes it (+ conflicts on a.txt). The
+    // user replaces the deleted directory `p` with a FILE; abort must refuse
+    // BEFORE mutating (restoring p/file under a file `p` would fail mid-way).
+    let repo = Repo::new();
+    repo.write("a.txt", b"base\n");
+    repo.write("p/file", b"pf\n");
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "c0"]);
+    repo.ok(&["branch", "feature"]);
+    repo.write("a.txt", b"ours\n");
+    repo.ok(&["add", "a.txt"]);
+    repo.ok(&["commit", "-m", "ours"]);
+    repo.ok(&["checkout", "feature"]);
+    repo.write("a.txt", b"theirs\n");
+    repo.ok(&["rm", "p/file"]);
+    repo.ok(&["add", "a.txt"]);
+    repo.ok(&["commit", "-m", "theirs"]);
+    repo.ok(&["checkout", "main"]);
+
+    repo.run(&["merge", "feature"]); // a.txt conflict; p/file cleanly deleted
+    std::fs::remove_dir_all(repo.path().join("p")).ok();
+    repo.write("p", b"my work\n");
+    let out = repo.run(&["merge", "--abort"]);
+    assert!(!out.status.success(), "abort must fail closed");
+    assert_eq!(
+        std::fs::read(repo.path().join("p")).unwrap(),
+        b"my work\n",
+        "the user's file must be preserved"
+    );
+}
+
+#[test]
+fn branch_ancestry_filter_rejects_non_commit() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"x\n", "c0");
+    let tree = stdout(&repo.ok(&["cat-file", "-p", "HEAD"]))
+        .lines()
+        .find_map(|l| l.strip_prefix("tree ").map(str::to_string))
+        .expect("tree line");
+    let out = repo.run(&["branch", "--no-contains", &tree]);
+    assert!(!out.status.success(), "a tree id must be rejected, not silently accepted");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not a commit"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn diff_merge_base_root_pathspec_matches_everything() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"base\n", "c0");
+    repo.ok(&["branch", "feature"]);
+    repo.commit_file("a.txt", b"changed\n", "m2");
+    for spec in [".", "./"] {
+        let out = stdout(&repo.ok(&["diff", "--merge-base", "feature", spec, "--name-only"]));
+        assert!(
+            out.contains("a.txt"),
+            "root pathspec {spec:?} must match the whole tree, got: {out:?}"
+        );
+    }
+}
