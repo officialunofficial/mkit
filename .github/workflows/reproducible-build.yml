@@ -1,4 +1,4 @@
-name: Reproducible Build Smoke Test
+name: "Quality: Reproducible Build"
 
 # Build mkit twice from the same commit and diff the outputs.
 # A non-zero diff indicates a non-deterministic input (embedded timestamp,

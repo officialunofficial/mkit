@@ -138,6 +138,7 @@ _mkit() {
                         '(--name-only --name-status --stat)--name-only[list changed paths only]' \
                         '(--name-only --name-status --stat)--name-status[list status letter + path]' \
                         '(--name-only --name-status --stat)--stat[diffstat: counts + graph + summary]' \
+                        '--merge-base[diff against the merge base of the revisions]' \
                         '-z[NUL-terminate name-only/name-status records, raw paths]' \
                         '--help[show help]' \
                         '*:file:_files'
@@ -202,7 +203,7 @@ _mkit() {
                     ;;
                 status)
                     _arguments \
-                        '--porcelain[machine-readable XY output]' \
+                        '--porcelain=-[machine-readable XY output]::version:(v1 v2)' \
                         '(-s --short)'{-s,--short}'[short format; alias for --porcelain=v1]' \
                         '-z[NUL-terminate records; raw unquoted paths]' \
                         '--help[show help]'
@@ -211,7 +212,9 @@ _mkit() {
                     _arguments \
                         '(-a --all)'{-a,--all}'[stage tracked changes before committing]' \
                         '--amend[replace HEAD instead of adding a new commit]' \
-                        '-m[commit message]:message:' \
+                        '(-m --message)-m[commit message]:message:' \
+                        '(-F --file)'{-F,--file}'[read the commit message from a file (- for stdin)]:file:_files' \
+                        '--author[override the author identity]:spec:' \
                         '--help[show help]'
                     ;;
                 log)
@@ -233,12 +236,14 @@ _mkit() {
                     ;;
                 push)
                     _arguments \
+                        '--all[mirror every local branch]' \
+                        '(--force --force-with-lease)--force[overwrite the remote branch unconditionally (skip CAS)]' \
+                        '(--force --force-with-lease)--force-with-lease[overwrite only if the remote has not moved]' \
                         '--dry-run[show what would be pushed]' \
                         '--help[show help]'
                     ;;
                 clone)
                     _arguments \
-                        '--depth[truncate history to N commits]:depth:' \
                         '--sparse[sparse-checkout pattern]:pattern:' \
                         '--help[show help]'
                     ;;
@@ -248,6 +253,11 @@ _mkit() {
                         '-d[delete branch (safe)]:branch:' \
                         '-D[force-delete branch]:branch:' \
                         '-m[rename branch]:branch:' \
+                        '--list[list branches (explicit selector)]' \
+                        '--contains[only branches whose tip contains COMMIT]::commit:' \
+                        '--no-contains[only branches whose tip does NOT contain COMMIT]::commit:' \
+                        '--merged[only branches merged into COMMIT (default HEAD)]::commit:' \
+                        '--no-merged[only branches NOT merged into COMMIT (default HEAD)]::commit:' \
                         '--format[output format]:format:(default json)' \
                         '--help[show help]'
                     ;;
@@ -272,6 +282,38 @@ _mkit() {
                     _arguments \
                         '--continue[continue after conflict resolution]' \
                         '--abort[abort revert]' \
+                        '(-n --no-commit)'{-n,--no-commit}'[stage the reverted tree without creating a commit]' \
+                        '--help[show help]'
+                    ;;
+                merge)
+                    _arguments \
+                        '--continue[continue an in-progress merge]' \
+                        '--abort[abort the in-progress merge]' \
+                        '--no-commit[merge but stop before creating the merge commit]' \
+                        '(-m --message)'{-m,--message}'[override the merge commit message]:message:' \
+                        '--help[show help]' \
+                        '1:branch:'
+                    ;;
+                cherry-pick)
+                    _arguments \
+                        '--continue[continue after conflict resolution]' \
+                        '--abort[abort the cherry-pick]' \
+                        '(-n --no-commit)'{-n,--no-commit}'[apply the change without creating a commit]' \
+                        '(-m --mainline)'{-m,--mainline}'[select the mainline parent of a merge commit]:parent-number:' \
+                        '--help[show help]' \
+                        '1:commit:'
+                    ;;
+                show)
+                    _arguments \
+                        '--stat[show a diffstat instead of the full patch]' \
+                        '--help[show help]' \
+                        '*:object:'
+                    ;;
+                keygen)
+                    _arguments \
+                        '--algorithm[signing algorithm]:alg:(ed25519 secp256k1 p256)' \
+                        '--force[overwrite an existing key file]' \
+                        '--print-pubkey[emit the canonical keyid on stdout]' \
                         '--help[show help]'
                     ;;
                 bisect)
@@ -345,6 +387,7 @@ _mkit() {
                         '--predicate-type[predicate type URI]:uri:' \
                         '--predicate-file[predicate file path]:_files' \
                         '*--additional-signer[additional signer spec]:spec:' \
+                        '*--external-signer-arg[arg for the external signer (repeatable; replaces config)]:arg:' \
                         '--help[show help]'
                     ;;
                 verify-attest)

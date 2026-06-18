@@ -497,6 +497,53 @@ pub fn sync_index_to_tree(root: &Path, store: &ObjectStore, tree_hash: Hash) -> 
     mkit_core::index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
 }
 
+/// After staging a `result_tree` (which, being a tree, omits removed paths),
+/// add `Removed` tombstones to the index for every path present in
+/// `base_tree` but absent from `result_tree`.
+///
+/// `sync_index_to_tree`/`restore_worktree_and_index` set the index from a
+/// tree, so a staged DELETION is silently dropped. Callers that stage a
+/// computed result without committing (e.g. `cherry-pick -n` / `revert -n`)
+/// use this so the deletion stays staged — otherwise an all-deletions result
+/// leaves an empty index and `mkit commit` rejects it as "nothing staged".
+pub fn stage_removed_tombstones(
+    root: &Path,
+    store: &ObjectStore,
+    base_tree: Option<Hash>,
+    result_tree: Hash,
+) -> Result<(), String> {
+    let diff = diff_trees(store, base_tree, Some(result_tree))
+        .map_err(|e| format!("diff for staged deletions: {e}"))?;
+    let removed: Vec<String> = diff
+        .entries
+        .iter()
+        .filter(|e| e.kind == DiffKind::Removed)
+        .map(|e| e.path.clone())
+        .collect();
+    if removed.is_empty() {
+        return Ok(());
+    }
+    let mut idx = mkit_core::index::read_index(root).map_err(|e| format!("read index: {e}"))?;
+    for path in removed {
+        match idx.entries.iter().position(|x| x.path == path) {
+            Some(j) => {
+                idx.entries[j].status = EntryStatus::Removed;
+                idx.entries[j].object_hash = mkit_core::hash::ZERO;
+            }
+            None => idx.entries.push(mkit_core::index::IndexEntry {
+                path,
+                status: EntryStatus::Removed,
+                object_hash: mkit_core::hash::ZERO,
+                mtime_ns: 0,
+                size: 0,
+                ino: 0,
+                ctime_ns: 0,
+            }),
+        }
+    }
+    mkit_core::index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
+}
+
 /// Materialise `tree_hash` and align the index while preserving `.mkitignore` entries.
 pub fn restore_worktree_and_index(
     root: &Path,

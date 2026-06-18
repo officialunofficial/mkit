@@ -373,7 +373,7 @@ export function TreeDemo() {
 
       <div>
         {'error' in encoded ? (
-          <p className='mb-4 text-red-600'>wasm encode failed: {encoded.error}</p>
+          <p className='mb-4 text-red-600 dark:text-red-400'>wasm encode failed: {encoded.error}</p>
         ) : (
           <div className='divide-y-2 divide-hairline border-y-2 border-hairline'>
             {merkle ? (
@@ -389,7 +389,9 @@ export function TreeDemo() {
                     label='commit'
                     meta='signed'
                     trailing={
-                      <span className={`text-xs ${commit.verified ? 'text-green-700' : 'text-red-600'}`}>
+                      <span
+                        className={`text-xs ${commit.verified ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}
+                      >
                         {commit.verified ? 'verified ✓' : 'invalid ✗'}
                       </span>
                     }

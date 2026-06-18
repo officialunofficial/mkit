@@ -60,6 +60,10 @@ pub const REVERT_HEAD: &str = "REVERT_HEAD";
 pub const REVERT_MSG: &str = "REVERT_MSG";
 /// File name: the conflict sidecar (also used inside `rebase-apply/`).
 pub const CONFLICTS_FILE: &str = "mkit-conflicts";
+/// File name: the operation's full result tree (clean changes + ours-at-
+/// conflict) recorded when a conflict pauses, so `--abort` can distinguish
+/// operation-authored paths from genuine user work.
+pub const RESULT_TREE: &str = "MKIT_OP_RESULT";
 
 /// Hard cap on any single state file we read back (1 MiB). Conflict
 /// sidecars list at most one line per repo path; 1 MiB is generous.
@@ -198,6 +202,31 @@ pub fn deserialize_conflicts(data: &[u8]) -> ConflictStateResult<Vec<ConflictRec
     Ok(out)
 }
 
+/// Persist the operation's full result tree under `dir` (the per-op state
+/// directory: `.mkit` for merge/cherry-pick/revert, the rebase dir for
+/// rebase). Used by `--abort` to treat operation-authored paths as
+/// discardable. Best-effort cleanup is done by the per-op clear functions
+/// (or by removing the rebase dir).
+///
+/// # Errors
+/// [`ConflictStateError::Io`] if the file cannot be written.
+pub fn write_result_tree(dir: &Path, tree: &Hash) -> ConflictStateResult<()> {
+    write_hex_file(dir, RESULT_TREE, tree)
+}
+
+/// Read the persisted operation result tree under `dir`, if any.
+///
+/// # Errors
+/// [`ConflictStateError::Invalid`] if the file is malformed.
+pub fn read_result_tree(dir: &Path) -> ConflictStateResult<Option<Hash>> {
+    read_hex_file(&dir.join(RESULT_TREE))
+}
+
+/// Remove the persisted operation result tree (best-effort).
+pub fn clear_result_tree(dir: &Path) {
+    let _ = fs::remove_file(dir.join(RESULT_TREE));
+}
+
 fn write_hex_file(mkit_dir: &Path, name: &str, h: &Hash) -> ConflictStateResult<()> {
     let mut buf = hash::to_hex(h);
     buf.push('\n');
@@ -315,6 +344,7 @@ pub fn clear_revert_state(mkit_dir: &Path) -> ConflictStateResult<()> {
     remove_if_present(&mkit_dir.join(REVERT_MSG))?;
     remove_if_present(&mkit_dir.join(ORIG_HEAD))?;
     remove_if_present(&mkit_dir.join(CONFLICTS_FILE))?;
+    remove_if_present(&mkit_dir.join(RESULT_TREE))?;
     Ok(())
 }
 
@@ -449,6 +479,7 @@ pub fn clear_merge_state(mkit_dir: &Path) -> ConflictStateResult<()> {
     remove_if_present(&mkit_dir.join(MERGE_MSG))?;
     remove_if_present(&mkit_dir.join(ORIG_HEAD))?;
     remove_if_present(&mkit_dir.join(CONFLICTS_FILE))?;
+    remove_if_present(&mkit_dir.join(RESULT_TREE))?;
     Ok(())
 }
 
@@ -461,6 +492,7 @@ pub fn clear_cherry_pick_state(mkit_dir: &Path) -> ConflictStateResult<()> {
     remove_if_present(&mkit_dir.join(CHERRY_PICK_MSG))?;
     remove_if_present(&mkit_dir.join(ORIG_HEAD))?;
     remove_if_present(&mkit_dir.join(CONFLICTS_FILE))?;
+    remove_if_present(&mkit_dir.join(RESULT_TREE))?;
     Ok(())
 }
 

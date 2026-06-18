@@ -589,7 +589,15 @@ fn apply_file_inner(
         let Some((k, v)) = line.split_once('=') else {
             continue;
         };
-        let key = k.trim();
+        // Git matches config section + variable names case-insensitively,
+        // so a hand-edited `User.Name` / `Core.AutoCRLF` must resolve like
+        // its canonical form. Normalize BEFORE the forbidden-key check so a
+        // case-variant (`User.Identity`) can't slip a security-sensitive key
+        // into the per-repo layer. Subsection names (`remote.<name>`,
+        // `branch.<branch>`) keep their case — they are case-sensitive in
+        // git, and lowercasing them would corrupt named remotes on reload.
+        let key = normalize_config_key(k.trim());
+        let key = key.as_str();
         let val = v.trim();
         if scope == ConfigScope::Repo && REPO_FORBIDDEN_KEYS.contains(&key) {
             if warn_on_forbidden {
@@ -693,6 +701,39 @@ pub fn core_allowed_suffix(key: &str) -> Option<String> {
     CORE_ALLOWED_KEYS
         .contains(&suffix.as_str())
         .then_some(suffix)
+}
+
+/// Canonicalize a config key's case the way git does: the **section** and
+/// **variable** names are case-insensitive (lowercased), but the
+/// **subsection** — the middle segment of a `<section>.<subsection>.<var>`
+/// key, e.g. the `<name>` in `remote.<name>.url` or the `<branch>` in
+/// `branch.<branch>.remote` — is **case-sensitive** and preserved verbatim.
+///
+/// Two-segment keys (`user.name`, `core.autocrlf`, …) have no subsection,
+/// so both halves are lowercased. The split mirrors `apply_section_kv`'s
+/// `splitn(3, '.')`, so the canonical form round-trips through it.
+#[must_use]
+pub fn normalize_config_key(key: &str) -> String {
+    // git's key model: the FIRST `.` separates the section, the LAST `.`
+    // separates the variable, and everything between is the (case-sensitive)
+    // subsection — which may itself contain dots (`remote.a.b.url` →
+    // subsection `a.b`, variable `url`). Section + variable are lowercased;
+    // the subsection is preserved verbatim.
+    match key.split_once('.') {
+        Some((section, rest)) => match rest.rsplit_once('.') {
+            Some((subsection, variable)) => format!(
+                "{}.{subsection}.{}",
+                section.to_ascii_lowercase(),
+                variable.to_ascii_lowercase()
+            ),
+            None => format!(
+                "{}.{}",
+                section.to_ascii_lowercase(),
+                rest.to_ascii_lowercase()
+            ),
+        },
+        None => key.to_ascii_lowercase(),
+    }
 }
 
 /// Apply a `<section>.<name>.<field>` key (named remotes, branch
@@ -1018,6 +1059,10 @@ where
 /// appends), and writes back. Caller is responsible for validating
 /// `value` (control bytes, key-path traversal).
 pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
+    // Normalize so the written line and the case-insensitive match below use
+    // git's canonical form, regardless of how the caller spelled the key.
+    let key = normalize_config_key(key);
+    let key = key.as_str();
     let path = user_config_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1032,8 +1077,12 @@ pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
             out.push('\n');
             continue;
         }
+        // Match existing lines case-insensitively (like reads), so a
+        // mixed-case duplicate of the same key is updated/normalized rather
+        // than left behind to shadow the canonical line. `key` is already
+        // normalized by the caller.
         if let Some((k, _)) = line.split_once('=')
-            && k.trim() == key
+            && normalize_config_key(k.trim()) == key
         {
             out.push_str(key);
             out.push_str(" = ");
@@ -1192,6 +1241,53 @@ pub fn xdg_state_home() -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn normalize_config_key_casing() {
+        // Two-segment keys: section + variable both lowercased.
+        assert_eq!(normalize_config_key("User.Name"), "user.name");
+        assert_eq!(normalize_config_key("Core.AutoCRLF"), "core.autocrlf");
+        assert_eq!(normalize_config_key("user.identity"), "user.identity");
+        // Three-segment keys: section + variable lowercased, subsection kept.
+        assert_eq!(normalize_config_key("remote.Origin.url"), "remote.Origin.url");
+        assert_eq!(normalize_config_key("Remote.Origin.URL"), "remote.Origin.url");
+        assert_eq!(
+            normalize_config_key("branch.Release.remote"),
+            "branch.Release.remote"
+        );
+        // 4+ segments: FIRST dot is the section, LAST dot is the variable;
+        // everything between is a (case-preserved) subsection that may itself
+        // contain dots — matching git (not `splitn(3)`, which would lump
+        // `URL.X` into the variable).
+        assert_eq!(normalize_config_key("Remote.A.B.URL"), "remote.A.B.url");
+        assert_eq!(
+            normalize_config_key("HTTP.https://Ex.com/.SSLVerify"),
+            "http.https://Ex.com/.sslverify"
+        );
+        // No dot: lowercased.
+        assert_eq!(normalize_config_key("Foo"), "foo");
+    }
+
+    #[test]
+    fn config_file_preserves_subsection_case() {
+        // A `remote.<Name>.url` written to the config file must reload with
+        // the subsection case intact (git treats subsections case-sensitively),
+        // so named remotes survive a round-trip.
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".mkit")).unwrap();
+        std::fs::write(
+            dir.path().join(".mkit/config"),
+            "remote.Origin.url = mkit+file:///tmp/x\nremote.Origin.type = file\n",
+        )
+        .unwrap();
+        let cfg = read_or_default(dir.path()).unwrap();
+        assert!(
+            cfg.remotes.contains_key("Origin"),
+            "subsection case lost on reload: {:?}",
+            cfg.remotes.keys().collect::<Vec<_>>()
+        );
+        assert!(!cfg.remotes.contains_key("origin"));
+    }
 
     #[test]
     fn durability_objects_key_selects_sync_policy() {

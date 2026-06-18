@@ -39,7 +39,7 @@ if (obsChanged) changes.push('observability')
 // Custom Domain(s). Listed patterns are attached to the Worker as Cloudflare Custom Domains — Wrangler auto-creates
 // the proxied DNS record and issues a cert on `wrangler deploy` as long as the zone is on the same account. Routes
 // are idempotent: re-running the patcher on an already-routed deploy is a no-op.
-const DESIRED_ROUTES = [{ pattern: 'mkit.makechain.net', custom_domain: true }]
+const DESIRED_ROUTES = [{ pattern: 'mkit.sh', custom_domain: true }]
 const currentRoutes = Array.isArray(config.routes) ? config.routes : []
 const hasRoute = (r) =>
   currentRoutes.some((c) => c && c.pattern === r.pattern && Boolean(c.custom_domain) === Boolean(r.custom_domain))

@@ -216,7 +216,7 @@ This server runs no network operations (push/pull/fetch/clone), no history surge
 without -f' error means run that operation outside the MCP, deliberately. Path rules: an \
 attest predicate_file must resolve INSIDE the repo; a verify_attest trust_roots path must \
 resolve OUTSIDE it. For docs/specs/source of mkit itself, use the separate mkit docs MCP \
-(mcp.mkit.makechain.net).";
+(mcp.mkit.sh).";
 
 // ---------------------------------------------------------------------------
 // Tool table

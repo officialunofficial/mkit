@@ -60,7 +60,7 @@ Preview locally with `bun run preview`. Source lives under `src/`.
 ## Agent skill (`/SKILL.md`)
 
 The site also serves the project's CLI Agent Skill at
-[`mkit.makechain.net/SKILL.md`](https://mkit.makechain.net/SKILL.md) so any
+[`mkit.sh/SKILL.md`](https://mkit.sh/SKILL.md) so any
 agent can fetch it directly. The canonical file is the **repo-root
 `SKILL.md`**; `bun run skill:stage` (run automatically by `dev`/`build` via
 `scripts/copy-skill.mjs`) copies it into the gitignored `public/SKILL.md` as a

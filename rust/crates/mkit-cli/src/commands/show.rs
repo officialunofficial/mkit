@@ -38,6 +38,11 @@ const MAX_TAG_DEPTH: usize = 16;
     about = "Display objects (default HEAD): commits with their diff, tags, trees, blobs."
 )]
 struct ShowOpts {
+    /// Show a diffstat instead of the full patch for commit/remix objects
+    /// (like `git show --stat`): per-file changed-line counts, a `+`/`-`
+    /// graph, and a summary line. Non-commit objects are shown as usual.
+    #[arg(long)]
+    stat: bool,
     /// Objects to show — revisions, refs, or hashes (e.g. `HEAD`, `main`,
     /// `HEAD~2`, `<hash>`, `<tag>`). Defaults to `HEAD`.
     objects: Vec<String>,
@@ -71,7 +76,7 @@ pub fn run(args: &[String]) -> u8 {
             Ok(h) => h,
             Err(e) => return emit_err(&e.to_string(), exit::GENERAL_ERROR),
         };
-        if let Err((msg, code)) = show_object(&mut stdout, &store, &h, 0) {
+        if let Err((msg, code)) = show_object(&mut stdout, &store, &h, 0, opts.stat) {
             return emit_err(&msg, code);
         }
     }
@@ -84,6 +89,7 @@ fn show_object(
     store: &ObjectStore,
     h: &Hash,
     tag_depth: usize,
+    stat: bool,
 ) -> Result<(), (String, u8)> {
     let obj = store
         .read_object(h)
@@ -99,6 +105,7 @@ fn show_object(
             &c.message,
             c.parents.first().copied(),
             c.tree_hash,
+            stat,
         ),
         Object::Remix(r) => show_commit_like(
             out,
@@ -110,8 +117,9 @@ fn show_object(
             &r.message,
             r.parents.first().copied(),
             r.tree_hash,
+            stat,
         ),
-        Object::Tag(t) => show_tag(out, store, &t, tag_depth),
+        Object::Tag(t) => show_tag(out, store, &t, tag_depth, stat),
         Object::Tree(t) => {
             for e in &t.entries {
                 let (mode, ty) = super::cat_file::git_mode_and_type(e.mode);
@@ -153,6 +161,7 @@ fn show_commit_like(
     message: &[u8],
     parent: Option<Hash>,
     tree: Hash,
+    stat: bool,
 ) -> Result<(), (String, u8)> {
     let _ = writeln!(out, "{label} {}", format::hex_hash(hash));
     let _ = writeln!(out, "Author: {}", format::short_identity(author));
@@ -171,6 +180,12 @@ fn show_commit_like(
     };
     let result = diff_trees(store, parent_tree, Some(tree))
         .map_err(|e| (format!("diff: {e}"), exit::GENERAL_ERROR))?;
+    // `--stat` renders the diffstat instead of the full patch (like
+    // `git show --stat`), reusing `diff`'s byte-exact stat renderer.
+    if stat {
+        return super::diff::render_stat(out, store, result.entries.iter())
+            .map_err(|e| (e, exit::GENERAL_ERROR));
+    }
     for e in &result.entries {
         super::diff::emit_entry_patch(out, store, e).map_err(|e| (e, exit::GENERAL_ERROR))?;
     }
@@ -183,6 +198,7 @@ fn show_tag(
     store: &ObjectStore,
     t: &Tag,
     tag_depth: usize,
+    stat: bool,
 ) -> Result<(), (String, u8)> {
     let _ = writeln!(out, "tag {}", String::from_utf8_lossy(&t.name));
     let _ = writeln!(out, "Tagger: {}", format::short_identity(&t.tagger));
@@ -199,7 +215,7 @@ fn show_tag(
     if tag_depth + 1 >= MAX_TAG_DEPTH {
         return Err(("tag chain too deep".to_string(), exit::DATAERR));
     }
-    show_object(out, store, &t.target, tag_depth + 1)
+    show_object(out, store, &t.target, tag_depth + 1, stat)
 }
 
 /// Write a commit message indented four spaces per line (blank lines stay

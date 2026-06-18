@@ -1,4 +1,4 @@
-name: MCP CI
+name: "CI: MCP"
 
 # Validation only. Deploys live elsewhere:
 #   - Worker-code deploy on merge to main  -> Cloudflare Workers Builds (CF

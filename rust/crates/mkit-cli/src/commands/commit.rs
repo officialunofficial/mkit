@@ -27,6 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use mkit_core::index;
 use mkit_core::object::{Commit, Identity, IdentityKind, Object, Tag};
+use mkit_core::ops::conflict_state;
 use mkit_core::refs::{self, Head};
 use mkit_core::serialize;
 use mkit_core::sign::{self, KeyPair};
@@ -49,6 +50,15 @@ struct CommitOptions {
     /// Commit message. If omitted, `$EDITOR` is launched.
     #[arg(short, long)]
     message: Option<String>,
+    /// Read the commit message from `<file>` (like `git commit -F`). Use
+    /// `-` to read from stdin. Mutually exclusive with `-m`.
+    #[arg(
+        short = 'F',
+        long = "file",
+        value_name = "FILE",
+        conflicts_with = "message"
+    )]
+    file: Option<String>,
     /// Override the author Identity for this commit.
     #[arg(long = "author", value_name = "SPEC")]
     author_spec: Option<String>,
@@ -101,6 +111,27 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
 
+    // ---- A merge left in progress turns this into a merge commit. --
+    // Either a clean `merge --no-commit`, or a conflicted merge the user
+    // has since resolved and staged. `mkit commit` then records a
+    // two-parent commit and clears the merge state, mirroring how
+    // `git commit` concludes a merge.
+    let merge_state = if conflict_state::is_merge_in_progress(&mkit_dir) {
+        match conflict_state::read_merge_state(&mkit_dir) {
+            Ok(s) => s,
+            Err(e) => return emit_err(&format!("read merge state: {e}"), exit::GENERAL_ERROR),
+        }
+    } else {
+        None
+    };
+    if merge_state.is_some() && opts.amend {
+        return emit_err(
+            "cannot --amend while a merge is in progress; finish it with `mkit commit` \
+             or abandon it with `mkit merge --abort`",
+            exit::USAGE,
+        );
+    }
+
     // ---- When amending, load the commit being replaced. ------------
     // `--amend` re-creates HEAD: the new commit inherits HEAD's parents
     // (so it supersedes HEAD rather than stacking on it) and, when no
@@ -117,16 +148,29 @@ pub fn run(args: &[String]) -> u8 {
     // ---- Resolve / prompt for message. -----------------------------
     // `--amend` without `-m` reuses the superseded commit's message and
     // never launches `$EDITOR`.
+    // Message precedence: `-m` → `-F <file>` → amend-reuse → merge message
+    // (`MERGE_MSG`) → `$EDITOR`. `-F`/merge defaults never launch the editor
+    // so they stay usable in non-interactive contexts.
     let msg = match opts.message {
         Some(m) => m,
-        None => match &amend_target {
-            Some(prev) => String::from_utf8_lossy(&prev.message).into_owned(),
-            None => match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
-                Ok(m) if !m.is_empty() => m,
-                Ok(_) => {
-                    return emit_err("empty commit message — aborting", exit::USAGE);
-                }
-                Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
+        None => match &opts.file {
+            Some(path) => match read_message_file(path) {
+                Ok(m) if !m.trim().is_empty() => m,
+                Ok(_) => return emit_err("empty commit message — aborting", exit::USAGE),
+                Err(e) => return emit_err(&format!("read message file: {e}"), exit::NOINPUT),
+            },
+            None => match &amend_target {
+                Some(prev) => String::from_utf8_lossy(&prev.message).into_owned(),
+                None => match &merge_state {
+                    Some(state) => String::from_utf8_lossy(&state.message).into_owned(),
+                    None => match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
+                        Ok(m) if !m.is_empty() => m,
+                        Ok(_) => {
+                            return emit_err("empty commit message — aborting", exit::USAGE);
+                        }
+                        Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
+                    },
+                },
             },
         },
     };
@@ -158,6 +202,33 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&format!("stage tracked changes: {e}"), exit::GENERAL_ERROR);
     }
 
+    // Finishing a merge: refuse while conflict markers remain and make sure
+    // every conflicted path is staged, exactly like `mkit merge --continue`
+    // (and `git commit` after a merge). For a clean `merge --no-commit`
+    // the record set is empty, so both checks are no-ops.
+    if merge_state.is_some() {
+        let records = match conflict_state::read_conflicts(&mkit_dir) {
+            Ok(r) => r,
+            Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
+        };
+        match super::conflict::first_unresolved_marker(&cwd, &records) {
+            Ok(Some(path)) => {
+                return emit_err(
+                    &format!(
+                        "committing is not possible because '{path}' still has unresolved \
+                         conflict markers; resolve it and `mkit add` it"
+                    ),
+                    exit::GENERAL_ERROR,
+                );
+            }
+            Ok(None) => {}
+            Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+        }
+        if let Err(e) = super::conflict::ensure_conflict_paths_staged(&cwd, &store, &records) {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
+    }
+
     // Read the staging index. An absent file OR a totally empty
     // entries vector is a hard error — see module docs and issue
     // #102. An all-Removed index, by contrast, is a meaningful
@@ -168,7 +239,12 @@ pub fn run(args: &[String]) -> u8 {
         Ok(idx) => idx,
         Err(e) => return emit_err(&format!("read index: {e}"), exit::GENERAL_ERROR),
     };
-    if idx.entries.is_empty() {
+    // A merge being concluded may legitimately produce an empty tree (both
+    // sides deleted everything), so the empty-index gate is skipped while a
+    // merge is in progress — the two-parent merge commit is still meaningful.
+    // (A merge that made NO net change vs HEAD is caught below, after the tree
+    // is built, matching git's "nothing to commit".)
+    if idx.entries.is_empty() && merge_state.is_none() {
         return emit_err(
             "nothing staged: index is empty; run `mkit add <path>` (or `mkit add .`) before commit",
             exit::USAGE,
@@ -184,15 +260,46 @@ pub fn run(args: &[String]) -> u8 {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("build tree: {e}"), exit::GENERAL_ERROR),
     };
+    // Refuse a no-op merge commit produced by discarding the staged merge
+    // (e.g. `reset` between `merge --no-commit` and `commit`), matching git's
+    // "nothing to commit". The staged tree equaling `ORIG_HEAD` is necessary
+    // but NOT sufficient — a legitimate merge of divergent branches can
+    // produce HEAD's tree (e.g. both sides deleted the same file). So only
+    // refuse when the recorded merge RESULT differs from HEAD yet the staged
+    // tree matches it: that means the merge changed something the user then
+    // reverted. (Absent result tree → don't refuse, preserving old behavior.)
+    if let Some(state) = &merge_state
+        && let Ok(Object::Commit(orig)) = store.read_object(&state.orig_head)
+        && orig.tree_hash == tree_hash
+        && conflict_state::read_result_tree(&mkit_dir)
+            .ok()
+            .flatten()
+            .is_some_and(|result| result != orig.tree_hash)
+    {
+        return emit_err(
+            "nothing to commit: the staged merge was discarded (its result \
+             differs from HEAD but the index matches HEAD); re-stage it or run \
+             `mkit merge --abort`",
+            exit::USAGE,
+        );
+    }
     // Parent selection. A normal commit builds on HEAD. An `--amend`
     // replaces HEAD, so it adopts HEAD's *parents* — the superseded
     // commit drops out of the chain entirely.
-    let parents = match &amend_target {
-        Some(prev) => prev.parents.clone(),
-        None => match refs::resolve_head(&mkit_dir) {
+    let parents = if let Some(prev) = &amend_target {
+        prev.parents.clone()
+    } else if let Some(state) = &merge_state {
+        // Two-parent merge commit. Use the merge's recorded base
+        // (`ORIG_HEAD`) as the first parent — NOT the live HEAD — so the
+        // result matches `mkit merge --continue` even if HEAD moved (e.g. a
+        // `reset` between `merge --no-commit` and `commit`), and so we never
+        // depend on a HEAD read that could silently drop a parent.
+        vec![state.orig_head, state.merge_head]
+    } else {
+        match refs::resolve_head(&mkit_dir) {
             Ok(Some(h)) => vec![h],
             _ => vec![],
-        },
+        }
     };
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -246,9 +353,18 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = super::sync_index_to_tree(&cwd, &store, tree_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
+    // The merge is now recorded; clear MERGE_HEAD/MERGE_MSG/conflicts so the
+    // repo is no longer "merging".
+    if merge_state.is_some()
+        && let Err(e) = conflict_state::clear_merge_state(&mkit_dir)
+    {
+        return emit_err(&format!("clear merge state: {e}"), exit::GENERAL_ERROR);
+    }
     let mut stderr = std::io::stderr().lock();
     let verb = if amend_target.is_some() {
         "amended"
+    } else if merge_state.is_some() {
+        "merge committed"
     } else {
         "committed"
     };
@@ -662,6 +778,21 @@ fn nibble(c: u8) -> Option<u8> {
         b'A'..=b'F' => 10 + c - b'A',
         _ => return None,
     })
+}
+
+/// Read a `-F`/`--file` commit message. `-` reads stdin; otherwise the
+/// named file. Trailing whitespace is trimmed (git's default `-F` cleanup
+/// drops trailing blank lines).
+fn read_message_file(path: &str) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let raw = if path == "-" {
+        let mut s = String::new();
+        std::io::stdin().lock().read_to_string(&mut s)?;
+        s
+    } else {
+        std::fs::read_to_string(path)?
+    };
+    Ok(raw.trim_end().to_string())
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {

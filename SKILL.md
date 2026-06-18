@@ -37,15 +37,17 @@ mkit --version          # must print exactly: mkit <X.Y.Z>
 
 # Start a repo and make your first signed commit:
 mkit init               # creates .mkit/ in the current directory
-mkit keygen             # generate an Ed25519 signing key (.mkit/keys/default.key)
+mkit keygen             # generate an Ed25519 signing key (signing_key path; default .mkit/keys/default.key)
 echo hello > hi.txt
 mkit add hi.txt
 mkit commit -m "first commit"   # commits are ALWAYS Ed25519-signed
 ```
 
 A signing key is mandatory: `commit`/`tag -s`/`attest` need one. If you skip
-`keygen`, commits fail. `commit` opens `$EDITOR` (then `$VISUAL`) when `-m` is
-omitted, and aborts if neither is set rather than guessing.
+`keygen`, commits fail. `commit` opens an editor (`$GIT_EDITOR`, then
+`$EDITOR`, then `$VISUAL`, falling back to `vi`/`notepad`) when `-m`/`-F` is
+omitted — so in a headless or agent context, ALWAYS pass `-m` or `-F` so it
+never blocks on an editor.
 
 ## Mental model: like git, with four differences that matter
 
@@ -74,7 +76,8 @@ accepted but does nothing; submodules, hooks, `git worktree`, `git notes`, and
 Ed25519 and lives at `.mkit/keys/default.key`:
 
 ```sh
-mkit keygen [--force] [--print-pubkey]   # Ed25519 -> .mkit/keys/default.key
+mkit keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
+                                         # Ed25519 -> .mkit/keys/default.key
 mkit verify <rev>                        # check the signature on a commit, remix, or signed tag
 mkit tag -s <name> -m "msg"              # signed tag (always pass -m; no -m opens an editor)
 ```
@@ -244,7 +247,7 @@ The shell rules below still apply whenever you do run `mkit` directly.
 
 ## Going deeper
 
-If the **mkit MCP** is connected (`mcp.mkit.makechain.net`), prefer its tools for
+If the **mkit MCP** is connected (`mcp.mkit.sh`), prefer its tools for
 authoritative depth: `get_command <name>` for a subcommand's full flags,
 `get_spec <NAME>` / `list_specs` for wire & on-disk formats, `search_docs` /
 `search_code` to find behavior, and `get_file 'docs/CLI.md'` for the complete

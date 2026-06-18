@@ -74,6 +74,13 @@ struct DiffOpts {
     #[arg(long, conflicts_with_all = ["name_only", "name_status"])]
     stat: bool,
 
+    /// Diff against the merge base of the revisions, like `git diff
+    /// --merge-base`. With one revision: `merge-base(<rev>, HEAD)` vs the
+    /// worktree. With two: `merge-base(<a>, <b>)` vs `<b>`. (Equivalent to
+    /// the `<a>...<b>` symmetric range, but spelled as a flag.)
+    #[arg(long = "merge-base", conflicts_with = "staged")]
+    merge_base: bool,
+
     /// NUL-terminate `--name-only` / `--name-status` records and emit raw
     /// (unquoted) paths — like `git diff -z`. In `--name-status`, the
     /// status letter and path are each NUL-terminated. Only valid with
@@ -119,11 +126,18 @@ pub fn run(args: &[String]) -> u8 {
     // no garbage objects. Reads fall through to the store.
     let snapshot = EphemeralSink::new(&store);
 
-    let (old_tree, new_tree, pathspecs) =
-        match resolve_diff_endpoints(&store, &snapshot, &mkit_dir, &cwd, opts.staged, &opts.args) {
-            Ok(v) => v,
-            Err((msg, code)) => return emit_err(&msg, code),
-        };
+    let (old_tree, new_tree, pathspecs) = match resolve_diff_endpoints(
+        &store,
+        &snapshot,
+        &mkit_dir,
+        &cwd,
+        opts.staged,
+        opts.merge_base,
+        &opts.args,
+    ) {
+        Ok(v) => v,
+        Err((msg, code)) => return emit_err(&msg, code),
+    };
 
     let result = match diff_trees(&snapshot, old_tree, new_tree) {
         Ok(r) => r,
@@ -179,7 +193,7 @@ enum StatChange {
 /// `+`/`-` graph is scaled to the terminal width when the largest change
 /// would overflow it. Width = `COLUMNS` (if a positive integer) else 80,
 /// exactly as git does even when stdout is not a tty.
-fn render_stat<'a, S: ObjectSource + ?Sized>(
+pub(super) fn render_stat<'a, S: ObjectSource + ?Sized>(
     out: &mut impl Write,
     store: &S,
     entries: impl Iterator<Item = &'a DiffEntry>,
@@ -443,14 +457,101 @@ type DiffEndpoints = (Option<Hash>, Option<Hash>, Vec<String>);
 ///   only in the no-positional case, handled above).
 /// - no leading revision — default HEAD-vs-worktree / HEAD-vs-index,
 ///   all positionals are pathspecs.
+/// `--merge-base` endpoint resolution. One revision: `merge-base(rev,
+/// HEAD)` vs the worktree; two revisions: `merge-base(a, b)` vs `b`.
+/// Trailing positionals are pathspecs. Annotated tags are peeled to their
+/// commit before the merge-base walk, like git.
+fn resolve_merge_base_endpoints(
+    store: &ObjectStore,
+    snapshot: &EphemeralSink<'_>,
+    mkit_dir: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[String],
+) -> Result<DiffEndpoints, (String, u8)> {
+    let first = args.first().ok_or_else(|| {
+        (
+            "`--merge-base` requires at least one revision".to_string(),
+            exit::USAGE,
+        )
+    })?;
+    let a = peel_tags(
+        store,
+        revspec::resolve_revision(store, mkit_dir, first)
+            .map_err(|e| (format!("bad revision '{first}': {e}"), exit::DATAERR))?,
+    );
+
+    // A second positional that resolves to a revision selects the
+    // two-revision form. One that only *looks* like a revision but fails to
+    // resolve is a hard error (#207); anything else is a pathspec, leaving
+    // the single-revision (vs worktree) form.
+    if let Some(second) = args.get(1) {
+        match revspec::resolve_revision(store, mkit_dir, second) {
+            Ok(h) => {
+                let b = peel_tags(store, h);
+                let base = merge_base_of(store, a, b)?;
+                let old = object_to_tree(store, &base).map_err(|e| (e, exit::GENERAL_ERROR))?;
+                let new = object_to_tree(store, &b).map_err(|e| (e, exit::GENERAL_ERROR))?;
+                return Ok((Some(old), Some(new), args[2..].to_vec()));
+            }
+            // A 2nd positional that fails to resolve is treated as a pathspec
+            // ONLY when it is clearly path-shaped (names an existing worktree
+            // path, a tracked path, or contains `/`). Otherwise it is an
+            // ambiguous bad revision — a typo'd `<b>` — which we surface,
+            // rather than silently falling back to the single-rev form and
+            // emitting an empty diff (matching git's "ambiguous argument").
+            Err(e)
+                if matches!(e, revspec::RevError::Unknown(_))
+                    && looks_like_pathspec(cwd, second) => {}
+            Err(e) => return Err((format!("bad revision '{second}': {e}"), exit::DATAERR)),
+        }
+    }
+
+    // Single revision: merge-base(rev, HEAD) vs the worktree.
+    let head = refs::resolve_head(mkit_dir)
+        .map_err(|e| (format!("resolve HEAD: {e}"), exit::GENERAL_ERROR))?
+        .ok_or_else(|| {
+            (
+                "HEAD has no commit to take a merge base with".to_string(),
+                exit::GENERAL_ERROR,
+            )
+        })?;
+    let head = peel_tags(store, head);
+    let base = merge_base_of(store, a, head)?;
+    let old = object_to_tree(store, &base).map_err(|e| (e, exit::GENERAL_ERROR))?;
+    let new = worktree_tree_filtered(store, snapshot, cwd)?;
+    Ok((Some(old), Some(new), args[1..].to_vec()))
+}
+
+/// Resolve the single merge base of `a` and `b`, mapping "no base" to a
+/// clear error (matches git's `--merge-base` failure on unrelated histories).
+fn merge_base_of(store: &ObjectStore, a: Hash, b: Hash) -> Result<Hash, (String, u8)> {
+    find_merge_base(store, a, b)
+        .map_err(|e| (format!("merge base: {e}"), exit::GENERAL_ERROR))?
+        .ok_or_else(|| {
+            (
+                "no merge base between the given revisions".to_string(),
+                exit::DATAERR,
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn resolve_diff_endpoints(
     store: &ObjectStore,
     snapshot: &EphemeralSink<'_>,
     mkit_dir: &std::path::Path,
     cwd: &std::path::Path,
     staged: bool,
+    merge_base: bool,
     args: &[String],
 ) -> Result<DiffEndpoints, (String, u8)> {
+    // `--merge-base <a> [<b>] [paths…]` — diff the merge base of the given
+    // revision(s) rather than the revisions themselves. Resolved before
+    // any other form (clap already rejects `--merge-base --staged`).
+    if merge_base {
+        return resolve_merge_base_endpoints(store, snapshot, mkit_dir, cwd, args);
+    }
+
     // #223: `--staged` with explicit revisions is contradictory —
     // `--staged` already pins HEAD vs the index. Pathspecs are fine, but
     // a leading argument that *looks* like a revision is not, and must
@@ -692,6 +793,29 @@ fn looks_like_rev_request(s: &str) -> bool {
         && base.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Is `arg` clearly a pathspec rather than a (typo'd) revision? True when it
+/// names an existing worktree path OR matches a tracked index path (a file/dir
+/// tracked but deleted from the worktree is still a valid pathspec, as in
+/// git). A bare `/` is NOT enough — branch names routinely contain `/` (e.g.
+/// `feature/x`), so a typo'd branch like `feature/typo` must surface as a bad
+/// revision rather than silently degrade into an empty-output pathspec filter.
+fn looks_like_pathspec(cwd: &std::path::Path, arg: &str) -> bool {
+    if cwd.join(arg).symlink_metadata().is_ok() {
+        return true;
+    }
+    // Normalize the spec the same way the path filter will (e.g. `./a.txt` ->
+    // `a.txt`) before matching the index, so a tracked-but-deleted file passed
+    // as `./a.txt` isn't misread as a bad revision.
+    let spec = normalize_pathspec(arg);
+    let Ok(idx) = mkit_core::index::read_index(cwd) else {
+        return false;
+    };
+    let prefix = format!("{spec}/");
+    idx.entries
+        .iter()
+        .any(|e| e.path == spec || e.path.starts_with(&prefix))
+}
+
 fn head_tree(store: &ObjectStore, mkit_dir: &std::path::Path) -> Result<Option<Hash>, String> {
     let head = refs::resolve_head(mkit_dir).map_err(|e| format!("resolve HEAD: {e}"))?;
     match head {
@@ -719,17 +843,22 @@ fn index_tree(
 }
 
 /// Normalize a pathspec to the index/diff path form: strip a leading
-/// `./`, collapse `\\` to `/`, drop a trailing `/`.
+/// `./`, collapse `\\` to `/`, drop a trailing `/`. The repo root in any
+/// spelling (`.`, `./`, `/`, or empty) normalizes to the empty string, which
+/// [`path_matches_any`] treats as "match everything" (matching git, where
+/// `diff -- .` is the whole-tree diff).
 fn normalize_pathspec(spec: &str) -> String {
     let s = spec.replace('\\', "/");
     let s = s.strip_prefix("./").unwrap_or(&s);
-    s.strip_suffix('/').unwrap_or(s).to_string()
+    let s = s.strip_suffix('/').unwrap_or(s);
+    if s == "." { String::new() } else { s.to_string() }
 }
 
 fn path_matches_any(path: &str, specs: &[String]) -> bool {
     specs
         .iter()
-        .any(|spec| super::index_path_matches_or_descends(path, spec))
+        // An empty spec is the repo root (`.`/`./`) → matches every path.
+        .any(|spec| spec.is_empty() || super::index_path_matches_or_descends(path, spec))
 }
 
 /// Abbreviated all-zero blob id git prints for an absent side of `index`.

@@ -1,4 +1,4 @@
-name: MCP Release
+name: "Release: MCP"
 
 # Release-gated corpus updates: the MCP indexes a release tag's tree, so the
 # served corpus always matches the published crates — `main` content never

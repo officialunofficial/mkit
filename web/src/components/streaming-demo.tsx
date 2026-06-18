@@ -179,7 +179,7 @@ function FileSidebar({
         </div>
       </div>
       {rejected ? (
-        <p className='text-xs text-amber-700'>
+        <p className='text-xs text-amber-700 dark:text-amber-400'>
           <span className='font-medium'>{rejected.name}</span> is {formatBytes(rejected.size)} — demo cap is{' '}
           {formatBytes(MAX_FILE_BYTES)} to keep the page snappy. Real mkit handles GBs; the cap only applies to this
           interactive page.
@@ -590,7 +590,7 @@ function StreamingBaoVerify({ file }: { file: FileAsset }) {
           </select>
         </label>
         {tamperedIndex !== null ? (
-          <span className='rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-xs text-red-700'>
+          <span className='rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400'>
             Will tamper chunk {tamperedIndex}
           </span>
         ) : null}

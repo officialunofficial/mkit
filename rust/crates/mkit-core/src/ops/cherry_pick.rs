@@ -24,6 +24,17 @@ pub enum CherryPickError {
     NotACommit,
     #[error("target commit's first parent does not refer to a commit object")]
     ParentNotACommit,
+    /// The target is a merge commit but no mainline parent was selected
+    /// (git: "commit … is a merge but no -m option was given").
+    #[error("commit is a merge but no mainline (-m <parent-number>) was given")]
+    MergeNeedsMainline,
+    /// A mainline parent was given for a non-merge commit (git: "mainline
+    /// was specified but commit … is not a merge").
+    #[error("mainline (-m) was specified but the commit is not a merge")]
+    MainlineForNonMerge,
+    /// The mainline parent number is out of range for this merge commit.
+    #[error("invalid mainline parent {given}: commit has {parents} parents")]
+    BadMainline { given: usize, parents: usize },
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -70,18 +81,39 @@ pub fn cherry_pick(
     store: &ObjectStore,
     target_hash: Hash,
     ours_tree: Hash,
+    mainline: Option<usize>,
 ) -> Result<CherryPickResult, CherryPickError> {
     let Object::Commit(target_commit) = store.read_object(&target_hash)? else {
         return Err(CherryPickError::NotACommit);
     };
 
-    let parent_tree: Option<Hash> = if target_commit.parents.is_empty() {
-        None
-    } else {
-        let Object::Commit(parent_commit) = store.read_object(&target_commit.parents[0])? else {
-            return Err(CherryPickError::ParentNotACommit);
-        };
-        Some(parent_commit.tree_hash)
+    // Pick the parent whose diff is replayed, with git's `-m`/`--mainline`
+    // semantics: a non-merge takes its sole parent (and rejects `-m`), while
+    // a merge REQUIRES `-m <parent-number>` to choose the mainline (git
+    // refuses to guess). The selected parent's tree is the base of the diff.
+    let n_parents = target_commit.parents.len();
+    let base_parent: Option<Hash> = match (n_parents, mainline) {
+        (0, None) => None,
+        (0 | 1, Some(_)) => return Err(CherryPickError::MainlineForNonMerge),
+        (1, None) => Some(target_commit.parents[0]),
+        (_, None) => return Err(CherryPickError::MergeNeedsMainline),
+        (_, Some(m)) if m >= 1 && m <= n_parents => Some(target_commit.parents[m - 1]),
+        (_, Some(m)) => {
+            return Err(CherryPickError::BadMainline {
+                given: m,
+                parents: n_parents,
+            });
+        }
+    };
+
+    let parent_tree: Option<Hash> = match base_parent {
+        None => None,
+        Some(parent_hash) => {
+            let Object::Commit(parent_commit) = store.read_object(&parent_hash)? else {
+                return Err(CherryPickError::ParentNotACommit);
+            };
+            Some(parent_commit.tree_hash)
+        }
     };
 
     let original_message = target_commit.message.clone();
@@ -172,7 +204,7 @@ mod tests {
         );
         let target_commit = make_commit(&s, target_tree, &[base_commit], "add b.txt");
 
-        let r = cherry_pick(&s, target_commit, base_tree).unwrap();
+        let r = cherry_pick(&s, target_commit, base_tree, None).unwrap();
         assert!(!r.has_conflicts());
         assert_eq!(r.original_message, b"add b.txt");
         let merged = tree_entries(&s, r.tree_hash);
@@ -191,7 +223,7 @@ mod tests {
         let blob_ours = put_blob(&s, b"ours-change");
         let ours_tree = make_tree(&s, vec![entry(b"a.txt", EntryMode::Blob, blob_ours)]);
 
-        let r = cherry_pick(&s, target_commit, ours_tree).unwrap();
+        let r = cherry_pick(&s, target_commit, ours_tree, None).unwrap();
         assert!(r.has_conflicts());
         assert_eq!(r.conflicts.len(), 1);
         assert_eq!(r.conflicts[0].path, "a.txt");
@@ -207,7 +239,7 @@ mod tests {
         let root_commit = make_commit(&s, root_tree, &[], "root commit");
         let blob_b = put_blob(&s, b"bbb");
         let ours_tree = make_tree(&s, vec![entry(b"b.txt", EntryMode::Blob, blob_b)]);
-        let r = cherry_pick(&s, root_commit, ours_tree).unwrap();
+        let r = cherry_pick(&s, root_commit, ours_tree, None).unwrap();
         assert!(!r.has_conflicts());
         assert_eq!(r.original_message, b"root commit");
         assert_eq!(tree_entries(&s, r.tree_hash).len(), 2);
@@ -223,7 +255,7 @@ mod tests {
         let target_commit = make_commit(&s, target_tree, &[base_commit], "remove a.txt");
         let blob_modified = put_blob(&s, b"modified content");
         let ours_tree = make_tree(&s, vec![entry(b"a.txt", EntryMode::Blob, blob_modified)]);
-        let r = cherry_pick(&s, target_commit, ours_tree).unwrap();
+        let r = cherry_pick(&s, target_commit, ours_tree, None).unwrap();
         assert!(r.has_conflicts());
         assert_eq!(r.conflicts[0].kind, ConflictKind::DeleteModify);
         assert_eq!(r.conflicts[0].path, "a.txt");
@@ -248,7 +280,7 @@ mod tests {
             ],
         );
         let target_commit = make_commit(&s, target_tree, &[base_commit], "add b, c, d");
-        let r = cherry_pick(&s, target_commit, base_tree).unwrap();
+        let r = cherry_pick(&s, target_commit, base_tree, None).unwrap();
         assert!(!r.has_conflicts());
         assert_eq!(tree_entries(&s, r.tree_hash).len(), 4);
     }
@@ -258,7 +290,7 @@ mod tests {
         let (_d, s) = store();
         let blob_hash = put_blob(&s, b"just a blob");
         let empty_tree = make_tree(&s, vec![]);
-        let err = cherry_pick(&s, blob_hash, empty_tree).unwrap_err();
+        let err = cherry_pick(&s, blob_hash, empty_tree, None).unwrap_err();
         assert!(matches!(err, CherryPickError::NotACommit));
     }
 
@@ -276,8 +308,83 @@ mod tests {
         );
         let root_commit = make_commit(&s, root_tree, &[], "root");
         let empty_tree = make_tree(&s, vec![]);
-        let r = cherry_pick(&s, root_commit, empty_tree).unwrap();
+        let r = cherry_pick(&s, root_commit, empty_tree, None).unwrap();
         assert!(!r.has_conflicts());
         assert_eq!(tree_entries(&s, r.tree_hash).len(), 2);
+    }
+
+    /// Build a 2-parent merge commit. Parent 1 has `a.txt`, parent 2 has
+    /// `b.txt`; the merge tree has both, plus `m.txt` unique to the merge.
+    fn merge_fixture(s: &ObjectStore) -> (Hash, Hash, Hash) {
+        let a = put_blob(s, b"a");
+        let b = put_blob(s, b"b");
+        let p1_tree = make_tree(s, vec![entry(b"a.txt", EntryMode::Blob, a)]);
+        let p2_tree = make_tree(s, vec![entry(b"b.txt", EntryMode::Blob, b)]);
+        let p1 = make_commit(s, p1_tree, &[], "p1");
+        let p2 = make_commit(s, p2_tree, &[], "p2");
+        let m = put_blob(s, b"m");
+        let merge_tree = make_tree(
+            s,
+            vec![
+                entry(b"a.txt", EntryMode::Blob, a),
+                entry(b"b.txt", EntryMode::Blob, b),
+                entry(b"m.txt", EntryMode::Blob, m),
+            ],
+        );
+        let merge_commit = make_commit(s, merge_tree, &[p1, p2], "merge");
+        (merge_commit, p1, p2)
+    }
+
+    #[test]
+    fn merge_without_mainline_is_rejected() {
+        let (_d, s) = store();
+        let (merge_commit, _p1, _p2) = merge_fixture(&s);
+        let empty = make_tree(&s, vec![]);
+        let err = cherry_pick(&s, merge_commit, empty, None).unwrap_err();
+        assert!(matches!(err, CherryPickError::MergeNeedsMainline));
+    }
+
+    #[test]
+    fn mainline_on_non_merge_is_rejected() {
+        let (_d, s) = store();
+        let blob_a = put_blob(&s, b"aaa");
+        let tree = make_tree(&s, vec![entry(b"a.txt", EntryMode::Blob, blob_a)]);
+        let root = make_commit(&s, tree, &[], "root");
+        let child = make_commit(&s, tree, &[root], "child");
+        let empty = make_tree(&s, vec![]);
+        let err = cherry_pick(&s, child, empty, Some(1)).unwrap_err();
+        assert!(matches!(err, CherryPickError::MainlineForNonMerge));
+    }
+
+    #[test]
+    fn out_of_range_mainline_is_rejected() {
+        let (_d, s) = store();
+        let (merge_commit, _p1, _p2) = merge_fixture(&s);
+        let empty = make_tree(&s, vec![]);
+        let err = cherry_pick(&s, merge_commit, empty, Some(3)).unwrap_err();
+        assert!(matches!(
+            err,
+            CherryPickError::BadMainline {
+                given: 3,
+                parents: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn mainline_selects_the_chosen_parent_as_base() {
+        // Picking the merge onto an empty tree with `-m 1` replays the merge's
+        // diff against parent 1 (which has a.txt) → adds b.txt + m.txt; with
+        // `-m 2` (parent has b.txt) → adds a.txt + m.txt. Different bases ⇒
+        // different results, proving the mainline actually selects the parent.
+        let (_d, s) = store();
+        let (merge_commit, _p1, _p2) = merge_fixture(&s);
+        let empty = make_tree(&s, vec![]);
+        let r1 = cherry_pick(&s, merge_commit, empty, Some(1)).unwrap();
+        let r2 = cherry_pick(&s, merge_commit, empty, Some(2)).unwrap();
+        assert_ne!(
+            r1.tree_hash, r2.tree_hash,
+            "different mainline parents must yield different patches"
+        );
     }
 }

@@ -1,4 +1,4 @@
-name: Fuzz smoke
+name: "Nightly: Fuzz"
 
 # Nightly libfuzzer smoke run for the cargo-fuzz targets under
 # rust/fuzz/fuzz_targets/. Each target runs for ~60 s; this is a

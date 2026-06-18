@@ -1,5 +1,25 @@
 @import 'tailwindcss';
 
+/* Manual override drives dark mode: the no-flash script in _root.tsx resolves
+   `system`/`light`/`dark` to an explicit `data-theme` attribute, so `dark:`
+   utilities key off that attribute (no prefers-color-scheme needed in CSS —
+   the script already folded the system preference into the attribute). */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* Dark token overrides: invert the neutral lightness ramp. Re-tune muted /
+   subtle / hairline so they keep the same perceptual separation against the
+   dark background that they had against white. Brand gradient is unchanged —
+   it reads on both surfaces. */
+[data-theme='dark'] {
+  --color-bg: oklch(0.16 0 0);
+  --color-fg: oklch(0.96 0 0);
+  --color-muted: oklch(0.62 0 0);
+  --color-subtle: oklch(0.48 0 0);
+  /* Lifted well above the 0.16 background so card/input borders read clearly
+     in dark mode (a 0.27 hairline nearly vanished against the dark ground). */
+  --color-hairline: oklch(0.34 0 0);
+}
+
 /* Design tokens lifted verbatim from searchartwith.art (OKLCH triplet of
    1 / 0.145 / 0.922 for bg / fg / hairline). Geist Variable is the
    sans; we skip the site's DaVinci serif deliberately. */

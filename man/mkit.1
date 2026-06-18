@@ -32,7 +32,9 @@ A user-level config at
 .Pa $XDG_CONFIG_HOME/mkit/config
 provides cross-repo defaults; repo-local values in
 .Pa .mkit/config
-always win.
+win over it for ordinary keys, but security-sensitive keys
+.Pq Cm signing_key , Cm user.identity , Cm signer , Cm key.* , Cm attest.* , Cm ssh.* , No and Cm trusted_remote_endpoint
+are user-scoped only and are ignored if set repo-locally.
 .Sh COMMANDS
 The full list of subcommands is printed by
 .Nm mkit Fl Fl help .
@@ -136,6 +138,25 @@ or
 overwrites an existing destination; without it,
 .Cm mv
 refuses to clobber one. A missing or untracked source is refused.
+A
+.Ar source
+may also be a directory:
+.Cm mv Ar dir Ar newdir
+renames it and
+.Cm mv Ar dir Ar existing-dir
+moves it inside, as
+.Pa existing-dir/dir .
+The directory is renamed in one filesystem operation, so untracked files
+within it travel along (like
+.Xr git 1 Ns 's
+.Cm mv ) ,
+and each tracked file beneath it is restaged at its new path. A directory
+move refuses a pre-existing destination even with
+.Fl f
+(recursively removing it would strand tracked files and destroy untracked
+ones), rejects overlapping sources
+.Pq Cm mv Ar dir Ar dir/file Ar dest ,
+and refuses moving a directory into itself.
 .It Cm restore Oo Fl Fl staged Oc Oo Fl Fl worktree Oc Oo Fl Fl source Ar rev Oc Oo Fl f | Fl Fl force Oc Ar path ...
 Restore path(s) in the worktree and/or unstage them. With no flag (or
 .Fl Fl worktree ) ,
@@ -242,7 +263,7 @@ header plus the content for each
 .Pq Ql <name> missing No for unknown objects .
 .Ar object
 resolves through the shared revspec grammar.
-.It Cm show Op Ar object ...
+.It Cm show Oo Fl Fl stat Oc Op Ar object ...
 Display objects, like
 .Xr git 1 Cm show ,
 defaulting to
@@ -260,6 +281,10 @@ the commit/tag header carries mkit's signed
 and 64-hex BLAKE3 ids, so those lines diverge from git's
 .Ql Author: Name <email>
 / 40-hex form; the diff body, tree listing, and blob output match git.
+.Fl Fl stat
+prints a diffstat
+.Pq as in Cm mkit diff Fl Fl stat
+instead of the patch for commits and remixes.
 .It Cm tree
 Snapshot the working directory as a tree object and print the tree hash.
 Honors
@@ -354,7 +379,7 @@ deletes the ref, optionally checking a
 first \(em an all-zero value is rejected in delete mode, since a ref asserted
 absent has nothing to delete. Deleting a branch refuses the currently
 checked-out one, an mkit safety divergence.
-.It Cm commit Oo Fl a | Fl Fl all Oc Op Fl Fl amend Op Fl m Ar message
+.It Cm commit Oo Fl a | Fl Fl all Oc Oo Fl Fl amend Oc Oo Fl m Ar message | Fl F Ar file Oc Op Fl Fl author Ar spec
 Create a signed commit. With
 .Fl a
 or
@@ -364,9 +389,11 @@ untracked files. The combined
 .Fl am Ar message
 form is accepted as shorthand for
 .Fl a Fl m Ar message .
-If
+If neither
 .Fl m
-is omitted,
+nor
+.Fl F
+is given,
 .Nm
 opens
 .Ev EDITOR
@@ -375,6 +402,22 @@ on
 lines starting with
 .Ql #
 are stripped, and an empty message aborts the commit.
+.Fl F
+or
+.Fl Fl file
+reads the commit message from
+.Ar file
+.Pq Ql - No reads from stdin
+and is mutually exclusive with
+.Fl m .
+.Fl Fl author Ar spec
+overrides the commit author Identity for this commit.
+.Pp
+After a
+.Cm merge Fl Fl no-commit
+.Pq or any otherwise-resolved merge ,
+.Cm commit
+records a two-parent merge commit from the staged merge result.
 .Pp
 With
 .Fl Fl amend ,
@@ -461,7 +504,7 @@ indexes the reachable chain, so commits superseded by
 .Cm commit --amend
 or a reset are no longer listed. This command never mutates refs, the
 journal, or any object.
-.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
+.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl Fl merge-base Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.
 .Fl Fl staged
@@ -477,6 +520,11 @@ and
 .Ar b
 against
 .Ar b .
+.Fl Fl merge-base
+is the flag spelling of an
+.Ar a Ns ... Ns Ar b
+range: it diffs the merge base of the given revisions instead of the
+revisions directly.
 Revisions may be refs, commit
 hashes, short hashes, or
 .Ql HEAD~n
@@ -533,7 +581,7 @@ and
 for untracked. Header lines
 .Pq Fl Fl branch
 are not emitted.
-.It Cm branch Oo Fl v | Fl Fl verbose Oc Oo Fl d | Fl D | Fl m Oc Op Ar name ...
+.It Cm branch Oo Fl v | Fl Fl verbose Oc Oo Fl d | Fl D | Fl m Oc Oo Fl Fl list Oc Oo Fl Fl contains Ar commit Oc Oo Fl Fl no-contains Ar commit Oc Oo Fl Fl merged Op Ar commit Oc Oo Fl Fl no-merged Op Ar commit Oc Op Ar name ...
 List, create, rename, or delete branches. With no arguments, lists
 branches as
 .Ql <marker> <name>
@@ -557,9 +605,29 @@ and both still refuse the current branch.
 renames a branch \(em the current branch when
 .Ar old
 is omitted \(em and moves HEAD if the renamed branch is checked out.
+.Pp
+The listing accepts ancestry filters (like
+.Xr git 1 Cm branch ) :
+.Fl Fl contains Ar commit
+keeps only branches whose tip has
+.Ar commit
+as an ancestor, and
+.Fl Fl no-contains Ar commit
+inverts that;
+.Fl Fl merged Op Ar commit
+keeps branches already merged into
+.Ar commit
+and
+.Fl Fl no-merged Op Ar commit
+keeps those not yet merged, both defaulting
+.Ar commit
+to
+.Cm HEAD .
+.Fl Fl list
+is an explicit list selector.
 .It Cm checkout Ar branch
 Switch HEAD to a branch and restore files from its tree.
-.It Cm tag Oo Fl a | Fl s Oc Oo Fl m Ar msg Oc Oo Ar name Oc Op Ar commit
+.It Cm tag Oo Fl a | Fl s Oc Oo Fl m Ar msg Oc Oo Fl Fl author Ar spec Oc Oo Ar name Oc Op Ar commit
 List, create, or delete tags. With no arguments, prints the list of
 tags, marking each annotated or signed tag. With a
 .Ar name
@@ -578,6 +646,8 @@ domain.
 supplies the message; without it
 .Ev EDITOR
 is launched.
+.Fl Fl author Ar spec
+overrides the tagger Identity for an annotated or signed tag.
 .Fl d
 deletes the named tag. Verify a signed tag with
 .Cm mkit verify Ar name .
@@ -592,10 +662,26 @@ prints the current patterns,
 clears them, and
 .Cm reapply
 re-materialises the working tree from the current patterns.
-.It Cm merge Ar branch
+.It Cm merge Oo Fl Fl no-commit Oc Oo Fl m Ar msg Oc Ar branch | Fl Fl continue | Fl Fl abort
 Merge
 .Ar branch
 into HEAD. Fast-forwards when possible.
+.Fl Fl no-commit
+stages the merge result but stops before committing; finish with
+.Cm mkit commit
+or
+.Cm mkit merge Fl Fl continue
+.Pq fast-forwards are unaffected by this flag .
+.Fl m
+or
+.Fl Fl message
+overrides the merge commit message. After a conflict, resolve and
+.Cm add
+the paths, then
+.Fl Fl continue ,
+or
+.Fl Fl abort
+to restore HEAD.
 .It Cm rebase Oo Fl i Oc Ar branch
 Replay commits from HEAD onto
 .Ar branch .
@@ -629,7 +715,7 @@ after a conflict.
 Push HEAD's commit chain to the configured remote.
 .It Cm pull , Cm fetch
 Download or download-and-merge from the remote.
-.It Cm clone Op Fl Fl depth Ar N Op Fl Fl sparse ... Ar url
+.It Cm clone Op Fl Fl sparse ... Ar url
 Clone a remote into a new working directory.
 .It Cm remote Oo Cm add | Cm set | Cm remove | Cm rename Oc Op Ar args ...
 Show or configure remotes. With no subcommand, lists the configured
@@ -654,8 +740,31 @@ renames a named remote and repoints any branch upstream tracking it.
 Removing or renaming a remote never touches the user-scoped
 .Ar trusted_remote_endpoint ,
 which is keyed by exact URL rather than remote name.
-.It Cm cherry-pick Ar hash
+.It Cm cherry-pick Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar parent-number Oc Ar hash | Fl Fl continue | Fl Fl abort
 Apply a single commit from elsewhere onto HEAD.
+.Fl n
+or
+.Fl Fl no-commit
+stages the picked change in the index and worktree without creating a
+commit.
+.Fl m
+or
+.Fl Fl mainline Ar parent-number
+selects which parent of a merge commit is the mainline (git semantics):
+it is required when replaying a merge commit and rejected for a non-merge.
+This differs from
+.Xr git 1 Ns 's
+.Cm commit Fl m :
+git's
+.Cm cherry-pick Fl m
+is mainline selection, not a message override.
+On conflict, resolve and
+.Cm add
+the paths, then
+.Fl Fl continue ,
+or
+.Fl Fl abort
+to restore HEAD.
 .It Cm revert Ar commit | Fl Fl continue | Fl Fl abort Oo Fl n | Fl Fl no-commit Oc
 Create a new commit that undoes
 .Ar commit
@@ -694,22 +803,52 @@ write an object before publishing its ref), so
 must be run only when no other mkit process is operating on the repo (gc prints
 a warning). Fails closed: a corrupt root or unreadable ref aborts with nothing
 removed.
-.It Cm stash Op Cm save Fl m Ar msg | Cm list | Cm pop Op Ar N | Cm apply Op Ar N | Cm drop Op Ar N | Cm clear | Cm show Op Ar N
+.It Cm stash Oo Cm save Fl m Ar msg | Cm list | Cm pop Oo Fl Fl index Oc Op Ar ref | Cm apply Oo Fl Fl index Oc Op Ar ref | Cm drop Op Ar ref | Cm clear | Cm show Op Ar ref Oc
 Save or restore a snapshot of working-tree changes.
 .Cm pop
-applies entry
-.Ar N
-and removes it;
+applies an entry and removes it;
 .Cm apply
-applies entry
-.Ar N
-but leaves it on the stack. Both run the destructive-restore guard so
-uncommitted edits on unrelated paths are never clobbered.
+applies an entry but leaves it on the stack. Both run the
+destructive-restore guard so uncommitted edits on unrelated paths are
+never clobbered.
+.Fl Fl index
+on
+.Cm pop Ns / Ns Cm apply
+also restores the staged state recorded when the stash was created (like
+.Xr git 1
+.Cm stash pop Fl Fl index ) ,
+not just the worktree changes.
+.Cm save
+records that staged snapshot as the stash commit's second parent, so it
+needs no on-disk format change; stashes created before this feature carry
+no index snapshot and
+.Fl Fl index
+is a no-op for them.
 .Cm clear
 removes every stash entry.
-.It Cm blame Ar file
+.Cm pop , Cm apply , Cm drop ,
+and
+.Cm show
+take an entry selector
+.Ar ref
+.Pq default 0
+that may be either a bare index
+.Ar N
+or the
+.Cm stash@{ Ns Ar N Ns Cm }
+form.
+.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Ar file
 Line-level attribution of the committed state of
 .Ar file .
+The default output is
+.Ql <short12>\et<line_num>\et<text>
+per line;
+.Fl Fl format Ns = Ns Cm json
+instead emits JSONL with
+.Cm hash , line_num , author , timestamp ,
+and
+.Cm text
+keys.
 .It Cm verify Ar rev
 Verify the signature on a commit, remix, or signed tag.
 .Ar rev
@@ -722,21 +861,61 @@ HEAD). Multiple
 .Fl Fl additional-signer
 specs may be supplied to co-sign the attestation. The resulting
 envelope is attached to the commit's attestation set.
+.Fl Fl external-signer-arg Ar V
+.Pq repeatable
+passes an argument to an external signer; if any instance is supplied,
+the full list
+.Em replaces
+.Cm attest.external_signer_args
+from config rather than appending to it.
 .It Cm verify-attest Oo Fl Fl commit Ar hash Oc Op Fl Fl trust-roots Ar path Op Fl Fl algorithm Ar filter
 Verify every attestation attached to the given commit. Returns success
-only if every envelope verifies; an algorithm filter restricts the
-check to a single algorithm.
+only if every attached envelope verifies.
+.Fl Fl algorithm
+filters which signature lines are
+.Em displayed
+to the named algorithm; it does NOT change the pass/fail criterion — every
+envelope must still verify regardless of the filter, so it cannot be used to
+require that a specific algorithm signed.
 .It Cm key Cm generate | Cm list | Cm import | Cm export | Cm delete
 Manage user-scoped keystore keys backed by the platform keystore
 (Keychain on macOS, libsecret/systemd-creds/YubiKey on Linux, Credential
 Manager on Windows). Unlike
 .Cm keygen
 (which writes to a repo-local file), these keys persist across repos.
-.It Cm keygen
-Generate a fresh Ed25519 keypair in
-.Pa .mkit/keys/default.key .
-.It Cm config Ar key Op Ar value
-Read or write a config key. Recognized keys include
+.It Cm keygen Oo Fl Fl algorithm Cm ed25519 | Cm secp256k1 | Cm p256 Oc Oo Fl Fl force Oc Op Fl Fl print-pubkey
+Generate a fresh keypair.
+.Fl Fl algorithm
+selects the key type
+.Pq default Cm ed25519 ;
+the destination depends on it:
+.Cm ed25519
+writes the signing key to the
+.Cm signing_key
+path
+.Pq default Pa .mkit/keys/default.key ,
+while
+.Cm secp256k1
+and
+.Cm p256
+write attestation keys to the
+.Cm attest. Ns Ar algo Ns Cm _key_path
+paths
+.Pq default Pa .mkit/keys/secp256k1.key No / Pa .mkit/keys/p256.key .
+.Fl Fl force
+overwrites an existing key file at the target path; and
+.Fl Fl print-pubkey
+emits the canonical keyid on stdout for trust-roots entries.
+.It Cm config Oo Ar key Oo Ar value Oc Oc Op Fl Fl format Ns = Ns Cm json
+Read or write a config key. With no
+.Ar key ,
+shows every configuration value; with a
+.Ar key
+alone, shows that value; with a
+.Ar key Ar value
+pair, sets it. On the show forms,
+.Fl Fl format Ns = Ns Cm json
+emits JSON instead of the default plain output. Recognized keys include
 .Cm user.identity , Cm ssh.strict_host_key_checking ,
 .Cm ssh.user_known_hosts_file ,
 and
@@ -772,7 +951,13 @@ under
 .Pa <out>/packs/<hex>/shards/<index>
 with the manifest written last, so racing readers see either no manifest
 (clean fall-through to the monolithic pack) or the manifest plus every
-shard. Requires building the binary with
+shard.
+.Fl Fl out Ar dir
+sets the output directory
+.Pq default Pa .mkit/pack-shards ;
+.Fl Fl force
+encodes even when the pack is below the size threshold. Requires building
+the binary with
 .Cm --features pack-shards .
 .It Cm git Cm export Oo Fl Fl remote-name Ar name Oc Oo Fl Fl ref Ar ref Oc Oo Fl Fl passthrough Oc Oo Fl Fl no-attest Oc Oo Fl Fl algorithm Ar alg Oc Oo Fl Fl signer Ar kind Oc Oo Fl Fl json Oc Ar dest
 Deterministic one-way export of branches and tags to a git mirror per
@@ -821,7 +1006,7 @@ SPEC-GIT-IMPORT. With
 initialise a fresh repository and check out the upstream default
 branch; without, add tracking refs to the current repository. Signed
 by a dedicated import key, pinned per state dir.
-.It Cm git Cm fetch | Cm pull Oo Fl Fl remote-name Ar name Oc
+.It Cm git Cm fetch | Cm pull Oo Fl Fl remote-name Ar name Oc Oo Fl Fl key Ar path Oc Op Fl Fl json
 Update
 .Pa refs/remotes/<name>/*
 and imported tags from the upstream (a locally-moved tag is never
@@ -830,6 +1015,12 @@ clobbered);
 also fast-forwards the current branch (divergence refuses with a
 .Cm mkit merge
 hint).
+.Fl Fl key Ar path
+selects the import signing key
+.Pq default the pinned key file ,
+and
+.Fl Fl json
+emits machine-readable JSON on stdout.
 .It Cm git Cm verify Oo Fl Fl remote-name Ar name Oc Oo Fl Fl fork-audit Oc Oo Fl Fl ref Ar ref Oc
 Audit recorded bridge state against the local store: bridge-translated
 objects shallow-verify and must reconstruct to their mapped twin;
@@ -866,12 +1057,22 @@ form \(em an intentional, packaging-pinned divergence.
 .El
 .Sh ENVIRONMENT
 .Bl -tag -width "CLICOLOR_FORCE"
-.It Ev EDITOR , Ev VISUAL
-Editor used by
+.It Ev GIT_EDITOR , Ev EDITOR , Ev VISUAL
+Editor opened by
 .Cm mkit commit
-when no
+when neither
 .Fl m
-is supplied. If neither is set, the commit aborts with a clear error.
+nor
+.Fl F
+is supplied, tried in that order. If none is set it falls back to
+.Xr vi 1
+(Unix) or
+.Ic notepad
+(Windows), matching git. In a headless or non-interactive context, pass
+.Fl m
+or
+.Fl F
+so the commit never blocks on an editor.
 .It Ev NO_COLOR
 If set to any value (including empty),
 .Nm
@@ -898,7 +1099,10 @@ respectively. See
 Repo-local state dir (analogous to
 .Pa .git/ ).
 .It Pa .mkit/config
-Repo-local config; overrides any user-level value.
+Repo-local config; overrides user-level values for ordinary keys. Security-
+sensitive keys
+.Pq Cm signing_key , Cm user.identity , Cm signer , Cm key.* , Cm attest.* , Cm ssh.* , No and Cm trusted_remote_endpoint
+are user-scoped only and ignored here.
 .It Pa .mkit/keys/default.key
 Repo-local Ed25519 signing key.
 .It Pa .mkit/index

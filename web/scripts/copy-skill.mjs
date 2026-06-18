@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Stage the canonical, repo-root SKILL.md into web/public/ so the demo site
-// serves it at https://mkit.makechain.net/SKILL.md. The repo-root file is the
+// serves it at https://mkit.sh/SKILL.md. The repo-root file is the
 // single source of truth; this generated copy is gitignored. Run before
 // `waku build`/`waku dev` so Waku collects it as a static asset.
 import { copyFileSync, mkdirSync } from 'node:fs'

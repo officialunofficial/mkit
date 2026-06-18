@@ -18,7 +18,7 @@ use std::io::Write;
 use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::object::{Commit, Object};
-use mkit_core::ops::cherry_pick::cherry_pick;
+use mkit_core::ops::cherry_pick::{CherryPickError, cherry_pick};
 use mkit_core::ops::conflict_state::{
     self, CherryPickState, in_progress_op_name, is_cherry_pick_in_progress,
 };
@@ -41,6 +41,16 @@ struct CherryPickOpts {
     /// Abort the in-progress cherry-pick and restore the original HEAD.
     #[arg(long, conflicts_with_all = ["cont", "commit"])]
     abort: bool,
+    /// Apply the picked change to the index + worktree without creating a
+    /// commit (like `git cherry-pick -n`). Run `mkit commit` when ready;
+    /// the result has the current branch as its single parent.
+    #[arg(short = 'n', long = "no-commit", conflicts_with_all = ["cont", "abort"])]
+    no_commit: bool,
+    /// Select the mainline parent (1-based) when replaying a merge commit,
+    /// like `git cherry-pick -m`. Required for a merge (mkit refuses to
+    /// guess which side is the mainline) and rejected for a non-merge.
+    #[arg(short = 'm', long = "mainline", value_name = "PARENT-NUMBER", conflicts_with_all = ["cont", "abort"])]
+    mainline: Option<usize>,
     /// Commit to replay: a ref, full/short hash, or `HEAD~n` revspec.
     commit: Option<String>,
 }
@@ -70,14 +80,21 @@ pub fn run(args: &[String]) -> u8 {
     } else if opts.cont {
         cont(&cwd, &mkit_dir, &store)
     } else if let Some(hex) = opts.commit.as_deref() {
-        start(&cwd, &mkit_dir, &store, hex)
+        start(&cwd, &mkit_dir, &store, hex, opts.no_commit, opts.mainline)
     } else {
         super::usage_error("usage: mkit cherry-pick <commit> | --continue | --abort")
     }
 }
 
 #[allow(clippy::too_many_lines)]
-fn start(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore, hex: &str) -> u8 {
+fn start(
+    cwd: &std::path::Path,
+    mkit_dir: &std::path::Path,
+    store: &ObjectStore,
+    hex: &str,
+    no_commit: bool,
+    mainline: Option<usize>,
+) -> u8 {
     if let Some(op) = in_progress_op_name(mkit_dir) {
         return emit_err(
             &format!("a {op} is already in progress (use --continue or --abort)"),
@@ -100,12 +117,37 @@ fn start(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore,
         Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::GENERAL_ERROR),
     };
 
-    let result = match cherry_pick(store, target, ours_tree) {
+    let result = match cherry_pick(store, target, ours_tree, mainline) {
         Ok(r) => r,
+        // Mainline-selection misuse is a usage error (bad invocation),
+        // distinct from a runtime store/merge failure.
+        Err(
+            e @ (CherryPickError::MergeNeedsMainline
+            | CherryPickError::MainlineForNonMerge
+            | CherryPickError::BadMainline { .. }),
+        ) => return emit_err(&format!("cherry-pick: {e}"), exit::USAGE),
         Err(e) => return emit_err(&format!("cherry-pick: {e}"), exit::GENERAL_ERROR),
     };
 
     if result.has_conflicts() {
+        // `-n` must never leave a committable conflict. mkit cannot represent
+        // a "staged but unresolved" conflict the way git's index can, and
+        // recording markers with no sequencer state would let a later
+        // `mkit commit` (which only guards merges) commit unresolved `<<<<<<<`
+        // markers. So we refuse the conflicting `-n` pick BEFORE touching the
+        // worktree — nothing is written. Re-run without `-n` (resumable via
+        // `--continue`/`--abort`) or resolve manually.
+        if no_commit {
+            return emit_err(
+                &format!(
+                    "cherry-pick -n of {} conflicts; mkit cannot stage an unresolved \
+                     conflict without committing — re-run without -n, then resolve and \
+                     `mkit cherry-pick --continue`",
+                    format::short_hash(&target, 8)
+                ),
+                exit::GENERAL_ERROR,
+            );
+        }
         if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
@@ -126,6 +168,11 @@ fn start(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore,
         if let Err(e) = conflict_state::write_cherry_pick_state(mkit_dir, &state, &records) {
             return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
         }
+        // Record the result tree so `--abort` treats the operation's clean
+        // hunks (not just conflict paths) as discardable.
+        if let Err(e) = conflict_state::write_result_tree(mkit_dir, &result.tree_hash) {
+            return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
+        }
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
@@ -137,6 +184,30 @@ fn start(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore,
 
     if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
+    }
+
+    // `--no-commit`: stage the picked tree into the index + worktree but do
+    // not commit or move HEAD. The next `mkit commit` records it as an
+    // ordinary single-parent commit on the current branch.
+    if no_commit {
+        if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
+        // Restoring from a tree drops staged DELETIONS; re-stage them as
+        // tombstones so a deletion-bearing pick (or an all-deletions pick)
+        // stays staged and `mkit commit` records it.
+        if let Err(e) =
+            super::stage_removed_tombstones(cwd, store, Some(ours_tree), result.tree_hash)
+        {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "staged cherry-pick of {} (no commit; run `mkit commit` when ready)",
+            format::short_hash(&target, 8),
+        );
+        return exit::OK;
     }
 
     let commit_hash = match create_commit(
@@ -223,7 +294,11 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
         Ok(h) => h,
         Err(code) => return code,
     };
-    if let Err(e) = super::restore_worktree_and_index(cwd, store, tree_hash) {
+    // Sync the index to the committed tree WITHOUT rewriting the worktree:
+    // the tree was built from the index, so the worktree already holds the
+    // resolved content; restoring it would clobber any unstaged edits the
+    // user made (e.g. on a cleanly-merged path) before `--continue`.
+    if let Err(e) = super::sync_index_to_tree(cwd, store, tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
     if let Err(e) = advance_head(mkit_dir, &commit_hash) {
@@ -280,14 +355,19 @@ fn restore_to(
     records: &[mkit_core::ops::conflict_state::ConflictRecord],
 ) -> Result<(), u8> {
     let target_tree = load_tree_hash(store, target)?;
+    // The operation's result tree lets the guards treat its clean hunks (not
+    // just conflict paths) as discardable.
+    let op_result = conflict_state::read_result_tree(mkit_dir).ok().flatten();
     // Pre-flight: refuse before any mutation when the abort would clobber
-    // genuine user work on a non-conflict path (the reset below discards
+    // genuine user work on a non-discardable path (the reset below discards
     // the user's in-progress conflict resolution, so it must not run if
     // the abort is going to fail).
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree) {
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, records, target_tree) {
+    if let Err(e) =
+        super::conflict::reset_conflict_paths(cwd, store, records, target_tree, op_result)
+    {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     if let Err(e) = super::ensure_restore_safe(cwd, store, target_tree) {
