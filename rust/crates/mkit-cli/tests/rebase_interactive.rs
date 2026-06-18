@@ -479,3 +479,40 @@ fn rebase_rejects_unknown_revspec() {
     assert_eq!(log_subjects(&repo), before);
     assert!(!repo.path.join(".mkit/rebase-apply").exists());
 }
+
+#[test]
+fn rebase_i_skip_rejects_newly_leading_squash() {
+    // feature: base -> A(a.txt) -> B(b.txt) -> C(c.txt). `main` diverges on
+    // a.txt so replaying A conflicts. Todo: pick A / squash B / pick C. Skip
+    // the conflicted A → `squash B` becomes the first APPLIED step, which must
+    // be rejected (a runtime leading-fold guard), not silently folded into
+    // onto's parent.
+    let repo = setup();
+    ok(&repo, &["checkout", "main"]);
+    commit(&repo, "a.txt", "main-A", "main diverge"); // conflicts with feature's A
+    ok(&repo, &["checkout", "feature"]);
+    let (_d, script) = editor_script();
+
+    let out = rebase_i(&repo, "main", &script, "squash_b", "BB");
+    assert!(
+        !out.status.success(),
+        "rebase should pause on A's conflict, not finish: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // Skip the conflicted A; the now-leading `squash B` must be rejected.
+    let skip = run(&repo, &["rebase", "--skip"]);
+    assert!(
+        !skip.status.success(),
+        "skip must reject a newly-leading squash, not fold B into onto"
+    );
+    assert!(
+        String::from_utf8_lossy(&skip.stderr).contains("cannot 'squash' as the first commit"),
+        "stderr: {}",
+        String::from_utf8_lossy(&skip.stderr)
+    );
+
+    // The rebase is still in progress and can be aborted cleanly.
+    assert!(run(&repo, &["rebase", "--abort"]).status.success());
+    assert_eq!(log_subjects(&repo), vec!["C", "B", "A", "base"]);
+}

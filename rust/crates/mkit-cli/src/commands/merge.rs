@@ -49,6 +49,16 @@ struct MergeOpts {
     /// Abort the in-progress merge and restore the original HEAD.
     #[arg(long, conflicts_with_all = ["cont", "branch"])]
     abort: bool,
+    /// Perform the merge but stop before creating the merge commit (like
+    /// `git merge --no-commit`): stage the merged tree and record
+    /// `MERGE_HEAD`. Finish with `mkit commit` (a two-parent merge commit)
+    /// or `mkit merge --continue`. Fast-forward updates create no commit,
+    /// so `--no-commit` does not affect them.
+    #[arg(long = "no-commit", conflicts_with_all = ["cont", "abort"])]
+    no_commit: bool,
+    /// Override the merge commit message (default `Merge branch '<name>'`).
+    #[arg(short = 'm', long = "message", conflicts_with_all = ["cont", "abort"])]
+    message: Option<String>,
     /// Branch to merge into HEAD.
     branch: Option<String>,
 }
@@ -78,7 +88,14 @@ pub fn run(args: &[String]) -> u8 {
     } else if opts.cont {
         cont(&cwd, &mkit_dir, &store)
     } else if let Some(branch) = opts.branch.as_deref() {
-        start(&cwd, &mkit_dir, &store, branch)
+        start(
+            &cwd,
+            &mkit_dir,
+            &store,
+            branch,
+            opts.no_commit,
+            opts.message.as_deref(),
+        )
     } else {
         super::usage_error("usage: mkit merge <branch> | --continue | --abort")
     }
@@ -90,6 +107,8 @@ fn start(
     mkit_dir: &std::path::Path,
     store: &ObjectStore,
     branch: &str,
+    no_commit: bool,
+    message: Option<&str>,
 ) -> u8 {
     if let Some(op) = in_progress_op_name(mkit_dir) {
         return emit_err(
@@ -166,12 +185,15 @@ fn start(
         Err(e) => return emit_err(&format!("merge: {e}"), exit::GENERAL_ERROR),
     };
 
-    // git's convention distinguishes the source kind in the message.
-    let msg = if merge_source_is_remote_tracking(mkit_dir, branch) {
-        let short = branch.strip_prefix("refs/remotes/").unwrap_or(branch);
-        format!("Merge remote-tracking branch '{short}'")
-    } else {
-        format!("Merge branch '{branch}'")
+    // git's convention distinguishes the source kind in the message; `-m`
+    // overrides it outright.
+    let msg = match message {
+        Some(m) => m.to_string(),
+        None if merge_source_is_remote_tracking(mkit_dir, branch) => {
+            let short = branch.strip_prefix("refs/remotes/").unwrap_or(branch);
+            format!("Merge remote-tracking branch '{short}'")
+        }
+        None => format!("Merge branch '{branch}'"),
     };
 
     if result.has_conflicts() {
@@ -196,6 +218,11 @@ fn start(
         if let Err(e) = conflict_state::write_merge_state(mkit_dir, &state, &records) {
             return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
         }
+        // Record the merge result tree so `--abort` treats the operation's
+        // clean hunks (not just conflict paths) as discardable.
+        if let Err(e) = conflict_state::write_result_tree(mkit_dir, &result.tree_hash) {
+            return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
+        }
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
@@ -207,6 +234,46 @@ fn start(
 
     if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
+    }
+
+    // `--no-commit`: stage the merged tree and record `MERGE_HEAD` with no
+    // conflicts, then stop. The next `mkit commit` records a two-parent
+    // merge commit (it consumes `MERGE_HEAD`); `mkit merge --continue`
+    // does the same.
+    if no_commit {
+        if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
+        // A tree can't encode deletions, so staging the result tree drops
+        // them. Re-stage Removed tombstones (like cherry-pick/revert -n) so an
+        // all-deletions merge leaves a non-empty index: otherwise `commit`'s
+        // index reads as empty and `merge --continue`/`merge --abort` (which
+        // seed an empty index from HEAD) would build/judge against the OLD
+        // tree, dropping the deletions.
+        if let Err(e) = super::stage_removed_tombstones(cwd, store, Some(ours_tree), result.tree_hash)
+        {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
+        let state = MergeState {
+            merge_head: theirs,
+            orig_head: ours,
+            message: msg.into_bytes(),
+        };
+        if let Err(e) = conflict_state::write_merge_state(mkit_dir, &state, &[]) {
+            return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
+        }
+        // Record the merge result tree so `--abort` can tell the staged merge
+        // (discardable) from genuine user work staged on top of it.
+        if let Err(e) = conflict_state::write_result_tree(mkit_dir, &result.tree_hash) {
+            return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
+        }
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "automatic merge went well; stopped before committing as requested\n\
+             commit the result with `mkit commit` (or `mkit merge --continue`)"
+        );
+        return exit::OK;
     }
 
     // Clean merge — build a merge commit with two parents.
@@ -282,7 +349,12 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
         Ok(h) => h,
         Err(code) => return code,
     };
-    if let Err(e) = super::restore_worktree_and_index(cwd, store, tree_hash) {
+    // Sync the index to the committed tree WITHOUT rewriting the worktree.
+    // The tree was built from the index, so the worktree already holds the
+    // resolved content; restoring it would clobber any unstaged edits the
+    // user made after staging — `git commit` (and `mkit commit`) leave the
+    // worktree untouched here.
+    if let Err(e) = super::sync_index_to_tree(cwd, store, tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
     if let Err(e) = advance_head(mkit_dir, &commit_hash) {
@@ -335,17 +407,24 @@ fn restore_to(
     records: &[mkit_core::ops::conflict_state::ConflictRecord],
 ) -> Result<(), u8> {
     let target_tree = load_tree_hash(store, target)?;
-    // Pre-flight: refuse the abort *before* any mutation when restoring
-    // would clobber genuine user work on a non-conflict path. The reset
-    // below is destructive (it discards the user's in-progress conflict
-    // resolution), so it must not run if the abort is going to fail.
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree) {
+    // The operation's result tree — written for BOTH conflict merges and a
+    // clean `merge --no-commit` — lets the guards treat the merge's own,
+    // user-untouched output as discardable while protecting genuine work the
+    // user staged or edited on top of it (a conflict resolution, an unrelated
+    // `mkit add`, or an edit to a cleanly-merged file).
+    let op_result = conflict_state::read_result_tree(mkit_dir).ok().flatten();
+    // Pre-flight: refuse *before* any mutation when restoring would clobber
+    // genuine user work on a non-discardable path (the reset below discards
+    // the operation material).
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    // Discard the conflict material we materialised on the recorded
-    // paths so the guarded restore below does not see them as user
-    // "local changes" (it still protects unrelated dirty/untracked work).
-    if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, records, target_tree) {
+    // Discard the operation material on the discardable paths so the guarded
+    // restore doesn't see it as user "local changes" (it still protects
+    // unrelated dirty/untracked work).
+    if let Err(e) =
+        super::conflict::reset_conflict_paths(cwd, store, records, target_tree, op_result)
+    {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     if let Err(e) = super::ensure_restore_safe(cwd, store, target_tree) {

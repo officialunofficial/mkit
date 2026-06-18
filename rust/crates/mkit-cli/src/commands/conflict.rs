@@ -309,6 +309,18 @@ fn materialize_conflict_side(store: &ObjectStore, abs: &Path, c: &Conflict) -> R
     let Some((h, mode)) = pick else {
         return Ok(());
     };
+    // File-vs-directory conflict: the merged result tree already materialized
+    // the directory side at `abs` (restore_worktree_and_index ran first), so
+    // the path is a real directory. We cannot write the surviving blob over a
+    // directory — `fs::remove_file` no-ops on it and the write fails, aborting
+    // materialization AFTER the worktree was mutated but BEFORE MERGE_HEAD is
+    // written, leaving no `--abort` path. Keep the directory (ours-wins, like
+    // `stage_ours` does for a tree side) and record the conflict for manual
+    // resolution. Use symlink_metadata so a symlink-to-a-directory still gets
+    // a normal blob write below.
+    if std::fs::symlink_metadata(abs).is_ok_and(|m| m.is_dir()) {
+        return Ok(());
+    }
     match mode {
         Some(EntryMode::Symlink) => write_symlink_to_worktree(store, abs, h),
         Some(EntryMode::Executable) => write_blob_to_worktree(store, abs, h, true),
@@ -414,16 +426,15 @@ fn write_bytes(abs: &Path, data: &[u8]) -> Result<(), String> {
 /// # Errors
 /// Returns a message describing the blocking path when the abort would
 /// be unsafe, or propagates store / filesystem failures.
+#[allow(clippy::too_many_lines)] // a sequence of independent pre-mutation safety checks
 pub fn ensure_abort_safe(
     root: &Path,
     store: &ObjectStore,
     records: &[ConflictRecord],
     target_tree: Hash,
+    op_result_tree: Option<Hash>,
 ) -> Result<(), String> {
     use std::collections::HashSet;
-
-    let conflict_paths: HashSet<&str> = records.iter().map(|r| r.path.as_str()).collect();
-    let is_conflict = |p: &str| conflict_paths.contains(p);
 
     let current_tree = super::current_head_tree(root, store)?;
     let idx = super::read_or_seed_index_from_head(root, store)?;
@@ -431,29 +442,65 @@ pub fn ensure_abort_safe(
     let snapshot = mkit_core::store::EphemeralSink::new(store);
     let index_tree = mkit_core::worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
         .map_err(|e| format!("check index state: {e}"))?;
+    // Pass the seeded index as the tracked set so a tracked file matching an
+    // ignore rule isn't dropped from the snapshot and misread as a deletion.
+    let worktree_tree = mkit_core::worktree::build_tree_filtered(&snapshot, root, Some(&idx))
+        .map_err(|e| format!("check worktree: {e}"))?;
 
-    // Staged changes on a non-conflict path.
+    // Discardable = the operation's OWN work that the user has not touched:
+    //   * recorded conflict paths (abort always throws away resolutions);
+    //   * operation-authored clean hunks whose current index AND worktree
+    //     content still match the operation result.
+    // A clean path the user has since edited (staged or in the worktree) is
+    // THEIR work — keep it non-discardable so the checks below refuse to
+    // destroy it. Without a result tree (legacy state) we fall back to the
+    // conflict records alone.
+    let conflict_paths: HashSet<String> = records.iter().map(|r| r.path.clone()).collect();
+    let mut discardable = conflict_paths.clone();
+    if let Some(result_tree) = op_result_tree {
+        let authored = mkit_core::ops::diff::diff_trees(&snapshot, current_tree, Some(result_tree))
+            .map_err(|e| format!("check operation changes: {e}"))?;
+        // Paths whose current index or worktree diverges from the operation
+        // result — i.e. the user changed them after the operation paused.
+        let mut modified: HashSet<String> = HashSet::new();
+        for e in mkit_core::ops::diff::diff_trees(&snapshot, Some(result_tree), Some(index_tree))
+            .map_err(|e| format!("check operation changes: {e}"))?
+            .entries
+        {
+            modified.insert(e.path);
+        }
+        for e in mkit_core::ops::diff::diff_trees(&snapshot, Some(result_tree), Some(worktree_tree))
+            .map_err(|e| format!("check operation changes: {e}"))?
+            .entries
+        {
+            modified.insert(e.path);
+        }
+        for e in authored.entries {
+            if conflict_paths.contains(&e.path) || !modified.contains(&e.path) {
+                discardable.insert(e.path);
+            }
+        }
+    }
+    let is_discardable = |p: &str| discardable.contains(p);
+
+    // Staged changes on a non-discardable path.
     let staged = mkit_core::ops::diff::diff_trees(&snapshot, current_tree, Some(index_tree))
         .map_err(|e| format!("check staged changes: {e}"))?;
-    if let Some(entry) = staged.entries.iter().find(|e| !is_conflict(&e.path)) {
+    if let Some(entry) = staged.entries.iter().find(|e| !is_discardable(&e.path)) {
         return Err(format!(
             "abort would overwrite staged changes; commit, stash, or reset '{}' first",
             entry.path
         ));
     }
 
-    // Unstaged worktree edits on a non-conflict path. Pass the seeded index
-    // as the tracked set so a tracked file matching an ignore rule isn't
-    // dropped from the snapshot and misread as a deletion.
-    let worktree_tree = mkit_core::worktree::build_tree_filtered(&snapshot, root, Some(&idx))
-        .map_err(|e| format!("check worktree: {e}"))?;
+    // Unstaged worktree edits on a non-discardable path.
     let unstaged =
         mkit_core::ops::diff::diff_trees(&snapshot, Some(index_tree), Some(worktree_tree))
             .map_err(|e| format!("check worktree: {e}"))?;
     if let Some(entry) = unstaged
         .entries
         .iter()
-        .find(|e| e.kind != mkit_core::ops::diff::DiffKind::Added && !is_conflict(&e.path))
+        .find(|e| e.kind != mkit_core::ops::diff::DiffKind::Added && !is_discardable(&e.path))
     {
         return Err(format!(
             "abort would overwrite local changes; commit, stash, or reset '{}' first",
@@ -469,17 +516,62 @@ pub fn ensure_abort_safe(
             .entries
             .into_iter()
             .filter(|e| e.kind != mkit_core::ops::diff::DiffKind::Removed)
-            .filter(|e| !is_conflict(&e.path))
+            .filter(|e| !is_discardable(&e.path))
             .map(|e| e.path)
             .collect();
     if !target_writes.is_empty() {
         for entry in &unstaged.entries {
             if entry.kind == mkit_core::ops::diff::DiffKind::Added
-                && !is_conflict(&entry.path)
+                && !is_discardable(&entry.path)
                 && target_writes.iter().any(|t| t == &entry.path)
             {
                 return Err(format!(
                     "abort would overwrite untracked path '{}'; move or remove it first",
+                    entry.path
+                ));
+            }
+        }
+    }
+
+    // Restoring `target_tree` writes a file at every path it adds/changes
+    // relative to the current index — INCLUDING discardable paths (e.g. a
+    // file the operation cleanly deleted). Refuse if any such path is now a
+    // DIRECTORY in the worktree (e.g. the user created `d/keep` after the
+    // operation deleted file `d`): the restore would fail part-way and
+    // removing the directory would destroy the user's untracked content.
+    // Checked here, before any mutation, so abort stays all-or-nothing.
+    for entry in &mkit_core::ops::diff::diff_trees(&snapshot, Some(index_tree), Some(target_tree))
+        .map_err(|e| format!("check restore target: {e}"))?
+        .entries
+    {
+        if entry.kind == mkit_core::ops::diff::DiffKind::Removed {
+            continue;
+        }
+        // The restore writes a file at `entry.path`. Refuse if the path itself
+        // is now a DIRECTORY (e.g. the user created `d/keep` after the
+        // operation deleted file `d`)...
+        if std::fs::symlink_metadata(root.join(&entry.path)).is_ok_and(|m| m.is_dir()) {
+            return Err(format!(
+                "abort would replace directory '{}' with a file; move or remove it first",
+                entry.path
+            ));
+        }
+        // ...or if any ANCESTOR component is now a non-directory file (e.g.
+        // target has `p/file`; the user replaced the deleted directory `p`
+        // with a file `p`). `create_dir_all` would fail mid-restore, breaking
+        // abort atomicity. Checked here, before any mutation.
+        let mut prefix = String::new();
+        for comp in entry.path.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(comp);
+            if prefix == entry.path {
+                break; // the leaf is handled by the is_dir check above
+            }
+            if std::fs::symlink_metadata(root.join(&prefix)).is_ok_and(|m| !m.is_dir()) {
+                return Err(format!(
+                    "abort would restore '{}' but '{prefix}' is a file; move or remove it first",
                     entry.path
                 ));
             }
@@ -501,13 +593,15 @@ pub fn ensure_abort_safe(
 ///
 /// # Errors
 /// Propagates store / filesystem failures.
+#[allow(clippy::too_many_lines)] // a pre-flight pass + the mutation pass, kept together
 pub fn reset_conflict_paths(
     root: &Path,
     store: &ObjectStore,
     records: &[ConflictRecord],
     target_tree: Hash,
+    op_result_tree: Option<Hash>,
 ) -> Result<(), String> {
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
 
     // Flatten the target tree into path → (mode, hash).
     let target_idx =
@@ -518,11 +612,77 @@ pub fn reset_conflict_paths(
         .map(|e| (e.path.as_str(), e))
         .collect();
 
+    // Reset every path the operation authored: the recorded conflict paths
+    // PLUS the operation's clean hunks (paths it changed vs the pre-op HEAD).
+    // The reset is purely target-content driven, so it generalizes from
+    // conflict records to any operation-authored path.
+    let mut paths: BTreeSet<String> = records.iter().map(|r| r.path.clone()).collect();
+    if let Some(result_tree) = op_result_tree {
+        let snapshot = mkit_core::store::EphemeralSink::new(store);
+        let authored =
+            mkit_core::ops::diff::diff_trees(&snapshot, Some(target_tree), Some(result_tree))
+                .map_err(|e| format!("check operation changes: {e}"))?;
+        for e in authored.entries {
+            paths.insert(e.path);
+        }
+    }
+
+    // Pre-flight (no mutation): reject the abort up front for any path whose
+    // reset would fail mid-loop, so abort stays all-or-nothing regardless of
+    // which target the caller resets toward. (Rebase vets `ensure_abort_safe`
+    // against `orig_tree` but resets `reset_conflict_paths` toward
+    // `head_tree`; a path present in `head_tree` but outside `orig_tree`'s
+    // change set would otherwise escape every pre-check and only fail in the
+    // mutation loop, after earlier-sorted paths were already reset.) This
+    // covers every way the loop below can error: writing a file where a
+    // directory now sits, writing under an ancestor that is now a file, and
+    // removing an op-added path the user replaced with a non-empty directory.
+    for path in &paths {
+        let abs = root.join(path);
+        if target_map.contains_key(path.as_str()) {
+            // The loop will WRITE target content here.
+            if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
+                return Err(format!(
+                    "abort would replace directory '{path}' with a file; move or remove it first"
+                ));
+            }
+            let mut prefix = String::new();
+            for comp in path.split('/') {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(comp);
+                if prefix == *path {
+                    break; // the leaf is handled by the is_dir check above
+                }
+                if fs::symlink_metadata(root.join(&prefix)).is_ok_and(|m| !m.is_dir()) {
+                    return Err(format!(
+                        "abort would restore '{path}' but '{prefix}' is a file; \
+                         move or remove it first"
+                    ));
+                }
+            }
+            continue;
+        }
+        let dir_prefix = format!("{path}/");
+        if target_map.keys().any(|k| k.starts_with(dir_prefix.as_str())) {
+            continue; // a pre-op directory left in place
+        }
+        // The loop will REMOVE this op-added path; refuse a non-empty dir.
+        if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir())
+            && fs::read_dir(&abs).is_ok_and(|mut it| it.next().is_some())
+        {
+            return Err(format!(
+                "abort would discard the untracked directory '{path}'; move or remove it first"
+            ));
+        }
+    }
+
     let mut idx = super::read_or_seed_index_from_head(root, store)?;
 
-    for r in records {
-        let abs = root.join(&r.path);
-        if let Some(target_entry) = target_map.get(r.path.as_str()) {
+    for path in &paths {
+        let abs = root.join(path);
+        if let Some(target_entry) = target_map.get(path.as_str()) {
             // Restore the path's pre-op content + index entry, honouring
             // the recorded symlink/exec mode (#214).
             match target_entry.status {
@@ -535,20 +695,45 @@ pub fn reset_conflict_paths(
                 _ => write_blob_to_worktree(store, &abs, target_entry.object_hash, false)?,
             }
             let entry = (*target_entry).clone();
-            if let Some(pos) = idx.find_entry(&r.path) {
+            if let Some(pos) = idx.find_entry(path) {
                 idx.entries[pos] = entry;
             } else {
                 idx.entries.push(entry);
             }
         } else {
-            // Path did not exist pre-op: remove the worktree file and
-            // drop it from the index.
-            if let Err(e) = fs::remove_file(&abs)
+            // `path` is absent from the target tree as a FILE. But it may be a
+            // DIRECTORY there (a file-vs-directory conflict records the path
+            // `p` while the target carries `p/<children>`): in that case the
+            // pre-op directory already sits in the worktree — leave it and let
+            // the final restore align its contents; only drop any stale index
+            // entry literally at `p`.
+            let dir_prefix = format!("{path}/");
+            if target_map.keys().any(|k| k.starts_with(dir_prefix.as_str())) {
+                if let Some(pos) = idx.find_entry(path) {
+                    idx.entries.remove(pos);
+                }
+                continue;
+            }
+            // Otherwise the path did not exist pre-op (the operation added it):
+            // remove it and drop it from the index. If the user has since
+            // replaced it with a DIRECTORY, remove it only when EMPTY
+            // (`remove_dir`) — a non-empty directory holds untracked user
+            // content that abort must NOT silently destroy, so we fail closed.
+            if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
+                if let Err(e) = fs::remove_dir(&abs)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(format!(
+                        "abort would discard the untracked directory '{path}'; \
+                         move or remove it first"
+                    ));
+                }
+            } else if let Err(e) = fs::remove_file(&abs)
                 && e.kind() != std::io::ErrorKind::NotFound
             {
                 return Err(format!("remove {}: {e}", abs.display()));
             }
-            if let Some(pos) = idx.find_entry(&r.path) {
+            if let Some(pos) = idx.find_entry(path) {
                 idx.entries.remove(pos);
             }
         }
@@ -670,6 +855,13 @@ pub fn first_unresolved_marker(
 ) -> Result<Option<String>, String> {
     for r in records {
         let abs = root.join(&r.path);
+        // A file-vs-directory conflict kept the ours-DIRECTORY at the record
+        // path (the round-9 D/F pause). A directory holds no conflict markers,
+        // so skip it rather than letting `fs::read` fail "Is a directory" —
+        // which would make `--continue` permanently impossible for that pause.
+        if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
         let data = match fs::read(&abs) {
             Ok(d) => d,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,

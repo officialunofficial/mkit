@@ -13,10 +13,13 @@
 use std::io::Write;
 
 use clap::{Parser, ValueEnum};
+use mkit_core::hash::Hash;
 use mkit_core::object::Object;
+use mkit_core::ops::merge::is_ancestor;
 use mkit_core::refs::{self, Head};
 use mkit_core::store::ObjectStore;
 
+use super::revspec;
 use crate::clap_shim;
 use crate::exit;
 use crate::format;
@@ -57,11 +60,32 @@ struct BranchOpts {
     /// commit subject (like `git branch -v`).
     #[arg(short = 'v', long)]
     verbose: bool,
+    /// List branches (explicit selector, like `git branch --list`). Listing
+    /// is already the default when no create/delete/rename flag is given;
+    /// `--list` additionally enables positional `<pattern>` glob filtering.
+    #[arg(long)]
+    list: bool,
+    /// List only branches whose tip has `<commit>` as an ancestor (default
+    /// HEAD when omitted, like `git branch --contains`).
+    #[arg(long, value_name = "COMMIT", num_args = 0..=1, default_missing_value = "HEAD")]
+    contains: Option<String>,
+    /// List only branches whose tip does NOT contain `<commit>` (default HEAD).
+    #[arg(long = "no-contains", value_name = "COMMIT", num_args = 0..=1, default_missing_value = "HEAD")]
+    no_contains: Option<String>,
+    /// List only branches already merged into `<commit>` (default HEAD) —
+    /// the branch tip is an ancestor of it (like `git branch --merged`).
+    #[arg(long, value_name = "COMMIT", num_args = 0..=1, default_missing_value = "HEAD")]
+    merged: Option<String>,
+    /// List only branches NOT merged into `<commit>` (default HEAD).
+    #[arg(long = "no-merged", value_name = "COMMIT", num_args = 0..=1, default_missing_value = "HEAD")]
+    no_merged: Option<String>,
     /// Output format for the list form. JSONL with `--format=json`.
     #[arg(long, value_enum, default_value = "default")]
     format: BranchFormat,
-    /// Positional arguments: branch name(s). Meaning depends on the mode.
-    #[arg(num_args = 0..=2)]
+    /// Positional arguments. In create/delete/rename mode these are branch
+    /// names; in list mode (`--list` or an ancestry filter) they are shell
+    /// glob patterns that filter the listing (like `git branch --list`).
+    #[arg(num_args = 0..)]
     names: Vec<String>,
 }
 
@@ -83,20 +107,37 @@ pub fn run(args: &[String]) -> u8 {
         return super::usage_error("usage: mkit branch [-d|-D|-m] ...  (modes are exclusive)");
     }
 
-    if opts.rename {
-        return rename(&mkit_dir, &opts.names);
-    }
-    if opts.delete || opts.force_delete {
+    let specs = FilterSpecs {
+        contains: opts.contains.as_deref(),
+        no_contains: opts.no_contains.as_deref(),
+        merged: opts.merged.as_deref(),
+        no_merged: opts.no_merged.as_deref(),
+    };
+    let has_filter = opts.list || specs.any();
+
+    if opts.rename || opts.delete || opts.force_delete {
+        if has_filter {
+            return super::usage_error(
+                "usage: mkit branch [--list|--contains|--no-contains|--merged|--no-merged] only \
+                 filter the listing — they cannot combine with -d/-D/-m",
+            );
+        }
+        if opts.rename {
+            return rename(&mkit_dir, &opts.names);
+        }
         return delete(&mkit_dir, &opts.names, opts.force_delete);
     }
 
+    let json = matches!(opts.format, BranchFormat::Json);
+
+    // In list mode (`--list` or an ancestry filter present) the positionals
+    // are glob patterns that filter the listing, like `git branch --list
+    // <pattern>`. Otherwise the positional is a branch name to create.
+    if has_filter {
+        return list(&cwd, &mkit_dir, json, opts.verbose, &specs, &opts.names);
+    }
     match opts.names.as_slice() {
-        [] => list(
-            &cwd,
-            &mkit_dir,
-            matches!(opts.format, BranchFormat::Json),
-            opts.verbose,
-        ),
+        [] => list(&cwd, &mkit_dir, json, opts.verbose, &specs, &[]),
         [name] => create(&mkit_dir, name),
         _ => super::usage_error("usage: mkit branch <name>  (create takes one name)"),
     }
@@ -209,15 +250,280 @@ fn rename(mkit_dir: &std::path::Path, names: &[String]) -> u8 {
     exit::OK
 }
 
-fn list(cwd: &std::path::Path, mkit_dir: &std::path::Path, json: bool, verbose: bool) -> u8 {
+/// The raw `--contains`/`--no-contains`/`--merged`/`--no-merged` specs as
+/// typed, resolved to commits only when a listing actually runs.
+struct FilterSpecs<'a> {
+    contains: Option<&'a str>,
+    no_contains: Option<&'a str>,
+    merged: Option<&'a str>,
+    no_merged: Option<&'a str>,
+}
+
+impl FilterSpecs<'_> {
+    fn any(&self) -> bool {
+        self.contains.is_some()
+            || self.no_contains.is_some()
+            || self.merged.is_some()
+            || self.no_merged.is_some()
+    }
+}
+
+/// The same specs after resolution to (tag-peeled) commit ids.
+struct BranchFilter {
+    contains: Option<Hash>,
+    no_contains: Option<Hash>,
+    merged: Option<Hash>,
+    no_merged: Option<Hash>,
+}
+
+/// Resolve each present spec to a commit id, peeling annotated tags like
+/// git. Returns `Err(message)` if a spec does not resolve.
+fn resolve_filter(
+    store: &ObjectStore,
+    mkit_dir: &std::path::Path,
+    specs: &FilterSpecs<'_>,
+) -> Result<BranchFilter, String> {
+    let resolve = |spec: Option<&str>| -> Result<Option<Hash>, String> {
+        match spec {
+            None => Ok(None),
+            Some(s) => {
+                let h = revspec::resolve_revision(store, mkit_dir, s)
+                    .map_err(|e| format!("bad revision '{s}': {e}"))?;
+                let h = peel_tags(store, h);
+                // The ancestry filters compare COMMITS; a tree/blob id would
+                // otherwise be treated as a parentless leaf and silently
+                // mis-filter (e.g. `--no-contains <tree>` keeps every branch
+                // and exits 0). Require a commit, like log/merge/cherry-pick.
+                match store.read_object(&h) {
+                    Ok(mkit_core::object::Object::Commit(_)) => Ok(Some(h)),
+                    Ok(_) => Err(format!("not a commit: '{s}'")),
+                    Err(e) => Err(format!("read '{s}': {e}")),
+                }
+            }
+        }
+    };
+    Ok(BranchFilter {
+        contains: resolve(specs.contains)?,
+        no_contains: resolve(specs.no_contains)?,
+        merged: resolve(specs.merged)?,
+        no_merged: resolve(specs.no_merged)?,
+    })
+}
+
+/// Whether a branch tip satisfies every active filter (AND). `contains C`
+/// keeps tips with C as an ancestor; `merged M` keeps tips that are
+/// ancestors of M; the `no_*` forms are their complements.
+fn tip_passes(store: &ObjectStore, filter: &BranchFilter, tip: &Hash) -> Result<bool, String> {
+    let anc = |a: Hash, d: Hash| is_ancestor(store, a, d).map_err(|e| format!("ancestry: {e}"));
+    if let Some(c) = filter.contains
+        && !anc(c, *tip)?
+    {
+        return Ok(false);
+    }
+    if let Some(c) = filter.no_contains
+        && anc(c, *tip)?
+    {
+        return Ok(false);
+    }
+    if let Some(m) = filter.merged
+        && !anc(*tip, m)?
+    {
+        return Ok(false);
+    }
+    if let Some(m) = filter.no_merged
+        && anc(*tip, m)?
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Bounded annotated-tag peel (mirrors `merge.rs`/`diff.rs`).
+fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
+    for _ in 0..16 {
+        match store.read_object(&h) {
+            Ok(Object::Tag(t)) => h = t.target,
+            _ => break,
+        }
+    }
+    h
+}
+
+/// Shell-glob match for `branch --list <pattern>`, mirroring git's
+/// `wildmatch` without pathname mode: `*` matches any run (including `/`,
+/// so `feature/*` works), `?` matches one character, and `[...]` is a
+/// character class (`[a-z]`, leading `!`/`^` negates). A pattern with no
+/// metacharacters must match the whole name (so `main` matches only
+/// `main`). Backslash escapes the next metacharacter.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // Backtrack point for the most recent `*`.
+    let mut star: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        let advanced = if pi < p.len() {
+            match p[pi] {
+                '*' => {
+                    star = Some((pi, ti));
+                    pi += 1;
+                    true
+                }
+                '?' => {
+                    pi += 1;
+                    ti += 1;
+                    true
+                }
+                '[' => match match_class(&p, pi, t[ti]) {
+                    Some((matched, next_pi)) if matched => {
+                        pi = next_pi;
+                        ti += 1;
+                        true
+                    }
+                    Some(_) => false, // well-formed class, no match
+                    None => {
+                        // Malformed class — treat `[` literally.
+                        if t[ti] == '[' {
+                            pi += 1;
+                            ti += 1;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                },
+                '\\' if pi + 1 < p.len() => {
+                    if p[pi + 1] == t[ti] {
+                        pi += 2;
+                        ti += 1;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                c => {
+                    if c == t[ti] {
+                        pi += 1;
+                        ti += 1;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        } else {
+            false
+        };
+        if advanced {
+            continue;
+        }
+        // Mismatch: backtrack to the last `*`, extending what it consumed.
+        match star {
+            Some((sp, st)) => {
+                pi = sp + 1;
+                ti = st + 1;
+                star = Some((sp, st + 1));
+            }
+            None => return false,
+        }
+    }
+    // Trailing `*`s match the empty remainder.
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Match a bracket character class beginning at `p[start]` (the opening
+/// bracket) against `ch`. Returns `Some((matched, next_index))` for a
+/// well-formed class, where `next_index` is just past the closing bracket;
+/// returns `None` when there is no closing bracket (the caller then treats
+/// the opening bracket as a literal).
+fn match_class(p: &[char], start: usize, ch: char) -> Option<(bool, usize)> {
+    let mut i = start + 1;
+    let mut negate = false;
+    if i < p.len() && (p[i] == '!' || p[i] == '^') {
+        negate = true;
+        i += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    while i < p.len() {
+        if p[i] == ']' && !first {
+            return Some((matched ^ negate, i + 1));
+        }
+        if i + 2 < p.len() && p[i + 1] == '-' && p[i + 2] != ']' {
+            if ch >= p[i] && ch <= p[i + 2] {
+                matched = true;
+            }
+            i += 3;
+        } else {
+            if p[i] == ch {
+                matched = true;
+            }
+            i += 1;
+        }
+        first = false;
+    }
+    None
+}
+
+fn list(
+    cwd: &std::path::Path,
+    mkit_dir: &std::path::Path,
+    json: bool,
+    verbose: bool,
+    specs: &FilterSpecs<'_>,
+    patterns: &[String],
+) -> u8 {
     let current = match refs::read_head(mkit_dir) {
         Ok(Head::Branch(n)) => Some(n),
         _ => None,
     };
-    let refs = match refs::list_refs(mkit_dir) {
+    let mut refs = match refs::list_refs(mkit_dir) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
     };
+
+    // Shell-glob name patterns (like `git branch --list <pattern>`): keep a
+    // branch if it matches ANY pattern. Applied before the ancestry walk so
+    // we don't resolve commits for branches the patterns already excluded.
+    if !patterns.is_empty() {
+        refs.retain(|r| patterns.iter().any(|pat| glob_match(pat, &r.name)));
+    }
+
+    // A filter or `-v` both need the object store; open it once.
+    let store = if verbose || specs.any() {
+        match ObjectStore::open(cwd) {
+            Ok(s) => Some(s),
+            Err(e) => return emit_err(&format!("open store: {e}"), exit::GENERAL_ERROR),
+        }
+    } else {
+        None
+    };
+
+    // Apply listing filters (ancestry-based) before any rendering, so all
+    // three output modes share the same filtered set.
+    if specs.any() {
+        let store = store.as_ref().expect("store opened when filtering");
+        let filter = match resolve_filter(store, mkit_dir, specs) {
+            Ok(f) => f,
+            Err(e) => return emit_err(&e, exit::DATAERR),
+        };
+        let mut kept = Vec::with_capacity(refs.len());
+        for r in refs {
+            // A tip-less ref can't satisfy a commit filter, so skip it.
+            if let Some(h) = &r.hash {
+                match tip_passes(store, &filter, h) {
+                    Ok(true) => kept.push(r),
+                    Ok(false) => {}
+                    Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+                }
+            }
+        }
+        refs = kept;
+    }
+
     let mut stdout = std::io::stdout().lock();
     if json {
         for r in &refs {
@@ -293,4 +599,52 @@ fn emit_err(msg: &str, code: u8) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "error: {msg}");
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_match;
+
+    #[test]
+    fn literal_matches_whole_name() {
+        assert!(glob_match("main", "main"));
+        assert!(!glob_match("main", "maintenance"));
+        assert!(!glob_match("main", " main"));
+    }
+
+    #[test]
+    fn star_matches_any_run_including_slash() {
+        assert!(glob_match("feat*", "feature"));
+        assert!(glob_match("feature/*", "feature/login"));
+        // `*` spans `/`, matching git's non-pathname wildmatch.
+        assert!(glob_match("*", "any/branch/name"));
+        assert!(glob_match("*login", "feature/login"));
+        assert!(!glob_match("feature/*", "main"));
+    }
+
+    #[test]
+    fn question_matches_single_char() {
+        assert!(glob_match("v?", "v1"));
+        assert!(!glob_match("v?", "v10"));
+    }
+
+    #[test]
+    fn char_classes_and_negation() {
+        assert!(glob_match("v[0-9]", "v3"));
+        assert!(!glob_match("v[0-9]", "vx"));
+        assert!(glob_match("v[!0-9]", "vx"));
+        assert!(!glob_match("v[!0-9]", "v3"));
+    }
+
+    #[test]
+    fn backslash_escapes_metacharacter() {
+        assert!(glob_match(r"feat\*", "feat*"));
+        assert!(!glob_match(r"feat\*", "feature"));
+    }
+
+    #[test]
+    fn star_backtracks() {
+        assert!(glob_match("a*b*c", "axxbyyc"));
+        assert!(!glob_match("a*b*c", "axxbyy"));
+    }
 }

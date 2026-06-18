@@ -56,6 +56,11 @@ Hashi = "Hashi"
 # and scripts; typos parses them as standalone "mis".
 mis = "mis"
 
+# `anc` — shorthand for "ancestor" used in the branch ancestry-filter
+# closure (`anc(c, tip)`) and the mv tracked-ancestor guard. Default
+# dictionary wants anc → and.
+anc = "anc"
+
 # `fo\0o` is a null-byte test fixture in object.rs validate_name tests.
 fo = "fo"
 

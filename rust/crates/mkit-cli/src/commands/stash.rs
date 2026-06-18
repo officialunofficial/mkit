@@ -33,26 +33,46 @@ enum StashCmd {
     List,
     /// Apply and remove a stash entry (default: entry 0).
     Pop {
-        #[arg(default_value_t = 0)]
-        index: usize,
+        /// Also restore the staged state recorded by the stash (like
+        /// `git stash pop --index`), not just the worktree changes.
+        #[arg(long = "index")]
+        restore_index: bool,
+        #[arg(default_value = "0")]
+        index: String,
     },
     /// Apply a stash entry WITHOUT removing it (default: entry 0).
     Apply {
-        #[arg(default_value_t = 0)]
-        index: usize,
+        /// Also restore the staged state recorded by the stash (like
+        /// `git stash apply --index`), not just the worktree changes.
+        #[arg(long = "index")]
+        restore_index: bool,
+        #[arg(default_value = "0")]
+        index: String,
     },
     /// Remove ALL stash entries.
     Clear,
     /// Remove a stash entry without applying it (default: entry 0).
     Drop {
-        #[arg(default_value_t = 0)]
-        index: usize,
+        #[arg(default_value = "0")]
+        index: String,
     },
     /// Show the diff of a stash entry (default: entry 0).
     Show {
-        #[arg(default_value_t = 0)]
-        index: usize,
+        #[arg(default_value = "0")]
+        index: String,
     },
+}
+
+/// Parse a stash entry reference. Accepts a bare index (`2`) or git's
+/// `stash@{N}` revision syntax (`stash@{2}`) — the same spelling `stash
+/// list` prints, so users can copy it back verbatim.
+fn parse_stash_index(spec: &str) -> Result<usize, String> {
+    let core = spec
+        .strip_prefix("stash@{")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .unwrap_or(spec);
+    core.parse::<usize>()
+        .map_err(|_| format!("invalid stash reference '{spec}' (expected N or stash@{{N}})"))
 }
 
 #[must_use]
@@ -149,8 +169,20 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
         // leaves it in place. Both run the same #205/#176 destructive-
         // restore guard so they never clobber uncommitted edits on
         // unrelated paths.
-        StashCmd::Pop { index } => restore_entry(store, cwd, index, true),
-        StashCmd::Apply { index } => restore_entry(store, cwd, index, false),
+        StashCmd::Pop {
+            index,
+            restore_index,
+        } => match parse_stash_index(&index) {
+            Ok(i) => restore_entry(store, cwd, i, true, restore_index),
+            Err(e) => emit_err(&e, exit::USAGE),
+        },
+        StashCmd::Apply {
+            index,
+            restore_index,
+        } => match parse_stash_index(&index) {
+            Ok(i) => restore_entry(store, cwd, i, false, restore_index),
+            Err(e) => emit_err(&e, exit::USAGE),
+        },
         StashCmd::Clear => match stash::clear(cwd) {
             Ok(()) => {
                 let mut stderr = std::io::stderr().lock();
@@ -159,21 +191,27 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
             }
             Err(e) => emit_err(&format!("stash clear: {e}"), exit::GENERAL_ERROR),
         },
-        StashCmd::Drop { index } => match stash::drop(cwd, index) {
-            Ok(()) => {
-                let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "dropped stash@{{{index}}}");
-                exit::OK
-            }
-            Err(e) => emit_err(&format!("stash drop: {e}"), exit::GENERAL_ERROR),
+        StashCmd::Drop { index } => match parse_stash_index(&index) {
+            Ok(i) => match stash::drop(cwd, i) {
+                Ok(()) => {
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(stderr, "dropped stash@{{{i}}}");
+                    exit::OK
+                }
+                Err(e) => emit_err(&format!("stash drop: {e}"), exit::GENERAL_ERROR),
+            },
+            Err(e) => emit_err(&e, exit::USAGE),
         },
-        StashCmd::Show { index } => match stash::render_stash_show(store, cwd, index) {
-            Ok(output) => {
-                let mut stdout = std::io::stdout().lock();
-                let _ = stdout.write_all(output.as_bytes());
-                exit::OK
-            }
-            Err(e) => emit_err(&format!("stash show: {e}"), exit::GENERAL_ERROR),
+        StashCmd::Show { index } => match parse_stash_index(&index) {
+            Ok(i) => match stash::render_stash_show(store, cwd, i) {
+                Ok(output) => {
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = stdout.write_all(output.as_bytes());
+                    exit::OK
+                }
+                Err(e) => emit_err(&format!("stash show: {e}"), exit::GENERAL_ERROR),
+            },
+            Err(e) => emit_err(&e, exit::USAGE),
         },
     }
 }
@@ -182,7 +220,13 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
 /// between `pop` (removes the entry after a clean restore) and `apply`
 /// (leaves it on the stack). Both run the #205/#176 destructive-restore
 /// guard up-front so a refusal leaves the stash and worktree untouched.
-fn restore_entry(store: &ObjectStore, cwd: &std::path::Path, index: usize, drop_entry: bool) -> u8 {
+fn restore_entry(
+    store: &ObjectStore,
+    cwd: &std::path::Path,
+    index: usize,
+    drop_entry: bool,
+    restore_index: bool,
+) -> u8 {
     let verb = if drop_entry { "pop" } else { "apply" };
     let tree_hash = match stash::entry_tree_hash(store, cwd, index) {
         Ok(h) => h,
@@ -191,24 +235,93 @@ fn restore_entry(store: &ObjectStore, cwd: &std::path::Path, index: usize, drop_
     if let Err(e) = super::ensure_restore_safe(cwd, store, tree_hash) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }
-    let result = if drop_entry {
-        stash::pop(store, cwd, index)
-    } else {
-        stash::apply(store, cwd, index)
-    };
-    match result {
-        Ok(()) => {
-            let past = if drop_entry { "popped" } else { "applied" };
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(stderr, "{past} stash@{{{index}}}");
-            exit::OK
-        }
-        Err(e) => emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+
+    // Without `--index`, keep the original behavior: `pop` restores the
+    // worktree, records recovery, and drops the entry; `apply` restores and
+    // keeps it.
+    if !restore_index {
+        let result = if drop_entry {
+            stash::pop(store, cwd, index)
+        } else {
+            stash::apply(store, cwd, index)
+        };
+        return match result {
+            Ok(()) => {
+                let past = if drop_entry { "popped" } else { "applied" };
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "{past} stash@{{{index}}}");
+                exit::OK
+            }
+            Err(e) => emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+        };
     }
+
+    // `--index`: restore the worktree (keeping the entry), then re-stage the
+    // recorded index, and only THEN drop the entry (for `pop`). Sequencing
+    // the entry removal last means a failure in the index rewrite leaves the
+    // stash in place for a normal retry, rather than dropping it with the
+    // index half-restored.
+    let snapshot_index = match stash::entry_index(store, cwd, index) {
+        Ok(i) => i,
+        Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+    };
+    if let Err(e) = stash::apply(store, cwd, index) {
+        return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
+    }
+    if let Some(restored) = snapshot_index {
+        // Write the exact recorded index — preserving staged deletions, which
+        // a tree round-trip would drop.
+        if let Err(e) = mkit_core::index::write_index(cwd, &restored) {
+            return emit_err(
+                &format!("stash {verb}: restore index: {e}"),
+                exit::GENERAL_ERROR,
+            );
+        }
+    } else {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "note: this stash has no recorded index state; --index had no effect"
+        );
+    }
+    if drop_entry
+        && let Err(e) = stash::pop_finalize(cwd, index)
+    {
+        return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
+    }
+    let past = if drop_entry { "popped" } else { "applied" };
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "{past} stash@{{{index}}}");
+    exit::OK
 }
 
 fn emit_err(msg: &str, code: u8) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "error: {msg}");
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_stash_index;
+
+    #[test]
+    fn parses_bare_index() {
+        assert_eq!(parse_stash_index("0").unwrap(), 0);
+        assert_eq!(parse_stash_index("3").unwrap(), 3);
+    }
+
+    #[test]
+    fn parses_stash_at_brace_syntax() {
+        assert_eq!(parse_stash_index("stash@{0}").unwrap(), 0);
+        assert_eq!(parse_stash_index("stash@{12}").unwrap(), 12);
+    }
+
+    #[test]
+    fn rejects_malformed_references() {
+        assert!(parse_stash_index("stash@{}").is_err());
+        assert!(parse_stash_index("stash@{x}").is_err());
+        assert!(parse_stash_index("-1").is_err());
+        assert!(parse_stash_index("stash@{1").is_err());
+    }
 }

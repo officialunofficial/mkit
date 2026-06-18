@@ -84,6 +84,8 @@ complete -c mkit -n "__fish_seen_subcommand_from diff" \
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -l stat -d "Diffstat: counts + graph + summary"
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
+    -l merge-base -d "Diff against the merge base of the revisions"
+complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -s z -d "NUL-terminate name-only/name-status records, raw paths"
 complete -c mkit -n "__fish_seen_subcommand_from cat-file" \
     -s t -d "Print object type"
@@ -126,7 +128,7 @@ complete -c mkit -n "__fish_seen_subcommand_from symbolic-ref" \
 complete -c mkit -n "__fish_seen_subcommand_from update-ref" \
     -l delete -s d -d "Delete the ref"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
-    -l porcelain -d "Machine-readable XY output"
+    -l porcelain -d "Machine-readable XY output" -xa "v1 v2"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
     -s s -l short -d "Short format; alias for --porcelain=v1"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
@@ -136,7 +138,11 @@ complete -c mkit -n "__fish_seen_subcommand_from commit" \
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -l amend -d "Replace HEAD instead of adding a new commit"
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
-    -s m -d "Commit message" -r
+    -l message -s m -d "Commit message" -r
+complete -c mkit -n "__fish_seen_subcommand_from commit" \
+    -l file -s F -d "Read the commit message from a file (- for stdin)" -r
+complete -c mkit -n "__fish_seen_subcommand_from commit" \
+    -l author -d "Override the author identity" -r
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
@@ -154,9 +160,13 @@ complete -c mkit -n "__fish_seen_subcommand_from reflog" \
 complete -c mkit -n "__fish_seen_subcommand_from reflog" \
     -s n -d "Limit number of entries" -r
 complete -c mkit -n "__fish_seen_subcommand_from push" \
+    -l all -d "Mirror every local branch"
+complete -c mkit -n "__fish_seen_subcommand_from push" \
+    -l force -d "Overwrite the remote branch unconditionally (skip CAS)"
+complete -c mkit -n "__fish_seen_subcommand_from push" \
+    -l force-with-lease -d "Overwrite only if the remote hasn't moved"
+complete -c mkit -n "__fish_seen_subcommand_from push" \
     -l dry-run -d "Show what would be pushed"
-complete -c mkit -n "__fish_seen_subcommand_from clone" \
-    -l depth -d "Shallow clone depth" -r
 complete -c mkit -n "__fish_seen_subcommand_from clone" \
     -l sparse -d "Sparse checkout"
 complete -c mkit -n "__fish_seen_subcommand_from branch" \
@@ -169,6 +179,16 @@ complete -c mkit -n "__fish_seen_subcommand_from branch" \
     -s D -d "Force-delete branch" -r
 complete -c mkit -n "__fish_seen_subcommand_from branch" \
     -s m -d "Rename branch" -r
+complete -c mkit -n "__fish_seen_subcommand_from branch" \
+    -l list -d "List branches (explicit selector)"
+complete -c mkit -n "__fish_seen_subcommand_from branch" \
+    -l contains -d "Only branches whose tip contains COMMIT" -r
+complete -c mkit -n "__fish_seen_subcommand_from branch" \
+    -l no-contains -d "Only branches whose tip does NOT contain COMMIT" -r
+complete -c mkit -n "__fish_seen_subcommand_from branch" \
+    -l merged -d "Only branches merged into COMMIT (default HEAD)" -r
+complete -c mkit -n "__fish_seen_subcommand_from branch" \
+    -l no-merged -d "Only branches NOT merged into COMMIT (default HEAD)" -r
 complete -c mkit -n "__fish_seen_subcommand_from tag" \
     -l annotate -s a -d "Create an annotated tag object"
 complete -c mkit -n "__fish_seen_subcommand_from tag" \
@@ -191,6 +211,32 @@ complete -c mkit -n "__fish_seen_subcommand_from revert" \
     -l continue -d "Continue an in-progress revert"
 complete -c mkit -n "__fish_seen_subcommand_from revert" \
     -l abort -d "Abort an in-progress revert"
+complete -c mkit -n "__fish_seen_subcommand_from revert" \
+    -l no-commit -s n -d "Stage the reverted tree without creating a commit"
+complete -c mkit -n "__fish_seen_subcommand_from merge" \
+    -l continue -d "Continue an in-progress merge"
+complete -c mkit -n "__fish_seen_subcommand_from merge" \
+    -l abort -d "Abort the in-progress merge"
+complete -c mkit -n "__fish_seen_subcommand_from merge" \
+    -l no-commit -d "Merge but stop before creating the merge commit"
+complete -c mkit -n "__fish_seen_subcommand_from merge" \
+    -l message -s m -d "Override the merge commit message" -r
+complete -c mkit -n "__fish_seen_subcommand_from cherry-pick" \
+    -l continue -d "Continue an in-progress cherry-pick"
+complete -c mkit -n "__fish_seen_subcommand_from cherry-pick" \
+    -l abort -d "Abort the in-progress cherry-pick"
+complete -c mkit -n "__fish_seen_subcommand_from cherry-pick" \
+    -l no-commit -s n -d "Apply the change without creating a commit"
+complete -c mkit -n "__fish_seen_subcommand_from cherry-pick" \
+    -l mainline -s m -d "Select the mainline parent (1-based) of a merge commit" -r
+complete -c mkit -n "__fish_seen_subcommand_from show" \
+    -l stat -d "Show a diffstat instead of the full patch"
+complete -c mkit -n "__fish_seen_subcommand_from keygen" \
+    -l algorithm -d "Algorithm: ed25519 (default), secp256k1, p256" -xa "ed25519 secp256k1 p256"
+complete -c mkit -n "__fish_seen_subcommand_from keygen" \
+    -l force -d "Overwrite an existing key file"
+complete -c mkit -n "__fish_seen_subcommand_from keygen" \
+    -l print-pubkey -d "Emit the canonical keyid on stdout"
 
 # Subcommands of subcommands.
 complete -c mkit -n "__fish_seen_subcommand_from bisect; \
@@ -221,6 +267,8 @@ complete -c mkit -n "__fish_seen_subcommand_from attest" \
     -l predicate-file -d "Predicate file path" -r
 complete -c mkit -n "__fish_seen_subcommand_from attest" \
     -l additional-signer -d "Additional signer spec" -r
+complete -c mkit -n "__fish_seen_subcommand_from attest" \
+    -l external-signer-arg -d "Arg for the external signer (repeatable; replaces config)" -r
 complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
     -l commit -d "Commit hash" -r
 complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
