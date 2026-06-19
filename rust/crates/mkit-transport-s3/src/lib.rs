@@ -267,7 +267,7 @@ impl S3Transport {
     /// Build the canonical `ListObjectsV2` query string for the next page
     /// of a truncated listing, carrying the `continuation-token` returned
     /// by the previous page. Same encoding/sorting rules as
-    /// [`build_list_query`].
+    /// [`Self::build_list_query`].
     #[must_use]
     pub fn build_list_query_continued(prefix: &str, continuation_token: &str) -> String {
         sigv4::canonical_query_string(&[
