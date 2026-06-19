@@ -45,11 +45,11 @@ export default function HomePage() {
             on GitHub.
           </p>
           <div className='flex flex-col items-start gap-2'>
-            {/* Primary install: the hosted one-liner. mkit.sh/install.sh is the
-                repo-root install.sh served as a static asset; it detects your
-                platform, verifies the cosign signature, and drops `mkit` into
-                ~/.local/bin. */}
-            <InstallCommand command='curl -sSfL https://mkit.sh/install.sh | sh' />
+            {/* Primary install: the hosted one-liner. Bare `mkit.sh` sniffs the
+                curl User-Agent and serves the signed installer (see
+                src/install-route.ts); it detects your platform, verifies the
+                cosign signature, and drops `mkit` into ~/.local/bin. */}
+            <InstallCommand command='curl mkit.sh | sh' />
             {/* Install the mkit agent skill (repo-root SKILL.md) into Claude Code
                 / Cursor / etc. via the vercel-labs `skills` CLI. */}
             <InstallCommand command='npx skills add officialunofficial/mkit' />
