@@ -1,0 +1,21 @@
+{
+  "name": "mkit-og",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "typecheck": "wrangler types && tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.12.25",
+    "workers-og": "^0.0.27"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250620.0",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.99.0"
+  }
+}

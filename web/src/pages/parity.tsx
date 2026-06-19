@@ -1,10 +1,16 @@
 import { Link } from 'waku'
 import { ParityMatrix } from '../components/parity-matrix'
+import { Seo } from '../components/seo'
 
 export default function ParityPage() {
   return (
     <div className='space-y-8'>
-      <title>mkit — parity</title>
+      <Seo
+        title='mkit — parity'
+        description='mkit aims for CLI parity with git — same commands and flags — while keeping BLAKE3 addressing and a signature on every commit. Parity of behavior, not wire interop with .git.'
+        path='/parity'
+        card='How much of git is here?'
+      />
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>How much of git is here?</h1>
         <p className='max-w-prose text-base text-fg'>

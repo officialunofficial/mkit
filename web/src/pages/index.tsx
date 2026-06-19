@@ -1,10 +1,16 @@
 import { Link } from 'waku'
 import { CopyButton } from '../components/copy-button'
+import { Seo } from '../components/seo'
 
 export default function HomePage() {
   return (
     <div className='space-y-10'>
-      <title>mkit demo</title>
+      <Seo
+        title='mkit — version control that signs itself'
+        description='Version control that signs itself. Every commit carries an Ed25519 signature; every file, folder, and commit is named by its BLAKE3 hash; attestations are first-class objects. Written in Rust.'
+        path='/'
+        card='Version control that signs itself.'
+      />
       <section className='space-y-5'>
         <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs itself.</h1>
         <p className='max-w-prose text-lg text-fg'>

@@ -1,11 +1,17 @@
 import { Link } from 'waku'
 import { HashDemo } from '../components/hash-demo'
 import { DemoBoundary } from '../components/demo-boundary'
+import { Seo } from '../components/seo'
 
 export default function HashPage() {
   return (
     <div className='space-y-8'>
-      <title>mkit — hash</title>
+      <Seo
+        title='mkit — hash'
+        description='Every file, folder, and commit is named by its BLAKE3 hash — change one byte and the name changes. Edit text and watch every hash rewrite live.'
+        path='/hash'
+        card='What’s in a hash?'
+      />
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>What&rsquo;s in a hash?</h1>
         <p className='max-w-prose text-base text-fg'>

@@ -1,11 +1,17 @@
 import { Link } from 'waku'
 import { DemoBoundary } from '../components/demo-boundary'
 import { TreeDemo } from '../components/tree-demo'
+import { Seo } from '../components/seo'
 
 export default function TreePage() {
   return (
     <div className='space-y-8'>
-      <title>mkit — tree</title>
+      <Seo
+        title='mkit — tree'
+        description="A folder is a list of BLAKE3-named entries; a parent's hash is computed from its children's. The repo is a Merkle tree — edit a file and the hashes ripple to the root."
+        path='/tree'
+        card='Folders, all the way down'
+      />
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Folders, all the way down</h1>
         <p className='max-w-prose text-base text-fg'>
