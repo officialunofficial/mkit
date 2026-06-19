@@ -45,31 +45,14 @@ export default function HomePage() {
             on GitHub.
           </p>
           <div className='flex flex-col items-start gap-2'>
-            {/* Primary install: the hosted one-liner. Bare `mkit.sh` sniffs the
-                curl User-Agent and serves the signed installer (see
-                src/install-route.ts); it detects your platform, verifies the
-                cosign signature, and drops `mkit` into ~/.local/bin. */}
-            <div className='inline-flex items-center gap-3 rounded-md border border-hairline bg-muted/10 px-3 py-2'>
-              <code className='font-mono text-sm'>
-                <span className='select-none text-muted'>$ </span>curl mkit.sh | sh
-              </code>
-              <CopyButton text='curl mkit.sh | sh' />
-            </div>
-            <div className='inline-flex items-center gap-3 rounded-md border border-hairline bg-muted/10 px-3 py-2'>
-              <code className='font-mono text-sm'>
-                <span className='select-none text-muted'>$ </span>cargo install mkit-cli
-              </code>
-              <CopyButton text='cargo install mkit-cli' />
-            </div>
-            {/* Connect an agent to mkit's hosted docs + source MCP — the
-                canonical "Connecting" command from mcp/README.md. */}
-            <div className='inline-flex max-w-full items-center gap-3 overflow-x-auto rounded-md border border-hairline bg-muted/10 px-3 py-2'>
-              <code className='whitespace-nowrap font-mono text-sm'>
-                <span className='select-none text-muted'>$ </span>claude mcp add --transport http mkit
-                https://mcp.mkit.sh
-              </code>
-              <CopyButton text='claude mcp add --transport http mkit https://mcp.mkit.sh' />
-            </div>
+            {/* Primary install: the hosted one-liner. mkit.sh/install.sh is the
+                repo-root install.sh served as a static asset; it detects your
+                platform, verifies the cosign signature, and drops `mkit` into
+                ~/.local/bin. */}
+            <InstallCommand command='curl -sSfL https://mkit.sh/install.sh | sh' />
+            {/* Install the mkit agent skill (repo-root SKILL.md) into Claude Code
+                / Cursor / etc. via the vercel-labs `skills` CLI. */}
+            <InstallCommand command='npx skills add officialunofficial/mkit' />
           </div>
         </div>
       </section>
@@ -111,6 +94,20 @@ export default function HomePage() {
           body='Which git commands mkit matches, where it diverges on purpose, and why it will never share bytes with a .git repo.'
         />
       </ul>
+    </div>
+  )
+}
+
+// A copyable shell command, rendered as a `$`-prefixed code chip. Long commands
+// scroll horizontally rather than wrapping.
+function InstallCommand({ command }: { command: string }) {
+  return (
+    <div className='inline-flex max-w-full items-center gap-3 overflow-x-auto rounded-md border border-hairline bg-muted/10 px-3 py-2'>
+      <code className='whitespace-nowrap font-mono text-sm'>
+        <span className='select-none text-muted'>$ </span>
+        {command}
+      </code>
+      <CopyButton text={command} />
     </div>
   )
 }

@@ -63,14 +63,13 @@ Pick one. Long-form guide with verification steps in
 ### Quick install (signed release binary)
 
 ```sh
-curl mkit.sh | sh
+curl -sSfL https://mkit.sh/install.sh | sh
 ```
 
 Detects your OS + architecture, downloads the matching signed release
 archive, verifies its cosign signature by default, and installs `mkit`
-into `~/.local/bin`. Equivalent explicit form:
-`curl -sSfL https://mkit.sh/install.sh | sh`. Pass `--version vX.Y.Z` to
-pin an exact release (`curl -sSfL https://mkit.sh/install.sh | sh -s -- --version v0.3.0`).
+into `~/.local/bin`. Pass `--version vX.Y.Z` to pin an exact release
+(`curl -sSfL https://mkit.sh/install.sh | sh -s -- --version v0.3.0`).
 
 ### From source
 
@@ -99,9 +98,9 @@ curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSIO
 tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 ```
 
-The one-liner `curl mkit.sh | sh` (or `curl -sSfL https://mkit.sh/install.sh | sh`)
-picks the right archive and verifies the cosign bundle by default. Pass
-`--version vX.Y.Z` to pin an exact release.
+The one-liner `curl -sSfL https://mkit.sh/install.sh | sh` picks the right
+archive and verifies the cosign bundle by default. Pass `--version vX.Y.Z`
+to pin an exact release.
 
 ### WASM (npm)
 

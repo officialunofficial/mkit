@@ -7,7 +7,6 @@
 # atomically into $MKIT_INSTALL_DIR (default: ~/.local/bin).
 #
 # Usage:
-#   curl mkit.sh | sh
 #   curl -sSfL https://mkit.sh/install.sh | sh
 #   curl -sSfL https://mkit.sh/install.sh | sh -s -- --version v0.3.0
 #   # The raw GitHub URL serves the same script as a fallback:
@@ -75,7 +74,6 @@ print_help() {
 mkit installer
 
 Usage:
-  curl mkit.sh | sh
   curl -sSfL https://mkit.sh/install.sh | sh
   sh install.sh [--version <tag>] [--prefix <dir>] [--insecure-skip-cosign]
 
