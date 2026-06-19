@@ -31,10 +31,10 @@ pub(super) use linux_secret_service::{
 #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
 pub(super) mod systemd_creds;
 #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-#[cfg_attr(not(test), allow(unused_imports))]
-pub(super) use systemd_creds::systemd_creds_protector_for_availability;
-#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
 pub(super) use systemd_creds::{SystemdCredsProtector, systemd_creds_protector};
+// `systemd_creds_protector_for_availability` is test-only and is imported
+// directly via `protectors::systemd_creds::…` in `super`, so it needs no
+// re-export here.
 
 /// Random opaque handle used by the credential-store protectors as the
 /// account/credential name under which the wrapped DEK is stored.
