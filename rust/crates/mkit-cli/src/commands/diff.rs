@@ -203,8 +203,11 @@ pub fn run(args: &[String]) -> u8 {
             // the byte-exact patch machinery stays color-agnostic.
             let mut buf: Vec<u8> = Vec::new();
             match emit_entry_patch(&mut buf, &snapshot, e) {
+                // Colorize on RAW BYTES (not via from_utf8_lossy) so a
+                // non-UTF-8 patch body round-trips byte-for-byte, matching
+                // the uncolored path.
                 Ok(()) => stdout
-                    .write_all(colorize_patch(&String::from_utf8_lossy(&buf)).as_bytes())
+                    .write_all(&colorize_patch(&buf))
                     .map_err(|err| format!("write: {err}")),
                 Err(msg) => Err(msg),
             }
@@ -220,42 +223,47 @@ pub fn run(args: &[String]) -> u8 {
 
 /// ANSI-colorize a unified-diff patch line-by-line, matching git's default
 /// palette: metadata bold, hunk headers cyan, additions green, deletions
-/// red. Context lines are left uncolored.
-fn colorize_patch(text: &str) -> String {
-    const RESET: &str = "\x1b[0m";
-    let mut out = String::with_capacity(text.len() + 64);
-    for line in text.split_inclusive('\n') {
-        let body = line.strip_suffix('\n').unwrap_or(line);
-        let nl = if line.ends_with('\n') { "\n" } else { "" };
-        let code = if body.starts_with("@@") {
-            Some("\x1b[36m") // hunk header: cyan
-        } else if body.starts_with("diff ")
-            || body.starts_with("index ")
-            || body.starts_with("new file")
-            || body.starts_with("deleted file")
-            || body.starts_with("old mode")
-            || body.starts_with("new mode")
-            || body.starts_with("rename ")
-            || body.starts_with("similarity ")
-            || body.starts_with("--- ")
-            || body.starts_with("+++ ")
+/// red. Context lines are left uncolored. Operates on raw bytes so a
+/// non-UTF-8 patch body round-trips unchanged (only ASCII line prefixes
+/// drive the coloring).
+fn colorize_patch(text: &[u8]) -> Vec<u8> {
+    const RESET: &[u8] = b"\x1b[0m";
+    let mut out: Vec<u8> = Vec::with_capacity(text.len() + 64);
+    for line in text.split_inclusive(|&b| b == b'\n') {
+        let (body, nl): (&[u8], &[u8]) = if line.last() == Some(&b'\n') {
+            (&line[..line.len() - 1], b"\n")
+        } else {
+            (line, b"")
+        };
+        let code: Option<&[u8]> = if body.starts_with(b"@@") {
+            Some(b"\x1b[36m") // hunk header: cyan
+        } else if body.starts_with(b"diff ")
+            || body.starts_with(b"index ")
+            || body.starts_with(b"new file")
+            || body.starts_with(b"deleted file")
+            || body.starts_with(b"old mode")
+            || body.starts_with(b"new mode")
+            || body.starts_with(b"rename ")
+            || body.starts_with(b"similarity ")
+            || body.starts_with(b"--- ")
+            || body.starts_with(b"+++ ")
         {
-            Some("\x1b[1m") // metadata: bold
-        } else if body.starts_with('+') {
-            Some("\x1b[32m") // addition: green
-        } else if body.starts_with('-') {
-            Some("\x1b[31m") // deletion: red
+            Some(b"\x1b[1m") // metadata: bold
+        } else if body.first() == Some(&b'+') {
+            Some(b"\x1b[32m") // addition: green
+        } else if body.first() == Some(&b'-') {
+            Some(b"\x1b[31m") // deletion: red
         } else {
             None
         };
         match code {
             Some(c) => {
-                out.push_str(c);
-                out.push_str(body);
-                out.push_str(RESET);
-                out.push_str(nl);
+                out.extend_from_slice(c);
+                out.extend_from_slice(body);
+                out.extend_from_slice(RESET);
+                out.extend_from_slice(nl);
             }
-            None => out.push_str(line),
+            None => out.extend_from_slice(line),
         }
     }
     out

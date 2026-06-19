@@ -169,8 +169,10 @@ fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushO
             record_upstream(cwd, cfg, &branch, &resolved.name, &remote_branch, opts.set_upstream);
             // git-style ref-update summary block: `To <url>` then one
             // `<old>..<new>` / `* [new branch]` / `+ …(forced)` line.
+            // On a store error during the ancestry check, assume a
+            // fast-forward (don't mislabel an ordinary push as forced).
             let forced = !remote_dispatch::is_fast_forward(cwd, old_tracked, new_tip)
-                .unwrap_or(false);
+                .unwrap_or(true);
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "To {}", resolved.endpoint);
             let _ = writeln!(

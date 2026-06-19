@@ -1480,3 +1480,66 @@ fn dash_c_enforced_on_read_or_default_path() {
         "inert -c must be accepted, not warned: {stderr}"
     );
 }
+
+// ---------- review round 2: atomicity, color byte-fidelity, tag -l -d -------
+
+#[test]
+fn checkout_dash_b_is_atomic_on_refused_switch() {
+    // A refused switch must NOT leave an orphan branch behind (git creates
+    // nothing when it refuses). Dirty tracked file + start-point with a
+    // different tree triggers the destructive-restore gate.
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"1\n", "c1");
+    let c1 = rev(&repo, "HEAD");
+    repo.commit_file("a.txt", b"2\n", "c2");
+    repo.write("a.txt", b"local-dirty\n"); // uncommitted, collides with c1's tree
+    let out = repo.run(&["checkout", "-b", "newbranch", &c1]);
+    assert!(!out.status.success(), "dirty -b switch must be refused");
+    // The branch must not exist (no orphan).
+    let listed = stdout(&repo.ok(&["branch", "--list", "newbranch"]));
+    assert!(
+        !listed.contains("newbranch"),
+        "refused checkout -b must not create the branch: {listed:?}"
+    );
+}
+
+#[test]
+fn checkout_dash_big_b_reset_existing_branch_message() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    assert!(repo.ok(&["branch", "feature"]).status.success());
+    let out = repo.run(&["checkout", "-B", "feature"]);
+    assert!(out.status.success(), "checkout -B failed: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("Reset branch 'feature'"),
+        "git-style reset message: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn tag_list_and_delete_are_mutually_exclusive() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"a\n", "c1");
+    repo.ok(&["tag", "v1"]);
+    let out = repo.run(&["tag", "-l", "-d", "v1"]);
+    assert!(!out.status.success(), "tag -l -d must error");
+    // v1 must still exist (delete did not run).
+    assert!(stdout(&repo.ok(&["tag", "-l"])).contains("v1"));
+}
+
+#[test]
+fn diff_color_preserves_non_utf8_bytes() {
+    let repo = Repo::new();
+    repo.write("f.txt", b"caf\xe9 latin1\n");
+    repo.ok(&["add", "f.txt"]);
+    repo.ok(&["commit", "-m", "c1"]);
+    repo.write("f.txt", b"caf\xe9 changed\n");
+    let out = repo.run(&["diff", "--color=always"]);
+    // The raw 0xE9 byte must survive (no U+FFFD = 0xEF 0xBF 0xBD).
+    assert!(
+        out.stdout.windows(3).all(|w| w != [0xEF, 0xBF, 0xBD]),
+        "non-UTF-8 patch bytes must round-trip under --color"
+    );
+    assert!(out.stdout.contains(&0xE9), "the raw latin-1 byte must be present");
+}

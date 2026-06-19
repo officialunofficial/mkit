@@ -77,44 +77,48 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
 
-    // `-b`/`-B`: create (or reset, for `-B`) a branch at the start-point
-    // (the optional positional, default HEAD), then fall through to switch
-    // to it. The new branch makes the success line `Switched to a new
-    // branch '<name>'`, like git.
-    let created = opts.create.is_some() || opts.create_force.is_some();
-    let name_owned: String = if created {
-        let new = opts
-            .create
-            .as_deref()
-            .or(opts.create_force.as_deref())
-            .unwrap_or_default();
-        let start = opts.target.as_deref().unwrap_or("HEAD");
-        let start_hash = match super::revspec::resolve_revision(&store, &mkit_dir, start) {
-            Ok(h) => h,
-            Err(e) => {
-                return emit_err(&format!("invalid start point '{start}': {e}"), exit::GENERAL_ERROR);
-            }
-        };
-        let cond = if opts.create_force.is_some() {
-            refs::RefWriteCondition::Any
-        } else {
-            refs::RefWriteCondition::Missing
-        };
-        match super::write_ref_recording_history(&mkit_dir, new, cond, &start_hash) {
-            Ok(()) => {}
-            Err(refs::RefError::Conflict(_)) => {
+    // `-b`/`-B`: plan a branch create (or reset, for `-B`) at the
+    // start-point (the optional positional, default HEAD). The ref is NOT
+    // written here — only AFTER the destructive-restore gate passes — so a
+    // refused switch creates nothing (git atomicity). `reset_existing`
+    // tracks whether `-B` is resetting a pre-existing branch (→ git's
+    // `Reset branch …` message rather than `Switched to a new branch …`).
+    let create_new = opts.create.as_deref().or(opts.create_force.as_deref());
+    let create_plan: Option<(String, Hash, refs::RefWriteCondition, bool)> =
+        if let Some(new) = create_new {
+            let start_spec = opts.target.as_deref().unwrap_or("HEAD");
+            let start = match super::revspec::resolve_revision(&store, &mkit_dir, start_spec) {
+                Ok(h) => h,
+                Err(e) => {
+                    return emit_err(
+                        &format!("invalid start point '{start_spec}': {e}"),
+                        exit::GENERAL_ERROR,
+                    );
+                }
+            };
+            let existed = matches!(refs::read_ref(&mkit_dir, new), Ok(Some(_)));
+            if existed && opts.create_force.is_none() {
                 return emit_err(&format!("branch '{new}' already exists"), exit::CANTCREAT);
             }
-            Err(e) => return emit_err(&format!("create branch {new}: {e}"), exit::CANTCREAT),
-        }
-        new.to_string()
-    } else {
-        match opts.target.as_deref() {
+            let cond = if opts.create_force.is_some() {
+                refs::RefWriteCondition::Any
+            } else {
+                refs::RefWriteCondition::Missing
+            };
+            Some((new.to_string(), start, cond, existed && opts.create_force.is_some()))
+        } else {
+            None
+        };
+    let created = create_plan.is_some();
+
+    let name_owned: String = match &create_plan {
+        Some((new, ..)) => new.clone(),
+        None => match opts.target.as_deref() {
             Some(t) => t.to_string(),
             None => {
                 return super::usage_error("usage: mkit checkout [-b|-B <new>] <branch|tag|commit>");
             }
-        }
+        },
     };
     let name = name_owned.as_str();
 
@@ -127,16 +131,19 @@ pub fn run(args: &[String]) -> u8 {
         Ok(mkit_core::refs::Head::Branch(ref cur)) if cur == name
     );
 
-    // Resolve <name> through the shared revspec resolver (branch / tag /
-    // HEAD / full+short hash / `~n`/`^` navigation).
-    let commit_hash: Hash = match super::revspec::resolve_revision(&store, &mkit_dir, name) {
-        Ok(h) => h,
-        Err(e) => {
-            return emit_err(
-                &format!("no such branch, tag, or commit: {name} ({e})"),
-                exit::GENERAL_ERROR,
-            );
-        }
+    // The target commit: for `-b`/`-B` it is the (resolved) start-point;
+    // otherwise resolve `<name>` via the shared revspec resolver.
+    let commit_hash: Hash = match &create_plan {
+        Some((_, start, ..)) => *start,
+        None => match super::revspec::resolve_revision(&store, &mkit_dir, name) {
+            Ok(h) => h,
+            Err(e) => {
+                return emit_err(
+                    &format!("no such branch, tag, or commit: {name} ({e})"),
+                    exit::GENERAL_ERROR,
+                );
+            }
+        },
     };
 
     // Resolve the commit's tree so we can materialise it.
@@ -201,6 +208,19 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
 
+    // Safety gate passed — NOW create the `-b`/`-B` branch ref. Deferring
+    // it to here means a refused switch above leaves no orphan branch
+    // behind (git creates nothing when it refuses the operation).
+    if let Some((new, start, cond, _)) = &create_plan {
+        match super::write_ref_recording_history(&mkit_dir, new, *cond, start) {
+            Ok(()) => {}
+            Err(refs::RefError::Conflict(_)) => {
+                return emit_err(&format!("branch '{new}' already exists"), exit::CANTCREAT);
+            }
+            Err(e) => return emit_err(&format!("create branch {new}: {e}"), exit::CANTCREAT),
+        }
+    }
+
     // Update HEAD FIRST, before mutating the worktree/index (#223). The
     // failure modes are asymmetric: if we materialised the new tree and
     // *then* HEAD failed to advance, the worktree would hold the new
@@ -241,9 +261,12 @@ pub fn run(args: &[String]) -> u8 {
     // git-shaped switch confirmation (drop mkit's non-git restored-count
     // line). `report` is no longer printed; keep the binding consumed.
     let _ = &report;
+    let reset_existing = matches!(&create_plan, Some((.., true)));
     let mut stderr = std::io::stderr().lock();
     if is_branch {
-        if created {
+        if reset_existing {
+            let _ = writeln!(stderr, "Reset branch '{name}'");
+        } else if created {
             let _ = writeln!(stderr, "Switched to a new branch '{name}'");
         } else if already_on {
             let _ = writeln!(stderr, "Already on '{name}'");

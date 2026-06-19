@@ -75,8 +75,12 @@ pub fn run(args: &[String]) -> u8 {
     let annotated = opts.annotate || opts.sign;
 
     // `-l`/`--list` forces list mode, with the positional treated as a
-    // glob filter (like `git tag -l '<pattern>'`).
+    // glob filter (like `git tag -l '<pattern>'`). `-l` with `-d` is an
+    // error, like git (the modes are mutually exclusive).
     if opts.list {
+        if opts.delete {
+            return super::usage_error("mkit tag: -l and -d are mutually exclusive");
+        }
         return list(&mkit_dir, opts.name.as_deref());
     }
 
