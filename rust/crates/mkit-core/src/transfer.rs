@@ -10,13 +10,14 @@
 //!
 //! Because a delta-encoded pack is keyed by the pack digest (not by the
 //! reconstructed object's hash), the fetch side can no longer find it by
-//! walking object hashes. A per-ref [`PackList`] — this module's small
-//! versioned wire format — records, in dependency order, every pack key
-//! needed to reconstruct the ref. The push side advertises it through a
-//! `refs/mkit/packmap/<branch>` metadata ref whose value is the BLAKE3 of
-//! the packlist bytes (themselves stored as a pack object). The fetch side
-//! reads that ref, downloads the packlist, then downloads and unpacks each
-//! listed pack in order.
+//! walking object hashes. Each push records a [`PackListNode`] — this
+//! module's small versioned wire format — holding the pack(s) it added plus
+//! a `prev` pointer to the previous node, forming a per-branch chain. The
+//! push side advertises the chain head through a `refs/mkit/packmap/<branch>`
+//! metadata ref whose value is the BLAKE3 of the head node (itself stored as
+//! a pack object). The fetch side reads that ref, walks the chain, and
+//! unpacks every pack oldest-first. Chaining keeps each push O(1) on the
+//! wire rather than re-uploading the whole history's list.
 //!
 //! Content addressing is unchanged: delta is a transfer encoding only. The
 //! reconstructed object's id is still BLAKE3 of its canonical bytes, which
@@ -27,26 +28,44 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{Object, ObjectType};
-use crate::pack::{ENTRY_FRAME_LEN, TRAILER_LEN};
 use crate::store::{ObjectStore, StoreError};
 
 // ---------------------------------------------------------------------------
 // PackList wire format
 // ---------------------------------------------------------------------------
 
-/// ASCII magic at the start of every packlist blob ("mkit pack list").
+/// ASCII magic at the start of every packlist node ("mkit pack list").
 pub const PACKLIST_MAGIC: &[u8; 4] = b"MKPL";
 /// Current packlist version. Readers reject anything else so a future
 /// format change is a loud error, not a silent misparse.
 pub const PACKLIST_VERSION: u8 = 1;
-/// Hard cap on packlist entries — one ref accumulating more packs than
-/// this is pathological; refuse rather than allocate unboundedly.
+/// Hard cap on packs recorded in a single node — a normal push records
+/// one; refuse to allocate unboundedly on a malformed blob.
 pub const PACKLIST_MAX_ENTRIES: u32 = 1_000_000;
 
-/// `[4B magic][1B version][4B count]`.
-const PACKLIST_HEADER_LEN: usize = 4 + 1 + 4;
+/// `[4B magic][1B version][1B has_prev][32B prev][4B count]`. The `prev`
+/// bytes are always present (zeroed when `has_prev == 0`) so the layout is
+/// fixed-size up to `count`.
+const PACKLIST_HEADER_LEN: usize = 4 + 1 + 1 + hash::HASH_LEN + 4;
 
-/// Errors decoding a [`PackList`] blob.
+/// A single node in a branch's packlist chain.
+///
+/// The push path appends one node per push: `prev` points at the previous
+/// node (the current packmap value before this push), and `packs` holds the
+/// pack(s) this push added. The full ordered pack set for a branch is the
+/// chain walked oldest-first — see `remote_dispatch::fetch_pack_chain`.
+///
+/// Chaining keeps each push O(1) on the wire (read a 32-byte pointer, write
+/// a ~64-byte node) instead of re-uploading the whole history's list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackListNode {
+    /// Previous node's key, or `None` for the first node of a branch.
+    pub prev: Option<Hash>,
+    /// Pack keys added by this node, in apply order.
+    pub packs: Vec<Hash>,
+}
+
+/// Errors decoding a [`PackListNode`] blob.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PackListError {
     #[error("packlist is shorter than the {PACKLIST_HEADER_LEN}-byte header")]
@@ -55,44 +74,45 @@ pub enum PackListError {
     InvalidMagic,
     #[error("packlist version {0} is not supported (v1 only)")]
     UnsupportedVersion(u8),
-    #[error("packlist entry count {0} exceeds the {PACKLIST_MAX_ENTRIES} cap")]
+    #[error("packlist has_prev byte {0} is not 0 or 1")]
+    InvalidHasPrev(u8),
+    #[error("packlist pack count {0} exceeds the {PACKLIST_MAX_ENTRIES} cap")]
     TooManyEntries(u32),
-    #[error("packlist body length does not match the declared entry count")]
+    #[error("packlist body length does not match the declared pack count")]
     LengthMismatch,
 }
 
-/// Serialise an ordered list of pack keys into a packlist blob.
-///
-/// The order is significant: a fetcher unpacks the listed packs in this
-/// order, so a pack whose deltas reference bases delivered by an earlier
-/// pack MUST appear later. Callers append the newest pack last.
+/// Serialise one packlist node.
 ///
 /// # Errors
 ///
-/// [`PackListError::TooManyEntries`] if `keys` exceeds the cap.
-pub fn encode_packlist(keys: &[Hash]) -> Result<Vec<u8>, PackListError> {
-    let count = u32::try_from(keys.len()).map_err(|_| PackListError::TooManyEntries(u32::MAX))?;
+/// [`PackListError::TooManyEntries`] if `packs` exceeds the cap.
+pub fn encode_packlist(prev: Option<Hash>, packs: &[Hash]) -> Result<Vec<u8>, PackListError> {
+    let count = u32::try_from(packs.len()).map_err(|_| PackListError::TooManyEntries(u32::MAX))?;
     if count > PACKLIST_MAX_ENTRIES {
         return Err(PackListError::TooManyEntries(count));
     }
-    let mut out = Vec::with_capacity(PACKLIST_HEADER_LEN + keys.len() * hash::HASH_LEN);
+    let mut out = Vec::with_capacity(PACKLIST_HEADER_LEN + packs.len() * hash::HASH_LEN);
     out.extend_from_slice(PACKLIST_MAGIC);
     out.push(PACKLIST_VERSION);
+    out.push(u8::from(prev.is_some()));
+    out.extend_from_slice(&prev.unwrap_or(hash::ZERO));
     out.extend_from_slice(&count.to_le_bytes());
-    for k in keys {
+    for k in packs {
         out.extend_from_slice(k);
     }
     Ok(out)
 }
 
-/// Parse a packlist blob back into its ordered pack keys.
+/// Parse a packlist node blob.
 ///
 /// # Errors
 ///
-/// Returns the matching [`PackListError`] for a short buffer, wrong
-/// magic, unknown version, an over-cap count, or a body whose length
-/// does not match the declared count (which also catches trailing data).
-pub fn decode_packlist(bytes: &[u8]) -> Result<Vec<Hash>, PackListError> {
+/// Returns the matching [`PackListError`] for a short buffer, wrong magic,
+/// unknown version, a bad `has_prev` flag, an over-cap count, or a body
+/// whose length does not match the declared count (which also catches
+/// trailing data).
+pub fn decode_packlist(bytes: &[u8]) -> Result<PackListNode, PackListError> {
     if bytes.len() < PACKLIST_HEADER_LEN {
         return Err(PackListError::TooShort);
     }
@@ -103,8 +123,18 @@ pub fn decode_packlist(bytes: &[u8]) -> Result<Vec<Hash>, PackListError> {
     if version != PACKLIST_VERSION {
         return Err(PackListError::UnsupportedVersion(version));
     }
+    let prev = match bytes[5] {
+        0 => None,
+        1 => {
+            let mut p = [0u8; hash::HASH_LEN];
+            p.copy_from_slice(&bytes[6..6 + hash::HASH_LEN]);
+            Some(p)
+        }
+        other => return Err(PackListError::InvalidHasPrev(other)),
+    };
+    let count_off = 6 + hash::HASH_LEN;
     let mut count_bytes = [0u8; 4];
-    count_bytes.copy_from_slice(&bytes[5..9]);
+    count_bytes.copy_from_slice(&bytes[count_off..count_off + 4]);
     let count = u32::from_le_bytes(count_bytes);
     if count > PACKLIST_MAX_ENTRIES {
         return Err(PackListError::TooManyEntries(count));
@@ -116,14 +146,14 @@ pub fn decode_packlist(bytes: &[u8]) -> Result<Vec<Hash>, PackListError> {
     if bytes.len() != expected {
         return Err(PackListError::LengthMismatch);
     }
-    let mut keys = Vec::with_capacity(count);
+    let mut packs = Vec::with_capacity(count);
     for i in 0..count {
         let start = PACKLIST_HEADER_LEN + i * hash::HASH_LEN;
         let mut h = [0u8; hash::HASH_LEN];
         h.copy_from_slice(&bytes[start..start + hash::HASH_LEN]);
-        keys.push(h);
+        packs.push(h);
     }
-    Ok(keys)
+    Ok(PackListNode { prev, packs })
 }
 
 // ---------------------------------------------------------------------------
@@ -195,9 +225,9 @@ fn pair_trees(
     if depth > MAX_TREE_DEPTH || new_tree == old_tree {
         return Ok(());
     }
-    let (Object::Tree(new_t), Object::Tree(old_t)) = (
-        read_or_skip(store, new_tree)?,
-        read_or_skip(store, old_tree)?,
+    let (Some(Object::Tree(new_t)), Some(Object::Tree(old_t))) = (
+        read_optional(store, new_tree)?,
+        read_optional(store, old_tree)?,
     ) else {
         return Ok(());
     };
@@ -273,14 +303,12 @@ fn pair_chunks(new_chunks: &[Hash], old_chunks: &[Hash], out: &mut HashMap<Hash,
     }
 }
 
-fn read_or_skip(store: &ObjectStore, h: Hash) -> Result<Object, StoreError> {
+/// Read an object, mapping a missing object to `None` so callers can treat
+/// "absent" the same as "not the kind I wanted" without a hard error.
+fn read_optional(store: &ObjectStore, h: Hash) -> Result<Option<Object>, StoreError> {
     match store.read_object(&h) {
-        Ok(o) => Ok(o),
-        // Caller treats a non-Tree as "skip"; surface a benign Blob so the
-        // `let-else` in `pair_trees` bails without a hard error.
-        Err(StoreError::ObjectNotFound(_)) => {
-            Ok(Object::Blob(crate::object::Blob { data: vec![] }))
-        }
+        Ok(o) => Ok(Some(o)),
+        Err(StoreError::ObjectNotFound(_)) => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -386,7 +414,11 @@ pub fn plan_pack(
 
     for h in &send {
         let bytes = store.read(h)?;
-        let is_blob = bytes.first().copied() == Some(ObjectType::Blob as u8);
+        // The object-type tag is the first prologue byte (SPEC-OBJECTS §1);
+        // decode it through the canonical helper rather than re-deriving the
+        // format here.
+        let is_blob =
+            bytes.first().and_then(|b| ObjectType::from_u8(*b).ok()) == Some(ObjectType::Blob);
 
         // Only blobs (FastCDC chunks) are delta candidates, and only against
         // a base the remote actually holds.
@@ -417,10 +449,10 @@ pub fn plan_pack(
 }
 
 /// Encode `target` against `base` and return the delta only if it is
-/// strictly smaller on the wire than sending the target raw. The wire cost
-/// of a delta entry is the SPEC-PACKFILE frame (5 bytes) + the 32-byte base
-/// hash + the stream; raw is the same frame + the object bytes. We compare
-/// the variable parts: `32 + stream` vs `target_bytes`.
+/// strictly smaller on the wire than sending the target raw. The per-entry
+/// frame (SPEC-PACKFILE §2) is identical for raw and delta, so only the
+/// payloads differ: a delta payload is `base_hash (HASH_LEN) + stream`
+/// (SPEC-PACKFILE §3.2) versus the raw object bytes. Compare those.
 fn try_delta(
     store: &ObjectStore,
     target: Hash,
@@ -433,10 +465,7 @@ fn try_delta(
         // any encode failure as "send raw" rather than propagating.
         return Ok(None);
     };
-    // `ENTRY_FRAME_LEN` is identical for raw and delta, so only the payload
-    // sizes matter: delta payload is `base_hash + stream`.
-    let _ = ENTRY_FRAME_LEN;
-    if TRAILER_LEN + stream.len() < target_bytes.len() {
+    if hash::HASH_LEN + stream.len() < target_bytes.len() {
         Ok(Some(PlannedDelta {
             target,
             base,
@@ -538,34 +567,49 @@ mod tests {
     }
 
     #[test]
-    fn packlist_roundtrip() {
-        let keys = vec![[1u8; 32], [2u8; 32], [0xABu8; 32]];
-        let bytes = encode_packlist(&keys).unwrap();
+    fn packlist_node_roundtrip_with_prev() {
+        let prev = [0x11u8; 32];
+        let packs = vec![[1u8; 32], [2u8; 32], [0xABu8; 32]];
+        let bytes = encode_packlist(Some(prev), &packs).unwrap();
         assert_eq!(&bytes[..4], PACKLIST_MAGIC);
         assert_eq!(bytes[4], PACKLIST_VERSION);
-        assert_eq!(decode_packlist(&bytes).unwrap(), keys);
+        let node = decode_packlist(&bytes).unwrap();
+        assert_eq!(node.prev, Some(prev));
+        assert_eq!(node.packs, packs);
     }
 
     #[test]
-    fn packlist_empty_roundtrip() {
-        let bytes = encode_packlist(&[]).unwrap();
-        assert_eq!(bytes.len(), PACKLIST_HEADER_LEN);
-        assert!(decode_packlist(&bytes).unwrap().is_empty());
+    fn packlist_node_roundtrip_first_node() {
+        // First node of a branch: no predecessor, one pack.
+        let bytes = encode_packlist(None, &[[7u8; 32]]).unwrap();
+        let node = decode_packlist(&bytes).unwrap();
+        assert_eq!(node.prev, None);
+        assert_eq!(node.packs, vec![[7u8; 32]]);
     }
 
     #[test]
-    fn packlist_rejects_bad_magic_version_and_length() {
-        let mut bytes = encode_packlist(&[[9u8; 32]]).unwrap();
-        let good = bytes.clone();
+    fn packlist_rejects_bad_magic_version_haspriv_and_length() {
+        let good = encode_packlist(Some([0x11u8; 32]), &[[9u8; 32]]).unwrap();
 
-        bytes[0] = b'X';
-        assert_eq!(decode_packlist(&bytes), Err(PackListError::InvalidMagic));
-
-        let mut v = good.clone();
-        v[4] = 2;
+        let mut bad_magic = good.clone();
+        bad_magic[0] = b'X';
         assert_eq!(
-            decode_packlist(&v),
+            decode_packlist(&bad_magic),
+            Err(PackListError::InvalidMagic)
+        );
+
+        let mut bad_ver = good.clone();
+        bad_ver[4] = 2;
+        assert_eq!(
+            decode_packlist(&bad_ver),
             Err(PackListError::UnsupportedVersion(2))
+        );
+
+        let mut bad_prev = good.clone();
+        bad_prev[5] = 9; // has_prev must be 0 or 1
+        assert_eq!(
+            decode_packlist(&bad_prev),
+            Err(PackListError::InvalidHasPrev(9))
         );
 
         // Drop a byte → declared count no longer matches the body.

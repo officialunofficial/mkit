@@ -213,6 +213,76 @@ pub fn pack_key(pack_bytes: &[u8]) -> Hash {
     hash::hash(pack_bytes)
 }
 
+/// Collect the `base_hash` of every `0x02` delta entry in `pack_bytes`,
+/// without resolving or storing anything.
+///
+/// This lets a caller pre-fetch bases that may live OUTSIDE the pack (e.g.
+/// objects a legacy per-object remote stored individually) before calling
+/// [`PackReader::read`], so delta resolution never fails part-way through a
+/// pack. Raw entries are skipped; duplicates are de-duplicated.
+///
+/// Only the header (magic/version) and entry framing are validated — the
+/// trailer is intentionally NOT verified here, because [`PackReader::read`]
+/// re-verifies the whole pack (trailer included) before storing anything.
+///
+/// # Errors
+///
+/// Returns the same framing [`PackError`] variants as [`PackReader::read`]
+/// for a malformed header or out-of-bounds entry.
+///
+/// # Panics
+///
+/// The `try_into` calls on fixed 4-byte slices are statically guaranteed by
+/// the preceding bounds checks; they `expect`-panic only if slice-bounds
+/// elision is wrong.
+pub fn delta_base_hashes(pack_bytes: &[u8]) -> Result<Vec<Hash>, PackError> {
+    if pack_bytes.len() < HEADER_LEN + TRAILER_LEN {
+        return Err(PackError::PackfileTooShort);
+    }
+    if &pack_bytes[..4] != MAGIC.as_slice() {
+        return Err(PackError::InvalidMagic);
+    }
+    let version = u32::from_le_bytes(pack_bytes[4..8].try_into().expect("4 bytes"));
+    if version != VERSION {
+        return Err(PackError::UnsupportedVersion(version));
+    }
+    let count = u32::from_le_bytes(pack_bytes[8..12].try_into().expect("4 bytes"));
+    if count > MAX_ENTRIES {
+        return Err(PackError::TooManyObjects(count));
+    }
+    // Entries live between the header and the 32-byte trailer.
+    let split = pack_bytes.len() - TRAILER_LEN;
+
+    let mut bases = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut pos = HEADER_LEN;
+    for _ in 0..count {
+        if pos + ENTRY_FRAME_LEN > split {
+            return Err(PackError::UnexpectedEof);
+        }
+        let etype = pack_bytes[pos];
+        pos += 1;
+        let payload_len =
+            u32::from_le_bytes(pack_bytes[pos..pos + 4].try_into().expect("4 bytes")) as usize;
+        pos += 4;
+        if pos + payload_len > split {
+            return Err(PackError::UnexpectedEof);
+        }
+        if etype == 0x02 {
+            if payload_len < TRAILER_LEN {
+                return Err(PackError::DeltaEntryTruncated);
+            }
+            let mut base = [0u8; 32];
+            base.copy_from_slice(&pack_bytes[pos..pos + TRAILER_LEN]);
+            if seen.insert(base) {
+                bases.push(base);
+            }
+        }
+        pos += payload_len;
+    }
+    Ok(bases)
+}
+
 /// Streaming-style packfile reader. Verifies header, trailer, entry
 /// framing, and the base-before-delta ordering rule. Reconstructs delta
 /// targets and writes every resolved object to `store`.
@@ -521,6 +591,43 @@ mod tests {
         assert_eq!(report.delta_count, 1);
         assert_eq!(report.stored, vec![base_hash, target_hash]);
         assert_eq!(store.read(&target_hash).unwrap(), target_obj);
+    }
+
+    #[test]
+    fn delta_base_hashes_lists_delta_bases_only() {
+        // One raw blob + two deltas against two different bases. The scan
+        // must return exactly the two (deduped) base hashes, ignoring raw.
+        let base_a = write_blob_via_serialize(b"base alpha content here padding");
+        let base_b = write_blob_via_serialize(b"base bravo content here padding");
+        let ha = hash::hash(&base_a);
+        let hb = hash::hash(&base_b);
+        let target_a = write_blob_via_serialize(b"base alpha content here PADDED!");
+        let target_b = write_blob_via_serialize(b"base bravo content here PADDED!");
+        let stream_a = delta::encode(&base_a, &target_a).unwrap();
+        let stream_b = delta::encode(&base_b, &target_b).unwrap();
+
+        let mut w = PackWriter::new();
+        w.push_raw(ha, base_a).unwrap(); // a raw entry — must be ignored
+        w.push_delta(&ha, &stream_a).unwrap();
+        w.push_delta(&hb, &stream_b).unwrap();
+        w.push_delta(&ha, &stream_a).unwrap(); // duplicate base — deduped
+        let pack = w.finish().unwrap();
+
+        let mut bases = delta_base_hashes(&pack).unwrap();
+        bases.sort_unstable();
+        let mut expected = vec![ha, hb];
+        expected.sort_unstable();
+        assert_eq!(bases, expected);
+    }
+
+    #[test]
+    fn delta_base_hashes_rejects_bad_magic() {
+        let mut pack = PackWriter::new().finish().unwrap();
+        pack[0] = b'X';
+        assert!(matches!(
+            delta_base_hashes(&pack),
+            Err(PackError::InvalidMagic)
+        ));
     }
 
     #[test]

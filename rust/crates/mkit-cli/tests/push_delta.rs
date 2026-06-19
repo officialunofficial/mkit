@@ -16,10 +16,10 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mkit_cli::remote_dispatch::{pull_all, push_all};
+use mkit_cli::remote_dispatch::{DispatchError, pull_all, push_all, push_branch};
 use mkit_core::hash;
 use mkit_core::ops::reachable_objects;
-use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportResult};
+use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, TransportResult};
 use mkit_core::refs::{self, Ref};
 use mkit_core::store::ObjectStore;
 use mkit_transport_memory::MemoryTransport;
@@ -282,4 +282,166 @@ fn identical_repush_transfers_nothing() {
         0,
         "identical re-push must transfer no bytes"
     );
+}
+
+/// A transport that fails every CAS write to the `refs/mkit/` (packmap)
+/// namespace, simulating sustained contention on the packmap pointer.
+/// Everything else delegates to an inner [`MemoryTransport`].
+struct PackmapBlockingTransport {
+    inner: MemoryTransport,
+}
+
+impl PackmapBlockingTransport {
+    fn new() -> Self {
+        Self {
+            inner: MemoryTransport::new(),
+        }
+    }
+}
+
+impl Transport for PackmapBlockingTransport {
+    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        self.inner.upload_pack(bytes, key)
+    }
+    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        self.inner.download_pack(key)
+    }
+    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+        self.inner.pack_exists(key)
+    }
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &hash::Hash,
+    ) -> TransportResult<()> {
+        if name.starts_with("refs/mkit/") {
+            return Err(TransportError::RefConflict); // always contended
+        }
+        self.inner.update_ref(name, condition, hash)
+    }
+    fn read_ref(&self, name: &str) -> TransportResult<Option<hash::Hash>> {
+        self.inner.read_ref(name)
+    }
+    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
+        self.inner.list_refs(prefix)
+    }
+}
+
+#[test]
+fn head_not_moved_when_packmap_cannot_be_established() {
+    // The atomicity invariant: if the packmap can't be durably advanced,
+    // the branch head must NOT move — otherwise a clone would see a tip the
+    // packmap can't reconstruct.
+    let alice = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    fs::write(alice.path().join("big.bin"), big_buffer()).unwrap();
+    commit_all(alice.path(), "v1");
+
+    let tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+        .unwrap()
+        .unwrap();
+    let store = ObjectStore::open(alice.path()).unwrap();
+    let tx = PackmapBlockingTransport::new();
+
+    let err = push_branch(&tx, &store, "main", tip, RefWriteCondition::Missing).unwrap_err();
+    assert!(
+        matches!(err, DispatchError::PackmapContended { .. }),
+        "expected PackmapContended, got {err:?}"
+    );
+    // The head ref must never have been written.
+    assert_eq!(
+        tx.read_ref("refs/heads/main").unwrap(),
+        None,
+        "head must not advance past an unestablished packmap"
+    );
+}
+
+#[test]
+fn divergent_concurrent_push_leaves_clonable_remote() {
+    // alice and bob both branch from a shared base and push divergent edits.
+    // alice wins the head CAS; bob loses it (non-fast-forward). The remote
+    // must still clone byte-identically to alice's tip — bob's losing push
+    // must not have left the packmap unable to reconstruct the head.
+    let alice = tempfile::tempdir().unwrap();
+    let bob = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    init_repo(bob.path());
+
+    let base = big_buffer();
+    fs::write(alice.path().join("big.bin"), &base).unwrap();
+    commit_all(alice.path(), "v0");
+
+    let tx = CountingTransport::new();
+    push_all(alice.path(), &tx).expect("alice base push");
+    pull_all(bob.path(), &tx, "default").expect("bob clones base");
+
+    let shared_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+        .unwrap()
+        .unwrap();
+
+    // alice edits → A1, bob edits the same region → B1 (divergent).
+    let mut av = base.clone();
+    for k in 0..32 {
+        av[800_000 + k] ^= 0xAA;
+    }
+    fs::write(alice.path().join("big.bin"), &av).unwrap();
+    commit_all(alice.path(), "A1");
+    let mut bv = base;
+    for k in 0..32 {
+        bv[800_000 + k] ^= 0x55;
+    }
+    fs::write(bob.path().join("big.bin"), &bv).unwrap();
+    commit_all(bob.path(), "B1");
+
+    let alice_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+        .unwrap()
+        .unwrap();
+    let bob_tip = refs::read_ref(&bob.path().join(".mkit"), "main")
+        .unwrap()
+        .unwrap();
+    let alice_store = ObjectStore::open(alice.path()).unwrap();
+    let bob_store = ObjectStore::open(bob.path()).unwrap();
+
+    // alice wins the head CAS off the shared base.
+    push_branch(
+        &tx,
+        &alice_store,
+        "main",
+        alice_tip,
+        RefWriteCondition::Match(shared_tip),
+    )
+    .expect("alice push wins");
+
+    // bob races with the same expected base → non-fast-forward.
+    let bob_err = push_branch(
+        &tx,
+        &bob_store,
+        "main",
+        bob_tip,
+        RefWriteCondition::Match(shared_tip),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(bob_err, DispatchError::NonFastForwardPush { .. }),
+        "expected NonFastForwardPush, got {bob_err:?}"
+    );
+
+    // The remote head is alice's tip, and a fresh clone reconstructs it
+    // byte-for-byte despite bob's losing push having advanced the packmap.
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(alice_tip));
+    let carol = tempfile::tempdir().unwrap();
+    init_repo(carol.path());
+    pull_all(carol.path(), &tx, "default").expect("carol clones");
+    assert_eq!(fs::read(carol.path().join("big.bin")).unwrap(), av);
+
+    let carol_tip = refs::read_ref(&carol.path().join(".mkit"), "main")
+        .unwrap()
+        .unwrap();
+    assert_eq!(carol_tip, alice_tip);
+    let carol_store = ObjectStore::open(carol.path()).unwrap();
+    for h in reachable_objects(&carol_store, &carol_tip).unwrap() {
+        let b = carol_store.read(&h).expect("hash-verified");
+        assert_eq!(hash::hash(&b), h);
+    }
 }
