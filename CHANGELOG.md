@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BlameResult2<T>` was renamed to `BlameOutcome<T>`, and the unbounded
   `match_lines` function is now private — callers must use the
   bounds-checked `match_lines_checked`. Both are pre-1.0 API breaks; no
-  in-workspace consumers were affected. (Release tooling bumps the crate
-  version accordingly via `semver_check`.)
+  in-workspace consumers were affected. (release-plz's `semver_check`
+  enforces the matching version bump at release time.)
 
 ### Internal
 

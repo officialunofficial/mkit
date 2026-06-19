@@ -301,14 +301,23 @@ impl FileTransport {
     /// Returns `Ok(())` on success, or a `RemoteError` if the operation
     /// would escape the transport tree via a pre-existing symlink.
     ///
-    /// Both `path` and the root are resolved with the same
-    /// [`canonicalize_with_missing_tail`] logic — canonicalise the path
-    /// (or its closest existing ancestor, re-attaching the missing tail)
-    /// so a symlinked parent already on disk is followed — then require
-    /// the result to sit under the canonical root.
+    /// - If `path` exists, `canonicalize(path)` is compared against the
+    ///   canonical root. A canonicalize failure here (e.g. `EACCES`/`ELOOP`
+    ///   on a component) is a hard error — fail closed rather than fall
+    ///   back to a lenient check on a path-traversal boundary.
+    /// - If `path` does not exist yet, [`canonicalize_with_missing_tail`]
+    ///   canonicalises its closest existing ancestor (following any
+    ///   symlinked parent already on disk) and re-attaches the missing
+    ///   tail; that result must sit under the canonical root.
     fn check_ref_path(&self, path: &Path) -> TransportResult<()> {
         let canonical_root = self.canonical_root();
-        let resolved = canonicalize_with_missing_tail(path).unwrap_or_else(|| path.to_path_buf());
+        let resolved = if path.exists() {
+            fs::canonicalize(path).map_err(|e| {
+                TransportError::RemoteError(format!("canonicalize ref path failed: {e}"))
+            })?
+        } else {
+            canonicalize_with_missing_tail(path).unwrap_or_else(|| path.to_path_buf())
+        };
 
         if resolved.starts_with(&canonical_root) {
             Ok(())

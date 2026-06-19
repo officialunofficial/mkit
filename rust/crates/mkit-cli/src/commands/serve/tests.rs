@@ -477,10 +477,12 @@ fn authorized_peers_rejects_malformed_key() {
 #[test]
 fn pack_key_from_id_rejects_bad_length_as_invalid_request() {
     // `pack_key_from_id` is the shared decoder behind PackExists and
-    // DownloadPack on both the sync and encrypted transports. A wrong-
-    // length or missing pack_id must surface as a protocol InvalidRequest
-    // (so the server emits an error frame), not a silently dropped
-    // connection like the pre-unification sync path did.
+    // DownloadPack on both the sync and encrypted transports. This covers
+    // the decoder itself: a wrong-length or missing pack_id must yield an
+    // InvalidRequest verb error, which the dispatchers then turn into an
+    // error frame — replacing the pre-unification sync path that silently
+    // dropped the connection. (The frame emission is exercised separately
+    // by the serve_loop tests.)
     let wrong_len = vec![0u8; 16];
     assert!(matches!(
         pack_key_from_id(Some(&wrong_len)),
