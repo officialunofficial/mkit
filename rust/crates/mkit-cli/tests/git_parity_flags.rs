@@ -1531,15 +1531,16 @@ fn tag_list_and_delete_are_mutually_exclusive() {
 #[test]
 fn diff_color_preserves_non_utf8_bytes() {
     let repo = Repo::new();
-    repo.write("f.txt", b"caf\xe9 latin1\n");
+    // 0xFF is an invalid UTF-8 lead byte; surrounding text is plain ASCII.
+    repo.write("f.txt", b"line one \xff end\n");
     repo.ok(&["add", "f.txt"]);
     repo.ok(&["commit", "-m", "c1"]);
-    repo.write("f.txt", b"caf\xe9 changed\n");
+    repo.write("f.txt", b"line two \xff end\n");
     let out = repo.run(&["diff", "--color=always"]);
-    // The raw 0xE9 byte must survive (no U+FFFD = 0xEF 0xBF 0xBD).
+    // The raw byte must survive (no U+FFFD = 0xEF 0xBF 0xBD substitution).
     assert!(
         out.stdout.windows(3).all(|w| w != [0xEF, 0xBF, 0xBD]),
         "non-UTF-8 patch bytes must round-trip under --color"
     );
-    assert!(out.stdout.contains(&0xE9), "the raw latin-1 byte must be present");
+    assert!(out.stdout.contains(&0xFF), "the raw non-UTF-8 byte must be present");
 }
