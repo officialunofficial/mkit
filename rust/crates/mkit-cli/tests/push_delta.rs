@@ -358,7 +358,7 @@ fn head_not_moved_when_packmap_cannot_be_established() {
 }
 
 #[test]
-fn divergent_concurrent_push_leaves_clonable_remote() {
+fn divergent_concurrent_push_leaves_cloneable_remote() {
     // alice and bob both branch from a shared base and push divergent edits.
     // alice wins the head CAS; bob loses it (non-fast-forward). The remote
     // must still clone byte-identically to alice's tip — bob's losing push

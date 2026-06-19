@@ -169,7 +169,7 @@ const MAX_TREE_DEPTH: usize = 64;
 ///
 /// The heuristic is deliberately simple (SPEC-DELTA §5 is informative —
 /// any base the size-gate later accepts is fine): diff the two commits'
-/// trees by path; where the same path is a [`ChunkedBlob`] on both sides
+/// trees by path; where the same path is a [`crate::object::ChunkedBlob`] on both sides
 /// with a different manifest hash, pair each new chunk against the
 /// old chunk at the same index (falling back to the last old chunk). A
 /// small in-place edit keeps chunk boundaries stable, so same-index
