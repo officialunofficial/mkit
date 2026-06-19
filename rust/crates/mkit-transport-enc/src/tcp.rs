@@ -1,9 +1,9 @@
 //! Real-TCP entry points for the encrypted transport.
 //!
-//! Phase 2 (issue #156): glue that lets a `mkit+enc://` URL turn into a
-//! live, encrypted [`EncTransport`] backed by a tokio TCP socket. This
-//! module is feature-gated behind `tcp` so consumers that only want
-//! the in-process scaffold (Phase 1's `from_session`) don't pay for
+//! The glue that lets a `mkit+enc://` URL turn into a live, encrypted
+//! [`EncTransport`] backed by a tokio TCP socket. This module is
+//! feature-gated behind `tcp` so consumers that only want the
+//! in-process path ([`EncTransport::from_session`]) don't pay for
 //! tokio's compile cost.
 //!
 //! ## Why we don't reuse `commonware_runtime::tokio::Runner`
@@ -258,9 +258,9 @@ impl Clock for TokioContext {
 ///
 /// The Runner is driven on a freshly-spawned OS thread because tokio
 /// refuses to nest `runtime::Builder::build()` inside an already-active
-/// runtime ("Cannot start a runtime from within a runtime"). On Phase
-/// 2's typical call site — the CLI's synchronous `connect_tcp` path —
-/// we are inside `TokioExecutor::block_on`, which is itself a tokio
+/// runtime ("Cannot start a runtime from within a runtime"). On the
+/// typical call site — the CLI's synchronous `connect_tcp` path — we
+/// are inside `TokioExecutor::block_on`, which is itself a tokio
 /// `Handle::block_on` on our owned runtime. Running the bootstrap
 /// Runner inline would therefore panic; hopping to a worker thread
 /// avoids that and isolates the bootstrap runtime's lifecycle from
@@ -284,7 +284,7 @@ fn acquire_network_buffer_pool() -> BufferPool {
 }
 
 // ---------------------------------------------------------------------------
-// connect_tcp — Phase 2 dial helper
+// connect_tcp — client dial helper
 // ---------------------------------------------------------------------------
 
 /// Dial a TCP socket and run the encrypted-stream handshake against
@@ -294,10 +294,9 @@ fn acquire_network_buffer_pool() -> BufferPool {
 ///
 /// `signing_key` is the **dialer's** static private key. It does not
 /// need to be pre-shared with the server — the server's bouncer either
-/// accepts any key (the default permissive policy in
-/// [`serve_tcp`]) or consults its own keyring (operator-supplied).
-/// The dialer always verifies the **server's** key matches
-/// `server_pubkey`.
+/// accepts any key ([`PeerPolicy::AllowAny`]) or consults its own
+/// keyring ([`PeerPolicy::Allowlist`]). The dialer always verifies the
+/// **server's** key matches `server_pubkey`.
 ///
 /// # Errors
 ///
@@ -374,7 +373,7 @@ fn decode_peer_pubkey(bytes: &[u8; 32]) -> Result<PublicKey, EncInitError> {
 }
 
 // ---------------------------------------------------------------------------
-// Peer-authorization policy (issue #178)
+// Peer-authorization policy
 // ---------------------------------------------------------------------------
 
 /// Server-side peer-authorization policy for the encrypted listener.
@@ -434,96 +433,24 @@ fn encode_pubkey(peer: &PublicKey) -> Option<[u8; 32]> {
 }
 
 // ---------------------------------------------------------------------------
-// serve_tcp — Phase 2 listener
+// serve_tcp — TCP listener
 // ---------------------------------------------------------------------------
 
-/// Accept one or more incoming encrypted connections on `addr` and
-/// hand each one off to `serve_fn`. The provided closure is an **async**
-/// fn that receives an already-authenticated [`EncSession`] paired with
-/// the dialer's public key.
-///
-/// This back-compat entry point uses [`PeerPolicy::AllowAny`] — it
-/// accepts any dialer. It is retained for the direct-listen e2e test
-/// harness and callers that have explicitly opted into the unsafe
-/// allow-any escape. Production servers MUST use
-/// [`serve_tcp_with_policy`] with a [`PeerPolicy::Allowlist`].
+/// Accept incoming encrypted connections on `addr`, enforce a
+/// [`PeerPolicy`] at the handshake, and hand each authorized connection
+/// off to `serve_fn`. The provided closure is an **async** fn that
+/// receives an already-authenticated [`EncSession`] paired with the
+/// dialer's public key.
 ///
 /// `serve_fn` is invoked on a fresh tokio task per accepted connection,
 /// so it gets to `.await` freely and stays inside the listener's
-/// runtime context for ambient I/O.
-///
-/// Runs until `accept` fails (host shutdown or socket error).
-///
-/// # Errors
-///
-/// - `EncInitError::HandshakeFailed` if `addr` is unparseable or
-///   `bind` fails.
-pub fn serve_tcp<F, Fut>(
-    addr: &str,
-    signing_key: PrivateKey,
-    serve_fn: F,
-) -> Result<(), EncInitError>
-where
-    F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
-    Fut: core::future::Future<Output = ()> + Send + 'static,
-{
-    serve_tcp_with_policy(addr, signing_key, PeerPolicy::AllowAny, serve_fn)
-}
-
-/// Variant of [`serve_tcp`] that enforces a [`PeerPolicy`].
-///
-/// # Errors
-///
-/// - `EncInitError::HandshakeFailed` if `addr` is unparseable or
-///   `bind` fails.
-pub fn serve_tcp_with_policy<F, Fut>(
-    addr: &str,
-    signing_key: PrivateKey,
-    policy: PeerPolicy,
-    serve_fn: F,
-) -> Result<(), EncInitError>
-where
-    F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
-    Fut: core::future::Future<Output = ()> + Send + 'static,
-{
-    let executor = TokioExecutor::new()
-        .map_err(|e| EncInitError::HandshakeFailed(format!("tokio runtime init failed: {e}")))?;
-    serve_tcp_with_executor(addr, signing_key, policy, executor, serve_fn)
-}
-
-/// Variant of [`serve_tcp_with_policy`] that reuses an existing
-/// [`TokioExecutor`].
-///
-/// # Errors
-///
-/// - `EncInitError::HandshakeFailed` if `addr` is unparseable or
-///   `bind` fails.
-#[allow(clippy::needless_pass_by_value)]
-pub fn serve_tcp_with_executor<F, Fut>(
-    addr: &str,
-    signing_key: PrivateKey,
-    policy: PeerPolicy,
-    executor: TokioExecutor,
-    serve_fn: F,
-) -> Result<(), EncInitError>
-where
-    F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
-    Fut: core::future::Future<Output = ()> + Send + 'static,
-{
-    serve_tcp_inner(
-        addr,
-        signing_key,
-        policy,
-        EncHandshakeBounds::default(),
-        executor,
-        None::<fn(SocketAddr)>,
-        serve_fn,
-    )
-}
-
-/// Variant of [`serve_tcp_with_policy`] that also accepts operator-tunable
-/// [`EncHandshakeBounds`] (#216) for tightening the handshake/synchrony
+/// runtime context for ambient I/O. Runs until `accept` fails (host
+/// shutdown or socket error). Also accepts operator-tunable
+/// [`EncHandshakeBounds`] for tightening the handshake/synchrony
 /// deadlines on real networks.
+///
+/// This is the production listener entry point consumed by
+/// `mkit serve --listen-enc`.
 ///
 /// # Errors
 ///
@@ -553,10 +480,11 @@ where
     )
 }
 
-/// Same as [`serve_tcp_with_executor`] but returns the bound
-/// `SocketAddr` to the caller before entering the accept loop, and
-/// enforces a [`PeerPolicy`]. Used by the e2e / unit tests to pick up
-/// the OS-assigned port when binding `127.0.0.1:0`.
+/// Like [`serve_tcp_with_policy_and_bounds`] but reuses an existing
+/// [`TokioExecutor`] and returns the bound `SocketAddr` to the caller
+/// (via `addr_cb`) before entering the accept loop. Used by the e2e /
+/// unit tests to pick up the OS-assigned port when binding
+/// `127.0.0.1:0`.
 ///
 /// # Errors
 ///
@@ -864,7 +792,7 @@ mod tests {
         }
     }
 
-    /// #216 slow-loris guard: a peer that completes the handshake but
+    /// Slow-loris guard: a peer that completes the handshake but
     /// then goes silent must NOT pin the server session forever. The
     /// `serve_fn` reads with `recv_frame_within(<short idle>)`; the
     /// session future must return (signalled over a channel) well within

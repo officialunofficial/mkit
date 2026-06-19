@@ -23,7 +23,7 @@ use mkit_core::object::{Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, 
 use mkit_core::serialize::serialize;
 use mkit_core::sign::{COMMIT_DOMAIN, KeyPair, PublicKey, Signature, commit_signing_bytes, verify};
 
-use std::io::{Read, Write};
+use std::io::Read;
 use zeroize::Zeroizing;
 
 /// Upper bound on the JSON input accepted by [`parse_json_triples`].
@@ -57,6 +57,21 @@ fn parse_fixed<const N: usize>(bytes: &[u8]) -> Result<[u8; N], JsValue> {
 fn parse_algo(s: &str) -> Result<Algorithm, JsValue> {
     s.parse::<Algorithm>()
         .map_err(|e| js_err(format!("unknown algorithm: {}", e.0)))
+}
+
+/// `len()` of a slice exposed to JS as a `u32`, saturating at `u32::MAX`.
+///
+/// Single home for the count/index boundary policy shared by every
+/// `*_count` getter on the result structs, so the saturation choice
+/// lives in one place rather than being re-justified per struct.
+fn js_vec_count<T>(xs: &[T]) -> u32 {
+    u32::try_from(xs.len()).unwrap_or(u32::MAX)
+}
+
+/// Indexed accessor matching [`js_vec_count`]: clones the element at the
+/// JS-supplied `u32` index, or `None` when out of range.
+fn js_vec_get<T: Clone>(xs: &[T], i: u32) -> Option<T> {
+    xs.get(i as usize).cloned()
 }
 
 // ---------------------------------------------------------------------
@@ -490,6 +505,36 @@ pub fn attest_build(
     })
 }
 
+/// Normalize a SEC1-encoded EC public key to its 33-byte compressed form.
+///
+/// Both secp256k1 and P-256 share the SEC1 point encoding, so a single
+/// byte-level helper covers both arms of [`attest_verify`]:
+///   * an already-compressed key (`0x02`/`0x03` ‖ X, 33 bytes) is returned as-is;
+///   * an uncompressed key (`0x04` ‖ X ‖ Y, 65 bytes) is compressed by
+///     keeping X and deriving the prefix from the parity of Y (LSB of the
+///     last byte): `0x02` if Y is even, `0x03` if Y is odd.
+///
+/// Returns `None` for any other length/prefix so a malformed input fails
+/// closed rather than producing a bogus keyid. No curve math is required:
+/// compression only re-tags the prefix and drops Y, and the still-valid
+/// SEC1 bytes are what the underlying verifier decodes.
+fn sec1_to_compressed(bytes: &[u8]) -> Option<Vec<u8>> {
+    match bytes {
+        // Already compressed: 0x02/0x03 ‖ X(32).
+        [0x02 | 0x03, ..] if bytes.len() == 33 => Some(bytes.to_vec()),
+        // Uncompressed: 0x04 ‖ X(32) ‖ Y(32). Compressed prefix encodes
+        // the parity of Y, which is the LSB of Y's final byte.
+        [0x04, ..] if bytes.len() == 65 => {
+            let mut out = Vec::with_capacity(33);
+            let y_is_odd = bytes[64] & 1 == 1;
+            out.push(if y_is_odd { 0x03 } else { 0x02 });
+            out.extend_from_slice(&bytes[1..33]);
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 /// Verify a DSSE envelope against a single trust root of the given algorithm.
 ///
 /// * `envelope_json` is the canonical DSSE envelope JSON emitted by [`attest_build`].
@@ -521,12 +566,23 @@ pub fn attest_verify(envelope_json: &str, pubkey_hex: &str, algo: &str) -> bool 
             registry.add(keyid, TrustRoot::Ed25519PubKey(pk));
         }
         Algorithm::Secp256k1 => {
-            let keyid = format!("secp256k1:{}", hex::encode(&pubkey_bytes));
-            registry.add(keyid, TrustRoot::Secp256k1PubKeySec1(pubkey_bytes));
+            // The envelope keyid emitted by `attest_build` is always the
+            // *compressed* SEC1 form (66 hex). Normalize an uncompressed
+            // (130 hex) input to compressed before building the lookup
+            // keyid, so the documented "accepts uncompressed" contract
+            // actually matches the envelope's keyid in the registry.
+            let Some(sec1) = sec1_to_compressed(&pubkey_bytes) else {
+                return false;
+            };
+            let keyid = format!("secp256k1:{}", hex::encode(&sec1));
+            registry.add(keyid, TrustRoot::Secp256k1PubKeySec1(sec1));
         }
         Algorithm::P256 => {
-            let keyid = format!("p256:{}", hex::encode(&pubkey_bytes));
-            registry.add(keyid, TrustRoot::P256PubKeySec1(pubkey_bytes));
+            let Some(sec1) = sec1_to_compressed(&pubkey_bytes) else {
+                return false;
+            };
+            let keyid = format!("p256:{}", hex::encode(&sec1));
+            registry.add(keyid, TrustRoot::P256PubKeySec1(sec1));
         }
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => return false,
@@ -762,10 +818,6 @@ pub fn bao_verify_slice(
     }
 }
 
-// Keep `Write` alive for future streaming shims; `Read` is used above.
-#[allow(dead_code)]
-fn _io_traits_reachable(_: &mut dyn Write) {}
-
 // ---------------------------------------------------------------------
 // Returned structs (plain JS objects via wasm-bindgen getters)
 // ---------------------------------------------------------------------
@@ -950,12 +1002,12 @@ impl ChunkerResult {
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn chunk_count(&self) -> u32 {
-        u32::try_from(self.chunks.len()).unwrap_or(u32::MAX)
+        js_vec_count(&self.chunks)
     }
     #[wasm_bindgen]
     #[must_use]
     pub fn chunk(&self, i: u32) -> Option<ChunkInfo> {
-        self.chunks.get(i as usize).cloned()
+        js_vec_get(&self.chunks, i)
     }
     #[wasm_bindgen(getter)]
     #[must_use]
@@ -992,12 +1044,12 @@ impl ChunkedBlobJs {
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn chunk_count(&self) -> u32 {
-        u32::try_from(self.chunks.len()).unwrap_or(u32::MAX)
+        js_vec_count(&self.chunks)
     }
     #[wasm_bindgen]
     #[must_use]
     pub fn chunk(&self, i: u32) -> Option<ChunkInfo> {
-        self.chunks.get(i as usize).cloned()
+        js_vec_get(&self.chunks, i)
     }
     #[wasm_bindgen(getter)]
     #[must_use]
@@ -1049,12 +1101,12 @@ impl DeltaSummary {
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn op_count(&self) -> u32 {
-        u32::try_from(self.ops.len()).unwrap_or(u32::MAX)
+        js_vec_count(&self.ops)
     }
     #[wasm_bindgen]
     #[must_use]
     pub fn op(&self, i: u32) -> Option<DeltaOp> {
-        self.ops.get(i as usize).cloned()
+        js_vec_get(&self.ops, i)
     }
     #[wasm_bindgen(getter)]
     #[must_use]
@@ -1247,5 +1299,77 @@ mod tests {
     fn parse_json_triples_accepts_small_valid_input() {
         let out = parse_json_triples(r#"[["a","b","c"]]"#).expect("small input is valid");
         assert_eq!(out, vec![("a".into(), "b".into(), "c".into())]);
+    }
+
+    #[test]
+    fn sec1_to_compressed_passes_through_compressed() {
+        // A 33-byte 0x02/0x03-prefixed key is already compressed.
+        let mut k = vec![0x03u8; 33];
+        k[0] = 0x02;
+        assert_eq!(sec1_to_compressed(&k).as_deref(), Some(k.as_slice()));
+        k[0] = 0x03;
+        assert_eq!(sec1_to_compressed(&k).as_deref(), Some(k.as_slice()));
+    }
+
+    #[test]
+    fn sec1_to_compressed_rejects_malformed() {
+        assert!(sec1_to_compressed(&[]).is_none());
+        assert!(sec1_to_compressed(&[0x04u8; 64]).is_none()); // wrong length
+        assert!(sec1_to_compressed(&[0x02u8; 32]).is_none()); // wrong length
+        assert!(sec1_to_compressed(&[0x05u8; 33]).is_none()); // bad tag
+        assert!(sec1_to_compressed(&[0x01u8; 65]).is_none()); // uncompressed bad tag
+    }
+
+    /// `sec1_to_compressed` must reproduce exactly the compressed encoding
+    /// that the signer emits when fed the matching *uncompressed* point —
+    /// this is what makes the keyid match the envelope's keyid.
+    #[test]
+    fn sec1_to_compressed_matches_signer_p256() {
+        let mut seed = [0u8; 32];
+        seed[31] = 7;
+        let signer = P256Signer::from_seed_zeroizing(&Zeroizing::new(seed)).unwrap();
+        let compressed = signer.public_key_sec1();
+        let uncompressed = signer.public_key_sec1_uncompressed();
+        assert_eq!(uncompressed.len(), 65);
+        assert_eq!(uncompressed[0], 0x04);
+        assert_eq!(
+            sec1_to_compressed(&uncompressed).as_deref(),
+            Some(compressed.as_slice()),
+            "compressing the uncompressed key must equal the signer's compressed key"
+        );
+    }
+
+    /// Regression: an envelope built (and thus keyed) with the compressed
+    /// SEC1 form must still verify when the caller supplies the *uncompressed*
+    /// 130-hex pubkey, as the public docstring promises. Before normalization
+    /// this returned `false` (keyid mismatch → lookup miss).
+    #[test]
+    fn attest_verify_accepts_uncompressed_p256_pubkey() {
+        let commit = to_hex(&hash(b"commit-bytes"));
+        let mut seed = [0u8; 32];
+        seed[31] = 7;
+        let seed_hex = to_hex(&seed);
+
+        let att = attest_build(
+            &commit,
+            "https://example/predicate",
+            b"{}",
+            &seed_hex,
+            "p256",
+        )
+        .expect("build p256 envelope");
+
+        // Sanity: the natural compressed pubkey verifies.
+        let compressed_hex = att.keyid.strip_prefix("p256:").unwrap().to_string();
+        assert!(attest_verify(&att.envelope_json, &compressed_hex, "p256"));
+
+        // The documented uncompressed form must verify too.
+        let signer = P256Signer::from_seed_zeroizing(&Zeroizing::new(seed)).unwrap();
+        let uncompressed_hex = hex::encode(signer.public_key_sec1_uncompressed());
+        assert_eq!(uncompressed_hex.len(), 130);
+        assert!(
+            attest_verify(&att.envelope_json, &uncompressed_hex, "p256"),
+            "uncompressed SEC1 pubkey must verify per the documented contract"
+        );
     }
 }

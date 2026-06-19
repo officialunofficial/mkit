@@ -9,6 +9,23 @@ use p256::ecdsa::{Signature as P256Signature, SigningKey as P256SigningKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
+mod protectors;
+
+#[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
+use protectors::LinuxSecretServiceProtector;
+#[cfg(all(target_os = "macos", feature = "macos-keychain"))]
+use protectors::MacosKeychainProtector;
+#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
+use protectors::SystemdCredsProtector;
+#[cfg(all(windows, feature = "windows-credential"))]
+use protectors::WindowsCredentialProtector;
+#[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
+use protectors::linux_desktop_session_available;
+#[cfg(all(test, target_os = "linux", feature = "systemd-creds"))]
+use protectors::systemd_creds::systemd_creds_protector_for_availability;
+#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
+use protectors::systemd_creds_protector;
+
 #[cfg(feature = "bls-threshold")]
 use crate::encrypted_record;
 use crate::encrypted_record::{EncryptedKeyRecord, KeyProtector};
@@ -104,11 +121,17 @@ impl SoftwareKeystore {
         self.backend == BackendKind::SoftwareRaw
     }
 
+    /// Build metadata for a key, reporting the key attributes that were
+    /// stored with it. The raw backend has no persisted attrs, so callers
+    /// pass `attrs = None` and the software-invariant defaults are reported;
+    /// the encrypted backend passes the record's authenticated `attrs` so
+    /// the listing reflects persisted state rather than constants.
     fn metadata_for_secret(
         &self,
         label: KeyLabel,
         algorithm: Algorithm,
         secret: &SecretKey,
+        attrs: Option<&KeyAttrs>,
     ) -> Result<KeyMetadata> {
         let signer = SoftwareSigner::new(
             label.clone(),
@@ -116,15 +139,19 @@ impl SoftwareKeystore {
             secret.algorithm(),
             *secret.expose_secret(),
         )?;
+        // The software backend only ever persists the default extractable
+        // attribute set (enforced by `validate_attrs`), so the raw path's
+        // `None` reports those defaults.
+        let attrs = attrs.cloned().unwrap_or_default();
         Ok(KeyMetadata {
             label,
             backend: self.backend,
             algorithm,
             public_key: signer.public_key()?,
             keyid: signer.keyid()?,
-            extractable: true,
-            require_user_presence: false,
-            device_bound: false,
+            extractable: attrs.extractable,
+            require_user_presence: attrs.require_user_presence,
+            device_bound: attrs.device_bound,
         })
     }
 
@@ -562,12 +589,17 @@ impl KeyLister for SoftwareKeystore {
                 let label = KeyLabel::new(label)?;
                 if self.is_raw() {
                     let secret = self.load_secret(&label, algorithm)?;
-                    out.push(self.metadata_for_secret(label, algorithm, &secret)?);
+                    out.push(self.metadata_for_secret(label, algorithm, &secret, None)?);
                 } else {
                     let record = self.load_record(&label, algorithm)?;
                     let protector = self.protector_for_record(&record)?;
                     let secret = record.decrypt(label.as_str(), protector.as_ref())?;
-                    out.push(self.metadata_for_secret(label, algorithm, &secret)?);
+                    out.push(self.metadata_for_secret(
+                        label,
+                        algorithm,
+                        &secret,
+                        Some(&record.attrs),
+                    )?);
                 }
             }
         }
@@ -1606,344 +1638,6 @@ fn default_protector_by_id(root: &Path, id: &str) -> Result<Arc<dyn KeyProtector
     }
 }
 
-#[allow(dead_code)]
-fn random_handle() -> Result<String> {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|_| Error::Internal("rng failed".into()))?;
-    Ok(hex_lower(&bytes))
-}
-
-#[cfg(all(target_os = "macos", feature = "macos-keychain"))]
-#[derive(Debug)]
-struct MacosKeychainProtector;
-
-#[cfg(all(target_os = "macos", feature = "macos-keychain"))]
-impl MacosKeychainProtector {
-    const ID: &'static str = "macos-keychain";
-    const SERVICE: &'static str = "dev.mkit.keystore.software-dek.v1";
-}
-
-#[cfg(all(target_os = "macos", feature = "macos-keychain"))]
-impl KeyProtector for MacosKeychainProtector {
-    fn id(&self) -> &'static str {
-        Self::ID
-    }
-
-    fn wrap_dek(&self, dek: &[u8; 32], _aad: &[u8]) -> Result<Vec<u8>> {
-        let account = random_handle()?;
-        security_framework::passwords::set_generic_password(Self::SERVICE, &account, dek).map_err(
-            |error| Error::Io(format!("macOS Keychain software protector set: {error}")),
-        )?;
-        Ok(account.into_bytes())
-    }
-
-    fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
-        let account = std::str::from_utf8(wrapped)
-            .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        let secret = zeroize::Zeroizing::new(
-            security_framework::passwords::get_generic_password(Self::SERVICE, account).map_err(
-                |error| Error::Io(format!("macOS Keychain software protector get: {error}")),
-            )?,
-        );
-        if secret.len() != 32 {
-            return Err(Error::Encoding(format!(
-                "protected DEK length: {}",
-                secret.len()
-            )));
-        }
-        let mut dek = zeroize::Zeroizing::new([0u8; 32]);
-        dek.copy_from_slice(secret.as_slice());
-        Ok(dek)
-    }
-
-    fn delete_wrapped_dek(&self, wrapped: &[u8]) -> Result<()> {
-        let account = std::str::from_utf8(wrapped)
-            .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        security_framework::passwords::delete_generic_password(Self::SERVICE, account).map_err(
-            |error| Error::Io(format!("macOS Keychain software protector delete: {error}")),
-        )
-    }
-}
-
-#[cfg(all(windows, feature = "windows-credential"))]
-#[derive(Debug)]
-struct WindowsCredentialProtector;
-
-#[cfg(all(windows, feature = "windows-credential"))]
-impl WindowsCredentialProtector {
-    const ID: &'static str = "windows-credential";
-    const SERVICE: &'static str = "dev.mkit.keystore.software-dek.v1";
-
-    fn entry(account: &str) -> Result<keyring_core::Entry> {
-        let store = windows_native_keyring_store::Store::new().map_err(|error| {
-            Error::BackendUnavailable(format!("Windows Credential software protector: {error}"))
-        })?;
-        let _guard = crate::keyring_default_store_lock();
-        keyring_core::set_default_store(store);
-        keyring_core::Entry::new(Self::SERVICE, account)
-            .map_err(|error| Error::Io(format!("Windows Credential software protector: {error}")))
-    }
-}
-
-#[cfg(all(windows, feature = "windows-credential"))]
-impl KeyProtector for WindowsCredentialProtector {
-    fn id(&self) -> &'static str {
-        Self::ID
-    }
-
-    fn wrap_dek(&self, dek: &[u8; 32], _aad: &[u8]) -> Result<Vec<u8>> {
-        let account = random_handle()?;
-        Self::entry(&account)?.set_secret(dek).map_err(|error| {
-            Error::Io(format!(
-                "Windows Credential software protector set: {error}"
-            ))
-        })?;
-        Ok(account.into_bytes())
-    }
-
-    fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
-        let account = std::str::from_utf8(wrapped)
-            .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        let secret =
-            zeroize::Zeroizing::new(Self::entry(account)?.get_secret().map_err(|error| {
-                Error::Io(format!(
-                    "Windows Credential software protector get: {error}"
-                ))
-            })?);
-        if secret.len() != 32 {
-            return Err(Error::Encoding(format!(
-                "protected DEK length: {}",
-                secret.len()
-            )));
-        }
-        let mut dek = zeroize::Zeroizing::new([0u8; 32]);
-        dek.copy_from_slice(secret.as_slice());
-        Ok(dek)
-    }
-
-    fn delete_wrapped_dek(&self, wrapped: &[u8]) -> Result<()> {
-        let account = std::str::from_utf8(wrapped)
-            .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        Self::entry(account)?.delete_credential().map_err(|error| {
-            Error::Io(format!(
-                "Windows Credential software protector delete: {error}"
-            ))
-        })
-    }
-}
-
-#[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
-#[derive(Debug)]
-struct LinuxSecretServiceProtector;
-
-#[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
-impl LinuxSecretServiceProtector {
-    const ID: &'static str = "linux-secret-service";
-    const SERVICE: &'static str = "dev.mkit.keystore.software-dek.v1";
-
-    fn available() -> Result<bool> {
-        match zbus_secret_service_keyring_store::Store::new() {
-            Ok(_) => Ok(true),
-            Err(error) => Err(Error::BackendUnavailable(format!(
-                "Linux Secret Service software protector: {error}"
-            ))),
-        }
-    }
-
-    fn entry(account: &str) -> Result<keyring_core::Entry> {
-        let store = zbus_secret_service_keyring_store::Store::new().map_err(|error| {
-            Error::BackendUnavailable(format!("Linux Secret Service software protector: {error}"))
-        })?;
-        let _guard = crate::keyring_default_store_lock();
-        keyring_core::set_default_store(store);
-        keyring_core::Entry::new(Self::SERVICE, account)
-            .map_err(|error| Error::Io(format!("Linux Secret Service software protector: {error}")))
-    }
-}
-
-#[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
-impl KeyProtector for LinuxSecretServiceProtector {
-    fn id(&self) -> &'static str {
-        Self::ID
-    }
-
-    fn wrap_dek(&self, dek: &[u8; 32], _aad: &[u8]) -> Result<Vec<u8>> {
-        let account = random_handle()?;
-        Self::entry(&account)?.set_secret(dek).map_err(|error| {
-            Error::Io(format!(
-                "Linux Secret Service software protector set: {error}"
-            ))
-        })?;
-        Ok(account.into_bytes())
-    }
-
-    fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
-        let account = std::str::from_utf8(wrapped)
-            .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        let secret =
-            zeroize::Zeroizing::new(Self::entry(account)?.get_secret().map_err(|error| {
-                Error::Io(format!(
-                    "Linux Secret Service software protector get: {error}"
-                ))
-            })?);
-        if secret.len() != 32 {
-            return Err(Error::Encoding(format!(
-                "protected DEK length: {}",
-                secret.len()
-            )));
-        }
-        let mut dek = zeroize::Zeroizing::new([0u8; 32]);
-        dek.copy_from_slice(secret.as_slice());
-        Ok(dek)
-    }
-
-    fn delete_wrapped_dek(&self, wrapped: &[u8]) -> Result<()> {
-        let account = std::str::from_utf8(wrapped)
-            .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        Self::entry(account)?.delete_credential().map_err(|error| {
-            Error::Io(format!(
-                "Linux Secret Service software protector delete: {error}"
-            ))
-        })
-    }
-}
-
-#[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
-fn linux_desktop_session_available() -> bool {
-    std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
-        || std::env::var_os("XDG_CURRENT_DESKTOP").is_some()
-        || std::env::var_os("DESKTOP_SESSION").is_some()
-}
-
-#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-#[derive(Debug)]
-struct SystemdCredsProtector {
-    storage_root: PathBuf,
-    dek_root: PathBuf,
-}
-
-#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-impl SystemdCredsProtector {
-    const ID: &'static str = "systemd-creds";
-
-    fn path_for(&self, handle: &str) -> PathBuf {
-        self.dek_root.join(format!("{handle}.cred"))
-    }
-
-    fn credential_name(handle: &str) -> String {
-        format!("mkit.software-dek.{handle}")
-    }
-
-    fn prepare_write_path(&self, path: &Path) -> Result<()> {
-        #[cfg(unix)]
-        {
-            let parent = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            ensure_no_symlink_path(&self.storage_root, parent)?;
-            std::fs::create_dir_all(parent)
-                .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
-            set_private_dir_permissions(&self.storage_root)?;
-            ensure_owned_by_euid(&self.storage_root)?;
-            if parent != self.storage_root {
-                set_private_dir_permissions(parent)?;
-                ensure_owned_by_euid(parent)?;
-            }
-        }
-
-        #[cfg(not(unix))]
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
-        }
-
-        Ok(())
-    }
-
-    fn validate_existing_path(&self, path: &Path) -> Result<()> {
-        #[cfg(unix)]
-        ensure_no_symlink_path(&self.storage_root, path)?;
-
-        Ok(())
-    }
-}
-
-#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-fn systemd_creds_protector(root: &Path) -> Result<Arc<dyn KeyProtector>> {
-    systemd_creds_protector_for_availability(
-        root,
-        crate::backend_systemd_creds::systemd_creds_runtime_available(),
-    )
-}
-
-#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-fn systemd_creds_protector_for_availability(
-    root: &Path,
-    runtime_available: bool,
-) -> Result<Arc<dyn KeyProtector>> {
-    if !runtime_available {
-        return Err(Error::BackendUnavailable(
-            "systemd-creds executable was not found or is unusable".into(),
-        ));
-    }
-    Ok(Arc::new(SystemdCredsProtector {
-        storage_root: root.into(),
-        dek_root: root.join("deks"),
-    }))
-}
-
-#[cfg(all(target_os = "linux", feature = "systemd-creds"))]
-impl KeyProtector for SystemdCredsProtector {
-    fn id(&self) -> &'static str {
-        Self::ID
-    }
-
-    fn wrap_dek(&self, dek: &[u8; 32], _aad: &[u8]) -> Result<Vec<u8>> {
-        let handle = random_handle()?;
-        let path = self.path_for(&handle);
-        self.prepare_write_path(&path)?;
-        crate::backend_systemd_creds::encrypt_credential_create_new(
-            dek,
-            &path,
-            &Self::credential_name(&handle),
-        )?;
-        Ok(handle.into_bytes())
-    }
-
-    fn unwrap_dek(&self, wrapped: &[u8], _aad: &[u8]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
-        let handle = std::str::from_utf8(wrapped)
-            .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        let path = self.path_for(handle);
-        self.validate_existing_path(&path)?;
-        let secret = zeroize::Zeroizing::new(crate::backend_systemd_creds::decrypt_credential(
-            &path,
-            &Self::credential_name(handle),
-        )?);
-        if secret.len() != 32 {
-            return Err(Error::Encoding(format!(
-                "protected DEK length: {}",
-                secret.len()
-            )));
-        }
-        let mut dek = zeroize::Zeroizing::new([0u8; 32]);
-        dek.copy_from_slice(secret.as_slice());
-        Ok(dek)
-    }
-
-    fn delete_wrapped_dek(&self, wrapped: &[u8]) -> Result<()> {
-        let handle = std::str::from_utf8(wrapped)
-            .map_err(|error| Error::Encoding(format!("protector handle is not UTF-8: {error}")))?;
-        let path = self.path_for(handle);
-        self.validate_existing_path(&path)?;
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(Error::Io(format!("delete systemd-creds DEK: {error}"))),
-        }
-    }
-}
-
 fn default_storage_root() -> Result<PathBuf> {
     #[cfg(unix)]
     {
@@ -1998,15 +1692,7 @@ fn invalid_key_material(algorithm: Algorithm, reason: &str) -> Error {
     }
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
+use crate::types::hex_lower;
 
 fn hex_decode(input: &str) -> Result<Vec<u8>> {
     if !input.len().is_multiple_of(2) {
@@ -2386,6 +2072,55 @@ mod tests {
         assert!(encoded.starts_with(b"MKITKSV1"));
         assert_ne!(encoded, seed);
         assert_eq!(store.list().unwrap()[0].label, "encrypted");
+    }
+
+    #[test]
+    fn software_list_reports_attrs_stored_in_record_not_constants() {
+        // Regression: `list()` must derive the reported attributes from the
+        // decrypted record's authenticated `KeyAttrs`, not from hardcoded
+        // constants. `validate_attrs` keeps the public API from writing
+        // anything but the defaults today, so we hand-craft a record with
+        // non-default attrs to prove the listing path honors stored state.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = software_store(dir.path().join("keys"));
+
+        let secret = SecretKey::new(Algorithm::Ed25519, [0x5c; 32]);
+        let public_key =
+            public_key(secret.algorithm(), secret.expose_secret()).expect("public key");
+        let keyid = format!("{}:{}", secret.algorithm(), hex_lower(&public_key));
+        let attrs = KeyAttrs {
+            extractable: true,
+            require_user_presence: true,
+            device_bound: true,
+        };
+        let record = EncryptedKeyRecord::encrypt(
+            "crafted",
+            &secret,
+            attrs,
+            public_key,
+            keyid,
+            &TestProtector,
+        )
+        .expect("encrypt record");
+
+        let path = store.path_for("crafted", Algorithm::Ed25519).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).expect("algorithm dir");
+        std::fs::write(&path, record.encode().expect("encode")).expect("write record");
+
+        let listed = store.list().expect("list");
+        let entry = listed
+            .iter()
+            .find(|metadata| metadata.label == "crafted")
+            .expect("crafted key listed");
+        assert!(entry.extractable, "stored extractable must be reported");
+        assert!(
+            entry.require_user_presence,
+            "stored require_user_presence must be reported, not the constant false"
+        );
+        assert!(
+            entry.device_bound,
+            "stored device_bound must be reported, not the constant false"
+        );
     }
 
     #[test]

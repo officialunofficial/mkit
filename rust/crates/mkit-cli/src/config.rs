@@ -1283,21 +1283,6 @@ pub fn xdg_config_home() -> PathBuf {
     xdg("XDG_CONFIG_HOME", ".config")
 }
 
-#[must_use]
-pub fn xdg_data_home() -> PathBuf {
-    xdg("XDG_DATA_HOME", ".local/share")
-}
-
-#[must_use]
-pub fn xdg_cache_home() -> PathBuf {
-    xdg("XDG_CACHE_HOME", ".cache")
-}
-
-#[must_use]
-pub fn xdg_state_home() -> PathBuf {
-    xdg("XDG_STATE_HOME", ".local/state")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -34,7 +34,6 @@
 //!   symlinked parent directory (git would silently follow it) — mkit
 //!   keeps writes inside the repo.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
@@ -184,7 +183,7 @@ pub fn run(args: &[String]) -> u8 {
     }
     let into_dir = sources.len() > 1 || dest_abs.is_dir();
 
-    // Phase 1 — validate and plan every move before touching anything. A
+    // Pass 1 — validate and plan every move before touching anything. A
     // source that is an exact tracked entry is a file move; one that is the
     // prefix of tracked entries is a directory move; anything else is not
     // under version control.
@@ -303,7 +302,7 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
 
-    // Phase 2 — execute. On a filesystem error mid-batch, persist the
+    // Pass 2 — execute. On a filesystem error mid-batch, persist the
     // index for the moves already done so it stays consistent with disk.
     for (done, p) in plan.iter().enumerate() {
         let exec = match p {
@@ -343,30 +342,17 @@ fn plan_move(
     let src_rel =
         super::index_path_for_arg(cwd, Path::new(source)).map_err(|e| emit_err(&e, exit::USAGE))?;
 
-    // The source must be a tracked, not-yet-removed index entry.
+    // The source must be a tracked, not-yet-removed index entry. The
+    // caller (`run`) only invokes `plan_move` after proving exactly this
+    // with the same predicate against the same index and `src_rel` (the
+    // `is_file` branch), so a match is guaranteed to exist here. The
+    // untracked and tracked-directory cases are handled by the caller's
+    // `else if is_dir` / `else` arms before we ever get here.
     let src_idx = idx
         .entries
         .iter()
         .position(|e| e.path == src_rel && e.status != EntryStatus::Removed)
-        .ok_or_else(|| {
-            // Distinguish "tracked directory" (unsupported) from "untracked".
-            let dir_prefix = format!("{src_rel}/");
-            let is_tracked_dir = idx
-                .entries
-                .iter()
-                .any(|e| e.status != EntryStatus::Removed && e.path.starts_with(&dir_prefix));
-            if is_tracked_dir {
-                emit_err(
-                    &format!("moving directories is not yet supported: {source}"),
-                    exit::GENERAL_ERROR,
-                )
-            } else {
-                emit_err(
-                    &format!("not under version control: {source}"),
-                    exit::GENERAL_ERROR,
-                )
-            }
-        })?;
+        .expect("plan_move caller guarantees the source is a tracked file");
     let status = idx.entries[src_idx].status;
     let hash = idx.entries[src_idx].object_hash;
 
@@ -864,8 +850,4 @@ fn target_within_repo(root_canon: &Path, target_abs: &Path) -> bool {
     false
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;

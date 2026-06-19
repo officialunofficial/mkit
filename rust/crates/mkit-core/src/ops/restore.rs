@@ -97,15 +97,6 @@ impl Default for RestoreOptions {
     }
 }
 
-impl RestoreOptions {
-    /// Same as `Default::default()`. Provided as a non-trait constructor
-    /// so call sites that prefer an explicit name can use it.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
 /// Parse the contents of a `.mkit/sparse-checkout` file into patterns.
 #[must_use]
 pub fn parse_sparse_patterns(content: &str) -> Vec<SparsePattern> {
@@ -245,10 +236,10 @@ fn path_matches_pattern(pattern: &str, path: &str) -> bool {
     false
 }
 
-/// Summary of a [`restore_tree_to_worktree`] call. Counts mirror the
-/// material the caller (`mkit checkout`) prints to the user, and the
-/// integration tests assert on these counts directly so the CLI output
-/// is trustable without scraping stdout.
+/// Summary of a [`restore_tree_to_worktree`] call. The counts are no
+/// longer printed by any caller (`mkit checkout` emits a git-shaped
+/// switch confirmation instead); they are retained for programmatic
+/// callers and asserted by this module's own unit tests.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RestoreReport {
     /// Number of regular / executable files materialised.
@@ -267,8 +258,9 @@ pub struct RestoreReport {
 ///    written (git parity) — they only protect *untracked* worktree files
 ///    (editor swapfiles, local-only build artefacts, …) from the
 ///    `clean=true` sweep.
-/// 2. Returns a [`RestoreReport`] with counts the `mkit checkout` UX
-///    prints for the user.
+/// 2. Returns a [`RestoreReport`] with counts of what was materialised
+///    (consumed by programmatic callers and this module's tests; not
+///    printed by the CLI).
 ///
 /// Symlink safety is inherited from [`restore_tree`] /
 /// [`worktree::validate_symlink_target`]: targets are validated BEFORE
@@ -318,12 +310,12 @@ fn restore_tree_to_worktree_inner(
     };
 
     if options.clean {
-        clean_directory_with_ignore(
+        clean_directory(
             target_dir,
             &tree.entries,
             options.sparse_patterns.as_deref(),
             path_prefix,
-            ignore,
+            Some(ignore),
         )?;
     }
 
@@ -431,6 +423,7 @@ fn restore_tree_inner(
             &tree.entries,
             options.sparse_patterns.as_deref(),
             path_prefix,
+            None,
         )?;
     }
 
@@ -641,11 +634,22 @@ fn make_tmp_sibling_name(name: &str) -> String {
     format!(".{name}.tmp.{pid}.{counter}")
 }
 
+/// Sweep `target_dir` of untracked entries before re-materialising a
+/// tree. Entries present in `tree_entries`, the repo-metadata dirs
+/// (`.mkit`/`.git`, ASCII case-insensitive so case-insensitive
+/// filesystems can't smuggle a `.MKIT`/`.Git` entry past the sweep — Git
+/// CVE-2021-21300 family), and `.mkitignore` are always preserved.
+///
+/// When `ignore` is `Some`, this is the worktree-checkout path: entries
+/// matching the ignore list are additionally preserved (ancestor-aware,
+/// so an untracked file *under* an ignored directory survives too), and
+/// `.gitignore` is preserved as well.
 fn clean_directory(
     target_dir: &Path,
     tree_entries: &[TreeEntry],
     sparse_patterns: Option<&[SparsePattern]>,
     path_prefix: &str,
+    ignore: Option<&IgnoreList>,
 ) -> RestoreResult<()> {
     struct CleanItem {
         name: String,
@@ -665,91 +669,14 @@ fn clean_directory(
             .to_str()
             .ok_or(RestoreError::InvalidUtf8)?
             .to_string();
-        // Hard-coded repo-metadata guard. Compared ASCII case-insensitively
-        // so case-insensitive filesystems (macOS default, Windows) can't
-        // smuggle a `.MKIT` or `.Git` entry past the sweep (Git CVE-
-        // 2021-21300 family).
         if name_str.eq_ignore_ascii_case(".mkit") || name_str.eq_ignore_ascii_case(".git") {
             continue;
         }
         if name_str == ".mkitignore" {
             continue;
         }
-        let mut found = false;
-        for te in tree_entries {
-            if te.name.as_slice() == name_str.as_bytes() {
-                found = true;
-                break;
-            }
-        }
-        if found {
-            continue;
-        }
-        let meta = entry.metadata()?;
-        let is_dir = meta.is_dir();
-        if let Some(patterns) = sparse_patterns {
-            let full_path = if path_prefix.is_empty() {
-                name_str.clone()
-            } else {
-                format!("{path_prefix}/{name_str}")
-            };
-            let allow = matches_sparse(patterns, &full_path, is_dir)
-                || (is_dir && could_match_descendant(patterns, &full_path));
-            if !allow {
-                continue;
-            }
-        }
-        to_delete.push(CleanItem {
-            name: name_str,
-            is_dir,
-        });
-    }
-
-    for item in to_delete {
-        let path = target_dir.join(&item.name);
-        if item.is_dir {
-            let _ = fs::remove_dir_all(&path);
-        } else {
-            let _ = fs::remove_file(&path);
-        }
-    }
-    Ok(())
-}
-
-/// Like [`clean_directory`] but additionally skips filesystem entries
-/// whose basename matches the `ignore` list — used by the worktree
-/// checkout path so locally-ignored artefacts (editor swapfiles, build
-/// outputs) survive the cleanup.
-fn clean_directory_with_ignore(
-    target_dir: &Path,
-    tree_entries: &[TreeEntry],
-    sparse_patterns: Option<&[SparsePattern]>,
-    path_prefix: &str,
-    ignore: &IgnoreList,
-) -> RestoreResult<()> {
-    struct CleanItem {
-        name: String,
-        is_dir: bool,
-    }
-    let mut to_delete: Vec<CleanItem> = Vec::new();
-
-    let read = match fs::read_dir(target_dir) {
-        Ok(r) => r,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(RestoreError::Io(e)),
-    };
-    for entry in read {
-        let entry = entry?;
-        let file_name = entry.file_name();
-        let name_str = file_name
-            .to_str()
-            .ok_or(RestoreError::InvalidUtf8)?
-            .to_string();
-        // Hard-coded repo-metadata guard, ASCII case-insensitive.
-        if name_str.eq_ignore_ascii_case(".mkit") || name_str.eq_ignore_ascii_case(".git") {
-            continue;
-        }
-        if name_str == ".mkitignore" || name_str == ".gitignore" {
+        // The ignore-aware checkout path also preserves `.gitignore`.
+        if ignore.is_some() && name_str == ".gitignore" {
             continue;
         }
         let mut found = false;
@@ -773,7 +700,9 @@ fn clean_directory_with_ignore(
         // ancestor-aware matching so an untracked file *under* an ignored
         // directory is preserved too (the safety gate exempts it, so the
         // sweep must not delete it).
-        if ignore.is_ignored_with_ancestors(&full_path, is_dir) {
+        if let Some(ignore) = ignore
+            && ignore.is_ignored_with_ancestors(&full_path, is_dir)
+        {
             continue;
         }
         if let Some(patterns) = sparse_patterns {
@@ -1074,7 +1003,7 @@ mod tests {
         fs::write(target.path().join(".Git/HEAD"), b"ref").unwrap();
         // Empty tree — without the case-insensitive guard, everything
         // unknown is removed.
-        clean_directory(target.path(), &[], None, "").unwrap();
+        clean_directory(target.path(), &[], None, "", None).unwrap();
         assert!(
             target.path().join(".MKIT/config").exists(),
             ".MKIT swept by clean_directory (case-fold bypass)"
@@ -1093,14 +1022,14 @@ mod tests {
         fs::create_dir_all(target.path().join(".GIT")).unwrap();
         fs::write(target.path().join(".GIT/HEAD"), b"ref").unwrap();
         let ignore = crate::ignore::IgnoreList::new();
-        clean_directory_with_ignore(target.path(), &[], None, "", &ignore).unwrap();
+        clean_directory(target.path(), &[], None, "", Some(&ignore)).unwrap();
         assert!(
             target.path().join(".MKIT/config").exists(),
-            ".MKIT swept by clean_directory_with_ignore (case-fold bypass)"
+            ".MKIT swept by clean_directory (ignore-aware, case-fold bypass)"
         );
         assert!(
             target.path().join(".GIT/HEAD").exists(),
-            ".GIT swept by clean_directory_with_ignore (case-fold bypass)"
+            ".GIT swept by clean_directory (ignore-aware, case-fold bypass)"
         );
     }
 

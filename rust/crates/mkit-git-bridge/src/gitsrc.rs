@@ -8,7 +8,7 @@
 //! is injection-free by construction.
 
 use crate::error::BridgeError;
-use crate::gitobj::{Sha1Id, sha1_from_hex, sha1_hex};
+use crate::gitobj::{GitType, Sha1Id, sha1_from_hex, sha1_hex};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -63,6 +63,17 @@ impl GitObjKind {
             "tag" => Self::Tag,
             _ => return None,
         })
+    }
+}
+
+impl From<GitObjKind> for GitType {
+    fn from(kind: GitObjKind) -> Self {
+        match kind {
+            GitObjKind::Blob => Self::Blob,
+            GitObjKind::Tree => Self::Tree,
+            GitObjKind::Commit => Self::Commit,
+            GitObjKind::Tag => Self::Tag,
+        }
     }
 }
 
@@ -437,5 +448,34 @@ mod tests {
             Some("refs/heads/main")
         );
         assert!(!is_sha256_repo(&git_dir).unwrap());
+    }
+
+    /// `GitObjKind -> GitType` must agree with the canonical
+    /// `GitObject::raw` framing for every kind, so the single shared
+    /// header layout stays correct (no per-call-site drift).
+    #[test]
+    fn objkind_into_gittype_frames_canonically() {
+        for (kind, name) in [
+            (GitObjKind::Blob, "blob"),
+            (GitObjKind::Tree, "tree"),
+            (GitObjKind::Commit, "commit"),
+            (GitObjKind::Tag, "tag"),
+        ] {
+            let gtype: GitType = kind.into();
+            assert_eq!(gtype.name(), name);
+            let body = b"hi".to_vec();
+            let raw = crate::gitobj::GitObject {
+                gtype,
+                body: body.clone(),
+            }
+            .raw();
+            let mut expect = Vec::new();
+            expect.extend_from_slice(name.as_bytes());
+            expect.push(b' ');
+            expect.extend_from_slice(body.len().to_string().as_bytes());
+            expect.push(0);
+            expect.extend_from_slice(&body);
+            assert_eq!(raw, expect, "{name} framing");
+        }
     }
 }

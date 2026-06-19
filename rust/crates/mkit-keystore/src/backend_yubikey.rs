@@ -258,7 +258,10 @@ impl KeySigner for YubiKeyPivSigner {
     }
 
     fn keyid(&self) -> Result<KeyId> {
-        KeyId::new(format!("p256:{}", hex_lower(&self.key.public_key)))
+        KeyId::new(format!(
+            "p256:{}",
+            crate::types::hex_lower(&self.key.public_key)
+        ))
     }
 
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>> {
@@ -544,7 +547,7 @@ fn piv_metadata_for(key: &PivSigningKey) -> KeyMetadata {
         backend: BackendKind::YubiKey,
         algorithm: Algorithm::P256,
         public_key: PublicKeyBytes::new(key.public_key.clone()),
-        keyid: KeyId::new(format!("p256:{}", hex_lower(&key.public_key)))
+        keyid: KeyId::new(format!("p256:{}", crate::types::hex_lower(&key.public_key)))
             .expect("generated key ID is valid"),
         extractable: false,
         require_user_presence: key.pin_policy != PinPolicy::Never
@@ -606,7 +609,7 @@ fn serial_qualified_piv_label(serial: yubikey::Serial, slot: SlotId) -> String {
 }
 
 fn keyid_for(public_key: &[u8]) -> String {
-    format!("ed25519:{}", hex_lower(public_key))
+    format!("ed25519:{}", crate::types::hex_lower(public_key))
 }
 
 fn label_from_ident(ident: &str) -> String {
@@ -655,16 +658,6 @@ fn map_yubikey_error(error: yubikey::Error) -> Error {
         }
         other => Error::Io(other.to_string()),
     }
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 #[cfg(test)]

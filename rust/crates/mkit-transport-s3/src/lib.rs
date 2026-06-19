@@ -264,6 +264,19 @@ impl S3Transport {
         sigv4::canonical_query_string(&[("list-type", "2"), ("prefix", prefix)])
     }
 
+    /// Build the canonical `ListObjectsV2` query string for the next page
+    /// of a truncated listing, carrying the `continuation-token` returned
+    /// by the previous page. Same encoding/sorting rules as
+    /// [`build_list_query`].
+    #[must_use]
+    pub fn build_list_query_continued(prefix: &str, continuation_token: &str) -> String {
+        sigv4::canonical_query_string(&[
+            ("continuation-token", continuation_token),
+            ("list-type", "2"),
+            ("prefix", prefix),
+        ])
+    }
+
     // -- HTTP core --
 
     /// Make a signed HTTP request with exponential-backoff retry on
@@ -359,10 +372,6 @@ impl S3Transport {
 struct HttpResponse {
     status: u16,
     body: Vec<u8>,
-    /// Reserved for future ETag-based CAS reconciliation. Reqwest lowercases
-    /// header names, and R2 returns the MD5 ETag on both `PUT` and `GET`.
-    #[allow(dead_code)]
-    etag: Option<String>,
 }
 
 fn extract_response(
@@ -371,11 +380,6 @@ fn extract_response(
     is_head: bool,
 ) -> TransportResult<HttpResponse> {
     let status = resp.status().as_u16();
-    let etag = resp
-        .headers()
-        .get(reqwest::header::ETAG)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
     let body = if is_head {
         Vec::new()
     } else if let Some(limit) = body_limit {
@@ -395,7 +399,7 @@ fn extract_response(
         // the status is retryable and the caller discards).
         Vec::new()
     };
-    Ok(HttpResponse { status, body, etag })
+    Ok(HttpResponse { status, body })
 }
 
 fn method_to_str(m: &Method) -> &'static str {
@@ -625,21 +629,46 @@ impl Transport for S3Transport {
             return Err(TransportError::InvalidRef(prefix.to_owned()));
         }
         let query_prefix = self.effective_list_prefix(prefix);
-        let query = Self::build_list_query(&query_prefix);
-        let resp = self.http_request(
-            &Method::GET,
-            "",
-            &query,
-            None,
-            &[],
-            Some(REF_LIST_BODY_LIMIT),
-        )?;
-        match resp.status {
-            200 => {}
-            403 | 401 => return Err(TransportError::AccessDenied),
-            s => return Err(TransportError::ServerError { status: s }),
+
+        // Trim a trailing '/' so suffix extraction below matches the
+        // canonical memory/file transports: `list_refs("refs/heads")`
+        // and `list_refs("refs/heads/")` both yield `"main"`, never
+        // `"/main"` (which `validate_ref_name` would reject, silently
+        // dropping the ref).
+        let prefix_trimmed = prefix.trim_end_matches('/');
+
+        // Paginate: ListObjectsV2 caps each page at 1000 keys and signals
+        // more via IsTruncated + NextContinuationToken. Without this loop
+        // a namespace with >1000 ref objects returns a silently truncated
+        // ref list, corrupting fetch/sync decisions.
+        let mut keys: Vec<String> = Vec::new();
+        let mut continuation: Option<String> = None;
+        loop {
+            let query = match continuation.as_deref() {
+                Some(token) => Self::build_list_query_continued(&query_prefix, token),
+                None => Self::build_list_query(&query_prefix),
+            };
+            let resp = self.http_request(
+                &Method::GET,
+                "",
+                &query,
+                None,
+                &[],
+                Some(REF_LIST_BODY_LIMIT),
+            )?;
+            match resp.status {
+                200 => {}
+                403 | 401 => return Err(TransportError::AccessDenied),
+                s => return Err(TransportError::ServerError { status: s }),
+            }
+            let page = parse_list_page(&resp.body);
+            keys.extend(page.keys);
+            match page.next_continuation_token {
+                Some(token) => continuation = Some(token),
+                None => break,
+            }
         }
-        let keys = parse_list_xml(&resp.body);
+
         let mut out: Vec<Ref> = Vec::new();
         for key in keys {
             let Some(repo_key) = self.strip_effective_prefix(&key) else {
@@ -648,17 +677,30 @@ impl Transport for S3Transport {
             if !validate_ref_name(repo_key) {
                 continue;
             }
-            // Resolve each key to its hash via a second GET.
-            let ref_resp =
-                self.http_request(&Method::GET, repo_key, "", None, &[], Some(REF_BODY_LIMIT))?;
+            // Resolve each key to its hash via a second GET. This is an
+            // inherent O(N) round-trip cost of the object-per-ref layout
+            // (the hash lives only in the object body, so ListObjectsV2
+            // cannot return it). Ref counts are normally small (branches
+            // + tags), so the cost is bounded in practice. A transient
+            // failure on one ref skips that ref rather than aborting the
+            // whole listing, matching the other `continue` paths below.
+            let Ok(ref_resp) =
+                self.http_request(&Method::GET, repo_key, "", None, &[], Some(REF_BODY_LIMIT))
+            else {
+                continue;
+            };
             if ref_resp.status != 200 {
                 continue;
             }
             let Ok(h) = parse_ref_body(&ref_resp.body) else {
                 continue;
             };
-            let suffix = if repo_key.len() > prefix.len() && repo_key.starts_with(prefix) {
-                &repo_key[prefix.len()..]
+            // Strip the (trimmed) prefix and the separating '/' so the
+            // returned name is suffix-only per the Transport contract.
+            let suffix = if prefix_trimmed.is_empty() {
+                repo_key
+            } else if let Some(after) = repo_key.strip_prefix(prefix_trimmed) {
+                after.strip_prefix('/').unwrap_or(after)
             } else {
                 repo_key
             };
@@ -685,6 +727,16 @@ fn parse_ref_body(body: &[u8]) -> TransportResult<Hash> {
     mkit_core::hash::from_hex(trimmed).map_err(|_| TransportError::InvalidResponse)
 }
 
+/// One parsed page of a `ListObjectsV2` response: the keys it contained
+/// plus the pagination cursor needed to fetch the next page.
+struct ListPage {
+    keys: Vec<String>,
+    /// `Some(token)` when `<IsTruncated>true</IsTruncated>` and a
+    /// `<NextContinuationToken>` is present — feed it back as the
+    /// `continuation-token` query parameter to fetch the next page.
+    next_continuation_token: Option<String>,
+}
+
 /// Minimal ListBucketResult XML parser — extracts every `<Key>...</Key>`.
 /// No XML validation, no entity decoding (S3 never URL-encodes keys in
 /// the XML).
@@ -693,6 +745,11 @@ pub fn parse_list_xml(xml: &[u8]) -> Vec<String> {
     let Ok(s) = std::str::from_utf8(xml) else {
         return Vec::new();
     };
+    extract_keys(s)
+}
+
+/// Extract every `<Key>...</Key>` value from a ListBucketResult body.
+fn extract_keys(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cursor = 0usize;
     while cursor < s.len() {
@@ -708,6 +765,44 @@ pub fn parse_list_xml(xml: &[u8]) -> Vec<String> {
         cursor = abs_end + "</Key>".len();
     }
     out
+}
+
+/// Extract the text content of the first `<tag>...</tag>` element.
+fn extract_element(s: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = s.find(&open)? + open.len();
+    let end = s[start..].find(&close)? + start;
+    Some(s[start..end].to_owned())
+}
+
+/// Parse a full `ListObjectsV2` XML body into keys + pagination cursor.
+///
+/// AWS S3 and Cloudflare R2 cap a single `ListObjectsV2` response at
+/// 1000 keys and signal more pages via
+/// `<IsTruncated>true</IsTruncated>` plus a `<NextContinuationToken>`.
+/// Ignoring those would silently truncate the ref list — see
+/// [`S3Transport::list_refs`], which loops on the returned token.
+fn parse_list_page(xml: &[u8]) -> ListPage {
+    let Ok(s) = std::str::from_utf8(xml) else {
+        return ListPage {
+            keys: Vec::new(),
+            next_continuation_token: None,
+        };
+    };
+    let keys = extract_keys(s);
+    let truncated = extract_element(s, "IsTruncated").as_deref() == Some("true");
+    let next_continuation_token = if truncated {
+        // Only honor a non-empty token; an empty/missing one ends the
+        // loop rather than re-requesting page 0 forever.
+        extract_element(s, "NextContinuationToken").filter(|t| !t.is_empty())
+    } else {
+        None
+    };
+    ListPage {
+        keys,
+        next_continuation_token,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,6 +1139,50 @@ mod tests {
             "list-type=2&prefix=refs%2Fheads%2F"
         );
         assert_eq!(S3Transport::build_list_query(""), "list-type=2&prefix=");
+    }
+
+    #[test]
+    fn list_query_continued_format() {
+        // Canonical sort puts `continuation-token` before `list-type`.
+        assert_eq!(
+            S3Transport::build_list_query_continued("refs/heads/", "TOKEN123"),
+            "continuation-token=TOKEN123&list-type=2&prefix=refs%2Fheads%2F"
+        );
+    }
+
+    #[test]
+    fn list_page_reports_continuation_when_truncated() {
+        let xml = br"<ListBucketResult>
+            <IsTruncated>true</IsTruncated>
+            <Contents><Key>refs/heads/a</Key></Contents>
+            <NextContinuationToken>NEXT</NextContinuationToken>
+        </ListBucketResult>";
+        let page = parse_list_page(xml);
+        assert_eq!(page.keys, vec!["refs/heads/a".to_owned()]);
+        assert_eq!(page.next_continuation_token.as_deref(), Some("NEXT"));
+    }
+
+    #[test]
+    fn list_page_no_continuation_when_not_truncated() {
+        let xml = br"<ListBucketResult>
+            <IsTruncated>false</IsTruncated>
+            <Contents><Key>refs/heads/a</Key></Contents>
+        </ListBucketResult>";
+        let page = parse_list_page(xml);
+        assert_eq!(page.keys, vec!["refs/heads/a".to_owned()]);
+        assert!(page.next_continuation_token.is_none());
+    }
+
+    #[test]
+    fn list_page_truncated_but_empty_token_terminates() {
+        // Defensive: IsTruncated=true with a missing/empty token must
+        // not loop forever.
+        let xml = br"<ListBucketResult>
+            <IsTruncated>true</IsTruncated>
+            <Contents><Key>refs/heads/a</Key></Contents>
+        </ListBucketResult>";
+        let page = parse_list_page(xml);
+        assert!(page.next_continuation_token.is_none());
     }
 
     #[test]

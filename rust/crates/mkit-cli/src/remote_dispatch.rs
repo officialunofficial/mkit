@@ -176,7 +176,7 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
     Err(DispatchError::MalformedUrl(url.to_string()))
 }
 
-/// `mkit+enc://` dispatch (Phase 2 of issue #156).
+/// `mkit+enc://` dispatch (issue #156).
 ///
 /// Parses the URL, derives an ephemeral dialer keypair (keystore
 /// integration is SPEC-TRANSPORT-ENC §6 item 5, still deferred), and

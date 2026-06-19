@@ -49,6 +49,22 @@ export async function tryServeInstaller(req: Request, env: AssetsEnv): Promise<R
   }
   if (!asset.ok) return null
 
+  // Read the asset to text rather than forwarding `asset.body` as a stream.
+  // We are deliberately dropping the asset's headers (see below), and a stream
+  // body must agree with its `Content-Encoding` header: if `env.ASSETS.fetch`
+  // ever returned a still-compressed body, forwarding those bytes without the
+  // encoding header would pipe gzip/br into `sh`. Materialising to text via
+  // `.text()` forces the runtime to honour any encoding and hand us decoded
+  // UTF-8, so the rebuilt response carries identity bytes that match the
+  // headers we set. (The installer is a small plain-text script, so buffering
+  // it is cheap.)
+  let script: string
+  try {
+    script = await asset.text()
+  } catch {
+    return null
+  }
+
   // Build the response from scratch instead of `new Response(asset.body, asset)`
   // so the asset's ETag / Content-Length / Content-Encoding don't leak through
   // and mismatch once we relabel the Content-Type.
@@ -57,7 +73,7 @@ export async function tryServeInstaller(req: Request, env: AssetsEnv): Promise<R
   // to CLI fetchers and HTML to browsers, but Cloudflare and many proxies ignore
   // `Vary: User-Agent`, so a shared cache could hand the script to a browser or
   // the homepage to `curl … | sh`. The only safe answer is to never cache `/`.
-  return new Response(asset.body, {
+  return new Response(script, {
     status: 200,
     headers: {
       'Content-Type': 'text/x-shellscript; charset=utf-8',

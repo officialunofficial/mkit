@@ -97,6 +97,7 @@ the next available number.
 | `ALGORITHM_SECP256K1` | 2 | ECDSA over SHA-256. DSSE-compatible. |
 | `ALGORITHM_P256` | 3 | ECDSA P-256 / secp256r1 / prime256v1 over SHA-256. |
 | `ALGORITHM_ED25519_WEBAUTHN` | 4 | Ed25519 wrapped in a WebAuthn assertion (CTAP signers). |
+| `ALGORITHM_BLS12381_THRESHOLD` | 5 | BLS12-381 threshold signature (variant `MinSig`); see `docs/SPEC-RELEASE-THRESHOLD.md`. |
 
 ### 3.2 `KeyForm`
 

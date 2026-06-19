@@ -599,7 +599,7 @@ fn rpc_algorithm_for(a: Algorithm) -> RpcAlgorithm {
         Algorithm::Secp256k1 => RpcAlgorithm::Secp256k1,
         Algorithm::P256 => RpcAlgorithm::P256,
         // External-signer dispatch for BLS threshold isn't wired
-        // yet — the Phase-1 holder runs in-process. But the proto
+        // yet — the threshold holder runs in-process. But the proto
         // wire integer is reserved so a future external signer can
         // claim ALGORITHM_BLS12381_THRESHOLD and the mapping
         // already exists.
@@ -751,8 +751,15 @@ fn validate_sign_response_with_policy(
         Algorithm::Ed25519 => validate_ed25519_response(public_key, pae, signature, key_id),
         Algorithm::Secp256k1 => validate_secp256k1_response(public_key, pae, signature, key_id),
         Algorithm::P256 => validate_p256_response(public_key, pae, signature, key_id),
+        // External-signer BLS-threshold dispatch is NOT wired: there is
+        // no signature-vs-public-key check for this arm, so accepting it
+        // would trust an unverifiable signature returned by the child.
+        // Fail closed until external BLS dispatch is actually
+        // implemented (see `rpc_algorithm_for`).
         #[cfg(feature = "bls-threshold")]
-        Algorithm::Bls12381Threshold => Ok(()),
+        Algorithm::Bls12381Threshold => Err(Error::ExternalSignerBadResponse(
+            "external BLS-threshold signing is not supported".into(),
+        )),
     }
 }
 
@@ -790,8 +797,15 @@ fn validate_sign_response_inner(
         Algorithm::Ed25519 => validate_ed25519_response(public_key, pae, signature, key_id),
         Algorithm::Secp256k1 => validate_secp256k1_response(public_key, pae, signature, key_id),
         Algorithm::P256 => validate_p256_response(public_key, pae, signature, key_id),
+        // External-signer BLS-threshold dispatch is NOT wired: there is
+        // no signature-vs-public-key check for this arm, so accepting it
+        // would trust an unverifiable signature returned by the child.
+        // Fail closed until external BLS dispatch is actually
+        // implemented (see `rpc_algorithm_for`).
         #[cfg(feature = "bls-threshold")]
-        Algorithm::Bls12381Threshold => Ok(()),
+        Algorithm::Bls12381Threshold => Err(Error::ExternalSignerBadResponse(
+            "external BLS-threshold signing is not supported".into(),
+        )),
     }
 }
 
@@ -1058,6 +1072,36 @@ mod tests {
 
         let err = validate_sign_response(&sr, Algorithm::Ed25519, PAE, &sig, &key_id).unwrap_err();
         assert!(err.to_string().contains("missing public_key"));
+    }
+
+    /// Regression: an external signer claiming the BLS12-381 threshold
+    /// algorithm must be REJECTED, not accepted. There is no
+    /// signature-vs-public-key check for the external BLS path, so a
+    /// child returning arbitrary signature bytes for a BLS keyid would
+    /// otherwise be trusted unverified. The arm must fail closed.
+    #[cfg(feature = "bls-threshold")]
+    #[test]
+    fn response_validation_rejects_bls_threshold_unverified() {
+        let key_id = "opaque:bls".to_owned();
+        // Attacker-controlled bytes: neither the signature nor the
+        // public_key is checked on this arm, so any values would be
+        // "accepted" if the arm returned Ok(()).
+        let signature = vec![0xAAu8; 48];
+        let sr = SignResponse::default()
+            .with_signature(signature.clone())
+            .with_public_key(vec![0xBBu8; 96])
+            .with_algorithm(RpcAlgorithm::Bls12381Threshold)
+            .with_key_id(key_id.clone());
+
+        let err =
+            validate_sign_response(&sr, Algorithm::Bls12381Threshold, PAE, &signature, &key_id)
+                .expect_err(
+                    "external BLS-threshold response must be rejected, not trusted unverified",
+                );
+        assert!(
+            matches!(err, Error::ExternalSignerBadResponse(ref m) if m.contains("BLS-threshold")),
+            "got {err:?}"
+        );
     }
 
     #[cfg(feature = "algo-p256")]

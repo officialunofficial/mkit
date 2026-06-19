@@ -13,7 +13,6 @@
 //! "don't clobber user work" spirit as the #176 restore guards: a
 //! tracked-but-modified file is not deleted without `--force`.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
@@ -242,8 +241,4 @@ fn prune_empty_dirs(root: &Path, mut dirs: Vec<PathBuf>) {
     }
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;

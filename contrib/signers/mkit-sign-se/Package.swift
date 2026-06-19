@@ -7,7 +7,8 @@
 // messages on stdin/stdout. The schema is shared with the Rust
 // reference signers (`rust/crates/mkit-rpc/proto/signer.proto`); the
 // Swift package consumes pre-generated `.pb.swift` sources from
-// `Sources/mkit-sign-se/Generated/` (see `scripts/regenerate-proto.sh`).
+// `Sources/mkit-sign-se/Generated/` (regenerate with the `protoc`
+// command documented in README.md).
 //
 // P-256 only (the only algorithm the Secure Enclave supports). The
 // private scalar is non-extractable by construction; the Keychain

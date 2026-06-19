@@ -305,9 +305,11 @@ fn load_raw_secret(
         }
     })?;
     if !path.exists() {
+        // Report the resolved absolute path, matching the ed25519 arm so
+        // the missing-key error is uniform across algorithms.
         return Err(FactoryError::MissingKeyFile {
             algorithm,
-            path: rel_path.to_owned(),
+            path: path.display().to_string(),
         });
     }
     mkit_core::sign::load_raw_32(&path).map_err(|e| FactoryError::InvalidKeyFile {

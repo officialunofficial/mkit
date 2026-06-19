@@ -452,8 +452,4 @@ fn show(cfg: &Config, json: bool, verbose: bool) -> u8 {
     exit::OK
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;

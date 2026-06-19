@@ -56,7 +56,9 @@ mkit-core = { version = "0.3", path = "../mkit-core" }
 mkit-attest = { version = "0.3", path = "../mkit-attest" }
 mkit-git-bridge = { version = "0.3", path = "../mkit-git-bridge", optional = true }
 mkit-keystore = { version = "0.3", path = "../mkit-keystore" }
-mkit-transport-memory = { version = "0.3", path = "../mkit-transport-memory" }
+# `mkit-transport-memory` is a dev-only (test) dependency — see
+# `[dev-dependencies]`. It is intentionally NOT a normal dependency so it
+# does not ship in `cargo install mkit-cli`.
 mkit-transport-file = { version = "0.3", path = "../mkit-transport-file" }
 mkit-transport-http = { version = "0.3", path = "../mkit-transport-http" }
 mkit-transport-s3 = { version = "0.3", path = "../mkit-transport-s3" }

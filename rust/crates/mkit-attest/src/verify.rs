@@ -229,24 +229,37 @@ pub fn verify(env: &Envelope, registry: &Registry) -> Result<VerifyResult, Error
 
 /// Verify a raw signature under the named algorithm.
 ///
-/// This is the plug-in point Teams Kappa (secp256k1) and Lambda (P-256)
-/// will wire their verifiers into. It takes the raw pubkey, signature,
-/// and message bytes with the [`Algorithm`] explicit, so callers that
-/// already know the algorithm don't have to reparse a keyid string.
+/// It takes the raw pubkey, signature, and message bytes with the
+/// [`Algorithm`] explicit, so callers that already know the algorithm
+/// don't have to reparse a keyid string.
 ///
 /// Contract:
 /// * `Ok(())` — the signature verified under `pubkey` over `msg`.
-/// * `Err(Error::AlgorithmNotEnabled(alg))` — either the algorithm's
-///   backend is compiled out of this build (e.g. `--no-default-features
-///   --features algo-ed25519` verifying a `secp256k1` keyid) OR the
-///   algorithm's backend ran but the signature failed to verify. The
-///   two are collapsed into one variant deliberately — callers who
-///   need reason-level detail (mismatch vs. unknown keyid vs. backend
-///   disabled) should use [`verify_envelope`] which returns a
+/// * `Err(Error::AlgorithmNotEnabled(alg))` — returned when the
+///   algorithm's backend is compiled out of this build (e.g.
+///   `--no-default-features --features algo-ed25519` verifying a
+///   `secp256k1` keyid). For the **Ed25519** and **BLS12-381 threshold**
+///   arms this variant is *also* returned when the backend ran but the
+///   signature failed to verify: those two arms deliberately collapse
+///   crypto-mismatch into the same variant as a disabled backend.
+/// * Typed per-algorithm errors — the **secp256k1** and **P-256** arms
+///   do NOT collapse. On failure they surface their backend's own typed
+///   variant ([`Error::Secp256k1KeyInvalid`],
+///   [`Error::Secp256k1SignatureInvalid`],
+///   [`Error::Secp256k1VerifyFailed`], or the `P256*` equivalents),
+///   never `AlgorithmNotEnabled`. A caller that matches only
+///   `AlgorithmNotEnabled` would therefore miss a genuine secp256k1/p256
+///   verification failure — match the typed variants too, or use
+///   [`verify_envelope`], which normalises every backend into a
 ///   per-signature [`Reason`].
 ///
 /// # Errors
-/// * [`Error::AlgorithmNotEnabled`] — see contract above.
+/// * [`Error::AlgorithmNotEnabled`] — backend compiled out, or (Ed25519
+///   / BLS-threshold only) the signature failed to verify.
+/// * [`Error::Secp256k1KeyInvalid`] / [`Error::Secp256k1SignatureInvalid`]
+///   / [`Error::Secp256k1VerifyFailed`] — secp256k1 backend failures.
+/// * [`Error::P256KeyInvalid`] / [`Error::P256SignatureInvalid`] /
+///   [`Error::P256VerifyFailed`] — P-256 backend failures.
 pub fn verify_signature(
     algorithm: Algorithm,
     pubkey: &[u8],
@@ -293,7 +306,7 @@ pub fn verify_signature(
                 Err(Error::AlgorithmNotEnabled(Algorithm::P256))
             }
         }
-        // BLS12-381 threshold dispatch. Phase 1 routes through the
+        // BLS12-381 threshold dispatch routes through the
         // `signer_bls_threshold::verify` helper, which uses the
         // mkit-attest BLS namespace + the MinSig variant — i.e. only
         // signatures produced by this crate's `ThresholdSigner`
@@ -304,8 +317,7 @@ pub fn verify_signature(
         // doc-comment) collapses crypto-mismatch into the same
         // `AlgorithmNotEnabled` error variant as a compiled-out
         // backend. Callers wanting reason-level detail use
-        // `verify_envelope` once the BLS keyid dispatch lands on the
-        // `TrustRoot` registry in Phase 2.
+        // `verify_envelope`.
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => {
             match crate::signer_bls_threshold::verify(pubkey, msg, sig) {
@@ -595,11 +607,11 @@ mod tests {
         }
     }
 
-    // -- Phase 1 multi-algorithm foundation tests --
+    // -- multi-algorithm foundation tests --
 
     /// A synthetic `secp256k1:<hex>` keyid (not in the registry) must
     /// surface as `UnknownKeyid` through the dispatch layer — not as a
-    /// generic error. Once Team Kappa wires a secp256k1 trust root and
+    /// generic error. Once a secp256k1 trust root is wired and
     /// the caller adds it to the registry, the reason turns into
     /// `AlgorithmNotEnabled` (when the feature is off) or `Ok` (when
     /// the feature is on and the signature verifies).
@@ -688,7 +700,7 @@ mod tests {
     }
 
     /// `verify_signature` with an Ed25519 key + valid signature returns
-    /// `Ok(())`. This is the helper Teams Kappa/Lambda will extend.
+    /// `Ok(())`.
     #[cfg(feature = "algo-ed25519")]
     #[test]
     fn verify_signature_ed25519_happy_path() {
@@ -765,7 +777,7 @@ mod tests {
 
     /// End-to-end: a DSSE envelope signed by a 3-of-4 BLS threshold
     /// cohort verifies against a `Bls12381ThresholdPubKey` trust root
-    /// in the registry. Pins Phase 2's registry-dispatch wiring.
+    /// in the registry. Pins the registry-dispatch wiring.
     #[cfg(feature = "bls-threshold")]
     #[test]
     fn registry_dispatches_bls_threshold_keyid_to_verify() {

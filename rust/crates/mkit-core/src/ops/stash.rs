@@ -46,7 +46,8 @@ pub const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
 
 /// Minimum on-wire entry size, used to sanity-check attacker-supplied
-/// `count` up-front during deserialise (SEC finding G12). Layout:
+/// `count` up-front during deserialise (so a tiny buffer declaring a huge
+/// `count` cannot drive a large pre-allocation). Layout:
 /// `commit_hash` (32) + `parent_hash` (32) + `timestamp` (4) +
 /// `msg_len` (2) + message (0).
 const MIN_ENTRY_BYTES: u64 = 32 + 32 + 4 + 2;
@@ -668,8 +669,7 @@ pub fn deserialize_list(data: &[u8]) -> StashResult<StashList> {
     // Reject an attacker-supplied `count` that cannot possibly fit in
     // the remaining body. With [`MIN_ENTRY_BYTES`] = 70 (empty message)
     // an 8-byte header declaring count = u32::MAX is rejected here
-    // instead of driving `Vec::with_capacity(u32::MAX)`. See SEC
-    // finding G12.
+    // instead of driving `Vec::with_capacity(u32::MAX)`.
     if (count as u64).saturating_mul(MIN_ENTRY_BYTES) > data.len() as u64 {
         return Err(StashError::InvalidFormat);
     }

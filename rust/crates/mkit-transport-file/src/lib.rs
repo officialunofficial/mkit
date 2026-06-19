@@ -1,4 +1,8 @@
-//! Local-filesystem [`Transport`] implementation for e2e tests.
+//! Local-filesystem [`Transport`] implementation.
+//!
+//! This is a real local/served transport, not a test-only fixture: it is
+//! the backend for `mkit+file://` remotes and for repositories served via
+//! `mkit serve`. It also doubles as the in-tree test transport.
 //!
 //! Stores pack files under `<root>/packs/<64-hex>` and ref files under
 //! `<root>/refs/...`.
@@ -224,29 +228,56 @@ impl Drop for RefLock {
 #[derive(Debug)]
 pub struct FileTransport {
     root: PathBuf,
-    /// Canonicalised `root` (if it exists on the filesystem at construction
-    /// time). Used by the path-escape guard to reject ref paths that resolve
-    /// outside the transport tree via a pre-existing symlink. Falls back to
-    /// `root` itself when canonicalisation fails (e.g. the dir does not
-    /// exist yet); in that case the guard matches on the literal prefix.
-    canonical_root: PathBuf,
     /// Serialises `Match` CAS within a single process.
     cas_lock: Mutex<()>,
 }
 
 impl FileTransport {
-    /// Create a `FileTransport` rooted at `root`. The directory must
-    /// already exist; sub-directories (`packs/`, `refs/`) are created
-    /// on demand.
+    /// Create a `FileTransport` rooted at `root`. The root directory does
+    /// not need to exist yet: sub-directories (`packs/`, `refs/`) and the
+    /// root itself are created on demand by the write paths. The
+    /// path-escape guard canonicalises the root lazily at use time, so a
+    /// root that does not exist at construction (or one that lives under a
+    /// symlinked parent, e.g. macOS `/tmp` -> `/private/tmp`) does not
+    /// spuriously trip the guard.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        let root: PathBuf = root.into();
-        let canonical_root = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
         Self {
-            root,
-            canonical_root,
+            root: root.into(),
             cas_lock: Mutex::new(()),
         }
+    }
+
+    /// Resolve the comparison base for the path-escape guard: the
+    /// canonical form of `root` if it (or its closest existing ancestor)
+    /// exists on disk, else the literal `root`.
+    ///
+    /// Computed lazily on every guard check rather than cached at
+    /// construction. Caching the construction-time value silently disables
+    /// the guard whenever the root does not exist yet (it would store the
+    /// non-canonical literal path) or lives under a symlinked parent: a
+    /// legitimate ref then canonicalises to the resolved `/private/...`
+    /// form which does not start with the stored `/tmp/...` prefix, so the
+    /// guard rejects valid writes. Re-deriving here keeps the base
+    /// canonical once the directory exists.
+    fn canonical_root(&self) -> PathBuf {
+        if let Ok(c) = fs::canonicalize(&self.root) {
+            return c;
+        }
+        // Root not present yet: canonicalise the closest existing ancestor
+        // and re-attach the not-yet-created trailing components, so the
+        // base reflects any symlinked parent that is already on disk.
+        let mut ancestor = self.root.parent();
+        while let Some(p) = ancestor {
+            if let Ok(c) = fs::canonicalize(p) {
+                return match self.root.strip_prefix(p) {
+                    Ok(rel) => c.join(rel),
+                    Err(_) => c,
+                };
+            }
+            ancestor = p.parent();
+        }
+        self.root.clone()
     }
 
     fn pack_path(&self, key: &PackKey) -> PathBuf {
@@ -258,32 +289,43 @@ impl FileTransport {
     }
 
     /// Path-escape guard: verify that `path` (whether it already exists
-    /// or not) resolves under `self.canonical_root`. Returns the path
-    /// unchanged on success, or a `RemoteError` if the operation would
-    /// escape the transport tree via a pre-existing symlink.
+    /// or not) resolves under the (lazily canonicalised) transport root.
+    /// Returns the path unchanged on success, or a `RemoteError` if the
+    /// operation would escape the transport tree via a pre-existing
+    /// symlink.
     ///
-    /// - If `path` exists, `canonicalize(path)` is compared against
-    ///   `canonical_root`.
+    /// - If `path` exists, `canonicalize(path)` is compared against the
+    ///   canonical root.
     /// - If `path` does not exist yet, we canonicalise the closest
-    ///   existing ancestor and require it to sit under
-    ///   `canonical_root`. This catches writes into a symlinked parent
-    ///   directory.
+    ///   existing ancestor and require it to sit under the canonical
+    ///   root. This catches writes into a symlinked parent directory.
     fn check_ref_path(&self, path: &Path) -> TransportResult<()> {
+        let canonical_root = self.canonical_root();
         let resolved = if path.exists() {
             fs::canonicalize(path).map_err(|e| {
                 TransportError::RemoteError(format!("canonicalize ref path failed: {e}"))
             })?
         } else {
-            // Walk up to the closest existing ancestor and canonicalise it.
+            // Walk up to the closest existing ancestor, canonicalise it,
+            // then re-attach the not-yet-created trailing components. This
+            // catches a symlinked parent directory while still producing
+            // the FULL intended path: comparing only the canonicalised
+            // ancestor would wrongly compare an ancestor of the root
+            // against the (deeper) canonical root and reject legitimate
+            // writes when the root itself does not exist yet.
             let mut anchor = path.parent();
             loop {
                 match anchor {
                     Some(p) if p.exists() => {
-                        break fs::canonicalize(p).map_err(|e| {
+                        let canon = fs::canonicalize(p).map_err(|e| {
                             TransportError::RemoteError(format!(
                                 "canonicalize ref parent failed: {e}"
                             ))
                         })?;
+                        break match path.strip_prefix(p) {
+                            Ok(rel) => canon.join(rel),
+                            Err(_) => canon,
+                        };
                     }
                     Some(p) => anchor = p.parent(),
                     None => {
@@ -295,7 +337,7 @@ impl FileTransport {
             }
         };
 
-        if resolved.starts_with(&self.canonical_root) {
+        if resolved.starts_with(&canonical_root) {
             Ok(())
         } else {
             Err(TransportError::RemoteError(format!(
@@ -952,6 +994,45 @@ mod tests {
             }
             other => panic!("expected RemoteError with path-escape, got {other:?}"),
         }
+    }
+
+    /// Regression: a root that lives under a symlinked parent and does
+    /// NOT exist at construction time must NOT spuriously trip the
+    /// path-escape guard. Previously `new()` cached
+    /// `canonicalize(root).unwrap_or(root)`; when `root` was absent it
+    /// stored the non-canonical literal path, so a later legitimate ref
+    /// that canonicalised to the resolved `/private/...` form failed the
+    /// `starts_with` prefix check and a valid write was rejected with a
+    /// spurious "path escape" error. The guard now canonicalises the root
+    /// lazily, so this round-trips cleanly.
+    #[cfg(unix)]
+    #[test]
+    fn legit_write_under_symlinked_root_not_yet_existing_is_allowed() {
+        use std::os::unix::fs::symlink;
+
+        // `real` is the actual backing directory; `link` is a symlink that
+        // points at it. We root the transport at `<link>/repo`, which does
+        // NOT exist yet at construction time. Writing a ref under it must
+        // succeed even though `<link>/repo` canonicalises to
+        // `<real>/repo`.
+        let real = tmp();
+        let link_parent = tmp();
+        let link = link_parent.path().join("link");
+        symlink(real.path(), &link).unwrap();
+
+        let root = link.join("repo");
+        assert!(!root.exists(), "root must be absent at construction");
+
+        let t = FileTransport::new(&root);
+        let h = blake3_hash(b"legit-under-symlink");
+
+        // This must NOT be rejected by the path-escape guard.
+        t.write_ref("refs/heads/main", &h)
+            .expect("legitimate write under a symlinked, not-yet-existing root must succeed");
+        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h));
+
+        // And the bytes really landed under the real backing directory.
+        assert!(real.path().join("repo/refs/heads/main").exists());
     }
 
     // ------------------------------------------------------------------

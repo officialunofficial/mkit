@@ -22,8 +22,10 @@
 //!     * `p256:<66-hex>`     (33-byte compressed SEC1)
 //!
 //! Key-file layout mirrors what the repo-key signer factory loads:
-//! a raw 32-byte secret, mode `0600` on Unix (set on the open file
-//! handle to avoid a TOCTOU `rename(2)` window; see finding H3).
+//! a raw 32-byte secret, mode `0600` on Unix. The mode is set on the
+//! open file handle (not via a post-write `chmod`/`rename`) so the
+//! secret is never briefly world-readable in a TOCTOU window between
+//! creating the file and tightening its permissions.
 
 use std::io::Write;
 use std::path::Path;
@@ -332,11 +334,7 @@ fn hex_lower(b: &[u8]) -> String {
     s
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {

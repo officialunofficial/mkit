@@ -5,8 +5,8 @@
 //! low-S normalization, or compact encoding ever regresses, this test
 //! breaks and the diff is obvious.
 //!
-//! Inputs — intentionally boring so they are easy to eyeball during
-//! integration with Team Iota's trait foundation:
+//! Inputs — intentionally boring so they are easy to eyeball against
+//! the Signer trait foundation:
 //!   secret = 32 bytes, all zeros except last byte = 0x01
 //!   pae    = b"DSSEv1 28 application/vnd.in-toto+json 2 {}"
 //!

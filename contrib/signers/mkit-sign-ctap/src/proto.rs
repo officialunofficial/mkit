@@ -97,10 +97,20 @@ const P256_N: [u8; 32] = [
     0xBC, 0xE6, 0xFA, 0xAD, 0xA7, 0x17, 0x9E, 0x84, 0xF3, 0xB9, 0xCA, 0xC2, 0xFC, 0x63, 0x25, 0x51,
 ];
 
-/// Return `s` if already low-S, else return `n - s`. The high-bit-of-s
-/// fast path covers every signature any real curve produces.
+/// `n / 2`. A signature is "low-S" iff `s <= n/2`. Comparing the full
+/// 32-byte `s` against this constant is the canonical test; a top-byte-only
+/// check is insufficient because `n/2` itself starts with `0x7F`, so values
+/// in `(n/2, 0x7FFF…FF]` also have top byte `0x7F` yet are high-S.
+const P256_HALF_N: [u8; 32] = [
+    0x7F, 0xFF, 0xFF, 0xFF, 0x80, 0x00, 0x00, 0x00, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xDE, 0x73, 0x7D, 0x56, 0xD3, 0x8B, 0xCF, 0x42, 0x79, 0xDC, 0xE5, 0x61, 0x7E, 0x31, 0x92, 0xA8,
+];
+
+/// Return `s` if already low-S (`s <= n/2`), else return `n - s`.
+/// Big-endian lexicographic compare equals numeric compare for equal-length
+/// unsigned values.
 fn low_s_normalise(s: &[u8; 32]) -> [u8; 32] {
-    if s[0] <= 0x7F {
+    if s[..] <= P256_HALF_N[..] {
         return *s;
     }
     let mut out = [0u8; 32];
@@ -174,6 +184,32 @@ mod tests {
         let mut expected = [0u8; 32];
         expected[31] = 1;
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn low_s_identity_at_half_n_boundary() {
+        // s == n/2 is the largest still-low value; must pass through unchanged.
+        let out = low_s_normalise(&P256_HALF_N);
+        assert_eq!(out, P256_HALF_N);
+    }
+
+    #[test]
+    fn low_s_flips_high_s_in_0x7f_top_byte_bucket() {
+        // s = n/2 + 1 has top byte 0x7F yet is high-S; a top-byte-only test
+        // would wrongly pass it through. It must be normalised to n - s.
+        let mut s = P256_HALF_N;
+        // n/2 ends in ...0x92, 0xA8; +1 -> ...0x92, 0xA9 (no carry).
+        s[31] += 1;
+        assert_eq!(s[0], 0x7F, "test vector must stay in the 0x7F bucket");
+        let out = low_s_normalise(&s);
+        assert_ne!(
+            out, s,
+            "high-S value must be normalised, not passed through"
+        );
+        // HALF_N = floor(n/2) = (n-1)/2, so s = (n+1)/2 and n - s = (n-1)/2 = HALF_N.
+        assert_eq!(out, P256_HALF_N);
+        // And the result is itself low-S (the whole point of normalisation).
+        assert!(out[..] <= P256_HALF_N[..]);
     }
 
     #[test]
