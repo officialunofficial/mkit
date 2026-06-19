@@ -232,6 +232,30 @@ pub struct FileTransport {
     cas_lock: Mutex<()>,
 }
 
+/// Canonicalize `path`, or — if it does not exist yet — canonicalize its
+/// closest existing ancestor and re-attach the not-yet-created trailing
+/// components. This resolves any symlinked parent already on disk while
+/// still yielding the full intended path (comparing only the ancestor
+/// would wrongly reject legitimate writes when the root itself does not
+/// exist yet). Returns `None` only if nothing along the ancestor chain
+/// can be canonicalized.
+fn canonicalize_with_missing_tail(path: &Path) -> Option<PathBuf> {
+    if let Ok(c) = fs::canonicalize(path) {
+        return Some(c);
+    }
+    let mut ancestor = path.parent();
+    while let Some(p) = ancestor {
+        if let Ok(c) = fs::canonicalize(p) {
+            return Some(match path.strip_prefix(p) {
+                Ok(rel) => c.join(rel),
+                Err(_) => c,
+            });
+        }
+        ancestor = p.parent();
+    }
+    None
+}
+
 impl FileTransport {
     /// Create a `FileTransport` rooted at `root`. The root directory does
     /// not need to exist yet: sub-directories (`packs/`, `refs/`) and the
@@ -261,23 +285,7 @@ impl FileTransport {
     /// guard rejects valid writes. Re-deriving here keeps the base
     /// canonical once the directory exists.
     fn canonical_root(&self) -> PathBuf {
-        if let Ok(c) = fs::canonicalize(&self.root) {
-            return c;
-        }
-        // Root not present yet: canonicalise the closest existing ancestor
-        // and re-attach the not-yet-created trailing components, so the
-        // base reflects any symlinked parent that is already on disk.
-        let mut ancestor = self.root.parent();
-        while let Some(p) = ancestor {
-            if let Ok(c) = fs::canonicalize(p) {
-                return match self.root.strip_prefix(p) {
-                    Ok(rel) => c.join(rel),
-                    Err(_) => c,
-                };
-            }
-            ancestor = p.parent();
-        }
-        self.root.clone()
+        canonicalize_with_missing_tail(&self.root).unwrap_or_else(|| self.root.clone())
     }
 
     fn pack_path(&self, key: &PackKey) -> PathBuf {
@@ -290,52 +298,17 @@ impl FileTransport {
 
     /// Path-escape guard: verify that `path` (whether it already exists
     /// or not) resolves under the (lazily canonicalised) transport root.
-    /// Returns the path unchanged on success, or a `RemoteError` if the
-    /// operation would escape the transport tree via a pre-existing
-    /// symlink.
+    /// Returns `Ok(())` on success, or a `RemoteError` if the operation
+    /// would escape the transport tree via a pre-existing symlink.
     ///
-    /// - If `path` exists, `canonicalize(path)` is compared against the
-    ///   canonical root.
-    /// - If `path` does not exist yet, we canonicalise the closest
-    ///   existing ancestor and require it to sit under the canonical
-    ///   root. This catches writes into a symlinked parent directory.
+    /// Both `path` and the root are resolved with the same
+    /// [`canonicalize_with_missing_tail`] logic — canonicalise the path
+    /// (or its closest existing ancestor, re-attaching the missing tail)
+    /// so a symlinked parent already on disk is followed — then require
+    /// the result to sit under the canonical root.
     fn check_ref_path(&self, path: &Path) -> TransportResult<()> {
         let canonical_root = self.canonical_root();
-        let resolved = if path.exists() {
-            fs::canonicalize(path).map_err(|e| {
-                TransportError::RemoteError(format!("canonicalize ref path failed: {e}"))
-            })?
-        } else {
-            // Walk up to the closest existing ancestor, canonicalise it,
-            // then re-attach the not-yet-created trailing components. This
-            // catches a symlinked parent directory while still producing
-            // the FULL intended path: comparing only the canonicalised
-            // ancestor would wrongly compare an ancestor of the root
-            // against the (deeper) canonical root and reject legitimate
-            // writes when the root itself does not exist yet.
-            let mut anchor = path.parent();
-            loop {
-                match anchor {
-                    Some(p) if p.exists() => {
-                        let canon = fs::canonicalize(p).map_err(|e| {
-                            TransportError::RemoteError(format!(
-                                "canonicalize ref parent failed: {e}"
-                            ))
-                        })?;
-                        break match path.strip_prefix(p) {
-                            Ok(rel) => canon.join(rel),
-                            Err(_) => canon,
-                        };
-                    }
-                    Some(p) => anchor = p.parent(),
-                    None => {
-                        // Nothing on-disk matches; fall back to the
-                        // literal prefix check below using `path` itself.
-                        break path.to_path_buf();
-                    }
-                }
-            }
-        };
+        let resolved = canonicalize_with_missing_tail(path).unwrap_or_else(|| path.to_path_buf());
 
         if resolved.starts_with(&canonical_root) {
             Ok(())

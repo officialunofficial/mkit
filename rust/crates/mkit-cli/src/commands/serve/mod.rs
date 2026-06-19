@@ -154,11 +154,12 @@ use enc::run_listen_enc;
 // listener helpers directly.
 #[cfg(all(test, feature = "enc-transport"))]
 use enc::{load_authorized_peers, serve_enc_session};
+// `#[doc(hidden)]` reference infra for issue #158 (no shipping verb yet);
+// re-exported so it stays reachable (not dead code) without advertising it
+// on the public API surface.
 #[cfg(feature = "sparse-checkout")]
-#[allow(unused_imports)]
-pub use sparse::{
-    SparseServeError, build_sparse_response_from_store, build_sparse_response_from_tree,
-};
+#[doc(hidden)]
+pub use sparse::{SparseServeError, build_sparse_response_from_tree};
 
 /// Resolve and validate the on-disk path supplied to `mkit serve`.
 pub(crate) fn resolve_repo_path(path: &str) -> Result<PathBuf, u8> {

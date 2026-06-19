@@ -352,7 +352,14 @@ fn plan_move(
         .entries
         .iter()
         .position(|e| e.path == src_rel && e.status != EntryStatus::Removed)
-        .expect("plan_move caller guarantees the source is a tracked file");
+        .ok_or_else(|| {
+            // Unreachable given the caller's guarantee above, but surface a
+            // clean error rather than panicking if that invariant ever breaks.
+            emit_err(
+                &format!("internal: source is not a tracked file: {source}"),
+                exit::GENERAL_ERROR,
+            )
+        })?;
     let status = idx.entries[src_idx].status;
     let hash = idx.entries[src_idx].object_hash;
 

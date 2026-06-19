@@ -31,14 +31,14 @@ impl SystemdCredsProtector {
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."));
-            super::super::ensure_no_symlink_path(&self.storage_root, parent)?;
+            super::super::atomic_write::ensure_no_symlink_path(&self.storage_root, parent)?;
             std::fs::create_dir_all(parent)
                 .map_err(|error| Error::Io(format!("mkdir {}: {error}", parent.display())))?;
-            super::super::set_private_dir_permissions(&self.storage_root)?;
-            super::super::ensure_owned_by_euid(&self.storage_root)?;
+            super::super::atomic_write::set_private_dir_permissions(&self.storage_root)?;
+            super::super::atomic_write::ensure_owned_by_euid(&self.storage_root)?;
             if parent != self.storage_root {
-                super::super::set_private_dir_permissions(parent)?;
-                super::super::ensure_owned_by_euid(parent)?;
+                super::super::atomic_write::set_private_dir_permissions(parent)?;
+                super::super::atomic_write::ensure_owned_by_euid(parent)?;
             }
         }
 
@@ -53,7 +53,7 @@ impl SystemdCredsProtector {
 
     fn validate_existing_path(&self, path: &Path) -> Result<()> {
         #[cfg(unix)]
-        super::super::ensure_no_symlink_path(&self.storage_root, path)?;
+        super::super::atomic_write::ensure_no_symlink_path(&self.storage_root, path)?;
 
         Ok(())
     }

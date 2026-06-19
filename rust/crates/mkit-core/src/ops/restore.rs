@@ -332,8 +332,8 @@ fn restore_tree_to_worktree_inner(
         // NOTE: ignore rules do NOT gate materialization. Tree entries are
         // tracked content and must always be written (git parity — skipping
         // them would desync the index from the worktree). Ignore rules only
-        // protect *untracked* worktree files during the clean sweep below /
-        // in `clean_directory_with_ignore`.
+        // protect *untracked* worktree files during the ignore-aware
+        // `clean_directory` sweep below.
         match entry.mode {
             EntryMode::Blob | EntryMode::Executable => {
                 if let Some(patterns) = options.sparse_patterns.as_deref()
@@ -1015,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_directory_with_ignore_preserves_case_variant_mkit_and_git() {
+    fn clean_directory_with_ignore_list_preserves_case_variant_mkit_and_git() {
         let target = TempDir::new().unwrap();
         fs::create_dir_all(target.path().join(".MKIT")).unwrap();
         fs::write(target.path().join(".MKIT/config"), b"meta").unwrap();

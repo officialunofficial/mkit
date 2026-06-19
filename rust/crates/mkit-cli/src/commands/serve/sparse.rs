@@ -24,6 +24,11 @@
 //! the narrow `(tree, filter)` shape below.
 
 /// Errors raised by [`build_sparse_response_from_tree`].
+///
+/// Hidden from the public API: this is server-side reference
+/// infrastructure for issue #158 with no shipping verb yet (see the
+/// module docs), retained so future servers stay byte-consistent.
+#[doc(hidden)]
 #[derive(Debug, thiserror::Error)]
 pub enum SparseServeError {
     /// Forward of any [`mkit_core::sparse::SparseError`] — the source
@@ -46,6 +51,7 @@ pub enum SparseServeError {
 ///
 /// Forwards [`mkit_core::sparse::SparseError`] — unsorted tree, too
 /// many leaves, too many filter paths.
+#[doc(hidden)]
 pub fn build_sparse_response_from_tree(
     tree: &mkit_core::object::Tree,
     filter: &[std::path::PathBuf],
@@ -58,29 +64,38 @@ pub fn build_sparse_response_from_tree(
     })
 }
 
-/// Convenience: resolve a `tree_hash` from `store` and build a sparse
-/// response. Used by both the on-disk `mkit serve` path (when an SSH
-/// verb is eventually added) and by integration tests that drive the
-/// server pipeline end-to-end.
-///
-/// # Errors
-///
-/// - [`mkit_core::store::StoreError`] surfaces if `tree_hash` is not
-///   present or the on-disk object is malformed.
-/// - The address must resolve to an `Object::Tree`; anything else is
-///   reported as a descriptive error string. (We rewrap rather than
-///   introduce a new error type so the downstream serve loop can keep
-///   its existing error taxonomy.)
-pub fn build_sparse_response_from_store(
-    store: &mkit_core::store::ObjectStore,
-    tree_hash: &mkit_core::hash::Hash,
-    filter: &[std::path::PathBuf],
-) -> Result<mkit_core::sparse::SparseResponse, String> {
-    use mkit_core::object::Object;
-    let tree = match store.read_object(tree_hash) {
-        Ok(Object::Tree(t)) => t,
-        Ok(_) => return Err("addressed object is not a tree".to_string()),
-        Err(e) => return Err(format!("read tree: {e}")),
-    };
-    build_sparse_response_from_tree(&tree, filter).map_err(|e| e.to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mkit_core::hash::ZERO;
+    use mkit_core::object::{EntryMode, Tree, TreeEntry};
+    use std::path::PathBuf;
+
+    fn entry(name: &[u8]) -> TreeEntry {
+        TreeEntry {
+            name: name.to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: ZERO,
+        }
+    }
+
+    #[test]
+    fn builds_response_for_filtered_subtree() {
+        // Two lex-sorted entries; a filter on "aa" selects exactly one.
+        let tree = Tree {
+            entries: vec![entry(b"aa"), entry(b"ab")],
+        };
+        let resp = build_sparse_response_from_tree(&tree, &[PathBuf::from("aa")])
+            .expect("valid sorted tree builds a sparse response");
+        assert_eq!(resp.entries.len(), 1);
+        assert_eq!(resp.entries[0].name, b"aa");
+    }
+
+    #[test]
+    fn unsorted_tree_is_rejected() {
+        let tree = Tree {
+            entries: vec![entry(b"ab"), entry(b"aa")],
+        };
+        assert!(build_sparse_response_from_tree(&tree, &[PathBuf::from("aa")]).is_err());
+    }
 }

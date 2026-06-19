@@ -518,6 +518,13 @@ pub fn attest_build(
 /// closed rather than producing a bogus keyid. No curve math is required:
 /// compression only re-tags the prefix and drops Y, and the still-valid
 /// SEC1 bytes are what the underlying verifier decodes.
+///
+/// CAVEAT: this performs NO on-curve / point-validity check — it only
+/// reshapes bytes to derive a stable keyid. Callers MUST hand the key to
+/// an on-curve-validating verifier (both [`attest_verify`] arms do, via
+/// `k256`/`p256` `from_sec1_bytes`, which reject off-curve points); a
+/// not-on-curve input here just yields a keyid that no valid signature
+/// will ever match.
 fn sec1_to_compressed(bytes: &[u8]) -> Option<Vec<u8>> {
     match bytes {
         // Already compressed: 0x02/0x03 ‖ X(32).

@@ -5,6 +5,26 @@ All notable changes to mkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING (`mkit-core`):** in the `blame` module, the public type alias
+  `BlameResult2<T>` was renamed to `BlameOutcome<T>`, and the unbounded
+  `match_lines` function is now private — callers must use the
+  bounds-checked `match_lines_checked`. Both are pre-1.0 API breaks; no
+  in-workspace consumers were affected. (Release tooling bumps the crate
+  version accordingly via `semver_check`.)
+
+### Internal
+
+- Open-source / publish readiness sweep: scrubbed internal identifiers,
+  fixed stale manifest/rustdoc claims, deduplicated copy-pasted helpers
+  (CLI `emit_err`, transport pubkey decoders, replay/rollback plumbing),
+  decomposed oversized modules (`keystore::software`, CLI `serve`), and
+  fixed several latent bugs (S3 ref pagination, atomic bisect-state
+  write, BLS external-signer fail-closed) with regression tests.
+
 ## [0.3.0] - 2026-06-15
 
 ### Performance

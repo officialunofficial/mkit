@@ -681,14 +681,12 @@ impl Transport for S3Transport {
             // inherent O(N) round-trip cost of the object-per-ref layout
             // (the hash lives only in the object body, so ListObjectsV2
             // cannot return it). Ref counts are normally small (branches
-            // + tags), so the cost is bounded in practice. A transient
-            // failure on one ref skips that ref rather than aborting the
-            // whole listing, matching the other `continue` paths below.
-            let Ok(ref_resp) =
-                self.http_request(&Method::GET, repo_key, "", None, &[], Some(REF_BODY_LIMIT))
-            else {
-                continue;
-            };
+            // + tags), so the cost is bounded in practice. Propagate a
+            // transport error (post-retry) rather than skipping the ref —
+            // silently dropping a ref would reintroduce the short-listing
+            // bug that the pagination above exists to prevent.
+            let ref_resp =
+                self.http_request(&Method::GET, repo_key, "", None, &[], Some(REF_BODY_LIMIT))?;
             if ref_resp.status != 200 {
                 continue;
             }
@@ -737,18 +735,9 @@ struct ListPage {
     next_continuation_token: Option<String>,
 }
 
-/// Minimal ListBucketResult XML parser — extracts every `<Key>...</Key>`.
+/// Extract every `<Key>...</Key>` value from a ListBucketResult body.
 /// No XML validation, no entity decoding (S3 never URL-encodes keys in
 /// the XML).
-#[must_use]
-pub fn parse_list_xml(xml: &[u8]) -> Vec<String> {
-    let Ok(s) = std::str::from_utf8(xml) else {
-        return Vec::new();
-    };
-    extract_keys(s)
-}
-
-/// Extract every `<Key>...</Key>` value from a ListBucketResult body.
 fn extract_keys(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cursor = 0usize;
@@ -1241,16 +1230,16 @@ mod tests {
 
     #[test]
     fn list_xml_extracts_keys() {
-        let xml = b"<ListBucketResult><Contents><Key>refs/heads/main</Key></Contents><Contents><Key>refs/tags/v1</Key></Contents></ListBucketResult>";
+        let xml = "<ListBucketResult><Contents><Key>refs/heads/main</Key></Contents><Contents><Key>refs/tags/v1</Key></Contents></ListBucketResult>";
         assert_eq!(
-            parse_list_xml(xml),
+            extract_keys(xml),
             vec!["refs/heads/main".to_owned(), "refs/tags/v1".to_owned()]
         );
     }
 
     #[test]
     fn list_xml_empty() {
-        assert!(parse_list_xml(b"<ListBucketResult></ListBucketResult>").is_empty());
+        assert!(extract_keys("<ListBucketResult></ListBucketResult>").is_empty());
     }
 
     #[test]

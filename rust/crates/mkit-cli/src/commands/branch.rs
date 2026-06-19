@@ -321,7 +321,7 @@ fn resolve_filter(
             Some(s) => {
                 let h = revspec::resolve_revision(store, mkit_dir, s)
                     .map_err(|e| format!("bad revision '{s}': {e}"))?;
-                let h = peel_tags(store, h);
+                let h = super::log::peel_tags(store, h);
                 // The ancestry filters compare COMMITS; a tree/blob id would
                 // otherwise be treated as a parentless leaf and silently
                 // mis-filter (e.g. `--no-contains <tree>` keeps every branch
@@ -368,17 +368,6 @@ fn tip_passes(store: &ObjectStore, filter: &BranchFilter, tip: &Hash) -> Result<
         return Ok(false);
     }
     Ok(true)
-}
-
-/// Bounded annotated-tag peel (mirrors `merge.rs`/`diff.rs`).
-fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
-    for _ in 0..16 {
-        match store.read_object(&h) {
-            Ok(Object::Tag(t)) => h = t.target,
-            _ => break,
-        }
-    }
-    h
 }
 
 /// Shell-glob match for `branch --list <pattern>`, mirroring git's

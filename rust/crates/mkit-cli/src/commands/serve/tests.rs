@@ -473,3 +473,23 @@ fn authorized_peers_rejects_malformed_key() {
     fs::write(&peers, "not-a-valid-key\n").unwrap();
     assert!(load_authorized_peers(peers.to_str().unwrap()).is_err());
 }
+
+#[test]
+fn pack_key_from_id_rejects_bad_length_as_invalid_request() {
+    // `pack_key_from_id` is the shared decoder behind PackExists and
+    // DownloadPack on both the sync and encrypted transports. A wrong-
+    // length or missing pack_id must surface as a protocol InvalidRequest
+    // (so the server emits an error frame), not a silently dropped
+    // connection like the pre-unification sync path did.
+    let wrong_len = vec![0u8; 16];
+    assert!(matches!(
+        pack_key_from_id(Some(&wrong_len)),
+        Err((ErrorCode::InvalidRequest, _))
+    ));
+    assert!(matches!(
+        pack_key_from_id(None),
+        Err((ErrorCode::InvalidRequest, _))
+    ));
+    // A correct 32-byte id still decodes.
+    assert!(pack_key_from_id(Some(&vec![7u8; 32])).is_ok());
+}
