@@ -18,7 +18,7 @@ verify the result.
 
 | Use case                              | Channel                              | Command                                                                                              |
 |---------------------------------------|--------------------------------------|------------------------------------------------------------------------------------------------------|
-| CLI on a dev machine                  | Release archive or `cargo install --git` | `curl mkit.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
+| CLI on a dev machine                  | Release archive or `cargo install --git` | `curl -sSfL https://mkit.sh/install.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-<VERSION>-<target>.tar.gz && tar -xzf mkit-<VERSION>-<target>.tar.gz` |
 | Browser / Cloudflare Worker           | npm                                  | `bun add @makechain/mkit-wasm`                                                                                  |
 | Library inside another Rust crate     | crates.io (or git dependency)        | `mkit-core = "0.3"`                                                                                  |
@@ -92,8 +92,8 @@ Targets shipped today:
 - `x86_64-unknown-linux-gnu` (Linux x86_64)
 - `aarch64-unknown-linux-gnu` (Linux arm64)
 
-If you want "latest", use the hosted installer — `curl mkit.sh | sh` (or
-the explicit `curl -sSfL https://mkit.sh/install.sh | sh`). It resolves
+If you want "latest", use the hosted installer —
+`curl -sSfL https://mkit.sh/install.sh | sh`. It resolves
 the current tag, fetches the matching archive for your platform, and
 verifies cosign by default. Direct release URLs are best when you want a
 pinned artifact.

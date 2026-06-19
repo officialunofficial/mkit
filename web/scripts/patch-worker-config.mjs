@@ -49,19 +49,6 @@ if (missing.length) {
   changes.push(`routes+=${missing.map((r) => r.pattern).join(',')}`)
 }
 
-// Run the Worker BEFORE static assets for the bare-domain root so `curl mkit.sh | sh` can be intercepted by the
-// User-Agent sniff in src/install-route.ts. Cloudflare's `run_worker_first` accepts a route list, so only `/` pays
-// the worker-first cost — every other path (including /install.sh and the prerendered demo pages) keeps the fast
-// asset-first path. Without this, `/` is served straight from the prerendered index.html and the Worker never runs.
-if (config.assets && typeof config.assets === 'object') {
-  const runFirst = new Set(Array.isArray(config.assets.run_worker_first) ? config.assets.run_worker_first : [])
-  if (!runFirst.has('/')) {
-    runFirst.add('/')
-    config.assets.run_worker_first = [...runFirst]
-    changes.push('assets.run_worker_first+=/')
-  }
-}
-
 // Keep the `*.workers.dev` subdomain live alongside the Custom Domain so preview links and smoke tests that target
 // `mkit-demo-web.<account>.workers.dev` keep working. Without this, Wrangler disables `workers.dev` the moment any
 // route is declared.
