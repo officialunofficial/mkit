@@ -28,6 +28,13 @@ export function previewBytes(bytes: Uint8Array, limit = 48): string {
   return bytes.length > limit ? `${hex}…` : hex
 }
 
+/** Human-readable byte count (B / KB / MB), shared across the interactive demos. */
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
 /**
  * Normalise a proposed tree-entry name to what `mkit-core::object::TreeEntry::validate_name` accepts: no `/ \ "`, no
  * control chars, printable-ASCII only, ≤255 bytes. The regex deliberately skips `\0` (oxlint no-control-regex) because

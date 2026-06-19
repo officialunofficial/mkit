@@ -30,11 +30,12 @@ use mkit_core::hash::Hash;
 use mkit_core::object::{Commit, Object};
 use mkit_core::ops::conflict_state::{self, MergeState, in_progress_op_name, is_merge_in_progress};
 use mkit_core::ops::merge::{find_merge_base, merge_trees};
-use mkit_core::refs::{self, Head};
+use mkit_core::refs;
 use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 
+use super::{advance_head, error as emit_err, load_tree_hash};
 use crate::clap_shim;
 use crate::config;
 use crate::exit;
@@ -127,7 +128,7 @@ fn start(
     // commit. Branch names keep their historical precedence because
     // resolve_revision checks refs/heads first.
     let theirs = match super::revspec::resolve_revision(store, mkit_dir, branch) {
-        Ok(h) => peel_tags(store, h),
+        Ok(h) => super::log::peel_tags(store, h),
         Err(e) => return emit_err(&format!("merge target: {e}"), exit::GENERAL_ERROR),
     };
 
@@ -470,25 +471,7 @@ fn restore_to(
     if let Err(e) = super::restore_worktree_and_index(cwd, store, target_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    let head = refs::read_head(mkit_dir).unwrap_or(Head::Branch("main".to_string()));
-    match head {
-        Head::Branch(name) => {
-            if let Err(e) = super::write_ref_recording_history(
-                mkit_dir,
-                &name,
-                refs::RefWriteCondition::Any,
-                &target,
-            ) {
-                return Err(emit_err(&format!("restore ref: {e}"), exit::CANTCREAT));
-            }
-        }
-        Head::Detached(_) => {
-            if let Err(e) = refs::write_head_detached(mkit_dir, &target) {
-                return Err(emit_err(&format!("restore HEAD: {e}"), exit::CANTCREAT));
-            }
-        }
-    }
-    Ok(())
+    super::restore_head_ref(mkit_dir, &target)
 }
 
 fn create_merge_commit(
@@ -531,39 +514,6 @@ fn create_merge_commit(
         .map_err(|e| emit_err(&format!("store commit: {e}"), exit::CANTCREAT))
 }
 
-fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, u8> {
-    match store.read_object(&commit_hash) {
-        Ok(Object::Commit(c)) => Ok(c.tree_hash),
-        Ok(_) => Err(emit_err("object is not a commit", exit::DATAERR)),
-        Err(e) => Err(emit_err(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
-    }
-}
-
-fn advance_head(mkit_dir: &std::path::Path, new_head: &Hash) -> Result<(), String> {
-    let head = refs::read_head(mkit_dir).unwrap_or(Head::Branch("main".to_string()));
-    match head {
-        Head::Branch(name) => super::write_ref_recording_history(
-            mkit_dir,
-            &name,
-            refs::RefWriteCondition::Any,
-            new_head,
-        )
-        .map_err(|e| format!("write ref: {e}")),
-        Head::Detached(_) => {
-            refs::write_head_detached(mkit_dir, new_head).map_err(|e| format!("update HEAD: {e}"))
-        }
-    }
-}
-
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
-
-/// Bounded annotated-tag peel (mirrors `log.rs`/`diff.rs`).
-const MAX_TAG_DEPTH: usize = 16;
-
 /// Whether `spec` names a remote-tracking ref under revspec
 /// precedence (local branches and tags win over `<remote>/<branch>`).
 fn merge_source_is_remote_tracking(mkit_dir: &Path, spec: &str) -> bool {
@@ -577,14 +527,4 @@ fn merge_source_is_remote_tracking(mkit_dir: &Path, spec: &str) -> bool {
         return false; // a local ref of the same spelling shadows it
     }
     refs::read_remote_ref(mkit_dir, remote, branch).is_ok_and(|r| r.is_some())
-}
-
-fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
-    for _ in 0..MAX_TAG_DEPTH {
-        match store.read_object(&h) {
-            Ok(Object::Tag(t)) => h = t.target,
-            _ => break,
-        }
-    }
-    h
 }

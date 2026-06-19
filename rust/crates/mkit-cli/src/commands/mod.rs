@@ -116,6 +116,82 @@ pub fn usage_error(msg: &str) -> u8 {
     exit::USAGE
 }
 
+/// Shared helper: print `error: <msg>` to stderr and return `code`.
+///
+/// This is the single source of truth for the `error: …`-prefixed
+/// stderr channel used by every subcommand. It generalises
+/// [`usage_error`] (which hardcodes [`exit::USAGE`]) to an arbitrary
+/// exit code so command modules don't each carry their own copy.
+#[must_use]
+pub(crate) fn error(msg: &str, code: u8) -> u8 {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "error: {msg}");
+    code
+}
+
+/// Load the tree hash of a commit object, surfacing a CLI error code.
+///
+/// Shared by the `cherry-pick`/`revert`/`merge` replay+rollback paths,
+/// which all need the tree of a resolved commit before restoring it.
+///
+/// # Errors
+/// Returns [`exit::DATAERR`] if the object is not a commit, or
+/// [`exit::GENERAL_ERROR`] if it cannot be read.
+pub(crate) fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, u8> {
+    match store.read_object(&commit_hash) {
+        Ok(Object::Commit(c)) => Ok(c.tree_hash),
+        Ok(_) => Err(error("object is not a commit", exit::DATAERR)),
+        Err(e) => Err(error(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
+    }
+}
+
+/// Point the current branch (or detached HEAD) at `new_head`, routing a
+/// branch advance through the history-MMR helper.
+///
+/// Shared by `cherry-pick`/`revert`/`merge`. Unlike the historical
+/// per-command copies, a failure to read HEAD is propagated as an error
+/// rather than silently fabricating `Head::Branch("main")` and writing
+/// the commit pointer to the wrong (or a non-existent) `main` ref.
+///
+/// # Errors
+/// Returns a human-readable message if HEAD cannot be read or the ref
+/// write fails.
+pub(crate) fn advance_head(mkit_dir: &Path, new_head: &Hash) -> Result<(), String> {
+    let head = refs::read_head(mkit_dir).map_err(|e| format!("read HEAD: {e}"))?;
+    match head {
+        Head::Branch(name) => {
+            write_ref_recording_history(mkit_dir, &name, RefWriteCondition::Any, new_head)
+                .map_err(|e| format!("write ref: {e}"))
+        }
+        Head::Detached(_) => {
+            refs::write_head_detached(mkit_dir, new_head).map_err(|e| format!("update HEAD: {e}"))
+        }
+    }
+}
+
+/// Restore the current branch (or detached HEAD) to `target` as the
+/// final step of a conflict `--abort`/rollback.
+///
+/// Shared by `cherry-pick`/`revert`/`merge` `restore_to`. As with
+/// [`advance_head`], an unreadable HEAD is reported as an error instead
+/// of defaulting to `main` — a corrupted HEAD during `--abort` must not
+/// silently clobber/create a `main` branch.
+///
+/// # Errors
+/// Returns a CLI exit code (already printed via [`error`]) on failure.
+pub(crate) fn restore_head_ref(mkit_dir: &Path, target: &Hash) -> Result<(), u8> {
+    let head =
+        refs::read_head(mkit_dir).map_err(|e| error(&format!("read HEAD: {e}"), exit::DATAERR))?;
+    match head {
+        Head::Branch(name) => {
+            write_ref_recording_history(mkit_dir, &name, RefWriteCondition::Any, target)
+                .map_err(|e| error(&format!("restore ref: {e}"), exit::CANTCREAT))
+        }
+        Head::Detached(_) => refs::write_head_detached(mkit_dir, target)
+            .map_err(|e| error(&format!("restore HEAD: {e}"), exit::CANTCREAT)),
+    }
+}
+
 /// Basename of the repo-level lock that serialises worktree/index
 /// read-modify-write commands (`add`, `rm`, `commit`, `merge`,
 /// `checkout`, `rebase`, `cherry-pick`, `stash`, `sparse-checkout`).
@@ -357,8 +433,8 @@ pub(crate) fn index_path_descends_from(path: &str, base: &str) -> bool {
 // History-MMR ref-write helper (feature: history-mmr)
 // ---------------------------------------------------------------------------
 //
-// Phase 2 of issue #157. Every CLI subcommand that advances a branch ref
-// MUST route the write through this helper instead of calling
+// Branch-ref history journaling (issue #157). Every CLI subcommand that
+// advances a branch ref MUST route the write through this helper instead of calling
 // `refs::write_ref` / `refs::update_ref` directly. Default builds
 // (no `history-mmr` feature) keep the old direct semantics; the
 // feature-gated path opens a per-branch journaled `CommitHistory`, takes
@@ -842,7 +918,8 @@ pub fn read_or_seed_index_from_head(
 
 #[cfg(test)]
 mod tests {
-    use super::c_quote_path;
+    use super::{advance_head, c_quote_path, restore_head_ref};
+    use mkit_core::hash::Hash;
 
     #[test]
     fn c_quote_leaves_plain_paths_alone() {
@@ -871,5 +948,40 @@ mod tests {
         assert_eq!(c_quote_path("é").as_deref(), Some(r#""\303\251""#));
         // Combined with ASCII: only the non-ASCII bytes are octal-escaped.
         assert_eq!(c_quote_path("x-é").as_deref(), Some(r#""x-\303\251""#));
+    }
+
+    // Regression: the shared replay helpers must NOT fabricate
+    // `Head::Branch("main")` when HEAD is unreadable/missing. A missing
+    // HEAD previously caused cherry-pick/revert/merge (and especially the
+    // `--abort` recovery path) to silently write the commit pointer to
+    // `refs/heads/main`, clobbering or creating a `main` branch the user
+    // never had. Both helpers must surface the read error instead.
+
+    #[test]
+    fn advance_head_errors_when_head_missing_instead_of_writing_main() {
+        let td = tempfile::tempdir().unwrap();
+        let mkit_dir = td.path();
+        // No HEAD file exists → refs::read_head returns NoHead.
+        let new_head: Hash = [0x11; 32];
+        let err = advance_head(mkit_dir, &new_head).expect_err("missing HEAD must error");
+        assert!(err.contains("read HEAD"), "unexpected error: {err}");
+        // Crucially, no `main` ref was fabricated.
+        assert!(
+            !mkit_dir.join("refs/heads/main").exists(),
+            "advance_head must not write refs/heads/main when HEAD is unreadable"
+        );
+    }
+
+    #[test]
+    fn restore_head_ref_errors_when_head_missing_instead_of_writing_main() {
+        let td = tempfile::tempdir().unwrap();
+        let mkit_dir = td.path();
+        let target: Hash = [0x22; 32];
+        let code = restore_head_ref(mkit_dir, &target).expect_err("missing HEAD must error");
+        assert_eq!(code, crate::exit::DATAERR);
+        assert!(
+            !mkit_dir.join("refs/heads/main").exists(),
+            "restore_head_ref must not write refs/heads/main when HEAD is unreadable"
+        );
     }
 }

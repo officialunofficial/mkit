@@ -314,7 +314,7 @@ fn verify_attest_rejects_statement_subject_errors() {
         (
             format!(r#"{{"subject":[{{"name":"commit","digest":{{"blake3":"{invalid_hex}"}}}}]}}"#)
                 .into_bytes(),
-            "Statement subject digest is not lowercase hex",
+            "Statement subject digest is not valid hex",
         ),
     ];
 

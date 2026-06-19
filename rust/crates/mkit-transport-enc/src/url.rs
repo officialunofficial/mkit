@@ -174,7 +174,7 @@ pub fn parse_enc_url(url: &str) -> Result<EncTarget, TransportError> {
 /// Pull the `pubkey=` value out of a query string. We deliberately do
 /// **not** accept any other parameters — a typo'd query (`?pubkey =`
 /// vs `?pubkey=`) must fail loudly because the pubkey is the trust
-/// anchor. Phase 3 may extend this if a real second param is added.
+/// anchor. This may be extended if a real second param is ever added.
 fn parse_pubkey_query(query: &str) -> Result<&str, TransportError> {
     let mut found: Option<&str> = None;
     for kv in query.split('&') {
@@ -209,7 +209,20 @@ fn parse_pubkey_query(query: &str) -> Result<&str, TransportError> {
 /// encodings are accepted because (a) the keystore emits unpadded
 /// url-safe base64 by default and (b) hex pastes are easier to inspect
 /// on the command line. Anything else is rejected.
-fn decode_pubkey(s: &str) -> Result<[u8; PUBKEY_LEN], TransportError> {
+///
+/// This is the canonical on-wire pubkey decoder for the encrypted
+/// transport: the `mkit+enc://?pubkey=` query parser uses it, and
+/// downstream consumers (e.g. `mkit serve --listen-enc`'s
+/// authorized-peers file parser) should call it rather than
+/// re-implementing the same encoding, so the accepted forms — and the
+/// rejection of non-zero base64 trailing bits — stay in one place.
+///
+/// # Errors
+///
+/// Returns [`TransportError::InvalidRef`] with a human-readable reason
+/// if `s` is neither 64 hex chars nor 43 url-safe base64 chars, or if a
+/// base64 input has non-zero trailing bits.
+pub fn decode_pubkey(s: &str) -> Result<[u8; PUBKEY_LEN], TransportError> {
     if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return decode_hex(s);
     }
@@ -552,6 +565,23 @@ mod tests {
     fn rejects_query_without_equals() {
         let url = "mkit+enc://h.example?pubkeyzero";
         assert!(parse_enc_url(url).is_err());
+    }
+
+    #[test]
+    fn decode_pubkey_public_api_accepts_hex_and_b64_and_rejects_garbage() {
+        // The canonical decoder is now public so downstream crates
+        // (e.g. `mkit serve --listen-enc`'s peer-allowlist parser) can
+        // share it. Pin its accepted/rejected forms directly.
+        assert_eq!(decode_pubkey(ZERO_HEX).unwrap(), [0u8; 32]);
+        assert_eq!(decode_pubkey(ZERO_B64).unwrap(), [0u8; 32]);
+        assert_eq!(decode_pubkey(&"FF".repeat(32)).unwrap(), [0xFFu8; 32]);
+        // Wrong length.
+        assert!(decode_pubkey(&"0".repeat(62)).is_err());
+        // Non-zero trailing bits in the final base64 char.
+        let mut bad = ZERO_B64.to_string();
+        bad.pop();
+        bad.push('B');
+        assert!(decode_pubkey(&bad).is_err());
     }
 
     #[test]

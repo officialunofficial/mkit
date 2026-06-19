@@ -52,50 +52,36 @@ fn slug(s: &str) -> String {
         .replace("__", "_")
 }
 
+/// Render `v` rounded to a whole number with a comma every three
+/// digits (e.g. `12345.0` → `"12,345"`).
+fn group_thousands(v: f64) -> String {
+    let digits = format!("{v:.0}");
+    digits
+        .bytes()
+        .rev()
+        .enumerate()
+        .map(|(i, b)| {
+            let ch = b as char;
+            if i > 0 && i % 3 == 0 {
+                format!("{ch},")
+            } else {
+                ch.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>()
+}
+
 fn fmt_value(v: f64, unit: Unit) -> String {
     match unit {
-        Unit::MibPerSec => {
+        // Pure throughput: comma-group once we hit four digits.
+        Unit::MibPerSec | Unit::OpsPerSec => {
             if v >= 1000.0 {
-                format!("{:.0}", v)
-                    .bytes()
-                    .rev()
-                    .enumerate()
-                    .map(|(i, b)| {
-                        let ch = b as char;
-                        if i > 0 && i % 3 == 0 {
-                            format!("{ch},")
-                        } else {
-                            ch.to_string()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<String>()
+                group_thousands(v)
             } else {
-                format!("{:.0}", v)
-            }
-        }
-        Unit::OpsPerSec => {
-            if v >= 1000.0 {
-                format!("{:.0}", v)
-                    .bytes()
-                    .rev()
-                    .enumerate()
-                    .map(|(i, b)| {
-                        let ch = b as char;
-                        if i > 0 && i % 3 == 0 {
-                            format!("{ch},")
-                        } else {
-                            ch.to_string()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<String>()
-            } else {
-                format!("{:.0}", v)
+                format!("{v:.0}")
             }
         }
         Unit::Millis => {
@@ -114,22 +100,7 @@ fn fmt_value(v: f64, unit: Unit) -> String {
 
 fn fmt_axis(v: f64) -> String {
     if v >= 1000.0 {
-        format!("{:.0}", v)
-            .bytes()
-            .rev()
-            .enumerate()
-            .map(|(i, b)| {
-                let ch = b as char;
-                if i > 0 && i % 3 == 0 {
-                    format!("{ch},")
-                } else {
-                    ch.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<String>()
+        group_thousands(v)
     } else if v == v.floor() {
         format!("{v:.0}")
     } else {
@@ -298,10 +269,6 @@ fn escape_xml(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn humanize_axis(axis: &str) -> String {
-    axis.to_string()
-}
-
 fn category_title(category: &str) -> &'static str {
     match category {
         "hashing" => "Hash Throughput",
@@ -381,11 +348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             ""
         };
-        let title = format!(
-            "{} — {}{suffix}",
-            category_title(category),
-            humanize_axis(axis)
-        );
+        let title = format!("{} — {axis}{suffix}", category_title(category));
         let svg = render_chart(&title, render_unit, display_unit, &rows);
         let path = charts_dir.join(format!("{}-{}.svg", slug(category), slug(axis)));
         fs::write(&path, svg)?;

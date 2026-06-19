@@ -1068,11 +1068,7 @@ fn read_blob<S: ObjectSource + ?Sized>(store: &S, h: &Hash) -> Result<Vec<u8>, S
     worktree::read_blob(store, h).map_err(|e| format!("read object: {e}"))
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {

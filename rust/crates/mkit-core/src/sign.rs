@@ -536,9 +536,10 @@ pub fn load_raw_32(path: &Path) -> Result<zeroize::Zeroizing<[u8; 32]>, MkitErro
 
         // SAFETY: `geteuid(2)` is a parameterless syscall that always
         // succeeds, never reads or writes user memory, and is reentrant
-        // and async-signal-safe per POSIX. The `unsafe` block is the
-        // only one in `mkit-core`; the crate keeps `deny(unsafe_code)`
-        // so this opt-out is reviewable.
+        // and async-signal-safe per POSIX. This is one of two reviewed
+        // `unsafe` blocks in `mkit-core` (the other being the
+        // `F_BARRIERFSYNC` fcntl in `batch.rs`); the crate keeps
+        // `deny(unsafe_code)` so each opt-out is reviewable.
         let euid = effective_uid();
         if meta.uid() != euid {
             return Err(MkitError::InsecureKeyOwner {
@@ -888,8 +889,8 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// Finding H4: `domain_digest` now hashes a 2-byte LE length
-    /// prefix before the domain label, so
+    /// `domain_digest` hashes a 2-byte LE length prefix before the
+    /// domain label, so
     /// `BLAKE3(len_le16(D) || D || M)` — not `BLAKE3(D || M)`. This
     /// closes a latent ambiguity between a domain `"ab"` + message
     /// `"cX"` vs domain `"abc"` + message `"X"` (same concatenation).
@@ -1145,12 +1146,14 @@ mod tests {
         assert_eq!(meta.mode() & 0o777, 0o600);
     }
 
-    /// Regression for finding H3. If the key file already exists with
-    /// a wider mode (e.g. from an older mkit that wrote 0o644), saving
-    /// again MUST tighten it to 0o600. The hardened path sets
-    /// permissions on the open File handle, not by path, so there is
-    /// no window in which an attacker could `rename(2)` in a different
-    /// inode between `open()` and `set_permissions()`.
+    /// If the key file already exists with a wider mode (e.g. from an
+    /// older mkit that wrote 0o644), saving again MUST tighten it to
+    /// 0o600. The hardened path writes a fresh temp file created at mode
+    /// 0o600 (via `O_CREAT|O_EXCL`) and `rename(2)`s it over the target,
+    /// so the wide-mode inode is replaced wholesale — the resulting file
+    /// carries the temp file's tight mode regardless of the old mode, and
+    /// there is no `open()`/`set_permissions()` window for an attacker to
+    /// swap in a different inode.
     #[cfg(unix)]
     #[test]
     fn save_key_tightens_preexisting_wide_mode_to_0600() {

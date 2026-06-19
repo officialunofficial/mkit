@@ -526,16 +526,15 @@ mod tpm {
     //! transitively pulls in the `tss-esapi` crate's link against the
     //! host's `libtss2-esys`.
     //!
-    //! NOTE (Team Upsilon, shipping from macOS): `tss-esapi-sys` 0.6
-    //! does not support aarch64-darwin, so this module's type usage
-    //! was designed against the tss-esapi 7.7 API surface but not yet
-    //! verified with a successful `cargo check --features tpm2` on
-    //! Linux. Minor type-name drift between 7.x minors is possible —
-    //! the first Linux integrator should expect to touch 1-2 fully-
-    //! qualified paths under `tss_esapi::structures::` /
-    //! `tss_esapi::handles::` if anything renamed. The DER/compact/
-    //! SEC1 helpers above are fully unit-tested and will not need
-    //! changes.
+    //! `tss-esapi-sys` does not support macOS, so this backend cannot be
+    //! built on a macOS host. It is, however, compiled and clippy-checked
+    //! on Linux CI: the workflow installs `libtss2-dev` and runs
+    //! `cargo clippy --all-features -- -D warnings` and a locked
+    //! `cargo build --all-features` against the pinned `tss-esapi 7.7`,
+    //! which gates in this module. If you bump `tss-esapi` to a new minor,
+    //! watch for type-name drift under `tss_esapi::structures::` /
+    //! `tss_esapi::handles::`. The DER/compact/SEC1 helpers above are
+    //! covered by the platform-independent unit tests.
 
     use super::{SignerError, compress_sec1, der_ecdsa_to_compact, normalize_low_s, to_hex};
     use sha2::{Digest, Sha256};

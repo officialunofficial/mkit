@@ -145,7 +145,10 @@ struct ParsedArgs {
         """
 }
 
-private let signerVersion = "0.2.0"
+// Kept in step with the reference-signer workspace version
+// (contrib/signers/Cargo.toml) so all signers advertise the same
+// `signer_id` version component.
+private let signerVersion = "0.1.0"
 
 // MARK: - Subcommand implementations
 

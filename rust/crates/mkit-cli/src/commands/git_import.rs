@@ -820,7 +820,7 @@ fn translate_upstream(
         new_state.push(map::RefState {
             ref_name: name.clone(),
             mkit_hash: *mkit_hash,
-            git_id: sha1_to_id(git_id),
+            git_id: *git_id,
         });
     }
     // Upstream deletions propagate to the tracking refs (like
@@ -894,10 +894,6 @@ fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = d.sync_all();
     }
     Ok(())
-}
-
-fn sha1_to_id(s: &Sha1Id) -> Sha1Id {
-    *s
 }
 
 /// SPEC-GIT-IMPORT §5: subject = mkit head, predicate carries the git
@@ -1173,7 +1169,4 @@ fn divergence_probe(
     Ok(())
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    eprintln!("error: {msg}");
-    code
-}
+use super::error as emit_err;

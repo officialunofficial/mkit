@@ -255,27 +255,6 @@ global flags (before <command>):
   --no-pager|-P     Accepted no-op (mkit never paginates)
 ";
 
-/// Strip lines beginning with `#` (after any leading whitespace) and
-/// trim surrounding whitespace. Used by `mkit commit` when
-/// `.mkit/COMMIT_EDITMSG` is edited via `$EDITOR`.
-#[must_use]
-pub fn strip_comments_and_trim(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for line in input.split('\n') {
-        let leading = line.trim_start_matches([' ', '\t']);
-        if leading.starts_with('#') {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.trim_matches([' ', '\t', '\r', '\n']).to_owned()
-}
-
-/// Template written into `.mkit/COMMIT_EDITMSG` before spawning
-/// `$EDITOR`. Pinned by snapshot tests.
-pub const COMMIT_EDITMSG_TEMPLATE: &str = "\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored, and an empty message aborts the commit.\n";
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,24 +324,5 @@ mod tests {
                 "HELP_TEXT missing documented subcommand: {cmd}"
             );
         }
-    }
-
-    #[test]
-    fn strip_comments_drops_hash_lines_and_trims() {
-        let input = "\nhello\n# a comment\nworld\n   # indented\n\n";
-        assert_eq!(strip_comments_and_trim(input), "hello\nworld");
-    }
-
-    #[test]
-    fn strip_comments_all_comments_is_empty() {
-        assert_eq!(strip_comments_and_trim("# only\n# comments\n"), "");
-    }
-
-    #[test]
-    fn strip_comments_preserves_interior_blank_lines() {
-        assert_eq!(
-            strip_comments_and_trim("title\n\nbody\n# comment\n"),
-            "title\n\nbody"
-        );
     }
 }

@@ -3,8 +3,10 @@
 //!
 //! The binary is `src/main.rs`; everything else is a module here so
 //! unit tests and integration tests can link without shelling out.
-//! `mkit-cli` is explicitly `publish = false` — it is monorepo-internal
-//! plumbing, not a stable API.
+//! `mkit-cli` IS published to crates.io so `cargo install mkit-cli`
+//! works, but its library surface (`mkit_cli::…`) is unstable, exists
+//! only for in-process testing, and is deliberately excluded from
+//! `cargo-semver-checks` — do not depend on it as a stable API.
 
 // `deny` rather than `forbid` so the (currently single) `getpwuid_r`
 // home-dir lookup in `config::home_dir_for_euid` can call libc. That
@@ -40,6 +42,7 @@ use std::io::Write;
 /// directly (in-process, faster). We keep this function small and
 /// dispatch-only so the command modules remain easy to snapshot.
 #[must_use]
+#[allow(clippy::too_many_lines)] // flat command-dispatch match; splitting it would only hurt readability
 pub fn dispatch(argv: &[String]) -> u8 {
     // Consume leading global flags (`-C <path>`, `-c <key>=<val>`, and the
     // accepted-as-no-op pager flags) BEFORE resolving the subcommand, so
@@ -141,6 +144,20 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "sparse-checkout" => commands::sparse_checkout::run(&rest),
         #[cfg(feature = "pack-shards")]
         "pack-shard" => commands::pack_shard::run(&rest),
+        #[cfg(not(feature = "pack-shards"))]
+        "pack-shard" => {
+            // `pack-shard` is advertised in HELP_TEXT as a feature-gated
+            // command; mirror the `git` fallback so an advertised-but-
+            // disabled command fails with a clear "not compiled in"
+            // message rather than a misleading "unknown command".
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "error: pack-shard is not compiled into this binary; \
+                 rebuild with `--features pack-shards`"
+            );
+            exit::UNAVAILABLE
+        }
         other => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(

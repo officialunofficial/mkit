@@ -1,10 +1,9 @@
 //! `mkit checkout <branch>` — switch HEAD to a branch and materialise
 //! the branch tip's tree into the working directory.
 //!
-//! The file-restoration half was previously a Phase 10 follow-up; this
-//! wire-up calls `mkit_core::ops::restore::restore_tree_to_worktree`
-//! which respects `.mkitignore` and rejects symlinks that would escape
-//! the repo root.
+//! The file-restoration half calls
+//! `mkit_core::ops::restore::restore_tree_to_worktree`, which respects
+//! `.mkitignore` and rejects symlinks that would escape the repo root.
 
 use std::io::Write;
 
@@ -305,11 +304,7 @@ fn commit_subject(store: &ObjectStore, commit: &Hash) -> String {
         .to_owned()
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;
 
 /// Tracked paths the target drops — present in the current index but
 /// absent from the target tree. The `clean = false` restore never

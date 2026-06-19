@@ -362,11 +362,7 @@ fn head_descriptor(store: &ObjectStore, mkit_dir: &std::path::Path) -> Option<(S
     Some((format::short_hash(&head, format::SUMMARY_ABBREV), subject))
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {

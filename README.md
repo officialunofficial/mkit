@@ -41,7 +41,7 @@ echo hello > hi.txt
 mkit add hi.txt
 mkit commit -m "first commit"
 
-# push to a remote (strict scheme — mkit+{file,https,s3,ssh}://)
+# push to a remote (strict scheme — mkit+{file,https,s3,ssh,enc}://)
 mkit remote add origin mkit+file:///srv/mkit/my-repo
 mkit push origin            # first push records `origin` as the branch upstream
 mkit push                   # subsequent pushes go to the recorded upstream

@@ -25,7 +25,7 @@
 //!
 //! ## Stability
 //!
-//! The schemas are frozen for the v0.1.x line at protocol version 1.
+//! The schemas are frozen at protocol version 1 across the 0.x line.
 //! Wire-compatible additions (new enum values, new optional fields,
 //! new oneof variants) ship as patches. Breaking changes bump the
 //! protocol-version integer in `common.proto` and introduce sibling

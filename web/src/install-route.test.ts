@@ -38,6 +38,27 @@ describe('tryServeInstaller', () => {
     await expect(res!.text()).resolves.toBe(SCRIPT)
   })
 
+  it('never forwards a Content-Encoding header and emits a decoded body', async () => {
+    // If the asset layer ever returned a body labelled Content-Encoding, the
+    // rebuilt response must not pass that header (or compressed bytes) through —
+    // otherwise `curl mkit.sh | sh` would pipe gzip/br into the shell. We read
+    // the asset to text, so the response carries identity bytes and no encoding.
+    const env = {
+      ASSETS: {
+        fetch: vi.fn(
+          async () =>
+            new Response(SCRIPT, {
+              headers: { 'Content-Type': 'application/octet-stream', 'Content-Encoding': 'gzip' },
+            }),
+        ),
+      },
+    }
+    const res = await tryServeInstaller(req('/', 'curl/8.4.0'), env)
+    expect(res).not.toBeNull()
+    expect(res!.headers.get('Content-Encoding')).toBeNull()
+    await expect(res!.text()).resolves.toBe(SCRIPT)
+  })
+
   it('also matches wget and other CLI fetchers', async () => {
     for (const ua of ['Wget/1.21.4', 'libcurl/8.0', 'HTTPie/3.2.2']) {
       const res = await tryServeInstaller(req('/', ua), makeEnv())

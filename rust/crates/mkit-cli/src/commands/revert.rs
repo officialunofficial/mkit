@@ -20,11 +20,12 @@ use mkit_core::ops::conflict_state::{
     self, RevertState, in_progress_op_name, is_revert_in_progress,
 };
 use mkit_core::ops::revert::revert as revert_tree;
-use mkit_core::refs::{self, Head};
+use mkit_core::refs;
 use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 
+use super::{advance_head, error as emit_err, load_tree_hash};
 use crate::clap_shim;
 use crate::config;
 use crate::exit;
@@ -103,7 +104,11 @@ fn start(
         );
     }
     let target: Hash = match super::revspec::resolve_revision(store, mkit_dir, hex) {
-        Ok(h) => h,
+        // Peel annotated/signed tags to their target commit so
+        // `mkit revert <annotated-tag>` works like git (a tag is a ref,
+        // which the doc comment advertises as acceptable). Mirrors
+        // `merge`'s behavior.
+        Ok(h) => super::log::peel_tags(store, h),
         Err(e) => return emit_err(&format!("bad commit: {e}"), exit::DATAERR),
     };
     let ours = match refs::resolve_head(mkit_dir) {
@@ -338,18 +343,7 @@ fn restore_to(
     if let Err(e) = super::restore_worktree_and_index(cwd, store, target_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    let head = refs::read_head(mkit_dir).unwrap_or(Head::Branch("main".to_string()));
-    match head {
-        Head::Branch(name) => super::write_ref_recording_history(
-            mkit_dir,
-            &name,
-            refs::RefWriteCondition::Any,
-            &target,
-        )
-        .map_err(|e| emit_err(&format!("restore ref: {e}"), exit::CANTCREAT)),
-        Head::Detached(_) => refs::write_head_detached(mkit_dir, &target)
-            .map_err(|e| emit_err(&format!("restore HEAD: {e}"), exit::CANTCREAT)),
-    }
+    super::restore_head_ref(mkit_dir, &target)
 }
 
 fn create_commit(
@@ -389,34 +383,4 @@ fn create_commit(
     store
         .write(&bytes)
         .map_err(|e| emit_err(&format!("store commit: {e}"), exit::CANTCREAT))
-}
-
-fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, u8> {
-    match store.read_object(&commit_hash) {
-        Ok(Object::Commit(c)) => Ok(c.tree_hash),
-        Ok(_) => Err(emit_err("object is not a commit", exit::DATAERR)),
-        Err(e) => Err(emit_err(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
-    }
-}
-
-fn advance_head(mkit_dir: &std::path::Path, new_head: &Hash) -> Result<(), String> {
-    let head = refs::read_head(mkit_dir).unwrap_or(Head::Branch("main".to_string()));
-    match head {
-        Head::Branch(name) => super::write_ref_recording_history(
-            mkit_dir,
-            &name,
-            refs::RefWriteCondition::Any,
-            new_head,
-        )
-        .map_err(|e| format!("write ref: {e}")),
-        Head::Detached(_) => {
-            refs::write_head_detached(mkit_dir, new_head).map_err(|e| format!("update HEAD: {e}"))
-        }
-    }
-}
-
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
 }

@@ -202,8 +202,4 @@ fn normalize(spec: &str) -> (String, bool) {
     (s.to_string(), dir_slash)
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;

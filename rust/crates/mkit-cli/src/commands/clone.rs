@@ -4,9 +4,11 @@
 //!
 //! Dispatches to the same transport-open path used by `mkit pull` —
 //! `file://`, `https://`, `s3://`, and `ssh://` are all wired via
-//! `remote_dispatch::open`. Shallow and sparse clone flags (`--depth`,
-//! `--sparse`) are recognised but deferred; we reject them with a clear
-//! message rather than silently ignoring.
+//! `remote_dispatch::open`. `--sparse` is implemented (behind the
+//! `sparse-checkout` feature): the patterns are persisted to
+//! `.mkit/sparse-checkout` and a verifiable sparse checkout is performed
+//! after the pull. `--depth` (shallow clone) is still deferred and is
+//! rejected with a clear message rather than silently ignored.
 
 use std::fs;
 use std::io::Write;
@@ -30,7 +32,7 @@ struct CloneOpts {
     /// Shallow clone depth (not yet wired).
     #[arg(long, value_name = "N")]
     depth: Option<u32>,
-    /// One or more sparse-checkout patterns (issue #158 Phase 2).
+    /// One or more sparse-checkout patterns (issue #158).
     /// Pulls the full ref set + reachable pack, then runs the
     /// verifiable sparse pipeline on the new working tree's HEAD,
     /// caching the bitmap and materialising only the matching files.
@@ -55,8 +57,8 @@ pub fn run(args: &[String]) -> u8 {
     }
     // `--sparse` no longer rejects — the patterns are persisted to
     // `.mkit/sparse-checkout` after the pack pull lands, and the next
-    // `mkit checkout` honours them. Phase 2 sparse fetch over the
-    // wire is wired through `mkit checkout --sparse` itself.
+    // `mkit checkout` honours them. Sparse fetch over the wire is
+    // wired through `mkit checkout --sparse` itself.
     let url = opts.url.as_str();
     // Reject control characters (newline et al.) before the URL is
     // persisted to `.mkit/config` via `config::write` (which emits values
@@ -241,8 +243,4 @@ fn scheme_of(url: &str) -> Option<&'static str> {
     None
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;

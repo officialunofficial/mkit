@@ -17,7 +17,9 @@
 //!   `attestation_id`.
 //! * [`signer`] — common Signer trait.
 //! * [`signer_repo_key`] — Ed25519 over the repo key (default).
-//! * [`signer_external`] — JSON-over-stdin/stdout subprocess.
+//! * [`signer_external`] — length-prefixed buffa `SignerFrame`
+//!   protocol over stdin/stdout to a caller-supplied subprocess
+//!   (see `rust/crates/mkit-rpc/proto/signer.proto`).
 //! * [`signer_sigstore`] — scaffold; returns `SigstoreNotImplemented`.
 //! * [`store`] — content-addressed `.mkit/attestations/<commit>/<id>.dsse`
 //!   on-disk layout with atomic writes.
@@ -27,8 +29,9 @@
 //! No `serde_json::to_string` is used on the emit path — the canonical
 //! encoder is hand-rolled per RFC 8785 because `serde_json` does NOT
 //! satisfy JCS's sort and number-format rules. `serde` and `serde_json`
-//! are used only for **parsing** envelopes-from-third-parties and the
-//! external-signer response line.
+//! are used only for **parsing** envelopes-from-third-parties; the
+//! external-signer path uses the binary buffa `SignerFrame` protocol,
+//! not JSON.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::multiple_crate_versions)]
@@ -122,7 +125,7 @@ pub enum Error {
     SubjectDigestMissing,
     #[error("Statement subject digest is not 64 hex characters")]
     InvalidDigestLength,
-    #[error("Statement subject digest is not lowercase hex")]
+    #[error("Statement subject digest is not valid hex")]
     InvalidDigestHex,
 
     // -- Signers --
@@ -134,8 +137,6 @@ pub enum Error {
     ExternalSignerFailed(String),
     #[error("external signer response could not be parsed: {0}")]
     ExternalSignerBadResponse(String),
-    #[error("external signer output exceeded the 1 MiB cap")]
-    ExternalSignerOutputTooLarge,
     #[error("external signer binary path must be absolute: {0}")]
     ExternalSignerRelativePath(String),
     /// The signer conversation exceeded the configured deadline at the
@@ -152,8 +153,6 @@ pub enum Error {
     // -- Algorithm dispatch --
     #[error("signature algorithm {0} is not enabled in this build")]
     AlgorithmNotEnabled(Algorithm),
-    #[error("unknown keyid prefix: {0}")]
-    UnknownKeyidPrefix(String),
 
     // -- Store --
     #[error("envelope is {len} bytes, exceeds the {max}-byte cap")]
@@ -237,9 +236,9 @@ pub enum Error {
         "BLS12-381 threshold recovery failed: fewer than `threshold` distinct partials supplied"
     )]
     BlsThresholdInsufficientPartials,
-    #[error("BLS12-381 threshold aggregate public key is malformed (bad G1 compressed encoding)")]
+    #[error("BLS12-381 threshold aggregate public key is malformed (bad G2 compressed encoding)")]
     BlsThresholdPublicKeyDecode,
-    #[error("BLS12-381 threshold signature is malformed (wrong length or bad G2 encoding)")]
+    #[error("BLS12-381 threshold signature is malformed (wrong length or bad G1 encoding)")]
     BlsThresholdSignatureDecode,
     #[error("BLS12-381 threshold signature did not verify against the aggregated public key")]
     BlsThresholdVerifyFailed,

@@ -19,8 +19,6 @@
 //! constants above. Any change breaks `chunked_blob` reproducibility
 //! (see `SPEC-FASTCDC.md` §2 determinism contract).
 
-use crate::object::MkitError;
-
 /// Frozen splitmix64 seed for v1 — ASCII `"MKITFCDC"` as big-endian u64.
 pub const SEED: u64 = 0x4D4B_4954_4643_4443;
 
@@ -100,7 +98,7 @@ impl FastCdc {
     /// Construct a chunker with custom parameters. `avg_size` MUST be a
     /// power of two; the strict/loose masks are derived as
     /// `mask = (1 << log2(avg)) - 1; mask_s = mask | (mask << 1); mask_l = mask >> 1`.
-    /// Returns [`MkitError::InvalidIdentity`] re-purposed as a generic
+    /// Returns [`crate::object::MkitError::InvalidIdentity`] re-purposed as a generic
     /// "bad parameter" error if the constraints are violated — but in
     /// practice this constructor is only used by tests, where the inputs
     /// are constants, so we panic instead for a clearer failure mode.
@@ -238,11 +236,6 @@ pub fn gear_table_digest() -> [u8; 32] {
     }
     crate::hash::hash(&bytes)
 }
-
-// MkitError is unused in this module today, but keep the import
-// reachable so future error returns don't drift the public surface.
-#[allow(dead_code)]
-fn _link_error_types(_: MkitError) {}
 
 // =========================================================================
 // Tests

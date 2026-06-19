@@ -21,7 +21,6 @@
 //! reasoning by analogy from git. Post-#102, the staging area is
 //! load-bearing: only paths in the index land in the commit's tree.
 
-use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -499,13 +498,12 @@ mod expand_dash_am_tests {
 /// exit-code) pair on failure so the caller can route the error
 /// through its usual `emit_err` path.
 ///
-/// Auto-generation was removed in combined with a non-atomic
-/// `save_key`, an interrupted keygen could silently rotate the user's
-/// identity (subsequent commits no longer share a signer with prior
-/// ones). The save path is now atomic, but auto-keygen also masks
-/// genuine path-misconfigurations and tooling errors. Users run
-/// `mkit keygen` once, explicitly, and a missing key on `mkit commit`
-/// is now an error.
+/// Auto-generation was removed: combined with a non-atomic `save_key`,
+/// an interrupted keygen could silently rotate the user's identity
+/// (subsequent commits no longer share a signer with prior ones). The
+/// save path is now atomic, but auto-keygen also masks genuine
+/// path-misconfigurations and tooling errors. Users run `mkit keygen`
+/// once, explicitly, and a missing key on `mkit commit` is now an error.
 fn load_signing_key(
     cwd: &std::path::Path,
     rel_signing_key_path: &str,
@@ -780,7 +778,7 @@ fn parse_author_spec(spec: &str) -> Result<Identity, String> {
         return Ok(Identity::opaque(raw.as_bytes().to_vec()));
     }
     Err(format!(
-        "unknown identity spec '{spec}' — expected ed25519:<hex>, did:key:<hex>, or opaque:<bytes>"
+        "unknown identity spec '{spec}' — expected ed25519:<hex>, did:key:<multibase>, or opaque:<bytes>"
     ))
 }
 
@@ -855,11 +853,7 @@ fn read_message_file(path: &str) -> std::io::Result<String> {
     Ok(raw.trim_end().to_string())
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {
