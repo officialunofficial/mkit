@@ -260,7 +260,7 @@ fn keyring_backend_error(operation: &str, error: keyring_core::Error) -> Error {
 fn keyring_list_error(error: keyring_core::Error) -> Error {
     match error {
         keyring_core::Error::NoEntry => Error::KeyNotFound(KeySelector {
-            label: static_label("list"),
+            label: crate::types::static_label("list"),
             algorithm: None,
         }),
         keyring_core::Error::NoStorageAccess(error) => Error::AccessDenied(error.to_string()),
