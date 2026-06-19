@@ -55,20 +55,13 @@ export default function HomePage() {
               </code>
               <CopyButton text='curl mkit.sh | sh' />
             </div>
-            <div className='inline-flex items-center gap-3 rounded-md border border-hairline bg-muted/10 px-3 py-2'>
-              <code className='font-mono text-sm'>
-                <span className='select-none text-muted'>$ </span>cargo install mkit-cli
-              </code>
-              <CopyButton text='cargo install mkit-cli' />
-            </div>
-            {/* Connect an agent to mkit's hosted docs + source MCP — the
-                canonical "Connecting" command from mcp/README.md. */}
+            {/* Install the mkit agent skill (SKILL.md at the repo root) into
+                Claude Code / Cursor / etc. via the vercel-labs `skills` CLI. */}
             <div className='inline-flex max-w-full items-center gap-3 overflow-x-auto rounded-md border border-hairline bg-muted/10 px-3 py-2'>
               <code className='whitespace-nowrap font-mono text-sm'>
-                <span className='select-none text-muted'>$ </span>claude mcp add --transport http mkit
-                https://mcp.mkit.sh
+                <span className='select-none text-muted'>$ </span>npx skills add officialunofficial/mkit
               </code>
-              <CopyButton text='claude mcp add --transport http mkit https://mcp.mkit.sh' />
+              <CopyButton text='npx skills add officialunofficial/mkit' />
             </div>
           </div>
         </div>
