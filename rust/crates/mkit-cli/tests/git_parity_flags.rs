@@ -1450,16 +1450,33 @@ fn diff_color_with_revision_arg_is_not_greedy() {
 
 #[test]
 fn dash_c_enforced_on_read_or_default_path() {
-    // commit reads config via read_or_default; `-c` overrides must reach it
-    // AND keep the forbidden-key guard there (refused with a warning).
+    // commit reads config via read_or_default; `-c` overrides must reach it.
+    // On one invocation: an inert key (user.email) is applied silently while
+    // a forbidden key (user.identity) is refused with a warning — selective
+    // application proving apply_cli_overrides runs on this path, not just
+    // read_layered. The inert value's *storage* is covered by
+    // global_dash_c_override_applies_inert_key (same apply_cli_overrides),
+    // since no read_or_default command echoes it to stdout.
     let repo = Repo::new();
     repo.write("a.txt", b"a\n");
     repo.ok(&["add", "a.txt"]);
-    let out = repo.run(&["-c", "user.identity=mid:99999", "commit", "-m", "c1"]);
+    let out = repo.run(&[
+        "-c",
+        "user.email=ci@example.com",
+        "-c",
+        "user.identity=mid:99999",
+        "commit",
+        "-m",
+        "c1",
+    ]);
     assert!(out.status.success(), "commit failed: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("ignoring `-c user.identity"),
-        "-c must be enforced on the commit (read_or_default) path: {}",
-        String::from_utf8_lossy(&out.stderr)
+        stderr.contains("ignoring `-c user.identity"),
+        "forbidden -c must be refused on the commit (read_or_default) path: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ignoring `-c user.email"),
+        "inert -c must be accepted, not warned: {stderr}"
     );
 }

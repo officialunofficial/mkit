@@ -807,16 +807,10 @@ fn try_rev_to_tree(
 }
 
 /// Follow `Object::Tag` targets to the first non-tag object, so an
-/// annotated/signed tag resolves to the commit it points at (bounded against
-/// a tag-of-tag cycle). A non-tag / unreadable object is returned unchanged.
-fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
-    for _ in 0..16 {
-        match store.read_object(&h) {
-            Ok(Object::Tag(t)) => h = t.target,
-            _ => break,
-        }
-    }
-    h
+/// annotated/signed tag resolves to the commit it points at. Delegates to
+/// the shared `log::peel_tags` (kept as a local alias for the call sites).
+fn peel_tags(store: &ObjectStore, h: Hash) -> Hash {
+    super::log::peel_tags(store, h)
 }
 
 /// Map a resolved object hash to a tree hash: commit/remix → its tree,
