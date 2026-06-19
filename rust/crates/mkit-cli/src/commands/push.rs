@@ -120,9 +120,7 @@ fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushO
 
     // Snapshot the local tip and the last-seen remote-tracking ref so we
     // can render git's ref-update summary block and detect a no-op push.
-    let local_tip = mkit_core::refs::read_ref(&mkit_dir, &branch)
-        .ok()
-        .flatten();
+    let local_tip = mkit_core::refs::read_ref(&mkit_dir, &branch).ok().flatten();
     let old_tracked = mkit_core::refs::read_remote_ref(&mkit_dir, &resolved.name, &remote_branch)
         .ok()
         .flatten();
@@ -166,13 +164,20 @@ fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushO
             // time (Git-like first-push convenience). Only persisted
             // when not already set, and never for a detached/forced
             // overwrite of an unrelated branch.
-            record_upstream(cwd, cfg, &branch, &resolved.name, &remote_branch, opts.set_upstream);
+            record_upstream(
+                cwd,
+                cfg,
+                &branch,
+                &resolved.name,
+                &remote_branch,
+                opts.set_upstream,
+            );
             // git-style ref-update summary block: `To <url>` then one
             // `<old>..<new>` / `* [new branch]` / `+ …(forced)` line.
             // On a store error during the ancestry check, assume a
             // fast-forward (don't mislabel an ordinary push as forced).
-            let forced = !remote_dispatch::is_fast_forward(cwd, old_tracked, new_tip)
-                .unwrap_or(true);
+            let forced =
+                !remote_dispatch::is_fast_forward(cwd, old_tracked, new_tip).unwrap_or(true);
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "To {}", resolved.endpoint);
             let _ = writeln!(

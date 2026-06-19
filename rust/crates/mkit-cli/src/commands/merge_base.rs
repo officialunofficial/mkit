@@ -47,11 +47,21 @@ pub fn run(args: &[String]) -> u8 {
     // sibling history commands (resolve_revision returns the tag object).
     let a = match super::revspec::resolve_revision(&store, &mkit_dir, &opts.a) {
         Ok(h) => super::log::peel_tags(&store, h),
-        Err(e) => return emit_err(&format!("bad revision '{}': {e}", opts.a), exit::GENERAL_ERROR),
+        Err(e) => {
+            return emit_err(
+                &format!("bad revision '{}': {e}", opts.a),
+                exit::GENERAL_ERROR,
+            );
+        }
     };
     let b = match super::revspec::resolve_revision(&store, &mkit_dir, &opts.b) {
         Ok(h) => super::log::peel_tags(&store, h),
-        Err(e) => return emit_err(&format!("bad revision '{}': {e}", opts.b), exit::GENERAL_ERROR),
+        Err(e) => {
+            return emit_err(
+                &format!("bad revision '{}': {e}", opts.b),
+                exit::GENERAL_ERROR,
+            );
+        }
     };
 
     if opts.is_ancestor {

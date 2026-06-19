@@ -512,7 +512,10 @@ fn render_human(mkit_dir: &std::path::Path, entries: &[StatusEntry]) -> u8 {
 
     if !staged.is_empty() {
         let _ = writeln!(stderr, "\nChanges to be committed:");
-        let _ = writeln!(stderr, "  (use \"mkit restore --staged <file>...\" to unstage)");
+        let _ = writeln!(
+            stderr,
+            "  (use \"mkit restore --staged <file>...\" to unstage)"
+        );
         for e in &staged {
             let _ = writeln!(stderr, "\t{:<12}{}", human_label(e.diff.kind), e.diff.path);
         }

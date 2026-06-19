@@ -665,7 +665,10 @@ pub fn reset_conflict_paths(
             continue;
         }
         let dir_prefix = format!("{path}/");
-        if target_map.keys().any(|k| k.starts_with(dir_prefix.as_str())) {
+        if target_map
+            .keys()
+            .any(|k| k.starts_with(dir_prefix.as_str()))
+        {
             continue; // a pre-op directory left in place
         }
         // The loop will REMOVE this op-added path; refuse a non-empty dir.
@@ -708,7 +711,10 @@ pub fn reset_conflict_paths(
             // the final restore align its contents; only drop any stale index
             // entry literally at `p`.
             let dir_prefix = format!("{path}/");
-            if target_map.keys().any(|k| k.starts_with(dir_prefix.as_str())) {
+            if target_map
+                .keys()
+                .any(|k| k.starts_with(dir_prefix.as_str()))
+            {
                 if let Some(pos) = idx.find_entry(path) {
                     idx.entries.remove(pos);
                 }

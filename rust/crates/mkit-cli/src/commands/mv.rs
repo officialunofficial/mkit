@@ -205,8 +205,16 @@ pub fn run(args: &[String]) -> u8 {
             .any(|e| e.status != EntryStatus::Removed && e.path.starts_with(&dir_prefix));
 
         let planned = if is_file {
-            plan_move(&cwd, &root_canon, &idx, source, &dest_rel, into_dir, opts.force)
-                .map(Planned::File)
+            plan_move(
+                &cwd,
+                &root_canon,
+                &idx,
+                source,
+                &dest_rel,
+                into_dir,
+                opts.force,
+            )
+            .map(Planned::File)
         } else if is_dir {
             plan_dir_move(
                 &cwd,
@@ -286,10 +294,7 @@ pub fn run(args: &[String]) -> u8 {
     for i in 0..dir_roots.len() {
         for j in (i + 1)..dir_roots.len() {
             let (a, b) = (dir_roots[i], dir_roots[j]);
-            if a == b
-                || b.starts_with(&format!("{a}/"))
-                || a.starts_with(&format!("{b}/"))
-            {
+            if a == b || b.starts_with(&format!("{a}/")) || a.starts_with(&format!("{b}/")) {
                 return emit_err(
                     &format!("multiple directory sources map to the same destination: {a}"),
                     exit::USAGE,
@@ -430,7 +435,8 @@ fn plan_move(
     // Skip entirely ONLY for a genuine case-only rename (the "destination" IS
     // the source on a case-insensitive filesystem) so `mv Foo foo` is a plain
     // rename. An untracked symlink pointing AT the source must NOT bypass this.
-    if path_present(&target_abs) && !is_case_only_rename(&src_rel, &target_rel, &src_abs, &target_abs)
+    if path_present(&target_abs)
+        && !is_case_only_rename(&src_rel, &target_rel, &src_abs, &target_abs)
     {
         // A file source can never replace a DIRECTORY destination — even with
         // -f. `-f` removes the destination first, and removing a directory
@@ -438,7 +444,9 @@ fn plan_move(
         // leave the index in a file/dir conflict. Git refuses this too.
         if std::fs::symlink_metadata(&target_abs).is_ok_and(|m| m.is_dir()) {
             return Err(emit_err(
-                &format!("destination is a directory: {target_rel} (mv cannot replace a directory with a file)"),
+                &format!(
+                    "destination is a directory: {target_rel} (mv cannot replace a directory with a file)"
+                ),
                 exit::GENERAL_ERROR,
             ));
         }
@@ -452,9 +460,11 @@ fn plan_move(
     // A tracked file BENEATH the destination (e.g. tracked `dst/child` with
     // `dst` deleted from disk, then `mv src dst`) would leave both `dst` (a
     // file) and `dst/child` in the index — a file/dir conflict.
-    if let Some(desc) = idx.entries.iter().find(|e| {
-        e.status != EntryStatus::Removed && e.path.starts_with(&format!("{target_rel}/"))
-    }) {
+    if let Some(desc) = idx
+        .entries
+        .iter()
+        .find(|e| e.status != EntryStatus::Removed && e.path.starts_with(&format!("{target_rel}/")))
+    {
         return Err(emit_err(
             &format!(
                 "destination has tracked descendants (e.g. '{}'); a file cannot replace it",
@@ -671,7 +681,10 @@ fn plan_dir_move(
             // from disk. Git refuses a move whose source is gone.
             let Ok(meta) = std::fs::symlink_metadata(&child_abs) else {
                 return Err(emit_err(
-                    &format!("bad source: {} (tracked file missing from the worktree)", e.path),
+                    &format!(
+                        "bad source: {} (tracked file missing from the worktree)",
+                        e.path
+                    ),
                     exit::GENERAL_ERROR,
                 ));
             };
@@ -680,7 +693,10 @@ fn plan_dir_move(
             // destination while the worktree keeps the directory.
             if meta.is_dir() {
                 return Err(emit_err(
-                    &format!("bad source: {} (tracked as a file but is now a directory)", e.path),
+                    &format!(
+                        "bad source: {} (tracked as a file but is now a directory)",
+                        e.path
+                    ),
                     exit::GENERAL_ERROR,
                 ));
             }

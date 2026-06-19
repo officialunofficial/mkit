@@ -426,7 +426,10 @@ pub fn run(args: &[String]) -> u8 {
 
 /// Resolve a commit/remix hash to its tree hash (None on any error or a
 /// non-commit object) — used to bound the post-commit diffstat.
-fn commit_tree(store: &ObjectStore, commit: &mkit_core::hash::Hash) -> Option<mkit_core::hash::Hash> {
+fn commit_tree(
+    store: &ObjectStore,
+    commit: &mkit_core::hash::Hash,
+) -> Option<mkit_core::hash::Hash> {
     match store.read_object(commit).ok()? {
         Object::Commit(c) => Some(c.tree_hash),
         Object::Remix(r) => Some(r.tree_hash),

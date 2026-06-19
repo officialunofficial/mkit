@@ -1310,8 +1310,14 @@ mod tests {
         assert_eq!(normalize_config_key("Core.AutoCRLF"), "core.autocrlf");
         assert_eq!(normalize_config_key("user.identity"), "user.identity");
         // Three-segment keys: section + variable lowercased, subsection kept.
-        assert_eq!(normalize_config_key("remote.Origin.url"), "remote.Origin.url");
-        assert_eq!(normalize_config_key("Remote.Origin.URL"), "remote.Origin.url");
+        assert_eq!(
+            normalize_config_key("remote.Origin.url"),
+            "remote.Origin.url"
+        );
+        assert_eq!(
+            normalize_config_key("Remote.Origin.URL"),
+            "remote.Origin.url"
+        );
         assert_eq!(
             normalize_config_key("branch.Release.remote"),
             "branch.Release.remote"

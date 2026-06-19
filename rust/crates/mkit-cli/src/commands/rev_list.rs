@@ -46,7 +46,10 @@ pub fn run(args: &[String]) -> u8 {
         // `log`/`diff`/`branch` (resolve_revision returns the tag object).
         Ok(h) => super::log::peel_tags(&store, h),
         Err(e) => {
-            return emit_err(&format!("bad revision '{}': {e}", opts.rev), exit::GENERAL_ERROR);
+            return emit_err(
+                &format!("bad revision '{}': {e}", opts.rev),
+                exit::GENERAL_ERROR,
+            );
         }
     };
     let commits = match super::log::ordered_commits(&store, &[tip], &HashSet::new()) {

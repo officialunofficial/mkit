@@ -134,7 +134,8 @@ pub fn run(args: &[String]) -> u8 {
     let Some(color_choice) = crate::term::ColorChoice::parse(opts.color.as_deref()) else {
         return emit_err("--color expects always, auto, or never", exit::USAGE);
     };
-    let use_color = !opts.no_color && color_choice.resolve(std::io::IsTerminal::is_terminal(&std::io::stdout()));
+    let use_color = !opts.no_color
+        && color_choice.resolve(std::io::IsTerminal::is_terminal(&std::io::stdout()));
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -943,7 +944,11 @@ fn normalize_pathspec(spec: &str) -> String {
     let s = spec.replace('\\', "/");
     let s = s.strip_prefix("./").unwrap_or(&s);
     let s = s.strip_suffix('/').unwrap_or(s);
-    if s == "." { String::new() } else { s.to_string() }
+    if s == "." {
+        String::new()
+    } else {
+        s.to_string()
+    }
 }
 
 fn path_matches_any(path: &str, specs: &[String]) -> bool {

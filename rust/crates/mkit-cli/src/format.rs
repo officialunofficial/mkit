@@ -181,7 +181,13 @@ pub const SUMMARY_ABBREV: usize = 7;
 /// Object ids are mkit BLAKE3 prefixes rather than git SHA-1 (documented
 /// divergence); everything else is byte-shaped like git.
 #[must_use]
-pub fn ref_update_line(old: Option<&Hash>, new: &Hash, src: &str, dst: &str, forced: bool) -> String {
+pub fn ref_update_line(
+    old: Option<&Hash>,
+    new: &Hash,
+    src: &str,
+    dst: &str,
+    forced: bool,
+) -> String {
     let n = short_hash(new, SUMMARY_ABBREV);
     match old {
         None => format!(" * [new branch]      {src} -> {dst}"),

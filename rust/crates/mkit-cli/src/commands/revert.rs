@@ -323,7 +323,8 @@ fn restore_to(
     // The operation's result tree lets the guards treat its clean hunks (not
     // just conflict paths) as discardable.
     let op_result = conflict_state::read_result_tree(mkit_dir).ok().flatten();
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result) {
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result)
+    {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     if let Err(e) =

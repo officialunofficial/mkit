@@ -201,11 +201,17 @@ fn cherry_pick_m_is_mainline_selection_not_a_message() {
         "cherry-pick -m 2 <merge> should succeed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(repo.path().join("b.txt").exists(), "mainline 2 should add b.txt");
+    assert!(
+        repo.path().join("b.txt").exists(),
+        "mainline 2 should add b.txt"
+    );
 
     // A non-numeric `-m` is a clean value error, not a silent message.
     let out = repo.run(&["cherry-pick", "-m", "notanumber", &m]);
-    assert!(!out.status.success(), "non-numeric -m must be a usage error");
+    assert!(
+        !out.status.success(),
+        "non-numeric -m must be a usage error"
+    );
 }
 
 #[test]
@@ -317,10 +323,16 @@ fn stash_pop_index_preserves_staged_deletion() {
 
     repo.ok(&["rm", "b.txt"]); // stage a deletion
     repo.ok(&["stash"]);
-    assert!(repo.path().join("b.txt").exists(), "save reset the worktree");
+    assert!(
+        repo.path().join("b.txt").exists(),
+        "save reset the worktree"
+    );
 
     repo.ok(&["stash", "pop", "--index"]);
-    assert!(!repo.path().join("b.txt").exists(), "worktree deletion restored");
+    assert!(
+        !repo.path().join("b.txt").exists(),
+        "worktree deletion restored"
+    );
     let status = stdout(&repo.ok(&["status", "--porcelain"]));
     assert!(
         status.contains("D  b.txt"),
@@ -426,13 +438,19 @@ fn cherry_pick_n_on_conflict_is_refused_cleanly() {
     let head_before = rev(&repo, "HEAD");
 
     let out = repo.run(&["cherry-pick", "-n", &pick]);
-    assert!(!out.status.success(), "a conflicting -n pick must be refused");
+    assert!(
+        !out.status.success(),
+        "a conflicting -n pick must be refused"
+    );
     assert_eq!(rev(&repo, "HEAD"), head_before, "-n must not move HEAD");
 
     // The worktree was left untouched — no `<<<<<<<` markers to accidentally
     // `mkit add` + commit.
     let body = std::fs::read(repo.path().join("a.txt")).unwrap();
-    assert_eq!(body, b"ours\n", "worktree must be untouched on a refused -n pick");
+    assert_eq!(
+        body, b"ours\n",
+        "worktree must be untouched on a refused -n pick"
+    );
     assert!(
         !String::from_utf8_lossy(&body).contains("<<<<<<<"),
         "no conflict markers should be materialized"
@@ -492,9 +510,16 @@ fn merge_no_commit_finish_uses_orig_base_as_first_parent() {
         .lines()
         .filter_map(|l| l.strip_prefix("parent "))
         .collect();
-    assert_eq!(parents.len(), 2, "merge commit must have two parents: {body}");
+    assert_eq!(
+        parents.len(),
+        2,
+        "merge commit must have two parents: {body}"
+    );
     assert_eq!(parents[0], main_before, "parent[0] must be the merge base");
-    assert_eq!(parents[1], feature, "parent[1] must be MERGE_HEAD (feature)");
+    assert_eq!(
+        parents[1], feature,
+        "parent[1] must be MERGE_HEAD (feature)"
+    );
 }
 
 #[test]
@@ -507,10 +532,16 @@ fn branch_contains_defaults_to_head() {
 
     // `--contains` (no arg) == `--contains HEAD`: only main contains HEAD.
     let contains = stdout(&repo.ok(&["branch", "--contains"]));
-    assert!(contains.contains("main") && !contains.contains("feature"), "{contains}");
+    assert!(
+        contains.contains("main") && !contains.contains("feature"),
+        "{contains}"
+    );
     // `--no-contains` (no arg): branches NOT containing HEAD → feature only.
     let no_contains = stdout(&repo.ok(&["branch", "--no-contains"]));
-    assert!(no_contains.contains("feature") && !no_contains.contains("main"), "{no_contains}");
+    assert!(
+        no_contains.contains("feature") && !no_contains.contains("main"),
+        "{no_contains}"
+    );
 }
 
 #[test]
@@ -531,7 +562,11 @@ fn rebase_replays_a_branch_containing_a_merge_commit() {
     repo.ok(&["checkout", "topic"]);
     repo.commit_file("t1.txt", b"t1\n", "A2"); // topic diverges from side
     repo.ok(&["merge", "side"]); // 3-way merge → merge commit M on topic
-    assert_eq!(parent_count(&repo, "HEAD"), 2, "topic tip should be a merge");
+    assert_eq!(
+        parent_count(&repo, "HEAD"),
+        2,
+        "topic tip should be a merge"
+    );
     repo.commit_file("t2.txt", b"t2\n", "B");
     // Advance main, then rebase topic onto it.
     repo.ok(&["checkout", "main"]);
@@ -557,7 +592,13 @@ fn diff_merge_base_typo_second_rev_errors() {
     // filter that emits an empty diff.
     let repo = Repo::new();
     clean_diverge(&repo); // `feature` and `main` exist
-    let out = repo.run(&["diff", "--merge-base", "feature", "nosuchrev", "--name-only"]);
+    let out = repo.run(&[
+        "diff",
+        "--merge-base",
+        "feature",
+        "nosuchrev",
+        "--name-only",
+    ]);
     assert!(
         !out.status.success(),
         "an unresolvable 2nd revision must fail, not exit 0: {}",
@@ -583,9 +624,16 @@ fn merge_abort_after_clean_no_commit_succeeds() {
     assert!(repo.path().join("b.txt").exists(), "merge staged b.txt");
 
     repo.ok(&["merge", "--abort"]);
-    assert!(!repo.path().join("b.txt").exists(), "abort discarded the merge");
+    assert!(
+        !repo.path().join("b.txt").exists(),
+        "abort discarded the merge"
+    );
     assert_eq!(rev(&repo, "HEAD"), head_before, "HEAD restored");
-    assert!(stdout(&repo.ok(&["status", "--porcelain"])).trim().is_empty());
+    assert!(
+        stdout(&repo.ok(&["status", "--porcelain"]))
+            .trim()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -597,7 +645,10 @@ fn merge_abort_refuses_unstaged_edits_after_no_commit() {
     repo.ok(&["merge", "--no-commit", "feature"]);
     repo.write("b.txt", b"hand-edited after the merge\n"); // unstaged edit
     let out = repo.run(&["merge", "--abort"]);
-    assert!(!out.status.success(), "abort must refuse to discard the edit");
+    assert!(
+        !out.status.success(),
+        "abort must refuse to discard the edit"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("b.txt"),
         "the refusal must name the protected path: {}",
@@ -665,13 +716,26 @@ fn merge_abort_discards_operation_authored_clean_paths() {
     conflict_plus_clean(&repo);
     let head0 = rev(&repo, "HEAD");
     let out = repo.run(&["merge", "feature"]);
-    assert!(!out.status.success(), "merge should pause on the a.txt conflict");
-    assert!(repo.path().join("b.txt").exists(), "the clean add was materialized");
+    assert!(
+        !out.status.success(),
+        "merge should pause on the a.txt conflict"
+    );
+    assert!(
+        repo.path().join("b.txt").exists(),
+        "the clean add was materialized"
+    );
 
     repo.ok(&["merge", "--abort"]);
-    assert!(!repo.path().join("b.txt").exists(), "abort discarded the clean op-authored file");
+    assert!(
+        !repo.path().join("b.txt").exists(),
+        "abort discarded the clean op-authored file"
+    );
     assert_eq!(rev(&repo, "HEAD"), head0, "HEAD restored");
-    assert!(stdout(&repo.ok(&["status", "--porcelain"])).trim().is_empty());
+    assert!(
+        stdout(&repo.ok(&["status", "--porcelain"]))
+            .trim()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -682,7 +746,10 @@ fn merge_abort_still_protects_unrelated_staged_work() {
     repo.write("unrelated.txt", b"my own work\n");
     repo.ok(&["add", "unrelated.txt"]);
     let out = repo.run(&["merge", "--abort"]);
-    assert!(!out.status.success(), "abort must refuse to discard unrelated staged work");
+    assert!(
+        !out.status.success(),
+        "abort must refuse to discard unrelated staged work"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("unrelated.txt"),
         "stderr: {}",
@@ -733,7 +800,10 @@ fn stash_index_round_trip_in_an_unborn_repo() {
     repo.write("s.txt", b"staged\n");
     repo.ok(&["add", "s.txt"]);
     repo.ok(&["stash"]);
-    assert!(!repo.path().join("s.txt").exists(), "stash removed the staged file");
+    assert!(
+        !repo.path().join("s.txt").exists(),
+        "stash removed the staged file"
+    );
     repo.ok(&["stash", "pop", "--index"]);
     let status = stdout(&repo.ok(&["status", "--porcelain"]));
     assert!(
@@ -751,7 +821,10 @@ fn merge_abort_preserves_edits_to_operation_authored_clean_paths() {
     repo.run(&["merge", "feature"]); // pauses on the a.txt conflict
     repo.write("b.txt", b"my edit to the clean file\n");
     let out = repo.run(&["merge", "--abort"]);
-    assert!(!out.status.success(), "abort must refuse to discard the edit to b.txt");
+    assert!(
+        !out.status.success(),
+        "abort must refuse to discard the edit to b.txt"
+    );
     assert_eq!(
         std::fs::read(repo.path().join("b.txt")).unwrap(),
         b"my edit to the clean file\n",
@@ -769,8 +842,14 @@ fn merge_abort_after_no_commit_protects_staged_unrelated_work() {
     repo.write("unrelated.txt", b"my own staged work\n");
     repo.ok(&["add", "unrelated.txt"]);
     let out = repo.run(&["merge", "--abort"]);
-    assert!(!out.status.success(), "abort must protect staged unrelated work");
-    assert!(repo.path().join("unrelated.txt").exists(), "the staged file must survive");
+    assert!(
+        !out.status.success(),
+        "abort must protect staged unrelated work"
+    );
+    assert!(
+        repo.path().join("unrelated.txt").exists(),
+        "the staged file must survive"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("unrelated.txt"),
         "stderr: {}",
@@ -804,7 +883,13 @@ fn diff_merge_base_typo_branch_with_slash_errors() {
     // surface as a bad revision, not silently degrade into a pathspec filter.
     let repo = Repo::new();
     clean_diverge(&repo);
-    let out = repo.run(&["diff", "--merge-base", "main", "feature/typo", "--name-only"]);
+    let out = repo.run(&[
+        "diff",
+        "--merge-base",
+        "main",
+        "feature/typo",
+        "--name-only",
+    ]);
     assert!(
         !out.status.success(),
         "a /-containing typo'd branch must be a bad revision: stdout={:?}",
@@ -835,10 +920,16 @@ fn rebase_skip_preserves_edits_to_operation_authored_clean_paths() {
     repo.ok(&["checkout", "topic"]);
 
     let out = repo.run(&["rebase", "main"]);
-    assert!(!out.status.success(), "rebase should pause on the a.txt conflict");
+    assert!(
+        !out.status.success(),
+        "rebase should pause on the a.txt conflict"
+    );
     repo.write("b.txt", b"my edit during rebase\n");
     let skip = repo.run(&["rebase", "--skip"]);
-    assert!(!skip.status.success(), "skip must refuse to discard the edit to b.txt");
+    assert!(
+        !skip.status.success(),
+        "skip must refuse to discard the edit to b.txt"
+    );
     assert_eq!(
         std::fs::read(repo.path().join("b.txt")).unwrap(),
         b"my edit during rebase\n"
@@ -873,13 +964,19 @@ fn merge_abort_refuses_restoring_a_deleted_file_over_a_user_directory() {
     repo.write("d/keep", b"my untracked work\n");
 
     let out = repo.run(&["merge", "--abort"]);
-    assert!(!out.status.success(), "abort must refuse the file-over-directory restore");
+    assert!(
+        !out.status.success(),
+        "abort must refuse the file-over-directory restore"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("replace directory"),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(repo.path().join("d/keep").exists(), "untracked content must survive");
+    assert!(
+        repo.path().join("d/keep").exists(),
+        "untracked content must survive"
+    );
 }
 
 #[test]
@@ -897,8 +994,14 @@ fn stash_in_unborn_repo_clears_and_restores_untracked_too() {
     );
     repo.ok(&["stash", "pop", "--index"]);
     let status = stdout(&repo.ok(&["status", "--porcelain"]));
-    assert!(status.contains("A  s.txt"), "staged file restored staged: {status}");
-    assert!(status.contains("?? u.txt"), "untracked file restored untracked: {status}");
+    assert!(
+        status.contains("A  s.txt"),
+        "staged file restored staged: {status}"
+    );
+    assert!(
+        status.contains("?? u.txt"),
+        "untracked file restored untracked: {status}"
+    );
 }
 
 #[test]
@@ -949,7 +1052,11 @@ fn merge_file_vs_directory_conflict_is_atomic_and_abortable() {
         b"inner\n",
         "ours directory restored"
     );
-    assert!(stdout(&repo.ok(&["status", "--porcelain"])).trim().is_empty());
+    assert!(
+        stdout(&repo.ok(&["status", "--porcelain"]))
+            .trim()
+            .is_empty()
+    );
 }
 
 /// base has x.txt + y.txt; feature deletes x.txt, main deletes y.txt, so a
@@ -978,7 +1085,9 @@ fn merge_continue_after_empty_no_commit_records_deletions() {
     repo.ok(&["merge", "--no-commit", "feature"]);
     repo.ok(&["merge", "--continue"]);
     assert!(
-        stdout(&repo.ok(&["status", "--porcelain"])).trim().is_empty(),
+        stdout(&repo.ok(&["status", "--porcelain"]))
+            .trim()
+            .is_empty(),
         "tree must be clean after --continue"
     );
     assert!(!repo.path().join("x.txt").exists() && !repo.path().join("y.txt").exists());
@@ -997,7 +1106,11 @@ fn merge_abort_after_empty_no_commit_restores_head() {
     assert_eq!(rev(&repo, "HEAD"), head0, "HEAD restored to pre-merge");
     // main still had x.txt (it only deleted y.txt) → restored.
     assert!(repo.path().join("x.txt").exists(), "main's x.txt restored");
-    assert!(stdout(&repo.ok(&["status", "--porcelain"])).trim().is_empty());
+    assert!(
+        stdout(&repo.ok(&["status", "--porcelain"]))
+            .trim()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1059,7 +1172,10 @@ fn merge_continue_after_file_vs_directory_conflict() {
     repo.run(&["merge", "feature"]); // D/F conflict, keep dir p
     repo.ok(&["merge", "--continue"]);
     assert_eq!(parent_count(&repo, "HEAD"), 2, "two-parent merge commit");
-    assert!(repo.path().join("p/inner.txt").exists(), "ours directory kept");
+    assert!(
+        repo.path().join("p/inner.txt").exists(),
+        "ours directory kept"
+    );
 }
 
 #[test]
@@ -1104,7 +1220,10 @@ fn branch_ancestry_filter_rejects_non_commit() {
         .find_map(|l| l.strip_prefix("tree ").map(str::to_string))
         .expect("tree line");
     let out = repo.run(&["branch", "--no-contains", &tree]);
-    assert!(!out.status.success(), "a tree id must be rejected, not silently accepted");
+    assert!(
+        !out.status.success(),
+        "a tree id must be rejected, not silently accepted"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("not a commit"),
         "stderr: {}",
@@ -1158,14 +1277,24 @@ fn merge_abort_atomic_when_conflict_path_replaced_by_nonempty_dir() {
     repo.write("p/keep", b"my work\n");
 
     let out = repo.run(&["merge", "--abort"]);
-    assert!(!out.status.success(), "abort must fail closed before mutating");
+    assert!(
+        !out.status.success(),
+        "abort must fail closed before mutating"
+    );
     assert_eq!(
         std::fs::read(repo.path().join("p/keep")).unwrap(),
         b"my work\n",
         "the untracked directory content must be preserved"
     );
-    assert_eq!(rev(&repo, "HEAD"), head0, "HEAD untouched — merge still in progress");
-    assert!(repo.mkit_dir().join("MERGE_HEAD").exists(), "merge state preserved (retryable)");
+    assert_eq!(
+        rev(&repo, "HEAD"),
+        head0,
+        "HEAD untouched — merge still in progress"
+    );
+    assert!(
+        repo.mkit_dir().join("MERGE_HEAD").exists(),
+        "merge state preserved (retryable)"
+    );
 }
 
 #[test]
@@ -1295,7 +1424,10 @@ fn rev_list_count_and_listing() {
     let repo = Repo::new();
     repo.commit_file("a.txt", b"a\n", "c1");
     repo.commit_file("b.txt", b"b\n", "c2");
-    assert_eq!(stdout(&repo.ok(&["rev-list", "--count", "HEAD"])).trim(), "2");
+    assert_eq!(
+        stdout(&repo.ok(&["rev-list", "--count", "HEAD"])).trim(),
+        "2"
+    );
     let listing = stdout(&repo.ok(&["rev-list", "HEAD"]));
     assert_eq!(listing.lines().count(), 2);
 }
@@ -1310,9 +1442,18 @@ fn merge_base_and_is_ancestor() {
     let mb = stdout(&repo.ok(&["merge-base", "main", "feature"]));
     assert_eq!(mb.trim(), base);
     // feature (== base) is an ancestor of main.
-    assert!(repo.run(&["merge-base", "--is-ancestor", "feature", "main"]).status.success());
+    assert!(
+        repo.run(&["merge-base", "--is-ancestor", "feature", "main"])
+            .status
+            .success()
+    );
     // main is NOT an ancestor of feature → exit 1.
-    assert!(!repo.run(&["merge-base", "--is-ancestor", "main", "feature"]).status.success());
+    assert!(
+        !repo
+            .run(&["merge-base", "--is-ancestor", "main", "feature"])
+            .status
+            .success()
+    );
 }
 
 #[test]
@@ -1324,7 +1465,10 @@ fn tag_list_glob_filters() {
     repo.ok(&["tag", "nightly"]);
     let out = stdout(&repo.ok(&["tag", "-l", "v*"]));
     assert!(out.contains("v1.0") && out.contains("v2.0"));
-    assert!(!out.contains("nightly"), "glob must exclude non-matches: {out}");
+    assert!(
+        !out.contains("nightly"),
+        "glob must exclude non-matches: {out}"
+    );
 }
 
 #[test]
@@ -1347,10 +1491,16 @@ fn diff_color_always_and_never() {
     repo.write("f.txt", b"a\nB\nc\n");
     // --color=always emits ANSI even when piped.
     let colored = stdout(&repo.ok(&["diff", "--color=always"]));
-    assert!(colored.contains('\u{1b}'), "expected ANSI codes: {colored:?}");
+    assert!(
+        colored.contains('\u{1b}'),
+        "expected ANSI codes: {colored:?}"
+    );
     assert!(colored.contains("\u{1b}[32m"), "expected green additions");
     // Default (piped, auto) and --no-color emit none.
-    assert!(!stdout(&repo.ok(&["diff"])).contains('\u{1b}'), "piped diff must be plain");
+    assert!(
+        !stdout(&repo.ok(&["diff"])).contains('\u{1b}'),
+        "piped diff must be plain"
+    );
     assert!(
         !stdout(&repo.ok(&["diff", "--no-color"])).contains('\u{1b}'),
         "--no-color must be plain"
@@ -1430,7 +1580,11 @@ fn merge_base_and_rev_list_peel_annotated_tags() {
     // rev-list must not error on an annotated tag.
     assert_eq!(stdout(&repo.ok(&["rev-list", "--count", "v1"])).trim(), "1");
     // merge-base (non-ancestor form) also peels.
-    assert!(!stdout(&repo.ok(&["merge-base", "v1", "HEAD"])).trim().is_empty());
+    assert!(
+        !stdout(&repo.ok(&["merge-base", "v1", "HEAD"]))
+            .trim()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1542,5 +1696,8 @@ fn diff_color_preserves_non_utf8_bytes() {
         out.stdout.windows(3).all(|w| w != [0xEF, 0xBF, 0xBD]),
         "non-UTF-8 patch bytes must round-trip under --color"
     );
-    assert!(out.stdout.contains(&0xFF), "the raw non-UTF-8 byte must be present");
+    assert!(
+        out.stdout.contains(&0xFF),
+        "the raw non-UTF-8 byte must be present"
+    );
 }

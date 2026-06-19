@@ -155,7 +155,10 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
             match stash::save(store, cwd, &effective) {
                 Ok(()) => {
                     let mut stderr = std::io::stderr().lock();
-                    let _ = writeln!(stderr, "Saved working directory and index state {effective}");
+                    let _ = writeln!(
+                        stderr,
+                        "Saved working directory and index state {effective}"
+                    );
                     exit::OK
                 }
                 Err(e) => emit_err(&format!("stash save: {e}"), exit::GENERAL_ERROR),
@@ -319,9 +322,7 @@ fn restore_entry(
             "note: this stash has no recorded index state; --index had no effect"
         );
     }
-    if drop_entry
-        && let Err(e) = stash::pop_finalize(cwd, index)
-    {
+    if drop_entry && let Err(e) = stash::pop_finalize(cwd, index) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }
     report_restore(drop_entry, index, entry_short.as_deref());

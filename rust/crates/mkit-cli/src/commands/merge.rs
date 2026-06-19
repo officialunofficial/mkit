@@ -269,7 +269,8 @@ fn start(
         // index reads as empty and `merge --continue`/`merge --abort` (which
         // seed an empty index from HEAD) would build/judge against the OLD
         // tree, dropping the deletions.
-        if let Err(e) = super::stage_removed_tombstones(cwd, store, Some(ours_tree), result.tree_hash)
+        if let Err(e) =
+            super::stage_removed_tombstones(cwd, store, Some(ours_tree), result.tree_hash)
         {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
@@ -451,7 +452,8 @@ fn restore_to(
     // Pre-flight: refuse *before* any mutation when restoring would clobber
     // genuine user work on a non-discardable path (the reset below discards
     // the operation material).
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result) {
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result)
+    {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     // Discard the operation material on the discardable paths so the guarded

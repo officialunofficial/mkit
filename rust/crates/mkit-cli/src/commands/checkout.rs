@@ -105,7 +105,12 @@ pub fn run(args: &[String]) -> u8 {
             } else {
                 refs::RefWriteCondition::Missing
             };
-            Some((new.to_string(), start, cond, existed && opts.create_force.is_some()))
+            Some((
+                new.to_string(),
+                start,
+                cond,
+                existed && opts.create_force.is_some(),
+            ))
         } else {
             None
         };
@@ -116,7 +121,9 @@ pub fn run(args: &[String]) -> u8 {
         None => match opts.target.as_deref() {
             Some(t) => t.to_string(),
             None => {
-                return super::usage_error("usage: mkit checkout [-b|-B <new>] <branch|tag|commit>");
+                return super::usage_error(
+                    "usage: mkit checkout [-b|-B <new>] <branch|tag|commit>",
+                );
             }
         },
     };
