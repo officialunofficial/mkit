@@ -79,6 +79,10 @@ struct BranchOpts {
     /// List only branches NOT merged into `<commit>` (default HEAD).
     #[arg(long = "no-merged", value_name = "COMMIT", num_args = 0..=1, default_missing_value = "HEAD")]
     no_merged: Option<String>,
+    /// Print the current branch name and exit (like `git branch
+    /// --show-current`). Empty output on a detached HEAD.
+    #[arg(long = "show-current")]
+    show_current: bool,
     /// Output format for the list form. JSONL with `--format=json`.
     #[arg(long, value_enum, default_value = "default")]
     format: BranchFormat,
@@ -100,6 +104,16 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+
+    // `--show-current`: print the checked-out branch (nothing when
+    // detached), then exit — like `git branch --show-current`.
+    if opts.show_current {
+        if let Ok(refs::Head::Branch(name)) = refs::read_head(&mkit_dir) {
+            let mut stdout = std::io::stdout().lock();
+            let _ = writeln!(stdout, "{name}");
+        }
+        return exit::OK;
+    }
 
     // `-m` / `-d` / `-D` are mutually exclusive mode flags.
     let mode_flags = u8::from(opts.delete) + u8::from(opts.force_delete) + u8::from(opts.rename);
@@ -176,8 +190,26 @@ fn delete(mkit_dir: &std::path::Path, names: &[String], force: bool) -> u8 {
         let flag = if force { "-D" } else { "-d" };
         return super::usage_error(&format!("usage: mkit branch {flag} <name>"));
     };
+    // Capture the tip before deletion for git's `Deleted branch <name>
+    // (was <hash>).` confirmation.
+    let was = refs::read_ref(mkit_dir, name).ok().flatten();
     match refs::delete_ref_safe(mkit_dir, name) {
-        Ok(()) => exit::OK,
+        Ok(()) => {
+            let mut stderr = std::io::stderr().lock();
+            match was {
+                Some(h) => {
+                    let _ = writeln!(
+                        stderr,
+                        "Deleted branch {name} (was {}).",
+                        format::short_hash(&h, format::SUMMARY_ABBREV)
+                    );
+                }
+                None => {
+                    let _ = writeln!(stderr, "Deleted branch {name}.");
+                }
+            }
+            exit::OK
+        }
         Err(refs::RefError::NotFound(_)) => {
             emit_err(&format!("branch '{name}' not found"), exit::GENERAL_ERROR)
         }
@@ -355,7 +387,7 @@ fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
 /// character class (`[a-z]`, leading `!`/`^` negates). A pattern with no
 /// metacharacters must match the whole name (so `main` matches only
 /// `main`). Backslash escapes the next metacharacter.
-fn glob_match(pattern: &str, text: &str) -> bool {
+pub(super) fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
     let (mut pi, mut ti) = (0usize, 0usize);

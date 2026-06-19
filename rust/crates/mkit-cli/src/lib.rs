@@ -41,12 +41,21 @@ use std::io::Write;
 /// dispatch-only so the command modules remain easy to snapshot.
 #[must_use]
 pub fn dispatch(argv: &[String]) -> u8 {
-    if argv.len() < 2 {
+    // Consume leading global flags (`-C <path>`, `-c <key>=<val>`, and the
+    // accepted-as-no-op pager flags) BEFORE resolving the subcommand, so
+    // they apply to every command and to repo discovery — like git.
+    let (cmd_idx, overrides) = match parse_global_flags(argv) {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
+    };
+    config::set_cli_overrides(overrides);
+
+    if cmd_idx >= argv.len() {
         print_usage_stderr();
         return exit::USAGE;
     }
-    let cmd = &argv[1];
-    let rest: Vec<String> = argv.iter().skip(2).cloned().collect();
+    let cmd = &argv[cmd_idx];
+    let rest: Vec<String> = argv.iter().skip(cmd_idx + 1).cloned().collect();
 
     match cmd.as_str() {
         "-h" | "--help" | "help" => {
@@ -93,6 +102,9 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "branch" => commands::branch::run(&rest),
         "tag" => commands::tag::run(&rest),
         "checkout" => commands::checkout::run(&rest),
+        "switch" => commands::switch::run(&rest),
+        "merge-base" => commands::merge_base::run(&rest),
+        "rev-list" => commands::rev_list::run(&rest),
         "clean" => commands::clean::run(&rest),
         "diff" => commands::diff::run(&rest),
         "verify" => commands::verify::run(&rest),
@@ -138,6 +150,73 @@ pub fn dispatch(argv: &[String]) -> u8 {
             exit::USAGE
         }
     }
+}
+
+/// Consume the leading global flags from `argv` (after `argv[0]`):
+/// `-C <path>` / `-C<path>` changes directory (repeatable, relative
+/// resolution like git), `-c <key>=<val>` / `-c<key>=<val>` records a
+/// one-shot config override, and `--no-pager` / `-P` / `--paginate` are
+/// accepted as no-ops (mkit never paginates). Returns the index of the
+/// subcommand token and the collected overrides, or an exit code on a
+/// malformed flag / failed `chdir`.
+fn parse_global_flags(argv: &[String]) -> Result<(usize, Vec<(String, String)>), u8> {
+    let mut i = 1; // skip argv[0]
+    let mut overrides: Vec<(String, String)> = Vec::new();
+    while i < argv.len() {
+        let arg = argv[i].as_str();
+        if arg == "-C" {
+            let Some(path) = argv.get(i + 1) else {
+                return Err(global_flag_err("option `-C` requires a path"));
+            };
+            chdir(path)?;
+            i += 2;
+        } else if let Some(path) = arg.strip_prefix("-C").filter(|p| !p.is_empty()) {
+            chdir(path)?;
+            i += 1;
+        } else if arg == "-c" {
+            let Some(kv) = argv.get(i + 1) else {
+                return Err(global_flag_err("option `-c` requires <key>=<value>"));
+            };
+            overrides.push(split_config_override(kv)?);
+            i += 2;
+        } else if let Some(kv) = arg.strip_prefix("-c").filter(|kv| !kv.is_empty()) {
+            overrides.push(split_config_override(kv)?);
+            i += 1;
+        } else if matches!(arg, "--no-pager" | "-P" | "--paginate") {
+            // mkit never paginates; accept the flags so defensive
+            // `mkit --no-pager log` doesn't error out.
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    Ok((i, overrides))
+}
+
+/// `chdir` for `-C`, resolving relative paths against the current dir
+/// (repeatable `-C` composes, like git).
+fn chdir(path: &str) -> Result<(), u8> {
+    std::env::set_current_dir(path).map_err(|e| {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "error: cannot change to '{path}': {e}");
+        exit::NOINPUT
+    })
+}
+
+/// Split a `-c key=value` argument; the value may itself contain `=`.
+fn split_config_override(kv: &str) -> Result<(String, String), u8> {
+    match kv.split_once('=') {
+        Some((k, v)) if !k.is_empty() => Ok((k.to_string(), v.to_string())),
+        _ => Err(global_flag_err(
+            "option `-c` expects <key>=<value> (e.g. -c user.email=ci@example.com)",
+        )),
+    }
+}
+
+fn global_flag_err(msg: &str) -> u8 {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "error: {msg}");
+    exit::USAGE
 }
 
 fn print_usage_stderr() {

@@ -35,6 +35,7 @@ use crate::format;
     name = "mkit revert",
     about = "Create a new commit that undoes a previous commit."
 )]
+#[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct RevertOpts {
     /// Continue an in-progress revert after resolving conflicts.
     #[arg(long = "continue", conflicts_with_all = ["abort", "commit"])]
@@ -47,6 +48,10 @@ struct RevertOpts {
     /// if the revert conflicts, resolve it with `--continue` / `--abort`.
     #[arg(short = 'n', long = "no-commit", conflicts_with_all = ["cont", "abort"])]
     no_commit: bool,
+    /// Accepted for git compatibility; mkit auto-generates the revert
+    /// message, so `--no-edit` is the default behavior (no-op).
+    #[arg(long = "no-edit")]
+    no_edit: bool,
     /// Commit to revert: a ref, full/short hash, or `HEAD~n` revspec.
     commit: Option<String>,
 }
@@ -57,6 +62,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    let _ = opts.no_edit; // accepted no-op (mkit auto-generates the message)
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -82,6 +88,7 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
+#[allow(clippy::too_many_lines)] // linear flow: apply + commit + report
 fn start(
     cwd: &std::path::Path,
     mkit_dir: &std::path::Path,
@@ -187,12 +194,30 @@ fn start(
     if let Err(e) = advance_head(mkit_dir, &commit_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
+    // git-shaped summary: `[<branch> <hash>] Revert "<subject>"` + diffstat.
+    let subject = String::from_utf8_lossy(&result.message)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_owned();
+    let branch_name = match mkit_core::refs::read_head(mkit_dir) {
+        Ok(mkit_core::refs::Head::Branch(b)) => Some(b),
+        _ => None,
+    };
+    let head_ref = match &branch_name {
+        Some(b) => super::summary::HeadRef::Branch(b),
+        None => super::summary::HeadRef::Detached,
+    };
     let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "reverted {} as {}",
-        format::short_hash(&target, 8),
-        format::short_hash(&commit_hash, 8),
+    super::summary::print_commit_summary(
+        &mut stderr,
+        store,
+        &head_ref,
+        &commit_hash,
+        &subject,
+        false,
+        Some(ours_tree),
+        Some(result.tree_hash),
     );
     exit::OK
 }
@@ -298,7 +323,8 @@ fn restore_to(
     // The operation's result tree lets the guards treat its clean hunks (not
     // just conflict paths) as discardable.
     let op_result = conflict_state::read_result_tree(mkit_dir).ok().flatten();
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result) {
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result)
+    {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     if let Err(e) =

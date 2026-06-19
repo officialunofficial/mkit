@@ -174,9 +174,14 @@ fn start(
             return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
+        // git-shaped per-path conflict lines (additive), then mkit's
+        // resumable-flow hint.
+        for rec in &records {
+            let _ = writeln!(stderr, "CONFLICT (content): Merge conflict in {}", rec.path);
+        }
         let _ = writeln!(
             stderr,
-            "cherry-pick conflict; resolve the files above, `mkit add` them, then run \
+            "hint: resolve the files above, `mkit add` them, then run \
              `mkit cherry-pick --continue` (or `mkit cherry-pick --abort`)"
         );
         return exit::GENERAL_ERROR;
@@ -227,13 +232,30 @@ fn start(
     if let Err(e) = advance_head(mkit_dir, &commit_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
+    // git-shaped summary: `[<branch> <hash>] <subject>` + diffstat.
+    let subject = String::from_utf8_lossy(&result.original_message)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_owned();
+    let branch_name = match refs::read_head(mkit_dir) {
+        Ok(Head::Branch(b)) => Some(b),
+        _ => None,
+    };
+    let head_ref = match &branch_name {
+        Some(b) => super::summary::HeadRef::Branch(b),
+        None => super::summary::HeadRef::Detached,
+    };
     let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "cherry-picked {} onto {} as {}",
-        format::short_hash(&target, 8),
-        format::short_hash(&ours, 8),
-        format::short_hash(&commit_hash, 8),
+    super::summary::print_commit_summary(
+        &mut stderr,
+        store,
+        &head_ref,
+        &commit_hash,
+        &subject,
+        false,
+        Some(ours_tree),
+        Some(result.tree_hash),
     );
     exit::OK
 }
@@ -362,7 +384,8 @@ fn restore_to(
     // genuine user work on a non-discardable path (the reset below discards
     // the user's in-progress conflict resolution, so it must not run if
     // the abort is going to fail).
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result) {
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result)
+    {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     if let Err(e) =

@@ -536,6 +536,10 @@ pub fn read_or_default(root: &Path) -> Result<Config, ConfigError> {
     let mut cfg = Config::with_defaults();
     apply_file(&mut cfg, &user_config_path(), ConfigScope::User)?;
     apply_file(&mut cfg, &root.join(CONFIG_FILE), ConfigScope::Repo)?;
+    // `-c <key>=<val>` one-shot overrides apply to BOTH the layered and the
+    // flat read path, so `mkit -c … <any-command>` is honored uniformly
+    // (commit/merge/etc. read through here). Same forbidden-key enforcement.
+    apply_cli_overrides(&mut cfg);
     Ok(cfg)
 }
 
@@ -546,6 +550,14 @@ pub fn read_layered(root: &Path) -> Result<LayeredConfig, ConfigError> {
     let repo_path = root.join(CONFIG_FILE);
     apply_file_inner(&mut merged, &user_path, ConfigScope::User, true)?;
     apply_file_inner(&mut merged, &repo_path, ConfigScope::Repo, true)?;
+    // `-c <key>=<val>` one-shot overrides (git parity) are applied LAST, on
+    // top of every file layer, but ONLY to the effective `merged` view —
+    // never to `user`/`repo`, so they are never persisted by a later
+    // `config::write`. They flow through the SAME forbidden-key enforcement
+    // as a per-repo file: security-sensitive keys (`REPO_FORBIDDEN_KEYS`)
+    // and dangerous `core.*` (`CORE_DENIED_KEYS`) are refused, so `-c`
+    // cannot spoof the signed author or redirect signing/transport trust.
+    apply_cli_overrides(&mut merged);
 
     let mut user = Config::default();
     apply_file_inner(&mut user, &user_path, ConfigScope::User, false)?;
@@ -554,6 +566,55 @@ pub fn read_layered(root: &Path) -> Result<LayeredConfig, ConfigError> {
     apply_file_inner(&mut repo, &repo_path, ConfigScope::Repo, false)?;
 
     Ok(LayeredConfig { merged, user, repo })
+}
+
+/// Process-global `-c <key>=<val>` overrides set once by the CLI
+/// dispatcher before any command runs.
+static CLI_OVERRIDES: std::sync::OnceLock<std::sync::Mutex<Vec<(String, String)>>> =
+    std::sync::OnceLock::new();
+
+/// Record the `-c key=value` overrides parsed from the global flags. Each
+/// is `(key, value)`; an empty list clears any previous set. Idempotent
+/// and safe to call before dispatch.
+pub fn set_cli_overrides(overrides: Vec<(String, String)>) {
+    let slot = CLI_OVERRIDES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut guard) = slot.lock() {
+        *guard = overrides;
+    }
+}
+
+/// Apply the recorded `-c` overrides to `cfg`, enforcing the same
+/// forbidden-key / denied-`core.*` rules a per-repo file gets.
+fn apply_cli_overrides(cfg: &mut Config) {
+    let Some(slot) = CLI_OVERRIDES.get() else {
+        return;
+    };
+    let Ok(overrides) = slot.lock() else {
+        return;
+    };
+    for (raw_key, val) in overrides.iter() {
+        let key = normalize_config_key(raw_key.trim());
+        if REPO_FORBIDDEN_KEYS.contains(&key.as_str()) {
+            let mut stderr = io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "warning: ignoring `-c {key}=…` (security-sensitive keys cannot be set via -c; \
+                 set it in your user config — see docs/THREAT-MODEL.md)"
+            );
+            continue;
+        }
+        // Reject control characters in the value (defense in depth — same
+        // check `mkit config` applies before persisting).
+        if validate_value(val.trim()).is_err() {
+            let mut stderr = io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "warning: ignoring `-c {key}=…` (value contains control characters)"
+            );
+            continue;
+        }
+        apply_kv(cfg, &key, val.trim());
+    }
 }
 
 /// Apply a single config file to `cfg` under the given scope. Missing
@@ -1249,8 +1310,14 @@ mod tests {
         assert_eq!(normalize_config_key("Core.AutoCRLF"), "core.autocrlf");
         assert_eq!(normalize_config_key("user.identity"), "user.identity");
         // Three-segment keys: section + variable lowercased, subsection kept.
-        assert_eq!(normalize_config_key("remote.Origin.url"), "remote.Origin.url");
-        assert_eq!(normalize_config_key("Remote.Origin.URL"), "remote.Origin.url");
+        assert_eq!(
+            normalize_config_key("remote.Origin.url"),
+            "remote.Origin.url"
+        );
+        assert_eq!(
+            normalize_config_key("Remote.Origin.URL"),
+            "remote.Origin.url"
+        );
         assert_eq!(
             normalize_config_key("branch.Release.remote"),
             "branch.Release.remote"

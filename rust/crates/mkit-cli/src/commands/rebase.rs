@@ -153,20 +153,20 @@ fn start(
         Err(e) => return emit_err(&format!("collect commits: {e}"), exit::GENERAL_ERROR),
     };
 
+    // Already at the target → nothing to do (git's `Current branch … is up
+    // to date.`), for both interactive and non-interactive. When HEAD is
+    // merely *behind* `onto` (an ancestor of it) we fall through and let the
+    // finalize flow fast-forward the branch.
+    if orig_head == onto {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "Current branch {head_name} is up to date.");
+        return exit::OK;
+    }
+
     // Interactive: let the user reorder / drop / reword the todo before any
     // mutation. Non-interactive: every commit is a plain pick.
     let (todo, actions) = if interactive {
         if candidates.is_empty() {
-            // Nothing to reorder/drop/reword. If HEAD is already at the
-            // target there is genuinely nothing to do; otherwise HEAD is
-            // *behind* `onto` (an ancestor of it), so fall through with an
-            // empty plan and let the finalize flow fast-forward the branch to
-            // `onto` — exactly what non-interactive `rebase` does.
-            if orig_head == onto {
-                let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "rebase: already up to date");
-                return exit::OK;
-            }
             (Vec::new(), Vec::new())
         } else {
             match edit_todo(store, &candidates, orig_head, onto) {
@@ -544,6 +544,10 @@ fn replay(
                 return emit_err(&format!("write conflicts: {e}"), exit::CANTCREAT);
             }
             let mut stderr = std::io::stderr().lock();
+            // git-shaped per-path conflict lines (additive).
+            for rec in &records {
+                let _ = writeln!(stderr, "CONFLICT (content): Merge conflict in {}", rec.path);
+            }
             let _ = writeln!(
                 stderr,
                 "rebase paused: conflict while replaying {}",
@@ -634,9 +638,8 @@ fn replay(
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
         stderr,
-        "rebased {} commit(s) onto {}",
-        state.done.len(),
-        format::short_hash(&state.onto, 8)
+        "Successfully rebased and updated refs/heads/{}.",
+        state.head_name
     );
     exit::OK
 }

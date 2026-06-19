@@ -78,6 +78,13 @@ pub fn run(args: &[String]) -> u8 {
             exit::CANTCREAT,
         );
     }
+    // git prints this before doing any work; match the shape (mkit's
+    // honest object-transfer summary follows at the end — the pack/delta
+    // progress lines are a separate follow-up).
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "Cloning into '{}'...", target.display());
+    }
     if let Err(e) = fs::create_dir_all(&target) {
         return emit_err(
             &format!("create {}: {e}", target.display()),

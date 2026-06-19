@@ -288,7 +288,11 @@ pub fn entry_tree_hash(store: &ObjectStore, repo_root: &Path, idx: usize) -> Sta
 /// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
 /// - [`StashError::NotACommit`] if a stored object is not a Commit.
 /// - [`StashError::Index`] if the serialized index blob is malformed.
-pub fn entry_index(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<Option<Index>> {
+pub fn entry_index(
+    store: &ObjectStore,
+    repo_root: &Path,
+    idx: usize,
+) -> StashResult<Option<Index>> {
     let list = read_list(repo_root)?;
     if idx >= list.entries.len() {
         return Err(StashError::IndexOutOfRange(idx));

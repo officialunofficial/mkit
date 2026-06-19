@@ -293,6 +293,21 @@ pub fn push_all_with(
     Ok(n)
 }
 
+/// True iff advancing a ref from `old` to `new` is a fast-forward (i.e.
+/// `old` is an ancestor of `new`). A missing `old` (brand-new ref) and an
+/// unchanged ref both count as fast-forwards. Used by `push`/`fetch` to
+/// pick the git-style summary symbol (`..` vs `...`/`(forced update)`).
+pub fn is_fast_forward(cwd: &Path, old: Option<Hash>, new: Hash) -> Result<bool, DispatchError> {
+    match old {
+        None => Ok(true),
+        Some(o) if o == new => Ok(true),
+        Some(o) => {
+            let store = crate::commands::open_store_configured(cwd)?;
+            Ok(is_ancestor(&store, o, new)?)
+        }
+    }
+}
+
 /// CAS lease policy for a default (current-branch → upstream) push.
 #[derive(Debug, Clone, Copy)]
 pub enum PushLease {

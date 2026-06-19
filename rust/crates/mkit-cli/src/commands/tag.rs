@@ -32,10 +32,15 @@ const TAG_EDITMSG_TEMPLATE: &str =
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit tag", about = "List, create, or delete tags.")]
+#[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct TagOpts {
     /// Delete the named tag instead of creating one.
     #[arg(short = 'd', long)]
     delete: bool,
+    /// List tags, optionally filtered by a shell glob pattern
+    /// (`mkit tag -l 'v*'`).
+    #[arg(short = 'l', long = "list")]
+    list: bool,
     /// Create an unsigned annotated tag object.
     #[arg(short = 'a', long)]
     annotate: bool,
@@ -69,17 +74,45 @@ pub fn run(args: &[String]) -> u8 {
     // -s implies -a (a signed tag is an annotated tag with a signature).
     let annotated = opts.annotate || opts.sign;
 
+    // `-l`/`--list` forces list mode, with the positional treated as a
+    // glob filter (like `git tag -l '<pattern>'`). `-l` with `-d` is an
+    // error, like git (the modes are mutually exclusive).
+    if opts.list {
+        if opts.delete {
+            return super::usage_error("mkit tag: -l and -d are mutually exclusive");
+        }
+        return list(&mkit_dir, opts.name.as_deref());
+    }
+
     match (opts.delete, opts.name.as_deref()) {
-        (true, Some(name)) => match refs::delete_tag(&mkit_dir, name) {
-            Ok(()) => exit::OK,
-            Err(e) => emit_err(&format!("delete tag {name}: {e}"), exit::GENERAL_ERROR),
-        },
+        (true, Some(name)) => {
+            let was = refs::read_tag(&mkit_dir, name).ok().flatten();
+            match refs::delete_tag(&mkit_dir, name) {
+                Ok(()) => {
+                    let mut stderr = std::io::stderr().lock();
+                    match was {
+                        Some(h) => {
+                            let _ = writeln!(
+                                stderr,
+                                "Deleted tag '{name}' (was {})",
+                                format::short_hash(&h, format::SUMMARY_ABBREV)
+                            );
+                        }
+                        None => {
+                            let _ = writeln!(stderr, "Deleted tag '{name}'");
+                        }
+                    }
+                    exit::OK
+                }
+                Err(e) => emit_err(&format!("delete tag {name}: {e}"), exit::GENERAL_ERROR),
+            }
+        }
         (true, None) => super::usage_error("usage: mkit tag -d <name>"),
         (false, None) => {
             if annotated || opts.message.is_some() {
                 return super::usage_error("usage: mkit tag -a|-s <name> [-m <msg>] [<commit>]");
             }
-            list(&mkit_dir)
+            list(&mkit_dir, None)
         }
         (false, Some(name)) => {
             if annotated {
@@ -96,11 +129,14 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
-fn list(mkit_dir: &std::path::Path) -> u8 {
-    let tags = match refs::list_tags(mkit_dir) {
+fn list(mkit_dir: &std::path::Path, pattern: Option<&str>) -> u8 {
+    let mut tags = match refs::list_tags(mkit_dir) {
         Ok(t) => t,
         Err(e) => return emit_err(&format!("list tags: {e}"), exit::GENERAL_ERROR),
     };
+    if let Some(pat) = pattern {
+        tags.retain(|t| super::branch::glob_match(pat, &t.name));
+    }
     // Open the store from the repo root (parent of `.mkit`) so we can
     // peek at annotated-tag objects. Listing still works if this fails.
     let store = mkit_dir

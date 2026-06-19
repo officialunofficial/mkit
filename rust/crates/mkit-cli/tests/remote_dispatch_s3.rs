@@ -141,8 +141,9 @@ fn credential_env_vars_are_consulted_at_connect_time() {
         &["remote", "add", "mkit+s3://r2.example.com/bkt/proj"],
     );
     assert!(out.status.success(), "remote add failed: {out:?}");
-    let out = run_in(td.path(), &["remote"]);
+    // Bare `remote` lists names only (git-shaped); the URL is under `-v`.
+    let out = run_in(td.path(), &["remote", "-v"]);
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("mkit+s3://r2.example.com/bkt/proj"));
-    assert!(stdout.contains("s3"));
+    assert!(stdout.contains("(fetch)"));
 }
