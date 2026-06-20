@@ -737,3 +737,32 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod wire_conformance {
+    use super::*;
+
+    /// Conformance pin: the exact on-wire bytes of a `PackListNode`. Locks
+    /// the `commonware-codec` body encoding (`MKPL` + version guard, then a
+    /// codec `Option<Hash>` and a length-prefixed `Vec<Hash>`) so a
+    /// commonware version bump that silently changes the encoding is caught
+    /// here rather than in the field. Regenerate deliberately only on an
+    /// intentional format change (and bump `PACKLIST_VERSION`).
+    #[test]
+    fn packlist_wire_format_is_pinned() {
+        let bytes = encode_packlist(Some([0x11u8; 32]), &[[0x22u8; 32], [0x33u8; 32]]).unwrap();
+        let expected = "4d4b504c0101\
+                        1111111111111111111111111111111111111111111111111111111111111111\
+                        02\
+                        2222222222222222222222222222222222222222222222222222222222222222\
+                        3333333333333333333333333333333333333333333333333333333333333333";
+        assert_eq!(
+            hash::to_hex_bytes(&bytes),
+            expected,
+            "PackListNode wire format drifted (commonware-codec change?)"
+        );
+        let node = decode_packlist(&bytes).unwrap();
+        assert_eq!(node.prev, Some([0x11u8; 32]));
+        assert_eq!(node.packs, vec![[0x22u8; 32], [0x33u8; 32]]);
+    }
+}
