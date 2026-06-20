@@ -309,6 +309,27 @@ pub trait Transport: Send + Sync {
     /// network transports.
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool>;
 
+    /// Upload a content-addressed **auxiliary blob** — transfer metadata
+    /// that is NOT a packfile (e.g. a packlist chain node, SPEC-PACKFILE is
+    /// silent on these). The key is BLAKE3 of `bytes`, exactly like a pack.
+    ///
+    /// Auxiliary blobs share the digest-keyed content-addressed store with
+    /// packs (the store is a general blob store; "pack" is just the primary
+    /// content kind), so the default impl delegates to [`Self::upload_pack`].
+    /// The distinct verb keeps the *kind* explicit at the call site so a
+    /// caller never has to infer "is this blob a packfile or metadata?".
+    fn upload_blob(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        self.upload_pack(bytes, key)
+    }
+
+    /// Download an auxiliary blob by digest. Counterpart to
+    /// [`Self::upload_blob`]; default impl delegates to
+    /// [`Self::download_pack`]. Returns [`TransportError::PackNotFound`] if
+    /// the remote does not hold this digest.
+    fn download_blob(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        self.download_pack(key)
+    }
+
     /// Unconditional ref write — equivalent to
     /// `update_ref(name, RefWriteCondition::Any, hash)`.
     ///

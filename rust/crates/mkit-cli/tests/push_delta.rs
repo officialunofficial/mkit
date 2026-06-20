@@ -445,3 +445,191 @@ fn divergent_concurrent_push_leaves_cloneable_remote() {
         assert_eq!(hash::hash(&b), h);
     }
 }
+
+/// Wraps a [`MemoryTransport`] and makes `download_pack` report
+/// `PackNotFound` for a configurable set of keys — simulating a pack that
+/// the remote advertised but no longer holds (pruned / corrupt R2).
+struct DropPackTransport {
+    inner: MemoryTransport,
+    dropped: std::sync::Mutex<std::collections::HashSet<PackKey>>,
+}
+
+impl DropPackTransport {
+    fn new() -> Self {
+        Self {
+            inner: MemoryTransport::new(),
+            dropped: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+    fn drop_pack(&self, key: PackKey) {
+        self.dropped.lock().unwrap().insert(key);
+    }
+}
+
+impl Transport for DropPackTransport {
+    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        self.inner.upload_pack(bytes, key)
+    }
+    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        if self.dropped.lock().unwrap().contains(key) {
+            return Err(TransportError::PackNotFound);
+        }
+        self.inner.download_pack(key)
+    }
+    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+        self.inner.pack_exists(key)
+    }
+    fn update_ref(&self, name: &str, c: RefWriteCondition, h: &hash::Hash) -> TransportResult<()> {
+        self.inner.update_ref(name, c, h)
+    }
+    fn read_ref(&self, name: &str) -> TransportResult<Option<hash::Hash>> {
+        self.inner.read_ref(name)
+    }
+    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
+        self.inner.list_refs(prefix)
+    }
+}
+
+fn packmap_head_pack(tx: &dyn Transport, branch: &str) -> PackKey {
+    // Read the branch's packmap head node and return the pack it lists.
+    let pm = tx
+        .read_ref(&format!("refs/mkit/packmap/{branch}"))
+        .unwrap()
+        .unwrap();
+    let node_bytes = tx.download_blob(&PackKey::from_hash(pm)).unwrap();
+    let node = mkit_core::transfer::decode_packlist(&node_bytes).unwrap();
+    PackKey::from_hash(node.packs[0])
+}
+
+#[test]
+fn fetch_fails_loudly_when_advertised_pack_is_missing() {
+    // The packmap promises a pack; if the remote can't deliver it, a fresh
+    // clone must error — NOT silently publish a ref to an unreconstructable
+    // history (those objects live only inside the pack).
+    let alice = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    fs::write(alice.path().join("big.bin"), big_buffer()).unwrap();
+    commit_all(alice.path(), "v1");
+
+    let tx = DropPackTransport::new();
+    push_all(alice.path(), &tx).expect("push v1");
+    // Drop the pack the packmap advertises.
+    tx.drop_pack(packmap_head_pack(&tx, "main"));
+
+    let bob = tempfile::tempdir().unwrap();
+    init_repo(bob.path());
+    let err = pull_all(bob.path(), &tx, "default").unwrap_err();
+    assert!(
+        matches!(err, DispatchError::AdvertisedPackMissing { .. }),
+        "expected AdvertisedPackMissing, got {err:?}"
+    );
+    // Bob must NOT have recorded a remote-tracking ref for the broken branch.
+    assert!(
+        refs::read_remote_ref(&bob.path().join(".mkit"), "default", "main")
+            .unwrap()
+            .is_none(),
+        "no ref should be published for an incompletely-fetched branch"
+    );
+}
+
+#[test]
+fn push_blocks_on_a_corrupt_prior_packmap_without_moving_head() {
+    // A non-self-contained push cannot safely append onto a chain whose tail
+    // is unreadable (its delta bases live there) — it must block before the
+    // head moves.
+    let alice = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    fs::write(alice.path().join("big.bin"), big_buffer()).unwrap();
+    commit_all(alice.path(), "v1");
+
+    let tx = MemoryTransport::new();
+    push_all(alice.path(), &tx).expect("push v1");
+    let v1_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+        .unwrap()
+        .unwrap();
+
+    // Corrupt the packmap: point it at a node that does not exist.
+    tx.update_ref(
+        "refs/mkit/packmap/main",
+        RefWriteCondition::Any,
+        &[0xEE; 32],
+    )
+    .unwrap();
+
+    // Edit + commit v2, then push the branch (fast-forward off v1).
+    let mut v2 = big_buffer();
+    v2[500_000] ^= 0xFF;
+    fs::write(alice.path().join("big.bin"), &v2).unwrap();
+    commit_all(alice.path(), "v2");
+    let v2_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+        .unwrap()
+        .unwrap();
+    let store = ObjectStore::open(alice.path()).unwrap();
+
+    let err = push_branch(
+        &tx,
+        &store,
+        "main",
+        v2_tip,
+        RefWriteCondition::Match(v1_tip),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, DispatchError::PackChainInvalid { .. }),
+        "expected PackChainInvalid, got {err:?}"
+    );
+    assert_eq!(
+        tx.read_ref("refs/heads/main").unwrap(),
+        Some(v1_tip),
+        "head must not move past a corrupt packmap"
+    );
+}
+
+#[test]
+fn self_contained_push_resets_a_corrupt_packmap_chain() {
+    // A full-closure (self-contained) push CAN escape a broken chain by
+    // resetting to a fresh one, then a clone reconstructs from it.
+    let alice = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    fs::write(alice.path().join("a.bin"), big_buffer()).unwrap();
+    commit_all(alice.path(), "alice-v1");
+
+    let tx = MemoryTransport::new();
+    push_all(alice.path(), &tx).expect("push alice v1");
+    // Corrupt the packmap chain head.
+    tx.update_ref(
+        "refs/mkit/packmap/main",
+        RefWriteCondition::Any,
+        &[0xEE; 32],
+    )
+    .unwrap();
+
+    // carol: a *fresh root* commit (no parents, complete local closure) that
+    // does not share alice's objects → the push diffs against a remote tip it
+    // lacks, so the plan is self-contained.
+    let carol = tempfile::tempdir().unwrap();
+    init_repo(carol.path());
+    let carol_data = {
+        let mut d = big_buffer();
+        d[0] ^= 0xAA; // make it distinct content
+        d
+    };
+    fs::write(carol.path().join("c.bin"), &carol_data).unwrap();
+    commit_all(carol.path(), "carol-root");
+    let carol_tip = refs::read_ref(&carol.path().join(".mkit"), "main")
+        .unwrap()
+        .unwrap();
+    let carol_store = ObjectStore::open(carol.path()).unwrap();
+
+    // Force-push over the divergent head; the self-contained plan resets the
+    // broken chain instead of blocking.
+    push_branch(&tx, &carol_store, "main", carol_tip, RefWriteCondition::Any)
+        .expect("self-contained push should reset and succeed");
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(carol_tip));
+
+    // The packmap is healthy again — a fresh clone reconstructs carol's tree.
+    let dave = tempfile::tempdir().unwrap();
+    init_repo(dave.path());
+    pull_all(dave.path(), &tx, "default").expect("clone after reset");
+    assert_eq!(fs::read(dave.path().join("c.bin")).unwrap(), carol_data);
+}

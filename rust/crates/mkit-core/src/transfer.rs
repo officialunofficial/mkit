@@ -342,9 +342,16 @@ pub struct PackPlan {
     pub raw: Vec<Hash>,
     /// Objects to send as a delta against an already-present base.
     pub deltas: Vec<PlannedDelta>,
-    /// `true` when the pack needs no externally-resolved base — i.e. this
-    /// is a full-closure push (no usable `old_tip`). The push path resets
-    /// the packlist to just this pack in that case; otherwise it appends.
+    /// `true` when the pack needs no externally-resolved base — i.e. this is
+    /// a full-closure push (no usable `old_tip`), so the pack reconstructs
+    /// the ref's whole closure on its own. The push path normally **appends**
+    /// this pack to the branch's packlist chain; it uses `self_contained`
+    /// only to decide whether a push may **reset** to a fresh chain when the
+    /// prior chain is unreadable — a self-contained pack is the one kind that
+    /// can safely escape a broken chain. (A safe re-baseline that resets a
+    /// *healthy* chain to bound its depth needs the atomic head+packmap
+    /// advance and is tracked as a follow-up; the resilient default is to
+    /// append.)
     pub self_contained: bool,
 }
 

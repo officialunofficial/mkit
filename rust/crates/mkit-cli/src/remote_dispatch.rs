@@ -102,10 +102,22 @@ pub enum DispatchError {
         "could not establish the pack map for branch '{branch}' under concurrent pushes; retry"
     )]
     PackmapContended { branch: String },
-    /// A packmap chain was malformed — it exceeded the depth cap or
-    /// contained a cycle. Indicates a corrupt or hostile remote.
-    #[error("pack map chain for branch '{branch}' is malformed (too deep or cyclic)")]
+    /// A packmap chain was malformed — it exceeded the depth cap, contained
+    /// a cycle, or a node could not be downloaded/decoded. Indicates a
+    /// corrupt or hostile remote.
+    #[error("pack map chain for branch '{branch}' is malformed (too deep, cyclic, or unreadable)")]
     PackChainInvalid { branch: String },
+    /// The packmap advertised a pack the remote does not hold. The branch's
+    /// closure cannot be reconstructed, so the fetch is aborted rather than
+    /// publishing a ref to an incomplete history.
+    #[error("remote advertised pack {pack} for branch '{branch}' but does not hold it")]
+    AdvertisedPackMissing { branch: String, pack: String },
+    /// An object reachable from the fetched tip is absent on the remote and
+    /// could not be recovered (it is not stored under its own digest, e.g. a
+    /// delta-only object whose pack is missing). Fetch aborts before
+    /// publishing the ref.
+    #[error("remote is missing object {0} needed to reconstruct the ref")]
+    RemoteMissingObject(String),
 }
 
 /// Open a transport for `endpoint` only after the per-endpoint
@@ -388,12 +400,14 @@ fn packmap_ref(branch: &str) -> String {
 /// *before* the branch ref moves — see [`advance_packmap`].
 const PACKMAP_CAS_ATTEMPTS: u32 = 8;
 
-/// Download and decode one packlist node by key.
+/// Download and decode one packlist node by key. Packlist nodes are
+/// auxiliary transfer metadata, not packfiles, so they travel over the
+/// dedicated [`Transport::download_blob`] verb.
 fn download_packlist_node(
     tx: &dyn Transport,
     key: Hash,
 ) -> Result<transfer::PackListNode, DispatchError> {
-    let bytes = tx.download_pack(&PackKey::from_hash(key))?;
+    let bytes = tx.download_blob(&PackKey::from_hash(key))?;
     Ok(transfer::decode_packlist(&bytes)?)
 }
 
@@ -408,26 +422,50 @@ fn download_packlist_node(
 /// If we can't land it within [`PACKMAP_CAS_ATTEMPTS`], the caller aborts
 /// the push without moving the head, so the head never advances past a
 /// packmap that fails to reconstruct it.
-fn advance_packmap(tx: &dyn Transport, branch: &str, pack_key: Hash) -> Result<(), DispatchError> {
+///
+/// The prior chain head is **validated** before we build on it:
+///
+/// * No prior packmap → start a fresh chain (`prev = None`).
+/// * Prior readable → append (`prev = prior`). If it already lists our pack
+///   the push is idempotent and we stop.
+/// * Prior unreadable/corrupt → we must not append a chain whose tail can't
+///   be resolved. If `self_contained` (this pack reconstructs the whole
+///   closure with no external base) we **reset** to a fresh chain — the only
+///   safe way to escape a broken chain. Otherwise we **block** the push
+///   ([`DispatchError::PackChainInvalid`]) before the head moves, because the
+///   deltas' bases live in the unreachable prior chain.
+fn advance_packmap(
+    tx: &dyn Transport,
+    branch: &str,
+    pack_key: Hash,
+    self_contained: bool,
+) -> Result<(), DispatchError> {
     let packmap_name = packmap_ref(branch);
     for _ in 0..PACKMAP_CAS_ATTEMPTS {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
         }
         let prior = tx.read_ref(&packmap_name)?;
-        // Idempotency: if a previous attempt already landed this pack at the
-        // head node, we're done (avoids double-chaining on a retry that
-        // raced its own success).
-        if let Some(p) = prior
-            && let Ok(node) = download_packlist_node(tx, p)
-            && node.packs.contains(&pack_key)
-        {
-            return Ok(());
-        }
-        // A new node chaining onto whatever the packmap currently points at.
-        let node = transfer::encode_packlist(prior, &[pack_key])?;
+        // Decide the new node's `prev` by validating the prior chain head.
+        let prev = match prior {
+            None => None,
+            Some(p) => match download_packlist_node(tx, p) {
+                // Idempotency: a previous attempt already landed this pack.
+                Ok(node) if node.packs.contains(&pack_key) => return Ok(()),
+                Ok(_) => Some(p),                 // append onto the readable prior
+                Err(_) if self_contained => None, // reset to escape a broken chain
+                Err(_) => {
+                    return Err(DispatchError::PackChainInvalid {
+                        branch: branch.to_owned(),
+                    });
+                }
+            },
+        };
+        let node = transfer::encode_packlist(prev, &[pack_key])?;
         let node_key = pack::pack_key(&node);
-        tx.upload_pack(&node, &PackKey::from_hash(node_key))?;
+        tx.upload_blob(&node, &PackKey::from_hash(node_key))?;
+        // CAS off the packmap's CURRENT value (`prior`), independent of the
+        // node's `prev` — a reset still has to win the race for the ref.
         let cond = match prior {
             Some(k) => refs::RefWriteCondition::Match(k),
             None => refs::RefWriteCondition::Missing,
@@ -503,7 +541,8 @@ pub fn push_branch(
         // Durably chain the pack onto the packmap BEFORE moving the head.
         // On failure we return without touching `refs/heads`, leaving the
         // uploaded pack orphaned (GC reclaims it) but the remote consistent.
-        advance_packmap(tx, branch, pack_key)?;
+        // `self_contained` lets a full-closure push reset a broken chain.
+        advance_packmap(tx, branch, pack_key, plan.self_contained)?;
     }
 
     let full_name = format!("refs/heads/{branch}");
@@ -720,9 +759,17 @@ fn fetch_pack_chain(
         }
         let pack = match tx.download_pack(&PackKey::from_hash(pk)) {
             Ok(b) => b,
-            // Best-effort: a missing pack is recovered by the completeness
-            // pass for any object it would have delivered.
-            Err(TransportError::PackNotFound) => continue,
+            // The packmap PROMISED this pack. Its objects are delta/raw
+            // entries inside the pack, not stored under their own digests, so
+            // the completeness pass cannot recover them. A missing advertised
+            // pack means a corrupt/incomplete remote — fail loudly rather
+            // than publish a ref to a history we can't reconstruct.
+            Err(TransportError::PackNotFound) => {
+                return Err(DispatchError::AdvertisedPackMissing {
+                    branch: branch.to_owned(),
+                    pack: mkit_core::hash::to_hex(&pk),
+                });
+            }
             Err(e) => return Err(e.into()),
         };
         unpack_resolving_bases(store, tx, &pack)?;
@@ -791,18 +838,17 @@ fn fetch_object_closure(
             let key = PackKey::from_hash(h);
             let bytes = match tx.download_pack(&key) {
                 Ok(b) => b,
+                // This object isn't in the store and the remote doesn't hold
+                // it under its own digest. For a packmap remote the chain
+                // fetch already unpacked every pack before this completeness
+                // pass, so anything still missing here is unrecoverable — a
+                // genuine gap. Fail rather than silently publish a ref to an
+                // incomplete closure. (A legacy per-object remote reaches
+                // this branch only when it too is missing the object.)
                 Err(TransportError::PackNotFound) => {
-                    // Accept as a no-op: the remote may have assembled
-                    // a multi-object pack and thus does not key on the
-                    // object digest. The per-object path can't see the
-                    // pack in that case; the caller is expected to
-                    // either download the pack explicitly (future: a
-                    // proper ref-advertise carrying pack keys) or
-                    // accept missing objects. For the memory/file
-                    // transports the per-object mapping is always
-                    // populated by the push side, so this branch is
-                    // defensive.
-                    continue;
+                    return Err(DispatchError::RemoteMissingObject(mkit_core::hash::to_hex(
+                        &h,
+                    )));
                 }
                 Err(e) => return Err(e.into()),
             };
