@@ -20,11 +20,18 @@ workspace = true
 
 [dependencies]
 blake3 = "1"
-# commonware-* (pinned at workspace root to the 2026.5.x train) —
-# all optional, gated by the feature flags below so default builds
-# never pay the dep cost. `std` features enabled because the
-# AuthenticatedBitMap path needs it and history-mmr accepts std as a
-# benign superset.
+# commonware-* (pinned at workspace root to the 2026.5.x train).
+#
+# commonware-* (pinned at workspace root to the 2026.5.x train) — all
+# optional, gated by the feature flags below so default builds never pay
+# the dep cost. NOTE on merkle identity: a merkelized object's id is a
+# Binary Merkle Tree root (see `merkle.rs`). We do NOT use
+# `commonware_storage::bmt` for it, because `bmt` is gated behind
+# `commonware-storage/std`, which drags in `zstd-sys` (a C lib that cannot
+# target wasm32) — and `mkit-wasm` computes object ids. Instead `merkle.rs`
+# vendors the identical BMT construction over the `blake3` crate (wasm-
+# clean, no new mainline dep) and a native-only test cross-verifies it
+# byte-for-byte against `commonware_storage::bmt` (see dev-dependencies).
 commonware-storage = { workspace = true, features = ["std"], optional = true }
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
 commonware-runtime = { workspace = true, optional = true }
@@ -74,6 +81,9 @@ default = []
 # (commonware-storage itself depends on it), so there is no lighter source.
 # We pin `Sequential` (single-threaded folding) deliberately; `Rayon` is never
 # used here.
+# commonware-storage / -cryptography / -codec are non-optional (object
+# identity depends on bmt), so these features only pull the extra crates
+# the heavy paths still need on top of the always-present base.
 history-mmr = [
     "dep:commonware-storage",
     "dep:commonware-cryptography",
@@ -99,6 +109,12 @@ pack-shards = [
 ]
 
 [dev-dependencies]
+# Native-only: cross-verify `merkle.rs`'s vendored BMT against the
+# canonical `commonware_storage::bmt` so the vendored construction stays
+# byte-for-byte identical to the house primitive (the wasm build uses the
+# vendored path; this proves they agree). std is fine for a native test.
+commonware-storage = { workspace = true, features = ["std"] }
+commonware-cryptography = { workspace = true, features = ["std"] }
 hex = "0.4"
 # Property-based testing: auto-shrinks counterexamples on round-trip
 # / invariant assertions. See issue #164.
