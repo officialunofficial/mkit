@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-// Post-build guard: fail the build if the installer asset did not ship.
-// `curl -sSfL https://mkit.sh/install.sh | sh` is served as the static asset
-// /install.sh, which depends on scripts/stage-public.mjs having staged the
-// repo-root install.sh into public/ BEFORE `waku build` collected static
-// assets. If that step is skipped, reordered, or the asset is pruned, the build
-// still succeeds but /install.sh silently 404s. Run after `waku build`.
+// Post-build guard: fail the build if the installer asset did not ship. The
+// /install.sh asset backs both the direct `curl -sSfL https://mkit.sh/install.sh | sh`
+// and the bare-domain `curl mkit.sh | sh` sniff (src/install-route.ts reads it
+// via env.ASSETS). It is staged by scripts/stage-public.mjs BEFORE `waku build`
+// collects static assets; if that step is skipped/reordered or the asset is
+// pruned, the build still succeeds but the installer silently 404s. Run after
+// `waku build`.
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
