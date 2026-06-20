@@ -146,6 +146,41 @@ export const sizeBenchmarks: SizeBenchmark[] = [
   },
 ]
 
+export type TransferBenchmark = {
+  id: string
+  name: string
+  description: string
+  /** Bytes put on the wire by the pre-delta push path (whole changed chunk re-uploaded). */
+  wholeChunkBytes: number
+  /** Bytes put on the wire with delta-on-the-wire encoding. */
+  deltaBytes: number
+  note?: string
+}
+
+/**
+ * Delta-on-the-wire push, added in the transport delta-encoding work (PR #401). A small edit to a large already-pushed
+ * file now sends a chunk delta instead of the whole re-cut chunk. Bytes are counted on the wire end-to-end over a local
+ * `file://` remote by the push/fetch integration suite (`rust/crates/mkit-cli/tests/push_delta.rs`), which asserts the
+ * second push is under 16 KiB and at least 20× smaller than the first — these figures are the measured run, not the
+ * asserted bound.
+ */
+export const transferBenchmarks: TransferBenchmark[] = [
+  {
+    id: 'push-small-edit',
+    name: 'push a 16-byte edit to a 2 MiB file',
+    description:
+      'Edit 16 bytes in the middle of a 2 MiB FastCDC-chunked file the remote already holds, then push the new commit. Bytes counted on the wire.',
+    wholeChunkBytes: 72704, // ~71 KiB: the whole re-cut FastCDC chunk
+    deltaBytes: 1536, // ~1.5 KiB: chunk delta (93 B) + fresh manifest, tree, commit, packmap node
+    note:
+      'Before this change the push re-sent the entire re-cut ~71 KiB chunk; with delta encoding the chunk delta itself ' +
+      'is 93 bytes and the whole push is ~1.5 KiB — the rest is the new chunk manifest, tree, commit, and packmap ' +
+      'node. Identical objects are deduped before a delta is even considered, and a delta is only used when it beats ' +
+      'sending the chunk raw, so correctness never depends on the heuristic. Content addressing is unchanged: delta is ' +
+      'a transfer encoding only, and every reconstructed object is re-verified against its hash before it is stored.',
+  },
+]
+
 export const methodology = {
   date: '2026-06-12',
   machine: 'Apple M4 Max, 16 cores, 128 GB RAM, APFS SSD, macOS 26.5.1',
