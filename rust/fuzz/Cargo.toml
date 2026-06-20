@@ -129,3 +129,19 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "merkle_packlist"
+path = "fuzz_targets/merkle_packlist.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "merkle_proof"
+path = "fuzz_targets/merkle_proof.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

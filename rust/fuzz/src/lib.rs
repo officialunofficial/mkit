@@ -235,6 +235,84 @@ pub fn rpc_decode_one_iteration(input: &[u8]) {
     }
 }
 
+/// Decode a packlist node from untrusted bytes — the
+/// `Transport::download_blob` boundary of the delta-push discovery chain
+/// (transfer.rs, now backed by `commonware-codec`). It accepts arbitrary
+/// remote bytes, so it must never panic, over-allocate, or hang. When a
+/// blob decodes, re-encoding it MUST reproduce a blob that decodes to the
+/// same node (encode∘decode stability over the codec body).
+pub fn merkle_packlist_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(node) = mkit_core::transfer::decode_packlist(input)
+        && let Ok(re) = mkit_core::transfer::encode_packlist(node.prev, &node.packs)
+    {
+        assert_eq!(
+            mkit_core::transfer::decode_packlist(&re),
+            Ok(node),
+            "packlist re-encode must round-trip"
+        );
+    }
+}
+
+/// Exercise merkle object identity and inclusion-proof verification on
+/// arbitrary input. Building an id must never panic and always yields 32
+/// bytes; a freshly built proof must verify; and `verify_*` over
+/// adversarial proof bytes must reject cleanly (never panic).
+pub fn merkle_proof_one_iteration(input: &[u8]) {
+    use mkit_core::merkle;
+    use mkit_core::object::{ChunkedBlob, EntryMode, Tree, TreeEntry};
+    let input = &input[..input.len().min(MAX_INPUT)];
+
+    // Build a ChunkedBlob from up to 64 chunk ids carved from `input`.
+    let chunks: Vec<[u8; 32]> = input
+        .chunks(32)
+        .take(64)
+        .map(|c| {
+            let mut h = [0u8; 32];
+            h[..c.len()].copy_from_slice(c);
+            h
+        })
+        .collect();
+    let cb = ChunkedBlob {
+        total_size: input.len() as u64,
+        chunk_size: 0,
+        chunks: chunks.clone(),
+    };
+    let cid = merkle::compute_chunked_id(&cb);
+    assert_eq!(cid.len(), 32);
+    let root = merkle::chunked_inner_root(&cb);
+    if !chunks.is_empty() {
+        // position 0 is the meta leaf; chunk i is at position i+1.
+        let pos = (input.first().copied().unwrap_or(0) as usize % chunks.len()) as u32 + 1;
+        if let Ok(proof) = merkle::build_chunk_inclusion_proof(&cb, pos) {
+            merkle::verify_chunk_inclusion_proof(&root, &chunks[(pos - 1) as usize], pos, &proof)
+                .expect("freshly built chunk proof must verify");
+        }
+        // Adversarial proof bytes / position must reject without panicking.
+        let _ = merkle::verify_chunk_inclusion_proof(&root, &chunks[0], 0, input);
+    }
+
+    // A Tree from the same bytes (one entry, name derived from input).
+    let tree = Tree {
+        entries: vec![TreeEntry {
+            name: if input.is_empty() {
+                b"x".to_vec()
+            } else {
+                vec![input[0].max(1)]
+            },
+            mode: EntryMode::Blob,
+            object_hash: chunks.first().copied().unwrap_or([0u8; 32]),
+        }],
+    };
+    assert_eq!(merkle::compute_tree_id(&tree).len(), 32);
+    let troot = merkle::tree_inner_root(&tree);
+    if let Ok(p) = merkle::build_tree_inclusion_proof(&tree, 0) {
+        merkle::verify_tree_inclusion_proof(&troot, &tree.entries[0], 0, &p)
+            .expect("freshly built tree proof must verify");
+    }
+    let _ = merkle::verify_tree_inclusion_proof(&troot, &tree.entries[0], 0, input);
+}
+
 /// Single-shot: invoke `body(input)` exactly once, with the
 /// per-iteration wall-clock cap. libfuzzer harnesses call this from
 /// their `fuzz_target!` body; the iteration counter lives one level up,
@@ -320,6 +398,23 @@ mod tests {
     #[test]
     fn software_key_record_target_runs_within_caps() {
         run_iterated_unit(software_key_record_one_iteration).expect("guardrails held");
+    }
+
+    #[test]
+    fn merkle_packlist_target_runs_within_caps() {
+        run_iterated_unit(merkle_packlist_one_iteration).expect("guardrails held");
+        // A couple of explicit boundary cases.
+        for case in [&b""[..], &b"MKPL\x01"[..], &[0xFF; 64]] {
+            run_one(case, merkle_packlist_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn merkle_proof_target_runs_within_caps() {
+        run_iterated_unit(merkle_proof_one_iteration).expect("guardrails held");
+        for case in [&b""[..], &[0u8; 32][..], &[0xAB; 200][..]] {
+            run_one(case, merkle_proof_one_iteration).expect("guardrails held");
+        }
     }
 
     /// Pilot migration to `minifuzz` (commonware-invariants) — the same
