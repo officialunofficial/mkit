@@ -534,3 +534,40 @@ and tests (8) describe the now-consistent behavior. **Parallelizable for a futur
 *Primitive:* `commonware_storage::bmt` v2026.5.0 (`storage/src/bmt/mod.rs`).
 *Verified empty BMT root:* `H(leaf_count_be32 ‖ H(""))` — empty hasher finalize, no position
 prefix (`bmt/mod.rs:124-169`).
+
+---
+
+## 9. Follow-up issues #406 / #408 — determination (transfer chain depth)
+
+The transfer follow-ups #406 (bound packmap chain depth via re-baseline) and #408
+(atomic branch+packmap advance) were investigated and are **deliberately not landed
+client-side**. The reasoning is now test-backed, not just asserted:
+
+- **#406 (re-baseline) is unsound without #408.** Two client-side forms exist, both
+  rejected:
+  - *Reset-and-orphan* (reset the packmap to a fresh self-contained chain) **leaks
+    storage**: the `Transport` API has no delete verb (`upload_pack`/`download_pack`/
+    `pack_exists`/`upload_blob`/`download_blob`/`update_ref`/`read_ref`/`list_refs` only),
+    so orphaned nodes/packs are unreclaimable until server GC (makechain **#849**).
+  - *Checkpoint truncation* (append a `self_contained` node; walk back only to the most
+    recent checkpoint) is leak-free but **unsound under concurrent/divergent pushes**.
+    A prototype was written and the existing `divergent_concurrent_push_leaves_cloneable_remote`
+    integration test caught it: a losing divergent pusher who lacks the winner's commit
+    plans a full-closure (self-contained) pack, so the packmap head becomes a *checkpoint
+    that reconstructs the loser's closure* while `refs/heads/<branch>` points at the
+    winner's tip. The truncated walk then reconstructs the wrong closure and the clone is
+    missing objects. The current full-chain walk masks this by unpacking everything.
+    Correctness requires the packmap head to always match the head ref — i.e. **#408's
+    atomic head+packmap advance**.
+
+- **#408 (atomic advance) requires a server protocol change.** Making `refs/heads/<branch>`
+  and `refs/mkit/packmap/<branch>` advance atomically needs a multi-ref server-side
+  transaction; the CAS-only `update_ref` cannot express it. This is makechain-server work,
+  not a client change. The client invariant *"head never advances past a packmap that
+  fails to reconstruct it"* already holds via the packmap-before-head ordering in
+  `advance_packmap`.
+
+**Client-side bound that IS in place:** `MAX_PACK_CHAIN_DEPTH` (100k nodes) makes a
+pathologically long or cyclic chain fail loudly (`PackChainInvalid`) rather than hang.
+That is the correct client guard until #408 lands the server-atomic advance that makes a
+true re-baseline sound.
