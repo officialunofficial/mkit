@@ -20,23 +20,28 @@ workspace = true
 
 [dependencies]
 blake3 = "1"
+# `bytes::{Buf, BufMut}` back the `commonware-codec` Read/Write buffer
+# traits used by the packlist node codec (transfer.rs). Pure, wasm-clean.
+bytes = "1"
 # commonware-* (pinned at workspace root to the 2026.5.x train).
 #
-# commonware-* (pinned at workspace root to the 2026.5.x train) — all
-# optional, gated by the feature flags below so default builds never pay
-# the dep cost. NOTE on merkle identity: a merkelized object's id is a
-# Binary Merkle Tree root (see `merkle.rs`). We do NOT use
-# `commonware_storage::bmt` for it, because `bmt` is gated behind
-# `commonware-storage/std`, which drags in `zstd-sys` (a C lib that cannot
-# target wasm32) — and `mkit-wasm` computes object ids. Instead `merkle.rs`
-# vendors the identical BMT construction over the `blake3` crate (wasm-
-# clean, no new mainline dep) and a native-only test cross-verifies it
-# byte-for-byte against `commonware_storage::bmt` (see dev-dependencies).
+# `commonware-codec` is NON-optional: the transfer packlist node
+# (transfer.rs) is encoded with it (idiomatic Option/Vec + RangeCfg cap).
+# It is `default-features = false` (no `std`) and compiles to wasm32.
+#
+# The others are optional, gated by the feature flags below. NOTE on
+# merkle identity: a merkelized object's id is a Binary Merkle Tree root
+# (see `merkle.rs`). We do NOT use `commonware_storage::bmt` for it,
+# because `bmt` is gated behind `commonware-storage/std`, which drags in
+# `zstd-sys` (a C lib that cannot target wasm32) — and `mkit-wasm` computes
+# object ids. Instead `merkle.rs` vendors the identical BMT construction
+# over the `blake3` crate (wasm-clean) and a native-only test cross-verifies
+# it byte-for-byte against `commonware_storage::bmt` (see dev-dependencies).
+commonware-codec = { workspace = true }
 commonware-storage = { workspace = true, features = ["std"], optional = true }
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
 commonware-runtime = { workspace = true, optional = true }
 commonware-coding = { workspace = true, optional = true }
-commonware-codec = { workspace = true, optional = true, features = ["std"] }
 commonware-parallel = { workspace = true, optional = true, features = ["std"] }
 commonware-utils = { workspace = true, optional = true, features = ["std"] }
 # tokio is opt-in via `history-mmr`: the journaled MMR persistence path
@@ -101,9 +106,9 @@ sparse-checkout = [
 ]
 # Issue #159 Phase 1 — erasure-coded pack delivery via Reed-Solomon.
 pack-shards = [
+        "commonware-codec/std",
     "dep:commonware-coding",
-    "dep:commonware-codec",
-    "dep:commonware-cryptography",
+        "dep:commonware-cryptography",
     "dep:commonware-parallel",
     "dep:commonware-utils",
 ]
