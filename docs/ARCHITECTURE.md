@@ -182,3 +182,5 @@ the change affects.
 - `SSH-SECURITY.md` — SSH trust model (informative)
 - `THREAT-MODEL.md` — security boundaries (informative)
 - `FUZZ.md` — fuzz harness conventions
+- `POSITIONING-STORAGE-MODEL.md` — why mkit chunks and packs rather
+  than mirroring files into the bucket (informative)
