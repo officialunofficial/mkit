@@ -441,6 +441,29 @@ impl Object {
             Self::Tag(_) => ObjectType::Tag,
         }
     }
+
+    /// This object's content-address (storage id).
+    ///
+    /// Merkelized types are addressed by their Binary Merkle Tree root
+    /// (`crate::merkle`): a `Tree` by [`crate::merkle::compute_tree_id`] and
+    /// a `ChunkedBlob` by [`crate::merkle::compute_chunked_id`]. Every other
+    /// type is addressed by `BLAKE3` of its canonical serialized bytes — the
+    /// historical scheme. This is the single dispatch point the store, pack
+    /// reader, and worktree all route through, so the two addressing schemes
+    /// can never diverge across call sites.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`MkitError`] from serializing a non-merkelized object
+    /// (merkelized ids are computed directly from the in-memory struct and
+    /// never serialize, so they cannot fail).
+    pub fn id(&self) -> Result<Hash, MkitError> {
+        Ok(match self {
+            Self::Tree(t) => crate::merkle::compute_tree_id(t),
+            Self::ChunkedBlob(cb) => crate::merkle::compute_chunked_id(cb),
+            other => crate::hash::hash(&crate::serialize::serialize(other)?),
+        })
+    }
 }
 
 /// All decode / validation errors raised by the serialize module, plus
