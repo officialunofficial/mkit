@@ -56,16 +56,13 @@ export function withSecurityHeaders(response: Response): Response {
 type ResponseContext = { res: Response }
 
 /**
- * Cloudflare-adapter middleware that applies the security headers to every
- * response on the LIVE request path.
+ * Cloudflare-adapter middleware that applies the security headers to every response on the LIVE request path.
  *
- * Must be wired via the adapter's `middlewareFns` option, not a top-level
- * `fetch` override: Waku's Cloudflare adapter dispatches the deployed Worker
- * through `defaultExport.fetch` → its internal Hono app, so an exported-object
- * `fetch` wrapper is only reached by build-time SSG and never runs in prod
- * (which is why these headers were silently absent before). Registering it
- * first in `middlewareFns` makes it the outermost wrapper, so it also covers
- * short-circuit responses like the installer sniff.
+ * Must be wired via the adapter's `middlewareFns` option, not a top-level `fetch` override: Waku's Cloudflare adapter
+ * dispatches the deployed Worker through `defaultExport.fetch` → its internal Hono app, so an exported-object `fetch`
+ * wrapper is only reached by build-time SSG and never runs in prod (which is why these headers were silently absent
+ * before). Registering it first in `middlewareFns` makes it the outermost wrapper, so it also covers short-circuit
+ * responses like the installer sniff.
  */
 export function securityHeadersMiddleware() {
   return async (c: ResponseContext, next: () => Promise<void>): Promise<void> => {
