@@ -633,3 +633,63 @@ fn self_contained_push_resets_a_corrupt_packmap_chain() {
     pull_all(dave.path(), &tx, "default").expect("clone after reset");
     assert_eq!(fs::read(dave.path().join("c.bin")).unwrap(), carol_data);
 }
+
+#[test]
+fn push_blocks_on_a_corrupt_deeper_packmap_node() {
+    // The packmap HEAD node decodes fine, but a DEEPER node it chains to is
+    // missing. A non-self-contained push must walk the whole chain, detect
+    // the break, and block — never moving the head onto a chain fetch can't
+    // walk. (The shallow case corrupts the ref itself; this covers depth.)
+    let alice = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    let tx = DropPackTransport::new();
+
+    // v1 → chain node N1 (the soon-to-be-deeper node).
+    let mut data = big_buffer();
+    fs::write(alice.path().join("big.bin"), &data).unwrap();
+    commit_all(alice.path(), "v1");
+    push_all(alice.path(), &tx).expect("push v1");
+    let n1 = tx.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
+
+    // v2 → head node N2 (prev = N1).
+    data[400_000] ^= 0xFF;
+    fs::write(alice.path().join("big.bin"), &data).unwrap();
+    commit_all(alice.path(), "v2");
+    push_all(alice.path(), &tx).expect("push v2");
+    let n2 = tx.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
+    assert_ne!(n1, n2, "v2 must chain a new head node");
+    let v2_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+        .unwrap()
+        .unwrap();
+
+    // Drop the DEEPER node N1; the head node N2 still decodes.
+    tx.drop_pack(PackKey::from_hash(n1));
+
+    // v3 → a non-self-contained push (diffs against v2, which alice holds).
+    data[400_000] ^= 0xFF; // back to v1 byte; still a fresh chunk vs v2
+    data[1_200_000] ^= 0xAA;
+    fs::write(alice.path().join("big.bin"), &data).unwrap();
+    commit_all(alice.path(), "v3");
+    let v3_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+        .unwrap()
+        .unwrap();
+    let store = ObjectStore::open(alice.path()).unwrap();
+
+    let err = push_branch(
+        &tx,
+        &store,
+        "main",
+        v3_tip,
+        RefWriteCondition::Match(v2_tip),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, DispatchError::PackChainInvalid { .. }),
+        "a deeper broken node must block the push, got {err:?}"
+    );
+    assert_eq!(
+        tx.read_ref("refs/heads/main").unwrap(),
+        Some(v2_tip),
+        "head must not move onto a chain with a broken deeper node"
+    );
+}

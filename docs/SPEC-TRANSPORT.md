@@ -30,7 +30,7 @@ caps, retry policy, and the error taxonomy.
 
 ## 1. Verbs
 
-Every transport implements the same seven verbs exposed by the
+Every transport implements the verbs exposed by the
 [`Transport`](../rust/crates/mkit-core/src/protocol.rs) trait. Method
 signatures are synchronous and take `&self`; transports that need
 interior mutability (connection pools, child-process stdio) use an
@@ -41,6 +41,8 @@ internal `Mutex` so the trait object remains object-safe.
 | `upload_pack(bytes, key)` | Store a packfile keyed by its 32-byte BLAKE3 digest (`PackKey`). |
 | `download_pack(key)` | Fetch a packfile by digest. |
 | `pack_exists(key)` | HEAD-check a pack by digest. |
+| `upload_blob(bytes, key)` | Store an auxiliary content-addressed blob — transfer metadata that is NOT a packfile (e.g. a packlist chain node). Shares the digest-keyed store with packs; a default trait impl delegates to `upload_pack`, so the verb only marks the *kind* explicit at the call site. |
+| `download_blob(key)` | Fetch an auxiliary blob by digest. Default impl delegates to `download_pack`. |
 | `update_ref(name, condition, hash)` | CAS ref write. |
 | `read_ref(name)` | Read a ref's current hash, or `None` if absent. |
 | `list_refs(prefix)` | List refs whose full name starts with `prefix`. Returned names have `prefix` stripped per SPEC-REFS §4. |
@@ -492,10 +494,20 @@ format itself (object index + delta encoding + chunk store) is
 defined in [SPEC-PACKFILE](SPEC-PACKFILE.md). Transport
 implementations MUST NOT inspect or rewrite pack bytes.
 
-The 32-byte pack digest is the BLAKE3 hash of the full pack-bytes
-buffer, wrapped in [`PackKey`](../rust/crates/mkit-core/src/protocol.rs)
-to keep pack digests and object hashes from silently crossing
-purposes at API boundaries.
+`upload_blob` / `download_blob` move opaque **auxiliary** bytes —
+content-addressed transfer metadata that is NOT a packfile (today only
+packlist chain nodes; their format is defined in `mkit_core::transfer`,
+not SPEC-PACKFILE). They share the same digest-keyed content-addressed
+store as packs (the store is a general blob store; "pack" is just the
+primary content kind), so a transport MAY back both with one keyspace —
+the default trait impls delegate the blob verbs to the pack verbs.
+Transports MUST NOT inspect or rewrite blob bytes either.
+
+The 32-byte digest is the BLAKE3 hash of the full bytes buffer, wrapped
+in [`PackKey`](../rust/crates/mkit-core/src/protocol.rs) to keep digests
+and object hashes from silently crossing purposes at API boundaries.
+(The `PackKey` name predates the blob verbs; it addresses any
+content-addressed blob the transport stores, pack or auxiliary.)
 
 ---
 
