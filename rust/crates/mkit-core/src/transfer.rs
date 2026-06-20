@@ -20,8 +20,9 @@
 //! wire rather than re-uploading the whole history's list.
 //!
 //! Content addressing is unchanged: delta is a transfer encoding only. The
-//! reconstructed object's id is still BLAKE3 of its canonical bytes, which
-//! `PackReader` re-verifies before storing.
+//! reconstructed object's id (BLAKE3 of its canonical bytes, or the merkle
+//! BMT root for a `Tree`/`ChunkedBlob` — see `crate::merkle`) is
+//! re-verified by `PackReader` before storing.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
