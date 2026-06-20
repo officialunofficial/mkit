@@ -44,8 +44,9 @@ struct MemSource(HashMap<Hash, Object>);
 
 impl MemSource {
     fn put(&mut self, obj: Object) -> Hash {
-        let bytes = mkit_core::serialize(&obj).unwrap();
-        let h = mkit_core::hash::hash(&bytes);
+        // Address objects exactly as the real store does: a merkle BMT root
+        // for Tree/ChunkedBlob, BLAKE3 of the bytes otherwise.
+        let h = obj.id().unwrap();
         self.0.insert(h, obj);
         h
     }

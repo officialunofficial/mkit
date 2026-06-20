@@ -710,11 +710,14 @@ mod tests {
         PackReader::read(&pack, &dst).unwrap();
 
         for h in crate::ops::reachable_objects(src, &new_tip).unwrap() {
+            // `dst.read` already re-verifies the object addresses to `h`
+            // (merkle root for Tree/ChunkedBlob, BLAKE3 otherwise); assert
+            // the dispatched id explicitly via `Object::id`.
             let got = dst.read(&h).unwrap();
             assert_eq!(
-                hash::hash(&got),
+                crate::serialize::deserialize(&got).unwrap().id().unwrap(),
                 h,
-                "reconstructed object must hash to its id"
+                "reconstructed object must address to its id"
             );
             assert_eq!(got, src.read(&h).unwrap());
         }

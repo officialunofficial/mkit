@@ -283,17 +283,37 @@ impl<'s> WriteBatch<'s> {
     /// previous write panicked while holding the batch mutex.
     pub fn write_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
         let mut total: usize = 0;
-        let mut hasher = Hasher::new();
         for p in parts {
             total = total
                 .checked_add(p.len())
                 .ok_or(StoreError::ObjectTooLarge)?;
-            hasher.update(p);
         }
         if total > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
-        self.write_prehashed(hasher.finalize(), parts)
+        // Merkelized types (Tree/ChunkedBlob) are addressed by a BMT root,
+        // which needs the contiguous bytes — buffer then dispatch. Blobs and
+        // chunks (the bulk) stay streaming. Routed through the one id
+        // function so every sink agrees (store::object_id_from_bytes).
+        let type_byte = parts.first().and_then(|p| p.first()).copied();
+        let is_merkle = matches!(
+            type_byte.and_then(|b| crate::object::ObjectType::from_u8(b).ok()),
+            Some(crate::object::ObjectType::Tree | crate::object::ObjectType::ChunkedBlob)
+        );
+        let h = if is_merkle {
+            let mut buf = Vec::with_capacity(total);
+            for p in parts {
+                buf.extend_from_slice(p);
+            }
+            crate::store::object_id_from_bytes(&buf)
+        } else {
+            let mut hasher = Hasher::new();
+            for p in parts {
+                hasher.update(p);
+            }
+            hasher.finalize()
+        };
+        self.write_prehashed(h, parts)
     }
 
     /// Stage `parts` under the caller-supplied content hash, skipping

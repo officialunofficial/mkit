@@ -677,12 +677,16 @@ pub fn hash_file_object(data: &[u8]) -> WorktreeResult<Hash> {
             Ok::<_, WorktreeError>(hash_parts(&[&prologue, chunk]))
         })
         .collect::<Result<_, _>>()?;
-    let manifest = Object::ChunkedBlob(ChunkedBlob {
+    // A ChunkedBlob is addressed by its merkle BMT root (crate::merkle),
+    // matching what the sink stores it under (store::object_id_from_bytes).
+    // This read-only mirror must agree with the write path or change
+    // detection breaks.
+    let cb = ChunkedBlob {
         total_size,
         chunk_size: 0,
         chunks,
-    });
-    Ok(crate::hash::hash(&serialize::serialize(&manifest)?))
+    };
+    Ok(crate::merkle::compute_chunked_id(&cb))
 }
 
 /// A file's mtime as nanoseconds since the Unix epoch, saturating; `0`

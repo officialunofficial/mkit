@@ -103,6 +103,38 @@ pub struct BulkWriter<'a> {
     files: std::collections::HashSet<PathBuf>,
 }
 
+/// The content-address (storage key) for an object's canonical bytes.
+///
+/// Merkelized types are addressed by their Binary Merkle Tree root
+/// (`crate::merkle`): a `Tree` by its `compute_tree_id` and a `ChunkedBlob`
+/// by its `compute_chunked_id`. Every other type is addressed by `BLAKE3`
+/// of its bytes — the historical scheme. Dispatch is on the prologue type
+/// byte, which is validated against the `MKT1` magic at decode. A
+/// merkle-typed buffer that fails to decode falls back to the byte hash;
+/// it could never have been produced by a real writer, so this only guards
+/// malformed input from being silently mis-addressed.
+///
+/// This is the SINGLE function every write path and the read verifier route
+/// through, so the two addressing schemes can never diverge across sinks
+/// (`BulkWriter`, `ObjectStore`, `EphemeralSink`, `WriteBatch`).
+pub(crate) fn object_id_from_bytes(bytes: &[u8]) -> Hash {
+    use crate::object::{Object, ObjectType};
+    match bytes.first().and_then(|b| ObjectType::from_u8(*b).ok()) {
+        Some(ObjectType::Tree) => {
+            if let Ok(Object::Tree(t)) = crate::serialize::deserialize(bytes) {
+                return crate::merkle::compute_tree_id(&t);
+            }
+        }
+        Some(ObjectType::ChunkedBlob) => {
+            if let Ok(Object::ChunkedBlob(cb)) = crate::serialize::deserialize(bytes) {
+                return crate::merkle::compute_chunked_id(&cb);
+            }
+        }
+        _ => {}
+    }
+    hash::hash(bytes)
+}
+
 impl BulkWriter<'_> {
     /// Write one object durable-before-visible: contents are fsynced
     /// before the rename publishes the object, and only the shard-dir
@@ -120,7 +152,7 @@ impl BulkWriter<'_> {
         if bytes.len() > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
-        let h = hash::hash(bytes);
+        let h = object_id_from_bytes(bytes);
         let final_path = self.store.path_for(&h);
         // VERIFY-skip an existing object: content addressing makes
         // byte-equality the exact durability test — a good file (from
@@ -301,7 +333,7 @@ impl ObjectStore {
         if bytes.len() > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
-        let h = hash::hash(bytes);
+        let h = object_id_from_bytes(bytes);
         let final_path = self.path_for(&h);
         if final_path.exists() {
             // Dedup hit: the object is visible, but if another process
@@ -377,7 +409,7 @@ impl ObjectStore {
         let cap = usize::try_from(size).map_err(|_| StoreError::ObjectTooLarge)?;
         let mut bytes = Vec::with_capacity(cap);
         file.read_to_end(&mut bytes)?;
-        let actual = hash::hash(&bytes);
+        let actual = object_id_from_bytes(&bytes);
         if actual != *h {
             return Err(StoreError::HashMismatch {
                 expected: to_hex(h),
@@ -627,15 +659,42 @@ impl ObjectSink for EphemeralSink<'_> {
 
     fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
         let mut total: usize = 0;
-        let mut hasher = hash::Hasher::new();
         for p in parts {
             total = total
                 .checked_add(p.len())
                 .ok_or(StoreError::ObjectTooLarge)?;
-            hasher.update(p);
         }
         if total > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
+        }
+        // Merkelized types (Tree/ChunkedBlob) are addressed by a BMT root,
+        // which needs the contiguous bytes to decode — so they buffer, then
+        // dispatch through the one id function. Blobs/chunks (the bulk of
+        // bytes) stay streaming and copy-free, materialising only on insert.
+        let type_byte = parts.first().and_then(|p| p.first()).copied();
+        let is_merkle = matches!(
+            type_byte.and_then(|b| crate::object::ObjectType::from_u8(b).ok()),
+            Some(crate::object::ObjectType::Tree | crate::object::ObjectType::ChunkedBlob)
+        );
+        if is_merkle {
+            let mut buf = Vec::with_capacity(total);
+            for p in parts {
+                buf.extend_from_slice(p);
+            }
+            let h = object_id_from_bytes(&buf);
+            if self.store.contains(&h) {
+                return Ok(h);
+            }
+            self.objects
+                .lock()
+                .expect("ephemeral sink mutex")
+                .entry(h)
+                .or_insert(buf);
+            return Ok(h);
+        }
+        let mut hasher = hash::Hasher::new();
+        for p in parts {
+            hasher.update(p);
         }
         let h = hasher.finalize();
         // Dedup against the durable store: visible store objects are
