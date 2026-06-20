@@ -10,8 +10,8 @@ audience: implementers of compatible transport clients and servers
 mkit talks to remote stores through a small set of pluggable
 transports (memory, file, HTTP, S3, SSH). All implement the same
 [`Transport`](../rust/crates/mkit-core/src/protocol.rs) trait —
-seven verbs over a synchronous, object-safe interface — but the wire
-shape and authentication model differ per scheme.
+a small set of verbs over a synchronous, object-safe interface — but the
+wire shape and authentication model differ per scheme.
 
 There is no negotiation between transports and no scheme fallback.
 The URL scheme is part of the remote address; if the scheme is
