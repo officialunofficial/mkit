@@ -2,6 +2,19 @@ import { Link } from 'waku'
 import { GridLogo } from './grid-logo'
 import { ThemeToggle } from './theme-toggle'
 
+// Top-nav order: the three primary pages (tree, performance, parity)
+// first, then the smaller single-primitive demos. Reordering the site nav
+// is editing this list — nothing else.
+const NAV_LINKS = [
+  { to: '/tree', label: 'tree' },
+  { to: '/performance', label: 'performance' },
+  { to: '/parity', label: 'parity' },
+  { to: '/hash', label: 'hash' },
+  { to: '/sign', label: 'sign' },
+  { to: '/streaming', label: 'streaming' },
+  { to: '/attest', label: 'attest' },
+] as const
+
 export const Header = () => {
   return (
     // Sticky header with a translucent white ground + backdrop blur.
@@ -22,51 +35,16 @@ export const Header = () => {
           <Link to='/' className='-m-3 flex items-center p-3' aria-label='mkit home'>
             <GridLogo className='size-5 rounded-[3px]' />
           </Link>
-          {/* Order: the three primary pages (tree, performance, parity)
-              first, then the smaller single-primitive demos. */}
           <nav className='flex items-center gap-4 text-sm'>
-            <Link
-              to='/tree'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              tree
-            </Link>
-            <Link
-              to='/performance'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              performance
-            </Link>
-            <Link
-              to='/parity'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              parity
-            </Link>
-            <Link
-              to='/hash'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              hash
-            </Link>
-            <Link
-              to='/sign'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              sign
-            </Link>
-            <Link
-              to='/streaming'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              streaming
-            </Link>
-            <Link
-              to='/attest'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              attest
-            </Link>
+            {NAV_LINKS.map(({ to, label }) => (
+              <Link
+                key={to}
+                to={to}
+                className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
+              >
+                {label}
+              </Link>
+            ))}
           </nav>
           <div className='ml-auto'>
             <ThemeToggle />

@@ -68,6 +68,9 @@
        heading sizes. */
     line-height: 1.15;
     letter-spacing: -0.01em;
+    /* Offset in-page anchor jumps so the sticky header doesn't cover the
+       target heading (the "On this page" TOC links to these). */
+    scroll-margin-top: 5rem;
   }
 
   code,

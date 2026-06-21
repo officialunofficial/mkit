@@ -34,9 +34,10 @@ export function OnThisPage() {
     for (const h of headings) {
       const text = (h.textContent ?? '').trim()
       if (!text) continue
+      // Anchor target for the TOC links. The scroll offset that keeps the
+      // sticky header from covering it is a CSS rule on headings, not an
+      // inline style mutated here (see styles.css h1,h2,h3).
       if (!h.id) h.id = slugify(text)
-      // Keep the sticky header from covering the target on jump.
-      h.style.scrollMarginTop = '5rem'
       found.push({ id: h.id, text })
     }
     setItems(found)
@@ -70,7 +71,7 @@ export function OnThisPage() {
             <li key={item.id}>
               <a
                 href={`#${item.id}`}
-                aria-current={active ? 'true' : undefined}
+                aria-current={active ? 'location' : undefined}
                 className={`-ml-px block border-l py-1.5 pl-3 leading-snug transition-colors ${
                   active ? 'border-fg text-fg' : 'border-transparent text-muted hover:border-hairline hover:text-fg'
                 }`}
