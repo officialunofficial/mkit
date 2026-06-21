@@ -16,7 +16,7 @@
 //! `mkit-wasm` computes object ids. Instead this module vendors the
 //! *identical* BMT construction over the `blake3` crate (already a mkit
 //! dependency, wasm-clean). A native-only test
-//! ([`tests::vendored_root_matches_commonware`]) cross-verifies the
+//! (`tests::vendored_root_matches_commonware`) cross-verifies the
 //! vendored root byte-for-byte against `commonware_storage::bmt`, so the
 //! two never drift.
 //!

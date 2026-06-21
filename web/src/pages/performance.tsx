@@ -12,8 +12,8 @@ export default function PerformancePage() {
           megabyte of a video means storing one megabyte — git hashes with SHA-1 and stores each version of a file whole
           until a repack. That trade cuts both ways, and the numbers below show both edges: real{' '}
           <code className='font-mono text-sm'>hyperfine</code> runs of the two CLIs on one machine, git wins included.
-          The same chunking pays off again over the network — a small edit to a large file now{' '}
-          <em>pushes</em> as a chunk delta, not a whole chunk (see “Bytes on the wire”).
+          The same chunking pays off again over the network — a small edit to a large file now <em>pushes</em> as a
+          chunk delta, not a whole chunk (see “Bytes on the wire”).
         </p>
       </header>
       <PerfSection />
