@@ -40,6 +40,7 @@ pub mod pack_shard;
 pub mod serialize;
 pub mod sign;
 pub mod store;
+pub mod transfer;
 
 // Phase 4 — refs + index + worktree + ignore + repo_lock.
 pub(crate) mod atomic;

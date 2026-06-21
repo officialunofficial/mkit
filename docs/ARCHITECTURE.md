@@ -144,7 +144,7 @@ Start at `rust/crates/mkit-core/src/serialize.rs`, then read
 
 ### "I'm adding a new transport."
 Start at `rust/crates/mkit-core/src/protocol.rs` for the `Transport`
-trait, then read `docs/SPEC-TRANSPORT.md` for the seven verbs. Use
+trait, then read `docs/SPEC-TRANSPORT.md` for the verb set. Use
 `mkit-transport-memory` as the smallest implementation reference.
 
 ### "I'm adding a new signer algorithm or implementation."

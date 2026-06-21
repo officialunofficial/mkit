@@ -18,22 +18,26 @@
 //!   checking, known-hosts path, identity file) are wired through via
 //!   `SshTransport::connect_with_options` when config is loaded.
 
+mod packmap;
+
 use std::path::Path;
 use std::sync::Arc;
 
 use mkit_core::hash::Hash;
 use mkit_core::object::Object;
 use mkit_core::ops::merge::is_ancestor;
-use mkit_core::ops::reachable_objects;
 use mkit_core::ops::restore;
-use mkit_core::pack::{PackError, PackReader};
+use mkit_core::pack::{self, PackError, PackWriter};
 use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
+use mkit_core::transfer::{self, PackListError};
 use mkit_transport_file::FileTransport;
 use mkit_transport_http::HttpTransport;
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshTransport};
+
+use packmap::{advance_packmap, fetch_pack_chain, packmap_ref};
 
 const DEFAULT_REMOTE: &str = "default";
 
@@ -66,6 +70,8 @@ pub enum DispatchError {
     Store(#[from] StoreError),
     #[error("pack: {0}")]
     Pack(#[from] PackError),
+    #[error("packlist: {0}")]
+    PackList(#[from] PackListError),
     #[error("ssh init: {0}")]
     SshInit(#[from] SshInitError),
     #[error("pull requires HEAD to point at a branch")]
@@ -93,6 +99,38 @@ pub enum DispatchError {
         "updates were rejected for branch '{branch}' (non-fast-forward); fetch and merge first, or re-run with --force-with-lease / --force"
     )]
     NonFastForwardPush { branch: String },
+    /// The branch's packmap pointer could not be durably advanced under
+    /// sustained concurrent pushes. The branch ref was NOT moved, so the
+    /// remote stays consistent; the push is safe to retry.
+    #[error(
+        "could not establish the pack map for branch '{branch}' under concurrent pushes; retry"
+    )]
+    PackmapContended { branch: String },
+    /// A packmap chain was malformed — it exceeded the depth cap, contained
+    /// a cycle, or a node could not be downloaded/decoded. Indicates a
+    /// corrupt or hostile remote.
+    #[error("pack map chain for branch '{branch}' is malformed (too deep, cyclic, or unreadable)")]
+    PackChainInvalid { branch: String },
+    /// The remote advertised a branch ref but no packmap
+    /// (`refs/mkit/packmap/<branch>`) for it. mkit speaks a single,
+    /// packmap-only transfer dialect: the push path ALWAYS advertises a
+    /// packmap before moving the branch ref, so a branch with a tip but no
+    /// packmap is a corrupt/incomplete remote, not a format we degrade to.
+    /// We refuse to fetch rather than silently materialise a partial ref.
+    #[error("remote advertised branch '{0}' but no pack map to reconstruct it")]
+    PackmapMissing(String),
+    /// The packmap advertised a pack the remote does not hold. The branch's
+    /// closure cannot be reconstructed, so the fetch is aborted rather than
+    /// publishing a ref to an incomplete history.
+    #[error("remote advertised pack {pack} for branch '{branch}' but does not hold it")]
+    AdvertisedPackMissing { branch: String, pack: String },
+    /// After unpacking the branch's whole packmap chain, an object
+    /// reachable from the fetched tip is still absent from the local store —
+    /// the chain did not deliver the full closure. This is a pure integrity
+    /// assertion (no recovery download is attempted): the remote's packmap
+    /// is incomplete, so fetch aborts before publishing the ref.
+    #[error("remote is missing object {0} needed to reconstruct the ref")]
+    RemoteMissingObject(String),
 }
 
 /// Open a transport for `endpoint` only after the per-endpoint
@@ -236,19 +274,10 @@ fn load_or_ephemeral_client_key()
     PrivateKey::decode(secret.as_ref()).map_err(|e| map_err(e.to_string()))
 }
 
-/// Push every ref under `refs/heads/` to the remote, assembling a pack
-/// of every object reachable from the branch tip that the remote does
-/// not already hold. Returns the count of refs pushed.
-///
-/// Per-ref flow:
-/// 1. Resolve the local branch tip.
-/// 2. Walk reachable objects (`ops::reachable_objects`).
-/// 3. Filter out any object the remote already has via
-///    [`Transport::pack_exists`] (single-object packs, so the digest ==
-///    pack key).
-/// 4. Build a pack with `PackWriter`; the whole-pack digest is the
-///    `PackKey` used by [`Transport::upload_pack`].
-/// 5. Publish the ref with [`Transport::write_ref`].
+/// Push every ref under `refs/heads/` to the remote. Returns the count of
+/// refs pushed. Each branch is published with [`push_branch`], which sends
+/// one delta-compressed pack of the objects the remote lacks, advertises it
+/// via the `refs/mkit/packmap/<branch>` ref, then moves the branch ref.
 pub fn push_all(cwd: &Path, tx: &dyn Transport) -> Result<usize, DispatchError> {
     push_all_with(cwd, tx, None, false)
 }
@@ -384,8 +413,23 @@ pub fn push_branch_tracked(
     Ok(tip)
 }
 
-/// Push one branch: upload every object reachable from `tip` that the
-/// remote lacks, then CAS-write `refs/heads/<branch>` under `condition`.
+/// Push one branch: upload a single delta-compressed pack carrying every
+/// object reachable from `tip` that the remote lacks, durably advertise it
+/// via the `refs/mkit/packmap/<branch>` metadata ref, then CAS-write
+/// `refs/heads/<branch>` under `condition`.
+///
+/// Objects already present at the remote's current tip are never re-sent
+/// (identical-object dedup), and changed `FastCDC` chunks are delta-encoded
+/// against the prior version the remote already holds when that saves
+/// bytes (see [`mkit_core::transfer::plan_pack`]). The pack is keyed by its
+/// own BLAKE3 digest (SPEC-PACKFILE §7) — required because the digest-
+/// checking storage server rejects a delta stored under the reconstructed
+/// object's hash.
+///
+/// The packmap is advanced *and confirmed* before the branch ref moves: if
+/// the packmap can't be durably established the push aborts without
+/// touching the head, so the head never points past a packmap that fails to
+/// reconstruct it (even under concurrent pushers to the same branch).
 ///
 /// On a CAS failure ([`TransportError::RefConflict`]) this returns
 /// [`DispatchError::NonFastForwardPush`] so callers can render an
@@ -398,29 +442,40 @@ pub fn push_branch(
     tip: Hash,
     condition: refs::RefWriteCondition,
 ) -> Result<(), DispatchError> {
-    // Walk the reachable set and figure out what the remote lacks.
-    // The current contract with the memory / file transports is one
-    // object per pack, keyed by the object's own digest. This keeps
-    // fetch simple (ask the remote for each hash as it walks the
-    // object graph) and means `pack_exists` is a per-object HEAD
-    // check against the same key we'd upload under.
-    let reachable = reachable_objects(store, &tip)?;
-    for obj in &reachable {
+    // Diff against the remote's CURRENT tip so we send only what it lacks
+    // and can delta against bases it already holds. Planning is an
+    // optimization; the head CAS below remains authoritative.
+    let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
+    let plan = transfer::plan_pack(store, tip, remote_tip)?;
+
+    if !plan.is_empty() {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
         }
-        let key = PackKey::from_hash(*obj);
-        if tx.pack_exists(&key)? {
-            continue;
+
+        // Build the pack from the deterministic plan: raws first (non-blobs
+        // before blobs), then deltas (their bases are external — resolved
+        // from the fetcher's store via earlier packs — so no in-pack
+        // ordering is required, SPEC-PACKFILE §4).
+        let mut w = PackWriter::new();
+        for h in &plan.raw {
+            let bytes = store.read(h)?;
+            w.push_raw(*h, bytes)?;
         }
-        let bytes = store.read(obj)?;
-        tx.upload_pack(&bytes, &key)?;
+        for d in &plan.deltas {
+            w.push_delta(&d.base, &d.stream)?;
+        }
+        let pack = w.finish()?;
+        let pack_key = pack::pack_key(&pack);
+        tx.upload_pack(&pack, &PackKey::from_hash(pack_key))?;
+
+        // Durably chain the pack onto the packmap BEFORE moving the head.
+        // On failure we return without touching `refs/heads`, leaving the
+        // uploaded pack orphaned (GC reclaims it) but the remote consistent.
+        // `self_contained` lets a full-closure push reset a broken chain.
+        advance_packmap(tx, branch, pack_key, plan.self_contained)?;
     }
-    // Multi-object pack-level transfer (one pack per ref) is more
-    // efficient but requires the transport contract to advertise
-    // pack keys alongside refs — deferred. Per-object addressing
-    // keeps fetch simple and matches what file.rs / memory.rs
-    // already implement.
+
     let full_name = format!("refs/heads/{branch}");
     match tx.update_ref(&full_name, condition, &tip) {
         Ok(()) => Ok(()),
@@ -559,9 +614,26 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, 
     fetch_objects(&store, &mkit_dir, tx, remote)
 }
 
-/// Download every remote `refs/heads/*` object closure and publish the
-/// remote-tracking refs. The caller MUST already hold the repo lock (so the
-/// object writes and ref publication are serialized against `gc`).
+/// Reconstruct every remote `refs/heads/*` from its packmap chain and
+/// publish the remote-tracking refs. The caller MUST already hold the repo
+/// lock (so the object writes and ref publication are serialized against
+/// `gc`).
+///
+/// mkit speaks a single, packmap-only transfer dialect (the legacy
+/// per-object download path was removed): for every advertised branch the
+/// flow is exactly
+///
+/// 1. read the branch's packmap ref (`refs/mkit/packmap/<branch>`),
+/// 2. walk its chain oldest-first and unpack each pack
+///    ([`packmap::fetch_pack_chain`]), then
+/// 3. assert the tip's closure is fully present
+///    ([`verify_closure_present`]) — a pure integrity check that downloads
+///    nothing.
+///
+/// Both ends fail loudly: an absent packmap is [`DispatchError::PackmapMissing`]
+/// and a present-but-incomplete packmap is [`DispatchError::RemoteMissingObject`].
+/// We never publish a remote-tracking ref to a closure we couldn't fully
+/// materialise locally.
 fn fetch_objects(
     store: &ObjectStore,
     mkit_dir: &Path,
@@ -575,22 +647,39 @@ fn fetch_objects(
             return Err(DispatchError::Interrupted);
         }
         let Some(h) = r.hash else { continue };
-        // Download the pack the remote uploaded for this ref. The
-        // per-object fallback below handles the case where the pack
-        // was never assembled (a push whose reachable set was empty
-        // because the remote already had everything).
-        //
-        // The push path uploads one pack keyed by its own digest; the
-        // memory / file transports `list_refs` only returns the ref,
-        // not the pack digest. So we walk commit→tree→blobs on the
-        // *local* side after downloading, re-using `download_pack` on
-        // each object's hash as a fallback. That matches the
-        // per-object transport semantics in file.rs / memory.rs.
-        fetch_object_closure(store, tx, &h)?;
+        // A branch tip without a packmap is a corrupt/incomplete remote, not
+        // a format we degrade to: the push path ALWAYS advertises a packmap
+        // before moving the branch ref. A real transport error (network blip,
+        // auth) propagates unchanged — only `Ok(None)` is the explicit
+        // "no packmap" verdict, and it is now an error.
+        let Some(chain_head) = tx.read_ref(&packmap_ref(&r.name))? else {
+            return Err(DispatchError::PackmapMissing(r.name.clone()));
+        };
+        fetch_pack_chain(store, tx, &r.name, chain_head)?;
+        // Integrity assertion only — NO downloads. The chain above is the
+        // sole delivery mechanism; if it didn't deliver the whole closure the
+        // remote's packmap is incomplete and we refuse to publish the ref.
+        verify_closure_present(store, &h)?;
         refs::write_remote_ref(mkit_dir, remote, &r.name, &h)?;
         n += 1;
     }
     Ok(n)
+}
+
+/// Assert that every object reachable from `tip` is already present in the
+/// local store after the packmap chain has been unpacked. This is a pure
+/// integrity check — it walks the closure via [`mkit_core::ops::reachable_objects`]
+/// (which reads each object and re-verifies its digest) and performs NO
+/// network access. A reachable object that the chain failed to deliver
+/// surfaces as [`StoreError::ObjectNotFound`], which we re-tag as
+/// [`DispatchError::RemoteMissingObject`] so the fetch aborts loudly rather
+/// than publishing a ref to a closure we can't reconstruct.
+fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<(), DispatchError> {
+    match mkit_core::ops::reachable_objects(store, tip) {
+        Ok(_) => Ok(()),
+        Err(StoreError::ObjectNotFound(hex)) => Err(DispatchError::RemoteMissingObject(hex)),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, DispatchError> {
@@ -599,101 +688,4 @@ fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, Dispat
         Object::Remix(r) => Ok(r.tree_hash),
         _ => Err(DispatchError::NotCommit),
     }
-}
-
-/// Recursively download every object reachable from `root` into
-/// `store`, fetching one digest at a time. Used by [`fetch_all`] /
-/// [`pull_all`] when the remote's ref-advertise doesn't carry a
-/// pack key (which is the current contract for the memory + file
-/// transports).
-fn fetch_object_closure(
-    store: &ObjectStore,
-    tx: &dyn Transport,
-    root: &Hash,
-) -> Result<(), DispatchError> {
-    use std::collections::VecDeque;
-
-    let mut queue: VecDeque<Hash> = VecDeque::new();
-    queue.push_back(*root);
-    let mut seen = std::collections::HashSet::new();
-
-    while let Some(h) = queue.pop_front() {
-        if crate::signal::is_shutdown() {
-            return Err(DispatchError::Interrupted);
-        }
-        if !seen.insert(h) {
-            continue;
-        }
-        if store.contains(&h) {
-            // Already local — still walk to be sure children are
-            // present. Read through the store to enqueue them.
-        } else {
-            // Download. Transports that keyed on the object digest
-            // (memory, file) return raw object bytes here.
-            let key = PackKey::from_hash(h);
-            let bytes = match tx.download_pack(&key) {
-                Ok(b) => b,
-                Err(TransportError::PackNotFound) => {
-                    // Accept as a no-op: the remote may have assembled
-                    // a multi-object pack and thus does not key on the
-                    // object digest. The per-object path can't see the
-                    // pack in that case; the caller is expected to
-                    // either download the pack explicitly (future: a
-                    // proper ref-advertise carrying pack keys) or
-                    // accept missing objects. For the memory/file
-                    // transports the per-object mapping is always
-                    // populated by the push side, so this branch is
-                    // defensive.
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            };
-            // If the remote returned a real packfile, unpack it. Else,
-            // treat the bytes as a single raw object.
-            if bytes.starts_with(mkit_core::pack::MAGIC) {
-                let _ = PackReader::read(&bytes, store)?;
-            } else {
-                let stored = store.write(&bytes)?;
-                // Sanity check: the digest MUST match the key we asked
-                // for — otherwise the remote is serving mismatched
-                // content.
-                if stored != h {
-                    return Err(DispatchError::Transport(TransportError::InvalidResponse));
-                }
-            }
-        }
-        // Enqueue children so we walk the whole closure.
-        if let Ok(obj) = store.read_object(&h) {
-            use mkit_core::object::Object;
-            match obj {
-                Object::Commit(c) => {
-                    queue.push_back(c.tree_hash);
-                    for p in c.parents {
-                        queue.push_back(p);
-                    }
-                }
-                Object::Remix(r) => {
-                    queue.push_back(r.tree_hash);
-                    for p in r.parents {
-                        queue.push_back(p);
-                    }
-                }
-                Object::Tree(t) => {
-                    for e in t.entries {
-                        queue.push_back(e.object_hash);
-                    }
-                }
-                Object::ChunkedBlob(cb) => {
-                    for c in cb.chunks {
-                        queue.push_back(c);
-                    }
-                }
-                Object::Tag(t) => {
-                    queue.push_back(t.target);
-                }
-                Object::Blob(_) | Object::Delta(_) => {}
-            }
-        }
-    }
-    Ok(())
 }
