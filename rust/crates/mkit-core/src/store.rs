@@ -43,7 +43,7 @@ use tempfile::NamedTempFile;
 use crate::batch::{RealSyncer, Syncer};
 pub use crate::batch::{SyncPolicy, WriteBatch};
 use crate::hash::{self, Hash, object_path, to_hex};
-use crate::object::{MkitError, Object};
+use crate::object::{MkitError, Object, object_id_from_bytes, object_id_from_parts};
 use crate::serialize;
 
 /// Top-level repository directory name.
@@ -114,38 +114,6 @@ pub struct BulkWriter<'a> {
     store: &'a ObjectStore,
     dirs: std::collections::HashSet<PathBuf>,
     files: std::collections::HashSet<PathBuf>,
-}
-
-/// The content-address (storage key) for an object's canonical bytes.
-///
-/// Merkelized types are addressed by their Binary Merkle Tree root
-/// (`crate::merkle`): a `Tree` by its `compute_tree_id` and a `ChunkedBlob`
-/// by its `compute_chunked_id`. Every other type is addressed by `BLAKE3`
-/// of its bytes — the historical scheme. Dispatch is on the prologue type
-/// byte, which is validated against the `MKT1` magic at decode. A
-/// merkle-typed buffer that fails to decode falls back to the byte hash;
-/// it could never have been produced by a real writer, so this only guards
-/// malformed input from being silently mis-addressed.
-///
-/// This is the SINGLE function every write path and the read verifier route
-/// through, so the two addressing schemes can never diverge across sinks
-/// (`BulkWriter`, `ObjectStore`, `EphemeralSink`, `WriteBatch`).
-pub(crate) fn object_id_from_bytes(bytes: &[u8]) -> Hash {
-    use crate::object::{Object, ObjectType};
-    match bytes.first().and_then(|b| ObjectType::from_u8(*b).ok()) {
-        Some(ObjectType::Tree) => {
-            if let Ok(Object::Tree(t)) = crate::serialize::deserialize(bytes) {
-                return crate::merkle::compute_tree_id(&t);
-            }
-        }
-        Some(ObjectType::ChunkedBlob) => {
-            if let Ok(Object::ChunkedBlob(cb)) = crate::serialize::deserialize(bytes) {
-                return crate::merkle::compute_chunked_id(&cb);
-            }
-        }
-        _ => {}
-    }
-    hash::hash(bytes)
 }
 
 impl BulkWriter<'_> {
@@ -702,50 +670,25 @@ impl ObjectSink for EphemeralSink<'_> {
         if total > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
-        // Merkelized types (Tree/ChunkedBlob) are addressed by a BMT root,
-        // which needs the contiguous bytes to decode — so they buffer, then
-        // dispatch through the one id function. Blobs/chunks (the bulk of
-        // bytes) stay streaming and copy-free, materialising only on insert.
-        let type_byte = parts.first().and_then(|p| p.first()).copied();
-        let is_merkle = matches!(
-            type_byte.and_then(|b| crate::object::ObjectType::from_u8(b).ok()),
-            Some(crate::object::ObjectType::Tree | crate::object::ObjectType::ChunkedBlob)
-        );
-        if is_merkle {
-            let mut buf = Vec::with_capacity(total);
-            for p in parts {
-                buf.extend_from_slice(p);
-            }
-            let h = object_id_from_bytes(&buf);
-            if self.store.contains(&h) {
-                return Ok(h);
-            }
-            self.objects
-                .lock()
-                .expect("ephemeral sink mutex")
-                .entry(h)
-                .or_insert(buf);
-            return Ok(h);
-        }
-        let mut hasher = hash::Hasher::new();
-        for p in parts {
-            hasher.update(p);
-        }
-        let h = hasher.finalize();
-        // Dedup against the durable store: visible store objects are
-        // durable by invariant, and skipping them keeps the overlay's
-        // memory bounded by the *changed* content, not the worktree.
+        let h = object_id_from_parts(parts);
+        // Dedup against the durable store: visible store objects are durable
+        // by invariant, and skipping them keeps the overlay's memory bounded
+        // by the *changed* content, not the worktree. The overlay only ever
+        // materialises the bytes on a dedup miss.
         if self.store.contains(&h) {
             return Ok(h);
         }
-        let mut map = self.objects.lock().expect("ephemeral sink mutex");
-        map.entry(h).or_insert_with(|| {
-            let mut buf = Vec::with_capacity(total);
-            for p in parts {
-                buf.extend_from_slice(p);
-            }
-            buf
-        });
+        self.objects
+            .lock()
+            .expect("ephemeral sink mutex")
+            .entry(h)
+            .or_insert_with(|| {
+                let mut buf = Vec::with_capacity(total);
+                for p in parts {
+                    buf.extend_from_slice(p);
+                }
+                buf
+            });
         Ok(h)
     }
 

@@ -379,7 +379,7 @@ impl PackReader {
                     // Address by the dispatched id (merkle root for
                     // Tree/ChunkedBlob, BLAKE3 otherwise) so the unpacked
                     // object lands under the same key every sink uses.
-                    let stored_hash = crate::store::object_id_from_bytes(payload);
+                    let stored_hash = crate::object::object_id_from_bytes(payload);
                     let bytes: Arc<[u8]> = Arc::from(payload);
                     in_pack.insert(stored_hash, Arc::clone(&bytes));
                     pending_writes.push((stored_hash, bytes));
@@ -408,7 +408,7 @@ impl PackReader {
                     validate_delta_result_size(stream)?;
                     let resolved = delta::decode(base_bytes.as_ref(), stream)?;
                     validate_storable_object(&resolved)?;
-                    let stored_hash = crate::store::object_id_from_bytes(&resolved);
+                    let stored_hash = crate::object::object_id_from_bytes(&resolved);
                     let bytes: Arc<[u8]> = Arc::from(resolved);
                     in_pack.insert(stored_hash, Arc::clone(&bytes));
                     pending_writes.push((stored_hash, bytes));

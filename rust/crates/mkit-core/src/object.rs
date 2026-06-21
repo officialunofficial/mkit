@@ -39,6 +39,16 @@ pub enum ObjectType {
 }
 
 impl ObjectType {
+    /// `true` for the types content-addressed by a merkle BMT root
+    /// (`Tree`, `ChunkedBlob`) rather than by `BLAKE3` of their bytes — see
+    /// `crate::merkle` and [`Object::id`]. The single source of truth for
+    /// the merkle-addressed set: the store's id dispatch and every write
+    /// path consult this instead of re-spelling `Tree | ChunkedBlob`.
+    #[must_use]
+    pub fn is_merkle(self) -> bool {
+        matches!(self, Self::Tree | Self::ChunkedBlob)
+    }
+
     /// Spec-defined short name, usable in logs / CLI output.
     #[must_use]
     pub fn name(self) -> &'static str {
@@ -464,6 +474,61 @@ impl Object {
             other => crate::hash::hash(&crate::serialize::serialize(other)?),
         })
     }
+}
+
+/// [`Object::id`] computed directly from an object's canonical **bytes**,
+/// without first decoding non-merkle types. A merkelized type ([`Tree`] /
+/// [`ChunkedBlob`], per [`ObjectType::is_merkle`]) is decoded and addressed
+/// by its BMT root; every other type is `BLAKE3` of the bytes. A
+/// merkle-typed buffer that fails to decode falls back to the byte hash —
+/// it could never have been produced by a real writer, so this only stops
+/// malformed input from being silently mis-addressed.
+///
+/// This is the bytes-level twin of [`Object::id`]; together they are the
+/// single content-addressing dispatch the store, batch writer, pack reader,
+/// and worktree all route through, so the two schemes never diverge.
+#[must_use]
+pub(crate) fn object_id_from_bytes(bytes: &[u8]) -> Hash {
+    match bytes.first().and_then(|b| ObjectType::from_u8(*b).ok()) {
+        Some(ObjectType::Tree) => {
+            if let Ok(Object::Tree(t)) = crate::serialize::deserialize(bytes) {
+                return crate::merkle::compute_tree_id(&t);
+            }
+        }
+        Some(ObjectType::ChunkedBlob) => {
+            if let Ok(Object::ChunkedBlob(cb)) = crate::serialize::deserialize(bytes) {
+                return crate::merkle::compute_chunked_id(&cb);
+            }
+        }
+        _ => {}
+    }
+    crate::hash::hash(bytes)
+}
+
+/// [`object_id_from_bytes`] for an object supplied as `parts` whose
+/// concatenation is the canonical bytes — the shape every part-wise sink
+/// (`EphemeralSink`, `WriteBatch`) receives.
+///
+/// A merkelized type needs its contiguous bytes to decode the BMT root, so
+/// it is buffered once and dispatched. A byte-hashed type (a `Blob`/chunk —
+/// the bulk of all bytes, up to ~1 GiB) is hashed **streaming**, never
+/// materialising the concatenation. This keeps the "buffer or stream"
+/// decision in one place instead of in every sink.
+#[must_use]
+pub(crate) fn object_id_from_parts(parts: &[&[u8]]) -> Hash {
+    let merkle = parts
+        .first()
+        .and_then(|p| p.first())
+        .and_then(|b| ObjectType::from_u8(*b).ok())
+        .is_some_and(ObjectType::is_merkle);
+    if merkle {
+        return object_id_from_bytes(&parts.concat());
+    }
+    let mut hasher = crate::hash::Hasher::new();
+    for p in parts {
+        hasher.update(p);
+    }
+    hasher.finalize()
 }
 
 /// All decode / validation errors raised by the serialize module, plus

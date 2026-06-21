@@ -54,7 +54,7 @@ use std::sync::Mutex;
 
 use tempfile::TempPath;
 
-use crate::hash::{Hash, Hasher};
+use crate::hash::Hash;
 use crate::store::{
     MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, StoreError, StoreResult, sync_parent_dir,
     temp_file_in,
@@ -291,29 +291,9 @@ impl<'s> WriteBatch<'s> {
         if total > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
-        // Merkelized types (Tree/ChunkedBlob) are addressed by a BMT root,
-        // which needs the contiguous bytes — buffer then dispatch. Blobs and
-        // chunks (the bulk) stay streaming. Routed through the one id
-        // function so every sink agrees (store::object_id_from_bytes).
-        let type_byte = parts.first().and_then(|p| p.first()).copied();
-        let is_merkle = matches!(
-            type_byte.and_then(|b| crate::object::ObjectType::from_u8(b).ok()),
-            Some(crate::object::ObjectType::Tree | crate::object::ObjectType::ChunkedBlob)
-        );
-        let h = if is_merkle {
-            let mut buf = Vec::with_capacity(total);
-            for p in parts {
-                buf.extend_from_slice(p);
-            }
-            crate::store::object_id_from_bytes(&buf)
-        } else {
-            let mut hasher = Hasher::new();
-            for p in parts {
-                hasher.update(p);
-            }
-            hasher.finalize()
-        };
-        self.write_prehashed(h, parts)
+        // One id dispatch shared by every part-wise sink: a merkle type
+        // buffers + uses its BMT root, a byte-hashed type streams.
+        self.write_prehashed(crate::object::object_id_from_parts(parts), parts)
     }
 
     /// Stage `parts` under the caller-supplied content hash, skipping
