@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { hashColor } from '../lib/hash-color'
 import { PUSH_MESH } from '../lib/mesh'
 import { ChunkStrip, type StripChunk } from './chunk-strip'
@@ -8,9 +8,9 @@ import { HashChip } from './result-panel'
 import { formatBytes, useMkit } from './use-mkit'
 
 // A demo "file": ~384 KB of varied bytes so FastCDC v1 cuts it into several
-// content-defined chunks (avg 64 KB). Deterministic so the view is stable
-// across renders; an edit XORs one sub-chunk region so the chunk covering it
-// changes — the point of chunked storage.
+// content-defined chunks (avg 64 KB). Deterministic so the walkthrough reads
+// the same every time; the "edit" XORs one sub-chunk region so exactly the
+// chunk covering it changes.
 const FILE_SIZE = 384 * 1024
 const FILE_SEED = 0x6b697421
 
@@ -31,158 +31,153 @@ function generateFile(): Uint8Array {
   return out
 }
 
-function editOneRegion(src: Uint8Array, tick: number): Uint8Array {
+function editOneRegion(src: Uint8Array): Uint8Array {
   const out = src.slice()
   const start = Math.floor(out.length * 0.45)
   const end = Math.min(out.length, start + 24 * 1024)
-  const mask = (tick * 37 + 11) & 0xff
-  for (let i = start; i < end; i++) out[i] = (out[i] ?? 0) ^ mask
+  for (let i = start; i < end; i++) out[i] = (out[i] ?? 0) ^ 0x5a
   return out
 }
 
-type Chunked = { root: string; bytesLen: number; chunks: StripChunk[] }
+type Encoded = { wholeId: string; root: string; bytesLen: number; chunks: StripChunk[] }
+
+const STEPS = [
+  { title: 'Your file', next: 'Chunk it' },
+  { title: 'mkit chunks it', next: 'Edit it' },
+  { title: 'You edit it', next: 'Ship it' },
+  { title: 'Ship & settle', next: 'Start over' },
+] as const
 
 const BTN = 'rounded-md border border-hairline px-3 py-1.5 text-sm transition-opacity duration-300 hover:opacity-70'
 
 export function PushDemo() {
   const api = useMkit()
-  const [bytes, setBytes] = useState<Uint8Array>(generateFile)
-  const [prevBytes, setPrevBytes] = useState<Uint8Array | null>(null)
-  const [edits, setEdits] = useState(0)
-  const edited = prevBytes !== null
+  const [step, setStep] = useState(0)
 
-  // Whole-file storage: the file as one object — a single Blob id.
-  const wholeId = useMemo(() => api.blob_encode(bytes).hash_hex, [api, bytes])
+  const base = useMemo(() => generateFile(), [])
+  const edited = useMemo(() => editOneRegion(base), [base])
 
-  // Chunked storage: split, then fold the chunks into a ChunkedBlob BMT root.
-  const chunked = useMemo<Chunked>(() => {
-    const r = api.chunked_blob_encode(bytes)
-    const chunks: StripChunk[] = Array.from({ length: r.chunk_count }, (_, i) => {
-      const c = r.chunk(i)!
-      return { offset: c.offset, len: c.len, hash_hex: c.hash_hex }
-    })
-    return { root: r.root_hash_hex, bytesLen: r.bytes_len, chunks }
-  }, [api, bytes])
-  const prevRoot = useMemo(
-    () => (prevBytes ? api.chunked_blob_encode(prevBytes).root_hash_hex : null),
-    [api, prevBytes],
+  const encode = useCallback(
+    (b: Uint8Array): Encoded => {
+      const r = api.chunked_blob_encode(b)
+      const chunks: StripChunk[] = Array.from({ length: r.chunk_count }, (_, i) => {
+        const c = r.chunk(i)!
+        return { offset: c.offset, len: c.len, hash_hex: c.hash_hex }
+      })
+      return { wholeId: api.blob_encode(b).hash_hex, root: r.root_hash_hex, bytesLen: r.bytes_len, chunks }
+    },
+    [api],
   )
-  const prevHashes = useMemo<Set<string>>(() => {
-    if (!prevBytes) return new Set()
-    const r = api.chunked_blob_encode(prevBytes)
-    return new Set(Array.from({ length: r.chunk_count }, (_, i) => r.chunk(i)!.hash_hex))
-  }, [api, prevBytes])
+  const before = useMemo(() => encode(base), [encode, base])
+  const after = useMemo(() => encode(edited), [encode, edited])
 
-  // Which chunks changed since the previous push (by hash). Chunked storage
-  // ships only these; whole-file storage always re-ships the entire file.
-  const changedIdx = edited ? chunked.chunks.flatMap((c, i) => (prevHashes.has(c.hash_hex) ? [] : [i])) : []
-  const dimSet = edited ? new Set(chunked.chunks.flatMap((c, i) => (prevHashes.has(c.hash_hex) ? [i] : []))) : undefined
-  const changedBytes = changedIdx.reduce((a, i) => a + (chunked.chunks[i]?.len ?? 0), 0)
+  // The chunks that changed (by hash) — only these ship.
+  const beforeHashes = useMemo(() => new Set(before.chunks.map((c) => c.hash_hex)), [before])
+  const changedIdx = after.chunks.flatMap((c, i) => (beforeHashes.has(c.hash_hex) ? [] : [i]))
+  const dimSet = new Set(after.chunks.flatMap((c, i) => (beforeHashes.has(c.hash_hex) ? [i] : [])))
+  const changedBytes = changedIdx.reduce((a, i) => a + (after.chunks[i]?.len ?? 0), 0)
+  const savedPct = Math.round((1 - changedBytes / edited.length) * 100)
 
-  const onEdit = () => {
-    setPrevBytes(bytes)
-    setBytes(editOneRegion(bytes, edits + 1))
-    setEdits(edits + 1)
-  }
-  const onReset = () => {
-    setPrevBytes(null)
-    setBytes(generateFile())
-    setEdits(0)
-  }
+  const back = () => setStep((s) => Math.max(0, s - 1))
+  const next = () => setStep((s) => (s + 1) % STEPS.length)
 
   return (
-    <div className='space-y-6'>
-      <div className='flex flex-wrap items-center gap-3'>
-        <button type='button' onClick={onEdit} className={BTN}>
-          Edit a region
-        </button>
-        <button type='button' onClick={onReset} className={`${BTN} text-muted`}>
-          Reset
-        </button>
-        <span className='text-sm text-muted'>
-          {formatBytes(bytes.length)} · {chunked.chunks.length} chunks{edits > 0 ? ` · edit #${edits}` : ''}
-        </span>
-      </div>
-
-      <div className='grid gap-4 md:grid-cols-2'>
-        {/* Whole-file storage */}
-        <div className='space-y-3 rounded-md border border-hairline p-4'>
-          <div className='font-mono text-xs uppercase tracking-wide text-subtle'>Store the whole file</div>
-          <div
-            className='h-6 w-full rounded-sm border border-hairline'
-            style={{ backgroundColor: hashColor(wholeId) }}
-          />
-          <IdLine label='file id' hash={wholeId} />
-          <Wire label='pushed on this edit' detail='the whole file, re-hashed' bytes={bytes.length} />
+    <div
+      className='space-y-5 rounded-md border border-hairline p-5'
+      style={step === 3 ? { backgroundImage: PUSH_MESH } : undefined}
+    >
+      <div className='flex items-center justify-between gap-3'>
+        <div className='font-mono text-xs text-subtle'>
+          {STEPS[step]?.title} · step {step + 1} of {STEPS.length}
         </div>
-
-        {/* Chunked storage */}
-        <div className='space-y-3 rounded-md border border-hairline p-4' style={{ backgroundImage: PUSH_MESH }}>
-          <div className='font-mono text-xs uppercase tracking-wide text-subtle'>Chunk and pack</div>
-          <ChunkStrip
-            chunks={chunked.chunks}
-            totalLen={chunked.bytesLen}
-            ariaLabel='content-defined chunks'
-            highlightIndex={changedIdx[0]}
-            dimSet={dimSet}
-          />
-          <div className='text-center text-xs text-subtle'>↓ fold chunks into a Merkle root ↓</div>
-          <IdLine label='BMT root = ChunkedBlob id' hash={chunked.root} />
-          <Wire
-            label='pushed on this edit'
-            detail={
-              edited ? `${changedIdx.length} of ${chunked.chunks.length} chunks — a delta` : 'only the missing chunks'
-            }
-            bytes={edited ? changedBytes : chunked.bytesLen}
-          />
+        <div className='flex gap-1.5'>
+          {STEPS.map((s, i) => (
+            <span
+              key={s.title}
+              aria-hidden
+              className={`h-1.5 w-1.5 rounded-full ${i <= step ? 'bg-fg' : 'bg-hairline'}`}
+            />
+          ))}
         </div>
       </div>
 
-      {/* Settle — advance the head pointer */}
-      <div className='space-y-2 rounded-md border border-hairline p-4'>
-        <div className='font-mono text-xs uppercase tracking-wide text-subtle'>Settle — advance the head (CAS)</div>
-        {edited && prevRoot ? (
-          <div className='flex flex-wrap items-center gap-2 font-mono text-xs'>
-            <HashChip hash={prevRoot} />
-            <code className='text-muted'>{prevRoot.slice(0, 12)}…</code>
-            <span aria-hidden className='text-subtle'>
-              →
-            </span>
-            <HashChip hash={chunked.root} />
-            <code>{chunked.root.slice(0, 12)}…</code>
-            <span className='text-subtle'>advanced atomically — all of it, or none</span>
-          </div>
-        ) : (
-          <div className='flex items-center gap-2 font-mono text-xs text-muted'>
-            <HashChip hash={chunked.root} />
-            head → {chunked.root.slice(0, 12)}…<span className='text-subtle'>· edit to settle a new root</span>
-          </div>
-        )}
+      <div className='min-h-[7.5rem] space-y-4'>
+        {step === 0 ? (
+          <>
+            <div
+              className='h-8 w-full rounded-sm border border-hairline'
+              style={{ backgroundColor: hashColor(before.wholeId) }}
+            />
+            <p className='max-w-prose text-sm text-muted'>
+              A file you want to push — {formatBytes(base.length)}. Today mkit stores it as one object and names it by
+              its hash.
+            </p>
+          </>
+        ) : null}
+
+        {step === 1 ? (
+          <>
+            <ChunkStrip chunks={before.chunks} totalLen={before.bytesLen} ariaLabel='content-defined chunks' />
+            <p className='max-w-prose text-sm text-muted'>
+              mkit splits it into {before.chunks.length} content-defined chunks (FastCDC) and names each by its BLAKE3
+              hash — so it stores identical chunks, across files or versions, only once.
+            </p>
+          </>
+        ) : null}
+
+        {step === 2 ? (
+          <>
+            <ChunkStrip
+              chunks={after.chunks}
+              totalLen={after.bytesLen}
+              ariaLabel='content-defined chunks after an edit'
+              highlightIndex={changedIdx[0]}
+              dimSet={dimSet}
+            />
+            <p className='max-w-prose text-sm text-muted'>
+              You changed a few bytes. Only the chunk covering them gets a new hash (outlined); every other chunk stays
+              byte-identical, so mkit already has it.
+            </p>
+          </>
+        ) : null}
+
+        {step === 3 ? (
+          <>
+            <div className='grid grid-cols-2 gap-3'>
+              <Stat label='git resends' value={formatBytes(edited.length)} detail='the whole file' />
+              <Stat label='mkit resends' value={formatBytes(changedBytes)} detail={`one chunk · ${savedPct}% less`} />
+            </div>
+            <p className='max-w-prose text-sm text-muted'>
+              Only the changed chunk ships. The chunks fold into a Merkle root — the file&rsquo;s new id — and mkit
+              advances the head to it atomically. Read it back: re-deriving the root proves every chunk intact.
+            </p>
+            <div className='flex items-center gap-2 font-mono text-xs text-muted'>
+              <HashChip hash={after.root} />
+              head → {after.root.slice(0, 12)}…
+            </div>
+          </>
+        ) : null}
+      </div>
+
+      <div className='flex items-center justify-between border-t border-hairline pt-4'>
+        <button type='button' onClick={back} disabled={step === 0} className={`${BTN} disabled:opacity-40`}>
+          ← back
+        </button>
+        <button type='button' onClick={next} className={BTN}>
+          {STEPS[step]?.next} {step < STEPS.length - 1 ? '→' : '↺'}
+        </button>
       </div>
     </div>
   )
 }
 
-// One id line: chip, label, truncated hash.
-function IdLine({ label, hash }: { label: string; hash: string }) {
+// A single bytes-on-the-wire figure: label, big value, one-line detail.
+function Stat({ label, value, detail }: { label: string; value: string; detail: string }) {
   return (
-    <div className='flex items-center gap-2 text-xs'>
-      <HashChip hash={hash} />
-      <span className='text-muted'>{label}</span>
-      <code className='font-mono break-all text-fg'>{hash.slice(0, 16)}…</code>
-    </div>
-  )
-}
-
-// Bytes-on-the-wire stat — the whole-file vs chunked punchline.
-function Wire({ label, detail, bytes }: { label: string; detail: string; bytes: number }) {
-  return (
-    <div className='flex items-baseline justify-between gap-3 border-t border-hairline pt-2'>
-      <span className='text-xs text-muted'>{label}</span>
-      <span className='text-right'>
-        <span className='font-mono text-sm font-semibold text-fg'>{formatBytes(bytes)}</span>
-        <span className='block text-[11px] text-subtle'>{detail}</span>
-      </span>
+    <div className='space-y-0.5 rounded-md border border-hairline bg-bg/40 p-3'>
+      <div className='text-xs text-muted'>{label}</div>
+      <div className='font-mono text-xl font-semibold text-fg'>{value}</div>
+      <div className='text-[11px] text-subtle'>{detail}</div>
     </div>
   )
 }

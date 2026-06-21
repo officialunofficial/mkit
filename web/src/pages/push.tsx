@@ -8,34 +8,33 @@ export default function PushPage() {
     <div className='space-y-8'>
       <Seo
         title='mkit — push'
-        description='Two ways to store a file in a bucket: as one whole object, or split into content-defined chunks. Edit a file and watch whole-file storage re-upload everything while chunked storage ships only the changed chunk, folds it into a Merkle root, and settles the head pointer.'
+        description='Watch what mkit does with a file you push: it splits the file into content-defined chunks named by their hashes, ships only the chunks that changed, and folds them into a Merkle root that becomes the new id.'
         path='/push'
-        card='How a push settles'
+        card='Push a file, any file'
       />
       <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>How a push settles</h1>
+        <h1 className='text-4xl font-semibold tracking-tight'>Push a file, any file</h1>
         <p className='max-w-prose text-base text-fg'>
-          There are two ways to store a file in a bucket. You can store each file as one object — but editing it
-          re-uploads the whole thing. Or you can split each file into content-defined chunks, fold the chunks into a
-          Merkle root, ship only what changed, and settle by advancing a single content-addressed pointer. Edit the file
-          below to compare the two.
+          Watch what mkit does with a file you push. It splits the file into content-defined chunks and names each by
+          its BLAKE3 hash; when the file changes, only the chunks that changed get new names, so a push ships just those
+          — then folds them into a Merkle root that becomes the file&rsquo;s new id. Step through it below.
         </p>
       </header>
       <DemoBoundary>
         <PushDemo />
       </DemoBoundary>
       <p className='max-w-prose text-sm text-muted'>
-        mkit takes the second approach. Like{' '}
-        <a
-          href='https://x.com/makechainnet'
-          target='_blank'
-          rel='noreferrer'
-          className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-        >
-          @makechainnet
-        </a>
-        &rsquo;s projects, it stores packed, hashed blobs: dedup, cheap deltas, file integrity, and signed history. It
-        does this because a bucket doesn&rsquo;t need to be human-browsable.
+        Why address a file by its Merkle root? Because the root <em>is</em> the id, reading the file back re-derives the
+        root and proves every chunk intact — integrity lives in the name, not in a separate checksum. The same root lets
+        a client verify that one chunk belongs to the file without fetching the rest, and a{' '}
+        <a href='/demos#sign' className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'>
+          signature
+        </a>{' '}
+        on the commit that names the file then covers every chunk beneath it — the same Merkle fold the{' '}
+        <Link to='/tree' className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'>
+          tree
+        </Link>{' '}
+        uses to roll a whole repository up to one signed hash.
       </p>
       <Link
         to='/'
