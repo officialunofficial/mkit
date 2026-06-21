@@ -15,9 +15,8 @@ export default function PushPage() {
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Push a file, any file</h1>
         <p className='max-w-prose text-base text-fg'>
-          Watch what mkit does with a file you push. It splits the file into content-defined chunks and names each by
-          its BLAKE3 hash; when the file changes, only the chunks that changed get new names, so a push ships just those
-          — then folds them into a Merkle root that becomes the file&rsquo;s new id. Step through it below.
+          When you push a file, mkit splits it into chunks and names each by its hash. Change the file, and only the
+          changed chunks get new names — so the push ships just those. Step through it below.
         </p>
       </header>
       <DemoBoundary>
