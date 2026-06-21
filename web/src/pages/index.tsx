@@ -97,7 +97,7 @@ export default function HomePage() {
         <Demo
           to='/push'
           title='push'
-          body='Two roads into a bucket: one object per file, or chunk-and-pack. Why mkit packs, hashes, and signs instead of leaving blobs browsable.'
+          body='Store a file whole, or chunk and pack it. Why mkit packs, hashes, and signs every push instead of leaving blobs browsable.'
         />
       </ul>
     </div>

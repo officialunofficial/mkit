@@ -10,7 +10,7 @@ import { formatBytes, useMkit } from './use-mkit'
 // A demo "file": ~384 KB of varied bytes so FastCDC v1 cuts it into several
 // content-defined chunks (avg 64 KB). Deterministic so the view is stable
 // across renders; an edit XORs one sub-chunk region so the chunk covering it
-// changes — the whole point of Road B.
+// changes — the point of chunked storage.
 const FILE_SIZE = 384 * 1024
 const FILE_SEED = 0x6b697421
 
@@ -40,7 +40,7 @@ function editOneRegion(src: Uint8Array, tick: number): Uint8Array {
   return out
 }
 
-type RoadB = { root: string; bytesLen: number; chunks: StripChunk[] }
+type Chunked = { root: string; bytesLen: number; chunks: StripChunk[] }
 
 const BTN = 'rounded-md border border-hairline px-3 py-1.5 text-sm transition-opacity duration-300 hover:opacity-70'
 
@@ -51,11 +51,11 @@ export function PushDemo() {
   const [edits, setEdits] = useState(0)
   const edited = prevBytes !== null
 
-  // Road A: the file as one whole object — a single Blob id.
-  const roadA = useMemo(() => api.blob_encode(bytes).hash_hex, [api, bytes])
+  // Whole-file storage: the file as one object — a single Blob id.
+  const wholeId = useMemo(() => api.blob_encode(bytes).hash_hex, [api, bytes])
 
-  // Road B: chunk + fold into a ChunkedBlob, addressed by its BMT root.
-  const roadB = useMemo<RoadB>(() => {
+  // Chunked storage: split, then fold the chunks into a ChunkedBlob BMT root.
+  const chunked = useMemo<Chunked>(() => {
     const r = api.chunked_blob_encode(bytes)
     const chunks: StripChunk[] = Array.from({ length: r.chunk_count }, (_, i) => {
       const c = r.chunk(i)!
@@ -73,11 +73,11 @@ export function PushDemo() {
     return new Set(Array.from({ length: r.chunk_count }, (_, i) => r.chunk(i)!.hash_hex))
   }, [api, prevBytes])
 
-  // Which chunks changed since the previous push (by hash). Road B ships only
-  // these; Road A always re-ships the whole file.
-  const changedIdx = edited ? roadB.chunks.flatMap((c, i) => (prevHashes.has(c.hash_hex) ? [] : [i])) : []
-  const dimSet = edited ? new Set(roadB.chunks.flatMap((c, i) => (prevHashes.has(c.hash_hex) ? [i] : []))) : undefined
-  const changedBytes = changedIdx.reduce((a, i) => a + (roadB.chunks[i]?.len ?? 0), 0)
+  // Which chunks changed since the previous push (by hash). Chunked storage
+  // ships only these; whole-file storage always re-ships the entire file.
+  const changedIdx = edited ? chunked.chunks.flatMap((c, i) => (prevHashes.has(c.hash_hex) ? [] : [i])) : []
+  const dimSet = edited ? new Set(chunked.chunks.flatMap((c, i) => (prevHashes.has(c.hash_hex) ? [i] : []))) : undefined
+  const changedBytes = changedIdx.reduce((a, i) => a + (chunked.chunks[i]?.len ?? 0), 0)
 
   const onEdit = () => {
     setPrevBytes(bytes)
@@ -100,37 +100,40 @@ export function PushDemo() {
           Reset
         </button>
         <span className='text-sm text-muted'>
-          {formatBytes(bytes.length)} · {roadB.chunks.length} chunks{edits > 0 ? ` · edit #${edits}` : ''}
+          {formatBytes(bytes.length)} · {chunked.chunks.length} chunks{edits > 0 ? ` · edit #${edits}` : ''}
         </span>
       </div>
 
       <div className='grid gap-4 md:grid-cols-2'>
-        {/* Road A — one object, one file */}
+        {/* Whole-file storage */}
         <div className='space-y-3 rounded-md border border-hairline p-4'>
-          <div className='font-mono text-xs uppercase tracking-wide text-subtle'>Road A — one object, one file</div>
-          <div className='h-6 w-full rounded-sm border border-hairline' style={{ backgroundColor: hashColor(roadA) }} />
-          <IdLine label='file id' hash={roadA} />
+          <div className='font-mono text-xs uppercase tracking-wide text-subtle'>Store the whole file</div>
+          <div
+            className='h-6 w-full rounded-sm border border-hairline'
+            style={{ backgroundColor: hashColor(wholeId) }}
+          />
+          <IdLine label='file id' hash={wholeId} />
           <Wire label='pushed on this edit' detail='the whole file, re-hashed' bytes={bytes.length} />
         </div>
 
-        {/* Road B — chunk + pack */}
+        {/* Chunked storage */}
         <div className='space-y-3 rounded-md border border-hairline p-4' style={{ backgroundImage: PUSH_MESH }}>
-          <div className='font-mono text-xs uppercase tracking-wide text-subtle'>Road B — chunk + pack</div>
+          <div className='font-mono text-xs uppercase tracking-wide text-subtle'>Chunk and pack</div>
           <ChunkStrip
-            chunks={roadB.chunks}
-            totalLen={roadB.bytesLen}
+            chunks={chunked.chunks}
+            totalLen={chunked.bytesLen}
             ariaLabel='content-defined chunks'
             highlightIndex={changedIdx[0]}
             dimSet={dimSet}
           />
           <div className='text-center text-xs text-subtle'>↓ fold chunks into a Merkle root ↓</div>
-          <IdLine label='BMT root = ChunkedBlob id' hash={roadB.root} />
+          <IdLine label='BMT root = ChunkedBlob id' hash={chunked.root} />
           <Wire
             label='pushed on this edit'
             detail={
-              edited ? `${changedIdx.length} of ${roadB.chunks.length} chunks — a delta` : 'only the missing chunks'
+              edited ? `${changedIdx.length} of ${chunked.chunks.length} chunks — a delta` : 'only the missing chunks'
             }
-            bytes={edited ? changedBytes : roadB.bytesLen}
+            bytes={edited ? changedBytes : chunked.bytesLen}
           />
         </div>
       </div>
@@ -145,14 +148,14 @@ export function PushDemo() {
             <span aria-hidden className='text-subtle'>
               →
             </span>
-            <HashChip hash={roadB.root} />
-            <code>{roadB.root.slice(0, 12)}…</code>
+            <HashChip hash={chunked.root} />
+            <code>{chunked.root.slice(0, 12)}…</code>
             <span className='text-subtle'>advanced atomically — all of it, or none</span>
           </div>
         ) : (
           <div className='flex items-center gap-2 font-mono text-xs text-muted'>
-            <HashChip hash={roadB.root} />
-            head → {roadB.root.slice(0, 12)}…<span className='text-subtle'>· edit to settle a new root</span>
+            <HashChip hash={chunked.root} />
+            head → {chunked.root.slice(0, 12)}…<span className='text-subtle'>· edit to settle a new root</span>
           </div>
         )}
       </div>
@@ -171,7 +174,7 @@ function IdLine({ label, hash }: { label: string; hash: string }) {
   )
 }
 
-// Bytes-on-the-wire stat — the Road A vs B punchline.
+// Bytes-on-the-wire stat — the whole-file vs chunked punchline.
 function Wire({ label, detail, bytes }: { label: string; detail: string; bytes: number }) {
   return (
     <div className='flex items-baseline justify-between gap-3 border-t border-hairline pt-2'>
