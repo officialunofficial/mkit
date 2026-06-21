@@ -219,7 +219,7 @@ fn golden_import_vectors_match() {
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         std::fs::create_dir_all(&dir).unwrap();
         let mut manifest = String::from(
-            "# SPEC-GIT-IMPORT §9 vectors. <name> <git-sha1> <mkit-blake3>\n\
+            "# SPEC-GIT-IMPORT §9 vectors. <name> <git-sha1> <mkit-object-id>\n\
              # Fixed importer key seed [0x42;32]. Regenerate with:\n\
              # UPDATE_GOLDEN=1 cargo test -p mkit-git-bridge --test golden_import\n",
         );

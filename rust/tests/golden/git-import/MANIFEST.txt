@@ -1,4 +1,4 @@
-# SPEC-GIT-IMPORT §9 vectors. <name> <git-sha1> <mkit-blake3>
+# SPEC-GIT-IMPORT §9 vectors. <name> <git-sha1> <mkit-object-id>
 # Fixed importer key seed [0x42;32]. Regenerate with:
 # UPDATE_GOLDEN=1 cargo test -p mkit-git-bridge --test golden_import
 commit_plain c9fb6bcdf6839c34bdabc8c4a69b138f0572048a a7f4e0c24c850b3dc6a0562f66f01ed186c103db37a0004e8f6f1a4b7630c7f1
