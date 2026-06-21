@@ -26,3 +26,18 @@ export function labelColor(label: string): string {
 function hueColor(hue: number): string {
   return `hsl(${Math.round(hue)} 70% 60%)`
 }
+
+/**
+ * A hash-derived _mesh_ gradient: two hues pulled from different bytes of the hash, layered as soft radial blooms over
+ * a linear base. Shares `hashColor`'s avalanche property — a one-byte change reshuffles the whole mesh — but reads with
+ * more texture than a flat fill. Used for the file bar on /push.
+ */
+export function hashMesh(hex: string): string {
+  const h1 = Math.round(parseInt(hex.slice(0, 2), 16) * (360 / 256))
+  const h2 = Math.round(parseInt(hex.slice(2, 4), 16) * (360 / 256))
+  return [
+    `radial-gradient(at 18% 28%, hsl(${h1} 80% 64%), transparent 62%)`,
+    `radial-gradient(at 82% 72%, hsl(${h2} 80% 58%), transparent 62%)`,
+    `linear-gradient(110deg, hsl(${h1} 70% 60%), hsl(${h2} 70% 58%))`,
+  ].join(', ')
+}

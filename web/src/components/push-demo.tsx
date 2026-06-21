@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useMemo, useState } from 'react'
-import { hashColor } from '../lib/hash-color'
+import { hashMesh } from '../lib/hash-color'
 import { PUSH_MESH } from '../lib/mesh'
 import { ChunkStrip, type StripChunk } from './chunk-strip'
 import { HashChip } from './result-panel'
@@ -106,7 +106,7 @@ export function PushDemo() {
           <>
             <div
               className='h-8 w-full rounded-sm border border-hairline'
-              style={{ backgroundColor: hashColor(before.wholeId) }}
+              style={{ backgroundImage: hashMesh(before.wholeId) }}
             />
             <p className='max-w-prose text-sm text-muted'>
               A file you want to push — {formatBytes(base.length)}. Today mkit stores it as one object and names it by
