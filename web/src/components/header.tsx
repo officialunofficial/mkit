@@ -22,7 +22,27 @@ export const Header = () => {
           <Link to='/' className='-m-3 flex items-center p-3' aria-label='mkit home'>
             <GridLogo className='size-5 rounded-[3px]' />
           </Link>
+          {/* Order: the three primary pages (tree, performance, parity)
+              first, then the smaller single-primitive demos. */}
           <nav className='flex items-center gap-4 text-sm'>
+            <Link
+              to='/tree'
+              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
+            >
+              tree
+            </Link>
+            <Link
+              to='/performance'
+              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
+            >
+              performance
+            </Link>
+            <Link
+              to='/parity'
+              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
+            >
+              parity
+            </Link>
             <Link
               to='/hash'
               className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
@@ -36,34 +56,16 @@ export const Header = () => {
               sign
             </Link>
             <Link
-              to='/tree'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              tree
-            </Link>
-            <Link
               to='/streaming'
               className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
             >
               streaming
             </Link>
             <Link
-              to='/performance'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              performance
-            </Link>
-            <Link
               to='/attest'
               className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
             >
               attest
-            </Link>
-            <Link
-              to='/parity'
-              className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-            >
-              parity
             </Link>
           </nav>
           <div className='ml-auto'>
