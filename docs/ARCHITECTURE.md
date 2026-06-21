@@ -33,9 +33,12 @@ responsibility boundaries — there is no "common" or "utils" crate.
 | `mkit-sign-tpm` (contrib)      | `contrib/signers/mkit-sign-tpm/`      | TPM 2.0 P-256 signer (Linux/Windows)                                   |
 | `mkit-sign-ctap` (contrib)     | `contrib/signers/mkit-sign-ctap/`     | FIDO2/WebAuthn roaming-authenticator signer                            |
 
-The `contrib/signers/*` crates are workspace members so they share
-lint config and dependency pins, but they are not part of the
-`mkit` binary's link graph. They communicate over the protocol
+The `contrib/signers/*` crates form a separate sibling Cargo
+workspace under `contrib/signers/` — they are **not** members of the
+`rust/` workspace (out-of-tree members break release-plz publishing).
+They share package metadata, lint config, and dependency pins by
+inheriting from `contrib/signers/Cargo.toml`, and they are not part of
+the `mkit` binary's link graph. They communicate over the protocol
 defined in `SPEC-EXTERNAL-SIGNER.md`.
 
 ---

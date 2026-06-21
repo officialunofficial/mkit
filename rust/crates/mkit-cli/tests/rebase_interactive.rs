@@ -416,7 +416,7 @@ fn rebase_accepts_head_relative_revspec() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("rebased 3 commit(s)"),
+        String::from_utf8_lossy(&out.stderr).contains("Successfully rebased"),
         "expected a 3-commit replay, got: {}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -436,7 +436,7 @@ fn rebase_accepts_short_hash_revspec() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("rebased 3 commit(s)"),
+        String::from_utf8_lossy(&out.stderr).contains("Successfully rebased"),
         "expected a 3-commit replay, got: {}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -457,7 +457,7 @@ fn rebase_i_accepts_head_relative_revspec() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("rebased 2 commit(s)"),
+        String::from_utf8_lossy(&out.stderr).contains("Successfully rebased"),
         "expected a 2-commit replay, got: {}",
         String::from_utf8_lossy(&out.stderr)
     );

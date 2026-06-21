@@ -8,10 +8,8 @@
 //! disk, so absolute values are machine/filesystem dependent — the
 //! interesting signal is the per-object/batch ratio on one machine.
 
-use std::time::Instant;
-
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit};
+use mkit_benches::{Sample, Unit, time_one};
 use mkit_core::store::{ObjectStore, SyncPolicy};
 use mkit_core::worktree::store_file_object;
 
@@ -45,10 +43,12 @@ fn write_all(store: &ObjectStore, policy: SyncPolicy, payloads: &[Vec<u8>]) {
     batch.commit().unwrap();
 }
 
-fn time_one(mut f: impl FnMut()) -> f64 {
-    let start = Instant::now();
-    f();
-    start.elapsed().as_secs_f64() * 1000.0
+/// Wallclock milliseconds for a single un-warmed invocation of `f`.
+/// The store-write durability series wants the cost of one real
+/// flush-to-disk pass (warmup would let the page cache hide it), so we
+/// take exactly one timed iteration and convert seconds → ms.
+fn time_ms(f: impl FnMut()) -> f64 {
+    time_one(0, 1, f) * 1000.0
 }
 
 fn bench_store_write(c: &mut Criterion) {
@@ -74,7 +74,7 @@ fn bench_store_write(c: &mut Criterion) {
             });
             let dir = tempfile::tempdir().unwrap();
             let store = ObjectStore::init(dir.path()).unwrap();
-            let ms = time_one(|| write_all(&store, policy, &data));
+            let ms = time_ms(|| write_all(&store, policy, &data));
             samples.push(Sample {
                 category: "store_write".into(),
                 axis: axis.into(),
@@ -112,7 +112,7 @@ fn bench_store_write(c: &mut Criterion) {
         });
         let dir = tempfile::tempdir().unwrap();
         let store = ObjectStore::init(dir.path()).unwrap();
-        let ms = time_one(|| {
+        let ms = time_ms(|| {
             let batch = store.batch();
             store_file_object(&batch, &blob).unwrap();
             batch.commit().unwrap();

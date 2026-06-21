@@ -16,8 +16,6 @@
 //! it refuses to delete the currently checked-out branch (git's plumbing
 //! would, leaving HEAD dangling).
 
-use std::io::Write;
-
 use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::refs::{self, RefWriteCondition};
@@ -203,8 +201,4 @@ fn is_zero(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b == b'0')
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;

@@ -66,6 +66,19 @@ pub(crate) fn static_label(label: &'static str) -> KeyLabel {
     KeyLabel::new(label).expect("static label is valid")
 }
 
+/// Lowercase hex encoding shared by every backend (key handles, key IDs,
+/// on-disk file names). Keeping a single implementation avoids the encoding
+/// drifting between backends.
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 /// Validated label component for `<backend>:<label>` key references.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyRefLabel(String);

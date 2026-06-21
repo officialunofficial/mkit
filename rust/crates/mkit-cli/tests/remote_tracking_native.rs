@@ -43,7 +43,10 @@ fn merge_fast_forwards_from_tracking_ref() {
     // Short form `<remote>/<branch>` resolves and fast-forwards.
     let out = r.ok(&["merge", "up/main"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("fast-forward"), "stderr: {stderr}");
+    assert!(
+        stderr.to_lowercase().contains("fast-forward"),
+        "stderr: {stderr}"
+    );
     assert_eq!(
         refs::read_ref(&r.mkit_dir(), "main").unwrap().unwrap(),
         ahead
@@ -205,7 +208,9 @@ fn named_remote_fetch_and_pull_use_their_namespace() {
     consumer.ok(&["remote", "add", "origin", &url]);
     let out = consumer.ok(&["fetch", "origin"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("fetched"), "fetch: {stderr}");
+    // git-shaped: `From <url>` + a per-ref summary line for the new branch.
+    assert!(stderr.contains("From "), "fetch: {stderr}");
+    assert!(stderr.contains("origin/main"), "fetch summary: {stderr}");
     assert!(
         refs::read_remote_ref(&consumer.mkit_dir(), "origin", "main")
             .unwrap()

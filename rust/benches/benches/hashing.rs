@@ -11,7 +11,7 @@
 //! to re-implement criterion's dir layout discovery.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit};
+use mkit_benches::{Sample, Unit, time_one};
 
 const SIZES: &[(usize, &str)] = &[
     (1024, "1 KiB"),
@@ -53,7 +53,7 @@ fn bench_hashing(c: &mut Criterion) {
             library: "BLAKE3 (mkit)".into(),
             value: throughput_mib(
                 n,
-                time_one(|| {
+                time_one(50, 200, || {
                     let _ = mkit_core::hash::hash(&buf);
                 }),
             ),
@@ -71,7 +71,7 @@ fn bench_hashing(c: &mut Criterion) {
             library: "SHA-1 (git)".into(),
             value: throughput_mib(
                 n,
-                time_one(|| {
+                time_one(50, 200, || {
                     use sha1::{Digest, Sha1};
                     let _ = Sha1::digest(&buf);
                 }),
@@ -94,7 +94,7 @@ fn bench_hashing(c: &mut Criterion) {
             library: "SHA-256 (git-sha256)".into(),
             value: throughput_mib(
                 n,
-                time_one(|| {
+                time_one(50, 200, || {
                     use sha2::{Digest, Sha256};
                     let _ = Sha256::digest(&buf);
                 }),
@@ -113,7 +113,7 @@ fn bench_hashing(c: &mut Criterion) {
             library: "BLAKE2b".into(),
             value: throughput_mib(
                 n,
-                time_one(|| {
+                time_one(50, 200, || {
                     use blake2::{Blake2b512, Digest};
                     let _ = Blake2b512::digest(&buf);
                 }),
@@ -125,23 +125,6 @@ fn bench_hashing(c: &mut Criterion) {
     }
 
     mkit_benches::write_summary("hashing", &samples);
-}
-
-/// Time a single closure invocation in seconds. Used to populate the
-/// summary JSON the renderer reads — criterion writes its own
-/// per-iteration estimates, but those are buried in nested dirs and
-/// we want a flat shape.
-fn time_one<F: FnMut()>(mut f: F) -> f64 {
-    // Run a few warm iterations, then a fixed batch of measured ones.
-    for _ in 0..50 {
-        f();
-    }
-    let n: u32 = 200;
-    let t0 = std::time::Instant::now();
-    for _ in 0..n {
-        f();
-    }
-    t0.elapsed().as_secs_f64() / f64::from(n)
 }
 
 fn throughput_mib(bytes: usize, seconds_per_iter: f64) -> f64 {

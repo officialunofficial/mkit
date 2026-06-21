@@ -77,12 +77,12 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# The publish=false crates (mkit-cli, mkit-wasm, mkit-transport-enc,
-# benches, fuzz) depend on workspace siblings via bare `path = "..."`
-# without a version pin, which cargo-deny treats as a wildcard. The nine
-# crates published to crates.io carry `version + path` internal deps
-# (publishing requires it); the bare-path form is fine for the crates
-# that never leave the workspace. Whitelist it.
+# The publish=false crates (mkit-wasm, benches, fuzz — plus the
+# out-of-tree contrib signers) depend on workspace siblings via bare
+# `path = "..."` without a version pin, which cargo-deny treats as a
+# wildcard. The 12 crates published to crates.io carry `version + path`
+# internal deps (publishing requires it); the bare-path form is fine for
+# the crates that never leave the workspace. Whitelist it.
 allow-wildcard-paths = true
 
 [sources]

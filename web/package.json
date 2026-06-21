@@ -9,9 +9,9 @@
   ],
   "scripts": {
     "wasm:build": "rm -rf vendor/mkit-wasm/pkg && cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir ../../../web/vendor/mkit-wasm/pkg --release",
-    "skill:stage": "node scripts/copy-skill.mjs",
-    "dev": "bun run skill:stage && waku dev",
-    "build": "bun run skill:stage && bun run wasm:build && CLOUDFLARE=1 waku build && node scripts/assert-prerender.mjs && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",
+    "stage": "node scripts/stage-public.mjs SKILL.md install.sh",
+    "dev": "bun run stage && waku dev",
+    "build": "bun run stage && bun run wasm:build && CLOUDFLARE=1 waku build && node scripts/assert-prerender.mjs && node scripts/assert-installer.mjs && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",
     "start": "waku start",
     "deploy": "bun run build && wrangler deploy -c dist/server/wrangler.json",
     "preview": "bun run build && wrangler dev -c dist/server/wrangler.json",
@@ -27,7 +27,6 @@
     "workerd"
   ],
   "dependencies": {
-    "agentation": "^3.0.2",
     "hono": "^4.12.25",
     "mkit-wasm": "workspace:*",
     "react": "~19.2.7",
@@ -37,6 +36,7 @@
   },
   "devDependencies": {
     "@rolldown/plugin-babel": "^0.2.3",
+    "agentation": "^3.0.2",
     "@tailwindcss/vite": "4.3.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

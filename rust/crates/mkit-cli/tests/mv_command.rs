@@ -136,7 +136,10 @@ fn mv_directory_renames_tracked_subtree() {
     fs::write(root.join("dir/untracked.txt"), b"u\n").unwrap();
 
     let out = run_in(root, x, &["mv", "dir", "newdir"]);
-    assert!(out.status.success(), "directory rename must succeed: {out:?}");
+    assert!(
+        out.status.success(),
+        "directory rename must succeed: {out:?}"
+    );
 
     // The whole subtree moved, including the nested and untracked files.
     assert!(!root.join("dir").exists(), "source directory must be gone");
@@ -153,7 +156,10 @@ fn mv_directory_renames_tracked_subtree() {
     let s = String::from_utf8_lossy(&status.stdout);
     assert!(s.contains("D  dir/file.txt"), "missing delete: {s}");
     assert!(s.contains("A  newdir/file.txt"), "missing add: {s}");
-    assert!(s.contains("D  dir/sub/n.txt") && s.contains("A  newdir/sub/n.txt"), "{s}");
+    assert!(
+        s.contains("D  dir/sub/n.txt") && s.contains("A  newdir/sub/n.txt"),
+        "{s}"
+    );
 }
 
 #[test]
@@ -179,7 +185,10 @@ fn mv_directory_into_itself_is_refused() {
         String::from_utf8_lossy(&out.stderr).contains("into itself"),
         "expected an into-itself message: {out:?}"
     );
-    assert!(root.join("dir/file.txt").exists(), "nothing should have moved");
+    assert!(
+        root.join("dir/file.txt").exists(),
+        "nothing should have moved"
+    );
 }
 
 #[test]
@@ -204,7 +213,10 @@ fn mv_directory_refuses_existing_destination_even_with_force() {
     // Nothing was destroyed: both the source and the pre-existing destination
     // (tracked AND untracked) are intact.
     assert!(root.join("src/a.txt").exists(), "source must be intact");
-    assert!(root.join("dst/src/old.txt").exists(), "dst tracked file intact");
+    assert!(
+        root.join("dst/src/old.txt").exists(),
+        "dst tracked file intact"
+    );
     assert!(
         root.join("dst/src/untracked.txt").exists(),
         "dst untracked file must not be destroyed"
@@ -325,7 +337,10 @@ fn mv_refuses_ancestor_destination_collision() {
     let (root, x) = (td.path(), xdg.path());
     fs::create_dir_all(root.join("dst")).unwrap();
     let out = run_in(root, x, &["mv", "a/x", "b/x", "dst"]);
-    assert!(!out.status.success(), "must refuse colliding targets: {out:?}");
+    assert!(
+        !out.status.success(),
+        "must refuse colliding targets: {out:?}"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("conflicting destinations"),
         "expected a conflicting-destinations message: {out:?}"
@@ -360,7 +375,10 @@ fn mv_refuses_symlinked_directory_source() {
     fs::remove_dir_all(root.join("dir")).unwrap();
     std::os::unix::fs::symlink(external.path(), root.join("dir")).unwrap();
     let out = run_in(root, x, &["mv", "dir", "newdir"]);
-    assert!(!out.status.success(), "symlink dir source must be refused: {out:?}");
+    assert!(
+        !out.status.success(),
+        "symlink dir source must be refused: {out:?}"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("not a directory"),
         "expected a not-a-directory message: {out:?}"
@@ -382,7 +400,10 @@ fn mv_refuses_source_through_a_symlinked_ancestor() {
     std::os::unix::fs::symlink(external.path(), root.join("link")).unwrap();
 
     let out = run_in(root, x, &["mv", "link/dir", "newdir"]);
-    assert!(!out.status.success(), "must refuse a symlinked-ancestor source: {out:?}");
+    assert!(
+        !out.status.success(),
+        "must refuse a symlinked-ancestor source: {out:?}"
+    );
     assert!(
         external.path().join("file.txt").exists(),
         "external content must be untouched"
@@ -414,7 +435,10 @@ fn mv_case_only_rename_preserves_the_file() {
     let (td, xdg) = repo(&[("Foo", b"data\n")]);
     let (root, x) = (td.path(), xdg.path());
     let out = run_in(root, x, &["mv", "-f", "Foo", "foo"]);
-    assert!(out.status.success(), "case-only rename should succeed: {out:?}");
+    assert!(
+        out.status.success(),
+        "case-only rename should succeed: {out:?}"
+    );
     assert_eq!(
         fs::read(root.join("foo")).unwrap(),
         b"data\n",
@@ -504,7 +528,10 @@ fn mv_dir_refuses_child_through_a_symlinked_ancestor() {
         String::from_utf8_lossy(&out.stderr).contains("traverses a symlink"),
         "expected a symlink-traversal message: {out:?}"
     );
-    assert!(external.path().join("file").exists(), "external content untouched");
+    assert!(
+        external.path().join("file").exists(),
+        "external content untouched"
+    );
 }
 
 #[cfg(unix)]
@@ -517,12 +544,19 @@ fn mv_refuses_symlink_destination_pointing_at_source() {
     let (root, x) = (td.path(), xdg.path());
     std::os::unix::fs::symlink("a", root.join("b")).unwrap();
     let out = run_in(root, x, &["mv", "a", "b"]);
-    assert!(!out.status.success(), "must refuse a symlink destination: {out:?}");
+    assert!(
+        !out.status.success(),
+        "must refuse a symlink destination: {out:?}"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("destination exists"),
         "expected a destination-exists message: {out:?}"
     );
-    assert_eq!(fs::read(root.join("a")).unwrap(), b"data\n", "source untouched");
+    assert_eq!(
+        fs::read(root.join("a")).unwrap(),
+        b"data\n",
+        "source untouched"
+    );
 }
 
 #[cfg(unix)]
@@ -541,7 +575,10 @@ fn mv_refuses_destination_through_in_repo_symlinked_parent() {
         String::from_utf8_lossy(&out.stderr).contains("traverses a symlink"),
         "expected a symlink-traversal message: {out:?}"
     );
-    assert!(!root.join("real/src").exists(), "nothing written through the symlink");
+    assert!(
+        !root.join("real/src").exists(),
+        "nothing written through the symlink"
+    );
 }
 
 #[test]
@@ -581,5 +618,8 @@ fn mv_dir_refuses_destination_through_in_repo_symlinked_parent() {
         String::from_utf8_lossy(&out.stderr).contains("traverses a symlink"),
         "expected a symlink-traversal message: {out:?}"
     );
-    assert!(!root.join("real/dir").exists(), "nothing written through the symlink");
+    assert!(
+        !root.join("real/dir").exists(),
+        "nothing written through the symlink"
+    );
 }

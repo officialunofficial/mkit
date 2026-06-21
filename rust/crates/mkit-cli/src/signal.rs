@@ -76,12 +76,6 @@ pub fn is_shutdown() -> bool {
     SHUTDOWN.get().is_some_and(|f| f.load(Ordering::Relaxed))
 }
 
-/// Alias kept for historical callers. Prefer [`is_shutdown`].
-#[must_use]
-pub fn interrupted() -> bool {
-    is_shutdown()
-}
-
 /// Test hook — flips the shutdown flag so unit tests can verify that
 /// long-running callers do honour it once it flips.
 #[doc(hidden)]
@@ -96,9 +90,9 @@ mod tests {
     #[test]
     fn flag_round_trips() {
         set_interrupted_for_tests(true);
-        assert!(interrupted());
+        assert!(is_shutdown());
         set_interrupted_for_tests(false);
-        assert!(!interrupted());
+        assert!(!is_shutdown());
     }
 
     /// `install()` must not pre-flip the flag — long-running callers
@@ -108,7 +102,6 @@ mod tests {
         set_interrupted_for_tests(false);
         install();
         assert!(!is_shutdown());
-        assert!(!interrupted(), "alias must agree with is_shutdown");
     }
 
     /// Double-install must not panic. Tests share a process, so any

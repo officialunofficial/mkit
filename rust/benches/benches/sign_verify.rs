@@ -7,7 +7,7 @@
 //! DSSE PAE wrapping an in-toto v1 statement; see SPEC-ATTESTATIONS).
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit};
+use mkit_benches::{Sample, Unit, time_one};
 
 const PAYLOAD_SIZE: usize = 200;
 
@@ -41,7 +41,7 @@ fn bench_sign_verify(c: &mut Criterion) {
             b.iter(|| vk.verify(&payload, &sig).unwrap());
         });
 
-        let s = time_one(|| {
+        let s = time_one(50, 500, || {
             let _ = sk.sign(&payload);
         });
         samples.push(Sample {
@@ -51,7 +51,7 @@ fn bench_sign_verify(c: &mut Criterion) {
             value: 1.0 / s,
             unit: Unit::OpsPerSec,
         });
-        let v = time_one(|| {
+        let v = time_one(50, 500, || {
             let _ = vk.verify(&payload, &sig);
         });
         samples.push(Sample {
@@ -81,7 +81,7 @@ fn bench_sign_verify(c: &mut Criterion) {
             b.iter(|| vk.verify(&payload, &sig).unwrap());
         });
 
-        let s = time_one(|| {
+        let s = time_one(50, 500, || {
             let _: Signature = sk.sign(&payload);
         });
         samples.push(Sample {
@@ -91,7 +91,7 @@ fn bench_sign_verify(c: &mut Criterion) {
             value: 1.0 / s,
             unit: Unit::OpsPerSec,
         });
-        let v = time_one(|| {
+        let v = time_one(50, 500, || {
             let _ = vk.verify(&payload, &sig);
         });
         samples.push(Sample {
@@ -121,7 +121,7 @@ fn bench_sign_verify(c: &mut Criterion) {
             b.iter(|| vk.verify(&payload, &sig).unwrap());
         });
 
-        let s = time_one(|| {
+        let s = time_one(50, 500, || {
             let _: Signature = sk.sign(&payload);
         });
         samples.push(Sample {
@@ -131,7 +131,7 @@ fn bench_sign_verify(c: &mut Criterion) {
             value: 1.0 / s,
             unit: Unit::OpsPerSec,
         });
-        let v = time_one(|| {
+        let v = time_one(50, 500, || {
             let _ = vk.verify(&payload, &sig);
         });
         samples.push(Sample {
@@ -144,18 +144,6 @@ fn bench_sign_verify(c: &mut Criterion) {
     }
 
     mkit_benches::write_summary("sign_verify", &samples);
-}
-
-fn time_one<F: FnMut()>(mut f: F) -> f64 {
-    for _ in 0..50 {
-        f();
-    }
-    let n: u32 = 500;
-    let t0 = std::time::Instant::now();
-    for _ in 0..n {
-        f();
-    }
-    t0.elapsed().as_secs_f64() / f64::from(n)
 }
 
 criterion_group!(benches, bench_sign_verify);

@@ -52,8 +52,11 @@ config-file I/O, so there is exactly one place to fence.
 ## 2. Per-key audit
 
 The table below covers every key that `apply_kv` in
-`mkit-cli/src/config.rs` recognises (in source order), plus the
-`_url`-suffixed forward-compat slot.
+`rust/crates/mkit-cli/src/config.rs` recognises — the flat keys (in
+source order), the dotted-section families (`remote.<name>.*`,
+`branch.<name>.*`, allow-listed `core.<key>`) handled via
+`apply_section_kv` / `core_allowed_suffix`, and the `_url`-suffixed
+forward-compat slot.
 
 | Key                                  | Scope      | Why this classification                                                                                                                                                              |
 |--------------------------------------|------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -69,6 +72,7 @@ The table below covers every key that `apply_kv` in
 | `key.p256_ref`                       | **UNSAFE** | Selects the P-256 signing key reference.                                                                                                                                            |
 | `signing_key`                        | **UNSAFE** | Legacy raw-file key path. If repo-controlled, doubles as an arbitrary-file overwrite primitive when paired with auto-keygen (auto-keygen has since been removed; the path is still UNSAFE for the read direction). |
 | `default_branch`                     | SAFE       | UX default. No security weight — the victim still verifies signed history regardless of which ref the repo nominates as default.                                                    |
+| `durability.objects`                 | SAFE       | Object-store durability/fsync mode. A pure local-performance/safety tunable with no credential-routing, signing-selection, or process-spawning behaviour; round-tripped and serialised in repo config.                |
 | `remote_endpoint`                    | **SAFE** with runtime gate | A pure address. Repo-scoped endpoints are accepted, but `enforce_trusted_remote_endpoint` refuses to send ambient `MKIT_API_TOKEN` / `MKIT_R2_*` credentials unless the user has explicitly listed the same endpoint under `trusted_remote_endpoint`. |
 | `remote_bucket`                      | SAFE       | Inert bucket-name slot. Not currently consumed by any transport; round-tripped only.                                                                                                |
 | `remote_type`                        | SAFE       | Dispatch hint (`file` / `http` / `s3` / `ssh`). The exfil channel is the endpoint URL, not the dispatch label.                                                                       |
@@ -79,8 +83,14 @@ The table below covers every key that `apply_kv` in
 | `attest.signer`                      | **UNSAFE** | Selector. Flipping from `repo-key` to `external` or `keystore` weaponises a user-scoped binary / keystore against attacker-chosen content.                                          |
 | `attest.external_signer_path`        | **UNSAFE** | Arbitrary executable path → RCE under the user's UID.                                                                                                                              |
 | `attest.external_signer_args`        | **UNSAFE** | Argv for the spawned signer. Combined with the path, gives the attacker full control of the subprocess.                                                                            |
+| `attest.external_signer_timeout_secs`| **UNSAFE** | Timeout for the spawned external signer. Listed in `REPO_FORBIDDEN_KEYS` alongside the other `attest.external_signer_*` keys: a repo-controlled value could keep a hostile signer subprocess alive (or starve a benign one) and only makes sense under the same trust scope as the path/argv it governs. |
 | `attest.secp256k1_key_path`          | **UNSAFE** | Legacy raw-file path for a secp256k1 signing key.                                                                                                                                   |
 | `attest.p256_key_path`               | **UNSAFE** | Legacy raw-file path for a P-256 signing key.                                                                                                                                       |
+| `remote.<name>.url`                  | **SAFE** with runtime gate | Named-remote address. Same classification as `remote_endpoint`: each endpoint still flows through `enforce_trusted_remote_endpoint`, so a repo-controlled named remote cannot smuggle ambient `MKIT_API_TOKEN` / `MKIT_R2_*` credentials.       |
+| `remote.<name>.type`                 | SAFE       | Dispatch hint for a named remote (`file` / `http` / `s3` / `ssh`); same reasoning as `remote_type`.                                                                                  |
+| `branch.<name>.remote`               | SAFE       | Per-branch upstream remote name. A UX/tracking pointer with no credential-routing or signing weight; the named remote it points at is still gated per-endpoint.                       |
+| `branch.<name>.merge`                | SAFE       | Per-branch upstream ref. Inert tracking metadata; the victim still verifies signed history regardless of the recorded upstream.                                                      |
+| `core.<key>` (allow-listed)          | SAFE       | Inert git-compatibility keys. Only the allow-listed `core.*` suffixes are stored on read (dangerous ones are dropped like any unknown key); mkit never acts on them.                  |
 | Legacy: `author_mid`, `project_id`, `network` | SAFE | Silently dropped on read; retained for forward/back compatibility with old hand-edited files. None have a code path that consumes them.                                              |
 | Forward-compat: `*_url`              | SAFE       | Reserved slot; no current consumer. If a future key in this namespace gains credential-routing or process-spawning behaviour, it MUST be promoted to UNSAFE in the same patch that introduces the consumer. |
 
@@ -133,10 +143,16 @@ In `mkit-cli::config::write`, only an explicit allow-list of
 repo-safe keys is emitted:
 
 ```text
+user.name
+user.email
 default_branch
+durability.objects
 remote_endpoint
 remote_bucket
 remote_type
+remote.<name>.url / remote.<name>.type   (per named remote)
+branch.<name>.remote / branch.<name>.merge   (per-branch upstream tracking)
+core.<key>                               (allow-listed git-compat keys)
 ```
 
 Any other field on the in-memory `Config` is suppressed when

@@ -1059,7 +1059,4 @@ fn recorded_import_source(mkit_dir: &Path, identity: &str) -> Option<String> {
     None
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    eprintln!("error: {msg}");
-    code
-}
+use super::error as emit_err;

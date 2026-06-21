@@ -22,7 +22,10 @@
 //! - `--format=json` — JSONL, one self-contained JSON object per
 //!   commit. Suitable for piping into `jq`.
 //!
-//! `--graph` is silently accepted as a no-op pending Phase 10.
+//! `--graph` is accepted for git compatibility but is a no-op: it is a
+//! documented v1 non-goal (see `docs/CLI.md`). Full graph parity is not
+//! achievable given mkit's content-addressed model; a limited
+//! `--oneline --graph` renderer remains a possible post-v1 follow-up.
 //!
 //! Argument parsing is delegated to clap-derive via
 //! [`crate::clap_shim::parse`]; clap emits standard diagnostics on
@@ -89,8 +92,8 @@ struct LogOpts {
     #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "7")]
     abbrev: Option<usize>,
 
-    /// Render an ASCII graph. Accepted for compatibility; Phase-10
-    /// follow-up.
+    /// Render an ASCII graph. Accepted for git compatibility but a
+    /// no-op (documented v1 non-goal).
     #[arg(long)]
     graph: bool,
 
@@ -296,8 +299,9 @@ const MAX_TAG_DEPTH: usize = 16;
 
 /// Follow `Object::Tag` targets to the first non-tag object, so an
 /// annotated/signed tag resolves to the commit it points at. A non-tag (or
-/// unreadable) object stops the peel and is returned as-is.
-fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
+/// unreadable) object stops the peel and is returned as-is. Shared with
+/// `rev-list` / `merge-base`.
+pub(super) fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
     for _ in 0..MAX_TAG_DEPTH {
         match store.read_object(&h) {
             Ok(Object::Tag(t)) => h = t.target,
@@ -342,7 +346,9 @@ const MAX_LOG_COMMITS: usize = 1_000_000;
 /// an in-degree + max-heap revwalk so equal-timestamp linear history keeps its
 /// natural child→parent order. Matches git's *default* order for linear and
 /// monotonic-timestamp history.
-fn ordered_commits(
+/// Topologically-ordered (reverse-chronological) commit walk from `tips`,
+/// excluding `excluded` and their ancestors. Shared with `rev-list`.
+pub(super) fn ordered_commits(
     store: &ObjectStore,
     tips: &[Hash],
     excluded: &HashSet<Hash>,
@@ -509,11 +515,7 @@ fn emit_json_entry(
     let _ = out.write_all(b"}\n");
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {

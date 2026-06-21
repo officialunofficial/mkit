@@ -184,7 +184,6 @@ pub fn read_state(mkit_dir: &Path) -> BisectResult<BisectState> {
 /// # Errors
 /// - [`BisectError::Io`] for filesystem failures.
 pub fn write_state(mkit_dir: &Path, state: &BisectState) -> BisectResult<()> {
-    fs::create_dir_all(mkit_dir)?;
     let mut buf = String::new();
     buf.push_str(&hash::to_hex(&state.orig_head));
     buf.push('\n');
@@ -205,7 +204,11 @@ pub fn write_state(mkit_dir: &Path, state: &BisectState) -> BisectResult<()> {
         buf.push_str(&hash::to_hex(s));
         buf.push('\n');
     }
-    fs::write(mkit_dir.join(BISECT_FILE), buf.as_bytes())?;
+    // Atomic + durable write (write-to-temp, fsync, rename, fsync parent
+    // dir) so a crash mid-write cannot leave a truncated bisect state file
+    // that `read_state` would reject as InvalidBisectState. Matches the
+    // rest of the ops state writers (stash/recovery/restore).
+    crate::atomic::write_atomic(&mkit_dir.join(BISECT_FILE), buf.as_bytes(), true)?;
     Ok(())
 }
 
@@ -487,6 +490,45 @@ mod tests {
         assert_eq!(read.skipped.len(), 2);
         assert!(read.skipped.contains(&s1));
         assert!(read.skipped.contains(&s2));
+    }
+
+    #[test]
+    fn write_state_creates_missing_dir_and_overwrites_atomically() {
+        // Regression: write_state now uses the durable atomic helper
+        // (write-to-temp + rename) instead of a bare fs::write. Verify it
+        // (a) creates the parent dir when absent, (b) cleanly overwrites an
+        // existing state file, and (c) leaves no `.bisect.tmp.*` sibling
+        // behind after the rename.
+        let tmp = TempDir::new().unwrap();
+        let mkit = tmp.path().join(".mkit");
+        // Note: directory intentionally NOT pre-created.
+        let first = BisectState {
+            orig_head: hash::hash(b"head"),
+            orig_branch: Some("main".to_string()),
+            bad_hash: Some(hash::hash(b"bad")),
+            good_hashes: vec![hash::hash(b"g1")],
+            skipped: BTreeSet::new(),
+        };
+        write_state(&mkit, &first).unwrap();
+        assert_eq!(read_state(&mkit).unwrap(), first);
+
+        let second = BisectState {
+            orig_head: hash::hash(b"head2"),
+            orig_branch: None,
+            bad_hash: None,
+            good_hashes: Vec::new(),
+            skipped: BTreeSet::new(),
+        };
+        write_state(&mkit, &second).unwrap();
+        assert_eq!(read_state(&mkit).unwrap(), second);
+
+        // No temp artefact left in the directory: only the bisect file.
+        let stray: Vec<_> = fs::read_dir(&mkit)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != BISECT_FILE)
+            .collect();
+        assert!(stray.is_empty(), "stray temp files left behind: {stray:?}");
     }
 
     #[test]

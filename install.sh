@@ -7,8 +7,11 @@
 # atomically into $MKIT_INSTALL_DIR (default: ~/.local/bin).
 #
 # Usage:
-#   curl -sSfL https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh | sh
-#   curl -sSfL https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh | sh -s -- --version v0.3.0
+#   curl mkit.sh | sh
+#   curl -sSfL https://mkit.sh/install.sh | sh
+#   curl -sSfL https://mkit.sh/install.sh | sh -s -- --version v0.3.0
+#   # The raw GitHub URL serves the same script as a fallback:
+#   #   curl -sSfL https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh | sh
 #
 # Trust model:
 #   * cosign keyless verification is REQUIRED by default. The script
@@ -72,7 +75,8 @@ print_help() {
 mkit installer
 
 Usage:
-  curl -sSfL https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh | sh
+  curl mkit.sh | sh
+  curl -sSfL https://mkit.sh/install.sh | sh
   sh install.sh [--version <tag>] [--prefix <dir>] [--insecure-skip-cosign]
 
 Flags:
@@ -107,8 +111,8 @@ skip_cosign="${MKIT_SKIP_COSIGN:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --version)               version="$2"; shift 2 ;;
-    --prefix)                install_dir="$2"; shift 2 ;;
+    --version)               [ $# -ge 2 ] || die "--version requires a tag (e.g. --version v0.3.0)"; version="$2"; shift 2 ;;
+    --prefix)                [ $# -ge 2 ] || die "--prefix requires a directory (e.g. --prefix /usr/local/bin)"; install_dir="$2"; shift 2 ;;
     --insecure-skip-cosign)  skip_cosign="1"; shift ;;
     --cosign)                shift ;;  # deprecated; cosign is default-on
     --help|-h)               print_help; exit 0 ;;

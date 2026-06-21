@@ -30,11 +30,12 @@ use mkit_core::hash::Hash;
 use mkit_core::object::{Commit, Object};
 use mkit_core::ops::conflict_state::{self, MergeState, in_progress_op_name, is_merge_in_progress};
 use mkit_core::ops::merge::{find_merge_base, merge_trees};
-use mkit_core::refs::{self, Head};
+use mkit_core::refs;
 use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 
+use super::{advance_head, error as emit_err, load_tree_hash};
 use crate::clap_shim;
 use crate::config;
 use crate::exit;
@@ -127,13 +128,13 @@ fn start(
     // commit. Branch names keep their historical precedence because
     // resolve_revision checks refs/heads first.
     let theirs = match super::revspec::resolve_revision(store, mkit_dir, branch) {
-        Ok(h) => peel_tags(store, h),
+        Ok(h) => super::log::peel_tags(store, h),
         Err(e) => return emit_err(&format!("merge target: {e}"), exit::GENERAL_ERROR),
     };
 
     if ours == theirs {
         let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "already up to date");
+        let _ = writeln!(stderr, "Already up to date.");
         return exit::OK;
     }
 
@@ -159,8 +160,18 @@ fn start(
         if let Err(e) = advance_head(mkit_dir, &theirs) {
             return emit_err(&e, exit::CANTCREAT);
         }
+        // git-shaped fast-forward report: `Updating <old>..<new>` +
+        // `Fast-forward` + the diffstat.
         let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "fast-forward {}", format::short_hash(&theirs, 8));
+        let _ = writeln!(
+            stderr,
+            "Updating {}..{}",
+            format::short_hash(&ours, format::SUMMARY_ABBREV),
+            format::short_hash(&theirs, format::SUMMARY_ABBREV),
+        );
+        let _ = writeln!(stderr, "Fast-forward");
+        drop(stderr);
+        print_merge_stat(store, ours, theirs);
         return exit::OK;
     }
 
@@ -224,9 +235,18 @@ fn start(
             return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
+        // git-shaped conflict lines, additive — followed by mkit's own
+        // resumable-flow hint.
+        for rec in &records {
+            let _ = writeln!(stderr, "CONFLICT (content): Merge conflict in {}", rec.path);
+        }
         let _ = writeln!(
             stderr,
-            "merge conflict; resolve the files above, `mkit add` them, then run \
+            "Automatic merge failed; fix conflicts and then commit the result."
+        );
+        let _ = writeln!(
+            stderr,
+            "hint: resolve the files above, `mkit add` them, then run \
              `mkit merge --continue` (or `mkit merge --abort`)"
         );
         return exit::GENERAL_ERROR;
@@ -250,7 +270,8 @@ fn start(
         // index reads as empty and `merge --continue`/`merge --abort` (which
         // seed an empty index from HEAD) would build/judge against the OLD
         // tree, dropping the deletions.
-        if let Err(e) = super::stage_removed_tombstones(cwd, store, Some(ours_tree), result.tree_hash)
+        if let Err(e) =
+            super::stage_removed_tombstones(cwd, store, Some(ours_tree), result.tree_hash)
         {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
@@ -288,14 +309,30 @@ fn start(
     if let Err(e) = advance_head(mkit_dir, &commit_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "merge {} into HEAD ({})",
-        format::short_hash(&theirs, 8),
-        format::short_hash(&commit_hash, 8)
-    );
+    // git-shaped true-merge report: `Merge made by the 'ort' strategy.` +
+    // the diffstat (ours → merged tree).
+    {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "Merge made by the 'ort' strategy.");
+    }
+    print_merge_stat_trees(store, Some(ours_tree), Some(result.tree_hash));
     exit::OK
+}
+
+/// Best-effort `Fast-forward` / merge diffstat between two commits' trees,
+/// reusing `diff`'s renderer. Failures are silent (the headline already
+/// printed).
+fn print_merge_stat(store: &ObjectStore, old: Hash, new: Hash) {
+    let old_tree = load_tree_hash(store, old).ok();
+    let new_tree = load_tree_hash(store, new).ok();
+    print_merge_stat_trees(store, old_tree, new_tree);
+}
+
+fn print_merge_stat_trees(store: &ObjectStore, old_tree: Option<Hash>, new_tree: Option<Hash>) {
+    if let Ok(result) = mkit_core::ops::diff_trees(store, old_tree, new_tree) {
+        let mut stderr = std::io::stderr().lock();
+        let _ = super::diff::render_stat(&mut stderr, store, result.entries.iter());
+    }
 }
 
 fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
@@ -416,7 +453,8 @@ fn restore_to(
     // Pre-flight: refuse *before* any mutation when restoring would clobber
     // genuine user work on a non-discardable path (the reset below discards
     // the operation material).
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result) {
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result)
+    {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     // Discard the operation material on the discardable paths so the guarded
@@ -433,25 +471,7 @@ fn restore_to(
     if let Err(e) = super::restore_worktree_and_index(cwd, store, target_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    let head = refs::read_head(mkit_dir).unwrap_or(Head::Branch("main".to_string()));
-    match head {
-        Head::Branch(name) => {
-            if let Err(e) = super::write_ref_recording_history(
-                mkit_dir,
-                &name,
-                refs::RefWriteCondition::Any,
-                &target,
-            ) {
-                return Err(emit_err(&format!("restore ref: {e}"), exit::CANTCREAT));
-            }
-        }
-        Head::Detached(_) => {
-            if let Err(e) = refs::write_head_detached(mkit_dir, &target) {
-                return Err(emit_err(&format!("restore HEAD: {e}"), exit::CANTCREAT));
-            }
-        }
-    }
-    Ok(())
+    super::restore_head_ref(mkit_dir, &target)
 }
 
 fn create_merge_commit(
@@ -494,39 +514,6 @@ fn create_merge_commit(
         .map_err(|e| emit_err(&format!("store commit: {e}"), exit::CANTCREAT))
 }
 
-fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, u8> {
-    match store.read_object(&commit_hash) {
-        Ok(Object::Commit(c)) => Ok(c.tree_hash),
-        Ok(_) => Err(emit_err("object is not a commit", exit::DATAERR)),
-        Err(e) => Err(emit_err(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
-    }
-}
-
-fn advance_head(mkit_dir: &std::path::Path, new_head: &Hash) -> Result<(), String> {
-    let head = refs::read_head(mkit_dir).unwrap_or(Head::Branch("main".to_string()));
-    match head {
-        Head::Branch(name) => super::write_ref_recording_history(
-            mkit_dir,
-            &name,
-            refs::RefWriteCondition::Any,
-            new_head,
-        )
-        .map_err(|e| format!("write ref: {e}")),
-        Head::Detached(_) => {
-            refs::write_head_detached(mkit_dir, new_head).map_err(|e| format!("update HEAD: {e}"))
-        }
-    }
-}
-
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
-
-/// Bounded annotated-tag peel (mirrors `log.rs`/`diff.rs`).
-const MAX_TAG_DEPTH: usize = 16;
-
 /// Whether `spec` names a remote-tracking ref under revspec
 /// precedence (local branches and tags win over `<remote>/<branch>`).
 fn merge_source_is_remote_tracking(mkit_dir: &Path, spec: &str) -> bool {
@@ -540,14 +527,4 @@ fn merge_source_is_remote_tracking(mkit_dir: &Path, spec: &str) -> bool {
         return false; // a local ref of the same spelling shadows it
     }
     refs::read_remote_ref(mkit_dir, remote, branch).is_ok_and(|r| r.is_some())
-}
-
-fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
-    for _ in 0..MAX_TAG_DEPTH {
-        match store.read_object(&h) {
-            Ok(Object::Tag(t)) => h = t.target,
-            _ => break,
-        }
-    }
-    h
 }

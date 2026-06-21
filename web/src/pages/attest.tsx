@@ -1,11 +1,17 @@
 import { Link } from 'waku'
 import { AttestDemo } from '../components/attest-demo'
 import { DemoBoundary } from '../components/demo-boundary'
+import { Seo } from '../components/seo'
 
 export default function AttestPage() {
   return (
     <div className='space-y-8'>
-      <title>mkit — attest</title>
+      <Seo
+        title='mkit — attest'
+        description='Any claim about a commit — reviewed, tested, deployed — travels as an in-toto Statement in a signed DSSE envelope that anyone can verify.'
+        path='/attest'
+        card='Statements, signed'
+      />
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Statements, signed</h1>
         <p className='max-w-prose text-base text-fg'>

@@ -114,7 +114,7 @@ FreeBSD. Spell "macOS" with a lowercase "m" and capital "OS".
 ### Referencing transports
 
 mkit ships several transport schemes — `mkit+file://`, `mkit+https://`,
-`mkit+s3://`, `mkit+ssh://`. Reference them by their full scheme,
+`mkit+s3://`, `mkit+ssh://`, `mkit+enc://`. Reference them by their full scheme,
 formatted as inline code, the first time they appear on a page. After
 that, "the SSH transport" or "the S3 transport" is acceptable.
 
@@ -130,8 +130,9 @@ consistently and link to the relevant SPEC document on first use.
 
 mkit uses BLAKE3 as its content-address primitive. Refer to a full
 hash as a **digest** or **object ID**, and to a shortened form as a
-**short hash**. When showing examples, use `b3:` as the canonical
-prefix and a realistic-looking digest, not `xxxxxxxx`.
+**short hash**. Object IDs are bare 64-character lowercase hex with no
+prefix — when showing examples, use a realistic-looking 64-hex digest,
+not `xxxxxxxx`.
 
 ### Abbreviations
 
@@ -429,8 +430,8 @@ relevant `SPEC-*.md` page) on first use.
   Subtypes are **blob**, **tree**, and **commit** (see
   [SPEC-OBJECTS](SPEC-OBJECTS.md)).
 - **Digest** / **object ID** — the BLAKE3 hash that names an
-  object. Always 32 bytes; rendered as `b3:` plus the lowercase hex
-  encoding.
+  object. Always 32 bytes; rendered as bare 64-character lowercase
+  hex with no prefix.
 - **Pack** — a single-file container holding many objects, used
   for transport and on-disk storage (see
   [SPEC-PACKFILE](SPEC-PACKFILE.md)).
@@ -443,7 +444,8 @@ relevant `SPEC-*.md` page) on first use.
   index and HEAD describe.
 - **Transport** — the protocol that moves packs between
   repositories. mkit transports are `mkit+file`, `mkit+https`,
-  `mkit+s3`, and `mkit+ssh` (see [SPEC-TRANSPORT](SPEC-TRANSPORT.md)).
+  `mkit+s3`, `mkit+ssh`, and `mkit+enc` (see
+  [SPEC-TRANSPORT](SPEC-TRANSPORT.md)).
 - **Signer** — a component that produces a signature over a payload
   using a private key. Built-in signers live in `mkit-attest`;
   external signers (TPM, secure element, CTAP, file) live under

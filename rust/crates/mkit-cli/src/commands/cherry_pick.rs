@@ -27,6 +27,7 @@ use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 
+use super::{advance_head, error as emit_err, load_tree_hash};
 use crate::clap_shim;
 use crate::config;
 use crate::exit;
@@ -102,7 +103,11 @@ fn start(
         );
     }
     let target: Hash = match super::revspec::resolve_revision(store, mkit_dir, hex) {
-        Ok(h) => h,
+        // Peel annotated/signed tags to their target commit so
+        // `mkit cherry-pick <annotated-tag>` works like git (a tag is a
+        // ref, which the doc comment advertises as acceptable). Mirrors
+        // `merge`'s behavior.
+        Ok(h) => super::log::peel_tags(store, h),
         Err(e) => return emit_err(&format!("bad commit: {e}"), exit::DATAERR),
     };
 
@@ -174,9 +179,14 @@ fn start(
             return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
+        // git-shaped per-path conflict lines (additive), then mkit's
+        // resumable-flow hint.
+        for rec in &records {
+            let _ = writeln!(stderr, "CONFLICT (content): Merge conflict in {}", rec.path);
+        }
         let _ = writeln!(
             stderr,
-            "cherry-pick conflict; resolve the files above, `mkit add` them, then run \
+            "hint: resolve the files above, `mkit add` them, then run \
              `mkit cherry-pick --continue` (or `mkit cherry-pick --abort`)"
         );
         return exit::GENERAL_ERROR;
@@ -227,13 +237,30 @@ fn start(
     if let Err(e) = advance_head(mkit_dir, &commit_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
+    // git-shaped summary: `[<branch> <hash>] <subject>` + diffstat.
+    let subject = String::from_utf8_lossy(&result.original_message)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_owned();
+    let branch_name = match refs::read_head(mkit_dir) {
+        Ok(Head::Branch(b)) => Some(b),
+        _ => None,
+    };
+    let head_ref = match &branch_name {
+        Some(b) => super::summary::HeadRef::Branch(b),
+        None => super::summary::HeadRef::Detached,
+    };
     let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "cherry-picked {} onto {} as {}",
-        format::short_hash(&target, 8),
-        format::short_hash(&ours, 8),
-        format::short_hash(&commit_hash, 8),
+    super::summary::print_commit_summary(
+        &mut stderr,
+        store,
+        &head_ref,
+        &commit_hash,
+        &subject,
+        false,
+        Some(ours_tree),
+        Some(result.tree_hash),
     );
     exit::OK
 }
@@ -362,7 +389,8 @@ fn restore_to(
     // genuine user work on a non-discardable path (the reset below discards
     // the user's in-progress conflict resolution, so it must not run if
     // the abort is going to fail).
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result) {
+    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result)
+    {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     if let Err(e) =
@@ -376,25 +404,7 @@ fn restore_to(
     if let Err(e) = super::restore_worktree_and_index(cwd, store, target_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    let head = refs::read_head(mkit_dir).unwrap_or(Head::Branch("main".to_string()));
-    match head {
-        Head::Branch(name) => {
-            if let Err(e) = super::write_ref_recording_history(
-                mkit_dir,
-                &name,
-                refs::RefWriteCondition::Any,
-                &target,
-            ) {
-                return Err(emit_err(&format!("restore ref: {e}"), exit::CANTCREAT));
-            }
-        }
-        Head::Detached(_) => {
-            if let Err(e) = refs::write_head_detached(mkit_dir, &target) {
-                return Err(emit_err(&format!("restore HEAD: {e}"), exit::CANTCREAT));
-            }
-        }
-    }
-    Ok(())
+    super::restore_head_ref(mkit_dir, &target)
 }
 
 fn create_commit(
@@ -442,34 +452,4 @@ fn create_commit(
     store
         .write(&bytes)
         .map_err(|e| emit_err(&format!("store commit: {e}"), exit::CANTCREAT))
-}
-
-fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, u8> {
-    match store.read_object(&commit_hash) {
-        Ok(Object::Commit(c)) => Ok(c.tree_hash),
-        Ok(_) => Err(emit_err("object is not a commit", exit::DATAERR)),
-        Err(e) => Err(emit_err(&format!("read commit: {e}"), exit::GENERAL_ERROR)),
-    }
-}
-
-fn advance_head(mkit_dir: &std::path::Path, new_head: &Hash) -> Result<(), String> {
-    let head = refs::read_head(mkit_dir).unwrap_or(Head::Branch("main".to_string()));
-    match head {
-        Head::Branch(name) => super::write_ref_recording_history(
-            mkit_dir,
-            &name,
-            refs::RefWriteCondition::Any,
-            new_head,
-        )
-        .map_err(|e| format!("write ref: {e}")),
-        Head::Detached(_) => {
-            refs::write_head_detached(mkit_dir, new_head).map_err(|e| format!("update HEAD: {e}"))
-        }
-    }
-}
-
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
 }

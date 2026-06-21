@@ -7,8 +7,8 @@
 //! - `onto`       : 64-hex BLAKE3 of the rebase target
 //! - `todo`       : newline-separated list of remaining commits
 //! - `actions`    : newline-separated per-commit action parallel to `todo`
-//!   (`pick`/`reword`); absent ⇒ every commit is a `pick`, for back-compat
-//!   with rebases started before interactive support
+//!   (`pick`/`reword`/`squash`/`fixup`); absent ⇒ every commit is a `pick`,
+//!   for back-compat with rebases started before interactive support
 //! - `done`       : newline-separated list of replayed commits
 //!
 //! Trailing newlines are tolerated on read and always written.

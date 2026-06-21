@@ -660,15 +660,6 @@ fn bootstrap_commonware_context(
     .map_err(|_| HistoryError::RuntimeBootstrap("bootstrap thread panicked".to_string()))
 }
 
-// `BufferPooler`, `Clock`, `RStorage`, `Supervisor` are implicit bounds on
-// the `Context` we use — the imports above keep them in scope so trait
-// methods (`child`, `network_buffer_pool`, …) resolve. Re-export nothing.
-#[allow(dead_code)]
-fn _trait_imports_keep_alive() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<commonware_runtime::tokio::Context>();
-}
-
 // ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------

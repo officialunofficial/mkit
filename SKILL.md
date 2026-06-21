@@ -133,6 +133,26 @@ mkit cat-file --batch            # stream object ids on stdin
 mkit tree                        # snapshot the working dir as a tree object
 mkit ls-tree -r <tree-ish>       # list tree entries (-r recurse, -z NUL-terminate)
 mkit rev-parse --short <rev>     # resolve a revision to an (abbreviated) id
+mkit rev-list --count <rev>      # count commits reachable from <rev> (omit --count to list)
+mkit merge-base [--is-ancestor] <a> <b>  # common ancestor (or test ancestry: exit 0/1)
+```
+
+## Global flags (before the subcommand, like git)
+
+```sh
+mkit -C <path> <command>         # run as if started in <path> (repeatable)
+mkit -c user.email=ci@x.com <command>  # one-shot config override (inert/allowlisted
+                                 # keys only; security-sensitive keys are refused)
+mkit --no-pager <command>        # accepted no-op — mkit never paginates
+```
+
+## Branch switching
+
+```sh
+mkit switch <branch>             # switch branches (git switch)
+mkit switch -c <new> [<start>]   # create + switch (-C create-or-reset)
+mkit checkout -b <new> [<start>] # same, classic spelling (-B create-or-reset)
+mkit branch --show-current       # print the current branch name
 ```
 
 ## Remotes & transports

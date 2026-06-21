@@ -1,11 +1,17 @@
 import { Link } from 'waku'
 import { DemoBoundary } from '../components/demo-boundary'
 import { SignDemo } from '../components/sign-demo'
+import { Seo } from '../components/seo'
 
 export default function SignPage() {
   return (
     <div className='space-y-8'>
-      <title>mkit — sign</title>
+      <Seo
+        title='mkit — sign'
+        description='Generate an Ed25519 key, sign a message, flip a single character, and watch the verifier reject it.'
+        path='/sign'
+        card='Who signed this?'
+      />
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Who signed this?</h1>
         <p className='max-w-prose text-base text-fg'>

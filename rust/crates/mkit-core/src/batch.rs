@@ -266,8 +266,8 @@ impl<'s> WriteBatch<'s> {
     }
 
     /// Hash `bytes`, dedup against staged and on-disk objects, and
-    /// stage (policy `Batch`/`None`) or durably write (policy
-    /// `PerObject`) the object. Returns the BLAKE3 hash either way.
+    /// stage (policy `Batch`) or durably write (policy `PerObject`) the
+    /// object. Returns the BLAKE3 hash either way.
     pub fn write(&self, bytes: &[u8]) -> StoreResult<Hash> {
         self.write_parts(&[bytes])
     }

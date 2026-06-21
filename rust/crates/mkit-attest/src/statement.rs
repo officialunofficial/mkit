@@ -228,10 +228,10 @@ mod tests {
         assert!(matches!(mk(b"{"), Err(Error::PredicateMustBeJsonObject)));
     }
 
-    /// Finding H5: the boundary check (`pj[0]=='{'` && `pj[last]=='}'`)
-    /// accepted arbitrary junk between the braces. Parsing via
-    /// `serde_json` tightens this: object-in-syntax-only (e.g. `{garbage}`
-    /// or `{"unterminated":...`) must now be rejected.
+    /// Regression: a brace-only boundary check (`pj[0]=='{'` &&
+    /// `pj[last]=='}'`) accepted arbitrary junk between the braces.
+    /// Parsing via `serde_json` tightens this: object-in-syntax-only
+    /// (e.g. `{garbage}` or `{"unterminated":...`) must now be rejected.
     #[test]
     fn rejects_predicate_with_braces_but_invalid_json() {
         let mk = |body: &[u8]| {

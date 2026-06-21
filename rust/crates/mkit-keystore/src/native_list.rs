@@ -96,6 +96,55 @@ pub(crate) fn is_malformed_list_entry_error(error: &Error) -> bool {
     )
 }
 
+/// Reject the key attributes that none of the extractable-secret backends
+/// (software, macOS Keychain, Linux Secret Service, Windows Credential,
+/// systemd-creds) can honor. `backend` names the backend for the error
+/// message so callers don't each carry a copy of this validation.
+pub(crate) fn validate_attrs(backend: &str, attrs: &crate::KeyAttrs) -> Result<()> {
+    if !attrs.extractable {
+        return Err(Error::UnsupportedAttributes(format!(
+            "{backend} backend does not support non-extractable keys"
+        )));
+    }
+    if attrs.require_user_presence {
+        return Err(Error::UnsupportedAttributes(format!(
+            "{backend} backend does not support user presence"
+        )));
+    }
+    if attrs.device_bound {
+        return Err(Error::UnsupportedAttributes(format!(
+            "{backend} backend does not support device-bound keys"
+        )));
+    }
+    Ok(())
+}
+
+/// Draw a random 32-byte scalar that is valid for `algorithm` under
+/// `backend`, retrying a bounded number of times. Shared by the
+/// extractable-secret backends, which generate keys by sampling raw
+/// scalars and validating them through `SoftwareSigner`.
+pub(crate) fn random_valid_secret(backend: BackendKind, algorithm: Algorithm) -> Result<[u8; 32]> {
+    use zeroize::Zeroize as _;
+    let mut secret = [0u8; 32];
+    for _ in 0..8 {
+        getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
+        if SoftwareSigner::new(
+            crate::types::static_label("validation"),
+            backend,
+            algorithm,
+            secret,
+        )
+        .is_ok()
+        {
+            return Ok(secret);
+        }
+    }
+    secret.zeroize();
+    Err(Error::Internal(
+        "rng failed to produce a valid scalar".into(),
+    ))
+}
+
 #[cfg(test)]
 pub(crate) fn exercise_native_backend_roundtrip(store: &dyn crate::Keystore) -> Result<()> {
     let label = unique_test_label();

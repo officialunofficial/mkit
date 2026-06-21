@@ -867,11 +867,7 @@ fn keystore_error(error: mkit_keystore::Error) -> u8 {
     emit_err(&format!("keystore: {error}"), exit::DATAERR)
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {

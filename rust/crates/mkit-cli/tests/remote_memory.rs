@@ -41,11 +41,18 @@ fn remote_add_memory_url_roundtrips_through_config() {
     let out = run_in(td.path(), &["remote", "add", "mkit+memory://example"]);
     assert!(out.status.success(), "remote add failed: {out:?}");
 
-    let out = run_in(td.path(), &["remote"]);
+    // Bare `remote` lists NAMES only (git-shaped); the URL appears under
+    // `remote -v` as `<name>\t<url> (fetch)` / `(push)`.
+    let names = run_in(td.path(), &["remote"]);
+    assert!(names.status.success());
+    assert!(String::from_utf8(names.stdout).unwrap().contains("default"));
+
+    let out = run_in(td.path(), &["remote", "-v"]);
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("mkit+memory://example"));
-    assert!(stdout.contains("memory"));
+    assert!(stdout.contains("(fetch)"));
+    assert!(stdout.contains("(push)"));
 }
 
 #[test]

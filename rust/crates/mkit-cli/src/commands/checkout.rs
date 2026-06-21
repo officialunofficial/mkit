@@ -1,10 +1,9 @@
 //! `mkit checkout <branch>` — switch HEAD to a branch and materialise
 //! the branch tip's tree into the working directory.
 //!
-//! The file-restoration half was previously a Phase 10 follow-up; this
-//! wire-up calls `mkit_core::ops::restore::restore_tree_to_worktree`
-//! which respects `.mkitignore` and rejects symlinks that would escape
-//! the repo root.
+//! The file-restoration half calls
+//! `mkit_core::ops::restore::restore_tree_to_worktree`, which respects
+//! `.mkitignore` and rejects symlinks that would escape the repo root.
 
 use std::io::Write;
 
@@ -43,17 +42,26 @@ struct CheckoutOpts {
     #[cfg(feature = "sparse-checkout")]
     #[arg(long = "sparse", value_name = "PATTERN", num_args = 1..)]
     sparse: Vec<String>,
-    /// Branch name, tag, or 64-char commit hash.
-    target: String,
+    /// Create a new branch at the start-point and switch to it
+    /// (`git checkout -b <new>`). Refuses to clobber an existing branch.
+    #[arg(short = 'b', value_name = "NEW", conflicts_with = "create_force")]
+    create: Option<String>,
+    /// Create-or-reset a branch at the start-point and switch to it
+    /// (`git checkout -B <new>`).
+    #[arg(short = 'B', value_name = "NEW")]
+    create_force: Option<String>,
+    /// Branch name, tag, or 64-char commit hash. With `-b`/`-B` this is
+    /// the optional start-point (defaults to HEAD).
+    target: Option<String>,
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // linear flow: create-branch + switch + report
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_shim::parse::<CheckoutOpts>("mkit checkout", args) {
         Ok(o) => o,
         Err(code) => return code,
     };
-    let name = &opts.target;
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -68,16 +76,80 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
 
-    // Resolve <name> through the shared revspec resolver (branch / tag /
-    // HEAD / full+short hash / `~n`/`^` navigation).
-    let commit_hash: Hash = match super::revspec::resolve_revision(&store, &mkit_dir, name) {
-        Ok(h) => h,
-        Err(e) => {
-            return emit_err(
-                &format!("no such branch, tag, or commit: {name} ({e})"),
-                exit::GENERAL_ERROR,
-            );
-        }
+    // `-b`/`-B`: plan a branch create (or reset, for `-B`) at the
+    // start-point (the optional positional, default HEAD). The ref is NOT
+    // written here — only AFTER the destructive-restore gate passes — so a
+    // refused switch creates nothing (git atomicity). `reset_existing`
+    // tracks whether `-B` is resetting a pre-existing branch (→ git's
+    // `Reset branch …` message rather than `Switched to a new branch …`).
+    let create_new = opts.create.as_deref().or(opts.create_force.as_deref());
+    let create_plan: Option<(String, Hash, refs::RefWriteCondition, bool)> =
+        if let Some(new) = create_new {
+            let start_spec = opts.target.as_deref().unwrap_or("HEAD");
+            let start = match super::revspec::resolve_revision(&store, &mkit_dir, start_spec) {
+                Ok(h) => h,
+                Err(e) => {
+                    return emit_err(
+                        &format!("invalid start point '{start_spec}': {e}"),
+                        exit::GENERAL_ERROR,
+                    );
+                }
+            };
+            let existed = matches!(refs::read_ref(&mkit_dir, new), Ok(Some(_)));
+            if existed && opts.create_force.is_none() {
+                return emit_err(&format!("branch '{new}' already exists"), exit::CANTCREAT);
+            }
+            let cond = if opts.create_force.is_some() {
+                refs::RefWriteCondition::Any
+            } else {
+                refs::RefWriteCondition::Missing
+            };
+            Some((
+                new.to_string(),
+                start,
+                cond,
+                existed && opts.create_force.is_some(),
+            ))
+        } else {
+            None
+        };
+    let created = create_plan.is_some();
+
+    let name_owned: String = match &create_plan {
+        Some((new, ..)) => new.clone(),
+        None => match opts.target.as_deref() {
+            Some(t) => t.to_string(),
+            None => {
+                return super::usage_error(
+                    "usage: mkit checkout [-b|-B <new>] <branch|tag|commit>",
+                );
+            }
+        },
+    };
+    let name = name_owned.as_str();
+
+    // Remember whether we were already on the requested branch so the
+    // final report can say `Already on '<name>'` for a no-op switch —
+    // WITHOUT short-circuiting the safety gate (a dirty same-branch
+    // checkout must still refuse, like mkit always has).
+    let already_on = matches!(
+        refs::read_head(&mkit_dir),
+        Ok(mkit_core::refs::Head::Branch(ref cur)) if cur == name
+    );
+
+    // The target commit: for `-b`/`-B` it is the (resolved) start-point;
+    // otherwise resolve `<name>` via the shared revspec resolver.
+    let commit_hash: Hash = match &create_plan {
+        Some((_, start, ..)) => *start,
+        None => match super::revspec::resolve_revision(&store, &mkit_dir, name) {
+            Ok(h) => h,
+            Err(e) => {
+                return emit_err(
+                    &format!("no such branch, tag, or commit: {name} ({e})"),
+                    exit::GENERAL_ERROR,
+                );
+            }
+        },
     };
 
     // Resolve the commit's tree so we can materialise it.
@@ -142,6 +214,19 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
 
+    // Safety gate passed — NOW create the `-b`/`-B` branch ref. Deferring
+    // it to here means a refused switch above leaves no orphan branch
+    // behind (git creates nothing when it refuses the operation).
+    if let Some((new, start, cond, _)) = &create_plan {
+        match super::write_ref_recording_history(&mkit_dir, new, *cond, start) {
+            Ok(()) => {}
+            Err(refs::RefError::Conflict(_)) => {
+                return emit_err(&format!("branch '{new}' already exists"), exit::CANTCREAT);
+            }
+            Err(e) => return emit_err(&format!("create branch {new}: {e}"), exit::CANTCREAT),
+        }
+    }
+
     // Update HEAD FIRST, before mutating the worktree/index (#223). The
     // failure modes are asymmetric: if we materialised the new tree and
     // *then* HEAD failed to advance, the worktree would hold the new
@@ -179,29 +264,47 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&e, exit::CANTCREAT);
     }
 
+    // git-shaped switch confirmation (drop mkit's non-git restored-count
+    // line). `report` is no longer printed; keep the binding consumed.
+    let _ = &report;
+    let reset_existing = matches!(&create_plan, Some((.., true)));
     let mut stderr = std::io::stderr().lock();
     if is_branch {
-        let _ = writeln!(stderr, "switched to branch {name}");
+        if reset_existing {
+            let _ = writeln!(stderr, "Reset branch '{name}'");
+        } else if created {
+            let _ = writeln!(stderr, "Switched to a new branch '{name}'");
+        } else if already_on {
+            let _ = writeln!(stderr, "Already on '{name}'");
+        } else {
+            let _ = writeln!(stderr, "Switched to branch '{name}'");
+        }
     } else {
         let _ = writeln!(
             stderr,
-            "switched to detached {}",
-            format::short_hash(&commit_hash, 8)
+            "HEAD is now at {} {}",
+            format::short_hash(&commit_hash, format::SUMMARY_ABBREV),
+            commit_subject(&store, &commit_hash),
         );
     }
-    let _ = writeln!(
-        stderr,
-        "  {} file(s), {} dir(s), {} symlink(s) restored",
-        report.files_written, report.directories_created, report.symlinks_written,
-    );
     exit::OK
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
+/// First line of a commit/remix message, for the detached-HEAD report
+/// (empty string on any read failure).
+fn commit_subject(store: &ObjectStore, commit: &Hash) -> String {
+    let msg = match store.read_object(commit) {
+        Ok(Object::Commit(c)) => c.message,
+        _ => return String::new(),
+    };
+    String::from_utf8_lossy(&msg)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_owned()
 }
+
+use super::error as emit_err;
 
 /// Tracked paths the target drops — present in the current index but
 /// absent from the target tree. The `clean = false` restore never

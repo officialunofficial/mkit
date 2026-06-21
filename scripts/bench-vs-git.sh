@@ -37,9 +37,6 @@ head -c $((100 * 1024 * 1024)) /dev/urandom > fixtures/video100m.bin
 head -c $((1024 * 1024 * 1024)) /dev/urandom > fixtures/blob1g.bin
 head -c $((1024 * 1024)) /dev/urandom > fixtures/append1m.bin
 
-MKIT_PREP="rm -rf work && mkdir work && cd work && $MKIT init -q >/dev/null 2>&1 || cd work && true"
-# (init prints a notice; discard. keygen needed once per fresh repo.)
-
 mkit_fresh() { # $1 = files to copy in (glob under fixtures)
   echo "rm -rf work && mkdir work && cd work && $MKIT init >/dev/null 2>&1 && $MKIT keygen >/dev/null 2>&1 && cp -R $1 ."
 }

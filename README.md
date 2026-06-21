@@ -41,7 +41,7 @@ echo hello > hi.txt
 mkit add hi.txt
 mkit commit -m "first commit"
 
-# push to a remote (strict scheme — mkit+{file,https,s3,ssh}://)
+# push to a remote (strict scheme — mkit+{file,https,s3,ssh,enc}://)
 mkit remote add origin mkit+file:///srv/mkit/my-repo
 mkit push origin            # first push records `origin` as the branch upstream
 mkit push                   # subsequent pushes go to the recorded upstream
@@ -59,6 +59,18 @@ Full CLI reference: [`docs/CLI.md`](docs/CLI.md).
 
 Pick one. Long-form guide with verification steps in
 [`docs/INSTALL.md`](docs/INSTALL.md).
+
+### Quick install (signed release binary)
+
+```sh
+curl mkit.sh | sh
+```
+
+Detects your OS + architecture, downloads the matching signed release
+archive, verifies its cosign signature by default, and installs `mkit`
+into `~/.local/bin`. Equivalent explicit form:
+`curl -sSfL https://mkit.sh/install.sh | sh`. Pass `--version vX.Y.Z` to
+pin an exact release (`curl -sSfL https://mkit.sh/install.sh | sh -s -- --version v0.3.0`).
 
 ### From source
 
@@ -87,9 +99,9 @@ curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSIO
 tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 ```
 
-The one-liner `curl -sSfL …/install.sh | sh` picks the right archive
-and verifies the cosign bundle by default. Pass `--version vX.Y.Z` to
-pin an exact release.
+The one-liner `curl mkit.sh | sh` (or `curl -sSfL https://mkit.sh/install.sh | sh`)
+picks the right archive and verifies the cosign bundle by default. Pass
+`--version vX.Y.Z` to pin an exact release.
 
 ### WASM (npm)
 

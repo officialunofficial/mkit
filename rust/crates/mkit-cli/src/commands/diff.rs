@@ -88,6 +88,26 @@ struct DiffOpts {
     #[arg(short = 'z')]
     z: bool,
 
+    /// Exit with 1 when there are differences, 0 when there are none (the
+    /// patch is still printed) — like `git diff --exit-code`. The CI
+    /// idiom for "fail if the tree changed".
+    #[arg(long = "exit-code")]
+    exit_code: bool,
+
+    /// Like `--exit-code` but print nothing (`git diff --quiet`).
+    #[arg(long)]
+    quiet: bool,
+
+    /// Colorize the patch: `always`, `auto` (default, tty-only), or
+    /// `never` (like `git diff --color[=<when>]`). Honors `NO_COLOR` /
+    /// `CLICOLOR_FORCE` under `auto`.
+    #[arg(long = "color", value_name = "WHEN", num_args = 0..=1, require_equals = true, default_missing_value = "always", conflicts_with = "no_color")]
+    color: Option<String>,
+
+    /// Disable colorized output (`git diff --no-color`).
+    #[arg(long = "no-color")]
+    no_color: bool,
+
     /// Optional revisions (refs, full/short hashes, `HEAD~n`, or an
     /// `A..B` range) followed by optional pathspecs to limit the
     /// output. With no revisions, diffs HEAD vs worktree (or HEAD vs
@@ -111,6 +131,11 @@ pub fn run(args: &[String]) -> u8 {
             exit::USAGE,
         );
     }
+    let Some(color_choice) = crate::term::ColorChoice::parse(opts.color.as_deref()) else {
+        return emit_err("--color expects always, auto, or never", exit::USAGE);
+    };
+    let use_color = !opts.no_color
+        && color_choice.resolve(std::io::IsTerminal::is_terminal(&std::io::stdout()));
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -145,15 +170,28 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     let normalized: Vec<String> = pathspecs.iter().map(|p| normalize_pathspec(p)).collect();
-    let selected = result
+    let selected: Vec<&mkit_core::ops::DiffEntry> = result
         .entries
         .iter()
-        .filter(|e| normalized.is_empty() || path_matches_any(&e.path, &normalized));
+        .filter(|e| normalized.is_empty() || path_matches_any(&e.path, &normalized))
+        .collect();
+
+    // `--exit-code`/`--quiet` report difference via the exit status (1 =
+    // changed, 0 = clean). `--quiet` additionally suppresses output.
+    let report_exit = opts.exit_code || opts.quiet;
+    let diff_status = if report_exit && !selected.is_empty() {
+        exit::GENERAL_ERROR
+    } else {
+        exit::OK
+    };
+    if opts.quiet {
+        return diff_status;
+    }
 
     let mut stdout = std::io::stdout().lock();
     if opts.stat {
-        return match render_stat(&mut stdout, &snapshot, selected) {
-            Ok(()) => exit::OK,
+        return match render_stat(&mut stdout, &snapshot, selected.into_iter()) {
+            Ok(()) => diff_status,
             Err(msg) => emit_err(&msg, exit::GENERAL_ERROR),
         };
     }
@@ -161,6 +199,19 @@ pub fn run(args: &[String]) -> u8 {
         let res = if opts.name_only || opts.name_status {
             emit_entry_name(&mut stdout, e, opts.name_status, opts.z);
             Ok(())
+        } else if use_color {
+            // Render the entry to a buffer, then colorize line-by-line so
+            // the byte-exact patch machinery stays color-agnostic.
+            let mut buf: Vec<u8> = Vec::new();
+            match emit_entry_patch(&mut buf, &snapshot, e) {
+                // Colorize on RAW BYTES (not via from_utf8_lossy) so a
+                // non-UTF-8 patch body round-trips byte-for-byte, matching
+                // the uncolored path.
+                Ok(()) => stdout
+                    .write_all(&colorize_patch(&buf))
+                    .map_err(|err| format!("write: {err}")),
+                Err(msg) => Err(msg),
+            }
         } else {
             emit_entry_patch(&mut stdout, &snapshot, e)
         };
@@ -168,7 +219,55 @@ pub fn run(args: &[String]) -> u8 {
             return emit_err(&msg, exit::GENERAL_ERROR);
         }
     }
-    exit::OK
+    diff_status
+}
+
+/// ANSI-colorize a unified-diff patch line-by-line, matching git's default
+/// palette: metadata bold, hunk headers cyan, additions green, deletions
+/// red. Context lines are left uncolored. Operates on raw bytes so a
+/// non-UTF-8 patch body round-trips unchanged (only ASCII line prefixes
+/// drive the coloring).
+fn colorize_patch(text: &[u8]) -> Vec<u8> {
+    const RESET: &[u8] = b"\x1b[0m";
+    let mut out: Vec<u8> = Vec::with_capacity(text.len() + 64);
+    for line in text.split_inclusive(|&b| b == b'\n') {
+        let (body, nl): (&[u8], &[u8]) = if line.last() == Some(&b'\n') {
+            (&line[..line.len() - 1], b"\n")
+        } else {
+            (line, b"")
+        };
+        let code: Option<&[u8]> = if body.starts_with(b"@@") {
+            Some(b"\x1b[36m") // hunk header: cyan
+        } else if body.starts_with(b"diff ")
+            || body.starts_with(b"index ")
+            || body.starts_with(b"new file")
+            || body.starts_with(b"deleted file")
+            || body.starts_with(b"old mode")
+            || body.starts_with(b"new mode")
+            || body.starts_with(b"rename ")
+            || body.starts_with(b"similarity ")
+            || body.starts_with(b"--- ")
+            || body.starts_with(b"+++ ")
+        {
+            Some(b"\x1b[1m") // metadata: bold
+        } else if body.first() == Some(&b'+') {
+            Some(b"\x1b[32m") // addition: green
+        } else if body.first() == Some(&b'-') {
+            Some(b"\x1b[31m") // deletion: red
+        } else {
+            None
+        };
+        match code {
+            Some(c) => {
+                out.extend_from_slice(c);
+                out.extend_from_slice(body);
+                out.extend_from_slice(RESET);
+                out.extend_from_slice(nl);
+            }
+            None => out.extend_from_slice(line),
+        }
+    }
+    out
 }
 
 /// One row of `--stat` output: a display name plus its change shape.
@@ -717,16 +816,10 @@ fn try_rev_to_tree(
 }
 
 /// Follow `Object::Tag` targets to the first non-tag object, so an
-/// annotated/signed tag resolves to the commit it points at (bounded against
-/// a tag-of-tag cycle). A non-tag / unreadable object is returned unchanged.
-fn peel_tags(store: &ObjectStore, mut h: Hash) -> Hash {
-    for _ in 0..16 {
-        match store.read_object(&h) {
-            Ok(Object::Tag(t)) => h = t.target,
-            _ => break,
-        }
-    }
-    h
+/// annotated/signed tag resolves to the commit it points at. Delegates to
+/// the shared `log::peel_tags` (kept as a local alias for the call sites).
+fn peel_tags(store: &ObjectStore, h: Hash) -> Hash {
+    super::log::peel_tags(store, h)
 }
 
 /// Map a resolved object hash to a tree hash: commit/remix → its tree,
@@ -851,7 +944,11 @@ fn normalize_pathspec(spec: &str) -> String {
     let s = spec.replace('\\', "/");
     let s = s.strip_prefix("./").unwrap_or(&s);
     let s = s.strip_suffix('/').unwrap_or(s);
-    if s == "." { String::new() } else { s.to_string() }
+    if s == "." {
+        String::new()
+    } else {
+        s.to_string()
+    }
 }
 
 fn path_matches_any(path: &str, specs: &[String]) -> bool {
@@ -971,11 +1068,7 @@ fn read_blob<S: ObjectSource + ?Sized>(store: &S, h: &Hash) -> Result<Vec<u8>, S
     worktree::read_blob(store, h).map_err(|e| format!("read object: {e}"))
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {
