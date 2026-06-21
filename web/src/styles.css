@@ -73,6 +73,17 @@
     scroll-margin-top: 5rem;
   }
 
+  /* Tailwind v4 Preflight no longer gives buttons a pointer cursor. Restore it
+     site-wide so every <button> (copy chips, tabs, Merkle nodes, demo controls)
+     reads as clickable; disabled ones fall back to not-allowed. */
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']) {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+
   code,
   pre,
   .font-mono {
