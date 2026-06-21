@@ -15,10 +15,9 @@
   --color-fg: oklch(0.96 0 0);
   --color-muted: oklch(0.62 0 0);
   --color-subtle: oklch(0.48 0 0);
-  /* Lifted above the 0.16 background so card/input borders stay visible in
-     dark mode, but kept subtle — closer to the ground than the old 0.34 so
-     borders read as a hairline, not a frame. */
-  --color-hairline: oklch(0.3 0 0);
+  /* Lifted well above the 0.16 background so card/input borders read clearly
+     in dark mode without vanishing into the ground. */
+  --color-hairline: oklch(0.35 0 0);
 }
 
 /* Design tokens lifted verbatim from searchartwith.art (OKLCH triplet of
