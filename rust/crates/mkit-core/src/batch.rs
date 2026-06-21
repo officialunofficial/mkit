@@ -54,7 +54,7 @@ use std::sync::Mutex;
 
 use tempfile::TempPath;
 
-use crate::hash::{Hash, Hasher};
+use crate::hash::Hash;
 use crate::store::{
     MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, StoreError, StoreResult, sync_parent_dir,
     temp_file_in,
@@ -283,17 +283,17 @@ impl<'s> WriteBatch<'s> {
     /// previous write panicked while holding the batch mutex.
     pub fn write_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
         let mut total: usize = 0;
-        let mut hasher = Hasher::new();
         for p in parts {
             total = total
                 .checked_add(p.len())
                 .ok_or(StoreError::ObjectTooLarge)?;
-            hasher.update(p);
         }
         if total > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
-        self.write_prehashed(hasher.finalize(), parts)
+        // One id dispatch shared by every part-wise sink: a merkle type
+        // buffers + uses its BMT root, a byte-hashed type streams.
+        self.write_prehashed(crate::object::object_id_from_parts(parts), parts)
     }
 
     /// Stage `parts` under the caller-supplied content hash, skipping

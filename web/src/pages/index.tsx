@@ -1,6 +1,7 @@
 import { Link } from 'waku'
 import { CopyButton } from '../components/copy-button'
 import { Seo } from '../components/seo'
+import { PUSH_MESH } from '../lib/mesh'
 
 export default function HomePage() {
   return (
@@ -93,6 +94,11 @@ export default function HomePage() {
           title='parity'
           body='Which git commands mkit matches, where it diverges on purpose, and why it will never share bytes with a .git repo.'
         />
+        <Demo
+          to='/push'
+          title='push'
+          body='Two roads into a bucket: one object per file, or chunk-and-pack. Why mkit packs, hashes, and signs instead of leaving blobs browsable.'
+        />
       </ul>
     </div>
   )
@@ -114,7 +120,7 @@ function InstallCommand({ command }: { command: string }) {
 
 // `to` is narrowed to the concrete route literals Waku emits — a plain
 // `string` is too wide for Waku 1.0.0-alpha.8's typed Link.
-type DemoRoute = '/hash' | '/sign' | '/attest' | '/tree' | '/streaming' | '/performance' | '/parity'
+type DemoRoute = '/hash' | '/sign' | '/attest' | '/tree' | '/streaming' | '/performance' | '/parity' | '/push'
 
 // Soft per-tile mesh gradients: layered low-alpha radial blooms over the
 // white card so text stays legible while each tile reads distinct.
@@ -133,6 +139,7 @@ const MESH: Record<DemoRoute, string> = {
     'radial-gradient(at 20% 22%, rgba(52,211,153,0.09), transparent 55%), radial-gradient(at 80% 14%, rgba(45,212,191,0.08), transparent 55%)',
   '/parity':
     'radial-gradient(at 16% 20%, rgba(167,139,250,0.09), transparent 55%), radial-gradient(at 84% 80%, rgba(96,165,250,0.08), transparent 55%)',
+  '/push': PUSH_MESH,
 }
 
 // Per-tile accent colour (solid hue echoing each tile's mesh) for the header shape.
@@ -144,6 +151,7 @@ const SHAPE_COLOR: Record<DemoRoute, string> = {
   '/performance': 'rgb(249,115,22)',
   '/attest': 'rgb(16,185,129)',
   '/parity': 'rgb(139,92,246)',
+  '/push': 'rgb(202,138,4)',
 }
 
 // A small distinct geometric mark per tile, drawn in the tile's accent colour.
@@ -175,6 +183,14 @@ function TileShape({ to }: { to: DemoRoute }) {
           <>
             <circle cx='6' cy='8' r='4' />
             <circle cx='10' cy='8' r='4' />
+          </>
+        )
+      case '/push':
+        return (
+          <>
+            <rect x='3' y='3.5' width='10' height='2.5' rx='0.8' />
+            <rect x='3' y='6.75' width='10' height='2.5' rx='0.8' />
+            <rect x='3' y='10' width='10' height='2.5' rx='0.8' />
           </>
         )
     }

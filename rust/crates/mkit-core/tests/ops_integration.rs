@@ -12,7 +12,7 @@
 
 use mkit_core::{
     Blob, Commit, ConflictKind, EntryMode, Identity, Object, ObjectStore, Tree, TreeEntry,
-    cherry_pick, diff_trees, find_merge_base, hash, is_ancestor, merge_trees, serialize,
+    cherry_pick, diff_trees, find_merge_base, is_ancestor, merge_trees, serialize,
 };
 use tempfile::TempDir;
 
@@ -256,9 +256,16 @@ fn merge_and_cherry_pick_are_byte_deterministic() {
     let m2 = merge_trees(&s, Some(base), Some(ours), Some(theirs)).unwrap();
     assert_eq!(m.tree_hash, m2.tree_hash);
 
-    // The merged tree's bytes hash to the tree hash by construction.
+    // The merged tree addresses to its tree hash by construction (a Tree
+    // is content-addressed by its merkle BMT root).
     let merged_bytes = s.read(&m.tree_hash).unwrap();
-    assert_eq!(hash::hash(&merged_bytes), m.tree_hash);
+    assert_eq!(
+        mkit_core::serialize::deserialize(&merged_bytes)
+            .unwrap()
+            .id()
+            .unwrap(),
+        m.tree_hash
+    );
 
     // Cherry-pick determinism: same target, same ours -> same result tree.
     let target_commit = put_commit(&s, ours, &[put_commit(&s, base, &[], "base")], "modify");

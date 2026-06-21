@@ -212,10 +212,15 @@ fn clone_after_delta_push_reconstructs_byte_identical() {
     assert!(closure.len() > 4, "closure should include several chunks");
     for h in &closure {
         let bytes = bob_store.read(h).expect("object present and hash-verified");
+        // `read` already re-verifies the dispatched id (merkle root for
+        // Tree/ChunkedBlob, BLAKE3 otherwise); assert it explicitly.
         assert_eq!(
-            hash::hash(&bytes),
+            mkit_core::serialize::deserialize(&bytes)
+                .unwrap()
+                .id()
+                .unwrap(),
             *h,
-            "reconstructed object must hash to its id"
+            "reconstructed object must address to its id"
         );
     }
 }
@@ -256,7 +261,13 @@ fn clone_reconstructs_multi_commit_delta_chain() {
         let bytes = bob_store
             .read(&h)
             .expect("object present and hash-verified");
-        assert_eq!(hash::hash(&bytes), h);
+        assert_eq!(
+            mkit_core::serialize::deserialize(&bytes)
+                .unwrap()
+                .id()
+                .unwrap(),
+            h
+        );
     }
 }
 
@@ -442,7 +453,10 @@ fn divergent_concurrent_push_leaves_cloneable_remote() {
     let carol_store = ObjectStore::open(carol.path()).unwrap();
     for h in reachable_objects(&carol_store, &carol_tip).unwrap() {
         let b = carol_store.read(&h).expect("hash-verified");
-        assert_eq!(hash::hash(&b), h);
+        assert_eq!(
+            mkit_core::serialize::deserialize(&b).unwrap().id().unwrap(),
+            h
+        );
     }
 }
 

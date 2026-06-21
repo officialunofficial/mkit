@@ -647,42 +647,61 @@ pub fn store_file_object<S: ObjectSink + ?Sized>(sink: &S, data: &[u8]) -> Workt
     Ok(sink.put(&manifest_bytes)?)
 }
 
+/// Build the canonical [`ChunkedBlob`] manifest for `data`: split with
+/// [`FastCdc::v1`], address each chunk by its **Blob object id** — the hash of
+/// the chunk's canonical Blob bytes (`blob_prologue ‖ chunk`), i.e. the id the
+/// chunk Blob is stored under — and set `chunk_size = 0` (content-defined).
+///
+/// This is the single source of the manifest recipe: [`hash_file_object`]
+/// (read-only change detection) and the `mkit-wasm` encoder both build through
+/// it, and [`store_file_object`] writes the chunk Blobs under these same ids,
+/// so every path agrees on the manifest — and thus on its merkle root.
+///
+/// # Errors
+/// [`WorktreeError::Object`] if a chunk length exceeds the wire-format cap.
+pub fn chunked_blob_from_bytes(data: &[u8]) -> WorktreeResult<ChunkedBlob> {
+    let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), data)
+        .map(|b| {
+            let chunk = &data[b.offset..b.offset + b.length];
+            // Blob object id = BLAKE3(blob_prologue ‖ chunk) — the id
+            // store_file_object writes this chunk Blob under (the prologue ‖
+            // payload split is pinned to serialize(Blob) by proptest).
+            let prologue = serialize::blob_prologue(chunk.len())?;
+            let mut hasher = crate::hash::Hasher::new();
+            hasher.update(&prologue);
+            hasher.update(chunk);
+            Ok::<_, WorktreeError>(hasher.finalize())
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(ChunkedBlob {
+        total_size: data.len() as u64,
+        chunk_size: 0,
+        chunks,
+    })
+}
+
 /// Content-address `data` exactly as [`store_file_object`] would,
-/// **without storing anything**. Computes per-chunk blob hashes via the
-/// streaming hasher and assembles the `ChunkedBlob` manifest in memory.
-/// Backs change detection (`status`, `rm`, restore safety checks) where
-/// only the answer "would this file hash to X?" is needed — writing
-/// objects there would turn a read-only query into store mutation.
-/// Equivalence with `store_file_object` is pinned by test.
+/// **without storing anything**. Backs change detection (`status`, `rm`,
+/// restore safety checks) where only the answer "would this file hash to X?"
+/// is needed — writing objects there would turn a read-only query into store
+/// mutation. Equivalence with `store_file_object` is pinned by test.
 ///
 /// # Errors
 /// [`WorktreeError::Object`] if a length exceeds the wire-format cap.
 pub fn hash_file_object(data: &[u8]) -> WorktreeResult<Hash> {
-    let hash_parts = |parts: &[&[u8]]| {
-        let mut hasher = crate::hash::Hasher::new();
-        for p in parts {
-            hasher.update(p);
-        }
-        hasher.finalize()
-    };
     if u64::try_from(data.len()).unwrap_or(u64::MAX) <= CHUNK_THRESHOLD {
         let prologue = serialize::blob_prologue(data.len())?;
-        return Ok(hash_parts(&[&prologue, data]));
+        let mut hasher = crate::hash::Hasher::new();
+        hasher.update(&prologue);
+        hasher.update(data);
+        return Ok(hasher.finalize());
     }
-    let total_size = data.len() as u64;
-    let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), data)
-        .map(|b| {
-            let chunk = &data[b.offset..b.offset + b.length];
-            let prologue = serialize::blob_prologue(chunk.len())?;
-            Ok::<_, WorktreeError>(hash_parts(&[&prologue, chunk]))
-        })
-        .collect::<Result<_, _>>()?;
-    let manifest = Object::ChunkedBlob(ChunkedBlob {
-        total_size,
-        chunk_size: 0,
-        chunks,
-    });
-    Ok(crate::hash::hash(&serialize::serialize(&manifest)?))
+    // A ChunkedBlob is addressed by its merkle BMT root, matching what the
+    // sink stores it under. This read-only mirror must agree with the write
+    // path or change detection breaks.
+    Ok(crate::merkle::compute_chunked_id(&chunked_blob_from_bytes(
+        data,
+    )?))
 }
 
 /// A file's mtime as nanoseconds since the Unix epoch, saturating; `0`

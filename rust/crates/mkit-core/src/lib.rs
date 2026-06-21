@@ -25,6 +25,7 @@ pub mod batch;
 pub mod chunker;
 pub mod delta;
 pub mod hash;
+pub mod merkle;
 pub mod object;
 pub mod ops;
 pub mod pack;

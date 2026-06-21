@@ -5,7 +5,7 @@
 //!
 //! Layout per vector `<name>`: `<name>.git.bin` (source git body),
 //! `<name>.mkit.bin` (imported mkit object bytes), `<name>.json`
-//! (ids), `MANIFEST.txt` (`<name> <git-sha1> <mkit-blake3>`). The
+//! (ids), `MANIFEST.txt` (`<name> <git-sha1> <mkit-object-id>`). The
 //! `big_blob` vector pins ids only (content regenerates).
 //!
 //! `UPDATE_GOLDEN=1` rewrites after a deliberate, spec-versioned
@@ -219,7 +219,7 @@ fn golden_import_vectors_match() {
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         std::fs::create_dir_all(&dir).unwrap();
         let mut manifest = String::from(
-            "# SPEC-GIT-IMPORT §9 vectors. <name> <git-sha1> <mkit-blake3>\n\
+            "# SPEC-GIT-IMPORT §9 vectors. <name> <git-sha1> <mkit-object-id>\n\
              # Fixed importer key seed [0x42;32]. Regenerate with:\n\
              # UPDATE_GOLDEN=1 cargo test -p mkit-git-bridge --test golden_import\n",
         );
@@ -232,7 +232,7 @@ fn golden_import_vectors_match() {
             std::fs::write(
                 dir.join(format!("{name}.json")),
                 format!(
-                    "{{\"name\":\"{name}\",\"git_sha1\":\"{}\",\"mkit_blake3\":\"{}\"}}\n",
+                    "{{\"name\":\"{name}\",\"git_sha1\":\"{}\",\"mkit_id\":\"{}\"}}\n",
                     hex(sha1),
                     mkit_core::to_hex(&blake3)
                 ),

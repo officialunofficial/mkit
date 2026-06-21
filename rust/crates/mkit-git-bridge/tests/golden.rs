@@ -5,7 +5,7 @@
 //! - `<name>.mkit.bin` — serialized mkit v1 object bytes
 //! - `<name>.git.bin`  — full git object bytes (`"<type> <len>\0"+body`)
 //! - `<name>.json`     — human-readable ids
-//! - `MANIFEST.txt`    — `<name> <blake3-of-mkit.bin> <git-sha1>`
+//! - `MANIFEST.txt`    — `<name> <mkit-object-id> <git-sha1>`
 //!
 //! The chunked-blob vector (§13.9) commits its (small) mkit manifest
 //! bytes but not its ~1.2 MiB flattened git bytes — that content is
@@ -44,8 +44,9 @@ struct MemSource(HashMap<Hash, Object>);
 
 impl MemSource {
     fn put(&mut self, obj: Object) -> Hash {
-        let bytes = mkit_core::serialize(&obj).unwrap();
-        let h = mkit_core::hash::hash(&bytes);
+        // Address objects exactly as the real store does: a merkle BMT root
+        // for Tree/ChunkedBlob, BLAKE3 of the bytes otherwise.
+        let h = obj.id().unwrap();
         self.0.insert(h, obj);
         h
     }
@@ -236,7 +237,7 @@ fn golden_vectors_match() {
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         std::fs::create_dir_all(&dir).unwrap();
         let mut manifest = String::from(
-            "# SPEC-GIT-BRIDGE §13 vectors. <name> <blake3-of-mkit-bytes> <git-sha1>\n\
+            "# SPEC-GIT-BRIDGE §13 vectors. <name> <mkit-object-id> <git-sha1>\n\
              # Regenerate with: UPDATE_GOLDEN=1 cargo test -p mkit-git-bridge --test golden\n",
         );
         for (name, h) in &vectors {
@@ -250,7 +251,7 @@ fn golden_vectors_match() {
             std::fs::write(
                 dir.join(format!("{name}.json")),
                 format!(
-                    "{{\"name\":\"{name}\",\"mkit_blake3\":\"{}\",\"git_sha1\":\"{sha1}\",\"git_type\":\"{}\"}}\n",
+                    "{{\"name\":\"{name}\",\"mkit_id\":\"{}\",\"git_sha1\":\"{sha1}\",\"git_type\":\"{}\"}}\n",
                     mkit_core::to_hex(h),
                     git.gtype.name()
                 ),

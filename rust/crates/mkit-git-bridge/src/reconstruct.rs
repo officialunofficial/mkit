@@ -58,7 +58,12 @@ fn finish(object: Object, extras: Vec<(Hash, Vec<u8>)>) -> Result<Reconstructed,
             )));
         }
     }
-    let hash = mkit_core::hash::hash(&bytes);
+    // Address by the dispatched id: a merkle BMT root for Tree/ChunkedBlob,
+    // BLAKE3 of the bytes for everything else — matching how the store keys
+    // the same object (store::object_id_from_bytes).
+    let hash = object
+        .id()
+        .map_err(|e| BridgeError::Integrity(format!("object id: {e}")))?;
     Ok(Reconstructed {
         hash,
         bytes,

@@ -103,6 +103,11 @@ repeat entry_count:
 
 `entry_count > 1_000_000` → `TooManyEntries`.
 
+**Identity:** a `Tree`'s object id is its Binary Merkle Tree root over the
+entry leaves (one leaf per `(name, mode, object_hash)` triple, in the
+canonical lex order), NOT `BLAKE3` of these bytes. The byte layout is
+unchanged. See [SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) §3.2.
+
 ### 4.1 Entry name rules
 
 Normative:
@@ -315,6 +320,12 @@ The concatenated length MUST equal `total_size`.
 
 `chunk_count > 1_000_000` → `TooManyChunks`.
 
+**Identity:** a `ChunkedBlob`'s object id is its Binary Merkle Tree root
+(leaves = a metadata leaf binding `total_size`/`chunk_size`, then the
+chunk ids), NOT `BLAKE3` of these manifest bytes. The byte layout above is
+unchanged; only the byte→id function differs. See
+[SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) §3.1.
+
 ---
 
 ## 8. Delta (`0x06`)
@@ -368,14 +379,24 @@ which is why the `len` field is always explicit.
 ## 10. Storage
 
 Objects are stored at `.mkit/objects/<dd>/<rrrrrrrrr...r>` where `<dd>`
-is the lowercase-hex first byte of `BLAKE3(object bytes)` and `<r...>`
-is the remaining 62 hex chars.
+is the lowercase-hex first byte of the **object id** and `<r...>` is the
+remaining 62 hex chars.
 
-On read, the store MUST recompute BLAKE3 and fail `HashMismatch` if the
-computed hash does not match the path. Objects > 1 GiB MUST be rejected.
+The object id is **type-dependent**: a `Tree` (`0x02`) or `ChunkedBlob`
+(`0x05`) is addressed by its Binary Merkle Tree root
+([SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md)); every other type is
+addressed by `BLAKE3(object bytes)`. On read, the store MUST recompute the
+id with the same type-dependent rule and fail `HashMismatch` if it does
+not match the path (for a merkelized type this re-derives and re-checks the
+root, which proves the whole child set is present and correctly ordered).
+Objects > 1 GiB MUST be rejected.
 
-`.mkit/` directory: presence of `.mkit/objects` is the repository
-marker. See SPEC-INDEX for the `.mkit/index` sidecar.
+`.mkit/` directory: presence of `.mkit/objects` is the repository marker.
+A conforming repository MUST also carry a `.mkit/format` file declaring
+the object-addressing format (`bmt-v1`); an implementation MUST refuse to
+open a repository whose marker is absent or unrecognised
+(`IncompatibleRepoFormat`) rather than mis-read a pre-merkle store under
+the current id rule. See SPEC-INDEX for the `.mkit/index` sidecar.
 
 ### 10.1 Durability
 
@@ -425,6 +446,15 @@ a new `object_type` byte and a new body layout but changes no existing
 type's bytes, so `schema_version` is NOT bumped and every pre-tag golden
 vector is unaffected. A version bump is reserved for changes that alter
 an existing type's layout.
+
+Merkle object addressing (`Tree`/`ChunkedBlob` keyed by BMT root,
+[SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md)) likewise leaves every
+type's **bytes** unchanged — only the bytes→id function changes — so
+`schema_version` is NOT bumped. The break it does introduce (every
+`Tree`/`ChunkedBlob` and thus every `Commit` re-addresses) is guarded
+instead by the mandatory `.mkit/format` = `bmt-v1` repository marker
+(§10): a pre-merkle store has no marker and is refused at open. Pre-1.0,
+no migration is provided.
 
 Future versions MUST increment `schema_version` and MUST preserve the
 `"MKT1"` magic prefix. The magic byte string is normative — readers are

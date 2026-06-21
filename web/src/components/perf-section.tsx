@@ -1,6 +1,6 @@
 import { labelColor } from '../lib/hash-color'
-import { methodology, sizeBenchmarks, timingBenchmarks } from '../lib/perf-data'
-import type { SizeBenchmark, TimingBenchmark } from '../lib/perf-data'
+import { methodology, sizeBenchmarks, timingBenchmarks, transferBenchmarks } from '../lib/perf-data'
+import type { SizeBenchmark, TimingBenchmark, TransferBenchmark } from '../lib/perf-data'
 
 /** `13.4628 → "13.5 s"`, `0.3108 → "311 ms"`, `0.0134 → "13.4 ms"`. Sub-second values read better in ms. */
 function fmtSeconds(s: number): string {
@@ -13,6 +13,12 @@ function fmtSeconds(s: number): string {
 function fmtKiB(kib: number): string {
   if (kib >= 1024) return `${(kib / 1024).toFixed(1)} MiB`
   return `${kib} KiB`
+}
+
+/** `72704 → "71.0 KiB"`, `1536 → "1.5 KiB"`, `93 → "93 B"`. Wire bytes are exact, so the base unit is bytes. */
+function fmtBytes(bytes: number): string {
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${bytes} B`
 }
 
 /** Multiplier between the two means, e.g. "6.9× faster". Below 1.15× the honest label is a tie. */
@@ -93,6 +99,25 @@ function SizeBlock({ b }: { b: SizeBenchmark }) {
   )
 }
 
+function TransferBlock({ b }: { b: TransferBenchmark }) {
+  const max = Math.max(b.wholeChunkBytes, b.deltaBytes)
+  const ratio = b.wholeChunkBytes / b.deltaBytes
+  return (
+    <div className='space-y-3 py-6'>
+      <div className='flex items-baseline justify-between gap-4'>
+        <h3 className='text-sm font-semibold'>{b.name}</h3>
+        <span className='shrink-0 text-xs text-muted'>{ratio.toFixed(0)}× smaller push</span>
+      </div>
+      <p className='max-w-prose text-sm text-subtle'>{b.description}</p>
+      <div className='space-y-1.5'>
+        <Bar label='whole' value={b.wholeChunkBytes} max={max} display={fmtBytes(b.wholeChunkBytes)} />
+        <Bar label='delta' value={b.deltaBytes} max={max} display={fmtBytes(b.deltaBytes)} color={labelColor(b.id)} />
+      </div>
+      {b.note ? <p className='max-w-prose text-xs text-muted'>{b.note}</p> : null}
+    </div>
+  )
+}
+
 /**
  * Static benchmark comparison: every number was measured once on a real machine (see `perf-data.ts` for the exact
  * commands) and baked in at build time. Bars are plain divs — lower is better everywhere, and git's wins are shown as
@@ -123,6 +148,20 @@ export function PerfSection() {
         <div className='divide-y divide-hairline border-y border-hairline'>
           {sizeBenchmarks.map((b) => (
             <SizeBlock key={b.id} b={b} />
+          ))}
+        </div>
+      </section>
+
+      <section className='space-y-1'>
+        <h2 className='text-sm font-semibold'>Bytes on the wire</h2>
+        <p className='max-w-prose text-sm text-subtle'>
+          What a <code className='font-mono text-xs'>push</code> sends after a small edit to a large file the remote
+          already holds. Delta-on-the-wire encodes the changed chunk against the version the remote has, instead of
+          re-uploading it whole. Lower is better.
+        </p>
+        <div className='divide-y divide-hairline border-y border-hairline'>
+          {transferBenchmarks.map((b) => (
+            <TransferBlock key={b.id} b={b} />
           ))}
         </div>
       </section>

@@ -43,13 +43,21 @@ use tempfile::NamedTempFile;
 use crate::batch::{RealSyncer, Syncer};
 pub use crate::batch::{SyncPolicy, WriteBatch};
 use crate::hash::{self, Hash, object_path, to_hex};
-use crate::object::{MkitError, Object};
+use crate::object::{MkitError, Object, object_id_from_bytes, object_id_from_parts};
 use crate::serialize;
 
 /// Top-level repository directory name.
 pub const MKIT_DIR: &str = ".mkit";
 /// Subdirectory under `.mkit/` that holds raw object files.
 pub const OBJECTS_DIR: &str = "objects";
+/// File under `.mkit/` declaring the object-addressing format. Written at
+/// [`ObjectStore::init`] and required (and matched) at [`ObjectStore::open`]
+/// so an older flat-hash-addressed repository is rejected loudly rather
+/// than silently mis-read once merkle addressing is in effect.
+pub const FORMAT_FILE: &str = "format";
+/// The only supported object-addressing format value (see
+/// `docs/SPEC-MERKLE-OBJECTS.md`): Tree/ChunkedBlob keyed by BMT root.
+pub const FORMAT_VALUE: &str = "bmt-v1";
 /// Hard cap on raw object size, enforced on both [`ObjectStore::write`]
 /// and [`ObjectStore::read`].
 pub const MAX_RAW_OBJECT_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
@@ -80,6 +88,11 @@ pub enum StoreError {
     NotAMkitRepository,
     #[error(".mkit already exists in this directory")]
     AlreadyInitialized,
+    #[error(
+        "repository object-addressing format is {found:?}, expected \"{}\" — this repository predates merkle object addressing and is not readable by this mkit (pre-1.0: no migration). See docs/SPEC-MERKLE-OBJECTS.md.",
+        FORMAT_VALUE
+    )]
+    IncompatibleRepoFormat { found: Option<String> },
     #[error("object {0} not found")]
     ObjectNotFound(String),
     #[error("object exceeds {} byte cap", MAX_RAW_OBJECT_SIZE)]
@@ -120,7 +133,7 @@ impl BulkWriter<'_> {
         if bytes.len() > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
-        let h = hash::hash(bytes);
+        let h = object_id_from_bytes(bytes);
         let final_path = self.store.path_for(&h);
         // VERIFY-skip an existing object: content addressing makes
         // byte-equality the exact durability test — a good file (from
@@ -196,9 +209,25 @@ impl ObjectStore {
     /// [`StoreError::NotAMkitRepository`] if `<root>/.mkit/objects` does
     /// not exist.
     pub fn open(root: &Path) -> StoreResult<Self> {
-        let objects_root = root.join(MKIT_DIR).join(OBJECTS_DIR);
+        let mkit_root = root.join(MKIT_DIR);
+        let objects_root = mkit_root.join(OBJECTS_DIR);
         if !objects_root.is_dir() {
             return Err(StoreError::NotAMkitRepository);
+        }
+        // Reject a repository that does not declare merkle object
+        // addressing — a pre-merkle repo would mis-read every Tree /
+        // ChunkedBlob (and thus every Commit) under the new id scheme.
+        match fs::read_to_string(mkit_root.join(FORMAT_FILE)) {
+            Ok(s) if s.trim() == FORMAT_VALUE => {}
+            Ok(s) => {
+                return Err(StoreError::IncompatibleRepoFormat {
+                    found: Some(s.trim().to_owned()),
+                });
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(StoreError::IncompatibleRepoFormat { found: None });
+            }
+            Err(e) => return Err(StoreError::Io(e)),
         }
         Ok(Self {
             objects_root,
@@ -216,6 +245,12 @@ impl ObjectStore {
         }
         let objects_root = mkit_root.join(OBJECTS_DIR);
         fs::create_dir_all(&objects_root)?;
+        // Declare the object-addressing format so a future open by an
+        // incompatible (older) mkit fails loudly (SPEC-MERKLE-OBJECTS §7).
+        fs::write(
+            mkit_root.join(FORMAT_FILE),
+            format!("{FORMAT_VALUE}\n").as_bytes(),
+        )?;
         Ok(Self {
             objects_root,
             syncer: Arc::new(RealSyncer),
@@ -301,7 +336,7 @@ impl ObjectStore {
         if bytes.len() > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
-        let h = hash::hash(bytes);
+        let h = object_id_from_bytes(bytes);
         let final_path = self.path_for(&h);
         if final_path.exists() {
             // Dedup hit: the object is visible, but if another process
@@ -377,7 +412,7 @@ impl ObjectStore {
         let cap = usize::try_from(size).map_err(|_| StoreError::ObjectTooLarge)?;
         let mut bytes = Vec::with_capacity(cap);
         file.read_to_end(&mut bytes)?;
-        let actual = hash::hash(&bytes);
+        let actual = object_id_from_bytes(&bytes);
         if actual != *h {
             return Err(StoreError::HashMismatch {
                 expected: to_hex(h),
@@ -627,31 +662,33 @@ impl ObjectSink for EphemeralSink<'_> {
 
     fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
         let mut total: usize = 0;
-        let mut hasher = hash::Hasher::new();
         for p in parts {
             total = total
                 .checked_add(p.len())
                 .ok_or(StoreError::ObjectTooLarge)?;
-            hasher.update(p);
         }
         if total > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
-        let h = hasher.finalize();
-        // Dedup against the durable store: visible store objects are
-        // durable by invariant, and skipping them keeps the overlay's
-        // memory bounded by the *changed* content, not the worktree.
+        let h = object_id_from_parts(parts);
+        // Dedup against the durable store: visible store objects are durable
+        // by invariant, and skipping them keeps the overlay's memory bounded
+        // by the *changed* content, not the worktree. The overlay only ever
+        // materialises the bytes on a dedup miss.
         if self.store.contains(&h) {
             return Ok(h);
         }
-        let mut map = self.objects.lock().expect("ephemeral sink mutex");
-        map.entry(h).or_insert_with(|| {
-            let mut buf = Vec::with_capacity(total);
-            for p in parts {
-                buf.extend_from_slice(p);
-            }
-            buf
-        });
+        self.objects
+            .lock()
+            .expect("ephemeral sink mutex")
+            .entry(h)
+            .or_insert_with(|| {
+                let mut buf = Vec::with_capacity(total);
+                for p in parts {
+                    buf.extend_from_slice(p);
+                }
+                buf
+            });
         Ok(h)
     }
 
@@ -768,6 +805,38 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let err = ObjectStore::open(dir.path()).unwrap_err();
         assert!(matches!(err, StoreError::NotAMkitRepository));
+    }
+
+    #[test]
+    fn init_writes_format_marker_and_open_accepts_it() {
+        let dir = TempDir::new().unwrap();
+        ObjectStore::init(dir.path()).unwrap();
+        let marker = fs::read_to_string(dir.path().join(MKIT_DIR).join(FORMAT_FILE)).unwrap();
+        assert_eq!(marker.trim(), FORMAT_VALUE);
+        // A freshly-init'd repo opens cleanly.
+        ObjectStore::open(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn open_rejects_repo_missing_or_wrong_format_marker() {
+        // A pre-merkle repo (objects dir present, no format marker) must be
+        // rejected loudly rather than silently mis-read.
+        let dir = TempDir::new().unwrap();
+        ObjectStore::init(dir.path()).unwrap();
+        let marker_path = dir.path().join(MKIT_DIR).join(FORMAT_FILE);
+
+        fs::remove_file(&marker_path).unwrap();
+        assert!(matches!(
+            ObjectStore::open(dir.path()),
+            Err(StoreError::IncompatibleRepoFormat { found: None })
+        ));
+
+        // A repo declaring some other (e.g. future) format is also rejected.
+        fs::write(&marker_path, b"flat-v0\n").unwrap();
+        assert!(matches!(
+            ObjectStore::open(dir.path()),
+            Err(StoreError::IncompatibleRepoFormat { found: Some(_) })
+        ));
     }
 
     #[test]

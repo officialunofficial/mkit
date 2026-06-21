@@ -2956,6 +2956,7 @@ name = "mkit-core"
 version = "0.3.0"
 dependencies = [
  "blake3",
+ "bytes",
  "commonware-codec",
  "commonware-coding",
  "commonware-cryptography",

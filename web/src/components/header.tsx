@@ -9,6 +9,7 @@ const NAV_LINKS = [
   { to: '/tree', label: 'tree' },
   { to: '/performance', label: 'performance' },
   { to: '/parity', label: 'parity' },
+  { to: '/push', label: 'push' },
   { to: '/hash', label: 'hash' },
   { to: '/sign', label: 'sign' },
   { to: '/streaming', label: 'streaming' },

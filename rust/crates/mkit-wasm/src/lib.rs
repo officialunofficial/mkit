@@ -19,7 +19,9 @@ use mkit_attest::{PAYLOAD_TYPE_IN_TOTO, Signer, signer_repo_key::RepoKeySigner};
 use mkit_core::chunker::{AVG_SIZE, ChunkIterator, FastCdc, MAX_SIZE, MIN_SIZE};
 use mkit_core::delta;
 use mkit_core::hash::{from_hex, hash, to_hex};
-use mkit_core::object::{Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+use mkit_core::object::{
+    Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry, id_from_object,
+};
 use mkit_core::serialize::serialize;
 use mkit_core::sign::{COMMIT_DOMAIN, KeyPair, PublicKey, Signature, commit_signing_bytes, verify};
 
@@ -89,7 +91,8 @@ pub fn blake3_hex(data: &[u8]) -> String {
 /// Serialize a blob object and return `{ bytes, hash_hex }`.
 ///
 /// The returned `bytes` are the canonical on-disk v1 object bytes
-/// (see `docs/SPEC-OBJECTS.md`); `hash_hex` is BLAKE3 of those bytes.
+/// (see `docs/SPEC-OBJECTS.md`); `hash_hex` is the object's content id
+/// (via `id_from_object`) — for a non-merkelized `Blob`, BLAKE3 of those bytes.
 #[wasm_bindgen]
 pub fn blob_encode(data: &[u8]) -> Result<EncodedObject, JsValue> {
     let obj = Object::Blob(Blob {
@@ -644,38 +647,36 @@ pub fn chunk_boundaries(bytes: &[u8]) -> Result<ChunkerResult, JsValue> {
     })
 }
 
-/// Build a `ChunkedBlob` manifest from raw bytes: chunk with `FastCDC` v1,
-/// BLAKE3-hash each chunk, serialise the manifest and return
-/// `{ root_hash_hex, chunks: [{ offset, len, hash_hex }], bytes_len }`.
+/// Build a `ChunkedBlob` manifest from raw bytes: chunk with `FastCDC` v1 and
+/// return `{ root_hash_hex, chunks: [{ offset, len, hash_hex }], bytes_len }`.
 ///
-/// `root_hash_hex` is BLAKE3 of the canonical on-disk `ChunkedBlob`
-/// object bytes — i.e. the same id mkit would store it under. `chunk_size`
-/// is `0` (the CDC marker, SPEC-OBJECTS §13.7).
+/// `root_hash_hex` is the object's content id — the BMT root of the manifest,
+/// whose leaves are the per-chunk **Blob object ids** (built via the shared
+/// `worktree::chunked_blob_from_bytes`), so it equals the id the native store
+/// keys the `ChunkedBlob` under. Each chunk's `hash_hex` is the **raw**
+/// BLAKE3 of the chunk payload — for UI colouring/dedup, distinct from the
+/// manifest leaf. `chunk_size` is `0` (the CDC marker, SPEC-OBJECTS §13.7).
 #[wasm_bindgen]
 pub fn chunked_blob_encode(bytes: &[u8]) -> Result<ChunkedBlobJs, JsValue> {
     let bytes_len = u32::try_from(bytes.len()).map_err(|_| js_err("bytes length exceeds u32"))?;
-    let cdc = FastCdc::v1();
+    // Per-chunk display info: offset, length, and the raw chunk-content hash
+    // (the UI colours and dedups by this — it is NOT the manifest leaf).
     let mut infos: Vec<ChunkInfo> = Vec::new();
-    let mut hashes: Vec<[u8; 32]> = Vec::new();
-    for b in ChunkIterator::new(cdc, bytes) {
+    for b in ChunkIterator::new(FastCdc::v1(), bytes) {
         let offset = u32::try_from(b.offset).map_err(|_| js_err("chunk offset exceeds u32"))?;
         let len = u32::try_from(b.length).map_err(|_| js_err("chunk length exceeds u32"))?;
-        let h = hash(&bytes[b.offset..b.offset + b.length]);
         infos.push(ChunkInfo {
             offset,
             len,
-            hash_hex: to_hex(&h),
+            hash_hex: to_hex(&hash(&bytes[b.offset..b.offset + b.length])),
         });
-        hashes.push(h);
     }
-    let cb = ChunkedBlob {
-        total_size: bytes.len() as u64, // usize -> u64 widening only
-        chunk_size: 0,                  // CDC marker
-        chunks: hashes,
-    };
-    let obj = Object::ChunkedBlob(cb);
-    let obj_bytes = serialize(&obj).map_err(|e| js_err(format!("serialize: {e}")))?;
-    let root_hash_hex = to_hex(&hash(&obj_bytes));
+    // The manifest addresses each chunk by its Blob object id (not the raw
+    // chunk hash), exactly as the native store does, so root_hash_hex matches
+    // the store's key. Single source of the recipe: chunked_blob_from_bytes.
+    let cb = mkit_core::worktree::chunked_blob_from_bytes(bytes)
+        .map_err(|e| js_err(format!("chunk: {e}")))?;
+    let root_hash_hex = to_hex(&mkit_core::merkle::compute_chunked_id(&cb));
     Ok(ChunkedBlobJs {
         root_hash_hex,
         chunks: infos,
@@ -1181,7 +1182,11 @@ impl BaoVerify {
 
 fn encode_object(obj: &Object) -> Result<EncodedObject, JsValue> {
     let bytes = serialize(obj).map_err(|e| js_err(format!("serialize: {e}")))?;
-    let hash_hex = to_hex(&hash(&bytes));
+    // Canonical content id: the BMT root for merkelized types (Tree /
+    // ChunkedBlob), BLAKE3 of the bytes otherwise. Routing through the same
+    // `id_from_object` dispatch the native store uses keeps wasm-computed ids
+    // equal to the key mkit stores the object under (no flat-hash drift).
+    let hash_hex = to_hex(&id_from_object(obj, &bytes));
     Ok(EncodedObject { bytes, hash_hex })
 }
 
@@ -1306,6 +1311,81 @@ mod tests {
     fn parse_json_triples_accepts_small_valid_input() {
         let out = parse_json_triples(r#"[["a","b","c"]]"#).expect("small input is valid");
         assert_eq!(out, vec![("a".into(), "b".into(), "c".into())]);
+    }
+
+    /// Finding 1 regression: `tree_encode` must key a tree by its **BMT root**
+    /// (`merkle::compute_tree_id`), matching the id the native store uses — and
+    /// must NOT be the pre-merkle flat BLAKE3 of the serialized bytes.
+    #[test]
+    fn tree_encode_id_matches_native_bmt_root() {
+        let h1 = [0x11u8; 32];
+        let h2 = [0x22u8; 32];
+        let entries_json = format!(
+            r#"[["a.txt","blob","{}"],["b.txt","blob","{}"]]"#,
+            to_hex(&h1),
+            to_hex(&h2)
+        );
+        let wasm_id = tree_encode(&entries_json).expect("tree encodes").hash_hex();
+
+        let tree = Tree {
+            entries: vec![
+                TreeEntry {
+                    name: b"a.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: h1,
+                },
+                TreeEntry {
+                    name: b"b.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: h2,
+                },
+            ],
+        };
+        let native_root = to_hex(&mkit_core::merkle::compute_tree_id(&tree));
+        assert_eq!(wasm_id, native_root, "tree_encode must emit the BMT root");
+
+        let flat = to_hex(&hash(&serialize(&Object::Tree(tree)).unwrap()));
+        assert_ne!(wasm_id, flat, "tree id regressed to pre-merkle flat BLAKE3");
+    }
+
+    /// `chunked_blob_encode` must emit the id the **native store** keys the
+    /// `ChunkedBlob` under — `worktree::hash_file_object` (the change-detection
+    /// path, itself pinned to `store_file_object`). This cross-checks the real
+    /// addressing path, not a same-recipe reconstruction; in particular the
+    /// manifest leaves must be per-chunk **Blob object ids**, not the raw
+    /// chunk-content hashes the UI displays.
+    #[test]
+    fn chunked_blob_encode_id_matches_native_store() {
+        // > CHUNK_THRESHOLD (1 MiB) so the native store actually chunks it,
+        // with byte variation so FastCDC cuts real content-defined boundaries.
+        let data: Vec<u8> = (0..2_500_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        let wasm_id = chunked_blob_encode(&data)
+            .expect("chunked blob encodes")
+            .root_hash_hex();
+
+        let native_id = to_hex(&mkit_core::worktree::hash_file_object(&data).unwrap());
+        assert_eq!(
+            wasm_id, native_id,
+            "wasm chunked id must equal the native store id"
+        );
+
+        // Guard against regressing to a manifest of raw chunk-content hashes
+        // (the prior bug): those leaves are not resolvable Blob ids.
+        let raw_chunks: Vec<[u8; 32]> = ChunkIterator::new(FastCdc::v1(), &data)
+            .map(|b| hash(&data[b.offset..b.offset + b.length]))
+            .collect();
+        let raw_cb = mkit_core::object::ChunkedBlob {
+            total_size: data.len() as u64,
+            chunk_size: 0,
+            chunks: raw_chunks,
+        };
+        let raw_root = to_hex(&mkit_core::merkle::compute_chunked_id(&raw_cb));
+        assert_ne!(
+            wasm_id, raw_root,
+            "manifest must use Blob object ids, not raw chunk hashes"
+        );
     }
 
     #[test]

@@ -39,6 +39,16 @@ pub enum ObjectType {
 }
 
 impl ObjectType {
+    /// `true` for the types content-addressed by a merkle BMT root
+    /// (`Tree`, `ChunkedBlob`) rather than by `BLAKE3` of their bytes — see
+    /// `crate::merkle` and [`Object::id`]. The single source of truth for
+    /// the merkle-addressed set: the store's id dispatch and every write
+    /// path consult this instead of re-spelling `Tree | ChunkedBlob`.
+    #[must_use]
+    pub fn is_merkle(self) -> bool {
+        matches!(self, Self::Tree | Self::ChunkedBlob)
+    }
+
     /// Spec-defined short name, usable in logs / CLI output.
     #[must_use]
     pub fn name(self) -> &'static str {
@@ -441,6 +451,111 @@ impl Object {
             Self::Tag(_) => ObjectType::Tag,
         }
     }
+
+    /// This object's content-address (storage id).
+    ///
+    /// Merkelized types are addressed by their Binary Merkle Tree root
+    /// (`crate::merkle`): a `Tree` by [`crate::merkle::compute_tree_id`] and
+    /// a `ChunkedBlob` by [`crate::merkle::compute_chunked_id`]. Every other
+    /// type is addressed by `BLAKE3` of its canonical serialized bytes — the
+    /// historical scheme. This is the single dispatch point the store, pack
+    /// reader, and worktree all route through, so the two addressing schemes
+    /// can never diverge across call sites.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`MkitError`] from serializing a non-merkelized object
+    /// (merkelized ids are computed directly from the in-memory struct and
+    /// never serialize, so they cannot fail).
+    pub fn id(&self) -> Result<Hash, MkitError> {
+        match merkle_id(self) {
+            Some(h) => Ok(h),
+            None => Ok(crate::hash::hash(&crate::serialize::serialize(self)?)),
+        }
+    }
+}
+
+/// The BMT-root id of a merkelized object ([`Tree`] / [`ChunkedBlob`]), or
+/// `None` for a byte-hashed type. The single source of truth for "is this type
+/// content-addressed by its merkle root?": both [`Object::id`] and
+/// [`id_from_object`] dispatch through it, so the in-memory path and the
+/// bytes path can never disagree on a type (add a merkelized variant here once
+/// and every id path follows).
+#[must_use]
+fn merkle_id(obj: &Object) -> Option<Hash> {
+    match obj {
+        Object::Tree(t) => Some(crate::merkle::compute_tree_id(t)),
+        Object::ChunkedBlob(cb) => Some(crate::merkle::compute_chunked_id(cb)),
+        _ => None,
+    }
+}
+
+/// Content id of an **already-decoded** object whose canonical encoding is
+/// `bytes`. A merkelized type ([`Tree`] / [`ChunkedBlob`]) is addressed by its
+/// BMT root, computed from the decoded struct; every other type is `BLAKE3` of
+/// `bytes`, reusing the caller's buffer (no re-serialize — `bytes` may be up
+/// to ~1 GiB).
+///
+/// This is the bytes-reusing twin of [`Object::id`]; both share the same
+/// `merkle_id` dispatch, so a merkelized type keys identically whether
+/// addressed from the decoded struct (native store) or from bytes the caller
+/// already holds (the pack reader, the `mkit-wasm` encoder).
+///
+/// # Precondition
+/// For a byte-hashed (non-merkle) type, `bytes` MUST be `obj`'s canonical
+/// serialization: the id is `BLAKE3(bytes)`, taken on trust with no re-encode.
+/// Passing a buffer that is not `obj`'s encoding silently mis-addresses it.
+/// Merkle types ignore `bytes` entirely (addressed from the struct).
+#[must_use]
+pub fn id_from_object(obj: &Object, bytes: &[u8]) -> Hash {
+    merkle_id(obj).unwrap_or_else(|| crate::hash::hash(bytes))
+}
+
+/// [`id_from_object`] for an object supplied only as its canonical **bytes**.
+/// Used by the store and batch writer, whose input is bytes they are about to
+/// persist (write) or have already persisted (read-verify).
+///
+/// Only the merkelized types are decoded — to find their BMT root; every
+/// other type (incl. up-to-~1 GiB blobs) is hashed straight from `bytes`
+/// without a decode. A merkle-typed buffer that fails to decode is byte-hashed
+/// like any other: real writers never emit one, and on read-verify the
+/// resulting id mismatch surfaces as `HashMismatch` rather than being masked.
+#[must_use]
+pub(crate) fn object_id_from_bytes(bytes: &[u8]) -> Hash {
+    let is_merkle = bytes
+        .first()
+        .and_then(|b| ObjectType::from_u8(*b).ok())
+        .is_some_and(ObjectType::is_merkle);
+    if is_merkle && let Ok(obj) = crate::serialize::deserialize(bytes) {
+        return id_from_object(&obj, bytes);
+    }
+    crate::hash::hash(bytes)
+}
+
+/// [`object_id_from_bytes`] for an object supplied as `parts` whose
+/// concatenation is the canonical bytes — the shape every part-wise sink
+/// (`EphemeralSink`, `WriteBatch`) receives.
+///
+/// A merkelized type needs its contiguous bytes to decode the BMT root, so
+/// it is buffered once and dispatched. A byte-hashed type (a `Blob`/chunk —
+/// the bulk of all bytes, up to ~1 GiB) is hashed **streaming**, never
+/// materialising the concatenation. This keeps the "buffer or stream"
+/// decision in one place instead of in every sink.
+#[must_use]
+pub(crate) fn object_id_from_parts(parts: &[&[u8]]) -> Hash {
+    let merkle = parts
+        .first()
+        .and_then(|p| p.first())
+        .and_then(|b| ObjectType::from_u8(*b).ok())
+        .is_some_and(ObjectType::is_merkle);
+    if merkle {
+        return object_id_from_bytes(&parts.concat());
+    }
+    let mut hasher = crate::hash::Hasher::new();
+    for p in parts {
+        hasher.update(p);
+    }
+    hasher.finalize()
 }
 
 /// All decode / validation errors raised by the serialize module, plus
@@ -557,6 +672,40 @@ mod tests {
         assert_eq!(ObjectType::ChunkedBlob.name(), "chunked_blob");
         assert_eq!(ObjectType::Delta.name(), "delta");
         assert_eq!(ObjectType::Tag.name(), "tag");
+    }
+
+    /// The two id paths — `Object::id` (from the in-memory struct) and
+    /// `id_from_object` (reusing the object's canonical bytes) — must agree for
+    /// every variant. Both dispatch through `merkle_id`, so this guards against
+    /// anyone re-introducing a second, divergent dispatch table.
+    #[test]
+    fn object_id_and_id_from_object_agree_for_every_variant() {
+        let samples = [
+            Object::Blob(Blob {
+                data: vec![1, 2, 3, 4],
+            }),
+            Object::Tree(Tree { entries: vec![] }),
+            Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"a".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: [9u8; 32],
+                }],
+            }),
+            Object::ChunkedBlob(ChunkedBlob {
+                total_size: 4,
+                chunk_size: 0,
+                chunks: vec![[7u8; 32], [8u8; 32]],
+            }),
+        ];
+        for obj in &samples {
+            let bytes = crate::serialize::serialize(obj).unwrap();
+            assert_eq!(
+                obj.id().unwrap(),
+                id_from_object(obj, &bytes),
+                "id paths diverged for {obj}"
+            );
+        }
     }
 
     #[test]
