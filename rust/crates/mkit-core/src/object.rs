@@ -484,8 +484,8 @@ impl Object {
 ///
 /// This is the single content-addressing dispatch. Callers that already hold
 /// a decoded object and its canonical bytes (the pack reader, the `mkit-wasm`
-/// encoder) use it directly; the bytes-only twins ([`object_id_from_bytes`] /
-/// [`object_id_from_parts`]) decode just the merkle types and delegate here,
+/// encoder) use it directly; the bytes-only twins `object_id_from_bytes` /
+/// `object_id_from_parts` decode just the merkle types and delegate here,
 /// so every path — native store and wasm alike — keys an object identically.
 #[must_use]
 pub fn id_from_object(obj: &Object, bytes: &[u8]) -> Hash {
