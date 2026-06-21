@@ -165,8 +165,10 @@ For compatibility with mkit's current external-signer host path, it also
 accepts `KEY_FORM_RAW_BYTES` when `key_ref` is empty and `--credential-id`
 supplies the credential handle on argv.
 
-Exit codes: 0 success, 1 generic error, 2 algorithm mismatch (same as
-`mkit-sign-se`). Requires a physical authenticator for `enroll` /
+Exit codes: 0 on success, non-zero on a setup-phase failure (no device,
+bad args, store IO error). Per-request errors such as an algorithm
+mismatch are reported in-band as protobuf `Error` frames on stdout, not
+via the process exit code. Requires a physical authenticator for `enroll` /
 `sign`; `list-credentials` runs fine without one. The
 `tests/e2e.sh` probe detects an attached authenticator by USB-vendor
 match and exits 0 with a skip message when none is present.

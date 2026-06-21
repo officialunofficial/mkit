@@ -9,8 +9,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
     KeyDeleter, KeyExporter, KeyGenerator, KeyImporter, KeyLabel, KeyLister, KeyMetadata,
-    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner,
-    types::static_label, validate_label,
+    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner, validate_label,
 };
 
 /// User-scoped systemd encrypted credentials backend.
@@ -35,10 +34,10 @@ impl SystemdCredsKeystore {
 
     fn path_for(&self, label: &str, algorithm: Algorithm) -> Result<PathBuf> {
         validate_label(label)?;
-        Ok(self
-            .root
-            .join(algorithm.as_str())
-            .join(format!("{}.cred", hex_lower(label.as_bytes()))))
+        Ok(self.root.join(algorithm.as_str()).join(format!(
+            "{}.cred",
+            crate::types::hex_lower(label.as_bytes())
+        )))
     }
 
     fn credential_name(label: &str, algorithm: Algorithm) -> Result<String> {
@@ -82,7 +81,19 @@ impl SystemdCredsKeystore {
             &Self::credential_name(label, algorithm)?,
         ) {
             Ok(plaintext) => plaintext,
-            Err(CredentialDecryptError::Status(_)) => return Ok(None),
+            // A present-but-undecryptable credential is skipped from the
+            // listing (fail-soft so one bad file can't break `list`), but we
+            // warn so users can tell this apart from "no such key" — e.g. a
+            // `.cred` bound to a different host/TPM key state under
+            // `--with-key=auto` will fail to decrypt on this host.
+            Err(CredentialDecryptError::Status(_)) => {
+                eprintln!(
+                    "warning: skipping systemd-creds key `{label}` ({algorithm}): \
+                     credential exists at {} but could not be decrypted on this host",
+                    path.display()
+                );
+                return Ok(None);
+            }
             Err(error) => return Err(error.into_error()),
         };
         match Self::secret_from_plaintext(algorithm, plaintext) {
@@ -185,8 +196,9 @@ impl KeyGenerator for SystemdCredsKeystore {
         attrs: KeyAttrs,
         options: GenerateOptions,
     ) -> Result<Box<dyn KeySigner>> {
-        validate_attrs(&attrs)?;
-        let mut secret = random_valid_secret(algorithm)?;
+        crate::native_list::validate_attrs("systemd-creds", &attrs)?;
+        let mut secret =
+            crate::native_list::random_valid_secret(BackendKind::SystemdCreds, algorithm)?;
         let wrapped = SecretKey::new(algorithm, secret);
         secret.zeroize();
         self.import(
@@ -208,7 +220,7 @@ impl KeyImporter for SystemdCredsKeystore {
         attrs: KeyAttrs,
         options: ImportOptions,
     ) -> Result<Box<dyn KeySigner>> {
-        validate_attrs(&attrs)?;
+        crate::native_list::validate_attrs("systemd-creds", &attrs)?;
         let signer = SoftwareSigner::new(
             label.clone(),
             BackendKind::SystemdCreds,
@@ -444,25 +456,6 @@ impl SystemdCredsKeystore {
     }
 }
 
-fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
-    if !attrs.extractable {
-        return Err(Error::UnsupportedAttributes(
-            "systemd-creds backend does not support non-extractable keys".into(),
-        ));
-    }
-    if attrs.require_user_presence {
-        return Err(Error::UnsupportedAttributes(
-            "systemd-creds backend does not support user presence".into(),
-        ));
-    }
-    if attrs.device_bound {
-        return Err(Error::UnsupportedAttributes(
-            "systemd-creds backend does not expose device-bound key requests".into(),
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(unix)]
 fn ensure_owned_by_euid(path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt as _;
@@ -631,7 +624,7 @@ fn temp_credential_path(path: &Path) -> Result<PathBuf> {
     Ok(parent.join(format!(
         ".{}.{}.tmp",
         filename.to_string_lossy(),
-        hex_lower(&suffix)
+        crate::types::hex_lower(&suffix)
     )))
 }
 
@@ -685,7 +678,10 @@ fn systemd_creds_roundtrip_available_with_command(command: &str) -> bool {
     if getrandom::fill(&mut suffix).is_err() {
         return false;
     }
-    let dir = std::env::temp_dir().join(format!("mkit-systemd-creds-{}", hex_lower(&suffix)));
+    let dir = std::env::temp_dir().join(format!(
+        "mkit-systemd-creds-{}",
+        crate::types::hex_lower(&suffix)
+    ));
     let path = dir.join("probe.cred");
     let name = "mkit.runtime-probe";
     let secret = [0x5a; 32];
@@ -719,27 +715,6 @@ fn systemd_creds_status_error(operation: &str, output: &std::process::Output) ->
     }
 }
 
-fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
-    let mut secret = [0u8; 32];
-    for _ in 0..8 {
-        getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
-        if SoftwareSigner::new(
-            static_label("validation"),
-            BackendKind::SystemdCreds,
-            algorithm,
-            secret,
-        )
-        .is_ok()
-        {
-            return Ok(secret);
-        }
-    }
-    zeroize::Zeroize::zeroize(&mut secret);
-    Err(Error::Internal(
-        "rng failed to produce a valid scalar".into(),
-    ))
-}
-
 fn default_storage_root() -> Result<PathBuf> {
     if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
         return Ok(PathBuf::from(data_home).join("mkit").join("systemd-creds"));
@@ -754,16 +729,6 @@ fn default_storage_root() -> Result<PathBuf> {
         .join("share")
         .join("mkit")
         .join("systemd-creds"))
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 fn hex_decode(input: &str) -> Result<Vec<u8>> {

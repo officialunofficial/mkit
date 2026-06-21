@@ -138,7 +138,7 @@ impl PackWriter {
     /// `delta_stream` MUST be a valid SPEC-DELTA stream — we don't
     /// re-validate here (the writer is trusted), but the reader will.
     pub fn push_delta(&mut self, base_hash: &Hash, delta_stream: &[u8]) -> Result<(), PackError> {
-        let payload_len = TRAILER_LEN + delta_stream.len();
+        let payload_len = hash::HASH_LEN + delta_stream.len();
         self.check_caps_for(payload_len)?;
         let mut payload = Vec::with_capacity(payload_len);
         payload.extend_from_slice(base_hash);
@@ -388,12 +388,12 @@ impl PackReader {
                 }
                 0x02 => {
                     // delta — payload is [32B base_hash][stream].
-                    if payload.len() < TRAILER_LEN {
+                    if payload.len() < hash::HASH_LEN {
                         return Err(PackError::DeltaEntryTruncated);
                     }
-                    let mut base_hash = [0u8; 32];
-                    base_hash.copy_from_slice(&payload[..TRAILER_LEN]);
-                    let stream = &payload[TRAILER_LEN..];
+                    let mut base_hash = [0u8; hash::HASH_LEN];
+                    base_hash.copy_from_slice(&payload[..hash::HASH_LEN]);
+                    let stream = &payload[hash::HASH_LEN..];
                     // Resolve base: in-pack first, then on-disk.
                     let base_bytes: std::borrow::Cow<'_, [u8]> =
                         if let Some(b) = in_pack.get(&base_hash) {

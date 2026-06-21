@@ -512,7 +512,6 @@ fn map_status(status: StatusCode, on_not_found: TransportError) -> TransportErro
         401 | 403 => TransportError::AccessDenied,
         404 => on_not_found,
         409 | 412 => TransportError::RefConflict,
-        s if (500..600).contains(&s) => TransportError::ServerError { status: s },
         s => TransportError::ServerError { status: s },
     }
 }
@@ -658,7 +657,6 @@ impl Transport for HttpTransport {
             200..=299 => Ok(true),
             404 => Ok(false),
             401 | 403 => Err(TransportError::AccessDenied),
-            s if (500..600).contains(&s) => Err(TransportError::ServerError { status: s }),
             s => Err(TransportError::ServerError { status: s }),
         }
     }

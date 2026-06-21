@@ -53,14 +53,8 @@ pub struct MemGitSource(pub HashMap<Sha1Id, (GitObjKind, Vec<u8>)>);
 impl MemGitSource {
     /// Insert a git object body, computing its real sha1 id.
     pub fn put(&mut self, kind: GitObjKind, body: Vec<u8>) -> Sha1Id {
-        let gtype = match kind {
-            GitObjKind::Blob => crate::gitobj::GitType::Blob,
-            GitObjKind::Tree => crate::gitobj::GitType::Tree,
-            GitObjKind::Commit => crate::gitobj::GitType::Commit,
-            GitObjKind::Tag => crate::gitobj::GitType::Tag,
-        };
         let id = crate::gitobj::GitObject {
-            gtype,
+            gtype: kind.into(),
             body: body.clone(),
         }
         .id();
@@ -680,21 +674,14 @@ fn ser(id: &Sha1Id, obj: &Object) -> Result<Vec<u8>, BridgeError> {
 /// Rebuild the full `"<type> <len>\0" + body` git object bytes for
 /// retention + `content_digest` (SPEC-GIT-IMPORT §5: "raw git commit
 /// bytes" are the framed object bytes, matching `git cat-file`'s
-/// hashed form).
+/// hashed form). Frames via the canonical [`GitObject::raw`] so the
+/// layout-critical header exists in exactly one place.
 fn raw_git_bytes(kind: GitObjKind, body: &[u8]) -> Vec<u8> {
-    let name = match kind {
-        GitObjKind::Blob => "blob",
-        GitObjKind::Tree => "tree",
-        GitObjKind::Commit => "commit",
-        GitObjKind::Tag => "tag",
-    };
-    let mut out = Vec::with_capacity(name.len() + 12 + body.len());
-    out.extend_from_slice(name.as_bytes());
-    out.push(b' ');
-    out.extend_from_slice(body.len().to_string().as_bytes());
-    out.push(0);
-    out.extend_from_slice(body);
-    out
+    crate::gitobj::GitObject {
+        gtype: kind.into(),
+        body: body.to_vec(),
+    }
+    .raw()
 }
 
 /// A `Sha1Id` widened into the 32-byte `Hash` slot Refusal uses for

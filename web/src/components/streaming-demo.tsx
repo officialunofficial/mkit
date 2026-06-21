@@ -4,7 +4,7 @@ import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { mulberry32 } from '../lib/grid-svg'
 import { ChunkStrip, type StripChunk } from './chunk-strip'
 import { ObjectRow } from './result-panel'
-import { useMkit } from './use-mkit'
+import { formatBytes, useMkit } from './use-mkit'
 
 // `source` lets the auto-edit loop pick the right mutator: defaults regenerate via canvas+PPM so a single grid-cell
 // edit produces a single localised byte-range change, uploads get random byte flips.
@@ -634,15 +634,9 @@ function findChunkAtOffset(chunks: StripChunk[], offset: number): number | null 
   return chunks.length > 0 ? chunks.length - 1 : null
 }
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1024 / 1024).toFixed(2)} MB`
-}
-
-// Build a 768×768 PPM (NetPBM P6) from a deterministic mulberry32 noise grid (256×256 cells × 3 px each), with
+// Build a 512×512 PPM (NetPBM P6) from a deterministic mulberry32 noise grid (256×256 cells × 2 px each), with
 // optional hue overrides on specific cells. PPM rather than PNG so a single-cell edit produces a contiguous
-// byte-range change (~9 bytes per cell at 3px×3px×3bytes) instead of zlib-cascading the change across the entire
+// byte-range change (~12 bytes per cell at 2px×2px×3bytes) instead of zlib-cascading the change across the entire
 // compressed stream — which is the whole point of demonstrating content-defined chunking. PPM picked over BMP for
 // the smaller, format-agnostic header (`P6 width height 255` in ASCII) and natural RGB byte order.
 type CellOverride = { x: number; y: number; hue: number }
@@ -911,7 +905,7 @@ function detectHeaderSize(bytes: Uint8Array): number {
 
 // Encode RGBA pixels to a NetPBM P6 (binary PPM) blob. Header is three ASCII lines — magic `P6`, dimensions, and
 // max-component value 255 — followed by raw RGB triplets in scanline order. No row padding, no endian-flipped bytes,
-// no quirks. ~16-byte header for our 768×768 grid.
+// no quirks. ~15-byte header for our 512×512 grid.
 function encodePpm(rgba: Uint8ClampedArray, width: number, height: number): Uint8Array {
   const headerStr = `P6\n${width} ${height}\n255\n`
   const headerBytes = new TextEncoder().encode(headerStr)

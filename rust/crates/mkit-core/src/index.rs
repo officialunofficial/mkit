@@ -5,16 +5,17 @@
 //! ```text
 //! [4B magic "MKIX"][1B version=0x02][4B LE entry_count][entries...]
 //! entry := [1B status][32B object_hash][8B LE mtime_ns][8B LE size]
-//!          [2B LE path_len][path_len UTF-8 bytes]
+//!          [8B LE ino][8B LE ctime_ns][2B LE path_len][path_len UTF-8 bytes]
 //! ```
 //!
-//! `mtime_ns`/`size` are the stat cache (SPEC-INDEX §"stat cache"):
-//! when a worktree file's live `stat` matches them, `add`/`status` may
-//! reuse `object_hash` without re-reading or re-hashing the content —
-//! O(stat) instead of O(content) for unchanged files. `mtime_ns == 0`
-//! is the sentinel for "no cache, always re-hash"; v1 streams (version
-//! `0x01`, 35-byte entries without the two fields) still parse, with
-//! the cache zero-filled. Writers smudge (zero) the cache of any entry
+//! `mtime_ns`/`size`/`ino`/`ctime_ns` are the stat cache (SPEC-INDEX
+//! §"stat cache"): when a worktree file's live `stat` matches them,
+//! `add`/`status` may reuse `object_hash` without re-reading or
+//! re-hashing the content — O(stat) instead of O(content) for unchanged
+//! files. `mtime_ns == 0` is the sentinel for "no cache, always
+//! re-hash"; v1 streams (version `0x01`, 35-byte entries without the
+//! four stat-cache fields) still parse, with the cache zero-filled.
+//! Writers smudge (zero) the cache of any entry
 //! whose mtime falls within the racy window of the index write itself
 //! — see [`write_index`].
 //!
@@ -208,7 +209,8 @@ pub enum IndexError {
     /// Magic bytes were not `"MKIX"`.
     #[error("index file has wrong magic (expected MKIX)")]
     BadMagic,
-    /// `version` byte was not `0x01`.
+    /// `version` byte was neither the current `FORMAT_VERSION` (`0x02`)
+    /// nor the legacy read-only `FORMAT_VERSION_V1` (`0x01`).
     #[error("unsupported index version: {0:#x}")]
     UnsupportedVersion(u8),
     /// Status byte was outside the documented {0x00..=0x04} range.
@@ -278,7 +280,7 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
     // loop would walk `count` iterations before failing (v1 minimum is
     // 35 bytes, v2 is 67) — trivially
     // triggered with a 9-byte buffer declaring `count = u32::MAX`.
-    // Mirrors the pattern used in `serialize.rs`. See SEC finding G11.
+    // Mirrors the same up-front bound used in `serialize.rs`.
     if (count as u64).saturating_mul(min_entry_len as u64) > data.len() as u64 {
         return Err(IndexError::Corrupt);
     }

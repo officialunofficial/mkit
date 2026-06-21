@@ -36,6 +36,19 @@ const MAX_CHUNKS: u32 = 1_000_000;
 /// Returns [`MkitError::OversizePayload`] if any length-prefixed field
 /// exceeds the wire-format `u32` cap, and [`MkitError::InvalidIdentity`]
 /// if the object carries a structurally invalid [`Identity`].
+///
+/// # Caller precondition: ordering
+///
+/// The writer does not reorder or validate entry/source ordering — it
+/// encodes them verbatim — but [`deserialize`] enforces a strict
+/// ascending order (`Tree` entries by `name`, `Remix` sources by
+/// `(upstream_id, commit_hash)`). An `Object` built by hand with
+/// out-of-order `Tree::entries` or `Remix::sources` will therefore
+/// serialize cleanly yet fail to round-trip (`deserialize` rejects it
+/// with `InvalidEntryOrder` / `InvalidSourceOrder`). Callers that bypass
+/// the ordered-building helpers MUST ensure [`Tree::is_sorted`] /
+/// [`Remix::sources_sorted`] hold before serializing — otherwise the
+/// resulting (possibly signed) bytes are undecodable.
 pub fn serialize(obj: &Object) -> Result<Vec<u8>, MkitError> {
     let mut buf = Vec::with_capacity(PROLOGUE_LEN + estimated_body_len(obj));
     write_prologue(&mut buf, obj.object_type());

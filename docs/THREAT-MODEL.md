@@ -443,7 +443,7 @@ matching update here.
   deserializer, and the encrypted software key record parser (`docs/FUZZ.md`).
 - Integration tests assert that a hostile `<repo>/.mkit/config`
   cannot set any user-scoped key (warning + ignored). Per-key
-  coverage lives in `crates/mkit-cli/tests/repo_config_forbidden_keys.rs`,
+  coverage lives in `rust/crates/mkit-cli/tests/repo_config_forbidden_keys.rs`,
   and the in-process meta-test
   `every_forbidden_key_is_actually_dropped_from_repo_scope` iterates
   the entire `REPO_FORBIDDEN_KEYS` list against a sentinel value.

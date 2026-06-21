@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit};
+use mkit_benches::{Sample, Unit, time_one};
 use mkit_core::store::ObjectStore;
 
 const SIZES: &[(usize, usize, &str)] = &[
@@ -40,7 +40,7 @@ fn bench_pack(c: &mut Criterion) {
         c.bench_function(&format!("pack/{axis}/mkit"), |b| {
             b.iter(|| pack_via_mkit(&store, &blobs));
         });
-        let t = time_one(|| pack_via_mkit(&store, &blobs));
+        let t = time_one(1, 5, || pack_via_mkit(&store, &blobs));
         samples.push(Sample {
             category: "pack-create".into(),
             axis: axis.into(),
@@ -56,7 +56,7 @@ fn bench_pack(c: &mut Criterion) {
             c.bench_function(&format!("pack/{axis}/git2"), |b| {
                 b.iter(|| pack_via_git2(&repo, &blobs));
             });
-            let t = time_one(|| pack_via_git2(&repo, &blobs));
+            let t = time_one(1, 5, || pack_via_git2(&repo, &blobs));
             samples.push(Sample {
                 category: "pack-create".into(),
                 axis: axis.into(),
@@ -167,16 +167,6 @@ fn bench_git_pack_objects(blobs: &[Vec<u8>]) -> f64 {
         total += t0.elapsed().as_secs_f64();
     }
     total / f64::from(n)
-}
-
-fn time_one<F: FnMut()>(mut f: F) -> f64 {
-    f();
-    let n: u32 = 5;
-    let t0 = Instant::now();
-    for _ in 0..n {
-        f();
-    }
-    t0.elapsed().as_secs_f64() / f64::from(n)
 }
 
 criterion_group!(benches, bench_pack);

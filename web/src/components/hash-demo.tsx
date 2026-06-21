@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from 'react'
 import { mulberry32, renderGridSvg } from '../lib/grid-svg'
 import { MerkleTree, type MerkleNode } from './merkle-tree'
 import { INPUT_CLASSES, ObjectRow, Section } from './result-panel'
-import { DEMO_SEED, TEXT_ENCODER, sanitizeTreeName, useMkit } from './use-mkit'
+import { DEMO_SEED, TEXT_ENCODER, formatBytes, sanitizeTreeName, useMkit } from './use-mkit'
 
 // Fixed seed so the default grid is identical on every render — no hydration mismatch, reliable baseline hash.
 const DEFAULT_SVG = renderGridSvg(mulberry32(0xc0de_cafe))
@@ -206,12 +206,6 @@ export function HashDemo() {
       </div>
     </div>
   )
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1024 / 1024).toFixed(2)} MB`
 }
 
 // Chunked base64 encoding — `btoa(String.fromCharCode(...bytes))` blows

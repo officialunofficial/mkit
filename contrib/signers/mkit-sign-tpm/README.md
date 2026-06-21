@@ -280,8 +280,11 @@ $ cargo test -p mkit-sign-tpm --features tpm2 -- --ignored
 $ ./tests/e2e.sh
 ```
 
-The `build.rs` script auto-detects `pkg-config --exists tss2-esys` and
-`/dev/tpm*`, setting the `tpm_available` cfg flag. TPM-dependent Rust
+The `build.rs` script detects only the TPM device files `/dev/tpmrm0`
+and `/dev/tpm0`, setting the `tpm_available` cfg flag. (Earlier revisions
+also accepted a `pkg-config --exists tss2-esys` hit, but that produced
+false positives on hosts with the library installed yet no TPM, so the
+device-file check is now the sole signal.) TPM-dependent Rust
 tests are tagged `#[cfg_attr(not(tpm_available), ignore)]` so a macOS
 or bare-CI test run leaves them in the "ignored" bucket rather than
 failing.

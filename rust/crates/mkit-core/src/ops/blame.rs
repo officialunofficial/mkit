@@ -22,8 +22,7 @@ use crate::store::ObjectStore;
 /// Hard cap on the per-side line count fed to the LCS matcher. The DP
 /// table is O(m*n) u32 entries: at 100 000 lines × 100 000 lines this
 /// is ≈ 40 GiB, so we refuse anything past this limit rather than let
-/// an attacker-supplied blob drive the decoder into swap/OOM. See SEC
-/// finding G13.
+/// an attacker-supplied blob drive the decoder into swap/OOM.
 pub const BLAME_MAX_LINES: usize = 100_000;
 
 /// Per-line blame attribution.
@@ -59,7 +58,7 @@ pub enum BlameError {
     FileNotFound(String),
     /// Either side of the LCS input exceeded [`BLAME_MAX_LINES`].
     /// Returned rather than allocating a DP table proportional to the
-    /// attacker-supplied line counts (SEC finding G13).
+    /// attacker-supplied line counts.
     #[error("file has too many lines for blame ({lines} > {max})", max = BLAME_MAX_LINES)]
     FileTooLarge { lines: usize },
     #[error(transparent)]
@@ -68,8 +67,8 @@ pub enum BlameError {
     Store(#[from] crate::store::StoreError),
 }
 
-/// Result alias.
-pub type BlameResult2<T> = Result<T, BlameError>;
+/// Fallible-result alias for this module's operations.
+pub type BlameOutcome<T> = Result<T, BlameError>;
 
 /// Blame `file_path` at `head_hash`. Walks first-parent ancestry,
 /// stops when the file disappears, and uses LCS to map lines forward.
@@ -88,7 +87,7 @@ pub fn blame_file(
     store: &ObjectStore,
     head_hash: Hash,
     file_path: &str,
-) -> BlameResult2<BlameResult> {
+) -> BlameOutcome<BlameResult> {
     #[derive(Clone)]
     struct HistoryEntry {
         commit_hash: Hash,
@@ -196,7 +195,7 @@ pub fn find_blob_in_tree(
     store: &ObjectStore,
     tree_hash: Hash,
     path: &str,
-) -> BlameResult2<Option<Hash>> {
+) -> BlameOutcome<Option<Hash>> {
     let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
     if components.is_empty() {
         return Ok(None);
@@ -238,7 +237,7 @@ pub fn find_blob_in_tree(
 
 /// Load a blob (or chunked-blob) and split into lines (no trailing
 /// newline preserved as a synthetic empty line).
-fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameResult2<Vec<Vec<u8>>> {
+fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec<u8>>> {
     let obj = store.read_object(&blob_hash)?;
     let data: Vec<u8> = match obj {
         Object::Blob(b) => b.data,
@@ -269,11 +268,11 @@ fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
-/// Size-checked wrapper around [`match_lines`]. Returns
+/// Size-checked LCS line matcher. Returns
 /// [`BlameError::FileTooLarge`] if either side exceeds
 /// [`BLAME_MAX_LINES`] rather than allocating an O(m*n) DP table. This
-/// is the entry point used by [`blame_file`]; direct callers of
-/// `match_lines` below are opt-in unbounded.
+/// is the only public entry point; the unbounded inner matcher is
+/// private so external callers cannot trip the O(m*n) allocation.
 ///
 /// # Errors
 /// - [`BlameError::FileTooLarge`] if `old_lines.len()` or
@@ -281,7 +280,7 @@ fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
 pub fn match_lines_checked<T: AsRef<[u8]>>(
     old_lines: &[T],
     new_lines: &[T],
-) -> BlameResult2<Vec<Option<usize>>> {
+) -> BlameOutcome<Vec<Option<usize>>> {
     if old_lines.len() > BLAME_MAX_LINES {
         return Err(BlameError::FileTooLarge {
             lines: old_lines.len(),
@@ -298,11 +297,11 @@ pub fn match_lines_checked<T: AsRef<[u8]>>(
 /// LCS line matching. For each line in `new_lines`, returns the index
 /// in `old_lines` it corresponds to, or `None` for inserted/changed.
 ///
-/// NOTE: This function allocates an O(m*n) DP table. Callers dealing
-/// with attacker-controlled inputs MUST use [`match_lines_checked`]
-/// instead.
+/// NOTE: This function allocates an O(m*n) DP table with no size guard,
+/// so it is kept private; all callers go through the size-checked
+/// [`match_lines_checked`] wrapper.
 #[must_use]
-pub fn match_lines<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<usize>> {
+fn match_lines<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<usize>> {
     let m = old_lines.len();
     let n = new_lines.len();
     // dp is (m+1) x (n+1).

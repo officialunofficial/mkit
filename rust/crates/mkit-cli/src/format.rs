@@ -163,6 +163,52 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Default abbreviation length for the git-style ref-update summary
+/// lines (`<old7>..<new7>`). Matches `log --oneline`'s default; mkit ids
+/// stay BLAKE3 prefixes (the documented hash-length divergence).
+pub const SUMMARY_ABBREV: usize = 7;
+
+/// A single git-style ref-update summary line, as printed under the
+/// `To <url>` / `From <url>` header of a push or fetch. `old` is the
+/// previous value of the destination ref (None = the ref did not exist),
+/// `new` the value just written; `src -> dst` is the refspec mapping.
+///
+/// Shapes match git's `transport.c` for the single-ref case:
+/// - new ref:   ` * [new branch]      <src> -> <dst>`
+/// - forced:    ` + <old>...<new> <src> -> <dst> (forced update)`
+/// - fast-fwd:  `   <old>..<new>  <src> -> <dst>`
+///
+/// Object ids are mkit BLAKE3 prefixes rather than git SHA-1 (documented
+/// divergence); everything else is byte-shaped like git.
+#[must_use]
+pub fn ref_update_line(
+    old: Option<&Hash>,
+    new: &Hash,
+    src: &str,
+    dst: &str,
+    forced: bool,
+) -> String {
+    let n = short_hash(new, SUMMARY_ABBREV);
+    match old {
+        None => format!(" * [new branch]      {src} -> {dst}"),
+        Some(o) => {
+            let o = short_hash(o, SUMMARY_ABBREV);
+            if forced {
+                format!(" + {o}...{n} {src} -> {dst} (forced update)")
+            } else {
+                format!("   {o}..{n}  {src} -> {dst}")
+            }
+        }
+    }
+}
+
+/// The git-style rejected-ref summary line (non-fast-forward), printed
+/// alongside the actionable hint when a push is refused.
+#[must_use]
+pub fn ref_rejected_line(src: &str, dst: &str) -> String {
+    format!(" ! [rejected]        {src} -> {dst} (non-fast-forward)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +227,34 @@ mod tests {
         assert_eq!(short_hash(&h, 0).len(), 4);
         assert_eq!(short_hash(&h, 8).len(), 8);
         assert_eq!(short_hash(&h, 999).len(), 64);
+    }
+
+    #[test]
+    fn ref_update_line_shapes_match_git() {
+        let old = hash::hash(b"old");
+        let new = hash::hash(b"new");
+        let o7 = short_hash(&old, SUMMARY_ABBREV);
+        let n7 = short_hash(&new, SUMMARY_ABBREV);
+        // new branch (no old)
+        assert_eq!(
+            ref_update_line(None, &new, "main", "main", false),
+            " * [new branch]      main -> main"
+        );
+        // fast-forward: `   <old>..<new>  src -> dst`
+        assert_eq!(
+            ref_update_line(Some(&old), &new, "main", "main", false),
+            format!("   {o7}..{n7}  main -> main")
+        );
+        // forced: `+ <old>...<new> src -> dst (forced update)`
+        assert_eq!(
+            ref_update_line(Some(&old), &new, "main", "main", true),
+            format!(" + {o7}...{n7} main -> main (forced update)")
+        );
+        // rejected
+        assert_eq!(
+            ref_rejected_line("main", "main"),
+            " ! [rejected]        main -> main (non-fast-forward)"
+        );
     }
 
     #[test]

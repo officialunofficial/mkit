@@ -61,8 +61,9 @@ pub fn cache_path(repo_root: &Path, tree_hash: &Hash) -> PathBuf {
 ///
 /// # Errors
 ///
-/// Any underlying filesystem error — missing parent dirs are created
-/// best-effort, so the only failures are permissions / disk full.
+/// Returns [`CacheError::Io`] for any underlying filesystem error. The
+/// missing parent directory is created first; if that or the write
+/// fails (typically permissions / disk full) the error is propagated.
 pub fn store(
     repo_root: &Path,
     tree_hash: &Hash,

@@ -38,6 +38,10 @@ struct RemoteOpts {
     /// Output format for the show form. JSON object with `--format=json`.
     #[arg(long, value_enum, default_value = "default")]
     format: RemoteFormat,
+    /// Verbose: list each remote's URL and direction (`<name>\t<url>
+    /// (fetch)` / `(push)`), like `git remote -v`.
+    #[arg(short = 'v', long)]
+    verbose: bool,
     #[command(subcommand)]
     sub: Option<RemoteCmd>,
 }
@@ -65,6 +69,13 @@ enum RemoteCmd {
     /// rewrites any `branch.<b>.remote` upstream pointing at `<old>`.
     #[command(alias = "mv")]
     Rename { old: String, new: String },
+    /// Print a remote's URL (`mkit remote get-url <name>`; use `default`
+    /// for the flat default remote).
+    #[command(name = "get-url")]
+    GetUrl { name: String },
+    /// Change a remote's URL (`mkit remote set-url <name> <url>`).
+    #[command(name = "set-url")]
+    SetUrl { name: String, url: String },
 }
 
 #[must_use]
@@ -87,7 +98,11 @@ pub fn run(args: &[String]) -> u8 {
     // private `user.email`) is never materialized into the clone-traveling
     // `.mkit/config` by `config::write`.
     if opts.sub.is_none() {
-        return show(&layered.merged, matches!(opts.format, RemoteFormat::Json));
+        return show(
+            &layered.merged,
+            matches!(opts.format, RemoteFormat::Json),
+            opts.verbose,
+        );
     }
     let mut cfg = layered.repo;
 
@@ -203,6 +218,55 @@ pub fn run(args: &[String]) -> u8 {
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
             }
         }
+        Some(RemoteCmd::GetUrl { name }) => {
+            // Read-only — reflect the merged view (a default endpoint may be
+            // user-scoped).
+            let url = if name == config::DEFAULT_REMOTE_NAME {
+                (!layered.merged.remote_endpoint.is_empty())
+                    .then(|| layered.merged.remote_endpoint.clone())
+            } else {
+                layered.merged.remotes.get(&name).map(|e| e.url.clone())
+            };
+            match url {
+                Some(u) => {
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = writeln!(stdout, "{u}");
+                    exit::OK
+                }
+                None => emit_err(&format!("remote '{name}' not found"), exit::GENERAL_ERROR),
+            }
+        }
+        Some(RemoteCmd::SetUrl { name, url }) => {
+            if config::validate_value(&url).is_err() {
+                return emit_err(
+                    &format!("invalid remote URL '{url}': contains control characters"),
+                    exit::PROTOCOL_ERROR,
+                );
+            }
+            let Some(scheme) = validate_url(&url) else {
+                return emit_err(
+                    &format!("invalid remote URL '{url}': must start with 'mkit+<scheme>://'"),
+                    exit::PROTOCOL_ERROR,
+                );
+            };
+            if name == config::DEFAULT_REMOTE_NAME {
+                if cfg.remote_endpoint.is_empty() {
+                    return emit_err("no default remote configured", exit::GENERAL_ERROR);
+                }
+                cfg.remote_endpoint = url;
+                scheme.clone_into(&mut cfg.remote_type);
+            } else {
+                let Some(entry) = cfg.remotes.get_mut(&name) else {
+                    return emit_err(&format!("remote '{name}' not found"), exit::GENERAL_ERROR);
+                };
+                entry.url = url;
+                scheme.clone_into(&mut entry.remote_type);
+            }
+            match config::write(&cwd, &cfg) {
+                Ok(()) => exit::OK,
+                Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
+            }
+        }
     }
 }
 
@@ -309,7 +373,7 @@ fn validate_url(url: &str) -> Option<&'static str> {
     None
 }
 
-fn show(cfg: &Config, json: bool) -> u8 {
+fn show(cfg: &Config, json: bool, verbose: bool) -> u8 {
     let has_default = !cfg.remote_endpoint.is_empty();
     if !has_default && cfg.remotes.is_empty() {
         // Empty listing → empty stdout in both modes. The default
@@ -362,30 +426,30 @@ fn show(cfg: &Config, json: bool) -> u8 {
         }
         return exit::OK;
     }
-    // Default (human) form. Keep the legacy two-line output when only
-    // the flat default remote is configured.
-    if has_default && cfg.remotes.is_empty() {
-        let _ = writeln!(stdout, "remote_endpoint = {}", cfg.remote_endpoint);
-        let _ = writeln!(stdout, "remote_type = {}", cfg.remote_type);
+    // Default (human) form, git-shaped:
+    //   `mkit remote`      → one remote NAME per line
+    //   `mkit remote -v`   → `<name>\t<url> (fetch)` and `(push)` per remote
+    // The flat default remote shows under the reserved name `default`.
+    if verbose {
+        if has_default {
+            let url = &cfg.remote_endpoint;
+            let name = config::DEFAULT_REMOTE_NAME;
+            let _ = writeln!(stdout, "{name}\t{url} (fetch)");
+            let _ = writeln!(stdout, "{name}\t{url} (push)");
+        }
+        for (name, entry) in &cfg.remotes {
+            let _ = writeln!(stdout, "{name}\t{} (fetch)", entry.url);
+            let _ = writeln!(stdout, "{name}\t{} (push)", entry.url);
+        }
         return exit::OK;
     }
     if has_default {
-        let _ = writeln!(
-            stdout,
-            "{}\t{} ({})",
-            config::DEFAULT_REMOTE_NAME,
-            cfg.remote_endpoint,
-            cfg.remote_type
-        );
+        let _ = writeln!(stdout, "{}", config::DEFAULT_REMOTE_NAME);
     }
-    for (name, entry) in &cfg.remotes {
-        let _ = writeln!(stdout, "{name}\t{} ({})", entry.url, entry.remote_type);
+    for name in cfg.remotes.keys() {
+        let _ = writeln!(stdout, "{name}");
     }
     exit::OK
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;

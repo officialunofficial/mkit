@@ -17,10 +17,11 @@ workspace = true
 [features]
 default = []
 attest = ["dep:mkit-attest"]
-# When `mkit-attest/bls-threshold` is also on (e.g. `--all-features`),
-# keystore needs to handle the BLS Algorithm variant in its conversion
-# impls. Phase 1 only handles its presence as a typed pass-through —
-# the actual BLS keystore backend is Phase 2 of issue #160.
+# Enables encrypted-at-rest storage of BLS12-381 threshold signing shares
+# via the dedicated `SoftwareKeystore` BLS API (`store_bls_share`,
+# `load_bls_share`, `list_bls_shares`, etc.). Also makes the keystore's
+# `Algorithm`/type conversions aware of the BLS variant. Requires the
+# `attest` feature for the BLS share codec and crypto.
 bls-threshold = ["attest", "mkit-attest/bls-threshold"]
 backend-linux-secret-service = ["linux-secret-service"]
 backend-macos-keychain = ["macos-keychain"]

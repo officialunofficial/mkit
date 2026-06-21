@@ -61,10 +61,16 @@ fn named_remote_add_lists_in_default_and_json() {
     let add = run_in(td.path(), &["remote", "add", "origin", &url]);
     assert!(add.status.success(), "remote add origin failed: {add:?}");
 
+    // Bare `remote` lists NAMES only (git-shaped); the URL is under `-v`.
     let out = run_in(td.path(), &["remote"]);
     assert!(out.status.success());
+    let names = String::from_utf8(out.stdout).unwrap();
+    assert!(names.contains("origin"), "default listing: {names}");
+
+    let out = run_in(td.path(), &["remote", "-v"]);
+    assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("origin"), "default listing: {stdout}");
+    assert!(stdout.contains("origin"), "verbose listing: {stdout}");
     assert!(stdout.contains(&url));
 
     let out = run_in(td.path(), &["remote", "--format=json"]);

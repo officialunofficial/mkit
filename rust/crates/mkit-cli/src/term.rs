@@ -29,6 +29,40 @@ fn use_color(is_tty: bool) -> bool {
     is_tty
 }
 
+/// A `--color=<when>` choice, mirroring git's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorChoice {
+    /// Always colorize, even when piped.
+    Always,
+    /// Colorize only on a tty (respecting `NO_COLOR`/`CLICOLOR_FORCE`).
+    Auto,
+    /// Never colorize.
+    Never,
+}
+
+impl ColorChoice {
+    /// Parse a `--color=<when>` value; `None`/`""`/`auto` → `Auto`.
+    #[must_use]
+    pub fn parse(s: Option<&str>) -> Option<Self> {
+        match s {
+            None | Some("" | "auto") => Some(Self::Auto),
+            Some("always") => Some(Self::Always),
+            Some("never") => Some(Self::Never),
+            Some(_) => None,
+        }
+    }
+
+    /// Resolve to an on/off decision for the given tty-ness.
+    #[must_use]
+    pub fn resolve(self, is_tty: bool) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => use_color(is_tty),
+        }
+    }
+}
+
 /// Convenience getenv — returns `None` for both unset and empty.
 #[must_use]
 pub fn getenv_nonempty(key: &str) -> Option<String> {

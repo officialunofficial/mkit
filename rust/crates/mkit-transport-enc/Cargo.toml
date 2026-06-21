@@ -30,10 +30,11 @@ commonware-runtime = { workspace = true }
 commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-codec = { workspace = true }
 
-# --- TCP / tokio glue (Phase 2, gated behind `tcp`) -------------------------
+# --- TCP / tokio glue (gated behind `tcp`) ----------------------------------
 #
-# The `tcp` feature plugs `connect_tcp` / `serve_tcp` in on top of the
-# Phase 1 `from_session` constructor. It pulls a real tokio runtime,
+# The `tcp` feature plugs `connect_tcp` / `serve_tcp_with_policy_and_bounds`
+# in on top of the in-process `from_session` constructor. It pulls a
+# real tokio runtime,
 # OS random, and a `governor`-compatible system clock so we can
 # construct the `BufferPooler + CryptoRngCore + Clock` context that
 # `commonware_stream::encrypted::dial` expects without depending on
@@ -48,11 +49,11 @@ governor = { version = "0.10", default-features = false, features = ["std"], opt
 
 [features]
 default = []
-# Real-TCP entry points: `EncTransport::connect_tcp`, `serve_tcp`, and
-# the `TokioExecutor` async/sync shim. Off by default so workspace
-# builds without tokio when the in-process scaffold is all callers
-# need (Phase 1 transport-trait shape work, deterministic-runtime
-# tests). Turn on from `mkit-cli` via its `enc-transport` feature.
+# Real-TCP entry points: `connect_tcp`, `serve_tcp_with_policy_and_bounds`,
+# and the `TokioExecutor` async/sync shim. Off by default so workspace
+# builds without tokio when the in-process path is all callers need
+# (transport-trait shape work, deterministic-runtime tests). Turn on
+# from `mkit-cli` via its `enc-transport` feature.
 tcp = ["dep:tokio", "dep:rand", "dep:rand_core", "dep:governor"]
 
 [dev-dependencies]
@@ -70,8 +71,8 @@ hex = "0.4"
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "macros", "io-util", "time", "sync"] }
 
 # E2E test gated behind `tcp` — `cargo test -p mkit-transport-enc`
-# without that feature still works (Phase 1 deterministic tests run).
-# With `--features tcp` the e2e test is compiled and exercised.
+# without that feature still works (the in-process deterministic tests
+# run). With `--features tcp` the e2e test is compiled and exercised.
 [[test]]
 name = "tcp_e2e"
 required-features = ["tcp"]

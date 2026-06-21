@@ -97,8 +97,7 @@ fn golden_signature_and_pubkey() {
 /// exactly matching the crypto a `WebAuthn` browser stack runs. We
 /// do NOT re-implement DER sig decoding here; DSSE is
 /// compact-sig-first, and `WebAuthn` DER-to-compact conversion would
-/// be a separate serialisation step outside this crate's Phase 1
-/// scope.
+/// be a separate serialisation step outside this crate's scope.
 ///
 /// Reference: <https://www.w3.org/TR/webauthn-2/#sctn-fido-u2f-sig-format-compat>
 ///

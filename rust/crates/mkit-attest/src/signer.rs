@@ -9,8 +9,9 @@
 //!
 //! * [`crate::signer_repo_key::RepoKeySigner`] — Ed25519 over the same
 //!   key the commit signer uses.
-//! * [`crate::signer_external::ExternalSigner`] — JSON-over-stdin/stdout
-//!   to a caller-supplied subprocess.
+//! * [`crate::signer_external::ExternalSigner`] — length-prefixed buffa
+//!   `SignerFrame` protocol over stdin/stdout to a caller-supplied
+//!   subprocess (see `rust/crates/mkit-rpc/proto/signer.proto`).
 //! * [`crate::signer_sigstore::SigstoreSigner`] — scaffold; returns
 //!   `Error::SigstoreNotImplemented`.
 //!

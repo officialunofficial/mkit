@@ -21,7 +21,6 @@
 //! reasoning by analogy from git. Post-#102, the staging area is
 //! load-bearing: only paths in the index land in the commit's tree.
 
-use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -46,6 +45,7 @@ use crate::format;
     name = "mkit commit",
     about = "Create a signed commit from the staging index."
 )]
+#[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct CommitOptions {
     /// Commit message. If omitted, `$EDITOR` is launched.
     #[arg(short, long)]
@@ -79,6 +79,29 @@ struct CommitOptions {
     /// an unreachable object until `mkit gc` ships (see issue #233).
     #[arg(long)]
     amend: bool,
+    /// Suppress the commit summary line (git `-q`).
+    #[arg(short = 'q', long = "quiet")]
+    quiet: bool,
+    /// Accepted for git compatibility; mkit ALWAYS signs commits with its
+    /// own key, so `-S`/`--gpg-sign[=<keyid>]` is a no-op (the optional
+    /// `<keyid>` is ignored).
+    #[arg(
+        short = 'S',
+        long = "gpg-sign",
+        value_name = "KEYID",
+        num_args = 0..=1,
+        default_missing_value = ""
+    )]
+    gpg_sign: Option<String>,
+    /// Accepted for git compatibility; mkit has no hooks, so `--no-verify`
+    /// is a no-op.
+    #[arg(long = "no-verify")]
+    no_verify: bool,
+    /// With `--amend`, keep the existing message. mkit already reuses
+    /// HEAD's message when `-m` is omitted, so this is effectively the
+    /// default; accepted for compatibility.
+    #[arg(long = "no-edit")]
+    no_edit: bool,
 }
 
 #[must_use]
@@ -91,6 +114,9 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    // Accepted-for-compatibility no-ops: mkit always signs (`-S`) and has
+    // no hooks (`--no-verify`); `--no-edit` matches mkit's default amend.
+    let _ = (&opts.gpg_sign, opts.no_verify, opts.no_edit);
 
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
@@ -301,6 +327,11 @@ pub fn run(args: &[String]) -> u8 {
             _ => vec![],
         }
     };
+    // Capture parent shape before `parents` is moved into the commit, for
+    // the git-shaped summary (root = no parents, merge = >=2 parents).
+    let is_root = parents.is_empty();
+    let is_merge = parents.len() >= 2;
+    let first_parent = parents.first().copied();
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -360,21 +391,49 @@ pub fn run(args: &[String]) -> u8 {
     {
         return emit_err(&format!("clear merge state: {e}"), exit::GENERAL_ERROR);
     }
-    let mut stderr = std::io::stderr().lock();
-    let verb = if amend_target.is_some() {
-        "amended"
-    } else if merge_state.is_some() {
-        "merge committed"
+    // git-shaped post-commit summary: `[<branch> <hash>] <subject>` plus
+    // a diffstat and create/delete-mode trailers. Merge commits (>=2
+    // parents) show no diffstat, like git.
+    let old_tree = if is_merge {
+        Some(tree_hash) // suppress the diffstat (empty diff) for merges
     } else {
-        "committed"
+        first_parent.and_then(|p| commit_tree(&store, &p))
     };
-    let _ = writeln!(
-        stderr,
-        "{verb} {} ({})",
-        format::short_hash(&commit_hash, 8),
-        msg.lines().next().unwrap_or("")
-    );
+    let branch_name = match refs::read_head(&mkit_dir) {
+        Ok(Head::Branch(b)) => Some(b),
+        _ => None,
+    };
+    let head_ref = match &branch_name {
+        Some(b) => super::summary::HeadRef::Branch(b),
+        None => super::summary::HeadRef::Detached,
+    };
+    if !opts.quiet {
+        let mut stderr = std::io::stderr().lock();
+        super::summary::print_commit_summary(
+            &mut stderr,
+            &store,
+            &head_ref,
+            &commit_hash,
+            msg.lines().next().unwrap_or(""),
+            is_root,
+            old_tree,
+            Some(tree_hash),
+        );
+    }
     exit::OK
+}
+
+/// Resolve a commit/remix hash to its tree hash (None on any error or a
+/// non-commit object) — used to bound the post-commit diffstat.
+fn commit_tree(
+    store: &ObjectStore,
+    commit: &mkit_core::hash::Hash,
+) -> Option<mkit_core::hash::Hash> {
+    match store.read_object(commit).ok()? {
+        Object::Commit(c) => Some(c.tree_hash),
+        Object::Remix(r) => Some(r.tree_hash),
+        _ => None,
+    }
 }
 
 /// Pre-process `args` to canonicalize the legacy `-am<msg>` /
@@ -439,13 +498,12 @@ mod expand_dash_am_tests {
 /// exit-code) pair on failure so the caller can route the error
 /// through its usual `emit_err` path.
 ///
-/// Auto-generation was removed in combined with a non-atomic
-/// `save_key`, an interrupted keygen could silently rotate the user's
-/// identity (subsequent commits no longer share a signer with prior
-/// ones). The save path is now atomic, but auto-keygen also masks
-/// genuine path-misconfigurations and tooling errors. Users run
-/// `mkit keygen` once, explicitly, and a missing key on `mkit commit`
-/// is now an error.
+/// Auto-generation was removed: combined with a non-atomic `save_key`,
+/// an interrupted keygen could silently rotate the user's identity
+/// (subsequent commits no longer share a signer with prior ones). The
+/// save path is now atomic, but auto-keygen also masks genuine
+/// path-misconfigurations and tooling errors. Users run `mkit keygen`
+/// once, explicitly, and a missing key on `mkit commit` is now an error.
 fn load_signing_key(
     cwd: &std::path::Path,
     rel_signing_key_path: &str,
@@ -720,7 +778,7 @@ fn parse_author_spec(spec: &str) -> Result<Identity, String> {
         return Ok(Identity::opaque(raw.as_bytes().to_vec()));
     }
     Err(format!(
-        "unknown identity spec '{spec}' — expected ed25519:<hex>, did:key:<hex>, or opaque:<bytes>"
+        "unknown identity spec '{spec}' — expected ed25519:<hex>, did:key:<multibase>, or opaque:<bytes>"
     ))
 }
 
@@ -795,11 +853,7 @@ fn read_message_file(path: &str) -> std::io::Result<String> {
     Ok(raw.trim_end().to_string())
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {

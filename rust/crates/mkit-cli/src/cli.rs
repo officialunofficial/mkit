@@ -33,7 +33,7 @@ commands:
                     Discard worktree changes for path(s) (restore from the
                     index), or --staged to unstage (restore the index entry
                     from HEAD); -f overrides the un-staged-edit guard
-  reset [--soft|--mixed|--hard] [-f] [<commit>]
+  reset [--soft|--mixed|--hard] [-f] [-q] [<commit>]
                     Move HEAD/branch (--soft) or HEAD + reset the index to
                     the commit's tree (--mixed, default); worktree untouched.
                     --hard also resets the worktree (keeps untracked files);
@@ -60,6 +60,10 @@ commands:
                     --abbrev-ref HEAD prints the branch, --show-toplevel
                     prints the repo root; --verify is accepted for git-script
                     compatibility — mkit always errors on a bad revision)
+  merge-base [--is-ancestor] <a> <b>  Print the common ancestor of two
+                    commits (--is-ancestor tests ancestry: exit 0/1, no output)
+  rev-list [--count] <rev>  List commit ids reachable from <rev> (--count
+                    prints the number)
   show-ref [--heads] [--tags]  List refs as `<hash> <refname>`
   for-each-ref [--format=<fmt>] [<pattern>...]
                     Iterate refs, optionally with a %(atom) format string
@@ -70,11 +74,13 @@ commands:
                     Create/update/delete refs/heads/* or refs/tags/*
                     (<oldvalue> compare-and-swap; all-zero = must be absent,
                     update mode only; -d's <oldvalue> must be concrete)
-  commit [-a] [--amend] [-m <msg> | -F <file>] [--author <spec>]
+  commit [-a] [-q] [--amend] [-m <msg> | -F <file>] [--author <spec>]
                     Create a signed commit (opens $EDITOR if -m/-F omitted).
                     -F reads the message from <file> (`-` = stdin); --author
                     overrides the commit author. After `merge --no-commit`
-                    (or a resolved merge) this records a two-parent merge commit
+                    (or a resolved merge) this records a two-parent merge commit.
+                    -q suppresses the summary; -S/--gpg-sign, --no-verify,
+                    --no-edit are accepted no-ops (mkit always signs, no hooks)
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable until `gc` ships.
@@ -101,7 +107,7 @@ commands:
                     --porcelain=v2 emits git's richer per-path format with
                     modes + object ids; special-byte paths are C-style
                     quoted; -z NUL-terminates records with raw paths)
-  diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
+  diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [--exit-code|--quiet] [--color[=WHEN]|--no-color] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
                     --staged for HEAD vs index, a single revision vs the
                     worktree, two revisions, an A..B range, or an A...B
@@ -123,6 +129,7 @@ commands:
   branch -D <name>  Force-delete a branch (errors on an absent branch,
                     like git; still refuses the current branch)
   branch -m [<old>] <new>  Rename a branch (current branch if <old> omitted)
+  branch --show-current  Print the current branch name
   branch [--list] [--contains [<c>]] [--no-contains [<c>]] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]
                     Filter the listing (like git): <pattern> are shell globs on
                     branch names (enabled by --list or any filter; `*`/`?`/`[…]`,
@@ -131,11 +138,15 @@ commands:
                     --no-* forms invert. All four commit args default to HEAD
                     when omitted
   checkout <branch> Switch HEAD to a branch and restore files
+  checkout -b|-B <new> [<start>]  Create (or -B reset) a branch and switch to it
+  switch <branch>   Switch branches (git switch)
+  switch -c|-C <new> [<start>]    Create (or -C reset) a branch and switch to it
   clean [-n] [-f] [-d] [-x|-X] [<path>...]
                     Remove untracked files (refuses without -f; -n
                     previews). -d also removes untracked dirs; -x includes
                     ignored files, -X removes only ignored
   tag [<name>] [<commit>]  List tags, or create a lightweight tag
+  tag -l [<pattern>]  List tags, optionally filtered by a shell glob
   tag -a <name> [-m <msg>] [--author <spec>] [<commit>]  Create an annotated tag
   tag -s <name> [-m <msg>] [--author <spec>] [<commit>]  Create a signed tag
   tag -d <name>     Delete a tag
@@ -155,10 +166,14 @@ commands:
                     Merge a branch into HEAD (--no-commit stages the merge and
                     stops before committing; finish with `mkit commit` or
                     `mkit merge --continue`; -m overrides the merge message)
-  push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]
-                    Push current branch to its upstream (--all mirrors every branch)
-  pull              Pull changes from remote
-  fetch             Download from remote without merging
+  push [<remote>] [-u|--set-upstream] [--all] [-f|--force|--force-with-lease] [--dry-run]
+                    Push current branch to its upstream (--all mirrors every
+                    branch; -u records the upstream; prints git's `To <url>` +
+                    ref-update summary, or `Everything up-to-date`)
+  pull              Pull changes from remote (fast-forward; prints `Updating
+                    <a>..<b>`/`Fast-forward`/diffstat, or `Already up to date.`)
+  fetch             Download from remote without merging (prints `From <url>`
+                    + per-ref summary; silent when nothing changed)
   stash             Stash working dir changes (save WIP; -m for a message)
   stash save -m <msg>  Stash with a message
   stash list        List stash entries (printed as stash@{N})
@@ -170,11 +185,14 @@ commands:
   stash clear       Remove all stash entries
   stash show [<n>|stash@{n}]   Show the diff of a stash entry (default 0)
   clone [--sparse ...] <url>  Clone a repository
-  remote [--format=json]  Show remote configuration (JSON with --format=json)
+  remote [-v|--verbose] [--format=json]  List remotes (names only; -v adds
+                    `<name>\t<url> (fetch)`/`(push)`; JSON with --format=json)
   remote add [<name>] <url>  Add a remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
   remote set [<name>] <url>  Alias for 'remote add'
   remote remove <name>  Remove a named remote (`default` clears the flat remote)
   remote rename <old> <new>  Rename a named remote
+  remote get-url <name>  Print a remote's URL
+  remote set-url <name> <url>  Change a remote's URL
   key generate|list|import|export|delete  Manage user-scoped keystore keys
   keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
                     Generate a new signing key (defaults to Ed25519)
@@ -182,7 +200,7 @@ commands:
                     Apply a commit to the current branch (-n stages the change
                     without committing; -m/--mainline selects the mainline
                     parent when replaying a merge commit, like git)
-  revert [-n] <commit> | --continue | --abort
+  revert [-n] [--no-edit] <commit> | --continue | --abort
                     Create a new commit undoing <commit> (forward commit;
                     conflict-aware; -n stages the revert without committing)
   rebase <branch>    Replay commits onto a different base
@@ -229,28 +247,13 @@ commands:
                     Verify every attestation attached to a commit
   version           Print version. Also available as the top-level
                     `--version` / `-V` flags; all emit `mkit <X.Y.Z>`.
+
+global flags (before <command>):
+  -C <path>         Run as if started in <path> (repeatable, like git)
+  -c <key>=<value>  One-shot config override for this invocation (inert /
+                    allowlisted keys only; security-sensitive keys refused)
+  --no-pager|-P     Accepted no-op (mkit never paginates)
 ";
-
-/// Strip lines beginning with `#` (after any leading whitespace) and
-/// trim surrounding whitespace. Used by `mkit commit` when
-/// `.mkit/COMMIT_EDITMSG` is edited via `$EDITOR`.
-#[must_use]
-pub fn strip_comments_and_trim(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for line in input.split('\n') {
-        let leading = line.trim_start_matches([' ', '\t']);
-        if leading.starts_with('#') {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.trim_matches([' ', '\t', '\r', '\n']).to_owned()
-}
-
-/// Template written into `.mkit/COMMIT_EDITMSG` before spawning
-/// `$EDITOR`. Pinned by snapshot tests.
-pub const COMMIT_EDITMSG_TEMPLATE: &str = "\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored, and an empty message aborts the commit.\n";
 
 #[cfg(test)]
 mod tests {
@@ -321,24 +324,5 @@ mod tests {
                 "HELP_TEXT missing documented subcommand: {cmd}"
             );
         }
-    }
-
-    #[test]
-    fn strip_comments_drops_hash_lines_and_trims() {
-        let input = "\nhello\n# a comment\nworld\n   # indented\n\n";
-        assert_eq!(strip_comments_and_trim(input), "hello\nworld");
-    }
-
-    #[test]
-    fn strip_comments_all_comments_is_empty() {
-        assert_eq!(strip_comments_and_trim("# only\n# comments\n"), "");
-    }
-
-    #[test]
-    fn strip_comments_preserves_interior_blank_lines() {
-        assert_eq!(
-            strip_comments_and_trim("title\n\nbody\n# comment\n"),
-            "title\n\nbody"
-        );
     }
 }

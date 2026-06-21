@@ -1,6 +1,6 @@
 //! End-to-end TCP round-trip test for the encrypted transport.
 //!
-//! Pins the Phase 2 wiring: a real `tokio::net::TcpListener`, a real
+//! Pins the TCP wiring: a real `tokio::net::TcpListener`, a real
 //! `commonware_stream::encrypted::listen` handshake, and a real
 //! `connect_tcp` dial that returns a synchronous [`Transport`] usable
 //! from non-async code.
@@ -207,8 +207,8 @@ fn bootstrap_buffer_pool() -> commonware_runtime::BufferPool {
 /// Minimal `Clock` / `RngCore` / `BufferPooler` implementation for the
 /// listener side. Duplicates the lib's private `TokioContext`
 /// because the lib type is `pub(crate)` and this test lives outside
-/// the crate. Phase 3 may promote that type to `pub` if a third
-/// caller materialises.
+/// the crate. That type may be promoted to `pub` if a third caller
+/// ever materialises.
 #[derive(Clone, Debug)]
 struct MiniContext {
     pool: commonware_runtime::BufferPool,

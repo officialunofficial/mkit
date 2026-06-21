@@ -674,3 +674,112 @@ fn retry_order_calls_server_enough_times() {
         CALLS.load(Ordering::SeqCst)
     );
 }
+
+/// Regression: a truncated ListObjectsV2 response (`IsTruncated=true`
+/// with a `NextContinuationToken`) MUST be followed with a
+/// `continuation-token` request, accumulating keys from every page.
+/// Before the fix, only the first page's keys were returned, silently
+/// truncating any ref list past the per-page cap.
+#[test]
+fn list_refs_paginates_on_continuation_token() {
+    let mut server = mockito::Server::new();
+
+    // Page 1: one key + IsTruncated=true + a continuation token.
+    let page1 = br#"<ListBucketResult>
+        <IsTruncated>true</IsTruncated>
+        <Contents><Key>refs/heads/alpha</Key></Contents>
+        <NextContinuationToken>TOKEN123</NextContinuationToken>
+    </ListBucketResult>"#;
+    // Page 2: the remaining key, not truncated.
+    let page2 = br#"<ListBucketResult>
+        <IsTruncated>false</IsTruncated>
+        <Contents><Key>refs/heads/zebra</Key></Contents>
+    </ListBucketResult>"#;
+
+    // Page 1 request: no continuation-token in the query.
+    let m_page1 = server
+        .mock("GET", "/bucket")
+        .match_query(mockito::Matcher::Exact(
+            "list-type=2&prefix=refs%2Fheads%2F".to_owned(),
+        ))
+        .with_status(200)
+        .with_body(page1)
+        .create();
+    // Page 2 request: carries continuation-token=TOKEN123 (canonically
+    // sorted, so it sorts before list-type).
+    let m_page2 = server
+        .mock("GET", "/bucket")
+        .match_query(mockito::Matcher::Exact(
+            "continuation-token=TOKEN123&list-type=2&prefix=refs%2Fheads%2F".to_owned(),
+        ))
+        .with_status(200)
+        .with_body(page2)
+        .create();
+
+    let h_alpha = [0x01u8; 32];
+    let h_zebra = [0x02u8; 32];
+    let mut body_alpha = to_hex(&h_alpha).into_bytes();
+    body_alpha.push(b'\n');
+    let mut body_zebra = to_hex(&h_zebra).into_bytes();
+    body_zebra.push(b'\n');
+    let _m_alpha = server
+        .mock("GET", "/bucket/refs/heads/alpha")
+        .with_status(200)
+        .with_body(body_alpha)
+        .create();
+    let _m_zebra = server
+        .mock("GET", "/bucket/refs/heads/zebra")
+        .with_status(200)
+        .with_body(body_zebra)
+        .create();
+
+    let t = build_transport(&server.url());
+    let refs = t.list_refs("refs/heads/").unwrap();
+    assert_eq!(refs.len(), 2, "both pages' refs must be returned");
+    assert_eq!(refs[0].name, "alpha");
+    assert_eq!(refs[1].name, "zebra");
+    m_page1.assert();
+    m_page2.assert();
+}
+
+/// Regression: `list_refs` with a prefix that has NO trailing slash
+/// (e.g. `refs/heads`, which `validate_ref_prefix` accepts) must still
+/// strip the prefix + separator and return suffix-only names, matching
+/// the canonical memory/file transports. Before the fix the suffix kept
+/// a leading '/' and the ref was silently dropped.
+#[test]
+fn list_refs_prefix_without_trailing_slash_strips_separator() {
+    let mut server = mockito::Server::new();
+
+    let xml = br#"<ListBucketResult>
+        <Contents><Key>refs/heads/main</Key></Contents>
+    </ListBucketResult>"#;
+    // effective_list_prefix appends no trailing slash for "refs/heads".
+    let _m_list = server
+        .mock("GET", "/bucket")
+        .match_query(mockito::Matcher::Exact(
+            "list-type=2&prefix=refs%2Fheads".to_owned(),
+        ))
+        .with_status(200)
+        .with_body(xml)
+        .create();
+
+    let h_main = [0x07u8; 32];
+    let mut body_main = to_hex(&h_main).into_bytes();
+    body_main.push(b'\n');
+    let _m_main = server
+        .mock("GET", "/bucket/refs/heads/main")
+        .with_status(200)
+        .with_body(body_main)
+        .create();
+
+    let t = build_transport(&server.url());
+    let refs = t.list_refs("refs/heads").unwrap();
+    assert_eq!(
+        refs.len(),
+        1,
+        "ref must not be dropped for slash-less prefix"
+    );
+    assert_eq!(refs[0].name, "main");
+    assert_eq!(refs[0].hash.unwrap(), h_main);
+}

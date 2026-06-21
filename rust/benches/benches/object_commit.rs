@@ -8,10 +8,9 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit};
+use mkit_benches::{Sample, Unit, time_one};
 use mkit_core::store::ObjectStore;
 
 const SIZES: &[(usize, &str)] = &[
@@ -44,7 +43,7 @@ fn bench_object_commit(c: &mut Criterion) {
             c.bench_function(&format!("commit/{axis}/mkit"), |b| {
                 b.iter(|| commit_via_mkit(&store, &payloads));
             });
-            let t = time_one(|| {
+            let t = time_one(2, 5, || {
                 commit_via_mkit(&store, &payloads);
             });
             samples.push(Sample {
@@ -63,7 +62,7 @@ fn bench_object_commit(c: &mut Criterion) {
             c.bench_function(&format!("commit/{axis}/git2"), |b| {
                 b.iter(|| commit_via_git2(&repo, &payloads));
             });
-            let t = time_one(|| {
+            let t = time_one(2, 5, || {
                 commit_via_git2(&repo, &payloads);
             });
             samples.push(Sample {
@@ -104,7 +103,7 @@ fn bench_object_commit(c: &mut Criterion) {
             c.bench_function(&format!("commit/{axis}/git-cli"), |b| {
                 b.iter(|| commit_via_git_cli(dir.path(), &payloads));
             });
-            let t = time_one(|| {
+            let t = time_one(2, 5, || {
                 commit_via_git_cli(dir.path(), &payloads);
             });
             samples.push(Sample {
@@ -152,17 +151,6 @@ fn commit_via_git_cli(repo: &Path, payloads: &[Vec<u8>]) {
         drop(child.stdin.take());
         let _ = child.wait();
     }
-}
-
-fn time_one<F: FnMut()>(mut f: F) -> f64 {
-    f();
-    f();
-    let n: u32 = 5;
-    let t0 = Instant::now();
-    for _ in 0..n {
-        f();
-    }
-    t0.elapsed().as_secs_f64() / f64::from(n)
 }
 
 criterion_group!(benches, bench_object_commit);

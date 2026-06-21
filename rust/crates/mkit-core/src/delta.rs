@@ -55,7 +55,11 @@ pub(crate) const CAP_MULTIPLIER: usize = 256;
 /// * the declared `result_len` (can't exceed declared output), and
 /// * `stream.len() * CAP_MULTIPLIER` (attacker bounded by on-wire size).
 ///
-/// Crucially, `base.len()` does NOT appear here — see SEC finding G5.
+/// Crucially, `base.len()` does NOT appear here: letting the base size
+/// influence the cap would let an attacker pair a small delta stream with
+/// a large base to pre-reserve a huge output buffer (a ~1 GiB
+/// attacker-controlled allocation), so the cap is bounded only by the
+/// declared output length and the on-wire stream size.
 #[inline]
 pub(crate) fn compute_cap_hint(result_len: usize, _base_len: usize, stream_len: usize) -> usize {
     result_len.min(stream_len.saturating_mul(CAP_MULTIPLIER))
@@ -202,9 +206,8 @@ pub fn decode(base: &[u8], stream: &[u8]) -> Result<Vec<u8>, MkitError> {
     // See [`compute_cap_hint`]: the hint is strictly a function of
     // `stream.len()` (with `result_len` as an upper bound) — `base.len()`
     // MUST NOT appear, because a 1 GiB base + 9-byte crafted stream
-    // otherwise triggers a ≈ 1 GiB allocation (SEC finding G5). The
-    // final `result_len` equality check below still enforces wire-level
-    // self-consistency.
+    // otherwise triggers a ≈ 1 GiB allocation. The final `result_len`
+    // equality check below still enforces wire-level self-consistency.
     let cap_hint = compute_cap_hint(result_len, base.len(), stream.len());
     let mut out: Vec<u8> = Vec::with_capacity(cap_hint);
     let mut pos = HEADER_LEN;
@@ -228,8 +231,9 @@ pub fn decode(base: &[u8], stream: &[u8]) -> Result<Vec<u8>, MkitError> {
             if length == 0 {
                 return Err(MkitError::TrailingData);
             }
-            // Use saturating math: an attacker-controlled offset could
-            // overflow `usize` on 32-bit targets when added to length.
+            // Use checked math: an attacker-controlled offset could
+            // overflow `usize` on 32-bit targets when added to length, so
+            // reject the input rather than wrapping or clamping.
             let end = offset.checked_add(length).ok_or(MkitError::TrailingData)?;
             if end > base.len() {
                 return Err(MkitError::TrailingData);
@@ -499,7 +503,7 @@ mod tests {
         );
     }
 
-    /// Finding H8: `encode()` used to saturate `base_len`/`result_len` to
+    /// `encode()` used to saturate `base_len`/`result_len` to
     /// `u32::MAX` for inputs over 4 GiB, silently producing a stream
     /// that `decode()` would reject with a confusing "length mismatch".
     /// Now `check_length_bounds` errors out explicitly with

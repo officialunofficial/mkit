@@ -96,9 +96,9 @@ fn remix_2sources_signing_bytes_match_golden() {
 /// (wrong terminator byte, missing length prefix, swapped domain,
 /// accidental `derive_key`, etc.) breaks this test.
 ///
-/// NOTE: values re-generated in finding H4 when the 2-byte LE length
-/// prefix was added in front of the domain. See CHANGELOG under
-/// `Unreleased` for the wire-break notice.
+/// NOTE: values were re-generated when the 2-byte LE length prefix was
+/// added in front of the domain. See CHANGELOG under `Unreleased` for
+/// the wire-break notice.
 #[test]
 fn signing_hashes_are_stable() {
     use mkit_core::sign::{commit_signing_hash, remix_signing_hash};

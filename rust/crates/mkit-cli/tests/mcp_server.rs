@@ -196,7 +196,11 @@ fn full_workflow_init_to_log() {
         "mkit_commit",
         &json!({ "repo_path": repo, "message": "via mcp" }),
     );
-    assert!(commit.contains("committed"), "commit: {commit}");
+    // git-shaped summary: `[<branch> <hash>] <subject>`.
+    assert!(
+        commit.contains("[main ") && commit.contains("via mcp"),
+        "commit: {commit}"
+    );
 
     let log = ok(&mut client, "mkit_log", &json!({ "repo_path": repo }));
     assert!(log.contains("via mcp"), "log: {log}");

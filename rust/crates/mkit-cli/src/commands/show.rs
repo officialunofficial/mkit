@@ -231,8 +231,4 @@ fn write_indented_message(out: &mut impl Write, message: &[u8]) {
     }
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;

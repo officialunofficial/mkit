@@ -355,19 +355,7 @@ impl Transport for SshTransport {
         let resp = read_child_frame_or_err(&mut io)?;
         match resp.body {
             Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(()),
-            Some(ssh_frame::Body::Error(e)) => {
-                // CAS-mismatch convention: server returns
-                // ERROR_CODE_INVALID_REQUEST with the current id in
-                // `details`. Map to RefConflict.
-                if e.code
-                    .is_some_and(|c| c == mkit_rpc::mkit::rpc::v1::ErrorCode::InvalidRequest)
-                    && !matches!(condition, RefWriteCondition::Any)
-                {
-                    Err(TransportError::RefConflict)
-                } else {
-                    Err(rpc_error_to_transport(*e, "ssh"))
-                }
-            }
+            Some(ssh_frame::Body::Error(e)) => Err(map_update_ref_error(*e, condition)),
             other => Err(unexpected_frame("ssh", "UpdateRefResponse", other)),
         }
     }
@@ -451,14 +439,54 @@ impl Transport for SshTransport {
 // live in `mkit_rpc::helpers`)
 // ---------------------------------------------------------------------------
 
-/// Read the response side of `download_pack` from a generic reader.
+/// Map a server `Error` reply to an `update_ref` request into a
+/// [`TransportError`].
 ///
-/// Factored out of [`SshTransport::download_pack`] so the OOM-defence
-/// against a malicious `DownloadPackHeader.total_bytes` can be unit
-/// tested without spawning a child process.
-#[cfg(test)]
-fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
-    let header = read_frame_or_err(r)?;
+/// Per SPEC-TRANSPORT / `UpdateRefResponse`, the server signals a
+/// compare-and-swap mismatch as `ERROR_CODE_INVALID_REQUEST` carrying
+/// the *current* ref id in `details`. We treat that as
+/// [`TransportError::RefConflict`].
+///
+/// The bare `ERROR_CODE_INVALID_REQUEST` code alone is ambiguous: the
+/// server reuses it for genuine bad requests (malformed ref, backend
+/// failure) as well as CAS mismatches. To avoid masking a real error as
+/// a conflict we only treat it as `RefConflict` when:
+///   - the write carried a CAS precondition (`condition != Any`), and
+///   - the error carries non-empty `details` (the documented current-id
+///     payload that disambiguates a true CAS mismatch).
+///
+/// When `details` is absent we fall back to [`rpc_error_to_transport`]
+/// so a genuine invalid-request surfaces its real message instead of a
+/// misleading `RefConflict`.
+fn map_update_ref_error(
+    e: mkit_rpc::mkit::rpc::v1::Error,
+    condition: RefWriteCondition,
+) -> TransportError {
+    let is_invalid_request = e
+        .code
+        .is_some_and(|c| c == mkit_rpc::mkit::rpc::v1::ErrorCode::InvalidRequest);
+    let has_cas_details = e.details.as_deref().is_some_and(|d| !d.is_empty());
+    if is_invalid_request && !matches!(condition, RefWriteCondition::Any) && has_cas_details {
+        TransportError::RefConflict
+    } else {
+        rpc_error_to_transport(e, "ssh")
+    }
+}
+
+/// Assemble the response side of `download_pack` from a frame source.
+///
+/// `next_frame` is called once for the `DownloadPackHeader` and then
+/// repeatedly for each `PackChunk` until a chunk with `last = true`.
+/// Both the production child path and the unit-test reader path share
+/// this single implementation so the OOM-defence against a malicious
+/// `DownloadPackHeader.total_bytes` (and a chunk stream that overruns
+/// the advertised size) is exercised by tests on the same code the
+/// child path runs.
+fn assemble_download_pack_body<F>(mut next_frame: F) -> TransportResult<Vec<u8>>
+where
+    F: FnMut() -> TransportResult<SshFrame>,
+{
+    let header = next_frame()?;
     let total = match header.body {
         Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
         Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "ssh")),
@@ -480,7 +508,7 @@ fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
     let initial = core::cmp::min(total as usize, PACK_BODY_LIMIT_USIZE);
     let mut out = Vec::with_capacity(initial);
     loop {
-        let chunk_frame = read_frame_or_err(r)?;
+        let chunk_frame = next_frame()?;
         match chunk_frame.body {
             Some(ssh_frame::Body::PackChunk(c)) => {
                 let data = c.data.unwrap_or_default();
@@ -504,42 +532,16 @@ fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
     Ok(out)
 }
 
+/// Test-only adapter: drive [`assemble_download_pack_body`] from a
+/// generic in-memory reader so the shared assembly logic can be unit
+/// tested without spawning a child process.
+#[cfg(test)]
+fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
+    assemble_download_pack_body(|| read_frame_or_err(r))
+}
+
 fn read_download_pack_body_from_child(io: &mut ChildIo) -> TransportResult<Vec<u8>> {
-    let header = read_child_frame_or_err(io)?;
-    let total = match header.body {
-        Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
-        Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "ssh")),
-        other => return Err(unexpected_frame("ssh", "DownloadPackHeader", other)),
-    };
-
-    if total > PACK_BODY_LIMIT {
-        return Err(TransportError::RemoteError(
-            "server-advertised pack size exceeds client cap".into(),
-        ));
-    }
-
-    let initial = core::cmp::min(total as usize, PACK_BODY_LIMIT_USIZE);
-    let mut out = Vec::with_capacity(initial);
-    loop {
-        let chunk_frame = read_child_frame_or_err(io)?;
-        match chunk_frame.body {
-            Some(ssh_frame::Body::PackChunk(c)) => {
-                let data = c.data.unwrap_or_default();
-                if out.len().saturating_add(data.len()) > PACK_BODY_LIMIT_USIZE {
-                    return Err(TransportError::RemoteError(
-                        "server-streamed pack body exceeds client cap".into(),
-                    ));
-                }
-                out.extend_from_slice(&data);
-                if c.last.unwrap_or(false) {
-                    break;
-                }
-            }
-            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "ssh")),
-            other => return Err(unexpected_frame("ssh", "PackChunk", other)),
-        }
-    }
-    Ok(out)
+    assemble_download_pack_body(|| read_child_frame_or_err(io))
 }
 
 #[cfg(test)]
@@ -796,6 +798,49 @@ mod tests {
     use mkit_rpc::mkit::rpc::v1::ssh::{
         DownloadPackHeader, RefExpectation, list_refs_response::RefEntry,
     };
+    use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode};
+
+    /// A CAS mismatch — `InvalidRequest` with the current id in
+    /// `details` under a precondition write — maps to `RefConflict`.
+    #[test]
+    fn update_ref_error_maps_cas_mismatch_to_conflict() {
+        let e = RpcError::default()
+            .with_code(ErrorCode::InvalidRequest)
+            .with_message("ref changed")
+            .with_details(vec![0xABu8; 32]);
+        assert!(matches!(
+            map_update_ref_error(e, RefWriteCondition::Missing),
+            TransportError::RefConflict
+        ));
+    }
+
+    /// A genuine invalid-request (no `details` payload) under a
+    /// precondition write must NOT be masked as `RefConflict` — it
+    /// surfaces its real message via `rpc_error_to_transport`.
+    #[test]
+    fn update_ref_error_does_not_mask_plain_invalid_request() {
+        let e = RpcError::default()
+            .with_code(ErrorCode::InvalidRequest)
+            .with_message("malformed ref name");
+        match map_update_ref_error(e, RefWriteCondition::Match([0u8; 32])) {
+            TransportError::RemoteError(msg) => assert_eq!(msg, "malformed ref name"),
+            other => panic!("expected RemoteError, got {other:?}"),
+        }
+    }
+
+    /// Under `Any` (no CAS precondition) even a detail-bearing
+    /// `InvalidRequest` is not a conflict.
+    #[test]
+    fn update_ref_error_any_condition_never_conflict() {
+        let e = RpcError::default()
+            .with_code(ErrorCode::InvalidRequest)
+            .with_message("bad")
+            .with_details(vec![0xABu8; 32]);
+        assert!(!matches!(
+            map_update_ref_error(e, RefWriteCondition::Any),
+            TransportError::RefConflict
+        ));
+    }
 
     #[test]
     fn ref_entry_to_ref_validates_oid_length() {

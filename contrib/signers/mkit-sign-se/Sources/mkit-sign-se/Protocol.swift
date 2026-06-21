@@ -12,8 +12,8 @@
 // are rejected and the connection MUST be closed — receivers MUST NOT
 // continue reading after a length-too-large.
 //
-// Pre-generated Swift sources live in `Generated/`; see
-// `Package.swift` and the regen script for the codegen path.
+// Pre-generated Swift sources live in `Generated/`; see README.md for
+// the `protoc` command that regenerates them.
 
 import Foundation
 import SwiftProtobuf
@@ -43,11 +43,9 @@ let maxFrameBytes: UInt32 = 1024 * 1024
 /// `mkit_rpc::FrameError` so the response logic in `Main.swift` can
 /// map each one onto an `Error` frame with the right `ErrorCode`.
 enum FrameError: Error, CustomStringConvertible {
-    /// Clean EOF before any of the 4 length-prefix bytes — caller
-    /// closed the pipe between requests. Not a fatal protocol error;
-    /// `serve` returns success.
-    case lengthTruncatedAtEof
-    /// Stream ended mid length-prefix (1–3 bytes read).
+    /// Stream ended mid length-prefix (1–3 bytes read). A clean EOF
+    /// before any length-prefix byte is not an error — `readFrame`
+    /// returns `nil` and `serve` exits successfully.
     case lengthPrefixTruncated
     /// Length prefix advertised > `maxFrameBytes`.
     case lengthTooLarge(UInt32)
@@ -60,7 +58,6 @@ enum FrameError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .lengthTruncatedAtEof: return "clean EOF on length prefix"
         case .lengthPrefixTruncated: return "length prefix truncated"
         case .lengthTooLarge(let n): return "frame length \(n) exceeds 1 MiB cap"
         case .bodyTruncated(let expected, let actual):

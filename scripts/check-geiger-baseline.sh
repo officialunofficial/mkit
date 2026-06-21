@@ -36,6 +36,8 @@ ceiling_for() {
         mkit-transport-memory) echo 0 ;;
         mkit-transport-s3)    echo 0  ;;
         mkit-transport-ssh)   echo 0  ;;
+        mkit-transport-enc)   echo 0  ;;
+        mkit-git-bridge)      echo 0  ;;
         *)                    echo "UNKNOWN" ;;
     esac
 }
@@ -47,14 +49,20 @@ EXPECTED_CRATES=(
     mkit-cli mkit-core mkit-keystore mkit-attest mkit-rpc
     mkit-transport-file mkit-transport-http mkit-transport-memory
     mkit-transport-s3 mkit-transport-ssh
+    mkit-transport-enc mkit-git-bridge
 )
 
-# Run from the crate that pulls every other first-party crate as a
-# direct or transitive dep. mkit-cli depends on every mkit-* crate
-# except mkit-wasm (Cloudflare Workers builds; lints separately).
+# Run from the crate that pulls every other first-party crate. mkit-cli
+# depends on every other publishable mkit-* crate except mkit-wasm
+# (Cloudflare Workers builds; lints separately). Two of those deps —
+# mkit-transport-enc (enc-transport feature) and mkit-git-bridge
+# (git-bridge feature) — are optional, so they only appear in geiger's
+# output when their feature is enabled; the geiger run below passes
+# --features enc-transport,git-bridge so the ceiling is enforced rather
+# than silently skipped.
 cd "$(dirname "$0")/../rust/crates/mkit-cli"
 
-OUTPUT=$(cargo geiger --quiet 2>/dev/null || true)
+OUTPUT=$(cargo geiger --quiet --features enc-transport,git-bridge 2>/dev/null || true)
 
 FAIL=0
 SEEN=""

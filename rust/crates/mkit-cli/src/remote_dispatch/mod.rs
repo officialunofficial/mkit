@@ -214,7 +214,7 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
     Err(DispatchError::MalformedUrl(url.to_string()))
 }
 
-/// `mkit+enc://` dispatch (Phase 2 of issue #156).
+/// `mkit+enc://` dispatch (issue #156).
 ///
 /// Parses the URL, derives an ephemeral dialer keypair (keystore
 /// integration is SPEC-TRANSPORT-ENC §6 item 5, still deferred), and
@@ -320,6 +320,21 @@ pub fn push_all_with(
         n += 1;
     }
     Ok(n)
+}
+
+/// True iff advancing a ref from `old` to `new` is a fast-forward (i.e.
+/// `old` is an ancestor of `new`). A missing `old` (brand-new ref) and an
+/// unchanged ref both count as fast-forwards. Used by `push`/`fetch` to
+/// pick the git-style summary symbol (`..` vs `...`/`(forced update)`).
+pub fn is_fast_forward(cwd: &Path, old: Option<Hash>, new: Hash) -> Result<bool, DispatchError> {
+    match old {
+        None => Ok(true),
+        Some(o) if o == new => Ok(true),
+        Some(o) => {
+            let store = crate::commands::open_store_configured(cwd)?;
+            Ok(is_ancestor(&store, o, new)?)
+        }
+    }
 }
 
 /// CAS lease policy for a default (current-branch → upstream) push.

@@ -1,9 +1,14 @@
 //! mkit encrypted-stream transport.
 //!
-//! Phase 1 scaffold: implements [`mkit_core::protocol::Transport`] by
-//! layering the existing mkit-rpc [`SshFrame`] message set on top of an
+//! Implements [`mkit_core::protocol::Transport`] by layering the
+//! existing mkit-rpc [`SshFrame`] message set on top of an
 //! authenticated, encrypted byte stream provided by
-//! [`commonware_stream::encrypted`].
+//! [`commonware_stream::encrypted`]. The crate ships the full client
+//! and server stack: in-process round-trips, a real TCP dial helper
+//! (`tcp::connect_tcp`), a TCP listener with peer-authorization policy
+//! (`tcp::serve_tcp_with_policy_and_bounds`), and `mkit+enc://` URL
+//! parsing ([`url::parse_enc_url`]). It is consumed in production by
+//! `mkit-cli`'s remote dispatch and `mkit serve --listen-enc`.
 //!
 //! ## Layering (see SPEC-TRANSPORT-ENC for the full picture)
 //!
@@ -32,19 +37,21 @@
 //!
 //! [`mkit_core::protocol::Transport`] is a synchronous, object-safe
 //! trait; `commonware-stream::encrypted` is async on
-//! `commonware-runtime`. Phase 1 reconciles this with a deliberately
-//! tiny shim: every verb implementation acquires the [`EncSession`]'s
+//! `commonware-runtime`. This is reconciled with a deliberately tiny
+//! shim: every verb implementation acquires the [`EncSession`]'s
 //! `Mutex`, then drives a single round-trip future to completion via a
-//! caller-provided [`Executor`]. Tests use a `deterministic::Runner`
-//! executor; Phase 2 (CLI integration) will swap in the
-//! `commonware-runtime` tokio runner.
+//! caller-provided [`Executor`]. In-process tests use a
+//! `deterministic::Runner` executor; production TCP callers use the
+//! tokio-backed `tcp::TokioExecutor`.
 //!
-//! ## Phase 1 scope
+//! ## Entry points
 //!
-//! - In-process round-trip via [`commonware_runtime::mocks::Channel`].
-//! - Constructor [`EncTransport::from_session`] takes an
-//!   already-established [`EncSession`]; the TCP dial helper, URL
-//!   parsing, and CLI wiring are Phase 2 — see
+//! - In-process round-trip via [`commonware_runtime::mocks::Channel`],
+//!   wrapped with [`EncTransport::from_session`] from an
+//!   already-established [`EncSession`].
+//! - Real TCP via `tcp::connect_tcp` (client) and
+//!   `tcp::serve_tcp_with_policy_and_bounds` (server).
+//! - `mkit+enc://` URL parsing via [`url::parse_enc_url`]. See
 //!   [docs/SPEC-TRANSPORT-ENC.md](../../../docs/SPEC-TRANSPORT-ENC.md)
 //!   §6.
 
@@ -59,8 +66,8 @@
 
 pub mod url;
 
-// Real-TCP entry points (Phase 2). Feature-gated so the in-process
-// scaffold builds without dragging tokio in.
+// Real-TCP entry points. Feature-gated so consumers that only want the
+// in-process path build without dragging tokio in.
 #[cfg(feature = "tcp")]
 pub mod tcp;
 #[cfg(feature = "tcp")]
@@ -68,15 +75,15 @@ pub mod tokio_io;
 
 #[cfg(feature = "tcp")]
 pub use tcp::{
-    PeerPolicy, TokioExecutor, connect_tcp, connect_tcp_with_executor, serve_tcp,
-    serve_tcp_with_policy, serve_tcp_with_policy_and_bounds,
+    PeerPolicy, TokioExecutor, connect_tcp, connect_tcp_with_executor,
+    serve_tcp_with_policy_and_bounds,
 };
 
 /// Re-export of the encrypted-stream `Sender` / `Receiver` types
 /// downstream callers need to plug a custom server-side verb loop on
-/// top of an [`EncSession`]. Phase 2's `mkit serve --listen-enc`
-/// dispatch lives in `mkit-cli` and consumes this re-export rather
-/// than depending on `commonware-stream` directly; that keeps the CLI
+/// top of an [`EncSession`]. The `mkit serve --listen-enc` dispatch
+/// lives in `mkit-cli` and consumes this re-export rather than
+/// depending on `commonware-stream` directly; that keeps the CLI
 /// crate's transitive surface area centred on `mkit-transport-enc`.
 pub use commonware_stream::encrypted::{Receiver as EncReceiver, Sender as EncSender};
 
@@ -156,7 +163,7 @@ impl From<commonware_stream::encrypted::Error> for EncInitError {
 ///
 /// Generic over the underlying [`Sink`] / [`Stream`] so the same code
 /// path works against in-process [`commonware_runtime::mocks::Channel`]
-/// in tests and against real TCP sockets in Phase 2.
+/// in tests and against real TCP sockets in production.
 pub struct EncSession<I: Stream, O: Sink> {
     sender: Sender<O>,
     receiver: Receiver<I>,
@@ -179,8 +186,9 @@ impl<I: Stream, O: Sink> EncSession<I, O> {
     }
 
     /// Decompose into the raw encrypted-stream halves. Useful for
-    /// server-side callers (the `serve_tcp` accept loop's `serve_fn`)
-    /// that want to run a custom request-response loop instead of
+    /// server-side callers (the accept loop's `serve_fn` in
+    /// `tcp::serve_tcp_with_policy_and_bounds`) that want to run a
+    /// custom request-response loop instead of
     /// going through the [`EncTransport`] client surface. The
     /// returned [`Sender`] / [`Receiver`] still share the same cipher
     /// state — drop either to tear the session down.
@@ -194,12 +202,11 @@ impl<I: Stream, O: Sink> EncSession<I, O> {
 // Executor trait — re-exported from mkit-core::protocol::async_shim
 // ---------------------------------------------------------------------------
 
-/// Pluggable async/sync shim. Re-exported here so the crate-public
-/// API stays backwards-compatible with Phase 1 callers that imported
-/// `mkit_transport_enc::Executor`. New code SHOULD prefer
-/// [`mkit_core::protocol::async_shim::Executor`] directly — the trait
-/// is generic infrastructure shared with `mkit-core::sparse` (Phase 2)
-/// and doesn't really belong in a transport crate.
+/// Pluggable async/sync shim. Re-exported here for the convenience of
+/// callers that import `mkit_transport_enc::Executor`. New code MAY
+/// prefer [`mkit_core::protocol::async_shim::Executor`] directly — the
+/// trait is generic infrastructure that also serves other consumers and
+/// doesn't strictly belong in a transport crate.
 pub use mkit_core::protocol::async_shim::Executor;
 
 // ---------------------------------------------------------------------------
@@ -217,11 +224,12 @@ pub use mkit_core::protocol::async_shim::Executor;
 pub struct EncTransport<I: Stream, O: Sink, E: Executor> {
     session: Mutex<EncSession<I, O>>,
     executor: E,
-    /// Remote host (for diagnostics / Phase 2 URL round-tripping).
-    /// Carried but unused for routing in Phase 1; surfaced via the
-    /// `Debug` impl so logging stays useful.
+    /// Remote host (for diagnostics / URL round-tripping). Carried but
+    /// unused for routing — the session is already established by the
+    /// time this struct exists; surfaced via the `Debug` impl so
+    /// logging stays useful.
     host: String,
-    /// Remote port. Same Phase-1 caveat as `host`.
+    /// Remote port. Same diagnostic-only caveat as `host`.
     port: u16,
 }
 
@@ -241,9 +249,9 @@ impl<I: Stream, O: Sink, E: Executor> EncTransport<I, O, E> {
     /// here, so a successful return guarantees the first verb call
     /// lands on a v1 mkit peer.
     ///
-    /// Phase 1 uses this constructor from tests after driving the
-    /// commonware-stream handshake manually; Phase 2 will add a real
-    /// TCP-connecting helper that folds dial+handshake+Hello.
+    /// Tests use this constructor after driving the commonware-stream
+    /// handshake manually; production TCP callers use `tcp::connect_tcp`,
+    /// which folds dial + handshake + Hello and then calls this.
     pub fn from_session(
         session: EncSession<I, O>,
         executor: E,
@@ -316,20 +324,21 @@ impl<I: Stream, O: Sink, E: Executor> EncTransport<I, O, E> {
 ///   record (matching the cap removes a class of off-by-overhead bugs
 ///   where one of the two limits sneaks past the other).
 /// - Handshake/synchrony bounds default to 30 s / 30 s / 60 s. These
-///   are deliberately generous for Phase 1 to keep flaky-CI failures
-///   out of the in-tree test; Phase 2 will tighten them per
-///   SPEC-TRANSPORT-ENC §4.
+///   are deliberately generous to keep flaky-CI failures out of the
+///   in-tree test; production listeners can tighten them via
+///   [`default_handshake_config_with_bounds`] /
+///   [`EncHandshakeBounds`] per SPEC-TRANSPORT-ENC §4.
 #[must_use]
 pub fn default_handshake_config(signing_key: PrivateKey) -> EncConfig<PrivateKey> {
     default_handshake_config_with_bounds(signing_key, EncHandshakeBounds::default())
 }
 
-/// Operator-tunable handshake/synchrony bounds (#216).
+/// Operator-tunable handshake/synchrony bounds.
 ///
 /// SPEC-TRANSPORT-ENC §6.2 recommends tightening these to ≤5–10s for
 /// real networks. They are exposed so a production listener can pick a
-/// tighter ladder than the (deliberately generous) Phase-1 defaults
-/// without flaky-CI failures in the in-tree deterministic tests.
+/// tighter ladder than the (deliberately generous) defaults without
+/// flaky-CI failures in the in-tree deterministic tests.
 #[derive(Debug, Clone, Copy)]
 pub struct EncHandshakeBounds {
     /// Acceptable clock skew between the two peers.
@@ -342,8 +351,8 @@ pub struct EncHandshakeBounds {
 
 impl Default for EncHandshakeBounds {
     fn default() -> Self {
-        // Phase-1 defaults: deliberately generous (30s / 30s / 60s) to
-        // keep flaky-CI failures out of the in-tree deterministic test.
+        // Deliberately generous defaults (30s / 30s / 60s) to keep
+        // flaky-CI failures out of the in-tree deterministic test.
         Self {
             synchrony_bound: Duration::from_secs(30),
             max_handshake_age: Duration::from_secs(30),
@@ -669,14 +678,15 @@ pub async fn recv_frame<I: Stream>(receiver: &mut Receiver<I>) -> TransportResul
 /// if no complete frame arrives within `idle`.
 ///
 /// This is the post-handshake slow-loris guard for the encrypted
-/// listener (#216): a peer that completes the handshake but then stalls
-/// the verb loop (or an upload's chunk stream) must not be able to pin a
+/// listener: a peer that completes the handshake but then stalls the
+/// verb loop (or an upload's chunk stream) must not be able to pin a
 /// tokio worker + socket indefinitely. The handshake itself is already
 /// bounded by [`default_handshake_config`]; this caps every *subsequent*
 /// frame read.
 ///
-/// Requires a tokio runtime context (the `serve_tcp` listener provides
-/// one), so it is gated on the `tcp` feature.
+/// Requires a tokio runtime context (the
+/// [`tcp::serve_tcp_with_policy_and_bounds`] listener provides one), so
+/// it is gated on the `tcp` feature.
 #[cfg(feature = "tcp")]
 pub async fn recv_frame_within<I: Stream>(
     receiver: &mut Receiver<I>,
@@ -729,7 +739,8 @@ fn stream_err(_: commonware_stream::encrypted::Error) -> TransportError {
 
 // ---------------------------------------------------------------------------
 // (Shared frame helpers now live in `mkit_rpc::helpers` — re-used by
-// both this crate and `mkit-transport-ssh`. See B1 in #163's review.)
+// both this crate and `mkit-transport-ssh`, keeping a single source of
+// truth for verb framing across the encrypted and SSH paths.)
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -741,15 +752,16 @@ mod tests {
     //! In-process round-trip tests for the encrypted transport. All
     //! tests run inside [`commonware_runtime::deterministic::Runner`]
     //! so they exercise the same async code paths that production
-    //! (tokio) wiring will hit in Phase 2, without depending on
-    //! wall-clock time or a multi-threaded executor.
+    //! (tokio) wiring hits, without depending on wall-clock time or a
+    //! multi-threaded executor.
     //!
     //! The Transport-trait sync facade is **not** exercised here — its
     //! `Executor` shim is only useful from a *separate* runtime than
-    //! the one driving the server task, which lives in Phase 2's
-    //! integration tests. Phase 1 tests assert the wire-level
-    //! invariants (handshake correctness, ciphertext-on-wire,
-    //! peer-rejection) by driving both halves' async helpers directly.
+    //! the one driving the server task, which is covered by the TCP
+    //! integration tests in `tcp.rs` and the e2e harness under
+    //! `tests/`. These tests assert the wire-level invariants
+    //! (handshake correctness, ciphertext-on-wire, peer-rejection) by
+    //! driving both halves' async helpers directly.
     //!
     //! See SPEC-TRANSPORT-ENC §5 for the test plan.
 

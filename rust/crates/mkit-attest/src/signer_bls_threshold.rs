@@ -1,6 +1,6 @@
 //! BLS12-381 threshold signer — partial signing + aggregation.
 //!
-//! Phase 1 of the release-party flow (see `docs/SPEC-RELEASE-THRESHOLD.md`).
+//! Part of the release-party flow (see `docs/SPEC-RELEASE-THRESHOLD.md`).
 //! This module exposes:
 //!
 //! * [`ThresholdSigner`] — a per-holder [`crate::Signer`] adapter that
@@ -12,10 +12,10 @@
 //! * [`verify`] — verify an already-aggregated threshold signature against
 //!   the group's aggregated public key.
 //!
-//! The signer is **trusted-dealer-style** in Phase 1: a single party
+//! The signer is currently **trusted-dealer-style**: a single party
 //! runs `commonware-cryptography::bls12381::dkg::feldman_desmedt::deal_anonymous` and
-//! hands each holder their share. Phase 2 will replace the dealer with
-//! a proper DKG ceremony; the Phase-1 signer adapter is API-stable
+//! hands each holder their share. A future revision may replace the
+//! dealer with a proper DKG ceremony; the signer adapter is API-stable
 //! because the dealer/DKG choice only affects how shares are produced,
 //! not how they're consumed at sign time.
 //!
@@ -102,8 +102,8 @@ impl ThresholdSigner {
     ///
     /// The dealer is expected to have produced `(sharing, shares)` via
     /// [`commonware_cryptography::bls12381::dkg::feldman_desmedt::deal_anonymous`]
-    /// (Phase 1) or a future DKG protocol (Phase 2). The dealer hands
-    /// the same `sharing` to every holder, plus one `Share` per
+    /// (current trusted-dealer mode) or a future DKG protocol. The dealer
+    /// hands the same `sharing` to every holder, plus one `Share` per
     /// holder.
     #[must_use]
     pub fn new(share: Share, sharing: Sharing<V>) -> Self {
@@ -144,7 +144,7 @@ impl Signer for ThresholdSigner {
 /// threshold signature.
 ///
 /// `sharing` is the cohort's public polynomial — the same one held by
-/// every signer. Phase 1 uses the [`N3f1`] fault model (threshold =
+/// every signer. Uses the [`N3f1`] fault model (threshold =
 /// quorum, i.e. ceil(2n/3) — matches the upstream tests).
 ///
 /// # Errors
@@ -202,14 +202,14 @@ pub fn verify(aggregate_pubkey: &[u8], message: &[u8], signature: &[u8]) -> Resu
         .map_err(|_| Error::BlsThresholdVerifyFailed)
 }
 
-/// Trusted-dealer helper: build a Phase-1 cohort of `n` holders with
+/// Trusted-dealer helper: build a cohort of `n` holders with
 /// the [`N3f1`] threshold (quorum = ceil(2n/3) per the fault model).
 ///
-/// This is the dealer side of the trusted-dealer ceremony. Phase 2
-/// will replace it with a DKG protocol; the holder-side API
+/// This is the dealer side of the trusted-dealer ceremony. A future
+/// revision may replace it with a DKG protocol; the holder-side API
 /// ([`ThresholdSigner`], [`aggregate`], [`verify`]) is stable across
-/// that swap. Exposed for tests and the future Phase-3 release-party
-/// dealer binary.
+/// that swap. Exposed for tests and a future release-party dealer
+/// binary.
 #[must_use]
 pub fn trusted_dealer<R: rand_core::CryptoRngCore>(
     rng: &mut R,
@@ -279,7 +279,7 @@ mod tests {
         }
 
         // Aggregator combines partials. Aggregated signature is the
-        // 96-byte G2 compressed form.
+        // 48-byte G1 compressed form.
         let agg_sig = aggregate(&sharing, &partials_bytes).expect("aggregate");
         assert_eq!(agg_sig.len(), SIGNATURE_SIZE);
 

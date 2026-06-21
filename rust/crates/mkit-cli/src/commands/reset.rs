@@ -64,6 +64,10 @@ struct ResetOpts {
     #[arg(short = 'f', long)]
     force: bool,
 
+    /// Suppress the `HEAD is now at …` summary (git `-q`).
+    #[arg(short = 'q', long)]
+    quiet: bool,
+
     /// Commit to reset to (branch, tag, HEAD, full/short hash, `HEAD~n`,
     /// `^`). Defaults to `HEAD`.
     target: Option<String>,
@@ -226,19 +230,25 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
 
-    let mut stderr = std::io::stderr().lock();
-    let mode = if opts.hard {
-        "hard"
-    } else if reset_index {
-        "mixed"
-    } else {
-        "soft"
-    };
-    let _ = writeln!(
-        stderr,
-        "reset ({mode}) to {}",
-        format::short_hash(&target, 8)
-    );
+    // git-shaped report: `--hard` prints `HEAD is now at <hash> <subject>`;
+    // `--soft`/`--mixed` are silent (git's `--mixed` "Unstaged changes
+    // after reset:" list is an optional follow-up).
+    if opts.hard && !opts.quiet {
+        let subject = match store.read_object(&target) {
+            Ok(Object::Commit(c)) => String::from_utf8_lossy(&c.message)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_owned(),
+            _ => String::new(),
+        };
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "HEAD is now at {} {subject}",
+            format::short_hash(&target, format::SUMMARY_ABBREV),
+        );
+    }
     exit::OK
 }
 
@@ -257,8 +267,4 @@ fn move_head(mkit_dir: &std::path::Path, target: &Hash) -> Result<(), (String, u
     }
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;

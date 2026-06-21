@@ -24,7 +24,7 @@
 //!
 //! ## Subcommands
 //!
-//! * `enroll --rp-id <rpid> --user-name <name> [--pin <pin>] [--resident]`
+//! * `enroll --rp-id <rpid> --user-name <name> [--pin <pin>]`
 //!   — runs a CTAP `make_credential` ceremony and stores the credential
 //!   metadata under `$HOME/.mkit-sign-ctap/credentials.json`.
 //! * `sign --credential-id <base64url> [--rp-id <rpid>] [--pin <pin>] [--origin <url>]`
@@ -85,8 +85,6 @@ struct EnrollArgs {
     rp_id: Option<String>,
     user_name: Option<String>,
     pin: Option<String>,
-    #[allow(dead_code)]
-    resident: bool,
 }
 
 fn parse_enroll(it: impl Iterator<Item = String>) -> Result<EnrollArgs, SignerError> {
@@ -112,7 +110,6 @@ fn parse_enroll(it: impl Iterator<Item = String>) -> Result<EnrollArgs, SignerEr
                         .ok_or(SignerError::BadArgs("--pin needs a value"))?,
                 );
             }
-            "--resident" => a.resident = true,
             other => return Err(SignerError::UnknownArg(other.to_owned())),
         }
     }
@@ -237,7 +234,7 @@ const HELP: &str = "\
 mkit-sign-ctap: FIDO2/WebAuthn external signer
 
 USAGE:
-    mkit-sign-ctap enroll --rp-id <rpid> --user-name <name> [--pin <pin>] [--resident]
+    mkit-sign-ctap enroll --rp-id <rpid> --user-name <name> [--pin <pin>]
     mkit-sign-ctap sign   [--credential-id <base64url>] [--rp-id <rpid>] [--pin <pin>] [--origin <url>]
     mkit-sign-ctap list-credentials
 
@@ -287,14 +284,15 @@ mod main_tests {
             "mkit.local",
             "--user-name",
             "alice",
-            "--resident",
+            "--pin",
+            "1234",
         ]
         .iter()
         .map(std::string::ToString::to_string);
         let a = parse_enroll(args).unwrap();
         assert_eq!(a.rp_id.as_deref(), Some("mkit.local"));
         assert_eq!(a.user_name.as_deref(), Some("alice"));
-        assert!(a.resident);
+        assert_eq!(a.pin.as_deref(), Some("1234"));
     }
 
     #[test]

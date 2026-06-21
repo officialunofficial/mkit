@@ -14,11 +14,11 @@
 //! pubkey_hex = "..."
 //! ```
 //!
-//! * `kind` is one of `ed25519`, `secp256k1`, `p256-sec1`,
-//!   `bls12381-thr`. Anything else is ignored.
-//! * `algorithm` is accepted as an alias for `kind` (per the
-//!   Phase 2 spec wording in `docs/SPEC-RELEASE-THRESHOLD.md`);
-//!   either field name works.
+//! * `kind` is one of `ed25519`, `secp256k1` (alias `secp256k1-sec1`),
+//!   `p256-sec1` (alias `p256`), or `bls12381-thr`. Anything else is
+//!   ignored.
+//! * `algorithm` is accepted as an alias for `kind` (per
+//!   `docs/SPEC-RELEASE-THRESHOLD.md`); either field name works.
 //! * `pubkey_hex` is the raw public key bytes in lowercase hex. For
 //!   `bls12381-thr`, the bytes are the 96-byte G2 compressed
 //!   aggregated cohort public key (the `MinSig` variant).
@@ -483,11 +483,7 @@ fn nibble(c: u8) -> Option<u8> {
     })
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {

@@ -2,13 +2,17 @@
 //! Downloads every object reachable from each remote ref and updates
 //! the `refs/remotes/<remote>/<name>` tracking refs.
 
+use std::collections::HashMap;
 use std::io::Write;
+use std::path::Path;
 
 use clap::Parser;
+use mkit_core::hash::Hash;
 
 use crate::clap_shim;
 use crate::config;
 use crate::exit;
+use crate::format;
 use crate::remote_dispatch;
 
 #[derive(Debug, Parser)]
@@ -45,11 +49,15 @@ pub fn run(args: &[String]) -> u8 {
         );
     };
     let endpoint = resolved.endpoint.as_str();
+    // Snapshot the remote-tracking refs so we can report exactly which
+    // ones moved (git prints nothing when nothing changed).
+    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let before = tracking_snapshot(&mkit_dir, &resolved.name);
     match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, &cfg) {
         Ok(tx) => match remote_dispatch::fetch_all(&cwd, tx.as_ref(), &resolved.name) {
-            Ok(n) => {
-                let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "fetched {n} ref(s) from {endpoint}");
+            Ok(_) => {
+                let after = tracking_snapshot(&mkit_dir, &resolved.name);
+                report_fetch(endpoint, &resolved.name, &before, &after);
                 exit::OK
             }
             Err(remote_dispatch::DispatchError::Interrupted) => {
@@ -64,8 +72,46 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
+/// Map of `refs/remotes/<remote>/<branch>` → tip, used to diff the
+/// tracking-ref state across a fetch.
+fn tracking_snapshot(mkit_dir: &Path, remote: &str) -> HashMap<String, Hash> {
+    mkit_core::refs::list_remote_refs(mkit_dir, remote)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| r.hash.map(|h| (r.name, h)))
+        .collect()
 }
+
+/// Print git's `From <url>` block with one summary line per moved
+/// tracking ref. Stays silent when nothing changed.
+fn report_fetch(
+    endpoint: &str,
+    remote: &str,
+    before: &HashMap<String, Hash>,
+    after: &HashMap<String, Hash>,
+) {
+    let mut changed: Vec<(&String, Option<Hash>, Hash)> = after
+        .iter()
+        .filter(|(name, new)| before.get(*name) != Some(*new))
+        .map(|(name, new)| (name, before.get(name).copied(), *new))
+        .collect();
+    if changed.is_empty() {
+        return;
+    }
+    changed.sort_by(|a, b| a.0.cmp(b.0));
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "From {endpoint}");
+    for (name, old, new) in changed {
+        // Tracking-ref updates are rendered as fast-forwards; detecting a
+        // forced (`+ old...new`) tracking update would need per-ref
+        // ancestry checks against the store — deferred (cosmetic only).
+        let dst = format!("{remote}/{name}");
+        let _ = writeln!(
+            stderr,
+            "{}",
+            format::ref_update_line(old.as_ref(), &new, name, &dst, false)
+        );
+    }
+}
+
+use super::error as emit_err;

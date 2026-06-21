@@ -830,10 +830,12 @@ Current implementation status:
   `supports_device_bound` and `supports_non_extractable` are true iff at least
   one signing key was discovered.
 - FIDO2/CTAP slots are not exposed by this backend at all. They remain on the
-  external signer path; the "fail closed through the keystore API for
-  FIDO2/CTAP labels" requirement is met implicitly because the backend will
-  return `KeyNotFound` for any label that does not resolve to an OpenPGP or
-  PIV signing slot.
+  external signer path. The "fail closed through the keystore API for
+  FIDO2/CTAP labels" requirement is enforced explicitly: a `fido2-`/`ctap-`
+  prefixed label hits a dedicated guard that returns `UnsupportedOperation`
+  (directing callers to the CTAP external signer), while any other label that
+  does not resolve to an OpenPGP or PIV signing slot returns `KeyNotFound`.
+  Both fail closed.
 
 ### 6.8 External And Cloud Backends
 

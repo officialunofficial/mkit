@@ -53,7 +53,13 @@ pub fn run(args: &[String]) -> u8 {
 
     match opts.args.len() {
         0 => return show_all(&layered.merged, json),
-        1 => return show_one(&layered.merged, &config::normalize_config_key(&opts.args[0]), json),
+        1 => {
+            return show_one(
+                &layered.merged,
+                &config::normalize_config_key(&opts.args[0]),
+                json,
+            );
+        }
         2 => {}
         _ => {
             return super::usage_error(&format!(
@@ -352,8 +358,4 @@ fn show_one(cfg: &Config, key: &str, json: bool) -> u8 {
     exit::OK
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;

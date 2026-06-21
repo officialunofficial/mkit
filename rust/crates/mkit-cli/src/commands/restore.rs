@@ -26,7 +26,6 @@
 //! rewrites the named tracked paths from the source tree.
 
 use std::ffi::OsString;
-use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use clap::Parser;
@@ -474,8 +473,4 @@ fn absolute_arg_to_repo_relative(root: &Path, arg: &Path) -> Result<PathBuf, Str
         .map_err(|_| format!("path is outside repository: {}", arg.display()))
 }
 
-fn emit_err(msg: &str, code: u8) -> u8 {
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "error: {msg}");
-    code
-}
+use super::error as emit_err;

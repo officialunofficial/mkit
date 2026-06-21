@@ -14,7 +14,8 @@ export default async function RootLayout({ children }: RootLayoutProps) {
 
   return (
     <div>
-      <meta name='description' content={data.description} />
+      {/* Per-page <title>, description, and Open Graph / Twitter tags are set by
+          <Seo> in each page (components/seo.tsx). */}
       <link rel='icon' type='image/png' href={data.icon} />
       <link rel='preconnect' href='https://fonts.googleapis.com' />
       <link rel='preconnect' href='https://fonts.gstatic.com' crossOrigin='' />
@@ -43,7 +44,6 @@ export default async function RootLayout({ children }: RootLayoutProps) {
 
 const getData = async () => {
   const data = {
-    description: 'A content-addressed VCS in Rust — mkit demos in your browser.',
     icon: '/images/favicon.png',
   }
 

@@ -7,8 +7,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     Algorithm, BackendKind, Capabilities, Error, GenerateOptions, ImportOptions, KeyAttrs,
     KeyDeleter, KeyExporter, KeyGenerator, KeyImporter, KeyLabel, KeyLister, KeyMetadata,
-    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner,
-    types::static_label, validate_label,
+    KeyOpener, KeySelector, KeySigner, Keystore, Result, SecretKey, SoftwareSigner, validate_label,
 };
 
 const SERVICE: &str = "dev.mkit.keystore.signing-key.v1";
@@ -93,8 +92,9 @@ impl KeyGenerator for LinuxSecretServiceKeystore {
         attrs: KeyAttrs,
         options: GenerateOptions,
     ) -> Result<Box<dyn KeySigner>> {
-        validate_attrs(&attrs)?;
-        let mut secret = random_valid_secret(algorithm)?;
+        crate::native_list::validate_attrs("Linux Secret Service", &attrs)?;
+        let mut secret =
+            crate::native_list::random_valid_secret(BackendKind::LinuxSecretService, algorithm)?;
         let wrapped = SecretKey::new(algorithm, secret);
         secret.zeroize();
         self.import(
@@ -116,7 +116,7 @@ impl KeyImporter for LinuxSecretServiceKeystore {
         attrs: KeyAttrs,
         options: ImportOptions,
     ) -> Result<Box<dyn KeySigner>> {
-        validate_attrs(&attrs)?;
+        crate::native_list::validate_attrs("Linux Secret Service", &attrs)?;
         let signer = SoftwareSigner::new(
             label.clone(),
             BackendKind::LinuxSecretService,
@@ -233,46 +233,6 @@ fn linux_secret_service_capabilities() -> Capabilities {
     }
 }
 
-fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
-    if !attrs.extractable {
-        return Err(Error::UnsupportedAttributes(
-            "Linux Secret Service backend does not support non-extractable keys".into(),
-        ));
-    }
-    if attrs.require_user_presence {
-        return Err(Error::UnsupportedAttributes(
-            "Linux Secret Service backend does not support user presence".into(),
-        ));
-    }
-    if attrs.device_bound {
-        return Err(Error::UnsupportedAttributes(
-            "Linux Secret Service backend does not support device-bound keys".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn random_valid_secret(algorithm: Algorithm) -> Result<[u8; 32]> {
-    let mut secret = [0u8; 32];
-    for _ in 0..8 {
-        getrandom::fill(&mut secret).map_err(|_| Error::Internal("rng failed".into()))?;
-        if SoftwareSigner::new(
-            static_label("validation"),
-            BackendKind::LinuxSecretService,
-            algorithm,
-            secret,
-        )
-        .is_ok()
-        {
-            return Ok(secret);
-        }
-    }
-    secret.zeroize();
-    Err(Error::Internal(
-        "rng failed to produce a valid scalar".into(),
-    ))
-}
-
 fn map_keyring_error(error: keyring_core::Error, label: &KeyLabel, algorithm: Algorithm) -> Error {
     match error {
         keyring_core::Error::NoEntry => Error::KeyNotFound(KeySelector {
@@ -300,7 +260,7 @@ fn keyring_backend_error(operation: &str, error: keyring_core::Error) -> Error {
 fn keyring_list_error(error: keyring_core::Error) -> Error {
     match error {
         keyring_core::Error::NoEntry => Error::KeyNotFound(KeySelector {
-            label: static_label("list"),
+            label: crate::types::static_label("list"),
             algorithm: None,
         }),
         keyring_core::Error::NoStorageAccess(error) => Error::AccessDenied(error.to_string()),
