@@ -23,19 +23,29 @@ export default function PushPage() {
       <DemoBoundary>
         <PushDemo />
       </DemoBoundary>
-      <p className='max-w-prose text-sm text-muted'>
-        Why address a file by its Merkle root? Because the root <em>is</em> the id, reading the file back re-derives the
-        root and proves every chunk intact — integrity lives in the name, not in a separate checksum. The same root lets
-        a client verify that one chunk belongs to the file without fetching the rest, and a{' '}
-        <a href='/demos#sign' className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'>
-          signature
-        </a>{' '}
-        on the commit that names the file then covers every chunk beneath it — the same Merkle fold the{' '}
-        <Link to='/tree' className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'>
-          tree
-        </Link>{' '}
-        uses to roll a whole repository up to one signed hash.
-      </p>
+      <div className='max-w-prose space-y-3 text-sm text-muted'>
+        <p>
+          Why address a file by its Merkle root? Because the root <em>is</em> the id. Read the file back, re-derive the
+          root, and you&rsquo;ve proven every chunk intact — integrity lives in the name, not in a separate checksum.
+        </p>
+        <p>
+          The same root lets a client verify that one chunk belongs to the file without fetching the rest. And a{' '}
+          <a
+            href='/demos#sign'
+            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+          >
+            signature
+          </a>{' '}
+          on the commit that names the file covers every chunk beneath it.
+        </p>
+        <p>
+          It&rsquo;s the same Merkle fold the{' '}
+          <Link to='/tree' className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'>
+            tree
+          </Link>{' '}
+          uses to roll a whole repository up to one signed hash.
+        </p>
+      </div>
       <Link
         to='/'
         className='-mx-2 inline-block px-2 py-2 text-sm underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
