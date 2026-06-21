@@ -15,9 +15,10 @@
   --color-fg: oklch(0.96 0 0);
   --color-muted: oklch(0.62 0 0);
   --color-subtle: oklch(0.48 0 0);
-  /* Lifted well above the 0.16 background so card/input borders read clearly
-     in dark mode (a 0.27 hairline nearly vanished against the dark ground). */
-  --color-hairline: oklch(0.34 0 0);
+  /* Lifted above the 0.16 background so card/input borders stay visible in
+     dark mode, but kept subtle — closer to the ground than the old 0.34 so
+     borders read as a hairline, not a frame. */
+  --color-hairline: oklch(0.3 0 0);
 }
 
 /* Design tokens lifted verbatim from searchartwith.art (OKLCH triplet of
@@ -30,7 +31,7 @@
   /* `subtle` sits between `muted` and `hairline` — used for descriptive
      copy that should read as secondary without fully fading out. */
   --color-subtle: oklch(0.68 0 0);
-  --color-hairline: oklch(0.922 0 0);
+  --color-hairline: oklch(0.945 0 0);
   --font-sans: 'Geist', 'Geist Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
