@@ -33,8 +33,11 @@ inclusion of any chunk/entry is provable and completeness is verifiable for free
 
 - BREAKING: every Tree id → every Commit id → every ref changes; all history is re-addressed. No
   migration (pre-1.0). Old repos are rejected loudly at open via `.mkit/format`.
-- `commonware-cryptography`/`-storage`/`-codec` become non-optional in `mkit-core` (the
-  "default build pays zero" property is given up for these three; gated on a wasm32 build check).
+- Only `commonware-codec` becomes non-optional in `mkit-core`. The BMT is **vendored** over
+  `blake3` (`mkit-core/src/merkle.rs`) so `mkit-core` stays wasm32-clean; `commonware-storage`/
+  `-cryptography` are **dev-dependencies** — a byte-for-byte cross-check oracle, not runtime deps.
+  Inclusion proofs are hand-rolled and **provisional** (no in-tree consumer; see
+  `SPEC-MERKLE-OBJECTS.md` §5). A `no_std` upstream `bmt` is tracked by commonwarexyz/monorepo#4090.
 - Golden vectors for Tree/ChunkedBlob (and git-bridge round-trips) are regenerated.
 - Open items requiring human sign-off are tracked in MERKELIZATION-PLAN.md §8 (domain-wrap vs bare
   root, wasm viability of non-optional storage, marker semantics, persisted git↔mkit oid maps).

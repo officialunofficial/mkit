@@ -9,6 +9,22 @@ design lenses disagreed, **this document picks one answer** and the others are d
 normative crypto formulas live in the new `docs/SPEC-MERKLE-OBJECTS.md` (created by this work);
 this plan is the engineering/sequencing contract.
 
+> **As-built reconciliation (post-merge).** Three forward-looking choices below were superseded
+> during implementation. Where they conflict, the code and `SPEC-MERKLE-OBJECTS.md` win:
+> 1. **The BMT is vendored, not a `commonware-storage` dependency.** At the pinned
+>    `commonware =2026.5.0`, `storage::bmt` is `std`-gated (drags in `zstd-sys`, no `wasm32`
+>    target), and `mkit-core/src/merkle.rs` must compile to wasm for `mkit-core` *itself*. It
+>    vendors the byte-identical BMT over `blake3`; `commonware-storage`/`-cryptography` are
+>    **dev-dependencies** (a cross-check oracle), and only `commonware-codec` actually became
+>    non-optional. Upstreaming of a `no_std` `bmt` is tracked by commonwarexyz/monorepo#4090.
+> 2. **The inclusion-proof wire format is hand-rolled and provisional**
+>    (`[u32 LE leaf_count][u32 LE n][n × 32B]`), not commonware-codec `Proof<Blake3::Digest>`,
+>    and has no in-tree consumer yet (`SPEC-MERKLE-OBJECTS.md` §5). The `Proof<…>` / `decode_cfg`
+>    references in §3.6/§5/§6.4 are superseded.
+> 3. **Drift is guarded by a native equality test, not `commonware-conformance`.**
+>    `merkle::tests::vendored_root_matches_commonware` pins the vendored root byte-for-byte against
+>    `commonware_storage::bmt`.
+
 ---
 
 ## 1. Decision summary

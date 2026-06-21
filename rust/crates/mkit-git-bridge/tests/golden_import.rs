@@ -5,7 +5,7 @@
 //!
 //! Layout per vector `<name>`: `<name>.git.bin` (source git body),
 //! `<name>.mkit.bin` (imported mkit object bytes), `<name>.json`
-//! (ids), `MANIFEST.txt` (`<name> <git-sha1> <mkit-blake3>`). The
+//! (ids), `MANIFEST.txt` (`<name> <git-sha1> <mkit-object-id>`). The
 //! `big_blob` vector pins ids only (content regenerates).
 //!
 //! `UPDATE_GOLDEN=1` rewrites after a deliberate, spec-versioned
@@ -232,7 +232,7 @@ fn golden_import_vectors_match() {
             std::fs::write(
                 dir.join(format!("{name}.json")),
                 format!(
-                    "{{\"name\":\"{name}\",\"git_sha1\":\"{}\",\"mkit_blake3\":\"{}\"}}\n",
+                    "{{\"name\":\"{name}\",\"git_sha1\":\"{}\",\"mkit_id\":\"{}\"}}\n",
                     hex(sha1),
                     mkit_core::to_hex(&blake3)
                 ),

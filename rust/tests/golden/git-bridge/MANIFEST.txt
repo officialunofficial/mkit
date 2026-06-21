@@ -1,4 +1,4 @@
-# SPEC-GIT-BRIDGE §13 vectors. <name> <blake3-of-mkit-bytes> <git-sha1>
+# SPEC-GIT-BRIDGE §13 vectors. <name> <mkit-object-id> <git-sha1>
 # Regenerate with: UPDATE_GOLDEN=1 cargo test -p mkit-git-bridge --test golden
 blob 4eeff5f8341e5cfd4b517caca780e4a6f979c91f53f2ce5a6bf94536004b96fc af4a5f79625c2fd79e5a48db74a5617876bf4834
 tree_empty 1ab8d0788b29fe5992011e64d6c922ec93f4248b3755b92b15b07e664cb15652 4b825dc642cb6eb9a060e54bf8d69288fbee4904

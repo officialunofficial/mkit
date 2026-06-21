@@ -476,31 +476,43 @@ impl Object {
     }
 }
 
-/// [`Object::id`] computed directly from an object's canonical **bytes**,
-/// without first decoding non-merkle types. A merkelized type ([`Tree`] /
-/// [`ChunkedBlob`], per [`ObjectType::is_merkle`]) is decoded and addressed
-/// by its BMT root; every other type is `BLAKE3` of the bytes. A
-/// merkle-typed buffer that fails to decode falls back to the byte hash —
-/// it could never have been produced by a real writer, so this only stops
-/// malformed input from being silently mis-addressed.
+/// Content id of an **already-decoded** object whose canonical encoding is
+/// `bytes`. A merkelized type ([`Tree`] / [`ChunkedBlob`], per
+/// [`ObjectType::is_merkle`]) is addressed by its BMT root, computed from the
+/// decoded struct; every other type is `BLAKE3` of `bytes`, reusing the
+/// caller's buffer (no re-serialize — `bytes` may be up to ~1 GiB).
 ///
-/// This is the bytes-level twin of [`Object::id`]; together they are the
-/// single content-addressing dispatch the store, batch writer, pack reader,
-/// and worktree all route through, so the two schemes never diverge.
+/// This is the single content-addressing dispatch. Callers that already hold
+/// a decoded object and its canonical bytes (the pack reader, the `mkit-wasm`
+/// encoder) use it directly; the bytes-only twins ([`object_id_from_bytes`] /
+/// [`object_id_from_parts`]) decode just the merkle types and delegate here,
+/// so every path — native store and wasm alike — keys an object identically.
+#[must_use]
+pub fn id_from_object(obj: &Object, bytes: &[u8]) -> Hash {
+    match obj {
+        Object::Tree(t) => crate::merkle::compute_tree_id(t),
+        Object::ChunkedBlob(cb) => crate::merkle::compute_chunked_id(cb),
+        _ => crate::hash::hash(bytes),
+    }
+}
+
+/// [`id_from_object`] for an object supplied only as its canonical **bytes**.
+/// Used by the store and batch writer, whose input is bytes they are about to
+/// persist (write) or have already persisted (read-verify).
+///
+/// Only the merkelized types are decoded — to find their BMT root; every
+/// other type (incl. up-to-~1 GiB blobs) is hashed straight from `bytes`
+/// without a decode. A merkle-typed buffer that fails to decode is byte-hashed
+/// like any other: real writers never emit one, and on read-verify the
+/// resulting id mismatch surfaces as `HashMismatch` rather than being masked.
 #[must_use]
 pub(crate) fn object_id_from_bytes(bytes: &[u8]) -> Hash {
-    match bytes.first().and_then(|b| ObjectType::from_u8(*b).ok()) {
-        Some(ObjectType::Tree) => {
-            if let Ok(Object::Tree(t)) = crate::serialize::deserialize(bytes) {
-                return crate::merkle::compute_tree_id(&t);
-            }
-        }
-        Some(ObjectType::ChunkedBlob) => {
-            if let Ok(Object::ChunkedBlob(cb)) = crate::serialize::deserialize(bytes) {
-                return crate::merkle::compute_chunked_id(&cb);
-            }
-        }
-        _ => {}
+    let is_merkle = bytes
+        .first()
+        .and_then(|b| ObjectType::from_u8(*b).ok())
+        .is_some_and(ObjectType::is_merkle);
+    if is_merkle && let Ok(obj) = crate::serialize::deserialize(bytes) {
+        return id_from_object(&obj, bytes);
     }
     crate::hash::hash(bytes)
 }

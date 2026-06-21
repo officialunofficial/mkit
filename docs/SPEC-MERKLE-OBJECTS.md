@@ -119,12 +119,17 @@ never transcribed by hand. The empty `ChunkedBlob` (`N = 0`, a meta-only
 
 ## 5. Inclusion proofs
 
+> **Provisional / unstable.** This proof API and wire format have no in-tree
+> consumer yet; proofs are **not** transported today (see SPEC-TRANSPORT). The
+> format is foundation for a future light-client / API reader and **may change
+> incompatibly** before that first consumer pins it. Object identity (§2) is
+> stable; this section is not.
+
 A single-leaf inclusion proof is the leaf count plus the bottom-up sibling
 digests. Wire form: `[u32 LE leaf_count][u32 LE n_siblings][n × 32B]`.
 Verification position-hashes the supplied leaf, folds up with the
 siblings, finalizes with `leaf_count`, and compares to the **bare**
-`tree_root` (the pre-domain-wrap root). Proofs are **not** shipped over
-the transport (see SPEC-TRANSPORT); they exist for light-client / API use.
+`tree_root` (the pre-domain-wrap root). They exist for light-client / API use.
 
 ## 6. Invariants
 

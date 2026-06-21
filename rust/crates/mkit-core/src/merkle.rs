@@ -10,15 +10,23 @@
 //! ## Primitive — a vendored BMT, byte-identical to `commonware_storage::bmt`
 //!
 //! The house idiom (makechain `transactions_root.rs`) uses
-//! `commonware_storage::bmt`. We do **not** depend on it for object
-//! identity, because `bmt` is gated behind `commonware-storage/std`, which
-//! pulls `zstd-sys` — a C library that cannot target `wasm32`, and
-//! `mkit-wasm` computes object ids. Instead this module vendors the
-//! *identical* BMT construction over the `blake3` crate (already a mkit
-//! dependency, wasm-clean). A native-only test
-//! (`tests::vendored_root_matches_commonware`) cross-verifies the
-//! vendored root byte-for-byte against `commonware_storage::bmt`, so the
-//! two never drift.
+//! `commonware_storage::bmt`. We do **not** depend on it for object identity:
+//! `merkle.rs` lives in `mkit-core` and `Object::id` calls it, so this module
+//! must compile to `wasm32` for `mkit-core` *itself* to — independent of any
+//! wasm caller. At the pinned `commonware =2026.5.0`, `bmt` is gated behind
+//! `commonware-storage/std`, which unconditionally pulls `zstd-sys` (a C
+//! library with no `wasm32-unknown-unknown` target). Instead this module
+//! vendors the *identical* BMT construction over the `blake3` crate (already a
+//! mkit dependency, wasm-clean). A native-only test
+//! (`tests::vendored_root_matches_commonware`) cross-verifies the vendored
+//! root byte-for-byte against `commonware_storage::bmt`, so the two never
+//! drift.
+//!
+//! TODO(commonware#4089): the upstream PR commonwarexyz/monorepo#4090 makes
+//! `bmt` `no_std` (it has no real `std` dependency — only an incidental
+//! `commonware-runtime` re-export of `bytes::{Buf, BufMut}`). Once that
+//! releases, this vendored copy can be dropped for a direct
+//! `commonware-storage` dependency; the cross-check test already pins equality.
 //!
 //! The construction (matching commonware):
 //! * leaf at index `i` is hashed with its position: `H(i_be32 ‖ leaf)`;
@@ -48,6 +56,17 @@
 //! prologue type byte is not in the root), so an empty `Tree` and an empty
 //! `ChunkedBlob`, or a 1-entry `Tree` and a 1-chunk `ChunkedBlob` with the
 //! same child hash, would otherwise share an id.
+//!
+//! ## Provisional — inclusion proofs
+//!
+//! Object identity (`compute_tree_id` / `compute_chunked_id`) is stable and on
+//! the hot path. The inclusion-proof API — `build_`/`verify_chunk_inclusion_proof`,
+//! `build_`/`verify_tree_inclusion_proof`, and the proof wire format
+//! `[leaf_count_le:u32][n:u32][n × 32B sibling]` (`docs/SPEC-MERKLE-OBJECTS.md`
+//! §5) — is **provisional**. It is foundation for a future light-client / API
+//! consumer and has no in-tree reader yet; proofs are **not** transported
+//! today. The construction is tested and fuzzed, but the wire format may change
+//! incompatibly before its first consumer pins it — do not treat it as stable.
 
 use crate::hash::{HASH_LEN, Hash, Hasher, domain_digest, hash};
 use crate::object::{ChunkedBlob, Tree, TreeEntry};

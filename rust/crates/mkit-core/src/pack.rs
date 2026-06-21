@@ -375,11 +375,12 @@ impl PackReader {
             match etype {
                 0x00 => {
                     // raw — validate and stage for writing after the whole pack parses.
-                    validate_storable_object(payload)?;
+                    let obj = validate_storable_object(payload)?;
                     // Address by the dispatched id (merkle root for
-                    // Tree/ChunkedBlob, BLAKE3 otherwise) so the unpacked
-                    // object lands under the same key every sink uses.
-                    let stored_hash = crate::object::object_id_from_bytes(payload);
+                    // Tree/ChunkedBlob, BLAKE3 otherwise) from the object we
+                    // just decoded, so the unpacked object lands under the same
+                    // key every sink uses without a second decode.
+                    let stored_hash = crate::object::id_from_object(&obj, payload);
                     let bytes: Arc<[u8]> = Arc::from(payload);
                     in_pack.insert(stored_hash, Arc::clone(&bytes));
                     pending_writes.push((stored_hash, bytes));
@@ -407,8 +408,8 @@ impl PackReader {
                         };
                     validate_delta_result_size(stream)?;
                     let resolved = delta::decode(base_bytes.as_ref(), stream)?;
-                    validate_storable_object(&resolved)?;
-                    let stored_hash = crate::object::object_id_from_bytes(&resolved);
+                    let obj = validate_storable_object(&resolved)?;
+                    let stored_hash = crate::object::id_from_object(&obj, &resolved);
                     let bytes: Arc<[u8]> = Arc::from(resolved);
                     in_pack.insert(stored_hash, Arc::clone(&bytes));
                     pending_writes.push((stored_hash, bytes));
@@ -439,18 +440,20 @@ impl PackReader {
     }
 }
 
-fn validate_storable_object(bytes: &[u8]) -> Result<(), PackError> {
+/// Decode `bytes`, enforce the size and storability invariants, and hand back
+/// the decoded [`Object`] so callers can address it without decoding twice.
+fn validate_storable_object(bytes: &[u8]) -> Result<Object, PackError> {
     if bytes.len() > MAX_RAW_OBJECT_SIZE {
         return Err(PackError::Store(crate::store::StoreError::ObjectTooLarge));
     }
     match crate::serialize::deserialize(bytes).map_err(PackError::InvalidObject)? {
         Object::Delta(_) => Err(PackError::NonStorableObject),
-        Object::Blob(_)
+        obj @ (Object::Blob(_)
         | Object::Tree(_)
         | Object::Commit(_)
         | Object::Remix(_)
         | Object::ChunkedBlob(_)
-        | Object::Tag(_) => Ok(()),
+        | Object::Tag(_)) => Ok(obj),
     }
 }
 
