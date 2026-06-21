@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { Link } from 'waku'
 import { Seo } from '../components/seo'
 import { WithToc } from '../components/with-toc'
+import { PUSH_MESH } from '../lib/mesh'
 
 export default function PushPage() {
   return (
@@ -71,37 +72,25 @@ export default function PushPage() {
             We did this because we don&rsquo;t think buckets will need to be human-browsable in the future. Four things
             you get for that trade:
           </p>
-          <dl className='max-w-prose space-y-4'>
-            <Trade term='Dedup'>
+          <div className='max-w-prose space-y-4'>
+            <Labeled term='Dedup'>
               Identical chunks are stored once — across files and across versions. Move a folder, copy a file, commit
               the same asset twice: the bytes land in the bucket a single time.
-            </Trade>
-            <Trade term='Cheap deltas'>
+            </Labeled>
+            <Labeled term='Cheap deltas'>
               A one-byte edit to a huge file pushes only the chunks that changed, encoded as a delta against a base the
-              remote already holds — not the whole file again (see{' '}
-              <Link to='/streaming' className='underline underline-offset-4 hover:opacity-70'>
-                streaming
-              </Link>
-              ).
-            </Trade>
-            <Trade term='File integrity'>
+              remote already holds — not the whole file again (see <DocLink to='/streaming'>streaming</DocLink>).
+            </Labeled>
+            <Labeled term='File integrity'>
               Every object is named by its hash. A merkelized object&rsquo;s id <em>is</em> its BMT root, so reading it
               back re-derives the root and proves its whole child set is intact — a free completeness check on anything
-              pulled out of the bucket (see{' '}
-              <Link to='/tree' className='underline underline-offset-4 hover:opacity-70'>
-                tree
-              </Link>
-              ).
-            </Trade>
-            <Trade term='Signed history'>
+              pulled out of the bucket (see <DocLink to='/tree'>tree</DocLink>).
+            </Labeled>
+            <Labeled term='Signed history'>
               Every commit carries an Ed25519 signature, so the chain of Merkle roots is also a chain of attestations:
-              who changed what, provable by anyone with the key (see{' '}
-              <Link to='/sign' className='underline underline-offset-4 hover:opacity-70'>
-                sign
-              </Link>
-              ).
-            </Trade>
-          </dl>
+              who changed what, provable by anyone with the key (see <DocLink to='/sign'>sign</DocLink>).
+            </Labeled>
+          </div>
         </section>
 
         <section className='space-y-4'>
@@ -123,11 +112,7 @@ export default function PushPage() {
             <Step n={3} term='Pack'>
               Only the objects the remote doesn&rsquo;t already have are serialized into a single pack. Large unchanged
               bases stay put; edits ride along as chunk deltas, so the bytes on the wire track what actually changed
-              (see{' '}
-              <Link to='/performance' className='underline underline-offset-4 hover:opacity-70'>
-                performance
-              </Link>
-              ).
+              (see <DocLink to='/performance'>performance</DocLink>).
             </Step>
             <Step n={4} term='Settle'>
               The pack is uploaded as a content-addressed blob, chained onto the branch&rsquo;s packmap, and the head
@@ -158,9 +143,33 @@ export default function PushPage() {
   )
 }
 
+// Inline prose link to another doc page. Carries the site's standard link
+// affordance (underline + opacity transition) in one place — the cross-links
+// previously inlined a shorter variant that dropped the transition.
+type DocRoute = '/streaming' | '/tree' | '/sign' | '/performance'
+function DocLink({ to, children }: { to: DocRoute; children: ReactNode }) {
+  return (
+    <Link to={to} className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'>
+      {children}
+    </Link>
+  )
+}
+
+// A bold term over muted body text — the shared row shape for both the "Why
+// packed" list and the numbered pipeline stages, so their typography is
+// defined once.
+function Labeled({ term, children }: { term: ReactNode; children: ReactNode }) {
+  return (
+    <div className='space-y-1'>
+      <div className='text-base font-medium'>{term}</div>
+      <div className='text-sm text-muted'>{children}</div>
+    </div>
+  )
+}
+
 // One of the two "roads" — a bordered card. `accent` (Road B, the chosen one)
-// gets a faint brand-tinted ground so it reads as the answer; `muted` (Road A)
-// stays plain white.
+// gets the shared brand mesh ground so it reads as the answer; `muted` (Road
+// A) stays plain white.
 function Road({
   tag,
   title,
@@ -175,20 +184,13 @@ function Road({
   return (
     <div
       className='space-y-3 rounded-md border border-hairline p-5'
-      style={
-        tone === 'accent'
-          ? {
-              backgroundImage:
-                'radial-gradient(at 18% 20%, rgba(0,210,168,0.08), transparent 55%), radial-gradient(at 84% 82%, rgba(122,59,247,0.07), transparent 55%)',
-            }
-          : undefined
-      }
+      style={tone === 'accent' ? { backgroundImage: PUSH_MESH } : undefined}
     >
       <div className='font-mono text-xs uppercase tracking-wide text-subtle'>{tag}</div>
       <div className='text-base font-medium'>{title}</div>
       <ul className='space-y-1.5 text-sm text-muted'>
-        {points.map((p) => (
-          <li key={p} className='flex gap-2'>
+        {points.map((p, i) => (
+          <li key={i} className='flex gap-2'>
             <span aria-hidden className='select-none text-subtle'>
               —
             </span>
@@ -200,17 +202,7 @@ function Road({
   )
 }
 
-// A labelled definition row used in "Why packed, not browsable".
-function Trade({ term, children }: { term: string; children: ReactNode }) {
-  return (
-    <div className='space-y-1'>
-      <dt className='text-base font-medium'>{term}</dt>
-      <dd className='text-sm text-muted'>{children}</dd>
-    </div>
-  )
-}
-
-// A numbered stage in the push pipeline.
+// A numbered stage in the push pipeline: a badge plus a shared `Labeled` block.
 function Step({ n, term, children }: { n: number; term: ReactNode; children: ReactNode }) {
   return (
     <li className='flex gap-3'>
@@ -220,10 +212,7 @@ function Step({ n, term, children }: { n: number; term: ReactNode; children: Rea
       >
         {n}
       </span>
-      <div className='space-y-1'>
-        <div className='text-base font-medium'>{term}</div>
-        <p className='text-sm text-muted'>{children}</p>
-      </div>
+      <Labeled term={term}>{children}</Labeled>
     </li>
   )
 }

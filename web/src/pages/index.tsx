@@ -1,6 +1,7 @@
 import { Link } from 'waku'
 import { CopyButton } from '../components/copy-button'
 import { Seo } from '../components/seo'
+import { PUSH_MESH } from '../lib/mesh'
 
 export default function HomePage() {
   return (
@@ -138,8 +139,7 @@ const MESH: Record<DemoRoute, string> = {
     'radial-gradient(at 20% 22%, rgba(52,211,153,0.09), transparent 55%), radial-gradient(at 80% 14%, rgba(45,212,191,0.08), transparent 55%)',
   '/parity':
     'radial-gradient(at 16% 20%, rgba(167,139,250,0.09), transparent 55%), radial-gradient(at 84% 80%, rgba(96,165,250,0.08), transparent 55%)',
-  '/push':
-    'radial-gradient(at 18% 20%, rgba(202,138,4,0.10), transparent 55%), radial-gradient(at 84% 82%, rgba(0,210,168,0.07), transparent 55%)',
+  '/push': PUSH_MESH,
 }
 
 // Per-tile accent colour (solid hue echoing each tile's mesh) for the header shape.
