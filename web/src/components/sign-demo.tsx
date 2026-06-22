@@ -79,7 +79,12 @@ export function SignDemo() {
       {sig ? (
         <>
           <label className='flex cursor-pointer items-center gap-2 text-sm'>
-            <input type='checkbox' className='accent-fg' checked={tamper} onChange={(e) => setTamper(e.target.checked)} />
+            <input
+              type='checkbox'
+              className='accent-fg'
+              checked={tamper}
+              onChange={(e) => setTamper(e.target.checked)}
+            />
             Tamper with the message before verifying
           </label>
           <FieldList>

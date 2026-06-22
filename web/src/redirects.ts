@@ -17,10 +17,9 @@ const REDIRECTS: Record<string, string> = {
 }
 
 /**
- * Target path for a deleted legacy route, or `null` if `pathname` is not one. A
- * single trailing slash is tolerated so `/sign/` resolves like `/sign` (the
- * asset layer's `drop-trailing-slash` only normalises requests that hit an
- * asset; these paths have none).
+ * Target path for a deleted legacy route, or `null` if `pathname` is not one. A single trailing slash is tolerated so
+ * `/sign/` resolves like `/sign` (the asset layer's `drop-trailing-slash` only normalises requests that hit an asset;
+ * these paths have none).
  */
 export function resolveRedirect(pathname: string): string | null {
   const path = pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname
@@ -32,15 +31,12 @@ export function resolveRedirect(pathname: string): string | null {
 type RedirectContext = { req: { raw: Request } }
 
 /**
- * Cloudflare-adapter middleware factory that 301s the deleted demo routes to
- * their `/demos#…` anchors.
+ * Cloudflare-adapter middleware factory that 301s the deleted demo routes to their `/demos#…` anchors.
  *
- * Like the installer sniff, this must be wired via the adapter's `middlewareFns`
- * option (see waku.server.tsx): it runs inside the deployed Worker's Hono app,
- * before the RSC page router, so it intercepts a path that no longer has a
- * prerendered asset before that router answers 404. No `run_worker_first` entry
- * is needed — a request with no matching static asset already falls through to
- * the Worker.
+ * Like the installer sniff, this must be wired via the adapter's `middlewareFns` option (see waku.server.tsx): it runs
+ * inside the deployed Worker's Hono app, before the RSC page router, so it intercepts a path that no longer has a
+ * prerendered asset before that router answers 404. No `run_worker_first` entry is needed — a request with no matching
+ * static asset already falls through to the Worker.
  */
 export function redirectMiddleware() {
   return async (c: RedirectContext, next: () => Promise<void>): Promise<Response | void> => {
