@@ -11,8 +11,10 @@
 //      is generated from these constants by scripts/gen-headers.mjs (run in the build
 //      chain) so it can't drift from this source.
 //
-// This module is plain data + string builders with no imports, so it can be loaded
-// both by the bundled Worker and by the Node build script.
+// This is a plain `.js` ESM module (paired with security-policy.d.ts for types)
+// with no imports, so it loads identically in the bundled Worker, the TypeScript
+// source, and the Node build scripts — without relying on Node TS type-stripping
+// (the Cloudflare Workers Builds image's `node` may not support importing `.ts`).
 
 /**
  * Content-Security-Policy directives.
@@ -35,7 +37,7 @@ export const CSP_DIRECTIVES = [
   "connect-src 'self' https://cloudflareinsights.com",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
-] as const
+]
 
 export const CONTENT_SECURITY_POLICY = CSP_DIRECTIVES.join('; ')
 
@@ -70,11 +72,11 @@ const STRICT_TRANSPORT_SECURITY = 'max-age=63072000; includeSubDomains; preload'
  * generator. CSP is sent ENFORCING (not Report-Only): there is no report-collection endpoint wired up, so Report-Only
  * was a no-op, and the directives above already match every resource the live demos load.
  */
-export const SECURITY_HEADERS: ReadonlyArray<readonly [string, string]> = [
+export const SECURITY_HEADERS = [
   ['Content-Security-Policy', CONTENT_SECURITY_POLICY],
   ['Strict-Transport-Security', STRICT_TRANSPORT_SECURITY],
   ['X-Content-Type-Options', 'nosniff'],
   ['X-Frame-Options', 'DENY'],
   ['Referrer-Policy', 'no-referrer'],
   ['Permissions-Policy', PERMISSIONS_POLICY],
-] as const
+]

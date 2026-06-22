@@ -1,12 +1,12 @@
 // Worker-side delivery of the security headers. The header VALUES are defined once
-// in ./security-policy.ts (the single source of truth shared with the build-time
+// in ./security-policy.js (the single source of truth shared with the build-time
 // `_headers` generator) — edit policy there, not here.
 //
 // Coverage note: this middleware only runs for routes the Worker actually handles —
 // i.e. `/` (the sole `run_worker_first` route) and short-circuit responses like the
 // installer sniff. Every prerendered page (/tree, /hash, …) is served directly by the
 // Cloudflare Assets binding and bypasses the Worker, so those routes get their headers
-// from public/_headers instead. The two paths are kept in sync via security-policy.ts.
+// from public/_headers instead. The two paths are kept in sync via security-policy.js.
 import { SECURITY_HEADERS } from './security-policy'
 
 export function withSecurityHeaders(response: Response): Response {

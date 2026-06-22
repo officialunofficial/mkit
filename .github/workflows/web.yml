@@ -39,6 +39,10 @@ jobs:
     name: Detect web-relevant changes
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # paths-filter reads the PR's changed-file list from the API.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       web: ${{ steps.filter.outputs.web }}
     steps:
