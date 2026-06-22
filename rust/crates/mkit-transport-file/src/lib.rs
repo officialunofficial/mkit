@@ -81,7 +81,11 @@ fn write_atomic(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result<()>
     }
 
     fs::rename(&tmp_path, dest)?;
-    let _ = sync_parent(parent); // best-effort
+    // Make the rename's dirent durable. Propagated (not best-effort
+    // discarded): on power loss a swallowed parent-dir fsync could lose a
+    // committed ref/pack write. Matches `mkit_core::atomic::write_atomic`,
+    // which propagates its `sync_parent_dir(parent)?` the same way.
+    sync_parent(parent)?;
     Ok(())
 }
 
@@ -117,7 +121,11 @@ fn write_create_new(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result
     match fs::hard_link(&tmp_path, dest) {
         Ok(()) => {
             let _ = fs::remove_file(&tmp_path);
-            let _ = sync_parent(parent);
+            // Make the hard-link's dirent durable. Propagated (not
+            // best-effort discarded): on power loss a swallowed
+            // parent-dir fsync could lose a committed ref write. Matches
+            // `mkit_core::atomic::write_create_new`.
+            sync_parent(parent)?;
             Ok(true)
         }
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
@@ -131,10 +139,19 @@ fn write_create_new(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result
     }
 }
 
-/// Best-effort fsync of a directory.
+/// Fsync a directory, making completed renames/hard-links durable.
+///
+/// The result is propagated by callers (not discarded) so a power loss
+/// cannot silently lose a committed ref/pack write. A `NotFound` is
+/// tolerated as success — the directory only vanishes if a concurrent
+/// actor removed it, in which case there is nothing left to make
+/// durable. Mirrors `mkit_core::atomic::sync_parent_dir`.
 fn sync_parent(dir: &Path) -> io::Result<()> {
-    let d = fs::File::open(dir)?;
-    d.sync_all()
+    match fs::File::open(dir) {
+        Ok(d) => d.sync_all(),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1213,6 +1230,60 @@ mod tests {
             final_hashes.contains(&final_h),
             "final ref must equal one of the writers' targets: got {final_h:?}, writers={final_hashes:?}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Durability: parent-dir fsync is propagated, not swallowed (C1)
+    // ------------------------------------------------------------------
+
+    /// Regression for C1: the parent-directory fsync that makes a
+    /// rename's / hard-link's dirent durable is now propagated via `?`
+    /// instead of being discarded as best-effort. This exercises the
+    /// now-propagating path end-to-end across all three write conditions
+    /// (`Any` and the `Missing` create path go through `write_atomic` /
+    /// `write_create_new`, both of which `sync_parent(parent)?`). A true
+    /// power-loss / fsync-fault injection is impractical in a unit test;
+    /// this asserts the synced write path still succeeds for every verb.
+    #[test]
+    fn synced_write_path_succeeds_for_all_conditions() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+
+        // pack upload → write_atomic → sync_parent(parent)?
+        let data = b"durable pack payload";
+        let key = pack_key_for(data);
+        t.upload_pack(data, &key)
+            .expect("upload_pack must succeed through the propagated parent fsync");
+        assert_eq!(t.download_pack(&key).unwrap(), data);
+
+        // Missing → write_create_new → sync_parent(parent)? on the link arm
+        let h0 = blake3_hash(b"durable-missing");
+        t.update_ref("refs/heads/main", RefWriteCondition::Missing, &h0)
+            .expect("update_ref(Missing) must succeed through the propagated parent fsync");
+        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h0));
+
+        // Any → write_atomic → sync_parent(parent)?
+        let h1 = blake3_hash(b"durable-any");
+        t.update_ref("refs/heads/main", RefWriteCondition::Any, &h1)
+            .expect("update_ref(Any) must succeed through the propagated parent fsync");
+        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h1));
+
+        // Match → read-check-write → write_atomic → sync_parent(parent)?
+        let h2 = blake3_hash(b"durable-match");
+        t.update_ref("refs/heads/main", RefWriteCondition::Match(h1), &h2)
+            .expect("update_ref(Match) must succeed through the propagated parent fsync");
+        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h2));
+    }
+
+    /// `sync_parent` tolerates a vanished directory as success (mirrors
+    /// `atomic::sync_parent_dir`): if the parent was removed concurrently
+    /// there is nothing left to make durable, so a `NotFound` must not be
+    /// surfaced as an error.
+    #[test]
+    fn sync_parent_tolerates_missing_dir() {
+        let dir = tmp();
+        let gone = dir.path().join("does-not-exist");
+        sync_parent(&gone).expect("sync_parent must treat a missing dir as success");
     }
 
     /// Write side: a symlink that already exists inside `<root>/` but

@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (`mkit-core`):** `Tree` and `ChunkedBlob` are now
+  content-addressed by a **domain-bound Binary Merkle Tree (BMT) root**
+  (`id = domain_digest(TYPE_DOMAIN, bmt_root)`) instead of `BLAKE3` of
+  their serialized bytes; every other object type keeps the flat scheme.
+  Because a `Tree` id feeds its `Commit` id which feeds every ref, this
+  re-addresses all history. Content addressing is preserved (the id is
+  still a deterministic function of canonical content) and stays
+  tamper-evident (read recomputes the root), and the serialized wire
+  format and `schema_version = 0x01` are unchanged — the break is in
+  object identity only. Cross-format safety is a **mandatory
+  `.mkit/format` repo marker** (`bmt-v1`): a pre-merkle repository is
+  rejected at open (`IncompatibleRepoFormat`) instead of silently
+  mis-reading every `Tree`/`ChunkedBlob`. Pre-1.0 API/format break, no
+  migration. New normative spec
+  [`docs/SPEC-MERKLE-OBJECTS.md`](docs/SPEC-MERKLE-OBJECTS.md) pins the
+  construction; see also ADR
+  [`docs/adr/0001-merkelize-chunkedblob-and-tree.md`](docs/adr/0001-merkelize-chunkedblob-and-tree.md)
+  ([#414](https://github.com/officialunofficial/mkit/pull/414)).
 - **BREAKING (`mkit-core`):** in the `blame` module, the public type alias
   `BlameResult2<T>` was renamed to `BlameOutcome<T>`, and the unbounded
   `match_lines` function is now private — callers must use the

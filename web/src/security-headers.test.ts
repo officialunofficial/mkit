@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { securityHeadersMiddleware, withSecurityHeaders } from './security-headers'
 
 describe('withSecurityHeaders', () => {
-  it('adds conservative hardening headers without enforcing CSP yet', async () => {
+  it('adds hardening headers with an enforcing CSP and HSTS', async () => {
     const input = new Response('ok', {
       headers: { 'Content-Type': 'text/plain' },
       status: 201,
@@ -16,14 +16,17 @@ describe('withSecurityHeaders', () => {
     expect(output.headers.get('X-Frame-Options')).toBe('DENY')
     expect(output.headers.get('Referrer-Policy')).toBe('no-referrer')
     expect(output.headers.get('Permissions-Policy')).toContain('camera=()')
-    expect(output.headers.get('Content-Security-Policy')).toBeNull()
+    expect(output.headers.get('Strict-Transport-Security')).toContain('max-age=')
 
-    const reportOnly = output.headers.get('Content-Security-Policy-Report-Only')
-    expect(reportOnly).toContain("default-src 'self'")
-    expect(reportOnly).toContain("script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'")
-    expect(reportOnly).toContain('https://fonts.googleapis.com')
-    expect(reportOnly).toContain('https://fonts.gstatic.com')
-    expect(reportOnly).toContain("img-src 'self' data: blob:")
+    // CSP is now ENFORCING (no longer Report-Only — there was no report endpoint,
+    // so Report-Only was a no-op). The Report-Only header must be absent.
+    const csp = output.headers.get('Content-Security-Policy')
+    expect(csp).toContain("default-src 'self'")
+    expect(csp).toContain("script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'")
+    expect(csp).toContain('https://fonts.googleapis.com')
+    expect(csp).toContain('https://fonts.gstatic.com')
+    expect(csp).toContain("img-src 'self' data: blob:")
+    expect(output.headers.get('Content-Security-Policy-Report-Only')).toBeNull()
     await expect(output.text()).resolves.toBe('ok')
   })
 })

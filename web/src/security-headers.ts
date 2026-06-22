@@ -1,47 +1,13 @@
-const CONTENT_SECURITY_POLICY_REPORT_ONLY = [
-  "default-src 'self'",
-  "base-uri 'self'",
-  "object-src 'none'",
-  "frame-ancestors 'none'",
-  "form-action 'self'",
-  "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://static.cloudflareinsights.com",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-  "font-src 'self' https://fonts.gstatic.com data:",
-  "img-src 'self' data: blob:",
-  "connect-src 'self' https://cloudflareinsights.com",
-  "worker-src 'self' blob:",
-  "manifest-src 'self'",
-].join('; ')
-
-const SECURITY_HEADERS = [
-  ['Content-Security-Policy-Report-Only', CONTENT_SECURITY_POLICY_REPORT_ONLY],
-  ['X-Content-Type-Options', 'nosniff'],
-  ['X-Frame-Options', 'DENY'],
-  ['Referrer-Policy', 'no-referrer'],
-  [
-    'Permissions-Policy',
-    [
-      'accelerometer=()',
-      'ambient-light-sensor=()',
-      'autoplay=()',
-      'camera=()',
-      'display-capture=()',
-      'encrypted-media=()',
-      'fullscreen=(self)',
-      'geolocation=()',
-      'gyroscope=()',
-      'magnetometer=()',
-      'microphone=()',
-      'payment=()',
-      'picture-in-picture=()',
-      'publickey-credentials-get=(self)',
-      'screen-wake-lock=()',
-      'serial=()',
-      'usb=()',
-      'xr-spatial-tracking=()',
-    ].join(', '),
-  ],
-] as const
+// Worker-side delivery of the security headers. The header VALUES are defined once
+// in ./security-policy.js (the single source of truth shared with the build-time
+// `_headers` generator) — edit policy there, not here.
+//
+// Coverage note: this middleware only runs for routes the Worker actually handles —
+// i.e. `/` (the sole `run_worker_first` route) and short-circuit responses like the
+// installer sniff. Every prerendered page (/tree, /hash, …) is served directly by the
+// Cloudflare Assets binding and bypasses the Worker, so those routes get their headers
+// from public/_headers instead. The two paths are kept in sync via security-policy.js.
+import { SECURITY_HEADERS } from './security-policy'
 
 export function withSecurityHeaders(response: Response): Response {
   const secured = new Response(response.body, response)

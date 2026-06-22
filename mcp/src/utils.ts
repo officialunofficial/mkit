@@ -7,6 +7,67 @@
  * scripts/build-index.mjs instead, since mkit bakes its corpus at deploy.
  */
 
+/** An MCP tool result: a content array, optionally flagged as an error. */
+export interface ToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
+}
+
+export const err = (text: string): ToolResult => ({
+  content: [{ type: "text" as const, text }],
+  isError: true,
+});
+export const ok = (text: string): ToolResult => ({ content: [{ type: "text" as const, text }] });
+
+/**
+ * Raised by the D1 layer when the corpus has no indexed versions (empty or
+ * un-seeded database). Distinguished from a genuine D1 outage so tool handlers
+ * can return a clear "index is empty/unavailable" message instead of a generic
+ * failure. See `guardTool`.
+ */
+export class EmptyCorpusError extends Error {
+  constructor(message = "No versions indexed") {
+    super(message);
+    this.name = "EmptyCorpusError";
+  }
+}
+
+/** Stable prefix for all structured error logs (greppable in Cloudflare logs). */
+export const LOG_PREFIX = "[mkit-mcp]";
+
+const EMPTY_CORPUS_MESSAGE =
+  "The mkit documentation index is empty or unavailable right now — no versions are indexed. " +
+  "Please try again later.";
+const D1_FAILURE_MESSAGE =
+  "The mkit documentation index is temporarily unavailable (backend error). Please try again later.";
+
+/**
+ * Wrap a tool callback so a thrown D1 error (or any exception) becomes a
+ * graceful MCP error result rather than an unhandled exception surfaced to the
+ * client. Logs the failure with a stable prefix + tool name for Cloudflare
+ * observability. Empty-corpus throws get a distinct, clearer message.
+ *
+ * `console.error` deliberately logs the error only (tool name + message/stack),
+ * never the caller's arguments, to avoid leaking query/content payloads.
+ */
+export function guardTool<TArgs>(
+  name: string,
+  cb: (args: TArgs) => Promise<ToolResult> | ToolResult,
+): (args: TArgs) => Promise<ToolResult> {
+  return async (args: TArgs) => {
+    try {
+      return await cb(args);
+    } catch (e) {
+      if (e instanceof EmptyCorpusError) {
+        console.error(`${LOG_PREFIX} tool=${name} empty-corpus:`, e.message);
+        return err(EMPTY_CORPUS_MESSAGE);
+      }
+      console.error(`${LOG_PREFIX} tool=${name} d1-error:`, e instanceof Error ? e.stack ?? e.message : e);
+      return err(D1_FAILURE_MESSAGE);
+    }
+  };
+}
+
 /** Sort semver-ish version tags (e.g. v0.2.0) in descending order, in place. */
 export function sortVersionsDesc(versions: string[]): void {
   // Parse only the numeric X.Y.Z core; drop any -prerelease/+build suffix so a

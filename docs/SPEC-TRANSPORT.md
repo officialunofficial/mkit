@@ -16,7 +16,7 @@ wire shape and authentication model differ per scheme.
 There is no negotiation between transports and no scheme fallback.
 The URL scheme is part of the remote address; if the scheme is
 unsupported, the dispatcher returns an error rather than guessing
-([`mkit-cli`'s `remote_dispatch::open`](../rust/crates/mkit-cli/src/remote_dispatch.rs)
+([`mkit-cli`'s `remote_dispatch::open`](../rust/crates/mkit-cli/src/remote_dispatch/mod.rs)
 performs the scheme switch).
 
 The SSH wire format is defined in
@@ -232,7 +232,7 @@ See [`SSH-SECURITY.md`](SSH-SECURITY.md) for the full trust model.
 
 The `mkit serve` server enforces per-connection budgets to bound a
 misbehaving or malicious client (see
-[`mkit-cli/src/commands/serve.rs`](../rust/crates/mkit-cli/src/commands/serve.rs)):
+[`mkit-cli/src/commands/serve/mod.rs`](../rust/crates/mkit-cli/src/commands/serve/mod.rs)):
 
 - `MAX_FRAMES_PER_CONN = 10_000` — hard cap on frames after `Hello`.
 - `MAX_BYTES_PER_CONN  = 1 GiB`  — cap on cumulative request payload bytes.
