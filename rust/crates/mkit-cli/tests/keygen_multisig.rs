@@ -1,5 +1,5 @@
 //! Integration tests for `mkit keygen --algorithm` + `mkit attest
-//! --additional-signer` (Phase 2 multi-algorithm / multi-signature).
+//! --additional-signer` (multi-algorithm / multi-signature).
 //!
 //! These tests drive the `mkit` binary end-to-end:
 //! * Generate per-algorithm keys with `mkit keygen --algorithm <algo>`.

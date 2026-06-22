@@ -1,4 +1,4 @@
-//! Phase 9 (annotated / signed tag) golden vectors.
+//! Annotated / signed tag golden vectors.
 //!
 //! Pins the canonical byte layout of [`Tag`] objects (SPEC-OBJECTS §6a)
 //! and the tag signing bytes + signing hash + Ed25519 signature under

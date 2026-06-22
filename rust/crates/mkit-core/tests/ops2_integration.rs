@@ -1,4 +1,4 @@
-//! End-to-end integration tests for Phase 5b — rebase / bisect /
+//! End-to-end integration tests for rebase / bisect /
 //! blame / stash / restore.
 
 use std::collections::BTreeSet;

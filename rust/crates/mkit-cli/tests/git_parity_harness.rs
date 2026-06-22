@@ -1007,7 +1007,7 @@ fn branch_delete_missing_fails_like_git() {
 }
 
 // =====================================================================
-// Passing subset — read-only plumbing (#251, Phase 3). rev-parse /
+// Passing subset — read-only plumbing (#251). rev-parse /
 // show-ref / ls-tree output is parity-able modulo hash length; cat-file
 // on a blob is byte-exact (type / size / content carry no object id).
 // =====================================================================

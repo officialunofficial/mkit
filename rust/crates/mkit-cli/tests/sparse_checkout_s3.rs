@@ -1,5 +1,5 @@
-//! End-to-end S3-transport sparse-checkout coverage (issue #158
-//! Phase 2). The S3 transport assumes the server (or a populating
+//! End-to-end S3-transport sparse-checkout coverage (issue #158).
+//! The S3 transport assumes the server (or a populating
 //! Cloudflare Worker) has pre-built the sparse delivery under the
 //! `sparse/<tree-hex>/<filter-hex>` object key — clients GET it.
 //!

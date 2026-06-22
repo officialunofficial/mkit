@@ -1,5 +1,5 @@
 #![allow(clippy::doc_markdown)]
-//! Phase 7d SigV4 golden-vector check.
+//! SigV4 golden-vector check.
 //!
 //! Loads `rust/tests/golden/transport/sigv4_basic.bin` (a JSON blob with
 //! fixed inputs + expected outputs) and asserts that the signer

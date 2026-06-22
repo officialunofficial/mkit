@@ -1,5 +1,5 @@
-//! End-to-end HTTP-transport sparse-checkout coverage (issue #158
-//! Phase 2). Spins up a `mockito` server that responds to
+//! End-to-end HTTP-transport sparse-checkout coverage (issue #158).
+//! Spins up a `mockito` server that responds to
 //! `POST /<project>/trees/<hex>/sparse?sparse=<filter-hex>` with a
 //! server-built sparse envelope, then asserts the client decodes and
 //! verifies it.

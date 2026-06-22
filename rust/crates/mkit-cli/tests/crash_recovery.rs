@@ -1,4 +1,4 @@
-//! Phase-2 fault injection — crash / partial-write recovery.
+//! Fault injection — crash / partial-write recovery.
 //!
 //! mkit's single-file writes are atomic (temp→fsync→rename), so the crash risk
 //! is the **multi-file** operation state: a conflicted merge/cherry-pick/revert

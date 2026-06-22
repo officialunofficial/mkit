@@ -1,5 +1,5 @@
 //! `mkit reset --hard` and `mkit clean` — guarded destructive worktree
-//! commands (#250, Phase 2), driven end-to-end through the binary.
+//! commands (#250), driven end-to-end through the binary.
 //!
 //! Both refuse to destroy without an explicit `-f` (the mkit safety
 //! divergence): `reset --hard` discards tracked changes silently in git

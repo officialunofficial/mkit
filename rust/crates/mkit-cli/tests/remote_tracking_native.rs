@@ -1,4 +1,4 @@
-//! Phase 2a-0 native prerequisites: remote-tracking refs are
+//! Native remote-tracking prerequisites: remote-tracking refs are
 //! first-class citizens of revspec/merge/show-ref/for-each-ref,
 //! printable opaque identities render as text, replays preserve
 //! authorship, and `remote rename/remove` cleans tracking refs.

@@ -1,4 +1,4 @@
-//! #249 Phase 1: `mkit status -z` emits NUL-terminated, raw (unquoted)
+//! #249: `mkit status -z` emits NUL-terminated, raw (unquoted)
 //! records, and default porcelain C-style-quotes special-byte paths.
 
 #![cfg(unix)]

@@ -1,9 +1,9 @@
-//! Phase-2 fault injection — corrupted-object / invalid-ref rejection.
+//! Fault injection — corrupted-object / invalid-ref rejection.
 //!
 //! Mutate on-disk artifacts (loose objects, ref files, HEAD, signatures) and
 //! assert the reading command rejects them **cleanly**: an allowlisted non-OK
-//! exit, no panic, and never a silent success. Phase 1 proved *detection* on
-//! read (`validator_detects_tampered_object`); this proves the **CLI commands**
+//! exit, no panic, and never a silent success. The validator unit test proved
+//! *detection* on read (`validator_detects_tampered_object`); this proves the **CLI commands**
 //! surface corruption as documented errors rather than crashing — the gap the
 //! pre-open-source audit flagged (only the bit-flip case was covered before).
 //!

@@ -1,4 +1,4 @@
-//! Phase 3 goldens.
+//! Chunker / delta / packfile goldens.
 //!
 //! These tests assert that:
 //!

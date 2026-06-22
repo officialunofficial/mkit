@@ -1,4 +1,4 @@
-//! End-to-end integration tests for the Phase 5a ops surface.
+//! End-to-end integration tests for the diff/merge/cherry-pick ops surface.
 //!
 //! These tests are deliberately *cross-module*: they build a small
 //! commit graph in a real `TempDir`-backed `ObjectStore` and then
@@ -224,7 +224,7 @@ fn cherry_pick_modify_modify_conflict_carries_message() {
     assert_eq!(merged[0].object_hash, v2);
 }
 
-/// Determinism guard for the Phase 5a operations: with fixed input
+/// Determinism guard for the merge / cherry-pick operations: with fixed input
 /// blob contents the merged tree's content-addressed hash is fully
 /// determined, and the cherry-pick result hashes likewise. If anything
 /// in the merge decision matrix or tree serialisation drifts, this

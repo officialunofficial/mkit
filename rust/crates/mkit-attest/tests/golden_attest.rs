@@ -1,4 +1,4 @@
-//! Phase 8 goldens.
+//! Attestation goldens.
 //!
 //! Fixed deterministic vectors pin two contracts:
 //!

@@ -1,4 +1,4 @@
-//! Git-compatibility `config` aliases (#250, Phase 2): `user.name` /
+//! Git-compatibility `config` aliases (#250): `user.name` /
 //! `user.email`. They round-trip like git, but are **non-authoritative** —
 //! they must never feed mkit's cryptographic commit author (which is
 //! `user.identity` / the signing key). These tests pin both the parity
