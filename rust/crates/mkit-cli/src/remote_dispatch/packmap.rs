@@ -22,7 +22,7 @@
 
 use mkit_core::hash::Hash;
 use mkit_core::pack::{self, PackReader};
-use mkit_core::protocol::{PackKey, Transport, TransportError};
+use mkit_core::protocol::{AdvanceOutcome, PackKey, Transport, TransportError};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 use mkit_core::transfer;
@@ -153,8 +153,11 @@ pub(crate) fn advance_packmap(
     branch: &str,
     pack_key: Hash,
     self_contained: bool,
+    head_condition: refs::RefWriteCondition,
+    tip: Hash,
 ) -> Result<(), DispatchError> {
     let packmap_name = packmap_ref(branch);
+    let head_name = format!("refs/heads/{branch}");
     for _ in 0..PACKMAP_CAS_ATTEMPTS {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
@@ -164,9 +167,12 @@ pub(crate) fn advance_packmap(
         let prev = match prior {
             None => None,
             Some(p) => match resolve_pack_chain(tx, branch, p) {
-                // Idempotency: a previous attempt already landed this pack
-                // somewhere in the chain.
-                Ok(packs) if packs.contains(&pack_key) => return Ok(()),
+                // Idempotency: a previous attempt already advertised this pack.
+                // The packmap is already correct, so only the head still needs
+                // to move — commit it alone.
+                Ok(packs) if packs.contains(&pack_key) => {
+                    return commit_head(tx, &head_name, head_condition, &tip, branch);
+                }
                 Ok(_) => Some(p), // healthy chain — append onto it
                 // Broken chain: a self-contained pack can reset to escape it;
                 // a delta push must block (its bases live in the broken tail).
@@ -180,20 +186,54 @@ pub(crate) fn advance_packmap(
         tx.upload_blob(&node, &PackKey::from_hash(node_key))?;
         // CAS off the packmap's CURRENT value (`prior`), independent of the
         // node's `prev` — a reset still has to win the race for the ref.
-        let cond = match prior {
+        let packmap_condition = match prior {
             Some(k) => refs::RefWriteCondition::Match(k),
             None => refs::RefWriteCondition::Missing,
         };
-        match tx.update_ref(&packmap_name, cond, &node_key) {
-            Ok(()) => return Ok(()),
+        // Commit the packmap AND the head together (#408). A transactional
+        // transport applies both atomically; the default does packmap-then-
+        // head — still safe, the head never lands past an unadvanced packmap.
+        match tx.advance_refs(
+            &head_name,
+            head_condition,
+            &tip,
+            &packmap_name,
+            packmap_condition,
+            &node_key,
+        )? {
+            AdvanceOutcome::Committed => return Ok(()),
             // Another pusher advanced the packmap under us — re-read and retry.
-            Err(TransportError::RefConflict) => {}
-            Err(e) => return Err(e.into()),
+            AdvanceOutcome::PackmapConflict => {}
+            // The branch moved under us — the push is stale.
+            AdvanceOutcome::HeadConflict => {
+                return Err(DispatchError::NonFastForwardPush {
+                    branch: branch.to_owned(),
+                });
+            }
         }
     }
     Err(DispatchError::PackmapContended {
         branch: branch.to_owned(),
     })
+}
+
+/// Move just the branch head under its CAS condition, mapping a conflict to
+/// the actionable non-fast-forward error. Used when the packmap already
+/// advertises the pack (idempotent retry) or a push has nothing to send.
+pub(crate) fn commit_head(
+    tx: &dyn Transport,
+    head_name: &str,
+    condition: refs::RefWriteCondition,
+    tip: &Hash,
+    branch: &str,
+) -> Result<(), DispatchError> {
+    match tx.update_ref(head_name, condition, tip) {
+        Ok(()) => Ok(()),
+        Err(TransportError::RefConflict) => Err(DispatchError::NonFastForwardPush {
+            branch: branch.to_owned(),
+        }),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Walk a branch's packlist chain from `head_key` and unpack every pack in

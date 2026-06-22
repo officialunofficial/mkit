@@ -707,3 +707,82 @@ fn push_blocks_on_a_corrupt_deeper_packmap_node() {
         "head must not move onto a chain with a broken deeper node"
     );
 }
+
+#[test]
+fn advance_refs_default_distinguishes_packmap_and_head_conflicts() {
+    // The #408 atomic-advance primitive: even the non-transactional default
+    // impl must report WHICH precondition failed, so the push loop can retry
+    // a packmap conflict but fail a head conflict.
+    use mkit_core::protocol::AdvanceOutcome;
+    let tx = MemoryTransport::new();
+    let head = "refs/heads/main";
+    let pm = "refs/mkit/packmap/main";
+    let (a, b, c, d, wrong) = ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32], [9u8; 32]);
+
+    // Both fresh → Committed; both refs land.
+    assert_eq!(
+        tx.advance_refs(
+            head,
+            RefWriteCondition::Missing,
+            &a,
+            pm,
+            RefWriteCondition::Missing,
+            &b
+        )
+        .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(tx.read_ref(head).unwrap(), Some(a));
+    assert_eq!(tx.read_ref(pm).unwrap(), Some(b));
+
+    // Packmap precondition wrong → PackmapConflict; NOTHING moves (packmap is
+    // attempted first and fails before the head is touched).
+    assert_eq!(
+        tx.advance_refs(
+            head,
+            RefWriteCondition::Match(a),
+            &c,
+            pm,
+            RefWriteCondition::Match(wrong),
+            &d
+        )
+        .unwrap(),
+        AdvanceOutcome::PackmapConflict
+    );
+    assert_eq!(
+        tx.read_ref(head).unwrap(),
+        Some(a),
+        "head unchanged on packmap conflict"
+    );
+    assert_eq!(
+        tx.read_ref(pm).unwrap(),
+        Some(b),
+        "packmap unchanged on packmap conflict"
+    );
+
+    // Head precondition wrong → HeadConflict; the head stays put. The default
+    // impl commits the packmap first (documented), so it advances to d — a
+    // superset, still safe; an atomic transport would leave it at b.
+    assert_eq!(
+        tx.advance_refs(
+            head,
+            RefWriteCondition::Match(wrong),
+            &c,
+            pm,
+            RefWriteCondition::Match(b),
+            &d
+        )
+        .unwrap(),
+        AdvanceOutcome::HeadConflict
+    );
+    assert_eq!(
+        tx.read_ref(head).unwrap(),
+        Some(a),
+        "head unchanged on head conflict"
+    );
+    assert_eq!(
+        tx.read_ref(pm).unwrap(),
+        Some(d),
+        "default impl commits packmap before head"
+    );
+}

@@ -134,8 +134,8 @@ pub use worktree::{
 // mkit-rpc's ssh.proto and are consumed by mkit-transport-ssh
 // directly.
 pub use protocol::{
-    BACKOFF_CAP, BACKOFF_INITIAL, BACKOFF_MAX_ATTEMPTS, BackoffIterator, PackKey, Transport,
-    TransportError, TransportResult, is_retryable, pack_key_from_hex,
+    AdvanceOutcome, BACKOFF_CAP, BACKOFF_INITIAL, BACKOFF_MAX_ATTEMPTS, BackoffIterator, PackKey,
+    Transport, TransportError, TransportResult, is_retryable, pack_key_from_hex,
 };
 
 // Phase 5 — ops re-exports (OPS1: diff/graph/merge/cherry_pick).
