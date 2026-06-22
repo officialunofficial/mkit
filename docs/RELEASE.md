@@ -64,8 +64,7 @@ Run top to bottom. Do not skip steps.
 
 ### Pre-tag
 
-- [ ] `main` is green in CI (build + test + verify-rename).
-- [ ] `bash scripts/verify-rename.sh` exits 0 locally.
+- [ ] `main` is green in CI (build + test).
 - [ ] `cd rust && cargo test --workspace` passes on a fresh clone.
 - [ ] `cargo build --release` passes for each release target:
   - [ ] `--target=aarch64-apple-darwin`

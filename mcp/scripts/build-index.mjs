@@ -70,7 +70,7 @@ crates.sort((a, b) => a.name.localeCompare(b.name));
 
 // docs/**/*.md (SPEC-*.md, CLI.md, PARITY.md, …) and top-level docs.
 for (const md of walk(join(repoRoot, "docs"), (p) => p.endsWith(".md"))) addFile(md);
-for (const f of ["README.md", "CHANGELOG.md", "GOVERNANCE.md", "SKILL.md", "man/mkit.1"]) {
+for (const f of ["README.md", "CHANGELOG.md", "SKILL.md", "man/mkit.1"]) {
   addFile(join(repoRoot, f));
 }
 

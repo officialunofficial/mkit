@@ -57,8 +57,6 @@ reproducible-build smoke test diffs two sequential release builds
 - `mkit version` emits exactly `mkit <X.Y.Z>\n` — asserted by both a
   snapshot test in `crates/mkit-cli/tests/version_snapshot.rs` and a CI
   step that runs the release binary.
-- `scripts/verify-rename.sh` enforces the public-surface rename gate
-  on every push.
 - Fuzz harnesses enforce the six guardrails documented in
   `docs/FUZZ.md` (≤100 iterations, ≤64 KiB input, bounded per-op
   allocations, 100 ms per-iteration cap, no unbounded loops, seeded

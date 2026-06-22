@@ -24,8 +24,7 @@ indent_size = 4
 [*.{toml,yml,yaml,json,md}]
 indent_size = 2
 
-# Shell scripts: 2 spaces is the project convention (matches install.sh,
-# scripts/verify-rename.sh).
+# Shell scripts: 2 spaces is the project convention (matches install.sh).
 [*.{sh,bash,zsh,fish}]
 indent_size = 2
 

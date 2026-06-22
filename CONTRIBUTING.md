@@ -55,7 +55,6 @@ cargo install cargo-deny cargo-audit cargo-nextest    # supply-chain + faster te
 cargo install cargo-mutants                           # mutation testing (see Test-first below)
 cargo deny check                                      # licenses, sources, advisories
 cargo audit                                           # RUSTSEC advisories
-../scripts/verify-rename.sh                           # rename-gate (CI-enforced)
 ```
 
 ## Test-first discipline
@@ -87,9 +86,9 @@ test classes earn their keep:
   output (CLI, JSON envelopes, formatted text). Update with
   `cargo insta review` after deliberate output changes.
 
-CI runs `cargo-mutants` nightly against `mkit-core` and `mkit-attest`;
-the mutation score is posted to issue #161. Aim to add tests that
-move the score up over time rather than down.
+Run `cargo-mutants` locally against `mkit-core` and `mkit-attest` to
+surface logic that no test pins down; aim to add tests that close those
+gaps over time.
 
 Optional but recommended for repeated local rebuilds:
 
@@ -144,33 +143,23 @@ and tested separately from `contrib/signers/`.
 
 ## Continuous integration
 
-Workflows live in `.github/workflows/`. Their display names are prefixed by
-purpose so the Actions tab self-groups: `CI:` (build/test/lint/coverage/docs),
-`Security:`, `Quality:`, `Nightly:` (scheduled deep checks), `Release:`, and
-`Meta:` (workflow lint, PR-title, typos).
+Workflows live in `.github/workflows/`. Display names are prefixed by purpose so
+the Actions tab self-groups: `CI:` (build/test/lint/coverage/docs), `Security:`,
+`Nightly:` (scheduled fuzzing), `Release:`, and `Meta:` (workflow lint).
 
 | Workflow | Triggers | Notes |
 |----------|----------|-------|
-| `CI: Rust` | push `main`¹, approved-PR² | Build, test, clippy, fmt, MSRV, keystore backends |
-| `CI: Coverage` | push `main`¹, approved-PR² | `cargo-llvm-cov` → Codecov |
+| `CI: Rust` | every PR; push `main`¹ | Build, test, clippy, fmt on every PR. The OS-matrix keystore-backends and MSRV jobs run on `main` pushes and approved reviews; a `ci-gate` job aggregates everything into one required check. |
+| `CI: Coverage` | every PR; push `main`¹ | `cargo-llvm-cov` → Codecov |
 | `CI: Docs` | every PR | rustdoc broken-link gate (`-D warnings`) |
-| `CI: Web` / `CI: MCP` | push/PR, path-filtered | only when `web/**` / `mcp/**` change |
-| `Quality: Reproducible Build` | approved-PR², weekly | two-pass determinism check |
-| `Quality: cargo-geiger` | push `main`, PR | unsafe-code ceiling |
-| `Security: Rust` | PR, Mon 06:00, dispatch | `cargo audit` + `cargo deny` (no longer on every main push) |
-| `Security: Supply Chain` | PR, Sun, dispatch | dependency review, OSSF Scorecard, SBOM |
-| `Nightly: *` | ~04:00 daily, dispatch | fuzz, mutation score, state-machine suite |
+| `CI: Web` / `CI: MCP` | push/PR, path-filtered | run only when `web/**` / `mcp/**` change; each has an always-run gate job so a required check is always present |
+| `Security: Rust` | PR, weekly, dispatch | `cargo audit` + `cargo deny` |
+| `Nightly: Fuzz` | scheduled, dispatch | fuzz harnesses |
 | `Release: *` | signed `v*` tag (or dispatch) | crates.io publish, binaries, MCP corpus seed |
-| `Meta: *` | push/PR, path-filtered | actionlint, PR-title, typos, rename gate (`scripts/verify-rename.sh`) |
+| `Meta: Actionlint` | push/PR | workflow lint |
 
-¹ Path-filtered: a docs/MCP/web-only push to `main` no longer triggers the full
+¹ Path-filtered: a docs/MCP/web-only push to `main` doesn't trigger the full
 Rust matrix or coverage.
-
-² **Why didn't CI run on my PR?** The expensive Rust jobs trigger on
-`pull_request_review` and only start **after a maintainer submits an approving
-review** — they intentionally don't burn runner minutes on every push to an
-open PR. `CI: Docs`, `CI: Web`, `CI: MCP`, and the `Meta:` checks run on every
-push as usual.
 
 The toolchain + protoc + cargo-cache setup shared by the Rust CI workflows is
 the `.github/actions/setup-rust` composite action — bump the pinned action SHAs
@@ -200,15 +189,14 @@ Every PR is held to:
 1. **Tests pass** — `cargo test --workspace` on Linux + macOS.
 2. **No new clippy warnings** — `clippy --all-targets -- -D warnings`.
 3. **Formatted** — `cargo fmt --check`.
-4. **Rename-gate green** — `scripts/verify-rename.sh`.
-5. **No new RUSTSEC advisories** — `cargo deny check advisories`.
-6. **Spec changes are versioned** — anything that mutates an on-disk
+4. **No new RUSTSEC advisories** — `cargo deny check advisories`.
+5. **Spec changes are versioned** — anything that mutates an on-disk
    or wire format requires a corresponding `docs/SPEC-*.md` change
    and, where applicable, a new golden vector under
    `rust/tests/golden/`.
-7. **Crypto / key-handling changes** require a second reviewer and an
+6. **Crypto / key-handling changes** require a second reviewer and an
    explicit threat-model note in the PR description.
-8. **Public API changes** require a CHANGELOG entry under the
+7. **Public API changes** require a CHANGELOG entry under the
    "Unreleased" heading and a SemVer impact note.
 
 ## What we will not merge
@@ -245,7 +233,6 @@ Before requesting review:
 - [ ] `cargo fmt --check` clean
 - [ ] `cargo clippy --all-targets -- -D warnings` clean
 - [ ] `cargo t` (or `cargo nextest run --workspace`) passes
-- [ ] `scripts/verify-rename.sh` passes
 - [ ] CHANGELOG entry under "Unreleased" if user-visible
 - [ ] Spec + golden vector updated if format changed
 - [ ] No new dependencies added without justification in the PR body

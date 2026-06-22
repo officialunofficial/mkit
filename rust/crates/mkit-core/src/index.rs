@@ -923,8 +923,8 @@ mod tests {
     #[test]
     fn rejects_zmix_magic_explicitly() {
         // SPEC-INDEX §5: v1 readers MUST reject `"ZMIX"`-prefixed files.
-        // We construct the rejected magic as ASCII bytes here to avoid
-        // tripping the rename-gate scanner.
+        // We construct the rejected magic as ASCII bytes here rather than
+        // embedding the legacy literal string.
         let bytes = [
             0x5A,
             0x4D,
