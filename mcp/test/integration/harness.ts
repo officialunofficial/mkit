@@ -3,11 +3,16 @@
  *
  * Drives the *real* public interface — the streamable-HTTP MCP endpoint served
  * by `MkitMCP.serve("/")` over a Durable Object, backed by a miniflare D1 — so
- * tests verify observable tool behavior, not private helpers. The endpoint
- * speaks the MCP streamable-HTTP transport: an `initialize` POST (no session)
- * returns an `mcp-session-id` header and an SSE-framed result, after which
- * `tools/call` POSTs carry that session id and stream their result as SSE.
+ * tests verify observable tool behavior, not private helpers. We use the
+ * canonical `@modelcontextprotocol/sdk` client, pointing its streamable-HTTP
+ * transport at the test Worker via the `fetch` injection (routes to `SELF`
+ * instead of the global). That keeps the harness to the part that is actually
+ * specific to mkit — seeding a corpus — and leaves protocol concerns (the
+ * initialize handshake, session-id tracking, SSE framing) to the SDK.
  */
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { type CallToolResult, CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { applyD1Migrations, env, SELF } from "cloudflare:test";
 
 interface TestEnv {
@@ -15,13 +20,6 @@ interface TestEnv {
   TEST_MIGRATIONS: Array<{ name: string; queries: string[] }>;
 }
 const testEnv = env as unknown as TestEnv;
-
-const ACCEPT = "application/json, text/event-stream";
-
-export interface ToolResult {
-  content: Array<{ type: string; text: string }>;
-  isError?: boolean;
-}
 
 /** Apply the D1 schema migrations (idempotent). */
 export async function applyMigrations(): Promise<void> {
@@ -103,116 +101,43 @@ export async function seedCorpus(): Promise<void> {
   ]);
 }
 
-interface JsonRpcMessage {
-  jsonrpc: "2.0";
-  id?: number;
-  method?: string;
-  params?: unknown;
-  result?: unknown;
-  error?: { code: number; message: string };
-}
-
-async function postRpc(body: object, sessionId?: string): Promise<Response> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: ACCEPT,
-  };
-  if (sessionId) headers["mcp-session-id"] = sessionId;
-  return SELF.fetch("https://mcp.test/", {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
+/**
+ * Connect an MCP client to the test Worker over streamable-HTTP. The transport's
+ * `fetch` is routed to `SELF` (the pool's service binding to the Worker under
+ * test) so requests hit the real Durable Object + D1 rather than the network.
+ * The returned client has already completed the initialize handshake.
+ */
+export async function connectMcpClient(): Promise<Client> {
+  const transport = new StreamableHTTPClientTransport(new URL("https://mcp.test/"), {
+    fetch: (input: string | URL, init?: RequestInit) =>
+      SELF.fetch(
+        input as Parameters<typeof SELF.fetch>[0],
+        init as Parameters<typeof SELF.fetch>[1],
+      ),
   });
+  const client = new Client({ name: "mkit-mcp-tests", version: "0" });
+  await client.connect(transport);
+  return client;
 }
 
 /**
- * Read an SSE-framed streamable-HTTP response and return the first JSON-RPC
- * message whose id matches. Resolves as soon as that frame arrives (the
- * transport may keep the stream open with keepalive comments), so it never
- * blocks on a stream that does not close promptly.
+ * Call a tool and return its result. Pins the strict `CallToolResultSchema` (so
+ * `content`/`isError` are well-typed, not the legacy `toolResult` union) and
+ * always sends an `arguments` object — every tool here expects one, even the
+ * no-arg ones.
  */
-async function readSseResult(res: Response, id: number): Promise<JsonRpcMessage> {
-  if (!res.body) throw new Error(`no response body (status ${res.status})`);
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (value) buf += decoder.decode(value, { stream: true });
-      let sep: number;
-      while ((sep = buf.indexOf("\n\n")) !== -1) {
-        const frame = buf.slice(0, sep);
-        buf = buf.slice(sep + 2);
-        for (const line of frame.split("\n")) {
-          if (!line.startsWith("data:")) continue;
-          const data = line.slice(5).trim();
-          if (!data) continue;
-          let msg: JsonRpcMessage;
-          try {
-            msg = JSON.parse(data) as JsonRpcMessage;
-          } catch {
-            continue; // keepalive / non-JSON line
-          }
-          if (msg.id === id) return msg;
-        }
-      }
-      if (done) break;
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-  throw new Error(`no JSON-RPC frame for id ${id} (status ${res.status}); leftover: ${buf.slice(0, 200)}`);
-}
-
-/** A minimal MCP client speaking streamable-HTTP against the test Worker. */
-export class McpTestClient {
-  private sessionId = "";
-  private nextId = 1;
-
-  async initialize(): Promise<void> {
-    const id = this.nextId++;
-    const res = await postRpc({
-      jsonrpc: "2.0",
-      id,
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-06-18",
-        capabilities: {},
-        clientInfo: { name: "mkit-mcp-tests", version: "0" },
-      },
-    });
-    if (res.status !== 200) {
-      throw new Error(`initialize failed: HTTP ${res.status} — ${await res.text()}`);
-    }
-    const sid = res.headers.get("mcp-session-id");
-    if (!sid) throw new Error("initialize response missing mcp-session-id header");
-    this.sessionId = sid;
-    const msg = await readSseResult(res, id);
-    if (msg.error) throw new Error(`initialize error: ${JSON.stringify(msg.error)}`);
-
-    // Required follow-up: the `notifications/initialized` notification (no id) → 202.
-    const note = await postRpc({ jsonrpc: "2.0", method: "notifications/initialized" }, this.sessionId);
-    await note.body?.cancel().catch(() => {});
-  }
-
-  async callTool(name: string, args: Record<string, unknown> = {}): Promise<ToolResult> {
-    if (!this.sessionId) throw new Error("callTool before initialize()");
-    const id = this.nextId++;
-    const res = await postRpc(
-      { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } },
-      this.sessionId,
-    );
-    if (res.status !== 200) {
-      throw new Error(`tools/call ${name} failed: HTTP ${res.status} — ${await res.text()}`);
-    }
-    const msg = await readSseResult(res, id);
-    if (msg.error) throw new Error(`tools/call ${name} JSON-RPC error: ${JSON.stringify(msg.error)}`);
-    return msg.result as ToolResult;
-  }
+export function callTool(
+  client: Client,
+  name: string,
+  args: Record<string, unknown> = {},
+): Promise<CallToolResult> {
+  // `callTool`'s return type unions in a legacy `{ toolResult }` shape that has
+  // no `content`; pinning CallToolResultSchema guarantees the server's standard
+  // result at runtime, so narrow the static type to match.
+  return client.callTool({ name, arguments: args }, CallToolResultSchema) as Promise<CallToolResult>;
 }
 
 /** Join a tool result's text content for easy assertions. */
-export function toolText(result: ToolResult): string {
-  return result.content.map((c) => c.text).join("\n");
+export function toolText(result: CallToolResult): string {
+  return result.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
 }
