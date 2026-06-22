@@ -112,7 +112,8 @@ message Error {
   ErrorCode code = 1;
 
   // Human-readable message, English, suitable for direct display.
-  // Length-capped at 1 KiB by the framing layer.
+  // No per-field cap; bounded only by the whole-frame
+  // `MAX_FRAME_BYTES` (1 MiB) limit enforced by the framing layer.
   string message = 2;
 
   // Vendor-specific bytes, opaque to mkit. May carry a CTAP CBOR

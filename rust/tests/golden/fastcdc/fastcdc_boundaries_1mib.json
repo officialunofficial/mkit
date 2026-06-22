@@ -1,6 +1,6 @@
 {
   "name": "fastcdc_boundaries_1mib",
-  "description": "1 MiB pseudo-random buffer (i*31+7 mod 256); chunk-end offsets as JSON",
+  "description": "1 MiB splitmix64 stream (seed 0xA5A5_F00D_DEAD_BEEF); chunk-end offsets as JSON",
   "bin": "fastcdc_boundaries_1mib.bin",
   "size": 104,
   "blake3": "c075a28bc3f497a4bc538de05ae9168237684fe3627252566c0590020679d59d"
