@@ -43,7 +43,7 @@ pub mod sign;
 pub mod store;
 pub mod transfer;
 
-// Phase 4 — refs + index + worktree + ignore + repo_lock.
+// Refs, index, worktree, ignore, and repo_lock.
 pub(crate) mod atomic;
 pub mod ignore;
 pub mod index;
@@ -51,18 +51,18 @@ pub mod refs;
 pub mod repo_lock;
 pub mod worktree;
 
-// Phase 7a — transport trait surface (vtable + SSH framing + retry policy).
+// Transport trait surface (vtable + SSH framing + retry policy).
 pub mod protocol;
 
-// Phase 1 of issue #157 — append-only MMR over the commit chain for
+// Issue #157 — append-only MMR over the commit chain for
 // O(log n) inclusion proofs. Feature-gated so the `commonware-storage`
 // dep tree only materialises for downstream callers that opt in.
-// Persisted (journaled) MMR + commit-field integration are Phase 2/3
-// — see docs/SPEC-HISTORY-PROOF.md.
+// Persisted (journaled) MMR is in this build; commit-field integration
+// is planned — see docs/SPEC-HISTORY-PROOF.md.
 #[cfg(feature = "history-mmr")]
 pub mod history;
 
-// Verifiable sparse-checkout (issue #158, Phase 2). Feature-gated
+// Verifiable sparse-checkout (issue #158). Feature-gated
 // because the upstream `commonware-storage::AuthenticatedBitMap` is
 // ALPHA-tier and pulls in `commonware-runtime` /
 // `commonware-cryptography`. Off by default.
@@ -96,24 +96,24 @@ pub use store::{
     StoreResult,
 };
 
-// Phase 3 — content-defined chunker (FastCDC v1).
+// Content-defined chunker (FastCDC v1).
 pub use chunker::{
     AVG_SIZE as CHUNK_AVG_SIZE, ChunkBoundary, ChunkIterator, FastCdc, MASK_L as CHUNK_MASK_L,
     MASK_S as CHUNK_MASK_S, MAX_SIZE as CHUNK_MAX_SIZE, MIN_SIZE as CHUNK_MIN_SIZE,
     SEED as CHUNK_SEED, chunk_boundaries, gear_table_digest,
 };
 
-// Phase 3 — delta instruction stream (SPEC-DELTA v1).
+// Delta instruction stream (SPEC-DELTA v1).
 pub use delta::{HEADER_LEN as DELTA_HEADER_LEN, MAX_INSERT_LEN, OP_COPY, STREAM_VERSION};
 
-// Phase 3 — packfile reader/writer (SPEC-PACKFILE v1).
+// Packfile reader/writer (SPEC-PACKFILE v1).
 pub use pack::{
     HEADER_LEN as PACK_HEADER_LEN, MAGIC as PACK_MAGIC, MAX_ENTRIES as PACK_MAX_ENTRIES,
     MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, PackError, PackReader, PackWriter,
     TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport, VERSION as PACK_VERSION, pack_key,
 };
 
-// Phase 4 — refs + index + worktree + ignore + repo_lock.
+// Refs, index, worktree, ignore, and repo_lock.
 pub use ignore::{IgnoreError, IgnoreList, MAX_IGNORE_FILE_BYTES, Pattern, glob_match};
 pub use index::{
     EntryStatus, INDEX_FILE, Index, IndexEntry, IndexError, IndexResult, MAGIC as INDEX_MAGIC,
@@ -138,7 +138,7 @@ pub use protocol::{
     Transport, TransportError, TransportResult, is_retryable, pack_key_from_hex,
 };
 
-// Phase 5 — ops re-exports (OPS1: diff/graph/merge/cherry_pick).
+// Ops re-exports (OPS1: diff/graph/merge/cherry_pick).
 // OPS2's rebase/bisect/blame/stash/restore are accessed via
 // `mkit_core::ops::{rebase, bisect, ...}` directly rather than re-exported
 // at the crate root — the submodule is typically the right import scope

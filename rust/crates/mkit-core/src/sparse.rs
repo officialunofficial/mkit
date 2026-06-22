@@ -1,4 +1,4 @@
-//! Verifiable sparse-checkout (Phase 1 scaffold).
+//! Verifiable sparse-checkout (in-process manifest-build + verify core).
 //!
 //! Spec reference: `docs/SPEC-SPARSE-CHECKOUT.md`. Issue #158.
 //!
@@ -11,11 +11,11 @@
 //! server didn't lie about which entries were omitted by request
 //! versus silently dropped.
 //!
-//! This module is the Phase 1 core scaffolding: build a manifest from
+//! This module is the in-process core: build a manifest from
 //! a `Tree` + filter, and verify a delivered set of `TreeEntry`s
 //! against it. The actual transport-level integration (HTTP/S3 query
-//! params, on-disk bitmap cache) is Phase 2 and is intentionally out
-//! of scope.
+//! params, on-disk bitmap cache) is planned and is intentionally out
+//! of scope here.
 //!
 //! # Authenticated bitmap
 //!
@@ -36,7 +36,7 @@
 //!
 //! # Wire format
 //!
-//! Strictly defined by `docs/SPEC-SPARSE-CHECKOUT.md`. Phase 1 does
+//! Strictly defined by `docs/SPEC-SPARSE-CHECKOUT.md`. This build does
 //! not yet wire `SparseProof` into any transport — the type is the
 //! in-memory carrier between [`build_sparse`] and [`verify_sparse`].
 //!
@@ -108,9 +108,9 @@ pub struct SparseManifest {
 
 /// Verifiable proof bundle accompanying a [`SparseManifest`].
 ///
-/// Phase 1 carries the full bitmap chunks; for any realistic tree
+/// This build carries the full bitmap chunks; for any realistic tree
 /// size the bitmap fits comfortably in a few hundred bytes and the
-/// verifier walks every delivered entry anyway. Phase 2's transport
+/// verifier walks every delivered entry anyway. A future transport
 /// wire-format may add per-bit inclusion proofs if bandwidth ever
 /// becomes a concern — those will land as a new field, not as a swap.
 #[derive(Debug, Clone)]
@@ -178,9 +178,9 @@ fn entry_matches_filter(entry: &TreeEntry, filter: &[PathBuf]) -> bool {
     false
 }
 
-/// Errors raised by [`build_sparse`] and [`verify_sparse`]. Phase 1
-/// keeps this small — the transport layer will wrap these in its own
-/// error type in Phase 2.
+/// Errors raised by [`build_sparse`] and [`verify_sparse`]. This is
+/// kept small — the transport layer will wrap these in its own
+/// error type once it lands.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SparseError {
     /// Source tree has more entries than [`MAX_LEAVES`]. The bitmap
@@ -281,8 +281,8 @@ pub fn build_sparse(
 /// `(root, bitmap_bytes)`. Shared between [`build_sparse`] and
 /// [`verify_sparse`] so the two cannot drift.
 ///
-/// Phase 1 spins a fresh `deterministic::Runner` per call. Phase 2
-/// (sparse over a real transport) will reuse a long-lived executor via
+/// This build spins a fresh `deterministic::Runner` per call. Sparse
+/// over a real transport will reuse a long-lived executor via
 /// the future `mkit_core::protocol::Executor` shim; the dependency is
 /// captured at this seam to keep the migration mechanical.
 fn merkleize_bits(bits: &[bool]) -> (Hash, Vec<u8>) {
@@ -332,9 +332,9 @@ fn merkleize_bits(bits: &[bool]) -> (Hash, Vec<u8>) {
 /// 5. `delivered_entries`, in order, are *exactly* the entries
 ///    whose leaf-index has its bit set.
 ///
-/// Phase 1 cannot independently check `tree_hash` because the
+/// This build cannot independently check `tree_hash` because the
 /// verifier doesn't have the full tree (that's the whole point of
-/// sparse delivery). The Phase 2 transport layer will recompute the
+/// sparse delivery). The transport layer will recompute the
 /// tree hash once it has assembled enough of the structure.
 ///
 /// # Panics
@@ -380,7 +380,7 @@ pub fn verify_sparse(
     // We can't fully verify (5) without seeing the source tree, but
     // we can verify the *count* of set bits matches the count of
     // delivered entries, and that delivered entries are themselves
-    // selected by the filter. The Phase 2 transport will cross-check
+    // selected by the filter. The transport layer will cross-check
     // delivered_entries[i] against tree position once it has the
     // canonical leaf-index → name mapping.
     let mut set_bits = 0usize;
@@ -416,8 +416,8 @@ pub fn verify_sparse(
 
 /// Compute the canonical SPEC-OBJECTS tree hash.
 ///
-/// Phase 2 swaps the Phase-1 placeholder for the canonical hash:
-/// `BLAKE3(serialize(Object::Tree(t)))`. This is the *same* digest the
+/// This is the canonical hash, replacing the earlier sparse-private
+/// placeholder: `BLAKE3(serialize(Object::Tree(t)))`. This is the *same* digest the
 /// rest of the codebase uses to address a tree object — commits, remix
 /// roots, and the object store all key trees by this value.
 ///
@@ -471,7 +471,7 @@ pub struct SparseResponse {
     /// The subset of tree entries the filter selects, in canonical
     /// lex-sorted order. The verifier walks these alongside the bitmap.
     pub entries: Vec<TreeEntry>,
-    /// Proof bundle. Phase 2 carries only the raw bitmap bytes; the
+    /// Proof bundle. This build carries only the raw bitmap bytes; the
     /// future MMR proof slot is reserved for streaming-only transports.
     pub proof: SparseProof,
 }
@@ -1030,14 +1030,14 @@ mod tests {
         assert_ne!(a, c);
     }
 
-    // ----- Phase 2: canonical tree-hash + wire format ----------------------
+    // ----- canonical tree-hash + wire format -------------------------------
 
     #[test]
     fn tree_hash_matches_canonical_serialize_then_hash() {
-        // The Phase-2 tree_hash is BLAKE3(serialize(Object::Tree(t))).
+        // The canonical tree_hash is BLAKE3(serialize(Object::Tree(t))).
         // Cross-check against the codebase's canonical "address a tree
         // object" recipe — anything else would defeat the point of the
-        // Phase-1 → Phase-2 swap.
+        // placeholder → canonical-hash swap.
         let tree = make_tree(5);
         let canonical = crate::hash::hash(
             &crate::serialize::serialize(&crate::object::Object::Tree(tree.clone())).unwrap(),
@@ -1047,12 +1047,12 @@ mod tests {
 
     #[test]
     fn tree_hash_differs_from_phase1_placeholder() {
-        // Sanity: the Phase-1 sparse-internal hash and the new
+        // Sanity: the old sparse-internal placeholder hash and the new
         // canonical hash MUST differ for any non-empty tree, so a
-        // mistakenly-pinned Phase-1 hash anywhere upstream surfaces
+        // mistakenly-pinned placeholder hash anywhere upstream surfaces
         // immediately as a verifier mismatch.
         let tree = make_tree(3);
-        // Phase-1 placeholder recipe — kept verbatim for the diff.
+        // Old placeholder recipe — kept verbatim for the diff.
         let mut body = Hasher::new();
         let count = u32::try_from(tree.entries.len()).unwrap();
         body.update(&count.to_le_bytes());

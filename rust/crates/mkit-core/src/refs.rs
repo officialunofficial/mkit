@@ -393,7 +393,7 @@ pub fn update_ref(
 // -----------------------------------------------------------------------------
 
 /// Combined ref-write + history-MMR-append, protected by a single
-/// repo-level lock. Issue #157, Phase 2.
+/// repo-level lock. Issue #157.
 ///
 /// Performs, in order:
 ///
@@ -412,7 +412,7 @@ pub fn update_ref(
 ///
 /// # Design note (Option B vs Option A)
 ///
-/// The original Phase-2 plan considered adding an optional
+/// The original journaled-history plan considered adding an optional
 /// `executor: Option<&dyn Executor>` parameter to [`update_ref`]
 /// itself ("Option A"). Two reasons not to:
 ///
@@ -451,7 +451,7 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
     hash: &Hash,
     history: &mut crate::history::CommitHistory<X>,
 ) -> RefResult<()> {
-    // Defence-in-depth: history must be a Phase-2 journaled flavour;
+    // Defence-in-depth: history must be a journaled flavour;
     // a mem-only flavour would silently drop the appended leaf on
     // process exit, defeating the whole point of this coupling.
     let Some(history_dir) = history.mkit_dir() else {

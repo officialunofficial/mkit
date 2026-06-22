@@ -1,7 +1,7 @@
 //! `tokio`-runtime-backed [`Executor`] for the journaled history MMR.
 //!
 //! Layered identically to the executor introduced for transport-enc
-//! Phase 2 (issue #156) but kept inside `mkit-core::history` so the
+//! (issue #156) but kept inside `mkit-core::history` so the
 //! `history-mmr` feature is self-contained — consumers don't need to
 //! depend on `mkit-transport-enc` just to persist commit history.
 //!

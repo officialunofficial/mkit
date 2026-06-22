@@ -7,10 +7,10 @@
 //!
 //! # Status
 //!
-//! - **Phase 1** (shipped, [`CommitHistory::open`]): `mem`-backed
-//!   in-memory MMR. Lost on process exit. Useful for tests and
+//! - **In-memory** (shipped, [`CommitHistory::open`]): `mem`-backed
+//!   MMR. Lost on process exit. Useful for tests and
 //!   short-lived computations where the proof is the only output.
-//! - **Phase 2** (this build, [`CommitHistory::open_at`]): on-disk
+//! - **On-disk journaled** (this build, [`CommitHistory::open_at`]):
 //!   journaled MMR backed by
 //!   [`commonware_storage::merkle::mmr::full::Mmr`] pinned to
 //!   `=2026.5.0`. The on-disk layout is commonware's native two-store
@@ -18,8 +18,8 @@
 //!   sidecar for pruned pinned nodes — laid out under
 //!   `<mkit_dir>/history/<sanitized_branch>/`. See
 //!   `docs/SPEC-HISTORY-PROOF.md` §4.
-//! - **Phase 3** (planned, v0.2): `Commit.history_root` proto field,
-//!   new signing-bytes layout. Out of scope here.
+//! - **Commit-field integration** (planned, v0.2): `Commit.history_root`
+//!   proto field, new signing-bytes layout. Out of scope here.
 //!
 //! # Hashing
 //!
@@ -52,7 +52,7 @@
 //! the caller. The commonware `Context` needed to drive the
 //! journaled MMR is bootstrapped *internally* via a one-shot
 //! [`commonware_runtime::tokio::Runner::start`] on a fresh OS thread
-//! (the standard workaround documented in transport-enc Phase 2):
+//! (the standard workaround documented in transport-enc):
 //! the runner returns a Context clone, the outer `Arc<Executor>` inside
 //! the Context keeps tokio's runtime alive, and the bootstrap thread
 //! joins immediately. Subsequent async ops are driven through the
@@ -222,8 +222,8 @@ pub struct CommitHistory<X: Executor = TokioExecutor> {
     hasher: StandardHasher<Blake3>,
 }
 
-/// Internal backend selector. The mem variant is the Phase-1 shape; the
-/// journaled variant is Phase-2.
+/// Internal backend selector. The mem variant is the in-memory shape;
+/// the journaled variant is the on-disk one.
 ///
 /// `Journaled` is boxed because its inner state (commonware's
 /// `Journaled` plus a `Context` clone) is ~2.2 KiB and would otherwise
@@ -271,7 +271,7 @@ impl<X: Executor> core::fmt::Debug for CommitHistory<X> {
 }
 
 impl CommitHistory<TokioExecutor> {
-    /// Open a fresh empty in-memory history (Phase 1 shape).
+    /// Open a fresh empty in-memory history (mem-backed shape).
     ///
     /// Lost on drop. Useful for unit tests and for callers that just
     /// need a proof bundle without committing any state to disk.
@@ -685,7 +685,7 @@ mod tests {
         Arc::new(TokioExecutor::new().expect("tokio runtime"))
     }
 
-    // ---- Phase 1 mem-only API (unchanged from issue #157 Phase 1) --
+    // ---- mem-only API (unchanged from issue #157) -----------------
 
     #[test]
     fn mem_empty_history_root_is_well_defined() {
@@ -753,7 +753,7 @@ mod tests {
         );
     }
 
-    // ---- Phase 2 journaled API ------------------------------------
+    // ---- journaled API --------------------------------------------
 
     #[test]
     fn open_at_rejects_invalid_branch() {
@@ -865,7 +865,7 @@ mod tests {
 
     // ---- Negative-path verification (journaled flow) -------------
 
-    /// Phase-1-equivalent: appending must change the root. Same
+    /// Mem-flavour-equivalent: appending must change the root. Same
     /// property as the deleted `root_changes_on_append` test, lifted
     /// onto the journaled flavour.
     #[test]
@@ -882,7 +882,7 @@ mod tests {
         );
     }
 
-    /// Phase-1-equivalent: an honest inclusion proof must not verify
+    /// Mem-flavour-equivalent: an honest inclusion proof must not verify
     /// against a different commit hash than the one that was appended.
     #[test]
     fn journaled_wrong_commit_fails_verification() {
@@ -905,7 +905,7 @@ mod tests {
         );
     }
 
-    /// Phase-1-equivalent: an inclusion proof from one branch's MMR
+    /// Mem-flavour-equivalent: an inclusion proof from one branch's MMR
     /// must not verify against another branch's root.
     #[test]
     fn journaled_wrong_root_fails_verification() {

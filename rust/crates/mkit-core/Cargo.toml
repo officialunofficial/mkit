@@ -70,16 +70,16 @@ libc = "0.2"
 default = []
 # Issue #157 — append-only MMR over the commit chain.
 #
-# Phase 1 (mem-only `CommitHistory::open`) needs only the in-process
+# The mem-only path (`CommitHistory::open`) needs only the in-process
 # MMR primitive from `commonware-storage` and the BLAKE3 hasher from
-# `commonware-cryptography`. Phase 2 (this build, on-disk journaled
-# MMR via `CommitHistory::open_at`) additionally needs:
+# `commonware-cryptography`. The on-disk journaled path (this build,
+# `CommitHistory::open_at`) additionally needs:
 #   - `commonware-runtime` for the `Storage + Clock + Metrics` Context
 #     that backs the journaled MMR's blob/metadata stores; and
 #   - `tokio` for the long-lived multi-thread runtime that drives the
 #     async journaled-MMR ops behind the sync mkit-core API.
 # Both are dragged in together because dropping either re-introduces
-# the rejected mem-only Phase 1 shape.
+# the rejected mem-only shape.
 # `commonware-parallel` is required (since the 2026.5.x train) to name the
 # `Sequential` fold strategy that `commonware-storage`'s MMR/bitmap now take
 # as a type parameter — it is the crate that defines `Sequential`/`Strategy`
@@ -97,14 +97,14 @@ history-mmr = [
     "dep:commonware-utils",
     "dep:tokio",
 ]
-# Issue #158 Phase 1 — verifiable sparse-checkout via AuthenticatedBitMap.
+# Issue #158 — verifiable sparse-checkout via AuthenticatedBitMap.
 sparse-checkout = [
     "dep:commonware-storage",
     "dep:commonware-runtime",
     "dep:commonware-cryptography",
     "dep:commonware-parallel",
 ]
-# Issue #159 Phase 1 — erasure-coded pack delivery via Reed-Solomon.
+# Issue #159 — erasure-coded pack delivery via Reed-Solomon.
 pack-shards = [
         "commonware-codec/std",
     "dep:commonware-coding",
