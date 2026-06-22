@@ -43,8 +43,8 @@ use std::time::Duration;
 
 use mkit_core::hash::{Hash, from_hex, to_hex};
 use mkit_core::protocol::{
-    BackoffIterator, PackKey, RefWriteCondition, Transport, TransportError, TransportResult,
-    is_retryable,
+    AdvanceOutcome, BackoffIterator, PackKey, RefWriteCondition, Transport, TransportError,
+    TransportResult, is_retryable,
 };
 use mkit_core::refs::{Ref, validate_ref_name, validate_ref_prefix};
 use reqwest::StatusCode;
@@ -346,6 +346,41 @@ impl HttpTransport {
         Ok(u)
     }
 
+    /// URL for the atomic two-ref advance endpoint: `<base>/refs/advance`.
+    fn advance_url(&self) -> TransportResult<Url> {
+        let mut u = self.base.clone();
+        u.path_segments_mut()
+            .map_err(|()| TransportError::InvalidResponse)?
+            .pop_if_empty()
+            .push("refs")
+            .push("advance");
+        Ok(u)
+    }
+
+    /// Ordered non-atomic fallback (packmap first, then head) — identical to
+    /// the [`Transport::advance_refs`] default. Used when a precondition is
+    /// `Any`, which the atomic endpoint can't express.
+    fn advance_refs_ordered(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+    ) -> TransportResult<AdvanceOutcome> {
+        match self.update_ref(packmap_ref, packmap_condition, packmap_value) {
+            Ok(()) => {}
+            Err(TransportError::RefConflict) => return Ok(AdvanceOutcome::PackmapConflict),
+            Err(e) => return Err(e),
+        }
+        match self.update_ref(head_ref, head_condition, head_value) {
+            Ok(()) => Ok(AdvanceOutcome::Committed),
+            Err(TransportError::RefConflict) => Ok(AdvanceOutcome::HeadConflict),
+            Err(e) => Err(e),
+        }
+    }
+
     fn refs_list_url(&self, prefix: &str) -> TransportResult<Url> {
         let mut u = self.base.clone();
         u.path_segments_mut()
@@ -484,6 +519,50 @@ struct PackUploadResponse {
 #[derive(Debug, Serialize, Deserialize)]
 struct RefPayload {
     hash: String,
+}
+
+/// JSON body for `POST <base>/refs/advance` (mkit #408): the two ref specs
+/// the server commits atomically. Mirrors the makechain vcs endpoint.
+#[derive(Debug, Serialize)]
+struct AdvanceBody {
+    head: RefAdvanceJson,
+    packmap: RefAdvanceJson,
+}
+
+#[derive(Debug, Serialize)]
+struct RefAdvanceJson {
+    #[serde(rename = "ref")]
+    ref_name: String,
+    value: String,
+    condition: CondJson,
+}
+
+/// CAS precondition in the advance body. `Any` has no representation — the
+/// server's ref API has no unconditional write — so callers fall back to the
+/// ordered two-CAS for that case ([`cond_to_json`] returns `None`).
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum CondJson {
+    Missing,
+    Match { expected: String },
+}
+
+/// 412 response body: which precondition failed.
+#[derive(Debug, Deserialize)]
+struct AdvanceConflictBody {
+    conflict: String,
+}
+
+/// Map a CAS condition to its advance-body JSON. `Any` → `None` (not
+/// expressible on the atomic endpoint; caller uses the ordered fallback).
+fn cond_to_json(cond: RefWriteCondition) -> Option<CondJson> {
+    match cond {
+        RefWriteCondition::Missing => Some(CondJson::Missing),
+        RefWriteCondition::Match(h) => Some(CondJson::Match {
+            expected: to_hex(&h),
+        }),
+        RefWriteCondition::Any => None,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -697,6 +776,75 @@ impl Transport for HttpTransport {
                 TransportError::InvalidRef(name.to_string()),
             ))
         }
+    }
+
+    /// Atomic two-ref advance (#408): one `POST <base>/refs/advance` carrying
+    /// both ref specs, which the makechain vcs endpoint commits in a single
+    /// Durable-Object transaction. Auth mirrors `update_ref` (the same bearer
+    /// `apply_auth`). A `412` body names which precondition failed. `Any`
+    /// conditions aren't expressible on the endpoint, so they fall back to the
+    /// ordered two-CAS.
+    fn advance_refs(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+    ) -> TransportResult<AdvanceOutcome> {
+        let (Some(head_cond), Some(packmap_cond)) = (
+            cond_to_json(head_condition),
+            cond_to_json(packmap_condition),
+        ) else {
+            return self.advance_refs_ordered(
+                head_ref,
+                head_condition,
+                head_value,
+                packmap_ref,
+                packmap_condition,
+                packmap_value,
+            );
+        };
+
+        let url = self.advance_url()?;
+        let body = AdvanceBody {
+            head: RefAdvanceJson {
+                ref_name: head_ref.to_string(),
+                value: to_hex(head_value),
+                condition: head_cond,
+            },
+            packmap: RefAdvanceJson {
+                ref_name: packmap_ref.to_string(),
+                value: to_hex(packmap_value),
+                condition: packmap_cond,
+            },
+        };
+        let body_json = serde_json::to_vec(&body).map_err(|_| TransportError::InvalidResponse)?;
+
+        let resp = self.retrying(|| {
+            let r = self
+                .client
+                .post(url.clone())
+                .header("Content-Type", "application/json")
+                .body(body_json.clone());
+            self.apply_auth(r)
+        })?;
+
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(AdvanceOutcome::Committed);
+        }
+        if status == StatusCode::PRECONDITION_FAILED {
+            let parsed: AdvanceConflictBody =
+                resp.json().map_err(|_| TransportError::InvalidResponse)?;
+            return match parsed.conflict.as_str() {
+                "head" => Ok(AdvanceOutcome::HeadConflict),
+                "packmap" => Ok(AdvanceOutcome::PackmapConflict),
+                _ => Err(TransportError::InvalidResponse),
+            };
+        }
+        Err(map_status(status, TransportError::InvalidResponse))
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
@@ -1301,6 +1449,107 @@ mod tests {
         let _m = server.mock("HEAD", path.as_str()).with_status(404).create();
         let t = make_transport(&server, None);
         assert!(!t.pack_exists(&key).unwrap());
+    }
+
+    // -- advance_refs (#408) -----------------------------------------------
+
+    #[test]
+    fn advance_refs_posts_both_specs_and_commits() {
+        let mut server = Server::new();
+        let _m = server
+            .mock("POST", "/myproj/refs/advance")
+            .match_header("content-type", "application/json")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex(r#""ref":"refs/heads/main""#.into()),
+                Matcher::Regex(r#""ref":"refs/mkit/packmap/main""#.into()),
+                Matcher::Regex(r#""kind":"missing""#.into()),
+            ]))
+            .with_status(200)
+            .with_body(r#"{"ok":true}"#)
+            .create();
+        let t = make_transport(&server, Some("tok"));
+        let out = t
+            .advance_refs(
+                "refs/heads/main",
+                RefWriteCondition::Missing,
+                &sample_hash(1),
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                &sample_hash(2),
+            )
+            .unwrap();
+        assert_eq!(out, AdvanceOutcome::Committed);
+    }
+
+    #[test]
+    fn advance_refs_412_head_conflict() {
+        let mut server = Server::new();
+        let _m = server
+            .mock("POST", "/myproj/refs/advance")
+            .with_status(412)
+            .with_body(r#"{"ok":false,"conflict":"head"}"#)
+            .create();
+        let t = make_transport(&server, Some("tok"));
+        let out = t
+            .advance_refs(
+                "refs/heads/main",
+                RefWriteCondition::Match(sample_hash(9)),
+                &sample_hash(1),
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Match(sample_hash(2)),
+                &sample_hash(3),
+            )
+            .unwrap();
+        assert_eq!(out, AdvanceOutcome::HeadConflict);
+    }
+
+    #[test]
+    fn advance_refs_412_packmap_conflict() {
+        let mut server = Server::new();
+        let _m = server
+            .mock("POST", "/myproj/refs/advance")
+            .with_status(412)
+            .with_body(r#"{"ok":false,"conflict":"packmap"}"#)
+            .create();
+        let t = make_transport(&server, Some("tok"));
+        let out = t
+            .advance_refs(
+                "refs/heads/main",
+                RefWriteCondition::Match(sample_hash(1)),
+                &sample_hash(4),
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Match(sample_hash(9)),
+                &sample_hash(5),
+            )
+            .unwrap();
+        assert_eq!(out, AdvanceOutcome::PackmapConflict);
+    }
+
+    #[test]
+    fn advance_refs_any_condition_falls_back_to_ordered_two_cas() {
+        // `Any` (force) isn't expressible on the atomic endpoint, so the
+        // override must NOT hit /refs/advance — it writes packmap then head.
+        let mut server = Server::new();
+        let _pm = server
+            .mock("PUT", "/myproj/refs/refs/mkit/packmap/main")
+            .with_status(200)
+            .create();
+        let _head = server
+            .mock("PUT", "/myproj/refs/refs/heads/main")
+            .with_status(200)
+            .create();
+        let t = make_transport(&server, Some("tok"));
+        let out = t
+            .advance_refs(
+                "refs/heads/main",
+                RefWriteCondition::Any,
+                &sample_hash(1),
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                &sample_hash(2),
+            )
+            .unwrap();
+        assert_eq!(out, AdvanceOutcome::Committed);
     }
 
     // -- read_ref ----------------------------------------------------------
