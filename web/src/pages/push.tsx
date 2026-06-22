@@ -29,6 +29,9 @@ export default function PushPage() {
         </p>
         <p>
           The same root lets a client verify that one chunk belongs to the file without fetching the rest. And a{' '}
+          {/* Raw <a>, not Waku's <Link>: the typed Link only accepts the bare route literals it emits ("/demos"),
+              with no `#fragment`. A full document load to /demos#sign is fine here — demos-tabs reads the hash on
+              mount to open the sign tab. */}
           <a
             href='/demos#sign'
             className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
