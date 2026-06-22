@@ -351,7 +351,7 @@ ergonomics, not a security property.
    `target_type=0x03`, fixed ed25519 tagger, non-empty message, fixed
    timestamp; record `tag_signing_bytes`, `signing_hash`, and (signing
    with seed `[0x07;32]`) the 64-byte signature. Pinned under
-   `rust/tests/golden/phase9/`.
+   `rust/tests/golden/tags/`.
 9. **Tag cross-domain negative**: a tag-domain signature MUST NOT verify
    under `"mkit.commit\x00"` or `"mkit.remix\x00"`, and vice versa.
 

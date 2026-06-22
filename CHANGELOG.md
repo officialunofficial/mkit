@@ -279,7 +279,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mkit cat` surfaces annotated-tag metadata. The new object type is an
   **additive** allocation within object schema v1 — no existing object
   layout, signing bytes, hash, or golden vector changes. New golden
-  vectors are pinned under `rust/tests/golden/phase9/`. Specs:
+  vectors are pinned under `rust/tests/golden/tags/`. Specs:
   [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) §6a,
   [`docs/SPEC-SIGNING.md`](docs/SPEC-SIGNING.md) §4a.
 - **`mkit-keystore` crate** — pluggable signing-key vault subsystem

@@ -224,7 +224,7 @@ chunk lists across platforms.
 
 The vectors below are exercised by
 `rust/crates/mkit-core/tests/golden_pack.rs` (boundaries on disk under
-`rust/tests/golden/phase3/`) plus the unit tests in
+`rust/tests/golden/fastcdc/`) plus the unit tests in
 `rust/crates/mkit-core/src/chunker.rs::tests`.
 
 1. **Gear table hash**: `gear_table_digest()` returns
@@ -240,11 +240,11 @@ The vectors below are exercised by
    → `cut` returns `data.len()` (`cut_at_exactly_min_size_returns_full`).
 4. **Pseudo-random 1 MiB file**, splitmix64 stream from seed
    `0xA5A5_F00D_DEAD_BEEF`: chunk boundary offsets are pinned in
-   `rust/tests/golden/phase3/fastcdc_boundaries_1mib.bin`
+   `rust/tests/golden/fastcdc/fastcdc_boundaries_1mib.bin`
    (`fastcdc_boundaries_1mib_match_golden`).
 5. **Pseudo-random 256 KiB file**, splitmix64 stream from seed
    `0xCAFE_BABE_1234_5678`: pinned in
-   `rust/tests/golden/phase3/fastcdc_boundaries_256k.bin`
+   `rust/tests/golden/fastcdc/fastcdc_boundaries_256k.bin`
    (`fastcdc_boundaries_256k_match_golden`).
 6. **Repetitive buffer**: all-zero data with a tiny chunker exercises
    the forced-cut-at-`max_size` path
