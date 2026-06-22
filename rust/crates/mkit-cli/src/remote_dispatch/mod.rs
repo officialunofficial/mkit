@@ -35,7 +35,7 @@ use mkit_core::transfer::{self, PackListError};
 use mkit_transport_file::FileTransport;
 use mkit_transport_http::HttpTransport;
 use mkit_transport_s3::S3Transport;
-use mkit_transport_ssh::{SshInitError, SshTransport};
+use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
 
 use packmap::{advance_packmap, commit_head, fetch_pack_chain, packmap_ref};
 
@@ -154,7 +154,26 @@ pub fn open_trusted(
 ) -> Result<Arc<dyn Transport>, DispatchError> {
     crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
         .map_err(DispatchError::UntrustedRemote)?;
-    open(endpoint)
+    // Issue #389: thread the per-repo `ssh.*` trust-pinning keys from the
+    // merged config into the spawned `ssh(1)` process. Without this the
+    // keys are parsed into `Config` but never reach the child, so the
+    // documented control is inert.
+    let ssh_options = ssh_options_from_config(&cfg.merged);
+    open_with_ssh_options(endpoint, &ssh_options)
+}
+
+/// Map the three `ssh.*` trust-pinning keys from a merged [`Config`] into
+/// the [`SshOptions`] carried to the spawned `ssh(1)` child. An empty
+/// string means "unset" — `build_ssh_command` emits no flag for it, so
+/// the user's `ssh(1)` defaults are inherited. This is the producer half
+/// of issue #389; the consumer half (`build_ssh_command`) already wired
+/// the fields into argv.
+pub(crate) fn ssh_options_from_config(cfg: &crate::config::Config) -> SshOptions {
+    SshOptions {
+        strict_host_key_checking: cfg.ssh_strict_host_key_checking.clone(),
+        user_known_hosts_file: cfg.ssh_user_known_hosts_file.clone(),
+        identity_file: cfg.ssh_identity_file.clone(),
+    }
 }
 
 /// Open a transport for the given URL. Returns a type-erased `Arc`
@@ -165,6 +184,19 @@ pub fn open_trusted(
 /// [`open_trusted`]; `open` stays public for file/memory integration
 /// tests that have no ambient credentials to fence.
 pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
+    open_with_ssh_options(url, &SshOptions::default())
+}
+
+/// Scheme dispatch with explicit SSH options. Identical to [`open`] for
+/// every non-SSH scheme; the `mkit+ssh://` branch threads `ssh_options`
+/// (issue #389) into the spawned `ssh(1)` child via
+/// [`SshTransport::connect_with_options`]. `open` passes
+/// [`SshOptions::default`]; [`open_trusted`] derives options from the
+/// loaded config.
+pub(crate) fn open_with_ssh_options(
+    url: &str,
+    ssh_options: &SshOptions,
+) -> Result<Arc<dyn Transport>, DispatchError> {
     if url.starts_with("git+") {
         return Err(DispatchError::UnsupportedScheme(format!(
             "'{url}' is a git-bridge remote — native push/pull/fetch/clone do not \
@@ -200,11 +232,13 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
         return Ok(Arc::new(tx));
     }
     if url.starts_with("mkit+ssh://") {
-        // SshTransport::connect parses the URL, spawns `ssh(1)`, and
+        // Parse the URL, then spawn `ssh(1)` with the caller-supplied
+        // trust-pinning options (issue #389). `connect_with_options`
         // performs the `Hello` / `HelloResponse` handshake. Any failure
         // here tears the child down before returning, so callers never
         // see a half-initialised transport.
-        let tx = SshTransport::connect(url)?;
+        let target = parse_mkit_ssh_url(url).map_err(SshInitError::from)?;
+        let tx = SshTransport::connect_with_options(&target, ssh_options)?;
         return Ok(Arc::new(tx));
     }
     #[cfg(feature = "enc-transport")]
@@ -683,5 +717,40 @@ fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<Hash, Dispat
         Object::Commit(c) => Ok(c.tree_hash),
         Object::Remix(r) => Ok(r.tree_hash),
         _ => Err(DispatchError::NotCommit),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ssh_options_from_config;
+    use crate::config::Config;
+
+    /// The three `ssh.*` trust-pinning keys, when set in `Config`, must
+    /// map 1:1 into the `SshOptions` carried to the spawned `ssh(1)`
+    /// child. This is the producer half of issue #389: without it the
+    /// keys are parsed but never reach the subprocess.
+    #[test]
+    fn populated_config_maps_to_ssh_options() {
+        let cfg = Config {
+            ssh_strict_host_key_checking: "yes".to_string(),
+            ssh_user_known_hosts_file: "/path/to/project.known_hosts".to_string(),
+            ssh_identity_file: "/path/to/id_ed25519".to_string(),
+            ..Config::default()
+        };
+        let opts = ssh_options_from_config(&cfg);
+        assert_eq!(opts.strict_host_key_checking, "yes");
+        assert_eq!(opts.user_known_hosts_file, "/path/to/project.known_hosts");
+        assert_eq!(opts.identity_file, "/path/to/id_ed25519");
+    }
+
+    /// Empty `ssh.*` fields must map to empty `SshOptions` fields so
+    /// `build_ssh_command` emits NO `-o`/`-i` flags and the user's
+    /// `ssh(1)` defaults are inherited unchanged.
+    #[test]
+    fn empty_config_maps_to_empty_ssh_options() {
+        let opts = ssh_options_from_config(&Config::default());
+        assert!(opts.strict_host_key_checking.is_empty());
+        assert!(opts.user_known_hosts_file.is_empty());
+        assert!(opts.identity_file.is_empty());
     }
 }

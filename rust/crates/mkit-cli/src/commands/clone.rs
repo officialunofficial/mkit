@@ -110,7 +110,15 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&format!("write config: {e}"), exit::CANTCREAT);
     }
 
-    let pull_outcome = match remote_dispatch::open(url) {
+    // Issue #389: thread per-repo `ssh.*` trust-pinning keys into the
+    // spawned `ssh(1)`. The keys are user-scoped (REPO_FORBIDDEN_KEYS),
+    // so `read_or_default` against the freshly-initialised destination
+    // still picks them up from the user-scoped config layer.
+    let ssh_options = match config::read_or_default(&target) {
+        Ok(merged) => remote_dispatch::ssh_options_from_config(&merged),
+        Err(e) => return emit_err(&format!("read config: {e}"), exit::CONFIG_ERROR),
+    };
+    let pull_outcome = match remote_dispatch::open_with_ssh_options(url, &ssh_options) {
         Ok(tx) => remote_dispatch::pull_all(&target, tx.as_ref(), "default"),
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };

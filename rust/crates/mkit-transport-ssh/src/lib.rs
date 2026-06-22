@@ -746,8 +746,16 @@ fn terminate_child_now(child: &mut Child) {
 // argv construction
 // ---------------------------------------------------------------------------
 
+/// Environment override for the SSH client program. Defaults to `ssh`.
+/// Set `MKIT_SSH_PROGRAM` to point at a wrapper script — used by the
+/// hermetic SSH e2e tests to record argv and exec the local `mkit serve`
+/// without a real network hop. In production this is unset and the
+/// system `ssh(1)` is spawned.
+const SSH_PROGRAM_ENV: &str = "MKIT_SSH_PROGRAM";
+
 fn build_ssh_command(target: &SshTarget, options: &SshOptions) -> Command {
-    let mut cmd = Command::new("ssh");
+    let program = std::env::var(SSH_PROGRAM_ENV).unwrap_or_else(|_| "ssh".to_string());
+    let mut cmd = Command::new(program);
     if let Some(port) = target.port {
         cmd.arg("-p").arg(port.to_string());
     }
@@ -1079,5 +1087,86 @@ mod tests {
         ];
         assert!(!names[0].is_empty());
         assert!(!names[1].is_empty());
+    }
+
+    // --- build_ssh_command argv wiring (issue #389) ----------------------
+
+    /// Collect the argv tokens of a built `Command` as owned strings so
+    /// tests can assert on the spawned `ssh(1)` command line.
+    fn argv_tokens(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Assert that `tokens` contains the consecutive pair
+    /// `[flag, value]` (e.g. `-o`, `StrictHostKeyChecking=yes`).
+    fn contains_pair(tokens: &[String], flag: &str, value: &str) -> bool {
+        tokens.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    fn target() -> SshTarget {
+        SshTarget {
+            user: "alice".to_string(),
+            host: "host.example.com".to_string(),
+            port: None,
+            path: "/repos/project".to_string(),
+        }
+    }
+
+    /// A fully-populated `SshOptions` must surface as the documented
+    /// `-o StrictHostKeyChecking=… -o UserKnownHostsFile=… -i …` flags
+    /// (SSH-SECURITY.md §3). This is the consumer half of issue #389 —
+    /// it already worked, but the test pins the exact flag form so the
+    /// producer wiring has a contract to satisfy.
+    #[test]
+    fn build_ssh_command_wires_populated_options() {
+        let opts = SshOptions {
+            strict_host_key_checking: "yes".to_string(),
+            user_known_hosts_file: "/path/to/project.known_hosts".to_string(),
+            identity_file: "/path/to/id_ed25519".to_string(),
+        };
+        let cmd = build_ssh_command(&target(), &opts);
+        let tokens = argv_tokens(&cmd);
+        assert!(
+            contains_pair(&tokens, "-o", "StrictHostKeyChecking=yes"),
+            "missing StrictHostKeyChecking flag: {tokens:?}"
+        );
+        assert!(
+            contains_pair(
+                &tokens,
+                "-o",
+                "UserKnownHostsFile=/path/to/project.known_hosts"
+            ),
+            "missing UserKnownHostsFile flag: {tokens:?}"
+        );
+        assert!(
+            contains_pair(&tokens, "-i", "/path/to/id_ed25519"),
+            "missing identity flag: {tokens:?}"
+        );
+    }
+
+    /// Default options must emit NONE of the trust-pinning flags — the
+    /// user's `ssh(1)` defaults are inherited. (A baseline
+    /// `StrictHostKeyChecking=accept-new` IS added, but never the
+    /// caller-supplied `yes`, and no `UserKnownHostsFile`/`-i`.)
+    #[test]
+    fn build_ssh_command_omits_flags_for_default_options() {
+        let cmd = build_ssh_command(&target(), &SshOptions::default());
+        let tokens = argv_tokens(&cmd);
+        assert!(
+            !tokens.iter().any(|t| t.starts_with("UserKnownHostsFile=")),
+            "default options must not set UserKnownHostsFile: {tokens:?}"
+        );
+        assert!(
+            !tokens.contains(&"-i".to_string()),
+            "default options must not pass -i: {tokens:?}"
+        );
+        // No explicit StrictHostKeyChecking=<caller value>; only the
+        // built-in accept-new baseline is permitted.
+        assert!(
+            !tokens.iter().any(|t| t == "StrictHostKeyChecking=yes"),
+            "default options must not pin StrictHostKeyChecking=yes: {tokens:?}"
+        );
     }
 }

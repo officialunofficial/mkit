@@ -58,6 +58,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed several latent bugs (S3 ref pagination, atomic bisect-state
   write, BLS external-signer fail-closed) with regression tests.
 
+### Security
+
+- **SSH trust-pinning is now actually enforced.** The per-repo
+  `ssh.strict_host_key_checking`, `ssh.user_known_hosts_file`, and
+  `ssh.identity_file` keys were parsed into `Config` but never threaded
+  into the spawned `ssh(1)` process, so the documented control was inert
+  (a documented-but-absent security control). They are now mapped into
+  `SshOptions` and passed to the child as
+  `-o StrictHostKeyChecking=… -o UserKnownHostsFile=… -i …`, matching
+  `docs/SSH-SECURITY.md` §3. Pure producer-side wiring — the transport
+  already consumed `SshOptions`
+  ([#389](https://github.com/officialunofficial/mkit/issues/389)).
+
 ## [0.3.0] - 2026-06-15
 
 ### Performance
