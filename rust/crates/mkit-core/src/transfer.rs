@@ -159,7 +159,7 @@ const MAX_TREE_DEPTH: usize = 64;
 /// hash, pair each changed new chunk against a base in the old manifest —
 /// by same-index when the chunk counts match (an in-place edit didn't shift
 /// boundaries) or by content similarity when they differ (an insert/delete
-/// did). See [`pair_chunks`]. Identical chunks (present byte-for-byte in the
+/// did, via `pair_chunks`). Identical chunks (present byte-for-byte in the
 /// old manifest) are skipped — they dedup for free and never need a delta.
 ///
 /// The returned map is `new_chunk_hash -> base_chunk_hash`. Every base is
