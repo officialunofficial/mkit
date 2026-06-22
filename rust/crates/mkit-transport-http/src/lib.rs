@@ -439,6 +439,18 @@ impl HttpTransport {
         Ok(buf)
     }
 
+    /// Read a small control-plane JSON response under `cap` (never trusting
+    /// `Content-Length`) and deserialize it. The single bounded path every
+    /// ref read/write goes through, so no control body is ever parsed
+    /// unbounded.
+    fn parse_json_body<T: serde::de::DeserializeOwned>(
+        resp: Response,
+        cap: usize,
+    ) -> TransportResult<T> {
+        let body = Self::read_body_capped_to(resp, cap)?;
+        serde_json::from_slice(&body).map_err(|_| TransportError::InvalidResponse)
+    }
+
     /// Issue a pack GET that explicitly does *not* advertise
     /// `Accept-Pack-Shards`, so the server is forced to reply
     /// monolithically. Used as a fallback when the shard flow fails
@@ -793,6 +805,15 @@ impl Transport for HttpTransport {
         packmap_condition: RefWriteCondition,
         packmap_value: &Hash,
     ) -> TransportResult<AdvanceOutcome> {
+        // Same client-side ref-name boundary `update_ref` enforces — an
+        // invalid ref must not reach the wire.
+        if !validate_ref_name(head_ref) {
+            return Err(TransportError::InvalidRef(head_ref.to_string()));
+        }
+        if !validate_ref_name(packmap_ref) {
+            return Err(TransportError::InvalidRef(packmap_ref.to_string()));
+        }
+
         let (Some(head_cond), Some(packmap_cond)) = (
             cond_to_json(head_condition),
             cond_to_json(packmap_condition),
@@ -836,8 +857,7 @@ impl Transport for HttpTransport {
             return Ok(AdvanceOutcome::Committed);
         }
         if status == StatusCode::PRECONDITION_FAILED {
-            let parsed: AdvanceConflictBody =
-                resp.json().map_err(|_| TransportError::InvalidResponse)?;
+            let parsed: AdvanceConflictBody = Self::parse_json_body(resp, CONTROL_BODY_LIMIT)?;
             return match parsed.conflict.as_str() {
                 "head" => Ok(AdvanceOutcome::HeadConflict),
                 "packmap" => Ok(AdvanceOutcome::PackmapConflict),
@@ -865,11 +885,9 @@ impl Transport for HttpTransport {
             ));
         }
 
-        // Cap the read so a hostile remote can't OOM us with a giant body
-        // in place of the tiny `{"hash": "<hex>"}` payload.
-        let body = Self::read_body_capped_to(resp, CONTROL_BODY_LIMIT)?;
-        let parsed: RefPayload =
-            serde_json::from_slice(&body).map_err(|_| TransportError::InvalidResponse)?;
+        // Bounded parse — a hostile remote can't OOM us with a giant body in
+        // place of the tiny `{"hash": "<hex>"}` payload.
+        let parsed: RefPayload = Self::parse_json_body(resp, CONTROL_BODY_LIMIT)?;
         let h = from_hex(&parsed.hash).map_err(|_| TransportError::InvalidResponse)?;
         Ok(Some(h))
     }
@@ -888,11 +906,9 @@ impl Transport for HttpTransport {
             ));
         }
 
-        // Cap the read at the list limit so a hostile remote can't OOM us
+        // Bounded parse at the list limit — a hostile remote can't OOM us
         // with an unbounded ref-list body (never trusting Content-Length).
-        let body = Self::read_body_capped_to(resp, REF_LIST_BODY_LIMIT)?;
-        let parsed: RefListResponse =
-            serde_json::from_slice(&body).map_err(|_| TransportError::InvalidResponse)?;
+        let parsed: RefListResponse = Self::parse_json_body(resp, REF_LIST_BODY_LIMIT)?;
 
         let mut out: Vec<Ref> = Vec::with_capacity(parsed.refs.len());
         let full_prefix = prefix.trim_end_matches('/');
@@ -1550,6 +1566,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out, AdvanceOutcome::Committed);
+    }
+
+    #[test]
+    fn advance_refs_oversized_412_body_is_payload_too_large() {
+        // A hostile remote can't OOM us with a giant body in place of the
+        // tiny `{"conflict": "..."}` payload — the control body is capped.
+        let mut server = Server::new();
+        let huge = vec![b'a'; CONTROL_BODY_LIMIT + 1];
+        let _m = server
+            .mock("POST", "/myproj/refs/advance")
+            .with_status(412)
+            .with_body(huge)
+            .create();
+        let t = make_transport(&server, Some("tok"));
+        let err = t
+            .advance_refs(
+                "refs/heads/main",
+                RefWriteCondition::Missing,
+                &sample_hash(1),
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                &sample_hash(2),
+            )
+            .unwrap_err();
+        assert!(matches!(err, TransportError::PayloadTooLarge(_)));
+    }
+
+    #[test]
+    fn advance_refs_rejects_invalid_ref_name_without_sending() {
+        // No mock is registered — an invalid ref name must be rejected
+        // client-side before any request is sent.
+        let server = Server::new();
+        let t = make_transport(&server, Some("tok"));
+        let err = t
+            .advance_refs(
+                "refs/heads/..", // `..` segment is invalid per validate_ref_name
+                RefWriteCondition::Missing,
+                &sample_hash(1),
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                &sample_hash(2),
+            )
+            .unwrap_err();
+        assert!(matches!(err, TransportError::InvalidRef(_)));
     }
 
     // -- read_ref ----------------------------------------------------------
