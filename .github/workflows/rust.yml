@@ -67,7 +67,7 @@ jobs:
           # push, github.sha is already the right commit.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # Phase-2 commonware adoption pulled in tokio + axum + criterion +
+      # The commonware adoption pulled in tokio + axum + criterion +
       # reed-solomon, doubling the post-nextest `target/` footprint past
       # what the ubuntu-latest runner ships with (~14 GiB free of 75 GiB).
       # Free the Android SDK / .NET / Haskell tree before the build so the
@@ -176,13 +176,13 @@ jobs:
             exit 1
           fi
 
-      # Phase 2 of issue #156: build the CLI with the dedicated
+      # Issue #156: build the CLI with the dedicated
       # `enc-transport` cargo feature and run the encrypted-transport
       # e2e test. The above `--all-features` test pass already covers
       # this in aggregate; the dedicated invocation pins the feature
       # gate so a future refactor can't silently break the
       # opt-in-only build path.
-      - name: Encrypted-transport feature build (Phase 2)
+      - name: Encrypted-transport feature build
         working-directory: rust
         run: |
           cargo build --locked -p mkit-cli --features enc-transport

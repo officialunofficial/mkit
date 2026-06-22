@@ -1,6 +1,6 @@
 //! Generator for the refs/index golden vectors.
 //!
-//! Run with `cargo run -p mkit-core --example generate_phase4_goldens
+//! Run with `cargo run -p mkit-core --example generate_refs_index_goldens
 //! -- <out-dir>` (defaults to `rust/tests/golden/refs-index`). Idempotent:
 //! every input is a fixed constant; re-running emits byte-identical
 //! files.

@@ -54,7 +54,7 @@ jobs:
           # PR head so coverage reflects the PR. github.sha on push.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # Phase-2 commonware adoption doubled the workspace target footprint.
+      # The commonware adoption doubled the workspace target footprint.
       # cargo-llvm-cov compiles instrumented binaries that are ~3x larger
       # than a regular debug build — free ~14 GiB before the run.
       - name: Free disk space
