@@ -19,9 +19,10 @@ use mkit_core::refs::encode_ref_wire;
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let out_dir = args
-        .get(1)
-        .map_or_else(|| PathBuf::from("rust/tests/golden/refs-index"), PathBuf::from);
+    let out_dir = args.get(1).map_or_else(
+        || PathBuf::from("rust/tests/golden/refs-index"),
+        PathBuf::from,
+    );
     fs::create_dir_all(&out_dir)?;
 
     // 1. index_empty.bin — 9 bytes (header only).

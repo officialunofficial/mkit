@@ -485,9 +485,7 @@ pub fn attest_build(
         }
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => {
-            return Err(js_err(
-                "BLS threshold signing is not supported in WASM",
-            ));
+            return Err(js_err("BLS threshold signing is not supported in WASM"));
         }
     };
 
