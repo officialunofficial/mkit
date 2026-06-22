@@ -17,10 +17,8 @@ const TABS: Tab[] = [
     title: 'What’s in a hash?',
     body: (
       <>
-        Every file, folder, and commit is named by the BLAKE3 hash of its bytes — change a single character and the name
-        changes too. git does the same with SHA-1; mkit uses BLAKE3, one algorithm everywhere, fast enough to re-hash on
-        every keystroke. This page builds a tiny commit out of two files: edit the text or swap the image and watch
-        every hash along the way rewrite.
+        Every file, folder, and commit is named by the BLAKE3 hash of its bytes — change one character and the name
+        changes. Edit the text or swap the image below and watch every hash rewrite.
       </>
     ),
     Demo: HashDemo,
@@ -31,10 +29,8 @@ const TABS: Tab[] = [
     title: 'Who signed this?',
     body: (
       <>
-        A private key signs a message; the matching public key verifies it — anyone can confirm the message is untouched
-        and that you signed it. In mkit this isn&rsquo;t optional: every commit carries an Ed25519 signature, where git
-        treats signing as a GPG add-on. Generate a key, sign a message, then flip a single character and watch the
-        verifier reject it.
+        A private key signs a message; the matching public key verifies it. mkit signs every commit this way, with an
+        Ed25519 key. Generate a key, sign a message, then flip one character and watch the verifier reject it.
       </>
     ),
     Demo: SignDemo,
@@ -45,10 +41,9 @@ const TABS: Tab[] = [
     title: 'Verifiable at gigabyte scale',
     body: (
       <>
-        Content addressing only works on big files if you can chunk, diff, and stream-verify them — git stores a fresh
-        copy of a large binary on every edit. mkit cuts files at content-defined boundaries (FastCDC), records the chunk
-        list in a ChunkedBlob, ships only the changed chunks as a delta, and verifies each chunk against the root hash
-        as it arrives (Bao). Drop a file — or let the auto-editor run — and watch all four below.
+        mkit cuts big files into content-defined chunks (FastCDC), ships only the chunks that changed, and verifies each
+        one as it arrives — where git re-stores the whole binary on every edit. Drop a file, or let the auto-editor run,
+        and watch it work.
       </>
     ),
     Demo: StreamingDemo,
@@ -59,11 +54,10 @@ const TABS: Tab[] = [
     title: 'Statements, signed',
     body: (
       <>
-        An attestation is a signed statement about a commit — &ldquo;reviewed&rdquo;, &ldquo;deployed&rdquo;,
-        &ldquo;tested&rdquo; — stored in the repo as a first-class object, not a side-channel. mkit uses the standard
-        formats (an in-toto Statement inside a DSSE signing envelope), so anyone holding your public key can verify it
-        later — with mkit, cosign, or any compliant verifier. Type a claim, pick a signing algorithm, and watch the
-        envelope rebuild and verify.
+        An attestation is a signed statement about a commit — &ldquo;reviewed&rdquo;, &ldquo;tested&rdquo;,
+        &ldquo;deployed&rdquo; — stored as a first-class object. mkit uses standard formats (in-toto + DSSE), so anyone
+        with your public key can verify it, in mkit or cosign. Type a claim, pick an algorithm, and watch the envelope
+        build and verify.
       </>
     ),
     Demo: AttestDemo,
