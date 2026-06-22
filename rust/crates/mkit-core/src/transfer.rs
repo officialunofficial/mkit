@@ -312,50 +312,61 @@ fn pair_chunks(
         return Ok(());
     }
 
-    // Shifted: index old chunks by their super-features once.
+    // Shifted: index old chunks by their super-features once. An unreadable
+    // old chunk (absent / non-blob) contributes no features and can't be a
+    // base — it is simply absent from the index.
     let mut feature_index: HashMap<u64, Vec<Hash>> = HashMap::new();
     for oc in old_chunks {
-        for f in chunk_features(&chunk_bytes(store, oc)?) {
-            feature_index.entry(f).or_default().push(*oc);
+        if let Some(content) = chunk_bytes(store, oc)? {
+            for f in chunk_features(&content) {
+                feature_index.entry(f).or_default().push(*oc);
+            }
         }
     }
 
-    for (j, nj) in new_chunks.iter().enumerate() {
+    for nj in new_chunks {
         if old_set.contains(nj) || out.contains_key(nj) {
             continue;
         }
-        let feats = chunk_features(&chunk_bytes(store, nj)?);
+        // An unreadable new chunk has no content signal — skip pairing it
+        // (it's sent raw) rather than guessing a base.
+        let Some(content) = chunk_bytes(store, nj)? else {
+            continue;
+        };
         // Count shared features per candidate old chunk.
         let mut votes: HashMap<Hash, u32> = HashMap::new();
-        for f in &feats {
+        for f in &chunk_features(&content) {
             if let Some(cands) = feature_index.get(f) {
                 for cand in cands {
                     *votes.entry(*cand).or_default() += 1;
                 }
             }
         }
-        // Most shared features wins; ties → lowest hash (deterministic,
-        // order-independent of the HashMap). No overlap → clamped same index.
-        let base = votes
+        // Pair ONLY on genuine content overlap: most shared features wins,
+        // ties → lowest hash (deterministic, order-independent). No overlap →
+        // no base; the chunk is sent raw (a dissimilar base would be rejected
+        // by the size-gate anyway). No position fallback after a shift.
+        if let Some((base, _)) = votes
             .into_iter()
             .filter(|(cand, _)| cand != nj)
             .max_by(|x, y| x.1.cmp(&y.1).then_with(|| y.0.cmp(&x.0)))
-            .map_or_else(|| old_chunks[j.min(old_chunks.len() - 1)], |(cand, _)| cand);
-        if base != *nj {
+        {
             out.insert(*nj, base);
         }
     }
     Ok(())
 }
 
-/// Read a chunk blob's CONTENT bytes (not its serialized object form). A
-/// missing object or non-blob yields empty, so similarity simply degrades to
-/// the position fallback rather than erroring.
-fn chunk_bytes(store: &ObjectStore, h: &Hash) -> Result<Vec<u8>, StoreError> {
+/// Read a chunk blob's CONTENT bytes (not its serialized object form).
+///
+/// Returns `None` when the object is absent or not a blob — there is no
+/// content to compare, so the caller skips pairing that chunk rather than
+/// inventing a base. A genuine read/IO error propagates, preserving the
+/// [`select_chunk_delta_bases`] contract (only `ObjectNotFound` is swallowed).
+fn chunk_bytes(store: &ObjectStore, h: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
     match store.read_object(h) {
-        Ok(Object::Blob(b)) => Ok(b.data),
-        // Non-blob or absent → no content signal; degrade to position.
-        Ok(_) | Err(StoreError::ObjectNotFound(_)) => Ok(Vec::new()),
+        Ok(Object::Blob(b)) => Ok(Some(b.data)),
+        Ok(_) | Err(StoreError::ObjectNotFound(_)) => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -364,7 +375,8 @@ fn chunk_bytes(store: &ObjectStore, h: &Hash) -> Result<Vec<u8>, StoreError> {
 /// smallest distinct `FEATURE_WINDOW`-byte FNV-1a window hashes. Two chunks
 /// that share content share these min-hashes with high probability even when
 /// the content is shifted, making them a cheap similarity key. Chunks shorter
-/// than the window yield none (they fall back to position).
+/// than the window yield none (such a chunk has no similarity key, so it is
+/// left unpaired and sent raw).
 fn chunk_features(bytes: &[u8]) -> Vec<u64> {
     if bytes.len() < FEATURE_WINDOW {
         return Vec::new();
@@ -914,6 +926,34 @@ mod tests {
             "E' must delta against E (content match), not the wrong-index D"
         );
         assert_ne!(bases.get(&e_mod_id), Some(&d_id));
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names)] // a..d + z keep the chunk table compact
+    fn shifted_pairing_skips_a_chunk_with_no_content_overlap() {
+        // After a shift (differing counts), a brand-new chunk dissimilar to
+        // every old chunk must NOT be paired — no position/clamp fallback.
+        let (_d, s) = store();
+        let (a, b, c, d) = (
+            chunk_content(1, 400),
+            chunk_content(2, 400),
+            chunk_content(3, 400),
+            chunk_content(4, 400),
+        );
+        let z = chunk_content(99, 400); // unrelated to a/b/c/d
+        // old = [A,B,C,D]; new = [B,C,Z] — counts differ (content path), and Z
+        // is new + dissimilar to every old chunk.
+        let old_file = put_chunked_from(&s, &[a, b.clone(), c.clone(), d]);
+        let new_file = put_chunked_from(&s, &[b, c, z.clone()]);
+        let c_old = commit_with_file(&s, old_file, vec![], "old");
+        let c_new = commit_with_file(&s, new_file, vec![c_old], "new");
+
+        let bases = select_chunk_delta_bases(&s, c_new, c_old).unwrap();
+        let z_id = put_blob(&s, z);
+        assert!(
+            !bases.contains_key(&z_id),
+            "a dissimilar new chunk must be left unpaired (sent raw), not clamped to a base"
+        );
     }
 
     #[test]
