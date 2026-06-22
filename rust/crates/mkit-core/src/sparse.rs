@@ -1046,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_hash_differs_from_phase1_placeholder() {
+    fn tree_hash_differs_from_old_placeholder() {
         // Sanity: the old sparse-internal placeholder hash and the new
         // canonical hash MUST differ for any non-empty tree, so a
         // mistakenly-pinned placeholder hash anywhere upstream surfaces
@@ -1064,8 +1064,8 @@ mod tests {
             body.update(&entry.object_hash);
         }
         let body_digest = body.finalize();
-        let phase1 = crate::hash::domain_digest(b"mkit-sparse-tree-v1", &body_digest);
-        assert_ne!(tree_hash(&tree), phase1);
+        let placeholder = crate::hash::domain_digest(b"mkit-sparse-tree-v1", &body_digest);
+        assert_ne!(tree_hash(&tree), placeholder);
     }
 
     #[test]

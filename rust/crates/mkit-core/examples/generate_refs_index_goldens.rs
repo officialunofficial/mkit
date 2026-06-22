@@ -1,4 +1,4 @@
-//! Generator for the Phase 4 golden vectors.
+//! Generator for the refs/index golden vectors.
 //!
 //! Run with `cargo run -p mkit-core --example generate_phase4_goldens
 //! -- <out-dir>` (defaults to `rust/tests/golden/refs-index`). Idempotent:
@@ -73,8 +73,8 @@ fn main() -> std::io::Result<()> {
 
     // Manifest for the integration tests.
     let mut manifest = String::new();
-    manifest.push_str("# Phase 4 golden vectors (deterministic)\n");
-    manifest.push_str("# Produced by examples/generate_phase4_goldens.rs\n");
+    manifest.push_str("# Refs/index golden vectors (deterministic)\n");
+    manifest.push_str("# Produced by examples/generate_refs_index_goldens.rs\n");
     manifest.push_str("# Format: <name> <blake3-hex-of-bin-bytes>\n");
     for name in [
         "index_empty",
