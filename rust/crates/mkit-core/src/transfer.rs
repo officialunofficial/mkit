@@ -153,15 +153,14 @@ const MAX_TREE_DEPTH: usize = 64;
 /// Choose, for each changed `FastCDC` chunk in `new_tip`, a base chunk from
 /// `old_tip` to delta against.
 ///
-/// The heuristic is deliberately simple (SPEC-DELTA §5 is informative —
-/// any base the size-gate later accepts is fine): diff the two commits'
-/// trees by path; where the same path is a [`crate::object::ChunkedBlob`] on both sides
-/// with a different manifest hash, pair each new chunk against the
-/// old chunk at the same index (falling back to the last old chunk). A
-/// small in-place edit keeps chunk boundaries stable, so same-index
-/// pairing lands the new chunk against its prior version. Identical chunks
-/// (present byte-for-byte in the old manifest) are skipped — they dedup
-/// for free and never need a delta.
+/// (SPEC-DELTA §5 is informative — any base the size-gate later accepts is
+/// fine.) Diff the two commits' trees by path; where the same path is a
+/// [`crate::object::ChunkedBlob`] on both sides with a different manifest
+/// hash, pair each changed new chunk against a base in the old manifest —
+/// by same-index when the chunk counts match (an in-place edit didn't shift
+/// boundaries) or by content similarity when they differ (an insert/delete
+/// did). See [`pair_chunks`]. Identical chunks (present byte-for-byte in the
+/// old manifest) are skipped — they dedup for free and never need a delta.
 ///
 /// The returned map is `new_chunk_hash -> base_chunk_hash`. Every base is
 /// reachable from `old_tip`, so a remote that already holds `old_tip` holds
@@ -253,8 +252,7 @@ fn pair_entry(
             pair_trees(store, new_hash, old_hash, depth + 1, out)
         }
         (Ok(Object::ChunkedBlob(new_cb)), Ok(Object::ChunkedBlob(old_cb))) => {
-            pair_chunks(&new_cb.chunks, &old_cb.chunks, out);
-            Ok(())
+            pair_chunks(store, &new_cb.chunks, &old_cb.chunks, out)
         }
         // A missing object or a kind mismatch (file became a chunked blob,
         // etc.) just yields no pairing for this entry.
@@ -264,29 +262,137 @@ fn pair_entry(
     }
 }
 
-/// Pair each new chunk against an old chunk by index. Skips chunks that
-/// already exist byte-identically in the old manifest (those dedup) and
-/// never overwrites an existing pairing, so the result is deterministic.
-fn pair_chunks(new_chunks: &[Hash], old_chunks: &[Hash], out: &mut HashMap<Hash, Hash>) {
+/// Window size for content-similarity sketching. Matches the delta
+/// encoder's match-block size, so a shared 16-byte run is a shared feature.
+const FEATURE_WINDOW: usize = 16;
+/// Number of min-hash "super-features" sampled per chunk. Small keeps the
+/// index cheap; the delta size-gate in [`plan_pack`] is the final judge of a
+/// pick, so a few features are enough signal to rank candidates.
+const FEATURE_COUNT: usize = 4;
+
+/// Pair each changed new chunk against a base chunk in the old manifest.
+/// Skips chunks already present byte-identically in the old manifest (those
+/// dedup for free) and never overwrites an existing pairing, so the result
+/// is deterministic.
+///
+/// Two regimes:
+///
+/// * **Equal chunk counts** ⇒ `FastCDC` boundaries didn't shift (an in-place,
+///   same-length edit), so same-index pairing lands the new chunk on its own
+///   prior version. This is the common case and reads no chunk content.
+/// * **Differing counts** ⇒ an insert/delete shifted indices, so position is
+///   unreliable. We match by **content similarity**: index every old chunk's
+///   min-hash super-features, then pick, for each changed new chunk, the old
+///   chunk sharing the most features (deterministic tiebreak: lowest hash),
+///   falling back to the clamped same-index chunk when there is no overlap.
+///   This reads the changed file's chunk content (`O(file size)`), but only
+///   when there actually was a shift — and it trades those local reads for a
+///   much smaller upload than re-sending the shifted chunks raw.
+fn pair_chunks(
+    store: &ObjectStore,
+    new_chunks: &[Hash],
+    old_chunks: &[Hash],
+    out: &mut HashMap<Hash, Hash>,
+) -> Result<(), StoreError> {
     if old_chunks.is_empty() {
-        return;
+        return Ok(());
     }
     let old_set: HashSet<&Hash> = old_chunks.iter().collect();
+
+    // Fast path: no boundary shift → same-index pairing, no content reads.
+    if new_chunks.len() == old_chunks.len() {
+        for (j, nj) in new_chunks.iter().enumerate() {
+            if old_set.contains(nj) || out.contains_key(nj) {
+                continue;
+            }
+            if old_chunks[j] != *nj {
+                out.insert(*nj, old_chunks[j]);
+            }
+        }
+        return Ok(());
+    }
+
+    // Shifted: index old chunks by their super-features once.
+    let mut feature_index: HashMap<u64, Vec<Hash>> = HashMap::new();
+    for oc in old_chunks {
+        for f in chunk_features(&chunk_bytes(store, oc)?) {
+            feature_index.entry(f).or_default().push(*oc);
+        }
+    }
+
     for (j, nj) in new_chunks.iter().enumerate() {
         if old_set.contains(nj) || out.contains_key(nj) {
             continue;
         }
-        // Same-index base, clamped to the last old chunk. The size-gate in
-        // `plan_pack` rejects a poor pick and falls back to raw, so a loose
-        // heuristic here only ever costs a wasted encode, never correctness.
-        let base = old_chunks
-            .get(j)
-            .copied()
-            .unwrap_or_else(|| old_chunks[old_chunks.len() - 1]);
+        let feats = chunk_features(&chunk_bytes(store, nj)?);
+        // Count shared features per candidate old chunk.
+        let mut votes: HashMap<Hash, u32> = HashMap::new();
+        for f in &feats {
+            if let Some(cands) = feature_index.get(f) {
+                for cand in cands {
+                    *votes.entry(*cand).or_default() += 1;
+                }
+            }
+        }
+        // Most shared features wins; ties → lowest hash (deterministic,
+        // order-independent of the HashMap). No overlap → clamped same index.
+        let base = votes
+            .into_iter()
+            .filter(|(cand, _)| cand != nj)
+            .max_by(|x, y| x.1.cmp(&y.1).then_with(|| y.0.cmp(&x.0)))
+            .map_or_else(|| old_chunks[j.min(old_chunks.len() - 1)], |(cand, _)| cand);
         if base != *nj {
             out.insert(*nj, base);
         }
     }
+    Ok(())
+}
+
+/// Read a chunk blob's CONTENT bytes (not its serialized object form). A
+/// missing object or non-blob yields empty, so similarity simply degrades to
+/// the position fallback rather than erroring.
+fn chunk_bytes(store: &ObjectStore, h: &Hash) -> Result<Vec<u8>, StoreError> {
+    match store.read_object(h) {
+        Ok(Object::Blob(b)) => Ok(b.data),
+        // Non-blob or absent → no content signal; degrade to position.
+        Ok(_) | Err(StoreError::ObjectNotFound(_)) => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Up to [`FEATURE_COUNT`] shift-resistant "super-features" for a chunk: the
+/// smallest distinct `FEATURE_WINDOW`-byte FNV-1a window hashes. Two chunks
+/// that share content share these min-hashes with high probability even when
+/// the content is shifted, making them a cheap similarity key. Chunks shorter
+/// than the window yield none (they fall back to position).
+fn chunk_features(bytes: &[u8]) -> Vec<u64> {
+    if bytes.len() < FEATURE_WINDOW {
+        return Vec::new();
+    }
+    // Keep the K smallest DISTINCT window hashes, ascending.
+    let mut best: Vec<u64> = Vec::with_capacity(FEATURE_COUNT + 1);
+    for w in bytes.windows(FEATURE_WINDOW) {
+        let h = fnv1a(w);
+        if best.len() == FEATURE_COUNT && h >= best[FEATURE_COUNT - 1] {
+            continue;
+        }
+        if let Err(pos) = best.binary_search(&h) {
+            best.insert(pos, h);
+            best.truncate(FEATURE_COUNT);
+        }
+    }
+    best
+}
+
+/// FNV-1a 64-bit over a fixed window — same primitive the delta writer uses
+/// for block matching, so a shared block surfaces as a shared feature.
+fn fnv1a(block: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in block {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0001_0000_01b3);
+    }
+    h
 }
 
 /// Read an object, mapping a missing object to `None` so callers can treat
@@ -736,6 +842,104 @@ mod tests {
             assert!(!v1_set.contains(target), "target should be new");
             assert!(v1_set.contains(base), "base must be present at old tip");
         }
+    }
+
+    /// Deterministic, feature-rich chunk content (xorshift so 16-byte window
+    /// hashes are well-distributed rather than colliding on flat data).
+    fn chunk_content(seed: u8, len: usize) -> Vec<u8> {
+        let mut state = u64::from(seed).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut v = vec![0u8; len];
+        for byte in &mut v {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *byte = (state & 0xff) as u8;
+        }
+        v
+    }
+
+    fn put_blob(s: &ObjectStore, content: Vec<u8>) -> Hash {
+        put(s, &Object::Blob(Blob { data: content }))
+    }
+
+    /// Build a `ChunkedBlob` from explicit chunk contents (bypassing
+    /// `FastCDC`) so a test can control chunk boundaries and shifts precisely.
+    fn put_chunked_from(s: &ObjectStore, chunks: &[Vec<u8>]) -> Hash {
+        let total: usize = chunks.iter().map(Vec::len).sum();
+        let chunk_ids: Vec<Hash> = chunks.iter().map(|c| put_blob(s, c.clone())).collect();
+        put(
+            s,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: total as u64,
+                chunk_size: 0,
+                chunks: chunk_ids,
+            }),
+        )
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names)] // a..e keep the chunk-shift table compact
+    fn content_aware_pairing_picks_similar_base_after_a_shift() {
+        let (_d, s) = store();
+        let (a, b, c, d, e) = (
+            chunk_content(1, 400),
+            chunk_content(2, 400),
+            chunk_content(3, 400),
+            chunk_content(4, 400),
+            chunk_content(5, 400),
+        );
+        let mut e_mod = e.clone();
+        e_mod[200] ^= 0xFF; // a one-byte edit to E
+
+        // Old file = [A,B,C,D,E]; new file = [B,C,D,E'] — A deleted (so every
+        // surviving chunk's index shifts down by one) and E modified. Counts
+        // differ, so the content-similarity path runs.
+        let old_file = put_chunked_from(&s, &[a, b.clone(), c.clone(), d.clone(), e.clone()]);
+        let new_file = put_chunked_from(&s, &[b, c, d.clone(), e_mod.clone()]);
+        let c_old = commit_with_file(&s, old_file, vec![], "old");
+        let c_new = commit_with_file(&s, new_file, vec![c_old], "new");
+
+        let bases = select_chunk_delta_bases(&s, c_new, c_old).unwrap();
+
+        let e_mod_id = put_blob(&s, e_mod);
+        let e_id = put_blob(&s, e);
+        let d_id = put_blob(&s, d);
+
+        // E' is the only changed chunk. It sits at new index 3; the old chunk
+        // at index 3 is D, so position-clamp pairing would mispair E'→D.
+        // Content similarity must instead pair E'→E (its real prior version).
+        assert_eq!(
+            bases.get(&e_mod_id),
+            Some(&e_id),
+            "E' must delta against E (content match), not the wrong-index D"
+        );
+        assert_ne!(bases.get(&e_mod_id), Some(&d_id));
+    }
+
+    #[test]
+    fn equal_count_edit_still_uses_fast_index_path() {
+        // Same chunk count ⇒ no shift ⇒ same-index pairing (no content reads).
+        let (_d, s) = store();
+        let (a, b, c) = (
+            chunk_content(10, 400),
+            chunk_content(11, 400),
+            chunk_content(12, 400),
+        );
+        let mut b_mod = b.clone();
+        b_mod[50] ^= 0xFF;
+        let old_file = put_chunked_from(&s, &[a.clone(), b.clone(), c.clone()]);
+        let new_file = put_chunked_from(&s, &[a, b_mod.clone(), c]);
+        let c_old = commit_with_file(&s, old_file, vec![], "old");
+        let c_new = commit_with_file(&s, new_file, vec![c_old], "new");
+
+        let bases = select_chunk_delta_bases(&s, c_new, c_old).unwrap();
+        let b_mod_id = put_blob(&s, b_mod);
+        let b_id = put_blob(&s, b);
+        assert_eq!(
+            bases.get(&b_mod_id),
+            Some(&b_id),
+            "in-place edit pairs by index"
+        );
     }
 }
 
