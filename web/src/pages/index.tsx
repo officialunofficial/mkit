@@ -15,11 +15,9 @@ export default function HomePage() {
       <section className='space-y-5'>
         <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs itself.</h1>
         <p className='max-w-prose text-lg text-fg'>
-          Every commit is signed with an Ed25519 key, so the history carries its own proof of who changed what. mkit
-          names by content, too: every file, folder, and commit <em>is</em> the BLAKE3 hash of its bytes. Change one
-          byte, get a new name. Any claim about a commit rides along as a signed statement anyone can verify: reviewed,
-          tested, deployed. It&rsquo;s written in Rust, so it runs just about anywhere. Right now, that&rsquo;s your
-          browser.
+          mkit signs every commit and names every file, folder, and commit by its BLAKE3 hash — change a byte, get a new
+          name. Claims about a commit (reviewed, tested, deployed) travel as signed statements anyone can verify.
+          It&rsquo;s written in Rust, so it runs anywhere — including this browser.
         </p>
         <div className='max-w-prose space-y-3'>
           <p className='text-sm text-muted'>
