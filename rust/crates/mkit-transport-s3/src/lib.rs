@@ -795,7 +795,7 @@ fn parse_list_page(xml: &[u8]) -> ListPage {
 }
 
 // ---------------------------------------------------------------------------
-// Sparse-checkout fetch (issue #158, Phase 2). Feature-gated behind
+// Sparse-checkout fetch (issue #158). Feature-gated behind
 // `sparse-checkout`.
 //
 // Wire contract additions (SPEC-TRANSPORT §6.6):

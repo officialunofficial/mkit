@@ -159,8 +159,8 @@ proptest = "1"
 default = []
 # Compile-time exhaustiveness mirror of mkit-attest's bls-threshold —
 # pulls the BLS Algorithm variant into scope so the CLI's match arms
-# cover it (returning UNAVAILABLE per-site). Phase 3 of issue #160
-# will replace the inert arms with a real release-party signer.
+# cover it (returning UNAVAILABLE per-site). The release-party signer
+# (issue #160) will later replace the inert arms.
 bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "dep:rand_core", "dep:commonware-codec"]
 # Enables the `mkit+enc://` dispatch path in `remote_dispatch::open`
 # and the `mkit serve --listen-enc <addr>` listener flag. Pulls in
@@ -173,7 +173,7 @@ enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:common
 # export-only era.
 git-bridge = ["dep:mkit-git-bridge"]
 git-export = ["git-bridge"]
-# Verifiable sparse-checkout (issue #158 Phase 2). Pulls the
+# Verifiable sparse-checkout (issue #158). Pulls the
 # `mkit-core` sparse module and the matching transport-side fetchers
 # into scope. Off by default — the upstream `commonware-storage` is
 # ALPHA-tier.
@@ -182,7 +182,7 @@ sparse-checkout = [
     "mkit-transport-http/sparse-checkout",
     "mkit-transport-s3/sparse-checkout",
 ]
-# Issue #159 Phase 2 — `mkit pack-shard <hash>` producer subcommand
+# Issue #159 — `mkit pack-shard <hash>` producer subcommand
 # and shard-aware HTTP / S3 downloads. Default-off because the
 # commonware dep stack is large.
 pack-shards = [
@@ -190,7 +190,7 @@ pack-shards = [
     "mkit-transport-http/pack-shards",
     "mkit-transport-s3/pack-shards",
 ]
-# Issue #157 Phase 2 — record every ref-write in an append-only,
+# Issue #157 — record every ref-write in an append-only,
 # branch-scoped Merkle Mountain Range journal under
 # `<mkit_dir>/history/<sanitized_branch>/`. Off by default because
 # the commonware journaled-MMR stack pulls in tokio + commonware-

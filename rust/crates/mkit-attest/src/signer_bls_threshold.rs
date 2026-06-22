@@ -157,7 +157,7 @@ pub fn aggregate(sharing: &Sharing<V>, partials: &[Vec<u8>]) -> Result<Vec<u8>, 
     // Decode each partial. Any malformed entry kills the aggregate —
     // we deliberately don't best-effort, because the aggregator is
     // expected to have already verified each partial individually
-    // (the release-party CLI does this in Phase 3) and a bad partial
+    // (the future release-party CLI does this) and a bad partial
     // at aggregate time is a protocol violation, not a transient.
     let mut decoded: Vec<PartialSignature<V>> = Vec::with_capacity(partials.len());
     for p in partials {
@@ -218,7 +218,7 @@ pub fn trusted_dealer<R: rand_core::CryptoRngCore>(
     dkg::feldman_desmedt::deal_anonymous::<V, N3f1>(rng, Mode::default(), n)
 }
 
-/// Phase-1 threshold for `n` holders under the N3f1 fault model.
+/// N3f1-quorum threshold for `n` holders under the N3f1 fault model.
 /// Helper for tests and the future release-party CLI.
 #[must_use]
 pub fn threshold_for(n: u32) -> u32 {

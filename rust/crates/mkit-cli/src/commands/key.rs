@@ -212,8 +212,8 @@ fn generate(opts: GenerateOpts) -> u8 {
 /// keystore root and prints the aggregated cohort public key + keyid
 /// so the caller can register it in their `trust-roots.toml`.
 ///
-/// Phase 3 (release-party CLI) replaces the single-host trusted dealer
-/// with a multi-host distribution ceremony; the keystore-side API is
+/// The planned multi-host distribution ceremony (release-party CLI)
+/// replaces the single-host trusted dealer; the keystore-side API is
 /// unchanged.
 #[cfg(feature = "bls-threshold")]
 #[allow(clippy::too_many_lines)]
@@ -243,7 +243,7 @@ fn generate_bls_threshold(cfg: &Config, opts: &GenerateOpts) -> u8 {
             exit::USAGE,
         );
     }
-    // The Phase 1 trusted dealer pins the N3f1 fault model, which
+    // The single-host trusted dealer pins the N3f1 fault model, which
     // fixes `threshold = ceil(2n/3)`. We accept the caller's
     // `--threshold` so the CLI surface matches the spec wording, but
     // we validate it against what the dealer will actually produce —
@@ -254,8 +254,8 @@ fn generate_bls_threshold(cfg: &Config, opts: &GenerateOpts) -> u8 {
         return emit_err(
             &format!(
                 "--threshold {threshold} does not match the N3f1 quorum for --total {total} \
-                 (expected {dealer_threshold}); the Phase 1 trusted dealer pins this ratio. \
-                 Phase 3 will accept arbitrary M-of-N once a DKG protocol is wired in."
+                 (expected {dealer_threshold}); the single-host trusted dealer pins this ratio. \
+                 Arbitrary M-of-N will be accepted once a DKG protocol is wired in."
             ),
             exit::USAGE,
         );
@@ -274,7 +274,7 @@ fn generate_bls_threshold(cfg: &Config, opts: &GenerateOpts) -> u8 {
     if !matches!(backend, BackendKind::Software) {
         return emit_err(
             &format!(
-                "BLS threshold shares are stored by the `software` backend in Phase 2; \
+                "BLS threshold shares are currently stored only by the `software` backend; \
                  `--backend {backend}` is not supported"
             ),
             exit::USAGE,
@@ -647,7 +647,7 @@ fn configured_ref_or_fallback(cfg: &Config, algorithm: Algorithm) -> &str {
         Algorithm::P256 => cfg.key.p256_ref_or_fallback(),
         // BLS threshold keystore ref defaults to the generic
         // `key.default_ref` (or the documented `software:default`
-        // fallback). The Phase 3 release-party CLI will introduce a
+        // fallback). The planned release-party CLI will introduce a
         // dedicated `key.bls12381_thr_ref` knob; until then the
         // generic ref is enough.
         #[cfg(feature = "bls-threshold")]

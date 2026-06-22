@@ -1,7 +1,7 @@
 //! `mkit pack-shard <hash>` — encode an existing pack into Reed-Solomon
 //! shards plus a manifest.
 //!
-//! This is the producer side of SPEC-PACK-SHARDS Phase 2. Given a pack
+//! This is the producer side of SPEC-PACK-SHARDS. Given a pack
 //! object hash, it reads the pack bytes from the local store, gates on
 //! the SPEC §6 size threshold (1 MiB), runs the encoder, and writes:
 //!

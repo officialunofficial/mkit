@@ -173,7 +173,7 @@ fn to_keystore_algorithm(algorithm: Algorithm) -> Result<mkit_keystore::Algorith
         Algorithm::P256 => Ok(mkit_keystore::Algorithm::P256),
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => Err(FactoryError::UnknownAlgorithm(
-            "bls12381-thr keystore backend is Phase 2 of issue #160".to_owned(),
+            "bls12381-thr keystore backend (issue #160) is not yet wired into the factory".to_owned(),
         )),
     }
 }
@@ -264,7 +264,7 @@ fn build_repo_key_signer(
         }
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => Err(FactoryError::UnknownAlgorithm(
-            "bls12381-thr repo-key signer is Phase 3 of issue #160 (release-party CLI)".to_owned(),
+            "bls12381-thr repo-key signer (issue #160) awaits the release-party CLI".to_owned(),
         )),
     }
 }

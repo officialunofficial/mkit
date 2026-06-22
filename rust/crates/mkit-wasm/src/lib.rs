@@ -412,7 +412,7 @@ pub fn attest_keypair(seed_hex: &str, algo: &str) -> Result<AttestKeyPairJs, JsV
         }
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => Err(js_err(
-            "BLS threshold keypair generation is not supported in WASM (Phase 1)",
+            "BLS threshold keypair generation is not supported in WASM",
         )),
     }
 }
@@ -486,7 +486,7 @@ pub fn attest_build(
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => {
             return Err(js_err(
-                "BLS threshold signing is not supported in WASM (Phase 1)",
+                "BLS threshold signing is not supported in WASM",
             ));
         }
     };

@@ -99,7 +99,7 @@ pub fn run(args: &[String]) -> u8 {
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => {
             return emit_err(
-                "BLS threshold keygen is not supported in Phase 1 (issue #160 Phase 2)",
+                "BLS threshold keygen is not supported here; use `mkit key generate` (issue #160)",
                 exit::UNAVAILABLE,
             );
         }
@@ -115,7 +115,7 @@ pub fn run(args: &[String]) -> u8 {
         Algorithm::P256 => run_p256(&key_path, parsed.force, parsed.print_pubkey),
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => emit_err(
-            "BLS threshold keygen is not supported in Phase 1 (issue #160 Phase 2)",
+            "BLS threshold keygen is not supported here; use `mkit key generate` (issue #160)",
             exit::UNAVAILABLE,
         ),
     }
