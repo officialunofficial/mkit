@@ -450,8 +450,6 @@ matching update here.
   The exact stderr warning shape is pinned by an `insta` snapshot.
 - Integration tests assert key-file owner / mode / `O_NOFOLLOW`
   behaviour and the atomic-write contract.
-- Rename-gate (`scripts/verify-rename.sh`) prevents legacy strings
-  from re-entering the public build surface.
 - CI matrix: `cargo fmt --check`, `cargo clippy --all-targets --
   -D warnings`, `cargo test --workspace --locked`, keystore backend feature
   jobs for macOS/Windows/Linux with opt-in live native-backend roundtrips,

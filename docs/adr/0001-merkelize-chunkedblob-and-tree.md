@@ -3,8 +3,7 @@
 - Status: Accepted (pre-1.0, breaking, no migration)
 - Date: 2026-06-20
 - Supersedes: n/a
-- Full design: [docs/MERKELIZATION-PLAN.md](../MERKELIZATION-PLAN.md);
-  normative crypto in `docs/SPEC-MERKLE-OBJECTS.md` (created by this work).
+- Normative crypto in `docs/SPEC-MERKLE-OBJECTS.md` (created by this work).
 
 ## Context
 
@@ -39,5 +38,6 @@ inclusion of any chunk/entry is provable and completeness is verifiable for free
   Inclusion proofs are hand-rolled and **provisional** (no in-tree consumer; see
   `SPEC-MERKLE-OBJECTS.md` §5). A `no_std` upstream `bmt` is tracked by commonwarexyz/monorepo#4090.
 - Golden vectors for Tree/ChunkedBlob (and git-bridge round-trips) are regenerated.
-- Open items requiring human sign-off are tracked in MERKELIZATION-PLAN.md §8 (domain-wrap vs bare
-  root, wasm viability of non-optional storage, marker semantics, persisted git↔mkit oid maps).
+- The design decisions that needed human sign-off (domain-wrap vs bare root, wasm viability of
+  non-optional storage, marker semantics, persisted git↔mkit oid maps) were resolved during
+  implementation; the normative outcome is `docs/SPEC-MERKLE-OBJECTS.md`.

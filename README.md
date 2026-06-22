@@ -19,8 +19,7 @@ and wire formats are pinned by golden vectors under
 
 **Alpha (pre-1.0).** The v1 wire and on-disk formats are stable
 through the 0.x line; APIs, CLI flags, and unpinned internals may
-change in any 0.x release. See [`GOVERNANCE.md`](GOVERNANCE.md) for
-the stability contract and [`CHANGELOG.md`](CHANGELOG.md) for the
+change in any 0.x release. See [`CHANGELOG.md`](CHANGELOG.md) for the
 breaking-change record.
 
 **MSRV** is Rust 1.95.0, pinned in
@@ -109,9 +108,10 @@ picks the right archive and verifies the cosign bundle by default. Pass
 bun add @makechain/mkit-wasm     # or: npm i @makechain/mkit-wasm
 ```
 
-The `@makechain` scope is intentional — see
-[`TRADEMARKS.md`](TRADEMARKS.md). TypeScript and Cloudflare Workers
-examples in [`docs/INSTALL.md`](docs/INSTALL.md#wasm--npm).
+The `@makechain` scope is intentional — Makechain is an internal team
+within Official Unofficial, Inc., not a separate entity. TypeScript and
+Cloudflare Workers examples in
+[`docs/INSTALL.md`](docs/INSTALL.md#wasm--npm).
 
 ### Hardware signers (optional)
 
@@ -379,14 +379,11 @@ cargo fmt --check                           # formatting gate (CI-enforced)
 cargo clippy --all-targets -- -D warnings   # lint gate
 ```
 
-`scripts/verify-rename.sh` is the rename-gate enforced in CI.
-
 ## Contributing
 
 Issues and PRs welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for
 build/test/style expectations and the inbound-license policy
-(inbound = outbound, no DCO/CLA). Governance and decision model in
-[`GOVERNANCE.md`](GOVERNANCE.md). Security-sensitive disclosures: see
+(inbound = outbound, no DCO/CLA). Security-sensitive disclosures: see
 [`SECURITY.md`](SECURITY.md).
 
 ## License
@@ -402,5 +399,4 @@ shall be dual-licensed as above, without any additional terms or
 conditions.
 
 mkit is published by Official Unofficial, Inc.; the mkit name and
-marks are owned by the company — see
-[`TRADEMARKS.md`](TRADEMARKS.md).
+marks are owned by the company.

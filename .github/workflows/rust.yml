@@ -162,11 +162,6 @@ jobs:
         working-directory: rust
         run: cargo test --locked --doc --workspace
 
-      # The repo-wide rename gate moved to its own workflow (rename-gate.yml):
-      # its scan covers paths beyond this matrix's Rust-only push:main filter,
-      # so coupling it here would skip it on main pushes that touch only those
-      # other paths. See that workflow's header.
-
       - name: Version contract
         working-directory: rust
         shell: bash

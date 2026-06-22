@@ -1,5 +1,5 @@
 # CODEOWNERS — see https://docs.github.com/articles/about-codeowners
-# Maintainers listed in MAINTAINERS.md and the officialunofficial GitHub org.
+# Review routing for the officialunofficial GitHub org.
 #
 # Owners route to @officialunofficial/makechain, an existing provisioned
 # team, so required-review routing resolves to real reviewers. If/when

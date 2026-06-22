@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Operational slim-down.** Removed governance/process ceremony whose
+  maintenance overhead was disproportionate to the project's size:
+  `GOVERNANCE.md`, `MAINTAINERS.md`, `TRADEMARKS.md`, `SUPPORT.md`, the GitHub
+  issue/PR templates, and eight non-gating or now-obsolete CI workflows
+  (`rename-gate`, `crates-owners`, `reproducible-build`, `mutation-score`,
+  `state-machine`, `supply-chain`, `typos`, `pr-title`) plus their configs
+  (`typos.toml`, `scripts/verify-rename.sh`). Also removed the completed
+  `docs/MERKELIZATION-PLAN.md` (the work shipped — see
+  `docs/SPEC-MERKLE-OBJECTS.md` and ADR 0001). The license grant
+  (`LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`), `SECURITY.md`,
+  `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, and the `geiger` unsafe-code
+  ceiling check are retained.
+
 ### Changed
 
 - **BREAKING (`mkit-core`):** `Tree` and `ChunkedBlob` are now
