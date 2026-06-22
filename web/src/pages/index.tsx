@@ -7,13 +7,13 @@ export default function HomePage() {
   return (
     <div className='space-y-10'>
       <Seo
-        title='mkit — version control that signs itself'
-        description='Version control that signs itself. Every commit carries an Ed25519 signature; every file, folder, and commit is named by its BLAKE3 hash; attestations are first-class objects. Written in Rust.'
+        title='mkit — version control that signs every commit'
+        description='Version control that signs every commit. Every commit carries an Ed25519 signature; every file, folder, and commit is named by its BLAKE3 hash; attestations are first-class objects. Written in Rust.'
         path='/'
-        card='Version control that signs itself.'
+        card='Version control that signs every commit.'
       />
       <section className='space-y-5'>
-        <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs itself.</h1>
+        <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs every commit.</h1>
         <p className='max-w-prose text-lg text-fg'>
           mkit signs every commit and names every file, folder, and commit by its BLAKE3 hash — change a byte, get a new
           name. Claims about a commit (reviewed, tested, deployed) travel as signed statements anyone can verify.
