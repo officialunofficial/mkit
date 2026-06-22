@@ -16,12 +16,9 @@ export default function PerformancePage() {
         <header className='space-y-3'>
           <h1 className='text-4xl font-semibold tracking-tight'>Measured against git</h1>
           <p className='max-w-prose text-base text-fg'>
-            mkit names every object by a BLAKE3 hash and splits large files into content-defined chunks, so changing one
-            megabyte of a video means storing one megabyte — git hashes with SHA-1 and stores each version of a file
-            whole until a repack. That trade cuts both ways, and the numbers below show both edges: real{' '}
-            <code className='font-mono text-sm'>hyperfine</code> runs of the two CLIs on one machine, git wins included.
-            The same chunking pays off again over the network — a small edit to a large file now <em>pushes</em> as a
-            chunk delta, not a whole chunk (see “Bytes on the wire”).
+            mkit names every object by a BLAKE3 hash and splits large files into content-defined chunks. The numbers
+            below are real <code className='font-mono text-sm'>hyperfine</code> runs of both CLIs on one machine —
+            git&rsquo;s wins included.
           </p>
         </header>
         <PerfSection />
