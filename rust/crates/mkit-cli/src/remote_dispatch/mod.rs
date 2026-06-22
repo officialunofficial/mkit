@@ -37,7 +37,7 @@ use mkit_transport_http::HttpTransport;
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshTransport};
 
-use packmap::{advance_packmap, fetch_pack_chain, packmap_ref};
+use packmap::{advance_packmap, commit_head, fetch_pack_chain, packmap_ref};
 
 const DEFAULT_REMOTE: &str = "default";
 
@@ -469,21 +469,17 @@ pub fn push_branch(
         let pack_key = pack::pack_key(&pack);
         tx.upload_pack(&pack, &PackKey::from_hash(pack_key))?;
 
-        // Durably chain the pack onto the packmap BEFORE moving the head.
-        // On failure we return without touching `refs/heads`, leaving the
-        // uploaded pack orphaned (GC reclaims it) but the remote consistent.
-        // `self_contained` lets a full-closure push reset a broken chain.
-        advance_packmap(tx, branch, pack_key, plan.self_contained)?;
+        // Chain the pack onto the packmap AND move the head together (#408):
+        // a transactional transport applies both atomically, the default does
+        // packmap-then-head. Either way the head never lands past a packmap
+        // that can't reconstruct it. `self_contained` lets a full-closure push
+        // reset a broken chain; a failed advance leaves the head untouched.
+        return advance_packmap(tx, branch, pack_key, plan.self_contained, condition, tip);
     }
 
-    let full_name = format!("refs/heads/{branch}");
-    match tx.update_ref(&full_name, condition, &tip) {
-        Ok(()) => Ok(()),
-        Err(TransportError::RefConflict) => Err(DispatchError::NonFastForwardPush {
-            branch: branch.to_owned(),
-        }),
-        Err(e) => Err(e.into()),
-    }
+    // Nothing to send — the remote already holds the closure; just move the
+    // head (no packmap change needed, so no atomic two-ref advance).
+    commit_head(tx, &format!("refs/heads/{branch}"), condition, &tip, branch)
 }
 
 /// Fetch remote refs, then fast-forward the current local branch from

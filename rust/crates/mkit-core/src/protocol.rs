@@ -359,6 +359,59 @@ pub trait Transport: Send + Sync {
     /// have `prefix` stripped per SPEC-REFS §4. An empty prefix lists
     /// every ref.
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>>;
+
+    /// Advance a branch by updating its **head ref and its packmap ref
+    /// together**, each under its own CAS precondition.
+    ///
+    /// This exists so the delta-transfer invariant — "if `head_ref` resolves
+    /// to T, the packmap reconstructs `closure(T)`" — can be upheld without a
+    /// window where the two refs disagree. A transport backed by a
+    /// transactional ref store SHOULD override this to apply both writes in
+    /// ONE transaction: then a failed advance changes nothing, and the head
+    /// is never observed past a packmap that can't yet reconstruct it.
+    ///
+    /// The default impl is the safe non-transactional approximation used by
+    /// stores without multi-ref transactions: it writes the **packmap first**
+    /// (durable before the head moves) then the head. A crash in between
+    /// leaves the head at its prior value and the packmap a superset — still
+    /// consistent for fetch. The [`AdvanceOutcome`] distinguishes a packmap
+    /// precondition failure (caller re-reads and retries the chain) from a
+    /// head precondition failure (caller treats it as non-fast-forward),
+    /// which a single `RefConflict` could not.
+    fn advance_refs(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+    ) -> TransportResult<AdvanceOutcome> {
+        match self.update_ref(packmap_ref, packmap_condition, packmap_value) {
+            Ok(()) => {}
+            Err(TransportError::RefConflict) => return Ok(AdvanceOutcome::PackmapConflict),
+            Err(e) => return Err(e),
+        }
+        match self.update_ref(head_ref, head_condition, head_value) {
+            Ok(()) => Ok(AdvanceOutcome::Committed),
+            Err(TransportError::RefConflict) => Ok(AdvanceOutcome::HeadConflict),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Result of [`Transport::advance_refs`] — a two-ref branch advance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvanceOutcome {
+    /// Both refs were updated.
+    Committed,
+    /// The head precondition did not hold (the branch moved under us). An
+    /// atomic transport leaves nothing changed; callers treat this as a
+    /// non-fast-forward.
+    HeadConflict,
+    /// The packmap precondition did not hold (a concurrent pusher advanced
+    /// the chain). Callers re-read the packmap and retry.
+    PackmapConflict,
 }
 
 // ---------------------------------------------------------------------------
