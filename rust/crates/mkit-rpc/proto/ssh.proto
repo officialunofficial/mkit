@@ -3,7 +3,7 @@
 // mkit SSH transport wire protocol v1.
 //
 // The protocol mkit v0.1.0 speaks over its `ssh(1)` child process to
-// a remote `mkit-server`. v1 is the only protocol; there is no
+// a remote `mkit serve <path>`. v1 is the only protocol; there is no
 // fallback. A future breaking revision will introduce a sibling
 // `ssh2.proto` rather than mutating the v1 schema in place.
 //
@@ -21,7 +21,7 @@
 //
 // ## Transport
 //
-// The SSH child process (`ssh user@host -- mkit-server`) receives
+// The SSH child process (`ssh user@host -- mkit serve <path>`) receives
 // SshFrame messages on its stdin and emits SshFrame messages on its
 // stdout. The forced-command server pattern from SPEC-TRANSPORT §4.1
 // remains: trust is delegated to the user's `ssh(1)` configuration
