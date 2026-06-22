@@ -15,21 +15,49 @@ on:
       - 'SKILL.md'
       - 'README.md'
       - 'man/**'
+  # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
+  # its required check (mcp-gate) is never absent. The `ci` job is gated on
+  # the in-workflow paths-filter below instead — this avoids the
+  # "required-but-skipped" trap where a path-filtered trigger leaves a
+  # required status stuck pending on PRs that don't touch MCP paths.
   pull_request:
-    paths:
-      - '.github/workflows/mcp.yml'
-      - 'mcp/**'
-      - 'docs/**'
-      - 'SKILL.md'
-      - 'README.md'
-      - 'man/**'
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
+  # Detect whether this PR touches anything the MCP build depends on. The
+  # `ci` job runs only when it does; the `mcp-gate` job below always runs and
+  # is the stable required-check name.
+  changes:
+    name: Detect MCP-relevant changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      mcp: ${{ steps.filter.outputs.mcp }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590  # v3
+        id: filter
+        with:
+          filters: |
+            mcp:
+              - '.github/workflows/mcp.yml'
+              - 'mcp/**'
+              - 'docs/**'
+              - 'SKILL.md'
+              - 'README.md'
+              - 'man/**'
+
   ci:
     name: Index, typecheck, and test the MCP
+    # Run on main pushes (push is path-filtered at the trigger), and on PRs
+    # only when MCP-relevant paths changed.
+    needs: changes
+    if: >-
+      always() &&
+      (github.event_name == 'push' || needs.changes.outputs.mcp == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -54,3 +82,30 @@ jobs:
       - name: Test
         working-directory: mcp
         run: npm run test
+
+  # Stable required-check name for branch protection. Always runs on PRs
+  # (if: always()) so the status is never absent — closing the
+  # "required-but-skipped" trap. Passes when the `ci` job succeeded OR was
+  # legitimately skipped because the PR touched no MCP-relevant paths; fails
+  # if `ci` actually failed or was cancelled.
+  mcp-gate:
+    name: MCP CI gate
+    if: always() && github.event_name == 'pull_request'
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check MCP ci job result
+        shell: bash
+        env:
+          CI: ${{ needs.ci.result }}
+        run: |
+          echo "ci: ${CI}"
+          case "${CI}" in
+            success|skipped)
+              echo "MCP CI gate satisfied."
+              ;;
+            *)
+              echo "::error::ci job did not succeed (result=${CI})"
+              exit 1
+              ;;
+          esac

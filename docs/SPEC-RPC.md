@@ -154,7 +154,7 @@ Reference implementations (all in this repository):
   FIDO2/WebAuthn signer, P-256 / Ed25519-WebAuthn.
 - [`contrib/signers/mkit-sign-tpm/`](../contrib/signers/mkit-sign-tpm/) —
   TPM 2.0 P-256 signer.
-- [`rust/crates/mkit-cli/src/commands/serve.rs`](../rust/crates/mkit-cli/src/commands/serve.rs) —
+- [`rust/crates/mkit-cli/src/commands/serve/mod.rs`](../rust/crates/mkit-cli/src/commands/serve/mod.rs) —
   `mkit serve` SSH server (consumes `ssh.proto`).
 
 The Swift `contrib/signers/mkit-sign-se/` (Apple Secure Enclave)

@@ -311,7 +311,7 @@ When embedding an image or video in Markdown, add a meaningful alt
 text inside the square brackets.
 
 ```markdown
-![BLAKE3 throughput chart at 1 MiB chunk size](benchmarks/charts/hashing-1_mib.svg)
+![BLAKE3 throughput chart at 1 MiB chunk size](../benchmarks/charts/hashing-1_mib.svg)
 ```
 
 Alt text should describe what the image conveys, not what it looks

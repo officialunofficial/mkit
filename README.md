@@ -343,6 +343,7 @@ they describe are pinned by the test vectors under
 | [`docs/PROFILING.md`](docs/PROFILING.md) | Contributors — benchmarking and profiling workflow |
 | [`docs/SPEC-INDEX.md`](docs/SPEC-INDEX.md) | Implementers — staging-index format |
 | [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) | Implementers — object on-disk format |
+| [`docs/SPEC-MERKLE-OBJECTS.md`](docs/SPEC-MERKLE-OBJECTS.md) | Implementers — BMT-root identity for `Tree`/`ChunkedBlob` |
 | [`docs/SPEC-GC.md`](docs/SPEC-GC.md) | Implementers — garbage-collection retention roots & recovery |
 | [`docs/SPEC-PACKFILE.md`](docs/SPEC-PACKFILE.md) | Implementers — packfile wire format |
 | [`docs/SPEC-DELTA.md`](docs/SPEC-DELTA.md) | Implementers — delta encoding |

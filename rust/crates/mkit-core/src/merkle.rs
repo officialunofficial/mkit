@@ -193,8 +193,8 @@ fn bmt_verify(root: &Hash, leaf: &Hash, position: u32, proof: &[u8]) -> Result<(
     if proof.len() < 8 {
         return Err(MerkleError::MalformedProof);
     }
-    let leaf_count = u32::from_le_bytes(proof[0..4].try_into().unwrap());
-    let n = u32::from_le_bytes(proof[4..8].try_into().unwrap()) as usize;
+    let leaf_count = u32::from_le_bytes(proof[0..4].try_into().expect("4 bytes"));
+    let n = u32::from_le_bytes(proof[4..8].try_into().expect("4 bytes")) as usize;
     if proof.len() != 8 + n * HASH_LEN {
         return Err(MerkleError::MalformedProof);
     }
@@ -205,7 +205,7 @@ fn bmt_verify(root: &Hash, leaf: &Hash, position: u32, proof: &[u8]) -> Result<(
     let mut idx = position as usize;
     for k in 0..n {
         let off = 8 + k * HASH_LEN;
-        let sib: Hash = proof[off..off + HASH_LEN].try_into().unwrap();
+        let sib: Hash = proof[off..off + HASH_LEN].try_into().expect("32 bytes");
         acc = if idx.is_multiple_of(2) {
             h2(&acc, &sib)
         } else {

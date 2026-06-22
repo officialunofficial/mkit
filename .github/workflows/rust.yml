@@ -12,9 +12,17 @@ on:
       - '.github/actions/setup-rust/**'
       - 'rust/**'
       - 'contrib/signers/**'
-  # Expensive CI: on PRs this runs only once a review is approved. The
-  # pull_request_review event can't filter by branch/path, so each job
-  # guards on the approval state + base ref below.
+  # Core build/test/clippy/fmt runs on EVERY PR into main so a green PR
+  # rollup actually means the Rust suite ran (and reports pending while it
+  # runs). See the `build-and-test` job's `if:` below — it runs on this
+  # event; the heavier jobs stay approval-gated.
+  pull_request:
+    branches:
+      - main
+  # Expensive CI (keystore-backends, msrv): on PRs these run only once a
+  # review is approved, to avoid burning multi-OS runner minutes on every
+  # push. The pull_request_review event can't filter by branch/path, so each
+  # job guards on the approval state + base ref below.
   pull_request_review:
     types: [submitted]
 
@@ -24,10 +32,10 @@ permissions:
 # One run per PR (or per branch on push); newer events cancel older ones.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # Cancel superseded approval runs; pushes to main are never cancelled.
+  # Cancel superseded PR + approval runs; pushes to main are never cancelled.
   # (On pull_request_review github.ref is the default branch, so we can't key
   # the guard off github.ref — gate on the event name instead.)
-  cancel-in-progress: ${{ github.event_name == 'pull_request_review' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_review' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -38,7 +46,9 @@ env:
 jobs:
   build-and-test:
     name: Build & Test (${{ matrix.os }})
-    # Run on main pushes; on PRs only after an approving review.
+    # Core suite: runs on main pushes AND on every pull_request into main
+    # (so the PR rollup reflects a real run). On the pull_request_review
+    # event it still requires an approving review on a main-targeted PR.
     if: >-
       github.event_name != 'pull_request_review' ||
       (github.event.review.state == 'approved' &&
@@ -185,9 +195,12 @@ jobs:
 
   keystore-backends:
     name: Keystore backends (${{ matrix.name }})
+    # Heavier (3-OS matrix): stays cost-gated. Runs on main pushes and on an
+    # approving review of a main-targeted PR — NOT on every pull_request.
     if: >-
-      github.event_name != 'pull_request_review' ||
-      (github.event.review.state == 'approved' &&
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.state == 'approved' &&
        github.event.pull_request.base.ref == 'main')
     runs-on: ${{ matrix.os }}
     strategy:
@@ -266,9 +279,12 @@ jobs:
   # before users on the pinned MSRV are affected.
   msrv:
     name: MSRV check
+    # Heavier gate: stays cost-gated. Runs on main pushes and on an approving
+    # review of a main-targeted PR — NOT on every pull_request.
     if: >-
-      github.event_name != 'pull_request_review' ||
-      (github.event.review.state == 'approved' &&
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.state == 'approved' &&
        github.event.pull_request.base.ref == 'main')
     runs-on: ubuntu-latest
     steps:
@@ -308,3 +324,60 @@ jobs:
         env:
           CARGO_INCREMENTAL: 0
         run: cargo check --workspace --locked --all-targets
+
+  # Aggregator gate — the single stable check to mark "required" in branch
+  # protection. It `needs` every critical Rust job and runs with
+  # `if: always()`, so it reports a real success/failure even when an
+  # upstream job fails, is cancelled, or is skipped. Because the core suite
+  # (build-and-test) runs on every pull_request but the heavier jobs
+  # (keystore-backends, msrv) are approval-gated and legitimately skip on
+  # PR-only events, the gate's rules are:
+  #   - keystore-backends / msrv: 'skipped' is acceptable (cost-gated);
+  #     only 'failure' / 'cancelled' fail the gate.
+  #   - build-and-test: MUST be 'success' — a skipped core suite means the
+  #     Rust build/test/clippy/fmt never ran, which must not pass the gate.
+  # This guarantees a green required check actually exercised the suite,
+  # closing the "green rollup but nothing ran" trust gap.
+  ci-gate:
+    name: Rust CI gate
+    if: always()
+    needs: [build-and-test, keystore-backends, msrv]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify core suite ran and no critical job failed
+        shell: bash
+        env:
+          BUILD_AND_TEST: ${{ needs.build-and-test.result }}
+          KEYSTORE_BACKENDS: ${{ needs.keystore-backends.result }}
+          MSRV: ${{ needs.msrv.result }}
+        run: |
+          echo "build-and-test:    ${BUILD_AND_TEST}"
+          echo "keystore-backends: ${KEYSTORE_BACKENDS}"
+          echo "msrv:              ${MSRV}"
+
+          fail=0
+
+          # The core suite must have actually run and passed.
+          if [ "${BUILD_AND_TEST}" != "success" ]; then
+            echo "::error::core suite (build-and-test) did not succeed (result=${BUILD_AND_TEST})"
+            fail=1
+          fi
+
+          # Cost-gated jobs may be skipped on PR-only events, but must not
+          # have failed or been cancelled when they did run.
+          for job in KEYSTORE_BACKENDS MSRV; do
+            result="${!job}"
+            case "${result}" in
+              success|skipped) ;;
+              *)
+                echo "::error::${job} did not succeed (result=${result})"
+                fail=1
+                ;;
+            esac
+          done
+
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error::Rust CI gate failed — see job results above."
+            exit 1
+          fi
+          echo "All critical Rust jobs satisfied the gate."

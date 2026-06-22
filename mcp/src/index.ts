@@ -21,14 +21,19 @@ import {
   buildFileTree,
   buildFTSQuery,
   buildSnippets,
+  EmptyCorpusError,
+  err,
   escapeLike,
   formatSnippet,
   formatWithLineNumbers,
   getLanguage,
+  guardTool,
   isValidPath,
+  ok,
   selectTopSnippets,
   sortVersionsDesc,
   stripCratePrefix,
+  type ToolResult,
 } from "./utils.ts";
 import pkg from "../package.json";
 
@@ -58,22 +63,27 @@ All content is version-pinned — omit \`version\` for the latest (list_versions
 
 To OPERATE a local mkit repository (status/add/commit/attest/verify), use the local MCP server that ships inside the CLI instead: \`mkit mcp --repository <path>\` (register via \`claude mcp add mkit-repo -- mkit mcp --repository <path>\`; reference: get_command "mcp" on releases that include it, or \`mkit help\`). This server is documentation/source only.`;
 
-const err = (text: string) => ({ content: [{ type: "text" as const, text }], isError: true });
-const ok = (text: string) => ({ content: [{ type: "text" as const, text }] });
-
 export class MkitMCP extends McpAgent<Env, {}, {}> {
   server = new McpServer({ name: "mkit", version: pkg.version }, { instructions: INSTRUCTIONS });
 
   async init() {
     // Thin wrapper preserving zod-schema -> handler-arg typing while casting
     // around the agents/SDK McpServer overload skew (same approach as the
-    // makechain MCP).
+    // makechain MCP). Every callback is wrapped in `guardTool` so a D1 outage,
+    // an empty corpus, or any other throw becomes a graceful MCP error result
+    // (logged for observability) instead of an unhandled exception to the client.
     const tool = <TShape extends Record<string, z.ZodTypeAny>>(
       name: string,
       description: string,
       params: TShape,
-      cb: (args: { [K in keyof TShape]: z.infer<TShape[K]> }) => Promise<unknown> | unknown,
-    ) => (this.server.tool as (...args: unknown[]) => unknown)(name, description, params, cb);
+      cb: (args: { [K in keyof TShape]: z.infer<TShape[K]> }) => Promise<ToolResult> | ToolResult,
+    ) =>
+      (this.server.tool as (...args: unknown[]) => unknown)(
+        name,
+        description,
+        params,
+        guardTool(name, cb),
+      );
 
     // --- get_file ----------------------------------------------------------
     tool(
@@ -326,7 +336,7 @@ export class MkitMCP extends McpAgent<Env, {}, {}> {
 
   private async latestVersion(): Promise<string> {
     const versions = await this.versions();
-    if (versions.length === 0) throw new Error("No versions indexed");
+    if (versions.length === 0) throw new EmptyCorpusError();
     return versions[0];
   }
 

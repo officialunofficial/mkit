@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "mkit-mcp",
   "main": "src/index.ts",
-  "compatibility_date": "2025-05-31",
+  "compatibility_date": "2026-05-31",
   "compatibility_flags": ["nodejs_compat"],
   // Durable Object backs the MCP agent's session/SSE transport.
   "durable_objects": {

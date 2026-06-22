@@ -10,7 +10,13 @@ on:
       - '.github/actions/setup-rust/**'
       - 'rust/**'
       - 'contrib/signers/**'
-  # Expensive CI: on PRs, run only once a review is approved (gated below).
+  # Run coverage on EVERY PR into main so the PR rollup reflects a real
+  # coverage run (and reports pending while it runs) rather than nothing
+  # until a review is submitted.
+  pull_request:
+    branches: [main]
+  # Also run on an approving review (gated below) — kept so coverage refreshes
+  # against the approved PR head before merge.
   pull_request_review:
     types: [submitted]
 
@@ -19,10 +25,10 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # Cancel superseded approval runs; pushes to main are never cancelled.
+  # Cancel superseded PR + approval runs; pushes to main are never cancelled.
   # (On pull_request_review github.ref is the default branch, so we can't key
   # the guard off github.ref — gate on the event name instead.)
-  cancel-in-progress: ${{ github.event_name == 'pull_request_review' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_review' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,7 +38,9 @@ env:
 jobs:
   llvm-cov:
     name: cargo-llvm-cov (nextest)
-    # Run on main pushes; on PRs only after an approving review.
+    # Run on main pushes and on every pull_request into main; on the
+    # pull_request_review event still requires an approving review on a
+    # main-targeted PR.
     if: >-
       github.event_name != 'pull_request_review' ||
       (github.event.review.state == 'approved' &&
@@ -130,10 +138,12 @@ jobs:
 
   # Codecov upload is split into its own job so CODECOV_TOKEN is NEVER present
   # in the job above, which checks out and EXECUTES untrusted PR-head code on
-  # the privileged `pull_request_review` event. This job runs only the
-  # base-branch workflow file plus pinned actions — it downloads the lcov
-  # artifact and never builds or runs PR source, so the token cannot be
-  # exfiltrated by a malicious fork PR.
+  # the `pull_request` and the privileged `pull_request_review` events. This
+  # job runs only the base-branch workflow file plus pinned actions — it
+  # downloads the lcov artifact and never builds or runs PR source, so the
+  # token cannot be exfiltrated by a malicious fork PR. (On fork-originated
+  # `pull_request` events GitHub withholds the secret anyway; the upload is
+  # non-fatal — fail_ci_if_error: false — so CI green never depends on it.)
   codecov-upload:
     name: Upload coverage to Codecov
     needs: llvm-cov
