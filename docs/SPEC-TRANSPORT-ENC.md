@@ -1,6 +1,6 @@
 ---
 spec: SPEC-TRANSPORT-ENC
-version: 1 (Phase 2)
+version: 1 (real-TCP transport stage)
 status: draft
 audience: implementers of mkit encrypted-stream clients and servers
 ---
@@ -20,12 +20,12 @@ transport for environments where shelling out to OpenSSH is awkward
 (WASM, embedded targets, browser-hosted Workers) while keeping a single
 source of truth for verb-level framing across SSH and encrypted paths.
 
-Phase 1 landed the in-process scaffold (`EncSession` /
-`from_session`) and the deterministic-runtime round-trip test. Phase 2
-(this revision) adds real TCP: URL parsing, `connect_tcp` /
+The in-process scaffold (`EncSession` / `from_session`) and the
+deterministic-runtime round-trip test landed first. The real-TCP transport
+stage (this revision) adds real TCP: URL parsing, `connect_tcp` /
 `serve_tcp`, the `mkit-cli/enc-transport` feature gate, and the
 `mkit serve --listen-enc <addr>` listener. §6 records what now ships
-and what remains for Phase 3.
+and what remains for the deferred follow-ups.
 
 ---
 
@@ -33,7 +33,7 @@ and what remains for Phase 3.
 
 | Scheme prefix | Transport | Notes |
 |---|---|---|
-| `mkit+enc://[user@]host[:port][/path]?pubkey=<hex-or-b64url>` | `mkit-transport-enc` | Implemented in Phase 2 (`mkit_transport_enc::url::parse_enc_url`). The `user@` and `/path` components are accepted for round-tripping but not consulted by the handshake; trust is via the `?pubkey=` payload only. |
+| `mkit+enc://[user@]host[:port][/path]?pubkey=<hex-or-b64url>` | `mkit-transport-enc` | Implemented by the real-TCP transport stage (`mkit_transport_enc::url::parse_enc_url`). The `user@` and `/path` components are accepted for round-tripping but not consulted by the handshake; trust is via the `?pubkey=` payload only. |
 
 The URL carries the **server's static `ed25519` public key** as a
 query-parameter `pubkey=<…>` in one of two equivalent encodings:
@@ -77,14 +77,14 @@ this section documents the parameters mkit configures.
 |---|---|---|
 | `namespace` | `b"mkit/transport-enc/v1"` | Pre-shared transcript binding. Prevents cross-application replay if peers share `ed25519` keys with another commonware-stream user. Bumping the `/v1` suffix is the lever for a hard cryptographic break in future. |
 | `max_message_size` | `mkit_rpc::MAX_FRAME_BYTES` (1 MiB) | Matches the inner `SshFrame` framing cap so a maximally-sized verb fits in one encrypted record. Removes an off-by-overhead class of bugs where one limit sneaks past the other. |
-| `synchrony_bound` | 30 s | Tolerable clock skew between client and server. Generous in Phase 1 to keep flaky-CI failures out of the in-tree round-trip test; Phase 2 will tighten to ≤ 5 s. |
-| `max_handshake_age` | 30 s | Same envelope as `synchrony_bound`; Phase 2 will tighten. |
-| `handshake_timeout` | 60 s | Hard ceiling for handshake completion. Generous for Phase 1; Phase 2 will tighten to ≤ 10 s. |
+| `synchrony_bound` | 30 s | Tolerable clock skew between client and server. Generous in the in-process scaffold to keep flaky-CI failures out of the in-tree round-trip test; real-network deployments tighten to ≤ 5 s. |
+| `max_handshake_age` | 30 s | Same envelope as `synchrony_bound`; real-network deployments tighten this. |
+| `handshake_timeout` | 60 s | Hard ceiling for handshake completion. Generous for the in-process scaffold; real-network deployments tighten to ≤ 10 s. |
 
 ### 2.2 Identity
 
 Both peers carry an [`ed25519`](https://docs.rs/commonware-cryptography)
-static keypair. mkit chose ed25519 (over BLS) for Phase 1 because:
+static keypair. mkit chose ed25519 (over BLS) for the in-process scaffold because:
 
 1. The keys are small (32-byte public, 32-byte private), matching the
    shape of SSH host keys mkit operators already manage.
@@ -93,9 +93,9 @@ static keypair. mkit chose ed25519 (over BLS) for Phase 1 because:
 3. `commonware-cryptography::ed25519` is already a stable `Signer` and
    needs no application glue.
 
-Phase 2 may add BLS as an optional alternative (the
+A later revision may add BLS as an optional alternative (the
 `commonware_stream::encrypted` API is generic over `Signer`), but the
-default — and the only form covered by Phase 1's CLI — is ed25519.
+default — and the only form covered by the in-process scaffold's CLI — is ed25519.
 
 ### 2.3 Properties
 
@@ -155,7 +155,7 @@ Concretely:
 ├──────────────────────────────────────────────┤
 │ commonware-stream varint length prefix       │  framing
 ├──────────────────────────────────────────────┤
-│ Sink / Stream byte transport                 │  TCP (Phase 2) or mocks::Channel (Phase 1 tests)
+│ Sink / Stream byte transport                 │  TCP (real-TCP transport stage) or mocks::Channel (in-process scaffold tests)
 └──────────────────────────────────────────────┘
 ```
 
@@ -195,8 +195,8 @@ The in-tree test suite lives in
 [`mkit-transport-enc/src/lib.rs`](../rust/crates/mkit-transport-enc/src/lib.rs)
 under `#[cfg(test)] mod tests`. Tests run inside a single
 `commonware_runtime::deterministic::Runner` so they exercise the same
-async code paths Phase 2's tokio wiring will hit, without depending on
-wall-clock time or a multi-threaded executor.
+async code paths the real-TCP transport stage's tokio wiring will hit,
+without depending on wall-clock time or a multi-threaded executor.
 
 | Test | What it pins |
 |---|---|
@@ -206,13 +206,13 @@ wall-clock time or a multi-threaded executor.
 | `url::parse_enc_url::*` (~25 cases) | URL parser: pins accepted forms (`mkit+enc://[user@]host[:port][/path]?pubkey=<hex\|b64url>`), both pubkey encodings, and rejection of bad inputs (missing prefix / pubkey, port overflow, CRLF / NUL injection, `..` path segments, b64 trailing-bit ambiguity, duplicate / unknown query params). |
 | `tcp::executor_handles_repeated_block_on` | `TokioExecutor::block_on` is safe to call repeatedly. Pins the `Arc<Runtime>` shape so a future refactor doesn't silently drop the runtime between calls. |
 | `tcp::buffer_pool_is_cached` | The `OnceLock`-cached buffer pool returns the same underlying allocation across calls. |
-| `tcp_e2e::list_refs_round_trip_over_real_tcp` (Phase 2, gated on `--features tcp`) | End-to-end TCP: real `TcpListener` on a free port, real `connect_tcp` dialer via an in-test byte-sniffing proxy. Asserts (a) `Transport::list_refs` round-trip succeeds and (b) the proxy never observes the literal `"refs/heads/"` prefix the client sent — bytes on wire are ChaCha20-Poly1305 ciphertext. |
+| `tcp_e2e::list_refs_round_trip_over_real_tcp` (real-TCP transport stage, gated on `--features tcp`) | End-to-end TCP: real `TcpListener` on a free port, real `connect_tcp` dialer via an in-test byte-sniffing proxy. Asserts (a) `Transport::list_refs` round-trip succeeds and (b) the proxy never observes the literal `"refs/heads/"` prefix the client sent — bytes on wire are ChaCha20-Poly1305 ciphertext. |
 
 ---
 
-## 6. Phase status
+## 6. Rollout status
 
-### 6.1 Phase 2 — landed
+### 6.1 Real-TCP transport — landed
 
 1. ~~**URL parsing**~~ — done. `mkit_transport_enc::url::parse_enc_url`
    accepts `mkit+enc://[user@]host[:port][/path]?pubkey=<hex|b64url>`.
@@ -247,7 +247,7 @@ wall-clock time or a multi-threaded executor.
    key paths are CLI-supplied or user-scoped and are **never** read
    from repo-local `.mkit/config`.
 
-### 6.2 Phase 3 — deferred
+### 6.2 Keystore integration & hardening — deferred
 
 5. **Keystore integration** — the server identity and (optionally) the
    client identity are now stable raw-32 key files on disk: the server
@@ -262,7 +262,7 @@ wall-clock time or a multi-threaded executor.
    deferred follow-up.
 6. **Tighten handshake bounds** — `default_handshake_config` still
    uses the generous 30 s / 30 s / 60 s envelope inherited from
-   Phase 1 (deterministic-runtime tests). Real-network deployments
+   the in-process scaffold (deterministic-runtime tests). Real-network deployments
    should tighten `synchrony_bound` / `max_handshake_age` to ≤ 5 s
    and `handshake_timeout` to ≤ 10 s. Pending CI infra for a
    real-network e2e job.
@@ -283,7 +283,7 @@ wall-clock time or a multi-threaded executor.
    `commonware_runtime::BufferPool` by spinning up a one-shot
    commonware tokio Runner on a fresh OS thread, then dropping the
    bootstrap runtime while holding an `Arc` clone of the pool. The
-   pool is cached process-wide. Phase 3 should land an upstream
+   pool is cached process-wide. A follow-up should land an upstream
    contribution to `commonware-runtime` that exposes a public
    `BufferPool::new_for_network()` so this trick can retire.
 

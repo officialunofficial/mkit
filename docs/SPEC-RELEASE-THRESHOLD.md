@@ -7,10 +7,10 @@ audience: implementers and integrators producing or verifying mkit release-party
 
 # SPEC-RELEASE-THRESHOLD — BLS12-381 threshold signatures for mkit releases
 
-Status: **Draft**. Phase 1 of issue #160 — the holder-side signer
-adapter and aggregator have landed in `mkit-attest` behind the
-`bls-threshold` Cargo feature. The keystore backend, ceremony CLI, and
-release-pipeline integration follow in Phases 2 and 3.
+Status: **Draft**. The holder-side signer/verifier stage of issue #160 —
+the holder-side signer adapter and aggregator have landed in `mkit-attest`
+behind the `bls-threshold` Cargo feature. The keystore-backed share storage
+and the release-party ceremony CLI / release-pipeline integration follow.
 
 This spec is normative for the wire bytes a threshold-signed release
 ships and the verifier path that consumes them. It is **not** a
@@ -33,12 +33,13 @@ each one having to publish a separate signature, BLS12-381 threshold
 signatures over the [`commonware-cryptography`](https://docs.rs/commonware-cryptography)
 crate provide:
 
-- N shares dealt by a trusted dealer (Phase 1) or DKG-generated
-  (Phase 2). M-of-N partial signatures recover a single signature.
+- N shares dealt by a trusted dealer (the holder-side signer/verifier
+  stage) or DKG-generated (a later stage). M-of-N partial signatures
+  recover a single signature.
 - Verifiers check **one** signature against **one** aggregated public
   key — no per-maintainer dispatch on the consumer side.
 - Adding or rotating maintainers happens through key resharing without
-  changing the verifier-side public key (Phase 2).
+  changing the verifier-side public key (also a later stage).
 
 The "release party" framing: a release is cut by M-of-N maintainers
 each posting their partial signature to a coordination channel; an
@@ -46,9 +47,10 @@ aggregator combines them; the resulting BLS signature lands on the
 GitHub Release alongside the existing cosign keyless signature. No
 single maintainer can produce a valid release signature alone.
 
-Phase 1 (this spec) lands the signer/verifier pair. Phase 2 lands the
-keystore backend. Phase 3 lands the dealer/aggregator CLI and the CI
-integration that makes the flow usable.
+The holder-side signer/verifier stage (this spec) lands the
+signer/verifier pair. The keystore-backed share storage stage lands the
+keystore backend. The release-party ceremony CLI stage lands the
+dealer/aggregator CLI and the CI integration that makes the flow usable.
 
 ### 1.1 Non-goals
 
@@ -64,7 +66,7 @@ integration that makes the flow usable.
 
 ## 2. Trust model
 
-### 2.1 Phase 1 — trusted dealer
+### 2.1 Trusted dealer
 
 A single party (the project lead, in practice) runs
 `mkit_attest::bls_threshold_trusted_dealer(rng, n)` and hands each
@@ -82,20 +84,20 @@ Trust assumptions in this phase:
    ceil(2n/3). At n=4 this gives 3-of-4; at n=7, 5-of-7.
 
 The dealer assumption is **explicitly time-bounded**: it holds for the
-window between key generation and the first Phase-2 DKG resharing.
+window between key generation and the first DKG resharing.
 Public commitment to the cohort public key (e.g. published in the
 project README and pinned in trust-roots TOML) closes the window: any
 future deal that doesn't match the published key is rejected.
 
-### 2.2 Phase 2 — DKG
+### 2.2 DKG
 
 `commonware-cryptography::bls12381::dkg` provides the
 distributed-key-generation protocol. No single party ever sees the
-unsplit secret. Phase 2 reuses every piece of Phase 1's holder-side
-machinery (`ThresholdSigner`, `aggregate`, `verify`) because the only
-thing that changes is how shares are produced.
+unsplit secret. The DKG ceremony reuses every piece of the holder-side
+signer/verifier stage's machinery (`ThresholdSigner`, `aggregate`,
+`verify`) because the only thing that changes is how shares are produced.
 
-The Phase 2 plan is the subject of a separate spec; this document only
+The DKG plan is the subject of a separate spec; this document only
 guarantees that the on-disk share format the keystore backend defines
 is compatible with both ceremonies.
 
@@ -116,7 +118,7 @@ A `PartialSignature<MinSig>` per `commonware-cryptography`:
 
 Total: 52 bytes on the wire. `mkit_attest::bls_threshold` ships this
 via the `commonware_codec::Encode` impl on `PartialSignature`; the
-release-party CLI (Phase 3) wraps it in a thin JSON envelope for
+release-party ceremony CLI wraps it in a thin JSON envelope for
 human-friendly coordination-channel transport.
 
 ### 3.2 Aggregated signature (on-disk, in DSSE envelope)
@@ -161,8 +163,8 @@ ALGORITHM_BLS12381_THRESHOLD = 5;
 
 The integer is load-bearing: the buffa codegen pins it. The variant
 appears in `SignerFrame.SignResponse.algorithm` when a future external
-signer produces a partial; in Phase 1 the holder-side adapter is
-in-process and does not emit a `SignerFrame`, but the integer is
+signer produces a partial; in the holder-side signer/verifier stage the
+adapter is in-process and does not emit a `SignerFrame`, but the integer is
 already reserved so an external BLS signer subprocess can use it.
 
 ### 3.5 Variant choice
@@ -223,16 +225,17 @@ unit of consensus).
 `mkit_attest::bls_threshold_verify` exposes this as a single function.
 The DSSE-envelope-level `verify_envelope` integration (i.e. wiring
 `TrustRoot::Bls12381ThresholdPubKey` into the registry dispatch) lands
-in Phase 2 alongside the keystore backend; until then the verifier is
+with the keystore-backed share storage stage alongside the keystore
+backend; until then the verifier is
 called directly by callers who know they're handling a BLS aggregate.
 
 ---
 
 ## 5. Ceremony walkthrough
 
-The actual CLI is Phase 3 (`contrib/release-party/`); this section
-describes the flow it implements so Phase 2 keystore work can target
-the right shape.
+The actual CLI is the release-party ceremony CLI stage
+(`contrib/release-party/`); this section describes the flow it implements
+so the keystore-backed share storage work can target the right shape.
 
 ### 5.1 Genesis (one-time)
 
@@ -248,8 +251,8 @@ Output:
   mode, total) and the keyid (`bls12381-thr:<hex>`). Public; committed
   to the repo and pinned in trust-roots TOML.
 - Four encrypted share files, one per maintainer, transported out of
-  band via Signal / age / SSH-wrapped. The keystore backend (Phase 2)
-  defines the at-rest format.
+  band via Signal / age / SSH-wrapped. The keystore backend (the
+  keystore-backed share storage stage) defines the at-rest format.
 
 ### 5.2 Per-release (every `vX.Y.Z`)
 
@@ -263,7 +266,7 @@ Output:
    `release-party sign --share ~/.mkit/release-share.json
                        --pae <bytes>`,
    which:
-   - Loads the share via the Phase-2 keystore.
+   - Loads the share via the keystore-backed share storage.
    - Computes the partial signature via
      `ThresholdSigner::sign(pae)`.
    - Emits the 52-byte partial as a base64-wrapped JSON object the
@@ -278,8 +281,9 @@ Output:
 
 ### 5.3 Rotation
 
-Phase-2 concern. The high-level shape: a quorum of current holders
-runs the keysharing protocol to mint a new share set; the public key
+A keystore-backed share storage concern. The high-level shape: a quorum
+of current holders runs the keysharing protocol to mint a new share set;
+the public key
 **does not change**, so existing trust-roots TOML pins keep working.
 Maintainer set churn is invisible at the verifier layer — by design.
 
@@ -287,48 +291,48 @@ Maintainer set churn is invisible at the verifier layer — by design.
 
 ## 6. Implementation status
 
-| Phase | Component | Status |
+| Stage | Component | Status |
 |-------|-----------|--------|
-| 1 | `Algorithm::ALGORITHM_BLS12381_THRESHOLD = 5` in `common.proto` | Landed |
-| 1 | `mkit-attest::signer_bls_threshold` (feature-gated) | Landed |
-| 1 | `ThresholdSigner` (holder-side `Signer` adapter) | Landed |
-| 1 | `bls_threshold_aggregate` (free function) | Landed |
-| 1 | `bls_threshold_verify` (free function) | Landed |
-| 1 | `bls_threshold_trusted_dealer` (Phase-1 dealer helper) | Landed |
-| 1 | `SPEC-RELEASE-THRESHOLD.md` (this document) | Draft |
-| 2 | `mkit-keystore::Algorithm::Bls12381Threshold` variant | Landed |
-| 2 | `SoftwareKeystore::store_bls_share` / `load_bls_share` / `delete_bls_share` / `list_bls_shares` | Landed |
-| 2 | `BlsShareRecord` AEAD wire format (magic `MKITKSB1`) | Landed |
-| 2 | `TrustRoot::Bls12381ThresholdPubKey` + `verify_envelope` registry dispatch | Landed |
-| 2 | Trust-roots TOML schema for `bls12381-thr:` keyids (`kind = "bls12381-thr"` or `algorithm = "bls12381-thr"`) | Landed |
-| 2 | `mkit key generate --algorithm bls12381-thr --threshold M --total N --label <base>` CLI | Landed |
-| 2 | DKG ceremony in place of trusted dealer | Deferred to Phase 3 |
-| 3 | `contrib/release-party/` CLI (`sign`, `aggregate`, `deal`) | Not started |
-| 3 | `.github/workflows/release.yml` integration | Not started |
-| 3 | Maintainer rotation / resharing tooling | Not started |
-| 3 | Multi-host distribution (replacement for single-host trusted dealer) | Not started |
+| Holder-side signer/verifier | `Algorithm::ALGORITHM_BLS12381_THRESHOLD = 5` in `common.proto` | Landed |
+| Holder-side signer/verifier | `mkit-attest::signer_bls_threshold` (feature-gated) | Landed |
+| Holder-side signer/verifier | `ThresholdSigner` (holder-side `Signer` adapter) | Landed |
+| Holder-side signer/verifier | `bls_threshold_aggregate` (free function) | Landed |
+| Holder-side signer/verifier | `bls_threshold_verify` (free function) | Landed |
+| Holder-side signer/verifier | `bls_threshold_trusted_dealer` (trusted-dealer helper) | Landed |
+| Holder-side signer/verifier | `SPEC-RELEASE-THRESHOLD.md` (this document) | Draft |
+| Keystore-backed share storage | `mkit-keystore::Algorithm::Bls12381Threshold` variant | Landed |
+| Keystore-backed share storage | `SoftwareKeystore::store_bls_share` / `load_bls_share` / `delete_bls_share` / `list_bls_shares` | Landed |
+| Keystore-backed share storage | `BlsShareRecord` AEAD wire format (magic `MKITKSB1`) | Landed |
+| Keystore-backed share storage | `TrustRoot::Bls12381ThresholdPubKey` + `verify_envelope` registry dispatch | Landed |
+| Keystore-backed share storage | Trust-roots TOML schema for `bls12381-thr:` keyids (`kind = "bls12381-thr"` or `algorithm = "bls12381-thr"`) | Landed |
+| Keystore-backed share storage | `mkit key generate --algorithm bls12381-thr --threshold M --total N --label <base>` CLI | Landed |
+| Keystore-backed share storage | DKG ceremony in place of trusted dealer | Deferred to the release-party ceremony CLI stage |
+| Release-party ceremony CLI | `contrib/release-party/` CLI (`sign`, `aggregate`, `deal`) | Not started |
+| Release-party ceremony CLI | `.github/workflows/release.yml` integration | Not started |
+| Release-party ceremony CLI | Maintainer rotation / resharing tooling | Not started |
+| Release-party ceremony CLI | Multi-host distribution (replacement for single-host trusted dealer) | Not started |
 
 Acceptance for the issue overall (#160):
 
 - [ ] `Algorithm::ALGORITHM_BLS12381_THRESHOLD` lands in common.proto
-      and is signable end-to-end (Phase 1: enum + signer adapter
-      shipped; end-to-end test deferred to Phase 3 where the CLI
-      consumes both).
+      and is signable end-to-end (holder-side signer/verifier stage: enum
+      + signer adapter shipped; end-to-end test deferred to the
+      release-party ceremony CLI stage where the CLI consumes both).
 - [ ] `mkit-keystore::BlsShare` backend works alongside the existing
-      backends (Phase 2).
+      backends (keystore-backed share storage stage).
 - [ ] `release-party` binary covers sign/aggregate/deal/verify
-      (Phase 3).
+      (release-party ceremony CLI stage).
 - [ ] `SPEC-RELEASE-THRESHOLD.md` documents the ceremony, share
       storage, rotation, verifier flow (this document, draft).
 - [ ] First v0.x.y BLS-signed release lands; `cosign verify` AND
       `mkit verify-attest --algorithm=bls12381-threshold` both pass on
-      the artefacts (Phase 3).
+      the artefacts (release-party ceremony CLI stage).
 
 ---
 
 ## 7. Open questions
 
-- **Share serialisation at rest.** *(Resolved in Phase 2.)* The
+- **Share serialisation at rest.** *(Resolved in the keystore-backed share storage stage.)* The
   software backend stores each share as a
   `commonware_codec::Encode`-encoded `Share` wrapped in a
   `BlsShareRecord` (magic `MKITKSB1`, `XChaCha20-Poly1305`,
@@ -340,8 +344,9 @@ Acceptance for the issue overall (#160):
   §"BLS12-381 threshold share storage".
 - **Coordination channel.** Signal vs. GitHub issue comment vs.
   OpenBao audit log — each has different trust-root assumptions.
-  Phase 3 picks one; the spec stays neutral.
-- **Rotation cadence.** Annual? Triggered by maintainer churn? Phase-2
-  question with operational implications that don't affect wire bytes.
+  The release-party ceremony CLI stage picks one; the spec stays neutral.
+- **Rotation cadence.** Annual? Triggered by maintainer churn? A
+  keystore-backed share storage question with operational implications
+  that don't affect wire bytes.
 - **Bridge to sigstore.** Could a Fulcio cert ever certify a BLS
   public key? Out of scope for now; would be a separate spec.

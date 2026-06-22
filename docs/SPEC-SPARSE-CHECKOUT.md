@@ -7,8 +7,8 @@ audience: implementers of verifiable server-side sparse-checkout for mkit transp
 
 # SPEC-SPARSE-CHECKOUT — verifiable server-side sparse delivery
 
-Status: **Draft** (Phase 2 — core module + wire envelope + transport
-glue). Normative for the `mkit-core::sparse` module's in-memory byte
+Status: **Draft** (wire & transport delivery — core module + wire envelope
++ transport glue). Normative for the `mkit-core::sparse` module's in-memory byte
 layouts, the `application/x-mkit-sparse` wire format, the per-tree
 on-disk bitmap cache layout, and the HTTP `/<project>/trees/<hex>/sparse`
 + S3 `sparse/<tree>/<filter>` endpoint shapes.
@@ -20,7 +20,8 @@ network envelope, the on-disk cache layout under
 `.mkit/sparse/<tree-hex>.bitmap`, and the `mkit checkout --sparse` /
 `mkit clone --sparse` CLI plumbing.
 
-Resolves issue #158 (Phases 1 + 2).
+Resolves issue #158 (the in-process core module and the wire & transport
+delivery stages).
 
 ---
 
@@ -81,7 +82,7 @@ before allocating any structure proportional to `leaf_count`.
 
 ### 2.2 `SparseProof`
 
-Variable-length. Phase 1 carries:
+Variable-length. The in-process core module carries:
 
 ```
 field         size                    encoding
@@ -101,10 +102,11 @@ checking the root.
 `mmr_proof` is the inclusion proof for **bit 0** of the bitmap. For
 trees with `leaf_count ≤ 256` (one chunk) this is the partial-chunk
 reconstruction proof (single digest); for larger trees it's a
-multi-digest MMR-style proof. Phase 1 verifier does not use this
-proof — the byte-level reconstruction in §3 is sufficient because the
-verifier has the full bitmap. The field exists so Phase 2's streamed
-transport can switch to per-bit proofs without a wire-format change.
+multi-digest MMR-style proof. The in-process core module's verifier does
+not use this proof — the byte-level reconstruction in §3 is sufficient
+because the verifier has the full bitmap. The field exists so the wire &
+transport delivery stage's streamed transport can switch to per-bit proofs
+without a wire-format change.
 
 ### 2.3 Filter canonical form
 
@@ -133,8 +135,8 @@ A filter prefix `P` matches an entry name `N` when either:
 
 ### 2.4 Tree hash
 
-Phase 2 swaps the Phase-1 placeholder for the canonical SPEC-OBJECTS
-tree hash:
+The wire & transport delivery stage swaps the in-process core module's
+placeholder for the canonical SPEC-OBJECTS tree hash:
 
 ```
 tree_hash = BLAKE3(serialize(Object::Tree(t)))
@@ -144,14 +146,14 @@ where `serialize` is the workspace-canonical
 `mkit_core::serialize::serialize` recipe (v1 prologue + length-prefixed
 entries — see SPEC-OBJECTS §4). This is the same hash the rest of the
 codebase uses to address a tree object: commits' `tree_hash`, remix
-roots, and the object store all key trees by this value. The Phase-1
-sparse-module-internal recipe is removed.
+roots, and the object store all key trees by this value. The
+sparse-module-internal recipe from the in-process core module is removed.
 
 Verifiers MAY now cross-check the manifest's `tree_hash` against any
 independently-known commitment to the source tree — a parent commit's
 `tree_hash`, a merge-base tree, the local object store — and reject on
-mismatch. This was not possible in Phase 1, when `tree_hash` was a
-manifest-private digest with no cross-codebase meaning.
+mismatch. This was not possible in the in-process core module, when
+`tree_hash` was a manifest-private digest with no cross-codebase meaning.
 
 ---
 
@@ -179,12 +181,12 @@ returns true iff **all** of:
    `MerkleizedBitMap<_, sha256::Digest, 32>` and compare its root
    against `manifest.bitmap_root` byte-for-byte.
 
-Phase 1 cannot independently verify that
+The in-process core module cannot independently verify that
 `delivered_entries[i].name` is the canonical name at leaf-index `i` of
 the source tree — the verifier doesn't have the source tree (that's
-the whole point of sparse delivery). The Phase 2 transport will
-cross-check the leaf-index → name mapping once it has assembled
-enough of the tree structure to know which leaf-indices exist.
+the whole point of sparse delivery). The wire & transport delivery stage's
+transport will cross-check the leaf-index → name mapping once it has
+assembled enough of the tree structure to know which leaf-indices exist.
 
 The verifier MUST NOT panic on any caller input; all failures return
 `false`.
@@ -199,19 +201,20 @@ The verifier MUST NOT panic on any caller input; all failures return
 | `MAX_FILTER_PATHS`     | 100,000   | Bounds client→server filter size before allocation.    |
 | Bitmap chunk size      | 32 bytes  | One SHA-256 digest, upstream's recommended size.       |
 | Filter path encoding   | UTF-8     | Tree entry names are arbitrary bytes; filters are not. |
-| `tree_hash` algorithm  | BLAKE3    | Phase 1 internal commitment; Phase 2 promotes to SPEC. |
+| `tree_hash` algorithm  | BLAKE3    | In-process core module internal commitment; promoted to SPEC by the wire & transport delivery stage. |
 | `bitmap_root` algorithm| SHA-256   | Upstream `AuthenticatedBitMap` produces SHA-256.       |
 
 A tree with the maximum 1,000,000 leaves produces a bitmap of
 `ceil(1_000_000 / 8)` = 125,000 bytes. The MMR proof at that scale is
 on the order of `log2(1_000_000 / 256) ≈ 12` digests = ~384 bytes.
 Total `SparseProof` size for a worst-case tree: ~125 KB. Acceptable
-for Phase 1; Phase 2's streamed transport will only ship the bitmap
-chunks the verifier hasn't already cached on disk.
+for the in-process core module; the wire & transport delivery stage's
+streamed transport will only ship the bitmap chunks the verifier hasn't
+already cached on disk.
 
 ---
 
-## 5. Wire envelope (Phase 2)
+## 5. Wire envelope
 
 The HTTP and S3 transports both ship a single
 `application/x-mkit-sparse` byte stream that encodes a complete
@@ -253,7 +256,7 @@ trailing bytes after the bitmap section are refused (extra trailing
 bytes would let an attacker encode bits the manifest never committed
 to).
 
-## 6. HTTP transport endpoint (Phase 2)
+## 6. HTTP transport endpoint
 
 ```
 POST /<project>/trees/<tree-hex>/sparse?sparse=<filter-hex>
@@ -278,7 +281,7 @@ The transport layer is **trust-thin**: it returns the decoded
 and `SPARSE_WIRE_MAX_BYTES`. The caller MUST run `verify_sparse` on
 the result before trusting any delivered entries.
 
-## 7. S3 transport endpoint (Phase 2)
+## 7. S3 transport endpoint
 
 S3 is a content-addressed key-value store; there is no "POST a
 request body, get a computed response" verb. The S3 transport
@@ -298,7 +301,7 @@ to keep the SigV4 canonical request minimal.
 Same trust-thin contract as HTTP: decode envelope → return →
 `verify_sparse` upstream.
 
-## 8. On-disk cache (Phase 2)
+## 8. On-disk cache
 
 The client persists a verified manifest's bitmap under:
 
@@ -339,7 +342,7 @@ NOT silently returned: `mkit_cli::sparse_cache::load` returns
 `CacheError::FilterMismatch`, and the caller treats it as a cache
 miss and re-fetches.
 
-## 9. CLI surface (Phase 2)
+## 9. CLI surface
 
 `mkit checkout --sparse <pattern>...` — switch HEAD with a verifiable
 sparse subset. The patterns are interpreted exactly like the existing
@@ -367,11 +370,11 @@ sparse-checkout set <pattern>...` to persist.
 
 ## 10. Implementation status
 
-* **Phase 1 (closed):** `mkit-core::sparse` module only. In-memory
-  `build_sparse` / `verify_sparse` plus the manifest/proof byte
+* **In-process core module (closed):** `mkit-core::sparse` module only.
+  In-memory `build_sparse` / `verify_sparse` plus the manifest/proof byte
   layouts. Feature-gated as `sparse-checkout`, default off.
 
-* **Phase 2 (this revision):**
+* **Wire & transport delivery (this revision):**
   - `tree_hash` swapped to the canonical SPEC-OBJECTS hash (§2.4).
   - `application/x-mkit-sparse` wire envelope (§5).
   - HTTP transport endpoint (§6) and `HttpTransport::fetch_sparse_tree`.
@@ -385,7 +388,7 @@ sparse-checkout set <pattern>...` to persist.
     Worker is in `web/`); §6 + §7 document exactly what they need to
     do.
 
-* **Phase 3 (future):** SSH transport extension. The SSH transport's
+* **SSH transport extension (future):** The SSH transport's
   protobuf-framed protocol fits a new `SparseFetch` frame more
   naturally than a query-param hack; left to a follow-up PR.
 

@@ -1,6 +1,6 @@
 # mkit ↔ Git parity matrix
 
-> **Authoritative scope gate for git-parity (umbrella #246, Phase -1 #247).**
+> **Authoritative scope gate for git-parity (umbrella #246, scope-definition milestone #247).**
 > This file defines *exactly* what "usable like git" means for mkit v1. A row
 > is in scope only if it appears here. If schedule pressure appears, the lever
 > is **renegotiating this matrix — never the safety principles.**
@@ -28,7 +28,7 @@ remains a permanent non-goal. Safety principles are untouched.
   A literal Git SHA pasted into mkit will never resolve. We match the UX
   *shape* (short prefixes, abbreviated display) but not the length.
 - **Repo marker** — mkit uses `.mkit/`, not `.git/`. Repo detection by `.git/`
-  is **not** added to core; the opt-in `git` alias shim (Phase 6, #254 —
+  is **not** added to core; the opt-in `git` alias shim (issue #254 —
   shipped at `contrib/git-shim/mkit-git`, never installed by default) is the
   only bridge.
 
@@ -88,7 +88,7 @@ creeping; revisit post-v1 if demand warrants.
 | `diff` | `<a>...<b>` symmetric range | same | ✅ | 4 | #252 | diffs `merge-base(a,b)` against `b` (git semantics); single merge base (criss-cross multi-base is a documented edge) |
 | `diff` | `--merge-base [<a> [<b>]]` | same | ✅ | — | — | flag spelling of `<a>...<b>`: one revision = `merge-base(<a>, HEAD)` vs the worktree; two revisions = `merge-base(<a>, <b>)` vs `<b>`; trailing args are pathspecs; rejected with `--staged` |
 | `log` | `--graph` | `--graph` is a no-op | 🚫 | 1 | #249 | **v1 non-goal** — flag accepted as a no-op; full graph parity unachievable (mkit's default `log` body diverges); optional `--oneline --graph` renderer is a post-v1 follow-up |
-| `branch` | create, list, `-v`, `-d`/`-D`/`-m`, `--list [<pattern>]`, `--contains`/`--no-contains`, `--merged`/`--no-merged` | same | ✅ | 1 | #249 | default list is `<marker> <name>` (no id, like git); `-v` adds abbreviated id + subject; `-D <missing>` errors like git (no silent no-op). Listing filters: `--list <pattern>...` keeps branches whose name matches any shell glob (`*`/`?`/`[…]`, `*` spans `/`; git `wildmatch` non-pathname semantics — enabled by `--list` or any filter); `--contains [<c>]`/`--no-contains [<c>]` keep (or exclude) branches whose tip has `<c>`; `--merged [<c>]`/`--no-merged [<c>]` keep (or exclude) branches merged into `<c>`; all four commit args default to HEAD when omitted (like git); filters and patterns combine (AND). Prior Phase-1 divergences reconciled. |
+| `branch` | create, list, `-v`, `-d`/`-D`/`-m`, `--list [<pattern>]`, `--contains`/`--no-contains`, `--merged`/`--no-merged` | same | ✅ | 1 | #249 | default list is `<marker> <name>` (no id, like git); `-v` adds abbreviated id + subject; `-D <missing>` errors like git (no silent no-op). Listing filters: `--list <pattern>...` keeps branches whose name matches any shell glob (`*`/`?`/`[…]`, `*` spans `/`; git `wildmatch` non-pathname semantics — enabled by `--list` or any filter); `--contains [<c>]`/`--no-contains [<c>]` keep (or exclude) branches whose tip has `<c>`; `--merged [<c>]`/`--no-merged [<c>]` keep (or exclude) branches merged into `<c>`; all four commit args default to HEAD when omitted (like git); filters and patterns combine (AND). Prior divergences from the core-porcelain milestone reconciled. |
 | `checkout` | switch branch, restore files; `-b`/`-B <new> [<start>]` | same | ✅ | — | — | guarded against clobber; untracked files preserved on switch (refuses only target-tree collisions); `-b` creates (refuses to clobber), `-B` create-or-resets, then switches — output `Switched to a new branch '<n>'`. `checkout -`/`@{-1}` (previous branch) not yet supported |
 | `switch` | `switch <branch>`, `switch -c`/`-C <new> [<start>]` | same | ✅ | — | — | git's modern switch UX; thin front-end over `checkout` (same clobber guard + `Switched to …` output). `switch -` not yet supported |
 | `tag` | lightweight/`-a`/`-s`/`-m`/`-d` | same | ✅ | — | — | |
@@ -128,7 +128,7 @@ creeping; revisit post-v1 if demand warrants.
 | `config user.name` / `user.email` | accept + round-trip, case-insensitive key | same | ✅ | 2 | #250 | **non-authoritative**: stored/round-tripped but never feed the signed `Identity` (that stays `user.identity`, still in `REPO_FORBIDDEN_KEYS`). Repo-safe precisely because inert — proven by a no-spoof test. Config section + variable names are matched case-insensitively like git (`User.Name` == `user.name`), in both the `config` command and the config-file parser; normalization happens **before** the `REPO_FORBIDDEN_KEYS` check so a case-variant (`User.Identity`) cannot bypass the spoof guard. **Subsection** names (`remote.<name>`, `branch.<branch>`) stay case-sensitive (git semantics), so a named remote `Origin` survives a reload uncorrupted |
 | `config core.*` | accept inert subset, reject dangerous | same | ✅ | 2 | #254 | inert allowlist (autocrlf/bare/filemode/ignorecase/quotepath/symlinks) stored & round-tripped but **not honored**; dangerous keys (sshCommand/pager/editor/hooksPath/fsmonitor) **rejected**; case-insensitive, lowercased like git |
 | `.gitignore` | `**`, anchored `/`, dir-relative, negation, char classes | path-relative; reads `.gitignore` + `.mkitignore` (root) | ✅ | 3 | #256 | v1 subset: path-relative matching, anchored leading `/`, multi-segment patterns, `**` (leading/middle/trailing), `[...]` classes, `\` escapes, negation (last-match-wins), trailing-space trim. Reads both files at the repo **root**; `.mkitignore` applied last (wins). **Deferred:** nested per-directory ignore files, `core.excludesFile` global excludes, escaped trailing spaces |
-| abbreviated hashes | short prefix resolution + display | resolve + `log --abbrev[=N]`/`--oneline` | ✅ | 0 | #248 | display side shipped; `rev-parse --short` is Phase 3 |
+| abbreviated hashes | short prefix resolution + display | resolve + `log --abbrev[=N]`/`--oneline` | ✅ | 0 | #248 | display side shipped; `rev-parse --short` lands with the plumbing-commands milestone (#251) |
 | `--version` / `-V` | top-level flag | `mkit --version`/`-V` alias `version` | ✅ | 0 | #248 | emits `mkit <X.Y.Z>` (not git's `git version …`) |
 | global `-C <path>` | run as if started in `<path>` | same | ✅ | — | — | parsed before the subcommand (so it applies to repo discovery); repeatable, relative-resolving, like git |
 | global `-c <key>=<val>` | one-shot config override | same | ✅ | — | — | applied to the effective config on **both** read paths (`read_or_default` + `read_layered`), so every command honors it; to the in-memory view only (never persisted). Flows through the SAME enforcement as a per-repo file — `REPO_FORBIDDEN_KEYS` refused, dangerous `core.*` dropped, control-char values rejected — so `-c` cannot spoof the signed author or redirect trust |
@@ -181,7 +181,7 @@ hash length:
   `ls-files --others` is raw plumbing and still *lists* the shadowed
   directory's contents; mkit matches that too.
 - Plumbing (`rev-parse`, `cat-file`, `ls-files`, `ls-tree`, `show-ref`,
-  `for-each-ref`) — exact flag contracts defined in Phase 3 (#251); output
+  `for-each-ref`) — exact flag contracts defined by the plumbing-commands milestone (#251); output
   matches Git modulo 64-hex vs 40-hex hashes.
 
 The **differential parity harness** (`rust/crates/mkit-cli/tests/git_parity_harness.rs`)

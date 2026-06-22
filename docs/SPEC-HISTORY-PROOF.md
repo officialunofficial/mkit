@@ -1,13 +1,13 @@
 ---
 spec: SPEC-HISTORY-PROOF
 version: 0
-status: draft (Phase 2 shipped)
+status: draft (journaled persistence shipped)
 audience: implementers of light-client verifiers and mirror-attestation services
 ---
 
 # SPEC-HISTORY-PROOF — mkit commit-history MMR and inclusion proofs
 
-Status: **Draft, Phase 2 of issue #157 (journaled persistence shipped).**
+Status: **Draft, journaled-persistence stage of issue #157 (shipped).**
 Scope: the append-only Merkle Mountain Range (MMR) that mkit keeps
 over each branch's commit chain, the on-disk layout that persists it,
 and the wire format of the inclusion proof that lets a light client
@@ -15,8 +15,8 @@ verify "commit `X` was the `N`-th commit on branch `Y` at root `R`".
 
 This document is normative for the `mkit-core::history` module and for
 any future on-disk or on-wire consumer. It does **not** yet mandate a
-wire `Commit` field or an attestation predicate — those are Phase 3 /
-`mkit-attest` respectively (see §4).
+wire `Commit` field or an attestation predicate — those are the
+proto-field integration stage / `mkit-attest` respectively (see §4).
 
 ---
 
@@ -44,9 +44,9 @@ canonical fit: append-only, dense leaf indices, stable positions, root
 hash compresses arbitrary history into one digest.
 
 mkit reuses [`commonware-storage`'s MMR][cw-mmr] pinned to `=2026.5.0`:
-- `merkle::mmr::mem::Mmr` for the Phase-1 mem-only flavour
+- `merkle::mmr::mem::Mmr` for the in-memory mem-only flavour
   ([`CommitHistory::open`]).
-- `merkle::mmr::full::Mmr` for the Phase-2 persisted flavour
+- `merkle::mmr::full::Mmr` for the journaled persisted flavour
   ([`CommitHistory::open_at`]). The on-disk layout is normatively
   defined in §4 below.
 
@@ -152,7 +152,7 @@ append-only.
 
 ## 3. Verifier algorithm
 
-Pseudocode for a Phase-1 light client:
+Pseudocode for a light client:
 
 ```text
 fn verify_inclusion(
@@ -201,7 +201,7 @@ round-trip and the bit-flip tamper case.
 
 ---
 
-## 4. On-disk layout (normative, Phase 2)
+## 4. On-disk layout (normative, journaled persistence)
 
 The persisted MMR for each branch lives under `<mkit_dir>/history/`.
 mkit does **not** invent a custom format: the durable representation
@@ -309,15 +309,15 @@ milliseconds for branches up to a few hundred thousand commits.
 
 ## 5. Implementation status and roadmap
 
-| Phase   | Scope                                                                  | Lands in     |
+| Stage   | Scope                                                                  | Lands in     |
 | ------- | ---------------------------------------------------------------------- | ------------ |
-| Phase 1 | `mem`-backed MMR, `CommitHistory::{open, append, root, prove}`, `verify_inclusion()`, §1–§3 of this spec | `feat/history-mmr-phase1` (issue #157, merged in PR #162) |
-| Phase 2 | **Shipped.** Journaled persistence via `commonware-storage::merkle::mmr::full::Mmr` pinned to `=2026.5.0`, with `Bagging::ForwardFold`. `CommitHistory::open_at`, `refs::update_ref_with_history`, `rebuild_from_chain`. §4 of this spec. | `feat/history-mmr-phase2-commonware` |
-| Phase 3 | New `Commit.history_root` proto field at the v0.2 break; new signing-bytes layout + golden vectors; SPEC-OBJECTS update | v0.2         |
-| Phase 4 | `mkit-attest` `commit_in_branch` predicate bundling `(commit, position, proof)` | v0.2         |
-| Phase 5 | Promote `history-mmr` from opt-in feature to default                   | v0.3         |
+| In-memory MMR | `mem`-backed MMR, `CommitHistory::{open, append, root, prove}`, `verify_inclusion()`, §1–§3 of this spec | `feat/history-mmr-phase1` (issue #157, merged in PR #162) |
+| Journaled persistence | **Shipped.** Journaled persistence via `commonware-storage::merkle::mmr::full::Mmr` pinned to `=2026.5.0`, with `Bagging::ForwardFold`. `CommitHistory::open_at`, `refs::update_ref_with_history`, `rebuild_from_chain`. §4 of this spec. | `feat/history-mmr-phase2-commonware` |
+| Proto-field integration | New `Commit.history_root` proto field at the v0.2 break; new signing-bytes layout + golden vectors; SPEC-OBJECTS update | v0.2         |
+| Attestation predicate | `mkit-attest` `commit_in_branch` predicate bundling `(commit, position, proof)` | v0.2         |
+| Default-on promotion | Promote `history-mmr` from opt-in feature to default                   | v0.3         |
 
-Phase 2 (this PR) deliberately does *not*:
+The journaled-persistence stage (this PR) deliberately does *not*:
 
 - touch `rust/crates/mkit-rpc/proto/` — no Commit field yet,
   no wire-breaking change yet;
@@ -329,8 +329,8 @@ Phase 2 (this PR) deliberately does *not*:
 Stability call: commonware-storage is ALPHA. We pin to an exact
 `=2026.5.0` and accept that future minor versions may change the
 proof's `digests` layout *and* the on-disk partition shape described
-in §4. Because Phase 3 includes a new signing-bytes golden vector
-anyway, the wire format documented in §2 and the on-disk format
+in §4. Because the proto-field integration stage includes a new
+signing-bytes golden vector anyway, the wire format documented in §2 and the on-disk format
 documented in §4 are both "frozen relative to the v0.2 break" — any
 change to commonware between now and v0.2 lands as part of the same
 migration, not as a separate break.

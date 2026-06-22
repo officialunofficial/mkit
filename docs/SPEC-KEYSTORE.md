@@ -650,9 +650,9 @@ Storage-security modes:
 
 #### 6.1.1 BLS12-381 Threshold Share Storage
 
-Phase 2 of issue #160 (and §6 of `SPEC-RELEASE-THRESHOLD.md`) adds
-support for storing BLS12-381 threshold shares in the encrypted
-software backend. The contract:
+The keystore-backed share storage stage of issue #160 (and §6 of
+`SPEC-RELEASE-THRESHOLD.md`) adds support for storing BLS12-381 threshold
+shares in the encrypted software backend. The contract:
 
 - BLS shares are **variable-length** (≈52 bytes for the `MinSig`
   variant — the wire-encoded
@@ -700,8 +700,9 @@ software backend. The contract:
 - Hostile backends (`yubikey`, `macos-keychain`, `windows-credential`,
   `linux-secret-service`, `systemd-creds`) MUST reject
   `Bls12381Threshold` with `UnsupportedAlgorithm`. BLS share storage
-  is software-backend-only in Phase 2; Phase 3 may extend to native
-  backends with their own threshold-aware wire formats.
+  is software-backend-only in the keystore-backed share storage stage; a
+  later stage may extend to native backends with their own threshold-aware
+  wire formats.
 
 ### 6.2 Memory Backend
 
@@ -1477,12 +1478,12 @@ Docs/spec cleanup:
 - User-facing docs may summarize the final behavior, but this specification
   remains the implementation-review authority unless replaced by a later spec.
 
-## 16. Implementation Phases
+## 16. Implementation Stages
 
 Status tags below describe what is in the current build. They are advisory;
 the per-section requirements above remain normative.
 
-### Phase 1: Foundation — shipped
+### Foundation — shipped
 
 - Add `mkit-keystore` crate. **Shipped.**
 - Add core API, errors, label/key-ref parsing, capabilities. **Shipped.**
@@ -1494,7 +1495,7 @@ the per-section requirements above remain normative.
   `mkit_core::sign::{load_raw_32, save_raw_32, save_raw_32_create_new}`.
 - Add unit tests. **Shipped.**
 
-### Phase 2: CLI Surface — shipped
+### CLI Surface — shipped
 
 - Add `commands/key.rs`. **Shipped** at
   `rust/crates/mkit-cli/src/commands/key.rs`.
@@ -1504,14 +1505,14 @@ the per-section requirements above remain normative.
   `REPO_FORBIDDEN_KEYS` in `mkit-cli/src/config.rs`.
 - Add CLI integration tests. **Shipped.**
 
-### Phase 3: Attestation Integration — shipped
+### Attestation Integration — shipped
 
 - Add keystore-backed `mkit_attest::Signer` adapter. **Shipped** as
   `KeystoreAttestSigner` in `commands/attest_factory.rs`.
 - Extend `attest_factory` for `attest.signer = keystore`. **Shipped.**
 - Add DSSE signing and verification tests. **Shipped.**
 
-### Phase 4: Commit Integration — shipped
+### Commit Integration — shipped
 
 - Add or expose the minimal `mkit-core` helper needed for keystore commit
   signing without creating a dependency cycle. **Shipped** —
@@ -1523,7 +1524,7 @@ the per-section requirements above remain normative.
   `keystore_commit_signature_matches_legacy_keypair_signature` in
   `commands/commit.rs` tests.
 
-### Phase 5: Keystore V1 Backend Matrix — mostly shipped
+### Keystore V1 Backend Matrix — mostly shipped
 
 - Make `software` the encrypted-at-rest software backend using OS-protected
   envelope encryption. **Shipped** — `SoftwareKeystore` + `EncryptedKeyRecord`
@@ -1543,7 +1544,7 @@ the per-section requirements above remain normative.
   in `commands/key.rs`, mirrored in commit and attest paths.
 - Add platform-gated tests and capability honesty tests. **Shipped.**
 
-### Phase 6: Production Readiness — in flight
+### Production Readiness — in flight
 
 - Add cross-platform CI for macOS, Windows, Linux desktop-compatible paths, and
   Linux headless/server-compatible paths. **Partially in flight** — live
