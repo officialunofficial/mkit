@@ -93,7 +93,7 @@ export default function HomePage() {
 // scroll horizontally rather than wrapping.
 function InstallCommand({ command }: { command: string }) {
   return (
-    <div className='inline-flex max-w-full items-center gap-3 overflow-x-auto rounded-md border border-hairline bg-muted/10 px-3 py-2'>
+    <div className='inline-flex max-w-full items-center gap-3 overflow-x-auto rounded-md border border-hairline bg-muted/5 px-3 py-2'>
       <code className='whitespace-nowrap font-mono text-sm'>
         <span className='select-none text-muted'>$ </span>
         {command}
