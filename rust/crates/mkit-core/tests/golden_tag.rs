@@ -35,7 +35,7 @@ fn golden_dir() -> PathBuf {
     d.pop(); // rust/
     d.push("tests");
     d.push("golden");
-    d.push("phase9");
+    d.push("tags");
     d
 }
 

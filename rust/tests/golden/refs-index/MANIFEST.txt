@@ -1,5 +1,5 @@
-# Phase 4 golden vectors (deterministic)
-# Produced by examples/generate_phase4_goldens.rs
+# Refs/index golden vectors (deterministic)
+# Produced by examples/generate_refs_index_goldens.rs
 # Format: <name> <blake3-hex-of-bin-bytes>
 index_empty fa77941e211262add18f880b13341150183ca8bda76a040f9d533b6f5dfc4f7c
 index_3entries 61469750893ee6718091d7694d14133c6d81754e8fe7c6da49d14f08bb4f3b8a

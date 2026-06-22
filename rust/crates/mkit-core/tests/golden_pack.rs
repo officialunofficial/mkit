@@ -4,7 +4,7 @@
 //!
 //! 1. [`mkit_core::chunker`] produces the pinned chunk boundaries for
 //!    the splitmix64-derived inputs stored at
-//!    `rust/tests/golden/phase3/fastcdc_boundaries_*.bin`.
+//!    `rust/tests/golden/fastcdc/fastcdc_boundaries_*.bin`.
 //! 2. [`mkit_core::delta`] encodes a SPEC-DELTA stream that round-trips
 //!    through [`mkit_core::delta::decode`] and pins to a fixed byte
 //!    prefix for a deterministic input.
@@ -30,7 +30,7 @@ fn phase3_dir() -> PathBuf {
     d.pop(); // rust/
     d.push("tests");
     d.push("golden");
-    d.push("phase3");
+    d.push("fastcdc");
     d
 }
 

@@ -1,4 +1,4 @@
-# Phase 9 golden vectors (deterministic) — annotated / signed tags (#230)
+# Tag golden vectors (deterministic) — annotated / signed tags (#230)
 # Object: SPEC-OBJECTS §6a. Signing: SPEC-SIGNING §4a, domain "mkit.tag\0".
 # Format: <name> <blake3-hex>
 #

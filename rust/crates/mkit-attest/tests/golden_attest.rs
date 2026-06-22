@@ -10,7 +10,7 @@
 //!    accepts the embedded Ed25519 signature against the trust root
 //!    recovered from the deterministic seed.
 //!
-//! See `docs/SPEC-ATTESTATIONS.md` and `rust/tests/golden/phase8/MANIFEST.txt`.
+//! See `docs/SPEC-ATTESTATIONS.md` and `rust/tests/golden/attest/MANIFEST.txt`.
 //!
 //! Feature-gated on `algo-ed25519` because the pinned vectors here are
 //! Ed25519 signatures produced by `RepoKeySigner`, which is gated on
@@ -41,13 +41,13 @@ fn attest_keyid() -> String {
 
 fn golden_dir() -> PathBuf {
     // CARGO_MANIFEST_DIR points at rust/crates/mkit-attest. Goldens live
-    // under rust/tests/golden/phase8.
+    // under rust/tests/golden/attest.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("tests")
         .join("golden")
-        .join("phase8")
+        .join("attest")
 }
 
 #[test]

@@ -1,12 +1,12 @@
-# Phase 5a golden vectors
+# Diff / merge golden vectors
 
-Phase 5a (`diff` / `graph` / `merge` / `cherry_pick`) is a **behavioral**
-phase: it composes already-pinned byte formats (the `Tree` and `Commit`
-encodings from Phase 1) into history operations. The on-disk byte
-format is therefore already pinned by `phase1/tree*` vectors — there
-is no new wire format to pin here.
+`diff` / `graph` / `merge` / `cherry_pick` are **behavioral**: they
+compose already-pinned byte formats (the `Tree` and `Commit` encodings)
+into history operations. The on-disk byte format is therefore already
+pinned by the `objects/tree*` vectors — there is no new wire format to
+pin here.
 
-What we *do* pin in Phase 5a — via regression tests — is the
+What we *do* pin here — via regression tests — is the
 **deterministic outcome** of operations on fixed inputs:
 
 - For a fixed (`base`, `ours`, `theirs`) set of tree entry hashes, the

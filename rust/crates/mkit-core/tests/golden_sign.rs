@@ -26,7 +26,7 @@ fn golden_dir() -> PathBuf {
     d.pop();
     d.push("tests");
     d.push("golden");
-    d.push("phase1");
+    d.push("objects");
     d
 }
 

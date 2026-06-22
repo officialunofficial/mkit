@@ -228,7 +228,7 @@ fn cherry_pick_modify_modify_conflict_carries_message() {
 /// blob contents the merged tree's content-addressed hash is fully
 /// determined, and the cherry-pick result hashes likewise. If anything
 /// in the merge decision matrix or tree serialisation drifts, this
-/// test flips. See `rust/tests/golden/phase5a/README.md` for why we
+/// test flips. See `rust/tests/golden/diff-merge/README.md` for why we
 /// pin hashes rather than byte vectors at this layer.
 #[test]
 fn merge_and_cherry_pick_are_byte_deterministic() {

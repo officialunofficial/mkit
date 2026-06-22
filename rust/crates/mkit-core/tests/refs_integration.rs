@@ -1,7 +1,7 @@
 //! Integration tests for Phase 4 — refs + index + worktree + ignore +
 //! `repo_lock`.
 //!
-//! Loads the golden byte vectors under `rust/tests/golden/phase4/` and
+//! Loads the golden byte vectors under `rust/tests/golden/refs-index/` and
 //! checks that the parsers in `mkit-core` accept them and round-trip
 //! cleanly. Also exercises every CAS variant of `update_ref` against a
 //! temp `ObjectStore`-rooted repo, which is the bit Phases 5+ depend
@@ -28,7 +28,7 @@ fn goldens_root() -> PathBuf {
     manifest_dir
         .parent()
         .and_then(Path::parent)
-        .map(|workspace| workspace.join("tests").join("golden").join("phase4"))
+        .map(|workspace| workspace.join("tests").join("golden").join("refs-index"))
         .expect("workspace layout: crates/mkit-core/.. → workspace root")
 }
 

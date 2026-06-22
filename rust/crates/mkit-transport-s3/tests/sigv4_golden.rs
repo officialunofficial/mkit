@@ -1,7 +1,7 @@
 #![allow(clippy::doc_markdown)]
 //! Phase 7d SigV4 golden-vector check.
 //!
-//! Loads `rust/tests/golden/phase7/sigv4_basic.bin` (a JSON blob with
+//! Loads `rust/tests/golden/transport/sigv4_basic.bin` (a JSON blob with
 //! fixed inputs + expected outputs) and asserts that the signer
 //! produces byte-identical `canonical_request`, `string_to_sign`, and
 //! final `signature_hex` for those inputs. If this test fails, either
@@ -16,7 +16,7 @@ fn load_golden_named(name: &str) -> Value {
     // Resolve the path relative to this crate's directory so the test
     // works whether it's run from the workspace root or the crate dir.
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push(format!("../../tests/golden/phase7/{name}.bin"));
+    path.push(format!("../../tests/golden/transport/{name}.bin"));
     let bytes = std::fs::read(&path)
         .unwrap_or_else(|e| panic!("could not read golden fixture at {}: {e}", path.display()));
     serde_json::from_slice(&bytes).expect("golden fixture is valid JSON")
