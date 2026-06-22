@@ -56,7 +56,7 @@ export default function HomePage() {
         </div>
       </section>
 
-      <ul className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4'>
+      <ul className='grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4'>
         <Demo
           to='/tree'
           title='tree'
