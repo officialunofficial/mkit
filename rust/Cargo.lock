@@ -2885,7 +2885,7 @@ dependencies = [
  "k256",
  "mkit-core",
  "mkit-rpc",
- "p256 0.14.0-rc.12",
+ "p256 0.13.2",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
@@ -2906,7 +2906,7 @@ dependencies = [
  "git2",
  "k256",
  "mkit-core",
- "p256 0.14.0-rc.12",
+ "p256 0.13.2",
  "serde",
  "serde_json",
  "sha1",
@@ -2939,7 +2939,7 @@ dependencies = [
  "mkit-transport-s3",
  "mkit-transport-ssh",
  "mockito",
- "p256 0.14.0-rc.12",
+ "p256 0.13.2",
  "proptest",
  "rand_core 0.6.4",
  "serde_json",
@@ -3018,7 +3018,7 @@ dependencies = [
  "mkit-attest",
  "mkit-core",
  "openpgp-card",
- "p256 0.14.0-rc.12",
+ "p256 0.13.2",
  "security-framework",
  "sha2 0.10.9",
  "tempfile",
@@ -3444,9 +3444,9 @@ dependencies = [
 
 [[package]]
 name = "p384"
-version = "0.14.0-rc.9"
+version = "0.14.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "437f30ebcb1e16ff48acead5f08bd69fbcdbc82421687bb48af5c315a0bfab03"
+checksum = "563b53b275b129c6f070e538bf0845f8e6abd0b5ffeb3f53f1d6ea5f8dbb3b2c"
 dependencies = [
  "ecdsa 0.17.0-rc.20",
  "elliptic-curve 0.14.0-rc.35",
@@ -4713,7 +4713,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
