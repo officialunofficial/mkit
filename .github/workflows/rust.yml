@@ -50,7 +50,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # On approval (pull_request_review) the default ref is the base
           # branch — check out the PR head so we test the PR's code. On
@@ -90,7 +90,7 @@ jobs:
       # `cargo test`. Pinned via taiki-e/install-action which fetches a
       # cosign-signed prebuilt binary from the cargo-nextest release.
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595  # v2
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9  # v2
         with:
           tool: cargo-nextest
 
@@ -205,7 +205,7 @@ jobs:
             features: backend-linux-secret-service backend-systemd-creds backend-yubikey
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # On approval (pull_request_review) the default ref is the base
           # branch — check out the PR head so we test the PR's code. On
@@ -273,7 +273,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # On approval (pull_request_review) the default ref is the base
           # branch — check out the PR head so we test the PR's code. On
