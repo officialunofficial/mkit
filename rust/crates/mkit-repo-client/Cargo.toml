@@ -1,0 +1,82 @@
+# mkit-repo-client — browser ConnectRPC client for `mkit.repo.v1.RepoService`.
+#
+# Compiles to `wasm32-unknown-unknown` (via `wasm-pack build --target web`) and
+# drives the repo worker over a Fetch-API transport. The generated client +
+# message types are generated from the CANONICAL proto compiled directly via a
+# workspace-relative path (apps/repo-worker/proto/mkit/repo/v1/repo.proto) — no
+# duplicate copy, so client and worker can never drift. See build.rs.
+#
+# Feature notes (wasm safety):
+#   - `connectrpc` is `default-features = false` (NO server / NO native TLS) with
+#     only `gzip` (pure-Rust flate2, wasm-safe). `zstd` is deliberately OFF — it
+#     pulls a C library and does not build for wasm32.
+#   - This crate sends Connect/proto requests UNCOMPRESSED (the default request
+#     compression is `None`), so the bytes the server BLAKE3-hashes for the write
+#     envelope are exactly the serialized protobuf message. See README.md.
+[package]
+name = "mkit-repo-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95.0"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Browser (wasm) ConnectRPC client for the mkit anonymous-multiplayer repo service"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The bundled wasm-opt in `wasm-pack` predates bulk-memory ops and rejects
+# rustc 1.95's codegen (memory.copy / memory.fill). Skip it — mirrors
+# mkit-wasm; a newer wasm-opt can run in CI if size becomes a concern.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = false
+
+[dependencies]
+# ConnectRPC client only. NO server, NO tls; gzip is pure-Rust (flate2) and
+# wasm-safe. zstd is NOT wasm-safe, keep it off.
+connectrpc = { version = "0.7", default-features = false, features = ["gzip"] }
+
+# Protobuf runtime for the generated message types.
+buffa = "0.7"
+buffa-types = "0.7"
+
+# Hashing — pure-Rust BLAKE3 over the raw request body (wasm-safe). Must match
+# the server's BLAKE3 of the serialized protobuf request body.
+blake3 = "1"
+
+# HTTP types shared with the transport.
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1.6"
+
+# Async.
+futures = "0.3"
+
+# Serialization (generated message derives).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Wasm / browser bindings.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Headers",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+] }
+# Bridges web-sys's !Send JS types with the Send bound on connectrpc's
+# BoxFuture. Sound on wasm32 (single-threaded).
+send_wrapper = { version = "0.6", features = ["futures"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[build-dependencies]
+connectrpc-build = "0.7"

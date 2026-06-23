@@ -20,6 +20,7 @@ members = [
     "crates/mkit-cli",
     "crates/mkit-rpc",
     "crates/mkit-wasm",
+    "crates/mkit-repo-client",
     "benches",
     # The reference external-signer binaries (mkit-sign-{file,ctap,tpm}) are a
     # SEPARATE workspace under contrib/signers/ — see contrib/signers/Cargo.toml.

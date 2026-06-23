@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# mkit anonymous-multiplayer repo server — a Rust Cloudflare Worker
+# (workers-rs) speaking ConnectRPC over the `mkit.repo.v1.RepoService`
+# contract in proto/mkit/repo/v1/repo.proto.
+#
+# Built with `worker-build` (see wrangler.toml `[build] command`), which
+# compiles this cdylib to `wasm32-unknown-unknown` and emits the ES-module
+# shim + bindings glue.
+[package]
+name = "mkit-repo-worker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# workers-rs: the user-facing crate. Request/Response, Env, Bucket (R2),
+# State/Storage + SqlStorage (DO), WebSocket — all wrappers over the
+# JS/WASM interop. We never touch worker-sys directly.
+worker = { version = "0.8", features = ["http"] }
+
+# ConnectRPC core — the tower::Service is `ConnectRpcService` and the Router
+# both live in the default/core path (no feature needed). We pin the crates.io
+# 0.7.0 (identical to what the sibling `rust/crates/mkit-repo-client` resolved,
+# so the workspace stays on a single version) with `default-features = false`
+# to drop the `streaming` default (it pulls tokio-based `async-compression`,
+# which won't build on wasm32) plus `server`/`client`/`axum`/`tls` (hyper +
+# tokio/net). `gzip` matches the client and is wasm-clean. serde/serde_json are
+# unconditional connectrpc deps (Connect error + end-of-stream frames are always
+# JSON) and the buffa-generated message types need `::serde` in direct scope.
+# The Router runs without a tokio runtime — its wasm32 internal spawn is
+# wasm_bindgen_futures::spawn_local.
+connectrpc = { version = "0.7", default-features = false, features = ["gzip"] }
+buffa = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# mkit crates by path (BLAKE3 hashing + native Ed25519 strict verify).
+# Both are wasm-clean in their default builds (no tokio / no commonware
+# heavy features). mkit-wasm depends on these same paths and ships to
+# wasm32, which is our parity proof that they compile to the target.
+mkit-core = { path = "../../rust/crates/mkit-core" }
+mkit-attest = { path = "../../rust/crates/mkit-attest" }
+
+# Ed25519 strict verify for the write-envelope. The envelope is a PLAIN
+# BLAKE3 digest (no mkit commit/remix/tag domain prefix), so we cannot use
+# mkit_core::sign::verify (which applies domain_digest). We strict-verify
+# directly with the SAME dalek `verify_strict` mkit-core uses under the
+# hood — byte-for-byte the same RFC-8032/ZIP-215-off line.
+ed25519-dalek = { version = "2", default-features = false }
+
+# http / body plumbing for the worker::Request <-> connectrpc adapter.
+http = "1"
+# The generated client stub references `::http_body::Body` in its transport
+# bound, so it must be a direct dep even though this worker is server-only.
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+tower = { version = "0.5", features = ["util"] }
+futures = "0.3"
+hex = "0.4"
+
+# Activate browser randomness backends for getrandom in the dep graph on
+# wasm32 (mirrors mkit-wasm's posture — dalek/mkit-core pull getrandom 0.4,
+# the k256/p256 stack in mkit-attest pulls 0.2; each needs its own feature).
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[build-dependencies]
+connectrpc-build = "0.7"
+
+[dev-dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }
+rand_core = "0.6"
+
+[profile.release]
+opt-level = "s"
+lto = true
