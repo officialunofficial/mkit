@@ -182,7 +182,7 @@ worker-build --release
 wrangler dev --local
 ```
 
-`wrangler.toml` binds the R2 bucket `STORAGE`, the Durable Object `REFSTORE`
+`wrangler.jsonc` binds the R2 bucket `STORAGE`, the Durable Object `REFSTORE`
 (SQLite migration `v1`), and `compatibility_date`.
 
 ### Conformance client / signer
@@ -223,7 +223,7 @@ live for everyone:
    `CLOUDFLARE_API_TOKEN`), or wire a Cloudflare **Workers Builds** project at
    `apps/repo-worker` so it deploys on merge — same mechanism as the web app.
 3. **Pin the origin:** uncomment the `repo.mkit.sh` `custom_domain` route in
-   `wrangler.toml` (or note the `workers.dev` URL). This host must match:
+   `wrangler.jsonc` (or note the `workers.dev` URL). This host must match:
    - `web/src/security-policy.js` → CSP `connect-src` (already allows
      `https://repo.mkit.sh` + `wss://repo.mkit.sh`), and
    - the web build's `VITE_REPO_BACKEND_URL` env (set it to `https://repo.mkit.sh`

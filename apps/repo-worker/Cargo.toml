@@ -4,7 +4,7 @@
 # (workers-rs) speaking ConnectRPC over the `mkit.repo.v1.RepoService`
 # contract in proto/mkit/repo/v1/repo.proto.
 #
-# Built with `worker-build` (see wrangler.toml `[build] command`), which
+# Built with `worker-build` (see wrangler.jsonc `[build] command`), which
 # compiles this cdylib to `wasm32-unknown-unknown` and emits the ES-module
 # shim + bindings glue.
 [package]

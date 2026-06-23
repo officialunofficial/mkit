@@ -42,7 +42,7 @@ export const CSP_DIRECTIVES = [
   // `repo.mkit.sh` is the production repo Worker (apps/repo-worker, deployed
   // separately). If the Worker is deployed to a different origin, update both
   // entries here AND the `VITE_REPO_BACKEND_URL` the web build is given.
-  "connect-src 'self' https://cloudflareinsights.com http://localhost:8787 ws://localhost:8787 https://repo.mkit.sh wss://repo.mkit.sh",
+  "connect-src 'self' https://cloudflareinsights.com http://localhost:8787 ws://localhost:8787 https://mkit-repo-worker.officialunofficial.workers.dev wss://mkit-repo-worker.officialunofficial.workers.dev https://repo.mkit.sh wss://repo.mkit.sh",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
 ]
