@@ -220,6 +220,16 @@ Future versions evolving the index MUST:
    → `IndexError::Corrupt`. Guards against attacker-controlled
    pre-allocation.
 
+The Phase 4 golden vectors under `rust/tests/golden/phase4/` pin both
+formats explicitly: `index_empty.bin` / `index_3entries.bin` are
+version-`0x01` read-compatibility fixtures (no stat cache) that must keep
+parsing, while `index_empty_v2.bin` / `index_3entries_v2.bin` carry the
+same logical entries in the version-`0x02` layout writers emit today and
+must round-trip byte-for-byte (deserialize → serialize is the identity on
+v2). The v1 files are never regenerated to v2; `generate_phase4_goldens`
+re-emits each filename byte-identically and records every BLAKE3 in
+`MANIFEST.txt`.
+
 ---
 
 ## 8. Non-goals
