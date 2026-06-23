@@ -1,0 +1,33 @@
+// Cloudflare Worker config for the mkit anonymous-multiplayer repo server.
+// JSONC to match the org convention (makechain/apps/vcs) + Cloudflare's default.
+// Build with worker-build (the workers-rs cross-platform build command), which
+// compiles the cdylib to wasm32 and emits the ES-module shim into ./build.
+{
+  "name": "mkit-repo-worker",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2024-09-23",
+  "build": { "command": "worker-build --release" },
+
+  // Structured logs/metrics for the deployed Worker.
+  "observability": { "enabled": true },
+
+  // Production origin. Serving at repo.mkit.sh gives the web app a deterministic
+  // host for its CSP `connect-src` and `VITE_REPO_BACKEND_URL` (see
+  // web/src/security-policy.js). `custom_domain` auto-provisions DNS + cert on
+  // the mkit.sh zone. Uncomment at deploy time; until then the Worker is
+  // reachable at its workers.dev URL. If you change this host, update the CSP +
+  // build env too.
+  // "routes": [{ "pattern": "repo.mkit.sh", "custom_domain": true }],
+
+  // R2 object store for immutable, content-addressed mkit objects.
+  // Key layout: {room}/objects/{hex(object_id)}.
+  "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-repo-objects" }],
+
+  // The RefStore Durable Object — one instance per room — owns all mutable refs
+  // (serial CAS) and the WatchRefs WebSocket fan-out.
+  "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
+
+  // SQLite-backed DO classes are declared in a `new_sqlite_classes` migration
+  // (the DO uses `state.storage().sql()`).
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
+}

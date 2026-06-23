@@ -1,0 +1,160 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// mkit anonymous multiplayer repo — ConnectRPC wire protocol v1.
+//
+// A single shared mkit repository that anyone may push to anonymously, each
+// write signed with an Ed25519 key (the key is the whole identity; no
+// accounts, no allow-list). See
+// docs/research/passkey-multiplayer-architecture.md.
+//
+// Storage model (framework-independent):
+//   - Immutable mkit objects (commits / trees / blobs) are content-addressed
+//     by their 32-byte BLAKE3 id and stored once (idempotent).
+//   - Refs are the only mutable state, advanced via compare-and-swap.
+//   - WatchRefs streams live ref advances for the multiplayer UI.
+//
+// Conventions mirror mkit-rpc/proto/ssh.proto + common.proto:
+//   - edition 2023.
+//   - All object/ref ids are raw `bytes` = 32-byte BLAKE3 digests (never hex
+//     on the wire).
+//   - The CAS enum is `RefExpectation` with the SAME wire numbers as ssh.proto
+//     (ANY=1, MISSING=2, MATCH=3; UNSPECIFIED=0 is a protocol error).
+//   - `RefEntry { string name; bytes object_id; }` matches
+//     ListRefsResponse.RefEntry in ssh.proto.
+//
+// AUTH (transport-level, not in this proto): every unary/stream call carries
+// the signed-write envelope as request metadata (headers) — `X-Public-Key`,
+// `X-Signature`, `X-Digest`, `X-Created-At`, `Idempotency-Key`. The canonical
+// signed string is defined in src/lib/envelope.ts and the README. Verification
+// is open-write/demo-mode: any valid Ed25519 key may write any ref. Carrying
+// auth in metadata (rather than proto fields) keeps the message shapes clean
+// and lets the same envelope guard every procedure uniformly.
+
+edition = "2023";
+
+package mkit.repo.v1;
+
+// ----------------------------------------------------------------------------
+// CAS semantics for UpdateRef. Wire numbers are load-bearing and match
+// mkit.rpc.v1.ssh.RefExpectation — do NOT renumber; new variants append.
+
+enum RefExpectation {
+  // Protocol error if sent (the proto default). Servers MUST reject.
+  REF_EXPECTATION_UNSPECIFIED = 0;
+
+  // "Clobber" / last-writer-wins. `expected_id` MUST be empty.
+  REF_EXPECTATION_ANY = 1;
+
+  // "Create only". The ref MUST NOT already exist. `expected_id` MUST be
+  // empty. (ANY overwrites an existing ref; MISSING conflicts on it.)
+  REF_EXPECTATION_MISSING = 2;
+
+  // Compare-and-swap. `expected_id` MUST be the 32-byte current value.
+  REF_EXPECTATION_MATCH = 3;
+}
+
+// A single ref and the object it points at. Matches ssh.proto RefEntry.
+message RefEntry {
+  string name = 1;        // e.g. "refs/heads/main" (mkit ref-name grammar)
+  bytes object_id = 2;    // raw 32-byte BLAKE3 digest
+}
+
+// ----------------------------------------------------------------------------
+// RepoService — the full anonymous-push + multiplayer surface.
+
+service RepoService {
+  // Store a loose mkit object. The server MUST verify BLAKE3(bytes)==object_id
+  // and store idempotently (a re-PUT of the same id is a no-op).
+  rpc PutObject(PutObjectRequest) returns (PutObjectResponse);
+
+  // Fetch a loose object by id. `found=false` if absent.
+  rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
+
+  // Read a ref's current value. `exists=false` if absent.
+  rpc GetRef(GetRefRequest) returns (GetRefResponse);
+
+  // Advance a ref under a CAS condition. `committed` on success, `conflict`
+  // on a precondition failure (the existing value is returned in
+  // `current_id` so the client can rebase/retry).
+  rpc UpdateRef(UpdateRefRequest) returns (UpdateRefResponse);
+
+  // List refs under an optional prefix.
+  rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
+
+  // Server-streaming live ref advances for the room — one RefEvent per
+  // successful UpdateRef, to every subscriber.
+  rpc WatchRefs(WatchRefsRequest) returns (stream RefEvent);
+}
+
+// ----------------------------------------------------------------------------
+// Objects.
+
+message PutObjectRequest {
+  string room = 1;
+  bytes object_id = 2;    // 32-byte BLAKE3 of `bytes`
+  bytes bytes = 3;        // raw mkit object bytes
+}
+
+message PutObjectResponse {
+  bool stored = 1;        // true if this call wrote the object
+  bool duplicate = 2;     // true if the object already existed (no-op write)
+}
+
+message GetObjectRequest {
+  string room = 1;
+  bytes object_id = 2;
+}
+
+message GetObjectResponse {
+  bool found = 1;
+  bytes bytes = 2;        // empty when found=false
+}
+
+// ----------------------------------------------------------------------------
+// Refs.
+
+message GetRefRequest {
+  string room = 1;
+  string name = 2;
+}
+
+message GetRefResponse {
+  bool exists = 1;
+  bytes object_id = 2;    // empty when exists=false
+}
+
+message UpdateRefRequest {
+  string room = 1;
+  string name = 2;
+  bytes new_id = 3;             // 32-byte target value
+  RefExpectation expectation = 4;  // REQUIRED; UNSPECIFIED is a protocol error
+  bytes expected_id = 5;        // 32 bytes for MATCH; MUST be empty for ANY/MISSING
+}
+
+message UpdateRefResponse {
+  bool committed = 1;
+  bool conflict = 2;            // true on CAS precondition failure
+  bytes current_id = 3;         // the server's current value (for retry); empty if ref absent
+}
+
+message ListRefsRequest {
+  string room = 1;
+  string prefix = 2;            // empty = all refs
+}
+
+message ListRefsResponse {
+  repeated RefEntry refs = 1;
+}
+
+// ----------------------------------------------------------------------------
+// Multiplayer event stream.
+
+message WatchRefsRequest {
+  string room = 1;
+}
+
+message RefEvent {
+  string name = 1;
+  bytes object_id = 2;
+  bytes author_pubkey = 3;      // 32-byte Ed25519 pubkey of the writer
+}

@@ -1,0 +1,20 @@
+{
+  "name": "mkit-repo-client",
+  "version": "0.0.0-local",
+  "private": true,
+  "type": "module",
+  "module": "./pkg/mkit_repo_client.js",
+  "types": "./pkg/mkit_repo_client.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./pkg/mkit_repo_client.d.ts",
+      "import": "./pkg/mkit_repo_client.js",
+      "default": "./pkg/mkit_repo_client.js"
+    },
+    "./mkit_repo_client_bg.wasm": "./pkg/mkit_repo_client_bg.wasm"
+  },
+  "files": [
+    "pkg"
+  ]
+}

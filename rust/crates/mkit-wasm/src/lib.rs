@@ -15,6 +15,7 @@ use mkit_attest::signer_k256::Secp256k1Signer;
 use mkit_attest::signer_p256::P256Signer;
 use mkit_attest::statement::{Statement, Subject, encode as encode_statement};
 use mkit_attest::verify::{Registry, TrustRoot, verify_envelope};
+use mkit_attest::webauthn::{WebAuthnPolicy, WebAuthnWrapping};
 use mkit_attest::{PAYLOAD_TYPE_IN_TOTO, Signer, signer_repo_key::RepoKeySigner};
 use mkit_core::chunker::{AVG_SIZE, ChunkIterator, FastCdc, MAX_SIZE, MIN_SIZE};
 use mkit_core::delta;
@@ -600,6 +601,220 @@ pub fn attest_verify(envelope_json: &str, pubkey_hex: &str, algo: &str) -> bool 
         Ok(r) => r.any_verified,
         Err(_) => false,
     }
+}
+
+// ---------------------------------------------------------------------
+// 3a. WebAuthn / passkey signing — browser passkeys (P-256) signing a
+//     DSSE attestation. mkit's core commit signing is Ed25519-only, but
+//     attestations are P-256-capable, and platform passkeys (Touch ID /
+//     Face ID / Android biometric) only ever produce P-256 (ES256), so
+//     the passkey lifecycle lands here. See
+//     docs/research/passkey-signing-demo.md.
+//
+//     A passkey does NOT sign arbitrary bytes: the authenticator signs
+//     `authenticatorData || SHA-256(clientDataJSON)` where the DSSE PAE
+//     is carried inside `clientDataJSON.challenge`. The demo therefore:
+//       1. calls `attest_pae(...)` to get the exact challenge bytes,
+//       2. runs `navigator.credentials.get({ challenge: <pae>, ... })`,
+//       3. feeds the assertion back into `verify_webauthn_wrapping(...)`.
+//     Key extraction (COSE -> SEC1) and signature normalisation
+//     (DER -> compact r||s, low-S) happen JS-side (ox / webauthx); the
+//     functions below expect a SEC1 pubkey + 64-byte compact signature.
+// ---------------------------------------------------------------------
+
+/// Compute the DSSE PAE for an (unsigned) in-toto attestation over a
+/// commit hash. This is the exact byte string a browser passkey MUST
+/// place in its `WebAuthn` `challenge` so the resulting assertion
+/// verifies under [`verify_webauthn_wrapping`].
+///
+/// Same `(commit_hash_hex, predicate_type, predicate_jcs)` inputs as
+/// [`attest_build`], minus the key — the PAE is signer-independent, so a
+/// passkey and a software key over the same statement bind to identical
+/// bytes. Returns the raw PAE; the JS side passes it straight to
+/// `navigator.credentials.get` as a `BufferSource` challenge.
+///
+/// NOTE: the `WebAuthn` `challenge` here is the *whole* PAE, and platform
+/// authenticators cap challenge size in practice — keep demo predicates
+/// small (see the research note's "challenge sizing" fork).
+///
+/// # Errors
+/// `commit_hash_hex` is not 64 lowercase hex chars, or the statement
+/// fails to encode.
+#[wasm_bindgen]
+pub fn attest_pae(
+    commit_hash_hex: &str,
+    predicate_type: &str,
+    predicate_jcs: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let _ = parse_hash_hex(commit_hash_hex)?;
+    let stmt = Statement {
+        subjects: vec![Subject {
+            name: Some("commit".to_string()),
+            digest_blake3_hex: commit_hash_hex.to_string(),
+        }],
+        predicate_type: predicate_type.to_string(),
+        predicate_jcs,
+    };
+    let statement_json = encode_statement(&stmt).map_err(|e| js_err(format!("statement: {e}")))?;
+    let env = Envelope {
+        payload_type: PAYLOAD_TYPE_IN_TOTO.to_string(),
+        payload: statement_json.into_bytes(),
+        signatures: Vec::new(),
+    };
+    Ok(env.pae())
+}
+
+/// Verify a browser passkey (`WebAuthn` / P-256) assertion against a DSSE
+/// PAE — cryptographic checks only, no ceremony policy.
+///
+/// Thin wrapper over `mkit_attest::verify_webauthn_wrapping`. Checks the
+/// `type == "webauthn.get"`, `challenge == base64url-nopad(pae)`, the
+/// `authenticatorData` shape, and the P-256 signature over
+/// `authenticatorData || SHA-256(clientDataJSON)`. It does NOT bind the
+/// RP ID or origin — use [`verify_webauthn_wrapping_with_policy`] for
+/// that (which is what a real demo should do, pinning the RP ID to the
+/// site so the green check proves origin binding, not just a signature).
+///
+/// * `pae` — the bytes from [`attest_pae`].
+/// * `authenticator_data` / `client_data_json` — raw bytes from the
+///   browser assertion (`response.authenticatorData` /
+///   `response.clientDataJSON`), passed as a `Uint8Array`.
+/// * `pubkey_hex` — SEC1 P-256 public key, 33-byte compressed (66 hex)
+///   or 65-byte uncompressed (130 hex).
+/// * `signature` — 64-byte compact `r || s` (DER must be converted and
+///   low-S-normalised JS-side first).
+///
+/// Returns `Ok(())` when the assertion verifies. On failure the `Err`
+/// carries the typed reason (challenge mismatch, signature failed, …) so
+/// the demo can show *why* — more instructive than a bare boolean.
+///
+/// # Errors
+/// `pubkey_hex` is not valid hex, or any `WebAuthn` verification failure.
+#[wasm_bindgen]
+pub fn verify_webauthn_wrapping(
+    pae: &[u8],
+    authenticator_data: &[u8],
+    client_data_json: &[u8],
+    pubkey_hex: &str,
+    signature: &[u8],
+) -> Result<(), JsValue> {
+    let pubkey = hex::decode(pubkey_hex).map_err(|_| js_err("pubkey_hex is not valid hex"))?;
+    let wrapping = WebAuthnWrapping {
+        authenticator_data: authenticator_data.to_vec(),
+        client_data_json: client_data_json.to_vec(),
+    };
+    attest_verify_webauthn(pae, &wrapping, &pubkey, signature, &WebAuthnPolicy::permissive())
+}
+
+/// Policy-aware counterpart of [`verify_webauthn_wrapping`].
+///
+/// Same cryptographic checks, plus the ceremony policy parsed from
+/// `policy_json` — an empty string (or `"{}"`) is fully permissive.
+/// Recognised keys (all optional):
+///
+/// ```json
+/// {
+///   "expected_rp_id": "mkit.sh",
+///   "allowed_origins": ["https://mkit.sh"],
+///   "require_user_presence": true,
+///   "require_user_verification": false,
+///   "allow_cross_origin": false,
+///   "previous_sign_count": 0
+/// }
+/// ```
+///
+/// Defaults match `WebAuthnPolicy::permissive` (no RP-ID/origin binding,
+/// UP/UV off, cross-origin allowed, counter unenforced) — only keys
+/// present in `policy_json` tighten the check.
+///
+/// # Errors
+/// Malformed `policy_json`, `pubkey_hex` is not valid hex, or any
+/// `WebAuthn` verification failure.
+#[wasm_bindgen]
+pub fn verify_webauthn_wrapping_with_policy(
+    pae: &[u8],
+    authenticator_data: &[u8],
+    client_data_json: &[u8],
+    pubkey_hex: &str,
+    signature: &[u8],
+    policy_json: &str,
+) -> Result<(), JsValue> {
+    let pubkey = hex::decode(pubkey_hex).map_err(|_| js_err("pubkey_hex is not valid hex"))?;
+    let policy = parse_webauthn_policy(policy_json)?;
+    let wrapping = WebAuthnWrapping {
+        authenticator_data: authenticator_data.to_vec(),
+        client_data_json: client_data_json.to_vec(),
+    };
+    attest_verify_webauthn(pae, &wrapping, &pubkey, signature, &policy)
+}
+
+/// Shared verify tail for the two `WebAuthn` exports: run the
+/// policy-aware verifier and map the typed `mkit-attest` error into a JS
+/// `Error` whose message names the failure mode.
+fn attest_verify_webauthn(
+    pae: &[u8],
+    wrapping: &WebAuthnWrapping,
+    pubkey_sec1: &[u8],
+    signature: &[u8],
+    policy: &WebAuthnPolicy,
+) -> Result<(), JsValue> {
+    // Fully-qualified to avoid colliding with the wasm export of the
+    // same name above; we always route through the policy-aware variant.
+    mkit_attest::webauthn::verify_webauthn_wrapping_with_policy(
+        pae,
+        wrapping,
+        pubkey_sec1,
+        signature,
+        policy,
+    )
+    .map_err(|e| js_err(format!("webauthn verify failed: {e}")))
+}
+
+/// Parse the optional `policy_json` blob into a [`WebAuthnPolicy`]. An
+/// empty string is treated as `"{}"` (fully permissive). Any present key
+/// overrides its permissive default; absent keys keep the default.
+fn parse_webauthn_policy(policy_json: &str) -> Result<WebAuthnPolicy, JsValue> {
+    let trimmed = policy_json.trim();
+    if trimmed.is_empty() {
+        return Ok(WebAuthnPolicy::permissive());
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|e| js_err(format!("policy_json: {e}")))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| js_err("policy_json must be a JSON object"))?;
+
+    let mut policy = WebAuthnPolicy::permissive();
+    if let Some(rp) = obj.get("expected_rp_id").and_then(serde_json::Value::as_str) {
+        policy.expected_rp_id = Some(rp.to_string());
+    }
+    if let Some(arr) = obj.get("allowed_origins").and_then(serde_json::Value::as_array) {
+        let origins = arr
+            .iter()
+            .map(|o| {
+                o.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| js_err("allowed_origins entries must be strings"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        policy.allowed_origins = Some(origins);
+    }
+    if let Some(b) = obj.get("require_user_presence").and_then(serde_json::Value::as_bool) {
+        policy.require_user_presence = b;
+    }
+    if let Some(b) = obj
+        .get("require_user_verification")
+        .and_then(serde_json::Value::as_bool)
+    {
+        policy.require_user_verification = b;
+    }
+    if let Some(b) = obj.get("allow_cross_origin").and_then(serde_json::Value::as_bool) {
+        policy.allow_cross_origin = b;
+    }
+    if let Some(n) = obj.get("previous_sign_count").and_then(serde_json::Value::as_u64) {
+        policy.previous_sign_count = Some(u32::try_from(n).unwrap_or(u32::MAX));
+    }
+    Ok(policy)
 }
 
 // ---------------------------------------------------------------------

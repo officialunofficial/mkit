@@ -38,6 +38,11 @@ mkit-core = { path = "../mkit-core" }
 mkit-attest = { path = "../mkit-attest" }
 wasm-bindgen = "0.2"
 hex = "0.4"
+# Parses the optional ceremony-policy blob handed to
+# `verify_webauthn_wrapping_with_policy`. Same major (1.x) as the copy
+# mkit-attest already pulls in for clientDataJSON parsing, so no new
+# version lands in the dep graph.
+serde_json = "1"
 # Verified streaming via BLAKE3 tree hashing (outboard + slice proof).
 # Drives the `/streaming` demo's Bao view. `blake3 = "1"` is already the
 # workspace pin (via mkit-core); the transitive re-export in
@@ -68,6 +73,14 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # dalek is a regular dependency above (see `[dependencies]`); tests
 # (`tests/ed25519.rs`) reach the same crate without a separate
 # `[dev-dependencies]` entry, which would risk a duplicate dep version.
+
+# Native-only test deps for the WebAuthn/passkey exports
+# (`tests/webauthn.rs`): forge a passkey-shaped assertion with the
+# deterministic P-256 signer and re-derive the clientDataJSON hash.
+# Versions match the copies mkit-attest already pulls in.
+[dev-dependencies]
+sha2 = { version = "0.10", default-features = false }
+base64 = "0.22"
 
 [features]
 default = []

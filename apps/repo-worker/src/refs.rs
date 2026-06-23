@@ -1,0 +1,278 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// Ref-name grammar (mkit SPEC-REFS §3) + the CAS state machine for UpdateRef.
+// A faithful Rust port of reference-ts/lib/refs.ts — the unit tests below
+// replay the TS conformance vectors verbatim.
+
+/// Validate a ref name against the mkit SPEC-REFS §3 grammar.
+///
+///   ref_name := segment ( '/' segment )*
+///   segment  := char+        char := [0-9A-Za-z._-]
+///
+/// Rejections: empty, leading '/', empty segment ('//' / trailing '/'),
+/// any segment == "." or "..", any byte in {space, '\\'}, any segment ending
+/// in ".lock", and a final segment equal to "HEAD".
+#[must_use]
+pub fn is_valid_ref_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if name.starts_with('/') {
+        return false;
+    }
+    if name.contains(' ') || name.contains('\\') {
+        return false;
+    }
+    let segments: Vec<&str> = name.split('/').collect();
+    for seg in &segments {
+        if seg.is_empty() {
+            return false; // empty segment: //, leading/trailing /
+        }
+        if *seg == "." || *seg == ".." {
+            return false;
+        }
+        if !seg
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+        {
+            return false;
+        }
+        if seg.ends_with(".lock") {
+            return false;
+        }
+    }
+    if *segments.last().expect("non-empty after split") == "HEAD" {
+        return false;
+    }
+    true
+}
+
+/// Validate a `room` identifier. Strict: 1..=64 chars from `[A-Za-z0-9._-]`,
+/// no slashes, non-empty. The room is used unescaped as an R2 key prefix and
+/// as a DO instance name, so a tight allow-list keeps both namespaces clean.
+#[must_use]
+pub fn is_valid_room(room: &str) -> bool {
+    if room.is_empty() || room.len() > 64 {
+        return false;
+    }
+    room.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
+
+/// A ListRefs prefix is empty, or a valid ref name (optionally trailing '/').
+#[must_use]
+pub fn is_valid_ref_prefix(prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    let trimmed = prefix.strip_suffix('/').unwrap_or(prefix);
+    is_valid_ref_name(trimmed)
+}
+
+/// CAS expectation, proto-aligned with `mkit.repo.v1.RefExpectation`.
+/// Wire numbers are load-bearing (ANY=1, MISSING=2, MATCH=3; UNSPECIFIED=0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefExpectation {
+    Unspecified = 0,
+    Any = 1,
+    Missing = 2,
+    Match = 3,
+}
+
+impl RefExpectation {
+    /// Map a raw proto enum wire number to the CAS expectation. Unknown
+    /// numbers collapse to `Unspecified` (a protocol error downstream).
+    #[must_use]
+    pub fn from_wire(n: i32) -> Self {
+        match n {
+            1 => Self::Any,
+            2 => Self::Missing,
+            3 => Self::Match,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
+/// The reason a CAS update could not commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictReason {
+    /// MISSING expectation but the ref already exists.
+    Exists,
+    /// MATCH expectation but the ref is absent.
+    Missing,
+    /// MATCH expectation but the current value differs from `expected`.
+    Mismatch,
+}
+
+/// Outcome of evaluating a CAS update — a pure decision, mirroring the TS
+/// `CasDecision`. `Invalid` is a malformed request (protocol error);
+/// `Conflict` is a precondition failure the client can rebase + retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CasDecision {
+    Committed,
+    Conflict(ConflictReason),
+    Invalid(&'static str),
+}
+
+/// Pure CAS decision. `current` is the ref's present value (None = absent);
+/// `expected` is the MATCH target (must be None for ANY/MISSING). Ids are
+/// compared as opaque byte slices. Mirrors `evaluateCas` in
+/// reference-ts/lib/refs.ts.
+///
+///   ANY      -> always commit (clobber); expected MUST be empty.
+///   MISSING  -> commit iff current is None (else conflict Exists); expected MUST be empty.
+///   MATCH    -> commit iff current == expected (else Missing/Mismatch); expected REQUIRED.
+#[must_use]
+pub fn evaluate_cas(
+    current: Option<&[u8]>,
+    expectation: RefExpectation,
+    expected: Option<&[u8]>,
+) -> CasDecision {
+    match expectation {
+        RefExpectation::Any => {
+            if expected.is_some() {
+                return CasDecision::Invalid("expected_id must be empty for ANY");
+            }
+            CasDecision::Committed
+        }
+        RefExpectation::Missing => {
+            if expected.is_some() {
+                return CasDecision::Invalid("expected_id must be empty for MISSING");
+            }
+            match current {
+                None => CasDecision::Committed,
+                Some(_) => CasDecision::Conflict(ConflictReason::Exists),
+            }
+        }
+        RefExpectation::Match => {
+            let Some(expected) = expected else {
+                return CasDecision::Invalid("expected_id required for MATCH");
+            };
+            match current {
+                None => CasDecision::Conflict(ConflictReason::Missing),
+                Some(cur) if cur != expected => CasDecision::Conflict(ConflictReason::Mismatch),
+                Some(_) => CasDecision::Committed,
+            }
+        }
+        RefExpectation::Unspecified => {
+            CasDecision::Invalid("expectation is UNSPECIFIED (protocol error)")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ID_A: &[u8] = &[0xaa; 32];
+    const ID_B: &[u8] = &[0xbb; 32];
+
+    // --- evaluate_cas, replaying reference-ts/test/refs.test.ts -------------
+    #[test]
+    fn any_clobbers() {
+        assert_eq!(evaluate_cas(Some(ID_A), RefExpectation::Any, None), CasDecision::Committed);
+        assert_eq!(evaluate_cas(None, RefExpectation::Any, None), CasDecision::Committed);
+        assert!(matches!(
+            evaluate_cas(Some(ID_A), RefExpectation::Any, Some(ID_A)),
+            CasDecision::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn missing_create_only() {
+        assert_eq!(evaluate_cas(None, RefExpectation::Missing, None), CasDecision::Committed);
+        assert_eq!(
+            evaluate_cas(Some(ID_A), RefExpectation::Missing, None),
+            CasDecision::Conflict(ConflictReason::Exists)
+        );
+        assert!(matches!(
+            evaluate_cas(None, RefExpectation::Missing, Some(ID_A)),
+            CasDecision::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn match_cas() {
+        assert_eq!(
+            evaluate_cas(Some(ID_A), RefExpectation::Match, Some(ID_A)),
+            CasDecision::Committed
+        );
+        assert_eq!(
+            evaluate_cas(Some(ID_B), RefExpectation::Match, Some(ID_A)),
+            CasDecision::Conflict(ConflictReason::Mismatch)
+        );
+        assert_eq!(
+            evaluate_cas(None, RefExpectation::Match, Some(ID_A)),
+            CasDecision::Conflict(ConflictReason::Missing)
+        );
+        assert!(matches!(
+            evaluate_cas(Some(ID_A), RefExpectation::Match, None),
+            CasDecision::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn unspecified_is_protocol_error() {
+        assert!(matches!(
+            evaluate_cas(None, RefExpectation::Unspecified, None),
+            CasDecision::Invalid(_)
+        ));
+    }
+
+    // --- is_valid_ref_name --------------------------------------------------
+    #[test]
+    fn accepts_valid_names() {
+        for n in ["main", "refs/heads/main", "feat/v1.0-beta", "release/2024_09", "refs/tags/v1"] {
+            assert!(is_valid_ref_name(n), "should accept {n}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_names() {
+        for n in [
+            "",                    // empty
+            "/main",               // leading slash
+            "refs//heads",         // double slash
+            "refs/heads/",         // trailing slash
+            "feat/../x",           // dotdot segment
+            "refs/./main",         // dot segment
+            "feat\\branch",        // backslash
+            "main@v1",             // at sign (git-only)
+            "my branch",           // space
+            "refs/heads/main.lock", // .lock suffix
+            "refs/heads/HEAD",     // final HEAD
+            "HEAD",                // bare HEAD
+            "feat+x",              // plus
+            "feat~1",              // tilde
+        ] {
+            assert!(!is_valid_ref_name(n), "should reject {n:?}");
+        }
+    }
+
+    #[test]
+    fn room_rules() {
+        for r in ["demo", "room-1", "a.b_c", "A1", &"x".repeat(64)] {
+            assert!(is_valid_room(r), "should accept {r:?}");
+        }
+        for r in ["", "a/b", "a b", "a\\b", "a@b", &"x".repeat(65), "refs/heads"] {
+            assert!(!is_valid_room(r), "should reject {r:?}");
+        }
+    }
+
+    #[test]
+    fn prefix_rules() {
+        assert!(is_valid_ref_prefix(""));
+        assert!(is_valid_ref_prefix("refs/heads/"));
+        assert!(is_valid_ref_prefix("refs/heads"));
+        assert!(!is_valid_ref_prefix("refs/../x"));
+    }
+
+    #[test]
+    fn from_wire_numbers_match_proto() {
+        assert_eq!(RefExpectation::from_wire(1), RefExpectation::Any);
+        assert_eq!(RefExpectation::from_wire(2), RefExpectation::Missing);
+        assert_eq!(RefExpectation::from_wire(3), RefExpectation::Match);
+        assert_eq!(RefExpectation::from_wire(0), RefExpectation::Unspecified);
+        assert_eq!(RefExpectation::from_wire(99), RefExpectation::Unspecified);
+    }
+}

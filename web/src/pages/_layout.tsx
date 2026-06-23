@@ -6,6 +6,7 @@ import { Footer } from '../components/footer'
 import { Header } from '../components/header'
 import { MkitPreloader } from '../components/mkit-preloader'
 import { PointerTracker } from '../components/pointer-tracker'
+import { QueryProvider } from '../components/query-provider'
 
 type RootLayoutProps = { children: ReactNode }
 
@@ -36,7 +37,9 @@ export default async function RootLayout({ children }: RootLayoutProps) {
           64rem) so pages that benefit from a two-column layout have
           room, while prose-heavy sections re-constrain themselves
           via `max-w-prose` at the page level. */}
-      <main className='mx-auto w-full max-w-5xl px-6 pt-8 pb-24'>{children}</main>
+      <main className='mx-auto w-full max-w-5xl px-6 pt-8 pb-24'>
+        <QueryProvider>{children}</QueryProvider>
+      </main>
       <Footer />
     </div>
   )

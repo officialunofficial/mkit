@@ -1,0 +1,21 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # mkit-rpc uses `bytes` for 32-byte BLAKE3 ids and a field literally named
+    # `bytes` (see ssh.proto); allow it.
+    - FIELD_LOWER_SNAKE_CASE
+    # The coordinator's contract names the WatchRefs stream element `RefEvent`
+    # (it is a broadcast event, reused conceptually across the stream), not
+    # `WatchRefsResponse`. Keep the spec'd name.
+    - RPC_RESPONSE_STANDARD_NAME
+    # The proto lives at proto/repo.proto (per the deliverable path) rather
+    # than proto/mkit/repo/v1/; package is still mkit.repo.v1. Relax the
+    # directory-match rule for this single-file standalone module.
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  use:
+    - FILE

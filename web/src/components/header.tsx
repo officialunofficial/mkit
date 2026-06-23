@@ -11,6 +11,7 @@ const NAV_LINKS = [
   { to: '/parity', label: 'parity' },
   { to: '/push', label: 'push' },
   { to: '/demos', label: 'demos' },
+  { to: '/multiplayer', label: 'multiplayer' },
 ] as const
 
 export const Header = () => {

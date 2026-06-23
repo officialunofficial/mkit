@@ -34,7 +34,15 @@ export const CSP_DIRECTIVES = [
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com data:",
   "img-src 'self' data: blob:",
-  "connect-src 'self' https://cloudflareinsights.com",
+  // The multiplayer demo's wasm ConnectRPC client talks to the mkit repo Worker
+  // (a SEPARATE origin) over fetch, and opens a `/watch/<room>` WebSocket — both
+  // are governed by `connect-src`, so the Worker origin must be listed here in
+  // BOTH its http(s) and ws(s) forms or the browser blocks the calls (server-side
+  // CORS is necessary but not sufficient). `localhost:8787` is local dev;
+  // `repo.mkit.sh` is the production repo Worker (apps/repo-worker, deployed
+  // separately). If the Worker is deployed to a different origin, update both
+  // entries here AND the `VITE_REPO_BACKEND_URL` the web build is given.
+  "connect-src 'self' https://cloudflareinsights.com http://localhost:8787 ws://localhost:8787 https://mkit-repo-worker.officialunofficial.workers.dev wss://mkit-repo-worker.officialunofficial.workers.dev https://repo.mkit.sh wss://repo.mkit.sh",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
 ]

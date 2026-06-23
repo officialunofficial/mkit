@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// wasm32-only worker glue: the auth interceptor, the RefStore Durable Object,
+// the RepoService implementation, and the `#[event(fetch)]` adapter that
+// bridges `worker::Request` <-> `http::Request` and drives the connectrpc
+// Router. Gated out of host builds (the macros emit `#[wasm_bindgen]`).
+
+use std::sync::Arc;
+
+use bytes::Bytes;
+use connectrpc::{ConnectRpcService, Router};
+use http_body_util::{BodyExt, Full};
+use tower::ServiceExt;
+use worker::send::SendFuture;
+use worker::{event, Context, Env, Method, Request, Response, Result};
+
+pub mod auth;
+pub mod refstore;
+pub mod service;
+
+use auth::AuthInterceptor;
+use service::RepoServer;
+
+// Surface the proto extension trait + DO type to this module.
+use crate::proto::mkit::repo::v1::RepoServiceExt;
+
+/// The RefStore Durable Object, re-exported so worker-build/wrangler find it.
+pub use refstore::RefStore;
+
+/// Reject any request body larger than this (the PutObject `bytes` payload is
+/// the only large input; everything else is tiny JSON). Buffering more than
+/// this is refused with `invalid_argument`.
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+
+/// Headers we expose for cross-origin browser clients.
+const CORS_ALLOW_HEADERS: &str = "x-public-key, x-signature, x-digest, x-created-at, \
+     idempotency-key, content-type, connect-protocol-version";
+const CORS_ALLOW_METHODS: &str = "POST, GET, OPTIONS";
+
+/// Append the permissive `Access-Control-Allow-Origin: *` header to a response.
+/// Browser clients hit this worker cross-origin (the demo web app on a
+/// different origin), so every response — success or error — must carry it.
+fn with_cors(resp: Response) -> Response {
+    let mut resp = resp;
+    let _ = resp.headers_mut().set("Access-Control-Allow-Origin", "*");
+    resp
+}
+
+#[event(fetch)]
+async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    // CORS preflight: answer OPTIONS with a 204 + the allow-* headers BEFORE
+    // any routing, so browsers can complete the preflight for the signed-write
+    // headers (X-Public-Key, …) regardless of the eventual route.
+    if req.method() == Method::Options {
+        let mut headers = worker::Headers::new();
+        let _ = headers.set("Access-Control-Allow-Origin", "*");
+        let _ = headers.set("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
+        let _ = headers.set("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
+        let _ = headers.set("Access-Control-Max-Age", "86400");
+        return Ok(Response::empty()?.with_status(204).with_headers(headers));
+    }
+
+    // WatchRefs streaming fallback: `GET /watch/<room>` opens a raw WebSocket
+    // straight to the room's RefStore DO (see README "WatchRefs"). Everything
+    // else is a ConnectRPC call routed through the Router.
+    let path = req.path();
+    if let Some(room) = path.strip_prefix("/watch/") {
+        if !room.is_empty() {
+            // The WebSocket upgrade response (status 101) must still carry the
+            // CORS header for browser clients.
+            return watch_fallback(env, room).await.map(with_cors);
+        }
+    }
+
+    serve_connect(req, env).await
+}
+
+/// Drive a ConnectRPC request through the Router-backed tower::Service.
+async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
+    // Read raw body + method/uri/headers up front. The envelope auth
+    // interceptor needs the raw body, and `Full<Bytes>` is the simplest
+    // `http_body::Body<Data = Bytes>` (error = Infallible) that satisfies the
+    // ConnectRpcService bound.
+    let body = req.bytes().await.unwrap_or_default();
+
+    // H2: cap the buffered request body. The only large input is the PutObject
+    // `bytes` payload; reject anything oversized with a Connect `invalid_argument`
+    // before doing any further work.
+    if body.len() > MAX_BODY_BYTES {
+        let payload = format!(
+            "{{\"code\":\"invalid_argument\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}"
+        );
+        let mut resp = Response::error(payload, 400)?;
+        let _ = resp.headers_mut().set("Content-Type", "application/json");
+        return Ok(with_cors(resp));
+    }
+
+    let method = match req.method() {
+        Method::Get => http::Method::GET,
+        Method::Post => http::Method::POST,
+        Method::Put => http::Method::PUT,
+        Method::Delete => http::Method::DELETE,
+        Method::Options => http::Method::OPTIONS,
+        Method::Head => http::Method::HEAD,
+        Method::Patch => http::Method::PATCH,
+        _ => http::Method::POST,
+    };
+    let uri = req.url()?.to_string();
+
+    let mut http_req = http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Full::new(Bytes::from(body)))
+        .map_err(|e| worker::Error::RustError(format!("build http request: {e}")))?;
+
+    {
+        let headers = http_req.headers_mut();
+        for (k, v) in req.headers().entries() {
+            if let (Ok(name), Ok(val)) = (
+                http::header::HeaderName::try_from(k.as_str()),
+                http::header::HeaderValue::try_from(v.as_str()),
+            ) {
+                headers.insert(name, val);
+            }
+        }
+    }
+
+    // Build the service fresh per request — `Env` is Send and cheap to clone;
+    // the service holds no cross-request state.
+    let router: Router = Arc::new(RepoServer::new(env)).register(Router::new());
+    let svc = ConnectRpcService::new(router).with_interceptor(AuthInterceptor);
+
+    // The dispatch touches JS-backed (`!Send`) worker handles inside handlers;
+    // wrap in SendFuture so it satisfies ConnectRpcService's `Future: Send`
+    // bound (sound under single-threaded wasm).
+    let http_resp = SendFuture::new(async move {
+        svc.oneshot(http_req)
+            .await
+            .expect("ConnectRpcService error is Infallible")
+    })
+    .await;
+
+    let status = http_resp.status().as_u16();
+    let resp_headers = http_resp.headers().clone();
+    let collected = SendFuture::new(async move { http_resp.into_body().collect().await })
+        .await
+        .map(|c| c.to_bytes())
+        .unwrap_or_default();
+
+    let mut out = Response::from_bytes(collected.to_vec())?.with_status(status);
+    let out_headers = out.headers_mut();
+    for (k, v) in resp_headers.iter() {
+        if let Ok(val) = v.to_str() {
+            let _ = out_headers.set(k.as_str(), val);
+        }
+    }
+    Ok(with_cors(out))
+}
+
+/// Raw-WebSocket fallback: proxy the client straight to the room DO `/watch`.
+async fn watch_fallback(env: Env, room: &str) -> Result<Response> {
+    let room = room.to_owned();
+    SendFuture::new(async move {
+        let ns = env.durable_object("REFSTORE")?;
+        let stub = ns.id_from_name(&room)?.get_stub()?;
+        let mut req = Request::new("https://refstore/watch", Method::Get)?;
+        req.headers_mut()?.set("upgrade", "websocket")?;
+        stub.fetch_with_request(req).await
+    })
+    .await
+}
