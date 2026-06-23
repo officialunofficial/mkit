@@ -11,13 +11,11 @@
   // Structured logs/metrics for the deployed Worker.
   "observability": { "enabled": true },
 
-  // Production origin. Serving at repo.mkit.sh gives the web app a deterministic
+  // Production origin. Serving at api.mkit.sh gives the web app a deterministic
   // host for its CSP `connect-src` and `VITE_REPO_BACKEND_URL` (see
-  // web/src/security-policy.js). `custom_domain` auto-provisions DNS + cert on
-  // the mkit.sh zone. Uncomment at deploy time; until then the Worker is
-  // reachable at its workers.dev URL. If you change this host, update the CSP +
-  // build env too.
-  // "routes": [{ "pattern": "repo.mkit.sh", "custom_domain": true }],
+  // apps/web/src/security-policy.js). `custom_domain` auto-provisions DNS + cert
+  // on the mkit.sh zone. If you change this host, update the CSP + build env too.
+  "routes": [{ "pattern": "api.mkit.sh", "custom_domain": true }],
 
   // R2 object store for immutable, content-addressed mkit objects.
   // Key layout: {room}/objects/{hex(object_id)}.

@@ -10,8 +10,8 @@
   ],
   "scripts": {
     "wasm:build": "bun run wasm:build:core && bun run wasm:build:repo-client",
-    "wasm:build:core": "rm -rf vendor/mkit-wasm/pkg && cd ../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir ../../../web/vendor/mkit-wasm/pkg --release",
-    "wasm:build:repo-client": "rm -rf vendor/mkit-repo-client/pkg && cd ../rust/crates/mkit-repo-client && wasm-pack build --target web --out-dir ../../../web/vendor/mkit-repo-client/pkg --release",
+    "wasm:build:core": "rm -rf vendor/mkit-wasm/pkg && cd ../../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir ../../../apps/web/vendor/mkit-wasm/pkg --release",
+    "wasm:build:repo-client": "rm -rf vendor/mkit-repo-client/pkg && cd ../../rust/crates/mkit-repo-client && wasm-pack build --target web --out-dir ../../../apps/web/vendor/mkit-repo-client/pkg --release",
     "stage": "node scripts/stage-public.mjs SKILL.md install.sh && node scripts/gen-headers.mjs",
     "dev": "bun run stage && waku dev",
     "build": "bun run stage && bun run wasm:build && CLOUDFLARE=1 waku build && node scripts/assert-prerender.mjs && node scripts/assert-installer.mjs && node scripts/assert-headers.mjs && node scripts/patch-worker-config.mjs && node scripts/fix-preload-as.mjs",

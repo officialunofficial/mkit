@@ -10,7 +10,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/mcp.yml'
-      - 'mcp/**'
+      - 'apps/mcp/**'
       - 'docs/**'
       - 'SKILL.md'
       - 'README.md'
@@ -48,7 +48,7 @@ jobs:
           filters: |
             mcp:
               - '.github/workflows/mcp.yml'
-              - 'mcp/**'
+              - 'apps/mcp/**'
               - 'docs/**'
               - 'SKILL.md'
               - 'README.md'
@@ -72,19 +72,19 @@ jobs:
           node-version: '22'
 
       - name: Install MCP dependencies
-        working-directory: mcp
+        working-directory: apps/mcp
         run: npm ci
 
       - name: Build corpus index (validates the indexer + parsers)
-        working-directory: mcp
+        working-directory: apps/mcp
         run: npm run index
 
       - name: Typecheck
-        working-directory: mcp
+        working-directory: apps/mcp
         run: npm run build
 
       - name: Test
-        working-directory: mcp
+        working-directory: apps/mcp
         run: npm run test
 
   # Stable required-check name for branch protection. Always runs on PRs

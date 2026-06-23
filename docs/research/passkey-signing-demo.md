@@ -38,7 +38,7 @@ for the demo, noted here as the boundary.
 
 ## 2. What already exists (compiled into the demo's WASM)
 
-The Rust backend behind `web/vendor/mkit-wasm` already implements the entire
+The Rust backend behind `apps/web/vendor/mkit-wasm` already implements the entire
 verification path. Key files:
 
 | File | What's there |

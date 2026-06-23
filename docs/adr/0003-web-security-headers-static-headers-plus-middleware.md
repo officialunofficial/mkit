@@ -15,14 +15,14 @@ uncovered.
 
 ## Decision
 
-- Ship a static [`public/_headers`](../../web/public/_headers) file so the
+- Ship a static [`public/_headers`](../../apps/web/public/_headers) file so the
   Assets binding applies security headers to **prerendered/static routes**,
   covering the paths the worker never sees.
 - Keep the worker response middleware for dynamically served routes, so the two
   mechanisms together cover **all routes**.
 - Add **HSTS** (`Strict-Transport-Security`) to the header set.
 - Note the **CSP posture**: a Content-Security-Policy is set as part of the
-  header set; it is tracked in `web/src/security-headers.ts` so the static and
+  header set; it is tracked in `apps/web/src/security-headers.ts` so the static and
   middleware paths stay in agreement.
 
 ## Consequences
@@ -31,6 +31,6 @@ uncovered.
   the worker runs — the static-asset bypass no longer drops them.
 - Two places define the header set (`public/_headers` and the worker
   middleware); they must be kept in sync, asserted by
-  `web/src/security-headers.test.ts`.
+  `apps/web/src/security-headers.test.ts`.
 - HSTS commits the apex/subdomains to HTTPS-only for its `max-age`; a rollback
   to plain HTTP is not transparent within that window.

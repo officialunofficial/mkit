@@ -1,7 +1,7 @@
 # mkit-repo-client
 
 Browser ConnectRPC client for `mkit.repo.v1.RepoService`, compiled to
-`wasm32-unknown-unknown` and consumed by the web demo (`web/src/lib/repo-api.ts`).
+`wasm32-unknown-unknown` and consumed by the web demo (`apps/web/src/lib/repo-api.ts`).
 
 - Transport: a Fetch-API `ClientTransport` ported from connect-rust's
   `examples/wasm-client` (`src/transport.rs`).

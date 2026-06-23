@@ -66,22 +66,22 @@ jobs:
           node-version: '22'
 
       - name: Install MCP dependencies
-        working-directory: mcp
+        working-directory: apps/mcp
         run: npm ci
 
       - name: Typecheck + test (never seed from a tree whose indexer fails)
-        working-directory: mcp
+        working-directory: apps/mcp
         run: npm run ci
 
       - name: Build corpus index from the tag's tree
-        working-directory: mcp
+        working-directory: apps/mcp
         run: npm run index
 
       # Guard: the indexer derives the version from rust/Cargo.toml. If the tag
       # was pushed before the release-plz version-bump merged, the label would
       # lie about the content — fail loudly instead.
       - name: Guard — tag matches workspace version
-        working-directory: mcp
+        working-directory: apps/mcp
         run: |
           INDEXED="$(jq -r .version dist/manifest.json)"
           if [[ "$INDEXED" != "$RELEASE_TAG" ]]; then
@@ -92,7 +92,7 @@ jobs:
 
       - name: Check whether this version is already indexed
         id: indexed
-        working-directory: mcp
+        working-directory: apps/mcp
         shell: bash  # explicit: gets `-o pipefail`, so a wrangler failure fails the step
         env:
           FORCE: ${{ inputs.force }}
@@ -139,10 +139,10 @@ jobs:
 
       - name: Apply D1 migrations (idempotent)
         if: ${{ steps.indexed.outputs.seed == 'true' }}
-        working-directory: mcp
+        working-directory: apps/mcp
         run: npm run db:migrate
 
       - name: Seed corpus into remote D1
         if: ${{ steps.indexed.outputs.seed == 'true' }}
-        working-directory: mcp
+        working-directory: apps/mcp
         run: npm run db:seed

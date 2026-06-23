@@ -385,7 +385,7 @@ sparse-checkout set <pattern>...` to persist.
     `mkit_cli::commands::serve::build_sparse_response_from_tree` and
     `build_sparse_response_from_store`. The HTTP / S3 reference
     servers themselves live outside the workspace (the Cloudflare
-    Worker is in `web/`); §6 + §7 document exactly what they need to
+    Worker is in `apps/web/`); §6 + §7 document exactly what they need to
     do.
 
 * **SSH transport extension (future):** The SSH transport's
@@ -400,4 +400,4 @@ Anti-goals (called out in #158 and still preserved):
   authenticated-bitmap protocol.
 * This document does NOT define an HTTP/S3 server reference
   implementation — only the contract such a server MUST honour. The
-  Cloudflare Worker in `web/` is the reference deployment.
+  Cloudflare Worker in `apps/web/` is the reference deployment.

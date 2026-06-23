@@ -20,7 +20,7 @@
       "database_id": "9c33a37c-3f56-43d0-b210-0132f2b37959"
     }
   ],
-  // Custom domain on the mkit.sh zone (mirrors web/ at mkit.sh).
+  // Custom domain on the mkit.sh zone (mirrors apps/web/ at mkit.sh).
   // Wrangler auto-creates the proxied DNS record + cert on deploy.
   "routes": [{ "pattern": "mcp.mkit.sh", "custom_domain": true }],
   "observability": { "enabled": true }

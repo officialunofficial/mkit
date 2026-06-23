@@ -1,5 +1,5 @@
-// Vendored from web/src/lib/grid-svg.ts. mkit is not a workspace, so this OG
-// worker can't import across the web/ package boundary — the grid renderer is a
+// Vendored from apps/web/src/lib/grid-svg.ts. mkit is not a workspace, so this OG
+// worker can't import across the apps/web/ package boundary — the grid renderer is a
 // pure ~15-line function, copied here verbatim so the package stays self-contained.
 
 /**

@@ -222,11 +222,11 @@ live for everyone:
 2. **Deploy the Worker:** `wrangler deploy` (needs an authenticated wrangler /
    `CLOUDFLARE_API_TOKEN`), or wire a Cloudflare **Workers Builds** project at
    `apps/repo-worker` so it deploys on merge — same mechanism as the web app.
-3. **Pin the origin:** uncomment the `repo.mkit.sh` `custom_domain` route in
-   `wrangler.jsonc` (or note the `workers.dev` URL). This host must match:
-   - `web/src/security-policy.js` → CSP `connect-src` (already allows
-     `https://repo.mkit.sh` + `wss://repo.mkit.sh`), and
-   - the web build's `VITE_REPO_BACKEND_URL` env (set it to `https://repo.mkit.sh`
+3. **Pin the origin:** the `api.mkit.sh` `custom_domain` route is declared in
+   `wrangler.jsonc` and is the production backend origin. This host must match:
+   - `apps/web/src/security-policy.js` → CSP `connect-src` (already allows
+     `https://api.mkit.sh` + `wss://api.mkit.sh`), and
+   - the web build's `VITE_REPO_BACKEND_URL` env (set it to `https://api.mkit.sh`
      in the Workers Builds env; when unset the demo falls back to the in-memory
      mock so it still runs offline).
 4. **Ship the web:** merge to main → Workers Builds deploys `mkit.sh/multiplayer`,

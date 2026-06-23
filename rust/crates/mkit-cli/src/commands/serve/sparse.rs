@@ -8,7 +8,7 @@
 //!
 //! The SSH transport is currently bytes-on-stream framed (mkit-rpc) and
 //! has no sparse-tree verb today; the Cloudflare Worker that backs the
-//! HTTP transport lives in `web/` outside the workspace. Both are
+//! HTTP transport lives in `apps/` outside the workspace. Both are
 //! expected to evolve to call these helpers directly. What the Worker
 //! would do:
 //!   1. Resolve `<project>/trees/<hex>` against R2.

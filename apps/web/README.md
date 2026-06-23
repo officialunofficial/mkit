@@ -31,7 +31,7 @@ bun run build
 declared as a Bun workspace (Bun has no relative `link:` protocol, so the
 workspace symlink replaces pnpm's `link:vendor/mkit-wasm`). `bun run
 wasm:build` generates the ignored `vendor/mkit-wasm/pkg/` contents from
-`../rust/crates/mkit-wasm` with `wasm-pack --target web`.
+`../../rust/crates/mkit-wasm` with `wasm-pack --target web`.
 
 Postinstall scripts are opt-in via `trustedDependencies` in `package.json`:
 `esbuild` and `workerd` (platform binaries) are trusted; `sharp` deliberately

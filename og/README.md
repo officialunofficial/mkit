@@ -31,5 +31,5 @@ npm run deploy     # wrangler deploy (provisions og.mkit.sh on first run)
 ```
 
 The brand mark is generated deterministically (`src/grid.ts`, seeded `"mkit"`),
-a self-contained copy of the renderer in `web/src/lib/grid-svg.ts` — mkit isn't a
-single npm workspace, so the OG worker can't import across the `web/` boundary.
+a self-contained copy of the renderer in `apps/web/src/lib/grid-svg.ts` — mkit isn't a
+single npm workspace, so the OG worker can't import across the `apps/web/` boundary.
