@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "mkit-demo-web",
+      "name": "mkit-web",
       "dependencies": {
         "@tanstack/react-query": "^5.101.1",
         "hono": "^4.12.25",
