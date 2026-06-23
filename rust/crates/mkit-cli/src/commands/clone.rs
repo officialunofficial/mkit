@@ -110,15 +110,18 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&format!("write config: {e}"), exit::CANTCREAT);
     }
 
-    // Issue #389: thread per-repo `ssh.*` trust-pinning keys into the
-    // spawned `ssh(1)`. The keys are user-scoped (REPO_FORBIDDEN_KEYS),
-    // so `read_or_default` against the freshly-initialised destination
-    // still picks them up from the user-scoped config layer.
-    let ssh_options = match config::read_or_default(&target) {
-        Ok(merged) => remote_dispatch::ssh_options_from_config(&merged),
+    // Issue #389: clone establishes trust for a brand-new endpoint, so it
+    // bypasses `open_trusted`'s credential gate — but it must still thread
+    // the per-repo `ssh.*` trust-pinning keys into the spawned `ssh(1)`.
+    // Routing through `open_with_config` keeps that resolution in the one
+    // shared chokepoint instead of re-deriving it here. The keys are
+    // user-scoped (REPO_FORBIDDEN_KEYS), so `read_or_default` against the
+    // freshly-initialised destination still picks them up.
+    let merged = match config::read_or_default(&target) {
+        Ok(merged) => merged,
         Err(e) => return emit_err(&format!("read config: {e}"), exit::CONFIG_ERROR),
     };
-    let pull_outcome = match remote_dispatch::open_with_ssh_options(url, &ssh_options) {
+    let pull_outcome = match remote_dispatch::open_with_config(url, &merged) {
         Ok(tx) => remote_dispatch::pull_all(&target, tx.as_ref(), "default"),
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };
