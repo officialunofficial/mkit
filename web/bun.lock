@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "mkit-demo-web",
+      "name": "mkit-web",
       "dependencies": {
         "hono": "^4.12.25",
         "mkit-wasm": "workspace:*",

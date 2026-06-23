@@ -63,7 +63,7 @@ if (config.assets && typeof config.assets === 'object') {
 }
 
 // Keep the `*.workers.dev` subdomain live alongside the Custom Domain so preview links and smoke tests that target
-// `mkit-demo-web.<account>.workers.dev` keep working. Without this, Wrangler disables `workers.dev` the moment any
+// `mkit-web.<account>.workers.dev` keep working. Without this, Wrangler disables `workers.dev` the moment any
 // route is declared.
 if (config.workers_dev !== true) {
   config.workers_dev = true
