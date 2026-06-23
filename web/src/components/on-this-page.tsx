@@ -29,34 +29,60 @@ export function OnThisPage() {
     const main = document.querySelector('main')
     if (!main) return
 
-    const headings = Array.from(main.querySelectorAll('h2')) as HTMLHeadingElement[]
-    const found: Item[] = []
-    for (const h of headings) {
-      const text = (h.textContent ?? '').trim()
-      if (!text) continue
-      // Anchor target for the TOC links. The scroll offset that keeps the
-      // sticky header from covering it is a CSS rule on headings, not an
-      // inline style mutated here (see styles.css h1,h2,h3).
-      if (!h.id) h.id = slugify(text)
-      found.push({ id: h.id, text })
-    }
-    setItems(found)
-    if (found.length < 2) return
+    let io: IntersectionObserver | null = null
 
-    // Highlight the section nearest the top of the viewport. The bottom
-    // margin biases "active" toward whatever just crossed the top edge.
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) setActiveId((entry.target as HTMLElement).id)
-        }
-      },
-      { rootMargin: '-80px 0px -65% 0px' },
-    )
-    for (const h of headings) {
-      if (h.id) observer.observe(h)
+    const scan = () => {
+      const headings = Array.from(main.querySelectorAll('h2')) as HTMLHeadingElement[]
+      const found: Item[] = []
+      for (const h of headings) {
+        const text = (h.textContent ?? '').trim()
+        if (!text) continue
+        // Anchor target for the TOC links. The scroll offset that keeps the
+        // sticky header from covering it is a CSS rule on headings, not an
+        // inline style mutated here (see styles.css h1,h2,h3).
+        if (!h.id) h.id = slugify(text)
+        found.push({ id: h.id, text })
+      }
+      setItems(found)
+      setActiveId('')
+
+      io?.disconnect()
+      io = null
+      if (found.length < 2) return
+
+      // Highlight the section nearest the top of the viewport. The bottom
+      // margin biases "active" toward whatever just crossed the top edge.
+      io = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) setActiveId((entry.target as HTMLElement).id)
+          }
+        },
+        { rootMargin: '-80px 0px -65% 0px' },
+      )
+      for (const h of headings) {
+        if (h.id) io.observe(h)
+      }
     }
-    return () => observer.disconnect()
+
+    scan()
+
+    // Client-side navigation swaps <main>'s content without remounting this
+    // component, so the headings change underneath us. Re-scan when they do;
+    // rAF coalesces the burst of mutations a route change produces into one
+    // scan. (Doc pages are static, so this only fires on navigation.)
+    let raf = 0
+    const mo = new MutationObserver(() => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(scan)
+    })
+    mo.observe(main, { childList: true, subtree: true })
+
+    return () => {
+      mo.disconnect()
+      io?.disconnect()
+      cancelAnimationFrame(raf)
+    }
   }, [])
 
   if (items.length < 2) return null

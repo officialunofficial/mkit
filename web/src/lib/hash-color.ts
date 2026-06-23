@@ -5,7 +5,7 @@
  * ancestor's chip.
  */
 export function hashColor(hex: string): string {
-  return hueColor(parseInt(hex.slice(0, 2), 16) * (360 / 256))
+  return hueColor(byteHue(hex, 0))
 }
 
 /**
@@ -25,4 +25,29 @@ export function labelColor(label: string): string {
 /** The single source of the brand palette projection: any hue, fixed 70% saturation / 60% lightness. */
 function hueColor(hue: number): string {
   return `hsl(${Math.round(hue)} 70% 60%)`
+}
+
+/**
+ * Hue (0–360, rounded) from byte `i` of a hex hash — the shared projection behind `hashColor` and `hashMesh`. Guards
+ * the slice: a hash too short to have byte `i` (or non-hex input) yields `NaN` from `parseInt`, which would render as
+ * invalid CSS, so it falls back to hue 0. Callers pass full BLAKE3 hashes, so the guard is belt-and-suspenders.
+ */
+function byteHue(hex: string, i: number): number {
+  const byte = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  return Math.round((Number.isNaN(byte) ? 0 : byte) * (360 / 256))
+}
+
+/**
+ * A hash-derived _mesh_ gradient: two hues pulled from different bytes of the hash, layered as soft radial blooms over
+ * a linear base. Shares `hashColor`'s avalanche property — a one-byte change reshuffles the whole mesh — but reads with
+ * more texture than a flat fill. Used for the file bar on /push.
+ */
+export function hashMesh(hex: string): string {
+  const h1 = byteHue(hex, 0)
+  const h2 = byteHue(hex, 1)
+  return [
+    `radial-gradient(at 18% 28%, hsl(${h1} 80% 64%), transparent 62%)`,
+    `radial-gradient(at 82% 72%, hsl(${h2} 80% 58%), transparent 62%)`,
+    `linear-gradient(110deg, hsl(${h1} 70% 60%), hsl(${h2} 70% 58%))`,
+  ].join(', ')
 }

@@ -16,8 +16,8 @@
   --color-muted: oklch(0.62 0 0);
   --color-subtle: oklch(0.48 0 0);
   /* Lifted well above the 0.16 background so card/input borders read clearly
-     in dark mode (a 0.27 hairline nearly vanished against the dark ground). */
-  --color-hairline: oklch(0.34 0 0);
+     in dark mode without vanishing into the ground. */
+  --color-hairline: oklch(0.35 0 0);
 }
 
 /* Design tokens lifted verbatim from searchartwith.art (OKLCH triplet of
@@ -30,7 +30,7 @@
   /* `subtle` sits between `muted` and `hairline` — used for descriptive
      copy that should read as secondary without fully fading out. */
   --color-subtle: oklch(0.68 0 0);
-  --color-hairline: oklch(0.922 0 0);
+  --color-hairline: oklch(0.945 0 0);
   --font-sans: 'Geist', 'Geist Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
@@ -71,6 +71,17 @@
     /* Offset in-page anchor jumps so the sticky header doesn't cover the
        target heading (the "On this page" TOC links to these). */
     scroll-margin-top: 5rem;
+  }
+
+  /* Tailwind v4 Preflight no longer gives buttons a pointer cursor. Restore it
+     site-wide so every <button> (copy chips, tabs, Merkle nodes, demo controls)
+     reads as clickable; disabled ones fall back to not-allowed. */
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']) {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
   }
 
   code,

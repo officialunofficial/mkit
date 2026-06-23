@@ -120,8 +120,8 @@ export function StreamingDemo() {
   }
 
   return (
-    // Mobile-first ordering: live sections above the file sidebar so a phone landing on /streaming sees the chunker
-    // changing immediately, then scrolls down to the file controls. See `hash-demo.tsx` for the same pattern.
+    // Mobile-first ordering: live sections above the file sidebar so a phone landing on the streaming demo sees the
+    // chunker changing immediately, then scrolls down to the file controls. See `hash-demo.tsx` for the same pattern.
     <div className='flex flex-col-reverse gap-10 lg:grid lg:grid-cols-[minmax(0,20rem)_1fr] lg:gap-12'>
       <div className='space-y-6 lg:sticky lg:top-24 lg:self-start'>
         <FileSidebar
