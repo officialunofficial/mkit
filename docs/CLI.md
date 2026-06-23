@@ -784,7 +784,8 @@ Remote / sync:
   SPEC-TRANSPORT-ENC §6.2).
 - `mkit pack-shard <hash> [--out <dir>] [--force]` — encode a stored
   pack into Reed-Solomon shards plus a manifest, ready to publish to
-  an HTTP / S3 origin. Producer side of SPEC-PACK-SHARDS Phase 2. The
+  an HTTP / S3 origin. Producer side of the SPEC-PACK-SHARDS
+  wire-format & transport-delivery stage. The
   pack must already be in the local object store. Output layout:
   `<out>/packs/<hex>/shards/<index>` and
   `<out>/packs/<hex>/shards.manifest`. The manifest is written last
@@ -1044,8 +1045,8 @@ These are documented behaviours, not bugs, with tracked follow-ups:
 ### Commands deliberately not implemented (by design)
 
 Several Git commands that were once "wontfix-by-design" have been
-**reinstated under safety guards** as part of the git-parity work
-(Phase 2, #250): `mkit revert`, `mkit mv`, `mkit clean`, and
+**reinstated under safety guards** as part of the git-parity
+porcelain-completion work (#250): `mkit revert`, `mkit mv`, `mkit clean`, and
 `mkit reset --hard` are all available and documented above. Each keeps an
 mkit data-loss guard — e.g. `clean` and `reset --hard` refuse to delete or
 discard without an explicit `-f` — rather than adopting git's silent

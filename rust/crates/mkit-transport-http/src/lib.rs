@@ -946,7 +946,7 @@ impl Transport for HttpTransport {
 }
 
 // ---------------------------------------------------------------------------
-// Sparse-checkout fetch (issue #158, Phase 2). Feature-gated behind
+// Sparse-checkout fetch (issue #158). Feature-gated behind
 // `sparse-checkout` so the binary cost of the upstream
 // `commonware-storage` chain is only paid when the consumer opts in.
 //

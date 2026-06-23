@@ -1,6 +1,6 @@
 //! Shared test harness for the end-to-end CLI suites.
 //!
-//! Phase 1 (`state_machine.rs`) and the Phase-2 fault-injection suites
+//! The state-machine suite (`state_machine.rs`) and the fault-injection suites
 //! (`crash_recovery.rs`, `corruption_rejection.rs`, `lock_contention.rs`) all
 //! drive the real `mkit` binary and assert the same repo-invariant battery, so
 //! that machinery lives here.

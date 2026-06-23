@@ -1,7 +1,7 @@
-//! Generator for the Phase 4 golden vectors.
+//! Generator for the refs/index golden vectors.
 //!
-//! Run with `cargo run -p mkit-core --example generate_phase4_goldens
-//! -- <out-dir>` (defaults to `rust/tests/golden/phase4`). Idempotent:
+//! Run with `cargo run -p mkit-core --example generate_refs_index_goldens
+//! -- <out-dir>` (defaults to `rust/tests/golden/refs-index`). Idempotent:
 //! every input is a fixed constant; re-running emits byte-identical
 //! files.
 //!
@@ -19,9 +19,10 @@ use mkit_core::refs::encode_ref_wire;
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let out_dir = args
-        .get(1)
-        .map_or_else(|| PathBuf::from("rust/tests/golden/phase4"), PathBuf::from);
+    let out_dir = args.get(1).map_or_else(
+        || PathBuf::from("rust/tests/golden/refs-index"),
+        PathBuf::from,
+    );
     fs::create_dir_all(&out_dir)?;
 
     // 1. index_empty.bin — 9 bytes (header only).
@@ -73,8 +74,8 @@ fn main() -> std::io::Result<()> {
 
     // Manifest for the integration tests.
     let mut manifest = String::new();
-    manifest.push_str("# Phase 4 golden vectors (deterministic)\n");
-    manifest.push_str("# Produced by examples/generate_phase4_goldens.rs\n");
+    manifest.push_str("# Refs/index golden vectors (deterministic)\n");
+    manifest.push_str("# Produced by examples/generate_refs_index_goldens.rs\n");
     manifest.push_str("# Format: <name> <blake3-hex-of-bin-bytes>\n");
     for name in [
         "index_empty",
@@ -88,7 +89,7 @@ fn main() -> std::io::Result<()> {
     }
     fs::write(out_dir.join("MANIFEST.txt"), manifest)?;
 
-    println!("phase4 goldens written to {}", out_dir.display());
+    println!("refs-index goldens written to {}", out_dir.display());
     Ok(())
 }
 

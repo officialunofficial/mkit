@@ -136,8 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `format-patch` renders native commits as `git am`-able patches.
   Journeys in
   [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md);
-  hostile-upstream surface in THREAT-MODEL §3.1a. Closes the Phase 2a
-  scope of the git-interop exploration.
+  hostile-upstream surface in THREAT-MODEL §3.1a. Closes the
+  importer-signed-import scope of the git-interop exploration.
 
 - **git-bridge: deterministic one-way export to git mirrors**
   (`mkit git export`, behind the default-off `git-bridge` feature;
@@ -157,7 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skips untranslatable refs loudly (remix ancestry, git-illegal
   names, non-canonical chunking); the import direction is specified
   separately in [`docs/SPEC-GIT-IMPORT.md`](docs/SPEC-GIT-IMPORT.md). PARITY.md gains a scope amendment per its
-  own renegotiation rule. Closes the Phase 0+1 scope of the
+  own renegotiation rule. Closes the export-bridge foundation scope of the
   git-interop exploration.
 
 - **`mkit mcp` — a local Model Context Protocol server in the CLI.**
@@ -279,7 +279,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mkit cat` surfaces annotated-tag metadata. The new object type is an
   **additive** allocation within object schema v1 — no existing object
   layout, signing bytes, hash, or golden vector changes. New golden
-  vectors are pinned under `rust/tests/golden/phase9/`. Specs:
+  vectors are pinned under `rust/tests/golden/tags/`. Specs:
   [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) §6a,
   [`docs/SPEC-SIGNING.md`](docs/SPEC-SIGNING.md) §4a.
 - **`mkit-keystore` crate** — pluggable signing-key vault subsystem

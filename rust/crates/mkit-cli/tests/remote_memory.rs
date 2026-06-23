@@ -1,7 +1,7 @@
 //! Remote roundtrip test against the in-process `MemoryTransport`.
 //!
 //! `MemoryTransport` is not URL-reachable by design — it lives in a
-//! single process address space. To satisfy the Phase 9 test matrix
+//! single process address space. To satisfy the remote test matrix
 //! ("remote add + push + pull against the memory transport") we wire
 //! up the dispatch helpers (`push_all`, `pull_all`) directly rather
 //! than spawning the binary.

@@ -1,5 +1,5 @@
 //! Read-only plumbing — `rev-parse` / `cat-file` / `ls-tree` / `ls-files` /
-//! `show-ref` / `for-each-ref` / `symbolic-ref` (#251, Phase 3). Covers the
+//! `show-ref` / `for-each-ref` / `symbolic-ref` (#251). Covers the
 //! mkit-specific paths the differential harness can't compare (abbreviated
 //! BLAKE3 ids, repo-root path, `-z`, detached HEAD, unsupported format atoms).
 

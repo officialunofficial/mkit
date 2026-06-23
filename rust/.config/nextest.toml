@@ -41,7 +41,7 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = 'test(=stateful_invariants)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
-# The Phase-2 fault-injection suites reconstruct many on-disk crash images and
+# The fault-injection suites reconstruct many on-disk crash images and
 # spawn N concurrent mutators, so each spawns the binary a lot. Deterministic,
 # not hangs — give the crash-recovery and lock-contention binaries the same
 # generous per-test ceiling so a slow/loaded (especially macOS) runner can't

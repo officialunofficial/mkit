@@ -2,7 +2,7 @@
 //!
 //! Minimal, deterministic SigV4 implementation used by the S3 /
 //! Cloudflare R2 transport. The golden vector at
-//! `rust/tests/golden/phase7/sigv4_basic.json` pins the exact bytes of
+//! `rust/tests/golden/transport/sigv4_basic.json` pins the exact bytes of
 //! the canonical request, string-to-sign, and final signature.
 //!
 //! The signer only ever signs the three headers `host`,

@@ -31,7 +31,7 @@
 //!
 //! Fault injection (crash recovery, corrupted-object rejection, multi-process
 //! lock contention) is intentionally **out of scope here** — it needs a
-//! different technique and is tracked as the Phase-2 follow-up in issue #307.
+//! different technique and is tracked as the follow-up in issue #307.
 
 use std::fmt;
 use std::fs;

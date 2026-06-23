@@ -1,4 +1,4 @@
-//! Phase-2 fault injection — multi-process lock contention.
+//! Fault injection — multi-process lock contention.
 //!
 //! mkit serialises worktree mutations under an `O_EXCL` lockfile + `flock`
 //! (`.mkit/worktree.lock`, 5s acquire timeout → exit `TEMPFAIL`/75). These

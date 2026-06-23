@@ -1,4 +1,4 @@
-# Phase 3 golden vectors (deterministic FastCDC boundaries)
+# FastCDC boundary golden vectors (deterministic)
 # Format: <name> <blake3-hex-of-bin-bytes>
 fastcdc_boundaries_1mib c075a28bc3f497a4bc538de05ae9168237684fe3627252566c0590020679d59d
 fastcdc_boundaries_256k c558e3da6b4ef940298447910c0a7de444fb87389ec26a82a6e068b52f43a2bf

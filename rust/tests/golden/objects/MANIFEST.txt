@@ -1,4 +1,4 @@
-# Phase 1 golden vectors (deterministic)
+# Object golden vectors (deterministic)
 # Produced by scripts/harvest-golden-vectors.sh
 # Format: <name> <blake3-hex-of-bin-bytes>
 identity_ed25519 0e4105b396214ae3a593f1a564766f7ad0fbc71fc045c6a62fdd128401ea4bb6

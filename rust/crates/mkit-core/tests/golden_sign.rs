@@ -1,9 +1,9 @@
-//! Phase 6 (signing) goldens.
+//! Signing goldens.
 //!
 //! For every fixture we:
 //!
-//! 1. Load the matching commit/remix object bytes from the Phase 1
-//!    fixtures (`commit_0parent.bin`, `remix_2sources.bin`).
+//! 1. Load the matching commit/remix object bytes from the core
+//!    object fixtures (`commit_0parent.bin`, `remix_2sources.bin`).
 //! 2. Deserialize via `mkit_core::serialize::deserialize`.
 //! 3. Re-derive the signing bytes via `commit_signing_bytes` /
 //!    `remix_signing_bytes`.
@@ -26,7 +26,7 @@ fn golden_dir() -> PathBuf {
     d.pop();
     d.push("tests");
     d.push("golden");
-    d.push("phase1");
+    d.push("objects");
     d
 }
 

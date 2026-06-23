@@ -1,13 +1,14 @@
 ---
 spec: SPEC-PACK-SHARDS
 version: 0
-status: phase-2-shipped
+status: transport-delivery-shipped
 audience: implementers of pack producers and consumers; transport implementers
 ---
 
 # SPEC-PACK-SHARDS — erasure-coded pack delivery
 
-Status: **Phase 2 shipped** for mkit v0.x. Tracks issue
+Status: **Transport delivery shipped** for mkit v0.x — the in-process
+codec and the wire/transport delivery surface have both landed. Tracks issue
 [#159](https://github.com/officialunofficial/mkit/issues/159).
 Scope: a wire-level encoding *of* a pack — the on-disk packfile format
 (SPEC-PACKFILE) is unchanged.
@@ -186,9 +187,9 @@ the `mkit_core::pack_shard::ShardError` rustdoc for the full taxonomy.
 
 ## 5. Implementation status
 
-This SPEC ships in two phases.
+This SPEC ships in two stages.
 
-### Phase 1 — shipped
+### In-process codec — shipped
 
 * `mkit-core::pack_shard` module behind the `pack-shards` feature
   flag (default off — the commonware dep stack is large)
@@ -197,7 +198,7 @@ This SPEC ships in two phases.
 * Round-trip, lossy round-trip, tamper-detection, and
   insufficient-shards tests
 
-### Phase 2 — shipped (this surface)
+### Wire format & transport delivery — shipped (this surface)
 
 * **Manifest wire format pinned**: see §2.1.
   `encode_manifest` / `decode_manifest` in `mkit_core::pack_shard`.
@@ -231,7 +232,7 @@ This SPEC ships in two phases.
   monolithic vs parallel-shard vs sequential-shard transfer on a
   100 MiB pack with jittered network sleeps. Not gated on CI.
 
-### Phase 3 — out of scope for this SPEC
+### Direct-upload negotiation & streaming — out of scope for this SPEC
 
 * Sharded uploads via the `Transport` trait directly (today, shards
   are published out-of-band by the operator).

@@ -16,7 +16,7 @@
 //!   UTF-16 ordering table for non-ASCII. We assert ASCII at debug time
 //!   and treat sort-by-bytes as equivalent.
 //!
-//! The golden vectors in `tests/golden_phase8.rs` pin the exact output
+//! The golden vectors in `tests/golden_attest.rs` pin the exact output
 //! bytes.
 
 use core::fmt::Write as _;

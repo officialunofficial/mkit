@@ -487,8 +487,8 @@ multi-version readers.
    `mkit.tag\0` domain): record serialised bytes, the canonical tag
    signing bytes, the signing hash, and the 64-byte Ed25519 signature.
 
-Vectors 1–7 are committed under `rust/tests/golden/phase1/`; the tag
-vectors 8–9 under `rust/tests/golden/phase9/`. Each phase ships a
+Vectors 1–7 are committed under `rust/tests/golden/objects/`; the tag
+vectors 8–9 under `rust/tests/golden/tags/`. Each set ships a
 `MANIFEST.txt` and per-vector `.json` sidecar carrying the BLAKE3
 digest, so external implementations can cross-verify byte-for-byte.
 

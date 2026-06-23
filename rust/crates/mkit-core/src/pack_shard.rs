@@ -1,6 +1,7 @@
 //! Erasure-coded pack delivery via Reed-Solomon shards.
 //!
-//! This module is the **Phase 1** scaffolding for issue #159: it wraps
+//! This module is the in-process encode/reconstruct core for issue #159:
+//! it wraps
 //! `commonware_coding::ReedSolomon<Sha256>` so a producer can split a
 //! pack into `N + K` shards and a consumer can reconstruct the pack
 //! from any `N` of those shards.
@@ -8,7 +9,7 @@
 //! The wire format and motivation are normatively documented in
 //! `docs/SPEC-PACK-SHARDS.md`. The implementation here matches the v0
 //! spec; transport-level shard fetch (HTTP, S3) is **out of scope** and
-//! lives in a later phase under `mkit-transport-*`.
+//! lands later under `mkit-transport-*`.
 //!
 //! # Threat model
 //!
@@ -54,8 +55,8 @@ type Commitment = <RsScheme as commonware_coding::Scheme>::Commitment;
 type RsChunk = <RsScheme as commonware_coding::Scheme>::Shard;
 
 /// Strategy used for the Reed-Solomon encode/decode internals. We use
-/// `Sequential` here so the scaffolding has no rayon thread-pool
-/// surprises; benches can swap in a parallel strategy in Phase 2.
+/// `Sequential` here so the encode/decode core has no rayon thread-pool
+/// surprises; benches can swap in a parallel strategy later.
 const STRATEGY: Sequential = Sequential;
 
 /// Cap on the per-shard codec payload size accepted at decode time.
@@ -404,7 +405,7 @@ fn bytes_to_digest(b: &[u8; HASH_LEN]) -> Commitment {
 //     public API and re-encoding every golden vector.
 //   * The shard manifest is a transport artifact, not an object on
 //     disk. Keeping its wire format colocated with the rest of the
-//     pack-shard module keeps Phase 2 changes scoped to one file.
+//     pack-shard module keeps transport-integration changes scoped to one file.
 
 /// Serialise a [`ShardSet`] into its v0 wire bytes.
 ///

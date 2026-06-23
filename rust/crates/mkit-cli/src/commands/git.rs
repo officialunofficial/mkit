@@ -522,7 +522,7 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     // ls-remote observation passes unconditionally, so require
     // fast-forward explicitly — the expected value must be an
     // ancestor of what we push, and tags must not move. Plain export
-    // keeps Phase-1 semantics (the mirror is owned by this repo).
+    // keeps the default mirror-owned semantics (the mirror is owned by this repo).
     if opts.passthrough {
         for (name, new_id) in &to_push {
             if *name == ATTESTATIONS_REF {

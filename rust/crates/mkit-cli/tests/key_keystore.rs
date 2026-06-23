@@ -1014,8 +1014,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// `mkit key generate --algorithm bls12381-thr --threshold 3 --total 4
 /// --label release` produces an N-share trusted-dealer set, stores
 /// each share under `<label>-<index>` in the software keystore, and
-/// prints the cohort keyid on stdout. Pinned to Phase 2 of issue
-/// #160.
+/// prints the cohort keyid on stdout. Pinned to the multi-signature
+/// work of issue #160.
 #[cfg(feature = "bls-threshold")]
 // Linux CI runs this job without a DBus session or gnome-keyring, so the
 // `software` backend can't resolve a key protector — see the `Keystore
@@ -1079,7 +1079,7 @@ fn bls_threshold_key_generate_stores_shares_and_prints_keyid() {
     );
 }
 
-/// `--threshold` must equal the N3f1 quorum the Phase 1 dealer
+/// `--threshold` must equal the N3f1 quorum the trusted dealer
 /// produces; mismatched values are rejected so the caller doesn't
 /// silently get a different M than they asked for.
 #[cfg(feature = "bls-threshold")]

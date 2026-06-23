@@ -326,7 +326,7 @@ with `cargo bench --workspace -- --quick` plus
 ## Documentation
 
 Each SPEC carries its own `status:` header — `draft`, `stable`,
-`phase-2-shipped`, `implemented`, or `normative` — reflecting how settled
+`transport-delivery-shipped`, `implemented`, or `normative` — reflecting how settled
 that document is. Regardless of header, the v1 wire and on-disk formats
 they describe are pinned by the test vectors under
 [`rust/tests/golden/`](rust/tests/golden/) and remain stable through the

@@ -1,5 +1,5 @@
 //! `mkit mv` — guarded move/rename, driven end-to-end through the binary
-//! (#250, Phase 2). mkit has no rename detection, so `status` shows the
+//! (#250). mkit has no rename detection, so `status` shows the
 //! move as a delete + add rather than git's `R`; these tests assert the
 //! worktree move and the staged/committed result instead.
 

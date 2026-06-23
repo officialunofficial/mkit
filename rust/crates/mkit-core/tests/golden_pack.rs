@@ -1,10 +1,10 @@
-//! Phase 3 goldens.
+//! Chunker / delta / packfile goldens.
 //!
 //! These tests assert that:
 //!
 //! 1. [`mkit_core::chunker`] produces the pinned chunk boundaries for
 //!    the splitmix64-derived inputs stored at
-//!    `rust/tests/golden/phase3/fastcdc_boundaries_*.bin`.
+//!    `rust/tests/golden/fastcdc/fastcdc_boundaries_*.bin`.
 //! 2. [`mkit_core::delta`] encodes a SPEC-DELTA stream that round-trips
 //!    through [`mkit_core::delta::decode`] and pins to a fixed byte
 //!    prefix for a deterministic input.
@@ -24,13 +24,13 @@ use mkit_core::hash;
 use mkit_core::pack::{PackReader, PackWriter, pack_key};
 use mkit_core::store::ObjectStore;
 
-fn phase3_dir() -> PathBuf {
+fn fastcdc_dir() -> PathBuf {
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     d.pop(); // crates/
     d.pop(); // rust/
     d.push("tests");
     d.push("golden");
-    d.push("phase3");
+    d.push("fastcdc");
     d
 }
 
@@ -73,7 +73,7 @@ fn parse_boundaries_json(s: &str) -> Vec<usize> {
 
 #[test]
 fn fastcdc_boundaries_1mib_match_golden() {
-    let raw = fs::read_to_string(phase3_dir().join("fastcdc_boundaries_1mib.bin"))
+    let raw = fs::read_to_string(fastcdc_dir().join("fastcdc_boundaries_1mib.bin"))
         .expect("missing fastcdc_boundaries_1mib.bin");
     let expected = parse_boundaries_json(&raw);
     let data = splitmix_bytes(0xA5A5_F00D_DEAD_BEEF, 1024 * 1024);
@@ -86,7 +86,7 @@ fn fastcdc_boundaries_1mib_match_golden() {
 
 #[test]
 fn fastcdc_boundaries_256k_match_golden() {
-    let raw = fs::read_to_string(phase3_dir().join("fastcdc_boundaries_256k.bin"))
+    let raw = fs::read_to_string(fastcdc_dir().join("fastcdc_boundaries_256k.bin"))
         .expect("missing fastcdc_boundaries_256k.bin");
     let expected = parse_boundaries_json(&raw);
     let data = splitmix_bytes(0xCAFE_BABE_1234_5678, 256 * 1024);

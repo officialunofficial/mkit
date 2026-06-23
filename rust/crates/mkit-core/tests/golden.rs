@@ -1,6 +1,6 @@
 //! Golden-vector tests for the canonical object byte format.
 //!
-//! Loads the byte fixtures in `rust/tests/golden/phase1/` and asserts
+//! Loads the byte fixtures in `rust/tests/golden/objects/` and asserts
 //! that this crate:
 //!
 //! 1. Re-serializes byte-for-byte the same fixture (proves the encoder
@@ -22,14 +22,14 @@ use mkit_core::object::{
 use mkit_core::{deserialize, serialize};
 
 fn golden_dir() -> PathBuf {
-    // The fixtures live at <repo>/rust/tests/golden/phase1/. CARGO_MANIFEST_DIR
+    // The fixtures live at <repo>/rust/tests/golden/objects/. CARGO_MANIFEST_DIR
     // points at the crate (rust/crates/mkit-core); walk up two levels.
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     d.pop(); // crates/
     d.pop(); // rust/
     d.push("tests");
     d.push("golden");
-    d.push("phase1");
+    d.push("objects");
     d
 }
 

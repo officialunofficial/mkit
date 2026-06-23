@@ -4,7 +4,7 @@
 //! Submodules are split by concern. Public surface is intentionally
 //! narrow.
 
-// Phase 5a — diff / graph / merge / cherry_pick (OPS1).
+// OPS1 — diff / graph / merge / cherry_pick.
 pub mod cherry_pick;
 pub mod conflict_state;
 pub mod diff;
@@ -13,7 +13,7 @@ pub mod graph;
 pub mod merge;
 pub mod revert;
 
-// Phase 5b — rebase / bisect / blame / stash / restore (OPS2).
+// OPS2 — rebase / bisect / blame / stash / restore.
 pub mod bisect;
 pub mod blame;
 pub mod rebase;

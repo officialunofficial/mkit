@@ -1,4 +1,4 @@
-//! End-to-end integration tests for Phase 5b — rebase / bisect /
+//! End-to-end integration tests for rebase / bisect /
 //! blame / stash / restore.
 
 use std::collections::BTreeSet;
@@ -252,7 +252,7 @@ fn goldens_root() -> PathBuf {
     manifest_dir
         .parent()
         .and_then(Path::parent)
-        .map(|workspace| workspace.join("tests").join("golden").join("phase5b"))
+        .map(|workspace| workspace.join("tests").join("golden").join("blame-stash"))
         .expect("workspace layout: crates/mkit-core/.. → workspace root")
 }
 
@@ -352,7 +352,7 @@ fn stash_index_out_of_range_errors() {
 
 #[test]
 fn stash_show_golden_one_added_one_modified() {
-    // Deterministic fixture matching rust/tests/golden/phase5b/stash_show_simple.txt.
+    // Deterministic fixture matching rust/tests/golden/blame-stash/stash_show_simple.txt.
     // Parent commit: existing.txt = "original content"
     // Stash commit:  existing.txt = "modified content" + new.txt = "brand new file"
     let tmp = TempDir::new().unwrap();

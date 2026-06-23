@@ -434,7 +434,7 @@ fn build_additional_signer(
                     #[cfg(feature = "bls-threshold")]
                     Algorithm::Bls12381Threshold => {
                         return Err(FactoryError::UnknownAlgorithm(
-                            "bls12381-thr key path not configurable in Phase 1".to_owned(),
+                            "bls12381-thr key path is not yet configurable".to_owned(),
                         ));
                     }
                 }

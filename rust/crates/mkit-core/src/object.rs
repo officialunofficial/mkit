@@ -605,7 +605,7 @@ pub enum MkitError {
     /// than `u32::MAX` because it reads the prefix first.
     #[error("oversized payload in field `{field}`: {len} bytes > u32::MAX")]
     OversizePayload { field: &'static str, len: usize },
-    // ---- sign / key-management errors (Phase 6) ----
+    // ---- sign / key-management errors ----
     /// Underlying secure-randomness source could not produce bytes.
     #[error("rng failed to produce key material")]
     RngFailure,

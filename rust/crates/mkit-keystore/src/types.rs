@@ -312,9 +312,9 @@ impl From<mkit_attest::Algorithm> for Algorithm {
             mkit_attest::Algorithm::Ed25519 => Self::Ed25519,
             mkit_attest::Algorithm::Secp256k1 => Self::Secp256k1,
             mkit_attest::Algorithm::P256 => Self::P256,
-            // Phase 2 of issue #160: the keystore now carries a
-            // dedicated BLS variant. Routes a BLS-flavoured signing
-            // algorithm into the keystore Algorithm space.
+            // Since issue #160 the keystore carries a dedicated BLS
+            // variant. Routes a BLS-flavoured signing algorithm into
+            // the keystore Algorithm space.
             #[cfg(feature = "bls-threshold")]
             mkit_attest::Algorithm::Bls12381Threshold => Self::Bls12381Threshold,
         }

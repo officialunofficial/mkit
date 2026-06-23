@@ -1,4 +1,4 @@
-//! Integration test for fix #1 of the Phase-2 rollup: every CLI
+//! Integration test for the history-recording fix in the fault-injection rollup: every CLI
 //! ref-writing path must funnel through `commands::write_ref_recording_history`,
 //! which on `--features history-mmr` builds opens a journaled
 //! `CommitHistory` for the current branch and appends each new tip

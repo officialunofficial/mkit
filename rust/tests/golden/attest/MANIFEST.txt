@@ -1,5 +1,5 @@
-# Phase 8 golden vectors (deterministic)
-# Produced by scripts/harvest-golden-vectors-phase8.sh
+# Attestation golden vectors (deterministic)
+# Produced by the attest envelope/statement fixtures
 # Format: <name> <blake3-hex-of-bin-bytes>
 statement_basic f16487164072097ed704c4d8687e2069dadc6dfcba453d14b45db1ceb7eba59f
 envelope_basic e0dcd6fa098c6e7de2f9f7ebfbea441b93c91b19638852718670657e4c0fbebc
