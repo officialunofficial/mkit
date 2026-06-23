@@ -154,21 +154,30 @@ pub fn open_trusted(
 ) -> Result<Arc<dyn Transport>, DispatchError> {
     crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
         .map_err(DispatchError::UntrustedRemote)?;
-    // Issue #389: thread the per-repo `ssh.*` trust-pinning keys from the
-    // merged config into the spawned `ssh(1)` process. Without this the
-    // keys are parsed into `Config` but never reach the child, so the
-    // documented control is inert.
-    let ssh_options = ssh_options_from_config(&cfg.merged);
-    open_with_ssh_options(endpoint, &ssh_options)
+    open_with_config(endpoint, &cfg.merged)
+}
+
+/// The single chokepoint that resolves SSH trust-pinning from config and
+/// opens a transport. Every config-bearing caller — [`open_trusted`]
+/// (push / fetch / pull) and `clone` — routes through here, so the
+/// `ssh.*` keys (issue #389) are resolved and threaded in exactly ONE
+/// place. A new remote command physically cannot forget them as long as
+/// it opens through config; the only un-pinned path is the config-less
+/// [`open`], which production never uses for `ssh`.
+pub(crate) fn open_with_config(
+    url: &str,
+    cfg: &crate::config::Config,
+) -> Result<Arc<dyn Transport>, DispatchError> {
+    open_with_ssh_options(url, &ssh_options_from_config(cfg))
 }
 
 /// Map the three `ssh.*` trust-pinning keys from a merged [`Config`] into
 /// the [`SshOptions`] carried to the spawned `ssh(1)` child. An empty
 /// string means "unset" — `build_ssh_command` emits no flag for it, so
-/// the user's `ssh(1)` defaults are inherited. This is the producer half
-/// of issue #389; the consumer half (`build_ssh_command`) already wired
-/// the fields into argv.
-pub(crate) fn ssh_options_from_config(cfg: &crate::config::Config) -> SshOptions {
+/// the user's `ssh(1)` defaults are inherited. The producer half of
+/// issue #389 (the consumer half, `build_ssh_command`, wires the fields
+/// into argv). Sole caller is [`open_with_config`].
+fn ssh_options_from_config(cfg: &crate::config::Config) -> SshOptions {
     SshOptions {
         strict_host_key_checking: cfg.ssh_strict_host_key_checking.clone(),
         user_known_hosts_file: cfg.ssh_user_known_hosts_file.clone(),
@@ -176,13 +185,18 @@ pub(crate) fn ssh_options_from_config(cfg: &crate::config::Config) -> SshOptions
     }
 }
 
-/// Open a transport for the given URL. Returns a type-erased `Arc`
-/// so callers can treat all schemes uniformly.
+/// Open a transport for the given URL with **no** SSH trust-pinning.
+/// Returns a type-erased `Arc` so callers can treat all schemes
+/// uniformly.
 ///
-/// Low-level scheme dispatch only — it does NOT enforce the credential
-/// gate. Production push / fetch / pull paths go through
-/// [`open_trusted`]; `open` stays public for file/memory integration
-/// tests that have no ambient credentials to fence.
+/// Low-level scheme dispatch only — it neither enforces the credential
+/// gate nor threads `ssh.*` config. Any caller that has a [`Config`]
+/// must use [`open_with_config`] (directly, or via [`open_trusted`]) so
+/// the trust-pinning keys reach the spawned `ssh(1)`; `open` stays
+/// public only for file/memory integration tests that have no ambient
+/// config to resolve.
+///
+/// [`Config`]: crate::config::Config
 pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
     open_with_ssh_options(url, &SshOptions::default())
 }
@@ -190,10 +204,9 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
 /// Scheme dispatch with explicit SSH options. Identical to [`open`] for
 /// every non-SSH scheme; the `mkit+ssh://` branch threads `ssh_options`
 /// (issue #389) into the spawned `ssh(1)` child via
-/// [`SshTransport::connect_with_options`]. `open` passes
-/// [`SshOptions::default`]; [`open_trusted`] derives options from the
-/// loaded config.
-pub(crate) fn open_with_ssh_options(
+/// [`SshTransport::connect_with_options`]. Reached only via [`open`]
+/// (default options) and [`open_with_config`] (config-derived options).
+fn open_with_ssh_options(
     url: &str,
     ssh_options: &SshOptions,
 ) -> Result<Arc<dyn Transport>, DispatchError> {
