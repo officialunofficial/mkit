@@ -7,6 +7,7 @@
 //! 4. Build a trust-roots TOML with the matching pubkey.
 //! 5. Shell out to `mkit verify-attest` and assert exit 0 + one
 //! verified signature in the output.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

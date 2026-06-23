@@ -1,5 +1,6 @@
 //! End-to-end integration tests for rebase / bisect /
 //! blame / stash / restore.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::collections::BTreeSet;
 use std::fs;

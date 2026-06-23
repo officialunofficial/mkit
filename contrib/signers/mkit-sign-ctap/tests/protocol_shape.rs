@@ -4,6 +4,7 @@
 //! the mock CTAP device. These tests exercise the binary itself: argv
 //! parsing, help text, exit codes. The hardware-gated end-to-end test
 //! lives in `tests/e2e.sh`.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 #[test]
 fn binary_help_exits_zero() {

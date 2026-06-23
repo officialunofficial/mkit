@@ -4,6 +4,7 @@
 //! incremental pull, native-merge integration, force-push handling,
 //! key pinning, the origin guard, and the dispatch matrix.
 #![cfg(feature = "git-bridge")]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
 

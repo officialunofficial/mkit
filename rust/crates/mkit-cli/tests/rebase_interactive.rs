@@ -6,6 +6,7 @@
 //! later editor invocation), keyed by the `$OP`/`$MSG` env vars.
 
 #![cfg(unix)]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

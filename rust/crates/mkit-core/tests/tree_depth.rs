@@ -10,6 +10,7 @@
 //! These tests build a chain `2 * MAX_TREE_DEPTH` levels deep (well past the
 //! cap, but small enough not to overflow on its own) and assert each walker
 //! reports `TreeTooDeep` instead of recursing the whole way.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use mkit_core::index::{self, IndexError};
 use mkit_core::ops::restore::{self, RestoreError, RestoreOptions};

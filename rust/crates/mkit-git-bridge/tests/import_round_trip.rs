@@ -9,6 +9,7 @@
 // `drop(imp)` is load-bearing: it ends the Importer's &mut borrows
 // so the owned sink/map/raws can move; the struct itself has no Drop.
 #![allow(clippy::drop_non_drop)]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use mkit_core::Hash;
 use mkit_core::object::{Identity, Object, ObjectType};

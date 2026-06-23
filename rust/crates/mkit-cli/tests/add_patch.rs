@@ -6,6 +6,7 @@
 //! itself is unit-tested in `mkit-core` (`enumerate_hunks` /
 //! `apply_hunks_subset`); these tests pin the CLI wiring: base selection,
 //! per-hunk prompting, partial-blob staging, and the refusals.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::io::Write;

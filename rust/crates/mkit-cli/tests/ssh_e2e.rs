@@ -33,6 +33,7 @@
 //!
 //! No sshd, no network, no `ssh` binary required. The higher-fidelity
 //! real-`ssh(1)` variant lives in `ssh_e2e_real.rs` and is `#[ignore]`d.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::collections::HashSet;
 use std::fs;

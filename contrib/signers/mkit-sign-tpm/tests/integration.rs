@@ -8,6 +8,7 @@
 //! itself: argv parsing, help text, exit codes, and (when a TPM is
 //! available + the `tpm2` feature is on) a real keygen → sign →
 //! delete round-trip via framed mkit-rpc messages.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::io::Write;
 use std::path::PathBuf;

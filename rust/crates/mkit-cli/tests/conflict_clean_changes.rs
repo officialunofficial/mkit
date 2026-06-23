@@ -3,6 +3,7 @@
 //! refuse `--continue` when a regular conflicted file was resolved in the
 //! worktree but not staged. Exercised via cherry-pick (the shared
 //! `materialize_conflicts` path is the same for merge/rebase/revert).
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

@@ -9,6 +9,7 @@
 //! SigV4 byte-parity is covered by `sigv4_golden.rs` — this file
 //! focuses on the status-code → [`TransportError`] mapping and retry
 //! loop correctness.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;

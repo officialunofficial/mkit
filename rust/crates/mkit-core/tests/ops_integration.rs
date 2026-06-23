@@ -9,6 +9,7 @@
 
 #![allow(clippy::many_single_char_names)] // single-letter commit names keep the test tables compact
 #![allow(clippy::similar_names)] // `add_b` / `add_b_tree` is the natural pairing
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use mkit_core::{
     Blob, Commit, ConflictKind, EntryMode, Identity, Object, ObjectStore, Tree, TreeEntry,

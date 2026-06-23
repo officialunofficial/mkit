@@ -1,6 +1,7 @@
 //! `mkit commit` without `-m` must spawn `$EDITOR` on a tempfile and
 //! use the resulting message. We use a shell-script-style editor that
 //! overwrites the file with a canned message.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

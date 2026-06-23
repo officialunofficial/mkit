@@ -1,4 +1,5 @@
 //! Integration tests for `mkit key` keystore commands.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::process::{Command, Output};
 

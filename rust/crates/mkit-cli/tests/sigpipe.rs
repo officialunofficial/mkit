@@ -33,6 +33,7 @@
 //! Unix-only. Windows has no SIGPIPE; the CLI does not ship on Windows.
 
 #![cfg(unix)]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

@@ -9,6 +9,7 @@
 //! real symlink, not a regular file holding the target text.
 
 #![cfg(unix)]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

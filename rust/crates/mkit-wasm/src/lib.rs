@@ -1218,11 +1218,10 @@ fn parse_json_triples(s: &str) -> Result<Vec<(String, String, String)>, &'static
     let mut chars = inner.chars().peekable();
     loop {
         skip_ws(&mut chars);
-        if chars.peek().is_none() {
-            break;
-        }
-        if *chars.peek().unwrap() != '[' {
-            return Err("expected `[` opening a triple");
+        match chars.peek() {
+            None => break,
+            Some('[') => {}
+            Some(_) => return Err("expected `[` opening a triple"),
         }
         chars.next();
         let a = read_string(&mut chars)?;
@@ -1309,6 +1308,18 @@ mod tests {
     fn parse_json_triples_accepts_small_valid_input() {
         let out = parse_json_triples(r#"[["a","b","c"]]"#).expect("small input is valid");
         assert_eq!(out, vec![("a".into(), "b".into(), "c".into())]);
+    }
+
+    #[test]
+    fn parse_json_triples_rejects_triple_not_opening_with_bracket() {
+        // A top-level array element that is not itself a `[ … ]` triple must
+        // be rejected, not panic. Guards the `Some(_) => Err` arm of the
+        // opening-token match (previously a `peek().unwrap()`).
+        let err = parse_json_triples(r#"["a","b","c"]"#).expect_err("scalars are not triples");
+        assert!(
+            err.contains("expected `[`"),
+            "unexpected error message: {err}"
+        );
     }
 
     /// Finding 1 regression: `tree_encode` must key a tree by its **BMT root**

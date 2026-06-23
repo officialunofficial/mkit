@@ -9,6 +9,7 @@
 //! Only compiled with `--features pack-shards`.
 
 #![cfg(feature = "pack-shards")]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::env;
 use std::fs;

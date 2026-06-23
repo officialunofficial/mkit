@@ -2,6 +2,7 @@
 //! mkit-specific paths the differential harness can't compare deterministically
 //! (empty/reverse ranges, range + `-n`, and the `A...B` symmetric range for
 //! both `log` and `diff`).
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

@@ -5,6 +5,7 @@
 //! dispatch, signing, and ref-history paths end-to-end. The
 //! journal-specific assertions are gated behind `--features
 //! history-mmr`; the rest run in every build.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

@@ -7,6 +7,7 @@
 //! gated on it; with that feature off the entire file compiles out.
 
 #![cfg(feature = "algo-ed25519")]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use ed25519_dalek::{Signature as DalekSig, Verifier, VerifyingKey};
 

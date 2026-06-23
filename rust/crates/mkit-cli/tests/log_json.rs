@@ -1,6 +1,7 @@
 //! `mkit log --format=json` — JSONL output, one self-contained JSON
 //! object per commit. Verifies field shape, key ordering, escaping,
 //! and the "no commits" case.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

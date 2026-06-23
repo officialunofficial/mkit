@@ -3,6 +3,7 @@
 //! Each command gets at least one happy-path and one error-path test.
 //! We spawn the real `mkit` binary so full argv → dispatch → library
 //! path is exercised.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

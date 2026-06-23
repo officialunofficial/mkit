@@ -1,4 +1,5 @@
 //! End-to-end coverage for `attest.signer = keystore`.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

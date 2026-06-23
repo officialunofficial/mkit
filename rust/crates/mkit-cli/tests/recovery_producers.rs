@@ -2,6 +2,7 @@
 //! `reset`, `rebase`) must record the superseded tip in
 //! `.mkit/recovery-log` so `mkit gc` keeps it recoverable. Spawns the
 //! real binary and asserts the old tip's full hash lands in the log.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

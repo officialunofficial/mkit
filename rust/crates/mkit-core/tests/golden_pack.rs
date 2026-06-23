@@ -14,6 +14,7 @@
 //!
 //! Goldens for #2 / #3 do NOT live on disk — they're inline byte
 //! arrays so the spec change → test failure feedback is immediate.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::PathBuf;

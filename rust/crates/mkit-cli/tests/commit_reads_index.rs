@@ -14,6 +14,7 @@
 //! 4. `mkit add .` followed by `mkit commit` produces a tree
 //!    byte-equivalent to what the pre-#102 behaviour produced (the
 //!    snapshot use-case still works with one extra command).
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

@@ -2,6 +2,7 @@
 //! new forward commit, the reverted commit stays reachable, and the
 //! conflict path records resumable state that `--abort` unwinds. Spawns
 //! the real binary.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

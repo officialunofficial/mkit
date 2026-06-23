@@ -2,6 +2,7 @@
 //! back to the pubkey-derived Identity otherwise. Integration test:
 //! seed `.mkit/config` with a known identity, commit, then read the
 //! commit object back and assert `author.bytes` match.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fmt::Write as _;
 use std::fs;

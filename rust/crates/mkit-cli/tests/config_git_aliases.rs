@@ -3,6 +3,7 @@
 //! they must never feed mkit's cryptographic commit author (which is
 //! `user.identity` / the signing key). These tests pin both the parity
 //! (round-trip) and the security boundary (no author spoofing).
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

@@ -5,6 +5,12 @@ msrv = "1.95"
 cognitive-complexity-threshold = 30
 too-many-arguments-threshold = 8
 
+# `unwrap_used`/`expect_used` are denied workspace-wide (see [workspace.lints]
+# in rust/Cargo.toml) so production code surfaces errors instead of panicking.
+# Tests stay idiomatic: a failed `unwrap()` in a test is the assertion.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
 disallowed-methods = [
     { path = "std::env::set_var", reason = "races other threads on POSIX; set env at process start" },
 ]

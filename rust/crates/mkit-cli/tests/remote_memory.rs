@@ -10,6 +10,7 @@
 //! / `remote` (show) against the `mkit+memory://` URL so the string
 //! contract (URL format accepted, roundtripped through config) stays
 //! under test.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

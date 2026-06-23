@@ -15,6 +15,7 @@
 //!   refused at startup with a non-zero exit and a stderr message —
 //!   stdout MUST stay empty in that path so callers don't see a
 //!   half-frame.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

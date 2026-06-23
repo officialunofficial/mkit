@@ -42,3 +42,7 @@ missing_errors_doc = "allow"
 doc_lazy_continuation = "allow"
 module_inception = "allow"
 multiple_crate_versions = "allow"
+# Mirror the main workspace: production code must surface errors instead of
+# panicking. Tests are exempt via `allow-unwrap-in-tests` in the repo-root
+# clippy.toml (found by walking up from this workspace).
+unwrap_used = "deny"

@@ -21,6 +21,7 @@
 //! for details.
 
 #![cfg(feature = "algo-p256")]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use mkit_attest::envelope::{self, Envelope, Sig};
 use mkit_attest::signer_p256::{self, P256Signer};

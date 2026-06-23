@@ -2,6 +2,7 @@
 //! `--dry-run` and the grace window, and never reclaims a commit that the
 //! recovery log pins (the amend/reset/rebase safety net). Spawns the real
 //! binary.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

@@ -5,6 +5,7 @@
 //! tests assert that under concurrency the repo never corrupts, never
 //! deadlocks, and leaves no stale lock — and they pin the documented
 //! crash-leaves-stale-lock behavior.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
 

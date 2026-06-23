@@ -17,6 +17,7 @@
 //! that feature. With `algo-ed25519` off, the file compiles out.
 
 #![cfg(feature = "algo-ed25519")]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::path::PathBuf;
 

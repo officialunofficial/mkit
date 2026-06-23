@@ -32,6 +32,7 @@
 //! Fault injection (crash recovery, corrupted-object rejection, multi-process
 //! lock contention) is intentionally **out of scope here** — it needs a
 //! different technique and is tracked as the follow-up in issue #307.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fmt;
 use std::fs;

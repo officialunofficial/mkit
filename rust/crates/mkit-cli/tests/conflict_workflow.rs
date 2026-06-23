@@ -1,6 +1,7 @@
 //! Integration tests for the resolvable-conflict workflow (#177):
 //! merge / cherry-pick / rebase conflict → state → resolve → continue /
 //! abort / skip.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
