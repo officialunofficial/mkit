@@ -23,9 +23,13 @@
 //!
 //!   (a) appends its entire argv to `$MKIT_SSH_ARGV_LOG`, then
 //!   (b) finds the `mkit` token in that argv and `exec`s
-//!       `<this-crate's-mkit-binary> serve <path>` locally with inherited
+//!       `$MKIT_SSH_TARGET_BIN serve <path>` locally with inherited
 //!       stdin/stdout — i.e. it replaces the network hop with a local
 //!       `mkit serve`, while still exercising the real wire protocol.
+//!
+//! Both env vars are set on the `mkit clone` process and inherited by the
+//! spawned wrapper, so the script body stays fully static (no path is
+//! interpolated into shell source).
 //!
 //! No sshd, no network, no `ssh` binary required. The higher-fidelity
 //! real-`ssh(1)` variant lives in `ssh_e2e_real.rs` and is `#[ignore]`d.
@@ -61,25 +65,29 @@ fn run_in(cwd: &Path, xdg: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> 
 }
 
 /// Write the hermetic ssh-wrapper script and `chmod +x` it. The script
-/// records its argv and execs `<mkit_bin> serve <path>`.
-fn write_ssh_wrapper(dir: &Path, argv_log: &Path) -> std::path::PathBuf {
+/// records its argv and execs `$MKIT_SSH_TARGET_BIN serve <path>`.
+///
+/// All dynamic inputs (the argv log path, the target binary) arrive via
+/// the environment, so the script body is fully static — no path is
+/// interpolated into shell source, leaving no injection surface. The
+/// caller sets `MKIT_SSH_ARGV_LOG` and `MKIT_SSH_TARGET_BIN` on the
+/// `mkit clone` process; `build_ssh_command` spawns this wrapper without
+/// clearing the environment, so both vars reach it.
+fn write_ssh_wrapper(dir: &Path) -> std::path::PathBuf {
     let wrapper = dir.join("fake_ssh.sh");
-    // The wrapper receives the full ssh argv. The remote command is the
-    // trailing `mkit serve <path>` (three tokens). We log everything for
-    // the assertions, then exec the local binary against <path>.
-    //
-    // `MKIT_BIN` and `ARGV_LOG` are templated in as absolute paths so the
-    // script never depends on PATH or cwd.
-    let script = format!(
-        r#"#!/bin/sh
+    // `set -eu`: fail loud on any error and on a missing MKIT_SSH_* var
+    // rather than silently logging to nowhere or exec'ing an empty path.
+    let script = r#"#!/bin/sh
+set -eu
+
 # Record the full argv this wrapper was invoked with, one token per line,
 # framed by a record separator so the test can scan a single invocation.
-{{
+{
   echo "=== ssh invocation ==="
   for a in "$@"; do
     printf '%s\n' "$a"
   done
-}} >> "{argv_log}"
+} >> "$MKIT_SSH_ARGV_LOG"
 
 # Find the `mkit serve <path>` triple at the tail of the argv and exec it
 # locally. We walk forward to the literal `mkit` token; everything after
@@ -87,15 +95,15 @@ fn write_ssh_wrapper(dir: &Path, argv_log: &Path) -> std::path::PathBuf {
 found=0
 path=""
 for a in "$@"; do
-  if [ "$found" = "2" ]; then
+  if [ "$found" = 2 ]; then
     path="$a"
     break
   fi
-  if [ "$found" = "1" ] && [ "$a" = "serve" ]; then
+  if [ "$found" = 1 ] && [ "$a" = serve ]; then
     found=2
     continue
   fi
-  if [ "$a" = "mkit" ]; then
+  if [ "$a" = mkit ]; then
     found=1
   fi
 done
@@ -105,11 +113,8 @@ if [ -z "$path" ]; then
   exit 64
 fi
 
-exec "{mkit_bin}" serve "$path"
-"#,
-        argv_log = argv_log.display(),
-        mkit_bin = mkit_bin(),
-    );
+exec "$MKIT_SSH_TARGET_BIN" serve "$path"
+"#;
     fs::write(&wrapper, script).expect("write wrapper");
     #[cfg(unix)]
     {
@@ -234,7 +239,7 @@ fn ssh_clone_moves_data_and_delivers_pinned_options() {
 
     // --- Hermetic ssh wrapper -------------------------------------------
     let argv_log = root.join("ssh_argv.log");
-    let wrapper = write_ssh_wrapper(root, &argv_log);
+    let wrapper = write_ssh_wrapper(root);
 
     // --- Clone over mkit+ssh:// -----------------------------------------
     // We serve the push-populated `remote` repo (it carries the packmap
@@ -249,7 +254,11 @@ fn ssh_clone_moves_data_and_delivers_pinned_options() {
         root,
         xdg.path(),
         &["clone", &url, dest_str],
-        &[("MKIT_SSH_PROGRAM", wrapper.to_str().unwrap())],
+        &[
+            ("MKIT_SSH_PROGRAM", wrapper.to_str().unwrap()),
+            ("MKIT_SSH_ARGV_LOG", argv_log.to_str().unwrap()),
+            ("MKIT_SSH_TARGET_BIN", mkit_bin()),
+        ],
     );
     assert!(
         clone.status.success(),
