@@ -86,7 +86,6 @@ fn write_ssh_wrapper(dir: &Path, argv_log: &Path) -> std::path::PathBuf {
 # `mkit serve` is the path.
 found=0
 path=""
-prev=""
 for a in "$@"; do
   if [ "$found" = "2" ]; then
     path="$a"
@@ -99,7 +98,6 @@ for a in "$@"; do
   if [ "$a" = "mkit" ]; then
     found=1
   fi
-  prev="$a"
 done
 
 if [ -z "$path" ]; then
@@ -209,7 +207,14 @@ fn ssh_clone_moves_data_and_delivers_pinned_options() {
     fs::write(&known_hosts, b"# pinned known hosts for e2e\n").unwrap();
     let identity = root.join("id_ed25519_e2e");
     fs::write(&identity, b"-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n").unwrap();
-    let strict_value = "accept-new";
+    // Must NOT be "accept-new": `build_ssh_command` emits
+    // `StrictHostKeyChecking=accept-new` as its default baseline whenever
+    // the configured value is empty, so an `accept-new` pin would pass the
+    // assertion below even on pre-fix code. "yes" is only ever produced by
+    // the live Config→SshOptions wiring, making the assertion discriminating.
+    // The hermetic `fake_ssh.sh` shim ignores all `-o` options, so the
+    // clone still succeeds regardless of the value.
+    let strict_value = "yes";
 
     // Set the three ssh.* keys in the USER-scoped config (they are
     // REPO_FORBIDDEN_KEYS, so only user scope may set them). `mkit
