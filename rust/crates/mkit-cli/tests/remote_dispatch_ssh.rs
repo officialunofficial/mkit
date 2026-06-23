@@ -3,8 +3,8 @@
 //!
 //! ## Why no live SSH subprocess here
 //!
-//! `SshTransport::connect` shells out to `ssh(1)` and performs an
-//! `OP_HELLO` handshake against a real peer. Running a live
+//! `SshTransport::connect_with_options` shells out to `ssh(1)` and
+//! performs an `OP_HELLO` handshake against a real peer. Running a live
 //! subprocess in CI would require:
 //!
 //! - A known-good `ssh` binary on `$PATH` (not guaranteed on minimal
@@ -28,7 +28,8 @@ use mkit_transport_ssh::{parse_mkit_ssh_url, validate_ssh_path};
 #[test]
 fn open_accepts_syntactically_valid_mkit_ssh_url() {
     // `open()` itself short-circuits on the `mkit+ssh://` prefix and
-    // calls `SshTransport::connect`, which DOES spawn `ssh(1)`. We
+    // calls `SshTransport::connect_with_options` (default options), which
+    // DOES spawn `ssh(1)`. We
     // can't guarantee `ssh` is on `$PATH` in CI, so a successful
     // `open()` here would be a test-flakiness hazard. Instead we
     // assert that open EITHER succeeds (ssh is available and a local
