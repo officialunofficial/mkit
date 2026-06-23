@@ -23,8 +23,8 @@ const DEFAULT_IMAGE: ImageAsset = {
   bytes: TEXT_ENCODER.encode(DEFAULT_SVG),
 }
 
-// Demo/browser cap. `/hash` builds an ArrayBuffer, WASM blob, and base64 data URL for preview, so keep this much lower
-// than the streaming demo and reject before allocating the file bytes.
+// Demo/browser cap. This demo builds an ArrayBuffer, WASM blob, and base64 data URL for preview, so keep this much
+// lower than the streaming demo and reject before allocating the file bytes.
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 export function HashDemo() {
@@ -158,9 +158,9 @@ export function HashDemo() {
             </div>
             {tooLarge ? (
               <p className='rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400'>
-                <span className='font-medium'>{tooLarge.name}</span> is {formatBytes(tooLarge.size)}. The `/hash` demo
-                previews files as data URLs, so it rejects files over {formatBytes(MAX_IMAGE_BYTES)} before reading
-                them. Use `/streaming` for larger files.
+                <span className='font-medium'>{tooLarge.name}</span> is {formatBytes(tooLarge.size)}. This demo previews
+                files as data URLs, so it rejects files over {formatBytes(MAX_IMAGE_BYTES)} before reading them. The
+                streaming tab handles larger files.
               </p>
             ) : null}
             <input

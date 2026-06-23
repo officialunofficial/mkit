@@ -40,12 +40,14 @@ export function SignDemo() {
   }
 
   return (
-    <div className='space-y-6'>
-      <label className='block'>
-        <span className='mb-2 block text-sm text-muted'>Private key</span>
-        <input className={INPUT_CLASSES_XS} value={seed} onChange={(e) => setSeed(e.target.value.trim())} />
-      </label>
-      <Button onClick={fresh}>Generate a new key</Button>
+    <div className='space-y-4'>
+      <div className='flex items-end gap-2'>
+        <label className='block flex-1'>
+          <span className='mb-1.5 block text-sm text-muted'>Private key</span>
+          <input className={INPUT_CLASSES_XS} value={seed} onChange={(e) => setSeed(e.target.value.trim())} />
+        </label>
+        <Button onClick={fresh}>New key</Button>
+      </div>
 
       <FieldList>
         <Field label='Public key'>
@@ -57,29 +59,26 @@ export function SignDemo() {
         </Field>
       </FieldList>
 
-      <label className='block'>
-        <span className='mb-2 block text-sm text-muted'>Message</span>
-        <input
-          className={INPUT_CLASSES}
-          value={message}
-          onChange={(e) => {
-            setMessage(e.target.value)
-            setSig(null)
-          }}
-        />
-      </label>
-      <Button onClick={doSign} disabled={'error' in keypair}>
-        Sign
-      </Button>
+      <div className='flex items-end gap-2'>
+        <label className='block flex-1'>
+          <span className='mb-1.5 block text-sm text-muted'>Message</span>
+          <input
+            className={INPUT_CLASSES}
+            value={message}
+            onChange={(e) => {
+              setMessage(e.target.value)
+              setSig(null)
+            }}
+          />
+        </label>
+        <Button onClick={doSign} disabled={'error' in keypair}>
+          Sign
+        </Button>
+      </div>
 
       {sig ? (
         <>
-          <FieldList>
-            <Field label='Signature'>
-              <code className='font-mono text-xs break-all'>{sig}</code>
-            </Field>
-          </FieldList>
-          <label className='flex cursor-pointer items-center gap-2 py-2 text-sm'>
+          <label className='flex cursor-pointer items-center gap-2 text-sm'>
             <input
               type='checkbox'
               className='accent-fg'
@@ -89,6 +88,9 @@ export function SignDemo() {
             Tamper with the message before verifying
           </label>
           <FieldList>
+            <Field label='Signature'>
+              <code className='font-mono text-xs break-all'>{sig}</code>
+            </Field>
             <Field label='Verifies'>
               {verdict === null ? null : (
                 <span className={verdict ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'}>

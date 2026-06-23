@@ -10,10 +10,7 @@ const NAV_LINKS = [
   { to: '/performance', label: 'performance' },
   { to: '/parity', label: 'parity' },
   { to: '/push', label: 'push' },
-  { to: '/hash', label: 'hash' },
-  { to: '/sign', label: 'sign' },
-  { to: '/streaming', label: 'streaming' },
-  { to: '/attest', label: 'attest' },
+  { to: '/demos', label: 'demos' },
 ] as const
 
 export const Header = () => {
@@ -36,12 +33,15 @@ export const Header = () => {
           <Link to='/' className='-m-3 flex items-center p-3' aria-label='mkit home'>
             <GridLogo className='size-5 rounded-[3px]' />
           </Link>
-          <nav className='flex items-center gap-4 text-sm'>
+          {/* min-w-0 + flex-1 lets the nav shrink and scroll horizontally on
+              narrow screens instead of overflowing the row; scrollbar hidden
+              since the row is short and the links wrap off-edge cleanly. */}
+          <nav className='flex min-w-0 flex-1 items-center gap-4 overflow-x-auto text-sm [scrollbar-width:none] [&::-webkit-scrollbar]:hidden'>
             {NAV_LINKS.map(({ to, label }) => (
               <Link
                 key={to}
                 to={to}
-                className='-mx-1 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
+                className='-mx-1 shrink-0 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
               >
                 {label}
               </Link>
