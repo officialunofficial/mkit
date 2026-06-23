@@ -2,6 +2,7 @@
 //! `show-ref` / `for-each-ref` / `symbolic-ref` (#251). Covers the
 //! mkit-specific paths the differential harness can't compare (abbreviated
 //! BLAKE3 ids, repo-root path, `-z`, detached HEAD, unsupported format atoms).
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::io::Write;

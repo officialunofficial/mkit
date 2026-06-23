@@ -4,6 +4,7 @@
 //! diff, blob contents, tree listing, tag peeling, default-to-HEAD, and the
 //! unknown-object error. The diff body's byte-parity with `git show` is
 //! covered by the differential harness.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

@@ -23,6 +23,7 @@
 
 #![cfg(feature = "tcp")]
 #![allow(clippy::missing_panics_doc)]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Barrier, Mutex as StdMutex};

@@ -12,6 +12,7 @@
 //! every test is gated below.
 
 #![cfg(feature = "pack-shards")]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::time::Duration;
 

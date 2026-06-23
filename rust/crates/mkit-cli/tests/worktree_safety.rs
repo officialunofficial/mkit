@@ -6,6 +6,7 @@
 //! - #222: the `worktree.lock` serialises mutating commands — a second
 //!   mutator blocks on the held lock and ultimately fails rather than
 //!   racing the worktree/index.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

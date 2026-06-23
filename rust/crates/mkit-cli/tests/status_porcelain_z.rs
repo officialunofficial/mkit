@@ -2,6 +2,7 @@
 //! records, and default porcelain C-style-quotes special-byte paths.
 
 #![cfg(unix)]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

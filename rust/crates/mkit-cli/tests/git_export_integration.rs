@@ -11,6 +11,7 @@
 //! complementing the default-features proptest state machine, which
 //! cannot carry feature-gated ops.
 #![cfg(feature = "git-bridge")]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
 

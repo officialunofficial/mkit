@@ -13,6 +13,7 @@
 //! encoder so regressions in either half surface here.
 
 #![cfg(feature = "sparse-checkout")]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::path::PathBuf;
 

@@ -21,6 +21,7 @@
 //! assertion exercises the same entry point the CLI dispatch calls —
 //! `parse_mkit_ssh_url` — so a regression in URL validation would show
 //! up here without needing a running sshd.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use mkit_cli::remote_dispatch;
 use mkit_transport_ssh::{parse_mkit_ssh_url, validate_ssh_path};

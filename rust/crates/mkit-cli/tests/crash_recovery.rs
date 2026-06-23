@@ -15,6 +15,7 @@
 //!   * **parseable partial** image → the same, PLUS: if the recovery command
 //!     reports success, the full `check_invariants` must hold.
 //!   * **successful `--abort`** → no in-progress marker / residue remains.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
 

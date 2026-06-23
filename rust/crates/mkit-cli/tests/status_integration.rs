@@ -5,6 +5,7 @@
 //! than the default human prose, which lives on stderr. The porcelain
 //! contract is the long-term machine interface; the human format is
 //! presentation-only and free to change.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

@@ -77,6 +77,11 @@ module_inception = "allow"
 # carry their own duplicate-version baggage we do not control. Revisit once
 # the ecosystem converges.
 multiple_crate_versions = "allow"
+# Panicking on a `None`/`Err` hides failure modes from callers. Production code
+# must surface errors via `?`/typed errors; tests are exempt
+# (`allow-unwrap-in-tests` in clippy.toml), where a failed unwrap *is* the
+# assertion.
+unwrap_used = "deny"
 
 [profile.release]
 codegen-units = 1

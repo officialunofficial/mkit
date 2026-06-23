@@ -4,6 +4,7 @@
 //!
 //! Cross-binds the store layout (`docs/SPEC-OBJECTS.md` §10) to the
 //! canonical byte format pinned by `tests/golden.rs`.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::PathBuf;

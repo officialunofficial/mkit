@@ -2,6 +2,7 @@
 //! server. We spawn the real binary and speak newline-delimited
 //! JSON-RPC over its stdin/stdout, exercising the full
 //! initialize → tools/list → tools/call lifecycle against temp repos.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;

@@ -5,6 +5,7 @@
 //! (we emit keys in a known order, escape control bytes, never embed
 //! raw quotes in hashes / branch names), so a search-for-key approach
 //! suffices and we avoid pulling `serde_json` into the dev deps.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

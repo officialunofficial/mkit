@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};

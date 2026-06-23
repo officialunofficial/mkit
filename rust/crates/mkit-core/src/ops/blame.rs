@@ -122,12 +122,11 @@ pub fn blame_file(
             break;
         }
     }
-    if history.is_empty() {
+    // Oldest entry: every line attributed to it. An empty history means the
+    // file was never present in any commit along the walk.
+    let Some(oldest) = history.last().cloned() else {
         return Err(BlameError::FileNotFound(file_path.to_string()));
-    }
-
-    // Oldest entry: every line attributed to it.
-    let oldest = history.last().unwrap().clone();
+    };
     let oldest_lines = load_blob_lines(store, oldest.blob_hash)?;
     let mut attributions: Vec<Attribution> = oldest_lines
         .iter()

@@ -4,6 +4,7 @@
 //! `key = value` lines into `.mkit/config` via `config::write`, which
 //! emits values raw. Both commands must reject control characters before
 //! persisting. Driven end-to-end through the real binary.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

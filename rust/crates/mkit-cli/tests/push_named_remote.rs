@@ -4,6 +4,7 @@
 //! bare-directory remote (the file transport is URL-reachable and
 //! honours CAS `update_ref`, so non-fast-forward rejection is exercised
 //! for real).
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

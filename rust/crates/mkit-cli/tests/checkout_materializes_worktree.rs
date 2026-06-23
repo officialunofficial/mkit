@@ -1,5 +1,6 @@
 //! `mkit checkout` must protect dirty work before rematerialising a
 //! branch tip's tree on disk.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

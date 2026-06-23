@@ -13,6 +13,7 @@
 //! - round-trip byte-identically through `add` → `commit` → `checkout`,
 //! - and `mkit cat <hash>` must stream its reassembled content rather
 //!   than the `Object::chunked_blob` placeholder.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

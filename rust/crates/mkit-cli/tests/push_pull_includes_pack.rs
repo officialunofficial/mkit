@@ -1,6 +1,7 @@
 //! push + pull must transfer the full object closure, not just ref
 //! pointers. Integration test: repo A commits two files and pushes;
 //! repo B pulls; all commit/tree/blob objects end up in repo B.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::collections::HashSet;
 use std::fs;

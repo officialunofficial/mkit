@@ -2,6 +2,7 @@
 //! timestamp (git parity: a replay re-signs but never re-attributes).
 //! `user.identity` config is not consulted during replay at all — it
 //! applies to NEW commits (`commit`, `merge`), not rewritten ones.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fmt::Write as _;
 use std::fs;

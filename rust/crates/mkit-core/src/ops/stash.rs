@@ -654,10 +654,6 @@ pub fn serialize_list(list: &StashList) -> StashResult<Vec<u8>> {
 ///
 /// # Errors
 /// - [`StashError::InvalidFormat`] if the bytes are malformed.
-///
-/// # Panics
-/// Panics only on internal invariant violation: each `try_into` on a
-/// 4-byte / 2-byte slice we just bounds-checked cannot fail.
 pub fn deserialize_list(data: &[u8]) -> StashResult<StashList> {
     if data.len() < 8 {
         return Err(StashError::InvalidFormat);
@@ -665,7 +661,11 @@ pub fn deserialize_list(data: &[u8]) -> StashResult<StashList> {
     if &data[..4] != MAGIC.as_slice() {
         return Err(StashError::InvalidFormat);
     }
-    let count = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+    let count = u32::from_le_bytes(
+        data[4..8]
+            .try_into()
+            .map_err(|_| StashError::InvalidFormat)?,
+    ) as usize;
     // Reject an attacker-supplied `count` that cannot possibly fit in
     // the remaining body. With [`MIN_ENTRY_BYTES`] = 70 (empty message)
     // an 8-byte header declaring count = u32::MAX is rejected here
@@ -685,9 +685,17 @@ pub fn deserialize_list(data: &[u8]) -> StashResult<StashList> {
         let mut parent_hash = [0u8; 32];
         parent_hash.copy_from_slice(&data[pos..pos + 32]);
         pos += 32;
-        let timestamp = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+        let timestamp = u32::from_le_bytes(
+            data[pos..pos + 4]
+                .try_into()
+                .map_err(|_| StashError::InvalidFormat)?,
+        );
         pos += 4;
-        let msg_len = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+        let msg_len = u16::from_le_bytes(
+            data[pos..pos + 2]
+                .try_into()
+                .map_err(|_| StashError::InvalidFormat)?,
+        ) as usize;
         pos += 2;
         if pos + msg_len > data.len() {
             return Err(StashError::InvalidFormat);

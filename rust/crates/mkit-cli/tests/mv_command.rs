@@ -2,6 +2,7 @@
 //! (#250). mkit has no rename detection, so `status` shows the
 //! move as a delete + add rather than git's `R`; these tests assert the
 //! worktree move and the staged/committed result instead.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

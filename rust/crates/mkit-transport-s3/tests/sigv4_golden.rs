@@ -6,6 +6,7 @@
 //! produces byte-identical `canonical_request`, `string_to_sign`, and
 //! final `signature_hex` for those inputs. If this test fails, either
 //! fix the code or re-generate the fixture intentionally.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::path::PathBuf;
 

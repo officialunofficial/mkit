@@ -17,6 +17,7 @@
 //! responds with canned JSON / bytes that mimic the real VCS Worker. The
 //! test doesn't depend on the real worker; it only asserts the client's
 //! wire behaviour.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::process::Command;
 

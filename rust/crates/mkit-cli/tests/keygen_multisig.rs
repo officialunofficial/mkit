@@ -8,6 +8,7 @@
 //! --additional-signer ...`.
 //! * Verify the envelope with `mkit verify-attest` against a
 //! trust-roots TOML listing every pubkey.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

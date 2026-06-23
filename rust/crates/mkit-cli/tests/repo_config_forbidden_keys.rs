@@ -16,6 +16,7 @@
 //! `every_forbidden_key_is_actually_dropped_from_repo_scope` in
 //! `mkit_cli::config` keeps the parser-side coverage tight; this file
 //! adds the CLI-surface coverage.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

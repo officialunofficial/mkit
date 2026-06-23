@@ -3,6 +3,7 @@
 //! tests prove the upgraded semantics actually flow through the real
 //! commands that consume the matcher — `add` (worktree tree-builder) and
 //! `ls-files --others`.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

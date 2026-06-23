@@ -19,6 +19,7 @@
 //! test file is an empty compilation unit.
 
 #![cfg(feature = "algo-secp256k1")]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use mkit_attest::signer_k256::{Secp256k1Signer, verify_secp256k1};
 

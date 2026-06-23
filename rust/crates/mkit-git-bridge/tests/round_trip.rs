@@ -4,6 +4,7 @@
 //! BLAKE3 hashes, and original-signature re-verification — plus a
 //! determinism check (two independent translations agree) and a
 //! differential check against the real `git` binary when present.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use mkit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tag, Tree, TreeEntry};
 use mkit_core::sign::{KeyPair, sign_commit, sign_tag};

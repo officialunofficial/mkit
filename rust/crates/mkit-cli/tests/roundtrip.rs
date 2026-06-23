@@ -8,6 +8,7 @@
 //! - `add` + `commit` + `log` roundtrip
 //! - `show <hash>` round-trip (here: `mkit cat <hash>`; `show` is an
 //! alias we do not expose).
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

@@ -13,6 +13,7 @@
 //!   * **deserialize** — write a *content-addressed* garbage object (bytes whose
 //!     BLAKE3 matches the path) so it passes content-addressing and then fails
 //!     to decode (bad magic / truncated / bad type).
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
 

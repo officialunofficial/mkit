@@ -10,6 +10,7 @@
 //!
 //! If you change byte layout in the spec, regenerate the fixtures
 //! intentionally and then re-run this suite.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::PathBuf;

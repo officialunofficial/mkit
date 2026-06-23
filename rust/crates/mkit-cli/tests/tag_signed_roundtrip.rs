@@ -7,6 +7,7 @@
 //! - `tag -s` writes a signed tag object that `mkit verify <name>`
 //!   accepts,
 //! - tampering the stored signed-tag object makes verify fail.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

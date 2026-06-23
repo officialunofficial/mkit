@@ -7,6 +7,7 @@
 //! (`tag -a`, `attest`) block and then fail with a lock error rather than
 //! racing — proving they acquire it. (fetch/pull take the lock in
 //! `remote_dispatch`; covered by the remote round-trip tests.)
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

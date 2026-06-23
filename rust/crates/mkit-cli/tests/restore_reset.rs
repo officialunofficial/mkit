@@ -11,6 +11,7 @@
 //!   target tree, leaving the worktree.
 //! - `reset` resolves `<commit>` as a short hash, branch name, and
 //!   `HEAD~1` via the shared revspec resolver.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

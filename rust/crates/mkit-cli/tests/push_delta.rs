@@ -9,6 +9,7 @@
 //!    with every object hash verifying (acceptance #2).
 //! 3. Re-pushing identical content transfers nothing — identical-object
 //!    dedup is preferred over delta (acceptance #3).
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

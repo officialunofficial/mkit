@@ -5,6 +5,7 @@
 //! parent process state. The parent crate has `#![forbid(unsafe_code)]`,
 //! so `std::env::set_var` (unsafe since edition 2024) is not available
 //! in-process tests.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::io::Write;

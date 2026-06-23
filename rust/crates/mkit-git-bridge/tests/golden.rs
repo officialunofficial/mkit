@@ -14,6 +14,7 @@
 //! Default mode is read-only assertion (the repo convention). Set
 //! `UPDATE_GOLDEN=1` to (re)write the files after a *deliberate,
 //! spec-versioned* mapping change.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use mkit_core::object::{
     Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, Tag, Tree, TreeEntry,

@@ -8,6 +8,7 @@
 //! build has no history journal to inspect).
 
 #![cfg(feature = "history-mmr")]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::{Path, PathBuf};

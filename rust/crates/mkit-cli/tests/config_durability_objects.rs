@@ -4,6 +4,7 @@
 //! config` — regression for the review finding that
 //! `mkit config durability.objects per-object` exited 78 with
 //! "unknown config key".
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::process::Command;
 

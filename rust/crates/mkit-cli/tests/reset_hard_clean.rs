@@ -5,6 +5,7 @@
 //! divergence): `reset --hard` discards tracked changes silently in git
 //! but refuses dirty content here unless `-f`; `clean` mirrors git's
 //! `clean.requireForce`.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

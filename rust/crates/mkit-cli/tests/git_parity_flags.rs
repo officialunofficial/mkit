@@ -3,6 +3,7 @@
 //! `cherry-pick -n`/`-m`, `merge -m`, `branch` ancestry filters,
 //! `show --stat`, `diff --merge-base`, `stash@{N}`, and case-insensitive
 //! `config` keys. Each asserts the git-shaped behavior end to end.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
 

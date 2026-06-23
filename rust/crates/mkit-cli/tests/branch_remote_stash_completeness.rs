@@ -7,6 +7,7 @@
 //! - `remote remove` / `remote rename` (named-remote config mutations,
 //!   trust boundary preserved).
 //! - `stash apply` (keeps the entry, guarded) and `stash clear`.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;

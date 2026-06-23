@@ -9,6 +9,7 @@
 //! every binary uses every helper — hence the crate-wide `allow(dead_code)`.
 
 #![allow(dead_code)]
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

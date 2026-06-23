@@ -11,6 +11,7 @@
 //!    fixture.
 //! 5. Re-derive `BLAKE3(len_le16(domain) || domain || signing_bytes)` and
 //!    assert it matches the recorded stable signing-hash vectors.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::PathBuf;

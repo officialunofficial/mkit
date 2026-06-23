@@ -2,6 +2,7 @@
 //! first-class citizens of revspec/merge/show-ref/for-each-ref,
 //! printable opaque identities render as text, replays preserve
 //! authorship, and `remote rename/remove` cleans tracking refs.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
 

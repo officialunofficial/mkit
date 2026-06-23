@@ -20,6 +20,7 @@
 //! constructing the transport directly via the test-only
 //! `S3Transport::with_parts` and asserting on the mockito-captured
 //! headers.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::process::Command;
 

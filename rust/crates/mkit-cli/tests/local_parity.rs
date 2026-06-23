@@ -2,6 +2,7 @@
 //! `rm` worktree removal + `--cached`/`-r`/`-f` + dirty/untracked
 //! guards, `diff` unified hunks + `--staged` + pathspecs, and
 //! `add -A`/`-u`/multi-pathspec. Spawns the real binary.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::process::Command;

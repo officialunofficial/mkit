@@ -433,11 +433,11 @@ fn merge_entries_recursive(
             ti += 1;
         }
 
-        match (has_base, has_ours, has_theirs) {
-            (true, true, true) => {
-                let b = base_entry.unwrap();
-                let o = ours_entry.unwrap();
-                let t = theirs_entry.unwrap();
+        // Match on the captured entries themselves rather than the parallel
+        // booleans: the `Some`/`None` shape carries the same information and
+        // binds the references directly, so there is nothing to `unwrap`.
+        match (base_entry, ours_entry, theirs_entry) {
+            (Some(b), Some(o), Some(t)) => {
                 let b_eq_o = hash_and_mode_eq(b, o);
                 let b_eq_t = hash_and_mode_eq(b, t);
                 let o_eq_t = hash_and_mode_eq(o, t);
@@ -536,17 +536,13 @@ fn merge_entries_recursive(
                     add_entry(merged, min_name, o.mode, o.object_hash);
                 }
             }
-            (false, true, false) => {
-                let o = ours_entry.unwrap();
+            (None, Some(o), None) => {
                 add_entry(merged, min_name, o.mode, o.object_hash);
             }
-            (false, false, true) => {
-                let t = theirs_entry.unwrap();
+            (None, None, Some(t)) => {
                 add_entry(merged, min_name, t.mode, t.object_hash);
             }
-            (false, true, true) => {
-                let o = ours_entry.unwrap();
-                let t = theirs_entry.unwrap();
+            (None, Some(o), Some(t)) => {
                 if hash_and_mode_eq(o, t) {
                     add_entry(merged, min_name, o.mode, o.object_hash);
                 } else if o.mode == EntryMode::Tree && t.mode == EntryMode::Tree {
@@ -574,9 +570,7 @@ fn merge_entries_recursive(
                     add_entry(merged, min_name, o.mode, o.object_hash);
                 }
             }
-            (true, true, false) => {
-                let b = base_entry.unwrap();
-                let o = ours_entry.unwrap();
+            (Some(b), Some(o), None) => {
                 if hash_and_mode_eq(b, o) {
                     // Ours unchanged, theirs deleted -> delete.
                 } else {
@@ -592,9 +586,7 @@ fn merge_entries_recursive(
                     add_entry(merged, min_name, o.mode, o.object_hash);
                 }
             }
-            (true, false, true) => {
-                let b = base_entry.unwrap();
-                let t = theirs_entry.unwrap();
+            (Some(b), None, Some(t)) => {
                 if hash_and_mode_eq(b, t) {
                     // Theirs unchanged, ours deleted -> delete.
                 } else {
@@ -610,10 +602,10 @@ fn merge_entries_recursive(
                     add_entry(merged, min_name, t.mode, t.object_hash);
                 }
             }
-            (true, false, false) => {
+            (Some(_b), None, None) => {
                 // Both deleted -> delete.
             }
-            (false, false, false) => {
+            (None, None, None) => {
                 // unreachable — `min_of_three` returns None in this case
                 // and we'd have broken out of the loop above.
                 break;
