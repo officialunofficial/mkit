@@ -1,6 +1,6 @@
-pub const PAE: &[u8] = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
+pub(crate) const PAE: &[u8] = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
 
-pub struct Vector {
+pub(crate) struct Vector {
     pub label: &'static str,
     pub algorithm: &'static str,
     pub seed_hex: &'static str,
@@ -8,7 +8,7 @@ pub struct Vector {
     pub signature_hex: &'static str,
 }
 
-pub const VECTORS: &[Vector] = &[
+pub(crate) const VECTORS: &[Vector] = &[
     Vector {
         label: "ed25519-rfc8032-empty",
         algorithm: "ed25519",
