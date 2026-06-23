@@ -15,7 +15,7 @@ import { parseCrateInfo, parseCommands, parseWorkspaceVersion } from "./parse.mj
 import { sqlStr, fileStatements, findOversized } from "./seed.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..", ".."); // mcp/scripts -> mcp -> repo root
+const repoRoot = resolve(here, "..", "..", ".."); // apps/mcp/scripts -> apps/mcp -> apps -> repo root
 const distDir = resolve(here, "..", "dist");
 
 // Cloudflare D1 rejects any single SQL statement over 100 KB (applies to

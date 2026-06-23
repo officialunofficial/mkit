@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Stage canonical, repo-root files into web/public/ so the demo site serves
+// Stage canonical, repo-root files into apps/web/public/ so the demo site serves
 // them as static assets (e.g. https://mkit.sh/SKILL.md, https://mkit.sh/install.sh).
 // The repo-root files are the single source of truth; these generated copies are
 // gitignored. Run before `waku build`/`waku dev` so Waku collects them.
@@ -10,7 +10,8 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const repoRoot = resolve(here, '..', '..')
+// apps/web/scripts -> apps/web -> apps -> repo root
+const repoRoot = resolve(here, '..', '..', '..')
 const publicDir = resolve(here, '..', 'public')
 
 const files = process.argv.slice(2)

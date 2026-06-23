@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build command for Cloudflare Workers Builds (set in the dashboard as
-# `bash scripts/cf-build.sh` with root directory `/web`).
+# `bash scripts/cf-build.sh` with root directory `/apps/web`).
 #
 # The Workers Builds image ships Node + Bun but no Rust toolchain, and
 # vendor/mkit-wasm/pkg is built from source (gitignored), so this script

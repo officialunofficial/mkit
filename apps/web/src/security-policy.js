@@ -39,10 +39,13 @@ export const CSP_DIRECTIVES = [
   // are governed by `connect-src`, so the Worker origin must be listed here in
   // BOTH its http(s) and ws(s) forms or the browser blocks the calls (server-side
   // CORS is necessary but not sufficient). `localhost:8787` is local dev;
-  // `repo.mkit.sh` is the production repo Worker (apps/repo-worker, deployed
-  // separately). If the Worker is deployed to a different origin, update both
-  // entries here AND the `VITE_REPO_BACKEND_URL` the web build is given.
-  "connect-src 'self' https://cloudflareinsights.com http://localhost:8787 ws://localhost:8787 https://mkit-repo-worker.officialunofficial.workers.dev wss://mkit-repo-worker.officialunofficial.workers.dev https://repo.mkit.sh wss://repo.mkit.sh",
+  // `api.mkit.sh` is the production repo backend (apps/repo-worker, deployed
+  // separately and attached to the custom domain https://api.mkit.sh). The
+  // `mkit-repo-worker.*.workers.dev` entries stay as a fallback origin. If the
+  // Worker is deployed to a different origin, update both entries here AND the
+  // `VITE_REPO_BACKEND_URL` the web build is given (set it to
+  // https://api.mkit.sh for prod).
+  "connect-src 'self' https://cloudflareinsights.com http://localhost:8787 ws://localhost:8787 https://api.mkit.sh wss://api.mkit.sh https://mkit-repo-worker.officialunofficial.workers.dev wss://mkit-repo-worker.officialunofficial.workers.dev",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
 ]
