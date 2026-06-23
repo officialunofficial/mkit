@@ -53,7 +53,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'mv',
         status: 'divergent',
-        note: 'Single-file rename with clobber guards. Directory moves are not yet supported, and there is no rename detection.',
+        note: 'Renames files and directories with clobber guards (`-f`), including move-into-directory and multi-source moves. No rename detection, so `status` shows a move as delete + add, not `R`.',
       },
       {
         cmd: 'checkout',
