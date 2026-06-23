@@ -74,9 +74,9 @@ creeping; revisit post-v1 if demand warrants.
 | `init` | create repo | `.mkit/` repo | ✅ | — | — | marker differs (`.mkit/`) |
 | `add` | pathspecs, `-A`, `-u` | same | ✅ | — | — | `-p` interactive hunk staging shipped (#258, row below) |
 | `rm` | `--cached`, `-r`, `-f` + dirty guard | same | ✅ | — | — | guard is an mkit safety divergence |
-| `mv` | rename file or directory, `-f`, into-dir | same | ✅ | 2 | #250 | guarded: refuses to clobber w/o `-f` (incl. dangling symlink); rejects missing/untracked source; keeps writes inside the repo. No rename detection → `status` shows delete+add not `R`. **Directory moves** (`mv dir newdir`, or `mv dir existing-dir/` → `existing-dir/dir`) are supported: one filesystem rename moves the whole subtree (untracked files included, like git), each tracked file beneath is restaged at its new path. A directory move refuses a pre-existing destination **even with `-f`** (recursively deleting it would strand tracked files in the index and destroy untracked ones), refuses overlapping sources up front (`mv dir dir/file …`), and refuses moving a directory into itself. |
+| `mv` | rename file or directory, `-f`, into-dir | same | ✅ | 2 | #250 | guarded: refuses to clobber w/o `-f` (incl. dangling symlink); rejects missing/untracked source; keeps writes inside the repo. Exact rename detection (identical content id) → `status`/`diff` show `R` like git; `--no-renames` falls back to delete+add. **Directory moves** (`mv dir newdir`, or `mv dir existing-dir/` → `existing-dir/dir`) are supported: one filesystem rename moves the whole subtree (untracked files included, like git), each tracked file beneath is restaged at its new path. A directory move refuses a pre-existing destination **even with `-f`** (recursively deleting it would strand tracked files in the index and destroy untracked ones), refuses overlapping sources up front (`mv dir dir/file …`), and refuses moving a directory into itself. |
 | `status` | `--porcelain[=v1]`, `-s`, `-z`, C-style path quoting | same | ✅ | 1 | #249 | tracked changes combine into one `XY` record per path (e.g. `MM`); untracked stays its own `??` record, so a staged-delete-plus-untracked path emits both `D ` and `??` like git; quoting matches git `core.quotePath`; `-z` = raw NUL-terminated |
-| `status` | `--porcelain=v2` | same | ✅ | 1 | #249 | `1 <XY> N... <mH> <mI> <mW> <hH> <hI> <path>` (octal modes; full 64-hex BLAKE3 ids modulo length) + `? <path>` for untracked; no rename `2` lines (no rename detection); `--branch` header lines not emitted. A tracked path shadowed on disk by a directory is suppressed like git — only the tracked-side deletion is reported (#288) |
+| `status` | `--porcelain=v2` | same | ✅ | 1 | #249 | `1 <XY> N... <mH> <mI> <mW> <hH> <hI> <path>` (octal modes; full 64-hex BLAKE3 ids modulo length) + `? <path>` for untracked; exact renames emit a `2` `R100` record; `--branch` header lines not emitted. A tracked path shadowed on disk by a directory is suppressed like git — only the tracked-side deletion is reported (#288) |
 | `diff` | HEAD/worktree, `--staged`, pathspecs | same | ✅ | — | — | |
 | `diff` | `<rev>`, `<a>..<b>` ranges | implemented (`split_range`/`rev_to_tree`) | ✅ | 0 | #248 | docs reconciled (stale CLI.md divergence removed) |
 | `diff` | `--name-only`, `--name-status`, `-z` | same | ✅ | 1 | #249 | `A`/`D`/`M` (`T` = mkit mode change); special-byte paths C-quoted, `-z` = raw NUL (status letter + path each NUL-terminated); `-z` only with name-only/-status |
@@ -170,7 +170,7 @@ hash length:
   <mH> <mI> <mW> <hH> <hI> <path>` for tracked changes (octal modes; full
   64-hex BLAKE3 object ids, masked to git's length in the differential
   harness; `<sub>` always `N...`) and `? <path>` for untracked. `-z` raw
-  NUL-terminated. No rename `2` lines (mkit has no rename detection); no
+  NUL-terminated. Exact renames emit a `2` `R100` record; no
   `--branch` header lines. The tracked-side columns match git, including
   `mW = 000000` when a tracked file is shadowed by a directory.
 - **Untracked-walk collision (#288, resolved)** — when a tracked path is

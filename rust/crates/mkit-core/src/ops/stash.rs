@@ -529,6 +529,7 @@ pub fn render_stash_show(store: &ObjectStore, repo_root: &Path, idx: usize) -> S
             DiffKind::Removed => "D",
             DiffKind::Modified => "M",
             DiffKind::ModeChanged => "T",
+            DiffKind::Renamed => "R",
         };
         let _ = writeln!(out, "{tag} {}", e.path);
     }
