@@ -36,7 +36,9 @@ use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::object::{EntryMode, Object};
 use mkit_core::ops::merge::find_merge_base;
-use mkit_core::ops::{DiffEntry, DiffKind, diff_line_counts, diff_trees, unified_hunks};
+use mkit_core::ops::{
+    DiffEntry, DiffKind, detect_exact_renames, diff_line_counts, diff_trees, unified_hunks,
+};
 use mkit_core::refs;
 use mkit_core::store::{EphemeralSink, ObjectSource, ObjectStore};
 use mkit_core::worktree;
@@ -97,6 +99,17 @@ struct DiffOpts {
     /// Like `--exit-code` but print nothing (`git diff --quiet`).
     #[arg(long)]
     quiet: bool,
+
+    /// Turn off rename detection (on by default, like git). A move then
+    /// shows as a separate deletion and addition.
+    #[arg(long = "no-renames")]
+    no_renames: bool,
+
+    /// Detect renames, optionally with a similarity threshold (`-M`,
+    /// `--find-renames[=N]`). mkit pairs by identical content (exact,
+    /// 100%), so any threshold ≤ 100 selects the same matches.
+    #[arg(short = 'M', long = "find-renames", value_name = "N", num_args = 0..=1, default_missing_value = "100")]
+    find_renames: Option<String>,
 
     /// Colorize the patch: `always`, `auto` (default, tty-only), or
     /// `never` (like `git diff --color[=<when>]`). Honors `NO_COLOR` /
@@ -164,10 +177,24 @@ pub fn run(args: &[String]) -> u8 {
         Err((msg, code)) => return emit_err(&msg, code),
     };
 
-    let result = match diff_trees(&snapshot, old_tree, new_tree) {
+    let mut result = match diff_trees(&snapshot, old_tree, new_tree) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("diff: {e}"), exit::GENERAL_ERROR),
     };
+
+    // Rename detection (on by default, like git's `diff.renames`): collapse
+    // identical-content delete/add pairs into `R` entries before filtering
+    // and rendering. A provided threshold must parse, but the exact matcher
+    // ignores its magnitude.
+    if let Some(t) = &opts.find_renames {
+        let n = t.trim_end_matches('%');
+        if !n.is_empty() && n.parse::<u8>().is_err() {
+            return emit_err(&format!("invalid --find-renames value: {t}"), exit::USAGE);
+        }
+    }
+    if !opts.no_renames {
+        detect_exact_renames(&mut result.entries);
+    }
 
     let normalized: Vec<String> = pathspecs.iter().map(|p| normalize_pathspec(p)).collect();
     let selected: Vec<&mkit_core::ops::DiffEntry> = result
@@ -512,6 +539,10 @@ fn name_status_letter(kind: DiffKind) -> char {
         DiffKind::Removed => 'D',
         DiffKind::Modified => 'M',
         DiffKind::ModeChanged => 'T',
+        // Renames carry a similarity score (`R100`) and two paths, so
+        // `--name-status` formats them specially in `emit_entry_name`;
+        // this bare letter is the fallback / name-only case.
+        DiffKind::Renamed => 'R',
     }
 }
 
@@ -524,6 +555,20 @@ fn name_status_letter(kind: DiffKind) -> char {
 /// the status letter and path are each their own NUL-terminated field
 /// (matching `git diff --name-status -z`).
 fn emit_entry_name(out: &mut impl Write, e: &DiffEntry, name_status: bool, z: bool) {
+    // `--name-status` rename: git emits `R100<sep><src><sep><dst>` (source
+    // first, unlike status's porcelain `-z`), TAB-separated by default and
+    // NUL-separated under `-z`. Verified against git.
+    if name_status && e.kind == DiffKind::Renamed {
+        let src = e.old_path.as_deref().unwrap_or(&e.path);
+        if z {
+            let _ = write!(out, "R100\0{src}\0{}\0", e.path);
+        } else {
+            let sq = super::c_quote_path(src).unwrap_or_else(|| src.to_string());
+            let dq = super::c_quote_path(&e.path).unwrap_or_else(|| e.path.clone());
+            let _ = writeln!(out, "R100\t{sq}\t{dq}");
+        }
+        return;
+    }
     if z {
         if name_status {
             let _ = write!(out, "{}\0", name_status_letter(e.kind));
@@ -989,12 +1034,27 @@ pub(super) fn emit_entry_patch<S: ObjectSource + ?Sized>(
     e: &DiffEntry,
 ) -> Result<(), String> {
     // git C-style quotes special-byte paths in the header (core.quotePath),
-    // quoting the whole `a/<path>` / `b/<path>` token as a unit.
-    let a_path = quoted_side('a', &e.path);
+    // quoting the whole `a/<path>` / `b/<path>` token as a unit. For a
+    // rename the `a/` side is the source path, the `b/` side the dest.
+    let a_src = if e.kind == DiffKind::Renamed {
+        e.old_path.as_deref().unwrap_or(&e.path)
+    } else {
+        e.path.as_str()
+    };
+    let a_path = quoted_side('a', a_src);
     let b_path = quoted_side('b', &e.path);
     let _ = writeln!(out, "diff --git {a_path} {b_path}");
 
     match e.kind {
+        DiffKind::Renamed => {
+            // Exact rename: identical content, so 100% similar and no hunk.
+            let from = super::c_quote_path(a_src).unwrap_or_else(|| a_src.to_string());
+            let to = super::c_quote_path(&e.path).unwrap_or_else(|| e.path.clone());
+            let _ = writeln!(out, "similarity index 100%");
+            let _ = writeln!(out, "rename from {from}");
+            let _ = writeln!(out, "rename to {to}");
+            return Ok(());
+        }
         DiffKind::ModeChanged => {
             // Identical content, mode flip — only the mode lines, no hunks.
             let _ = writeln!(out, "old mode {}", git_octal(e.old_mode));
@@ -1082,6 +1142,7 @@ mod tests {
             new_hash: None,
             old_mode: None,
             new_mode: None,
+            old_path: None,
         }
     }
 

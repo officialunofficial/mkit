@@ -57,9 +57,9 @@
 //! octal file modes in HEAD / index / worktree, and `<hH>/<hI>` are the
 //! HEAD and index object ids (full 64-hex BLAKE3; git's are 40-hex
 //! SHA-1, so the differential harness masks length). Untracked paths are
-//! `? <path>` records. mkit emits no rename (`2`) records — it has no
-//! rename detection — and no `--branch` header lines. Path quoting and
-//! `-z` semantics match the v1 renderer.
+//! `? <path>` records, and a rename emits a `2` record (`R100`, exact
+//! content). There are no `--branch` header lines. Path quoting and `-z`
+//! semantics match the v1 renderer.
 
 use std::io::Write;
 
@@ -68,7 +68,9 @@ use std::path::Path;
 use clap::{Parser, ValueEnum};
 use mkit_core::Hash;
 use mkit_core::index::{self, EntryStatus, Index};
-use mkit_core::ops::{DiffKind, StatusEntry, StatusStaging, status_diff_observed};
+use mkit_core::ops::{
+    DiffEntry, DiffKind, StatusEntry, StatusStaging, detect_exact_renames, status_diff_observed,
+};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
@@ -103,6 +105,17 @@ struct StatusOpts {
     /// `-z`, paths with special bytes are C-style quoted.
     #[arg(short = 'z')]
     z: bool,
+
+    /// Turn off rename detection (on by default, like git). A move then
+    /// reports as a separate deletion and addition.
+    #[arg(long = "no-renames")]
+    no_renames: bool,
+
+    /// Detect renames, optionally with a similarity threshold. Accepted
+    /// for git familiarity; mkit pairs by identical content (exact, 100%),
+    /// so any threshold ≤ 100 selects the same exact matches.
+    #[arg(long = "find-renames", value_name = "N", num_args = 0..=1, require_equals = true)]
+    find_renames: Option<String>,
 }
 
 #[must_use]
@@ -142,7 +155,17 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("read index: {e}"), exit::GENERAL_ERROR),
     };
 
-    let (entries, observations) =
+    // A provided `--find-renames` threshold must be a number (`50`, `50%`)
+    // — reject garbage like git does, even though the exact matcher then
+    // ignores the magnitude.
+    if let Some(t) = &opts.find_renames {
+        let n = t.trim_end_matches('%');
+        if !n.is_empty() && n.parse::<u8>().is_err() {
+            return emit_err(&format!("invalid --find-renames value: {t}"), exit::USAGE);
+        }
+    }
+
+    let (mut entries, observations) =
         match status_diff_observed(&store, head_tree.as_ref(), &cwd, idx.as_ref()) {
             Ok(v) => v,
             Err(e) => return emit_err(&format!("status: {e}"), exit::GENERAL_ERROR),
@@ -155,6 +178,12 @@ pub fn run(args: &[String]) -> u8 {
     // optimisation — skipped on lock contention or any error.
     if idx.is_some() {
         refresh_stat_cache(&cwd, &observations);
+    }
+
+    // Rename detection (on by default, like git): pair identical-content
+    // staged deletes and adds into a single `R` entry.
+    if !opts.no_renames {
+        entries = detect_status_renames(entries);
     }
 
     if porcelain {
@@ -253,25 +282,36 @@ fn refresh_stat_cache(root: &Path, observations: &[mkit_core::worktree::StatObse
 /// and paths are emitted **raw** (unquoted) — the round-trip-safe form
 /// for paths that contain newlines or other special bytes.
 fn render_porcelain(entries: &[StatusEntry], z: bool) -> u8 {
+    let disp = |p: &str| super::c_quote_path(p).unwrap_or_else(|| p.to_string());
     let mut stdout = std::io::stdout().lock();
-    for (xy, path) in combine_porcelain(entries) {
+    for (xy, path, old_path) in combine_porcelain(entries) {
         // `xy` is two ASCII status columns by construction.
         let code = std::str::from_utf8(&xy).unwrap_or("??");
-        if z {
-            let _ = write!(stdout, "{code} {path}\0");
-        } else if let Some(quoted) = super::c_quote_path(path) {
-            let _ = writeln!(stdout, "{code} {quoted}");
-        } else {
-            let _ = writeln!(stdout, "{code} {path}");
+        match old_path {
+            // Rename: git renders `old -> new` by default, and `new\0old\0`
+            // under `-z` (destination first — verified against git).
+            Some(old) if z => {
+                let _ = write!(stdout, "{code} {path}\0{old}\0");
+            }
+            Some(old) => {
+                let _ = writeln!(stdout, "{code} {} -> {}", disp(old), disp(path));
+            }
+            None if z => {
+                let _ = write!(stdout, "{code} {path}\0");
+            }
+            None => {
+                let _ = writeln!(stdout, "{code} {}", disp(path));
+            }
         }
     }
     exit::OK
 }
 
 /// `--porcelain=v2` output — git's richer per-path format. Each changed
-/// tracked path is a `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` line
-/// (mkit emits no rename `2` lines — it has no rename detection — and no
-/// submodules, so `<sub>` is always `N...`); untracked paths are `? <path>`.
+/// tracked path is a `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` line, a
+/// rename is a `2 … <Xscore> <new>\t<old>` line (mkit pairs exact-content
+/// moves, so the score is always `R100`), and (mkit having no submodules)
+/// `<sub>` is always `N...`; untracked paths are `? <path>`.
 ///
 /// `<XY>` uses `.` for an unchanged column (vs v1's space). `<mH>`/`<mI>` are
 /// the HEAD/index octal modes, `<mW>` the worktree mode (`000000` when the
@@ -300,7 +340,7 @@ fn render_porcelain_v2(
     };
 
     let mut stdout = std::io::stdout().lock();
-    for (xy, path) in combine_porcelain(entries) {
+    for (xy, path, old_path) in combine_porcelain(entries) {
         if xy == [b'?', b'?'] {
             emit_v2_record(&mut stdout, "? ", path, z);
             continue;
@@ -308,6 +348,18 @@ fn render_porcelain_v2(
         // v2 uses `.` for an unchanged column, not a space.
         let x = if xy[0] == b' ' { '.' } else { xy[0] as char };
         let y = if xy[1] == b' ' { '.' } else { xy[1] as char };
+        if let Some(old) = old_path {
+            // `2` rename record. The HEAD side (mH/hH) describes the SOURCE
+            // path; the index side (mI/hI) the DESTINATION. Exact content
+            // means hH == hI and the score is `R100`. Verified vs git.
+            let (m_head, h_head) = v2_mode_and_id(&head_index, old);
+            let (m_index, h_index) = v2_mode_and_id(&work_index, path);
+            let m_work = worktree_mode(root, path);
+            let prefix =
+                format!("2 {x}{y} N... {m_head} {m_index} {m_work} {h_head} {h_index} R100 ");
+            emit_v2_rename_record(&mut stdout, &prefix, path, old, z);
+            continue;
+        }
         let (m_head, h_head) = v2_mode_and_id(&head_index, path);
         let (m_index, h_index) = v2_mode_and_id(&work_index, path);
         let m_work = worktree_mode(root, path);
@@ -315,6 +367,19 @@ fn render_porcelain_v2(
         emit_v2_record(&mut stdout, &prefix, path, z);
     }
     exit::OK
+}
+
+/// Write a v2 `2` rename record: `<prefix><dest><sep><src>` where `<sep>`
+/// is a TAB by default and NUL under `-z` (destination first, then the
+/// source — matching git). Paths are C-quoted when not in `-z` mode.
+fn emit_v2_rename_record(out: &mut impl Write, prefix: &str, new: &str, old: &str, z: bool) {
+    if z {
+        let _ = write!(out, "{prefix}{new}\0{old}\0");
+    } else {
+        let nq = super::c_quote_path(new).unwrap_or_else(|| new.to_string());
+        let oq = super::c_quote_path(old).unwrap_or_else(|| old.to_string());
+        let _ = writeln!(out, "{prefix}{nq}\t{oq}");
+    }
 }
 
 /// Write one v2 record: `<prefix><path>` with git's quoting/termination —
@@ -403,9 +468,11 @@ fn is_executable(_meta: &std::fs::Metadata) -> bool {
 ///
 /// Output order matches git: all tracked-change records first (first-seen
 /// order), then all untracked records.
-fn combine_porcelain(entries: &[StatusEntry]) -> Vec<([u8; 2], &str)> {
+fn combine_porcelain(entries: &[StatusEntry]) -> Vec<([u8; 2], &str, Option<&str>)> {
     let mut tracked_order: Vec<&str> = Vec::new();
-    let mut tracked: std::collections::HashMap<&str, [u8; 2]> = std::collections::HashMap::new();
+    // value = (XY columns, source path for a rename).
+    let mut tracked: std::collections::HashMap<&str, ([u8; 2], Option<&str>)> =
+        std::collections::HashMap::new();
     let mut untracked: Vec<&str> = Vec::new();
     for e in entries {
         // Untracked: a worktree path the index doesn't know about. Never
@@ -417,19 +484,29 @@ fn combine_porcelain(entries: &[StatusEntry]) -> Vec<([u8; 2], &str)> {
         let c = porcelain_code(e.staging, e.diff.kind).as_bytes();
         let slot = tracked.entry(&e.diff.path).or_insert_with(|| {
             tracked_order.push(&e.diff.path);
-            [b' ', b' ']
+            ([b' ', b' '], None)
         });
         // Fill each column from whichever entry sets it (non-space wins).
         if c[0] != b' ' {
-            slot[0] = c[0];
+            slot.0[0] = c[0];
         }
         if c[1] != b' ' {
-            slot[1] = c[1];
+            slot.0[1] = c[1];
+        }
+        // A rename keyed by its destination path carries the source path
+        // (e.g. an `RM` entry: renamed in index, modified in worktree).
+        if e.diff.kind == DiffKind::Renamed {
+            slot.1 = e.diff.old_path.as_deref();
         }
     }
-    let mut out: Vec<([u8; 2], &str)> =
-        tracked_order.into_iter().map(|p| (tracked[p], p)).collect();
-    out.extend(untracked.into_iter().map(|p| ([b'?', b'?'], p)));
+    let mut out: Vec<([u8; 2], &str, Option<&str>)> = tracked_order
+        .into_iter()
+        .map(|p| {
+            let s = tracked[p];
+            (s.0, p, s.1)
+        })
+        .collect();
+    out.extend(untracked.into_iter().map(|p| ([b'?', b'?'], p, None)));
     out
 }
 
@@ -455,6 +532,11 @@ fn porcelain_code(staging: StatusStaging, kind: DiffKind) -> &'static str {
         (StatusStaging::PartiallyStaged, DiffKind::Removed) => "MD",
         (StatusStaging::PartiallyStaged, DiffKind::Modified) => "MM",
         (StatusStaging::PartiallyStaged, DiffKind::ModeChanged) => "MT",
+        // Renames are detected per staging leg, so they only ever appear
+        // as a clean staged (`R `) or unstaged (` R`) move; PartiallyStaged
+        // can't be produced for a rename but is rendered defensively.
+        (StatusStaging::Staged | StatusStaging::PartiallyStaged, DiffKind::Renamed) => "R ",
+        (StatusStaging::Unstaged, DiffKind::Renamed) => " R",
     }
 }
 
@@ -517,13 +599,13 @@ fn render_human(mkit_dir: &std::path::Path, entries: &[StatusEntry]) -> u8 {
             "  (use \"mkit restore --staged <file>...\" to unstage)"
         );
         for e in &staged {
-            let _ = writeln!(stderr, "\t{:<12}{}", human_label(e.diff.kind), e.diff.path);
+            let _ = writeln!(stderr, "	{:<12}{}", human_label(e.diff.kind), human_path(e));
         }
     }
     if !partial.is_empty() {
         let _ = writeln!(stderr, "\nChanges both staged and not staged:");
         for e in &partial {
-            let _ = writeln!(stderr, "\t{:<12}{}", human_label(e.diff.kind), e.diff.path);
+            let _ = writeln!(stderr, "	{:<12}{}", human_label(e.diff.kind), human_path(e));
         }
     }
     if !unstaged.is_empty() {
@@ -537,7 +619,7 @@ fn render_human(mkit_dir: &std::path::Path, entries: &[StatusEntry]) -> u8 {
             "  (use \"mkit restore <file>...\" to discard changes in working directory)"
         );
         for e in &unstaged {
-            let _ = writeln!(stderr, "\t{:<12}{}", human_label(e.diff.kind), e.diff.path);
+            let _ = writeln!(stderr, "	{:<12}{}", human_label(e.diff.kind), human_path(e));
         }
     }
     if !untracked.is_empty() {
@@ -569,13 +651,62 @@ fn render_human(mkit_dir: &std::path::Path, entries: &[StatusEntry]) -> u8 {
     exit::OK
 }
 
-/// git's word label for a change kind (no rename detection in mkit).
+/// git's word label for a change kind.
 fn human_label(kind: DiffKind) -> &'static str {
     match kind {
         DiffKind::Added => "new file:",
         DiffKind::Removed => "deleted:",
         DiffKind::Modified => "modified:",
         DiffKind::ModeChanged => "typechange:",
+        DiffKind::Renamed => "renamed:",
+    }
+}
+
+/// The path column for the human listing. A rename renders `old -> new`
+/// (git's form); every other kind is just its path.
+fn human_path(e: &StatusEntry) -> String {
+    match (e.diff.kind, &e.diff.old_path) {
+        (DiffKind::Renamed, Some(old)) => format!("{old} -> {}", e.diff.path),
+        _ => e.diff.path.clone(),
+    }
+}
+
+/// Pair identical-content staged deletes and adds into single `Renamed`
+/// entries, matching git's rename detection in `status`.
+///
+/// Scoped to the staged leg: `git mv` (and `mkit mv`) stage both sides, so
+/// they share a staging state and — because mkit is content-addressed — an
+/// object id. An *unstaged* move leaves the destination untracked (`??`),
+/// which git never folds into a rename, so the worktree leg is left alone.
+fn detect_status_renames(entries: Vec<StatusEntry>) -> Vec<StatusEntry> {
+    let (staged, others): (Vec<StatusEntry>, Vec<StatusEntry>) = entries
+        .into_iter()
+        .partition(|e| e.staging == StatusStaging::Staged);
+    let mut staged_diffs: Vec<DiffEntry> = staged.into_iter().map(|e| e.diff).collect();
+    detect_exact_renames(&mut staged_diffs);
+    let mut out: Vec<StatusEntry> = staged_diffs
+        .into_iter()
+        .map(|d| StatusEntry {
+            diff: d,
+            staging: StatusStaging::Staged,
+        })
+        .chain(others)
+        .collect();
+    // Restore status's canonical order: by path, staged before unstaged.
+    out.sort_by(|a, b| {
+        a.diff
+            .path
+            .cmp(&b.diff.path)
+            .then_with(|| staging_rank(a.staging).cmp(&staging_rank(b.staging)))
+    });
+    out
+}
+
+fn staging_rank(s: StatusStaging) -> u8 {
+    match s {
+        StatusStaging::Staged => 0,
+        StatusStaging::PartiallyStaged => 1,
+        StatusStaging::Unstaged => 2,
     }
 }
 
@@ -620,6 +751,7 @@ mod tests {
                 new_hash: None,
                 old_mode: None,
                 new_mode: None,
+                old_path: None,
             },
             staging,
         }
@@ -628,7 +760,7 @@ mod tests {
     fn combined(entries: &[StatusEntry]) -> Vec<(String, String)> {
         combine_porcelain(entries)
             .into_iter()
-            .map(|(xy, p)| (std::str::from_utf8(&xy).unwrap().to_string(), p.to_string()))
+            .map(|(xy, p, _)| (std::str::from_utf8(&xy).unwrap().to_string(), p.to_string()))
             .collect()
     }
 

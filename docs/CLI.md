@@ -87,9 +87,10 @@ Working-tree commands:
   one source, `<dest>` must be an existing directory. The worktree file is
   moved and the index updated (the source staged as removed, the
   destination staged with the source's blob and mode — content is
-  unchanged, so the existing object is reused). Because mkit has no rename
-  detection, `mkit status` reports the move as a deletion plus an addition
-  rather than git's `R`; the committed result is equivalent.
+  unchanged, so the existing object is reused). Because the blob keeps the
+  same content id at the new path, `mkit status` / `mkit diff` detect the
+  move as an exact rename and report git's `R` by default; `--no-renames`
+  shows the underlying deletion plus addition instead.
   - `-f`/`--force` — overwrite an existing destination. Without it, `mv`
     refuses to clobber an existing path (matching git's `mv` guard) — an
     mkit data-loss guard; a dangling symlink at the destination counts as
@@ -1022,9 +1023,8 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   `Identity` + 64-hex ids); an `--oneline --graph` renderer for the
   linear/DAG case is a tracked post-v1 follow-up, not a v1 blocker.
 - **`mkit status --porcelain=v2`** matches git's format except that object
-  ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1) and mkit emits no
-  rename (`2`) records — it has no rename detection. `--branch` header
-  lines are not emitted.
+  ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1). Exact renames emit a
+  `2` record (`R100`); `--branch` header lines are not emitted.
 - **`mkit clone --depth N` is parsed but not yet wired.** The flag is
   accepted by the parser but `clone` rejects it with a `--depth is not
   yet wired` usage error rather than silently producing a full clone.

@@ -29,6 +29,11 @@ pub enum DiffKind {
     Modified,
     /// Same path, same content hash, different [`EntryMode`].
     ModeChanged,
+    /// Content moved from [`DiffEntry::old_path`] to [`DiffEntry::path`].
+    /// Only produced by [`detect_exact_renames`]; an exact rename pairs a
+    /// removed object id with an identical added object id, so the content
+    /// is byte-identical (git's `similarity index 100%`).
+    Renamed,
 }
 
 /// One leaf-level change. `path` is `/`-joined relative to the root
@@ -44,6 +49,9 @@ pub struct DiffEntry {
     /// render git-shaped `new file mode`/`index` header lines.
     pub old_mode: Option<EntryMode>,
     pub new_mode: Option<EntryMode>,
+    /// Source path for a [`DiffKind::Renamed`] entry; `None` for every
+    /// other kind. `path` always holds the destination (new) path.
+    pub old_path: Option<String>,
 }
 
 /// Sorted (by path) sequence of [`DiffEntry`].
@@ -62,6 +70,82 @@ impl DiffResult {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+}
+
+/// Collapse exact (identical-content) delete+add pairs in `entries` into
+/// single [`DiffKind::Renamed`] entries, in place.
+///
+/// mkit is content-addressed, so two paths that share an object id hold
+/// byte-identical content. A [`DiffKind::Removed`] entry and a
+/// [`DiffKind::Added`] entry with equal object ids are therefore an exact
+/// rename — git's `similarity index 100%`, but with no heuristic, no
+/// threshold, and no false positives. When identical content is
+/// duplicated across several removed/added paths, pairs are formed in
+/// sorted-path order so the outcome is deterministic; any unpaired
+/// remainder stays as a plain add/remove. The result is left sorted by
+/// destination `path`, matching the rest of the diff pipeline.
+///
+/// Callers scope this to a single diff (git detects renames within one
+/// diff): for `status`, that means applying it per staging leg so a
+/// staged delete never pairs with an unstaged add.
+pub fn detect_exact_renames(entries: &mut Vec<DiffEntry>) {
+    use std::collections::HashMap;
+
+    let mut removed: HashMap<Hash, Vec<usize>> = HashMap::new();
+    let mut added: HashMap<Hash, Vec<usize>> = HashMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        match e.kind {
+            DiffKind::Removed => {
+                if let Some(h) = e.old_hash {
+                    removed.entry(h).or_default().push(i);
+                }
+            }
+            DiffKind::Added => {
+                if let Some(h) = e.new_hash {
+                    added.entry(h).or_default().push(i);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut consumed = vec![false; entries.len()];
+    let mut renames: Vec<DiffEntry> = Vec::new();
+    for (h, rem_idx) in &removed {
+        let Some(add_idx) = added.get(h) else {
+            continue;
+        };
+        let mut r = rem_idx.clone();
+        let mut a = add_idx.clone();
+        r.sort_by(|&x, &y| entries[x].path.cmp(&entries[y].path));
+        a.sort_by(|&x, &y| entries[x].path.cmp(&entries[y].path));
+        for (&ri, &ai) in r.iter().zip(a.iter()) {
+            renames.push(DiffEntry {
+                path: entries[ai].path.clone(),
+                kind: DiffKind::Renamed,
+                old_hash: Some(*h),
+                new_hash: Some(*h),
+                old_mode: entries[ri].old_mode,
+                new_mode: entries[ai].new_mode,
+                old_path: Some(entries[ri].path.clone()),
+            });
+            consumed[ri] = true;
+            consumed[ai] = true;
+        }
+    }
+
+    if renames.is_empty() {
+        return;
+    }
+    let mut out: Vec<DiffEntry> = Vec::with_capacity(entries.len());
+    for (i, e) in entries.drain(..).enumerate() {
+        if !consumed[i] {
+            out.push(e);
+        }
+    }
+    out.extend(renames);
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    *entries = out;
 }
 
 /// Compare two trees and return their [`DiffResult`]. `None` for either
@@ -176,6 +260,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                             new_hash: Some(n.object_hash),
                             old_mode: Some(o.mode),
                             new_mode: Some(n.mode),
+                            old_path: None,
                         });
                     }
                 } else if o.object_hash != n.object_hash || o.mode != n.mode {
@@ -186,6 +271,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                         new_hash: Some(n.object_hash),
                         old_mode: Some(o.mode),
                         new_mode: Some(n.mode),
+                        old_path: None,
                     });
                 }
                 i += 1;
@@ -236,6 +322,7 @@ fn add_removed_entries<S: ObjectSource + ?Sized>(
             new_hash: None,
             old_mode: Some(entry.mode),
             new_mode: None,
+            old_path: None,
         });
     }
     Ok(())
@@ -265,6 +352,7 @@ fn add_added_entries<S: ObjectSource + ?Sized>(
             new_hash: Some(entry.object_hash),
             old_mode: None,
             new_mode: Some(entry.mode),
+            old_path: None,
         });
     }
     Ok(())
@@ -1240,6 +1328,125 @@ mod tests {
         assert_eq!(diff_line_counts(b"x\x00y", b"z"), None);
         // No NUL but invalid UTF-8 → still counted as text (lossy), not binary.
         assert!(diff_line_counts(b"\xff\xfe\n", b"\xff\xfe\nmore\n").is_some());
+    }
+
+    // --- exact rename detection -----------------------------------------
+
+    fn h(b: &[u8]) -> Hash {
+        crate::hash::hash(b)
+    }
+    fn removed(path: &str, content: &[u8]) -> DiffEntry {
+        DiffEntry {
+            path: path.into(),
+            kind: DiffKind::Removed,
+            old_hash: Some(h(content)),
+            new_hash: None,
+            old_mode: Some(EntryMode::Blob),
+            new_mode: None,
+            old_path: None,
+        }
+    }
+    fn added(path: &str, content: &[u8]) -> DiffEntry {
+        DiffEntry {
+            path: path.into(),
+            kind: DiffKind::Added,
+            old_hash: None,
+            new_hash: Some(h(content)),
+            old_mode: None,
+            new_mode: Some(EntryMode::Blob),
+            old_path: None,
+        }
+    }
+
+    #[test]
+    fn detect_pairs_identical_content_into_one_rename() {
+        let mut es = vec![removed("old.txt", b"hello"), added("new.txt", b"hello")];
+        detect_exact_renames(&mut es);
+        assert_eq!(es.len(), 1);
+        assert_eq!(es[0].kind, DiffKind::Renamed);
+        assert_eq!(es[0].path, "new.txt");
+        assert_eq!(es[0].old_path.as_deref(), Some("old.txt"));
+        assert_eq!(es[0].old_hash, Some(h(b"hello")));
+        assert_eq!(es[0].new_hash, Some(h(b"hello")));
+    }
+
+    #[test]
+    fn detect_leaves_unrelated_delete_add_alone() {
+        let mut es = vec![removed("a", b"one"), added("b", b"two")];
+        let before = es.clone();
+        detect_exact_renames(&mut es);
+        assert_eq!(es, before);
+    }
+
+    #[test]
+    fn detect_ignores_modified_in_place() {
+        let mut es = vec![DiffEntry {
+            path: "f".into(),
+            kind: DiffKind::Modified,
+            old_hash: Some(h(b"x")),
+            new_hash: Some(h(b"y")),
+            old_mode: Some(EntryMode::Blob),
+            new_mode: Some(EntryMode::Blob),
+            old_path: None,
+        }];
+        let before = es.clone();
+        detect_exact_renames(&mut es);
+        assert_eq!(es, before);
+    }
+
+    #[test]
+    fn detect_pairs_duplicates_deterministically_by_path() {
+        // Identical content at two old paths and two new paths → two
+        // renames, paired in sorted-path order (old_a→new_a, old_b→new_b)
+        // regardless of input order.
+        let mut es = vec![
+            added("new_b", b"dup"),
+            removed("old_b", b"dup"),
+            added("new_a", b"dup"),
+            removed("old_a", b"dup"),
+        ];
+        detect_exact_renames(&mut es);
+        assert_eq!(es.len(), 2);
+        assert_eq!(
+            (es[0].old_path.as_deref(), es[0].path.as_str()),
+            (Some("old_a"), "new_a")
+        );
+        assert_eq!(
+            (es[1].old_path.as_deref(), es[1].path.as_str()),
+            (Some("old_b"), "new_b")
+        );
+    }
+
+    #[test]
+    fn detect_leaves_unpaired_remainder() {
+        // Two deletes, one add of the same content → one rename (the
+        // sorted-first old path) plus one plain delete.
+        let mut es = vec![
+            removed("old_a", b"c"),
+            removed("old_b", b"c"),
+            added("new", b"c"),
+        ];
+        detect_exact_renames(&mut es);
+        assert_eq!(es.len(), 2);
+        let r = es.iter().find(|e| e.kind == DiffKind::Renamed).unwrap();
+        assert_eq!(r.old_path.as_deref(), Some("old_a"));
+        let d = es.iter().find(|e| e.kind == DiffKind::Removed).unwrap();
+        assert_eq!(d.path, "old_b");
+    }
+
+    #[test]
+    fn detect_preserves_modes_on_rename_with_mode_change() {
+        // Identical content, exec bit added on the new side: still an exact
+        // rename, and both modes are preserved for the header renderer.
+        let r = removed("old", b"same");
+        let mut a = added("new", b"same");
+        a.new_mode = Some(EntryMode::Executable);
+        let mut es = vec![r, a];
+        detect_exact_renames(&mut es);
+        assert_eq!(es.len(), 1);
+        assert_eq!(es[0].kind, DiffKind::Renamed);
+        assert_eq!(es[0].old_mode, Some(EntryMode::Blob));
+        assert_eq!(es[0].new_mode, Some(EntryMode::Executable));
     }
 
     fn fresh_store() -> (TempDir, ObjectStore) {

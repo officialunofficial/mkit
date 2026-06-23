@@ -157,9 +157,19 @@ Any other mode byte → `InvalidEntryMode`.
 
 ### 4.3 Rename detection
 
-mkit v1 does not detect renames or copies. Diff and merge treat renames
-as (delete, add) pairs. This is a documented departure from Git; see
-red-team R-21.
+mkit detects **exact** renames: because every blob is named by its BLAKE3
+content id, a deletion and an addition that share an object id are the same
+bytes at two paths — an exact move (git's `similarity index 100%`), found
+by an O(n) hash match with no heuristic and no false positives. `status`
+and `diff` render these as `R` by default (`--no-renames` opts out),
+scoped per diff as git does.
+
+**Not yet detected:** rename-with-edits (similarity < 100%) and copy
+detection (`-C`). Those require git's content-similarity scoring; mkit's
+chunked/merkle blobs give a natural shared-chunk similarity signal, so they
+are a tractable follow-up rather than a structural gap. `merge` still
+treats all moves as (delete, add) pairs. Departure tracked from red-team
+R-21.
 
 ---
 

@@ -14,15 +14,17 @@
 //! the index is touched until every move is known to be legal, so a bad
 //! source in a batch can't leave the worktree half-moved.
 //!
-//! mkit has no rename detection, so `mkit status` reports the move as a
-//! deletion plus an addition rather than git's `R` — a documented
-//! divergence; the staged result (`mkit commit`) is equivalent.
+//! Because mkit is content-addressed, the moved blob keeps the same object
+//! id at its new path, so `mkit status` / `mkit diff` detect the move as an
+//! exact rename and report git's `R` (`renamed: old -> new`) by default —
+//! no similarity heuristic needed. `--no-renames` opts back into the
+//! delete-plus-add view.
 //!
 //! Directory sources (`mv dir newdir`, or `mv dir existing-dir/`) are also
 //! supported: the directory is renamed on disk in one filesystem operation
 //! — so untracked files inside it come along, exactly like `git mv` — and
-//! every tracked file beneath it is restaged at its new path (each as a
-//! delete + add, per the no-rename-detection note above). The same up-front
+//! every tracked file beneath it is restaged at its new path (each then
+//! surfaces as an exact rename, per the note above). The same up-front
 //! validation, clobber guard (`-f`), and repo-escape guard apply, plus a
 //! refusal to move a directory into itself.
 //!

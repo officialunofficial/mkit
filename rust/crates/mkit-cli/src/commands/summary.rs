@@ -61,7 +61,7 @@ pub fn print_commit_summary(
             DiffKind::Removed => {
                 let _ = writeln!(out, " delete mode {} {}", octal(e.old_mode), e.path);
             }
-            DiffKind::Modified | DiffKind::ModeChanged => {}
+            DiffKind::Modified | DiffKind::ModeChanged | DiffKind::Renamed => {}
         }
     }
 }

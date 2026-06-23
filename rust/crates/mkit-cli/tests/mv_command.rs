@@ -1,7 +1,7 @@
 //! `mkit mv` — guarded move/rename, driven end-to-end through the binary
-//! (#250). mkit has no rename detection, so `status` shows the
-//! move as a delete + add rather than git's `R`; these tests assert the
-//! worktree move and the staged/committed result instead.
+//! (#250). These tests assert the worktree move and the staged/committed
+//! result; the `R` rename rendering it now produces in `status`/`diff` is
+//! covered in `rename_detection.rs`.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
@@ -152,14 +152,21 @@ fn mv_directory_renames_tracked_subtree() {
     );
 
     // Each tracked file is staged as a delete at the old path + add at the
-    // new one (mkit has no rename detection).
+    // new one. mkit now detects the move by identical content (BLAKE3
+    // object id), so status shows `R old -> new`, exactly like git.
     let status = run_in(root, x, &["status", "--porcelain"]);
     let s = String::from_utf8_lossy(&status.stdout);
-    assert!(s.contains("D  dir/file.txt"), "missing delete: {s}");
-    assert!(s.contains("A  newdir/file.txt"), "missing add: {s}");
     assert!(
-        s.contains("D  dir/sub/n.txt") && s.contains("A  newdir/sub/n.txt"),
-        "{s}"
+        s.contains("R  dir/file.txt -> newdir/file.txt"),
+        "missing rename: {s}"
+    );
+    assert!(
+        s.contains("R  dir/sub/n.txt -> newdir/sub/n.txt"),
+        "missing rename: {s}"
+    );
+    assert!(
+        s.contains("?? newdir/untracked.txt"),
+        "untracked carried: {s}"
     );
 }
 

@@ -53,7 +53,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'mv',
         status: 'divergent',
-        note: 'Renames files and directories with clobber guards (`-f`), including move-into-directory and multi-source moves. No rename detection, so `status` shows a move as delete + add, not `R`.',
+        note: 'Renames files and directories with clobber guards (`-f`), including move-into-directory and multi-source moves. Content addressing gives exact rename detection, so `status` and `diff` show `R` like git (`--no-renames` to opt out).',
       },
       {
         cmd: 'checkout',
