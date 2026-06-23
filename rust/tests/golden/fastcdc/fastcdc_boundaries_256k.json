@@ -1,6 +1,6 @@
 {
   "name": "fastcdc_boundaries_256k",
-  "description": "256 KiB pattern ((i*17)^(i>>3))&0xFF; chunk-end offsets as JSON",
+  "description": "256 KiB splitmix64 stream (seed 0xCAFE_BABE_1234_5678); chunk-end offsets as JSON",
   "bin": "fastcdc_boundaries_256k.bin",
   "size": 25,
   "blake3": "c558e3da6b4ef940298447910c0a7de444fb87389ec26a82a6e068b52f43a2bf"
