@@ -4,11 +4,14 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import {
   type BindingCredential,
+  PrfUnsupportedError,
   attestEd25519Binding,
   createIdentity,
+  deriveEd25519Seed,
   enrollBindingPasskey,
   rpId,
 } from '../lib/passkey'
+import { playerName } from '../lib/identity-name'
 import { DEFAULT_ROOM, useIdentityStore } from '../lib/identity-store'
 import {
   CasConflictError,
@@ -175,6 +178,32 @@ export function MultiplayerDemo() {
     }
   }
 
+  // RECOVER the SAME identity (after a Lock, or on a returning visit). Unlike
+  // `onCreate`, this does NOT mint a new passkey: `deriveEd25519Seed` runs a
+  // get() that re-derives the SAME PRF → SAME seed → SAME Ed25519 pubkey from
+  // the existing (resident) passkey. A discoverable get() (no credentialId)
+  // still recovers the same identity and tells us which passkey was used, so we
+  // persist it for next time.
+  const onUnlock = async () => {
+    setStatus(null)
+    setBusy(true)
+    try {
+      const res = await deriveEd25519Seed(id.credentialId ?? undefined)
+      if (res.credentialId) id.setCredentialId(res.credentialId)
+      const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
+      id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: false })
+      setStatus('Unlocked — recovered your existing player from the passkey via PRF.')
+    } catch (e) {
+      if (e instanceof PrfUnsupportedError) {
+        setStatus('This passkey can’t derive a key (no PRF). Create a new identity instead.')
+      } else {
+        setStatus(errMsg(e))
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
   // State machine: LOCKED → (one prompt) → UNLOCKED, laid out in two columns with
   // the live log ALWAYS on the right — so you can watch others contribute even
   // before you create an identity ("signed out" mode). The left column swaps
@@ -199,7 +228,13 @@ export function MultiplayerDemo() {
   if (!id.unlocked || !id.seedHex || !id.ed25519PubkeyHex) {
     return (
       <div className='grid gap-8 lg:grid-cols-2 lg:items-start'>
-        <LockedView onCreate={onCreate} busy={busy} status={status} />
+        <LockedView
+          onCreate={onCreate}
+          onUnlock={onUnlock}
+          busy={busy}
+          status={status}
+          hasPasskey={id.credentialId != null}
+        />
         {browser}
       </div>
     )
@@ -293,16 +328,57 @@ function AttestBinding({
   )
 }
 
-/** LOCKED state: a single action that creates the passkey + derives the key in one prompt. */
-function LockedView({ onCreate, busy, status }: { onCreate: () => void; busy: boolean; status: string | null }) {
+/**
+ * LOCKED state: two clearly-labelled actions. When a passkey is already known
+ * (after a Lock, or a persisted credential on a fresh load) the primary action
+ * RECOVERS the same player (Unlock), with "New identity" as the secondary.
+ * Otherwise (first-time) the primary mints a passkey (Create) and the secondary
+ * recovers a returning user's existing passkey.
+ */
+function LockedView({
+  onCreate,
+  onUnlock,
+  busy,
+  status,
+  hasPasskey,
+}: {
+  onCreate: () => void
+  onUnlock: () => void
+  busy: boolean
+  status: string | null
+  hasPasskey: boolean
+}) {
   return (
     <section className='space-y-3'>
-      <button type='button' className={PRIMARY_BTN} onClick={onCreate} disabled={busy}>
-        {busy ? 'Creating…' : 'Create passkey identity'}
-      </button>
-      <p className='max-w-prose text-sm text-muted'>
-        One passkey → your Ed25519 player. A single prompt; every push afterwards signs without one.
-      </p>
+      {hasPasskey ? (
+        <>
+          <div className='flex flex-wrap items-center gap-2'>
+            <button type='button' className={PRIMARY_BTN} onClick={onUnlock} disabled={busy}>
+              {busy ? 'Unlocking…' : 'Unlock'}
+            </button>
+            <button type='button' className={BTN} onClick={onCreate} disabled={busy}>
+              New identity
+            </button>
+          </div>
+          <p className='max-w-prose text-sm text-muted'>
+            Unlock recovers your existing player from the passkey; New identity mints a fresh one.
+          </p>
+        </>
+      ) : (
+        <>
+          <div className='flex flex-wrap items-center gap-2'>
+            <button type='button' className={PRIMARY_BTN} onClick={onCreate} disabled={busy}>
+              {busy ? 'Creating…' : 'Create passkey identity'}
+            </button>
+            <button type='button' className={BTN} onClick={onUnlock} disabled={busy}>
+              Unlock existing passkey
+            </button>
+          </div>
+          <p className='max-w-prose text-sm text-muted'>
+            One passkey → your Ed25519 player. A single prompt; every push afterwards signs without one.
+          </p>
+        </>
+      )}
       {status ? <p className='text-sm text-muted'>{status}</p> : null}
     </section>
   )
@@ -314,8 +390,11 @@ function UnlockedHeader() {
   return (
     <section className='space-y-3'>
       <div className='flex flex-wrap items-center gap-2'>
-        <span className='shrink-0 text-sm text-muted'>You</span>
-        <code className='min-w-0 flex-1 truncate font-mono text-sm'>{id.ed25519PubkeyHex}</code>
+        <span className='min-w-0 flex-1 truncate text-sm font-medium' title={id.ed25519PubkeyHex ?? undefined}>
+          <span className='text-muted'>You · </span>
+          {playerName(id.ed25519PubkeyHex ?? '')}{' '}
+          <code className='font-mono text-xs text-muted'>{(id.ed25519PubkeyHex ?? '').slice(0, 10)}…</code>
+        </span>
         <button type='button' className={BTN} onClick={() => id.lock()}>
           Lock
         </button>
@@ -736,9 +815,12 @@ function LogRow({
             ) : null}
             {mine ? <span className='shrink-0 text-xs text-green-700 dark:text-green-400'>you</span> : null}
           </div>
-          <code className='block font-mono text-xs break-all text-muted'>
-            {entry.authorPubkey.slice(0, 16)}… · {entry.hash.slice(0, 16)}…
-          </code>
+          <div className='text-xs text-muted' title={entry.authorPubkey}>
+            <span className='font-medium text-fg'>{playerName(entry.authorPubkey)}</span>{' '}
+            <code className='font-mono break-all'>
+              {entry.authorPubkey.slice(0, 10)}… · {entry.hash.slice(0, 16)}…
+            </code>
+          </div>
         </div>
       </button>
       {/* Fork a COMMIT (not a remix — that would fork a fork; out of scope for the demo). */}
@@ -882,8 +964,12 @@ function CommitDetail({
           <Field label='Message'>
             <span className='text-sm break-words whitespace-pre-wrap'>{decoded.message || '(empty)'}</span>
           </Field>
-          <Field label='Author / signer (Ed25519 pubkey)'>
-            <code className='font-mono text-xs break-all'>{decoded.signerHex}</code>
+          <Field label='Author / signer'>
+            <div title={decoded.signerHex}>
+              <span className='text-sm font-medium'>{playerName(decoded.signerHex)}</span>{' '}
+              <code className='font-mono text-xs text-muted'>{decoded.signerHex.slice(0, 10)}…</code>
+            </div>
+            <code className='mt-1 block font-mono text-xs break-all text-muted'>{decoded.signerHex}</code>
           </Field>
           <Field label='Timestamp'>
             <span className='text-sm'>
