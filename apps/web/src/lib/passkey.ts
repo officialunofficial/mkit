@@ -136,6 +136,13 @@ export type DeriveResult = {
   seedHex: string
   /** The raw 32-byte PRF output, for display/debugging only. */
   prfHex: string
+  /**
+   * Base64url credential id of the passkey the assertion actually used. For a
+   * discoverable (no `allowCredentials`) recovery `get()`, this reveals WHICH
+   * resident key the user picked, so the caller can persist it. Absent only
+   * from the random `ephemeral` fallback.
+   */
+  credentialId?: string
 }
 
 /**
@@ -173,7 +180,10 @@ export async function deriveEd25519Seed(credentialId?: string): Promise<DeriveRe
 
   const prf = new Uint8Array(first instanceof ArrayBuffer ? first : (first as ArrayBufferView).buffer)
   const seed = await hkdfSha256(prf, HKDF_INFO)
-  return { seedHex: bytesToHex(seed), prfHex: bytesToHex(prf) }
+  // Surface which credential the assertion used — for a discoverable (no
+  // `allowCredentials`) recovery, this is how the caller learns which resident
+  // passkey was picked, so it can be persisted for next time.
+  return { seedHex: bytesToHex(seed), prfHex: bytesToHex(prf), credentialId: b64url(new Uint8Array(assertion.rawId)) }
 }
 
 export type IdentityResult = DeriveResult & {

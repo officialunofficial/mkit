@@ -56,6 +56,9 @@ describe('passkey derivation', () => {
     expect(res1.seedHex).toMatch(/^[0-9a-f]{64}$/)
     expect(res1.seedHex).toBe(res2.seedHex) // same PRF → same seed
     expect(res1.prfHex).toBe(bytesToHex(PRF_OUTPUT))
+    // The assertion's rawId ([1,2,3,4]) round-trips to its base64url id, so a
+    // discoverable recovery can persist which passkey was used.
+    expect(res1.credentialId).toBe('AQIDBA')
 
     // The derived seed must produce a valid Ed25519 keypair via the WASM path.
     const m = await mkit()
@@ -64,6 +67,15 @@ describe('passkey derivation', () => {
     // And it must match the seed_hex→pubkey path the commit signer uses.
     const kp = m.keypair_from_seed(res1.seedHex)
     expect(kp.pubkey_hex).toBe(bytesToHex(pubkey))
+  })
+
+  it('recovers the credential id from a discoverable get() (no credentialId arg)', async () => {
+    installWebAuthnMock(PRF_OUTPUT.buffer)
+    // Discoverable recovery: no allowCredentials → the platform picks the
+    // resident key and we learn its id from the assertion's rawId.
+    const res = await deriveEd25519Seed(undefined)
+    expect(res.credentialId).toBe('AQIDBA')
+    expect(res.seedHex).toMatch(/^[0-9a-f]{64}$/)
   })
 
   it('throws PrfUnsupportedError when the authenticator returns no PRF result', async () => {

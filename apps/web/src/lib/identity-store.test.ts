@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { DEFAULT_ROOM, useIdentityStore } from './identity-store'
+import { DEFAULT_ROOM, partializeIdentity, useIdentityStore } from './identity-store'
 
 describe('identity store', () => {
   beforeEach(() => {
@@ -55,5 +55,41 @@ describe('identity store', () => {
     const after = useIdentityStore.getState()
     expect(after.credentialId).toBeNull()
     expect(after.seedHex).toBeNull()
+  })
+
+  it('lock keeps credentialId (so the player can re-derive on reload)', () => {
+    const s = useIdentityStore.getState()
+    s.setCredentialId('cred-keep')
+    s.unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32) })
+    s.lock()
+    expect(useIdentityStore.getState().credentialId).toBe('cred-keep')
+  })
+
+  it('reset clears credentialId', () => {
+    const s = useIdentityStore.getState()
+    s.setCredentialId('cred-gone')
+    s.reset()
+    expect(useIdentityStore.getState().credentialId).toBeNull()
+  })
+
+  describe('persistence partialize', () => {
+    it('persists ONLY credentialId + room', () => {
+      const s = useIdentityStore.getState()
+      s.setCredentialId('cred-1')
+      s.setRoom('arena')
+      s.unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32) })
+      const persisted = partializeIdentity(useIdentityStore.getState())
+      expect(persisted).toEqual({ credentialId: 'cred-1', room: 'arena' })
+      expect(Object.keys(persisted).toSorted()).toEqual(['credentialId', 'room'])
+    })
+
+    it('NEVER persists seedHex / pubkey / unlocked (no signing material on disk)', () => {
+      useIdentityStore.getState().unlock({ seedHex: 'cc'.repeat(32), ed25519PubkeyHex: 'dd'.repeat(32) })
+      const persisted = partializeIdentity(useIdentityStore.getState()) as Record<string, unknown>
+      expect('seedHex' in persisted).toBe(false)
+      expect('ed25519PubkeyHex' in persisted).toBe(false)
+      expect('unlocked' in persisted).toBe(false)
+      expect('ephemeral' in persisted).toBe(false)
+    })
   })
 })
