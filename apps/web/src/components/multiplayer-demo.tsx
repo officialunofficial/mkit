@@ -3,6 +3,8 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import { PrfUnsupportedError, createIdentity, deriveEd25519Seed } from '../lib/passkey'
+import { randomPetname } from '../lib/identity-name'
+import { keysEnabled } from '../lib/keys-client'
 import { DEFAULT_ROOM, type IdentityState, useIdentityStore } from '../lib/identity-store'
 import {
   MockRepoBackend,
@@ -15,6 +17,7 @@ import { repoWasm } from '../lib/repo-client'
 import { bytesToHex, hexToBytes, useMkit } from './use-mkit'
 import { AttestBinding, LockedView, UnlockedHeader } from './multiplayer/identity-panel'
 import { Compose } from './multiplayer/compose'
+import { useSetName } from './multiplayer/player-label'
 import { RepoBrowser } from './multiplayer/repo-browser'
 import { errMsg } from './multiplayer/shared'
 
@@ -107,6 +110,7 @@ function MultiplayerBody({
   useMock: boolean
 }) {
   useRepoEvents(room)
+  const setNameMut = useSetName()
 
   const [status, setStatus] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -122,7 +126,12 @@ function MultiplayerBody({
     setStatus(null)
     setBusy(true)
     try {
-      const res = await createIdentity()
+      // Roll a friendly handle BEFORE creation so the passkey is saved as
+      // "slate-badger@<host>" (not "mkit player@<host>") in the OS passkey
+      // manager. The same handle is registered to the derived pubkey below so it
+      // survives recovery and is what other players see.
+      const petname = randomPetname()
+      const res = await createIdentity(petname)
       // Persist the credentialId ONLY for a real (passkey-backed) identity. The
       // ephemeral fallback returns the created credentialId too, but its seed is
       // RANDOM — not derived from that passkey — so persisting it would flip
@@ -132,6 +141,13 @@ function MultiplayerBody({
       if (res.credentialId && res.via !== 'ephemeral') id.setCredentialId(res.credentialId)
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: res.via === 'ephemeral' })
+      // Register the handle in keys.mkit.sh (signed write). Fire-and-forget and
+      // only for a recoverable identity with a configured registry — a failure
+      // here must not block identity creation (the name still renders via the
+      // deterministic fallback).
+      if (res.via !== 'ephemeral' && keysEnabled()) {
+        setNameMut.mutate({ pubkeyHex: pubkey, seedHex: res.seedHex, name: petname })
+      }
       setStatus(
         res.via === 'prf-create'
           ? 'Identity ready — one passkey prompt, Ed25519 derived via PRF.'

@@ -45,7 +45,10 @@ export const CSP_DIRECTIVES = [
   // Worker is deployed to a different origin, update both entries here AND the
   // `VITE_REPO_BACKEND_URL` the web build is given (set it to
   // https://api.mkit.sh for prod).
-  "connect-src 'self' https://cloudflareinsights.com http://localhost:8787 ws://localhost:8787 https://api.mkit.sh wss://api.mkit.sh https://mkit-repo-worker.officialunofficial.workers.dev wss://mkit-repo-worker.officialunofficial.workers.dev",
+  // `keys.mkit.sh` is the production pubkey→handle registry (apps/keys-worker);
+  // it's plain HTTPS (no WebSocket), driven by `VITE_KEYS_URL`. `localhost:8788`
+  // is its local-dev port.
+  "connect-src 'self' https://cloudflareinsights.com http://localhost:8787 ws://localhost:8787 https://api.mkit.sh wss://api.mkit.sh https://mkit-repo-worker.officialunofficial.workers.dev wss://mkit-repo-worker.officialunofficial.workers.dev http://localhost:8788 https://keys.mkit.sh",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
 ]

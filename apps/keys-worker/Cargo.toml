@@ -1,0 +1,37 @@
+[package]
+name = "mkit-keys-worker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+# Standalone cdylib (its own workspace) — like apps/repo-worker, this is NOT a
+# member of the rust/ workspace. It has no mkit path deps: BLAKE3 + Ed25519
+# strict-verify come straight from the `blake3` / `ed25519-dalek` crates so the
+# signed-write envelope is reproduced byte-for-byte without pulling mkit-core.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# workers-rs: Request/Response, Env, KvStore — wrappers over the JS/WASM interop.
+worker = { version = "0.8", features = ["http"] }
+
+# Ed25519 strict verify for the write envelope (RFC 8032 / ZIP-215-off), the
+# SAME `verify_strict` line apps/repo-worker uses. Verify-only: no RNG needed,
+# so no getrandom backend feature is required (unlike repo-worker, which pulls
+# the k256/p256 keygen stack).
+ed25519-dalek = { version = "2", default-features = false }
+
+# BLAKE3 content-address primitive — the envelope's body digest + signing digest
+# are plain BLAKE3, matching the web client's `api.blake3_hex`.
+blake3 = "1"
+
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true

@@ -174,3 +174,18 @@ export function playerName(pubkeyHex: string): string {
   const animal = (((b[2]! << 8) | b[3]!) % ANIMALS.length + ANIMALS.length) % ANIMALS.length
   return `${ADJECTIVES[adj]}-${ANIMALS[animal]}`
 }
+
+/**
+ * A fresh, RANDOM adjective-animal handle (e.g. "slate-badger"), used as the
+ * default petname a player is given the moment they create an identity — set as
+ * the passkey's `user.name` (so the OS passkey manager reads "slate-badger@host"
+ * instead of "mkit player@host") and stored in the repo so it survives recovery.
+ *
+ * Unlike {@link playerName} this is NOT derived from a key (the pubkey doesn't
+ * exist yet at passkey-creation time), so the chosen name must be persisted to
+ * be recoverable — see `lib/repo/player-names.ts`.
+ */
+export function randomPetname(): string {
+  const b = crypto.getRandomValues(new Uint8Array(2))
+  return `${ADJECTIVES[b[0]! % ADJECTIVES.length]}-${ANIMALS[b[1]! % ANIMALS.length]}`
+}

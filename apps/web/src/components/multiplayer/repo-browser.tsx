@@ -5,7 +5,6 @@
 // Moved verbatim out of `multiplayer-demo.tsx`.
 
 import { useMemo, useState } from 'react'
-import { playerName } from '../../lib/identity-name'
 import {
   CasConflictError,
   type CommitLogEntry,
@@ -20,6 +19,7 @@ import {
 import { Field, FieldList, HashChip } from '../result-panel'
 import { useMkit } from '../use-mkit'
 import { useFork } from './compose'
+import { PlayerLabel } from './player-label'
 import { BTN, errMsg } from './shared'
 
 /**
@@ -296,7 +296,7 @@ function LogRow({
             {mine ? <span className='shrink-0 text-xs text-green-700 dark:text-green-400'>you</span> : null}
           </div>
           <div className='text-xs text-muted' title={entry.authorPubkey}>
-            <span className='font-medium text-fg'>{playerName(entry.authorPubkey)}</span>{' '}
+            <PlayerLabel pubkey={entry.authorPubkey} className='font-medium text-fg' />{' '}
             <code className='font-mono break-all'>
               {entry.authorPubkey.slice(0, 10)}… · {entry.hash.slice(0, 16)}…
             </code>
@@ -446,7 +446,7 @@ function CommitDetail({
           </Field>
           <Field label='Author / signer'>
             <div title={decoded.signerHex}>
-              <span className='text-sm font-medium'>{playerName(decoded.signerHex)}</span>{' '}
+              <PlayerLabel pubkey={decoded.signerHex} className='text-sm font-medium' />{' '}
               <code className='font-mono text-xs text-muted'>{decoded.signerHex.slice(0, 10)}…</code>
             </div>
             <code className='mt-1 block font-mono text-xs break-all text-muted'>{decoded.signerHex}</code>

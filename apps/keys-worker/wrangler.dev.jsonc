@@ -1,0 +1,10 @@
+// Local-dev config: no-op build (wasm prebuilt) to avoid the worker-build
+// rebuild loop, and a local KV namespace (Miniflare provides one in-memory).
+//   wrangler dev -c wrangler.dev.jsonc --local
+{
+  "name": "mkit-keys",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2024-09-23",
+  "build": { "command": "true" },
+  "kv_namespaces": [{ "binding": "NAMES", "id": "names-dev" }]
+}

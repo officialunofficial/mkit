@@ -11,10 +11,10 @@ import {
   enrollBindingPasskey,
   rpId,
 } from '../../lib/passkey'
-import { playerName } from '../../lib/identity-name'
 import { useIdentityStore } from '../../lib/identity-store'
 import { Field, FieldList } from '../result-panel'
 import { useMkit } from '../use-mkit'
+import { OwnPlayerName } from './player-label'
 import { BTN, PRIMARY_BTN, errMsg } from './shared'
 
 /**
@@ -150,7 +150,7 @@ export function UnlockedHeader() {
       <div className='flex flex-wrap items-center gap-2'>
         <span className='min-w-0 flex-1 truncate text-sm font-medium' title={id.ed25519PubkeyHex ?? undefined}>
           <span className='text-muted'>You · </span>
-          {playerName(id.ed25519PubkeyHex ?? '')}{' '}
+          <OwnPlayerName />{' '}
           <code className='font-mono text-xs text-muted'>{(id.ed25519PubkeyHex ?? '').slice(0, 10)}…</code>
         </span>
         <button type='button' className={BTN} onClick={() => id.lock()}>

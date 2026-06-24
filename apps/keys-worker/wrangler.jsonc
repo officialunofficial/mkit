@@ -1,0 +1,28 @@
+// Cloudflare Worker config for keys.mkit.sh — the KV-backed pubkey→handle
+// registry. JSONC to match the org convention (apps/repo-worker). Build with
+// worker-build, which compiles the cdylib to wasm32 and emits the ES-module
+// shim into ./build.
+{
+  "name": "mkit-keys",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2024-09-23",
+  "build": { "command": "worker-build --release" },
+
+  "observability": { "enabled": true },
+
+  // Production origin. keys.mkit.sh gives the web app a deterministic host for
+  // its CSP `connect-src` and `VITE_KEYS_URL`. `custom_domain` auto-provisions
+  // DNS + cert on the mkit.sh zone.
+  "routes": [{ "pattern": "keys.mkit.sh", "custom_domain": true }],
+
+  // KV namespace holding `<lowercase-pubkey-hex> -> NameRecord JSON`.
+  // Namespaces live in the Official Unofficial account (mkit-keys-NAMES /
+  // mkit-keys-NAMES_preview).
+  "kv_namespaces": [
+    {
+      "binding": "NAMES",
+      "id": "8c063de4f5674d24811c5acf3ff82196",
+      "preview_id": "83d3b7622f7041d59fe90145399db55b"
+    }
+  ]
+}
