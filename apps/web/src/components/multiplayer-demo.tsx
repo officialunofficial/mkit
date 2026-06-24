@@ -718,6 +718,30 @@ function RepoBrowser({
   )
 }
 
+/**
+ * Loading placeholder for the refs / commit-log lists. Shown while the first
+ * fetch is in flight (`isPending`) so a cold load reads as "loading" rather than
+ * an empty "no commits / no refs" state — the bug where a freshly-opened room
+ * showed an empty log under a populated `main` ref before the walk resolved.
+ */
+function SkeletonRows({ rows = 5 }: { rows?: number }) {
+  return (
+    <ul
+      className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'
+      aria-hidden='true'
+    >
+      {Array.from({ length: rows }).map((_, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: static placeholder rows, no identity
+        <li key={i} className='flex items-center gap-3 py-2.5'>
+          <span className='h-3.5 w-3.5 shrink-0 animate-pulse rounded-sm bg-fg/10' />
+          <span className='h-3 animate-pulse rounded bg-fg/10' style={{ width: `${8 + ((i * 7) % 9)}rem` }} />
+          <span className='ml-auto h-3 w-16 shrink-0 animate-pulse rounded bg-fg/10' />
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 /** All refs in the room. Each row selects the ref the log/detail view follows. */
 function RefsPanel({
   room,
@@ -742,7 +766,9 @@ function RefsPanel({
         <h2 className='text-sm font-semibold'>Refs · room “{room}”</h2>
         <span className='font-mono text-xs text-muted'>{useMock ? 'mock backend' : 'worker'}</span>
       </div>
-      {entries.length === 0 ? (
+      {refs.isPending ? (
+        <SkeletonRows rows={3} />
+      ) : entries.length === 0 ? (
         <p className='text-sm text-muted'>No refs yet — push a commit to create one.</p>
       ) : (
         <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
@@ -806,9 +832,13 @@ function LiveLog({
         <h2 className='text-sm font-semibold'>
           {isForkRef(selectedRef) ? 'Fork log' : 'Commit log'} · “{selectedRef}”
         </h2>
-        <span className='font-mono text-xs text-muted'>head {head.data ? head.data.slice(0, 10) : '∅'}…</span>
+        <span className='font-mono text-xs text-muted'>
+          head {head.isPending ? '…' : head.data ? `${head.data.slice(0, 10)}…` : '∅'}
+        </span>
       </div>
-      {entries.length === 0 ? (
+      {log.isPending ? (
+        <SkeletonRows rows={5} />
+      ) : entries.length === 0 ? (
         <p className='text-sm text-muted'>No commits on this ref yet — push one above.</p>
       ) : (
         <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
