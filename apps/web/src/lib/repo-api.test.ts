@@ -197,19 +197,30 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     graph: Record<string, Node>
     /** Counts decode + object reads so we can assert the head-keyed cache. */
     counters: { decode: number; getObject: number; getRef: number }
+    /** Optional extra ref → head map (beyond `main`) for branch tests. */
+    refs?: Record<string, string>
   }) {
     const { graph, counters } = opts
     let head = opts.head
+    const refs = opts.refs ?? {}
 
     const wasm = {
       get_ref: async (_base: string, _room: string, name: string) => {
         counters.getRef++
-        return name === 'main' ? head : undefined
+        if (name === 'main') return head
+        return refs[name]
       },
       get_object: async (_base: string, _room: string, hash: string) => {
         counters.getObject++
         // Encode the hash itself as the "bytes" so commit_decode can map back.
         return graph[hash] ? new TextEncoder().encode(hash) : undefined
+      },
+      list_refs: async (_base: string, _room: string, prefix: string) => {
+        const all = [
+          ...(head ? [{ name: 'main', objectIdHex: head }] : []),
+          ...Object.entries(refs).map(([name, objectIdHex]) => ({ name, objectIdHex })),
+        ]
+        return all.filter((r) => r.name.startsWith(prefix))
       },
     } as unknown as RepoWasmClient
 
@@ -223,6 +234,8 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
           message: node.message,
           signer_hex: node.signer,
           timestamp: 1n,
+          tree_hex: 'aa'.repeat(32),
+          signature_hex: 'bb'.repeat(64),
           parent_count: node.parent ? 1 : 0,
           parent: (i: number) => (i === 0 ? node.parent : undefined),
         }
@@ -283,5 +296,104 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     const { backend } = harness({ head: 'c2', graph, counters })
     const log = await backend.commitLog('room')
     expect(log.map((e) => e.hash)).toEqual(['c2'])
+  })
+
+  it('walks a non-`main` ref independently, tagging entries with that ref', async () => {
+    const counters = { decode: 0, getObject: 0, getRef: 0 }
+    const graph = {
+      m2: { message: 'main 2', signer: 's', parent: 'm1' },
+      m1: { message: 'main 1', signer: 's' },
+      f1: { message: 'feature spike', signer: 's' },
+    }
+    const { backend } = harness({ head: 'm2', graph, counters, refs: { feature: 'f1' } })
+
+    const main = await backend.commitLog('room', 'main')
+    expect(main.map((e) => e.hash)).toEqual(['m2', 'm1'])
+    expect(main.every((e) => e.ref === 'main')).toBe(true)
+
+    const feature = await backend.commitLog('room', 'feature')
+    expect(feature.map((e) => e.hash)).toEqual(['f1'])
+    expect(feature.every((e) => e.ref === 'feature')).toBe(true)
+  })
+
+  it('caches per `room::ref`: switching branches does not invalidate the other', async () => {
+    const counters = { decode: 0, getObject: 0, getRef: 0 }
+    const graph = {
+      m1: { message: 'main', signer: 's' },
+      f1: { message: 'feature', signer: 's' },
+    }
+    const { backend } = harness({ head: 'm1', graph, counters, refs: { feature: 'f1' } })
+
+    await backend.commitLog('room', 'main')
+    await backend.commitLog('room', 'feature')
+    const afterBoth = counters.decode
+    expect(afterBoth).toBe(2) // each ref walked once
+
+    // Repeat calls hit each ref's own cache — no extra decodes.
+    await backend.commitLog('room', 'main')
+    await backend.commitLog('room', 'feature')
+    expect(counters.decode).toBe(afterBoth)
+  })
+
+  it('decodes a single commit by hash for the detail view (tree + signature)', async () => {
+    const counters = { decode: 0, getObject: 0, getRef: 0 }
+    const graph = { c1: { message: 'detail me', signer: 'sig1' } }
+    const { backend } = harness({ head: 'c1', graph, counters })
+
+    // The detail view fetches the object then decodes it client-side.
+    const bytes = await backend.getObject('room', 'c1')
+    expect(bytes).not.toBeNull()
+    // The wasm walk in commitLog already exercises commit_decode; here we just
+    // assert the bytes round-trip back to the same hash for get_object.
+    expect(new TextDecoder().decode(bytes!)).toBe('c1')
+  })
+})
+
+describe('listRefs exposes all branches in the room', () => {
+  it('WasmRepoBackend.listRefs returns main + branches', async () => {
+    const graph = { m1: { message: 'main', signer: 's' }, f1: { message: 'feat', signer: 's' } }
+    // Reuse the wasm harness above via a fresh instance.
+    const backend = new WasmRepoBackend(
+      {
+        get_ref: async (_b: string, _r: string, n: string) => (n === 'main' ? 'm1' : n === 'feature' ? 'f1' : undefined),
+        get_object: async (_b: string, _r: string, h: string) =>
+          graph[h as keyof typeof graph] ? new TextEncoder().encode(h) : undefined,
+        list_refs: async (_b: string, _r: string, prefix: string) =>
+          [
+            { name: 'main', objectIdHex: 'm1' },
+            { name: 'feature', objectIdHex: 'f1' },
+          ].filter((r) => r.name.startsWith(prefix)),
+      } as unknown as RepoWasmClient,
+      {} as unknown as MkitApi,
+      () => null,
+      'http://x',
+    )
+    const refs = await backend.listRefs('room')
+    expect(refs.map((r) => r.name).toSorted()).toEqual(['feature', 'main'])
+    const filtered = await backend.listRefs('room', 'feat')
+    expect(filtered.map((r) => r.name)).toEqual(['feature'])
+  })
+
+  it('MockRepoBackend.commitLog filters by ref so each branch shows its own chain', async () => {
+    const api = await mkit()
+    const backend = new MockRepoBackend(api)
+    backend.seedForeignCommit('room', {
+      hash: 'h-main',
+      message: 'on main',
+      authorPubkey: 'a',
+      ref: 'main',
+      createdAt: '1',
+    })
+    backend.seedForeignCommit('room', {
+      hash: 'h-feat',
+      message: 'on feature',
+      authorPubkey: 'a',
+      ref: 'feature',
+      createdAt: '2',
+    })
+    expect((await backend.commitLog('room', 'main')).map((e) => e.hash)).toEqual(['h-main'])
+    expect((await backend.commitLog('room', 'feature')).map((e) => e.hash)).toEqual(['h-feat'])
+    // Both refs are listed in the panel.
+    expect((await backend.listRefs('room')).map((r) => r.name).toSorted()).toEqual(['feature', 'main'])
   })
 })

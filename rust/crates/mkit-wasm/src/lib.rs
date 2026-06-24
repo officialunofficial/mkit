@@ -211,7 +211,10 @@ pub fn commit_verify(commit_bytes: &[u8]) -> bool {
 /// chain: the [`CommitInfoJs::message`], the [`CommitInfoJs::parents`]
 /// (64-hex object ids, parent 0 first), the
 /// [`CommitInfoJs::signer_hex`] (the 64-hex Ed25519 signer/author
-/// pubkey), and the [`CommitInfoJs::timestamp`] (unix seconds).
+/// pubkey), the [`CommitInfoJs::timestamp`] (unix seconds), the
+/// [`CommitInfoJs::tree_hex`] (64-hex tree object id), and the
+/// [`CommitInfoJs::signature_hex`] (128-hex Ed25519 signature) — the
+/// last two power the navigable commit-detail view.
 ///
 /// # Errors
 /// `commit_bytes` is not a valid serialized object, or it deserializes
@@ -229,6 +232,8 @@ pub fn commit_decode(bytes: &[u8]) -> Result<CommitInfoJs, JsValue> {
         parents,
         signer_hex: to_hex(&c.signer),
         timestamp: c.timestamp,
+        tree_hex: to_hex(&c.tree_hash),
+        signature_hex: hex::encode(c.signature),
     })
 }
 
@@ -1123,7 +1128,9 @@ impl EncodedCommit {
 /// Decoded display fields of a commit object — what [`commit_decode`]
 /// returns for the multiplayer log to walk + render the room's `main`
 /// chain. `parents` are 64-hex object ids (parent 0 first); `signer_hex`
-/// is the 64-hex Ed25519 signer/author pubkey; `timestamp` is unix seconds.
+/// is the 64-hex Ed25519 signer/author pubkey; `timestamp` is unix
+/// seconds; `tree_hex` is the 64-hex tree object id; `signature_hex` is
+/// the 128-hex Ed25519 signature.
 #[wasm_bindgen]
 #[derive(Debug, Clone)]
 pub struct CommitInfoJs {
@@ -1131,6 +1138,8 @@ pub struct CommitInfoJs {
     parents: Vec<String>,
     signer_hex: String,
     timestamp: u64,
+    tree_hex: String,
+    signature_hex: String,
 }
 
 #[wasm_bindgen]
@@ -1162,6 +1171,18 @@ impl CommitInfoJs {
     #[must_use]
     pub fn timestamp(&self) -> u64 {
         self.timestamp
+    }
+    /// 64-hex id of the tree this commit snapshots.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn tree_hex(&self) -> String {
+        self.tree_hex.clone()
+    }
+    /// 128-hex Ed25519 signature over the commit's signing bytes.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn signature_hex(&self) -> String {
+        self.signature_hex.clone()
     }
 }
 

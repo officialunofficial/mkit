@@ -42,6 +42,13 @@ fn round_trip_root_commit() {
     let expected_signer = hex::encode(ed25519_pubkey_from_seed(&hex_to_bytes(SEED_HEX)).unwrap());
     assert_eq!(info.signer_hex(), expected_signer);
     assert_eq!(info.signer_hex().len(), 64);
+
+    // tree_hex round-trips the tree the commit was built over.
+    assert_eq!(info.tree_hex(), TREE_HEX);
+    // signature_hex matches what `commit_encode_and_sign` reported and is
+    // the canonical 128-hex Ed25519 signature.
+    assert_eq!(info.signature_hex(), encoded.signature_hex());
+    assert_eq!(info.signature_hex().len(), 128);
 }
 
 /// A child commit decodes its parent as the first (and only) parent id.

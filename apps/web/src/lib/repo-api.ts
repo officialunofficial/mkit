@@ -173,8 +173,11 @@ export interface RepoBackend {
   listRefs(room: string, prefix?: string): Promise<RefEntry[]>
   /** WatchRefs (server-streaming) — fires on each ref advance. Returns an unsubscribe fn. */
   watchRefs(room: string, prefix: string, onUpdate: (u: RefUpdate) => void): () => void
-  /** Commit log for the demo UI — derived by the mock; a server would source it. */
-  commitLog(room: string): Promise<CommitLogEntry[]>
+  /**
+   * Commit log for the demo UI — the chain reachable from `ref` (default
+   * `main`), newest-first. The mock derives it; a server walk sources it.
+   */
+  commitLog(room: string, ref?: string): Promise<CommitLogEntry[]>
 }
 
 export class CasConflictError extends Error {
@@ -267,8 +270,8 @@ export class MockRepoBackend implements RepoBackend {
     return () => set?.delete(onUpdate)
   }
 
-  async commitLog(room: string): Promise<CommitLogEntry[]> {
-    return (this.log.get(room) ?? []).toReversed()
+  async commitLog(room: string, ref = 'main'): Promise<CommitLogEntry[]> {
+    return (this.log.get(room) ?? []).filter((e) => e.ref === ref).toReversed()
   }
 
   private broadcast(room: string, name: string, u: RefUpdate): void {
@@ -371,10 +374,12 @@ export interface RepoWasmClient {
 export class WasmRepoBackend implements RepoBackend {
   private log = new Map<string, CommitLogEntry[]>()
   /**
-   * Memoised result of the last `main`-ref walk, keyed by room. `head` is
+   * Memoised result of the last ref walk, keyed by `room::ref`. `head` is
    * the ref value the cached `entries` were walked from; when the ref
    * advances (our push, or a peer's push surfaced via WatchRefs → query
    * invalidation → re-`commitLog`), `head` no longer matches and we re-walk.
+   * Keying by ref lets the browser switch between branches without one
+   * branch's cache shadowing another's.
    */
   private walkCache = new Map<string, { head: string; entries: CommitLogEntry[] }>()
 
@@ -517,23 +522,26 @@ export class WasmRepoBackend implements RepoBackend {
   }
 
   /**
-   * Authoritative shared history: the `main` chain read from the worker, so
-   * every viewer renders the SAME log (history + live), not just this
-   * session's pushes. Walks from the room's `main` ref by first-parent,
-   * decoding each commit object (`commit_decode`) for its real message /
-   * signer / parents — so a peer's push (surfaced via WatchRefs → query
-   * invalidation → re-walk) shows its real message, not a placeholder.
+   * Authoritative shared history: the chain reachable from the selected
+   * `ref` (default `main`), read from the worker, so every viewer renders
+   * the SAME log (history + live), not just this session's pushes. Walks
+   * from the room's `ref` by first-parent, decoding each commit object
+   * (`commit_decode`) for its real message / signer / parents — so a
+   * peer's push (surfaced via WatchRefs → query invalidation → re-walk)
+   * shows its real message, not a placeholder.
    *
    * Newest-first (head → parent → …), matching the order `LiveLog` renders.
-   * Memoised by head hash so repeated calls don't re-walk; a new head
-   * (push or WS event) invalidates the cache and re-walks. Stops at no
-   * parent, a missing object, or {@link WasmRepoBackend.WALK_CAP}.
+   * Memoised by `room::ref` head hash so repeated calls (and other branches)
+   * don't re-walk; a new head (push or WS event) invalidates the cache and
+   * re-walks. Stops at no parent, a missing object, or
+   * {@link WasmRepoBackend.WALK_CAP}.
    */
-  async commitLog(room: string): Promise<CommitLogEntry[]> {
-    const head = await this.wasm.get_ref(this.baseUrl, room, 'main')
+  async commitLog(room: string, ref = 'main'): Promise<CommitLogEntry[]> {
+    const head = await this.wasm.get_ref(this.baseUrl, room, ref)
     if (!head) return []
 
-    const cached = this.walkCache.get(room)
+    const cacheKey = `${room}::${ref}`
+    const cached = this.walkCache.get(cacheKey)
     if (cached && cached.head === head) return cached.entries
 
     const entries: CommitLogEntry[] = []
@@ -553,7 +561,7 @@ export class WasmRepoBackend implements RepoBackend {
         hash,
         message: info.message,
         authorPubkey: info.signer_hex,
-        ref: 'main',
+        ref,
         // `timestamp` is unix seconds (commit field); the log renders the
         // hash/message, but keep a sortable ISO string for consistency.
         createdAt: new Date(Number(info.timestamp) * 1000).toISOString(),
@@ -561,7 +569,7 @@ export class WasmRepoBackend implements RepoBackend {
       hash = info.parent_count > 0 ? info.parent(0) : undefined
     }
 
-    this.walkCache.set(room, { head, entries })
+    this.walkCache.set(cacheKey, { head, entries })
     return entries
   }
 
@@ -597,8 +605,9 @@ export function getRepoBackend(): RepoBackend {
 
 export const repoKeys = {
   ref: (room: string, name: string) => ['repo', room, 'ref', name] as const,
+  refs: (room: string, prefix: string) => ['repo', room, 'refs', prefix] as const,
   object: (room: string, hash: string) => ['repo', room, 'object', hash] as const,
-  log: (room: string) => ['repo', room, 'log'] as const,
+  log: (room: string, ref: string) => ['repo', room, 'log', ref] as const,
 }
 
 // ---------------------------------------------------------------------------
@@ -620,10 +629,18 @@ export function useObject(room: string, hash: string | null) {
   })
 }
 
-export function useCommitLog(room: string) {
+export function useCommitLog(room: string, ref = 'main') {
   return useQuery({
-    queryKey: repoKeys.log(room),
-    queryFn: () => getRepoBackend().commitLog(room),
+    queryKey: repoKeys.log(room, ref),
+    queryFn: () => getRepoBackend().commitLog(room, ref),
+  })
+}
+
+/** All refs in the room (optionally prefix-filtered) — drives the branches panel. */
+export function useRefs(room: string, prefix = '') {
+  return useQuery({
+    queryKey: repoKeys.refs(room, prefix),
+    queryFn: () => getRepoBackend().listRefs(room, prefix),
   })
 }
 
@@ -685,7 +702,9 @@ export function usePushCommit() {
     },
     onSuccess: (_entry, args) => {
       void qc.invalidateQueries({ queryKey: repoKeys.ref(args.room, args.ref) })
-      void qc.invalidateQueries({ queryKey: repoKeys.log(args.room) })
+      void qc.invalidateQueries({ queryKey: repoKeys.log(args.room, args.ref) })
+      // A first push to a new ref makes a new branch appear in the panel.
+      void qc.invalidateQueries({ queryKey: ['repo', args.room, 'refs'] })
     },
   })
 }
@@ -700,7 +719,9 @@ export function useRepoEvents(room: string, prefix = ''): void {
   useEffect(() => {
     const unsub = getRepoBackend().watchRefs(room, prefix, (u) => {
       void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
-      void qc.invalidateQueries({ queryKey: repoKeys.log(room) })
+      void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
+      // The advanced ref may be new (a peer created a branch) → refresh the panel.
+      void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
     })
     return unsub
   }, [room, prefix, qc])

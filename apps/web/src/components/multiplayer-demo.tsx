@@ -18,8 +18,10 @@ import {
   type CommitLogEntry,
   setRepoBackend,
   useCommitLog,
+  useObject,
   usePushCommit,
   useRef,
+  useRefs,
   useRepoEvents,
 } from '../lib/repo-api'
 import { repoWasm } from '../lib/repo-client'
@@ -35,9 +37,11 @@ const PRIMARY_BTN =
   'inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-blue-600 px-3 text-sm font-medium text-white shadow-[1px_1px_0_0_#1e3a8a] transition-all duration-200 hover:bg-blue-700 active:translate-y-px active:shadow-none disabled:pointer-events-none disabled:opacity-50 sm:h-9'
 
 // A couple of "other players'" commits, so the live multiplayer log isn't empty
-// on first load. Seeded once per mock backend.
-const FOREIGN_SEEDS = ['7'.repeat(64), 'a3'.repeat(32)]
-const FOREIGN_MESSAGES = ['hello from another tab', 'ship it 🚀']
+// on first load. Seeded once per mock backend. The third lands on a `feature`
+// branch so the refs panel shows more than just `main` offline.
+const FOREIGN_SEEDS = ['7'.repeat(64), 'a3'.repeat(32), 'b5'.repeat(32)]
+const FOREIGN_MESSAGES = ['hello from another tab', 'ship it 🚀', 'spike on a feature branch']
+const FOREIGN_REFS = ['main', 'main', 'feature']
 
 /** The single source of identity + push + live-log UI (design note §2 steps 1–6). */
 export function MultiplayerDemo() {
@@ -58,15 +62,17 @@ export function MultiplayerDemo() {
   useEffect(() => {
     setRepoBackend(mock)
     // Seed foreign commits deterministically so the log shows multiplayer life.
+    // Also store the commit object so the offline detail view can decode it.
     FOREIGN_SEEDS.forEach((seed, i) => {
       const tree = api.tree_encode('[]')
       const commit = api.commit_encode_and_sign(tree.hash_hex, '', FOREIGN_MESSAGES[i]!, BigInt(i), seed)
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(seed)))
+      void mock.putObject(room, commit.hash_hex, commit.bytes)
       mock.seedForeignCommit(room, {
         hash: commit.hash_hex,
         message: FOREIGN_MESSAGES[i]!,
         authorPubkey: pubkey,
-        ref: 'main',
+        ref: FOREIGN_REFS[i]!,
         createdAt: new Date(Date.now() - (FOREIGN_SEEDS.length - i) * 60_000).toISOString(),
       })
     })
@@ -99,6 +105,10 @@ export function MultiplayerDemo() {
 
   const [status, setStatus] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // Repo-browser navigation state (no router change needed): which ref the
+  // log/detail view follows, and which commit's detail is open (null = none).
+  const [selectedRef, setSelectedRef] = useState('main')
+  const [selectedCommit, setSelectedCommit] = useState<string | null>(null)
 
   // One ceremony: create the passkey AND derive the Ed25519 seed (PRF-on-create),
   // falling back to one get() or an ephemeral key inside `createIdentity`. Every
@@ -129,11 +139,26 @@ export function MultiplayerDemo() {
   // the live log ALWAYS on the right — so you can watch others contribute even
   // before you create an identity ("signed out" mode). The left column swaps
   // between the single create action and the compose/attest surface.
+  const browser = (
+    <RepoBrowser
+      room={room}
+      myPubkey={id.unlocked ? id.ed25519PubkeyHex : null}
+      useMock={useMock}
+      selectedRef={selectedRef}
+      onSelectRef={(r) => {
+        setSelectedRef(r)
+        setSelectedCommit(null) // switching branches closes any open detail
+      }}
+      selectedCommit={selectedCommit}
+      onSelectCommit={setSelectedCommit}
+    />
+  )
+
   if (!id.unlocked || !id.seedHex || !id.ed25519PubkeyHex) {
     return (
       <div className='grid gap-8 lg:grid-cols-2 lg:items-start'>
         <LockedView onCreate={onCreate} busy={busy} status={status} />
-        <LiveLog room={room} myPubkey={null} useMock={useMock} />
+        {browser}
       </div>
     )
   }
@@ -141,7 +166,7 @@ export function MultiplayerDemo() {
     <div className='grid gap-8 lg:grid-cols-2 lg:items-start'>
       <div className='space-y-6'>
         <UnlockedHeader />
-        <Compose api={api} seedHex={id.seedHex} room={room} />
+        <Compose api={api} seedHex={id.seedHex} room={room} targetRef={selectedRef} onTargetRef={setSelectedRef} />
         <details className='group'>
           <summary className='flex cursor-pointer list-none items-center gap-1 text-sm text-muted select-none hover:text-fg [&::-webkit-details-marker]:hidden'>
             <span className='inline-block transition-transform group-open:rotate-90'>›</span> Attest this Ed25519 with a
@@ -152,7 +177,7 @@ export function MultiplayerDemo() {
           </div>
         </details>
       </div>
-      <LiveLog room={room} myPubkey={id.ed25519PubkeyHex} useMock={useMock} />
+      {browser}
     </div>
   )
 }
@@ -270,10 +295,25 @@ function UnlockedHeader() {
   )
 }
 
-function Compose({ api, seedHex, room }: { api: ReturnType<typeof useMkit>; seedHex: string; room: string }) {
+function Compose({
+  api,
+  seedHex,
+  room,
+  targetRef,
+  onTargetRef,
+}: {
+  api: ReturnType<typeof useMkit>
+  seedHex: string
+  room: string
+  /** Ref the push targets (shared with the browser's selected ref). */
+  targetRef: string
+  onTargetRef: (r: string) => void
+}) {
   const [message, setMessage] = useState('gm, multiplayer mkit')
   const push = usePushCommit()
-  const headRef = useRef(room, 'main')
+  // Build on the head of the TARGET ref: pushing to a fresh branch name has no
+  // head yet (parentHash = '' → MISSING → first commit), an existing one MATCHes.
+  const headRef = useRef(room, targetRef)
   const parentHash = headRef.data ?? ''
   // Live lock state: the backend signs with whatever seed is in memory at call
   // time, so a push can race a Lock. Disable the button + surface a typed error.
@@ -292,12 +332,12 @@ function Compose({ api, seedHex, room }: { api: ReturnType<typeof useMkit>; seed
   }, [api, message, parentHash, seedHex])
 
   const onPush = () => {
-    if (!built.ok) return
+    if (!built.ok || !targetRef) return
     push.mutate({
       api,
       seedHex,
       room,
-      ref: 'main',
+      ref: targetRef,
       commitBytes: built.commit.bytes,
       commitHash: built.commit.hash_hex,
       message,
@@ -325,13 +365,25 @@ function Compose({ api, seedHex, room }: { api: ReturnType<typeof useMkit>; seed
           onChange={(e) => setMessage(e.target.value)}
         />
       </label>
+      <label className='block'>
+        <span className='mb-1.5 block text-sm text-muted'>
+          Branch / ref — type a new name to start a branch
+        </span>
+        <input
+          className={INPUT_CLASSES}
+          value={targetRef}
+          onChange={(e) => onTargetRef(e.target.value)}
+          placeholder='main'
+          spellCheck={false}
+        />
+      </label>
       <button
         type='button'
         className={PRIMARY_BTN}
         onClick={onPush}
-        disabled={!built.ok || push.isPending || !unlocked}
+        disabled={!built.ok || push.isPending || !unlocked || !targetRef}
       >
-        {push.isPending ? 'Pushing…' : !unlocked ? 'Locked' : 'Sign & push'}
+        {push.isPending ? 'Pushing…' : !unlocked ? 'Locked' : `Sign & push → ${targetRef || '…'}`}
       </button>
 
       {built.ok ? (
@@ -342,8 +394,8 @@ function Compose({ api, seedHex, room }: { api: ReturnType<typeof useMkit>; seed
           <Field label='Signature (Ed25519, in WASM)'>
             <code className='font-mono text-xs break-all'>{built.commit.signature_hex}</code>
           </Field>
-          <Field label='Parent (current head)'>
-            <code className='font-mono text-xs break-all'>{parentHash || '∅ (first commit)'}</code>
+          <Field label={`Parent (head of “${targetRef || 'main'}”)`}>
+            <code className='font-mono text-xs break-all'>{parentHash || '∅ (first commit on this ref)'}</code>
           </Field>
         </FieldList>
       ) : (
@@ -355,33 +407,139 @@ function Compose({ api, seedHex, room }: { api: ReturnType<typeof useMkit>; seed
   )
 }
 
-function LiveLog({
+/**
+ * Navigable repo browser (right column): a refs/branches panel, the selected
+ * ref's history, and — when a commit row is clicked — a commit-detail view
+ * whose parents are themselves links. All navigation is component state
+ * (selectedRef / selectedCommit), no router change.
+ */
+function RepoBrowser({
   room,
   myPubkey,
   useMock,
+  selectedRef,
+  onSelectRef,
+  selectedCommit,
+  onSelectCommit,
 }: {
   room: string
   myPubkey: string | null
   useMock: boolean
+  selectedRef: string
+  onSelectRef: (r: string) => void
+  selectedCommit: string | null
+  onSelectCommit: (h: string | null) => void
 }) {
-  const log = useCommitLog(room)
-  const head = useRef(room, 'main')
+  return (
+    <div className='space-y-6'>
+      <RefsPanel room={room} useMock={useMock} selectedRef={selectedRef} onSelectRef={onSelectRef} />
+      {selectedCommit ? (
+        <CommitDetail
+          room={room}
+          hash={selectedCommit}
+          onSelectCommit={onSelectCommit}
+          onClose={() => onSelectCommit(null)}
+        />
+      ) : (
+        <LiveLog
+          room={room}
+          selectedRef={selectedRef}
+          myPubkey={myPubkey}
+          onSelectCommit={onSelectCommit}
+        />
+      )}
+    </div>
+  )
+}
+
+/** All refs in the room. Each row selects the ref the log/detail view follows. */
+function RefsPanel({
+  room,
+  useMock,
+  selectedRef,
+  onSelectRef,
+}: {
+  room: string
+  useMock: boolean
+  selectedRef: string
+  onSelectRef: (r: string) => void
+}) {
+  const refs = useRefs(room)
+  // Sort `main` first, then alphabetically — a stable, predictable panel.
+  const entries = (refs.data ?? []).toSorted((a, b) =>
+    a.name === 'main' ? -1 : b.name === 'main' ? 1 : a.name.localeCompare(b.name),
+  )
+
+  return (
+    <section className='space-y-3'>
+      <div className='flex items-baseline justify-between'>
+        <h2 className='text-sm font-semibold'>Refs · room “{room}”</h2>
+        <span className='font-mono text-xs text-muted'>{useMock ? 'mock backend' : 'worker'}</span>
+      </div>
+      {entries.length === 0 ? (
+        <p className='text-sm text-muted'>No refs yet — push a commit to create one.</p>
+      ) : (
+        <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
+          {entries.map((r) => {
+            const active = r.name === selectedRef
+            return (
+              <li key={r.name}>
+                <button
+                  type='button'
+                  onClick={() => onSelectRef(r.name)}
+                  aria-pressed={active}
+                  className={`flex w-full items-center gap-3 py-2.5 text-left transition-colors ${
+                    active ? 'text-fg' : 'text-muted hover:text-fg'
+                  }`}
+                >
+                  <HashChip hash={r.objectIdHex} size={14} />
+                  <span className={`truncate font-mono text-sm ${active ? 'font-semibold' : 'font-medium'}`}>
+                    {r.name}
+                  </span>
+                  {active ? <span className='shrink-0 text-xs text-blue-600 dark:text-blue-400'>selected</span> : null}
+                  <code className='ml-auto shrink-0 font-mono text-xs text-muted'>{r.objectIdHex.slice(0, 10)}…</code>
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function LiveLog({
+  room,
+  selectedRef,
+  myPubkey,
+  onSelectCommit,
+}: {
+  room: string
+  selectedRef: string
+  myPubkey: string | null
+  onSelectCommit: (h: string) => void
+}) {
+  const log = useCommitLog(room, selectedRef)
+  const head = useRef(room, selectedRef)
   const entries = log.data ?? []
 
   return (
     <section className='space-y-3'>
       <div className='flex items-baseline justify-between'>
-        <h2 className='text-sm font-semibold'>Live commit log · room “{room}”</h2>
-        <span className='font-mono text-xs text-muted'>
-          {useMock ? 'mock backend' : 'worker'} · head {head.data ? head.data.slice(0, 10) : '∅'}…
-        </span>
+        <h2 className='text-sm font-semibold'>Commit log · “{selectedRef}”</h2>
+        <span className='font-mono text-xs text-muted'>head {head.data ? head.data.slice(0, 10) : '∅'}…</span>
       </div>
       {entries.length === 0 ? (
-        <p className='text-sm text-muted'>No commits yet — push one above.</p>
+        <p className='text-sm text-muted'>No commits on this ref yet — push one above.</p>
       ) : (
         <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
           {entries.map((e) => (
-            <LogRow key={e.hash} entry={e} mine={!!myPubkey && e.authorPubkey === myPubkey} />
+            <LogRow
+              key={e.hash}
+              entry={e}
+              mine={!!myPubkey && e.authorPubkey === myPubkey}
+              onSelect={() => onSelectCommit(e.hash)}
+            />
           ))}
         </ul>
       )}
@@ -389,20 +547,143 @@ function LiveLog({
   )
 }
 
-function LogRow({ entry, mine }: { entry: CommitLogEntry; mine: boolean }) {
+function LogRow({ entry, mine, onSelect }: { entry: CommitLogEntry; mine: boolean; onSelect: () => void }) {
   return (
-    <li className='flex items-center gap-3 py-2.5'>
-      <HashChip hash={entry.hash} size={14} />
-      <div className='min-w-0 flex-1'>
-        <div className='flex items-baseline gap-2'>
-          <span className='truncate text-sm font-medium'>{entry.message}</span>
-          {mine ? <span className='shrink-0 text-xs text-green-700 dark:text-green-400'>you</span> : null}
+    <li>
+      <button
+        type='button'
+        onClick={onSelect}
+        className='flex w-full items-center gap-3 py-2.5 text-left transition-colors hover:text-fg'
+      >
+        <HashChip hash={entry.hash} size={14} />
+        <div className='min-w-0 flex-1'>
+          <div className='flex items-baseline gap-2'>
+            <span className='truncate text-sm font-medium'>{entry.message}</span>
+            {mine ? <span className='shrink-0 text-xs text-green-700 dark:text-green-400'>you</span> : null}
+          </div>
+          <code className='block font-mono text-xs break-all text-muted'>
+            {entry.authorPubkey.slice(0, 16)}… · {entry.hash.slice(0, 16)}…
+          </code>
         </div>
-        <code className='block font-mono text-xs break-all text-muted'>
-          {entry.authorPubkey.slice(0, 16)}… · {entry.hash.slice(0, 16)}…
-        </code>
-      </div>
+      </button>
     </li>
+  )
+}
+
+/**
+ * Navigable detail for one commit: fetched by hash (get_object), decoded
+ * (commit_decode) for message / signer / timestamp / tree / signature, and its
+ * parents rendered as links that load THAT commit's detail in place. This is
+ * the in-component navigation graph (selectedCommit follows first/any parent).
+ *
+ * TODO(remix): remix objects would slot in here as an additional "sources"
+ * block once `remix_decode` exists in mkit-wasm — out of scope for this PR
+ * (needs new WASM primitives). See the PR description.
+ */
+function CommitDetail({
+  room,
+  hash,
+  onSelectCommit,
+  onClose,
+}: {
+  room: string
+  hash: string
+  onSelectCommit: (h: string) => void
+  onClose: () => void
+}) {
+  const api = useMkit()
+  const obj = useObject(room, hash)
+
+  const decoded = useMemo(() => {
+    if (!obj.data) return null
+    try {
+      const info = api.commit_decode(obj.data)
+      const parents: string[] = []
+      for (let i = 0; i < info.parent_count; i++) {
+        const p = info.parent(i)
+        if (p) parents.push(p)
+      }
+      return {
+        ok: true as const,
+        message: info.message,
+        signerHex: info.signer_hex,
+        timestamp: Number(info.timestamp),
+        treeHex: info.tree_hex,
+        signatureHex: info.signature_hex,
+        parents,
+      }
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
+    }
+  }, [api, obj.data])
+
+  return (
+    <section className='space-y-3'>
+      <div className='flex items-baseline justify-between gap-3'>
+        <h2 className='flex items-center gap-2 text-sm font-semibold'>
+          <HashChip hash={hash} size={14} />
+          Commit detail
+        </h2>
+        <button type='button' className={BTN} onClick={onClose}>
+          ← Back to log
+        </button>
+      </div>
+
+      {obj.isLoading ? (
+        <p className='text-sm text-muted'>Loading commit…</p>
+      ) : !obj.data ? (
+        <p className='text-sm text-amber-700 dark:text-amber-400'>Commit object not found in this room.</p>
+      ) : !decoded?.ok ? (
+        <p className='text-red-600 dark:text-red-400'>Could not decode commit: {decoded?.error}</p>
+      ) : (
+        <FieldList>
+          <Field label='Hash'>
+            <code className='font-mono text-sm break-all'>{hash}</code>
+          </Field>
+          <Field label='Message'>
+            <span className='text-sm break-words whitespace-pre-wrap'>{decoded.message || '(empty)'}</span>
+          </Field>
+          <Field label='Author / signer (Ed25519 pubkey)'>
+            <code className='font-mono text-xs break-all'>{decoded.signerHex}</code>
+          </Field>
+          <Field label='Timestamp'>
+            <span className='text-sm'>
+              {decoded.timestamp ? new Date(decoded.timestamp * 1000).toISOString() : '∅'}{' '}
+              <span className='text-muted'>({decoded.timestamp} unix s)</span>
+            </span>
+          </Field>
+          <Field label='Tree'>
+            <code className='font-mono text-xs break-all'>{decoded.treeHex}</code>
+          </Field>
+          <Field label='Parents'>
+            {decoded.parents.length === 0 ? (
+              <span className='text-sm text-muted'>∅ (root commit)</span>
+            ) : (
+              <ul className='space-y-1.5'>
+                {decoded.parents.map((p, i) => (
+                  <li key={p} className='flex items-center gap-2'>
+                    <HashChip hash={p} size={12} />
+                    <button
+                      type='button'
+                      onClick={() => onSelectCommit(p)}
+                      className='min-w-0 truncate text-left font-mono text-xs break-all text-blue-600 hover:underline dark:text-blue-400'
+                    >
+                      {p}
+                    </button>
+                    {decoded.parents.length > 1 ? (
+                      <span className='shrink-0 text-xs text-muted'>{i === 0 ? '(first)' : `(#${i})`}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Field>
+          <Field label='Signature (Ed25519)'>
+            <code className='font-mono text-xs break-all'>{decoded.signatureHex}</code>
+          </Field>
+        </FieldList>
+      )}
+    </section>
   )
 }
 
