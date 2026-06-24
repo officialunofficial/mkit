@@ -9,7 +9,10 @@ import {
   WasmRepoBackend,
   buildSignedEnvelope,
   canonicalString,
+  decodeLogObject,
   envelopeHeaders,
+  forkRefName,
+  isForkRef,
   makeSignFn,
   procedures,
 } from './repo-api'
@@ -225,6 +228,13 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     } as unknown as RepoWasmClient
 
     const api = {
+      // The walk now routes by object_kind first; every node in these
+      // graphs is a commit, so report "commit" for any known hash.
+      object_kind: (bytes: Uint8Array) => {
+        const hash = new TextDecoder().decode(bytes)
+        if (!graph[hash]) throw new Error('unknown object')
+        return 'commit'
+      },
       commit_decode: (bytes: Uint8Array) => {
         counters.decode++
         const hash = new TextDecoder().decode(bytes)
@@ -395,5 +405,108 @@ describe('listRefs exposes all branches in the room', () => {
     expect((await backend.commitLog('room', 'feature')).map((e) => e.hash)).toEqual(['h-feat'])
     // Both refs are listed in the panel.
     expect((await backend.listRefs('room')).map((r) => r.name).toSorted()).toEqual(['feature', 'main'])
+  })
+})
+
+describe('fork ref scheme', () => {
+  it('forkRefName keys a fork by the upstream short hash under forks/', () => {
+    const upstream = 'abcdef0123456789'.repeat(4) // 64 hex
+    const ref = forkRefName(upstream)
+    expect(ref).toBe('forks/abcdef012345')
+    expect(isForkRef(ref)).toBe(true)
+    expect(isForkRef('main')).toBe(false)
+    expect(isForkRef('feature')).toBe(false)
+  })
+})
+
+describe('decodeLogObject routes commits vs remixes via object_kind', () => {
+  const SEED2 = '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60'
+  const TREE = '11'.repeat(32)
+  const UPSTREAM_ID = '22'.repeat(32)
+
+  it('a commit decodes as kind="commit" with its first parent', async () => {
+    const api = await mkit()
+    const root = api.commit_encode_and_sign(TREE, '', 'root', 1n, SEED2)
+    const child = api.commit_encode_and_sign(TREE, root.hash_hex, 'child', 2n, SEED2)
+
+    const res = decodeLogObject(api, child.bytes, child.hash_hex, 'main')
+    expect(res).not.toBeNull()
+    expect(res!.entry.kind).toBe('commit')
+    expect(res!.entry.message).toBe('child')
+    expect(res!.entry.sources).toBeUndefined()
+    expect(res!.firstParent).toBe(root.hash_hex)
+  })
+
+  it('a remix decodes as kind="remix" carrying its upstream source', async () => {
+    const api = await mkit()
+    const upstream = api.commit_encode_and_sign(TREE, '', 'upstream', 1n, SEED2)
+    const sourcesJson = JSON.stringify([
+      { upstream_id_hex: UPSTREAM_ID, commit_hash_hex: upstream.hash_hex },
+    ])
+    const remix = api.remix_encode_and_sign(TREE, '', sourcesJson, 'forked it', 2n, SEED2)
+
+    const res = decodeLogObject(api, remix.bytes, remix.hash_hex, forkRefName(upstream.hash_hex))
+    expect(res).not.toBeNull()
+    expect(res!.entry.kind).toBe('remix')
+    expect(res!.entry.message).toBe('forked it')
+    expect(res!.entry.sources).toEqual([
+      { upstreamIdHex: UPSTREAM_ID, commitHashHex: upstream.hash_hex },
+    ])
+    // Root remix → no parent to continue the walk.
+    expect(res!.firstParent).toBeUndefined()
+  })
+
+  it('returns null on non-commit/remix bytes so the walk stops cleanly', async () => {
+    const api = await mkit()
+    expect(decodeLogObject(api, new Uint8Array([1, 2, 3]), 'h', 'main')).toBeNull()
+  })
+
+  it('object_kind separates a commit from a remix', async () => {
+    const api = await mkit()
+    const commit = api.commit_encode_and_sign(TREE, '', 'c', 1n, SEED2)
+    const sourcesJson = JSON.stringify([
+      { upstream_id_hex: UPSTREAM_ID, commit_hash_hex: commit.hash_hex },
+    ])
+    const remix = api.remix_encode_and_sign(TREE, '', sourcesJson, 'r', 2n, SEED2)
+    expect(api.object_kind(commit.bytes)).toBe('commit')
+    expect(api.object_kind(remix.bytes)).toBe('remix')
+  })
+})
+
+describe('WasmRepoBackend.commitLog walks a fork ref of remixes', () => {
+  it('routes a remix head through remix_decode and tags entries kind="remix"', async () => {
+    const api = await mkit()
+    const SEED2 = '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60'
+    const TREE = '11'.repeat(32)
+    const UPSTREAM_ID = '22'.repeat(32)
+
+    const upstream = api.commit_encode_and_sign(TREE, '', 'upstream', 1n, SEED2)
+    const sourcesJson = JSON.stringify([
+      { upstream_id_hex: UPSTREAM_ID, commit_hash_hex: upstream.hash_hex },
+    ])
+    const remix = api.remix_encode_and_sign(TREE, '', sourcesJson, 'a fork', 2n, SEED2)
+    const forkRef = forkRefName(upstream.hash_hex)
+
+    // Real object bytes keyed by hash; get_object returns them verbatim so the
+    // walk decodes the genuine remix object (not a fake).
+    const store: Record<string, Uint8Array> = {
+      [remix.hash_hex]: remix.bytes,
+      [upstream.hash_hex]: upstream.bytes,
+    }
+    const wasm = {
+      get_ref: async (_b: string, _r: string, name: string) =>
+        name === forkRef ? remix.hash_hex : undefined,
+      get_object: async (_b: string, _r: string, hash: string) => store[hash],
+      list_refs: async (_b: string, _r: string, prefix: string) =>
+        [{ name: forkRef, objectIdHex: remix.hash_hex }].filter((r) => r.name.startsWith(prefix)),
+    } as unknown as RepoWasmClient
+
+    const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
+    const log = await backend.commitLog('room', forkRef)
+    // Root remix → the walk yields just the remix (its parents are empty).
+    expect(log.map((e) => e.hash)).toEqual([remix.hash_hex])
+    expect(log[0]!.kind).toBe('remix')
+    expect(log[0]!.message).toBe('a fork')
+    expect(log[0]!.sources).toEqual([{ upstreamIdHex: UPSTREAM_ID, commitHashHex: upstream.hash_hex }])
   })
 })

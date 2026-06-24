@@ -39,12 +39,35 @@ export type RefExpectation = 'ANY' | 'MISSING' | 'MATCH'
 
 export type RefEntry = { name: string; objectIdHex: string }
 export type RefUpdate = { name: string; objectIdHex: string; authorPubkeyHex: string }
+
+/** One upstream commit a remix/fork derives from. */
+export type RemixSourceEntry = { upstreamIdHex: string; commitHashHex: string }
+
 export type CommitLogEntry = {
   hash: string
   message: string
   authorPubkey: string
   ref: string
   createdAt: string
+  /** `'commit'` (default) or `'remix'` — drives the fork badge in the log. */
+  kind?: 'commit' | 'remix'
+  /** For a remix: the upstream commit(s) it forks from. */
+  sources?: RemixSourceEntry[]
+}
+
+/**
+ * Fork ref name for a remix derived from `upstreamCommitHash`. Lands under
+ * the `forks/` prefix so the Refs panel can mark it as a fork (distinct
+ * from `main` / feature branches), keyed by the upstream's short hash so
+ * two people forking the same commit collide on the same ref (the CAS
+ * `MISSING`/`MATCH` gate then orders them).
+ */
+export const FORKS_PREFIX = 'forks/'
+export function forkRefName(upstreamCommitHash: string): string {
+  return `${FORKS_PREFIX}${upstreamCommitHash.slice(0, 12)}`
+}
+export function isForkRef(name: string): boolean {
+  return name.startsWith(FORKS_PREFIX)
 }
 
 /** Fully-qualified Connect procedure paths — also the `procedure` field of the envelope. */
@@ -178,6 +201,74 @@ export interface RepoBackend {
    * `main`), newest-first. The mock derives it; a server walk sources it.
    */
   commitLog(room: string, ref?: string): Promise<CommitLogEntry[]>
+}
+
+/**
+ * Decode one fetched object into a log entry, routing by `object_kind` so
+ * the SAME walk handles both commits and remixes (a fork ref's head is a
+ * remix). Returns the entry plus its first parent to continue the walk, or
+ * `null` for any other object kind (or a decode failure) so the caller
+ * stops the walk rather than throwing. Shared by the wasm ref-walk and the
+ * detail view's client-side decode.
+ */
+export function decodeLogObject(
+  api: MkitApi,
+  bytes: Uint8Array,
+  hash: string,
+  ref: string,
+): { entry: CommitLogEntry; firstParent: string | undefined } | null {
+  let kind: string
+  try {
+    kind = api.object_kind(bytes)
+  } catch {
+    return null
+  }
+  if (kind === 'commit') {
+    let info: ReturnType<MkitApi['commit_decode']>
+    try {
+      info = api.commit_decode(bytes)
+    } catch {
+      return null
+    }
+    return {
+      entry: {
+        hash,
+        message: info.message,
+        authorPubkey: info.signer_hex,
+        ref,
+        kind: 'commit',
+        // `timestamp` is unix seconds; keep a sortable ISO string.
+        createdAt: new Date(Number(info.timestamp) * 1000).toISOString(),
+      },
+      firstParent: info.parent_count > 0 ? info.parent(0) : undefined,
+    }
+  }
+  if (kind === 'remix') {
+    let info: ReturnType<MkitApi['remix_decode']>
+    try {
+      info = api.remix_decode(bytes)
+    } catch {
+      return null
+    }
+    const sources: RemixSourceEntry[] = []
+    for (let i = 0; i < info.source_count; i++) {
+      const s = info.source(i)
+      if (s) sources.push({ upstreamIdHex: s.upstream_id_hex, commitHashHex: s.commit_hash_hex })
+    }
+    return {
+      entry: {
+        hash,
+        message: info.message,
+        authorPubkey: info.signer_hex,
+        ref,
+        kind: 'remix',
+        sources,
+        createdAt: new Date(Number(info.timestamp) * 1000).toISOString(),
+      },
+      firstParent: info.parent_count > 0 ? info.parent(0) : undefined,
+    }
+  }
+  return null
 }
 
 export class CasConflictError extends Error {
@@ -551,22 +642,13 @@ export class WasmRepoBackend implements RepoBackend {
       seen.add(hash)
       const bytes = await this.wasm.get_object(this.baseUrl, room, hash)
       if (!bytes) break // object missing — stop the walk
-      let info: ReturnType<MkitApi['commit_decode']>
-      try {
-        info = this.api.commit_decode(bytes)
-      } catch {
-        break // not a decodable commit — stop rather than throw
-      }
-      entries.push({
-        hash,
-        message: info.message,
-        authorPubkey: info.signer_hex,
-        ref,
-        // `timestamp` is unix seconds (commit field); the log renders the
-        // hash/message, but keep a sortable ISO string for consistency.
-        createdAt: new Date(Number(info.timestamp) * 1000).toISOString(),
-      })
-      hash = info.parent_count > 0 ? info.parent(0) : undefined
+      // Route by the object's prologue type: a fork ref's head is a remix,
+      // not a commit. `decodeLogObject` handles both kinds (and stops the
+      // walk on anything else) so a fork chain renders alongside commits.
+      const decoded = decodeLogObject(this.api, bytes, hash, ref)
+      if (!decoded) break // not a commit/remix — stop rather than throw
+      entries.push(decoded.entry)
+      hash = decoded.firstParent
     }
 
     this.walkCache.set(cacheKey, { head, entries })
@@ -649,12 +731,20 @@ export type PushArgs = {
   seedHex: string
   room: string
   ref: string
-  /** Raw mkit commit object bytes (from `commit_encode_and_sign`). */
+  /**
+   * Raw mkit object bytes — a commit (from `commit_encode_and_sign`) or a
+   * remix (from `remix_encode_and_sign`). PutObject is content-addressed,
+   * so the same push path stores either kind.
+   */
   commitBytes: Uint8Array
   commitHash: string
   message: string
-  /** Parent the commit was built on — the CAS expected id (empty for the first commit). */
+  /** Parent the object was built on — the CAS expected id (empty for the first object on the ref). */
   parentHash: string
+  /** `'commit'` (default) or `'remix'` — tags the recorded log entry. */
+  kind?: 'commit' | 'remix'
+  /** For a remix push: the upstream commit(s) it forks from (for the log badge). */
+  sources?: RemixSourceEntry[]
 }
 
 /**
@@ -694,6 +784,8 @@ export function usePushCommit() {
         authorPubkey,
         ref: args.ref,
         createdAt: String(Date.now()),
+        kind: args.kind ?? 'commit',
+        ...(args.sources ? { sources: args.sources } : {}),
       }
       if (backend instanceof MockRepoBackend || backend instanceof WasmRepoBackend) {
         backend.recordCommit(args.room, entry)

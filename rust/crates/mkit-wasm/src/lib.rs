@@ -21,10 +21,13 @@ use mkit_core::chunker::{AVG_SIZE, ChunkIterator, FastCdc, MAX_SIZE, MIN_SIZE};
 use mkit_core::delta;
 use mkit_core::hash::{from_hex, hash, to_hex};
 use mkit_core::object::{
-    Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry, id_from_object,
+    Blob, Commit, EntryMode, Identity, Object, Remix, RemixSource, Tree, TreeEntry, id_from_object,
 };
 use mkit_core::serialize::serialize;
-use mkit_core::sign::{COMMIT_DOMAIN, KeyPair, PublicKey, Signature, commit_signing_bytes, verify};
+use mkit_core::sign::{
+    COMMIT_DOMAIN, KeyPair, PublicKey, REMIX_DOMAIN, Signature, commit_signing_bytes,
+    remix_signing_bytes, verify,
+};
 
 use std::io::Read;
 use zeroize::Zeroizing;
@@ -235,6 +238,157 @@ pub fn commit_decode(bytes: &[u8]) -> Result<CommitInfoJs, JsValue> {
         tree_hex: to_hex(&c.tree_hash),
         signature_hex: hex::encode(c.signature),
     })
+}
+
+// ---------------------------------------------------------------------
+// 1b. Remix / fork primitives
+// ---------------------------------------------------------------------
+
+/// Build and sign a remix (fork/derivation), returning
+/// `{ bytes, hash_hex, signature_hex }` like [`commit_encode_and_sign`].
+///
+/// A `Remix` is the first-class fork object: it snapshots a `tree_hash`,
+/// names zero or more `parents` (prior remixes/commits in the fork's own
+/// history), and — crucially — records one or more `sources`, each a
+/// `RemixSource { upstream_id, commit_hash }` pointing at the upstream
+/// commit(s) this fork derives from.
+///
+/// Inputs mirror the commit variant, plus `sources_json`:
+/// * `tree_hash_hex` — 64-hex tree object id this remix snapshots.
+/// * `parent_hex` — comma-separated parent ids (empty = root remix).
+/// * `sources_json` — JSON array of `{ "upstream_id_hex", "commit_hash_hex" }`
+///   objects, each 64-hex. The upstream commits being forked/remixed.
+/// * `message` / `timestamp` — same as a commit.
+/// * `seed_hex` — the 32-byte Ed25519 seed.
+///
+/// `sources` are sorted here by `(upstream_id, commit_hash)` and checked
+/// for duplicates, satisfying the strict-ascending order mkit-core's
+/// `read_remix` enforces at decode time (see `Remix::sources_sorted`).
+/// At least one source is required — a remix with no source is not a fork.
+///
+/// # Errors
+/// Any hex field is malformed, `sources_json` does not parse, `sources`
+/// is empty or contains a duplicate `(upstream_id, commit_hash)` pair, or
+/// signing-bytes construction fails.
+#[wasm_bindgen]
+pub fn remix_encode_and_sign(
+    tree_hash_hex: &str,
+    parent_hex: &str,
+    sources_json: &str,
+    message: &str,
+    timestamp: u64,
+    seed_hex: &str,
+) -> Result<EncodedCommit, JsValue> {
+    let tree_hash = parse_hash_hex(tree_hash_hex)?;
+    let parents = parse_parent_list(parent_hex)?;
+    let mut sources = parse_remix_sources(sources_json)?;
+    if sources.is_empty() {
+        return Err(js_err("a remix must reference at least one source"));
+    }
+    // Strict-ascending order by (upstream_id, commit_hash) is what
+    // `read_remix` enforces at decode time. Sort, then reject duplicates
+    // (sort alone would silently accept a repeated pair).
+    sources.sort_by(|a, b| {
+        a.upstream_id
+            .cmp(&b.upstream_id)
+            .then(a.commit_hash.cmp(&b.commit_hash))
+    });
+    if sources
+        .windows(2)
+        .any(|w| w[0].upstream_id == w[1].upstream_id && w[0].commit_hash == w[1].commit_hash)
+    {
+        return Err(js_err("duplicate remix source (upstream_id, commit_hash)"));
+    }
+
+    // # Zeroization — see `commit_encode_and_sign`.
+    let seed: Zeroizing<[u8; 32]> = Zeroizing::new(parse_hash_hex(seed_hex)?);
+    let kp = KeyPair::from_seed_zeroizing(&seed);
+    let signer_pub = kp.public.0;
+    let author = Identity::ed25519(signer_pub);
+
+    // Start from an empty signature so `remix_signing_bytes` excludes it,
+    // then populate after we compute the signature.
+    let mut remix = Remix {
+        tree_hash,
+        parents,
+        sources,
+        author,
+        signer: signer_pub,
+        message: message.as_bytes().to_vec(),
+        timestamp,
+        signature: [0u8; 64],
+    };
+
+    let signing_bytes =
+        remix_signing_bytes(&remix).map_err(|e| js_err(format!("signing bytes: {e}")))?;
+    let sig: Signature = kp.sign(REMIX_DOMAIN, &signing_bytes);
+    remix.signature = sig.0;
+
+    let encoded = encode_object(&Object::Remix(remix))?;
+    Ok(EncodedCommit {
+        bytes: encoded.bytes,
+        hash_hex: encoded.hash_hex,
+        signature_hex: hex::encode(sig.0),
+    })
+}
+
+/// Decode a remix object's display fields from its raw on-disk bytes.
+///
+/// The remix counterpart of [`commit_decode`]: deserializes via
+/// `mkit_core::deserialize` → [`Object::Remix`] and exposes the same
+/// commit-shaped fields (`message`, `signer_hex`, `timestamp`,
+/// `tree_hex`, `signature_hex`, `parents`) plus the remix-only
+/// [`RemixInfoJs::sources`] — each a `{ upstream_id_hex, commit_hash_hex }`
+/// read by `source_count` + the `source(i)` indexed getter. The web
+/// browser uses the sources to render the "fork of …" badge whose
+/// `commit_hash` links to the upstream commit's detail.
+///
+/// # Errors
+/// `bytes` is not a valid serialized object, or it deserializes to a
+/// non-`Remix` object.
+#[wasm_bindgen]
+pub fn remix_decode(bytes: &[u8]) -> Result<RemixInfoJs, JsValue> {
+    let obj = mkit_core::deserialize(bytes).map_err(|e| js_err(format!("deserialize: {e}")))?;
+    let Object::Remix(r) = obj else {
+        return Err(js_err("object is not a remix"));
+    };
+    let message = String::from_utf8_lossy(&r.message).into_owned();
+    let parents = r.parents.iter().map(to_hex).collect();
+    let sources = r
+        .sources
+        .iter()
+        .map(|s| RemixSourceJs {
+            upstream_id_hex: to_hex(&s.upstream_id),
+            commit_hash_hex: to_hex(&s.commit_hash),
+        })
+        .collect();
+    Ok(RemixInfoJs {
+        message,
+        parents,
+        sources,
+        signer_hex: to_hex(&r.signer),
+        timestamp: r.timestamp,
+        tree_hex: to_hex(&r.tree_hash),
+        signature_hex: hex::encode(r.signature),
+    })
+}
+
+/// Read the object-type tag from a serialized object's prologue and
+/// return its spec short name: `"commit" | "remix" | "tree" | "blob" |
+/// "chunked_blob" | "delta" | "tag"`.
+///
+/// Lets the browser route a fetched object to the right decoder
+/// (`commit_decode` vs `remix_decode`) without guessing or trial-decoding.
+/// Goes through `mkit_core::deserialize` so the answer reflects a fully
+/// well-formed object, then reports [`ObjectType::name`].
+///
+/// # Errors
+/// `bytes` is not a valid serialized object (bad prologue / truncated /
+/// unknown type tag).
+#[wasm_bindgen]
+pub fn object_kind(bytes: &[u8]) -> Result<String, JsValue> {
+    let obj = mkit_core::deserialize(bytes).map_err(|e| js_err(format!("deserialize: {e}")))?;
+    Ok(obj.object_type().name().to_string())
 }
 
 // ---------------------------------------------------------------------
@@ -1186,6 +1340,107 @@ impl CommitInfoJs {
     }
 }
 
+/// One remix source: a `{ upstream_id_hex, commit_hash_hex }` pair naming
+/// an upstream commit this fork derives from. `upstream_id` is the opaque
+/// caller-chosen 32-byte provenance tag (e.g. the room id); `commit_hash`
+/// is the 64-hex id of the upstream commit being remixed.
+#[wasm_bindgen]
+#[derive(Debug, Clone)]
+pub struct RemixSourceJs {
+    upstream_id_hex: String,
+    commit_hash_hex: String,
+}
+
+#[wasm_bindgen]
+impl RemixSourceJs {
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn upstream_id_hex(&self) -> String {
+        self.upstream_id_hex.clone()
+    }
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn commit_hash_hex(&self) -> String {
+        self.commit_hash_hex.clone()
+    }
+}
+
+/// Decoded display fields of a remix object — the remix counterpart of
+/// [`CommitInfoJs`]. Carries the same commit-shaped fields plus the
+/// remix-only `sources` (read via `source_count` + the `source(i)`
+/// indexed getter), each a [`RemixSourceJs`] naming an upstream commit
+/// the fork derives from. `parents` are 64-hex object ids (parent 0
+/// first); `signer_hex` is the 64-hex Ed25519 signer pubkey; `timestamp`
+/// is unix seconds; `tree_hex` is the 64-hex tree id; `signature_hex` is
+/// the 128-hex Ed25519 signature.
+#[wasm_bindgen]
+#[derive(Debug, Clone)]
+pub struct RemixInfoJs {
+    message: String,
+    parents: Vec<String>,
+    sources: Vec<RemixSourceJs>,
+    signer_hex: String,
+    timestamp: u64,
+    tree_hex: String,
+    signature_hex: String,
+}
+
+#[wasm_bindgen]
+impl RemixInfoJs {
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn message(&self) -> String {
+        self.message.clone()
+    }
+    /// Number of parents; pair with [`RemixInfoJs::parent`] to read each
+    /// 64-hex id by index.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn parent_count(&self) -> u32 {
+        js_vec_count(&self.parents)
+    }
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn parent(&self, i: u32) -> Option<String> {
+        js_vec_get(&self.parents, i)
+    }
+    /// Number of sources (upstream commits this fork derives from); pair
+    /// with [`RemixInfoJs::source`] to read each `{ upstream_id_hex,
+    /// commit_hash_hex }` by index.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn source_count(&self) -> u32 {
+        js_vec_count(&self.sources)
+    }
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn source(&self, i: u32) -> Option<RemixSourceJs> {
+        js_vec_get(&self.sources, i)
+    }
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn signer_hex(&self) -> String {
+        self.signer_hex.clone()
+    }
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+    /// 64-hex id of the tree this remix snapshots.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn tree_hex(&self) -> String {
+        self.tree_hex.clone()
+    }
+    /// 128-hex Ed25519 signature over the remix's signing bytes.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn signature_hex(&self) -> String {
+        self.signature_hex.clone()
+    }
+}
+
 #[wasm_bindgen]
 #[derive(Debug)]
 pub struct KeyPairJs {
@@ -1508,6 +1763,43 @@ fn parse_parent_list(s: &str) -> Result<Vec<[u8; 32]>, JsValue> {
         .filter(|p| !p.is_empty())
         .map(parse_hash_hex)
         .collect()
+}
+
+/// Parse the `sources_json` handed to [`remix_encode_and_sign`]: a JSON
+/// array of `{ "upstream_id_hex": <64-hex>, "commit_hash_hex": <64-hex> }`
+/// objects. Uses `serde_json` (already a dep) rather than the hand-rolled
+/// triple parser, since the shape is an object-array, not a triple-array.
+///
+/// Each pair's two fields are decoded to 32-byte hashes here so the caller
+/// gets ready-to-sort `RemixSource`s; ordering/dedup is the caller's job.
+fn parse_remix_sources(s: &str) -> Result<Vec<RemixSource>, JsValue> {
+    if s.len() > MAX_JSON_BYTES {
+        return Err(js_err("sources JSON exceeds 16 MiB cap"));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(s).map_err(|e| js_err(format!("sources JSON: {e}")))?;
+    let arr = v
+        .as_array()
+        .ok_or_else(|| js_err("sources JSON must be an array"))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let obj = item
+            .as_object()
+            .ok_or_else(|| js_err(format!("source[{i}] must be an object")))?;
+        let upstream_hex = obj
+            .get("upstream_id_hex")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| js_err(format!("source[{i}].upstream_id_hex must be a string")))?;
+        let commit_hex = obj
+            .get("commit_hash_hex")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| js_err(format!("source[{i}].commit_hash_hex must be a string")))?;
+        out.push(RemixSource {
+            upstream_id: parse_hash_hex(upstream_hex)?,
+            commit_hash: parse_hash_hex(commit_hex)?,
+        });
+    }
+    Ok(out)
 }
 
 /// Tiny JSON parser for `[["name","mode","hex"], ...]`. We avoid pulling
