@@ -10,9 +10,9 @@ import {
   IdentityLockedError,
   type RemixSourceEntry,
   forkRefName,
-  getRepoBackend,
   usePushCommit,
   useRef,
+  useRepoBackend,
 } from '../../lib/repo-api'
 import { Field, FieldList, INPUT_CLASSES } from '../result-panel'
 import { bytesToHex, hexToBytes, useMkit } from '../use-mkit'
@@ -164,9 +164,10 @@ export function Compose({
  */
 export function useFork(api: ReturnType<typeof useMkit>, room: string, seedHex: string | null) {
   const push = usePushCommit()
+  const backend = useRepoBackend()
 
   const fork = async (upstreamCommitHash: string): Promise<string | null> => {
-    if (!seedHex) return null
+    if (!seedHex || !backend) return null
     // The fork ref is unique per (upstream commit, forker): keying on the
     // forker's pubkey too means two users forking the SAME commit get distinct
     // refs (no collision), while the SAME forker re-forking advances ITS ref.
@@ -184,7 +185,7 @@ export function useFork(api: ReturnType<typeof useMkit>, room: string, seedHex: 
     // SAME ref, chaining onto the prior remix instead of orphaning it (building
     // with an empty parent while pushing parentHash=head would MATCH-overwrite
     // and lose the existing fork on the first-parent walk).
-    const head = await getRepoBackend().getRef(room, ref)
+    const head = await backend.getRef(room, ref)
     // Empty tree keeps the demo remix tiny; a real fork snapshots its own tree.
     const tree = api.tree_encode('[]')
     const remix = api.remix_encode_and_sign(
@@ -210,5 +211,7 @@ export function useFork(api: ReturnType<typeof useMkit>, room: string, seedHex: 
     return ref
   }
 
-  return { fork, pending: push.isPending, error: push.error }
+  // `ready` lets the UI disable the Fork action until a backend is present (and
+  // a seed is in memory) — forking needs both to read the head and push.
+  return { fork, pending: push.isPending, error: push.error, ready: !!backend && !!seedHex }
 }

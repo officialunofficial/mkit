@@ -50,7 +50,7 @@ export function RepoBrowser({
   selectedCommit: string | null
   onSelectCommit: (h: string | null) => void
 }) {
-  const { fork, pending, error } = useFork(api, room, seedHex)
+  const { fork, pending, error, ready: forkReady } = useFork(api, room, seedHex)
   const [forkStatus, setForkStatus] = useState<string | null>(null)
 
   // Build + push a fork of `upstreamCommit`, then select its new fork ref so
@@ -76,7 +76,8 @@ export function RepoBrowser({
       )
     }
   }
-  const canFork = !!seedHex
+  // Fork needs both a seed (to sign) and a backend (to read head + push).
+  const canFork = !!seedHex && forkReady
 
   return (
     <div className='space-y-6'>

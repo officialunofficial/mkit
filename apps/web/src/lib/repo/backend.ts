@@ -181,6 +181,16 @@ export class IdentityLockedError extends Error {
   }
 }
 
+/** Thrown when a push is attempted before a backend is available. In practice
+ * push is only reachable once unlocked (backend present), so this is a guard
+ * for the structurally-impossible null case rather than a user-facing path. */
+export class BackendNotReadyError extends Error {
+  constructor() {
+    super('push requires a ready backend — none is available yet')
+    this.name = 'BackendNotReadyError'
+  }
+}
+
 // ---------------------------------------------------------------------------
 // In-memory mock backend (no server)
 // ---------------------------------------------------------------------------
