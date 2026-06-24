@@ -16,10 +16,25 @@ const TEXT_ENCODER = new TextEncoder()
 /** Envelope `procedure` for a name write — must match keys-worker's constant. */
 const SET_NAME_PROCEDURE = '/mkit.keys.v1.Keys/SetName'
 
-/** Registry base URL (no trailing slash), or null when the registry is disabled. */
+/** The deployed production registry (apps/keys-worker). */
+const PROD_KEYS_URL = 'https://keys.mkit.sh'
+
+/**
+ * Registry base URL (no trailing slash), or null when the registry is disabled.
+ *
+ * `VITE_KEYS_URL` (a build-time var) wins when set — use it to point at a local worker or a preview deploy. Otherwise
+ * we default to the production registry when served from an `mkit.sh` host, so prod works with no build-env wiring.
+ * Local dev / SSR / tests (no `window`, or a non-mkit host) stay disabled and fall back to the deterministic
+ * `playerName`.
+ */
 export function keysBaseUrl(): string | null {
   const raw = import.meta.env.VITE_KEYS_URL as string | undefined
-  return raw ? raw.replace(/\/$/, '') : null
+  if (raw) return raw.replace(/\/$/, '')
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname
+    if (host === 'mkit.sh' || host.endsWith('.mkit.sh')) return PROD_KEYS_URL
+  }
+  return null
 }
 
 /** True when a keys.mkit.sh base URL is configured. */

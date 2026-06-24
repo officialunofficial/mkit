@@ -45,6 +45,28 @@ describe('keys-client — registry disabled (no VITE_KEYS_URL)', () => {
   })
 })
 
+describe('keys-client — production host default (no VITE_KEYS_URL)', () => {
+  beforeEach(() => vi.stubEnv('VITE_KEYS_URL', ''))
+
+  it('defaults to https://keys.mkit.sh on the mkit.sh host', () => {
+    vi.stubGlobal('window', { location: { hostname: 'mkit.sh' } })
+    expect(keysBaseUrl()).toBe('https://keys.mkit.sh')
+    expect(keysEnabled()).toBe(true)
+  })
+
+  it('defaults on a subdomain of mkit.sh', () => {
+    vi.stubGlobal('window', { location: { hostname: 'demo.mkit.sh' } })
+    expect(keysBaseUrl()).toBe('https://keys.mkit.sh')
+  })
+
+  it('stays disabled on a non-mkit host (and never matches a look-alike)', () => {
+    vi.stubGlobal('window', { location: { hostname: 'localhost' } })
+    expect(keysBaseUrl()).toBeNull()
+    vi.stubGlobal('window', { location: { hostname: 'evil-mkit.sh' } })
+    expect(keysBaseUrl()).toBeNull()
+  })
+})
+
 describe('keys-client — registry enabled', () => {
   beforeEach(() => vi.stubEnv('VITE_KEYS_URL', BASE))
 
