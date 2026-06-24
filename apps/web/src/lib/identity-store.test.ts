@@ -40,6 +40,14 @@ describe('identity store', () => {
     expect(useIdentityStore.getState().ephemeral).toBe(true)
   })
 
+  it('lock clears the ephemeral flag (the in-memory seed it described is gone)', () => {
+    const s = useIdentityStore.getState()
+    s.unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32), ephemeral: true })
+    expect(useIdentityStore.getState().ephemeral).toBe(true)
+    s.lock()
+    expect(useIdentityStore.getState().ephemeral).toBe(false)
+  })
+
   it('setRoom falls back to the default on empty input', () => {
     useIdentityStore.getState().setRoom('   ')
     expect(useIdentityStore.getState().room).toBe(DEFAULT_ROOM)
@@ -70,6 +78,14 @@ describe('identity store', () => {
     s.setCredentialId('cred-gone')
     s.reset()
     expect(useIdentityStore.getState().credentialId).toBeNull()
+  })
+
+  it('reset returns the room to the default (persist now writes room)', () => {
+    const s = useIdentityStore.getState()
+    s.setRoom('arena')
+    expect(useIdentityStore.getState().room).toBe('arena')
+    s.reset()
+    expect(useIdentityStore.getState().room).toBe(DEFAULT_ROOM)
   })
 
   describe('persistence partialize', () => {

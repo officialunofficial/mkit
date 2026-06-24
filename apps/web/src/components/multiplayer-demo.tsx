@@ -67,8 +67,23 @@ export function MultiplayerDemo() {
 
   // One mock backend per mounted demo, always available as the offline fallback.
   const mock = useMemo(() => new MockRepoBackend(api), [api])
+
+  // Install the mock as the SYNCHRONOUS bootstrap backend exactly once per mock
+  // instance (deps `[mock]` only — NOT `room`). This is the offline default and,
+  // in worker mode, the synchronous fallback the wasm effect replaces once its
+  // async init resolves (so head/ref/log queries have a backend to answer before
+  // then). Keying this off `room` was the bug: editing the Room re-ran it and
+  // clobbered the already-installed WasmRepoBackend, reverting worker → mock.
   useEffect(() => {
     setRepoBackend(mock)
+  }, [mock])
+
+  useEffect(() => {
+    // MOCK MODE ONLY. The foreign-commit/remix seeding is a mock-only demo
+    // affordance — in worker mode the room's real shared history comes from the
+    // worker, so don't seed (and don't touch the active backend). Gated on the
+    // same `!backendUrl` condition the wasm effect below uses.
+    if (!useMock) return
     // Seed foreign commits deterministically so the log shows multiplayer life.
     // Also store the commit object so the offline detail view can decode it.
     // Keep the first foreign commit's hash so we can seed a remix of it.
@@ -119,7 +134,7 @@ export function MultiplayerDemo() {
         sources: [{ upstreamIdHex: upstreamId, commitHashHex: upstreamCommit }],
       })
     }
-  }, [mock, api, room])
+  }, [mock, api, room, useMock])
 
   // When a backend URL is configured, install the wasm-backed ConnectRPC client.
   // It reads the live seed from the identity store at call time so writes sign
@@ -161,7 +176,13 @@ export function MultiplayerDemo() {
     setBusy(true)
     try {
       const res = await createIdentity()
-      if (res.credentialId) id.setCredentialId(res.credentialId)
+      // Persist the credentialId ONLY for a real (passkey-backed) identity. The
+      // ephemeral fallback returns the created credentialId too, but its seed is
+      // RANDOM — not derived from that passkey — so persisting it would flip
+      // `hasPasskey` true and surface an "Unlock" that derives a DIFFERENT seed
+      // (a non-functional identity). Ephemeral identities can't be recovered, so
+      // the locked screen must stay on "Create".
+      if (res.credentialId && res.via !== 'ephemeral') id.setCredentialId(res.credentialId)
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: res.via === 'ephemeral' })
       setStatus(
@@ -440,13 +461,16 @@ function Compose({
   // time, so a push can race a Lock. Disable the button + surface a typed error.
   const unlocked = useIdentityStore((s) => s.unlocked)
 
-  // Build + sign the commit in WASM each render so the preview tracks the message
-  // and the current head (re-parents on a peer push). Empty tree keeps the demo tiny.
+  // Build + sign the commit in WASM each render for a LIGHTWEIGHT PREVIEW that
+  // tracks the message and the current head (re-parents on a peer push). The
+  // timestamp here is render-time and is NOT what gets pushed — `onPush`
+  // re-builds + re-signs with a fresh wall clock so the SIGNED object stamps
+  // push time, not render time. Empty tree keeps the demo tiny.
   const built = useMemo(() => {
     try {
       const tree = api.tree_encode('[]')
       // mkit commit timestamps are unix *seconds*; stamp the wall clock so the
-      // detail view shows a real time instead of epoch 0.
+      // preview shows a real time instead of epoch 0.
       const nowSecs = BigInt(Math.floor(Date.now() / 1000))
       const commit = api.commit_encode_and_sign(tree.hash_hex, parentHash, message, nowSecs, seedHex)
       return { ok: true as const, commit }
@@ -457,13 +481,27 @@ function Compose({
 
   const onPush = () => {
     if (!built.ok || !targetRef) return
+    // Re-build + re-sign AT CLICK TIME so the pushed object's timestamp == push
+    // time (the memo above captured render time). Stamp a fresh unix-seconds
+    // wall clock and push THESE bytes; behavior is otherwise identical.
+    let commitBytes: Uint8Array
+    let commitHash: string
+    try {
+      const tree = api.tree_encode('[]')
+      const nowSecs = BigInt(Math.floor(Date.now() / 1000))
+      const fresh = api.commit_encode_and_sign(tree.hash_hex, parentHash, message, nowSecs, seedHex)
+      commitBytes = fresh.bytes
+      commitHash = fresh.hash_hex
+    } catch {
+      return // a build failure is already surfaced via `built.error`
+    }
     push.mutate({
       api,
       seedHex,
       room,
       ref: targetRef,
-      commitBytes: built.commit.bytes,
-      commitHash: built.commit.hash_hex,
+      commitBytes,
+      commitHash,
       message,
       parentHash,
     })
@@ -534,9 +572,10 @@ function Compose({
 /**
  * A "Fork / Remix" action: builds + signs a remix referencing a given
  * upstream commit (one source = `{ upstream_id = blake3(room), commit_hash
- * = the clicked commit }`), then pushes it onto a `forks/<short-hash>` ref
- * so it appears in the Refs panel as a fork. Reuses the same PutObject +
- * CAS UpdateRef + envelope-signing flow commits use (`usePushCommit`).
+ * = the clicked commit }`), then pushes it onto a per-forker
+ * `forks/<upstreamShort>-<forkerShort>` ref so it appears in the Refs panel
+ * as a fork. Reuses the same PutObject + CAS UpdateRef + envelope-signing
+ * flow commits use (`usePushCommit`).
  *
  * Returns `{ fork, pending, error }`: call `fork(upstreamCommit)` to fork
  * that commit; it resolves to the new fork ref so the caller can select it
@@ -547,27 +586,34 @@ function useFork(api: ReturnType<typeof useMkit>, room: string, seedHex: string 
 
   const fork = async (upstreamCommitHash: string): Promise<string | null> => {
     if (!seedHex) return null
-    const ref = forkRefName(upstreamCommitHash)
+    // The fork ref is unique per (upstream commit, forker): keying on the
+    // forker's pubkey too means two users forking the SAME commit get distinct
+    // refs (no collision), while the SAME forker re-forking advances ITS ref.
+    const forkerPubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(seedHex)))
+    const ref = forkRefName(upstreamCommitHash, forkerPubkey)
     // Opaque caller-chosen provenance tag — the room id hashed to 32 bytes.
     const upstreamId = api.blake3_hex(new TextEncoder().encode(room))
     const sources: RemixSourceEntry[] = [{ upstreamIdHex: upstreamId, commitHashHex: upstreamCommitHash }]
     const sourcesJson = JSON.stringify(
       sources.map((s) => ({ upstream_id_hex: s.upstreamIdHex, commit_hash_hex: s.commitHashHex })),
     )
+    // Read the fork ref's current head FIRST, then embed it as the remix's
+    // FIRST PARENT so the chain is correctly linked: a fresh ref → '' → the
+    // push picks MISSING (create); an existing ref → head → MATCH advances the
+    // SAME ref, chaining onto the prior remix instead of orphaning it (building
+    // with an empty parent while pushing parentHash=head would MATCH-overwrite
+    // and lose the existing fork on the first-parent walk).
+    const head = await getRepoBackend().getRef(room, ref)
     // Empty tree keeps the demo remix tiny; a real fork snapshots its own tree.
     const tree = api.tree_encode('[]')
     const remix = api.remix_encode_and_sign(
       tree.hash_hex,
-      '', // root remix on a fresh fork ref
+      head ?? '', // chain onto the fork's current head (fresh ref → root remix)
       sourcesJson,
       `fork of ${upstreamCommitHash.slice(0, 10)}…`,
       BigInt(Math.floor(Date.now() / 1000)),
       seedHex,
     )
-    // First push to a fresh fork ref → MISSING (parentHash ''); if the ref
-    // already exists (someone else forked the same commit) the CAS surfaces
-    // a conflict the caller can show.
-    const head = await getRepoBackend().getRef(room, ref)
     await push.mutateAsync({
       api,
       seedHex,
@@ -630,8 +676,10 @@ function RepoBrowser({
       }
     } catch (e) {
       setForkStatus(
+        // The fork ref is unique per (commit, you), so a conflict here means a
+        // concurrent re-fork raced your push — your fork chain moved under you.
         e instanceof CasConflictError
-          ? 'That commit already has a fork ref here — open it from the Refs panel.'
+          ? 'Your fork ref just moved (a concurrent push) — try forking again.'
           : e instanceof IdentityLockedError
             ? 'Unlock (create an identity) before forking.'
             : errMsg(e),

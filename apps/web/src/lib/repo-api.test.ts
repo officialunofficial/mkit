@@ -409,13 +409,81 @@ describe('listRefs exposes all branches in the room', () => {
 })
 
 describe('fork ref scheme', () => {
-  it('forkRefName keys a fork by the upstream short hash under forks/', () => {
+  it('forkRefName keys a fork by the upstream short hash under forks/ (legacy, no forker)', () => {
     const upstream = 'abcdef0123456789'.repeat(4) // 64 hex
     const ref = forkRefName(upstream)
     expect(ref).toBe('forks/abcdef012345')
     expect(isForkRef(ref)).toBe(true)
     expect(isForkRef('main')).toBe(false)
     expect(isForkRef('feature')).toBe(false)
+  })
+
+  it('keys a fork by BOTH the upstream short hash AND the forker short pubkey', () => {
+    const upstream = 'abcdef0123456789'.repeat(4)
+    const forker = '1122334455667788'.repeat(4)
+    const ref = forkRefName(upstream, forker)
+    expect(ref).toBe('forks/abcdef012345-112233445566')
+    expect(isForkRef(ref)).toBe(true)
+  })
+
+  it('two different forkers of the SAME commit get DISTINCT refs (no collision)', () => {
+    const upstream = 'abcdef0123456789'.repeat(4)
+    const alice = 'aa'.repeat(32)
+    const bob = 'bb'.repeat(32)
+    expect(forkRefName(upstream, alice)).not.toBe(forkRefName(upstream, bob))
+  })
+
+  it('the same forker re-forking the same commit reuses ITS ref (so the chain advances)', () => {
+    const upstream = 'abcdef0123456789'.repeat(4)
+    const forker = 'dd'.repeat(32)
+    expect(forkRefName(upstream, forker)).toBe(forkRefName(upstream, forker))
+  })
+})
+
+describe('fork push: fresh ref → MISSING, existing ref → MATCH chains (no orphan)', () => {
+  // The component builds the remix with parent = (current head ?? '') and
+  // pushes via usePushCommit, which picks MISSING when parentHash is empty and
+  // MATCH otherwise. Here we replay that decision against the mock backend to
+  // prove a first fork creates the ref and a second fork on the SAME ref
+  // chains onto the prior head (CAS MATCH) rather than overwriting it.
+  async function pushRemix(
+    backend: MockRepoBackend,
+    room: string,
+    ref: string,
+    hash: string,
+    parentHash: string,
+  ): Promise<void> {
+    await backend.putObject(room, hash, new TextEncoder().encode(hash))
+    const expectation = parentHash ? 'MATCH' : 'MISSING'
+    await backend.updateRef(room, ref, hash, expectation, parentHash || undefined)
+  }
+
+  it('first fork of a fresh ref uses MISSING and creates the ref', async () => {
+    const api = await mkit()
+    const backend = new MockRepoBackend(api)
+    const ref = forkRefName('abcdef0123456789'.repeat(4), 'aa'.repeat(32))
+    // The component reads head first; a fresh ref has none → parent '' → MISSING.
+    const head = await backend.getRef('room', ref)
+    expect(head).toBeNull()
+    await pushRemix(backend, 'room', ref, 'remix1', head ?? '')
+    expect(await backend.getRef('room', ref)).toBe('remix1')
+  })
+
+  it('a second fork on the existing ref chains onto the prior head (MATCH), not orphaning it', async () => {
+    const api = await mkit()
+    const backend = new MockRepoBackend(api)
+    const ref = forkRefName('abcdef0123456789'.repeat(4), 'aa'.repeat(32))
+
+    await pushRemix(backend, 'room', ref, 'remix1', '') // MISSING → create
+    const head1 = await backend.getRef('room', ref)
+    expect(head1).toBe('remix1')
+
+    // Second fork: parent = current head → MATCH advances the SAME ref.
+    await pushRemix(backend, 'room', ref, 'remix2', head1 ?? '')
+    expect(await backend.getRef('room', ref)).toBe('remix2')
+
+    // A stale parent (orphan attempt) would have conflicted under MATCH.
+    await expect(pushRemix(backend, 'room', ref, 'remix3', 'remix1')).rejects.toBeInstanceOf(CasConflictError)
   })
 })
 

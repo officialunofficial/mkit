@@ -56,15 +56,27 @@ export type CommitLogEntry = {
 }
 
 /**
- * Fork ref name for a remix derived from `upstreamCommitHash`. Lands under
- * the `forks/` prefix so the Refs panel can mark it as a fork (distinct
- * from `main` / feature branches), keyed by the upstream's short hash so
- * two people forking the same commit collide on the same ref (the CAS
- * `MISSING`/`MATCH` gate then orders them).
+ * Fork ref name for a remix derived from `upstreamCommitHash` by the forker
+ * whose Ed25519 pubkey is `forkerPubkeyHex`. Lands under the `forks/` prefix
+ * so the Refs panel can mark it as a fork (distinct from `main` / feature
+ * branches).
+ *
+ * Scheme: `forks/<upstreamShort>-<forkerShort>` where `upstreamShort` is the
+ * upstream commit's first 12 hex chars and `forkerShort` is the forker's
+ * pubkey first 12 hex chars. Keying on BOTH makes the ref unique per (commit,
+ * forker): two users forking the SAME commit get DISTINCT refs (no collision),
+ * and a 48-bit prefix collision across two upstream commits no longer aliases
+ * onto one ref. The same forker re-forking the same commit reuses ITS ref, so
+ * repeated forks chain (CAS `MATCH` advances) instead of orphaning.
+ *
+ * `forkerPubkeyHex` is optional only so legacy seeded demo data (which keys on
+ * the upstream alone) still resolves; real forks always pass it.
  */
 export const FORKS_PREFIX = 'forks/'
-export function forkRefName(upstreamCommitHash: string): string {
-  return `${FORKS_PREFIX}${upstreamCommitHash.slice(0, 12)}`
+export function forkRefName(upstreamCommitHash: string, forkerPubkeyHex?: string): string {
+  const upstreamShort = upstreamCommitHash.slice(0, 12)
+  if (!forkerPubkeyHex) return `${FORKS_PREFIX}${upstreamShort}`
+  return `${FORKS_PREFIX}${upstreamShort}-${forkerPubkeyHex.slice(0, 12)}`
 }
 export function isForkRef(name: string): boolean {
   return name.startsWith(FORKS_PREFIX)

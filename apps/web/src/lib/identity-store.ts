@@ -87,8 +87,13 @@ export const useIdentityStore = create<IdentityState>()(
       setCredentialId: (id) => set({ credentialId: id }),
       unlock: ({ seedHex, ed25519PubkeyHex, ephemeral = false }) =>
         set({ seedHex, ed25519PubkeyHex, unlocked: true, ephemeral }),
-      lock: () => set({ seedHex: null, unlocked: false }),
+      // Clearing the seed also clears `ephemeral`: that flag describes the
+      // now-gone in-memory seed, so leaving it stuck `true` would mislabel the
+      // locked state.
+      lock: () => set({ seedHex: null, unlocked: false, ephemeral: false }),
       setRoom: (room) => set({ room: room.trim() || DEFAULT_ROOM }),
+      // Full reset — forget the passkey AND return to the default room (persist
+      // now writes `room`, so a "forget everything" must reset it too).
       reset: () =>
         set({
           credentialId: null,
@@ -96,6 +101,7 @@ export const useIdentityStore = create<IdentityState>()(
           seedHex: null,
           unlocked: false,
           ephemeral: false,
+          room: DEFAULT_ROOM,
         }),
     }),
     {

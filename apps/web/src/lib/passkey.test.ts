@@ -7,6 +7,7 @@ import {
   hkdfSha256,
   randomSeed,
   sha256,
+  toPrfBytes,
 } from './passkey'
 import { bytesToHex } from '../components/use-mkit'
 
@@ -81,6 +82,27 @@ describe('passkey derivation', () => {
   it('throws PrfUnsupportedError when the authenticator returns no PRF result', async () => {
     installWebAuthnMock(undefined)
     await expect(deriveEd25519Seed('AQIDBA')).rejects.toBeInstanceOf(PrfUnsupportedError)
+  })
+
+  it('toPrfBytes reads exactly an offset view, not the whole backing buffer', () => {
+    // A 32-byte PRF result sitting at byteOffset 8 inside a 48-byte buffer.
+    const backing = new ArrayBuffer(48)
+    const whole = new Uint8Array(backing)
+    // Fill the whole buffer with a sentinel so a "read the whole buffer" bug
+    // would surface extra/non-matching bytes.
+    whole.fill(0xee)
+    const known = new Uint8Array(32).map((_, i) => (i * 5 + 1) & 0xff)
+    const view = new Uint8Array(backing, 8, 32)
+    view.set(known)
+
+    const out = toPrfBytes(view)
+    expect(out.length).toBe(32)
+    expect(bytesToHex(out)).toBe(bytesToHex(known))
+  })
+
+  it('toPrfBytes passes a plain ArrayBuffer through as all its bytes', () => {
+    const buf = new Uint8Array([1, 2, 3, 4]).buffer
+    expect(Array.from(toPrfBytes(buf))).toEqual([1, 2, 3, 4])
   })
 
   it('randomSeed produces a fresh 32-byte seed each call', () => {

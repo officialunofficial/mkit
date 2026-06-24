@@ -178,7 +178,7 @@ export async function deriveEd25519Seed(credentialId?: string): Promise<DeriveRe
   const first = ext.prf?.results?.first
   if (!first) throw new PrfUnsupportedError()
 
-  const prf = new Uint8Array(first instanceof ArrayBuffer ? first : (first as ArrayBufferView).buffer)
+  const prf = toPrfBytes(first)
   const seed = await hkdfSha256(prf, HKDF_INFO)
   // Surface which credential the assertion used — for a discoverable (no
   // `allowCredentials`) recovery, this is how the caller learns which resident
@@ -193,9 +193,18 @@ export type IdentityResult = DeriveResult & {
   via: 'prf-create' | 'prf-get' | 'ephemeral'
 }
 
-/** Coerce a WebAuthn `BufferSource` PRF result to a `Uint8Array`. */
-function toPrfBytes(first: BufferSource): Uint8Array {
-  return new Uint8Array(first instanceof ArrayBuffer ? first : (first as ArrayBufferView).buffer)
+/**
+ * Coerce a WebAuthn `BufferSource` PRF result to a `Uint8Array` of EXACTLY the
+ * view's bytes. A typed-array view can sit at a non-zero `byteOffset` inside a
+ * larger backing `ArrayBuffer` (and span only part of it); reading `.buffer`
+ * alone would return the WHOLE buffer, corrupting the derived seed. Slice the
+ * view's `[byteOffset, byteOffset + byteLength)` window so only its own bytes
+ * are used.
+ */
+export function toPrfBytes(first: BufferSource): Uint8Array {
+  return ArrayBuffer.isView(first)
+    ? new Uint8Array(first.buffer.slice(first.byteOffset, first.byteOffset + first.byteLength))
+    : new Uint8Array(first)
 }
 
 /**
