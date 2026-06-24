@@ -34,7 +34,7 @@ import {
 } from '../lib/repo-api'
 import { repoWasm } from '../lib/repo-client'
 import { Field, FieldList, HashChip, INPUT_CLASSES } from './result-panel'
-import { bytesToHex, useMkit } from './use-mkit'
+import { bytesToHex, hexToBytes, useMkit } from './use-mkit'
 
 const BTN =
   'inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-hairline bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-fg active:translate-y-px disabled:pointer-events-none disabled:opacity-50 sm:h-9'
@@ -1107,14 +1107,6 @@ function CommitDetail({
       )}
     </section>
   )
-}
-
-// Local hex→bytes (kept private; repo-api owns the envelope-side copy).
-function hexToBytes(hex: string): Uint8Array {
-  const clean = hex.length % 2 === 0 ? hex : `0${hex}`
-  const out = new Uint8Array(clean.length / 2)
-  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16)
-  return out
 }
 
 function errMsg(e: unknown): string {

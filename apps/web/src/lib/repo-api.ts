@@ -25,7 +25,7 @@
 
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useSyncExternalStore } from 'react'
-import { bytesToHex } from '../components/use-mkit'
+import { bytesToHex, hexToBytes } from '../components/use-mkit'
 import type { MkitApi } from './mkit'
 
 const TEXT_ENCODER = new TextEncoder()
@@ -121,13 +121,6 @@ export type SignedEnvelope = {
   createdAt: string
   idempotencyKey: string
   canonical: string
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const clean = hex.length % 2 === 0 ? hex : `0${hex}`
-  const out = new Uint8Array(clean.length / 2)
-  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16)
-  return out
 }
 
 /** BLAKE3 hex of a UTF-8 string (via WASM). */
