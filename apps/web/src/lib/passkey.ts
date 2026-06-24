@@ -15,7 +15,7 @@
 // ceremony (see `attestEd25519Binding`).
 
 import { Hex, PublicKey, Signature, WebAuthnP256 } from 'ox'
-import { bytesToHex } from '../components/use-mkit'
+import { bytesToHex, hexToBytes } from '../components/use-mkit'
 import type { MkitApi } from './mkit'
 
 /** Per-host PRF salt label. The salt itself is SHA-256 of this string (32 bytes). */
@@ -136,6 +136,13 @@ export type DeriveResult = {
   seedHex: string
   /** The raw 32-byte PRF output, for display/debugging only. */
   prfHex: string
+  /**
+   * Base64url credential id of the passkey the assertion actually used. For a
+   * discoverable (no `allowCredentials`) recovery `get()`, this reveals WHICH
+   * resident key the user picked, so the caller can persist it. Absent only
+   * from the random `ephemeral` fallback.
+   */
+  credentialId?: string
 }
 
 /**
@@ -171,9 +178,12 @@ export async function deriveEd25519Seed(credentialId?: string): Promise<DeriveRe
   const first = ext.prf?.results?.first
   if (!first) throw new PrfUnsupportedError()
 
-  const prf = new Uint8Array(first instanceof ArrayBuffer ? first : (first as ArrayBufferView).buffer)
+  const prf = toPrfBytes(first)
   const seed = await hkdfSha256(prf, HKDF_INFO)
-  return { seedHex: bytesToHex(seed), prfHex: bytesToHex(prf) }
+  // Surface which credential the assertion used — for a discoverable (no
+  // `allowCredentials`) recovery, this is how the caller learns which resident
+  // passkey was picked, so it can be persisted for next time.
+  return { seedHex: bytesToHex(seed), prfHex: bytesToHex(prf), credentialId: b64url(new Uint8Array(assertion.rawId)) }
 }
 
 export type IdentityResult = DeriveResult & {
@@ -183,9 +193,18 @@ export type IdentityResult = DeriveResult & {
   via: 'prf-create' | 'prf-get' | 'ephemeral'
 }
 
-/** Coerce a WebAuthn `BufferSource` PRF result to a `Uint8Array`. */
-function toPrfBytes(first: BufferSource): Uint8Array {
-  return new Uint8Array(first instanceof ArrayBuffer ? first : (first as ArrayBufferView).buffer)
+/**
+ * Coerce a WebAuthn `BufferSource` PRF result to a `Uint8Array` of EXACTLY the
+ * view's bytes. A typed-array view can sit at a non-zero `byteOffset` inside a
+ * larger backing `ArrayBuffer` (and span only part of it); reading `.buffer`
+ * alone would return the WHOLE buffer, corrupting the derived seed. Slice the
+ * view's `[byteOffset, byteOffset + byteLength)` window so only its own bytes
+ * are used.
+ */
+export function toPrfBytes(first: BufferSource): Uint8Array {
+  return ArrayBuffer.isView(first)
+    ? new Uint8Array(first.buffer.slice(first.byteOffset, first.byteOffset + first.byteLength))
+    : new Uint8Array(first)
 }
 
 /**
@@ -280,13 +299,6 @@ export async function enrollBindingPasskey(name = 'mkit binding'): Promise<Bindi
   return { id: cred.id, pubkeyHex: sec1.replace(/^0x/, '') }
 }
 
-function hexToBytesLocal(hex: string): Uint8Array {
-  const clean = (hex.startsWith('0x') ? hex.slice(2) : hex)
-  const out = new Uint8Array(clean.length / 2)
-  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16)
-  return out
-}
-
 /**
  * Sign a DSSE-PAE challenge with the binding passkey and verify the assertion
  * through the WASM WebAuthn verifier (`verify_webauthn_wrapping[_with_policy]`),
@@ -315,9 +327,9 @@ export async function attestEd25519Binding(
     challenge: Hex.fromBytes(pae),
   })
 
-  const authenticatorData = hexToBytesLocal(metadata.authenticatorData)
+  const authenticatorData = hexToBytes(metadata.authenticatorData)
   const clientDataJSONBytes = TEXT_ENCODER.encode(metadata.clientDataJSON)
-  const sigCompact = hexToBytesLocal(Signature.toHex(signature)) // r||s, low-S normalized by ox
+  const sigCompact = hexToBytes(Signature.toHex(signature)) // r||s, low-S normalized by ox
 
   // Throws a typed reason on failure; resolves on success.
   if (opts.policyJson !== undefined) {

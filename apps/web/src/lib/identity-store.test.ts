@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { DEFAULT_ROOM, useIdentityStore } from './identity-store'
+import { DEFAULT_ROOM, partializeIdentity, useIdentityStore } from './identity-store'
 
 describe('identity store', () => {
   beforeEach(() => {
@@ -40,6 +40,14 @@ describe('identity store', () => {
     expect(useIdentityStore.getState().ephemeral).toBe(true)
   })
 
+  it('lock clears the ephemeral flag (the in-memory seed it described is gone)', () => {
+    const s = useIdentityStore.getState()
+    s.unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32), ephemeral: true })
+    expect(useIdentityStore.getState().ephemeral).toBe(true)
+    s.lock()
+    expect(useIdentityStore.getState().ephemeral).toBe(false)
+  })
+
   it('setRoom falls back to the default on empty input', () => {
     useIdentityStore.getState().setRoom('   ')
     expect(useIdentityStore.getState().room).toBe(DEFAULT_ROOM)
@@ -55,5 +63,49 @@ describe('identity store', () => {
     const after = useIdentityStore.getState()
     expect(after.credentialId).toBeNull()
     expect(after.seedHex).toBeNull()
+  })
+
+  it('lock keeps credentialId (so the player can re-derive on reload)', () => {
+    const s = useIdentityStore.getState()
+    s.setCredentialId('cred-keep')
+    s.unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32) })
+    s.lock()
+    expect(useIdentityStore.getState().credentialId).toBe('cred-keep')
+  })
+
+  it('reset clears credentialId', () => {
+    const s = useIdentityStore.getState()
+    s.setCredentialId('cred-gone')
+    s.reset()
+    expect(useIdentityStore.getState().credentialId).toBeNull()
+  })
+
+  it('reset returns the room to the default (persist now writes room)', () => {
+    const s = useIdentityStore.getState()
+    s.setRoom('arena')
+    expect(useIdentityStore.getState().room).toBe('arena')
+    s.reset()
+    expect(useIdentityStore.getState().room).toBe(DEFAULT_ROOM)
+  })
+
+  describe('persistence partialize', () => {
+    it('persists ONLY credentialId + room', () => {
+      const s = useIdentityStore.getState()
+      s.setCredentialId('cred-1')
+      s.setRoom('arena')
+      s.unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32) })
+      const persisted = partializeIdentity(useIdentityStore.getState())
+      expect(persisted).toEqual({ credentialId: 'cred-1', room: 'arena' })
+      expect(Object.keys(persisted).toSorted()).toEqual(['credentialId', 'room'])
+    })
+
+    it('NEVER persists seedHex / pubkey / unlocked (no signing material on disk)', () => {
+      useIdentityStore.getState().unlock({ seedHex: 'cc'.repeat(32), ed25519PubkeyHex: 'dd'.repeat(32) })
+      const persisted = partializeIdentity(useIdentityStore.getState()) as Record<string, unknown>
+      expect('seedHex' in persisted).toBe(false)
+      expect('ed25519PubkeyHex' in persisted).toBe(false)
+      expect('unlocked' in persisted).toBe(false)
+      expect('ephemeral' in persisted).toBe(false)
+    })
   })
 })

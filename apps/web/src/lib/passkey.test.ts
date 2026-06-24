@@ -7,6 +7,7 @@ import {
   hkdfSha256,
   randomSeed,
   sha256,
+  toPrfBytes,
 } from './passkey'
 import { bytesToHex } from '../components/use-mkit'
 
@@ -56,6 +57,9 @@ describe('passkey derivation', () => {
     expect(res1.seedHex).toMatch(/^[0-9a-f]{64}$/)
     expect(res1.seedHex).toBe(res2.seedHex) // same PRF → same seed
     expect(res1.prfHex).toBe(bytesToHex(PRF_OUTPUT))
+    // The assertion's rawId ([1,2,3,4]) round-trips to its base64url id, so a
+    // discoverable recovery can persist which passkey was used.
+    expect(res1.credentialId).toBe('AQIDBA')
 
     // The derived seed must produce a valid Ed25519 keypair via the WASM path.
     const m = await mkit()
@@ -66,9 +70,39 @@ describe('passkey derivation', () => {
     expect(kp.pubkey_hex).toBe(bytesToHex(pubkey))
   })
 
+  it('recovers the credential id from a discoverable get() (no credentialId arg)', async () => {
+    installWebAuthnMock(PRF_OUTPUT.buffer)
+    // Discoverable recovery: no allowCredentials → the platform picks the
+    // resident key and we learn its id from the assertion's rawId.
+    const res = await deriveEd25519Seed(undefined)
+    expect(res.credentialId).toBe('AQIDBA')
+    expect(res.seedHex).toMatch(/^[0-9a-f]{64}$/)
+  })
+
   it('throws PrfUnsupportedError when the authenticator returns no PRF result', async () => {
     installWebAuthnMock(undefined)
     await expect(deriveEd25519Seed('AQIDBA')).rejects.toBeInstanceOf(PrfUnsupportedError)
+  })
+
+  it('toPrfBytes reads exactly an offset view, not the whole backing buffer', () => {
+    // A 32-byte PRF result sitting at byteOffset 8 inside a 48-byte buffer.
+    const backing = new ArrayBuffer(48)
+    const whole = new Uint8Array(backing)
+    // Fill the whole buffer with a sentinel so a "read the whole buffer" bug
+    // would surface extra/non-matching bytes.
+    whole.fill(0xee)
+    const known = new Uint8Array(32).map((_, i) => (i * 5 + 1) & 0xff)
+    const view = new Uint8Array(backing, 8, 32)
+    view.set(known)
+
+    const out = toPrfBytes(view)
+    expect(out.length).toBe(32)
+    expect(bytesToHex(out)).toBe(bytesToHex(known))
+  })
+
+  it('toPrfBytes passes a plain ArrayBuffer through as all its bytes', () => {
+    const buf = new Uint8Array([1, 2, 3, 4]).buffer
+    expect(Array.from(toPrfBytes(buf))).toEqual([1, 2, 3, 4])
   })
 
   it('randomSeed produces a fresh 32-byte seed each call', () => {

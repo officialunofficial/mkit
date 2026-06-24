@@ -26,6 +26,7 @@ use crate::proto::mkit::repo::v1::{
     UpdateRefResponse, WatchRefsRequest,
 };
 use super::refstore::RefEventJson;
+use super::wire::{GetReq, GetResp, ListReq, ListResp, UpdateReq, UpdateResp};
 
 const STORAGE_BUCKET: &str = "STORAGE";
 const REFSTORE_BINDING: &str = "REFSTORE";
@@ -103,44 +104,7 @@ async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
         .map_err(|e| ce_internal(format!("refstore decode: {e}")))
 }
 
-// --- DO wire types (mirror refstore.rs) ------------------------------------
-
-#[derive(Serialize)]
-struct GetReq<'a> {
-    name: &'a str,
-}
-#[derive(serde::Deserialize)]
-struct GetResp {
-    exists: bool,
-    value: Option<String>,
-}
-#[derive(Serialize)]
-struct UpdateReq<'a> {
-    name: &'a str,
-    new: String,
-    expectation: i32,
-    expected: Option<String>,
-    author: Option<String>,
-}
-#[derive(serde::Deserialize)]
-struct UpdateResp {
-    committed: bool,
-    conflict: bool,
-    current: Option<String>,
-}
-#[derive(Serialize)]
-struct ListReq<'a> {
-    prefix: &'a str,
-}
-#[derive(serde::Deserialize)]
-struct ListResp {
-    refs: Vec<ListEntry>,
-}
-#[derive(serde::Deserialize)]
-struct ListEntry {
-    name: String,
-    value: String,
-}
+// DO wire types are declared once in `super::wire` and shared with refstore.rs.
 
 fn hex_to_bytes_opt(s: &Option<String>) -> Option<Vec<u8>> {
     s.as_ref().and_then(|s| hex::decode(s).ok())
@@ -178,28 +142,29 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
             let key = object_key(&room, &object_id);
 
-            // Idempotent store: check-then-put. A re-PUT of an existing id is
-            // a no-op (duplicate=true). R2 is strongly consistent for an
-            // object's own key, so head()->put() is safe here.
-            let existing = bucket
-                .head(&key)
-                .await
-                .map_err(|e| ce_internal(format!("R2 head: {e}")))?;
-            if existing.is_some() {
-                return Ok(Response::new(PutObjectResponse {
-                    stored: Some(false),
-                    duplicate: Some(true),
-                    ..Default::default()
-                }));
-            }
-            bucket
+            // Idempotent store in ONE round-trip: a conditional put with
+            // `If-None-Match: *` (etag_does_not_match = "*") writes only when
+            // the key is absent. This drops the prior head()+put() (two R2
+            // round-trips) for the common commit-push latency. Safe because
+            // the key IS the content hash — a re-put of identical bytes is
+            // harmless either way, and we already verified BLAKE3(bytes)==id.
+            //
+            // execute() returns Ok(Some(_)) when it stored (key was absent)
+            // and Ok(None) when the condition failed (key already present),
+            // so we still report `duplicate` accurately without the head.
+            let stored = bucket
                 .put(&key, bytes)
+                .only_if(worker::Conditional {
+                    etag_does_not_match: Some("*".to_string()),
+                    ..Default::default()
+                })
                 .execute()
                 .await
-                .map_err(|e| ce_internal(format!("R2 put: {e}")))?;
+                .map_err(|e| ce_internal(format!("R2 put: {e}")))?
+                .is_some();
             Ok(Response::new(PutObjectResponse {
-                stored: Some(true),
-                duplicate: Some(false),
+                stored: Some(stored),
+                duplicate: Some(!stored),
                 ..Default::default()
             }))
         })
@@ -264,7 +229,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            let resp: GetResp = do_call(&env, &room, "/get", &GetReq { name: &name }).await?;
+            let resp: GetResp = do_call(&env, &room, "/get", &GetReq { name }).await?;
             let object_id = hex_to_bytes_opt(&resp.value).unwrap_or_default();
             Ok(Response::new(GetRefResponse {
                 exists: Some(resp.exists),
@@ -305,7 +270,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         let env = self.env.clone();
         SendFuture::new(async move {
             let body = UpdateReq {
-                name: &name,
+                name,
                 new: hex::encode(&new_id),
                 expectation,
                 expected: if expected_id.is_empty() {
@@ -344,7 +309,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         let env = self.env.clone();
         SendFuture::new(async move {
             let resp: ListResp =
-                do_call(&env, &room, "/list", &ListReq { prefix: &prefix }).await?;
+                do_call(&env, &room, "/list", &ListReq { prefix }).await?;
             let refs = resp
                 .refs
                 .into_iter()

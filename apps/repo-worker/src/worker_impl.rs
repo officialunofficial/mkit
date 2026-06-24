@@ -17,12 +17,17 @@ use worker::{event, Context, Env, Method, Request, Response, Result};
 pub mod auth;
 pub mod refstore;
 pub mod service;
+pub mod wire;
 
 use auth::AuthInterceptor;
 use service::RepoServer;
 
 // Surface the proto extension trait + DO type to this module.
 use crate::proto::mkit::repo::v1::RepoServiceExt;
+// Reuse the canonical room validator (same one the unary path enforces via
+// `service::check_room`) so the streaming /watch route can't address a DO with
+// an invalid room name.
+use crate::refs::is_valid_room;
 
 /// The RefStore Durable Object, re-exported so worker-build/wrangler find it.
 pub use refstore::RefStore;
@@ -66,9 +71,18 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let path = req.path();
     if let Some(room) = path.strip_prefix("/watch/") {
         if !room.is_empty() {
-            // The WebSocket upgrade response (status 101) must still carry the
-            // CORS header for browser clients.
-            return watch_fallback(env, room).await.map(with_cors);
+            // Validate the room with the SAME allow-list the unary path enforces
+            // (see `service::check_room` → `is_valid_room`) BEFORE addressing a
+            // DO via `id_from_name`: the room is used as the DO instance name, so
+            // an unvalidated value must not reach `watch_fallback`.
+            if !is_valid_room(room) {
+                return Ok(with_cors(Response::error("invalid room", 400)?));
+            }
+            // Return the WebSocket upgrade Response (status 101) DIRECTLY — do
+            // NOT run `with_cors` on it: CORS headers are meaningless on a 101
+            // handshake, and mutating the upgrade response can drop the
+            // `webSocket` it carries. CORS stays on the unary/JSON path only.
+            return watch_fallback(env, room).await;
         }
     }
 
