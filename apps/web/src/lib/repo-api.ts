@@ -981,7 +981,13 @@ export function usePushCommit() {
  */
 export function useRepoEvents(room: string, prefix = ''): void {
   const qc = useQueryClient()
+  // Gate on backend readiness: in worker mode the backend is null until the wasm
+  // client loads, so subscribing on mount would call `getRepoBackend()` while
+  // unconfigured and throw into the ErrorBoundary. When the backend installs,
+  // `ready` flips and the effect re-runs to attach the live subscription.
+  const ready = useRepoBackendReady()
   useEffect(() => {
+    if (!ready) return
     const unsub = getRepoBackend().watchRefs(room, prefix, (u) => {
       void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
       void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
@@ -989,5 +995,5 @@ export function useRepoEvents(room: string, prefix = ''): void {
       void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
     })
     return unsub
-  }, [room, prefix, qc])
+  }, [room, prefix, qc, ready])
 }
