@@ -17,6 +17,7 @@ use worker::{event, Context, Env, Method, Request, Response, Result};
 pub mod auth;
 pub mod refstore;
 pub mod service;
+pub mod wire;
 
 use auth::AuthInterceptor;
 use service::RepoServer;
