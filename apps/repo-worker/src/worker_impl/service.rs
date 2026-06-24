@@ -178,28 +178,29 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
             let key = object_key(&room, &object_id);
 
-            // Idempotent store: check-then-put. A re-PUT of an existing id is
-            // a no-op (duplicate=true). R2 is strongly consistent for an
-            // object's own key, so head()->put() is safe here.
-            let existing = bucket
-                .head(&key)
-                .await
-                .map_err(|e| ce_internal(format!("R2 head: {e}")))?;
-            if existing.is_some() {
-                return Ok(Response::new(PutObjectResponse {
-                    stored: Some(false),
-                    duplicate: Some(true),
-                    ..Default::default()
-                }));
-            }
-            bucket
+            // Idempotent store in ONE round-trip: a conditional put with
+            // `If-None-Match: *` (etag_does_not_match = "*") writes only when
+            // the key is absent. This drops the prior head()+put() (two R2
+            // round-trips) for the common commit-push latency. Safe because
+            // the key IS the content hash — a re-put of identical bytes is
+            // harmless either way, and we already verified BLAKE3(bytes)==id.
+            //
+            // execute() returns Ok(Some(_)) when it stored (key was absent)
+            // and Ok(None) when the condition failed (key already present),
+            // so we still report `duplicate` accurately without the head.
+            let stored = bucket
                 .put(&key, bytes)
+                .only_if(worker::Conditional {
+                    etag_does_not_match: Some("*".to_string()),
+                    ..Default::default()
+                })
                 .execute()
                 .await
-                .map_err(|e| ce_internal(format!("R2 put: {e}")))?;
+                .map_err(|e| ce_internal(format!("R2 put: {e}")))?
+                .is_some();
             Ok(Response::new(PutObjectResponse {
-                stored: Some(true),
-                duplicate: Some(false),
+                stored: Some(stored),
+                duplicate: Some(!stored),
                 ..Default::default()
             }))
         })

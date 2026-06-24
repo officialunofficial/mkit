@@ -482,9 +482,20 @@ export class WasmRepoBackend implements RepoBackend {
    * advances (our push, or a peer's push surfaced via WatchRefs → query
    * invalidation → re-`commitLog`), `head` no longer matches and we re-walk.
    * Keying by ref lets the browser switch between branches without one
-   * branch's cache shadowing another's.
+   * branch's cache shadowing another's. The walk is INCREMENTAL: a re-walk
+   * after an advance only fetches objects newer than the cached head, then
+   * splices the cached tail (see {@link WasmRepoBackend.commitLog}).
    */
   private walkCache = new Map<string, { head: string; entries: CommitLogEntry[] }>()
+  /**
+   * Hash-keyed object cache, keyed by `room::objectIdHex`. mkit objects are
+   * CONTENT-ADDRESSED — a given hash maps to fixed bytes forever — so a
+   * cached entry can never go stale and is ALWAYS safe to serve without a
+   * network round-trip. Populated on every successful {@link getObject} and
+   * consulted first; subsumes the per-walk re-download of immutable history,
+   * so a post-commit re-walk network-fetches only the NEW object(s).
+   */
+  private objectCache = new Map<string, Uint8Array>()
 
   /** Safety cap on how far back the ref walk follows first-parents. */
   private static readonly WALK_CAP = 100
@@ -508,7 +519,23 @@ export class WasmRepoBackend implements RepoBackend {
   }
 
   async getObject(room: string, objectIdHex: string): Promise<Uint8Array | null> {
-    return (await this.wasm.get_object(this.baseUrl, room, objectIdHex)) ?? null
+    return this.cachedObject(room, objectIdHex)
+  }
+
+  /**
+   * Fetch an object, serving from {@link WasmRepoBackend.objectCache} when
+   * present. Safe because objects are content-addressed (immutable): the bytes
+   * behind a hash never change, so a cache hit is always correct. Misses hit
+   * the wasm client once and populate the cache for every later read (the
+   * post-commit re-walk, the detail view, a peer's re-walk).
+   */
+  private async cachedObject(room: string, objectIdHex: string): Promise<Uint8Array | null> {
+    const ck = `${room}::${objectIdHex}`
+    const hit = this.objectCache.get(ck)
+    if (hit) return hit
+    const bytes = (await this.wasm.get_object(this.baseUrl, room, objectIdHex)) ?? null
+    if (bytes) this.objectCache.set(ck, bytes)
+    return bytes
   }
 
   async getRef(room: string, name: string): Promise<string | null> {
@@ -647,22 +674,41 @@ export class WasmRepoBackend implements RepoBackend {
     const cached = this.walkCache.get(cacheKey)
     if (cached && cached.head === head) return cached.entries
 
-    const entries: CommitLogEntry[] = []
+    // INCREMENTAL re-walk: when we already have a cached chain for this ref,
+    // walk from the NEW head by first-parent only until we reach a hash that
+    // is already in the cached chain, then splice that cached tail on. The
+    // common case (our push, a peer's single commit) fetches just the new
+    // object(s) instead of re-walking up to WALK_CAP. A cold walk (no cache)
+    // is bounded by WALK_CAP as before.
+    const tailByHash = new Map<string, number>() // hash → index in cached.entries
+    if (cached) cached.entries.forEach((e, i) => tailByHash.set(e.hash, i))
+
+    const fresh: CommitLogEntry[] = []
     const seen = new Set<string>() // guard against a cyclic/self-parent chain
     let hash: string | undefined = head
-    while (hash && entries.length < WasmRepoBackend.WALK_CAP && !seen.has(hash)) {
+    let spliced: CommitLogEntry[] | null = null
+    while (hash && fresh.length < WasmRepoBackend.WALK_CAP && !seen.has(hash)) {
+      const tailIdx = tailByHash.get(hash)
+      if (tailIdx !== undefined) {
+        // Reached the cached chain — splice its tail (from this hash down)
+        // instead of re-fetching/decoding the immutable history again.
+        // biome-ignore lint/style/noNonNullAssertion: tailIdx came from cached.entries
+        spliced = cached!.entries.slice(tailIdx)
+        break
+      }
       seen.add(hash)
-      const bytes = await this.wasm.get_object(this.baseUrl, room, hash)
+      const bytes = await this.cachedObject(room, hash)
       if (!bytes) break // object missing — stop the walk
       // Route by the object's prologue type: a fork ref's head is a remix,
       // not a commit. `decodeLogObject` handles both kinds (and stops the
       // walk on anything else) so a fork chain renders alongside commits.
       const decoded = decodeLogObject(this.api, bytes, hash, ref)
       if (!decoded) break // not a commit/remix — stop rather than throw
-      entries.push(decoded.entry)
+      fresh.push(decoded.entry)
       hash = decoded.firstParent
     }
 
+    const entries = spliced ? [...fresh, ...spliced] : fresh
     this.walkCache.set(cacheKey, { head, entries })
     return entries
   }
@@ -720,6 +766,12 @@ export function useObject(room: string, hash: string | null) {
     queryKey: repoKeys.object(room, hash ?? ''),
     queryFn: () => (hash ? getRepoBackend().getObject(room, hash) : Promise.resolve(null)),
     enabled: !!hash,
+    // Objects are CONTENT-ADDRESSED (immutable): a hash → fixed bytes forever,
+    // so a cached object is never stale and never needs eviction. Keep this
+    // query permanent (don't touch the global default, which keeps refs/log
+    // fresh / WS-invalidated).
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
   })
 }
 
@@ -760,6 +812,99 @@ export type PushArgs = {
 }
 
 /**
+ * Build the log entry recorded for a locally-originated push, SHAPE-IDENTICAL
+ * to what a server ref-walk produces in {@link decodeLogObject}. We decode the
+ * commit/remix bytes we already hold so `authorPubkey` (signer), `kind`,
+ * `sources` and `createdAt` (ISO from the object's unix-seconds timestamp) all
+ * match a walked entry exactly — so the optimistic entry we prepend renders
+ * identically to the authoritative one and the later reconcile is a no-op for
+ * our own commit. Falls back to args-derived fields if the bytes don't decode
+ * (e.g. a test/mock that passes opaque bytes), so the entry is always usable.
+ */
+export function buildPushLogEntry(args: PushArgs): CommitLogEntry {
+  const decoded = decodeLogObject(args.api, args.commitBytes, args.commitHash, args.ref)
+  if (decoded) {
+    // Prefer the caller's explicit kind/sources/message (the UI's intent),
+    // but take signer + timestamp from the signed bytes for walk-parity.
+    return {
+      ...decoded.entry,
+      message: args.message,
+      kind: args.kind ?? decoded.entry.kind ?? 'commit',
+      ...(args.sources ? { sources: args.sources } : {}),
+    }
+  }
+  // Fallback: derive the author from the in-memory seed; stamp "now" (seconds,
+  // rendered ISO) to stay consistent with the walked `createdAt` format.
+  const authorPubkey = bytesToHex(args.api.ed25519_pubkey_from_seed(hexToBytes(args.seedHex)))
+  return {
+    hash: args.commitHash,
+    message: args.message,
+    authorPubkey,
+    ref: args.ref,
+    createdAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString(),
+    kind: args.kind ?? 'commit',
+    ...(args.sources ? { sources: args.sources } : {}),
+  }
+}
+
+/**
+ * Mutation options for {@link usePushCommit}, factored out so the optimistic
+ * lifecycle (onMutate prepend → onError rollback → onSettled reconcile) is
+ * unit-testable against a real QueryClient + MutationObserver without React.
+ */
+export function pushCommitMutationOptions(qc: ReturnType<typeof useQueryClient>) {
+  return {
+    mutationFn: async (args: PushArgs) => {
+      const backend = getRepoBackend()
+
+      await backend.putObject(args.room, args.commitHash, args.commitBytes)
+
+      const expectation: RefExpectation = args.parentHash ? 'MATCH' : 'MISSING'
+      await backend.updateRef(args.room, args.ref, args.commitHash, expectation, args.parentHash || undefined)
+
+      const entry = buildPushLogEntry(args)
+      if (backend instanceof MockRepoBackend || backend instanceof WasmRepoBackend) {
+        backend.recordCommit(args.room, entry)
+      }
+      return entry
+    },
+    // OPTIMISTIC PREPEND: show the user's own commit instantly. Cancel any
+    // in-flight log fetch (so a slow walk can't clobber our optimistic value),
+    // snapshot the current log for rollback, and prepend the new entry built
+    // from the bytes we already hold.
+    onMutate: async (args: PushArgs) => {
+      const logKey = repoKeys.log(args.room, args.ref)
+      await qc.cancelQueries({ queryKey: logKey })
+      const previous = qc.getQueryData<CommitLogEntry[]>(logKey)
+      const entry = buildPushLogEntry(args)
+      qc.setQueryData<CommitLogEntry[]>(logKey, (prev) => {
+        const list = prev ?? []
+        if (list.some((e) => e.hash === entry.hash)) return list // already present — no dupe
+        return [entry, ...list]
+      })
+      return { previous, logKey }
+    },
+    // ROLLBACK on a rejected push (e.g. CAS conflict) — restore the snapshot.
+    onError: (
+      _err: unknown,
+      _args: PushArgs,
+      context: { previous: CommitLogEntry[] | undefined; logKey: readonly unknown[] } | undefined,
+    ) => {
+      if (context) qc.setQueryData(context.logKey, context.previous)
+    },
+    // RECONCILE with the server regardless of outcome: invalidate ref + log +
+    // refs so the authoritative walk corrects any divergence (the object cache
+    // + incremental walk make this cheap — only new objects are fetched).
+    onSettled: (_entry: CommitLogEntry | undefined, _err: unknown, args: PushArgs) => {
+      void qc.invalidateQueries({ queryKey: repoKeys.ref(args.room, args.ref) })
+      void qc.invalidateQueries({ queryKey: repoKeys.log(args.room, args.ref) })
+      // A first push to a new ref makes a new branch appear in the panel.
+      void qc.invalidateQueries({ queryKey: ['repo', args.room, 'refs'] })
+    },
+  }
+}
+
+/**
  * Push a signed commit: PutObject (idempotent), then UpdateRef with an in-message
  * CAS expectation (§3 step 5). First commit (no parent) → `MISSING`; otherwise
  * `MATCH` on the parent. A failed precondition surfaces as `CasConflictError`
@@ -773,44 +918,7 @@ export type PushArgs = {
  */
 export function usePushCommit() {
   const qc = useQueryClient()
-  return useMutation({
-    mutationFn: async (args: PushArgs) => {
-      const backend = getRepoBackend()
-
-      await backend.putObject(args.room, args.commitHash, args.commitBytes)
-
-      const expectation: RefExpectation = args.parentHash ? 'MATCH' : 'MISSING'
-      await backend.updateRef(
-        args.room,
-        args.ref,
-        args.commitHash,
-        expectation,
-        args.parentHash || undefined,
-      )
-
-      // Author id for the log entry, derived from the in-memory seed.
-      const authorPubkey = bytesToHex(args.api.ed25519_pubkey_from_seed(hexToBytes(args.seedHex)))
-      const entry: CommitLogEntry = {
-        hash: args.commitHash,
-        message: args.message,
-        authorPubkey,
-        ref: args.ref,
-        createdAt: String(Date.now()),
-        kind: args.kind ?? 'commit',
-        ...(args.sources ? { sources: args.sources } : {}),
-      }
-      if (backend instanceof MockRepoBackend || backend instanceof WasmRepoBackend) {
-        backend.recordCommit(args.room, entry)
-      }
-      return entry
-    },
-    onSuccess: (_entry, args) => {
-      void qc.invalidateQueries({ queryKey: repoKeys.ref(args.room, args.ref) })
-      void qc.invalidateQueries({ queryKey: repoKeys.log(args.room, args.ref) })
-      // A first push to a new ref makes a new branch appear in the panel.
-      void qc.invalidateQueries({ queryKey: ['repo', args.room, 'refs'] })
-    },
-  })
+  return useMutation(pushCommitMutationOptions(qc))
 }
 
 /**

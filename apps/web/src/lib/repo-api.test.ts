@@ -1,9 +1,12 @@
+import { MutationObserver, QueryClient } from '@tanstack/react-query'
 import { describe, expect, it } from 'vitest'
 import type { MkitApi } from './mkit'
 import { mkit } from './mkit'
 import {
   CasConflictError,
+  type CommitLogEntry,
   MockRepoBackend,
+  type PushArgs,
   type RepoWasmClient,
   type SignedEnvelope,
   WasmRepoBackend,
@@ -15,6 +18,9 @@ import {
   isForkRef,
   makeSignFn,
   procedures,
+  pushCommitMutationOptions,
+  repoKeys,
+  setRepoBackend,
 } from './repo-api'
 
 const SEED = '0101010101010101010101010101010101010101010101010101010101010101'
@@ -576,5 +582,194 @@ describe('WasmRepoBackend.commitLog walks a fork ref of remixes', () => {
     expect(log[0]!.kind).toBe('remix')
     expect(log[0]!.message).toBe('a fork')
     expect(log[0]!.sources).toEqual([{ upstreamIdHex: UPSTREAM_ID, commitHashHex: upstream.hash_hex }])
+  })
+})
+
+describe('usePushCommit optimistic prepend (TanStack Query)', () => {
+  const SEED2 = '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60'
+  const TREE = '11'.repeat(32)
+  const ROOM = 'room'
+  const REF = 'main'
+
+  /**
+   * A backend whose updateRef we can make succeed or reject on demand, and
+   * (optionally) block on an external gate so we can assert the optimistic
+   * prepend is visible while the push is still in flight.
+   */
+  function makeControllableBackend(opts: { failUpdate?: boolean; gate?: Promise<void> }) {
+    return {
+      putObject: async () => {},
+      getObject: async () => null,
+      getRef: async () => null,
+      updateRef: async () => {
+        if (opts.gate) await opts.gate
+        if (opts.failUpdate) throw new CasConflictError(null)
+      },
+      listRefs: async () => [],
+      watchRefs: () => () => {},
+      commitLog: async () => [],
+    } satisfies import('./repo-api').RepoBackend
+  }
+
+  async function makePushArgs(message: string): Promise<PushArgs> {
+    const api = await mkit()
+    const commit = api.commit_encode_and_sign(TREE, '', message, 7n, SEED2)
+    return {
+      api,
+      seedHex: SEED2,
+      room: ROOM,
+      ref: REF,
+      commitBytes: commit.bytes,
+      commitHash: commit.hash_hex,
+      message,
+      parentHash: '',
+    }
+  }
+
+  it('prepends the new commit to the log query data while the push is still in flight', async () => {
+    // Gate updateRef so the mutation cannot settle until we release it — this
+    // makes "the entry is visible before the push resolves" a real assertion.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    setRepoBackend(makeControllableBackend({ gate }))
+    const qc = new QueryClient()
+    const logKey = repoKeys.log(ROOM, REF)
+    qc.setQueryData<CommitLogEntry[]>(logKey, []) // an empty walked log
+
+    const args = await makePushArgs('optimistic me')
+    const observer = new MutationObserver(qc, pushCommitMutationOptions(qc))
+
+    const p = observer.mutate(args)
+    // Let onMutate (cancelQueries → setQueryData) run; the push itself is still
+    // blocked on `gate`, so the entry below is purely optimistic.
+    await new Promise((r) => setTimeout(r, 0))
+
+    const optimistic = qc.getQueryData<CommitLogEntry[]>(logKey)
+    expect(optimistic?.map((e) => e.hash)).toEqual([args.commitHash])
+    expect(optimistic?.[0]?.message).toBe('optimistic me')
+    // Walk-parity: signer + ISO createdAt come from the decoded bytes.
+    const decoded = decodeLogObject(args.api, args.commitBytes, args.commitHash, REF)
+    expect(optimistic?.[0]?.authorPubkey).toBe(decoded?.entry.authorPubkey)
+    expect(optimistic?.[0]?.createdAt).toBe(decoded?.entry.createdAt)
+
+    release() // unblock the push
+    await p // let it settle
+  })
+
+  it('rolls the optimistic entry back when the push is rejected', async () => {
+    setRepoBackend(makeControllableBackend({ failUpdate: true }))
+    const qc = new QueryClient()
+    const logKey = repoKeys.log(ROOM, REF)
+    const prior: CommitLogEntry[] = [
+      { hash: 'old', message: 'prior', authorPubkey: 'a', ref: REF, createdAt: '1970-01-01T00:00:01.000Z' },
+    ]
+    qc.setQueryData<CommitLogEntry[]>(logKey, prior)
+
+    const args = await makePushArgs('will fail')
+    const observer = new MutationObserver(qc, pushCommitMutationOptions(qc))
+    await expect(observer.mutate(args)).rejects.toBeInstanceOf(CasConflictError)
+
+    // onError restored the snapshot — the optimistic entry is gone.
+    expect(qc.getQueryData<CommitLogEntry[]>(logKey)).toEqual(prior)
+  })
+})
+
+describe('WasmRepoBackend object cache (content-addressed → cache forever)', () => {
+  function spyClient(store: Record<string, Uint8Array>) {
+    const calls: string[] = []
+    const wasm = {
+      get_ref: async () => undefined,
+      get_object: async (_b: string, _r: string, hash: string) => {
+        calls.push(hash)
+        return store[hash]
+      },
+      list_refs: async () => [],
+    } as unknown as RepoWasmClient
+    return { wasm, calls }
+  }
+
+  it('getObject for the same hash issues exactly ONE underlying client call', async () => {
+    const bytes = new Uint8Array([1, 2, 3])
+    const { wasm, calls } = spyClient({ h1: bytes })
+    const backend = new WasmRepoBackend(wasm, {} as unknown as MkitApi, () => null, 'http://x')
+
+    const a = await backend.getObject('room', 'h1')
+    const b = await backend.getObject('room', 'h1')
+    expect(a).toEqual(bytes)
+    expect(b).toEqual(bytes)
+    expect(calls).toEqual(['h1']) // second read served from cache
+  })
+
+  it('getObject for a DIFFERENT hash still fetches', async () => {
+    const { wasm, calls } = spyClient({ h1: new Uint8Array([1]), h2: new Uint8Array([2]) })
+    const backend = new WasmRepoBackend(wasm, {} as unknown as MkitApi, () => null, 'http://x')
+    await backend.getObject('room', 'h1')
+    await backend.getObject('room', 'h2')
+    await backend.getObject('room', 'h1') // cached
+    expect(calls).toEqual(['h1', 'h2'])
+  })
+})
+
+describe('WasmRepoBackend incremental commit-log walk', () => {
+  type Node = { message: string; signer: string; parent?: string }
+
+  function harness(graph: Record<string, Node>, initialHead: string) {
+    let head = initialHead
+    const getObjectCalls: string[] = []
+    const wasm = {
+      get_ref: async () => head,
+      get_object: async (_b: string, _r: string, hash: string) => {
+        getObjectCalls.push(hash)
+        return graph[hash] ? new TextEncoder().encode(hash) : undefined
+      },
+      list_refs: async () => [],
+    } as unknown as RepoWasmClient
+    const api = {
+      object_kind: (bytes: Uint8Array) => {
+        const hash = new TextDecoder().decode(bytes)
+        if (!graph[hash]) throw new Error('unknown')
+        return 'commit'
+      },
+      commit_decode: (bytes: Uint8Array) => {
+        const hash = new TextDecoder().decode(bytes)
+        const node = graph[hash]!
+        return {
+          message: node.message,
+          signer_hex: node.signer,
+          timestamp: 1n,
+          tree_hex: 'aa'.repeat(32),
+          signature_hex: 'bb'.repeat(64),
+          parent_count: node.parent ? 1 : 0,
+          parent: (i: number) => (i === 0 ? node.parent : undefined),
+        }
+      },
+    } as unknown as MkitApi
+    const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
+    return { backend, getObjectCalls, setHead: (h: string) => (head = h) }
+  }
+
+  it('after a cached 3-commit walk, a 4th-commit re-walk fetches only the new object', async () => {
+    const graph: Record<string, Node> = {
+      c3: { message: 'c3', signer: 's', parent: 'c2' },
+      c2: { message: 'c2', signer: 's', parent: 'c1' },
+      c1: { message: 'c1', signer: 's' },
+    }
+    const h = harness(graph, 'c3')
+
+    const first = await h.backend.commitLog('room')
+    expect(first.map((e) => e.hash)).toEqual(['c3', 'c2', 'c1'])
+    const afterCold = h.getObjectCalls.length
+    expect(afterCold).toBe(3) // cold walk fetched all 3
+
+    // Push a 4th commit on top → head advances.
+    graph.c4 = { message: 'c4', signer: 's', parent: 'c3' }
+    h.setHead('c4')
+
+    h.getObjectCalls.length = 0
+    const second = await h.backend.commitLog('room')
+    expect(second.map((e) => e.hash)).toEqual(['c4', 'c3', 'c2', 'c1']) // newest-first, full chain
+    expect(h.getObjectCalls).toEqual(['c4']) // ONLY the new object, not 4
   })
 })
