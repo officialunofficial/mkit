@@ -9,14 +9,16 @@ import { useEffect } from 'react'
 import { bytesToHex, hexToBytes } from '../../components/use-mkit'
 import type { MkitApi } from '../mkit'
 import {
+  BackendNotReadyError,
   type CommitLogEntry,
   type RefExpectation,
   type RemixSourceEntry,
   MockRepoBackend,
+  type RepoBackend,
   WasmRepoBackend,
   decodeLogObject,
 } from './backend'
-import { getRepoBackend, useRepoBackendReady } from './store'
+import { useRepoBackend } from './store'
 
 export const repoKeys = {
   ref: (room: string, name: string) => ['repo', room, 'ref', name] as const,
@@ -30,23 +32,23 @@ export const repoKeys = {
 // ---------------------------------------------------------------------------
 
 export function useRef(room: string, name: string) {
-  const ready = useRepoBackendReady()
+  const backend = useRepoBackend()
   return useQuery({
     queryKey: repoKeys.ref(room, name),
-    queryFn: () => getRepoBackend().getRef(room, name),
-    // Dependent query: don't run (stay pending) until a backend is installed,
-    // so `getRepoBackend()` is never called while null.
-    enabled: ready,
+    queryFn: () => backend!.getRef(room, name),
+    // Dependent query: don't run (stay pending) until a backend is available,
+    // so `backend!` is only ever dereferenced when present.
+    enabled: !!backend,
   })
 }
 
 export function useObject(room: string, hash: string | null) {
-  const ready = useRepoBackendReady()
+  const backend = useRepoBackend()
   return useQuery({
     queryKey: repoKeys.object(room, hash ?? ''),
-    queryFn: () => (hash ? getRepoBackend().getObject(room, hash) : Promise.resolve(null)),
-    // Preserve the existing hash guard AND gate on backend readiness.
-    enabled: ready && !!hash,
+    queryFn: () => (hash ? backend!.getObject(room, hash) : Promise.resolve(null)),
+    // Preserve the existing hash guard AND gate on backend availability.
+    enabled: !!backend && !!hash,
     // Objects are CONTENT-ADDRESSED (immutable): a hash → fixed bytes forever,
     // so a cached object is never stale and never needs eviction. Keep this
     // query permanent (don't touch the global default, which keeps refs/log
@@ -57,11 +59,11 @@ export function useObject(room: string, hash: string | null) {
 }
 
 export function useCommitLog(room: string, ref = 'main') {
-  const ready = useRepoBackendReady()
+  const backend = useRepoBackend()
   return useQuery({
     queryKey: repoKeys.log(room, ref),
-    queryFn: () => getRepoBackend().commitLog(room, ref),
-    enabled: ready,
+    queryFn: () => backend!.commitLog(room, ref),
+    enabled: !!backend,
     // Switching branches keeps the previous ref's list on screen during the
     // fetch (no skeleton/empty flash); replaced once the new ref's log resolves.
     placeholderData: keepPreviousData,
@@ -70,11 +72,11 @@ export function useCommitLog(room: string, ref = 'main') {
 
 /** All refs in the room (optionally prefix-filtered) — drives the branches panel. */
 export function useRefs(room: string, prefix = '') {
-  const ready = useRepoBackendReady()
+  const backend = useRepoBackend()
   return useQuery({
     queryKey: repoKeys.refs(room, prefix),
-    queryFn: () => getRepoBackend().listRefs(room, prefix),
-    enabled: ready,
+    queryFn: () => backend!.listRefs(room, prefix),
+    enabled: !!backend,
     // Keep the prior prefix's refs visible while a new prefix loads.
     placeholderData: keepPreviousData,
   })
@@ -141,12 +143,13 @@ export function buildPushLogEntry(args: PushArgs): CommitLogEntry {
  * Mutation options for {@link usePushCommit}, factored out so the optimistic
  * lifecycle (onMutate prepend → onError rollback → onSettled reconcile) is
  * unit-testable against a real QueryClient + MutationObserver without React.
+ *
+ * The backend is an EXPLICIT parameter (no module global): the mutation writes
+ * through exactly the instance passed in — directly testable by injecting a mock.
  */
-export function pushCommitMutationOptions(qc: ReturnType<typeof useQueryClient>) {
+export function pushCommitMutationOptions(qc: ReturnType<typeof useQueryClient>, backend: RepoBackend) {
   return {
     mutationFn: async (args: PushArgs) => {
-      const backend = getRepoBackend()
-
       await backend.putObject(args.room, args.commitHash, args.commitBytes)
 
       const expectation: RefExpectation = args.parentHash ? 'MATCH' : 'MISSING'
@@ -208,7 +211,15 @@ export function pushCommitMutationOptions(qc: ReturnType<typeof useQueryClient>)
  */
 export function usePushCommit() {
   const qc = useQueryClient()
-  return useMutation(pushCommitMutationOptions(qc))
+  const backend = useRepoBackend()
+  // In practice push is only reachable once unlocked (backend present). If a
+  // null backend ever reaches here, the mutation rejects with a clear typed
+  // error rather than dereferencing null. `useMutation` is called
+  // unconditionally (rules of hooks); only the options differ.
+  const options = backend
+    ? pushCommitMutationOptions(qc, backend)
+    : { mutationFn: (_args: PushArgs) => Promise.reject<CommitLogEntry>(new BackendNotReadyError()) }
+  return useMutation(options)
 }
 
 /**
@@ -218,19 +229,18 @@ export function usePushCommit() {
  */
 export function useRepoEvents(room: string, prefix = ''): void {
   const qc = useQueryClient()
-  // Gate on backend readiness: in worker mode the backend is null until the wasm
-  // client loads, so subscribing on mount would call `getRepoBackend()` while
-  // unconfigured and throw into the ErrorBoundary. When the backend installs,
-  // `ready` flips and the effect re-runs to attach the live subscription.
-  const ready = useRepoBackendReady()
+  // Gate on the backend value from context: in worker mode it's null until the
+  // wasm client loads, so the effect simply returns until a backend is present.
+  // When the backend instance changes (null → mock/wasm, or mock → wasm), the
+  // effect re-runs and (re-)subscribes — `backend!` is never dereferenced null.
+  const backend = useRepoBackend()
   useEffect(() => {
-    if (!ready) return
-    const unsub = getRepoBackend().watchRefs(room, prefix, (u) => {
+    if (!backend) return
+    return backend.watchRefs(room, prefix, (u) => {
       void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
       void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
       // The advanced ref may be new (a peer created a branch) → refresh the panel.
       void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
     })
-    return unsub
-  }, [room, prefix, qc, ready])
+  }, [backend, room, prefix, qc])
 }

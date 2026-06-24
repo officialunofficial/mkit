@@ -3,8 +3,14 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import { PrfUnsupportedError, createIdentity, deriveEd25519Seed } from '../lib/passkey'
-import { DEFAULT_ROOM, useIdentityStore } from '../lib/identity-store'
-import { MockRepoBackend, WasmRepoBackend, setRepoBackend, useRepoEvents } from '../lib/repo-api'
+import { DEFAULT_ROOM, type IdentityState, useIdentityStore } from '../lib/identity-store'
+import {
+  MockRepoBackend,
+  type RepoBackend,
+  RepoBackendProvider,
+  WasmRepoBackend,
+  useRepoEvents,
+} from '../lib/repo-api'
 import { repoWasm } from '../lib/repo-client'
 import { bytesToHex, hexToBytes, useMkit } from './use-mkit'
 import { AttestBinding, LockedView, UnlockedHeader } from './multiplayer/identity-panel'
@@ -12,7 +18,12 @@ import { Compose } from './multiplayer/compose'
 import { RepoBrowser } from './multiplayer/repo-browser'
 import { errMsg } from './multiplayer/shared'
 
-/** The single source of identity + push + live-log UI (design note §2 steps 1–6). */
+/**
+ * Owns the repo backend as a VALUE and provides it to the tree. The backend is
+ * computed (not imperatively installed): the mock is memoised; the wasm client
+ * loads into state. `backend` is `null` in worker mode until wasm resolves, so
+ * descendants gate on it (skeleton) — the behavior the old readiness flag gave.
+ */
 export function MultiplayerDemo() {
   const api = useMkit()
   const id = useIdentityStore()
@@ -21,64 +32,80 @@ export function MultiplayerDemo() {
 
   // Backend selection: when `VITE_REPO_BACKEND_URL` is set, drive the real
   // ConnectRPC service through the wasm client; otherwise use the in-memory mock
-  // (offline dev default). The mock is the synchronous fallback; the wasm client
-  // initialises asynchronously and replaces it once ready.
+  // (offline dev default).
   const backendUrl = import.meta.env.VITE_REPO_BACKEND_URL as string | undefined
   const useMock = !backendUrl
 
   // One mock backend per mounted demo, always available as the offline fallback.
   const mock = useMemo(() => new MockRepoBackend(api), [api])
 
-  // Install the mock as the bootstrap backend — MOCK MODE ONLY. In worker mode
-  // we deliberately leave the backend NULL until the wasm effect installs the
-  // WasmRepoBackend: gating queries on `useRepoBackendReady()` keeps refs/log
-  // PENDING (→ skeleton) instead of letting them resolve empty `[]` against the
-  // not-yet-seeded mock and flashing "No refs/commits" on a populated room. The
-  // genuine offline fallback lives in the wasm effect's `.catch` (if wasm load
-  // rejects). Deps `[mock, useMock]` — NOT `room` (editing the Room must not
-  // re-install and clobber the WasmRepoBackend back to mock).
-  useEffect(() => {
-    if (useMock) setRepoBackend(mock)
-  }, [mock, useMock])
-
-  useEffect(() => {
-    // MOCK MODE ONLY. The foreign-commit/remix seeding is a mock-only demo
-    // affordance — in worker mode the room's real shared history comes from the
-    // worker, so don't seed (and don't touch the active backend). Gated on the
-    // same `!backendUrl` condition the wasm effect below uses. The seeding logic
-    // (3 foreign commits + a sample remix) lives on the backend itself.
-    if (useMock) mock.seedDemo(room)
-  }, [mock, room, useMock])
-
-  // When a backend URL is configured, install the wasm-backed ConnectRPC client.
-  // It reads the live seed from the identity store at call time so writes sign
-  // with whatever key is currently unlocked.
+  // Worker mode: the wasm-backed backend loads asynchronously into state. While
+  // it's null the children gate on the context (skeleton) instead of resolving
+  // empty against the not-yet-ready mock. One effect owns the load + fallback.
+  const [wasmBackend, setWasmBackend] = useState<RepoBackend | null>(null)
   useEffect(() => {
     if (!backendUrl) return
     let cancelled = false
-    void repoWasm()
+    repoWasm()
       .then((wasm) => {
         if (cancelled) return
-        setRepoBackend(
-          new WasmRepoBackend(wasm, api, () => useIdentityStore.getState().seedHex, backendUrl),
-        )
-        // Installing the backend flips `useRepoBackendReady()` true, enabling the
-        // gated refs/head/log queries to fetch against the worker (the room's
-        // real, shared history). Invalidate the whole `repo` tree to be safe in
-        // case anything was cached. See repo-api `repoKeys` (all prefixed `repo`).
-        void qc.invalidateQueries({ queryKey: ['repo'] })
+        // The wasm backend reads the live seed from the identity store at call
+        // time so writes sign with whatever key is currently unlocked.
+        setWasmBackend(new WasmRepoBackend(wasm, api, () => useIdentityStore.getState().seedHex, backendUrl))
       })
       .catch(() => {
-        // GENUINE FALLBACK: if the wasm client fails to load in worker mode,
-        // install the mock so the demo still runs (offline-style) rather than
-        // leaving every query stuck pending forever.
-        if (!cancelled) setRepoBackend(mock)
+        // GENUINE FALLBACK: if the wasm client fails to load in worker mode, use
+        // the mock so the demo still runs (offline-style) rather than leaving
+        // every query stuck pending forever.
+        if (!cancelled) setWasmBackend(mock)
       })
     return () => {
       cancelled = true
     }
-  }, [backendUrl, api, qc, mock])
+  }, [backendUrl, api, mock])
 
+  // The backend VALUE the tree owns: mock offline, else the wasm backend once it
+  // loads (null until then → children gate → skeleton).
+  const backend = useMock ? mock : wasmBackend
+
+  useEffect(() => {
+    // MOCK MODE ONLY. The foreign-commit/remix seeding is a mock-only demo
+    // affordance — in worker mode the room's real shared history comes from the
+    // worker, so don't seed. The seeding logic (3 foreign commits + a sample
+    // remix) lives on the backend itself.
+    if (useMock) mock.seedDemo(room)
+  }, [mock, room, useMock])
+
+  // The backend just became available (null → mock/wasm) — refresh the gated
+  // queries so they fetch the room's real, shared history. See `repoKeys` (all
+  // prefixed `repo`).
+  useEffect(() => {
+    if (backend) void qc.invalidateQueries({ queryKey: ['repo'] })
+  }, [backend, qc])
+
+  return (
+    <RepoBackendProvider backend={backend}>
+      <MultiplayerBody api={api} id={id} room={room} useMock={useMock} />
+    </RepoBackendProvider>
+  )
+}
+
+/**
+ * The demo body — a DESCENDANT of the provider so `useRepoEvents` and every
+ * panel read the backend from context. (Kept separate from the component that
+ * renders the provider: a component can't consume a context it provides.)
+ */
+function MultiplayerBody({
+  api,
+  id,
+  room,
+  useMock,
+}: {
+  api: ReturnType<typeof useMkit>
+  id: IdentityState
+  room: string
+  useMock: boolean
+}) {
   useRepoEvents(room)
 
   const [status, setStatus] = useState<string | null>(null)

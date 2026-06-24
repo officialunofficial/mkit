@@ -9,7 +9,7 @@
 //   repo/backend.ts  — service shapes, fork-ref scheme, the RepoBackend
 //                      interface, decodeLogObject, typed errors, MockRepoBackend
 //                      (incl. seedDemo) and WasmRepoBackend.
-//   repo/store.ts    — the reactive backend holder + readiness flag.
+//   repo/store.tsx   — the RepoBackend context (provider + useRepoBackend hook).
 //   repo/hooks.ts    — query keys, query hooks, the push mutation, useRepoEvents.
 //
 // Service contract (unary unless noted):

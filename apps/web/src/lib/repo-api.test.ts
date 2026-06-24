@@ -7,7 +7,6 @@ import {
   type CommitLogEntry,
   MockRepoBackend,
   type PushArgs,
-  type RepoBackend,
   type RepoWasmClient,
   type SignedEnvelope,
   WasmRepoBackend,
@@ -16,14 +15,11 @@ import {
   decodeLogObject,
   envelopeHeaders,
   forkRefName,
-  getBackendSnapshot,
   isForkRef,
   makeSignFn,
   procedures,
   pushCommitMutationOptions,
   repoKeys,
-  setRepoBackend,
-  subscribeBackend,
 } from './repo-api'
 
 const SEED = '0101010101010101010101010101010101010101010101010101010101010101'
@@ -675,13 +671,14 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
     const gate = new Promise<void>((r) => {
       release = r
     })
-    setRepoBackend(makeControllableBackend({ gate }))
+    const backend = makeControllableBackend({ gate })
     const qc = new QueryClient()
     const logKey = repoKeys.log(ROOM, REF)
     qc.setQueryData<CommitLogEntry[]>(logKey, []) // an empty walked log
 
     const args = await makePushArgs('optimistic me')
-    const observer = new MutationObserver(qc, pushCommitMutationOptions(qc))
+    // The backend is INJECTED (no global) — the mutation writes through it.
+    const observer = new MutationObserver(qc, pushCommitMutationOptions(qc, backend))
 
     const p = observer.mutate(args)
     // Let onMutate (cancelQueries → setQueryData) run; the push itself is still
@@ -701,7 +698,7 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
   })
 
   it('rolls the optimistic entry back when the push is rejected', async () => {
-    setRepoBackend(makeControllableBackend({ failUpdate: true }))
+    const backend = makeControllableBackend({ failUpdate: true })
     const qc = new QueryClient()
     const logKey = repoKeys.log(ROOM, REF)
     const prior: CommitLogEntry[] = [
@@ -710,11 +707,28 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
     qc.setQueryData<CommitLogEntry[]>(logKey, prior)
 
     const args = await makePushArgs('will fail')
-    const observer = new MutationObserver(qc, pushCommitMutationOptions(qc))
+    const observer = new MutationObserver(qc, pushCommitMutationOptions(qc, backend))
     await expect(observer.mutate(args)).rejects.toBeInstanceOf(CasConflictError)
 
     // onError restored the snapshot — the optimistic entry is gone.
     expect(qc.getQueryData<CommitLogEntry[]>(logKey)).toEqual(prior)
+  })
+
+  it('writes through the INJECTED backend (putObject + updateRef), not a global', async () => {
+    // The backend is an explicit param: the mutation must call THIS instance.
+    const backend = makeControllableBackend({})
+    const putObject = vi.spyOn(backend, 'putObject')
+    const updateRef = vi.spyOn(backend, 'updateRef')
+    const qc = new QueryClient()
+    qc.setQueryData<CommitLogEntry[]>(repoKeys.log(ROOM, REF), [])
+
+    const args = await makePushArgs('inject me')
+    const observer = new MutationObserver(qc, pushCommitMutationOptions(qc, backend))
+    await observer.mutate(args)
+
+    expect(putObject).toHaveBeenCalledWith(ROOM, args.commitHash, args.commitBytes)
+    // First object on the ref (parentHash '') → MISSING expectation.
+    expect(updateRef).toHaveBeenCalledWith(ROOM, REF, args.commitHash, 'MISSING', undefined)
   })
 })
 
@@ -816,42 +830,6 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
   })
 })
 
-// A trivial backend the readiness store can hold; only identity matters here.
-function stubBackend(): RepoBackend {
-  return {
-    putObject: async () => {},
-    getObject: async () => null,
-    getRef: async () => null,
-    updateRef: async () => {},
-    listRefs: async () => [],
-    watchRefs: () => () => {},
-    commitLog: async () => [],
-  }
-}
-
-describe('reactive backend store (useSyncExternalStore source)', () => {
-  it('subscribeBackend fires its listener on setRepoBackend', () => {
-    const cb = vi.fn()
-    const unsub = subscribeBackend(cb)
-    setRepoBackend(stubBackend())
-    expect(cb).toHaveBeenCalledTimes(1)
-    setRepoBackend(stubBackend())
-    expect(cb).toHaveBeenCalledTimes(2)
-    unsub()
-    setRepoBackend(stubBackend())
-    expect(cb).toHaveBeenCalledTimes(2) // unsubscribed — no further calls
-  })
-
-  it('getBackendSnapshot returns the installed backend (the readiness selector flips false→true)', () => {
-    // The readiness selector used by useRepoBackendReady is `getBackendSnapshot() != null`.
-    const ready = () => getBackendSnapshot() != null
-    const backend = stubBackend()
-    setRepoBackend(backend)
-    expect(getBackendSnapshot()).toBe(backend)
-    expect(ready()).toBe(true)
-  })
-})
-
 describe('enabled-gating keeps repo queries pending until a backend is ready', () => {
   it('a query with enabled:false never calls its queryFn and stays pending; flipping enabled runs it', async () => {
     const qc = new QueryClient()
@@ -883,8 +861,8 @@ describe('enabled-gating keeps repo queries pending until a backend is ready', (
     expect(seen[0]).toBe('pending')
   })
 
-  it('useObject gating predicate is ready && !!hash (preserves the hash guard)', () => {
-    const enabledFor = (ready: boolean, hash: string | null) => ready && !!hash
+  it('useObject gating predicate is !!backend && !!hash (preserves the hash guard)', () => {
+    const enabledFor = (hasBackend: boolean, hash: string | null) => hasBackend && !!hash
     expect(enabledFor(false, 'abc')).toBe(false) // no backend
     expect(enabledFor(true, null)).toBe(false) // no hash
     expect(enabledFor(true, '')).toBe(false) // empty hash
