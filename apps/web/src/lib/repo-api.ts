@@ -296,6 +296,13 @@ export class IdentityLockedError extends Error {
 // In-memory mock backend (no server)
 // ---------------------------------------------------------------------------
 
+// A couple of "other players'" commits, so the live multiplayer log isn't empty
+// on first load. Seeded once per mock backend via `seedDemo`. The third lands on
+// a `feature` branch so the refs panel shows more than just `main` offline.
+const FOREIGN_SEEDS = ['7'.repeat(64), 'a3'.repeat(32), 'b5'.repeat(32)]
+const FOREIGN_MESSAGES = ['hello from another tab', 'ship it 🚀', 'spike on a feature branch']
+const FOREIGN_REFS = ['main', 'main', 'feature']
+
 /**
  * In-memory backend implementing the Connect service shape. Mirrors server
  * semantics: content-addressed idempotent object writes, in-message CAS via
@@ -395,6 +402,73 @@ export class MockRepoBackend implements RepoBackend {
       objectIdHex: entry.hash,
       authorPubkeyHex: entry.authorPubkey,
     })
+  }
+
+  /**
+   * MOCK-MODE demo seeding (offline affordance). Builds a few "other players'"
+   * commits — three foreign commits (two on `main`, one on a `feature` branch)
+   * plus a sample remix/fork of the first commit on a `forks/` ref — so the live
+   * multiplayer log isn't empty on first load and the offline detail + fork UI
+   * paths are exercised before anyone interacts. Deterministic: the objects (and
+   * their hashes/messages/authors/refs/timestamps) are fixed per `room`, built
+   * via the same `commit_encode_and_sign` / `remix_encode_and_sign` a real push
+   * uses so they decode through the SAME `object_kind` → commit/remix walk.
+   *
+   * In worker mode the room's real shared history comes from the worker, so this
+   * is NOT called there.
+   */
+  seedDemo(room: string): void {
+    const api = this.api
+    // Seed foreign commits deterministically so the log shows multiplayer life.
+    // Also store the commit object so the offline detail view can decode it.
+    // Keep the first foreign commit's hash so we can seed a remix of it.
+    let firstCommitHash: string | null = null
+    FOREIGN_SEEDS.forEach((seed, i) => {
+      const tree = api.tree_encode('[]')
+      const commit = api.commit_encode_and_sign(tree.hash_hex, '', FOREIGN_MESSAGES[i]!, BigInt(i), seed)
+      if (i === 0) firstCommitHash = commit.hash_hex
+      const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(seed)))
+      void this.putObject(room, commit.hash_hex, commit.bytes)
+      this.seedForeignCommit(room, {
+        hash: commit.hash_hex,
+        message: FOREIGN_MESSAGES[i]!,
+        authorPubkey: pubkey,
+        ref: FOREIGN_REFS[i]!,
+        createdAt: new Date(Date.now() - (FOREIGN_SEEDS.length - i) * 60_000).toISOString(),
+      })
+    })
+    // Seed a sample remix/fork of the first commit so the fork UI path
+    // (badge + navigable upstream link + `forks/` ref) is exercised offline,
+    // even before anyone clicks "Fork". The remix decodes through the SAME
+    // object_kind → remix_decode walk a real push produces.
+    if (firstCommitHash) {
+      const upstreamCommit: string = firstCommitHash
+      const upstreamId = api.blake3_hex(new TextEncoder().encode(room))
+      const sourcesJson = JSON.stringify([
+        { upstream_id_hex: upstreamId, commit_hash_hex: upstreamCommit },
+      ])
+      const tree = api.tree_encode('[]')
+      const remix = api.remix_encode_and_sign(
+        tree.hash_hex,
+        '',
+        sourcesJson,
+        `fork of ${upstreamCommit.slice(0, 10)}…`,
+        4n,
+        FOREIGN_SEEDS[0]!,
+      )
+      const forkRef = forkRefName(upstreamCommit)
+      const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(FOREIGN_SEEDS[0]!)))
+      void this.putObject(room, remix.hash_hex, remix.bytes)
+      this.seedForeignCommit(room, {
+        hash: remix.hash_hex,
+        message: `fork of ${upstreamCommit.slice(0, 10)}…`,
+        authorPubkey: pubkey,
+        ref: forkRef,
+        createdAt: new Date(Date.now() - 30_000).toISOString(),
+        kind: 'remix',
+        sources: [{ upstreamIdHex: upstreamId, commitHashHex: upstreamCommit }],
+      })
+    }
   }
 }
 

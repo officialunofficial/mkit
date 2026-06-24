@@ -44,13 +44,6 @@ const BTN =
 const PRIMARY_BTN =
   'inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-blue-600 px-3 text-sm font-medium text-white shadow-[1px_1px_0_0_#1e3a8a] transition-all duration-200 hover:bg-blue-700 active:translate-y-px active:shadow-none disabled:pointer-events-none disabled:opacity-50 sm:h-9'
 
-// A couple of "other players'" commits, so the live multiplayer log isn't empty
-// on first load. Seeded once per mock backend. The third lands on a `feature`
-// branch so the refs panel shows more than just `main` offline.
-const FOREIGN_SEEDS = ['7'.repeat(64), 'a3'.repeat(32), 'b5'.repeat(32)]
-const FOREIGN_MESSAGES = ['hello from another tab', 'ship it 🚀', 'spike on a feature branch']
-const FOREIGN_REFS = ['main', 'main', 'feature']
-
 /** The single source of identity + push + live-log UI (design note §2 steps 1–6). */
 export function MultiplayerDemo() {
   const api = useMkit()
@@ -84,59 +77,10 @@ export function MultiplayerDemo() {
     // MOCK MODE ONLY. The foreign-commit/remix seeding is a mock-only demo
     // affordance — in worker mode the room's real shared history comes from the
     // worker, so don't seed (and don't touch the active backend). Gated on the
-    // same `!backendUrl` condition the wasm effect below uses.
-    if (!useMock) return
-    // Seed foreign commits deterministically so the log shows multiplayer life.
-    // Also store the commit object so the offline detail view can decode it.
-    // Keep the first foreign commit's hash so we can seed a remix of it.
-    let firstCommitHash: string | null = null
-    FOREIGN_SEEDS.forEach((seed, i) => {
-      const tree = api.tree_encode('[]')
-      const commit = api.commit_encode_and_sign(tree.hash_hex, '', FOREIGN_MESSAGES[i]!, BigInt(i), seed)
-      if (i === 0) firstCommitHash = commit.hash_hex
-      const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(seed)))
-      void mock.putObject(room, commit.hash_hex, commit.bytes)
-      mock.seedForeignCommit(room, {
-        hash: commit.hash_hex,
-        message: FOREIGN_MESSAGES[i]!,
-        authorPubkey: pubkey,
-        ref: FOREIGN_REFS[i]!,
-        createdAt: new Date(Date.now() - (FOREIGN_SEEDS.length - i) * 60_000).toISOString(),
-      })
-    })
-    // Seed a sample remix/fork of the first commit so the fork UI path
-    // (badge + navigable upstream link + `forks/` ref) is exercised offline,
-    // even before anyone clicks "Fork". The remix decodes through the SAME
-    // object_kind → remix_decode walk a real push produces.
-    if (firstCommitHash) {
-      const upstreamCommit: string = firstCommitHash
-      const upstreamId = api.blake3_hex(new TextEncoder().encode(room))
-      const sourcesJson = JSON.stringify([
-        { upstream_id_hex: upstreamId, commit_hash_hex: upstreamCommit },
-      ])
-      const tree = api.tree_encode('[]')
-      const remix = api.remix_encode_and_sign(
-        tree.hash_hex,
-        '',
-        sourcesJson,
-        `fork of ${upstreamCommit.slice(0, 10)}…`,
-        4n,
-        FOREIGN_SEEDS[0]!,
-      )
-      const forkRef = forkRefName(upstreamCommit)
-      const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(FOREIGN_SEEDS[0]!)))
-      void mock.putObject(room, remix.hash_hex, remix.bytes)
-      mock.seedForeignCommit(room, {
-        hash: remix.hash_hex,
-        message: `fork of ${upstreamCommit.slice(0, 10)}…`,
-        authorPubkey: pubkey,
-        ref: forkRef,
-        createdAt: new Date(Date.now() - 30_000).toISOString(),
-        kind: 'remix',
-        sources: [{ upstreamIdHex: upstreamId, commitHashHex: upstreamCommit }],
-      })
-    }
-  }, [mock, api, room, useMock])
+    // same `!backendUrl` condition the wasm effect below uses. The seeding logic
+    // (3 foreign commits + a sample remix) lives on the backend itself.
+    if (useMock) mock.seedDemo(room)
+  }, [mock, room, useMock])
 
   // When a backend URL is configured, install the wasm-backed ConnectRPC client.
   // It reads the live seed from the identity store at call time so writes sign

@@ -417,6 +417,45 @@ describe('listRefs exposes all branches in the room', () => {
   })
 })
 
+describe('MockRepoBackend.seedDemo populates the offline demo state', () => {
+  it('seeds refs (main + feature + a fork), a main log, and the remix entry', async () => {
+    const api = await mkit()
+    const backend = new MockRepoBackend(api)
+    backend.seedDemo('room')
+
+    // Refs: two foreign commits on main + one on feature + one forks/ ref.
+    const refs = await backend.listRefs('room')
+    const names = refs.map((r) => r.name)
+    expect(names).toContain('main')
+    expect(names).toContain('feature')
+    expect(names.some((n) => isForkRef(n))).toBe(true)
+
+    // main log has the two foreign commits, newest-first.
+    const mainLog = await backend.commitLog('room', 'main')
+    expect(mainLog.map((e) => e.message)).toEqual(['ship it 🚀', 'hello from another tab'])
+
+    // feature ref carries its own commit.
+    const featLog = await backend.commitLog('room', 'feature')
+    expect(featLog.map((e) => e.message)).toEqual(['spike on a feature branch'])
+
+    // The fork ref's head is a remix carrying its upstream source.
+    const forkRef = names.find((n) => isForkRef(n))!
+    const forkLog = await backend.commitLog('room', forkRef)
+    expect(forkLog).toHaveLength(1)
+    expect(forkLog[0]!.kind).toBe('remix')
+    expect(forkLog[0]!.sources?.length).toBe(1)
+
+    // The remix's upstream is the FIRST foreign commit (on main).
+    const upstream = forkLog[0]!.sources![0]!.commitHashHex
+    const firstMain = mainLog.find((e) => e.message === 'hello from another tab')!
+    expect(upstream).toBe(firstMain.hash)
+
+    // The seeded objects are stored so the offline detail view can decode them.
+    expect(await backend.getObject('room', firstMain.hash)).not.toBeNull()
+    expect(await backend.getObject('room', forkLog[0]!.hash)).not.toBeNull()
+  })
+})
+
 describe('fork ref scheme', () => {
   it('forkRefName keys a fork by the upstream short hash under forks/ (legacy, no forker)', () => {
     const upstream = 'abcdef0123456789'.repeat(4) // 64 hex
