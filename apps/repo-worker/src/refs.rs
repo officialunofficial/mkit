@@ -1,50 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// Ref-name grammar (mkit SPEC-REFS §3) + the CAS state machine for UpdateRef.
-// A faithful Rust port of reference-ts/lib/refs.ts — the unit tests below
-// replay the TS conformance vectors verbatim.
+// Worker-specific ref helpers: the `room` allow-list plus thin wrappers over
+// the canonical SPEC-REFS §3 validators in `mkit_core::refs`, and the CAS state
+// machine for UpdateRef. The CAS unit tests below replay the TS conformance
+// vectors verbatim.
 
-/// Validate a ref name against the mkit SPEC-REFS §3 grammar.
-///
-///   ref_name := segment ( '/' segment )*
-///   segment  := char+        char := [0-9A-Za-z._-]
-///
-/// Rejections: empty, leading '/', empty segment ('//' / trailing '/'),
-/// any segment == "." or "..", any byte in {space, '\\'}, any segment ending
-/// in ".lock", and a final segment equal to "HEAD".
+/// Validate a ref name against the mkit SPEC-REFS §3 grammar. Delegates to the
+/// canonical [`mkit_core::refs::validate_ref_name`] so the worker and the core
+/// crate can never desync on the grammar.
 #[must_use]
 pub fn is_valid_ref_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    if name.starts_with('/') {
-        return false;
-    }
-    if name.contains(' ') || name.contains('\\') {
-        return false;
-    }
-    let segments: Vec<&str> = name.split('/').collect();
-    for seg in &segments {
-        if seg.is_empty() {
-            return false; // empty segment: //, leading/trailing /
-        }
-        if *seg == "." || *seg == ".." {
-            return false;
-        }
-        if !seg
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
-        {
-            return false;
-        }
-        if seg.ends_with(".lock") {
-            return false;
-        }
-    }
-    if *segments.last().expect("non-empty after split") == "HEAD" {
-        return false;
-    }
-    true
+    mkit_core::refs::validate_ref_name(name)
 }
 
 /// Validate a `room` identifier. Strict: 1..=64 chars from `[A-Za-z0-9._-]`,
@@ -60,13 +26,10 @@ pub fn is_valid_room(room: &str) -> bool {
 }
 
 /// A ListRefs prefix is empty, or a valid ref name (optionally trailing '/').
+/// Delegates to the canonical [`mkit_core::refs::validate_ref_prefix`].
 #[must_use]
 pub fn is_valid_ref_prefix(prefix: &str) -> bool {
-    if prefix.is_empty() {
-        return true;
-    }
-    let trimmed = prefix.strip_suffix('/').unwrap_or(prefix);
-    is_valid_ref_name(trimmed)
+    mkit_core::refs::validate_ref_prefix(prefix)
 }
 
 /// CAS expectation, proto-aligned with `mkit.repo.v1.RefExpectation`.
@@ -219,35 +182,8 @@ mod tests {
         ));
     }
 
-    // --- is_valid_ref_name --------------------------------------------------
-    #[test]
-    fn accepts_valid_names() {
-        for n in ["main", "refs/heads/main", "feat/v1.0-beta", "release/2024_09", "refs/tags/v1"] {
-            assert!(is_valid_ref_name(n), "should accept {n}");
-        }
-    }
-
-    #[test]
-    fn rejects_invalid_names() {
-        for n in [
-            "",                    // empty
-            "/main",               // leading slash
-            "refs//heads",         // double slash
-            "refs/heads/",         // trailing slash
-            "feat/../x",           // dotdot segment
-            "refs/./main",         // dot segment
-            "feat\\branch",        // backslash
-            "main@v1",             // at sign (git-only)
-            "my branch",           // space
-            "refs/heads/main.lock", // .lock suffix
-            "refs/heads/HEAD",     // final HEAD
-            "HEAD",                // bare HEAD
-            "feat+x",              // plus
-            "feat~1",              // tilde
-        ] {
-            assert!(!is_valid_ref_name(n), "should reject {n:?}");
-        }
-    }
+    // Ref-name / prefix grammar is validated by the canonical
+    // `mkit_core::refs` conformance tests; the worker only re-exports them.
 
     #[test]
     fn room_rules() {
@@ -257,14 +193,6 @@ mod tests {
         for r in ["", "a/b", "a b", "a\\b", "a@b", &"x".repeat(65), "refs/heads"] {
             assert!(!is_valid_room(r), "should reject {r:?}");
         }
-    }
-
-    #[test]
-    fn prefix_rules() {
-        assert!(is_valid_ref_prefix(""));
-        assert!(is_valid_ref_prefix("refs/heads/"));
-        assert!(is_valid_ref_prefix("refs/heads"));
-        assert!(!is_valid_ref_prefix("refs/../x"));
     }
 
     #[test]

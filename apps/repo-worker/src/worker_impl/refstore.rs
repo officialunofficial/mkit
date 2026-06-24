@@ -30,49 +30,9 @@ use worker::{
 };
 
 use crate::refs::{evaluate_cas, CasDecision, ConflictReason, RefExpectation};
-
-#[derive(Deserialize)]
-struct GetReq {
-    name: String,
-}
-
-#[derive(Serialize)]
-struct GetResp {
-    exists: bool,
-    value: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct UpdateReq {
-    name: String,
-    new: String,                 // 64-hex target value
-    expectation: i32,            // proto wire number
-    expected: Option<String>,    // 64-hex (MATCH only)
-    author: Option<String>,      // 64-hex Ed25519 pubkey of the writer
-}
-
-#[derive(Serialize)]
-struct UpdateResp {
-    committed: bool,
-    conflict: bool,
-    current: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ListReq {
-    prefix: String,
-}
-
-#[derive(Serialize)]
-struct ListEntry {
-    name: String,
-    value: String,
-}
-
-#[derive(Serialize)]
-struct ListResp {
-    refs: Vec<ListEntry>,
-}
+// DO wire types are declared once in `super::wire` and shared with service.rs,
+// so a field rename can't desync the worker (client) and the DO (server).
+use super::wire::{GetReq, GetResp, ListEntry, ListReq, ListResp, UpdateReq, UpdateResp};
 
 /// A live ref advance, broadcast to every WatchRefs subscriber. The hex
 /// fields are decoded back to raw bytes by the worker before re-encoding into
