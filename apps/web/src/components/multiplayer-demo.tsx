@@ -366,7 +366,10 @@ function Compose({
   const built = useMemo(() => {
     try {
       const tree = api.tree_encode('[]')
-      const commit = api.commit_encode_and_sign(tree.hash_hex, parentHash, message, 0n, seedHex)
+      // mkit commit timestamps are unix *seconds*; stamp the wall clock so the
+      // detail view shows a real time instead of epoch 0.
+      const nowSecs = BigInt(Math.floor(Date.now() / 1000))
+      const commit = api.commit_encode_and_sign(tree.hash_hex, parentHash, message, nowSecs, seedHex)
       return { ok: true as const, commit }
     } catch (e) {
       return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
@@ -479,7 +482,7 @@ function useFork(api: ReturnType<typeof useMkit>, room: string, seedHex: string 
       '', // root remix on a fresh fork ref
       sourcesJson,
       `fork of ${upstreamCommitHash.slice(0, 10)}…`,
-      0n,
+      BigInt(Math.floor(Date.now() / 1000)),
       seedHex,
     )
     // First push to a fresh fork ref → MISSING (parentHash ''); if the ref
