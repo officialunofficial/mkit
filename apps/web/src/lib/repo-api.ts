@@ -23,8 +23,8 @@
 //   → BLAKE3 → Ed25519-sign with the derived seed.
 // `procedure` is the Connect path, e.g. "/mkit.repo.v1.RepoService/UpdateRef".
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect } from 'react'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useSyncExternalStore } from 'react'
 import { bytesToHex } from '../components/use-mkit'
 import type { MkitApi } from './mkit'
 
@@ -731,16 +731,54 @@ export class WasmRepoBackend implements RepoBackend {
 // Backend selection (mock toggle) + query keys
 // ---------------------------------------------------------------------------
 
+// The backend holder is a tiny REACTIVE external store (useSyncExternalStore
+// source) — not a bare global. The bug it fixes: the hooks read this via
+// `getRepoBackend()` with no `enabled` gate, so in worker mode the synchronous
+// mock bootstrap let refs/log queries RESOLVE to empty `[]` before the async
+// WasmRepoBackend was installed, flipping `isPending → false` and rendering the
+// "No refs/commits" empty state on a populated room. Making the holder reactive
+// lets `useRepoBackendReady()` gate every query so they stay PENDING (skeleton)
+// until a backend is actually installed.
 let activeBackend: RepoBackend | null = null
+const backendListeners = new Set<() => void>()
 
-/** Install the backend used by the hooks (mock now; the Connect client later). */
+/** Install the backend used by the hooks, then notify subscribers so any
+ * `useRepoBackendReady()` consumers re-render and gated queries enable. */
 export function setRepoBackend(backend: RepoBackend): void {
   activeBackend = backend
+  for (const l of backendListeners) l()
+}
+
+/** Subscribe to backend changes (useSyncExternalStore subscribe fn). Returns an unsubscribe. */
+export function subscribeBackend(cb: () => void): () => void {
+  backendListeners.add(cb)
+  return () => backendListeners.delete(cb)
+}
+
+/** Current backend, or null if none is installed yet (useSyncExternalStore snapshot). */
+export function getBackendSnapshot(): RepoBackend | null {
+  return activeBackend
 }
 
 export function getRepoBackend(): RepoBackend {
   if (!activeBackend) throw new Error('repo backend not configured — call setRepoBackend()')
   return activeBackend
+}
+
+/**
+ * Reactive readiness flag: `true` once a backend is installed. Drives the
+ * `enabled` gate on every repo query (dependent-query pattern) so a query stays
+ * `status:'pending'` (→ skeleton) until there is a backend to answer it, instead
+ * of resolving empty against a not-yet-replaced mock. The 3rd `useSyncExternalStore`
+ * arg is the SERVER snapshot (`false`) for SSR safety — the server never has a
+ * backend, so readiness is false there and the queries don't fire during SSR.
+ */
+export function useRepoBackendReady(): boolean {
+  return useSyncExternalStore(
+    subscribeBackend,
+    () => getBackendSnapshot() != null,
+    () => false,
+  )
 }
 
 export const repoKeys = {
@@ -755,17 +793,23 @@ export const repoKeys = {
 // ---------------------------------------------------------------------------
 
 export function useRef(room: string, name: string) {
+  const ready = useRepoBackendReady()
   return useQuery({
     queryKey: repoKeys.ref(room, name),
     queryFn: () => getRepoBackend().getRef(room, name),
+    // Dependent query: don't run (stay pending) until a backend is installed,
+    // so `getRepoBackend()` is never called while null.
+    enabled: ready,
   })
 }
 
 export function useObject(room: string, hash: string | null) {
+  const ready = useRepoBackendReady()
   return useQuery({
     queryKey: repoKeys.object(room, hash ?? ''),
     queryFn: () => (hash ? getRepoBackend().getObject(room, hash) : Promise.resolve(null)),
-    enabled: !!hash,
+    // Preserve the existing hash guard AND gate on backend readiness.
+    enabled: ready && !!hash,
     // Objects are CONTENT-ADDRESSED (immutable): a hash → fixed bytes forever,
     // so a cached object is never stale and never needs eviction. Keep this
     // query permanent (don't touch the global default, which keeps refs/log
@@ -776,17 +820,26 @@ export function useObject(room: string, hash: string | null) {
 }
 
 export function useCommitLog(room: string, ref = 'main') {
+  const ready = useRepoBackendReady()
   return useQuery({
     queryKey: repoKeys.log(room, ref),
     queryFn: () => getRepoBackend().commitLog(room, ref),
+    enabled: ready,
+    // Switching branches keeps the previous ref's list on screen during the
+    // fetch (no skeleton/empty flash); replaced once the new ref's log resolves.
+    placeholderData: keepPreviousData,
   })
 }
 
 /** All refs in the room (optionally prefix-filtered) — drives the branches panel. */
 export function useRefs(room: string, prefix = '') {
+  const ready = useRepoBackendReady()
   return useQuery({
     queryKey: repoKeys.refs(room, prefix),
     queryFn: () => getRepoBackend().listRefs(room, prefix),
+    enabled: ready,
+    // Keep the prior prefix's refs visible while a new prefix loads.
+    placeholderData: keepPreviousData,
   })
 }
 

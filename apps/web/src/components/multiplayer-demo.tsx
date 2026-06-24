@@ -68,15 +68,17 @@ export function MultiplayerDemo() {
   // One mock backend per mounted demo, always available as the offline fallback.
   const mock = useMemo(() => new MockRepoBackend(api), [api])
 
-  // Install the mock as the SYNCHRONOUS bootstrap backend exactly once per mock
-  // instance (deps `[mock]` only — NOT `room`). This is the offline default and,
-  // in worker mode, the synchronous fallback the wasm effect replaces once its
-  // async init resolves (so head/ref/log queries have a backend to answer before
-  // then). Keying this off `room` was the bug: editing the Room re-ran it and
-  // clobbered the already-installed WasmRepoBackend, reverting worker → mock.
+  // Install the mock as the bootstrap backend — MOCK MODE ONLY. In worker mode
+  // we deliberately leave the backend NULL until the wasm effect installs the
+  // WasmRepoBackend: gating queries on `useRepoBackendReady()` keeps refs/log
+  // PENDING (→ skeleton) instead of letting them resolve empty `[]` against the
+  // not-yet-seeded mock and flashing "No refs/commits" on a populated room. The
+  // genuine offline fallback lives in the wasm effect's `.catch` (if wasm load
+  // rejects). Deps `[mock, useMock]` — NOT `room` (editing the Room must not
+  // re-install and clobber the WasmRepoBackend back to mock).
   useEffect(() => {
-    setRepoBackend(mock)
-  }, [mock])
+    if (useMock) setRepoBackend(mock)
+  }, [mock, useMock])
 
   useEffect(() => {
     // MOCK MODE ONLY. The foreign-commit/remix seeding is a mock-only demo
@@ -142,22 +144,28 @@ export function MultiplayerDemo() {
   useEffect(() => {
     if (!backendUrl) return
     let cancelled = false
-    void repoWasm().then((wasm) => {
-      if (cancelled) return
-      setRepoBackend(
-        new WasmRepoBackend(wasm, api, () => useIdentityStore.getState().seedHex, backendUrl),
-      )
-      // The mock backend answered head/ref/log queries synchronously before
-      // the worker-backed client finished initialising; those cached results
-      // are stale ("head ∅ / No commits yet"). Invalidate the whole `repo`
-      // tree so head/ref/log refetch against the worker (which has the room's
-      // real, shared history). See repo-api `repoKeys` (all prefixed `repo`).
-      void qc.invalidateQueries({ queryKey: ['repo'] })
-    })
+    void repoWasm()
+      .then((wasm) => {
+        if (cancelled) return
+        setRepoBackend(
+          new WasmRepoBackend(wasm, api, () => useIdentityStore.getState().seedHex, backendUrl),
+        )
+        // Installing the backend flips `useRepoBackendReady()` true, enabling the
+        // gated refs/head/log queries to fetch against the worker (the room's
+        // real, shared history). Invalidate the whole `repo` tree to be safe in
+        // case anything was cached. See repo-api `repoKeys` (all prefixed `repo`).
+        void qc.invalidateQueries({ queryKey: ['repo'] })
+      })
+      .catch(() => {
+        // GENUINE FALLBACK: if the wasm client fails to load in worker mode,
+        // install the mock so the demo still runs (offline-style) rather than
+        // leaving every query stuck pending forever.
+        if (!cancelled) setRepoBackend(mock)
+      })
     return () => {
       cancelled = true
     }
-  }, [backendUrl, api, qc])
+  }, [backendUrl, api, qc, mock])
 
   useRepoEvents(room)
 
@@ -759,6 +767,11 @@ function RefsPanel({
   const entries = (refs.data ?? []).toSorted((a, b) =>
     a.name === 'main' ? -1 : b.name === 'main' ? 1 : a.name.localeCompare(b.name),
   )
+  // Show the skeleton while loading (gated-pending OR no backend yet) OR while
+  // refetching with nothing to show yet — so a populated room never flashes its
+  // empty state before the walk resolves. Only render the empty copy once the
+  // query has settled with genuinely zero refs.
+  const showSkeleton = refs.isPending || (refs.isFetching && (refs.data?.length ?? 0) === 0)
 
   return (
     <section className='space-y-3'>
@@ -766,7 +779,7 @@ function RefsPanel({
         <h2 className='text-sm font-semibold'>Refs · room “{room}”</h2>
         <span className='font-mono text-xs text-muted'>{useMock ? 'mock backend' : 'worker'}</span>
       </div>
-      {refs.isPending ? (
+      {showSkeleton ? (
         <SkeletonRows rows={3} />
       ) : entries.length === 0 ? (
         <p className='text-sm text-muted'>No refs yet — push a commit to create one.</p>
@@ -825,6 +838,9 @@ function LiveLog({
   const log = useCommitLog(room, selectedRef)
   const head = useRef(room, selectedRef)
   const entries = log.data ?? []
+  // Same skeleton rule as the refs panel: loading, or refetching with nothing to
+  // show yet. Keeps a populated ref from flashing "No commits" before the walk.
+  const showSkeleton = log.isPending || (log.isFetching && entries.length === 0)
 
   return (
     <section className='space-y-3'>
@@ -833,10 +849,13 @@ function LiveLog({
           {isForkRef(selectedRef) ? 'Fork log' : 'Commit log'} · “{selectedRef}”
         </h2>
         <span className='font-mono text-xs text-muted'>
-          head {head.isPending ? '…' : head.data ? `${head.data.slice(0, 10)}…` : '∅'}
+          {/* Show "head …" while the head is loading/refetching; only show ∅ once
+              the query has settled with no head. */}
+          head{' '}
+          {head.isPending || head.isFetching ? '…' : head.data ? `${head.data.slice(0, 10)}…` : '∅'}
         </span>
       </div>
-      {log.isPending ? (
+      {showSkeleton ? (
         <SkeletonRows rows={5} />
       ) : entries.length === 0 ? (
         <p className='text-sm text-muted'>No commits on this ref yet — push one above.</p>

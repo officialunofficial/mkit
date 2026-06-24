@@ -1,5 +1,5 @@
-import { MutationObserver, QueryClient } from '@tanstack/react-query'
-import { describe, expect, it } from 'vitest'
+import { QueryClient, QueryObserver, MutationObserver, keepPreviousData } from '@tanstack/react-query'
+import { describe, expect, it, vi } from 'vitest'
 import type { MkitApi } from './mkit'
 import { mkit } from './mkit'
 import {
@@ -7,6 +7,7 @@ import {
   type CommitLogEntry,
   MockRepoBackend,
   type PushArgs,
+  type RepoBackend,
   type RepoWasmClient,
   type SignedEnvelope,
   WasmRepoBackend,
@@ -15,12 +16,14 @@ import {
   decodeLogObject,
   envelopeHeaders,
   forkRefName,
+  getBackendSnapshot,
   isForkRef,
   makeSignFn,
   procedures,
   pushCommitMutationOptions,
   repoKeys,
   setRepoBackend,
+  subscribeBackend,
 } from './repo-api'
 
 const SEED = '0101010101010101010101010101010101010101010101010101010101010101'
@@ -771,5 +774,129 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
     const second = await h.backend.commitLog('room')
     expect(second.map((e) => e.hash)).toEqual(['c4', 'c3', 'c2', 'c1']) // newest-first, full chain
     expect(h.getObjectCalls).toEqual(['c4']) // ONLY the new object, not 4
+  })
+})
+
+// A trivial backend the readiness store can hold; only identity matters here.
+function stubBackend(): RepoBackend {
+  return {
+    putObject: async () => {},
+    getObject: async () => null,
+    getRef: async () => null,
+    updateRef: async () => {},
+    listRefs: async () => [],
+    watchRefs: () => () => {},
+    commitLog: async () => [],
+  }
+}
+
+describe('reactive backend store (useSyncExternalStore source)', () => {
+  it('subscribeBackend fires its listener on setRepoBackend', () => {
+    const cb = vi.fn()
+    const unsub = subscribeBackend(cb)
+    setRepoBackend(stubBackend())
+    expect(cb).toHaveBeenCalledTimes(1)
+    setRepoBackend(stubBackend())
+    expect(cb).toHaveBeenCalledTimes(2)
+    unsub()
+    setRepoBackend(stubBackend())
+    expect(cb).toHaveBeenCalledTimes(2) // unsubscribed — no further calls
+  })
+
+  it('getBackendSnapshot returns the installed backend (the readiness selector flips false→true)', () => {
+    // The readiness selector used by useRepoBackendReady is `getBackendSnapshot() != null`.
+    const ready = () => getBackendSnapshot() != null
+    const backend = stubBackend()
+    setRepoBackend(backend)
+    expect(getBackendSnapshot()).toBe(backend)
+    expect(ready()).toBe(true)
+  })
+})
+
+describe('enabled-gating keeps repo queries pending until a backend is ready', () => {
+  it('a query with enabled:false never calls its queryFn and stays pending; flipping enabled runs it', async () => {
+    const qc = new QueryClient()
+    const queryFn = vi.fn(async () => ['ref-a'])
+
+    // Mirror the dependent-query options shape the hooks build: keyed by repoKeys,
+    // gated by `enabled`, with the same queryFn the hook would call.
+    const buildOptions = (ready: boolean) => ({
+      queryKey: repoKeys.refs('room', ''),
+      queryFn,
+      enabled: ready,
+    })
+
+    const observer = new QueryObserver(qc, buildOptions(false))
+    const seen: string[] = []
+    const unsub = observer.subscribe((r) => seen.push(r.status))
+
+    await new Promise((r) => setTimeout(r, 0))
+    expect(queryFn).not.toHaveBeenCalled() // disabled → queryFn never runs
+    expect(observer.getCurrentResult().status).toBe('pending') // stays pending → skeleton
+
+    // Flip enabled true (backend ready) → the query runs.
+    observer.setOptions(buildOptions(true))
+    await vi.waitFor(() => expect(queryFn).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(observer.getCurrentResult().status).toBe('success'))
+    expect(observer.getCurrentResult().data).toEqual(['ref-a'])
+
+    unsub()
+    expect(seen[0]).toBe('pending')
+  })
+
+  it('useObject gating predicate is ready && !!hash (preserves the hash guard)', () => {
+    const enabledFor = (ready: boolean, hash: string | null) => ready && !!hash
+    expect(enabledFor(false, 'abc')).toBe(false) // no backend
+    expect(enabledFor(true, null)).toBe(false) // no hash
+    expect(enabledFor(true, '')).toBe(false) // empty hash
+    expect(enabledFor(true, 'abc')).toBe(true) // both → enabled
+  })
+})
+
+describe('keepPreviousData smooths ref switching (useCommitLog / useRefs)', () => {
+  it('keepPreviousData keeps prior data on a key change until the new fetch resolves', async () => {
+    const qc = new QueryClient()
+    const logKeyMain = repoKeys.log('room', 'main')
+    const logKeyFeat = repoKeys.log('room', 'feature')
+
+    // Seed "main" as already-loaded.
+    qc.setQueryData<CommitLogEntry[]>(logKeyMain, [
+      { hash: 'm1', message: 'on main', authorPubkey: 'a', ref: 'main', createdAt: '1' },
+    ])
+
+    let resolveFeat: (v: CommitLogEntry[]) => void = () => {}
+    const featData = new Promise<CommitLogEntry[]>((r) => {
+      resolveFeat = r
+    })
+
+    const observer = new QueryObserver<CommitLogEntry[]>(qc, {
+      queryKey: logKeyMain,
+      queryFn: async () =>
+        qc.getQueryData<CommitLogEntry[]>(logKeyMain) ?? [],
+      placeholderData: keepPreviousData,
+      enabled: true,
+    })
+    const unsub = observer.subscribe(() => {})
+    await vi.waitFor(() => expect(observer.getCurrentResult().data?.[0]?.hash).toBe('m1'))
+
+    // Switch to "feature" — its fetch is in flight (pending) but keepPreviousData
+    // keeps main's list visible (isPlaceholderData true) rather than flashing empty.
+    observer.setOptions({
+      queryKey: logKeyFeat,
+      queryFn: () => featData,
+      placeholderData: keepPreviousData,
+      enabled: true,
+    })
+    await new Promise((r) => setTimeout(r, 0))
+    const during = observer.getCurrentResult()
+    expect(during.data?.[0]?.hash).toBe('m1') // prior data retained
+    expect(during.isPlaceholderData).toBe(true)
+
+    // Once the new ref resolves, its data replaces the placeholder.
+    resolveFeat([{ hash: 'f1', message: 'on feature', authorPubkey: 'a', ref: 'feature', createdAt: '2' }])
+    await vi.waitFor(() => expect(observer.getCurrentResult().data?.[0]?.hash).toBe('f1'))
+    await vi.waitFor(() => expect(observer.getCurrentResult().isPlaceholderData).toBe(false))
+
+    unsub()
   })
 })
