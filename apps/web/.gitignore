@@ -5,6 +5,10 @@ dist
 wrangler.jsonc
 src/pages.gen.ts
 .env*
+# …but DO commit .env.production: it holds only the public, build-time
+# VITE_REPO_BACKEND_URL (baked into the client bundle anyway), so the multiplayer
+# demo points at the shared repo Worker without a per-deploy dashboard env.
+!.env.production
 *.tsbuildinfo
 .cache
 .DS_Store
