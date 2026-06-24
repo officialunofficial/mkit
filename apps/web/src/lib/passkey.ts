@@ -15,7 +15,7 @@
 // ceremony (see `attestEd25519Binding`).
 
 import { Hex, PublicKey, Signature, WebAuthnP256 } from 'ox'
-import { bytesToHex } from '../components/use-mkit'
+import { bytesToHex, hexToBytes } from '../components/use-mkit'
 import type { MkitApi } from './mkit'
 
 /** Per-host PRF salt label. The salt itself is SHA-256 of this string (32 bytes). */
@@ -299,13 +299,6 @@ export async function enrollBindingPasskey(name = 'mkit binding'): Promise<Bindi
   return { id: cred.id, pubkeyHex: sec1.replace(/^0x/, '') }
 }
 
-function hexToBytesLocal(hex: string): Uint8Array {
-  const clean = (hex.startsWith('0x') ? hex.slice(2) : hex)
-  const out = new Uint8Array(clean.length / 2)
-  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16)
-  return out
-}
-
 /**
  * Sign a DSSE-PAE challenge with the binding passkey and verify the assertion
  * through the WASM WebAuthn verifier (`verify_webauthn_wrapping[_with_policy]`),
@@ -334,9 +327,9 @@ export async function attestEd25519Binding(
     challenge: Hex.fromBytes(pae),
   })
 
-  const authenticatorData = hexToBytesLocal(metadata.authenticatorData)
+  const authenticatorData = hexToBytes(metadata.authenticatorData)
   const clientDataJSONBytes = TEXT_ENCODER.encode(metadata.clientDataJSON)
-  const sigCompact = hexToBytesLocal(Signature.toHex(signature)) // r||s, low-S normalized by ox
+  const sigCompact = hexToBytes(Signature.toHex(signature)) // r||s, low-S normalized by ox
 
   // Throws a typed reason on failure; resolves on success.
   if (opts.policyJson !== undefined) {
