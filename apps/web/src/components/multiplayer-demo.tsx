@@ -1,5 +1,6 @@
 'use client'
 
+import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import {
   type BindingCredential,
@@ -42,6 +43,7 @@ const FOREIGN_MESSAGES = ['hello from another tab', 'ship it 🚀']
 export function MultiplayerDemo() {
   const api = useMkit()
   const id = useIdentityStore()
+  const qc = useQueryClient()
   const room = id.room || DEFAULT_ROOM
 
   // Backend selection: when `VITE_REPO_BACKEND_URL` is set, drive the real
@@ -81,11 +83,17 @@ export function MultiplayerDemo() {
       setRepoBackend(
         new WasmRepoBackend(wasm, api, () => useIdentityStore.getState().seedHex, backendUrl),
       )
+      // The mock backend answered head/ref/log queries synchronously before
+      // the worker-backed client finished initialising; those cached results
+      // are stale ("head ∅ / No commits yet"). Invalidate the whole `repo`
+      // tree so head/ref/log refetch against the worker (which has the room's
+      // real, shared history). See repo-api `repoKeys` (all prefixed `repo`).
+      void qc.invalidateQueries({ queryKey: ['repo'] })
     })
     return () => {
       cancelled = true
     }
-  }, [backendUrl, api])
+  }, [backendUrl, api, qc])
 
   useRepoEvents(room)
 

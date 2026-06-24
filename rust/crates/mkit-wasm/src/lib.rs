@@ -203,6 +203,35 @@ pub fn commit_verify(commit_bytes: &[u8]) -> bool {
     mkit_core::sign::verify_commit(&c).is_ok()
 }
 
+/// Decode a commit object's display fields from its raw on-disk bytes.
+///
+/// Deserializes via the same path [`commit_verify`] uses
+/// (`mkit_core::deserialize` → [`Object::Commit`]) and exposes the
+/// fields the multiplayer log needs to walk + render the room's `main`
+/// chain: the [`CommitInfoJs::message`], the [`CommitInfoJs::parents`]
+/// (64-hex object ids, parent 0 first), the
+/// [`CommitInfoJs::signer_hex`] (the 64-hex Ed25519 signer/author
+/// pubkey), and the [`CommitInfoJs::timestamp`] (unix seconds).
+///
+/// # Errors
+/// `commit_bytes` is not a valid serialized object, or it deserializes
+/// to a non-`Commit` object.
+#[wasm_bindgen]
+pub fn commit_decode(bytes: &[u8]) -> Result<CommitInfoJs, JsValue> {
+    let obj = mkit_core::deserialize(bytes).map_err(|e| js_err(format!("deserialize: {e}")))?;
+    let Object::Commit(c) = obj else {
+        return Err(js_err("object is not a commit"));
+    };
+    let message = String::from_utf8_lossy(&c.message).into_owned();
+    let parents = c.parents.iter().map(to_hex).collect();
+    Ok(CommitInfoJs {
+        message,
+        parents,
+        signer_hex: to_hex(&c.signer),
+        timestamp: c.timestamp,
+    })
+}
+
 // ---------------------------------------------------------------------
 // 2. Ed25519 keygen + raw sign/verify
 // ---------------------------------------------------------------------
@@ -1088,6 +1117,51 @@ impl EncodedCommit {
     #[must_use]
     pub fn signature_hex(&self) -> String {
         self.signature_hex.clone()
+    }
+}
+
+/// Decoded display fields of a commit object — what [`commit_decode`]
+/// returns for the multiplayer log to walk + render the room's `main`
+/// chain. `parents` are 64-hex object ids (parent 0 first); `signer_hex`
+/// is the 64-hex Ed25519 signer/author pubkey; `timestamp` is unix seconds.
+#[wasm_bindgen]
+#[derive(Debug, Clone)]
+pub struct CommitInfoJs {
+    message: String,
+    parents: Vec<String>,
+    signer_hex: String,
+    timestamp: u64,
+}
+
+#[wasm_bindgen]
+impl CommitInfoJs {
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn message(&self) -> String {
+        self.message.clone()
+    }
+    /// Number of parents; pair with [`CommitInfoJs::parent`] to read each
+    /// 64-hex id by index, matching the `*_count` + indexed-getter shape
+    /// used by the streaming result structs.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn parent_count(&self) -> u32 {
+        js_vec_count(&self.parents)
+    }
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn parent(&self, i: u32) -> Option<String> {
+        js_vec_get(&self.parents, i)
+    }
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn signer_hex(&self) -> String {
+        self.signer_hex.clone()
+    }
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
     }
 }
 

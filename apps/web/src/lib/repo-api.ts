@@ -370,6 +370,16 @@ export interface RepoWasmClient {
  */
 export class WasmRepoBackend implements RepoBackend {
   private log = new Map<string, CommitLogEntry[]>()
+  /**
+   * Memoised result of the last `main`-ref walk, keyed by room. `head` is
+   * the ref value the cached `entries` were walked from; when the ref
+   * advances (our push, or a peer's push surfaced via WatchRefs → query
+   * invalidation → re-`commitLog`), `head` no longer matches and we re-walk.
+   */
+  private walkCache = new Map<string, { head: string; entries: CommitLogEntry[] }>()
+
+  /** Safety cap on how far back the ref walk follows first-parents. */
+  private static readonly WALK_CAP = 100
 
   constructor(
     private wasm: RepoWasmClient,
@@ -506,11 +516,61 @@ export class WasmRepoBackend implements RepoBackend {
     }
   }
 
+  /**
+   * Authoritative shared history: the `main` chain read from the worker, so
+   * every viewer renders the SAME log (history + live), not just this
+   * session's pushes. Walks from the room's `main` ref by first-parent,
+   * decoding each commit object (`commit_decode`) for its real message /
+   * signer / parents — so a peer's push (surfaced via WatchRefs → query
+   * invalidation → re-walk) shows its real message, not a placeholder.
+   *
+   * Newest-first (head → parent → …), matching the order `LiveLog` renders.
+   * Memoised by head hash so repeated calls don't re-walk; a new head
+   * (push or WS event) invalidates the cache and re-walks. Stops at no
+   * parent, a missing object, or {@link WasmRepoBackend.WALK_CAP}.
+   */
   async commitLog(room: string): Promise<CommitLogEntry[]> {
-    return (this.log.get(room) ?? []).toReversed()
+    const head = await this.wasm.get_ref(this.baseUrl, room, 'main')
+    if (!head) return []
+
+    const cached = this.walkCache.get(room)
+    if (cached && cached.head === head) return cached.entries
+
+    const entries: CommitLogEntry[] = []
+    const seen = new Set<string>() // guard against a cyclic/self-parent chain
+    let hash: string | undefined = head
+    while (hash && entries.length < WasmRepoBackend.WALK_CAP && !seen.has(hash)) {
+      seen.add(hash)
+      const bytes = await this.wasm.get_object(this.baseUrl, room, hash)
+      if (!bytes) break // object missing — stop the walk
+      let info: ReturnType<MkitApi['commit_decode']>
+      try {
+        info = this.api.commit_decode(bytes)
+      } catch {
+        break // not a decodable commit — stop rather than throw
+      }
+      entries.push({
+        hash,
+        message: info.message,
+        authorPubkey: info.signer_hex,
+        ref: 'main',
+        // `timestamp` is unix seconds (commit field); the log renders the
+        // hash/message, but keep a sortable ISO string for consistency.
+        createdAt: new Date(Number(info.timestamp) * 1000).toISOString(),
+      })
+      hash = info.parent_count > 0 ? info.parent(0) : undefined
+    }
+
+    this.walkCache.set(room, { head, entries })
+    return entries
   }
 
-  /** Append a commit to the in-memory log (push mutation + WatchRefs peers), deduped by hash. */
+  /**
+   * Append a commit to the in-memory log (push mutation + WatchRefs peers),
+   * deduped by hash. The ref walk in {@link WasmRepoBackend.commitLog} is the
+   * authoritative source; this is kept for any callers that still read
+   * `this.log`, and as a record of locally-originated pushes.
+   */
   recordCommit(room: string, entry: CommitLogEntry): void {
     const list = this.log.get(room) ?? []
     if (list.some((e) => e.hash === entry.hash)) return // e.g. our own push echoed back over WatchRefs

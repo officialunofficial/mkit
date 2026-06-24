@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
+import type { MkitApi } from './mkit'
 import { mkit } from './mkit'
 import {
   CasConflictError,
   MockRepoBackend,
+  type RepoWasmClient,
   type SignedEnvelope,
+  WasmRepoBackend,
   buildSignedEnvelope,
   canonicalString,
   envelopeHeaders,
@@ -180,5 +183,105 @@ describe('mock backend / RefExpectation CAS semantics', () => {
     unsub()
     await backend.updateRef('r', 'main', 'h2', 'MATCH', 'h1')
     expect(seen).toEqual(['h1']) // unsubscribed
+  })
+})
+
+describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
+  // A fake commit graph: hash → { message, signer, firstParent }. The walk
+  // follows firstParent from the room's `main` head, decoding each node.
+  type Node = { message: string; signer: string; parent?: string }
+
+  /** Build a fake wasm client + api over a static commit graph. */
+  function harness(opts: {
+    head: string | undefined
+    graph: Record<string, Node>
+    /** Counts decode + object reads so we can assert the head-keyed cache. */
+    counters: { decode: number; getObject: number; getRef: number }
+  }) {
+    const { graph, counters } = opts
+    let head = opts.head
+
+    const wasm = {
+      get_ref: async (_base: string, _room: string, name: string) => {
+        counters.getRef++
+        return name === 'main' ? head : undefined
+      },
+      get_object: async (_base: string, _room: string, hash: string) => {
+        counters.getObject++
+        // Encode the hash itself as the "bytes" so commit_decode can map back.
+        return graph[hash] ? new TextEncoder().encode(hash) : undefined
+      },
+    } as unknown as RepoWasmClient
+
+    const api = {
+      commit_decode: (bytes: Uint8Array) => {
+        counters.decode++
+        const hash = new TextDecoder().decode(bytes)
+        const node = graph[hash]
+        if (!node) throw new Error('not a commit')
+        return {
+          message: node.message,
+          signer_hex: node.signer,
+          timestamp: 1n,
+          parent_count: node.parent ? 1 : 0,
+          parent: (i: number) => (i === 0 ? node.parent : undefined),
+        }
+      },
+    } as unknown as MkitApi
+
+    const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
+    return { backend, setHead: (h: string | undefined) => (head = h) }
+  }
+
+  it('returns [] when the room has no `main` ref', async () => {
+    const counters = { decode: 0, getObject: 0, getRef: 0 }
+    const { backend } = harness({ head: undefined, graph: {}, counters })
+    expect(await backend.commitLog('room')).toEqual([])
+    expect(counters.getObject).toBe(0)
+  })
+
+  it('walks first-parents newest-first, decoding real message + signer', async () => {
+    const counters = { decode: 0, getObject: 0, getRef: 0 }
+    const graph = {
+      c3: { message: 'third', signer: 'sig3', parent: 'c2' },
+      c2: { message: 'second', signer: 'sig2', parent: 'c1' },
+      c1: { message: 'first', signer: 'sig1' },
+    }
+    const { backend } = harness({ head: 'c3', graph, counters })
+    const log = await backend.commitLog('room')
+    expect(log.map((e) => e.hash)).toEqual(['c3', 'c2', 'c1']) // newest-first
+    expect(log.map((e) => e.message)).toEqual(['third', 'second', 'first'])
+    expect(log.map((e) => e.authorPubkey)).toEqual(['sig3', 'sig2', 'sig1'])
+    expect(log.every((e) => e.ref === 'main')).toBe(true)
+  })
+
+  it('caches by head: a repeat call does not re-walk, a new head does', async () => {
+    const counters = { decode: 0, getObject: 0, getRef: 0 }
+    const graph = {
+      c2: { message: 'second', signer: 's', parent: 'c1' },
+      c1: { message: 'first', signer: 's' },
+    }
+    const h = harness({ head: 'c1', graph, counters })
+
+    await h.backend.commitLog('room') // walks c1
+    const afterFirst = counters.decode
+    expect(afterFirst).toBe(1)
+
+    await h.backend.commitLog('room') // same head → cache hit, no decode
+    expect(counters.decode).toBe(afterFirst)
+
+    h.setHead('c2') // a peer pushed → head advanced → re-walk
+    const log = await h.backend.commitLog('room')
+    expect(log.map((e) => e.hash)).toEqual(['c2', 'c1'])
+    expect(counters.decode).toBeGreaterThan(afterFirst)
+  })
+
+  it('stops the walk on a missing object rather than throwing', async () => {
+    const counters = { decode: 0, getObject: 0, getRef: 0 }
+    // head points at c2 whose parent c1 is absent from the object store.
+    const graph = { c2: { message: 'second', signer: 's', parent: 'c1' } }
+    const { backend } = harness({ head: 'c2', graph, counters })
+    const log = await backend.commitLog('room')
+    expect(log.map((e) => e.hash)).toEqual(['c2'])
   })
 })
