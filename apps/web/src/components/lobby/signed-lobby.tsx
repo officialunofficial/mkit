@@ -274,7 +274,9 @@ function ReactionBar({
           onClick={() => onToggle(r.emoji)}
           title={canReact ? (r.mine ? 'Remove your reaction' : 'Add your reaction') : 'Unlock to react'}
           className={`inline-flex h-6 items-center gap-1 rounded-full border px-2 text-xs leading-none tabular-nums transition-colors active:scale-[0.96] ${
-            r.mine ? 'border-blue-500/60 bg-blue-500/10 text-fg' : 'border-hairline bg-muted/5 text-muted hover:border-fg'
+            r.mine
+              ? 'border-blue-500/60 bg-blue-500/10 text-fg'
+              : 'border-hairline bg-muted/5 text-muted hover:border-blue-500/50 hover:text-fg'
           }`}
         >
           <span className='text-sm'>{r.emoji}</span>
@@ -289,7 +291,7 @@ function ReactionBar({
           type='button'
           onClick={() => setPickerOpen((o) => !o)}
           aria-label='Add reaction'
-          className={`inline-flex h-6 w-6 items-center justify-center rounded-full border border-hairline bg-muted/5 text-muted transition-all hover:border-fg hover:text-fg active:scale-[0.96] ${
+          className={`inline-flex h-6 w-6 items-center justify-center rounded-full border border-hairline bg-muted/5 text-muted transition-all hover:border-blue-500/50 hover:text-fg active:scale-[0.96] ${
             reactions.length > 0 ? 'opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100' : 'opacity-100'
           }`}
         >
