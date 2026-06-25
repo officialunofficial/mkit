@@ -6,7 +6,12 @@
   "name": "mkit-keys",
   "main": "build/worker/shim.mjs",
   "compatibility_date": "2024-09-23",
-  "build": { "command": "worker-build --release" },
+  // The CF Workers Build image has NO Rust toolchain — install rustup (pinned
+  // 1.95.0 + wasm32) and worker-build, then compile. Guarded by `command -v` so
+  // it's a no-op where they already exist (local `wrangler deploy`).
+  "build": {
+    "command": "(command -v cargo >/dev/null 2>&1 || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0 -t wasm32-unknown-unknown) && . \"$HOME/.cargo/env\" && (command -v worker-build >/dev/null 2>&1 || cargo install -q worker-build) && worker-build --release"
+  },
 
   "observability": { "enabled": true },
 
