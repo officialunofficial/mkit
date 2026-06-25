@@ -84,11 +84,11 @@ export function OwnPlayerName() {
 
   if (editing) {
     return (
-      <span className='inline-flex items-center gap-2'>
+      <span className='inline-flex flex-wrap items-center gap-2'>
         <input
           // biome-ignore lint/a11y/noAutofocus: focus the field the user just opened
           autoFocus
-          className='w-40 rounded-md border border-hairline bg-transparent px-2 py-1 text-sm outline-none focus:border-fg'
+          className='w-32 rounded-md border border-hairline bg-transparent px-2 py-1 text-sm outline-none focus:border-fg sm:w-40'
           value={value}
           maxLength={32}
           placeholder={current}

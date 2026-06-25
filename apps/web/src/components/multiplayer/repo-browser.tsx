@@ -23,11 +23,9 @@ import { PlayerLabel } from './player-label'
 import { BTN, errMsg } from './shared'
 
 /**
- * Navigable repo browser (right column): a refs/branches panel, the selected
- * ref's history, and — when a commit row is clicked — a commit/remix-detail
- * view whose parents (and, for a remix, its upstream sources) are themselves
- * links. All navigation is component state (selectedRef / selectedCommit),
- * no router change.
+ * Navigable repo browser (right column): a refs/branches panel, the selected ref's history, and — when a commit row is
+ * clicked — a commit/remix-detail view whose parents (and, for a remix, its upstream sources) are themselves links. All
+ * navigation is component state (selectedRef / selectedCommit), no router change.
  */
 export function RepoBrowser({
   api,
@@ -110,17 +108,13 @@ export function RepoBrowser({
 }
 
 /**
- * Loading placeholder for the refs / commit-log lists. Shown while the first
- * fetch is in flight (`isPending`) so a cold load reads as "loading" rather than
- * an empty "no commits / no refs" state — the bug where a freshly-opened room
+ * Loading placeholder for the refs / commit-log lists. Shown while the first fetch is in flight (`isPending`) so a cold
+ * load reads as "loading" rather than an empty "no commits / no refs" state — the bug where a freshly-opened room
  * showed an empty log under a populated `main` ref before the walk resolved.
  */
 function SkeletonRows({ rows = 5 }: { rows?: number }) {
   return (
-    <ul
-      className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'
-      aria-hidden='true'
-    >
+    <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline' aria-hidden='true'>
       {Array.from({ length: rows }).map((_, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: static placeholder rows, no identity
         <li key={i} className='flex items-center gap-3 py-2.5'>
@@ -234,8 +228,7 @@ function LiveLog({
         <span className='font-mono text-xs text-muted'>
           {/* Show "head …" while the head is loading/refetching; only show ∅ once
               the query has settled with no head. */}
-          head{' '}
-          {head.isPending || head.isFetching ? '…' : head.data ? `${head.data.slice(0, 10)}…` : '∅'}
+          head {head.isPending || head.isFetching ? '…' : head.data ? `${head.data.slice(0, 10)}…` : '∅'}
         </span>
       </div>
       {showSkeleton ? (
@@ -320,14 +313,11 @@ function LogRow({
 }
 
 /**
- * Navigable detail for one commit OR remix: fetched by hash (get_object),
- * routed by `object_kind`, then decoded with `commit_decode` /
- * `remix_decode`. Renders message / signer / timestamp / tree / signature
- * for either kind; parents are links that load THAT object's detail in
- * place. For a remix it additionally renders a "remix / fork of …" block
- * whose upstream `commit_hash` is a link → the upstream commit's detail
- * (reusing the same `onSelectCommit` parent-navigation mechanism). A Fork
- * button on a commit builds + pushes a remix of it.
+ * Navigable detail for one commit OR remix: fetched by hash (get_object), routed by `object_kind`, then decoded with
+ * `commit_decode` / `remix_decode`. Renders message / signer / timestamp / tree / signature for either kind; parents
+ * are links that load THAT object's detail in place. For a remix it additionally renders a "remix / fork of …" block
+ * whose upstream `commit_hash` is a link → the upstream commit's detail (reusing the same `onSelectCommit`
+ * parent-navigation mechanism). A Fork button on a commit builds + pushes a remix of it.
  */
 function CommitDetail({
   room,
@@ -357,8 +347,7 @@ function CommitDetail({
     const res = decodeLogObject(api, obj.data, hash, '')
     if (!res) return { ok: false as const, error: 'unknown object kind' }
     try {
-      const info =
-        res.entry.kind === 'remix' ? api.remix_decode(obj.data) : api.commit_decode(obj.data)
+      const info = res.entry.kind === 'remix' ? api.remix_decode(obj.data) : api.commit_decode(obj.data)
       const parents: string[] = []
       for (let i = 0; i < info.parent_count; i++) {
         const p = info.parent(i)
@@ -384,7 +373,7 @@ function CommitDetail({
 
   return (
     <section className='space-y-3'>
-      <div className='flex items-baseline justify-between gap-3'>
+      <div className='flex flex-wrap items-baseline justify-between gap-3'>
         <h2 className='flex items-center gap-2 text-sm font-semibold'>
           <HashChip hash={hash} size={14} />
           {isRemix ? 'Remix detail' : 'Commit detail'}
@@ -394,7 +383,7 @@ function CommitDetail({
             </span>
           ) : null}
         </h2>
-        <div className='flex items-center gap-2'>
+        <div className='flex flex-wrap items-center gap-2'>
           {/* Fork a commit (not a remix) straight from its detail. */}
           {canFork && decoded?.ok && !isRemix ? (
             <button type='button' className={BTN} onClick={() => onFork(hash)} disabled={forkPending}>
