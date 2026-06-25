@@ -2,9 +2,9 @@ import { categories, inherentDivergences, legend, nonGoals, safetyDivergences } 
 import type { ParityCategory, ParityStatus } from '../lib/parity-data'
 
 /**
- * Status glyph encoding git-alignment on two axes: green = on the git track (filled = exact parity, outline = works but
- * divergent), slate dash = deliberately off the track (non-goal). Drawn as inline SVG with explicit colors so they read
- * the same in light and dark, independent of the theme tokens.
+ * Status glyph: filled green circle (parity — exact git match), amber outline circle (divergent — works but differs),
+ * slate dash (non-goal — deliberately off the git track). Drawn as inline SVG with explicit colors so they read the
+ * same in light and dark, independent of the theme tokens.
  */
 function StatusIcon({ status }: { status: ParityStatus }) {
   switch (status) {
@@ -17,7 +17,7 @@ function StatusIcon({ status }: { status: ParityStatus }) {
     case 'divergent':
       return (
         <svg width='10' height='10' viewBox='0 0 10 10' aria-hidden className='shrink-0'>
-          <circle cx='5' cy='5' r='3.6' fill='none' stroke='#16a34a' strokeWidth='1.5' />
+          <circle cx='5' cy='5' r='3.6' fill='none' stroke='#f59e0b' strokeWidth='1.5' />
         </svg>
       )
     case 'non-goal':
